@@ -1,0 +1,79 @@
+{
+  "summarizers": [
+    "carrierStopMatrix",
+    "currencyNotice",
+    "solutionList",
+    "itineraryPriceSlider",
+    "itineraryCarrierList",
+    "itineraryDepartureTimeRanges",
+    "itineraryArrivalTimeRanges",
+    "durationSliderItinerary",
+    "itineraryOrigins",
+    "itineraryDestinations",
+    "itineraryStopCountList",
+    "warningsItinerary"
+  ],
+  "inputs": {
+    "layover": {
+      "max": 4,
+      "min": 4
+    },
+    "page": {
+      "current": 1,
+      "size": 25
+    },
+    "pax": {
+      "adults": 1
+    },
+    "slices": [
+      {
+        "origins": [
+          "NYC"
+        ],
+        "destinations": [
+          "MUC",
+          "FRA"
+        ],
+        "date": "2026-06-07",
+        "routeLanguage": "LH+",
+        "commandLine": "MAXCONNECT 2:00",
+        "filter": {
+          "warnings": {
+            "values": []
+          }
+        },
+        "selected": false
+      },
+      {
+        "origins": [
+          "MUC",
+          "FRA"
+        ],
+        "destinations": [
+          "NYC"
+        ],
+        "date": "2026-06-11",
+        "filter": {
+          "warnings": {
+            "values": []
+          }
+        },
+        "selected": false
+      }
+    ],
+    "firstDayOfWeek": "SUNDAY",
+    "internalUser": false,
+    "sliceIndex": 0,
+    "sorts": "default",
+    "endDate": "2026-06-21",
+    "startDate": "2026-05-21",
+    "cabin": "COACH",
+    "maxLegsRelativeToMin": 1,
+    "changeOfAirport": true,
+    "checkAvailability": true
+  },
+  "summarizerSet": "wholeTrip",
+  "name": "calendarFollowup",
+  "session": "nMQ0kOfYbLa6cQcEUNyb2CHtw",
+  "bgProgramResponse": "!d3SldBDNAAZDGaMfYxlCaSFfIRrvvHo7AEABEArZ1CJNyy4sm11N1PIIjKzyk-s5aFupBhz1Qwj_Gb-7xT-_fyX_LW5YdxHkrm-WFDemuWB7qk9ooaFT_5cnAgAAACxSAAAAA2gBB34AQm9JLyC8QpuOnfNWRGXATguh_LXn6l0Mmj4Lf9JPtnsOtdHx7llL-5DaI3FsbYk7AxwT_B4KuDd7y9GeXUgdYfgffJkD2sI539oVmKQfqyR08aC8CZQW07QwvW1dcjKii9GSeGpWA7Qe0Ku-Slg0eoMZO6cKhEOIermTcbPWbqbSSOJEj95bM4g3FNMjdFAxHkR2yIriF1LVXr4gju-m8cG7M0QMURhlxjyUqr1m01mM599ldJgPAWeYQk5MeYGuEN0pPDI138UgxMXGKbSFTJ9DnwDjjNMd0RGqcqMBhkIaHwu3XOv-gnLjK19XvGqTeef0MMgglnbrOR3rgSN35VKM5VjlTLNIJL9mkOYo60ziAkJxM96tC9QqJcGMRO3ltuBZtcVBMNVO-vqrWqC9H1lAYCKpHJGiyGRZtmW0Lxi3lV5zdIIXZ3VToJYy372W5gIhbghRkfes_rJuVaRGvnaivuFsXpRLXGyWxVJwTkhgrbEPt39XeY5G2xyPS3l2_F_PWAMwzP28DuFUiUV3Rhk7x2lg8gnEv1_iBiXFV_OzePnJdYCC-dX9u4pS2ND2_cZuYRw1ppnOXlrBkmcBBHy9Tc2f8Kp3vC5Zt-WlAmybR63-Nfx5fEC1DjfNb86yCU2wX9DZM4MuH-r87IoR1Tua6zymHb5T1xceMLbv6bUR0946jH4c2oxsbq8ptHXz0c5dPaUr0G2p_oVHUzG54igFoYxfzpbRZZJInNc-Jv5dctskzzi-_UvbxQ_12AgQxkxkoqnFvyvtz87oYEgrvWGyx6jEO0QW3qU5MAb87GrDeeBS6IS1GhSRCRAjo4iO-ENOkaHAgv61T5esGroKPNaK1SnflI8xFxlDv9DhvPJW7karTpGQR0g8IA7wxGWM46jwSpVF1Ei8vYa7AlzmQuRfYDZczbNlVbdgwCYvq3WFPQaYNUfPtVv-ztB-BpDb59PJCI4N7T-aBuuWmAxiCoKsy1eW3zQlHJqNG6kkP7Q43g22pc7c-FfuY5VE3zX63BFFjCETQBUk9dJBi-eOhJuxNNjUIK9As56rt5TIxyCpNK00jowW6O19Rbn3y5k5q7nYd66M1zAw7sh-kjIXOVs0DXfO4n65H50PWpsTtffXfhLqlLv7V9WaiW6aYfzX9LtQLsMtMhuRdN2rS17UB_WOP2K4JErpVYjtc6ObI5Je_MT1w9V4lKQmXwgM8G0iBtYSVDyT8JEQJyBu84cf6I_MB3l8H2JTNF01Yx1mMvJsd9H7eChyWI6oYsP3T0yqlOna74tzOPTBkYB6LbqsQAWUaoEQSdT_xx-3Qds9xwZa4Cg32VfSAdtWIAs1ufstPygqMUJKWHlZS-gJFHzTGo45ZN_MVVN7mV0hmv7yCpW-MiJ-N-9On3tHH2_GVSuM"
+}

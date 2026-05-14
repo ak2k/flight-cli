@@ -1,0 +1,97 @@
+{
+  "summarizers": [
+    "carrierStopMatrix",
+    "currencyNotice",
+    "solutionList",
+    "itineraryPriceSlider",
+    "itineraryCarrierList",
+    "itineraryDepartureTimeRanges",
+    "itineraryArrivalTimeRanges",
+    "durationSliderItinerary",
+    "itineraryOrigins",
+    "itineraryDestinations",
+    "itineraryStopCountList",
+    "warningsItinerary"
+  ],
+  "inputs": {
+    "filter": {},
+    "page": {
+      "current": 1,
+      "size": 25
+    },
+    "pax": {
+      "adults": 1
+    },
+    "slices": [
+      {
+        "origins": [
+          "JFK"
+        ],
+        "destinations": [
+          "LHR"
+        ],
+        "date": "2026-08-15",
+        "dateModifier": {
+          "minus": 0,
+          "plus": 0
+        },
+        "isArrivalDate": false,
+        "timeRanges": [
+          {
+            "min": "8:00",
+            "max": "11:00"
+          },
+          {
+            "min": "11:00",
+            "max": "14:00"
+          },
+          {
+            "min": "14:00",
+            "max": "17:00"
+          },
+          {
+            "min": "21:00",
+            "max": "23:59"
+          }
+        ],
+        "filter": {
+          "warnings": {
+            "values": []
+          }
+        },
+        "selected": false
+      },
+      {
+        "origins": [
+          "LHR"
+        ],
+        "destinations": [
+          "JFK"
+        ],
+        "date": "2026-08-22",
+        "dateModifier": {
+          "minus": 0,
+          "plus": 0
+        },
+        "isArrivalDate": false,
+        "filter": {
+          "warnings": {
+            "values": []
+          }
+        },
+        "selected": false
+      }
+    ],
+    "firstDayOfWeek": "SUNDAY",
+    "internalUser": false,
+    "sliceIndex": 0,
+    "sorts": "default",
+    "cabin": "COACH",
+    "maxLegsRelativeToMin": 1,
+    "changeOfAirport": true,
+    "checkAvailability": true
+  },
+  "summarizerSet": "wholeTrip",
+  "name": "specificDatesSlice",
+  "bgProgramResponse": "!wcKlwqbNAAZDGaMfYxlCzT5RwArUseI7AEABEArZ1GduT9amAEsWcfHwB9VUlqE6vkWsuVlDnpG8ULX61WSThX2Abdz8wDCjjmp3pBEwv7eze4XlJ4-8v-XtAgAAACdSAAAABWgBB34AQTJVZU0m0POlWXwZaC_8r9mhjNqIWelnsZf8Z53NHpOOuPKVsYk0aNZOeMrzEQbgQuumTK9DDrB2UHMNiC6igXxlmQO5ypPd7r0DM0z8e3veRH4vyNtJQuvkqtR7XkkXEwD_qTbWiSirlgMXoBDD8Mi33a_O8bOToQZJNd5p0BFWXVdwvDPUaxo5V2cLvNeLFptkTb1DFdEub-Lhc-xuuMOfdpLrE2Gergv1Q5gzCfrw0qzaOq43kPwA8OZezIXp6EsvxGR_PHKunYk_FoxfKkhbwaj-0gWH87n_sOeHtxOZRo7vUvCeyqyi88-wOCzQVIA6md098OZduVIVAl-wn914eDMWcd28mZQqtHiFYWJMMXFTskrtZN2GEwXgARP4lirEM33xplfTY179G_0d-JZ6Ekv2oFuV-aoVEaww8CxuewHtmqZRjExLLzd56eC37tiRb8XzTRLDbHGOYMhGdpiegrB-Co4tYynWGWh0O6tmuadvtmfYh2EdYYSL7UPmEFzf15g-Dk0QLiL8WVggjUFeVaycwijUCLhGecZiVD-iMHaBNjYX3N9_GEmfvNnJ8rPyyHwgKc9t4qzQ_1p7e7wXoIze0PeG5oQtfpULori8NoxAXxW6gRskacB0xpT_2VXbSaasa668GQF26tITYrFVmvusNGaXyAz_Gi9gzFSFyiLUrPrrwqiuGEdOh-jDVvbfTRp6G96AtjvLA0Ux4mCBI023WC-_TWTtipYEm-PUzTJz2BpYnFPcgiUgxTOAOKWT5TAlOjr-UmSf90occKdd2u-_WvgEA9kAlhWD3KHAYx9wn198xVcrYUzsOalpcSELmFPxDaY51bo1gXTc1JB0dHpVSaiO9WaNzu0cdw3rGtQS4lQUYmNnm7k_1FhCwy8eSj5fzru8DjrMPi-JkxLsKDhywWjN-tovzEf2vaePLW3UMplljoi-D_Zk19EsNNqexevrdmkYjZ9AwwQYW3vdjnDUWGCyfDjyskCPGyuc6C6NlxN0M0utdkrzbQJUx3IGzCXRtkGef-L95weqUq0feVRqD-ex8BLrLFNa7Aa_pc-8xUgnQzTmJGJcfsEGaY86DG1sK1wOIPgBhYCsdlN7yT5RdzrVPsP1zskYvA35uQ0emEAG8JKnJP9712JVcUy7Yr_azma9YpWnJokP-ipl1T6LlUD5aZwkySdgQwbKjqh-6nyj1skVsXpnJHg8mShEaM412Lne3BnPi-PRdO0RTUVy-AjfA6cukSzOwmY21EXCffbYw1LGZHGG4EvFhw9lK52ziLdwbbvfAq3Qd0EAFOO1geePCXEsTjJdlJexR2OInSWfcavdk2E1Dl3PPvIalEMMrXsS4xtWZMI"
+}

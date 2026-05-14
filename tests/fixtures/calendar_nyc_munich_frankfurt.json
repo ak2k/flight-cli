@@ -1,0 +1,69 @@
+{
+  "summarizers": [
+    "calendar",
+    "overnightFlightsCalendar",
+    "itineraryStopCountList",
+    "itineraryCarrierList",
+    "currencyNotice"
+  ],
+  "inputs": {
+    "filter": {},
+    "layover": {
+      "max": 4,
+      "min": 4
+    },
+    "page": {
+      "size": 25
+    },
+    "pax": {
+      "adults": 1
+    },
+    "slices": [
+      {
+        "origins": [
+          "NYC"
+        ],
+        "destinations": [
+          "MUC",
+          "FRA"
+        ],
+        "commandLine": "MAXCONNECT 2:00",
+        "routeLanguage": "LH+",
+        "filter": {
+          "warnings": {
+            "values": []
+          }
+        },
+        "selected": false
+      },
+      {
+        "origins": [
+          "MUC",
+          "FRA"
+        ],
+        "destinations": [
+          "NYC"
+        ],
+        "filter": {
+          "warnings": {
+            "values": []
+          }
+        },
+        "selected": false
+      }
+    ],
+    "firstDayOfWeek": "SUNDAY",
+    "internalUser": false,
+    "sliceIndex": 0,
+    "sorts": "default",
+    "endDate": "2026-06-21",
+    "startDate": "2026-05-21",
+    "cabin": "COACH",
+    "maxLegsRelativeToMin": 1,
+    "changeOfAirport": true,
+    "checkAvailability": true
+  },
+  "summarizerSet": "calendarRoundTrip",
+  "name": "calendar",
+  "bgProgramResponse": "!YGOlYwfNAAZDGaMfYxlCaSFfIRrvvHo7AEABEArZ1CJNyy4sm11N1PIIjKzyk-s5aFupBhz1Qwj_Gb-7xT-_fyX_LW5YdxHkrm-WFDemuWB7qk9ooaFT_5cnAgAAACxSAAAAAmgBB34AQm9JLyC8QpuOnfNWRGXATguh_LXn6l0Mmj4Lf9JPtnsOtdHx7llL-5DaI3FsbYk7AxwT_B4KuDd7y9GeXUgdYfgffJkD3sI539oVmKQfqyR08aC8CZQW07QwvW1dcjKii9GSeGpWA7Qe0Ku-Slg0eoMZO6cKhEOIermTcbPWbqbSSOJEj95bM4g3FNMjdFAxHkR2yIriF1LVXr4gju-m8cG7M0QMURhlxjyUqr1m01mM599ldJgPAWeYQk5MeYGuEN0pPDI138UgxMXGKbSFTJ9DnwDjjNMd0RGqcqMBhkIaHwu3XOv-gnLjK19XvGqTeef0MMgglnbrOR3rgSN35VKM5VjlTLNIJL9mkOYo60ziAkJxM96tC9QqJcGMRO3ltuBZtcVBMNVO-vqrWqC9H1lAYCKpHJGiyGRZtmW0Lxi3lV5zdIIXZ3VToJYy372W5gIhbghRkfes_rJuVaRGvnaivuFsXpRLXGyWxVJwTkhgrbEPt39XeY5G2xyPS3l2_F_PWAMwzP28DuFUiUV3Rhk7x2lg8gnEv1_iBiXFV_OzePnJdYCC-dX9u4pS2ND2_cZuYRw1ppnOXlrBkmcBBHy9Tc2f8Kp3vC5Zt-WlAmybR63-Nfx5fEC1DjfNb86yCU2wX9DZM4MuH-r87IoR1Tua6zymHb5T1xceMLbv6bUR0946jH4c2oxsbq8ptHXz0c5dPaUr0G2p_oVHUzG54igFoYxfzpbRZZJInNc-Jv5dctskzzi-_UvbxQ_12AgQxkxkoqnFvyvtz87oYEgrvWGyx6jEO0QW3qU5MAb87GrDeeBS6IS1GhSRLBAjo4iO-ENdYikIiCDmn83OgnGvSzzDu1yazP4Bc54LEE1TtjXf3u9WcKBVmi7T2hVpqGruZpQrOAIWxEXXxubSS_w6LN-t-rmy27P6VLReNg98fkfjjo4CvHmhLC1nD2WQBKzwXIIbTPmim6cw2uRIolxpXfhRpNxEcnXomOBp8fLqc8jJwei-ewDT_wPSrE-Ud0MeBzbkn_LRchhLJ0HmxukWRZQ5GdaVYnO5YGzxGlM2Un3GY77W2VKLOBeSjA5Q5hXh9Wi66YCafyhzrUZ1TYONDr6maVQCAHyvXLrBpT6Wf90xVAOKwp6j5M2EnRVJTdQzDDFDhplamUXd7z8VBICpfMn4R64ZK7eHIPRAbcUErwfsat36geEv0z903b0-H7-grLTgJyRDCiAssMgXrITm5ATI3YJ_6t8QP3ofkLCuJaJeouh_5D-Bbd953fcaJ9t7ii7L1RfozgPRkQWyTJj_6VGbBTYWCB0jTR_Q4wwTOjyGR8garMShLfYaLXGn6RLXHAGjEwc1wt8G9x3MjxRix2Vm19gcHM4EE9PzFnSOUkTCWMPXchNXULQ4WFD_4cBKxDw-Xg"
+}

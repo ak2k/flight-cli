@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Pytest / mypy / etc.
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Local cache
+.cache/
+
+# Research artifacts (capture scripts, HAR files, screenshots, raw probes).
+# These live in-tree for convenience but aren't part of the published code.
+# Tracked test fixtures live in tests/fixtures/ instead.
+research/
