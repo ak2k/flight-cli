@@ -9,12 +9,13 @@ Five commands:
   flight airport   — IATA autocomplete
 """
 from __future__ import annotations
-import asyncio, json, re, sys
+import asyncio, json, logging, re, sys
 from datetime import date, datetime, timedelta
 from typing import Annotated, Any, Optional
 
 import typer
 from rich.console import Console
+from rich.logging import RichHandler
 from rich.table import Table
 
 from .client import MatrixClient, MatrixApiError
@@ -29,6 +30,24 @@ app = typer.Typer(add_completion=False, rich_markup_mode="rich",
                    help="CLI for ITA Matrix's Alkali backend.")
 console = Console()
 err = Console(stderr=True)
+
+
+@app.callback()
+def main(
+    verbose: Annotated[int, typer.Option(
+        "--verbose", "-v", count=True,
+        help="Increase log verbosity (-v=INFO, -vv=DEBUG). Logs go to stderr.",
+    )] = 0,
+) -> None:
+    # _http.py emits log.warning/debug for cache hits/misses, retry attempts,
+    # and rate-limit pauses. Without a handler those go nowhere.
+    level = logging.WARNING - 10 * min(verbose, 2)
+    logging.basicConfig(
+        level=level,
+        format="%(message)s",
+        datefmt="[%X]",
+        handlers=[RichHandler(console=err, rich_tracebacks=False, show_path=False)],
+    )
 
 
 # ─────────────────────────── argument parsers ──────────────────────────────
@@ -98,7 +117,7 @@ def _build_options(*, cabin: str, adults: int, children: int, seniors: int,
         cabin=_resolve_cabin(cabin),
         pax=Pax(adults=adults, children=children, seniors=seniors, youth=youth,
                  infants_in_seat=infants_in_seat, infants_in_lap=infants_in_lap),
-        max_stops=stops,
+        max_extra_stops=stops,
         allow_airport_changes=allow_airport_changes,
         show_only_available=show_only_available,
         page_size=page_size,
@@ -246,7 +265,8 @@ def fare(
         help="Preferred outbound times-of-day (comma list: morning,evening)")] = None,
     return_times: Annotated[Optional[str], typer.Option("--return-times",
         help="Preferred return times-of-day")] = None,
-    stops: Annotated[Optional[int], typer.Option("--stops")] = None,
+    stops: Annotated[Optional[int], typer.Option("--stops",
+        help="Max extra stops beyond nonstop (0=nonstop only, 1=up to 1 stop, ...)")] = None,
     allow_airport_changes: bool = typer.Option(
         True, "--allow-airport-changes/--no-airport-changes"),
     only_available: bool = typer.Option(

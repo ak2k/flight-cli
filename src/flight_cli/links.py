@@ -28,11 +28,11 @@ def _spa_options_block(opts: SearchOptions, *, extra_stops_override: int | None 
         es = opts.extra_stops
     else:
         # Mirror Matrix UI default: -1 when stops constrained, 1 otherwise.
-        es = -1 if opts.max_stops is not None else 1
+        es = -1 if opts.max_extra_stops is not None else 1
     return {
         "cabin": opts.cabin.value,
-        "stops": ("-1" if opts.max_stops is None or opts.max_stops < 0
-                  else str(opts.max_stops)),
+        "stops": ("-1" if opts.max_extra_stops is None or opts.max_extra_stops < 0
+                  else str(opts.max_extra_stops)),
         "extraStops": str(es),
         "allowAirportChanges": "true" if opts.allow_airport_changes else "false",
         "showOnlyAvailable": "true" if opts.show_only_available else "false",

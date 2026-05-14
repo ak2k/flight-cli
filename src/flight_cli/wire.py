@@ -78,7 +78,10 @@ class WireInputs(_Wire):
     internalUser: bool = False
     changeOfAirport: bool = True
     checkAvailability: bool = True
-    maxLegsRelativeToMin: int = 10
+    # SPA's "No limit" UI default = 1 (see CLAUDE.md quirk #3). The wire
+    # adapter (`_base_inputs`) always sets this explicitly, so the value
+    # here is only used if someone constructs WireInputs directly.
+    maxLegsRelativeToMin: int = 1
     slices: list[WireSlice]
     # Calendar / followup add these:
     startDate: str | None = None
@@ -159,9 +162,9 @@ def _base_inputs(opts: SearchOptions, slices: list[WireSlice]) -> WireInputs:
         changeOfAirport=opts.allow_airport_changes,
         checkAvailability=opts.show_only_available,
         # Matches the SPA's "No limit" / "Up to 1 extra stop" default = 1.
-        # User can override by passing options.max_stops explicitly.
-        maxLegsRelativeToMin=(1 if opts.max_stops is None or opts.max_stops < 0
-                               else opts.max_stops),
+        # User can override by passing options.max_extra_stops explicitly.
+        maxLegsRelativeToMin=(1 if opts.max_extra_stops is None or opts.max_extra_stops < 0
+                               else opts.max_extra_stops),
         slices=slices,
     )
 

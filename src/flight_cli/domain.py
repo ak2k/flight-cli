@@ -76,11 +76,17 @@ class SearchOptions(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     cabin: Cabin = Cabin.COACH
     pax: Pax = Pax()
-    # max connecting stops. None = no limit. 0 = nonstop only. N = at most N.
-    max_stops: int | None = None
+    # Maps to Matrix's `maxLegsRelativeToMin` — "up to N extra legs beyond the
+    # nonstop minimum." Effectively "max N connecting stops" for a one-way leg
+    # (1 nonstop leg + N extra = N stops). None = SPA's "No limit" default of 1
+    # extra stop. 0 = nonstop only.
+    max_extra_stops: int | None = None
     allow_airport_changes: bool = True
     show_only_available: bool = True
-    extra_stops: int | None = None     # SPA UI quirk; None = use default
+    # SPA URL-state only — does NOT flow to the API request, only to the
+    # Matrix deep-link in links._spa_options_block. None = mirror SPA's
+    # derived default (-1 when stops constrained, 1 otherwise).
+    extra_stops: int | None = None
     page_size: int = 25
 
 

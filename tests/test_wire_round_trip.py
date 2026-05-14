@@ -6,7 +6,7 @@ changes the wire shape, this test fails immediately and tells us which
 field drifted.
 
 To capture more fixtures: drive a search in the recording harness
-(scripts/record_user_session.py) and drop the resulting req_*.json into
+(research/record_user_session.py) and drop the resulting req_*.json into
 tests/fixtures/."""
 from __future__ import annotations
 import json

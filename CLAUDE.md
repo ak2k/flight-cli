@@ -2,7 +2,8 @@
 
 Power-user CLI wrapping ITA Matrix's undocumented Alkali backend.
 Architecture: pydantic discriminated union → match-based wire adapters →
-thin typer CLI shells. ~1900 LOC across 7 src modules + golden-file tests.
+thin typer CLI shells. Small (~2K LOC, single-package layout)
++ golden-file regression tests + pyright-strict type checking.
 
 ## Workflow
 
@@ -48,9 +49,12 @@ Full detail at [docs/memories/MEMORY.md](docs/memories/MEMORY.md). Highlights:
 5. **Summarizer order is asserted by golden-file tests.** The captured
    SPA order is `["carrierStopMatrix", "currencyNotice", "solutionList", ...]`.
    Don't reorder unless you also rebase the fixtures.
-6. **7 AIza keys in the SPA bundle.** Only `B7.matrix="..."` is the prod
-   search key. Bootstrap regex targets it specifically — first-match would
-   pick the People API key and 403.
+6. **Multiple AIza keys in the SPA bundle.** Only the entry tagged
+   `matrix` (e.g. `.matrix="AIza..."` or `"matrix":"AIza..."`) is the prod
+   search key — siblings `matrix-nightly` / `matrix-uat` / `matrix-dev`
+   share the prefix but route to different backends. Bootstrap regex
+   anchors on the bare `matrix` label so it excludes the variants; a
+   first-match-any-AIzaSy approach would pick the People API key and 403.
 7. **Calendar brownouts are real, not our bug.** Matrix's own UI returns
    empty grids for complex queries sometimes. Surface error message
    clearly; retry; consider simpler query.

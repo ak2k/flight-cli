@@ -5,11 +5,16 @@ response. All routing/filtering/mode-dispatch lives in `wire.to_wire()`.
 from __future__ import annotations
 from typing import Any, assert_never, cast
 
+import httpx
+
 from .domain import Search, SpecificDateSearch, CalendarSearch, CalendarFollowup
 from .models import SearchResult, CalendarResult, Location
 from .wire import to_wire
 from ._http import HttpTransport
-from ._api_key import resolve_api_key, ApiKeyResolutionError as ApiKeyResolutionError
+from ._api_key import (
+    resolve_api_key, invalidate_cache,
+    ApiKeyResolutionError as ApiKeyResolutionError,
+)
 
 BASE = "https://content-alkalimatrix-pa.googleapis.com"
 SEARCH_URL = f"{BASE}/v1/search"
@@ -89,12 +94,38 @@ class MatrixClient:
 
     async def execute(self, search: Search, *, cache: bool = True) -> SearchResult | CalendarResult:
         """Run any flavor of search. Returns SearchResult or CalendarResult
-        depending on the search variant."""
+        depending on the search variant.
+
+        On a 403 from Matrix (typically a stale or wrong cached API key),
+        invalidate the cache, re-bootstrap once, and retry. If the retry
+        also 403s, surface ApiKeyResolutionError with the recovery guidance
+        from _api_key._help_text — instead of a raw httpx traceback.
+        """
         body = to_wire(search).as_json()
-        data = await self._http.post_json(
-            SEARCH_URL, body, params={"key": self._api_key, "alt": "json"},
-            cache=cache,
-        )
+        try:
+            data = await self._http.post_json(
+                SEARCH_URL, body, params={"key": self._api_key, "alt": "json"},
+                cache=cache,
+            )
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code != 403:
+                raise
+            invalidate_cache()
+            self._api_key = resolve_api_key(force_bootstrap=True)
+            try:
+                data = await self._http.post_json(
+                    SEARCH_URL, body, params={"key": self._api_key, "alt": "json"},
+                    cache=cache,
+                )
+            except httpx.HTTPStatusError as e2:
+                if e2.response.status_code == 403:
+                    raise ApiKeyResolutionError(
+                        "Matrix rejected the API key with HTTP 403 even after "
+                        "re-bootstrapping. The bootstrap regex may be picking up "
+                        "a non-prod key (e.g. matrix-nightly), or Matrix has "
+                        "tightened access. Set FLIGHT_API_KEY explicitly."
+                    ) from e2
+                raise
         _raise_if_api_error(data)
         return _parse_response(search, data)
 
@@ -109,16 +140,18 @@ class MatrixClient:
         return [Location.model_validate(loc) for loc in data.get("locations", [])]
 
     async def airport(self, code: str) -> Location | None:
+        """Look up a single airport by IATA code. Returns None only on 404
+        ('no such airport'); network errors and auth failures propagate so
+        callers can distinguish 'doesn't exist' from 'lookup is broken'."""
         url = (f"{BASE}/v1/locationTypes/airportOrMultiAirportCity/"
                f"locationCodes/{code.upper()}")
         try:
             data = await self._http.get_json(url, params={"key": self._api_key})
-        except Exception:
-            return None
-        try:
-            return Location.model_validate(data)
-        except Exception:
-            return None
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                return None
+            raise
+        return Location.model_validate(data)
 
     async def currencies(self) -> list[dict[str, str]]:
         data = await self._http.get_json(

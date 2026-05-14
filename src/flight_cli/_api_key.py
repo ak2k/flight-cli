@@ -21,6 +21,9 @@ import httpx
 
 _CACHE_PATH = Path.home() / ".cache" / "flight-cli" / ".matrix-key"
 _CACHE_TTL_SECS = 30 * 86400
+# Shape of a real Google API key. Used to reject malformed cached values
+# *before* they round-trip through a 403 from Matrix.
+_KEY_SHAPE = re.compile(r"^AIzaSy[A-Za-z0-9_-]{33}$")
 _HOMEPAGE = "https://matrix.itasoftware.com/search"
 # Matrix's homepage references the SPA bundle via a protocol-relative URL
 # (`//www.gstatic.com/alkali/...`), not an absolute one. Accept either.
@@ -58,11 +61,25 @@ def resolve_api_key(*, force_bootstrap: bool = False) -> str:
         return key.strip()
 
     if not force_bootstrap and _cache_fresh():
-        return _CACHE_PATH.read_text().strip()
+        cached = _CACHE_PATH.read_text().strip()
+        if _KEY_SHAPE.match(cached):
+            return cached
+        # Cached value doesn't look like a Matrix key (truncated, edited,
+        # wrong shape from an older bootstrap that captured the People API
+        # key by mistake). Fall through to re-bootstrap.
 
     key = _bootstrap_from_spa()
     _write_cache(key)
     return key
+
+
+def invalidate_cache() -> None:
+    """Delete the cached API key. Call after a 403 from Matrix to force
+    re-bootstrap on the next resolve_api_key() call."""
+    try:
+        _CACHE_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 # ──────────────────────────────── helpers ──────────────────────────────────
