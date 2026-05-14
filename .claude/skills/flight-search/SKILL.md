@@ -102,15 +102,56 @@ Multiple segments separated by **space**; alternatives within a segment by **com
 | `DFW,DEN` | Single connection at DFW or DEN |
 | `~l:nUS+` | 0+ non-US connections (excludes US transit) |
 
-**Slash-prefixed global modifiers** (units = minutes int):
-- `[/ minconnect 60; maxconnect 180]`
-- `[/ maxdur 720]`  (12 hours, in minutes)
-- `[/ alliance star-alliance]`
-- `[/ -overnight;-redeye]`
+**Slash-prefixed global modifiers** are documented at Google's help page
+(`[/ alliance star-alliance]`, `[/ maxdur 480]`, `[/ -overnight;-redeye]`,
+etc.) but **empirically do not work via the public API as of 2026-05** —
+every variant tested (with brackets, without brackets, with/without
+spaces) returns `QPX Warning. Bad route specification`. Use the
+**extension-code equivalents** instead — they cover the same constraints
+reliably:
 
-For these slash-modifiers, the **extension-code equivalent is usually cleaner** (uses HH:MM): `MINCONNECT 1:00; MAXCONNECT 3:00; MAXDUR 12:00; ALLIANCE star-alliance; -OVERNIGHTS; -REDEYES`.
+- Alliance restriction → `--extension 'ALLIANCE star-alliance'`
+- Min/max connection time → `--extension 'MINCONNECT 1:00; MAXCONNECT 3:00'`
+- Duration cap → `--extension 'MAXDUR 12:00'`
+- No overnights / red-eyes → `--extension '-OVERNIGHTS; -REDEYES'`
 
-Full reference: [Google's routing-language help](https://support.google.com/faqs/answer/2736497).
+The routing language is for **shape** filters (which carriers, which
+airports, which segment count). Aggregate constraints go in extensions.
+
+Carrier and airport codes in routing are **case-insensitive** (`lh+` ≡ `LH+`,
+`x:icn` ≡ `X:ICN`). There are no `STAR+` or `oneworld+` carrier shortcuts —
+use `--extension 'ALLIANCE star-alliance'` for alliance filtering.
+
+Full reference: [Google's routing-language help](https://support.google.com/faqs/answer/2736497)
+(note: the slash-modifier section in that doc is functional in Matrix's
+UI but not via the API endpoint this CLI hits).
+
+## Documented but broken via the API
+
+The Matrix SPA at matrix.itasoftware.com accepts these idioms in its
+routing-box; the API endpoint we hit rejects them with `QPX Warning. Bad
+route specification` (verified 2026-05). Most plausible cause: the SPA
+runs a client-side preprocessing pass that splits these out into
+`commandLine` extensions before sending — we don't reproduce that
+preprocessing, so use the **API-direct equivalent** when interacting
+with this CLI.
+
+| User reaches for (SPA idiom) | API doesn't accept → use instead |
+|---|---|
+| `--routing '[/ alliance star-alliance]'` | `--extension 'ALLIANCE star-alliance'` |
+| `--routing 'F+ / alliance oneworld'` | `--extension 'ALLIANCE oneworld'` |
+| `--routing '[/ maxdur 480]'` | `--extension 'MAXDUR 8:00'` |
+| `--routing '[/ minconnect 60; maxconnect 180]'` | `--extension 'MINCONNECT 1:00; MAXCONNECT 3:00'` |
+| `--routing '[/ -overnight;-redeye]'` | `--extension '-OVERNIGHTS; -REDEYES'` |
+| `--routing '[/ -prop]'` | `--extension '-PROPS'` |
+| `--routing 'STAR+'` or `--routing 'oneworld+'` (alliance shortcuts) | `--extension 'ALLIANCE star-alliance'` |
+
+This list is "presumed-SPA-only" — definitive resolution requires capturing
+a real SPA session via `research/record_user_session.py` to see what wire
+shape the SPA emits when these idioms are typed in. If anyone runs that
+capture, update this section: either with the API-direct form (current
+guess) or with the SPA's preprocessing rule we should implement
+client-side.
 
 ## Extension codes (`--extension`) — compressed reference
 
@@ -293,22 +334,42 @@ flight fare JFK LHR --dep 2026-08-15 --return 2026-08-22 \
   --depart-times morning
 ```
 
-### Example 9: multi-city
-User: "round-the-world: JFK→LHR→DXB→NRT→JFK, all in August"
+### Example 9: multi-city (single-ticket — needs alliance constraint)
+User: "round-the-world: NYC→Frankfurt→Singapore→Tokyo→NYC, all in August"
 ```bash
-flight fare --slice 'JFK-LHR:2026-08-01' \
-            --slice 'LHR-DXB:2026-08-08' \
-            --slice 'DXB-NRT:2026-08-15' \
-            --slice 'NRT-JFK:2026-08-22'
+flight fare --slice 'EWR-FRA:2026-08-01' \
+            --slice 'FRA-SIN:2026-08-08' \
+            --slice 'SIN-NRT:2026-08-15' \
+            --slice 'NRT-EWR:2026-08-22' \
+            --extension 'ALLIANCE star-alliance'
 ```
+**Why the alliance constraint matters:** Matrix can only return a multi-city
+itinerary that books as a single ticket. That requires every leg's airline
+to share an interline / fare-construction agreement. Without an alliance
+constraint, the solver hunts across non-interlining carriers (e.g. Emirates
++ JAL + AA) and frequently returns "No solutions returned" even though each
+leg individually has flights. Cross-alliance round-the-world tickets
+generally have to be **stitched together as separate one-ways**, not done
+as a single multi-city in Matrix. For single-ticket multi-city, always:
+- Pin to one alliance via `--extension 'ALLIANCE oneworld|skyteam|star-alliance'`, OR
+- Limit slices to a single carrier's network (e.g. all on LH+UA via Star), OR
+- Run as separate `flight fare` queries and present prices summed.
 
 ### Example 10: fare-basis hunt
-User: "find Lufthansa W-class (premium economy upgrade-eligible) JFK to MUC"
+User: "find me business class (J-class) JFK to LHR"
 ```bash
-flight fare JFK MUC --dep 2026-08-15 --return 2026-08-22 \
-  --routing 'LH+' \
-  --extension 'F lh..w'
+flight fare JFK LHR --dep 2026-08-15 --return 2026-08-22 \
+  --extension 'F BC=j'
 ```
+Or for a carrier+booking-class combo (e.g. "AA in W class"):
+```bash
+flight fare JFK LHR --dep 2026-08-15 --return 2026-08-22 \
+  --extension 'F aa..w-'
+```
+Note the trailing `-` on `w-` — it's the wildcard that matches any fare
+basis starting with W (e.g. WCXLA, WQLOWUS). Without the dash, `F aa..w`
+means "fare basis literally named 'w'", which usually doesn't exist and
+returns no results.
 
 ### Example 11: paste-back from calendar to detail
 User: "use that 2026-09-15 date from the calendar grid I just looked at"
@@ -316,10 +377,16 @@ User: "use that 2026-09-15 date from the calendar grid I just looked at"
 flight detail NYC PAR --dep 2026-09-15 \
   --start 2026-09-01 --end 2026-09-30 -d 5-7
 ```
+**Caveat:** the `calendarFollowup` endpoint can be flaky. If Matrix returns
+`Internal server error` or empty results, the followup query needs the
+exact `--start`/`--end`/`-d` of the original calendar that surfaced the
+date. When in doubt, fall back to a plain `flight fare` for the specific
+date — it returns the same shape of result without the followup
+machinery.
 
 ## Common pitfalls (don't trip on first try)
 
-1. **`--routing` vs `--extension`.** Carrier filters as routing-language (`AA+`); itinerary constraints as extension codes (`MAXSTOPS 1`). Mixing them returns `Illegal COMMAND-LINE prefix`. When in doubt: does this constrain *the shape* of the trip? → routing. Does this constrain *aggregate properties*? → extension.
+1. **`--routing` vs `--extension`.** Carrier/airport/segment-shape filters as routing-language (`AA+`, `F* X:LHR F*`); itinerary aggregate constraints as extension codes (`MAXSTOPS 1`, `ALLIANCE oneworld`, `-OVERNIGHTS`). Mixing them returns `Illegal COMMAND-LINE prefix` (routing → extension) or `Bad route specification` (extension → routing).
 
 2. **`--stops 0` is nonstop only.** `--stops 1` = up to 1 stop. `--stops N` maps to Matrix's "max N extra legs beyond nonstop." Leave unset for "no limit" (default 1 extra stop, which is the SPA's "No limit" semantics).
 
@@ -333,11 +400,19 @@ flight detail NYC PAR --dep 2026-09-15 \
 
 7. **Cabin codes: `1`=first, `2`=business, `premium-coach`=premium econ, `3`=economy.** Easy to flip.
 
-8. **Round-trip routing/extension is per-direction.** `--routing 'STAR+'` applies outbound only; use `--routing-ret` (or `--ext-ret`) for the return direction. If one constraint applies to both, set both.
+8. **Round-trip routing/extension is per-direction.** Outbound and return apply independently; the CLI exposes `--routing-ret` / `--ext-ret` if they differ. If one constraint applies to both, set both.
 
 9. **Specific-date round-trip vs calendar round-trip use different commands.** `flight fare X Y --dep D1 --return D2` for known dates. `flight calendar X Y --start S --end E` for "best date in a window."
 
 10. **Wide origin/destination + wide date window = thousands of itineraries + risk of brownout.** Narrow one dimension before another. Calendar is fastest at constraining the date dimension; routing/extension at constraining the airline/route dimension.
+
+11. **Multi-city needs alliance/carrier constraint to be ticketable.** Matrix can only return single-ticket multi-city itineraries that share fare-construction agreements. Without an `ALLIANCE` constraint or single-carrier routing, mixed-alliance multi-city (e.g. EK + JL + AA) silently returns "No solutions returned" even when each leg has flights. **Solution**: pin to one alliance, OR run multiple `flight fare` queries and stitch the results in your head.
+
+12. **Routing-language slash modifiers (`[/ alliance ...]`, `[/ maxdur N]`, etc.) are documented at Google but rejected by the public API.** Always reach for the extension-code equivalent (`ALLIANCE`, `MAXDUR`, `MINCONNECT`, `-OVERNIGHTS`, etc.).
+
+13. **Fare-basis with literal-class names usually fails — use the wildcard form (`-` suffix) or `BC=` form.** `F lh..w` matches a fare basis literally named "w" (vanishingly rare); use `F lh..w-` (any fare basis starting with W) or `F BC=w` (any prime booking code W). Same for J, Y, etc.
+
+14. **`flight detail` (calendarFollowup) is flaky.** If Matrix returns `Internal server error`, fall back to `flight fare` on the specific date — same result shape, fewer moving parts.
 
 ## Where to dig deeper
 

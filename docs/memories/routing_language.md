@@ -61,11 +61,10 @@ Naming:
 - Countries: 2-letter ISO (US, GB, DE, JP)
 - Alliances: lowercase strings (`oneworld`, `skyteam`, `star-alliance`)
 
-## Global itinerary modifiers (`/`-prefix)
+## Global itinerary modifiers (`/`-prefix) — documented, but broken via the API
 
-Inside square brackets in the docs (`[/ ... ]`) but in the wire format these
-go inline. Units differ from the extension-code equivalents — these are
-**minutes as integers**:
+Google's help page documents slash-modifiers that go inside the routing
+language to express itinerary-level constraints:
 
 ```
 [/ minconnect 45]            # 45 minutes minimum connection time
@@ -79,10 +78,62 @@ go inline. Units differ from the extension-code equivalents — these are
 [/ -prop]
 ```
 
-**These overlap with extension codes** (see [extension_codes.md](extension_codes.md)).
-The difference: routing-language uses **minutes as integers** (`maxdur 240`),
-extension codes use **HH:MM strings** (`MAXDUR 4:00`). Functionally
-equivalent — pick whichever flows better for the case.
+**These DO NOT WORK via the API endpoint this CLI hits** (verified
+empirically 2026-05). Every variant tested — with/without surrounding
+brackets, with/without spaces, with various route prefixes (`F+`, bare,
+etc.) — returns:
+
+```
+QPX Warning.  Bad route specification
+```
+
+**Hypothesis**: the matrix.itasoftware.com SPA accepts these in its
+routing-language box but runs a **client-side preprocessing step** that
+splits them out into the `commandLine` field (extension codes) before
+sending the wire request. We don't reproduce that preprocessing, so the
+slash-modifier strings reach Matrix's API as-is and are rejected.
+
+**Resolution**: use the [extension_codes.md](extension_codes.md)
+equivalent instead. They cover the same constraints reliably:
+
+| Routing-language slash form (broken) | Extension-code equivalent (works) |
+|---|---|
+| `/ minconnect 45` (mins) | `MINCONNECT 0:45` (HH:MM) |
+| `/ maxconnect 180` (mins) | `MAXCONNECT 3:00` (HH:MM) |
+| `/ padconnect 20` (mins) | `PADCONNECT 0:20` (HH:MM) |
+| `/ maxdur 480` (mins) | `MAXDUR 8:00` (HH:MM) |
+| `/ alliance star-alliance` | `ALLIANCE star-alliance` |
+| `/ -overnight; -redeye` | `-OVERNIGHTS; -REDEYES` |
+| `/ -prop` | `-PROPS` |
+
+**Verification TODO**: capture a real SPA session via
+`research/record_user_session.py` with one of these idioms typed in the
+routing box. The captured wire body will show whether (a) the SPA
+preprocesses the routing-language string into `commandLine` extensions
+(confirming the hypothesis — would mean we could implement the same
+client-side translation), or (b) the SPA sends it unchanged and some
+other mechanism makes it work (different endpoint, different auth, etc).
+Update this section with the finding.
+
+## Other API-rejected idioms
+
+Same caveat — documented in Google's help but rejected by the API:
+
+- **Alliance carrier-shortcuts** like `STAR+`, `oneworld+`, `skyteam+`
+  return `Bad route specification`. Use `--extension 'ALLIANCE …'`
+  instead.
+- Anything starting with a bare `/` (e.g. `/alliance ...`) without a
+  preceding route segment is rejected.
+
+## What does work in routing — confirmed empirically
+
+- Bare carrier codes: `LH+`, `BA AA`, `~UA+`, `O:LH+` ✅
+- Connection-airport filters: `F* X:LHR F*`, `~DFW`, `DFW,DEN` ✅
+- Country filters: `~l:nUS+` ✅
+- Flight-number filters: `UA882`, `UA1000-2000+` ✅
+- Case-insensitive: `lh+` ≡ `LH+`, `x:icn` ≡ `X:ICN` ✅
+- Non-stop forms: `N`, `N:UA` ✅
+- Segment placeholders: `F`, `F+`, `F?`, `F*` ✅
 
 ## Worked examples
 
