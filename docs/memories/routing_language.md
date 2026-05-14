@@ -87,11 +87,26 @@ etc.) — returns:
 QPX Warning.  Bad route specification
 ```
 
-**Hypothesis**: the matrix.itasoftware.com SPA accepts these in its
-routing-language box but runs a **client-side preprocessing step** that
-splits them out into the `commandLine` field (extension codes) before
-sending the wire request. We don't reproduce that preprocessing, so the
-slash-modifier strings reach Matrix's API as-is and are rejected.
+**Original hypothesis (refuted)**: that the matrix.itasoftware.com SPA
+preprocesses slash-modifiers client-side and we just don't reproduce that
+preprocessing. Inspecting the SPA bundle (2026-05) refuted this. The
+serializer is literally:
+
+```js
+{ commandLine: c.ext || void 0, routeLanguage: c.routing || void 0, ... }
+```
+
+where `c.ext` is the user-typed content of the SPA's "Extension codes"
+input and `c.routing` is the user-typed content of the "Routing
+language" input. The strings are passed through verbatim — no
+preprocessing, no shortcut expansion, no slash-modifier splitting. (Bundle
+also has zero matches for any plausible-named preprocessing function:
+`parseRouting`, `expandRouting`, `splitSlashModifiers`, etc.)
+
+**Conclusion**: slash-modifier syntax doesn't work in the SPA either. The
+Google routing-language help page documents idioms that aren't (or are no
+longer) accepted by Matrix's actual server. Treat the slash-modifier
+section of that page as misleading.
 
 **Resolution**: use the [extension_codes.md](extension_codes.md)
 equivalent instead. They cover the same constraints reliably:
@@ -106,14 +121,14 @@ equivalent instead. They cover the same constraints reliably:
 | `/ -overnight; -redeye` | `-OVERNIGHTS; -REDEYES` |
 | `/ -prop` | `-PROPS` |
 
-**Verification TODO**: capture a real SPA session via
-`research/record_user_session.py` with one of these idioms typed in the
-routing box. The captured wire body will show whether (a) the SPA
-preprocesses the routing-language string into `commandLine` extensions
-(confirming the hypothesis — would mean we could implement the same
-client-side translation), or (b) the SPA sends it unchanged and some
-other mechanism makes it work (different endpoint, different auth, etc).
-Update this section with the finding.
+**Original verification plan**: capture a real SPA session to see what
+wire body the SPA emits when slash-modifiers are typed. **Skipped** in
+favor of inspecting the SPA bundle directly, which gave a definitive
+answer faster (the serializer is exposed in the minified JS as a simple
+pass-through of `c.ext` and `c.routing`). If someone wants to confirm via
+a live capture anyway, `research/record_user_session.py` is the tool —
+type `[/ alliance star-alliance]` in the routing box and observe whether
+Matrix's UI even renders results (it shouldn't, based on the bundle).
 
 ## Other API-rejected idioms
 

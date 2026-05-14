@@ -126,17 +126,20 @@ Full reference: [Google's routing-language help](https://support.google.com/faqs
 (note: the slash-modifier section in that doc is functional in Matrix's
 UI but not via the API endpoint this CLI hits).
 
-## Documented but broken via the API
+## Documented but broken in BOTH the SPA and the API
 
-The Matrix SPA at matrix.itasoftware.com accepts these idioms in its
-routing-box; the API endpoint we hit rejects them with `QPX Warning. Bad
-route specification` (verified 2026-05). Most plausible cause: the SPA
-runs a client-side preprocessing pass that splits these out into
-`commandLine` extensions before sending — we don't reproduce that
-preprocessing, so use the **API-direct equivalent** when interacting
-with this CLI.
+These idioms are documented at Google's routing-language help page but
+**Matrix's server rejects them with `QPX Warning. Bad route
+specification`** when sent verbatim in the `routeLanguage` field
+(verified 2026-05 via direct API testing AND via inspection of the SPA
+bundle, which serializes `routeLanguage` as a pass-through of the user's
+"Routing language" input box — no preprocessing). The Google docs appear
+to be stale or refer to a different surface; **typing these into the SPA
+UI's routing box would produce the same error**.
 
-| User reaches for (SPA idiom) | API doesn't accept → use instead |
+Always reach for the extension-code equivalent in `--extension`:
+
+| Documented idiom (broken) | Use instead |
 |---|---|
 | `--routing '[/ alliance star-alliance]'` | `--extension 'ALLIANCE star-alliance'` |
 | `--routing 'F+ / alliance oneworld'` | `--extension 'ALLIANCE oneworld'` |
@@ -144,14 +147,8 @@ with this CLI.
 | `--routing '[/ minconnect 60; maxconnect 180]'` | `--extension 'MINCONNECT 1:00; MAXCONNECT 3:00'` |
 | `--routing '[/ -overnight;-redeye]'` | `--extension '-OVERNIGHTS; -REDEYES'` |
 | `--routing '[/ -prop]'` | `--extension '-PROPS'` |
-| `--routing 'STAR+'` or `--routing 'oneworld+'` (alliance shortcuts) | `--extension 'ALLIANCE star-alliance'` |
-
-This list is "presumed-SPA-only" — definitive resolution requires capturing
-a real SPA session via `research/record_user_session.py` to see what wire
-shape the SPA emits when these idioms are typed in. If anyone runs that
-capture, update this section: either with the API-direct form (current
-guess) or with the SPA's preprocessing rule we should implement
-client-side.
+| `--routing 'STAR+'` or `--routing 'oneworld+'` (alliance carrier-shortcuts) | `--extension 'ALLIANCE star-alliance'` |
+| `--routing '[/ padconnect 20]'` | `--extension 'PADCONNECT 0:20'` |
 
 ## Extension codes (`--extension`) — compressed reference
 
