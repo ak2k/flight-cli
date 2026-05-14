@@ -31,3 +31,8 @@ htmlcov/
 # These live in-tree for convenience but aren't part of the published code.
 # Tracked test fixtures live in tests/fixtures/ instead.
 research/
+
+# Claude Code per-session agent state — settings only. Project-shared
+# skills under .claude/skills/ ARE checked in.
+.claude/settings.json
+.claude/settings.local.json

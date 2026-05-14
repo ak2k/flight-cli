@@ -1,0 +1,357 @@
+---
+name: flight-search
+description: Use this skill when a user wants to search for flights, find airfare deals, build a flight query, compare prices across dates, or invoke the `flight` CLI in this project. Translates user intent (origin, destination, dates, constraints like alliance / cabin / duration / layover preferences / region rather than airport / etc.) into the right `flight fare` / `flight calendar` / `flight detail` / `flight gflight` invocation with proper --routing, --extension, and multi-airport arguments. Grounds the agent in Matrix's routing language, extension codes, and IATA metro/region groupings — knowledge that's NOT in `flight --help` and that the agent will otherwise hallucinate. Invoke whenever a user mentions flights, airfare, ITA Matrix, or any of the project's CLI commands.
+---
+
+# Flight search with flight-cli
+
+This project wraps ITA Matrix's undocumented Alkali backend. The CLI is
+powerful but the most useful constraints — alliance filters, no-overnight,
+fare-basis, multi-airport — live in two opaque DSLs (routing language and
+extension codes). This skill is the cheat sheet so you can translate user
+intent into the right invocation **on the first try**.
+
+## CLI surface
+
+| Command | Purpose |
+|---|---|
+| `flight fare ORIGIN DEST --dep YYYY-MM-DD [--return YYYY-MM-DD]` | Specific-date search. 1 leg = one-way; 2 = round-trip; multi-city via `--slice`. |
+| `flight calendar ORIGIN DEST --start YYYY-MM-DD [--end ...] [-d 5-7]` | Lowest-fare grid across a date window. Default round-trip; `--one-way` flips. |
+| `flight detail ORIGIN DEST --dep YYYY-MM-DD --start ... --end ...` | Phase-2 of the calendar flow: full itineraries for a date picked from the grid. |
+| `flight gflight ORIGIN DEST --dep YYYY-MM-DD` | Google Flights handoff via `fli`. Useful for booking links. |
+| `flight airport QUERY` | IATA / partial-name autocomplete. |
+
+Global flags (every command):
+- `-v` / `-vv` — verbose logging (cache hits, retries) to stderr
+- `--json` — emit raw response JSON
+- `--no-cache` — bypass the on-disk response cache
+- `--matrix-url` / `--google-url` — toggle deep-link emission
+
+## The two opaque DSLs
+
+| DSL | CLI flag | Wire field | Goes here for |
+|---|---|---|---|
+| Routing language | `--routing 'EXPR'` | `routeLanguage` | Carrier / airport / segment-shape filters (`LH+`, `BA AA`, `F* X:LHR F*`) |
+| Extension codes | `--extension 'CODES'` (alias `--ext`) | `commandLine` | Itinerary-level limits (`MAXSTOPS 1`, `MAXDUR 18:00`, `-OVERNIGHTS`, `+CABIN 2`) |
+
+**Putting one in the other returns `QPX Warning. Illegal COMMAND-LINE prefix`.** Keep them straight.
+
+`--routing-ret` / `--ext-ret` set the return-direction values when they differ from outbound (round-trip and calendar modes).
+
+## Intent → flag cheat sheet
+
+| User says… | Reach for… |
+|---|---|
+| "max 1 stop" / "at most one connection" | `--stops 1` |
+| "nonstop only" | `--stops 0` |
+| "Star Alliance only" | `--extension 'ALLIANCE star-alliance'` |
+| "Oneworld" / "SkyTeam" | `--extension 'ALLIANCE oneworld'` / `ALLIANCE skyteam` |
+| "no red-eyes" | `--extension '-REDEYES'` |
+| "no overnight layovers" | `--extension '-OVERNIGHTS'` |
+| "no propeller planes" | `--extension '-PROPS'` |
+| "business class" | `--cabin business` (or `--extension '+CABIN 2'` to enforce) |
+| "premium economy" | `--cabin premium-coach` |
+| "max 18 hours total" | `--extension 'MAXDUR 18:00'` |
+| "min 90 minute connections" | `--extension 'MINCONNECT 1:30'` |
+| "max 2 hour layovers" | `--extension 'MAXCONNECT 2:00'` |
+| "only Lufthansa" | `--routing 'LH+'` |
+| "only operated by Lufthansa" (no codeshares) | `--routing 'O:LH+'` |
+| "fly via LHR" | `--routing 'F* X:LHR F*'` |
+| "anywhere but US connections" | `--routing '~l:nUS+'` |
+| "avoid AA and DL" | `--extension '-AIRLINES AA DL'` |
+| "avoid connecting in DFW or ORD" | `--extension '-CITIES DFW ORD'` |
+| "any morning departure" | `--depart-times morning` (or comma list: `morning,early-morning`) |
+| "from New York City" | `NYC` (Matrix-native metro code; expands to JFK/LGA/EWR) |
+| "from anywhere in the US East Coast" | `JFK,LGA,EWR,BOS,IAD,DCA,BWI,PHL,ATL,MIA` (see Airport groups) |
+| "to Europe" | `LHR,CDG,FRA,AMS,IST,MAD,BCN,FCO,MUC,ZRH,VIE,CPH,DUB` (see Airport groups) |
+| "I want to see prices across dates" | `flight calendar` not `flight fare` |
+| "what's the cheapest week to fly?" | `flight calendar` with a wide `--end` |
+
+## Routing language (`--routing`) — compressed reference
+
+Multiple segments separated by **space**; alternatives within a segment by **comma, no spaces**. Brackets `[ ]` in Google's docs are illustrative; the wire string omits them.
+
+**Operators:**
+- `~` — negation (`~UA`, `~DFW`)
+- `+` — one or more
+- `*` — zero or more
+- `?` — zero or one
+
+**Prefixes:**
+- `C:` — marketing carrier (default for 2-letter codes; `AA` ≡ `C:AA`)
+- `O:` — operating carrier (`O:LH` = LH metal, not codeshare)
+- `X:` — connection airport (default for 3-letter codes)
+- `F` — flight-segment placeholder (`F+` = 1+ flights, `F?` = 0 or 1)
+- `N` — non-stop only
+- `L:` — country filter (`~l:nUS+` = no US connections)
+
+**Alliance shortcuts** (single-token; goes alone in routing OR `[/ alliance ...]` in routing OR `ALLIANCE` in extension):
+- `oneworld`, `skyteam`, `star-alliance`
+
+**Common patterns:**
+
+| Expression | Meaning |
+|---|---|
+| `LH+` | Any number of LH flights, all LH |
+| `BA AA` | BA flight then AA flight (exactly 2 segments) |
+| `F* X:LHR F*` | Itinerary that has LHR as a connection |
+| `O:LH F+ / alliance star-alliance` | LH-operated + Star Alliance overall |
+| `~UA+` | Itinerary with zero UA flights |
+| `~AA,UA,DL` | Direct flight, none of these carriers |
+| `N` / `N:UA` | Non-stop / non-stop on UA |
+| `DFW,DEN` | Single connection at DFW or DEN |
+| `~l:nUS+` | 0+ non-US connections (excludes US transit) |
+
+**Slash-prefixed global modifiers** (units = minutes int):
+- `[/ minconnect 60; maxconnect 180]`
+- `[/ maxdur 720]`  (12 hours, in minutes)
+- `[/ alliance star-alliance]`
+- `[/ -overnight;-redeye]`
+
+For these slash-modifiers, the **extension-code equivalent is usually cleaner** (uses HH:MM): `MINCONNECT 1:00; MAXCONNECT 3:00; MAXDUR 12:00; ALLIANCE star-alliance; -OVERNIGHTS; -REDEYES`.
+
+Full reference: [Google's routing-language help](https://support.google.com/faqs/answer/2736497).
+
+## Extension codes (`--extension`) — compressed reference
+
+Multiple codes joined by **semicolon** (`;`). Args within a code by **space**. Times = `HH:MM`. Distances/counts = integers. Codes are case-insensitive.
+
+**Itinerary constraints:**
+
+| Code | Example | Meaning |
+|---|---|---|
+| `MAXSTOPS n` | `MAXSTOPS 1` | Max connecting stops per direction |
+| `MAXDUR hh:mm` | `MAXDUR 18:00` | Max itinerary duration per direction |
+| `MAXMILES n` / `MINMILES n` | `MAXMILES 8000` | Mileage bounds per direction |
+| `MINCONNECT hh:mm` | `MINCONNECT 1:00` | Min layover |
+| `MAXCONNECT hh:mm` | `MAXCONNECT 2:00` | Max layover |
+| `PADCONNECT hh:mm` | `PADCONNECT 0:30` | Add buffer to airline minimum |
+| `-OVERNIGHTS` | `-OVERNIGHTS` | Exclude overnight stays at hubs |
+| `-REDEYES` | `-REDEYES` | Exclude overnight flights |
+| `-PROPS` | `-PROPS` | Exclude propeller aircraft |
+| `-CODESHARE` | `-CODESHARE` | Disallow codeshares |
+| `-NOFIRSTCLASS` | `-NOFIRSTCLASS` | Require flights that have a first-class cabin |
+
+**Carrier filters:**
+
+| Code | Example | Meaning |
+|---|---|---|
+| `ALLIANCE x\|y\|…` | `ALLIANCE star-alliance` | Restrict to alliance(s). Multiple via `\|`. |
+| `AIRLINES x y …` | `AIRLINES BA AF KL` | Only these marketing carriers |
+| `-AIRLINES x y …` | `-AIRLINES AA UA DL` | Exclude these marketing carriers |
+| `OPAIRLINES x y …` | `OPAIRLINES LH` | Only these operating carriers (no codeshares from non-LH metal) |
+| `-OPAIRLINES x y …` | `-OPAIRLINES YV` | Exclude these operating carriers |
+
+**Airport filters:**
+
+| Code | Example | Meaning |
+|---|---|---|
+| `-CITIES x y …` | `-CITIES DFW ORD` | Don't connect at these cities |
+
+**Cabin filters:**
+
+| Code | Example | Meaning |
+|---|---|---|
+| `+CABIN n …` | `+CABIN 1 2` | Require booking in first or business cabin |
+| `-CABIN n …` | `-CABIN 3` | Prohibit booking in economy |
+
+Cabin values: `1`=first, `2`=business, `premium-coach`=premium economy, `3`=economy.
+
+**Fare-basis filters:**
+
+| Pattern | Example | Meaning |
+|---|---|---|
+| `F BC=code\|BC=code` | `F bc=y\|bc=b` | Specific prime booking codes |
+| `F CC.AAA+BBB.FFFFFF` | `F aa.lon+chi.yup` | Carrier + market + fare basis |
+| `F ..FFFFFF` | `F ..yup` | Fare basis only (any carrier, any market) |
+| `F ..F-` | `F ..y-` | Wildcard — fare bases starting with letter |
+
+**Combining example:**
+
+```
+ALLIANCE star-alliance; -REDEYES; MAXSTOPS 1; +CABIN 2; MINCONNECT 1:00; MAXDUR 14:00
+```
+
+Full reference: [uponarriving.com ITA Matrix guide](https://www.uponarriving.com/ita-matrix-guide/).
+
+## Airport groups (region/metro → IATA expansion)
+
+When users mention regions / metros, expand to the right IATA list. Two flavors:
+
+**IATA metro codes Matrix accepts as a single token** (prefer these):
+
+| Metro | Code | Airports it covers |
+|---|---|---|
+| New York City | `NYC` | JFK, LGA, EWR |
+| London | `LON` | LHR, LGW, STN, LTN, LCY, SEN |
+| Paris | `PAR` | CDG, ORY, BVA |
+| Tokyo | `TYO` | NRT, HND |
+| Moscow | `MOW` | SVO, DME, VKO |
+| Stockholm | `STO` | ARN, BMA, NYO |
+| Milan | `MIL` | MXP, LIN, BGY |
+| Rome | `ROM` | FCO, CIA |
+| Buenos Aires | `BUE` | EZE, AEP |
+| São Paulo | `SAO` | GRU, CGH, VCP |
+| Washington DC | `WAS` | IAD, DCA, BWI |
+| Chicago | `CHI` | ORD, MDW |
+| Houston | `HOU` | IAH, HOU |
+| Bay Area | `QSF` | SFO, OAK, SJC |
+| Osaka | `OSA` | KIX, ITM, UKB |
+| Seoul | `SEL` | ICN, GMP |
+| Beijing | `BJS` | PEK, PKX |
+
+**Manual region expansions** (Matrix has no single code for these):
+
+| Region | Comma-list |
+|---|---|
+| US East Coast | `JFK,LGA,EWR,BOS,IAD,DCA,BWI,PHL,ATL,MIA,FLL,CLT` |
+| US West Coast | `LAX,SFO,SEA,PDX,SAN,OAK,SJC,LAS,PHX` |
+| US major hubs (top 15) | `JFK,LGA,EWR,LAX,ORD,ATL,DFW,DEN,SFO,SEA,LAS,MIA,BOS,IAD,PHX` |
+| Canada major | `YYZ,YVR,YUL,YYC,YEG` |
+| Europe major hubs | `LHR,CDG,FRA,AMS,IST,MAD,BCN,FCO,MUC,ZRH,VIE,CPH,DUB` |
+| UK & Ireland | `LHR,LGW,STN,LTN,MAN,EDI,GLA,DUB,ORK` |
+| France & Iberia | `CDG,ORY,NCE,LYS,MAD,BCN,LIS,OPO,VLC,SVQ` |
+| Germany / Switzerland / Austria | `FRA,MUC,BER,DUS,HAM,STR,ZRH,GVA,VIE` |
+| Italy & Greece | `FCO,MXP,LIN,VCE,NAP,ATH,SKG,HER` |
+| Nordics | `CPH,ARN,OSL,HEL,RIX` |
+| East Asia hubs | `HND,NRT,KIX,ICN,PEK,PVG,HKG,TPE` |
+| Southeast Asia hubs | `SIN,BKK,KUL,CGK,DPS,MNL,HAN,SGN` |
+| South Asia | `DEL,BOM,BLR,MAA,HYD,KTM,CMB` |
+| Middle East hubs | `DXB,AUH,DOH,RUH,JED,TLV,AMM` |
+| Australia & NZ | `SYD,MEL,BNE,PER,AKL,WLG,CHC` |
+| South America hubs | `GRU,GIG,SCL,EZE,LIM,BOG,UIO,PTY` |
+| Africa hubs | `JNB,CPT,NBO,ADD,LOS,CMN,CAI` |
+| Hawaii | `HNL,OGG,KOA,LIH` |
+
+**Alliance-hub shortcuts** (useful with `ALLIANCE` extension):
+
+| Alliance | European hubs | Asian hubs | US hubs |
+|---|---|---|---|
+| Star Alliance | `FRA,MUC,ZRH,VIE,CPH,IST,LIS` | `ICN,NRT,PEK,SIN` | `EWR,ORD,IAH,DEN,SFO,LAX` |
+| Oneworld | `LHR,MAD,HEL,DUB` | `HKG,DOH,NRT` | `JFK,DFW,ORD,LAX,MIA` |
+| SkyTeam | `CDG,AMS,FCO,PRG` | `ICN,CDG,PVG` | `JFK,ATL,DTW,MSP,SLC,LAX` |
+
+Full reference: [airport_groups.md](../../docs/memories/airport_groups.md).
+
+## Worked examples (user request → CLI invocation)
+
+### Example 1: simple round-trip with stops cap
+User: "find me round-trip JFK to LHR in mid-August, max 1 stop"
+```bash
+flight fare JFK LHR --dep 2026-08-15 --return 2026-08-22 --stops 1
+```
+
+### Example 2: alliance + cabin + duration
+User: "Star Alliance from New York to Munich, business class, max 14 hours per direction"
+```bash
+flight fare NYC MUC --dep 2026-09-05 --return 2026-09-12 \
+  --cabin business \
+  --extension 'ALLIANCE star-alliance; MAXDUR 14:00; +CABIN 2'
+```
+
+### Example 3: lowest fare across a date window
+User: "what's the cheapest week to fly NYC to Paris in October for a 5-7 night trip"
+```bash
+flight calendar NYC PAR --start 2026-10-01 --end 2026-10-31 -d 5-7
+```
+
+### Example 4: connect via a specific airport
+User: "I want to fly JFK to Tokyo via Seoul on Star Alliance"
+```bash
+flight fare JFK TYO --dep 2026-11-01 \
+  --routing 'F* X:ICN F*' \
+  --extension 'ALLIANCE star-alliance'
+```
+
+### Example 5: avoid red-eyes + overnight layovers + props
+User: "I hate red-eyes and don't want to overnight in a connecting city, and please no propeller planes"
+```bash
+flight fare LAX BOS --dep 2026-07-04 \
+  --extension '-REDEYES; -OVERNIGHTS; -PROPS'
+```
+
+### Example 6: regional search
+User: "find me a cheap flight from anywhere on the east coast to anywhere in Europe in September"
+```bash
+flight calendar 'JFK,LGA,EWR,BOS,IAD,DCA,BWI,PHL' \
+                'LHR,CDG,FRA,AMS,IST,MAD,BCN,FCO,MUC,ZRH,VIE,CPH,DUB' \
+                --start 2026-09-01 --end 2026-09-30 -d 7-10
+```
+
+### Example 7: specific carrier + connection time
+User: "JFK to LHR on Lufthansa-operated metal only, with at least 1.5 hours between flights"
+```bash
+flight fare JFK LHR --dep 2026-08-15 --return 2026-08-22 \
+  --routing 'O:LH+' \
+  --extension 'MINCONNECT 1:30'
+```
+
+### Example 8: morning departure preference
+User: "I want a morning departure from JFK to LHR"
+```bash
+flight fare JFK LHR --dep 2026-08-15 --return 2026-08-22 \
+  --depart-times morning
+```
+
+### Example 9: multi-city
+User: "round-the-world: JFK→LHR→DXB→NRT→JFK, all in August"
+```bash
+flight fare --slice 'JFK-LHR:2026-08-01' \
+            --slice 'LHR-DXB:2026-08-08' \
+            --slice 'DXB-NRT:2026-08-15' \
+            --slice 'NRT-JFK:2026-08-22'
+```
+
+### Example 10: fare-basis hunt
+User: "find Lufthansa W-class (premium economy upgrade-eligible) JFK to MUC"
+```bash
+flight fare JFK MUC --dep 2026-08-15 --return 2026-08-22 \
+  --routing 'LH+' \
+  --extension 'F lh..w'
+```
+
+### Example 11: paste-back from calendar to detail
+User: "use that 2026-09-15 date from the calendar grid I just looked at"
+```bash
+flight detail NYC PAR --dep 2026-09-15 \
+  --start 2026-09-01 --end 2026-09-30 -d 5-7
+```
+
+## Common pitfalls (don't trip on first try)
+
+1. **`--routing` vs `--extension`.** Carrier filters as routing-language (`AA+`); itinerary constraints as extension codes (`MAXSTOPS 1`). Mixing them returns `Illegal COMMAND-LINE prefix`. When in doubt: does this constrain *the shape* of the trip? → routing. Does this constrain *aggregate properties*? → extension.
+
+2. **`--stops 0` is nonstop only.** `--stops 1` = up to 1 stop. `--stops N` maps to Matrix's "max N extra legs beyond nonstop." Leave unset for "no limit" (default 1 extra stop, which is the SPA's "No limit" semantics).
+
+3. **Comma-list for multi-airport, no spaces.** `JFK,LGA,EWR` works; `JFK, LGA, EWR` does not.
+
+4. **Calendar mode requires `--start`; needs a window.** `flight calendar` without `--start` errors. `--end` defaults to start+30d.
+
+5. **Calendar brownouts.** Matrix's calendar returns empty grids for some queries — not our bug. If you get "Calendar empty", retry, simplify constraints, or fall back to `flight fare` on a specific date.
+
+6. **`-OVERNIGHTS` vs `-REDEYES` are different.** Use both if the user wants neither overnight-stays-at-hubs *nor* overnight-flights.
+
+7. **Cabin codes: `1`=first, `2`=business, `premium-coach`=premium econ, `3`=economy.** Easy to flip.
+
+8. **Round-trip routing/extension is per-direction.** `--routing 'STAR+'` applies outbound only; use `--routing-ret` (or `--ext-ret`) for the return direction. If one constraint applies to both, set both.
+
+9. **Specific-date round-trip vs calendar round-trip use different commands.** `flight fare X Y --dep D1 --return D2` for known dates. `flight calendar X Y --start S --end E` for "best date in a window."
+
+10. **Wide origin/destination + wide date window = thousands of itineraries + risk of brownout.** Narrow one dimension before another. Calendar is fastest at constraining the date dimension; routing/extension at constraining the airline/route dimension.
+
+## Where to dig deeper
+
+Pin these for follow-up reading:
+
+- [docs/memories/routing_language.md](../../docs/memories/routing_language.md) — full grammar
+- [docs/memories/extension_codes.md](../../docs/memories/extension_codes.md) — full code table
+- [docs/memories/airport_groups.md](../../docs/memories/airport_groups.md) — more region groupings and notes
+- [docs/memories/wire_format_quirks.md](../../docs/memories/wire_format_quirks.md) — wire-level subtleties (mostly relevant when *extending* the CLI, less when invoking it)
+- [docs/memories/public_alkali_wrapper.md](../../docs/memories/public_alkali_wrapper.md) — context on the project's role
+- [CLAUDE.md](../../CLAUDE.md) — top-level project notes
+
+## When this skill is the wrong tool
+
+- User wants to **add a new search mode** (new `Search` variant in domain.py) → read CLAUDE.md and wire_format_quirks.md first; that's a coding task, not a query task.
+- User wants to **debug a Matrix response** → start from raw `--json` output and `wire_format_quirks.md`, not this skill.
+- User wants to **understand pricing logic** → Matrix's pricing isn't documented anywhere; this skill won't help.

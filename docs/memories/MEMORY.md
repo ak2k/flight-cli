@@ -6,6 +6,16 @@ go into detail and are loaded on demand.
 - [wire_format_quirks.md](wire_format_quirks.md) — Per-mode field rules,
   `routeLanguage` vs `commandLine`, summarizer ordering, page semantics,
   timeRanges flexibility. Read before touching `wire.py` or `links.py`.
+- [routing_language.md](routing_language.md) — Full grammar of the
+  `routeLanguage` field (`LH+`, `BA AA`, `F* X:LHR F*`, alliance codes,
+  per-segment carrier/airport filters). What goes into `--routing`.
+- [extension_codes.md](extension_codes.md) — Full table of `commandLine`
+  extension codes (`MAXSTOPS`, `MAXDUR`, `ALLIANCE`, `-OVERNIGHTS`,
+  `+CABIN`, fare-basis, etc.). What goes into `--extension`.
+- [airport_groups.md](airport_groups.md) — Metro IATA codes Matrix accepts
+  natively (NYC, LON, PAR…) and manual region expansions (Europe, US
+  East Coast, East Asia…) for users who ask "find me a flight to
+  Europe".
 - [api_key_bootstrap.md](api_key_bootstrap.md) — 7 keys in Matrix's SPA
   bundle, how the regex targets the prod one, cache + env-var fallback,
   what to do if Google rotates.
@@ -16,6 +26,10 @@ go into detail and are loaded on demand.
   surfaces input-validation as HTTP 200 + `{"error":...}` payloads (not
   4xx). How `MatrixApiError` catches it; useful error patterns to
   recognize.
+- [public_alkali_wrapper.md](public_alkali_wrapper.md) — As far as 2026-05
+  web search shows, this project is the only public wrapper of the Alkali
+  endpoint. Implications: our fixtures are the spec; forward-compat is
+  on us. What to do if Matrix changes shape.
 
 ## When to add a new memory file
 

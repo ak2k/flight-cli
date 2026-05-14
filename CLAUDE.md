@@ -5,6 +5,11 @@ Architecture: pydantic discriminated union → match-based wire adapters →
 thin typer CLI shells. Small (~2K LOC, single-package layout)
 + golden-file regression tests + pyright-strict type checking.
 
+As of 2026-05, an exhaustive web search turned up zero other public
+wrappers of this endpoint — see
+[docs/memories/public_alkali_wrapper.md](docs/memories/public_alkali_wrapper.md).
+Our fixtures are the de facto spec.
+
 ## Workflow
 
 - **Install**: `uv venv && uv pip install -e .`
@@ -34,7 +39,9 @@ Full detail at [docs/memories/MEMORY.md](docs/memories/MEMORY.md). Highlights:
 1. **`routeLanguage` ≠ `commandLine`.** Matrix slice has TWO distinct fields:
    `routeLanguage` for routing language (`"LH+"`, `"BA AA"`, `"[F* X F*]"`)
    and `commandLine` for extension codes (`"MAXCONNECT 2:00"`, `"MAXSTOPS 1"`).
-   Confusing them returns `QPX Warning. Illegal COMMAND-LINE prefix`.
+   Confusing them returns `QPX Warning. Illegal COMMAND-LINE prefix`. Full
+   references: [routing_language.md](docs/memories/routing_language.md) +
+   [extension_codes.md](docs/memories/extension_codes.md).
 2. **Per-mode field rules.** Specific-date emits `dateModifier` +
    `isArrivalDate` always; calendar + followup omit them. Followup omits
    `inputs.filter`. Calendar has `page: {size}`; specific + followup have
@@ -71,6 +78,15 @@ Full detail at [docs/memories/MEMORY.md](docs/memories/MEMORY.md). Highlights:
 3. `assert_never` ensures pyright catches forgotten branches.
 4. Capture a real SPA body to use as a golden-file fixture.
 5. Write a reconstruction test in `tests/test_wire_round_trip.py`.
+
+## Agent skill
+
+The `.claude/skills/flight-search/SKILL.md` skill packages the routing-
+language grammar, extension-code reference, airport-group expansions, and
+worked examples — enough that an agent can translate a user's flight-search
+intent into the right CLI invocation on the first try. Triggered by
+flight-search-shaped requests in any Claude Code session working in this
+repo.
 
 ## Project memory
 
