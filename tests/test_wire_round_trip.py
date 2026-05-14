@@ -19,7 +19,7 @@ from flight_cli.domain import (
     Cabin, Pax, Leg, SearchOptions, TimeOfDay,
     SpecificDateSearch, CalendarSearch, CalendarFollowup,
 )
-from flight_cli.domain import _CalendarWindow
+from flight_cli.domain import CalendarWindow
 from flight_cli.wire import to_wire
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
@@ -55,7 +55,7 @@ def test_calendar_round_trip_multi_airport():
             Leg.of(["MUC", "FRA"], "NYC"),
         ),
         options=SearchOptions(cabin=Cabin.COACH, pax=Pax(adults=1)),
-        window=_CalendarWindow(
+        window=CalendarWindow(
             start=date.fromisoformat(captured["inputs"]["startDate"]),
             end=date.fromisoformat(captured["inputs"]["endDate"]),
             duration_min=captured["inputs"]["layover"]["min"],
@@ -80,7 +80,7 @@ def test_calendarFollowup_after_pick():
                     date.fromisoformat("2026-06-11")),
         ),
         options=SearchOptions(cabin=Cabin.COACH, pax=Pax(adults=1)),
-        window=_CalendarWindow(
+        window=CalendarWindow(
             start=date.fromisoformat(captured["inputs"]["startDate"]),
             end=date.fromisoformat(captured["inputs"]["endDate"]),
             duration_min=captured["inputs"]["layover"]["min"],

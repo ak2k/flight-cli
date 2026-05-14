@@ -3,14 +3,13 @@ the domain Search into a wire body, hits the endpoint, returns a parsed
 response. All routing/filtering/mode-dispatch lives in `wire.to_wire()`.
 """
 from __future__ import annotations
-from typing import Any
-from functools import singledispatch
+from typing import Any, assert_never, cast
 
 from .domain import Search, SpecificDateSearch, CalendarSearch, CalendarFollowup
 from .models import SearchResult, CalendarResult, Location
 from .wire import to_wire
 from ._http import HttpTransport
-from ._api_key import resolve_api_key, ApiKeyResolutionError  # noqa: F401 (re-export)
+from ._api_key import resolve_api_key, ApiKeyResolutionError as ApiKeyResolutionError
 
 BASE = "https://content-alkalimatrix-pa.googleapis.com"
 SEARCH_URL = f"{BASE}/v1/search"
@@ -20,7 +19,7 @@ class MatrixApiError(Exception):
     """Matrix's validation errors come back as HTTP 200 + `{"error": ...}`."""
     def __init__(self, message: str, kind: str = "input",
                  request_id: str | None = None,
-                 raw: dict | None = None) -> None:
+                 raw: dict[str, Any] | None = None) -> None:
         super().__init__(message)
         self.message = message
         self.kind = kind
@@ -28,9 +27,10 @@ class MatrixApiError(Exception):
         self.raw = raw
 
 
-def _raise_if_api_error(data: dict) -> None:
-    err = data.get("error")
-    if isinstance(err, dict) and ("message" in err or "code" in err):
+def _raise_if_api_error(data: dict[str, Any]) -> None:
+    err_raw = data.get("error")
+    if isinstance(err_raw, dict) and ("message" in err_raw or "code" in err_raw):
+        err = cast(dict[str, Any], err_raw)
         raise MatrixApiError(
             message=err.get("message", "unknown error"),
             kind=err.get("type") or err.get("status") or "unknown",
@@ -39,23 +39,16 @@ def _raise_if_api_error(data: dict) -> None:
         )
 
 
-@singledispatch
-def _parse_response(search: Search, data: dict):
+def _parse_response(search: Search, data: dict[str, Any]) -> SearchResult | CalendarResult:
     """Pick the right response model based on the search variant."""
-    raise TypeError(f"no response parser for {type(search).__name__}")
-
-@_parse_response.register
-def _(s: SpecificDateSearch, data: dict) -> SearchResult:
-    return SearchResult.from_api(data)
-
-@_parse_response.register
-def _(s: CalendarSearch, data: dict) -> CalendarResult:
-    return CalendarResult.from_api(data)
-
-@_parse_response.register
-def _(s: CalendarFollowup, data: dict) -> SearchResult:
-    # followup returns the same shape as specific-date search
-    return SearchResult.from_api(data)
+    match search:
+        case SpecificDateSearch() | CalendarFollowup():
+            # followup returns the same shape as specific-date search
+            return SearchResult.from_api(data)
+        case CalendarSearch():
+            return CalendarResult.from_api(data)
+        case _:
+            assert_never(search)
 
 
 class MatrixClient:
@@ -94,7 +87,7 @@ class MatrixClient:
 
     # ─────────────────────────── search execution ──────────────────────────
 
-    async def execute(self, search: Search, *, cache: bool = True):
+    async def execute(self, search: Search, *, cache: bool = True) -> SearchResult | CalendarResult:
         """Run any flavor of search. Returns SearchResult or CalendarResult
         depending on the search variant."""
         body = to_wire(search).as_json()

@@ -1,8 +1,8 @@
 """Low-level HTTP transport: httpx + curl_cffi TLS fingerprint, rate-limit,
 retry, and an optional on-disk response cache for offline development."""
 from __future__ import annotations
-import asyncio, hashlib, json, logging, os, pathlib, time
-from typing import Any
+import asyncio, hashlib, json, logging, os, pathlib
+from typing import Any, cast
 
 import httpx
 import stamina
@@ -60,7 +60,9 @@ class HttpTransport:
         cache_write: bool = True,
     ) -> None:
         self._transport = AsyncCurlTransport(
-            impersonate=impersonate,
+            # `impersonate` is a curl_cffi BrowserTypeLiteral string at runtime;
+            # accept any str from callers and let curl_cffi validate.
+            impersonate=cast(Any, impersonate),
             curl_options={CurlOpt.FRESH_CONNECT: True},
             default_headers=True,
         )
@@ -124,7 +126,7 @@ class HttpTransport:
 
     # ───────────────────────────── public API ──────────────────────────────
 
-    async def get_json(self, url: str, *, params: dict | None = None,
+    async def get_json(self, url: str, *, params: dict[str, Any] | None = None,
                        cache: bool = True) -> dict[str, Any]:
         cache_key = self._cache_key(
             url + "?" + "&".join(f"{k}={v}" for k, v in (params or {}).items()),
@@ -153,7 +155,7 @@ class HttpTransport:
         return data
 
     async def post_json(self, url: str, body: dict[str, Any], *,
-                        params: dict | None = None, cache: bool = True,
+                        params: dict[str, Any] | None = None, cache: bool = True,
                         ) -> dict[str, Any]:
         # NB: payload includes a unique-ish bgProgramResponse on captured
         # bodies; we strip that field before hashing so two semantically equal

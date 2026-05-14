@@ -11,7 +11,7 @@ Five commands:
 from __future__ import annotations
 import asyncio, json, re, sys
 from datetime import date, datetime, timedelta
-from typing import Annotated, Optional
+from typing import Annotated, Any, Optional
 
 import typer
 from rich.console import Console
@@ -23,7 +23,7 @@ from .domain import (
     SpecificDateSearch, CalendarSearch, CalendarFollowup, Search,
 )
 from .links import matrix_deep_link, google_flights_url
-from .models import SearchResult, CalendarResult
+from .models import SearchResult, CalendarResult, Slice
 
 app = typer.Typer(add_completion=False, rich_markup_mode="rich",
                    help="CLI for ITA Matrix's Alkali backend.")
@@ -144,19 +144,20 @@ def _render_search(res: SearchResult) -> None:
                   f"cheapest: [bold cyan]{cheapest}[/]")
 
     cm = res.carrier_stop_matrix
-    if cm and cm.get("columns") and cm.get("rows"):
+    if cm and cm.columns and cm.rows:
         t = Table(title="Carrier × stops grid", show_header=True,
                    header_style="bold magenta")
         t.add_column("stops")
-        for col in cm["columns"]:
-            label = col.get("label", {})
-            t.add_column(f"{label.get('code','?')}\n{label.get('shortName','')[:14]}")
-        for row in cm["rows"]:
-            cells = [str(row.get("label", "?"))]
-            for c in row.get("cells", []):
-                p = c.get("minPrice", "—")
-                mark = "★" if c.get("minPriceInGrid") else (
-                    "·" if c.get("minPriceInRow") else "")
+        for col in cm.columns:
+            code = col.label.code if col.label else "?"
+            sn = (col.label.short_name or "") if col.label else ""
+            t.add_column(f"{code or '?'}\n{sn[:14]}")
+        for row in cm.rows:
+            cells = [str(row.label) if row.label is not None else "?"]
+            for c in row.cells:
+                p = c.min_price or "—"
+                mark = "★" if c.min_price_in_grid else (
+                    "·" if c.min_price_in_row else "")
                 cells.append(f"{p} {mark}")
             t.add_row(*cells)
         console.print(t)
@@ -168,18 +169,18 @@ def _render_search(res: SearchResult) -> None:
     st.add_column("outbound")
     st.add_column("return")
     for i, it in enumerate(res.solutions[:10], 1):
-        itn = it.itinerary or {}
-        slcs = itn.get("slices") or []
-        it_carriers = ",".join(c.get("code", "?") for c in (itn.get("carriers") or []))
-        def _fmt(s):
-            fls = s.get("flights", [])
-            dep = s.get("departure", "")
-            arr = s.get("arrival", "")
-            dur_min = s.get("duration", 0)
+        itn = it.itinerary
+        slcs: list[Slice] = itn.slices if itn else []
+        it_carriers = ",".join((c.code or "?") for c in (itn.carriers if itn else []))
+        def _fmt(s: Slice) -> str:
+            dep = s.departure or ""
+            arr = s.arrival or ""
+            dur_min = s.duration or 0
             dur = f"{dur_min//60}h{dur_min%60:02d}m" if dur_min else ""
-            return (f"{s.get('origin',{}).get('code','?')}→"
-                    f"{s.get('destination',{}).get('code','?')} "
-                    f"{'/'.join(fls) or '?'} "
+            o = (s.origin.code if s.origin else None) or "?"
+            d = (s.destination.code if s.destination else None) or "?"
+            return (f"{o}→{d} "
+                    f"{'/'.join(s.flights) or '?'} "
                     f"{dep[:16]}→{arr[:16]} {dur}")
         out = _fmt(slcs[0]) if slcs else "—"
         ret = _fmt(slcs[1]) if len(slcs) > 1 else "—"
@@ -226,8 +227,8 @@ _IMPERSONATE_OPT = typer.Option("chrome", help="curl_cffi profile")
 
 @app.command()
 def fare(
-    origin: Annotated[str, typer.Argument(help="Origin IATA (comma-list ok)")] = None,
-    destination: Annotated[str, typer.Argument(help="Destination IATA (comma-list ok)")] = None,
+    origin: Annotated[Optional[str], typer.Argument(help="Origin IATA (comma-list ok)")] = None,
+    destination: Annotated[Optional[str], typer.Argument(help="Destination IATA (comma-list ok)")] = None,
     dep: Annotated[Optional[str], typer.Option("--dep", help="YYYY-MM-DD")] = None,
     ret: Annotated[Optional[str], typer.Option("--return", "-r", help="YYYY-MM-DD; omit for one-way")] = None,
     slice_specs: Annotated[Optional[list[str]], typer.Option(
@@ -284,6 +285,7 @@ def fare(
     )
     search = SpecificDateSearch(legs=legs, options=opts)
     res = _run(search, rps, impersonate, no_cache)
+    assert isinstance(res, SearchResult)  # SpecificDateSearch → SearchResult
     if json_out:
         sys.stdout.write(json.dumps(res.raw, indent=2)); return
     _render_search(res)
@@ -311,7 +313,7 @@ def _parse_slice_spec(s: str) -> Leg:
 def calendar(
     origin: Annotated[str, typer.Argument(help="Origin IATA (comma-list for multi-airport)")],
     destination: Annotated[str, typer.Argument(help="Destination IATA (comma-list)")],
-    start: Annotated[str, typer.Option("--start", help="Window start YYYY-MM-DD")] = ...,
+    start: Annotated[str, typer.Option("--start", help="Window start YYYY-MM-DD")],
     end: Annotated[Optional[str], typer.Option("--end", help="Window end (default: start+30d)")] = None,
     duration: Annotated[str, typer.Option("--duration", "-d", help="Nights, '5' or '5-7'")] = "5-7",
     one_way: bool = typer.Option(False, "--one-way"),
@@ -352,17 +354,18 @@ def calendar(
                          extension=extension_return or extension,
                          time_ranges=ret_times),)
 
-    from .domain import _CalendarWindow
+    from .domain import CalendarWindow
     opts = _build_options(
         cabin=cabin, adults=adults, children=children, seniors=seniors,
         youth=youth, infants_in_seat=0, infants_in_lap=0,
         stops=stops, allow_airport_changes=allow_airport_changes,
         show_only_available=only_available,
     )
-    window = _CalendarWindow(start=sd, end=ed,
+    window = CalendarWindow(start=sd, end=ed,
                               duration_min=dmin, duration_max=dmax)
     search = CalendarSearch(legs=legs, options=opts, window=window)
     res = _run(search, rps, impersonate, no_cache)
+    assert isinstance(res, CalendarResult)  # CalendarSearch → CalendarResult
     if json_out:
         sys.stdout.write(json.dumps(res.raw, indent=2)); return
     _render_calendar(res, dmin=dmin, dmax=dmax,
@@ -374,7 +377,7 @@ def calendar(
 def detail(
     origin: Annotated[str, typer.Argument()],
     destination: Annotated[str, typer.Argument()],
-    dep: Annotated[str, typer.Option("--dep", help="Departure YYYY-MM-DD")] = ...,
+    dep: Annotated[str, typer.Option("--dep", help="Departure YYYY-MM-DD")],
     ret: Annotated[Optional[str], typer.Option("--return", "-r")] = None,
     start: Annotated[Optional[str], typer.Option("--start",
         help="Original calendar window start (defaults to --dep)")] = None,
@@ -398,7 +401,7 @@ def detail(
     no_cache: bool = typer.Option(False, "--no-cache"),
 ) -> None:
     """Phase-2 of the calendar flow: full itineraries for a picked date."""
-    from .domain import _CalendarWindow
+    from .domain import CalendarWindow
     origins = _parse_iata_list(origin)
     dests = _parse_iata_list(destination)
     dep_d = _parse_date(dep)
@@ -420,10 +423,11 @@ def detail(
         stops=stops, allow_airport_changes=allow_airport_changes,
         show_only_available=True,
     )
-    window = _CalendarWindow(start=sd, end=ed,
+    window = CalendarWindow(start=sd, end=ed,
                               duration_min=dmin, duration_max=dmax)
     search = CalendarFollowup(legs=legs, options=opts, window=window)
     res = _run(search, rps, impersonate, no_cache)
+    assert isinstance(res, SearchResult)  # CalendarFollowup → SearchResult
     if json_out:
         sys.stdout.write(json.dumps(res.raw, indent=2)); return
     _render_search(res)
@@ -434,7 +438,7 @@ def detail(
 def gflight(
     origin: Annotated[str, typer.Argument()],
     destination: Annotated[str, typer.Argument()],
-    dep: Annotated[str, typer.Option("--dep")] = ...,
+    dep: Annotated[str, typer.Option("--dep")],
     ret: Annotated[Optional[str], typer.Option("--return", "-r")] = None,
     cabin: str = "economy",
     adults: int = 1, children: int = 0,
@@ -464,7 +468,7 @@ def gflight(
         return
 
     if json_out:
-        out = []
+        out: list[Any] = []
         for r in results:
             if isinstance(r, tuple):
                 out.append([fr.model_dump(mode="json") for fr in r])

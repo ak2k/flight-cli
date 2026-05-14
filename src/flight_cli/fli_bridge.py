@@ -16,11 +16,15 @@ from .domain import (
 def to_fli_filter(s: Search):
     """Translate domain → fli FlightSearchFilters. Lazy imports so the
     rest of flight_cli doesn't pay the fli import cost when not used."""
-    from fli.models.google_flights.flights import (
+    from fli.models.google_flights.flights import (  # pyright: ignore[reportMissingTypeStubs]
         FlightSearchFilters, FlightSegment, PassengerInfo,
     )
-    from fli.models.google_flights.base import SeatType, TripType
-    from fli.models.airport import Airport as FliAirport
+    from fli.models.google_flights.base import (  # pyright: ignore[reportMissingTypeStubs]
+        SeatType, TripType,
+    )
+    from fli.models.airport import (  # pyright: ignore[reportMissingTypeStubs]
+        Airport as FliAirport,
+    )
 
     cab_map = {
         Cabin.COACH: SeatType.ECONOMY,
@@ -38,17 +42,20 @@ def to_fli_filter(s: Search):
             travel_date=dt,
         )
 
+    segs: list[Any] = []
     match s:
         case SpecificDateSearch() | CalendarFollowup():
-            segs = [_seg(leg.origins[0], leg.destinations[0],
-                          leg.date.isoformat())
-                    for leg in s.legs]
+            for leg in s.legs:
+                # SpecificDate/Followup validators guarantee leg.date is set
+                assert leg.date is not None
+                segs.append(_seg(leg.origins[0], leg.destinations[0],
+                                  leg.date.isoformat()))
         case CalendarSearch():
             mean_dur = (s.window.duration_min + s.window.duration_max) // 2
             out = s.legs[0]
             ret = s.legs[1] if len(s.legs) == 2 else None
-            segs = [_seg(out.origins[0], out.destinations[0],
-                          s.window.start.isoformat())]
+            segs.append(_seg(out.origins[0], out.destinations[0],
+                              s.window.start.isoformat()))
             if ret:
                 segs.append(_seg(ret.origins[0], ret.destinations[0],
                                   (s.window.start + timedelta(days=mean_dur)).isoformat()))
@@ -70,5 +77,5 @@ def to_fli_filter(s: Search):
 
 def run_gflight_search(s: Search, *, top_n: int = 5):
     """Build a fli filter from a Search and run the Google Flights query."""
-    from fli.search.flights import SearchFlights
+    from fli.search.flights import SearchFlights  # pyright: ignore[reportMissingTypeStubs]
     return SearchFlights().search(to_fli_filter(s), top_n=top_n)

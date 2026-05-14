@@ -14,8 +14,8 @@ from typing import Any, Literal, assert_never
 from pydantic import BaseModel, ConfigDict, Field
 
 from .domain import (
-    Cabin, Leg, Pax, SearchOptions, Search, SpecificDateSearch,
-    CalendarSearch, CalendarFollowup, TimeOfDay, time_range_for,
+    Leg, Pax, SearchOptions, Search, SpecificDateSearch,
+    CalendarSearch, CalendarFollowup, time_range_for,
 )
 
 

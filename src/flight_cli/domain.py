@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import date as _date
 from enum import Enum
 from typing import Annotated, Literal, Union
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 # ──────────────────────────────── enums ────────────────────────────────────
 
@@ -58,12 +58,12 @@ def time_range_for(t: TimeOfDay) -> dict[str, str]:
 class Pax(BaseModel):
     """Passenger counts. Adults default to 1."""
     model_config = ConfigDict(frozen=True, extra="forbid")
-    adults: int = Field(1, ge=0, le=9)
-    children: int = Field(0, ge=0, le=9)
-    seniors: int = Field(0, ge=0, le=9)
-    youth: int = Field(0, ge=0, le=9)
-    infants_in_seat: int = Field(0, ge=0, le=9)
-    infants_in_lap: int = Field(0, ge=0, le=9)
+    adults: int = Field(default=1, ge=0, le=9)
+    children: int = Field(default=0, ge=0, le=9)
+    seniors: int = Field(default=0, ge=0, le=9)
+    youth: int = Field(default=0, ge=0, le=9)
+    infants_in_seat: int = Field(default=0, ge=0, le=9)
+    infants_in_lap: int = Field(default=0, ge=0, le=9)
 
     @property
     def total(self) -> int:
@@ -75,7 +75,7 @@ class SearchOptions(BaseModel):
     """Shared search constraints across all modes."""
     model_config = ConfigDict(frozen=True, extra="forbid")
     cabin: Cabin = Cabin.COACH
-    pax: Pax = Field(default_factory=Pax)
+    pax: Pax = Pax()
     # max connecting stops. None = no limit. 0 = nonstop only. N = at most N.
     max_stops: int | None = None
     allow_airport_changes: bool = True
@@ -101,8 +101,8 @@ class Leg(BaseModel):
     destinations: tuple[str, ...]
     date: _date | None = None
     is_arrival_date: bool = False
-    date_minus: int = Field(0, ge=0, le=3)
-    date_plus: int = Field(0, ge=0, le=3)
+    date_minus: int = Field(default=0, ge=0, le=3)
+    date_plus: int = Field(default=0, ge=0, le=3)
     route_language: str | None = None      # 'LH+', 'BA AA', '[F* X F*]'
     extension: str | None = None           # 'MAXCONNECT 5:00', etc.
     time_ranges: tuple[TimeOfDay, ...] = ()   # empty = no preference
@@ -153,7 +153,7 @@ class SpecificDateSearch(_SearchBase):
         return legs
 
 
-class _CalendarWindow(BaseModel):
+class CalendarWindow(BaseModel):
     """Shared between CalendarSearch and CalendarFollowup."""
     model_config = ConfigDict(frozen=True, extra="forbid")
     start: _date
@@ -163,8 +163,8 @@ class _CalendarWindow(BaseModel):
 
     @field_validator("duration_max")
     @classmethod
-    def _validate_duration_range(cls, m, info):
-        d_min = info.data.get("duration_min", 0)
+    def _validate_duration_range(cls, m: int, info: ValidationInfo) -> int:
+        d_min: int = info.data.get("duration_min", 0)
         if m < d_min:
             raise ValueError(f"duration_max ({m}) < duration_min ({d_min})")
         return m
@@ -175,7 +175,7 @@ class CalendarSearch(_SearchBase):
     2 legs = round-trip calendar. Legs are templates — no per-leg date;
     the calendar window owns dates."""
     kind: Literal["calendar"] = "calendar"
-    window: _CalendarWindow
+    window: CalendarWindow
 
     @field_validator("legs")
     @classmethod
@@ -194,7 +194,7 @@ class CalendarFollowup(_SearchBase):
     """Phase-2: itineraries for a date picked from a calendar grid. Legs
     have dates; preserves window context for the API."""
     kind: Literal["followup"] = "followup"
-    window: _CalendarWindow
+    window: CalendarWindow
 
     @field_validator("legs")
     @classmethod

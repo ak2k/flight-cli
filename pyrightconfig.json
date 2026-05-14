@@ -1,0 +1,8 @@
+{
+  "include": ["src/flight_cli"],
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.11",
+  "strict": ["src/flight_cli"],
+  "reportMissingTypeStubs": false
+}

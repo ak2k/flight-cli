@@ -10,12 +10,11 @@ exhaustiveness checking)."""
 from __future__ import annotations
 import base64, json, urllib.parse
 from datetime import date, timedelta
-from typing import Any, assert_never
+from typing import Any, Literal, assert_never
 
 from .domain import (
     Cabin, Leg, Pax, Search, SearchOptions,
     SpecificDateSearch, CalendarSearch, CalendarFollowup,
-    TimeOfDay, time_range_for,
 )
 
 
@@ -51,7 +50,7 @@ def _pax_strs(pax: Pax) -> dict[str, str]:
     return d
 
 
-def _spa_specific_leg(leg: Leg) -> dict:
+def _spa_specific_leg(leg: Leg) -> dict[str, Any]:
     """SPA URL-state slice for a specific-date search."""
     return {
         "origin": list(leg.origins),
@@ -72,7 +71,7 @@ def _spa_specific_leg(leg: Leg) -> dict:
 
 def _spa_calendar_leg(out: Leg, ret: Leg | None,
                        start: date, end: date,
-                       duration_min: int, duration_max: int) -> dict:
+                       duration_min: int, duration_max: int) -> dict[str, Any]:
     """SPA URL-state slice for calendar mode. Round-trip is folded into ONE
     slice with `routingRet`/`extRet` carrying return-direction routing."""
     d: dict[str, Any] = {
@@ -106,7 +105,7 @@ def _spa_calendar_leg(out: Leg, ret: Leg | None,
     return d
 
 
-def _encode_payload(payload: dict, path: str) -> str:
+def _encode_payload(payload: dict[str, Any], path: str) -> str:
     b = base64.b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode()
     return f"https://matrix.itasoftware.com/{path}?search={urllib.parse.quote(b)}"
 
@@ -157,7 +156,7 @@ def matrix_deep_link(s: Search) -> str:
 
 # ───────────────────────── Google Flights URL ──────────────────────────────
 
-_CABIN_TFS = {
+_CABIN_TFS: dict[Cabin, Literal["economy", "premium-economy", "business", "first"]] = {
     Cabin.COACH: "economy",
     Cabin.PREMIUM_COACH: "premium-economy",
     Cabin.BUSINESS: "business",
@@ -179,12 +178,14 @@ def google_flights_url(s: Search, *, currency: str = "USD",
 
     match s:
         case SpecificDateSearch() | CalendarFollowup():
-            flight_data = [
-                FlightData(date=leg.date.isoformat(),
-                            from_airport=leg.origins[0],
-                            to_airport=leg.destinations[0])
-                for leg in s.legs
-            ]
+            flight_data: list[Any] = []
+            for leg in s.legs:
+                # SpecificDate/Followup validators guarantee leg.date is set
+                assert leg.date is not None
+                flight_data.append(FlightData(
+                    date=leg.date.isoformat(),
+                    from_airport=leg.origins[0],
+                    to_airport=leg.destinations[0]))
         case CalendarSearch():
             mean_dur = (s.window.duration_min + s.window.duration_max) // 2
             ret_date = s.window.start + timedelta(days=mean_dur)
@@ -221,8 +222,6 @@ def google_flights_url(s: Search, *, currency: str = "USD",
             infants_on_lap=p.infants_in_lap,
         ),
     )
-    b64 = td.as_b64()
-    if isinstance(b64, bytes):
-        b64 = b64.decode()
+    b64 = td.as_b64().decode()
     return (f"https://www.google.com/travel/flights/search?"
             f"tfs={urllib.parse.quote(b64)}&hl={language}&curr={currency}")
