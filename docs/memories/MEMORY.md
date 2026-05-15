@@ -39,6 +39,12 @@ go into detail and are loaded on demand.
   rides both backends. Decision: `enable_matching=False` + the existing
   matcher keys, not the matched-Google-flight-id path. Empirical evidence
   behind the choice and the upgrade path if it turns out worth it later.
+- [pp_matched_id_recipe.md](pp_matched_id_recipe.md) — **Supersedes the
+  "dead end" framing in `pp_on_gflight.md`.** The matched-id join *does*
+  work; the previous "no" was because we sent synthetic flight_ids and
+  the wrong hint shape. Recipe (real `data[0][17]` from fli + IATA-prefixed
+  flight#, human-readable airline name, space-separated times), empirical
+  proof, and wire-through implementation notes.
 
 ## When to add a new memory file
 

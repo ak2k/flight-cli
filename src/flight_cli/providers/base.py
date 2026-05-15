@@ -18,7 +18,10 @@ and is provider-agnostic by construction.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from ..pp.client import CashFlightHint
 
 
 @dataclass
@@ -73,6 +76,13 @@ class AwardFlight:
 
     cabins: list[CabinAward] = field(default_factory=list[CabinAward])
 
+    # Opaque ID PP echoes back via `matchedGoogleFlightId` when the provider
+    # was given a cash hint with the same `flight_id`. Empty when no match,
+    # or when the cash side didn't carry an ID (Matrix backend). The matcher
+    # uses this as its primary key when populated — exact-equality join vs.
+    # the (flight#, date) / (route, time) heuristics it falls back to.
+    matched_google_flight_id: str = ""
+
 
 @runtime_checkable
 class AwardProvider(Protocol):
@@ -102,10 +112,18 @@ class AwardProvider(Protocol):
         *,
         cabins: tuple[str, ...],
         num_passengers: int = 1,
+        cash_hints: tuple[CashFlightHint, ...] = (),
     ) -> list[AwardFlight]:
         """Run all per-airline (or whatever the provider's atomic unit is)
         queries for one leg across the given cabins, return the merged
-        normalized flights. Errors are the provider's to log; the function
-        should return `[]` on failure rather than raising, so one provider's
-        outage doesn't sink the augmented render."""
+        normalized flights.
+
+        `cash_hints` carry per-cash-itinerary opaque IDs (today: Google Flights
+        `data[0][17]`) that providers MAY use to ask their upstream to echo
+        back a precise match identifier. Today only PointsPath uses them
+        (via its `enableGoogleFlightMatching`); other providers may ignore.
+
+        Errors are the provider's to log; should return `[]` on failure
+        rather than raising, so one provider's outage doesn't sink the
+        augmented render."""
         ...

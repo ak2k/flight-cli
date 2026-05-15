@@ -502,14 +502,18 @@ def _run_gflight_path(
     (origin, dest, date) per leg as the matrix path.
     """
     # fli is heavy (selenium/selectolax); lazy-import so the rest of flight_cli
-    # doesn't pay the startup cost when not used.
-    from .fli_bridge import run_gflight_search  # noqa: PLC0415
+    # doesn't pay the startup cost when not used. `search_with_ids` wraps fli's
+    # encoder + client but parses the response ourselves to capture the opaque
+    # per-flight ID (data[0][17]) — that's what PP's enableGoogleFlightMatching
+    # joins against to produce matchedGoogleFlightId in its response.
+    from ._gflight_ids import search_with_ids  # noqa: PLC0415
+    from .fli_bridge import to_fli_filter  # noqa: PLC0415
 
     search = SpecificDateSearch(legs=legs, options=opts)
     try:
-        # fli has no type stubs; treat its return as opaque at this boundary
-        # and use duck-typed attribute access below.
-        results: list[Any] = run_gflight_search(search, top_n=top_n)
+        # Returns GFlightWithId | tuple[GFlightWithId, ...]. The .flight attribute
+        # exposes fli's FlightResult; .flight_id is Google's opaque ID.
+        results: list[Any] = search_with_ids(to_fli_filter(search), top_n=top_n) or []
     except Exception as e:
         err.print(f"[red]Google Flights query failed:[/] {e}")
         raise typer.Exit(1) from e
@@ -526,10 +530,9 @@ def _run_gflight_path(
     if json_out and not run_pp:
         out: list[Any] = []
         for r in results:
-            if isinstance(r, tuple):
-                out.append([fr.model_dump(mode="json") for fr in r])  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-            else:
-                out.append(r.model_dump(mode="json"))
+            items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
+            dumped = [{**g.flight.model_dump(mode="json"), "flight_id": g.flight_id} for g in items]
+            out.append(dumped if isinstance(r, tuple) else dumped[0])
         sys.stdout.write(json.dumps(out, indent=2, default=str))
         return
 
@@ -553,7 +556,9 @@ def _run_gflight_path(
 
 
 def _render_gflight_table(results: list[Any], *, legs: tuple[Leg, ...], top_n: int) -> None:
-    """Render fli results as a rich table. Duck-typed: fli has no type stubs."""
+    """Render fli results as a rich table. Duck-typed: fli has no type stubs.
+
+    Accepts our `GFlightWithId` wrappers — `.flight` is fli's FlightResult."""
     origin = legs[0].origins[0] if legs[0].origins else "?"
     destination = legs[0].destinations[0] if legs[0].destinations else "?"
     has_return = len(legs) >= _ROUND_TRIP_LEGS
@@ -569,7 +574,8 @@ def _render_gflight_table(results: list[Any], *, legs: tuple[Leg, ...], top_n: i
     t.add_column("legs")
     for i, r in enumerate(results[:top_n], 1):
         items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
-        for j, fr in enumerate(items):
+        for j, g in enumerate(items):
+            fr = g.flight  # unwrap GFlightWithId → fli FlightResult
             label = f"{i}{'a' if j == 0 else 'b'}" if len(items) > 1 else str(i)
             legs_str = " → ".join(
                 f"{getattr(leg.airline, 'name', leg.airline)} {getattr(leg, 'flight_number', '?')}"

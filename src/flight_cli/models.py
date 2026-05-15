@@ -89,6 +89,12 @@ class Slice(_Loose):
     duration: int | None = None
     origin: SliceEndpoint | None = None
     destination: SliceEndpoint | None = None
+    # Provider-supplied opaque ID for this leg (Google Flights data[0][17]).
+    # Populated when the cash side is built from fli's response (gflight backend);
+    # used by PP's enableGoogleFlightMatching to mint the matchedGoogleFlightId
+    # join key. None for Matrix cash itineraries — they don't expose an ID
+    # PP recognizes, so those fall back to flight#+date / route+time joins.
+    flight_id: str | None = None
 
 
 class SliceCarrier(_Loose):

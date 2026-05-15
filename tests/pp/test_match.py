@@ -41,6 +41,22 @@ def _itin(*slices_data: tuple[str, str, str, str]) -> Itinerary:
     )
 
 
+def _itin_with_id(fn: str, dep: str, o: str, d: str, flight_id: str) -> Itinerary:
+    """Like _itin() but populates `Slice.flight_id` — what the gflight
+    backend sets from Google's data[0][17]."""
+    s = Slice(
+        flights=[fn],
+        departure=dep,
+        origin=SliceEndpoint(code=o),
+        destination=SliceEndpoint(code=d),
+        flight_id=flight_id,
+    )
+    return Itinerary(
+        displayTotal="USD500.00",
+        itinerary=ItineraryDetails(slices=[s], carriers=[]),
+    )
+
+
 def _award(
     fn: str,
     dep: str,
@@ -53,6 +69,7 @@ def _award(
     dest: str = "LHR",
     funding_banks: list[str] | None = None,
     miles_to_cash_ratio: float = 0.0125,
+    matched_id: str = "",
 ) -> AwardFlight:
     return AwardFlight(
         origin=origin,
@@ -66,6 +83,7 @@ def _award(
         miles_to_cash_ratio=miles_to_cash_ratio,
         funding_banks=funding_banks or ["Chase", "Bilt"],
         cabins=[CabinAward(cabin=cabin, miles=miles, tax_usd=tax, tax_currency="USD")],
+        matched_google_flight_id=matched_id,
     )
 
 
@@ -314,3 +332,114 @@ def test_join_empty_award_list():
     )
     matches = join(res, [])
     assert matches[0].awards == []
+
+
+# ──────────────── matched-id join (work-?? matched-id upgrade) ──────────────
+
+
+def test_matched_id_key_overrides_when_present():
+    """When the cash slice carries a flight_id AND an award has the same
+    matched_google_flight_id, that's the primary key — fires regardless of
+    whether flight#+date or route+time would also match."""
+    res = SearchResult(
+        solutions=[
+            _itin_with_id("UA146", "2026-06-09T22:00:00", "JFK", "LHR", flight_id="MWRvrf"),
+        ]
+    )
+    awards = [
+        _award(
+            "UA146",
+            "2026-06-09T22:00:00",
+            origin="JFK",
+            dest="LHR",
+            matched_id="MWRvrf",
+        ),
+    ]
+    matches = join(res, awards)
+    assert len(matches[0].awards) == 1
+    assert matches[0].awards[0].matched_google_flight_id == "MWRvrf"
+
+
+def test_matched_id_key_joins_when_flight_number_disagrees():
+    """The matched-id key bridges flight-number mismatches the heuristic
+    keys would miss — e.g. cash side has a marketed flight#, award side
+    reports the operating flight# but the underlying flight_id agrees."""
+    res = SearchResult(
+        solutions=[
+            _itin_with_id("AA6939", "2026-08-15T18:40:00", "JFK", "LHR", flight_id="x9z2"),
+        ]
+    )
+    # Different flight#, different time → no flight#+date or route+time match.
+    # Only the matched-id key can bridge.
+    awards = [
+        _award(
+            "BA174",
+            "2026-08-15T19:15:00",
+            program="American",
+            origin="JFK",
+            dest="LHR",
+            matched_id="x9z2",
+        ),
+    ]
+    matches = join(res, awards)
+    assert len(matches[0].awards) == 1
+    assert matches[0].awards[0].flight_number == "BA174"
+
+
+def test_matched_id_dedup_with_heuristic_keys():
+    """When the same AwardFlight matches via matched-id AND a heuristic key,
+    it must attach exactly once."""
+    res = SearchResult(
+        solutions=[
+            _itin_with_id("UA146", "2026-06-09T22:00:00", "JFK", "LHR", flight_id="MWRvrf"),
+        ]
+    )
+    awards = [
+        _award(
+            "UA146",
+            "2026-06-09T22:00:00",
+            origin="JFK",
+            dest="LHR",
+            matched_id="MWRvrf",
+        ),
+    ]
+    matches = join(res, awards)
+    assert len(matches[0].awards) == 1
+
+
+def test_award_without_matched_id_still_joins_via_heuristics():
+    """An award flight without matched_google_flight_id populated must
+    still join via flight#+date when applicable — backwards compat with
+    enable_matching=False providers / responses."""
+    res = SearchResult(
+        solutions=[
+            _itin_with_id("UA146", "2026-06-09T22:00:00", "JFK", "LHR", flight_id="MWRvrf"),
+        ]
+    )
+    # Award doesn't carry matched_id (empty default), so falls through to
+    # the (flight#, date) primary heuristic key.
+    awards = [_award("UA146", "2026-06-09T22:00:00", origin="JFK", dest="LHR")]
+    matches = join(res, awards)
+    assert len(matches[0].awards) == 1
+
+
+def test_cash_without_flight_id_skips_matched_id_path():
+    """Matrix backend: slices have no flight_id; the matched-id key is
+    never evaluated and the heuristics carry the join."""
+    res = SearchResult(
+        solutions=[
+            _itin(("UA146", "2026-06-09T22:00:00", "JFK", "LHR")),  # no flight_id
+        ]
+    )
+    awards = [
+        _award(
+            "UA146",
+            "2026-06-09T22:00:00",
+            origin="JFK",
+            dest="LHR",
+            matched_id="MWRvrf",  # would match if cash had flight_id="MWRvrf"
+        ),
+    ]
+    matches = join(res, awards)
+    # Joins via flight#+date heuristic, not matched-id.
+    assert len(matches[0].awards) == 1
