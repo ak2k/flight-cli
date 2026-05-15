@@ -6,17 +6,23 @@ Same key can appear at most once per side per day, so a dict-lookup is enough.
 Outputs MatchedFare records, one per cash itinerary, with optional award
 data attached. Caller renders.
 """
+
 from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING
 
-from ..models import Itinerary, SearchResult
-from .models import (
-    AirlineSearchResponse, OutboundFlight, PerCabinMilesPricing,
-    PricingInfo, PricingInfoResponse,
-)
+if TYPE_CHECKING:
+    from ..models import Itinerary, SearchResult
+    from .models import (
+        AirlineSearchResponse,
+        OutboundFlight,
+        PerCabinMilesPricing,
+        PricingInfo,
+        PricingInfoResponse,
+    )
 
-MatchKey = tuple[str, str]   # (FLIGHT_NUMBER_UPPER_NOSPACE, "YYYY-MM-DD")
+MatchKey = tuple[str, str]  # (FLIGHT_NUMBER_UPPER_NOSPACE, "YYYY-MM-DD")
 
 
 def _norm_fn(fn: str | None) -> str:
@@ -33,7 +39,7 @@ def _iso_date(s: str | None) -> str:
     return s[:10]
 
 
-def cash_match_key(it: Itinerary, slice_index: int = 0) -> Optional[MatchKey]:
+def cash_match_key(it: Itinerary, slice_index: int = 0) -> MatchKey | None:
     """Build the match key from a Matrix itinerary's slice's first flight.
 
     Default slice_index=0 = outbound leg. For round-trips pass 1 to match the
@@ -60,18 +66,20 @@ def award_match_key(of: OutboundFlight) -> MatchKey:
 @dataclass
 class CabinAward:
     """One cabin's award price for a single flight."""
-    cabin: str                    # "Economy" / "Business" / etc.
+
+    cabin: str  # "Economy" / "Business" / etc.
     miles: int
     tax_usd: float
     tax_currency: str
-    is_basic_economy: Optional[bool] = None
+    is_basic_economy: bool | None = None
 
 
 @dataclass
 class AwardOption:
     """All cabin offerings for a single matched flight, plus transfer info."""
-    airline: str                  # PointsPath canonical name (e.g. "United")
-    miles_to_cash_ratio: float    # PointsPath valuation (¢/mi)
+
+    airline: str  # PointsPath canonical name (e.g. "United")
+    miles_to_cash_ratio: float  # PointsPath valuation (¢/mi)
     flight: OutboundFlight
     cabins: list[CabinAward] = field(default_factory=list)
     funding_banks: list[str] = field(default_factory=list)
@@ -80,6 +88,7 @@ class AwardOption:
 @dataclass
 class MatchedFare:
     """One cash itinerary with zero-or-more award options attached."""
+
     itinerary: Itinerary
     awards: list[AwardOption] = field(default_factory=list)
 
@@ -90,13 +99,15 @@ def _cabin_awards(pricing: list[PerCabinMilesPricing]) -> list[CabinAward]:
         pp = p.perPassengerPricing
         if not pp or pp.perPassengerMilesAmount <= 0:
             continue
-        out.append(CabinAward(
-            cabin=p.cabinClass,
-            miles=pp.perPassengerMilesAmount,
-            tax_usd=pp.perPassengerTaxAmountUsd,
-            tax_currency=pp.taxCurrencyCode or "USD",
-            is_basic_economy=pp.isBasicEconomyFare,
-        ))
+        out.append(
+            CabinAward(
+                cabin=p.cabinClass,
+                miles=pp.perPassengerMilesAmount,
+                tax_usd=pp.perPassengerTaxAmountUsd,
+                tax_currency=pp.taxCurrencyCode or "USD",
+                is_basic_economy=pp.isBasicEconomyFare,
+            )
+        )
     return out
 
 
@@ -144,16 +155,14 @@ def join(
         if k and k in award_idx:
             for airline, of in award_idx[k]:
                 pi = pricing_idx.get(airline)
-                awards.append(AwardOption(
-                    airline=airline,
-                    miles_to_cash_ratio=pi.milesToCashRatio if pi else 0.0,
-                    flight=of,
-                    cabins=_cabin_awards(of.perCabinMilesPricing),
-                    funding_banks=[
-                        b.bank for b in (pi.bankPointsInfos if pi else [])
-                    ],
-                ))
+                awards.append(
+                    AwardOption(
+                        airline=airline,
+                        miles_to_cash_ratio=pi.milesToCashRatio if pi else 0.0,
+                        flight=of,
+                        cabins=_cabin_awards(of.perCabinMilesPricing),
+                        funding_banks=[b.bank for b in (pi.bankPointsInfos if pi else [])],
+                    )
+                )
         out.append(MatchedFare(itinerary=it, awards=awards))
     return out
-
-

@@ -4,40 +4,55 @@ The augmentation entry point (`run_pp_for_search`) is what the existing `fare`
 command calls when `--pp` is on. It runs PP airline-search in parallel with the
 finished Matrix result, joins via match.py, and renders.
 """
+
 from __future__ import annotations
-import asyncio
+
 import json
 import sys
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
-from typing import Annotated, Optional
+from pathlib import Path  # noqa: TC003 - typer evaluates annotations at runtime
+from typing import TYPE_CHECKING, Annotated, Any
 
+import anyio
 import typer
 from rich.console import Console
 from rich.table import Table
 
-from ..models import SearchResult
 from .auth import (
-    PPAuthError, TOKENS_PATH, clear_tokens, get_valid_tokens,
-    import_from_tokens_file, load_tokens,
+    TOKENS_PATH,
+    PPAuthError,
+    clear_tokens,
+    get_valid_tokens,
+    import_from_tokens_file,
+    load_tokens,
 )
 from .client import (
-    DEFAULT_AIRLINES, DEFAULT_CABINS, PPClient, SearchSpec, enabled_airlines,
+    DEFAULT_AIRLINES,
+    DEFAULT_CABINS,
+    PPClient,
+    SearchSpec,
+    enabled_airlines,
 )
 from .match import MatchedFare, join
-from .models import AirlineSearchResponse, PricingInfoResponse
+
+if TYPE_CHECKING:
+    from ..models import SearchResult
+    from .match import AwardOption
+    from .models import AirlineSearchResponse, PricingInfoResponse
 
 
 @dataclass
 class LegQuery:
     """One leg's PP query. slice_index points at the corresponding Slice in
     each Itinerary returned by Matrix; label is the user-facing leg name."""
+
     origin: str
     destination: str
-    date: str             # YYYY-MM-DD
+    date: str  # YYYY-MM-DD
     slice_index: int
-    label: str            # e.g. "outbound JFK→LHR" or "return LHR→JFK"
+    label: str  # e.g. "outbound JFK→LHR" or "return LHR→JFK"
+
 
 console = Console()
 err = Console(stderr=True)
@@ -46,11 +61,13 @@ err = Console(stderr=True)
 # ─────────────────────────── auth pp subcommands ────────────────────────────
 
 auth_app = typer.Typer(
-    add_completion=False, no_args_is_help=True,
+    add_completion=False,
+    no_args_is_help=True,
     help="Auth helpers per provider. Today: PointsPath only.",
 )
 pp_auth_app = typer.Typer(
-    add_completion=False, no_args_is_help=True,
+    add_completion=False,
+    no_args_is_help=True,
     help="PointsPath token management.",
 )
 auth_app.add_typer(pp_auth_app, name="pp")
@@ -58,10 +75,14 @@ auth_app.add_typer(pp_auth_app, name="pp")
 
 @pp_auth_app.command("login")
 def pp_login(
-    tokens_file: Annotated[Optional[Path], typer.Option(
-        "--tokens-file", "-f",
-        help="Import tokens from a JSON file (e.g. one captured via CDP cookie sniff).",
-    )] = None,
+    tokens_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--tokens-file",
+            "-f",
+            help="Import tokens from a JSON file (e.g. one captured via CDP cookie sniff).",
+        ),
+    ] = None,
 ) -> None:
     """Save tokens to ~/.config/flight-cli/pp.json.
 
@@ -83,7 +104,7 @@ def pp_login(
         t = import_from_tokens_file(tokens_file)
     except (PPAuthError, OSError, json.JSONDecodeError, KeyError) as e:
         err.print(f"[red]Login failed: {e}[/]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
     when = datetime.fromtimestamp(t.expires_at).isoformat() if t.expires_at else "?"
     console.print(
         f"[green]Saved[/] tokens for [bold]{t.user_email or '?'}[/] "
@@ -118,17 +139,25 @@ def pp_logout() -> None:
 
 # ───────────────────── augmentation entry point for `fare` ──────────────────
 
-def _parse_csv(s: Optional[str], default: tuple[str, ...]) -> tuple[str, ...]:
+
+def _parse_csv(s: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
     if not s:
         return default
     return tuple(part.strip() for part in s.split(",") if part.strip())
 
 
 _CABIN_ALIASES = {
-    "y": "Economy", "economy": "Economy", "coach": "Economy", "main": "Economy",
-    "w": "Premium economy", "premium": "Premium economy", "premiumeconomy": "Premium economy",
-    "j": "Business", "business": "Business",
-    "f": "First", "first": "First",
+    "y": "Economy",
+    "economy": "Economy",
+    "coach": "Economy",
+    "main": "Economy",
+    "w": "Premium economy",
+    "premium": "Premium economy",
+    "premiumeconomy": "Premium economy",
+    "j": "Business",
+    "business": "Business",
+    "f": "First",
+    "first": "First",
 }
 
 
@@ -142,13 +171,13 @@ def run_pp_for_search(
     *,
     legs: list[LegQuery],
     num_passengers: int = 1,
-    airlines: Optional[str] = None,
-    cabins: Optional[str] = None,
+    airlines: str | None = None,
+    cabins: str | None = None,
     pp_only: bool = False,
     json_out: bool = False,
 ) -> None:
     """Called by the `fare` command when --pp is on. For each leg, runs PP
-    queries (one per airline × cabin), joins against the corresponding Slice
+    queries (one per airline x cabin), joins against the corresponding Slice
     in each Itinerary, and renders one table per leg.
 
     Errors are non-fatal — print and continue so the user still sees their
@@ -166,13 +195,16 @@ def run_pp_for_search(
     # DEFAULT_AIRLINES is the last-resort fallback if discovery fails.
     explicit_airlines = _parse_csv(airlines, ()) if airlines else None
 
-    try:
-        per_leg, pricing = asyncio.run(
-            _gather_pp(
-                legs=legs, num_passengers=num_passengers,
-                explicit_airlines=explicit_airlines, cabins=cabin_list,
-            )
+    async def _go() -> tuple[list[dict[str, AirlineSearchResponse]], PricingInfoResponse]:
+        return await _gather_pp(
+            legs=legs,
+            num_passengers=num_passengers,
+            explicit_airlines=explicit_airlines,
+            cabins=cabin_list,
         )
+
+    try:
+        per_leg, pricing = anyio.run(_go)
     except Exception as e:  # noqa: BLE001 — surface anything to user, don't crash CLI
         err.print(f"[red]--pp: PointsPath query failed: {e}[/]")
         return
@@ -180,7 +212,8 @@ def run_pp_for_search(
     if pp_only:
         # JSON: dump per-leg award listings; pretty: one PP-only table per leg.
         if json_out:
-            sys.stdout.write(_serialize_pp_only_per_leg(per_leg, legs)); return
+            sys.stdout.write(_serialize_pp_only_per_leg(per_leg, legs))
+            return
         for leg, merged in zip(legs, per_leg, strict=True):
             console.print(f"\n[bold]Leg: {leg.label}[/]")
             _render_pp_only(merged, pricing)
@@ -192,17 +225,21 @@ def run_pp_for_search(
         for leg, merged in zip(legs, per_leg, strict=True)
     ]
     if json_out:
-        sys.stdout.write(_serialize_matches_per_leg(matches_per_leg, legs)); return
+        sys.stdout.write(_serialize_matches_per_leg(matches_per_leg, legs))
+        return
     for leg, matches in zip(legs, matches_per_leg, strict=True):
         console.print(f"\n[bold]Leg: {leg.label}[/]")
         _render_matches(matches, cabin_list, slice_index=leg.slice_index)
 
 
-async def _gather_pp(*, legs: list[LegQuery], num_passengers: int,
-                      explicit_airlines: Optional[tuple[str, ...]],
-                      cabins: tuple[str, ...]
-                      ) -> tuple[list[dict[str, AirlineSearchResponse]], PricingInfoResponse]:
-    """Per leg, fan out PP airline-search across (airlines × cabins). Returns
+async def _gather_pp(
+    *,
+    legs: list[LegQuery],
+    num_passengers: int,
+    explicit_airlines: tuple[str, ...] | None,
+    cabins: tuple[str, ...],
+) -> tuple[list[dict[str, AirlineSearchResponse]], PricingInfoResponse]:
+    """Per leg, fan out PP airline-search across (airlines x cabins). Returns
     one merged airline→response map per leg, plus the shared pricing-info."""
     async with await PPClient.create() as c:
         pricing = await c.pricing_info()
@@ -221,11 +258,14 @@ async def _gather_pp(*, legs: list[LegQuery], num_passengers: int,
             merged: dict[str, AirlineSearchResponse] = {}
             for cabin in cabins:
                 spec = SearchSpec(
-                    origin=leg.origin, destination=leg.destination,
-                    date=leg.date, return_date="",
+                    origin=leg.origin,
+                    destination=leg.destination,
+                    date=leg.date,
+                    return_date="",
                     is_round_trip_return=False,
                     num_passengers=num_passengers,
-                    cabin_class=cabin, enable_matching=False,
+                    cabin_class=cabin,
+                    enable_matching=False,
                 )
                 per_airline = await c.airline_search_many(spec, airlines)
                 for airline, resp in per_airline.items():
@@ -265,11 +305,14 @@ def _cents_per_mile(cash_usd: float, miles: int, tax_usd: float) -> float | None
     return (net / miles) * 100
 
 
+_MILES_K_THRESHOLD = 1000  # render as "30.0k" once we cross 1000 miles
+
+
 def _fmt_miles(n: int) -> str:
-    return f"{n/1000:.1f}k" if n >= 1000 else str(n)
+    return f"{n / 1000:.1f}k" if n >= _MILES_K_THRESHOLD else str(n)
 
 
-def _fmt_award_cell(award_options, want_cabin: str) -> str:
+def _fmt_award_cell(award_options: list[AwardOption], want_cabin: str) -> str:
     """Render the best (lowest miles) offer across airlines for one cabin."""
     best: tuple[int, float, str, list[str]] | None = None
     for ao in award_options:
@@ -285,19 +328,19 @@ def _fmt_award_cell(award_options, want_cabin: str) -> str:
     return f"{_fmt_miles(miles)} {airline} + ${tax:.0f}"
 
 
-def _fmt_funding(award_options) -> str:
+def _fmt_funding(award_options: list[AwardOption]) -> str:
     banks: list[str] = []
     seen: set[str] = set()
     for ao in award_options:
         for b in ao.funding_banks:
             if b not in seen:
-                seen.add(b); banks.append(b)
+                seen.add(b)
+                banks.append(b)
     return ", ".join(banks) if banks else ""
 
 
-def _dedupe_per_leg(matches: list[MatchedFare],
-                     slice_index: int = 0) -> list[MatchedFare]:
-    """Matrix returns the cross-product of outbound × return itineraries, so
+def _dedupe_per_leg(matches: list[MatchedFare], slice_index: int = 0) -> list[MatchedFare]:
+    """Matrix returns the cross-product of outbound x return itineraries, so
     the same leg-flight surfaces in many rows. Collapse to one row per
     (flight_number, departure_date), keeping the row with cheapest cash.
     """
@@ -328,18 +371,23 @@ def _dedupe_per_leg(matches: list[MatchedFare],
         if key in seen:
             continue
         if best.get(key) is m:
-            seen.add(key); out.append(m)
+            seen.add(key)
+            out.append(m)
     return out
 
 
-def _render_matches(matches: list[MatchedFare], cabin_list: tuple[str, ...],
-                     *, slice_index: int = 0) -> None:
+def _render_matches(
+    matches: list[MatchedFare], cabin_list: tuple[str, ...], *, slice_index: int = 0
+) -> None:
     matches = _dedupe_per_leg(matches, slice_index=slice_index)
     if not matches:
         console.print("[yellow]No matched fares.[/]")
         return
-    t = Table(title="Cash + award (matched on flight # × date)",
-               show_header=True, header_style="bold cyan")
+    t = Table(
+        title="Cash + award (matched on flight # x date)",
+        show_header=True,
+        header_style="bold cyan",
+    )
     t.add_column("flight")
     t.add_column("price", justify="right")
     for cab in cabin_list:
@@ -381,8 +429,12 @@ def _render_matches(matches: list[MatchedFare], cabin_list: tuple[str, ...],
 
 # ──────────────────────────── render: pp-only ──────────────────────────────
 
-def _render_pp_only(merged: dict, pricing) -> None:
-    rows: list[tuple] = []
+
+def _render_pp_only(
+    merged: dict[str, AirlineSearchResponse],
+    pricing: PricingInfoResponse,
+) -> None:
+    rows: list[tuple[str, str, str, str, str, int, float, str]] = []
     pricing_idx = {p.airline: p for p in pricing.pricingInfos}
     for airline, resp in merged.items():
         pi = pricing_idx.get(airline)
@@ -392,85 +444,94 @@ def _render_pp_only(merged: dict, pricing) -> None:
                 pp = c.perPassengerPricing
                 if not pp or pp.perPassengerMilesAmount <= 0:
                     continue
-                rows.append((
-                    airline, of.firstFlightNumber,
-                    f"{of.origin}→{of.destination}",
-                    of.localDepartureDateTime[:16],
-                    c.cabinClass,
-                    pp.perPassengerMilesAmount,
-                    pp.perPassengerTaxAmountUsd,
-                    banks,
-                ))
+                rows.append(
+                    (
+                        airline,
+                        of.firstFlightNumber,
+                        f"{of.origin}→{of.destination}",
+                        of.localDepartureDateTime[:16],
+                        c.cabinClass,
+                        pp.perPassengerMilesAmount,
+                        pp.perPassengerTaxAmountUsd,
+                        banks,
+                    )
+                )
     rows.sort(key=lambda r: (r[3], r[5]))  # by departure, then miles
-    t = Table(title="PointsPath award availability",
-               show_header=True, header_style="bold cyan")
-    for col in ("airline", "flight", "route", "departs", "cabin",
-                 "miles", "tax", "funded by"):
+    t = Table(title="PointsPath award availability", show_header=True, header_style="bold cyan")
+    for col in ("airline", "flight", "route", "departs", "cabin", "miles", "tax", "funded by"):
         t.add_column(col)
     for r in rows:
-        t.add_row(r[0], r[1], r[2], r[3], r[4],
-                  _fmt_miles(r[5]), f"${r[6]:.0f}", r[7])
+        t.add_row(r[0], r[1], r[2], r[3], r[4], _fmt_miles(r[5]), f"${r[6]:.0f}", r[7])
     console.print(t)
 
 
 # ─────────────────────────────── json shapes ───────────────────────────────
 
+
 def _serialize_matches(matches: list[MatchedFare]) -> str:
-    out = []
+    out: list[dict[str, Any]] = []
     for m in matches:
         itn = m.itinerary.itinerary
-        s = (itn.slices[0] if itn and itn.slices else None)
-        out.append({
-            "flight": (s.flights[0] if s and s.flights else None),
-            "departure": (s.departure if s else None),
-            "origin": (s.origin.code if s and s.origin else None),
-            "destination": (s.destination.code if s and s.destination else None),
-            "cash_price": m.itinerary.price,
-            "awards": [
-                {
-                    "airline": ao.airline,
-                    "miles_to_cash_ratio": ao.miles_to_cash_ratio,
-                    "funding_banks": ao.funding_banks,
-                    "matched_origin": ao.flight.origin,
-                    "matched_destination": ao.flight.destination,
-                    "matched_departure": ao.flight.localDepartureDateTime,
-                    "cabins": [
-                        {"cabin": c.cabin, "miles": c.miles,
-                         "tax_usd": c.tax_usd, "tax_currency": c.tax_currency}
-                        for c in ao.cabins
-                    ],
-                }
-                for ao in m.awards
-            ],
-        })
+        s = itn.slices[0] if itn and itn.slices else None
+        out.append(
+            {
+                "flight": (s.flights[0] if s and s.flights else None),
+                "departure": (s.departure if s else None),
+                "origin": (s.origin.code if s and s.origin else None),
+                "destination": (s.destination.code if s and s.destination else None),
+                "cash_price": m.itinerary.price,
+                "awards": [
+                    {
+                        "airline": ao.airline,
+                        "miles_to_cash_ratio": ao.miles_to_cash_ratio,
+                        "funding_banks": ao.funding_banks,
+                        "matched_origin": ao.flight.origin,
+                        "matched_destination": ao.flight.destination,
+                        "matched_departure": ao.flight.localDepartureDateTime,
+                        "cabins": [
+                            {
+                                "cabin": c.cabin,
+                                "miles": c.miles,
+                                "tax_usd": c.tax_usd,
+                                "tax_currency": c.tax_currency,
+                            }
+                            for c in ao.cabins
+                        ],
+                    }
+                    for ao in m.awards
+                ],
+            }
+        )
     return json.dumps(out, indent=2)
 
 
-def _serialize_pp_only(merged: dict) -> str:
-    return json.dumps(
-        {a: r.model_dump() for a, r in merged.items()},
-        indent=2,
-    )
-
-
-def _serialize_matches_per_leg(matches_per_leg: list[list[MatchedFare]],
-                                legs: list[LegQuery]) -> str:
+def _serialize_matches_per_leg(
+    matches_per_leg: list[list[MatchedFare]], legs: list[LegQuery]
+) -> str:
     return json.dumps(
         [
-            {"leg": leg.label, "slice_index": leg.slice_index,
-             "matches": json.loads(_serialize_matches(matches))}
+            {
+                "leg": leg.label,
+                "slice_index": leg.slice_index,
+                "matches": json.loads(_serialize_matches(matches)),
+            }
             for leg, matches in zip(legs, matches_per_leg, strict=True)
         ],
         indent=2,
     )
 
 
-def _serialize_pp_only_per_leg(per_leg: list[dict],
-                                legs: list[LegQuery]) -> str:
+def _serialize_pp_only_per_leg(
+    per_leg: list[dict[str, AirlineSearchResponse]],
+    legs: list[LegQuery],
+) -> str:
     return json.dumps(
         [
-            {"leg": leg.label, "slice_index": leg.slice_index,
-             "by_airline": {a: r.model_dump() for a, r in merged.items()}}
+            {
+                "leg": leg.label,
+                "slice_index": leg.slice_index,
+                "by_airline": {a: r.model_dump() for a, r in merged.items()},
+            }
             for leg, merged in zip(legs, per_leg, strict=True)
         ],
         indent=2,

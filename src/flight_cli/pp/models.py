@@ -4,13 +4,19 @@ Mirrors the `_Loose`-extra style from src/flight_cli/models.py — PointsPath
 adds and removes fields without notice; we capture the parts we use and
 let the rest pass through.
 """
+
 from __future__ import annotations
-from typing import Any, Optional
+
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, field_validator
 
 
 class _Loose(BaseModel):
-    model_config = ConfigDict(extra="allow", populate_by_name=True)
+    # DIVERGE Profile-B edge: PointsPath is reverse-engineered, adds fields
+    # without notice. Same justification as flight_cli.models._Loose for
+    # Matrix responses.
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
 
 def _none_to_empty_list(v: Any) -> Any:
@@ -22,29 +28,30 @@ def _none_to_empty_list(v: Any) -> Any:
 
 # ─────────────────────────── /api/airline-search ───────────────────────────
 
+
 class PerPassengerPricing(_Loose):
     perPassengerMilesAmount: int = 0
     perPassengerTaxAmountUsd: float = 0.0
     taxCurrencyCode: str = "USD"
-    isBasicEconomyFare: Optional[bool] = None
+    isBasicEconomyFare: bool | None = None
 
 
 class OneWayPricing(_Loose):
     perPassengerMilesAmount: int = 0
     perPassengerTaxAmountUsd: float = 0.0
     taxCurrencyCode: str = ""
-    isBasicEconomyFare: Optional[bool] = None
+    isBasicEconomyFare: bool | None = None
 
 
 class SelectedFlightState(_Loose):
-    oneWayPricing: Optional[OneWayPricing] = None
-    airlineState: Optional[dict] = None
+    oneWayPricing: OneWayPricing | None = None
+    airlineState: dict[str, Any] | None = None
 
 
 class PerCabinMilesPricing(_Loose):
     cabinClass: str
-    perPassengerPricing: Optional[PerPassengerPricing] = None
-    selectedFlightState: Optional[SelectedFlightState] = None
+    perPassengerPricing: PerPassengerPricing | None = None
+    selectedFlightState: SelectedFlightState | None = None
 
 
 class OutboundFlight(_Loose):
@@ -53,11 +60,11 @@ class OutboundFlight(_Loose):
     localDepartureDateTime: str  # ISO local without TZ, e.g. "2026-06-09T22:00:00"
     localArrivalDateTime: str
     firstFlightNumber: str
-    googleAirlineName: Optional[str] = None
+    googleAirlineName: str | None = None
     numConnections: int = 0
-    externalId: Optional[str] = None
-    matchedGoogleFlightId: Optional[str] = None
-    matchedGoogleFlightCashPriceUsd: Optional[float] = None
+    externalId: str | None = None
+    matchedGoogleFlightId: str | None = None
+    matchedGoogleFlightCashPriceUsd: float | None = None
     perCabinMilesPricing: list[PerCabinMilesPricing] = []
 
     _none_pricing = field_validator("perCabinMilesPricing", mode="before")(_none_to_empty_list)
@@ -66,7 +73,7 @@ class OutboundFlight(_Loose):
 class AirlineSearchResponse(_Loose):
     outboundFlights: list[OutboundFlight] = []
     inboundFlights: list[OutboundFlight] = []
-    roundTripReturnState: Optional[dict] = None
+    roundTripReturnState: dict[str, Any] | None = None
 
     _none_out = field_validator("outboundFlights", mode="before")(_none_to_empty_list)
     _none_in = field_validator("inboundFlights", mode="before")(_none_to_empty_list)
@@ -74,12 +81,13 @@ class AirlineSearchResponse(_Loose):
 
 # ─────────────────────────── /api/pricing-info ─────────────────────────────
 
+
 class BankPointsInfo(_Loose):
     bank: str
     conversionValue: float = 1.0
     defaultConversionValue: float = 1.0
     isBonusActive: bool = False
-    conversionExpiryDate: Optional[str] = None
+    conversionExpiryDate: str | None = None
 
 
 class PricingInfo(_Loose):

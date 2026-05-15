@@ -1,7 +1,10 @@
 """Tests for the PointsPath HTTP client's pure helpers (no live API)."""
+
 from __future__ import annotations
+
 import json
 import pathlib
+from typing import Any
 
 from flight_cli.pp.client import enabled_airlines
 from flight_cli.pp.models import PricingInfoResponse
@@ -10,16 +13,15 @@ FIX = pathlib.Path(__file__).parent / "fixtures"
 
 
 def _pricing() -> PricingInfoResponse:
-    return PricingInfoResponse.model_validate(
-        json.loads((FIX / "pricing_info.json").read_text())
-    )
+    return PricingInfoResponse.model_validate(json.loads((FIX / "pricing_info.json").read_text()))
 
 
-def _ext_config() -> dict:
+def _ext_config() -> dict[str, Any]:
     return json.loads((FIX / "extension_config.json").read_text())
 
 
 # ────────────────────────── enabled_airlines() ──────────────────────────────
+
 
 def test_enabled_excludes_explicitly_disabled():
     """`enableSingapore=0` and `enableIberia=0` should suppress those

@@ -45,6 +45,7 @@ if TYPE_CHECKING:
 # Tuple-length sentinels for `--slice` parser (`ORIGIN-DEST:DATE[:r=...:e=...]`).
 _SLICE_MIN_PARTS = 2
 _SLICE_MAX_PARTS = 3
+_ROUND_TRIP_LEGS = 2  # 2 legs = round-trip; 1 = one-way; >2 = multi-city
 
 # Matrix returns prices as 'USD877.00' (ISO-4217 prefix + decimal). We split
 # the prefix off for rendering so tables can show the currency once in the
@@ -491,19 +492,26 @@ def fare(
         for i, leg in enumerate(legs):
             if not leg.date or not leg.origins or not leg.destinations:
                 continue  # shouldn't happen for SpecificDateSearch; defensive
+            n = len(legs)
             label_kind = (
-                "outbound" if i == 0 and len(legs) > 1
-                else "return" if i == 1 and len(legs) == 2
-                else f"leg {i + 1}" if len(legs) > 2
+                "outbound"
+                if i == 0 and n > 1
+                else "return"
+                if i == 1 and n == _ROUND_TRIP_LEGS
+                else f"leg {i + 1}"
+                if n > _ROUND_TRIP_LEGS
                 else "one-way"
             )
-            pp_legs.append(LegQuery(
-                origin=leg.origins[0],
-                destination=leg.destinations[0],
-                date=leg.date.isoformat(),
-                slice_index=i,
-                label=f"{label_kind} {leg.origins[0]}→{leg.destinations[0]} {leg.date.isoformat()}",
-            ))
+            iso = leg.date.isoformat()
+            pp_legs.append(
+                LegQuery(
+                    origin=leg.origins[0],
+                    destination=leg.destinations[0],
+                    date=iso,
+                    slice_index=i,
+                    label=f"{label_kind} {leg.origins[0]}→{leg.destinations[0]} {iso}",
+                )
+            )
         run_pp_for_search(
             res,
             legs=pp_legs,

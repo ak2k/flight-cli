@@ -1,16 +1,21 @@
 """Pydantic shape tests. Real captured-JSON snippets in fixtures/."""
+
 from __future__ import annotations
+
 import json
 import pathlib
+from typing import Any
 
 from flight_cli.pp.models import (
-    AirlineSearchResponse, OutboundFlight, PricingInfoResponse,
+    AirlineSearchResponse,
+    OutboundFlight,
+    PricingInfoResponse,
 )
 
 FIX = pathlib.Path(__file__).parent / "fixtures"
 
 
-def _load(name: str) -> dict:
+def _load(name: str) -> dict[str, Any]:
     return json.loads((FIX / name).read_text())
 
 
@@ -42,13 +47,16 @@ def test_airline_search_inbound_null_coerced():
 
 def test_outbound_flight_pricing_null_coerced():
     """`perCabinMilesPricing` arrives as null for some routes; coerce to []."""
-    f = OutboundFlight.model_validate({
-        "origin": "JFK", "destination": "LHR",
-        "localDepartureDateTime": "2026-06-09T22:00:00",
-        "localArrivalDateTime": "2026-06-10T10:25:00",
-        "firstFlightNumber": "UA146",
-        "perCabinMilesPricing": None,
-    })
+    f = OutboundFlight.model_validate(
+        {
+            "origin": "JFK",
+            "destination": "LHR",
+            "localDepartureDateTime": "2026-06-09T22:00:00",
+            "localArrivalDateTime": "2026-06-10T10:25:00",
+            "firstFlightNumber": "UA146",
+            "perCabinMilesPricing": None,
+        }
+    )
     assert f.perCabinMilesPricing == []
 
 

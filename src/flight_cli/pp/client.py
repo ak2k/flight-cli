@@ -7,22 +7,33 @@ Three endpoints matter:
 
 401 → refresh tokens once → retry. Anything else propagates.
 """
+
 from __future__ import annotations
-import asyncio
+
 import json
-import logging
 import re
 import time
 from dataclasses import dataclass
+from http import HTTPStatus
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any
 
+import anyio
 import httpx
+import structlog
 
-from .auth import Tokens, get_valid_tokens, refresh as refresh_tokens
+from .auth import Tokens, get_valid_tokens
+from .auth import refresh as refresh_tokens
 from .models import AirlineSearchResponse, PricingInfoResponse
 
-log = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from types import TracebackType
+
+    from structlog.stdlib import BoundLogger
+
+log: BoundLogger = structlog.get_logger(__name__)  # pyright: ignore[reportAny]
+
+_JsonDict = dict[str, Any]
 
 API_BASE = "https://api.pointspath.com"
 
@@ -38,9 +49,19 @@ EXT_CONFIG_VERSION = "1.10.4"
 # probably differs by Pro tier — the extension's /api/extension-config feature
 # flags drive this — but starting with what we observed avoids guessing.
 DEFAULT_AIRLINES: tuple[str, ...] = (
-    "AirCanada", "AirFrance", "Alaska", "American", "Avianca",
-    "Delta", "Etihad", "JetBlue", "Qantas", "Qatar",
-    "United", "VirginAtlantic", "VirginAustralia",
+    "AirCanada",
+    "AirFrance",
+    "Alaska",
+    "American",
+    "Avianca",
+    "Delta",
+    "Etihad",
+    "JetBlue",
+    "Qantas",
+    "Qatar",
+    "United",
+    "VirginAtlantic",
+    "VirginAustralia",
 )
 
 DEFAULT_CABINS: tuple[str, ...] = ("Economy", "Business")
@@ -54,9 +75,10 @@ DEFAULT_CONCURRENCY = 5
 class CashFlightHint:
     """Subset of GFlights itinerary data the airline-search endpoint expects
     when enableGoogleFlightMatching=True. Unused when matching is False."""
+
     origin: str
     dest: str
-    start_dt: str   # "YYYY-MM-DD HH:MM"
+    start_dt: str  # "YYYY-MM-DD HH:MM"
     end_dt: str
     flight_id: str
     airline: str
@@ -66,7 +88,7 @@ class CashFlightHint:
     cash_price_usd: int
     raw_cash_price: str
 
-    def to_payload(self) -> dict:
+    def to_payload(self) -> _JsonDict:
         return {
             "origin": self.origin,
             "dest": self.dest,
@@ -87,7 +109,7 @@ class CashFlightHint:
 class SearchSpec:
     origin: str
     destination: str
-    date: str           # YYYY-MM-DD
+    date: str  # YYYY-MM-DD
     return_date: str = ""
     is_round_trip_return: bool = False
     num_passengers: int = 1
@@ -98,7 +120,7 @@ class SearchSpec:
     disable_cache: bool = False
 
 
-def _payload(spec: SearchSpec, airline: str) -> dict:
+def _payload(spec: SearchSpec, airline: str) -> _JsonDict:
     return {
         "selectedFlightNumber": "",
         "selectedFlightPricing": [],
@@ -121,10 +143,15 @@ class PPClient:
     """Thin async wrapper. Construct with `await PPClient.create()` so token
     refresh runs once up front."""
 
-    def __init__(self, tokens: Tokens, *, timeout: float = 25.0,
-                 concurrency: int = DEFAULT_CONCURRENCY):
+    def __init__(
+        self,
+        tokens: Tokens,
+        *,
+        timeout: float = 25.0,
+        concurrency: int = DEFAULT_CONCURRENCY,
+    ) -> None:
         self._tokens = tokens
-        self._sem = asyncio.Semaphore(concurrency)
+        self._sem = anyio.Semaphore(concurrency)
         self._client = httpx.AsyncClient(
             base_url=API_BASE,
             timeout=timeout,
@@ -132,7 +159,7 @@ class PPClient:
         )
 
     @classmethod
-    async def create(cls, **kw) -> "PPClient":
+    async def create(cls, **kw: Any) -> PPClient:
         # get_valid_tokens is sync (httpx.post for refresh) — fine; called once.
         return cls(get_valid_tokens(), **kw)
 
@@ -140,8 +167,16 @@ class PPClient:
         await self._client.aclose()
 
     # context-manager sugar
-    async def __aenter__(self) -> "PPClient": return self
-    async def __aexit__(self, *exc) -> None: await self.aclose()
+    async def __aenter__(self) -> PPClient:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        await self.aclose()
 
     def _auth_headers(self) -> dict[str, str]:
         return {
@@ -149,57 +184,74 @@ class PPClient:
             "content-type": "application/json",
         }
 
-    async def _request(self, method: str, path: str, *,
-                       json_body: Optional[dict] = None,
-                       params: Optional[dict] = None) -> httpx.Response:
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: _JsonDict | None = None,
+        params: _JsonDict | None = None,
+    ) -> httpx.Response:
         async with self._sem:
             r = await self._client.request(
-                method, path, json=json_body, params=params,
+                method,
+                path,
+                json=json_body,
+                params=params,
                 headers=self._auth_headers(),
             )
-        if r.status_code == 401:
-            log.info("pp: 401 — refreshing tokens and retrying once")
+        if r.status_code == HTTPStatus.UNAUTHORIZED:
+            log.info("pp_token_refresh", reason="401_retry_once")
             self._tokens = refresh_tokens(self._tokens)
             async with self._sem:
                 r = await self._client.request(
-                    method, path, json=json_body, params=params,
+                    method,
+                    path,
+                    json=json_body,
+                    params=params,
                     headers=self._auth_headers(),
                 )
         return r
 
     async def airline_search(self, spec: SearchSpec, airline: str) -> AirlineSearchResponse:
-        r = await self._request("POST", "/api/airline-search",
-                                json_body=_payload(spec, airline))
+        r = await self._request("POST", "/api/airline-search", json_body=_payload(spec, airline))
         # 204 = airline has nothing for this route+date; return empty model.
-        if r.status_code == 204 or not r.content:
+        if r.status_code == HTTPStatus.NO_CONTENT or not r.content:
             return AirlineSearchResponse()
-        if r.status_code >= 400:
-            log.warning("pp: airline-search %s → %s %s",
-                        airline, r.status_code, r.text[:200])
+        if r.status_code >= HTTPStatus.BAD_REQUEST:
+            log.warning(
+                "pp_airline_search_failed",
+                airline=airline,
+                status=r.status_code,
+                body=r.text[:200],
+            )
             return AirlineSearchResponse()
         return AirlineSearchResponse.model_validate(r.json())
 
-    async def airline_search_many(self, spec: SearchSpec,
-                                   airlines: tuple[str, ...]) -> dict[str, AirlineSearchResponse]:
+    async def airline_search_many(
+        self,
+        spec: SearchSpec,
+        airlines: tuple[str, ...],
+    ) -> dict[str, AirlineSearchResponse]:
         """Fan out one request per airline; concurrency-bounded by the semaphore."""
-        async def one(a: str) -> tuple[str, AirlineSearchResponse]:
-            return a, await self.airline_search(spec, a)
-        results = await asyncio.gather(*(one(a) for a in airlines), return_exceptions=True)
         out: dict[str, AirlineSearchResponse] = {}
-        for r in results:
-            if isinstance(r, BaseException):
-                log.warning("pp: airline-search exception: %r", r)
-                continue
-            out[r[0]] = r[1]
+
+        async def runner(airline: str) -> None:
+            try:
+                out[airline] = await self.airline_search(spec, airline)
+            except Exception as e:  # noqa: BLE001 - per-airline failures are non-fatal
+                log.warning("pp_airline_search_exception", airline=airline, error=str(e))
+
+        async with anyio.create_task_group() as tg:
+            for a in airlines:
+                tg.start_soon(runner, a)
         return out
 
     async def pricing_info(self, *, force_refresh: bool = False) -> PricingInfoResponse:
         if not force_refresh and PRICING_CACHE.exists():
             age = time.time() - PRICING_CACHE.stat().st_mtime
             if age < PRICING_TTL_SECS:
-                return PricingInfoResponse.model_validate(
-                    json.loads(PRICING_CACHE.read_text())
-                )
+                return PricingInfoResponse.model_validate(json.loads(PRICING_CACHE.read_text()))
         r = await self._request("GET", "/api/pricing-info")
         r.raise_for_status()
         PRICING_CACHE.parent.mkdir(parents=True, exist_ok=True)
@@ -218,7 +270,8 @@ class PPClient:
             if age < EXT_CONFIG_TTL_SECS:
                 return json.loads(EXT_CONFIG_CACHE.read_text())
         r = await self._request(
-            "GET", "/api/extension-config",
+            "GET",
+            "/api/extension-config",
             params={"v": EXT_CONFIG_VERSION},
         )
         r.raise_for_status()
@@ -267,6 +320,8 @@ def enabled_airlines(
     return tuple(enabled)
 
 
-_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-       "AppleWebKit/537.36 (KHTML, like Gecko) "
-       "Chrome/148.0.0.0 Safari/537.36")
+_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/148.0.0.0 Safari/537.36"
+)
