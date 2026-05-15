@@ -62,12 +62,14 @@ cache (`~/.cache/flight-cli/.matrix-key`) or a Matrix brownout (see
 ## Principles
 
 1. **Boundaries fail loudly.** Pydantic at every external edge. Wire
-   models in `wire.py` use `extra="ignore"` for forward-compat (Matrix
-   adds fields unannounced); domain models in `domain.py` and response
-   models in `models.py` validate strictly. Domain errors
-   (`MatrixApiError`, `ApiKeyResolutionError`) wrap third-party
-   exceptions — `httpx.HTTPStatusError` never leaks to a caller. Shape
-   drift is an alarm, not a silent fallthrough.
+   models in `wire.py` AND response models in `models.py` both use
+   `extra="ignore"` — Matrix is reverse-engineered and adds fields
+   unannounced in directions that aren't load-bearing for us
+   (Profile-B-edge divergence; see "Appropriate divergence" below).
+   Domain models in `domain.py` use `extra="forbid"` — that's where
+   *we* control the contract. Domain errors (`MatrixApiError`,
+   `ApiKeyResolutionError`) wrap third-party exceptions —
+   `httpx.HTTPStatusError` never leaks to a caller.
 
 2. **Suppress with cost.** Every `# pyright: ignore[code]` and `# noqa: code`
    names the specific rule and a one-line reason. Suppression is annotated
@@ -139,6 +141,7 @@ Tunings applied versus the strict-service default:
 | `PLR0913` (too many args) | strict | ignored (CLI verbs are wide) |
 | `N815` (camelCase) | strict | per-file-ignored in `wire.py`, `domain.py`, `models.py` — Matrix wire JSON dictates field names |
 | `reportAny` | `"warning"` | `"none"` — Profile-B edge: fli/fast_flights ship no stubs; Matrix response is `dict[str, Any]` by design; `ValidationInfo.data` and `Field` overloads are Any internally. `reportUnknown*` stays on (higher-signal "can't type this"). |
+| Pydantic `extra` on boundary models | `"forbid"` | `"ignore"` on wire + response (`_Wire`, `_Loose`) — Profile-B edge: Matrix is reverse-engineered and adds fields unannounced in directions that aren't load-bearing. Domain models stay `extra="forbid"` (we control that contract). |
 
 ## flight-cli load-bearing quirks (read before touching wire.py)
 
