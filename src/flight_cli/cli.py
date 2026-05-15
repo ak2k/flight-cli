@@ -37,6 +37,7 @@ from .domain import (
 )
 from .links import google_flights_url, matrix_deep_link
 from .log import configure as configure_logging
+from .pp.cli import auth_app, run_pp_for_search
 
 if TYPE_CHECKING:
     from .models import CalendarResult, Location, SearchResult, Slice
@@ -67,6 +68,7 @@ def _amount(s: str | None) -> str:
 app = typer.Typer(
     add_completion=False, rich_markup_mode="rich", help="CLI for ITA Matrix's Alkali backend."
 )
+app.add_typer(auth_app, name="auth")
 console = Console()
 err = Console(stderr=True)
 
@@ -403,6 +405,26 @@ def fare(
     matrix_url: bool = typer.Option(True, "--matrix-url/--no-matrix-url"),
     google_url: bool = typer.Option(True, "--google-url/--no-google-url"),
     no_cache: bool = typer.Option(False, "--no-cache"),
+    pp: bool = typer.Option(
+        False,
+        "--pp",
+        help="Augment results with PointsPath award prices (requires `auth pp login`).",
+    ),
+    pp_only: bool = typer.Option(
+        False,
+        "--pp-only",
+        help="Show only PointsPath award availability; skip Matrix table render.",
+    ),
+    pp_airlines: str | None = typer.Option(
+        None,
+        "--pp-airlines",
+        help="CSV of PointsPath airline names (e.g. United,Delta). Default: 13 common.",
+    ),
+    pp_cabin: str | None = typer.Option(
+        None,
+        "--pp-cabin",
+        help="CSV of cabins to query (Economy,Business,First). Default: Economy,Business.",
+    ),
 ) -> None:
     """Specific-date search. One leg = one-way, two = round-trip, N = multi-city."""
     if slice_specs:
@@ -451,10 +473,29 @@ def fare(
     search = SpecificDateSearch(legs=legs, options=opts)
     # SpecificDateSearch → SearchResult by client._parse_response dispatch.
     res = cast("SearchResult", _run(search, rps, impersonate, no_cache))
-    if json_out:
+    if json_out and not pp:
         sys.stdout.write(json.dumps(res.raw, indent=2))
         return
-    _render_search(res)
+    if not pp_only:
+        _render_search(res)
+    if pp:
+        # Use the first leg's origin/destination/date for the PP query. PP's
+        # airline-search is single-leg per call, so multi-city / round-trip
+        # legs would need separate calls — punted to a follow-up.
+        first = legs[0]
+        ret_date = legs[1].date.isoformat() if len(legs) > 1 and legs[1].date else ""
+        run_pp_for_search(
+            res,
+            origin=first.origins[0] if first.origins else "",
+            destination=first.destinations[0] if first.destinations else "",
+            dep_date=first.date.isoformat() if first.date else "",
+            return_date=ret_date,
+            num_passengers=adults + children + seniors + youth,
+            airlines=pp_airlines,
+            cabins=pp_cabin,
+            pp_only=pp_only,
+            json_out=json_out,
+        )
     _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
 
 
