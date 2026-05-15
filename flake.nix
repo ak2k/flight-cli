@@ -45,6 +45,14 @@
             shellHook = ''
               export UV_PYTHON=${python}/bin/python3
               export UV_PYTHON_PREFERENCE=only-system
+              ${lib.optionalString pkgs.stdenv.isLinux ''
+                # Binary Python wheels with compiled C++ extensions
+                # (curl_cffi via httpx-curl-cffi, used for TLS
+                # fingerprinting) link against libstdc++.so.6 at
+                # runtime. The Nix devShell doesn't expose the host's
+                # library paths; surface it from the Nix store.
+                export LD_LIBRARY_PATH="${lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib ]}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+              ''}
               echo "🐍 python: $(python3 --version)"
               echo "📦 uv:     $(uv --version)"
             '';
