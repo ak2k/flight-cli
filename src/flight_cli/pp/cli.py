@@ -22,10 +22,13 @@ from rich.table import Table
 from .auth import (
     TOKENS_PATH,
     PPAuthError,
+    Tokens,
     clear_tokens,
     get_valid_tokens,
     import_from_tokens_file,
     load_tokens,
+    login_from_chrome,
+    login_via_browser,
 )
 from .client import (
     DEFAULT_AIRLINES,
@@ -80,35 +83,67 @@ def pp_login(
         typer.Option(
             "--tokens-file",
             "-f",
-            help="Import tokens from a JSON file (e.g. one captured via CDP cookie sniff).",
+            help="Import tokens from a JSON file (e.g. previously captured Supabase session).",
         ),
     ] = None,
+    from_chrome: Annotated[
+        bool,
+        typer.Option(
+            "--from-chrome",
+            help=(
+                "Read tokens from a local Chrome profile via rookiepy. "
+                "Inherits Chrome's session (and its rotation chain — Chrome and "
+                "the CLI may race on refresh). Convenience path; prefer the "
+                "default headed browser login for a clean, independent session."
+            ),
+        ),
+    ] = False,
 ) -> None:
-    """Save tokens to ~/.config/flight-cli/pp.json.
+    """Authenticate with PointsPath. Three modes (mutually exclusive).
 
-    Today only `--tokens-file` is wired. Browser-based login is planned but
-    not yet implemented; for now, capture tokens from your authenticated Chrome
-    session and pass the JSON file in.
+    Default (no flag): open a headed Playwright Chromium so you can sign
+    in normally. Captures the resulting Supabase session into
+    ~/.config/flight-cli/pp.json. Independent of any user-facing Chrome
+    PP session. Needs playwright at runtime (ephemeral or installed): the
+    README PP Setup section covers `uv run --with playwright` + the
+    one-time `uvx --from playwright playwright install chromium`.
+
+    --from-chrome: import the session from your local Chrome profile via
+    cookies. Quicker, but the CLI then shares Chrome's refresh-token
+    chain (Supabase rotates single-use, so a refresh on one side will
+    eventually invalidate the other).
+
+    --tokens-file PATH: import from a pre-captured JSON file. Expected
+    shape: {access_token, refresh_token, user.email}.
     """
-    if tokens_file is None:
-        err.print("[yellow]Browser-based login isn't implemented yet.[/]")
-        err.print(
-            "Workaround: capture your Supabase tokens from your authenticated "
-            "Chrome session and pass them in:\n"
-            "  flight-cli auth pp login --tokens-file /path/to/pp_tokens.json\n"
-            "Expected file shape: "
-            '{"access_token": "...", "refresh_token": "...", "user": {"email": "..."}}'
-        )
+    modes = [bool(tokens_file), from_chrome]
+    if sum(modes) > 1:
+        err.print("[red]Pick at most one of --tokens-file or --from-chrome.[/]")
         raise typer.Exit(2)
+
     try:
-        t = import_from_tokens_file(tokens_file)
+        t: Tokens
+        if tokens_file is not None:
+            t = import_from_tokens_file(tokens_file)
+            source = f"{tokens_file}"
+        elif from_chrome:
+            t = login_from_chrome()
+            source = "local Chrome cookies"
+        else:
+            console.print(
+                "[dim]Opening a browser to PointsPath. Sign in normally; "
+                "the CLI will capture your session and close the browser.[/]"
+            )
+            t = login_via_browser()
+            source = "headed browser login"
     except (PPAuthError, OSError, json.JSONDecodeError, KeyError) as e:
-        err.print(f"[red]Login failed: {e}[/]")
+        err.print(f"[red]Login failed ({type(e).__name__}): {e}[/]")
         raise typer.Exit(1) from e
+
     when = datetime.fromtimestamp(t.expires_at).isoformat() if t.expires_at else "?"
     console.print(
         f"[green]Saved[/] tokens for [bold]{t.user_email or '?'}[/] "
-        f"to {TOKENS_PATH}\n  access_token expires: {when}"
+        f"to {TOKENS_PATH}\n  source: {source}\n  access_token expires: {when}"
     )
 
 
