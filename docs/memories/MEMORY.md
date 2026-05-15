@@ -11,7 +11,12 @@ go into detail and are loaded on demand.
   per-segment carrier/airport filters). What goes into `--routing`.
 - [extension_codes.md](extension_codes.md) — Full table of `commandLine`
   extension codes (`MAXSTOPS`, `MAXDUR`, `ALLIANCE`, `-OVERNIGHTS`,
-  `+CABIN`, fare-basis, etc.). What goes into `--extension`.
+  `+CABIN`, fare-basis, `AIRCRAFT`, etc.). What goes into `--extension`.
+- [matrix_help_docs.md](matrix_help_docs.md) — Verbatim copy of
+  matrix.itasoftware.com's in-app help dialog (Itineraries / Faring /
+  Aircraft Types tabs), captured by paste from the SPA UI. Canonical
+  reference when the curated tables in `extension_codes.md` /
+  `routing_language.md` are ambiguous.
 - [airport_groups.md](airport_groups.md) — Metro IATA codes Matrix accepts
   natively (NYC, LON, PAR…) and manual region expansions (Europe, US
   East Coast, East Asia…) for users who ask "find me a flight to

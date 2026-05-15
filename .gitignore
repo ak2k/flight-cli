@@ -30,7 +30,11 @@ htmlcov/
 # Research artifacts (capture scripts, HAR files, screenshots, raw probes).
 # These live in-tree for convenience but aren't part of the published code.
 # Tracked test fixtures live in tests/fixtures/ instead.
-research/
+# Exception: the help-docs extractor is the canonical regen tool for
+# docs/memories/matrix_help_docs.md, so it ships with the project. Use
+# `research/*` not `research/` so git can still see inside the dir.
+research/*
+!research/extract_help_docs.py
 
 # Claude Code per-session agent state — settings only. Project-shared
 # skills under .claude/skills/ ARE checked in.
