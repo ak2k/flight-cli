@@ -12,10 +12,12 @@ dist/
 venv/
 env/
 
-# Pytest / mypy / etc.
+# Pytest / basedpyright / hypothesis / coverage caches
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.basedpyright/
+.hypothesis/
 .coverage
 htmlcov/
 
@@ -36,7 +38,6 @@ htmlcov/
 research/*
 !research/extract_help_docs.py
 
-# Claude Code per-session agent state — settings only. Project-shared
-# skills under .claude/skills/ ARE checked in.
-.claude/settings.json
+# Claude Code per-session agent state. Project-shared `.claude/settings.json`
+# and `.claude/skills/` ARE checked in; per-machine override stays local.
 .claude/settings.local.json

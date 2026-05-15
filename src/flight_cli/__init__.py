@@ -1,23 +1,52 @@
 """flight-cli: ITA Matrix Alkali backend wrapper."""
-from .client import MatrixClient, MatrixApiError, ApiKeyResolutionError, resolve_api_key
+
+from .client import ApiKeyResolutionError, MatrixApiError, MatrixClient, resolve_api_key
 from .domain import (
-    Cabin, Pax, TimeOfDay, Leg, SearchOptions, CalendarWindow,
-    SpecificDateSearch, CalendarSearch, CalendarFollowup, Search,
+    Cabin,
+    CalendarFollowup,
+    CalendarSearch,
+    CalendarWindow,
+    Leg,
+    Pax,
+    Search,
+    SearchOptions,
+    SpecificDateSearch,
+    TimeOfDay,
 )
+from .links import google_flights_url, matrix_deep_link
 from .models import (
-    SearchResult, Itinerary, CalendarResult, CalendarDay, DurationOption,
+    CalendarDay,
+    CalendarResult,
+    DurationOption,
+    Itinerary,
     Location,
+    SearchResult,
 )
-from .wire import to_wire, WireBody
-from .links import matrix_deep_link, google_flights_url
+from .wire import WireBody, to_wire
 
 __all__ = [
-    "MatrixClient", "MatrixApiError", "ApiKeyResolutionError", "resolve_api_key",
-    "Cabin", "Pax", "TimeOfDay", "Leg", "SearchOptions", "CalendarWindow",
-    "SpecificDateSearch", "CalendarSearch", "CalendarFollowup", "Search",
-    "SearchResult", "Itinerary",
-    "CalendarResult", "CalendarDay", "DurationOption",
+    "ApiKeyResolutionError",
+    "Cabin",
+    "CalendarDay",
+    "CalendarFollowup",
+    "CalendarResult",
+    "CalendarSearch",
+    "CalendarWindow",
+    "DurationOption",
+    "Itinerary",
+    "Leg",
     "Location",
-    "to_wire", "WireBody",
-    "matrix_deep_link", "google_flights_url",
+    "MatrixApiError",
+    "MatrixClient",
+    "Pax",
+    "Search",
+    "SearchOptions",
+    "SearchResult",
+    "SpecificDateSearch",
+    "TimeOfDay",
+    "WireBody",
+    "google_flights_url",
+    "matrix_deep_link",
+    "resolve_api_key",
+    "to_wire",
 ]

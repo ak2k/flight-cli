@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # uv path — runs for everyone
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        run: uv python install
+
+      - name: Install deps
+        run: uv sync --frozen
+
+      - name: Inner loop (uv)
+        run: make check
+
+      # nix path — only if the user kept flake.nix
+      - name: Install Nix
+        if: ${{ hashFiles('flake.nix') != '' }}
+        uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Inner loop (nix develop)
+        if: ${{ hashFiles('flake.nix') != '' }}
+        run: nix develop -c make check
