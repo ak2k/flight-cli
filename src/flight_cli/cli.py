@@ -1,12 +1,14 @@
 """CLI: thin shells over the domain types. Each command parses args, builds
-a Search variant, hands it to MatrixClient.execute(), and renders.
+a Search variant, hands it to MatrixClient.execute() (or fli for gflight),
+and renders.
 
-Five commands:
-  flight fare      — specific-date search
-  flight calendar  — lowest-fare grid
+Commands:
+  flight search    — specific-date search (auto-picks Matrix vs Google Flights)
+  flight calendar  — lowest-fare grid (Matrix only)
   flight detail    — phase-2 itineraries for a date picked from the grid
-  flight gflight   — Google Flights handoff via fli
   flight airport   — IATA autocomplete
+  flight fare      — [deprecated] alias for `search --backend matrix`
+  flight gflight   — [deprecated] alias for `search --backend gflight`
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ from .domain import (
 )
 from .links import google_flights_url, matrix_deep_link
 from .log import configure as configure_logging
+from .pp.auth import load_tokens
 from .pp.cli import LegQuery, auth_app, run_pp_for_search
 
 if TYPE_CHECKING:
@@ -195,6 +198,94 @@ def _build_options(
     )
 
 
+# ─────────────────────────── backend dispatch ──────────────────────────────
+
+BACKEND_AUTO = "auto"
+BACKEND_MATRIX = "matrix"
+BACKEND_GFLIGHT = "gflight"
+_VALID_BACKENDS = (BACKEND_AUTO, BACKEND_MATRIX, BACKEND_GFLIGHT)
+
+
+def _pick_backend(
+    *,
+    backend: str,
+    routing: str | None,
+    extension: str | None,
+    slice_specs: list[str] | None,
+    depart_times: str | None,
+    return_times: str | None,
+    seniors: int,
+    youth: int,
+    inf_seat: int,
+    inf_lap: int,
+    pp_only: bool,
+    pp_airlines: str | None,
+    pp_cabin: str | None,
+) -> str:
+    """Resolve --backend to a concrete backend.
+
+    auto: matrix iff a Matrix-only flag is set, else gflight.
+    Matrix-only set: --routing/--extension/--slice/--depart-times/--return-times,
+    any pax type beyond adults+children, any --pp-* configuration flag.
+    PP is currently Matrix-only (provider abstraction is work-z6zi).
+
+    Explicit --backend matrix: matrix. --backend gflight: gflight, unless a
+    Matrix-only flag is also set (error — the request is inexpressible on fli)."""
+    matrix_only = bool(
+        routing
+        or extension
+        or slice_specs
+        or depart_times
+        or return_times
+        or pp_airlines
+        or pp_cabin
+    ) or (seniors > 0 or youth > 0 or inf_seat > 0 or inf_lap > 0 or pp_only)
+    if backend == BACKEND_AUTO:
+        return BACKEND_MATRIX if matrix_only else BACKEND_GFLIGHT
+    if backend == BACKEND_GFLIGHT and matrix_only:
+        raise typer.BadParameter(
+            "--backend gflight is incompatible with Matrix-only flags "
+            "(--routing/--extension/--slice/--depart-times/--return-times/"
+            "extra pax types/--pp-*). Drop them, or use --backend matrix.",
+        )
+    if backend not in _VALID_BACKENDS:
+        raise typer.BadParameter(f"--backend must be one of {_VALID_BACKENDS}; got {backend!r}")
+    return backend
+
+
+def _should_run_pp(*, backend: str, no_pp: bool, pp_only: bool) -> bool:
+    """Decide whether PP augmentation runs.
+
+    Matrix backend + tokens present → True (unless --no-pp).
+    --pp-only with missing tokens → hard error (user explicitly asked for PP).
+    gflight backend → False (PP needs Matrix's SearchResult shape; work-z6zi
+    introduces the AwardProvider abstraction that makes this provider-neutral).
+    """
+    if backend != BACKEND_MATRIX:
+        if pp_only:
+            err.print(
+                "[red]--pp-only requires Matrix backend; "
+                "drop the Matrix-only flag or use --backend matrix.[/]",
+            )
+            raise typer.Exit(2)
+        return False
+    if no_pp:
+        if pp_only:
+            err.print("[red]--pp-only and --no-pp are mutually exclusive.[/]")
+            raise typer.Exit(2)
+        return False
+    tokens = load_tokens()
+    if tokens is None:
+        if pp_only:
+            err.print(
+                "[red]--pp-only set but no PointsPath tokens.[/] "
+                "Run `flight auth pp login --tokens-file ...` first.",
+            )
+            raise typer.Exit(2)
+        return False
+    return True
+
+
 # ─────────────────────────── shared execution ──────────────────────────────
 
 
@@ -336,6 +427,144 @@ def _render_calendar(
     console.print(t)
 
 
+# ─────────────────────────── backend execution ─────────────────────────────
+
+
+def _build_pp_legs(legs: tuple[Leg, ...]) -> list[LegQuery]:
+    """One PP query per Matrix leg. slice_index lets the matcher join PP
+    award results to the correct Itinerary slice in each Matrix solution."""
+    out: list[LegQuery] = []
+    for i, leg in enumerate(legs):
+        if not leg.date or not leg.origins or not leg.destinations:
+            continue
+        n = len(legs)
+        kind = (
+            "outbound"
+            if i == 0 and n > 1
+            else "return"
+            if i == 1 and n == _ROUND_TRIP_LEGS
+            else f"leg {i + 1}"
+            if n > _ROUND_TRIP_LEGS
+            else "one-way"
+        )
+        iso = leg.date.isoformat()
+        out.append(
+            LegQuery(
+                origin=leg.origins[0],
+                destination=leg.destinations[0],
+                date=iso,
+                slice_index=i,
+                label=f"{kind} {leg.origins[0]}→{leg.destinations[0]} {iso}",
+            ),
+        )
+    return out
+
+
+def _run_matrix_path(
+    *,
+    legs: tuple[Leg, ...],
+    opts: SearchOptions,
+    rps: float,
+    impersonate: str,
+    no_cache: bool,
+    json_out: bool,
+    matrix_url: bool,
+    google_url: bool,
+    run_pp: bool,
+    pp_only: bool,
+    pp_airlines: str | None,
+    pp_cabin: str | None,
+) -> None:
+    """Matrix path: Alkali call → optional cash render → optional PP augmentation → URLs."""
+    search = SpecificDateSearch(legs=legs, options=opts)
+    # SpecificDateSearch → SearchResult by client._parse_response dispatch.
+    res = cast("SearchResult", _run(search, rps, impersonate, no_cache))
+    if json_out and not run_pp:
+        sys.stdout.write(json.dumps(res.raw, indent=2))
+        return
+    if not pp_only:
+        _render_search(res)
+    if run_pp:
+        p = opts.pax
+        run_pp_for_search(
+            res,
+            legs=_build_pp_legs(legs),
+            num_passengers=p.adults + p.children + p.seniors + p.youth,
+            airlines=pp_airlines,
+            cabins=pp_cabin,
+            pp_only=pp_only,
+            json_out=json_out,
+        )
+    _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
+
+
+def _run_gflight_path(
+    *,
+    legs: tuple[Leg, ...],
+    opts: SearchOptions,
+    top_n: int,
+    json_out: bool,
+) -> None:
+    """Google Flights path: build fli filter → query → render. Single-leg or round-trip."""
+    # fli is heavy (selenium/selectolax); lazy-import so the rest of flight_cli
+    # doesn't pay the startup cost when not used.
+    from .fli_bridge import run_gflight_search  # noqa: PLC0415
+
+    search = SpecificDateSearch(legs=legs, options=opts)
+    try:
+        # fli has no type stubs; treat its return as opaque at this boundary
+        # and use duck-typed attribute access below.
+        results: list[Any] = run_gflight_search(search, top_n=top_n)
+    except Exception as e:
+        err.print(f"[red]Google Flights query failed:[/] {e}")
+        raise typer.Exit(1) from e
+
+    if not results:
+        console.print("[yellow]Google Flights returned no results.[/]")
+        return
+
+    # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType,
+    #                 reportUnknownArgumentType, reportUnknownParameterType]
+    # fli/fast_flights have no type stubs; results are duck-typed pydantic
+    # models. Suppressing the noisy unknown-type chatter for this rendering
+    # block keeps the boundary localized.
+    if json_out:
+        out: list[Any] = []
+        for r in results:
+            if isinstance(r, tuple):
+                out.append([fr.model_dump(mode="json") for fr in r])  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+            else:
+                out.append(r.model_dump(mode="json"))
+        sys.stdout.write(json.dumps(out, indent=2, default=str))
+        return
+
+    origin = legs[0].origins[0] if legs[0].origins else "?"
+    destination = legs[0].destinations[0] if legs[0].destinations else "?"
+    has_return = len(legs) >= _ROUND_TRIP_LEGS
+    t = Table(
+        title=f"Google Flights · {origin}→{destination}" + (" + return" if has_return else ""),
+        show_header=True,
+        header_style="bold green",
+    )
+    t.add_column("#", justify="right")
+    t.add_column("price", justify="right")
+    t.add_column("stops", justify="right")
+    t.add_column("duration")
+    t.add_column("legs")
+    for i, r in enumerate(results[:top_n], 1):
+        items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
+        for j, fr in enumerate(items):
+            label = f"{i}{'a' if j == 0 else 'b'}" if len(items) > 1 else str(i)
+            legs_str = " → ".join(
+                f"{getattr(leg.airline, 'name', leg.airline)} {getattr(leg, 'flight_number', '?')}"
+                for leg in fr.legs
+            )
+            mins = fr.duration
+            dur = f"{mins // 60}h{mins % 60:02d}m"
+            t.add_row(label, f"{fr.currency or 'USD'}{fr.price:.2f}", str(fr.stops), dur, legs_str)
+    console.print(t)
+
+
 # ─────────────────────────────── commands ──────────────────────────────────
 
 # Common-args helpers — these reduce repetition across commands.
@@ -344,6 +573,205 @@ _IMPERSONATE_OPT = typer.Option("chrome", help="curl_cffi profile")
 
 
 @app.command()
+def search(
+    origin: Annotated[
+        str | None,
+        typer.Argument(help="Origin IATA (comma-list ok for multi-airport)"),
+    ] = None,
+    destination: Annotated[
+        str | None,
+        typer.Argument(help="Destination IATA (comma-list ok)"),
+    ] = None,
+    dep: Annotated[str | None, typer.Option("--dep", help="YYYY-MM-DD")] = None,
+    ret: Annotated[
+        str | None,
+        typer.Option("--return", "-r", help="YYYY-MM-DD; omit for one-way"),
+    ] = None,
+    slice_specs: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--slice",
+            "-s",
+            help="Multi-city: 'ORIG-DEST:DATE[:r=ROUTING:e=EXT]'. Repeat. (Matrix only)",
+        ),
+    ] = None,
+    backend: Annotated[
+        str,
+        typer.Option(
+            "--backend",
+            help=(
+                "auto|matrix|gflight. auto picks gflight for plain searches and "
+                "matrix when Matrix-only flags are set (routing/extension/slice/"
+                "time-of-day/extra pax types/PP config)."
+            ),
+        ),
+    ] = BACKEND_AUTO,
+    cabin: str = "economy",
+    adults: int = 1,
+    children: int = 0,
+    seniors: int = 0,
+    youth: int = 0,
+    inf_seat: Annotated[int, typer.Option("--inf-seat")] = 0,
+    inf_lap: Annotated[int, typer.Option("--inf-lap")] = 0,
+    routing: Annotated[
+        str | None,
+        typer.Option(
+            "--routing",
+            help="Routing language ('LH+', 'BA AA', '[F* X F*]'). Matrix only.",
+        ),
+    ] = None,
+    extension: Annotated[
+        str | None,
+        typer.Option(
+            "--extension",
+            "--ext",
+            help="Extension codes ('MAXCONNECT 2:00', 'MAXSTOPS 1'). Matrix only.",
+        ),
+    ] = None,
+    depart_times: Annotated[
+        str | None,
+        typer.Option(
+            "--depart-times",
+            help="Preferred outbound times-of-day (comma list: morning,evening). Matrix only.",
+        ),
+    ] = None,
+    return_times: Annotated[
+        str | None,
+        typer.Option("--return-times", help="Preferred return times-of-day. Matrix only."),
+    ] = None,
+    stops: Annotated[
+        int | None,
+        typer.Option(
+            "--stops", help="Max extra stops beyond nonstop (0=nonstop only, 1=up to 1 stop, ...)"
+        ),
+    ] = None,
+    allow_airport_changes: bool = typer.Option(
+        True, "--allow-airport-changes/--no-airport-changes"
+    ),
+    only_available: bool = typer.Option(True, "--only-available/--include-unavailable"),
+    page_size: int = typer.Option(
+        10, "--n", "-n", help="Result count (matrix: page size; gflight: top_n)."
+    ),
+    rps: float = _RPS_OPT,
+    impersonate: str = _IMPERSONATE_OPT,
+    json_out: bool = typer.Option(False, "--json"),
+    matrix_url: bool = typer.Option(True, "--matrix-url/--no-matrix-url"),
+    google_url: bool = typer.Option(True, "--google-url/--no-google-url"),
+    no_cache: bool = typer.Option(False, "--no-cache"),
+    no_pp: bool = typer.Option(
+        False,
+        "--no-pp",
+        help=(
+            "Skip PointsPath award augmentation even if tokens are present. "
+            "PP runs implicitly on matrix backend when valid tokens exist."
+        ),
+    ),
+    pp_only: bool = typer.Option(
+        False,
+        "--pp-only",
+        help="Show only PointsPath award availability; skip Matrix cash table.",
+    ),
+    pp_airlines: str | None = typer.Option(
+        None,
+        "--pp-airlines",
+        help=(
+            "CSV of PointsPath airline names (e.g. United,Delta). "
+            "Default: discovered from your account's enabled airline set."
+        ),
+    ),
+    pp_cabin: str | None = typer.Option(
+        None,
+        "--pp-cabin",
+        help="CSV of cabins to query (Economy,Business,First). Default: Economy,Business.",
+    ),
+) -> None:
+    """Specific-date flight search across Matrix and Google Flights backends.
+
+    auto-picks the backend: gflight for plain cash searches; matrix when a
+    Matrix-only flag is set (routing/extension/multi-city slice/time-of-day/
+    extra pax types/PP config). Force with --backend matrix|gflight.
+    """
+    resolved = _pick_backend(
+        backend=backend,
+        routing=routing,
+        extension=extension,
+        slice_specs=slice_specs,
+        depart_times=depart_times,
+        return_times=return_times,
+        seniors=seniors,
+        youth=youth,
+        inf_seat=inf_seat,
+        inf_lap=inf_lap,
+        pp_only=pp_only,
+        pp_airlines=pp_airlines,
+        pp_cabin=pp_cabin,
+    )
+    if slice_specs:
+        legs = tuple(_parse_slice_spec(s) for s in slice_specs)
+    elif origin and destination and dep:
+        out_times = _parse_times(depart_times)
+        ret_times = _parse_times(return_times)
+        legs = (
+            Leg.of(
+                _parse_iata_list(origin),
+                _parse_iata_list(destination),
+                _parse_date(dep),
+                route_language=routing,
+                extension=extension,
+                time_ranges=out_times,
+            ),
+        )
+        if ret:
+            legs += (
+                Leg.of(
+                    _parse_iata_list(destination),
+                    _parse_iata_list(origin),
+                    _parse_date(ret),
+                    route_language=routing,
+                    extension=extension,
+                    time_ranges=ret_times,
+                ),
+            )
+    else:
+        err.print("[red]Specify --slice ... or origin destination --dep[/]")
+        raise typer.Exit(2)
+
+    opts = _build_options(
+        cabin=cabin,
+        adults=adults,
+        children=children,
+        seniors=seniors,
+        youth=youth,
+        infants_in_seat=inf_seat,
+        infants_in_lap=inf_lap,
+        stops=stops,
+        allow_airport_changes=allow_airport_changes,
+        show_only_available=only_available,
+        page_size=page_size,
+    )
+
+    if resolved == BACKEND_GFLIGHT:
+        _run_gflight_path(legs=legs, opts=opts, top_n=page_size, json_out=json_out)
+        return
+
+    run_pp = _should_run_pp(backend=resolved, no_pp=no_pp, pp_only=pp_only)
+    _run_matrix_path(
+        legs=legs,
+        opts=opts,
+        rps=rps,
+        impersonate=impersonate,
+        no_cache=no_cache,
+        json_out=json_out,
+        matrix_url=matrix_url,
+        google_url=google_url,
+        run_pp=run_pp,
+        pp_only=pp_only,
+        pp_airlines=pp_airlines,
+        pp_cabin=pp_cabin,
+    )
+
+
+@app.command(deprecated=True)
 def fare(
     origin: Annotated[
         str | None,
@@ -409,7 +837,12 @@ def fare(
     pp: bool = typer.Option(
         False,
         "--pp",
-        help="Augment results with PointsPath award prices (requires `auth pp login`).",
+        help="[deprecated] No-op; PP is implicit on the Matrix backend now.",
+    ),
+    no_pp: bool = typer.Option(
+        False,
+        "--no-pp",
+        help="Skip PointsPath award augmentation even if tokens are present.",
     ),
     pp_only: bool = typer.Option(
         False,
@@ -431,7 +864,13 @@ def fare(
         help="CSV of cabins to query (Economy,Business,First). Default: Economy,Business.",
     ),
 ) -> None:
-    """Specific-date search. One leg = one-way, two = round-trip, N = multi-city."""
+    """[deprecated] Use `flight search` (or `flight search --backend matrix`)."""
+    err.print(
+        "[yellow]`flight fare` is deprecated; use `flight search` "
+        "(it auto-picks Matrix when Matrix-only flags are set).[/]",
+    )
+    if pp:
+        err.print("[dim]Note: `--pp` is now a no-op (PP is implicit on Matrix backend).[/]")
     if slice_specs:
         legs = tuple(_parse_slice_spec(s) for s in slice_specs)
     elif origin and destination and dep:
@@ -475,53 +914,21 @@ def fare(
         show_only_available=only_available,
         page_size=page_size,
     )
-    search = SpecificDateSearch(legs=legs, options=opts)
-    # SpecificDateSearch → SearchResult by client._parse_response dispatch.
-    res = cast("SearchResult", _run(search, rps, impersonate, no_cache))
-    if json_out and not pp:
-        sys.stdout.write(json.dumps(res.raw, indent=2))
-        return
-    if not pp_only:
-        _render_search(res)
-    if pp:
-        # Build one PP query per Matrix leg. PP's airline-search is per-direction,
-        # so a round-trip → 2 queries, multi-city → N queries. Each LegQuery
-        # carries its slice_index so the matcher knows which Itinerary slice to
-        # join against.
-        pp_legs: list[LegQuery] = []
-        for i, leg in enumerate(legs):
-            if not leg.date or not leg.origins or not leg.destinations:
-                continue  # shouldn't happen for SpecificDateSearch; defensive
-            n = len(legs)
-            label_kind = (
-                "outbound"
-                if i == 0 and n > 1
-                else "return"
-                if i == 1 and n == _ROUND_TRIP_LEGS
-                else f"leg {i + 1}"
-                if n > _ROUND_TRIP_LEGS
-                else "one-way"
-            )
-            iso = leg.date.isoformat()
-            pp_legs.append(
-                LegQuery(
-                    origin=leg.origins[0],
-                    destination=leg.destinations[0],
-                    date=iso,
-                    slice_index=i,
-                    label=f"{label_kind} {leg.origins[0]}→{leg.destinations[0]} {iso}",
-                )
-            )
-        run_pp_for_search(
-            res,
-            legs=pp_legs,
-            num_passengers=adults + children + seniors + youth,
-            airlines=pp_airlines,
-            cabins=pp_cabin,
-            pp_only=pp_only,
-            json_out=json_out,
-        )
-    _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
+    run_pp = _should_run_pp(backend=BACKEND_MATRIX, no_pp=no_pp, pp_only=pp_only)
+    _run_matrix_path(
+        legs=legs,
+        opts=opts,
+        rps=rps,
+        impersonate=impersonate,
+        no_cache=no_cache,
+        json_out=json_out,
+        matrix_url=matrix_url,
+        google_url=google_url,
+        run_pp=run_pp,
+        pp_only=pp_only,
+        pp_airlines=pp_airlines,
+        pp_cabin=pp_cabin,
+    )
 
 
 def _parse_slice_spec(s: str) -> Leg:
@@ -709,7 +1116,7 @@ def detail(
     _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
 
 
-@app.command()
+@app.command(deprecated=True)
 def gflight(
     origin: Annotated[str, typer.Argument()],
     destination: Annotated[str, typer.Argument()],
@@ -721,11 +1128,11 @@ def gflight(
     top_n: Annotated[int, typer.Option("--n", "-n")] = 5,
     json_out: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Query Google Flights for a city-pair you discovered with flight calendar."""
-
-    # the CLI shouldn't pay that startup cost.
-    from .fli_bridge import run_gflight_search  # noqa: PLC0415
-
+    """[deprecated] Use `flight search --backend gflight` (or just `flight search`)."""
+    err.print(
+        "[yellow]`flight gflight` is deprecated; use `flight search` "
+        "(or `flight search --backend gflight` to force).[/]",
+    )
     legs = (Leg.of(origin, destination, _parse_date(dep)),)
     if ret:
         legs += (Leg.of(destination, origin, _parse_date(ret)),)
@@ -741,61 +1148,7 @@ def gflight(
         allow_airport_changes=True,
         show_only_available=True,
     )
-    search = SpecificDateSearch(legs=legs, options=opts)
-
-    # fli wraps selenium/selectolax and has no documented exception surface;
-    # catching broadly here translates any underlying failure into a clean CLI
-    # exit instead of an opaque traceback.
-    try:
-        # fli has no type stubs; treat its return as opaque at this boundary
-        # and use duck-typed attribute access below.
-        results: list[Any] = run_gflight_search(search, top_n=top_n)
-    except Exception as e:
-        err.print(f"[red]Google Flights query failed:[/] {e}")
-        raise typer.Exit(1) from e
-
-    if not results:
-        console.print("[yellow]Google Flights returned no results.[/]")
-        return
-
-    # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType,
-    #                 reportUnknownArgumentType, reportUnknownParameterType]
-    # fli/fast_flights have no type stubs; results are duck-typed pydantic
-    # models. Suppressing the noisy unknown-type chatter for this rendering
-    # block keeps the boundary localized.
-    if json_out:
-        out: list[Any] = []
-        for r in results:
-            if isinstance(r, tuple):
-                out.append([fr.model_dump(mode="json") for fr in r])  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-            else:
-                out.append(r.model_dump(mode="json"))
-        sys.stdout.write(json.dumps(out, indent=2, default=str))
-        return
-
-    t = Table(
-        title=f"Google Flights · {origin.upper()}→{destination.upper()}"
-        + (" + return" if ret else ""),
-        show_header=True,
-        header_style="bold green",
-    )
-    t.add_column("#", justify="right")
-    t.add_column("price", justify="right")
-    t.add_column("stops", justify="right")
-    t.add_column("duration")
-    t.add_column("legs")
-    for i, r in enumerate(results[:top_n], 1):
-        items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
-        for j, fr in enumerate(items):
-            label = f"{i}{'a' if j == 0 else 'b'}" if len(items) > 1 else str(i)
-            legs_str = " → ".join(
-                f"{getattr(leg.airline, 'name', leg.airline)} {getattr(leg, 'flight_number', '?')}"
-                for leg in fr.legs
-            )
-            mins = fr.duration
-            dur = f"{mins // 60}h{mins % 60:02d}m"
-            t.add_row(label, f"{fr.currency or 'USD'}{fr.price:.2f}", str(fr.stops), dur, legs_str)
-    console.print(t)
+    _run_gflight_path(legs=legs, opts=opts, top_n=top_n, json_out=json_out)
 
 
 @app.command()
