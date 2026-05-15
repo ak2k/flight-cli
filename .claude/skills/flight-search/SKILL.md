@@ -1,6 +1,6 @@
 ---
 name: flight-search
-description: Use this skill when a user wants to search for flights, find airfare deals, build a flight query, compare prices across dates, or invoke the `flight` CLI in this project. Translates user intent (origin, destination, dates, constraints like alliance / cabin / duration / layover preferences / region rather than airport / etc.) into the right `flight fare` / `flight calendar` / `flight detail` / `flight gflight` invocation with proper --routing, --extension, and multi-airport arguments. Grounds the agent in Matrix's routing language, extension codes, and IATA metro/region groupings — knowledge that's NOT in `flight --help` and that the agent will otherwise hallucinate. Invoke whenever a user mentions flights, airfare, ITA Matrix, or any of the project's CLI commands.
+description: Use when a user asks to find flights, search airfare, compare prices across dates, or invoke the `flight` CLI. Translates intent (origin, destination, dates, constraints like alliance / cabin / duration / layovers / region-rather-than-airport) into the right `flight fare` / `calendar` / `detail` / `gflight` invocation with correct `--routing`, `--extension`, and multi-airport args. Provides Matrix's routing language, extension codes, and IATA metro/region groupings — knowledge that's not in `flight --help`.
 ---
 
 # Flight search with flight-cli
@@ -27,17 +27,6 @@ Global flags (every command):
 - `--no-cache` — bypass the on-disk response cache
 - `--matrix-url` / `--google-url` — toggle deep-link emission
 
-## The two opaque DSLs
-
-| DSL | CLI flag | Wire field | Goes here for |
-|---|---|---|---|
-| Routing language | `--routing 'EXPR'` | `routeLanguage` | Carrier / airport / segment-shape filters (`LH+`, `BA AA`, `F* X:LHR F*`) |
-| Extension codes | `--extension 'CODES'` (alias `--ext`) | `commandLine` | Itinerary-level limits (`MAXSTOPS 1`, `MAXDUR 18:00`, `-OVERNIGHTS`, `+CABIN 2`) |
-
-**Putting one in the other returns `QPX Warning. Illegal COMMAND-LINE prefix`.** Keep them straight.
-
-`--routing-ret` / `--ext-ret` set the return-direction values when they differ from outbound (round-trip and calendar modes).
-
 ## Intent → flag cheat sheet
 
 | User says… | Reach for… |
@@ -49,8 +38,7 @@ Global flags (every command):
 | "no red-eyes" | `--extension '-REDEYES'` |
 | "no overnight layovers" | `--extension '-OVERNIGHTS'` |
 | "no propeller planes" | `--extension '-PROPS'` |
-| "business class" | `--cabin business` (or `--extension '+CABIN 2'` to enforce) |
-| "premium economy" | `--cabin premium-coach` |
+| "business class" / "premium economy" / "first class" | `--cabin business` / `premium-coach` / `first` (or `--extension '+CABIN N'` to enforce; see Cabin filters below) |
 | "max 18 hours total" | `--extension 'MAXDUR 18:00'` |
 | "min 90 minute connections" | `--extension 'MINCONNECT 1:30'` |
 | "max 2 hour layovers" | `--extension 'MAXCONNECT 2:00'` |
@@ -128,7 +116,7 @@ aircraft) all go in `--extension` — never in `--routing`. Codes are
 
 ## Extension codes (`--extension`) — compressed reference
 
-Multiple codes joined by **semicolon** (`;`). Args within a code by **space**. Times = `HH:MM`. Distances/counts = integers. Codes are case-insensitive.
+Multiple codes joined by **semicolon** (`;`). Args within a code by **space**. Times = `HH:MM`. Distances/counts = integers.
 
 **Itinerary constraints:**
 
@@ -307,7 +295,7 @@ flight fare JFK LHR --dep 2026-08-15 --return 2026-08-22 \
   --depart-times morning
 ```
 
-### Example 9: multi-city (single-ticket — needs alliance constraint)
+### Example 9: multi-city (always pin to one alliance)
 User: "round-the-world: NYC→Frankfurt→Singapore→Tokyo→NYC, all in August"
 ```bash
 flight fare --slice 'EWR-FRA:2026-08-01' \
@@ -316,33 +304,18 @@ flight fare --slice 'EWR-FRA:2026-08-01' \
             --slice 'NRT-EWR:2026-08-22' \
             --extension 'ALLIANCE star-alliance'
 ```
-**Why the alliance constraint matters:** Matrix can only return a multi-city
-itinerary that books as a single ticket. That requires every leg's airline
-to share an interline / fare-construction agreement. Without an alliance
-constraint, the solver hunts across non-interlining carriers (e.g. Emirates
-+ JAL + AA) and frequently returns "No solutions returned" even though each
-leg individually has flights. Cross-alliance round-the-world tickets
-generally have to be **stitched together as separate one-ways**, not done
-as a single multi-city in Matrix. For single-ticket multi-city, always:
-- Pin to one alliance via `--extension 'ALLIANCE oneworld|skyteam|star-alliance'`, OR
-- Limit slices to a single carrier's network (e.g. all on LH+UA via Star), OR
-- Run as separate `flight fare` queries and present prices summed.
 
-### Example 10: fare-basis hunt
+### Example 10: fare-basis (use wildcard `-` suffix or `BC=`)
 User: "find me business class (J-class) JFK to LHR"
 ```bash
 flight fare JFK LHR --dep 2026-08-15 --return 2026-08-22 \
   --extension 'F BC=j'
 ```
-Or for a carrier+booking-class combo (e.g. "AA in W class"):
+AA in W class:
 ```bash
 flight fare JFK LHR --dep 2026-08-15 --return 2026-08-22 \
   --extension 'F aa..w-'
 ```
-Note the trailing `-` on `w-` — it's the wildcard that matches any fare
-basis starting with W (e.g. WCXLA, WQLOWUS). Without the dash, `F aa..w`
-means "fare basis literally named 'w'", which usually doesn't exist and
-returns no results.
 
 ### Example 11: paste-back from calendar to detail
 User: "use that 2026-09-15 date from the calendar grid I just looked at"
@@ -350,12 +323,6 @@ User: "use that 2026-09-15 date from the calendar grid I just looked at"
 flight detail NYC PAR --dep 2026-09-15 \
   --start 2026-09-01 --end 2026-09-30 -d 5-7
 ```
-**Caveat:** the `calendarFollowup` endpoint can be flaky. If Matrix returns
-`Internal server error` or empty results, the followup query needs the
-exact `--start`/`--end`/`-d` of the original calendar that surfaced the
-date. When in doubt, fall back to a plain `flight fare` for the specific
-date — it returns the same shape of result without the followup
-machinery.
 
 ## When a query returns nothing
 
