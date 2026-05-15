@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Optional
@@ -22,9 +23,21 @@ from .auth import (
     import_from_tokens_file, load_tokens,
 )
 from .client import (
-    DEFAULT_AIRLINES, DEFAULT_CABINS, PPClient, SearchSpec,
+    DEFAULT_AIRLINES, DEFAULT_CABINS, PPClient, SearchSpec, enabled_airlines,
 )
 from .match import MatchedFare, join
+from .models import AirlineSearchResponse, PricingInfoResponse
+
+
+@dataclass
+class LegQuery:
+    """One leg's PP query. slice_index points at the corresponding Slice in
+    each Itinerary returned by Matrix; label is the user-facing leg name."""
+    origin: str
+    destination: str
+    date: str             # YYYY-MM-DD
+    slice_index: int
+    label: str            # e.g. "outbound JFK→LHR" or "return LHR→JFK"
 
 console = Console()
 err = Console(stderr=True)
@@ -127,82 +140,103 @@ def _normalize_cabin(c: str) -> str:
 def run_pp_for_search(
     res: SearchResult,
     *,
-    origin: str,
-    destination: str,
-    dep_date: str,
-    return_date: str = "",
+    legs: list[LegQuery],
     num_passengers: int = 1,
     airlines: Optional[str] = None,
     cabins: Optional[str] = None,
     pp_only: bool = False,
     json_out: bool = False,
 ) -> None:
-    """Called by the `fare` command when --pp is on. Runs PP queries, joins,
-    and renders. Errors here are non-fatal — print and continue so the user
-    still sees their Matrix results."""
+    """Called by the `fare` command when --pp is on. For each leg, runs PP
+    queries (one per airline × cabin), joins against the corresponding Slice
+    in each Itinerary, and renders one table per leg.
+
+    Errors are non-fatal — print and continue so the user still sees their
+    Matrix results.
+    """
     try:
         get_valid_tokens()  # validate + refresh up-front, surface a clear error
     except PPAuthError as e:
         err.print(f"[red]--pp: {e}[/]")
         return
 
-    airline_list = _parse_csv(airlines, DEFAULT_AIRLINES)
     cabin_list = tuple(_normalize_cabin(c) for c in _parse_csv(cabins, DEFAULT_CABINS))
+    # Resolve airline list: explicit --pp-airlines wins; otherwise fetch the
+    # tier-enabled set from extension-config + pricing-info (cached). Static
+    # DEFAULT_AIRLINES is the last-resort fallback if discovery fails.
+    explicit_airlines = _parse_csv(airlines, ()) if airlines else None
 
     try:
-        merged_by_airline, pricing = asyncio.run(
+        per_leg, pricing = asyncio.run(
             _gather_pp(
-                origin=origin, destination=destination,
-                dep_date=dep_date, return_date=return_date,
-                num_passengers=num_passengers,
-                airlines=airline_list, cabins=cabin_list,
+                legs=legs, num_passengers=num_passengers,
+                explicit_airlines=explicit_airlines, cabins=cabin_list,
             )
         )
     except Exception as e:  # noqa: BLE001 — surface anything to user, don't crash CLI
         err.print(f"[red]--pp: PointsPath query failed: {e}[/]")
         return
 
-    matches = join(res, merged_by_airline, pricing)
     if pp_only:
-        # Skip cash-only rows; just dump every award flight we received.
+        # JSON: dump per-leg award listings; pretty: one PP-only table per leg.
         if json_out:
-            sys.stdout.write(_serialize_pp_only(merged_by_airline)); return
-        _render_pp_only(merged_by_airline, pricing)
+            sys.stdout.write(_serialize_pp_only_per_leg(per_leg, legs)); return
+        for leg, merged in zip(legs, per_leg, strict=True):
+            console.print(f"\n[bold]Leg: {leg.label}[/]")
+            _render_pp_only(merged, pricing)
         return
 
+    # Cash + award per leg.
+    matches_per_leg: list[list[MatchedFare]] = [
+        join(res, merged, pricing, slice_index=leg.slice_index)
+        for leg, merged in zip(legs, per_leg, strict=True)
+    ]
     if json_out:
-        sys.stdout.write(_serialize_matches(matches)); return
-    _render_matches(matches, cabin_list)
+        sys.stdout.write(_serialize_matches_per_leg(matches_per_leg, legs)); return
+    for leg, matches in zip(legs, matches_per_leg, strict=True):
+        console.print(f"\n[bold]Leg: {leg.label}[/]")
+        _render_matches(matches, cabin_list, slice_index=leg.slice_index)
 
 
-async def _gather_pp(*, origin: str, destination: str, dep_date: str,
-                      return_date: str, num_passengers: int,
-                      airlines: tuple[str, ...], cabins: tuple[str, ...]):
+async def _gather_pp(*, legs: list[LegQuery], num_passengers: int,
+                      explicit_airlines: Optional[tuple[str, ...]],
+                      cabins: tuple[str, ...]
+                      ) -> tuple[list[dict[str, AirlineSearchResponse]], PricingInfoResponse]:
+    """Per leg, fan out PP airline-search across (airlines × cabins). Returns
+    one merged airline→response map per leg, plus the shared pricing-info."""
     async with await PPClient.create() as c:
         pricing = await c.pricing_info()
-        merged: dict[str, "AirlineSearchResponse"] = {}  # type: ignore[name-defined]
-        for cabin in cabins:
-            spec = SearchSpec(
-                origin=origin, destination=destination,
-                date=dep_date, return_date=return_date,
-                is_round_trip_return=bool(return_date),
-                num_passengers=num_passengers,
-                cabin_class=cabin,
-                enable_matching=False,
-            )
-            per_airline = await c.airline_search_many(spec, airlines)
-            # Merge per-cabin results into one airline → response map.
-            for airline, resp in per_airline.items():
-                if airline not in merged:
-                    merged[airline] = resp
-                    continue
-                # Append outboundFlights; same flight may appear multiple
-                # times across cabin queries — match.py de-dupes by key.
-                existing = merged[airline]
-                # Keep the union of flights; later identical-key rows
-                # are tolerated and not double-counted by the matcher.
-                existing.outboundFlights.extend(resp.outboundFlights)
-        return merged, pricing
+        if explicit_airlines:
+            airlines = explicit_airlines
+        else:
+            try:
+                ext_cfg = await c.extension_config()
+                airlines = enabled_airlines(pricing, ext_cfg)
+                if not airlines:
+                    airlines = DEFAULT_AIRLINES
+            except Exception:  # noqa: BLE001 — fall back to static default
+                airlines = DEFAULT_AIRLINES
+        per_leg: list[dict[str, AirlineSearchResponse]] = []
+        for leg in legs:
+            merged: dict[str, AirlineSearchResponse] = {}
+            for cabin in cabins:
+                spec = SearchSpec(
+                    origin=leg.origin, destination=leg.destination,
+                    date=leg.date, return_date="",
+                    is_round_trip_return=False,
+                    num_passengers=num_passengers,
+                    cabin_class=cabin, enable_matching=False,
+                )
+                per_airline = await c.airline_search_many(spec, airlines)
+                for airline, resp in per_airline.items():
+                    if airline not in merged:
+                        merged[airline] = resp
+                        continue
+                    # Append flights from later cabin queries; the matcher
+                    # tolerates same-key duplicates without double-counting.
+                    merged[airline].outboundFlights.extend(resp.outboundFlights)
+            per_leg.append(merged)
+        return per_leg, pricing
 
 
 # ──────────────────────────── render: matched ──────────────────────────────
@@ -261,7 +295,46 @@ def _fmt_funding(award_options) -> str:
     return ", ".join(banks) if banks else ""
 
 
-def _render_matches(matches: list[MatchedFare], cabin_list: tuple[str, ...]) -> None:
+def _dedupe_per_leg(matches: list[MatchedFare],
+                     slice_index: int = 0) -> list[MatchedFare]:
+    """Matrix returns the cross-product of outbound × return itineraries, so
+    the same leg-flight surfaces in many rows. Collapse to one row per
+    (flight_number, departure_date), keeping the row with cheapest cash.
+    """
+    best: dict[tuple[str, str], MatchedFare] = {}
+    for m in matches:
+        itn = m.itinerary.itinerary
+        if not itn or len(itn.slices) <= slice_index:
+            continue
+        s = itn.slices[slice_index]
+        if not s.flights or not s.departure:
+            continue
+        key = (s.flights[0].upper().replace(" ", ""), (s.departure or "")[:10])
+        cash = _parse_cash(m.itinerary.price) or float("inf")
+        existing = best.get(key)
+        if existing is None or (_parse_cash(existing.itinerary.price) or float("inf")) > cash:
+            best[key] = m
+    # Preserve original order (cheapest cash first, since `solutions` is sorted).
+    seen: set[tuple[str, str]] = set()
+    out: list[MatchedFare] = []
+    for m in matches:
+        itn = m.itinerary.itinerary
+        if not itn or len(itn.slices) <= slice_index:
+            continue
+        s = itn.slices[slice_index]
+        if not s.flights or not s.departure:
+            continue
+        key = (s.flights[0].upper().replace(" ", ""), (s.departure or "")[:10])
+        if key in seen:
+            continue
+        if best.get(key) is m:
+            seen.add(key); out.append(m)
+    return out
+
+
+def _render_matches(matches: list[MatchedFare], cabin_list: tuple[str, ...],
+                     *, slice_index: int = 0) -> None:
+    matches = _dedupe_per_leg(matches, slice_index=slice_index)
     if not matches:
         console.print("[yellow]No matched fares.[/]")
         return
@@ -276,9 +349,9 @@ def _render_matches(matches: list[MatchedFare], cabin_list: tuple[str, ...]) -> 
 
     for m in matches:
         itn = m.itinerary.itinerary
-        if not itn or not itn.slices:
+        if not itn or not itn.slices or len(itn.slices) <= slice_index:
             continue
-        s = itn.slices[0]
+        s = itn.slices[slice_index]
         flight = (s.flights or ["?"])[0]
         cash_str = m.itinerary.price or "—"
         # Parse cash price for cpm calc. Matrix returns "USD530.00", "$1,078",
@@ -376,5 +449,29 @@ def _serialize_matches(matches: list[MatchedFare]) -> str:
 def _serialize_pp_only(merged: dict) -> str:
     return json.dumps(
         {a: r.model_dump() for a, r in merged.items()},
+        indent=2,
+    )
+
+
+def _serialize_matches_per_leg(matches_per_leg: list[list[MatchedFare]],
+                                legs: list[LegQuery]) -> str:
+    return json.dumps(
+        [
+            {"leg": leg.label, "slice_index": leg.slice_index,
+             "matches": json.loads(_serialize_matches(matches))}
+            for leg, matches in zip(legs, matches_per_leg, strict=True)
+        ],
+        indent=2,
+    )
+
+
+def _serialize_pp_only_per_leg(per_leg: list[dict],
+                                legs: list[LegQuery]) -> str:
+    return json.dumps(
+        [
+            {"leg": leg.label, "slice_index": leg.slice_index,
+             "by_airline": {a: r.model_dump() for a, r in merged.items()}}
+            for leg, merged in zip(legs, per_leg, strict=True)
+        ],
         indent=2,
     )

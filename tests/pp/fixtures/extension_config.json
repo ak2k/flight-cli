@@ -1,0 +1,30 @@
+{
+  "status": true,
+  "latestSafariExtensionVersion": "1.10.3",
+  "featureFlags": {
+    "enableAerLingus": 1,
+    "enableAirCanada": 1,
+    "enableAirCanadaHiddenMatching": 0,
+    "enableAirFranceV2": 1,
+    "enableAvianca": 1,
+    "enableDeltaTakeOff15": 1,
+    "enableDeltaOneWayBMPApi": 0,
+    "enableEmirates": 1,
+    "enableEtihad": 1,
+    "enableIberia": 0,
+    "enableQantas": 1,
+    "enableQatar": 1,
+    "enableSingapore": 0,
+    "enableSpirit": 0,
+    "enableSpiritSaversClub": 1,
+    "enableTapAirPortugal": 1,
+    "enableTurkish": 1,
+    "enableUnitedAwardToolApi": 0,
+    "enableUnitedWebApi": 0,
+    "enableVirginAtlantic": 1,
+    "enableVirginAustralia": 1,
+    "enableBasicEconomyIndicator": 1,
+    "enableProgramValuations": 1,
+    "enableManualPointsWallet": 1
+  }
+}

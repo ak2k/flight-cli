@@ -33,12 +33,16 @@ def _iso_date(s: str | None) -> str:
     return s[:10]
 
 
-def cash_match_key(it: Itinerary) -> Optional[MatchKey]:
-    """Build the match key from a Matrix itinerary's first slice's first flight."""
+def cash_match_key(it: Itinerary, slice_index: int = 0) -> Optional[MatchKey]:
+    """Build the match key from a Matrix itinerary's slice's first flight.
+
+    Default slice_index=0 = outbound leg. For round-trips pass 1 to match the
+    return leg; for multi-city pass 2, 3, etc.
+    """
     itn = it.itinerary
-    if not itn or not itn.slices:
+    if not itn or not itn.slices or slice_index >= len(itn.slices):
         return None
-    s = itn.slices[0]
+    s = itn.slices[slice_index]
     flights = s.flights or []
     if not flights:
         return None
@@ -104,11 +108,21 @@ def join(
     search: SearchResult,
     award_by_airline: dict[str, AirlineSearchResponse],
     pricing: PricingInfoResponse,
+    *,
+    slice_index: int = 0,
+    use_inbound: bool = False,
 ) -> list[MatchedFare]:
     """Outer-join cash itineraries onto award flights by (flight#, date).
 
     Cash itineraries with no award match keep an empty `awards` list — caller
     decides whether to render them or filter to inner-join.
+
+    `slice_index` selects which leg of each Itinerary to match against (0 for
+    outbound, 1 for return on a round-trip, etc).
+
+    `use_inbound` reads from `inboundFlights` instead of `outboundFlights` —
+    set when joining the return leg of a round-trip query whose response is
+    a single bidirectional record.
     """
     pricing_idx = _index_pricing(pricing)
 
@@ -116,7 +130,8 @@ def join(
     # so we keep a list per key.
     award_idx: dict[MatchKey, list[tuple[str, OutboundFlight]]] = {}
     for airline, resp in award_by_airline.items():
-        for of in resp.outboundFlights:
+        flights = resp.inboundFlights if use_inbound else resp.outboundFlights
+        for of in flights:
             k = award_match_key(of)
             if not k[0]:
                 continue
@@ -124,7 +139,7 @@ def join(
 
     out: list[MatchedFare] = []
     for it in search.solutions:
-        k = cash_match_key(it)
+        k = cash_match_key(it, slice_index=slice_index)
         awards: list[AwardOption] = []
         if k and k in award_idx:
             for airline, of in award_idx[k]:

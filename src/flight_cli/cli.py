@@ -37,7 +37,7 @@ from .domain import (
 )
 from .links import google_flights_url, matrix_deep_link
 from .log import configure as configure_logging
-from .pp.cli import auth_app, run_pp_for_search
+from .pp.cli import LegQuery, auth_app, run_pp_for_search
 
 if TYPE_CHECKING:
     from .models import CalendarResult, Location, SearchResult, Slice
@@ -418,7 +418,11 @@ def fare(
     pp_airlines: str | None = typer.Option(
         None,
         "--pp-airlines",
-        help="CSV of PointsPath airline names (e.g. United,Delta). Default: 13 common.",
+        help=(
+            "CSV of PointsPath airline names (e.g. United,Delta). "
+            "Default: discovered from your account's enabled airline set "
+            "via /api/extension-config + /api/pricing-info."
+        ),
     ),
     pp_cabin: str | None = typer.Option(
         None,
@@ -479,17 +483,30 @@ def fare(
     if not pp_only:
         _render_search(res)
     if pp:
-        # Use the first leg's origin/destination/date for the PP query. PP's
-        # airline-search is single-leg per call, so multi-city / round-trip
-        # legs would need separate calls — punted to a follow-up.
-        first = legs[0]
-        ret_date = legs[1].date.isoformat() if len(legs) > 1 and legs[1].date else ""
+        # Build one PP query per Matrix leg. PP's airline-search is per-direction,
+        # so a round-trip → 2 queries, multi-city → N queries. Each LegQuery
+        # carries its slice_index so the matcher knows which Itinerary slice to
+        # join against.
+        pp_legs: list[LegQuery] = []
+        for i, leg in enumerate(legs):
+            if not leg.date or not leg.origins or not leg.destinations:
+                continue  # shouldn't happen for SpecificDateSearch; defensive
+            label_kind = (
+                "outbound" if i == 0 and len(legs) > 1
+                else "return" if i == 1 and len(legs) == 2
+                else f"leg {i + 1}" if len(legs) > 2
+                else "one-way"
+            )
+            pp_legs.append(LegQuery(
+                origin=leg.origins[0],
+                destination=leg.destinations[0],
+                date=leg.date.isoformat(),
+                slice_index=i,
+                label=f"{label_kind} {leg.origins[0]}→{leg.destinations[0]} {leg.date.isoformat()}",
+            ))
         run_pp_for_search(
             res,
-            origin=first.origins[0] if first.origins else "",
-            destination=first.destinations[0] if first.destinations else "",
-            dep_date=first.date.isoformat() if first.date else "",
-            return_date=ret_date,
+            legs=pp_legs,
             num_passengers=adults + children + seniors + youth,
             airlines=pp_airlines,
             cabins=pp_cabin,

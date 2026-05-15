@@ -1,0 +1,45 @@
+{
+  "pricingInfos": [
+    {
+      "airline": "United",
+      "milesToCashRatio": 0.0125,
+      "bankPointsInfos": [
+        {"bank": "Chase", "conversionValue": 1, "defaultConversionValue": 1, "isBonusActive": false, "conversionExpiryDate": null},
+        {"bank": "Bilt", "conversionValue": 1, "defaultConversionValue": 1, "isBonusActive": false, "conversionExpiryDate": null}
+      ]
+    },
+    {
+      "airline": "Delta",
+      "milesToCashRatio": 0.011,
+      "bankPointsInfos": [
+        {"bank": "Amex", "conversionValue": 1, "defaultConversionValue": 1, "isBonusActive": false, "conversionExpiryDate": null}
+      ]
+    },
+    {
+      "airline": "American",
+      "milesToCashRatio": 0.013,
+      "bankPointsInfos": null
+    },
+    {
+      "airline": "AirFrance",
+      "milesToCashRatio": 0.0125,
+      "bankPointsInfos": [
+        {"bank": "Chase", "conversionValue": 0.8333, "defaultConversionValue": 1, "isBonusActive": true, "conversionExpiryDate": "2026-05-28T00:00:00Z"}
+      ]
+    },
+    {
+      "airline": "Iberia",
+      "milesToCashRatio": 0.014,
+      "bankPointsInfos": [
+        {"bank": "Citi", "conversionValue": 1, "defaultConversionValue": 1, "isBonusActive": false, "conversionExpiryDate": null}
+      ]
+    },
+    {
+      "airline": "Singapore",
+      "milesToCashRatio": 0.013,
+      "bankPointsInfos": [
+        {"bank": "Amex", "conversionValue": 1, "defaultConversionValue": 1, "isBonusActive": false, "conversionExpiryDate": null}
+      ]
+    }
+  ]
+}

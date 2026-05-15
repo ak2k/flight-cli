@@ -1,8 +1,9 @@
 """Async PointsPath HTTP client.
 
-Two endpoints matter for the merged-fares table:
-  POST /api/airline-search   one POST per airline (request body holds route + cabin)
-  GET  /api/pricing-info     transfer-partner mapping (cached 24h on disk)
+Three endpoints matter:
+  POST /api/airline-search    one POST per airline (request body holds route + cabin)
+  GET  /api/pricing-info      airline catalog + transfer-partner mapping (cached 24h)
+  GET  /api/extension-config  per-tier feature flags (cached 7d) — drives airline filter
 
 401 → refresh tokens once → retry. Anything else propagates.
 """
@@ -10,10 +11,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 
@@ -26,6 +28,10 @@ API_BASE = "https://api.pointspath.com"
 
 PRICING_CACHE = Path.home() / ".cache" / "flight-cli" / "pp_pricing.json"
 PRICING_TTL_SECS = 24 * 3600
+
+EXT_CONFIG_CACHE = Path.home() / ".cache" / "flight-cli" / "pp_extension_config.json"
+EXT_CONFIG_TTL_SECS = 7 * 24 * 3600
+EXT_CONFIG_VERSION = "1.10.4"
 
 # Airlines observed firing in a single GFlights international search. Used as
 # the default fan-out set when --pp-airlines isn't provided. Real catalog
@@ -199,6 +205,66 @@ class PPClient:
         PRICING_CACHE.parent.mkdir(parents=True, exist_ok=True)
         PRICING_CACHE.write_text(r.text)
         return PricingInfoResponse.model_validate(r.json())
+
+    async def extension_config(self, *, force_refresh: bool = False) -> dict[str, Any]:
+        """Fetch /api/extension-config?v=<version>. Cached 7d on disk.
+
+        The shape is large and version-tagged; we only consume `featureFlags`
+        currently, but the full body is cached so future code paths can read
+        other parts (e.g. valuation overrides) without re-fetching.
+        """
+        if not force_refresh and EXT_CONFIG_CACHE.exists():
+            age = time.time() - EXT_CONFIG_CACHE.stat().st_mtime
+            if age < EXT_CONFIG_TTL_SECS:
+                return json.loads(EXT_CONFIG_CACHE.read_text())
+        r = await self._request(
+            "GET", "/api/extension-config",
+            params={"v": EXT_CONFIG_VERSION},
+        )
+        r.raise_for_status()
+        EXT_CONFIG_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        EXT_CONFIG_CACHE.write_text(r.text)
+        return r.json()
+
+
+# Match `enable<AirlineName>` exactly, or `enable<AirlineName>V<digits>` (the
+# Vn pattern is how PointsPath versions individual airline integrations — e.g.
+# `enableAirFranceV2`). Sub-feature flags like `enableDeltaTakeOff15` or
+# `enableSpiritSaversClub` carry trailing words and so don't match.
+_AIRLINE_FLAG_RE = re.compile(r"^enable(?P<name>[A-Z][A-Za-z]+?)(?:V\d+)?$")
+
+
+def enabled_airlines(
+    pricing: PricingInfoResponse,
+    ext_config: dict[str, Any],
+) -> tuple[str, ...]:
+    """Pick the airline-search call set: pricing-info airlines (universe)
+    intersected with extension-config feature flags.
+
+    Rule: an airline is enabled if either (a) no `enable<Airline>` flag exists
+    (always-on, e.g. American, Delta, United, JetBlue, Alaska), or (b) the
+    flag exists with value 1. Falsy flags (e.g. `enableSingapore=0`) suppress
+    the airline.
+    """
+    flags: dict[str, int] = ext_config.get("featureFlags", {}) or {}
+
+    # Build a name → truthy-or-not lookup, ignoring sub-feature flags.
+    flag_for_airline: dict[str, bool] = {}
+    for flag, val in flags.items():
+        m = _AIRLINE_FLAG_RE.match(flag)
+        if not m:
+            continue
+        # Last writer wins on collisions (e.g. enableAirFrance + enableAirFranceV2).
+        # In practice PP uses one form per airline at a time.
+        flag_for_airline[m.group("name").lower()] = bool(val)
+
+    enabled: list[str] = []
+    for p in pricing.pricingInfos:
+        v = flag_for_airline.get(p.airline.lower())
+        if v is False:
+            continue  # explicitly disabled
+        enabled.append(p.airline)
+    return tuple(enabled)
 
 
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
