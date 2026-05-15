@@ -15,7 +15,7 @@ intent into the right invocation **on the first try**.
 
 | Command | Purpose |
 |---|---|
-| `flight search ORIGIN DEST --dep YYYY-MM-DD [--return YYYY-MM-DD]` | Specific-date search. Auto-picks Google Flights for plain cash queries and ITA Matrix when a Matrix-only flag is set (routing/extension/multi-city slice/time-of-day/extra pax types/PP config). Force with `--backend matrix\|gflight`. |
+| `flight search ORIGIN DEST --dep YYYY-MM-DD [--return YYYY-MM-DD]` | Specific-date search. Auto-picks Google Flights for plain cash queries and ITA Matrix when a Matrix-only flag is set (routing/extension/multi-city slice/time-of-day/extra pax types). Force with `--backend matrix\|gflight`. PointsPath award overlay runs on both backends when tokens are present. |
 | `flight calendar ORIGIN DEST --start YYYY-MM-DD [--end ...] [-d 5-7]` | Lowest-fare grid across a date window. Matrix only. Default round-trip; `--one-way` flips. |
 | `flight detail ORIGIN DEST --dep YYYY-MM-DD --start ... --end ...` | Phase-2 of the calendar flow: full itineraries for a date picked from the grid. Matrix only. |
 | `flight airport QUERY` | IATA / partial-name autocomplete. |
@@ -26,7 +26,7 @@ Global flags (every search-printing command):
 - `--json` — emit raw response JSON
 - `--no-cache` — bypass the on-disk response cache
 - `--matrix-url` / `--google-url` — toggle deep-link emission
-- `--no-pp` (Matrix backend only) — skip the PointsPath award overlay even if tokens are logged in (PP runs implicitly when tokens are present)
+- `--no-pp` — skip the PointsPath award overlay even if tokens are logged in (PP runs implicitly on both matrix and gflight backends when tokens are present)
 
 ## Intent → flag cheat sheet
 
