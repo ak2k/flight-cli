@@ -8,42 +8,49 @@ Adding a new search mode = add a new variant + extend each adapter's match
 block. Type checker (pyright/mypy) flags every adapter that forgot the
 new case via `typing.assert_never`.
 """
+
 from __future__ import annotations
-from datetime import date as _date
-from enum import Enum
-from typing import Annotated, Literal, Union
+
+# resolves type hints at validation time and needs the symbol present in the
+# module's runtime globals, even with `from __future__ import annotations`.
+from datetime import date as _date  # noqa: TC003
+from enum import StrEnum
+from typing import Annotated, Literal
+
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 # ──────────────────────────────── enums ────────────────────────────────────
 
-class Cabin(str, Enum):
+
+class Cabin(StrEnum):
     COACH = "COACH"
     PREMIUM_COACH = "PREMIUM_COACH"
     BUSINESS = "BUSINESS"
     FIRST = "FIRST"
 
 
-class TimeOfDay(str, Enum):
+class TimeOfDay(StrEnum):
     """Preferred time-of-day filter. Captured from Matrix's wire format —
     do NOT change the (min, max) tuples without re-verifying via capture.
 
     Quirk: Early Morning uses zero-padded '00:00', everything else uses
     single-digit hour ('8:00' not '08:00')."""
-    EARLY_MORNING = "early_morning"   # before 8:00
-    MORNING = "morning"               # 8:00-11:00
-    MIDDAY = "midday"                 # 11:00-14:00
-    AFTERNOON = "afternoon"           # 14:00-17:00
-    EVENING = "evening"               # 17:00-21:00
-    NIGHT = "night"                   # after 21:00
+
+    EARLY_MORNING = "early_morning"  # before 8:00
+    MORNING = "morning"  # 8:00-11:00
+    MIDDAY = "midday"  # 11:00-14:00
+    AFTERNOON = "afternoon"  # 14:00-17:00
+    EVENING = "evening"  # 17:00-21:00
+    NIGHT = "night"  # after 21:00
 
 
 _TIME_RANGE_FOR: dict[TimeOfDay, tuple[str, str]] = {
     TimeOfDay.EARLY_MORNING: ("00:00", "8:00"),
-    TimeOfDay.MORNING:       ("8:00",  "11:00"),
-    TimeOfDay.MIDDAY:        ("11:00", "14:00"),
-    TimeOfDay.AFTERNOON:     ("14:00", "17:00"),
-    TimeOfDay.EVENING:       ("17:00", "21:00"),
-    TimeOfDay.NIGHT:         ("21:00", "23:59"),
+    TimeOfDay.MORNING: ("8:00", "11:00"),
+    TimeOfDay.MIDDAY: ("11:00", "14:00"),
+    TimeOfDay.AFTERNOON: ("14:00", "17:00"),
+    TimeOfDay.EVENING: ("17:00", "21:00"),
+    TimeOfDay.NIGHT: ("21:00", "23:59"),
 }
 
 
@@ -55,8 +62,10 @@ def time_range_for(t: TimeOfDay) -> dict[str, str]:
 
 # ──────────────────────────────── shared ───────────────────────────────────
 
+
 class Pax(BaseModel):
     """Passenger counts. Adults default to 1."""
+
     model_config = ConfigDict(frozen=True, extra="forbid")
     adults: int = Field(default=1, ge=0, le=9)
     children: int = Field(default=0, ge=0, le=9)
@@ -67,12 +76,19 @@ class Pax(BaseModel):
 
     @property
     def total(self) -> int:
-        return (self.adults + self.children + self.seniors + self.youth +
-                self.infants_in_seat + self.infants_in_lap)
+        return (
+            self.adults
+            + self.children
+            + self.seniors
+            + self.youth
+            + self.infants_in_seat
+            + self.infants_in_lap
+        )
 
 
 class SearchOptions(BaseModel):
     """Shared search constraints across all modes."""
+
     model_config = ConfigDict(frozen=True, extra="forbid")
     cabin: Cabin = Cabin.COACH
     pax: Pax = Pax()
@@ -90,9 +106,13 @@ class SearchOptions(BaseModel):
     page_size: int = 25
 
 
+_IATA_CODE_LEN = 3
+_MAX_CAL_LEGS = 2  # calendar/followup support one-way (1) or round-trip (2)
+
+
 def _iata(v: str) -> str:
     v = v.upper().strip()
-    if not (len(v) == 3 and v.isalpha()):
+    if not (len(v) == _IATA_CODE_LEN and v.isalpha()):
         raise ValueError(f"Not a 3-letter IATA code: {v!r}")
     return v
 
@@ -102,6 +122,7 @@ class Leg(BaseModel):
 
     Calendar-mode legs leave `date` unset; the calendar window owns dates
     at the search level. Specific-date and followup legs require date."""
+
     model_config = ConfigDict(frozen=True, extra="forbid")
     origins: tuple[str, ...]
     destinations: tuple[str, ...]
@@ -109,9 +130,9 @@ class Leg(BaseModel):
     is_arrival_date: bool = False
     date_minus: int = Field(default=0, ge=0, le=3)
     date_plus: int = Field(default=0, ge=0, le=3)
-    route_language: str | None = None      # 'LH+', 'BA AA', '[F* X F*]'
-    extension: str | None = None           # 'MAXCONNECT 5:00', etc.
-    time_ranges: tuple[TimeOfDay, ...] = ()   # empty = no preference
+    route_language: str | None = None  # 'LH+', 'BA AA', '[F* X F*]'
+    extension: str | None = None  # 'MAXCONNECT 5:00', etc.
+    time_ranges: tuple[TimeOfDay, ...] = ()  # empty = no preference
 
     @field_validator("origins", "destinations")
     @classmethod
@@ -119,23 +140,31 @@ class Leg(BaseModel):
         return tuple(_iata(c) for c in v)
 
     @classmethod
-    def of(cls, origin: str | list[str] | tuple[str, ...],
-           destination: str | list[str] | tuple[str, ...],
-           dt: _date | None = None,
-           *,
-           route_language: str | None = None,
-           extension: str | None = None,
-           time_ranges: tuple[TimeOfDay, ...] = (),
-           ) -> "Leg":
+    def of(
+        cls,
+        origin: str | list[str] | tuple[str, ...],
+        destination: str | list[str] | tuple[str, ...],
+        dt: _date | None = None,
+        *,
+        route_language: str | None = None,
+        extension: str | None = None,
+        time_ranges: tuple[TimeOfDay, ...] = (),
+    ) -> Leg:
         """Convenience constructor — accepts a single IATA or list/tuple."""
         os = (origin,) if isinstance(origin, str) else tuple(origin)
         ds = (destination,) if isinstance(destination, str) else tuple(destination)
-        return cls(origins=os, destinations=ds, date=dt,
-                   route_language=route_language, extension=extension,
-                   time_ranges=time_ranges)
+        return cls(
+            origins=os,
+            destinations=ds,
+            date=dt,
+            route_language=route_language,
+            extension=extension,
+            time_ranges=time_ranges,
+        )
 
 
 # ───────────────────────────── search variants ─────────────────────────────
+
 
 class _SearchBase(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -145,6 +174,7 @@ class _SearchBase(BaseModel):
 
 class SpecificDateSearch(_SearchBase):
     """1 leg = one-way. 2 = round-trip. 3+ = multi-city. Each leg has date."""
+
     kind: Literal["specific"] = "specific"
 
     @field_validator("legs")
@@ -154,13 +184,13 @@ class SpecificDateSearch(_SearchBase):
             raise ValueError("at least one leg required")
         for i, leg in enumerate(legs):
             if leg.date is None:
-                raise ValueError(
-                    f"SpecificDateSearch.legs[{i}] requires a date")
+                raise ValueError(f"SpecificDateSearch.legs[{i}] requires a date")
         return legs
 
 
 class CalendarWindow(BaseModel):
     """Shared between CalendarSearch and CalendarFollowup."""
+
     model_config = ConfigDict(frozen=True, extra="forbid")
     start: _date
     end: _date
@@ -180,42 +210,43 @@ class CalendarSearch(_SearchBase):
     """Lowest-fare grid across a date window. 1 leg = one-way calendar,
     2 legs = round-trip calendar. Legs are templates — no per-leg date;
     the calendar window owns dates."""
+
     kind: Literal["calendar"] = "calendar"
     window: CalendarWindow
 
     @field_validator("legs")
     @classmethod
     def _legs_no_dates(cls, legs: tuple[Leg, ...]) -> tuple[Leg, ...]:
-        if not (1 <= len(legs) <= 2):
+        if not (1 <= len(legs) <= _MAX_CAL_LEGS):
             raise ValueError("calendar search supports 1 or 2 legs")
         for i, leg in enumerate(legs):
             if leg.date is not None:
                 raise ValueError(
-                    f"CalendarSearch.legs[{i}].date must be None "
-                    "(window owns the dates)")
+                    f"CalendarSearch.legs[{i}].date must be None (window owns the dates)"
+                )
         return legs
 
 
 class CalendarFollowup(_SearchBase):
     """Phase-2: itineraries for a date picked from a calendar grid. Legs
     have dates; preserves window context for the API."""
+
     kind: Literal["followup"] = "followup"
     window: CalendarWindow
 
     @field_validator("legs")
     @classmethod
     def _legs_have_dates(cls, legs: tuple[Leg, ...]) -> tuple[Leg, ...]:
-        if not (1 <= len(legs) <= 2):
+        if not (1 <= len(legs) <= _MAX_CAL_LEGS):
             raise ValueError("followup search supports 1 or 2 legs")
         for i, leg in enumerate(legs):
             if leg.date is None:
-                raise ValueError(
-                    f"CalendarFollowup.legs[{i}] requires a date")
+                raise ValueError(f"CalendarFollowup.legs[{i}] requires a date")
         return legs
 
 
 Search = Annotated[
-    Union[SpecificDateSearch, CalendarSearch, CalendarFollowup],
+    SpecificDateSearch | CalendarSearch | CalendarFollowup,
     Field(discriminator="kind"),
 ]
 """Tagged union of every search variant. Adapters dispatch on `kind` (or via

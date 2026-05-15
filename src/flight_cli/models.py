@@ -3,9 +3,15 @@
 Lenient (`extra='ignore'`) because the Matrix Alkali response is
 undocumented and prone to occasional field additions.
 """
+
 from __future__ import annotations
-from datetime import datetime
+
+# `datetime` is used in pydantic-model annotations; pydantic v2 resolves
+# type hints at validation time and needs the symbol in the module's
+# runtime globals, even with `from __future__ import annotations`.
+from datetime import datetime  # noqa: TC003
 from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -31,6 +37,7 @@ class BookingInfo(_Loose):
 class Leg(_Loose):
     """One physical flight segment within a solution.itinerary.slices[].
     Distinct from the domain `Leg` (which represents user intent)."""
+
     origin: Airport
     destination: Airport
     departure: datetime
@@ -41,6 +48,7 @@ class Leg(_Loose):
 
 class Flight(_Loose):
     """Flight-number metadata attached to a Segment."""
+
     number: str | None = None
 
 
@@ -52,7 +60,10 @@ class Segment(_Loose):
     duration: int | None = None
     carrier: Carrier
     flight: Flight | None = None
-    booking_infos: list[BookingInfo] = Field(default_factory=list[BookingInfo], alias="bookingInfos")
+    booking_infos: list[BookingInfo] = Field(
+        default_factory=list[BookingInfo],
+        alias="bookingInfos",
+    )
     legs: list[Leg] = Field(default_factory=list[Leg])
 
     @property
@@ -63,6 +74,7 @@ class Segment(_Loose):
 class ItineraryExt(_Loose):
     """`ext` blob shared by Itinerary and CurrencyNotice. Holds the
     user-facing price string."""
+
     price: str | None = None
 
 
@@ -85,12 +97,14 @@ class SliceCarrier(_Loose):
 
 class ItineraryDetails(_Loose):
     """The deep itinerary payload — slices + carriers per solution."""
+
     slices: list[Slice] = Field(default_factory=list[Slice])
     carriers: list[SliceCarrier] = Field(default_factory=list[SliceCarrier])
 
 
 class Itinerary(_Loose):
     """One bookable itinerary returned by /v1/search."""
+
     display_total: str | None = Field(None, alias="displayTotal")
     ext: ItineraryExt | None = None
     itinerary: ItineraryDetails | None = None
@@ -135,6 +149,7 @@ class CurrencyNotice(_Loose):
 
 class SearchResult(_Loose):
     """/v1/search (specific-date or followup) response."""
+
     solution_count: int = Field(0, alias="solutionCount")
     solutions: list[Itinerary] = Field(default_factory=list[Itinerary])
     carrier_stop_matrix: CarrierStopMatrix | None = Field(None, alias="carrierStopMatrix")
@@ -171,7 +186,7 @@ class DurationOption(_Loose):
     @property
     def price_value(self) -> float:
         s = self.min_price
-        i = next((j for j, c in enumerate(s) if c.isdigit() or c == '.'), len(s))
+        i = next((j for j, c in enumerate(s) if c.isdigit() or c == "."), len(s))
         return float(s[i:])
 
 
@@ -196,7 +211,7 @@ class CalendarDay(_Loose):
         if not self.min_price:
             return None
         s = self.min_price
-        i = next((j for j, c in enumerate(s) if c.isdigit() or c == '.'), len(s))
+        i = next((j for j, c in enumerate(s) if c.isdigit() or c == "."), len(s))
         return float(s[i:])
 
 
@@ -249,6 +264,7 @@ class CalendarResult(_Loose):
 
 class Location(_Loose):
     """Result of an airport autocomplete or single-code lookup."""
+
     code: str
     display_name: str | None = Field(None, alias="displayName")
     city_code: str | None = Field(None, alias="cityCode")

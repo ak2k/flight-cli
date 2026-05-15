@@ -2,19 +2,26 @@
 the domain Search into a wire body, hits the endpoint, returns a parsed
 response. All routing/filtering/mode-dispatch lives in `wire.to_wire()`.
 """
+
 from __future__ import annotations
+
+from http import HTTPStatus
 from typing import Any, assert_never, cast
 
 import httpx
 
-from .domain import Search, SpecificDateSearch, CalendarSearch, CalendarFollowup
-from .models import SearchResult, CalendarResult, Location
-from .wire import to_wire
+from ._api_key import ApiKeyResolutionError, invalidate_cache, resolve_api_key
 from ._http import HttpTransport
-from ._api_key import (
-    resolve_api_key, invalidate_cache,
-    ApiKeyResolutionError as ApiKeyResolutionError,
-)
+from .domain import CalendarFollowup, CalendarSearch, Search, SpecificDateSearch
+from .models import CalendarResult, Location, SearchResult
+from .wire import to_wire
+
+# Re-export so callers can `from flight_cli.client import ApiKeyResolutionError`.
+__all__ = [
+    "ApiKeyResolutionError",
+    "MatrixApiError",
+    "MatrixClient",
+]
 
 BASE = "https://content-alkalimatrix-pa.googleapis.com"
 SEARCH_URL = f"{BASE}/v1/search"
@@ -22,9 +29,14 @@ SEARCH_URL = f"{BASE}/v1/search"
 
 class MatrixApiError(Exception):
     """Matrix's validation errors come back as HTTP 200 + `{"error": ...}`."""
-    def __init__(self, message: str, kind: str = "input",
-                 request_id: str | None = None,
-                 raw: dict[str, Any] | None = None) -> None:
+
+    def __init__(
+        self,
+        message: str,
+        kind: str = "input",
+        request_id: str | None = None,
+        raw: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.message = message
         self.kind = kind
@@ -35,7 +47,7 @@ class MatrixApiError(Exception):
 def _raise_if_api_error(data: dict[str, Any]) -> None:
     err_raw = data.get("error")
     if isinstance(err_raw, dict) and ("message" in err_raw or "code" in err_raw):
-        err = cast(dict[str, Any], err_raw)
+        err = cast("dict[str, Any]", err_raw)
         raise MatrixApiError(
             message=err.get("message", "unknown error"),
             kind=err.get("type") or err.get("status") or "unknown",
@@ -76,12 +88,16 @@ class MatrixClient:
         # Never hardcoded in the source.
         self._api_key = api_key or resolve_api_key()
         self._http = HttpTransport(
-            impersonate=impersonate, rps=rps, concurrency=concurrency,
-            timeout=timeout, cache_dir=cache_dir,
-            cache_read=cache_read, cache_write=cache_write,
+            impersonate=impersonate,
+            rps=rps,
+            concurrency=concurrency,
+            timeout=timeout,
+            cache_dir=cache_dir,
+            cache_read=cache_read,
+            cache_write=cache_write,
         )
 
-    async def __aenter__(self) -> "MatrixClient":
+    async def __aenter__(self) -> MatrixClient:
         return self
 
     async def __aexit__(self, *_: object) -> None:
@@ -104,21 +120,25 @@ class MatrixClient:
         body = to_wire(search).as_json()
         try:
             data = await self._http.post_json(
-                SEARCH_URL, body, params={"key": self._api_key, "alt": "json"},
+                SEARCH_URL,
+                body,
+                params={"key": self._api_key, "alt": "json"},
                 cache=cache,
             )
         except httpx.HTTPStatusError as e:
-            if e.response.status_code != 403:
+            if e.response.status_code != HTTPStatus.FORBIDDEN:
                 raise
             invalidate_cache()
             self._api_key = resolve_api_key(force_bootstrap=True)
             try:
                 data = await self._http.post_json(
-                    SEARCH_URL, body, params={"key": self._api_key, "alt": "json"},
+                    SEARCH_URL,
+                    body,
+                    params={"key": self._api_key, "alt": "json"},
                     cache=cache,
                 )
             except httpx.HTTPStatusError as e2:
-                if e2.response.status_code == 403:
+                if e2.response.status_code == HTTPStatus.FORBIDDEN:
                     raise ApiKeyResolutionError(
                         "Matrix rejected the API key with HTTP 403 even after "
                         "re-bootstrapping. The bootstrap regex may be picking up "
@@ -132,10 +152,10 @@ class MatrixClient:
     # ───────────────────────── ancillary helpers ───────────────────────────
 
     async def airports(self, partial: str, page_size: int = 10) -> list[Location]:
-        url = (f"{BASE}/v1/locationTypes/CITIES_AND_AIRPORTS/"
-               f"partialNames/{partial}/locations")
+        url = f"{BASE}/v1/locationTypes/CITIES_AND_AIRPORTS/partialNames/{partial}/locations"
         data = await self._http.get_json(
-            url, params={"pageSize": page_size, "key": self._api_key},
+            url,
+            params={"pageSize": page_size, "key": self._api_key},
         )
         return [Location.model_validate(loc) for loc in data.get("locations", [])]
 
@@ -143,18 +163,18 @@ class MatrixClient:
         """Look up a single airport by IATA code. Returns None only on 404
         ('no such airport'); network errors and auth failures propagate so
         callers can distinguish 'doesn't exist' from 'lookup is broken'."""
-        url = (f"{BASE}/v1/locationTypes/airportOrMultiAirportCity/"
-               f"locationCodes/{code.upper()}")
+        url = f"{BASE}/v1/locationTypes/airportOrMultiAirportCity/locationCodes/{code.upper()}"
         try:
             data = await self._http.get_json(url, params={"key": self._api_key})
         except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
+            if e.response.status_code == HTTPStatus.NOT_FOUND:
                 return None
             raise
         return Location.model_validate(data)
 
     async def currencies(self) -> list[dict[str, str]]:
         data = await self._http.get_json(
-            f"{BASE}/v1/currencies", params={"key": self._api_key},
+            f"{BASE}/v1/currencies",
+            params={"key": self._api_key},
         )
         return data.get("currencies", [])

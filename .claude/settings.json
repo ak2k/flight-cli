@@ -1,0 +1,17 @@
+{
+  "enabledPlugins": {
+    "pr-review-toolkit@claude-plugins-official": true
+  },
+  "permissions": {
+    "allow": [
+      "Bash(uv:*)",
+      "Bash(uvx:*)",
+      "Bash(ruff:*)",
+      "Bash(basedpyright:*)",
+      "Bash(pytest:*)",
+      "Bash(make:*)",
+      "Bash(nix develop:*)",
+      "Bash(nix flake:*)"
+    ]
+  }
+}

@@ -1,7 +1,15 @@
 """Low-level HTTP transport: httpx + curl_cffi TLS fingerprint, rate-limit,
 retry, and an optional on-disk response cache for offline development."""
+
 from __future__ import annotations
-import asyncio, hashlib, json, logging, os, pathlib
+
+import asyncio
+import hashlib
+import json
+import logging
+import os
+import pathlib
+from http import HTTPStatus
 from typing import Any, cast
 
 import httpx
@@ -11,7 +19,12 @@ from httpx_curl_cffi import AsyncCurlTransport, CurlOpt
 
 log = logging.getLogger(__name__)
 
-DEFAULT_IMPERSONATE = "chrome"   # alias → latest curl_cffi knows about
+DEFAULT_IMPERSONATE = "chrome"  # alias → latest curl_cffi knows about
+
+# 5xx + 408 are retryable per AGENTS.md (`http.HTTPStatus.*` is well-typed;
+# `httpx.codes.*` is mis-typed as tuple — see AGENTS.md gotchas).
+_SERVER_ERROR_FLOOR = HTTPStatus.INTERNAL_SERVER_ERROR.value  # 500
+_REQUEST_TIMEOUT = HTTPStatus.REQUEST_TIMEOUT.value  # 408
 
 # Headers required by the Alkali backend. Values copied from real SPA captures.
 ALKALI_HEADERS = {
@@ -29,12 +42,11 @@ ALKALI_HEADERS = {
 
 def _is_retryable(exc: Exception) -> bool:
     """Retry on transient network errors and 5xx. Surface 4xx immediately."""
-    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError,
-                         httpx.RemoteProtocolError)):
+    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
         s = exc.response.status_code
-        return s >= 500 or s == 408
+        return s >= _SERVER_ERROR_FLOOR or s == _REQUEST_TIMEOUT
     return False
 
 
@@ -62,7 +74,7 @@ class HttpTransport:
         self._transport = AsyncCurlTransport(
             # `impersonate` is a curl_cffi BrowserTypeLiteral string at runtime;
             # accept any str from callers and let curl_cffi validate.
-            impersonate=cast(Any, impersonate),
+            impersonate=cast("Any", impersonate),
             curl_options={CurlOpt.FRESH_CONNECT: True},
             default_headers=True,
         )
@@ -79,15 +91,14 @@ class HttpTransport:
 
         if cache_dir is None:
             cache_dir = pathlib.Path(
-                os.environ.get("MATRIX_CACHE_DIR")
-                or pathlib.Path.home() / ".cache" / "flight-cli"
+                os.environ.get("MATRIX_CACHE_DIR") or pathlib.Path.home() / ".cache" / "flight-cli"
             )
         self._cache_dir = pathlib.Path(cache_dir)
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         self._cache_read = cache_read
         self._cache_write = cache_write
 
-    async def __aenter__(self) -> "HttpTransport":
+    async def __aenter__(self) -> HttpTransport:
         return self
 
     async def __aexit__(self, *_: object) -> None:
@@ -113,21 +124,22 @@ class HttpTransport:
         if not p.exists():
             return None
         try:
-            return json.loads(p.read_text())
-        except Exception as e:
+            return cast("dict[str, Any]", json.loads(p.read_text()))
+        except (OSError, json.JSONDecodeError) as e:
             log.warning("cache read failed for %s: %s", key, e)
             return None
 
     def _cache_put(self, key: str, value: dict[str, Any]) -> None:
         try:
             self._cache_path(key).write_text(json.dumps(value, indent=2))
-        except Exception as e:
+        except OSError as e:
             log.warning("cache write failed for %s: %s", key, e)
 
     # ───────────────────────────── public API ──────────────────────────────
 
-    async def get_json(self, url: str, *, params: dict[str, Any] | None = None,
-                       cache: bool = True) -> dict[str, Any]:
+    async def get_json(
+        self, url: str, *, params: dict[str, Any] | None = None, cache: bool = True
+    ) -> dict[str, Any]:
         cache_key = self._cache_key(
             url + "?" + "&".join(f"{k}={v}" for k, v in (params or {}).items()),
             None,
@@ -139,13 +151,21 @@ class HttpTransport:
                 return hit
 
         async with self._limiter, self._sem:
-            @stamina.retry(on=_is_retryable, attempts=3, wait_initial=2.0,
-                           wait_jitter=1.0, wait_max=15.0, timeout=120.0)
+
+            @stamina.retry(
+                on=_is_retryable,
+                attempts=3,
+                wait_initial=2.0,
+                wait_jitter=1.0,
+                wait_max=15.0,
+                timeout=120.0,
+            )
             async def _send() -> httpx.Response:
                 r = await self._client.get(url, params=params, headers=ALKALI_HEADERS)
-                if r.status_code >= 500:
+                if r.status_code >= _SERVER_ERROR_FLOOR:
                     r.raise_for_status()
                 return r
+
             r = await _send()
 
         r.raise_for_status()
@@ -154,9 +174,14 @@ class HttpTransport:
             self._cache_put(cache_key, data)
         return data
 
-    async def post_json(self, url: str, body: dict[str, Any], *,
-                        params: dict[str, Any] | None = None, cache: bool = True,
-                        ) -> dict[str, Any]:
+    async def post_json(
+        self,
+        url: str,
+        body: dict[str, Any],
+        *,
+        params: dict[str, Any] | None = None,
+        cache: bool = True,
+    ) -> dict[str, Any]:
         # NB: payload includes a unique-ish bgProgramResponse on captured
         # bodies; we strip that field before hashing so two semantically equal
         # requests share a cache entry.
@@ -172,15 +197,26 @@ class HttpTransport:
                 return hit
 
         async with self._limiter, self._sem:
-            @stamina.retry(on=_is_retryable, attempts=3, wait_initial=2.0,
-                           wait_jitter=1.0, wait_max=15.0, timeout=240.0)
+
+            @stamina.retry(
+                on=_is_retryable,
+                attempts=3,
+                wait_initial=2.0,
+                wait_jitter=1.0,
+                wait_max=15.0,
+                timeout=240.0,
+            )
             async def _send() -> httpx.Response:
                 r = await self._client.post(
-                    url, params=params, json=body, headers=ALKALI_HEADERS,
+                    url,
+                    params=params,
+                    json=body,
+                    headers=ALKALI_HEADERS,
                 )
-                if r.status_code >= 500:
+                if r.status_code >= _SERVER_ERROR_FLOOR:
                     r.raise_for_status()
                 return r
+
             r = await _send()
 
         r.raise_for_status()
