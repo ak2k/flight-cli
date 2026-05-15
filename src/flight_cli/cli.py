@@ -218,57 +218,42 @@ def _pick_backend(
     youth: int,
     inf_seat: int,
     inf_lap: int,
-    pp_only: bool,
-    pp_airlines: str | None,
-    pp_cabin: str | None,
 ) -> str:
     """Resolve --backend to a concrete backend.
 
     auto: matrix iff a Matrix-only flag is set, else gflight.
     Matrix-only set: --routing/--extension/--slice/--depart-times/--return-times,
-    any pax type beyond adults+children, any --pp-* configuration flag.
-    PP is currently Matrix-only (provider abstraction is work-z6zi).
+    any pax type beyond adults+children. PP overlay rides both backends now —
+    plain `--pp-only` stays on gflight for speed + ULCC inventory.
 
     Explicit --backend matrix: matrix. --backend gflight: gflight, unless a
     Matrix-only flag is also set (error — the request is inexpressible on fli)."""
-    matrix_only = bool(
-        routing
-        or extension
-        or slice_specs
-        or depart_times
-        or return_times
-        or pp_airlines
-        or pp_cabin
-    ) or (seniors > 0 or youth > 0 or inf_seat > 0 or inf_lap > 0 or pp_only)
+    matrix_only = bool(routing or extension or slice_specs or depart_times or return_times) or (
+        seniors > 0 or youth > 0 or inf_seat > 0 or inf_lap > 0
+    )
     if backend == BACKEND_AUTO:
         return BACKEND_MATRIX if matrix_only else BACKEND_GFLIGHT
     if backend == BACKEND_GFLIGHT and matrix_only:
         raise typer.BadParameter(
             "--backend gflight is incompatible with Matrix-only flags "
             "(--routing/--extension/--slice/--depart-times/--return-times/"
-            "extra pax types/--pp-*). Drop them, or use --backend matrix.",
+            "extra pax types). Drop them, or use --backend matrix.",
         )
     if backend not in _VALID_BACKENDS:
         raise typer.BadParameter(f"--backend must be one of {_VALID_BACKENDS}; got {backend!r}")
     return backend
 
 
-def _should_run_pp(*, backend: str, no_pp: bool, pp_only: bool) -> bool:
+def _should_run_pp(*, no_pp: bool, pp_only: bool) -> bool:
     """Decide whether PP augmentation runs.
 
-    Matrix backend + tokens present → True (unless --no-pp).
+    Tokens present → True (unless --no-pp). Both backends support PP overlay
+    now: matrix consumes its own SearchResult directly; gflight wraps fli
+    output via gflight_adapter into the same shape, so the matcher and
+    renderer reuse end-to-end.
+
     --pp-only with missing tokens → hard error (user explicitly asked for PP).
-    gflight backend → False (PP needs Matrix's SearchResult shape; work-z6zi
-    introduces the AwardProvider abstraction that makes this provider-neutral).
     """
-    if backend != BACKEND_MATRIX:
-        if pp_only:
-            err.print(
-                "[red]--pp-only requires Matrix backend; "
-                "drop the Matrix-only flag or use --backend matrix.[/]",
-            )
-            raise typer.Exit(2)
-        return False
     if no_pp:
         if pp_only:
             err.print("[red]--pp-only and --no-pp are mutually exclusive.[/]")
@@ -504,8 +489,17 @@ def _run_gflight_path(
     opts: SearchOptions,
     top_n: int,
     json_out: bool,
+    run_pp: bool = False,
+    pp_only: bool = False,
+    pp_airlines: str | None = None,
+    pp_cabin: str | None = None,
 ) -> None:
-    """Google Flights path: build fli filter → query → render. Single-leg or round-trip."""
+    """Google Flights path: build fli filter → query → render. Single-leg or round-trip.
+
+    When run_pp=True, fli's results are adapted into a SearchResult shape so
+    the existing PP matcher + renderer reuse cleanly. PP runs on the same
+    (origin, dest, date) per leg as the matrix path.
+    """
     # fli is heavy (selenium/selectolax); lazy-import so the rest of flight_cli
     # doesn't pay the startup cost when not used.
     from .fli_bridge import run_gflight_search  # noqa: PLC0415
@@ -528,7 +522,7 @@ def _run_gflight_path(
     # fli/fast_flights have no type stubs; results are duck-typed pydantic
     # models. Suppressing the noisy unknown-type chatter for this rendering
     # block keeps the boundary localized.
-    if json_out:
+    if json_out and not run_pp:
         out: list[Any] = []
         for r in results:
             if isinstance(r, tuple):
@@ -538,6 +532,27 @@ def _run_gflight_path(
         sys.stdout.write(json.dumps(out, indent=2, default=str))
         return
 
+    if not pp_only:
+        _render_gflight_table(results, legs=legs, top_n=top_n)
+
+    if run_pp:
+        from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
+
+        sr = fli_results_to_search_result(results)
+        p = opts.pax
+        run_pp_for_search(
+            sr,
+            legs=_build_pp_legs(legs),
+            num_passengers=p.adults + p.children + p.seniors + p.youth,
+            airlines=pp_airlines,
+            cabins=pp_cabin,
+            pp_only=pp_only,
+            json_out=json_out,
+        )
+
+
+def _render_gflight_table(results: list[Any], *, legs: tuple[Leg, ...], top_n: int) -> None:
+    """Render fli results as a rich table. Duck-typed: fli has no type stubs."""
     origin = legs[0].origins[0] if legs[0].origins else "?"
     destination = legs[0].destinations[0] if legs[0].destinations else "?"
     has_return = len(legs) >= _ROUND_TRIP_LEGS
@@ -702,9 +717,6 @@ def search(
         youth=youth,
         inf_seat=inf_seat,
         inf_lap=inf_lap,
-        pp_only=pp_only,
-        pp_airlines=pp_airlines,
-        pp_cabin=pp_cabin,
     )
     if slice_specs:
         legs = tuple(_parse_slice_spec(s) for s in slice_specs)
@@ -751,10 +763,20 @@ def search(
     )
 
     if resolved == BACKEND_GFLIGHT:
-        _run_gflight_path(legs=legs, opts=opts, top_n=page_size, json_out=json_out)
+        run_pp = _should_run_pp(no_pp=no_pp, pp_only=pp_only)
+        _run_gflight_path(
+            legs=legs,
+            opts=opts,
+            top_n=page_size,
+            json_out=json_out,
+            run_pp=run_pp,
+            pp_only=pp_only,
+            pp_airlines=pp_airlines,
+            pp_cabin=pp_cabin,
+        )
         return
 
-    run_pp = _should_run_pp(backend=resolved, no_pp=no_pp, pp_only=pp_only)
+    run_pp = _should_run_pp(no_pp=no_pp, pp_only=pp_only)
     _run_matrix_path(
         legs=legs,
         opts=opts,
@@ -914,7 +936,7 @@ def fare(
         show_only_available=only_available,
         page_size=page_size,
     )
-    run_pp = _should_run_pp(backend=BACKEND_MATRIX, no_pp=no_pp, pp_only=pp_only)
+    run_pp = _should_run_pp(no_pp=no_pp, pp_only=pp_only)
     _run_matrix_path(
         legs=legs,
         opts=opts,

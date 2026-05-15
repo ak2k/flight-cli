@@ -35,6 +35,10 @@ go into detail and are loaded on demand.
   web search shows, this project is the only public wrapper of the Alkali
   endpoint. Implications: our fixtures are the spec; forward-compat is
   on us. What to do if Matrix changes shape.
+- [pp_on_gflight.md](pp_on_gflight.md) — Why PointsPath overlay now
+  rides both backends. Decision: `enable_matching=False` + the existing
+  matcher keys, not the matched-Google-flight-id path. Empirical evidence
+  behind the choice and the upgrade path if it turns out worth it later.
 
 ## When to add a new memory file
 

@@ -32,9 +32,6 @@ def _call(backend: str = BACKEND_AUTO, **overrides: object) -> str:
         "youth": 0,
         "inf_seat": 0,
         "inf_lap": 0,
-        "pp_only": False,
-        "pp_airlines": None,
-        "pp_cabin": None,
     }
     defaults.update(overrides)
     return _pick_backend(backend=backend, **defaults)  # type: ignore[arg-type]
@@ -59,15 +56,17 @@ def test_auto_plain_search_picks_gflight() -> None:
         ("youth", 1),
         ("inf_seat", 1),
         ("inf_lap", 1),
-        ("pp_only", True),
-        ("pp_airlines", "United,Delta"),
-        ("pp_cabin", "Business"),
     ],
 )
 def test_auto_matrix_only_flag_picks_matrix(flag: str, value: object) -> None:
     # pyright: ignore[reportArgumentType] — `flag` is a parametrize key; types are
     # heterogeneous (str/int/list/bool). _call's kwargs accept object.
     assert _call(**{flag: value}) == BACKEND_MATRIX  # pyright: ignore[reportArgumentType]
+
+
+# PP-* flags no longer influence backend choice (work-qmx1): PP overlay runs on
+# both backends, so `--pp-only` on a plain query stays on gflight (faster). The
+# flags aren't in `_pick_backend`'s signature anymore — that's the test.
 
 
 # ──────────────────────────────── explicit ─────────────────────────────────
