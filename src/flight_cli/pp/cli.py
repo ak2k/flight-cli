@@ -1,16 +1,15 @@
-"""CLI surface for PointsPath: `auth pp ...` subcommands + implicit augmentation.
+"""CLI surface for PointsPath: `auth pp ...` subcommands + augmentation entry.
 
-The augmentation entry point (`run_pp_for_search`) is wired into `search` on
-the Matrix backend: it runs implicitly whenever valid PP tokens are loaded
-(opt out with `--no-pp`). Runs PP airline-search in parallel with the
-finished Matrix result, joins via match.py, and renders.
+`run_pp_for_search` is wired into `flight search` (both backends): it runs
+implicitly whenever any provider's tokens are present (opt out with `--no-pp`).
+Iterates the provider registry, fans out each leg's queries in parallel,
+joins via match.py, and renders.
 """
 
 from __future__ import annotations
 
 import json
 import sys
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path  # noqa: TC003 - typer evaluates annotations at runtime
 from typing import TYPE_CHECKING, Annotated, Any
@@ -20,6 +19,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from ..providers.registry import gather_awards
 from .auth import (
     TOKENS_PATH,
     PPAuthError,
@@ -31,31 +31,12 @@ from .auth import (
     login_from_chrome,
     login_via_browser,
 )
-from .client import (
-    DEFAULT_AIRLINES,
-    DEFAULT_CABINS,
-    PPClient,
-    SearchSpec,
-    enabled_airlines,
-)
+from .client import DEFAULT_CABINS
 from .match import MatchedFare, join
 
 if TYPE_CHECKING:
     from ..models import SearchResult
-    from .match import AwardOption
-    from .models import AirlineSearchResponse, PricingInfoResponse
-
-
-@dataclass
-class LegQuery:
-    """One leg's PP query. slice_index points at the corresponding Slice in
-    each Itinerary returned by Matrix; label is the user-facing leg name."""
-
-    origin: str
-    destination: str
-    date: str  # YYYY-MM-DD
-    slice_index: int
-    label: str  # e.g. "outbound JFK→LHR" or "return LHR→JFK"
+    from ..providers.base import AwardFlight, LegQuery
 
 
 console = Console()
@@ -212,12 +193,12 @@ def run_pp_for_search(
     pp_only: bool = False,
     json_out: bool = False,
 ) -> None:
-    """Called by the `fare` command when --pp is on. For each leg, runs PP
-    queries (one per airline x cabin), joins against the corresponding Slice
-    in each Itinerary, and renders one table per leg.
+    """Run award augmentation through the provider registry, join against
+    `res`'s cash itineraries, render. Today the registry hands back
+    PointsPath only; future providers (seats.aero) join via the same path.
 
     Errors are non-fatal — print and continue so the user still sees their
-    Matrix results.
+    cash results.
     """
     try:
         get_valid_tokens()  # validate + refresh up-front, surface a clear error
@@ -226,93 +207,53 @@ def run_pp_for_search(
         return
 
     cabin_list = tuple(_normalize_cabin(c) for c in _parse_csv(cabins, DEFAULT_CABINS))
-    # Resolve airline list: explicit --pp-airlines wins; otherwise fetch the
-    # tier-enabled set from extension-config + pricing-info (cached). Static
-    # DEFAULT_AIRLINES is the last-resort fallback if discovery fails.
     explicit_airlines = _parse_csv(airlines, ()) if airlines else None
 
-    async def _go() -> tuple[list[dict[str, AirlineSearchResponse]], PricingInfoResponse]:
-        return await _gather_pp(
+    async def _go() -> tuple[list[list[AwardFlight]], list[Any]]:
+        return await gather_awards(
             legs=legs,
             num_passengers=num_passengers,
-            explicit_airlines=explicit_airlines,
             cabins=cabin_list,
+            pp_airlines=explicit_airlines,
         )
 
     try:
-        per_leg, pricing = anyio.run(_go)
+        per_leg, providers = anyio.run(_go)
     except Exception as e:  # noqa: BLE001 — surface anything to user, don't crash CLI
-        err.print(f"[red]--pp: PointsPath query failed: {e}[/]")
+        err.print(f"[red]--pp: award query failed: {e}[/]")
         return
 
-    if pp_only:
-        # JSON: dump per-leg award listings; pretty: one PP-only table per leg.
-        if json_out:
-            sys.stdout.write(_serialize_pp_only_per_leg(per_leg, legs))
+    try:
+        if pp_only:
+            if json_out:
+                sys.stdout.write(_serialize_pp_only_per_leg(per_leg, legs))
+                return
+            for leg, awards in zip(legs, per_leg, strict=True):
+                console.print(f"\n[bold]Leg: {leg.label}[/]")
+                _render_pp_only(awards)
             return
-        for leg, merged in zip(legs, per_leg, strict=True):
+
+        matches_per_leg: list[list[MatchedFare]] = [
+            join(res, awards, slice_index=leg.slice_index)
+            for leg, awards in zip(legs, per_leg, strict=True)
+        ]
+        if json_out:
+            sys.stdout.write(_serialize_matches_per_leg(matches_per_leg, legs))
+            return
+        for leg, matches in zip(legs, matches_per_leg, strict=True):
             console.print(f"\n[bold]Leg: {leg.label}[/]")
-            _render_pp_only(merged, pricing)
-        return
-
-    # Cash + award per leg.
-    matches_per_leg: list[list[MatchedFare]] = [
-        join(res, merged, pricing, slice_index=leg.slice_index)
-        for leg, merged in zip(legs, per_leg, strict=True)
-    ]
-    if json_out:
-        sys.stdout.write(_serialize_matches_per_leg(matches_per_leg, legs))
-        return
-    for leg, matches in zip(legs, matches_per_leg, strict=True):
-        console.print(f"\n[bold]Leg: {leg.label}[/]")
-        _render_matches(matches, cabin_list, slice_index=leg.slice_index)
+            _render_matches(matches, cabin_list, slice_index=leg.slice_index)
+    finally:
+        # Providers hold HTTP keepalive; close them so the event loop doesn't
+        # warn about unclosed transports on exit.
+        anyio.run(_aclose_all, providers)
 
 
-async def _gather_pp(
-    *,
-    legs: list[LegQuery],
-    num_passengers: int,
-    explicit_airlines: tuple[str, ...] | None,
-    cabins: tuple[str, ...],
-) -> tuple[list[dict[str, AirlineSearchResponse]], PricingInfoResponse]:
-    """Per leg, fan out PP airline-search across (airlines x cabins). Returns
-    one merged airline→response map per leg, plus the shared pricing-info."""
-    async with await PPClient.create() as c:
-        pricing = await c.pricing_info()
-        if explicit_airlines:
-            airlines = explicit_airlines
-        else:
-            try:
-                ext_cfg = await c.extension_config()
-                airlines = enabled_airlines(pricing, ext_cfg)
-                if not airlines:
-                    airlines = DEFAULT_AIRLINES
-            except Exception:  # noqa: BLE001 — fall back to static default
-                airlines = DEFAULT_AIRLINES
-        per_leg: list[dict[str, AirlineSearchResponse]] = []
-        for leg in legs:
-            merged: dict[str, AirlineSearchResponse] = {}
-            for cabin in cabins:
-                spec = SearchSpec(
-                    origin=leg.origin,
-                    destination=leg.destination,
-                    date=leg.date,
-                    return_date="",
-                    is_round_trip_return=False,
-                    num_passengers=num_passengers,
-                    cabin_class=cabin,
-                    enable_matching=False,
-                )
-                per_airline = await c.airline_search_many(spec, airlines)
-                for airline, resp in per_airline.items():
-                    if airline not in merged:
-                        merged[airline] = resp
-                        continue
-                    # Append flights from later cabin queries; the matcher
-                    # tolerates same-key duplicates without double-counting.
-                    merged[airline].outboundFlights.extend(resp.outboundFlights)
-            per_leg.append(merged)
-        return per_leg, pricing
+async def _aclose_all(providers: list[Any]) -> None:
+    for p in providers:
+        aclose = getattr(p, "aclose", None)
+        if aclose is not None:
+            await aclose()
 
 
 # ──────────────────────────── render: matched ──────────────────────────────
@@ -348,27 +289,27 @@ def _fmt_miles(n: int) -> str:
     return f"{n / 1000:.1f}k" if n >= _MILES_K_THRESHOLD else str(n)
 
 
-def _fmt_award_cell(award_options: list[AwardOption], want_cabin: str) -> str:
-    """Render the best (lowest miles) offer across airlines for one cabin."""
+def _fmt_award_cell(award_flights: list[AwardFlight], want_cabin: str) -> str:
+    """Render the best (lowest miles) offer across providers for one cabin."""
     best: tuple[int, float, str, list[str]] | None = None
-    for ao in award_options:
-        for ca in ao.cabins:
+    for af in award_flights:
+        for ca in af.cabins:
             if ca.cabin != want_cabin:
                 continue
-            key = (ca.miles, ca.tax_usd, ao.airline, ao.funding_banks)
+            key = (ca.miles, ca.tax_usd, af.program, af.funding_banks)
             if best is None or key[0] < best[0]:
                 best = key
     if best is None:
         return "—"
-    miles, tax, airline, _banks = best
-    return f"{_fmt_miles(miles)} {airline} + ${tax:.0f}"
+    miles, tax, program, _banks = best
+    return f"{_fmt_miles(miles)} {program} + ${tax:.0f}"
 
 
-def _fmt_funding(award_options: list[AwardOption]) -> str:
+def _fmt_funding(award_flights: list[AwardFlight]) -> str:
     banks: list[str] = []
     seen: set[str] = set()
-    for ao in award_options:
-        for b in ao.funding_banks:
+    for af in award_flights:
+        for b in af.funding_banks:
             if b not in seen:
                 seen.add(b)
                 banks.append(b)
@@ -447,10 +388,10 @@ def _render_matches(
         for cab in cabin_list:
             cells.append(_fmt_award_cell(m.awards, cab))
             if cab == "Economy" and cash_val is not None:
-                # CPM uses cheapest economy across airlines.
+                # CPM uses cheapest economy across providers.
                 best_y: tuple[int, float] | None = None
-                for ao in m.awards:
-                    for ca in ao.cabins:
+                for af in m.awards:
+                    for ca in af.cabins:
                         if ca.cabin == "Economy" and (best_y is None or ca.miles < best_y[0]):
                             best_y = (ca.miles, ca.tax_usd)
                 if best_y is not None:
@@ -466,42 +407,61 @@ def _render_matches(
 # ──────────────────────────── render: pp-only ──────────────────────────────
 
 
-def _render_pp_only(
-    merged: dict[str, AirlineSearchResponse],
-    pricing: PricingInfoResponse,
-) -> None:
-    rows: list[tuple[str, str, str, str, str, int, float, str]] = []
-    pricing_idx = {p.airline: p for p in pricing.pricingInfos}
-    for airline, resp in merged.items():
-        pi = pricing_idx.get(airline)
-        banks = ", ".join(b.bank for b in (pi.bankPointsInfos if pi else []))
-        for of in resp.outboundFlights:
-            for c in of.perCabinMilesPricing:
-                pp = c.perPassengerPricing
-                if not pp or pp.perPassengerMilesAmount <= 0:
-                    continue
-                rows.append(
-                    (
-                        airline,
-                        of.firstFlightNumber,
-                        f"{of.origin}→{of.destination}",
-                        of.localDepartureDateTime[:16],
-                        c.cabinClass,
-                        pp.perPassengerMilesAmount,
-                        pp.perPassengerTaxAmountUsd,
-                        banks,
-                    )
-                )
-    rows.sort(key=lambda r: (r[3], r[5]))  # by departure, then miles
-    t = Table(title="PointsPath award availability", show_header=True, header_style="bold cyan")
-    for col in ("airline", "flight", "route", "departs", "cabin", "miles", "tax", "funded by"):
+def _render_pp_only(awards: list[AwardFlight]) -> None:
+    """One leg's provider-merged awards as a flat table. Multi-provider
+    today is degenerate (PP only); the table just shows `provider | program`
+    so when seats.aero lands the surface doesn't need to change."""
+    rows: list[tuple[str, str, str, str, str, str, int, float, str]] = []
+    for af in awards:
+        for c in af.cabins:
+            if c.miles <= 0:
+                continue
+            rows.append(
+                (
+                    af.provider,
+                    af.program,
+                    af.flight_number,
+                    f"{af.origin}→{af.destination}",
+                    af.departure[:16],
+                    c.cabin,
+                    c.miles,
+                    c.tax_usd,
+                    ", ".join(af.funding_banks),
+                ),
+            )
+    rows.sort(key=lambda r: (r[4], r[6]))  # by departure, then miles
+    t = Table(title="Award availability", show_header=True, header_style="bold cyan")
+    cols = ("source", "program", "flight", "route", "departs", "cabin", "miles", "tax", "funded by")
+    for col in cols:
         t.add_column(col)
     for r in rows:
-        t.add_row(r[0], r[1], r[2], r[3], r[4], _fmt_miles(r[5]), f"${r[6]:.0f}", r[7])
+        t.add_row(r[0], r[1], r[2], r[3], r[4], r[5], _fmt_miles(r[6]), f"${r[7]:.0f}", r[8])
     console.print(t)
 
 
 # ─────────────────────────────── json shapes ───────────────────────────────
+
+
+def _serialize_award(af: AwardFlight) -> dict[str, Any]:
+    return {
+        "provider": af.provider,
+        "program": af.program,
+        "miles_to_cash_ratio": af.miles_to_cash_ratio,
+        "funding_banks": af.funding_banks,
+        "matched_origin": af.origin,
+        "matched_destination": af.destination,
+        "matched_departure": af.departure,
+        "flight_number": af.flight_number,
+        "cabins": [
+            {
+                "cabin": c.cabin,
+                "miles": c.miles,
+                "tax_usd": c.tax_usd,
+                "tax_currency": c.tax_currency,
+            }
+            for c in af.cabins
+        ],
+    }
 
 
 def _serialize_matches(matches: list[MatchedFare]) -> str:
@@ -516,27 +476,8 @@ def _serialize_matches(matches: list[MatchedFare]) -> str:
                 "origin": (s.origin.code if s and s.origin else None),
                 "destination": (s.destination.code if s and s.destination else None),
                 "cash_price": m.itinerary.price,
-                "awards": [
-                    {
-                        "airline": ao.airline,
-                        "miles_to_cash_ratio": ao.miles_to_cash_ratio,
-                        "funding_banks": ao.funding_banks,
-                        "matched_origin": ao.flight.origin,
-                        "matched_destination": ao.flight.destination,
-                        "matched_departure": ao.flight.localDepartureDateTime,
-                        "cabins": [
-                            {
-                                "cabin": c.cabin,
-                                "miles": c.miles,
-                                "tax_usd": c.tax_usd,
-                                "tax_currency": c.tax_currency,
-                            }
-                            for c in ao.cabins
-                        ],
-                    }
-                    for ao in m.awards
-                ],
-            }
+                "awards": [_serialize_award(af) for af in m.awards],
+            },
         )
     return json.dumps(out, indent=2)
 
@@ -558,7 +499,7 @@ def _serialize_matches_per_leg(
 
 
 def _serialize_pp_only_per_leg(
-    per_leg: list[dict[str, AirlineSearchResponse]],
+    per_leg: list[list[AwardFlight]],
     legs: list[LegQuery],
 ) -> str:
     return json.dumps(
@@ -566,9 +507,9 @@ def _serialize_pp_only_per_leg(
             {
                 "leg": leg.label,
                 "slice_index": leg.slice_index,
-                "by_airline": {a: r.model_dump() for a, r in merged.items()},
+                "awards": [_serialize_award(af) for af in awards],
             }
-            for leg, merged in zip(legs, per_leg, strict=True)
+            for leg, awards in zip(legs, per_leg, strict=True)
         ],
         indent=2,
     )

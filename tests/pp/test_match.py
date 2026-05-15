@@ -6,9 +6,6 @@
 
 from __future__ import annotations
 
-import json
-import pathlib
-
 from flight_cli.models import (
     Itinerary,
     ItineraryDetails,
@@ -23,13 +20,7 @@ from flight_cli.pp.match import (
     cash_route_time_key,
     join,
 )
-from flight_cli.pp.models import (
-    AirlineSearchResponse,
-    OutboundFlight,
-    PricingInfoResponse,
-)
-
-FIX = pathlib.Path(__file__).parent / "fixtures"
+from flight_cli.providers.base import AwardFlight, CabinAward
 
 
 def _itin(*slices_data: tuple[str, str, str, str]) -> Itinerary:
@@ -54,30 +45,27 @@ def _award(
     fn: str,
     dep: str,
     *,
+    program: str = "United",
     miles: int = 47000,
     tax: float = 250.0,
     cabin: str = "Economy",
     origin: str = "EWR",
     dest: str = "LHR",
-) -> OutboundFlight:
-    return OutboundFlight.model_validate(
-        {
-            "origin": origin,
-            "destination": dest,
-            "localDepartureDateTime": dep,
-            "localArrivalDateTime": dep,
-            "firstFlightNumber": fn,
-            "perCabinMilesPricing": [
-                {
-                    "cabinClass": cabin,
-                    "perPassengerPricing": {
-                        "perPassengerMilesAmount": miles,
-                        "perPassengerTaxAmountUsd": tax,
-                        "taxCurrencyCode": "USD",
-                    },
-                }
-            ],
-        }
+    funding_banks: list[str] | None = None,
+    miles_to_cash_ratio: float = 0.0125,
+) -> AwardFlight:
+    return AwardFlight(
+        origin=origin,
+        destination=dest,
+        departure=dep,
+        arrival=dep,
+        flight_number=fn,
+        num_connections=0,
+        provider="PointsPath",
+        program=program,
+        miles_to_cash_ratio=miles_to_cash_ratio,
+        funding_banks=funding_banks or ["Chase", "Bilt"],
+        cabins=[CabinAward(cabin=cabin, miles=miles, tax_usd=tax, tax_currency="USD")],
     )
 
 
@@ -115,8 +103,8 @@ def test_cash_match_key_out_of_range_slice_returns_none():
 
 
 def test_award_match_key_normalizes_consistently():
-    of = _award("ua 146", "2026-06-09T22:00:00")
-    assert award_match_key(of) == ("UA146", "2026-06-09")
+    af = _award("ua 146", "2026-06-09T22:00:00")
+    assert award_match_key(af) == ("UA146", "2026-06-09")
 
 
 # ───────────────────────── route+time key ──────────────────────────────────
@@ -147,13 +135,6 @@ def test_cash_route_time_key_out_of_range_slice_returns_none():
 def test_cash_route_time_key_works_when_flights_list_is_empty():
     """Route+time doesn't need flight numbers — it should still produce a
     key for a slice that has origin/dest/departure but no flights[]."""
-    from flight_cli.models import (
-        Itinerary,
-        ItineraryDetails,
-        Slice,
-        SliceEndpoint,
-    )
-
     it = Itinerary(
         itinerary=ItineraryDetails(
             slices=[
@@ -162,7 +143,7 @@ def test_cash_route_time_key_works_when_flights_list_is_empty():
                     departure="2026-08-15T18:40:00",
                     origin=SliceEndpoint(code="JFK"),
                     destination=SliceEndpoint(code="LHR"),
-                )
+                ),
             ],
         ),
     )
@@ -170,8 +151,8 @@ def test_cash_route_time_key_works_when_flights_list_is_empty():
 
 
 def test_award_route_time_key_normalizes_consistently():
-    of = _award("BA174", "2026-08-15T18:40:00", origin="JFK", dest="LHR")
-    assert award_route_time_key(of) == ("JFK", "LHR", "2026-08-15T18:40")
+    af = _award("BA174", "2026-08-15T18:40:00", origin="JFK", dest="LHR")
+    assert award_route_time_key(af) == ("JFK", "LHR", "2026-08-15T18:40")
 
 
 # ───────────────── codeshare fallback (the work-22az fix) ──────────────────
@@ -191,31 +172,27 @@ def test_join_codeshare_via_route_time_when_flight_numbers_differ():
     )
     # PP's American airline-search returns BA-operated codeshares under the
     # OPERATING flight number — this is what we observed in the probe.
-    award_resp = AirlineSearchResponse(
-        outboundFlights=[
-            _award("BA174", "2026-08-15T18:40:00", origin="JFK", dest="LHR"),
-        ]
-    )
-    matches = join(res, {"American": award_resp}, _pricing())
+    awards = [
+        _award("BA174", "2026-08-15T18:40:00", program="American", origin="JFK", dest="LHR"),
+    ]
+    matches = join(res, awards)
     assert len(matches[0].awards) == 1
-    assert matches[0].awards[0].flight.firstFlightNumber == "BA174"
+    assert matches[0].awards[0].flight_number == "BA174"
 
 
 def test_join_does_not_double_attach_when_both_keys_match():
     """The non-codeshare case: Matrix and PP both report UA146 at the same
     time, so both the flight# key AND the route+time key fire. Dedup must
-    keep it to one award per OutboundFlight."""
+    keep it to one award per AwardFlight."""
     res = SearchResult(
         solutions=[
             _itin(("UA146", "2026-06-09T22:00:00", "JFK", "LHR")),
         ]
     )
-    award_resp = AirlineSearchResponse(
-        outboundFlights=[
-            _award("UA146", "2026-06-09T22:00:00", origin="JFK", dest="LHR"),
-        ]
-    )
-    matches = join(res, {"United": award_resp}, _pricing())
+    awards = [
+        _award("UA146", "2026-06-09T22:00:00", origin="JFK", dest="LHR"),
+    ]
+    matches = join(res, awards)
     assert len(matches[0].awards) == 1
 
 
@@ -227,12 +204,10 @@ def test_join_route_time_fallback_does_not_match_different_route():
             _itin(("AA6939", "2026-08-15T18:40:00", "JFK", "LHR")),
         ]
     )
-    award_resp = AirlineSearchResponse(
-        outboundFlights=[
-            _award("BA174", "2026-08-15T18:40:00", origin="JFK", dest="ORD"),
-        ]
-    )
-    matches = join(res, {"American": award_resp}, _pricing())
+    awards = [
+        _award("BA174", "2026-08-15T18:40:00", program="American", origin="JFK", dest="ORD"),
+    ]
+    matches = join(res, awards)
     assert matches[0].awards == []
 
 
@@ -244,53 +219,39 @@ def test_join_route_time_fallback_requires_minute_precision():
             _itin(("AA6939", "2026-08-15T18:40:00", "JFK", "LHR")),
         ]
     )
-    award_resp = AirlineSearchResponse(
-        outboundFlights=[
-            _award("BA174", "2026-08-15T18:45:00", origin="JFK", dest="LHR"),
-        ]
-    )
-    matches = join(res, {"American": award_resp}, _pricing())
+    awards = [
+        _award("BA174", "2026-08-15T18:45:00", program="American", origin="JFK", dest="LHR"),
+    ]
+    matches = join(res, awards)
     assert matches[0].awards == []
 
 
 def test_join_route_time_unions_with_flight_number_match():
-    """If two airlines' PP responses describe overlapping award metal —
-    one matches by flight number, the other matches by route+time — both
-    should attach to the same cash itinerary."""
+    """If two providers' awards describe overlapping metal — one matches by
+    flight number, the other matches by route+time — both attach to the same
+    cash itinerary."""
     res = SearchResult(
         solutions=[
             _itin(("AA6939", "2026-08-15T18:40:00", "JFK", "LHR")),
         ]
     )
-    award_by_airline = {
+    awards = [
         # Same metal under the OPERATING number (matches via route+time):
-        "American": AirlineSearchResponse(
-            outboundFlights=[
-                _award("BA174", "2026-08-15T18:40:00", origin="JFK", dest="LHR"),
-            ]
-        ),
-        # Hypothetical second airline that happens to report the cash
-        # marketing number directly (matches via primary key):
-        "VirginAtlantic": AirlineSearchResponse(
-            outboundFlights=[
-                _award("AA6939", "2026-08-15T18:40:00", origin="JFK", dest="LHR"),
-            ]
-        ),
-    }
-    matches = join(res, award_by_airline, _pricing())
-    airlines = {ao.airline for ao in matches[0].awards}
-    assert airlines == {"American", "VirginAtlantic"}
+        _award("BA174", "2026-08-15T18:40:00", program="American", origin="JFK", dest="LHR"),
+        # Hypothetical second source reporting the cash marketing number directly
+        # (matches via primary key):
+        _award("AA6939", "2026-08-15T18:40:00", program="VirginAtlantic", origin="JFK", dest="LHR"),
+    ]
+    matches = join(res, awards)
+    programs = {ao.program for ao in matches[0].awards}
+    assert programs == {"American", "VirginAtlantic"}
 
 
 # ────────────────────────────── join semantics ─────────────────────────────
 
 
-def _pricing() -> PricingInfoResponse:
-    return PricingInfoResponse.model_validate(json.loads((FIX / "pricing_info.json").read_text()))
-
-
 def test_join_outer_keeps_unmatched_cash():
-    """A cash itinerary whose flight # has no PP award match should still
+    """A cash itinerary whose flight # has no award match should still
     surface in the output — with empty awards."""
     res = SearchResult(
         solutions=[
@@ -298,82 +259,58 @@ def test_join_outer_keeps_unmatched_cash():
             _itin(("BA178", "2026-06-09T07:50:00", "JFK", "LHR")),  # no award
         ]
     )
-    award_resp = AirlineSearchResponse(
-        outboundFlights=[
-            _award("UA146", "2026-06-09T22:00:00"),
-        ]
-    )
-    matches = join(res, {"United": award_resp}, _pricing())
+    awards = [_award("UA146", "2026-06-09T22:00:00")]
+    matches = join(res, awards)
     assert len(matches) == 2
-    assert matches[0].awards and matches[0].awards[0].airline == "United"
+    assert matches[0].awards and matches[0].awards[0].program == "United"
     assert matches[1].awards == []  # BA178 unmatched but preserved
 
 
-def test_join_attaches_funding_banks_from_pricing():
+def test_join_preserves_funding_banks_and_ratio_from_award():
+    """Funding banks and miles_to_cash_ratio travel with the AwardFlight
+    (set by the provider during conversion). The matcher attaches the
+    award unchanged."""
     res = SearchResult(
         solutions=[
             _itin(("UA146", "2026-06-09T22:00:00", "JFK", "LHR")),
         ]
     )
-    award_resp = AirlineSearchResponse(
-        outboundFlights=[
-            _award("UA146", "2026-06-09T22:00:00"),
-        ]
-    )
-    matches = join(res, {"United": award_resp}, _pricing())
-    [option] = matches[0].awards
-    assert sorted(option.funding_banks) == ["Bilt", "Chase"]
-    assert option.miles_to_cash_ratio == 0.0125
+    awards = [
+        _award(
+            "UA146",
+            "2026-06-09T22:00:00",
+            funding_banks=["Chase", "Bilt"],
+            miles_to_cash_ratio=0.0125,
+        ),
+    ]
+    matches = join(res, awards)
+    [matched] = matches[0].awards
+    assert sorted(matched.funding_banks) == ["Bilt", "Chase"]
+    assert matched.miles_to_cash_ratio == 0.0125
 
 
 def test_join_codeshare_surfaces_multiple_airlines():
-    """When two airlines (PP-side) report the same flight#xdate as their own
-    award, both options should attach to the cash itinerary."""
+    """When two airlines report the same flight#xdate as their own award,
+    both options should attach to the cash itinerary."""
     res = SearchResult(
         solutions=[
             _itin(("BA178", "2026-06-09T07:50:00", "JFK", "LHR")),
         ]
     )
-    award_by_airline = {
-        "American": AirlineSearchResponse(
-            outboundFlights=[
-                _award("BA178", "2026-06-09T07:50:00", miles=30000, tax=308.0),
-            ]
-        ),
-        "British Airways": AirlineSearchResponse(
-            outboundFlights=[
-                _award("BA178", "2026-06-09T07:50:00", miles=50000, tax=750.0),
-            ]
-        ),
-    }
-    matches = join(res, award_by_airline, _pricing())
-    airlines = {ao.airline for ao in matches[0].awards}
-    assert airlines == {"American", "British Airways"}
+    awards = [
+        _award("BA178", "2026-06-09T07:50:00", program="American", miles=30000, tax=308.0),
+        _award("BA178", "2026-06-09T07:50:00", program="British Airways", miles=50000, tax=750.0),
+    ]
+    matches = join(res, awards)
+    programs = {ao.program for ao in matches[0].awards}
+    assert programs == {"American", "British Airways"}
 
 
-def test_join_use_inbound_reads_inboundFlights():
-    res = SearchResult(
-        solutions=[
-            _itin(
-                ("UA146", "2026-06-09T22:00:00", "JFK", "LHR"),  # outbound
-                ("UA147", "2026-06-12T10:00:00", "LHR", "JFK"),  # return
-            ),
-        ]
-    )
-    award_resp = AirlineSearchResponse(
-        outboundFlights=[],  # nothing on outbound
-        inboundFlights=[_award("UA147", "2026-06-12T10:00:00", origin="LHR", dest="JFK")],
-    )
-    # use_inbound=True flips the index source
-    matches = join(res, {"United": award_resp}, _pricing(), slice_index=1, use_inbound=True)
-    assert len(matches[0].awards) == 1
-
-
-def test_join_empty_award_response():
+def test_join_empty_award_list():
     res = SearchResult(
         solutions=[
             _itin(("UA146", "2026-06-09T22:00:00", "JFK", "LHR")),
         ]
     )
-    matches = join(res, {"United": AirlineSearchResponse()}, _pricing())
+    matches = join(res, [])
     assert matches[0].awards == []

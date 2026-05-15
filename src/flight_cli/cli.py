@@ -40,7 +40,8 @@ from .domain import (
 from .links import google_flights_url, matrix_deep_link
 from .log import configure as configure_logging
 from .pp.auth import load_tokens
-from .pp.cli import LegQuery, auth_app, run_pp_for_search
+from .pp.cli import auth_app, run_pp_for_search
+from .providers.base import LegQuery
 
 if TYPE_CHECKING:
     from .models import CalendarResult, Location, SearchResult, Slice
