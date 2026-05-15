@@ -46,6 +46,25 @@ if TYPE_CHECKING:
 _SLICE_MIN_PARTS = 2
 _SLICE_MAX_PARTS = 3
 
+# Matrix returns prices as 'USD877.00' (ISO-4217 prefix + decimal). We split
+# the prefix off for rendering so tables can show the currency once in the
+# title and keep cells uncluttered.
+_PRICE_RE = re.compile(r"^([A-Z]{3})(.+)$")
+
+
+def _split_price(s: str | None) -> tuple[str, str]:
+    """Return (currency, amount). ('', s) if no recognizable prefix."""
+    if not s:
+        return "", s or ""
+    m = _PRICE_RE.match(s)
+    return (m.group(1), m.group(2)) if m else ("", s)
+
+
+def _amount(s: str | None) -> str:
+    """Strip the currency prefix; pass-through for placeholders like '—'."""
+    return _split_price(s)[1] if s else "—"
+
+
 app = typer.Typer(
     add_completion=False, rich_markup_mode="rich", help="CLI for ITA Matrix's Alkali backend."
 )
@@ -223,12 +242,20 @@ def _render_search(res: SearchResult) -> None:
     if res.solution_count == 0:
         console.print("[yellow]No solutions returned.[/]")
         return
-    cheapest = res.cheapest_price or "—"
-    console.print(f"[bold]{res.solution_count} solutions[/]  · cheapest: [bold cyan]{cheapest}[/]")
+    ccy, cheapest = _split_price(res.cheapest_price)
+    ccy_tag = f" ({ccy})" if ccy else ""
+    console.print(
+        f"[bold]{res.solution_count} solutions[/]  · "
+        f"cheapest: [bold cyan]{cheapest or '—'}{ccy_tag}[/]"
+    )
 
     cm = res.carrier_stop_matrix
     if cm and cm.columns and cm.rows:
-        t = Table(title="Carrier x stops grid", show_header=True, header_style="bold magenta")
+        t = Table(
+            title=f"Carrier x stops grid{ccy_tag}",
+            show_header=True,
+            header_style="bold magenta",
+        )
         t.add_column("stops")
         for col in cm.columns:
             code = col.label.code if col.label else "?"
@@ -237,13 +264,13 @@ def _render_search(res: SearchResult) -> None:
         for row in cm.rows:
             cells = [str(row.label) if row.label is not None else "?"]
             for c in row.cells:
-                p = c.min_price or "—"
+                p = _amount(c.min_price)
                 mark = "★" if c.min_price_in_grid else ("·" if c.min_price_in_row else "")
                 cells.append(f"{p} {mark}")
             t.add_row(*cells)
         console.print(t)
 
-    st = Table(title="Itineraries", show_header=True, header_style="bold green")
+    st = Table(title=f"Itineraries{ccy_tag}", show_header=True, header_style="bold green")
     st.add_column("#", justify="right")
     st.add_column("price", justify="right")
     st.add_column("carriers")
@@ -265,7 +292,7 @@ def _render_search(res: SearchResult) -> None:
 
         out = _fmt(slcs[0]) if slcs else "—"
         ret = _fmt(slcs[1]) if len(slcs) > 1 else "—"
-        st.add_row(str(i), it.price or "—", it_carriers or "?", out, ret)
+        st.add_row(str(i), _amount(it.price), it_carriers or "?", out, ret)
     console.print(st)
 
 
@@ -286,13 +313,15 @@ def _render_calendar(
             "for a single date."
         )
         return
+    ccy, cheapest = _split_price(res.cheapest_price)
+    ccy_tag = f" ({ccy})" if ccy else ""
     console.print(
         f"[bold]{res.solution_count} solutions[/]  · "
-        f"overall cheapest: [bold cyan]{res.cheapest_price}[/]  · "
+        f"overall cheapest: [bold cyan]{cheapest or '—'}{ccy_tag}[/]  · "
         f"window {sd.isoformat()} → {ed.isoformat()}  · "
         f"duration {dmin}-{dmax} nights"
     )
-    title = f"{','.join(origin)} → {','.join(destination)}: lowest fare per departure day"
+    title = f"{','.join(origin)} → {','.join(destination)}: lowest fare per departure day{ccy_tag}"
     t = Table(title=title, show_header=True, header_style="bold green")
     t.add_column("departure", justify="right")
     t.add_column("min", justify="right")
@@ -300,10 +329,10 @@ def _render_calendar(
         t.add_column(f"{dur}n", justify="right")
     t.add_column("sols", justify="right")
     for d in sorted(res.priced_days, key=lambda x: x.price_value or 9e9):
-        row = [str(d.date), d.min_price or "—"]
+        row = [str(d.date), _amount(d.min_price)]
         opts = {o.trip_length: o.min_price for o in d.options}
         for dur in range(dmin, dmax + 1):
-            row.append(opts.get(dur, "—"))
+            row.append(_amount(opts.get(dur)))
         row.append(str(d.solution_count))
         t.add_row(*row)
     console.print(t)
