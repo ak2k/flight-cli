@@ -5,19 +5,24 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import os
 import pathlib
 from http import HTTPStatus
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import anyio
 import httpx
 import stamina
+import structlog
 from aiolimiter import AsyncLimiter
 from httpx_curl_cffi import AsyncCurlTransport, CurlOpt
 
-log = logging.getLogger(__name__)
+if TYPE_CHECKING:
+    from structlog.stdlib import BoundLogger
+
+# structlog.get_logger() is typed Any; pin to BoundLogger so downstream
+# call sites are typed without spreading reportAny across the module.
+log: BoundLogger = structlog.get_logger(__name__)  # pyright: ignore[reportAny]
 
 DEFAULT_IMPERSONATE = "chrome"  # alias → latest curl_cffi knows about
 
@@ -126,14 +131,14 @@ class HttpTransport:
         try:
             return cast("dict[str, Any]", json.loads(p.read_text()))
         except (OSError, json.JSONDecodeError) as e:
-            log.warning("cache read failed for %s: %s", key, e)
+            log.warning("cache_read_failed", key=key, error=str(e))
             return None
 
     def _cache_put(self, key: str, value: dict[str, Any]) -> None:
         try:
             self._cache_path(key).write_text(json.dumps(value, indent=2))
         except OSError as e:
-            log.warning("cache write failed for %s: %s", key, e)
+            log.warning("cache_write_failed", key=key, error=str(e))
 
     # ───────────────────────────── public API ──────────────────────────────
 
@@ -147,7 +152,7 @@ class HttpTransport:
         if cache and self._cache_read:
             hit = self._cache_get(cache_key)
             if hit is not None:
-                log.debug("cache hit %s", url)
+                log.debug("cache_hit", method="GET", url=url)
                 return hit
 
         async with self._limiter, self._sem:
@@ -193,7 +198,7 @@ class HttpTransport:
         if cache and self._cache_read:
             hit = self._cache_get(cache_key)
             if hit is not None:
-                log.debug("cache hit POST %s", url)
+                log.debug("cache_hit", method="POST", url=url)
                 return hit
 
         async with self._limiter, self._sem:

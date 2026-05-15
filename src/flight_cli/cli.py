@@ -12,7 +12,6 @@ Five commands:
 from __future__ import annotations
 
 import json
-import logging
 import re
 import sys
 from datetime import date, datetime, timedelta
@@ -21,7 +20,6 @@ from typing import TYPE_CHECKING, Annotated, Any, cast
 import anyio
 import typer
 from rich.console import Console
-from rich.logging import RichHandler
 from rich.table import Table
 
 from .client import MatrixApiError, MatrixClient
@@ -38,6 +36,7 @@ from .domain import (
     TimeOfDay,
 )
 from .links import google_flights_url, matrix_deep_link
+from .log import configure as configure_logging
 
 if TYPE_CHECKING:
     from .models import CalendarResult, Location, SearchResult, Slice
@@ -84,15 +83,11 @@ def main(
         ),
     ] = 0,
 ) -> None:
-    # _http.py emits log.warning/debug for cache hits/misses, retry attempts,
-    # and rate-limit pauses. Without a handler those go nowhere.
-    level = logging.WARNING - 10 * min(verbose, 2)
-    logging.basicConfig(
-        level=level,
-        format="%(message)s",
-        datefmt="[%X]",
-        handlers=[RichHandler(console=err, rich_tracebacks=False, show_path=False)],
-    )
+    # _http.py emits structlog warning/debug for cache hits/misses, retry
+    # attempts, and rate-limit pauses. Configure the renderer to taste:
+    # `-v` shows info-level diagnostics, `-vv` includes debug.
+    level = ("warning", "info", "debug")[min(verbose, 2)]
+    configure_logging(level)
 
 
 # ─────────────────────────── argument parsers ──────────────────────────────

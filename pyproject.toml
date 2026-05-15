@@ -20,6 +20,7 @@ dependencies = [
     "aiolimiter>=1.1",
     "stamina>=24.3",
     "pydantic>=2.7",
+    "structlog>=24",
     "typer>=0.12",
     "rich>=13",
     "flights>=0.8",         # fli — drives Google Flights for booking handoff

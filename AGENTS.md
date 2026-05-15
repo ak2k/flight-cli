@@ -18,7 +18,7 @@ work.
 | Boundary validation | Pydantic v2 | ✓ (see `wire.py`, `models.py`, `domain.py`) | dataclasses, attrs, TypedDict |
 | HTTP | `httpx` | ✓ | requests, aiohttp, urllib |
 | Async runtime | `anyio` | ✓ | raw asyncio |
-| Logging | `structlog` | stdlib `logging` (DIVERGE — see below) | `print()` |
+| Logging | `structlog` | ✓ (see `log.py`) | `print()` |
 | Paths | `pathlib.Path` | ✓ | `os.path` |
 | Tests | `pytest` + `hypothesis` | `pytest` (no hypothesis yet) | unittest |
 | Errors | subclass project-local error hierarchy | `MatrixApiError`, `ApiKeyResolutionError` | bare `Exception`, string errors |
@@ -90,7 +90,10 @@ cache (`~/.cache/flight-cli/.matrix-key`) or a Matrix brownout (see
      the boundary.
    - **HTTP transport**: `src/flight_cli/_http.py` — `stamina.retry`
      decorator, `aiolimiter.AsyncLimiter`, `httpx-curl-cffi` for
-     fingerprinting, on-disk JSON cache.
+     fingerprinting, on-disk JSON cache. structlog `BoundLogger` for
+     cache-hit / retry / rate-limit diagnostics.
+   - **Logging config**: `src/flight_cli/log.py` — idempotent
+     `configure(level)` with ConsoleRenderer; stderr-bound for CLI use.
    - **Env + disk-cache config**: `src/flight_cli/_api_key.py` — env-var
      override → disk cache (TTL) → live resolution → cache write.
    - **Test pattern**: `tests/test_wire_round_trip.py` — captured SPA
@@ -100,10 +103,10 @@ cache (`~/.cache/flight-cli/.matrix-key`) or a Matrix brownout (see
 4. **Diverge with a comment.** When tuning a default below (or deviating
    from the stack table), leave `# DIVERGE: <reason>` so future readers
    don't "fix" it back. Existing divergences from the template default:
-   - stdlib `logging` instead of `structlog` — CLI tool with rich-handler
-     output; structured logging would target a sink we don't have.
    - Coverage gate at 0% — golden-file regression tests; fixture parity
      is the signal, not line coverage.
+   - See "Appropriate divergence" table for the Profile-A→A/B-edge
+     tunings (reportAny, Pydantic `extra` on boundary models).
 
 5. **Ask when guessing.** Unknown Matrix wire shape, new SPA capture
    needed, irresolvable type error → ask. Don't invent the shape; capture
