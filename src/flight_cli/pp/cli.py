@@ -1,7 +1,8 @@
-"""CLI surface for PointsPath: `auth pp ...` subcommands + `--pp` augmentation.
+"""CLI surface for PointsPath: `auth pp ...` subcommands + implicit augmentation.
 
-The augmentation entry point (`run_pp_for_search`) is what the existing `fare`
-command calls when `--pp` is on. It runs PP airline-search in parallel with the
+The augmentation entry point (`run_pp_for_search`) is wired into `search` on
+the Matrix backend: it runs implicitly whenever valid PP tokens are loaded
+(opt out with `--no-pp`). Runs PP airline-search in parallel with the
 finished Matrix result, joins via match.py, and renders.
 """
 

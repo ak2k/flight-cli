@@ -1,6 +1,6 @@
 ---
 name: flight-search
-description: Use when a user asks to find flights, search airfare, compare prices across dates, or invoke the `flight` CLI. Translates intent (origin, destination, dates, constraints like alliance / cabin / duration / layovers / region-rather-than-airport) into the right `flight fare` / `calendar` / `detail` / `gflight` invocation with correct `--routing`, `--extension`, and multi-airport args. Provides Matrix's routing language, extension codes, and IATA metro/region groupings — knowledge that's not in `flight --help`.
+description: Use when a user asks to find flights, search airfare, compare prices across dates, or invoke the `flight` CLI. Translates intent (origin, destination, dates, constraints like alliance / cabin / duration / layovers / region-rather-than-airport) into the right `flight search` / `calendar` / `detail` invocation with correct `--routing`, `--extension`, `--backend`, and multi-airport args. Provides Matrix's routing language, extension codes, and IATA metro/region groupings — knowledge that's not in `flight --help`.
 ---
 
 # Flight search with flight-cli
@@ -15,17 +15,18 @@ intent into the right invocation **on the first try**.
 
 | Command | Purpose |
 |---|---|
-| `flight fare ORIGIN DEST --dep YYYY-MM-DD [--return YYYY-MM-DD]` | Specific-date search. 1 leg = one-way; 2 = round-trip; multi-city via `--slice`. |
-| `flight calendar ORIGIN DEST --start YYYY-MM-DD [--end ...] [-d 5-7]` | Lowest-fare grid across a date window. Default round-trip; `--one-way` flips. |
-| `flight detail ORIGIN DEST --dep YYYY-MM-DD --start ... --end ...` | Phase-2 of the calendar flow: full itineraries for a date picked from the grid. |
-| `flight gflight ORIGIN DEST --dep YYYY-MM-DD` | Google Flights handoff via `fli`. Useful for booking links. |
+| `flight search ORIGIN DEST --dep YYYY-MM-DD [--return YYYY-MM-DD]` | Specific-date search. Auto-picks Google Flights for plain cash queries and ITA Matrix when a Matrix-only flag is set (routing/extension/multi-city slice/time-of-day/extra pax types/PP config). Force with `--backend matrix\|gflight`. |
+| `flight calendar ORIGIN DEST --start YYYY-MM-DD [--end ...] [-d 5-7]` | Lowest-fare grid across a date window. Matrix only. Default round-trip; `--one-way` flips. |
+| `flight detail ORIGIN DEST --dep YYYY-MM-DD --start ... --end ...` | Phase-2 of the calendar flow: full itineraries for a date picked from the grid. Matrix only. |
 | `flight airport QUERY` | IATA / partial-name autocomplete. |
+| `flight fare` / `flight gflight` | **Deprecated** aliases for `search --backend matrix` / `search --backend gflight` — still work for one release; emit a deprecation warning. Prefer `flight search` for new invocations. |
 
-Global flags (every command):
+Global flags (every search-printing command):
 - `-v` / `-vv` — verbose logging (cache hits, retries) to stderr
 - `--json` — emit raw response JSON
 - `--no-cache` — bypass the on-disk response cache
 - `--matrix-url` / `--google-url` — toggle deep-link emission
+- `--no-pp` (Matrix backend only) — skip the PointsPath award overlay even if tokens are logged in (PP runs implicitly when tokens are present)
 
 ## Intent → flag cheat sheet
 
@@ -52,8 +53,10 @@ Global flags (every command):
 | "from New York City" | `NYC` (Matrix-native metro code; expands to JFK/LGA/EWR) |
 | "from anywhere in the US East Coast" | `JFK,LGA,EWR,BOS,IAD,DCA,BWI,PHL,ATL,MIA` (see Airport groups) |
 | "to Europe" | `LHR,CDG,FRA,AMS,IST,MAD,BCN,FCO,MUC,ZRH,VIE,CPH,DUB` (see Airport groups) |
-| "I want to see prices across dates" | `flight calendar` not `flight fare` |
+| "I want to see prices across dates" | `flight calendar` not `flight search` |
 | "what's the cheapest week to fly?" | `flight calendar` with a wide `--end` |
+| "just give me Google Flights booking results" | `flight search` (auto-picks gflight for plain cash queries) |
+| "force Matrix even though my query is plain" | `flight search --backend matrix` |
 
 ## Routing language (`--routing`) — compressed reference
 
@@ -240,13 +243,17 @@ Full reference: [airport_groups.md](../../docs/memories/airport_groups.md).
 ### Example 1: simple round-trip with stops cap
 User: "find me round-trip JFK to LHR in mid-August, max 1 stop"
 ```bash
-flight fare JFK LHR --dep 2026-08-15 --return 2026-08-22 --stops 1
+flight search JFK LHR --dep 2026-08-15 --return 2026-08-22 --stops 1
 ```
+This is a plain cash query, so `flight search` auto-picks the Google Flights
+backend (faster, broader carrier coverage). To force ITA Matrix instead — say
+the user is logged into PointsPath and wants the award overlay — add
+`--backend matrix`.
 
 ### Example 2: alliance + cabin + duration
 User: "Star Alliance from New York to Munich, business class, max 14 hours per direction"
 ```bash
-flight fare NYC MUC --dep 2026-09-05 --return 2026-09-12 \
+flight search NYC MUC --dep 2026-09-05 --return 2026-09-12 \
   --cabin business \
   --extension 'ALLIANCE star-alliance; MAXDUR 14:00; +CABIN 2'
 ```
@@ -260,7 +267,7 @@ flight calendar NYC PAR --start 2026-10-01 --end 2026-10-31 -d 5-7
 ### Example 4: connect via a specific airport
 User: "I want to fly JFK to Tokyo via Seoul on Star Alliance"
 ```bash
-flight fare JFK TYO --dep 2026-11-01 \
+flight search JFK TYO --dep 2026-11-01 \
   --routing 'F* X:ICN F*' \
   --extension 'ALLIANCE star-alliance'
 ```
@@ -268,7 +275,7 @@ flight fare JFK TYO --dep 2026-11-01 \
 ### Example 5: avoid red-eyes + overnight layovers + props
 User: "I hate red-eyes and don't want to overnight in a connecting city, and please no propeller planes"
 ```bash
-flight fare LAX BOS --dep 2026-07-04 \
+flight search LAX BOS --dep 2026-07-04 \
   --extension '-REDEYES; -OVERNIGHTS; -PROPS'
 ```
 
@@ -283,7 +290,7 @@ flight calendar 'JFK,LGA,EWR,BOS,IAD,DCA,BWI,PHL' \
 ### Example 7: specific carrier + connection time
 User: "JFK to LHR on Lufthansa-operated metal only, with at least 1.5 hours between flights"
 ```bash
-flight fare JFK LHR --dep 2026-08-15 --return 2026-08-22 \
+flight search JFK LHR --dep 2026-08-15 --return 2026-08-22 \
   --routing 'O:LH+' \
   --extension 'MINCONNECT 1:30'
 ```
@@ -291,14 +298,14 @@ flight fare JFK LHR --dep 2026-08-15 --return 2026-08-22 \
 ### Example 8: morning departure preference
 User: "I want a morning departure from JFK to LHR"
 ```bash
-flight fare JFK LHR --dep 2026-08-15 --return 2026-08-22 \
+flight search JFK LHR --dep 2026-08-15 --return 2026-08-22 \
   --depart-times morning
 ```
 
 ### Example 9: multi-city (always pin to one alliance)
 User: "round-the-world: NYC→Frankfurt→Singapore→Tokyo→NYC, all in August"
 ```bash
-flight fare --slice 'EWR-FRA:2026-08-01' \
+flight search --slice 'EWR-FRA:2026-08-01' \
             --slice 'FRA-SIN:2026-08-08' \
             --slice 'SIN-NRT:2026-08-15' \
             --slice 'NRT-EWR:2026-08-22' \
@@ -308,12 +315,12 @@ flight fare --slice 'EWR-FRA:2026-08-01' \
 ### Example 10: fare-basis (use wildcard `-` suffix or `BC=`)
 User: "find me business class (J-class) JFK to LHR"
 ```bash
-flight fare JFK LHR --dep 2026-08-15 --return 2026-08-22 \
+flight search JFK LHR --dep 2026-08-15 --return 2026-08-22 \
   --extension 'F BC=j'
 ```
 AA in W class:
 ```bash
-flight fare JFK LHR --dep 2026-08-15 --return 2026-08-22 \
+flight search JFK LHR --dep 2026-08-15 --return 2026-08-22 \
   --extension 'F aa..w-'
 ```
 
@@ -334,8 +341,8 @@ Recovery sequence:
    `--routing`, narrow fare-basis, alliance restriction) and rerun.
 2. **Narrow date range OR origin/destination range, not both.** Wide ×
    wide queries are most brownout-prone.
-3. **Fall back from `flight calendar` to `flight fare`** on a specific
-   date — same shape, fewer moving parts.
+3. **Fall back from `flight calendar` to `flight search --backend matrix`**
+   on a specific date — same shape, fewer moving parts.
 4. **For multi-city**, always include `--extension 'ALLIANCE <name>'` so
    the solver can construct a single ticketable fare. Cross-alliance
    multi-city silently returns nothing even when each leg has flights.

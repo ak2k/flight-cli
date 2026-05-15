@@ -21,10 +21,20 @@ Requires Python 3.11+.
 ## What it does
 
 ```sh
-# specific-date search — one-way, round-trip, or multi-city
-flight fare JFK LHR --dep 2026-08-15 --return 2026-08-22
+# specific-date search — auto-picks the backend.
+# Plain cash search → Google Flights (fast, broad coverage).
+flight search JFK LHR --dep 2026-08-15 --return 2026-08-22
 
-# lowest-fare calendar across a date window (one API call returns
+# Power-user flag → auto-flips to ITA Matrix (routing language,
+# extension codes, multi-city slices, time-of-day filters all live here).
+flight search MIA PAR --dep 2026-06-15 \
+    --routing "LH+" --ext "MAXCONNECT 2:00"
+
+# Force a backend explicitly:
+flight search JFK LHR --dep 2026-08-15 --backend matrix
+flight search JFK LHR --dep 2026-08-15 --backend gflight
+
+# lowest-fare calendar across a date window (one Matrix call returns
 # 30 days × N durations of priced options)
 flight calendar MIA PAR --start 2026-06-07 -d 5-7 \
     --routing "LH+" --ext "MAXCONNECT 2:00"
@@ -33,16 +43,18 @@ flight calendar MIA PAR --start 2026-06-07 -d 5-7 \
 flight detail MIA PAR --dep 2026-06-01 --return 2026-06-07 \
     --routing "LH+" --ext "MAXCONNECT 2:00" --duration 5-7
 
-# hand off to Google Flights for actual booking results
-flight gflight JFK LHR --dep 2026-08-15 --return 2026-08-22
-
 # IATA autocomplete
 flight airport LON
 
-# overlay PointsPath award prices on cash search results (requires PointsPath
-# subscription + one-time `flight auth pp login`)
-flight fare JFK LHR --dep 2026-08-15 --pp
+# PointsPath award overlay is implicit on the Matrix backend if you've
+# logged in (`flight auth pp login --tokens-file ...`). Use --no-pp to skip,
+# --pp-only to show only the award table.
+flight search JFK LHR --dep 2026-08-15 --backend matrix
 ```
+
+`flight fare` and `flight gflight` are deprecated aliases for `flight search
+--backend matrix` and `flight search --backend gflight` respectively. They
+still work for one release; --help marks them deprecated.
 
 Every result-printing command supports:
 
@@ -61,21 +73,33 @@ Every result-printing command supports:
 
 ## PointsPath integration
 
-`flight fare ... --pp` overlays award prices from [PointsPath](https://pointspath.com) onto the cash itineraries Matrix returns. For each cash flight, you see the airline-native miles cost, taxes, the banks whose points transfer to that program, and cents-per-mile valuation. Round-trips render one table per leg.
+When you've logged in (`flight auth pp login --tokens-file ...`), the
+Matrix backend automatically overlays award prices from
+[PointsPath](https://pointspath.com) onto each cash itinerary it returns:
+the airline-native miles cost, taxes, the banks whose points transfer to
+that program, and cents-per-mile valuation. Round-trips render one table
+per leg.
+
+PP is currently Matrix-only — the AwardProvider abstraction that would
+let it overlay Google Flights results too is a planned follow-up.
 
 ```sh
-# one-way with award overlay
-flight fare JFK LHR --dep 2026-08-15 --pp
+# implicit overlay — any --backend matrix search adds the award table
+# (drop --backend matrix when a Matrix-only flag like --routing is set;
+# auto-detect picks Matrix on its own)
+flight search JFK LHR --dep 2026-08-15 --backend matrix
+
+# skip the overlay even when logged in
+flight search JFK LHR --dep 2026-08-15 --backend matrix --no-pp
 
 # limit the cabin set (default: Economy + Business)
-flight fare JFK LHR --dep 2026-08-15 --pp --pp-cabin Economy
+flight search JFK LHR --dep 2026-08-15 --backend matrix --pp-cabin Economy
 
 # limit the airline set (default: discovered from your account's enabled list)
-flight fare JFK LHR --dep 2026-08-15 --pp --pp-airlines United,Delta,American
+flight search JFK LHR --dep 2026-08-15 --backend matrix --pp-airlines United,Delta,American
 
-# award-only listing (still runs Matrix to show the cash table; pass --pp-only
-# to skip the cash render)
-flight fare JFK LHR --dep 2026-08-15 --pp --pp-only
+# award-only listing (skip the Matrix cash table render)
+flight search JFK LHR --dep 2026-08-15 --backend matrix --pp-only
 ```
 
 ### Setup
@@ -147,11 +171,11 @@ src/flight_cli/
   cli.py           typer commands
   models.py        response models
   _http.py         httpx + curl_cffi + aiolimiter + stamina
-  pp/              PointsPath integration (--pp on `fare` + `auth pp` subapp)
+  pp/              PointsPath integration (implicit on `search` matrix backend + `auth pp` subapp)
     auth.py        Supabase JWT store + refresh
     client.py      airline-search / pricing-info / extension-config (cached)
     match.py       cash↔award join by (flight#, date)
-    cli.py         auth subapp + augmenter for `fare`
+    cli.py         auth subapp + augmenter wired into `search`
     models.py      PointsPath response shapes
 tests/
   fixtures/        captured SPA wire bodies (golden files)
