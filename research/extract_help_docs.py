@@ -91,7 +91,149 @@ SECTIONS = [
     ("Aircraft Types",  ["Code", "Parent", "Aircraft"],
         '"AT4"',                'Yunshuji-5'),
 ]
-SKIP_HEADERS = {"Syntax", "Code", "CODE", "Aircraft Name"}
+SKIP_HEADERS = {"Syntax", "Code", "CODE", "Aircraft Name", "Format",
+                "Definition", "Term", "Example", "Results"}
+
+
+class PermissiveGlobals(dict):
+    """For the routing-codes V functions: any unknown name (R, du, etc.)
+    becomes a no-op callable returning itself, so chained calls don't blow up."""
+    def __missing__(self, k):
+        stub: object = None
+        def stub_fn(*_a, **_kw): return stub
+        stub = stub_fn
+        return stub
+
+
+def _eval_into_tree(slice_src: str, extras: dict) -> dict:
+    """Run `slice_src` as a Python tuple-expression with L/Y/Q[+extras]
+    stubs that build a tree; return the root."""
+    root: dict = {"tag": "root", "children": []}
+    stack: list[dict] = [root]
+    def L(_n, tag, *_):
+        node = {"tag": tag, "children": []}
+        stack[-1]["children"].append(node)
+        stack.append(node)
+        return L
+    def Y(_n, text):
+        stack[-1]["children"].append(text)
+    def Q():
+        if len(stack) > 1: stack.pop()
+        return Q
+    g = PermissiveGlobals({"L": L, "Y": Y, "Q": Q, **extras})
+    exec(f"({slice_src.rstrip(', \\t\\n')},)", g)
+    return root
+
+
+def _tree_rows(root: dict) -> list[list[str]]:
+    def text(n) -> str:
+        return n if isinstance(n, str) else "".join(text(c) for c in n["children"])
+    rows: list[list[str]] = []
+    def walk(n):
+        if isinstance(n, str): return
+        if n["tag"] == "tr":
+            cells = [text(c).strip() for c in n["children"]
+                     if isinstance(c, dict) and c["tag"] in ("td", "th")]
+            if any(cells): rows.append(cells)
+        for c in n["children"]: walk(c)
+    walk(root)
+    return rows
+
+
+def extract_routing_codes(bundle: str) -> list[tuple[str, list[list[str]]]]:
+    """The matrix-routing-codes-dialog has THREE tabs (Syntax, Examples,
+    Glossary) rendered by three `V:function(a){a&1&&(<render>)}` calls. The
+    `<render>` body uses `ux(node_id, str_idx)` to insert localized strings
+    from an `Aa:function(){return [strings...]}` array — extract that array
+    first, then eval each V's body with a `ux` stub that looks up
+    `strings[str_idx]`."""
+    scope = bundle.find('matrix-routing-codes-dialog')
+    if scope < 0: return []
+
+    # 1) Strings array
+    aa = bundle.find('Aa:function(){return[', scope) + len('Aa:function(){return')
+    pos, depth = aa, 1
+    while pos < len(bundle) and depth:
+        pos += 1
+        c = bundle[pos]
+        if c == '[': depth += 1
+        elif c == ']': depth -= 1
+        elif c == '"':
+            pos += 1
+            while pos < len(bundle) and bundle[pos] != '"':
+                if bundle[pos] == '\\': pos += 1
+                pos += 1
+    strings_raw = eval(bundle[aa:pos+1], {"__builtins__": {}})
+    # Some entries are nested lists (CSS class metadata); coerce to string.
+    strings = [s if isinstance(s, str) else "" for s in strings_raw]
+
+    def ux(_n, idx):
+        # closure rebound per-V-call below
+        pass
+
+    # 2) The first `V:function(a){a&1&&(<calls>)}` renders the entire
+    # mat-tab-group — Syntax / Examples / Glossary tabs are all inside.
+    # Body `<calls>` is pure render-call comma-expression (no `{`/`}` of
+    # its own), so the first `}` after `&&(` closes the V function and the
+    # `)` just before it closes the body.
+    v = bundle.find('V:function(', pos)
+    if v < 0: return []
+    body_open = bundle.find('&&(', v) + 3
+    body_close = bundle.find('}', body_open) - 1
+    if bundle[body_close] != ')': return []
+    body = bundle[body_open:body_close]
+
+    results: list[tuple[str, list[list[str]]]] = []
+    for tab_name in ("__combined__",):  # single iteration
+        # Build a tree with ux() looking up our strings array
+        captured: list = []
+        # Set up parser inline so we can access strings via closure
+        root: dict = {"tag": "root", "children": []}
+        stack: list[dict] = [root]
+        def L(_n, tag, *_, _s=stack):
+            node = {"tag": tag, "children": []}
+            _s[-1]["children"].append(node)
+            _s.append(node)
+            return L
+        def Y(_n, text, _s=stack):
+            _s[-1]["children"].append(text)
+        def Q(_s=stack):
+            if len(_s) > 1: _s.pop()
+            return Q
+        def ux(_n, idx, _s=stack, _strs=strings):
+            if 0 <= idx < len(_strs):
+                _s[-1]["children"].append(_strs[idx])
+        g = PermissiveGlobals({"L": L, "Y": Y, "Q": Q, "ux": ux})
+        try:
+            exec(f"({body.rstrip(', \\t\\n')},)", g)
+        except SyntaxError as e:
+            print(f"  [skip routing-codes: {e}]", file=sys.stderr)
+            return []
+    all_rows = _tree_rows(root)
+
+    # Split combined output on header rows. Each tab's table starts with
+    # its own header row (these are the only places these exact 2-col
+    # headers appear).
+    markers = {
+        ("Format", "Definition"): "Syntax",
+        ("Example", "Results"):   "Examples",
+        ("Term", "Definition"):   "Glossary",
+    }
+    sections: list[tuple[str, list[list[str]]]] = []
+    cur_name: str | None = None
+    cur_rows: list[list[str]] = []
+    for r in all_rows:
+        key = tuple(c.strip() for c in r[:2])
+        if key in markers:
+            if cur_name:
+                sections.append((f"Routing Codes — {cur_name}", cur_rows))
+            cur_name = markers[key]
+            cur_rows = []
+        elif cur_name:
+            cur_rows.append(r)
+    if cur_name:
+        sections.append((f"Routing Codes — {cur_name}", cur_rows))
+    return sections
 
 
 def to_md(name: str, header: list[str], rows: list[list[str]]) -> str:
@@ -120,6 +262,14 @@ def main() -> None:
     ]
     for name, header, s, e in SECTIONS:
         rs = rows_in(bundle, s, e)
+        print(f"   {name}: {len(rs)} rows", file=sys.stderr)
+        pieces.append(to_md(name, header, rs))
+
+    # Routing-codes dialog: three tabs rendered by separate V functions.
+    for name, rs in extract_routing_codes(bundle):
+        header = (["Term", "Definition"] if name.endswith("Glossary")
+                  else ["Format", "Definition"] if name.endswith("Syntax")
+                  else ["Example", "Results"])
         print(f"   {name}: {len(rs)} rows", file=sys.stderr)
         pieces.append(to_md(name, header, rs))
 
