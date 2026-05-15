@@ -8,6 +8,8 @@ correlating against Google Flights' detail-panel labels — see
 
 from __future__ import annotations
 
+from typing import Any
+
 from flight_cli._gflight_ids import (
     LegAmenities,
     _decode_power,
@@ -16,7 +18,6 @@ from flight_cli._gflight_ids import (
     _parse_leg_amenities,
     _parse_pitch,
 )
-
 
 # ─────────────────────────── pitch parsing ─────────────────────────────
 
@@ -131,11 +132,11 @@ def test_video_byod_via_idx10() -> None:
 def test_video_seatback_beats_byod() -> None:
     """When multiple delivery channels are set, the most-premium seatback
     option wins — matches Google's label priority."""
-    arr = [None] * 12
+    arr: list[Any] = [None] * 12
     arr[8] = True
     arr[10] = True
     assert _decode_video(arr) == "stream"
-    arr2 = [None] * 12
+    arr2: list[Any] = [None] * 12
     arr2[9] = True
     arr2[10] = True
     assert _decode_video(arr2) == "ondemand"
@@ -156,14 +157,14 @@ def test_video_robust_to_short_array() -> None:
 
 def _build_leg(
     *,
-    amenities: list | None = None,
+    amenities: list[Any] | None = None,
     legroom_class: object = 1,
     pitch: object = "31 in",
     cabin: object = 1,
     aircraft: object = "Airbus A330",
-) -> list:
+) -> list[Any]:
     """Construct a 33-element leg tuple with the indices under test populated."""
-    leg: list = [None] * 33
+    leg: list[Any] = [None] * 33
     leg[12] = amenities
     leg[13] = legroom_class
     leg[14] = pitch
@@ -261,7 +262,7 @@ def test_premium_cabin_suite_paid_wifi() -> None:
 
 def test_missing_indices_handled_gracefully() -> None:
     """Truncated leg: parser shouldn't raise, just returns None for absent fields."""
-    short_leg: list = [None] * 13
+    short_leg: list[Any] = [None] * 13
     short_leg[12] = None
     a = _parse_leg_amenities(short_leg)
     assert a.aircraft is None

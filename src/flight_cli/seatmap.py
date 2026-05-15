@@ -14,8 +14,8 @@ Eager batch fetches across a result set are opt-in.
 
 from __future__ import annotations
 
+import datetime as _dt
 import urllib.parse
-from datetime import date as Date
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -25,13 +25,13 @@ _SEATMAP_API = "https://www.travelarrow.io/api/s"
 _SEATMAPS_BASE = "https://seatmaps.com"
 
 
-def _format_date(d: Date | str) -> str:
+def _format_date(d: _dt.date | str) -> str:
     """Legrooms+ extension sends `M/D/YYYY` (no zero-padding) — confirmed
     from load_flight_data.js: `date=${n}/${i}/${e}` where [e, n, i] = raw[20]
     is [year, month, day]. The travelarrow API tolerates ISO too, but we
     match the extension's wire shape exactly to minimize divergence risk."""
     if isinstance(d, str):
-        d = Date.fromisoformat(d[:10])
+        d = _dt.date.fromisoformat(d[:10])
     return f"{d.month}/{d.day}/{d.year}"
 
 
@@ -41,7 +41,7 @@ def seatmap_api_url(
     dest: str,
     flight_number: str,
     carrier: str,
-    date: Date | str,
+    date: _dt.date | str,
     aircraft: str | None = None,
 ) -> str:
     """Build the travelarrow.io/api/s URL for a single physical leg.
@@ -71,7 +71,7 @@ def fetch_seatmap_url(
     dest: str,
     flight_number: str,
     carrier: str,
-    date: Date | str,
+    date: _dt.date | str,
     aircraft: str | None = None,
     timeout: float = 10.0,
 ) -> str | None:

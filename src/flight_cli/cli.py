@@ -661,8 +661,10 @@ _CABIN_LETTER = {"ECONOMY": "Y", "PREMIUM": "W", "BUSINESS": "J", "FIRST": "F"}
 # 1-col Unicode pairs so the plug-vs-USB and stream-vs-ondemand distinctions
 # don't bloat the column. See `_LEGROOM_KEY` for the rendered legend.
 _WIFI_GLYPH = {"free": "📶", "paid": "[yellow]📶$[/]"}
-_POWER_GLYPH = {"plug": "↯", "usb": "⌁"}  # ↯ is more lightning-y (=plug); ⌁ reads more like a connector (=USB)
-_VIDEO_GLYPH = {"stream": "▶", "ondemand": "▷", "byod": "◰"}  # ◰ = quadrant square, evokes a phone screen
+# ↯ is more lightning-y (= plug power); ⌁ reads more like a connector (= USB).
+_POWER_GLYPH = {"plug": "↯", "usb": "⌁"}
+# ◰ (quadrant square) evokes a phone screen — stands in for BYOD streaming.
+_VIDEO_GLYPH = {"stream": "▶", "ondemand": "▷", "byod": "◰"}
 _LEGROOM_KEY = (
     "[dim]Legroom glyphs: "
     f"{_WIFI_GLYPH['free']} free wifi · "
@@ -1344,7 +1346,10 @@ def airport(
 def seatmap(
     origin: Annotated[str, typer.Argument(help="Origin IATA")],
     destination: Annotated[str, typer.Argument(help="Destination IATA")],
-    flight: Annotated[str, typer.Argument(help="Flight number, bare or IATA-prefixed (e.g. AA100)")],
+    flight: Annotated[
+        str,
+        typer.Argument(help="Flight number, bare or IATA-prefixed (e.g. AA100)"),
+    ],
     date: Annotated[str, typer.Option("--date", help="Flight date YYYY-MM-DD")],
     aircraft: Annotated[
         str | None,
@@ -1352,11 +1357,17 @@ def seatmap(
     ] = None,
     carrier: Annotated[
         str | None,
-        typer.Option("--carrier", help="Carrier IATA. Inferred from flight# if it starts with letters."),
+        typer.Option(
+            "--carrier",
+            help="Carrier IATA. Inferred from flight# if it starts with letters.",
+        ),
     ] = None,
     fetch: Annotated[
         bool,
-        typer.Option("--fetch/--no-fetch", help="Resolve to seatmaps.com URL via one HTTP GET (default)."),
+        typer.Option(
+            "--fetch/--no-fetch",
+            help="Resolve to seatmaps.com URL via one HTTP GET (default).",
+        ),
     ] = True,
 ) -> None:
     """Get a seatmaps.com URL for a specific flight.
@@ -1397,7 +1408,7 @@ def seatmap(
             date=parsed,
             aircraft=aircraft,
         )
-    except Exception as e:  # noqa: BLE001 - third-party undocumented errors; show + degrade
+    except Exception as e:
         err.print(f"[red]Seatmap lookup failed:[/] {e}")
         console.print(f"[dim]API URL:[/] {api_url}")
         raise typer.Exit(1) from e
