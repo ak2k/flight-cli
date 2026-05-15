@@ -45,6 +45,12 @@ go into detail and are loaded on demand.
   the wrong hint shape. Recipe (real `data[0][17]` from fli + IATA-prefixed
   flight#, human-readable airline name, space-separated times), empirical
   proof, and wire-through implementation notes.
+- [legroom_recipe.md](legroom_recipe.md) — Per-leg legroom + amenities +
+  aircraft come back in-band in Google Flights' own response (no
+  travelarrow.io API call needed for the data itself). Index map for
+  `data[0][2][i]` 12-17, enum decodings, amenity bit positions, and the
+  seatmap URL contract (`/api/s` with M/D/YYYY dates). Read before
+  touching `_gflight_ids._parse_leg_amenities` or `seatmap.py`.
 
 ## When to add a new memory file
 
