@@ -90,11 +90,12 @@ ignore = [
     "N",      # test function names may mirror wire-field names (camelCase)
     "PLC0415", # internal lazy imports are fine for accessing private helpers
 ]
-# DIVERGE: wire.py mirrors Matrix's JSON shape directly with camelCase attrs
-# (instead of snake_case + Field(alias=...) on every field). N815 doesn't
-# apply to models.py either — its alias= strings aren't attr names — or to
-# domain.py, which is snake_case throughout.
+# DIVERGE: wire.py and pp/models.py mirror their respective upstream JSON
+# shapes directly with camelCase attrs (instead of snake_case + Field(alias=...)
+# on every field). Profile-B-edge: reverse-engineered, undocumented upstreams
+# (Matrix, PointsPath) — the attr names ARE the contract here.
 "src/flight_cli/wire.py" = ["N815"]
+"src/flight_cli/pp/models.py" = ["N815"]
 
 [tool.ruff.format]
 docstring-code-format = true

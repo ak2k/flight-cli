@@ -37,6 +37,7 @@ from .domain import (
 )
 from .links import google_flights_url, matrix_deep_link
 from .log import configure as configure_logging
+from .pp.cli import LegQuery, auth_app, run_pp_for_search
 
 if TYPE_CHECKING:
     from .models import CalendarResult, Location, SearchResult, Slice
@@ -44,6 +45,7 @@ if TYPE_CHECKING:
 # Tuple-length sentinels for `--slice` parser (`ORIGIN-DEST:DATE[:r=...:e=...]`).
 _SLICE_MIN_PARTS = 2
 _SLICE_MAX_PARTS = 3
+_ROUND_TRIP_LEGS = 2  # 2 legs = round-trip; 1 = one-way; >2 = multi-city
 
 # Matrix returns prices as 'USD877.00' (ISO-4217 prefix + decimal). We split
 # the prefix off for rendering so tables can show the currency once in the
@@ -67,6 +69,7 @@ def _amount(s: str | None) -> str:
 app = typer.Typer(
     add_completion=False, rich_markup_mode="rich", help="CLI for ITA Matrix's Alkali backend."
 )
+app.add_typer(auth_app, name="auth")
 console = Console()
 err = Console(stderr=True)
 
@@ -403,6 +406,30 @@ def fare(
     matrix_url: bool = typer.Option(True, "--matrix-url/--no-matrix-url"),
     google_url: bool = typer.Option(True, "--google-url/--no-google-url"),
     no_cache: bool = typer.Option(False, "--no-cache"),
+    pp: bool = typer.Option(
+        False,
+        "--pp",
+        help="Augment results with PointsPath award prices (requires `auth pp login`).",
+    ),
+    pp_only: bool = typer.Option(
+        False,
+        "--pp-only",
+        help="Show only PointsPath award availability; skip Matrix table render.",
+    ),
+    pp_airlines: str | None = typer.Option(
+        None,
+        "--pp-airlines",
+        help=(
+            "CSV of PointsPath airline names (e.g. United,Delta). "
+            "Default: discovered from your account's enabled airline set "
+            "via /api/extension-config + /api/pricing-info."
+        ),
+    ),
+    pp_cabin: str | None = typer.Option(
+        None,
+        "--pp-cabin",
+        help="CSV of cabins to query (Economy,Business,First). Default: Economy,Business.",
+    ),
 ) -> None:
     """Specific-date search. One leg = one-way, two = round-trip, N = multi-city."""
     if slice_specs:
@@ -451,10 +478,49 @@ def fare(
     search = SpecificDateSearch(legs=legs, options=opts)
     # SpecificDateSearch → SearchResult by client._parse_response dispatch.
     res = cast("SearchResult", _run(search, rps, impersonate, no_cache))
-    if json_out:
+    if json_out and not pp:
         sys.stdout.write(json.dumps(res.raw, indent=2))
         return
-    _render_search(res)
+    if not pp_only:
+        _render_search(res)
+    if pp:
+        # Build one PP query per Matrix leg. PP's airline-search is per-direction,
+        # so a round-trip → 2 queries, multi-city → N queries. Each LegQuery
+        # carries its slice_index so the matcher knows which Itinerary slice to
+        # join against.
+        pp_legs: list[LegQuery] = []
+        for i, leg in enumerate(legs):
+            if not leg.date or not leg.origins or not leg.destinations:
+                continue  # shouldn't happen for SpecificDateSearch; defensive
+            n = len(legs)
+            label_kind = (
+                "outbound"
+                if i == 0 and n > 1
+                else "return"
+                if i == 1 and n == _ROUND_TRIP_LEGS
+                else f"leg {i + 1}"
+                if n > _ROUND_TRIP_LEGS
+                else "one-way"
+            )
+            iso = leg.date.isoformat()
+            pp_legs.append(
+                LegQuery(
+                    origin=leg.origins[0],
+                    destination=leg.destinations[0],
+                    date=iso,
+                    slice_index=i,
+                    label=f"{label_kind} {leg.origins[0]}→{leg.destinations[0]} {iso}",
+                )
+            )
+        run_pp_for_search(
+            res,
+            legs=pp_legs,
+            num_passengers=adults + children + seniors + youth,
+            airlines=pp_airlines,
+            cabins=pp_cabin,
+            pp_only=pp_only,
+            json_out=json_out,
+        )
     _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
 
 

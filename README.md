@@ -38,6 +38,10 @@ flight gflight JFK LHR --dep 2026-08-15 --return 2026-08-22
 
 # IATA autocomplete
 flight airport LON
+
+# overlay PointsPath award prices on cash search results (requires PointsPath
+# subscription + one-time `flight auth pp login`)
+flight fare JFK LHR --dep 2026-08-15 --pp
 ```
 
 Every result-printing command supports:
@@ -54,6 +58,57 @@ Every result-printing command supports:
 - **Multi-airport**: `flight calendar MIA VIE,PAR,FCO,MAD --start ...` — search across N European cities at once.
 - **Time-of-day filters** (`--depart-times`, `--return-times`): `morning,evening` etc.
 - **Calendar-mode duration ranges** (`-d 5-7`): one search returns prices for 5-, 6-, and 7-night trips at every starting day.
+
+## PointsPath integration
+
+`flight fare ... --pp` overlays award prices from [PointsPath](https://pointspath.com) onto the cash itineraries Matrix returns. For each cash flight, you see the airline-native miles cost, taxes, the banks whose points transfer to that program, and cents-per-mile valuation. Round-trips render one table per leg.
+
+```sh
+# one-way with award overlay
+flight fare JFK LHR --dep 2026-08-15 --pp
+
+# limit the cabin set (default: Economy + Business)
+flight fare JFK LHR --dep 2026-08-15 --pp --pp-cabin Economy
+
+# limit the airline set (default: discovered from your account's enabled list)
+flight fare JFK LHR --dep 2026-08-15 --pp --pp-airlines United,Delta,American
+
+# award-only listing (still runs Matrix to show the cash table; pass --pp-only
+# to skip the cash render)
+flight fare JFK LHR --dep 2026-08-15 --pp --pp-only
+```
+
+### Setup
+
+PointsPath requires a paid subscription (free tier is the browser extension only). Today the only login mode is to import tokens captured from a logged-in Chrome session:
+
+```sh
+# 1. Capture your Supabase tokens from the browser. The extension is on
+#    pointspath.com under cookies named `sb-hxjqzkcirzhjvtubefie-auth-token.0/.1`;
+#    reassemble and save as JSON like:
+#    {"access_token": "...", "refresh_token": "...", "user": {"email": "..."}}
+# 2. Import into the local token store:
+flight auth pp login --tokens-file ~/Downloads/pp_tokens.json
+flight auth pp whoami     # confirm
+```
+
+A browser-based `flight auth pp login` is planned but not yet shipped; once you have tokens cached, refresh is automatic for the lifetime of your refresh token.
+
+### How airline selection works
+
+On each `--pp` invocation (cached for 24h / 7d respectively):
+
+1. `GET /api/pricing-info` — universe of supported airlines + their transfer-partner banks
+2. `GET /api/extension-config` — your account's enabled feature flags
+3. The airlines fanned out are: pricing-info entries minus those with `enable<Airline>=0` in the feature flags. Always-on airlines (American, Delta, United, JetBlue, Alaska) have no toggle and are always included.
+
+Pass `--pp-airlines United,Delta,...` to skip discovery and call only the named set.
+
+### What it doesn't do
+
+- Browser-based login (use `--tokens-file` for now)
+- `calendar --pp` (lowest-fare-calendar overlay) — fan-out is N days × M airlines; deserves its own design
+- Match against airlines we don't yet support (the few in pricing-info but not enabled for your tier are silently skipped)
 
 ## Architecture
 
@@ -72,9 +127,16 @@ src/flight_cli/
   cli.py           typer commands
   models.py        response models
   _http.py         httpx + curl_cffi + aiolimiter + stamina
+  pp/              PointsPath integration (--pp on `fare` + `auth pp` subapp)
+    auth.py        Supabase JWT store + refresh
+    client.py      airline-search / pricing-info / extension-config (cached)
+    match.py       cash↔award join by (flight#, date)
+    cli.py         auth subapp + augmenter for `fare`
+    models.py      PointsPath response shapes
 tests/
   fixtures/        captured SPA wire bodies (golden files)
   test_wire_round_trip.py
+  pp/              PointsPath model + match + helper unit tests
 ```
 
 Run tests with `pytest tests/`.
