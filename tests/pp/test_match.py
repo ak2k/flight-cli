@@ -18,7 +18,9 @@ from flight_cli.models import (
 )
 from flight_cli.pp.match import (
     award_match_key,
+    award_route_time_key,
     cash_match_key,
+    cash_route_time_key,
     join,
 )
 from flight_cli.pp.models import (
@@ -115,6 +117,169 @@ def test_cash_match_key_out_of_range_slice_returns_none():
 def test_award_match_key_normalizes_consistently():
     of = _award("ua 146", "2026-06-09T22:00:00")
     assert award_match_key(of) == ("UA146", "2026-06-09")
+
+
+# ───────────────────────── route+time key ──────────────────────────────────
+
+
+def test_cash_route_time_key_includes_origin_dest_minute():
+    it = _itin(("AA6939", "2026-08-15T18:40:00", "JFK", "LHR"))
+    assert cash_route_time_key(it) == ("JFK", "LHR", "2026-08-15T18:40")
+
+
+def test_cash_route_time_key_uppercases_airports():
+    """IATA codes are case-insensitive on the wire; canonicalize so a malformed
+    'jfk' on one side still matches a proper 'JFK' on the other."""
+    it = _itin(("AA6939", "2026-08-15T18:40:00", "jfk", "lhr"))
+    assert cash_route_time_key(it) == ("JFK", "LHR", "2026-08-15T18:40")
+
+
+def test_cash_route_time_key_handles_space_separated_iso():
+    it = _itin(("AA6939", "2026-08-15 18:40", "JFK", "LHR"))
+    assert cash_route_time_key(it) == ("JFK", "LHR", "2026-08-15T18:40")
+
+
+def test_cash_route_time_key_out_of_range_slice_returns_none():
+    it = _itin(("AA6939", "2026-08-15T18:40:00", "JFK", "LHR"))
+    assert cash_route_time_key(it, slice_index=5) is None
+
+
+def test_cash_route_time_key_works_when_flights_list_is_empty():
+    """Route+time doesn't need flight numbers — it should still produce a
+    key for a slice that has origin/dest/departure but no flights[]."""
+    from flight_cli.models import (
+        Itinerary,
+        ItineraryDetails,
+        Slice,
+        SliceEndpoint,
+    )
+
+    it = Itinerary(
+        itinerary=ItineraryDetails(
+            slices=[
+                Slice(
+                    flights=[],
+                    departure="2026-08-15T18:40:00",
+                    origin=SliceEndpoint(code="JFK"),
+                    destination=SliceEndpoint(code="LHR"),
+                )
+            ],
+        ),
+    )
+    assert cash_route_time_key(it) == ("JFK", "LHR", "2026-08-15T18:40")
+
+
+def test_award_route_time_key_normalizes_consistently():
+    of = _award("BA174", "2026-08-15T18:40:00", origin="JFK", dest="LHR")
+    assert award_route_time_key(of) == ("JFK", "LHR", "2026-08-15T18:40")
+
+
+# ───────────────── codeshare fallback (the work-22az fix) ──────────────────
+
+
+def test_join_codeshare_via_route_time_when_flight_numbers_differ():
+    """Matrix returns the marketing flight number; PP returns the operating
+    flight number for the same physical aircraft. The (flight#, date) key
+    can't bridge them, but the route+time fallback does.
+
+    Real example from a live probe: AA6939 (AA-marketed) ↔ BA174 (BA-operated).
+    """
+    res = SearchResult(
+        solutions=[
+            _itin(("AA6939", "2026-08-15T18:40:00", "JFK", "LHR")),
+        ]
+    )
+    # PP's American airline-search returns BA-operated codeshares under the
+    # OPERATING flight number — this is what we observed in the probe.
+    award_resp = AirlineSearchResponse(
+        outboundFlights=[
+            _award("BA174", "2026-08-15T18:40:00", origin="JFK", dest="LHR"),
+        ]
+    )
+    matches = join(res, {"American": award_resp}, _pricing())
+    assert len(matches[0].awards) == 1
+    assert matches[0].awards[0].flight.firstFlightNumber == "BA174"
+
+
+def test_join_does_not_double_attach_when_both_keys_match():
+    """The non-codeshare case: Matrix and PP both report UA146 at the same
+    time, so both the flight# key AND the route+time key fire. Dedup must
+    keep it to one award per OutboundFlight."""
+    res = SearchResult(
+        solutions=[
+            _itin(("UA146", "2026-06-09T22:00:00", "JFK", "LHR")),
+        ]
+    )
+    award_resp = AirlineSearchResponse(
+        outboundFlights=[
+            _award("UA146", "2026-06-09T22:00:00", origin="JFK", dest="LHR"),
+        ]
+    )
+    matches = join(res, {"United": award_resp}, _pricing())
+    assert len(matches[0].awards) == 1
+
+
+def test_join_route_time_fallback_does_not_match_different_route():
+    """Sanity: a JFK→LHR cash flight at 18:40 must not match a JFK→ORD flight
+    at 18:40, even though times agree."""
+    res = SearchResult(
+        solutions=[
+            _itin(("AA6939", "2026-08-15T18:40:00", "JFK", "LHR")),
+        ]
+    )
+    award_resp = AirlineSearchResponse(
+        outboundFlights=[
+            _award("BA174", "2026-08-15T18:40:00", origin="JFK", dest="ORD"),
+        ]
+    )
+    matches = join(res, {"American": award_resp}, _pricing())
+    assert matches[0].awards == []
+
+
+def test_join_route_time_fallback_requires_minute_precision():
+    """A 5-minute offset must not fall back. (We can broaden to a tolerance
+    window later if real traffic shows minor schedule-source drift.)"""
+    res = SearchResult(
+        solutions=[
+            _itin(("AA6939", "2026-08-15T18:40:00", "JFK", "LHR")),
+        ]
+    )
+    award_resp = AirlineSearchResponse(
+        outboundFlights=[
+            _award("BA174", "2026-08-15T18:45:00", origin="JFK", dest="LHR"),
+        ]
+    )
+    matches = join(res, {"American": award_resp}, _pricing())
+    assert matches[0].awards == []
+
+
+def test_join_route_time_unions_with_flight_number_match():
+    """If two airlines' PP responses describe overlapping award metal —
+    one matches by flight number, the other matches by route+time — both
+    should attach to the same cash itinerary."""
+    res = SearchResult(
+        solutions=[
+            _itin(("AA6939", "2026-08-15T18:40:00", "JFK", "LHR")),
+        ]
+    )
+    award_by_airline = {
+        # Same metal under the OPERATING number (matches via route+time):
+        "American": AirlineSearchResponse(
+            outboundFlights=[
+                _award("BA174", "2026-08-15T18:40:00", origin="JFK", dest="LHR"),
+            ]
+        ),
+        # Hypothetical second airline that happens to report the cash
+        # marketing number directly (matches via primary key):
+        "VirginAtlantic": AirlineSearchResponse(
+            outboundFlights=[
+                _award("AA6939", "2026-08-15T18:40:00", origin="JFK", dest="LHR"),
+            ]
+        ),
+    }
+    matches = join(res, award_by_airline, _pricing())
+    airlines = {ao.airline for ao in matches[0].awards}
+    assert airlines == {"American", "VirginAtlantic"}
 
 
 # ────────────────────────────── join semantics ─────────────────────────────
