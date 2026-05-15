@@ -125,8 +125,11 @@ cache (`~/.cache/flight-cli/.matrix-key`) or a Matrix brownout (see
 
 ## Appropriate divergence
 
-This project is **Profile A — distributable CLI**. Tunings already
-applied versus the strict-service default:
+This project is **Profile A — distributable CLI** with a Profile-B edge
+(reverse-engineering / scraping) — the CLI surface is typed strictly,
+but the integration boundaries with `fli`, `fast_flights`, Matrix's
+undocumented JSON, and pydantic internals are inherently `Any`-typed.
+Tunings applied versus the strict-service default:
 
 | Knob | Default | flight-cli |
 |---|---|---|
@@ -136,6 +139,7 @@ applied versus the strict-service default:
 | Coverage `fail_under` | 80 | 0 (golden-file suite) |
 | `PLR0913` (too many args) | strict | ignored (CLI verbs are wide) |
 | `N815` (camelCase) | strict | per-file-ignored in `wire.py`, `domain.py`, `models.py` — Matrix wire JSON dictates field names |
+| `reportAny` | `"warning"` | `"none"` — Profile-B edge: fli/fast_flights ship no stubs; Matrix response is `dict[str, Any]` by design; `ValidationInfo.data` and `Field` overloads are Any internally. `reportUnknown*` stays on (higher-signal "can't type this"). |
 
 ## flight-cli load-bearing quirks (read before touching wire.py)
 

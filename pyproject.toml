@@ -104,7 +104,13 @@ typeCheckingMode = "strict"
 reportMissingTypeStubs = "warning"
 reportImplicitOverride = "error"
 reportUnusedCallResult = "none"
-reportAny = "warning"
+# DIVERGE Profile A → A/B edge: flight-cli is a CLI veneer over RE/scraping
+# work. fli/fast_flights ship no stubs; Matrix's JSON response is
+# dict[str, Any] by design (pydantic validates downstream); pydantic's
+# ValidationInfo.data and Field overloads are Any internally. All
+# reportUnknown* rules stay on (the higher-signal "can't type this"
+# warnings); silencing reportAny only.
+reportAny = "none"
 
 # --- pytest ---
 [tool.pytest.ini_options]

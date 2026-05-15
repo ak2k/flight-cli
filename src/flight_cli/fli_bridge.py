@@ -98,8 +98,8 @@ def to_fli_filter(s: Search) -> Any:
 def run_gflight_search(s: Search, *, top_n: int = 5) -> Any:
     """Build a fli filter from a Search and run the Google Flights query."""
 
-    from fli.search.flights import (  # noqa: PLC0415
-        SearchFlights,  # pyright: ignore[reportMissingTypeStubs]
+    from fli.search.flights import (  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
+        SearchFlights,
     )
 
     return SearchFlights().search(to_fli_filter(s), top_n=top_n)
