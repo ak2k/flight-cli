@@ -85,14 +85,18 @@ PointsPath requires a paid subscription (free tier is the browser extension only
 **1. Headed browser login (default, recommended).** Opens a Playwright Chromium so you can sign in normally; the CLI captures the resulting session into `~/.config/flight-cli/pp.json`. Independent of any Chrome PP session you have open elsewhere — different server-side Supabase session, so the refresh chains never race.
 
 ```sh
-# One-time setup: install the optional browser-login deps.
-uv pip install -e '.[browser-login]'
-uv run playwright install chromium
+# One-time: download Chromium into Playwright's global cache
+# (~/Library/Caches/ms-playwright on macOS). The browser install is
+# disk-cached, not venv-resident.
+uvx --from playwright playwright install chromium
 
-# Then log in:
-flight auth pp login
+# Then log in. `--with playwright` adds the Python package ephemerally
+# for this one invocation — no need to mutate flight-cli's venv.
+uv run --with playwright flight auth pp login
 flight auth pp whoami     # confirm
 ```
+
+If you'd rather make playwright a permanent venv resident (skip `--with` every time), there's an optional install extra: `uv pip install -e '.[browser-login]'`. Most users don't need this.
 
 **2. `--from-chrome` (cookie import).** Reads Supabase cookies from your local Chrome profile via `rookiepy`. Quicker than headed login since you don't sign in again — but the CLI then *shares* Chrome's refresh-token chain. Supabase rotates refresh tokens single-use, so a refresh on one side will eventually invalidate the other. Use this when you don't mind re-importing periodically.
 

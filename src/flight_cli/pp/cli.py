@@ -104,7 +104,9 @@ def pp_login(
     Default (no flag): open a headed Playwright Chromium so you can sign
     in normally. Captures the resulting Supabase session into
     ~/.config/flight-cli/pp.json. Independent of any user-facing Chrome
-    PP session. Requires the browser-login extra (see README PP Setup).
+    PP session. Needs playwright at runtime (ephemeral or installed): the
+    README PP Setup section covers `uv run --with playwright` + the
+    one-time `uvx --from playwright playwright install chromium`.
 
     --from-chrome: import the session from your local Chrome profile via
     cookies. Quicker, but the CLI then shares Chrome's refresh-token

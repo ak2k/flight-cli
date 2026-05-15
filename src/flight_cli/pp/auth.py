@@ -306,8 +306,9 @@ def login_via_browser(
     except ImportError as e:  # pragma: no cover — install-time concern
         raise PPAuthError(
             "playwright isn't installed (needed for headed browser login). "
-            "Install with: uv pip install 'flight-cli[browser-login]' "
-            "and then run: uv run playwright install chromium. "
+            "Quickest path: rerun this command via "
+            "`uv run --with playwright flight auth pp login` "
+            "(plus a one-time `uvx --from playwright playwright install chromium`). "
             "Alternatives: --from-chrome or --tokens-file PATH.",
         ) from e
 
