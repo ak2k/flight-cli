@@ -3,7 +3,6 @@ retry, and an optional on-disk response cache for offline development."""
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import logging
@@ -12,6 +11,7 @@ import pathlib
 from http import HTTPStatus
 from typing import Any, cast
 
+import anyio
 import httpx
 import stamina
 from aiolimiter import AsyncLimiter
@@ -87,7 +87,7 @@ class HttpTransport:
             self._limiter = AsyncLimiter(max_rate=1, time_period=1.0 / rps)
         else:
             self._limiter = AsyncLimiter(max_rate=rps, time_period=1.0)
-        self._sem = asyncio.Semaphore(concurrency)
+        self._sem = anyio.Semaphore(concurrency)
 
         if cache_dir is None:
             cache_dir = pathlib.Path(

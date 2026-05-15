@@ -11,7 +11,6 @@ Five commands:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
@@ -19,6 +18,7 @@ import sys
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
+import anyio
 import typer
 from rich.console import Console
 from rich.logging import RichHandler
@@ -192,7 +192,7 @@ def _run(
             return await c.execute(search, cache=not no_cache)
 
     try:
-        return asyncio.run(go())
+        return anyio.run(go)
     except MatrixApiError as e:
         err.print(f"[red]Matrix returned an error ({e.kind}):[/] {e.message}")
         if e.request_id:
@@ -719,7 +719,7 @@ def airport(
         async with MatrixClient(impersonate=impersonate) as c:
             return await c.airports(query)
 
-    locs = asyncio.run(go())
+    locs = anyio.run(go)
     if not locs:
         console.print("[yellow]No matches.[/]")
         return

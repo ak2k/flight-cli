@@ -17,7 +17,7 @@ work.
 | Type checker | `basedpyright` strict | ✓ (was `pyright`) | mypy, pyright |
 | Boundary validation | Pydantic v2 | ✓ (see `wire.py`, `models.py`, `domain.py`) | dataclasses, attrs, TypedDict |
 | HTTP | `httpx` | ✓ | requests, aiohttp, urllib |
-| Async runtime | `anyio` | asyncio (DIVERGE — see below) | raw asyncio |
+| Async runtime | `anyio` | ✓ | raw asyncio |
 | Logging | `structlog` | stdlib `logging` (DIVERGE — see below) | `print()` |
 | Paths | `pathlib.Path` | ✓ | `os.path` |
 | Tests | `pytest` + `hypothesis` | `pytest` (no hypothesis yet) | unittest |
@@ -98,8 +98,6 @@ cache (`~/.cache/flight-cli/.matrix-key`) or a Matrix brownout (see
 4. **Diverge with a comment.** When tuning a default below (or deviating
    from the stack table), leave `# DIVERGE: <reason>` so future readers
    don't "fix" it back. Existing divergences from the template default:
-   - `asyncio` instead of `anyio` — flight-cli is single-runtime; no
-     library-author concern. Cost of switching is real, value is small.
    - stdlib `logging` instead of `structlog` — CLI tool with rich-handler
      output; structured logging would target a sink we don't have.
    - Coverage gate at 0% — golden-file regression tests; fixture parity
@@ -119,9 +117,10 @@ cache (`~/.cache/flight-cli/.matrix-key`) or a Matrix brownout (see
    the top of every module; runtime-only third-party types inside
    `if TYPE_CHECKING:`.
 
-8. **Async runtime is asyncio (DIVERGE).** Not anyio. See divergence note
-   in principle 4. Stick with asyncio unless we add a library-author
-   concern.
+8. **Async runtime is anyio.** Not raw asyncio. Compose with sync at the
+   edges via `anyio.from_thread` / `anyio.to_thread`. CLI entrypoints use
+   `anyio.run(coro_fn)` (not `asyncio.run(coro_fn())`). Concurrency
+   primitives: `anyio.Semaphore`, `anyio.create_task_group()`.
 
 ## Appropriate divergence
 
