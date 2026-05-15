@@ -142,7 +142,7 @@ Tunings applied versus the strict-service default:
 | `pythonVersion` (basedpyright) | `"3.13"` | `"3.12"` |
 | Coverage `fail_under` | 80 | 0 (golden-file suite) |
 | `PLR0913` (too many args) | strict | ignored (CLI verbs are wide) |
-| `N815` (camelCase) | strict | per-file-ignored in `wire.py`, `domain.py`, `models.py` — Matrix wire JSON dictates field names |
+| `N815` (camelCase) | strict | per-file-ignored in `wire.py` only — direct camelCase attrs mirror Matrix's JSON without per-field `alias=`. `models.py` uses snake_case + `Field(alias="…")` so N815 doesn't fire there; `domain.py` is snake_case throughout. |
 | `reportAny` | `"warning"` | `"none"` — Profile-B edge: fli/fast_flights ship no stubs; Matrix response is `dict[str, Any]` by design; `ValidationInfo.data` and `Field` overloads are Any internally. `reportUnknown*` stays on (higher-signal "can't type this"). |
 | Pydantic `extra` on boundary models | `"forbid"` | `"ignore"` on wire + response (`_Wire`, `_Loose`) — Profile-B edge: Matrix is reverse-engineered and adds fields unannounced in directions that aren't load-bearing. Domain models stay `extra="forbid"` (we control that contract). |
 

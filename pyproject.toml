@@ -90,10 +90,11 @@ ignore = [
     "N",      # test function names may mirror wire-field names (camelCase)
     "PLC0415", # internal lazy imports are fine for accessing private helpers
 ]
-# DIVERGE: Matrix's wire JSON forces camelCase field names; N815 cannot apply here.
-"src/flight_cli/wire.py"   = ["N815"]
-"src/flight_cli/domain.py" = ["N815"]
-"src/flight_cli/models.py" = ["N815"]
+# DIVERGE: wire.py mirrors Matrix's JSON shape directly with camelCase attrs
+# (instead of snake_case + Field(alias=...) on every field). N815 doesn't
+# apply to models.py either — its alias= strings aren't attr names — or to
+# domain.py, which is snake_case throughout.
+"src/flight_cli/wire.py" = ["N815"]
 
 [tool.ruff.format]
 docstring-code-format = true
