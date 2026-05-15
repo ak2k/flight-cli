@@ -112,7 +112,18 @@ class MatchedFare:
     awards: list[AwardFlight] = field(default_factory=list)
 
 
-def join(
+def cash_matched_id_key(it: Itinerary, slice_index: int = 0) -> str | None:
+    """Opaque Google Flights ID for the cash slice, if the backend populated
+    one. Matches against `AwardFlight.matched_google_flight_id` (echoed back
+    by PP when `enableGoogleFlightMatching=true`)."""
+    itn = it.itinerary
+    if not itn or slice_index >= len(itn.slices):
+        return None
+    fid = itn.slices[slice_index].flight_id
+    return fid or None
+
+
+def join(  # noqa: PLR0912 — three index lookups in priority order, hard to split cleanly
     search: SearchResult,
     awards: list[AwardFlight],
     *,
@@ -120,11 +131,18 @@ def join(
 ) -> list[MatchedFare]:
     """Outer-join cash itineraries onto award flights.
 
-    Match strategy: primary by (flight#, date), then a route+time fallback to
-    catch codeshares (Matrix's marketing flight# won't equal PP's operating
-    flight#, but origin+dest+minute identifies the same physical flight).
-    Hits from both keys are unioned and deduped by AwardFlight identity, so
-    non-codeshare flights aren't double-attached.
+    Match strategy, in priority order:
+      1. **Matched-ID** (`flight_id` ↔ `matched_google_flight_id`). Exact
+         string equality on PP's echoed `matchedGoogleFlightId`. Fires only
+         when the cash side has `flight_id` (gflight backend) AND the
+         provider was called with `enable_matching=True` + cash hints.
+      2. **(flight#, date)** primary heuristic key.
+      3. **(route, time)** codeshare fallback (Matrix's marketing flight#
+         won't equal PP's operating flight#, but origin+dest+minute identifies
+         the same physical flight).
+
+    Hits across all three are unioned and deduped by AwardFlight identity, so
+    a flight satisfying multiple keys isn't double-attached.
 
     Cash itineraries with no award match keep an empty `awards` list — caller
     decides whether to render them or filter to inner-join.
@@ -132,12 +150,15 @@ def join(
     `slice_index` selects which leg of each Itinerary to match against (0 for
     outbound, 1 for return on a round-trip, etc).
     """
-    # Build both award indexes in one pass over the flights. A single flight
-    # may appear under both — that's expected; per-itinerary dedup in the
-    # join loop keeps the output clean.
+    # Build all three award indexes in one pass. A single flight may appear
+    # under multiple — per-itinerary dedup in the join loop keeps the output
+    # clean.
+    mid_idx: dict[str, list[AwardFlight]] = {}
     fn_idx: dict[MatchKey, list[AwardFlight]] = {}
     rt_idx: dict[RouteTimeKey, list[AwardFlight]] = {}
     for af in awards:
+        if af.matched_google_flight_id:
+            mid_idx.setdefault(af.matched_google_flight_id, []).append(af)
         fn_k = award_match_key(af)
         if fn_k[0]:
             fn_idx.setdefault(fn_k, []).append(af)
@@ -150,6 +171,13 @@ def join(
         matched: list[AwardFlight] = []
         seen_ids: set[int] = set()
 
+        mid_k = cash_matched_id_key(it, slice_index=slice_index)
+        if mid_k and mid_k in mid_idx:
+            for af in mid_idx[mid_k]:
+                if id(af) in seen_ids:
+                    continue
+                seen_ids.add(id(af))
+                matched.append(af)
         fn_k = cash_match_key(it, slice_index=slice_index)
         if fn_k and fn_k in fn_idx:
             for af in fn_idx[fn_k]:

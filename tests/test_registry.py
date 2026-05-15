@@ -8,11 +8,16 @@ to pin the behavior."""
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import anyio
 import pytest
 
 from flight_cli.providers.base import AwardFlight, AwardProvider, LegQuery
 from flight_cli.providers.registry import _gather_one_leg
+
+if TYPE_CHECKING:
+    from flight_cli.pp.client import CashFlightHint
 
 
 class _StubProvider:
@@ -24,9 +29,14 @@ class _StubProvider:
         self._raises = raises
 
     async def search_leg(
-        self, leg: LegQuery, *, cabins: tuple[str, ...], num_passengers: int = 1
+        self,
+        leg: LegQuery,
+        *,
+        cabins: tuple[str, ...],
+        num_passengers: int = 1,
+        cash_hints: tuple[CashFlightHint, ...] = (),
     ) -> list[AwardFlight]:
-        _ = leg, cabins, num_passengers
+        _ = leg, cabins, num_passengers, cash_hints
         if self._raises:
             raise self._raises
         return list(self._flights)

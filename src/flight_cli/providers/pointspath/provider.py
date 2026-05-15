@@ -16,7 +16,13 @@ from typing import TYPE_CHECKING
 import structlog
 
 from ...pp.auth import PPAuthError, get_valid_tokens
-from ...pp.client import DEFAULT_AIRLINES, PPClient, SearchSpec, enabled_airlines
+from ...pp.client import (
+    DEFAULT_AIRLINES,
+    CashFlightHint,
+    PPClient,
+    SearchSpec,
+    enabled_airlines,
+)
 from ..base import AwardFlight, CabinAward
 
 if TYPE_CHECKING:
@@ -73,6 +79,7 @@ def _flight_to_award(
         miles_to_cash_ratio=miles_to_cash_ratio,
         funding_banks=funding_banks,
         cabins=_cabin_awards(of.perCabinMilesPricing),
+        matched_google_flight_id=of.matchedGoogleFlightId or "",
     )
 
 
@@ -153,10 +160,18 @@ class PointsPathProvider:
         *,
         cabins: tuple[str, ...],
         num_passengers: int = 1,
+        cash_hints: tuple[CashFlightHint, ...] = (),
     ) -> list[AwardFlight]:
         """Fan out one airline-search call per (airline x cabin) for this
-        leg, merge results, convert to AwardFlight. Duplicate flights across
-        cabins are tolerated — the matcher dedupes by identity downstream."""
+        leg, merge results, convert to AwardFlight.
+
+        When `cash_hints` is non-empty (gflight backend has captured Google's
+        opaque flight IDs), the request goes out with `enable_matching=True`
+        and PP echoes the supplied `flightId`s back via `matchedGoogleFlightId`
+        on each returned award. Without hints (Matrix backend, or no IDs
+        available), `enable_matching=False` and the matcher falls back to its
+        flight#+date / route+time keys.
+        """
         merged: dict[str, AirlineSearchResponse] = {}
         for cabin in cabins:
             spec = SearchSpec(
@@ -167,7 +182,8 @@ class PointsPathProvider:
                 is_round_trip_return=False,
                 num_passengers=num_passengers,
                 cabin_class=cabin,
-                enable_matching=False,
+                enable_matching=bool(cash_hints),
+                cash_hints=cash_hints,
             )
             per_airline = await self._client.airline_search_many(spec, self._airlines)
             for airline, resp in per_airline.items():

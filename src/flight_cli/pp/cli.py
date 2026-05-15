@@ -31,7 +31,8 @@ from .auth import (
     login_from_chrome,
     login_via_browser,
 )
-from .client import DEFAULT_CABINS
+from .client import DEFAULT_CABINS, CashFlightHint
+from .gflight_adapter import cash_hints_from_search_result
 from .match import MatchedFare, join
 
 if TYPE_CHECKING:
@@ -211,12 +212,21 @@ def run_pp_for_search(
     cabin_list = tuple(_normalize_cabin(c) for c in _parse_csv(cabins, DEFAULT_CABINS))
     explicit_airlines = _parse_csv(airlines, ()) if airlines else None
 
+    # If `res` carries gflight-captured opaque flight IDs on its slices, build
+    # PP cash hints per leg so the request goes out with enable_matching=True
+    # and the matcher's matched-id key becomes available. Matrix-built
+    # SearchResults won't have flight_id populated; hints stays empty.
+    cash_hints_per_leg: list[tuple[CashFlightHint, ...]] = [
+        tuple(cash_hints_from_search_result(res, slice_index=leg.slice_index)) for leg in legs
+    ]
+
     async def _go() -> tuple[list[list[AwardFlight]], list[Any]]:
         return await gather_awards(
             legs=legs,
             num_passengers=num_passengers,
             cabins=cabin_list,
             pp_airlines=explicit_airlines,
+            cash_hints_per_leg=cash_hints_per_leg,
         )
 
     try:

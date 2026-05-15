@@ -22,6 +22,7 @@ from .pointspath.provider import is_configured as pp_is_configured
 if TYPE_CHECKING:
     from structlog.stdlib import BoundLogger
 
+    from ..pp.client import CashFlightHint
     from .base import AwardFlight, AwardProvider, LegQuery
 
 log: BoundLogger = structlog.get_logger(__name__)  # pyright: ignore[reportAny]
@@ -53,16 +54,21 @@ async def _gather_one_leg(
     *,
     cabins: tuple[str, ...],
     num_passengers: int = 1,
+    cash_hints: tuple[CashFlightHint, ...] = (),
 ) -> list[AwardFlight]:
     """Run all providers concurrently for one leg, concatenate results."""
     results: list[list[AwardFlight]] = [[] for _ in providers]
 
     async def runner(idx: int, p: AwardProvider) -> None:
         try:
-            results[idx] = await p.search_leg(
+            # cash_hints is provider-optional — providers that don't take it
+            # via Protocol can be called without the kwarg by Python's
+            # liberal **kwargs forwarding. PointsPathProvider accepts it.
+            results[idx] = await p.search_leg(  # type: ignore[call-arg]
                 leg,
                 cabins=cabins,
                 num_passengers=num_passengers,
+                cash_hints=cash_hints,
             )
         except Exception as e:  # noqa: BLE001 — surface provider failures, keep others
             log.warning("provider_search_failed", provider=p.name, error=str(e))
@@ -83,8 +89,15 @@ async def gather_awards(
     cabins: tuple[str, ...],
     num_passengers: int = 1,
     pp_airlines: tuple[str, ...] | None = None,
+    cash_hints_per_leg: list[tuple[CashFlightHint, ...]] | None = None,
 ) -> tuple[list[list[AwardFlight]], list[AwardProvider]]:
     """End-to-end registry call: construct enabled providers, fan out per leg.
+
+    `cash_hints_per_leg[i]` (when supplied) carries the gflight backend's
+    captured Google Flights opaque IDs for legs[i]. The PointsPath provider
+    uses them to fire `/api/airline-search` with `enable_matching=True`,
+    making PP's `matchedGoogleFlightId` available as a primary join key
+    downstream. When None / empty, falls back to the heuristic matcher keys.
 
     Returns:
         (per_leg_awards, providers)
@@ -95,13 +108,17 @@ async def gather_awards(
     """
     providers = await _construct_enabled(pp_airlines=pp_airlines)
     per_leg: list[list[AwardFlight]] = []
-    for leg in legs:
+    for i, leg in enumerate(legs):
+        hints: tuple[CashFlightHint, ...] = ()
+        if cash_hints_per_leg and i < len(cash_hints_per_leg):
+            hints = cash_hints_per_leg[i]
         per_leg.append(
             await _gather_one_leg(
                 providers,
                 leg,
                 cabins=cabins,
                 num_passengers=num_passengers,
+                cash_hints=hints,
             ),
         )
     return per_leg, providers
