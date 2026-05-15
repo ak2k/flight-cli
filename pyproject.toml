@@ -29,9 +29,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Heavier interactive-login path. Optional because the package is small
-# but `playwright install chromium` is ~150MB — non-PP users shouldn't pay.
-browser-login = ["playwright>=1.40"]
+# Heavier interactive-login path. Patchright is a Playwright fork that
+# patches CDP leaks + navigator.webdriver detection so Cloudflare's bot
+# fingerprint check passes — required for the PP login flow (Cloudflare-
+# protected). Package itself is small; `patchright install chrome` is what
+# pulls the real Chrome binary (~150MB) and is only needed for the headed
+# login path, so it's not auto-installed.
+browser-login = ["patchright>=1.59"]
 
 [dependency-groups]
 dev = [
@@ -40,9 +44,9 @@ dev = [
     "pytest>=8.3",
     "pytest-cov>=5",
     "hypothesis>=6.100",
-    # Pulled in only for type-checking; `playwright install chromium` is NOT
+    # Pulled in only for type-checking; `patchright install chrome` is NOT
     # run automatically — the dev Python package itself is small.
-    "playwright>=1.40",
+    "patchright>=1.59",
 ]
 
 [project.scripts]

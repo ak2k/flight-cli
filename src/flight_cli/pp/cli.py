@@ -102,12 +102,14 @@ def pp_login(
 ) -> None:
     """Authenticate with PointsPath. Three modes (mutually exclusive).
 
-    Default (no flag): open a headed Playwright Chromium so you can sign
+    Default (no flag): open a headed Patchright Chrome so you can sign
     in normally. Captures the resulting Supabase session into
     ~/.config/flight-cli/pp.json. Independent of any user-facing Chrome
-    PP session. Needs playwright at runtime (ephemeral or installed): the
-    README PP Setup section covers `uv run --with playwright` + the
-    one-time `uvx --from playwright playwright install chromium`.
+    PP session. Uses Patchright (a Playwright fork that patches the CDP
+    Runtime.enable leak + navigator.webdriver) to clear Cloudflare's
+    bot fingerprint check. Needs patchright at runtime (ephemeral or
+    installed): README PP Setup covers `uv run --with patchright` + the
+    one-time `uvx --from patchright patchright install chrome`.
 
     --from-chrome: import the session from your local Chrome profile via
     cookies. Quicker, but the CLI then shares Chrome's refresh-token

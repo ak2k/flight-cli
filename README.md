@@ -106,21 +106,23 @@ flight search JFK LHR --dep 2026-08-15 --backend matrix --pp-only
 
 PointsPath requires a paid subscription (free tier is the browser extension only). Three login modes:
 
-**1. Headed browser login (default, recommended).** Opens a Playwright Chromium so you can sign in normally; the CLI captures the resulting session into `~/.config/flight-cli/pp.json`. Independent of any Chrome PP session you have open elsewhere — different server-side Supabase session, so the refresh chains never race.
+**1. Headed browser login (default, recommended).** Opens a Patchright Chrome so you can sign in normally; the CLI captures the resulting session into `~/.config/flight-cli/pp.json`. Independent of any Chrome PP session you have open elsewhere — different server-side Supabase session, so the refresh chains never race.
+
+We use [Patchright](https://pypi.org/project/patchright/) (a drop-in Playwright fork that patches the CDP `Runtime.enable` leak and the `navigator.webdriver` flag) because pointspath.com is behind Cloudflare's bot fingerprint check, which stock Playwright fails. The browser profile is persisted at `~/.cache/flight-cli/browser-profile/` so the Cloudflare `cf_clearance` cookie survives across login sessions — you usually only have to clear the human-check once.
 
 ```sh
-# One-time: download Chromium into Playwright's global cache
-# (~/Library/Caches/ms-playwright on macOS). The browser install is
-# disk-cached, not venv-resident.
-uvx --from playwright playwright install chromium
+# One-time: download real Chrome (~150MB) into Patchright's cache.
+# `channel="chrome"` uses the real Chrome binary because its TLS
+# fingerprint matches real Chrome traffic — bundled Chromium doesn't.
+uvx --from patchright patchright install chrome
 
-# Then log in. `--with playwright` adds the Python package ephemerally
+# Then log in. `--with patchright` adds the Python package ephemerally
 # for this one invocation — no need to mutate flight-cli's venv.
-uv run --with playwright flight auth pp login
+uv run --with patchright flight auth pp login
 flight auth pp whoami     # confirm
 ```
 
-If you'd rather make playwright a permanent venv resident (skip `--with` every time), there's an optional install extra: `uv pip install -e '.[browser-login]'`. Most users don't need this.
+If you'd rather make patchright a permanent venv resident (skip `--with` every time), there's an optional install extra: `uv pip install -e '.[browser-login]'`. Most users don't need this.
 
 **2. `--from-chrome` (cookie import).** Reads Supabase cookies from your local Chrome profile via `rookiepy`. Quicker than headed login since you don't sign in again — but the CLI then *shares* Chrome's refresh-token chain. Supabase rotates refresh tokens single-use, so a refresh on one side will eventually invalidate the other. Use this when you don't mind re-importing periodically.
 
