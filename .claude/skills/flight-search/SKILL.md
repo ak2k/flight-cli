@@ -77,30 +77,48 @@ Multiple segments separated by **space**; alternatives within a segment by **com
 - `*` — zero or more
 - `?` — zero or one
 
-**Prefixes:**
-- `C:` — marketing carrier (default for 2-letter codes; `AA` ≡ `C:AA`)
+**Prefixes** (all optional — bare 2-letter codes default to `C:`, bare 3-letter to `X:`):
+- `C:` — marketing carrier (`AA` ≡ `C:AA`)
 - `O:` — operating carrier (`O:LH` = LH metal, not codeshare)
-- `X:` — connection airport (default for 3-letter codes)
-- `F` — flight-segment placeholder (`F+` = 1+ flights, `F?` = 0 or 1)
-- `N` — non-stop only
+- `X:` — connection airport (`NYC` ≡ `X:NYC`)
+- `N`  — non-stop flight (`N:UA` = non-stop on UA)
+- `F`  — any single flight; segment placeholder (`F+`, `F?`, `F*` work too)
 - `L:` — country filter (`~l:nUS+` = no US connections)
 
-**Alliance shortcuts** (single-token; goes alone in routing OR `[/ alliance ...]` in routing OR `ALLIANCE` in extension):
-- `oneworld`, `skyteam`, `star-alliance`
+There are **no `STAR+` / `oneworld+` carrier shortcuts** for alliances —
+use `--extension 'ALLIANCE star-alliance'` instead.
 
-**Common patterns:**
+**Canonical worked examples** (Google's routing-codes help dialog,
+verbatim — see `docs/memories/matrix_help_docs.md` for the full
+extracted text):
 
 | Expression | Meaning |
 |---|---|
-| `LH+` | Any number of LH flights, all LH |
-| `BA AA` | BA flight then AA flight (exactly 2 segments) |
-| `F* X:LHR F*` | Itinerary that has LHR as a connection |
-| `O:LH F+ / alliance star-alliance` | LH-operated + Star Alliance overall |
-| `~UA+` | Itinerary with zero UA flights |
-| `~AA,UA,DL` | Direct flight, none of these carriers |
-| `N` / `N:UA` | Non-stop / non-stop on UA |
-| `DFW,DEN` | Single connection at DFW or DEN |
-| `~l:nUS+` | 0+ non-US connections (excludes US transit) |
+| `N` | Non-stop flight only |
+| `NYC` | Single stop in New York |
+| `~NYC` | Single stop, not in New York |
+| `DEN?` | Direct flight or one stop in Denver |
+| `X?` | Direct flight or one stop anywhere |
+| `~DEN?` | Direct flight or one stop anywhere but Denver |
+| `EWR CVG SLC` | Stops in Newark, Cincinnati, and Salt Lake City |
+| `AA` | Direct flight on AA (American) |
+| `AA+` | Any number of flights on AA |
+| `AA,UA` | Direct flight on either AA or UA |
+| `~AA` | Direct flight, not on AA |
+| `~AA,UA,DL` | Direct flight, not on AA, UA, or DL |
+| `~AA,UA,DL+` | Any number of flights not on AA, UA, or DL |
+| `AA+ DL+` | One or more flights on AA, then one or more on DL |
+| `AA DL,AF` | Flight on AA, then flight on either DL or AF |
+| `AA UA?` | One AA flight, optionally followed by a UA flight |
+| `AA N?` | One AA flight, optionally followed by a non-stop on any airline |
+| `AA25 UA814` | Flight AA25 followed by UA814 |
+| `AA25 UA+` | Flight AA25 followed by one or more UA flights |
+| `AA25 F+` | Flight AA25 followed by one or more flights on any airline |
+| `DL CHI DL` | Two DL flights with a connection in Chicago |
+| `O:UA` | Single flight operated by UA (not codeshares or UA subsidiaries) |
+| `~UA882` | Single flight, but not UA882 |
+| `UA1000-2000+` | One or more UA flights with numbers 1000–2000 |
+| `~UA5000-9999,AA,DL+` | Any number of flights, none on AA/DL/UA-5000-9999 |
 
 **Slash-prefixed global modifiers** are documented at Google's help page
 (`[/ alliance star-alliance]`, `[/ maxdur 480]`, `[/ -overnight;-redeye]`,
@@ -126,29 +144,25 @@ Full reference: [Google's routing-language help](https://support.google.com/faqs
 (note: the slash-modifier section in that doc is functional in Matrix's
 UI but not via the API endpoint this CLI hits).
 
-## Documented but broken in BOTH the SPA and the API
+## Documented-but-broken routing idioms
 
-These idioms are documented at Google's routing-language help page but
-**Matrix's server rejects them with `QPX Warning. Bad route
-specification`** when sent verbatim in the `routeLanguage` field
-(verified 2026-05 via direct API testing AND via inspection of the SPA
-bundle, which serializes `routeLanguage` as a pass-through of the user's
-"Routing language" input box — no preprocessing). The Google docs appear
-to be stale or refer to a different surface; **typing these into the SPA
-UI's routing box would produce the same error**.
+Notably absent from the canonical routing-codes Examples above:
+slash-modifiers (`[/ alliance ...]`, `[/ maxdur N]`, `[/ -overnight]`,
+etc.) and alliance carrier-shortcuts (`STAR+`, `oneworld+`). Google's
+routing-language doc page mentions slash-modifiers, but Matrix's server
+rejects every variant tested with `QPX Warning. Bad route specification`
+— they're effectively dead syntax. **Always use the extension-code
+equivalent in `--extension`:**
 
-Always reach for the extension-code equivalent in `--extension`:
-
-| Documented idiom (broken) | Use instead |
+| Pseudo-routing idiom (rejected) | Use instead |
 |---|---|
-| `--routing '[/ alliance star-alliance]'` | `--extension 'ALLIANCE star-alliance'` |
-| `--routing 'F+ / alliance oneworld'` | `--extension 'ALLIANCE oneworld'` |
-| `--routing '[/ maxdur 480]'` | `--extension 'MAXDUR 8:00'` |
-| `--routing '[/ minconnect 60; maxconnect 180]'` | `--extension 'MINCONNECT 1:00; MAXCONNECT 3:00'` |
-| `--routing '[/ -overnight;-redeye]'` | `--extension '-OVERNIGHTS; -REDEYES'` |
-| `--routing '[/ -prop]'` | `--extension '-PROPS'` |
-| `--routing 'STAR+'` or `--routing 'oneworld+'` (alliance carrier-shortcuts) | `--extension 'ALLIANCE star-alliance'` |
-| `--routing '[/ padconnect 20]'` | `--extension 'PADCONNECT 0:20'` |
+| `[/ alliance star-alliance]` | `--extension 'ALLIANCE star-alliance'` |
+| `[/ maxdur 480]` | `--extension 'MAXDUR 8:00'` |
+| `[/ minconnect 60; maxconnect 180]` | `--extension 'MINCONNECT 1:00; MAXCONNECT 3:00'` |
+| `[/ -overnight;-redeye]` | `--extension '-OVERNIGHTS; -REDEYES'` |
+| `[/ -prop]` | `--extension '-PROPS'` |
+| `[/ padconnect 20]` | `--extension 'PADCONNECT 0:20'` |
+| `STAR+` / `oneworld+` (carrier-shortcut form) | `--extension 'ALLIANCE star-alliance'` |
 
 ## Extension codes (`--extension`) — compressed reference
 
@@ -415,8 +429,9 @@ machinery.
 
 Pin these for follow-up reading:
 
-- [docs/memories/routing_language.md](../../docs/memories/routing_language.md) — full grammar
-- [docs/memories/extension_codes.md](../../docs/memories/extension_codes.md) — full code table
+- [docs/memories/matrix_help_docs.md](../../docs/memories/matrix_help_docs.md) — **canonical text** extracted verbatim from Matrix's in-app help dialog: Itineraries / Faring / Aircraft Types / Routing Codes (Syntax + Examples + Glossary). Includes the **~500-row IATA aircraft-type code table** for `AIRCRAFT T:…` filtering — not inlined here for size. Source of truth when this skill's compressed tables are ambiguous.
+- [docs/memories/routing_language.md](../../docs/memories/routing_language.md) — full grammar narrative + pitfalls
+- [docs/memories/extension_codes.md](../../docs/memories/extension_codes.md) — full code table with curated common aircraft-code subset
 - [docs/memories/airport_groups.md](../../docs/memories/airport_groups.md) — more region groupings and notes
 - [docs/memories/wire_format_quirks.md](../../docs/memories/wire_format_quirks.md) — wire-level subtleties (mostly relevant when *extending* the CLI, less when invoking it)
 - [docs/memories/public_alkali_wrapper.md](../../docs/memories/public_alkali_wrapper.md) — context on the project's role
