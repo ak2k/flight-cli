@@ -182,6 +182,72 @@ def get_valid_tokens() -> Tokens:
 
 # ──────────────────────────── login helpers ────────────────────────────────
 
+# Supabase splits the auth-token cookie across `sb-<ref>-auth-token.0` and
+# `.1` to dodge the 4KB cookie limit. The reassembled value is either raw
+# JSON or "base64-" + base64 of JSON, depending on gotrue-js version.
+SUPABASE_PROJECT_REF = "hxjqzkcirzhjvtubefie"
+SUPABASE_AUTH_COOKIE_PREFIX = f"sb-{SUPABASE_PROJECT_REF}-auth-token"
+
+
+def _tokens_from_supabase_payload(payload: _JsonDict) -> Tokens:
+    """Build Tokens from the JSON object Supabase stores in its session cookie
+    or returns from /auth/v1/token: {access_token, refresh_token, user, ...}.
+    Falls back to JWT exp claim if expires_at is absent."""
+    access: str = payload["access_token"]
+    parts = access.split(".")
+    if len(parts) != _JWT_PARTS:
+        raise PPAuthError("access_token is not a JWT (expected 3 dot-separated parts)")
+    claims_payload = parts[1] + "=" * (-len(parts[1]) % 4)
+    claims: _JsonDict = json.loads(base64.urlsafe_b64decode(claims_payload))
+    user: _JsonDict = payload.get("user") or {}
+    expires_at = int(payload.get("expires_at") or claims.get("exp") or 0)
+    return Tokens(
+        access_token=access,
+        refresh_token=payload.get("refresh_token") or "",
+        expires_at=expires_at,
+        user_email=user.get("email") or claims.get("email"),
+    )
+
+
+def tokens_from_supabase_cookies(cookies: list[dict[str, Any]]) -> Tokens:
+    """Reassemble Supabase auth tokens from a list of cookie dicts.
+
+    Each dict needs `name` and `value` keys (the shape produced by rookiepy
+    and Playwright's BrowserContext.cookies()). Filters to `sb-<ref>-auth-
+    token[.N]` cookies, concatenates by index, decodes optional `base64-`
+    prefix, parses the JSON, and returns Tokens.
+    """
+    by_idx: dict[int, str] = {}
+    for c in cookies:
+        name = c.get("name", "")
+        if not name.startswith(SUPABASE_AUTH_COOKIE_PREFIX):
+            continue
+        if "verifier" in name:  # PKCE-flow verifier cookie; not the session
+            continue
+        if name == SUPABASE_AUTH_COOKIE_PREFIX:
+            by_idx[0] = c.get("value", "")
+        else:
+            suffix = name.removeprefix(SUPABASE_AUTH_COOKIE_PREFIX + ".")
+            try:
+                by_idx[int(suffix)] = c.get("value", "")
+            except ValueError:
+                continue
+    if not by_idx:
+        raise PPAuthError(
+            f"No {SUPABASE_AUTH_COOKIE_PREFIX}.* cookies found "
+            "(is the browser logged into PointsPath?)",
+        )
+    joined = "".join(by_idx[i] for i in sorted(by_idx))
+    if joined.startswith("base64-"):
+        decoded = base64.b64decode(joined.removeprefix("base64-") + "==", validate=False)
+        raw_json = decoded.decode("utf-8")
+    else:
+        raw_json = joined
+    payload: _JsonDict = json.loads(raw_json)
+    t = _tokens_from_supabase_payload(payload)
+    save_tokens(t)
+    return t
+
 
 def import_from_tokens_file(path: Path) -> Tokens:
     """Import tokens from a JSON file (e.g., one captured via CDP cookie sniffing).
@@ -190,18 +256,86 @@ def import_from_tokens_file(path: Path) -> Tokens:
       {access_token, refresh_token, supabase_url?, user?}
     """
     raw: _JsonDict = json.loads(Path(path).read_text())
-    access: str = raw["access_token"]
-    parts = access.split(".")
-    if len(parts) != _JWT_PARTS:
-        raise PPAuthError("access_token is not a JWT (expected 3 dot-separated parts)")
-    payload = parts[1] + "=" * (-len(parts[1]) % 4)
-    claims: _JsonDict = json.loads(base64.urlsafe_b64decode(payload))
-    user: _JsonDict = raw.get("user") or {}
-    t = Tokens(
-        access_token=access,
-        refresh_token=raw.get("refresh_token") or "",
-        expires_at=int(claims.get("exp") or 0),
-        user_email=user.get("email") or claims.get("email"),
-    )
+    t = _tokens_from_supabase_payload(raw)
     save_tokens(t)
     return t
+
+
+# Pointspath login URL — the homepage redirects unauthenticated users here.
+_PP_HOME_URL = "https://pointspath.com/"
+
+# Convenience login mode default: leave the browser open long enough for the
+# user to click through email confirmation / 2FA if needed.
+_DEFAULT_BROWSER_LOGIN_TIMEOUT_SECS = 300
+
+
+def login_from_chrome() -> Tokens:
+    """Import a PointsPath session from a local Chrome profile via rookiepy.
+
+    Convenience path: piggybacks on whatever Chrome session you already have
+    open. Inherits Chrome's refresh chain, so a CLI refresh here can race
+    against Chrome's gotrue-js. Prefer the headed Playwright path
+    (`login_via_browser`) for an independent session.
+    """
+    try:
+        import rookiepy  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
+    except ImportError as e:  # pragma: no cover — install-time concern
+        raise PPAuthError(
+            "rookiepy isn't installed (used for --from-chrome). "
+            "Install with: uv pip install rookiepy",
+        ) from e
+
+    cookies: list[_JsonDict] = rookiepy.chrome(domains=["pointspath.com"])  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    return tokens_from_supabase_cookies(cookies)
+
+
+def login_via_browser(
+    *,
+    timeout_secs: int = _DEFAULT_BROWSER_LOGIN_TIMEOUT_SECS,
+    poll_interval_secs: float = 1.0,
+) -> Tokens:
+    """Open a headed Playwright Chromium for the user to log into PointsPath.
+
+    Independent of any user-facing Chrome session — this is the recommended
+    primary path. Polls for the Supabase auth-token cookie; returns as soon
+    as it appears, or raises PPAuthError on timeout / browser close.
+    """
+    try:
+        from playwright.sync_api import Error as PlaywrightError  # noqa: PLC0415
+        from playwright.sync_api import sync_playwright  # noqa: PLC0415
+    except ImportError as e:  # pragma: no cover — install-time concern
+        raise PPAuthError(
+            "playwright isn't installed (needed for headed browser login). "
+            "Install with: uv pip install 'flight-cli[browser-login]' "
+            "and then run: uv run playwright install chromium. "
+            "Alternatives: --from-chrome or --tokens-file PATH.",
+        ) from e
+
+    import time  # noqa: PLC0415
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False)
+        try:
+            context = browser.new_context()
+            page = context.new_page()
+            page.goto(_PP_HOME_URL)
+
+            deadline = time.time() + timeout_secs
+            while time.time() < deadline:
+                try:
+                    raw_cookies = context.cookies([_PP_HOME_URL])
+                except PlaywrightError as e:
+                    raise PPAuthError(f"Browser closed before login completed: {e}") from e
+                cookies: list[_JsonDict] = [dict(c) for c in raw_cookies]
+                try:
+                    return tokens_from_supabase_cookies(cookies)
+                except PPAuthError:
+                    # Cookies aren't ready yet; user is still authenticating.
+                    pass
+                time.sleep(poll_interval_secs)
+            raise PPAuthError(
+                f"Timed out after {timeout_secs}s waiting for PointsPath login. "
+                "Re-run `flight auth pp login` and complete sign-in before the timeout.",
+            )
+        finally:
+            browser.close()

@@ -80,19 +80,35 @@ flight fare JFK LHR --dep 2026-08-15 --pp --pp-only
 
 ### Setup
 
-PointsPath requires a paid subscription (free tier is the browser extension only). Today the only login mode is to import tokens captured from a logged-in Chrome session:
+PointsPath requires a paid subscription (free tier is the browser extension only). Three login modes:
+
+**1. Headed browser login (default, recommended).** Opens a Playwright Chromium so you can sign in normally; the CLI captures the resulting session into `~/.config/flight-cli/pp.json`. Independent of any Chrome PP session you have open elsewhere — different server-side Supabase session, so the refresh chains never race.
 
 ```sh
-# 1. Capture your Supabase tokens from the browser. The extension is on
-#    pointspath.com under cookies named `sb-hxjqzkcirzhjvtubefie-auth-token.0/.1`;
-#    reassemble and save as JSON like:
-#    {"access_token": "...", "refresh_token": "...", "user": {"email": "..."}}
-# 2. Import into the local token store:
-flight auth pp login --tokens-file ~/Downloads/pp_tokens.json
+# One-time setup: install the optional browser-login deps.
+uv pip install -e '.[browser-login]'
+uv run playwright install chromium
+
+# Then log in:
+flight auth pp login
 flight auth pp whoami     # confirm
 ```
 
-A browser-based `flight auth pp login` is planned but not yet shipped; once you have tokens cached, refresh is automatic for the lifetime of your refresh token.
+**2. `--from-chrome` (cookie import).** Reads Supabase cookies from your local Chrome profile via `rookiepy`. Quicker than headed login since you don't sign in again — but the CLI then *shares* Chrome's refresh-token chain. Supabase rotates refresh tokens single-use, so a refresh on one side will eventually invalidate the other. Use this when you don't mind re-importing periodically.
+
+```sh
+flight auth pp login --from-chrome
+```
+
+**3. `--tokens-file PATH` (JSON import).** Bring your own session JSON. Useful when you've captured tokens with another tool (CDP cookie sniff, browser DevTools, etc.).
+
+```sh
+flight auth pp login --tokens-file ~/Downloads/pp_tokens.json
+# Expected file shape:
+# {"access_token": "...", "refresh_token": "...", "user": {"email": "..."}}
+```
+
+Once tokens are saved, refresh is automatic for the lifetime of the refresh-token chain (~indefinite, modulo the rotation race in mode 2).
 
 ### How airline selection works
 
@@ -106,7 +122,7 @@ Pass `--pp-airlines United,Delta,...` to skip discovery and call only the named 
 
 ### What it doesn't do
 
-- Browser-based login (use `--tokens-file` for now)
+- ~~Browser-based login~~ (now the default — see Setup above)
 - `calendar --pp` (lowest-fare-calendar overlay) — fan-out is N days × M airlines; deserves its own design
 - Match against airlines we don't yet support (the few in pricing-info but not enabled for your tier are silently skipped)
 
