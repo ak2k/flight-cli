@@ -24,6 +24,7 @@ from ..models import (
     Itinerary,
     ItineraryDetails,
     ItineraryExt,
+    LegInfo,
     SearchResult,
     Slice,
     SliceEndpoint,
@@ -32,6 +33,8 @@ from .client import CashFlightHint
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from .._gflight_ids import LegAmenities
 
 
 def _airport_code(a: Any) -> str:
@@ -47,9 +50,26 @@ def _flight_id_string(leg: Any) -> str:
     return f"{iata}{leg.flight_number}"
 
 
-def _slice_from_flight_result(fr: Any, flight_id: str | None = None) -> Slice:
+def _leg_info(a: LegAmenities) -> LegInfo:
+    return LegInfo(
+        aircraft=a.aircraft,
+        pitch_inches=a.pitch_inches,
+        legroom_class=a.legroom_class,
+        cabin=a.cabin,
+        wifi=a.wifi,
+        power=a.power,
+        video=a.video,
+    )
+
+
+def _slice_from_flight_result(
+    fr: Any,
+    flight_id: str | None = None,
+    amenities: list[LegAmenities] | None = None,
+) -> Slice:
     legs: list[Any] = list(fr.legs)
     first, last = legs[0], legs[-1]
+    leg_infos: list[LegInfo] = [_leg_info(a) for a in (amenities or [])]
     return Slice(
         flights=[_flight_id_string(leg) for leg in legs],
         departure=first.departure_datetime.isoformat(),
@@ -58,6 +78,7 @@ def _slice_from_flight_result(fr: Any, flight_id: str | None = None) -> Slice:
         origin=SliceEndpoint(code=_airport_code(first.departure_airport)),
         destination=SliceEndpoint(code=_airport_code(last.arrival_airport)),
         flight_id=flight_id,
+        legs=leg_infos,
     )
 
 
@@ -67,12 +88,12 @@ def _price_string(fr: Any) -> str:
     return f"{currency}{fr.price:.2f}"
 
 
-def _unwrap(item: Any) -> tuple[Any, str | None]:
-    """Accept either a raw fli `FlightResult` (no flight_id available) or
-    a `GFlightWithId` carrying the captured opaque ID."""
+def _unwrap(item: Any) -> tuple[Any, str | None, list[LegAmenities] | None]:
+    """Accept either a raw fli `FlightResult` (no flight_id / amenities) or
+    a `GFlightWithId` carrying the captured opaque ID + per-leg amenities."""
     if hasattr(item, "flight_id") and hasattr(item, "flight"):
-        return item.flight, item.flight_id
-    return item, None
+        return item.flight, item.flight_id, getattr(item, "amenities", None)
+    return item, None, None
 
 
 def fli_results_to_search_result(results: Sequence[Any]) -> SearchResult:
@@ -98,8 +119,8 @@ def fli_results_to_search_result(results: Sequence[Any]) -> SearchResult:
         if not items_raw:
             continue
         unwrapped = [_unwrap(it) for it in items_raw]
-        slices = [_slice_from_flight_result(fr, fid) for fr, fid in unwrapped]
-        first_fr, _ = unwrapped[0]
+        slices = [_slice_from_flight_result(fr, fid, am) for fr, fid, am in unwrapped]
+        first_fr = unwrapped[0][0]
         price_str = _price_string(first_fr)
         solutions.append(
             Itinerary(

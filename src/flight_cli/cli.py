@@ -44,7 +44,7 @@ from .pp.cli import auth_app, run_pp_for_search
 from .providers.base import LegQuery
 
 if TYPE_CHECKING:
-    from .models import CalendarResult, Location, SearchResult, Slice
+    from .models import CalendarResult, LegInfo, Location, SearchResult, Slice
 
 # Tuple-length sentinels for `--slice` parser (`ORIGIN-DEST:DATE[:r=...:e=...]`).
 _SLICE_MIN_PARTS = 2
@@ -363,12 +363,59 @@ def _render_search(res: SearchResult) -> None:
             dur = f"{dur_min // 60}h{dur_min % 60:02d}m" if dur_min else ""
             o = (s.origin.code if s.origin else None) or "?"
             d = (s.destination.code if s.destination else None) or "?"
-            return f"{o}→{d} {'/'.join(s.flights) or '?'} {dep[:16]}→{arr[:16]} {dur}"
+            head = f"{o}→{d} {'/'.join(s.flights) or '?'} {dep[:16]}→{arr[:16]} {dur}"
+            tail = _fmt_legroom_lines(s)
+            return f"{head}\n{tail}" if tail else head
 
         out = _fmt(slcs[0]) if slcs else "—"
         ret = _fmt(slcs[1]) if len(slcs) > 1 else "—"
         st.add_row(str(i), _amount(it.price), it_carriers or "?", out, ret)
     console.print(st)
+
+
+# ───────────────── legroom formatters (gflight-populated; Matrix slices noop) ──
+
+
+def _fmt_legroom_one(flight_no: str, leg: LegInfo) -> str:
+    """Per-leg summary. Returns '' when no legroom fields are populated
+    (Matrix path — Matrix's response doesn't carry legroom). Uses the
+    same color-not-text policy as `_fmt_gflight_legroom`."""
+    parts: list[str] = []
+    cabin_short = _CABIN_LETTER.get(leg.cabin or "", "")
+    if cabin_short:
+        parts.append(cabin_short)
+    if leg.pitch_inches is not None:
+        token = f'{leg.pitch_inches}"'
+        color = _LEGROOM_AS_COLOR.get(leg.legroom_class or "")
+        if color:
+            token = f"[{color}]{token}[/]"
+        parts.append(token)
+    if leg.legroom_class and leg.legroom_class not in {"AVERAGE", "BELOW", "ABOVE"}:
+        parts.append(leg.legroom_class)
+    amenities: list[str] = []
+    w = _WIFI_GLYPH.get(leg.wifi or "")
+    if w:
+        amenities.append(w)
+    p = _POWER_GLYPH.get(leg.power or "")
+    if p:
+        amenities.append(p)
+    v = _VIDEO_GLYPH.get(leg.video or "")
+    if v:
+        amenities.append(v)
+    if amenities:
+        parts.append("".join(amenities))
+    if not parts:
+        return ""
+    return f"  {flight_no:<6} " + " ".join(parts)
+
+
+def _fmt_legroom_lines(s: Slice) -> str:
+    """Per-leg lines under a slice cell, one row per physical flight in the slice.
+    Empty when no legroom data populated (Matrix path)."""
+    if not s.legs:
+        return ""
+    rows = [_fmt_legroom_one(s.flights[i], leg) for i, leg in enumerate(s.legs)]
+    return "\n".join(r for r in rows if r)
 
 
 def _render_calendar(
@@ -558,7 +605,8 @@ def _run_gflight_path(
 def _render_gflight_table(results: list[Any], *, legs: tuple[Leg, ...], top_n: int) -> None:
     """Render fli results as a rich table. Duck-typed: fli has no type stubs.
 
-    Accepts our `GFlightWithId` wrappers — `.flight` is fli's FlightResult."""
+    Accepts our `GFlightWithId` wrappers — `.flight` is fli's FlightResult,
+    `.amenities` is per-leg legroom data parsed from Google's response."""
     origin = legs[0].origins[0] if legs[0].origins else "?"
     destination = legs[0].destinations[0] if legs[0].destinations else "?"
     has_return = len(legs) >= _ROUND_TRIP_LEGS
@@ -572,10 +620,13 @@ def _render_gflight_table(results: list[Any], *, legs: tuple[Leg, ...], top_n: i
     t.add_column("stops", justify="right")
     t.add_column("duration")
     t.add_column("legs")
+    t.add_column("legroom")
+    any_legroom = False
     for i, r in enumerate(results[:top_n], 1):
         items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
         for j, g in enumerate(items):
             fr = g.flight  # unwrap GFlightWithId → fli FlightResult
+            amenities = getattr(g, "amenities", []) or []
             label = f"{i}{'a' if j == 0 else 'b'}" if len(items) > 1 else str(i)
             legs_str = " → ".join(
                 f"{getattr(leg.airline, 'name', leg.airline)} {getattr(leg, 'flight_number', '?')}"
@@ -583,8 +634,94 @@ def _render_gflight_table(results: list[Any], *, legs: tuple[Leg, ...], top_n: i
             )
             mins = fr.duration
             dur = f"{mins // 60}h{mins % 60:02d}m"
-            t.add_row(label, f"{fr.currency or 'USD'}{fr.price:.2f}", str(fr.stops), dur, legs_str)
+            legroom_str = _fmt_gflight_legroom(fr.legs, amenities)
+            if legroom_str:
+                any_legroom = True
+            t.add_row(
+                label,
+                f"{fr.currency or 'USD'}{fr.price:.2f}",
+                str(fr.stops),
+                dur,
+                legs_str,
+                legroom_str,
+            )
     console.print(t)
+    if any_legroom:
+        console.print(_LEGROOM_KEY)
+
+
+# AVERAGE/BELOW/ABOVE are pitch-relative judgments — collapse them to color on
+# the inches token so the eye picks out squeeze rows without text noise. The
+# named premium-cabin enums describe seat construction (Lie Flat vs Suite vs
+# Angled Flat aren't comparable on pitch alone) so those stay as text.
+_LEGROOM_AS_COLOR = {"BELOW": "red", "ABOVE": "green"}
+_CABIN_LETTER = {"ECONOMY": "Y", "PREMIUM": "W", "BUSINESS": "J", "FIRST": "F"}
+# 📶 for wifi is the only emoji (2-col) — wifi is the highest-value binary signal
+# and 📶 is universally read at-a-glance where ≋ is not. Power and video keep
+# 1-col Unicode pairs so the plug-vs-USB and stream-vs-ondemand distinctions
+# don't bloat the column. See `_LEGROOM_KEY` for the rendered legend.
+_WIFI_GLYPH = {"free": "📶", "paid": "[yellow]📶$[/]"}
+# ↯ is more lightning-y (= plug power); ⌁ reads more like a connector (= USB).
+_POWER_GLYPH = {"plug": "↯", "usb": "⌁"}
+# ◰ (quadrant square) evokes a phone screen — stands in for BYOD streaming.
+_VIDEO_GLYPH = {"stream": "▶", "ondemand": "▷", "byod": "◰"}
+_LEGROOM_KEY = (
+    "[dim]Legroom glyphs: "
+    f"{_WIFI_GLYPH['free']} free wifi · "
+    f"{_WIFI_GLYPH['paid']}[dim] paid wifi · "
+    f"{_POWER_GLYPH['plug']} in-seat plug · "
+    f"{_POWER_GLYPH['usb']} USB only · "
+    f"{_VIDEO_GLYPH['stream']} live TV · "
+    f"{_VIDEO_GLYPH['ondemand']} on-demand · "
+    f"{_VIDEO_GLYPH['byod']} stream-to-device · "
+    "[red]red[/dim] = BELOW · [green]green[/] = ABOVE"
+    "[/]"
+)
+
+
+def _fmt_gflight_legroom(fli_legs: list[Any], amenities: list[Any]) -> str:
+    """One line per physical leg: `<cabin> <pitch>" [seat-type] <amenities>`.
+
+    `amenities[i]` is a LegAmenities instance from _gflight_ids; misaligned
+    or empty inputs render as ''."""
+    lines: list[str] = []
+    for i, leg in enumerate(fli_legs):
+        a = amenities[i] if i < len(amenities) else None
+        if a is None:
+            continue
+        parts: list[str] = []
+        cabin = _CABIN_LETTER.get(getattr(a, "cabin", None) or "", "")
+        if cabin:
+            parts.append(cabin)
+        pitch = getattr(a, "pitch_inches", None)
+        cls = getattr(a, "legroom_class", None)
+        if pitch is not None:
+            tok = f'{pitch}"'
+            color = _LEGROOM_AS_COLOR.get(cls or "")
+            if color:
+                tok = f"[{color}]{tok}[/]"
+            parts.append(tok)
+        if cls and cls not in {"AVERAGE", "BELOW", "ABOVE"}:
+            parts.append(cls)
+        glyphs: list[str] = []
+        wifi_g = _WIFI_GLYPH.get(getattr(a, "wifi", None) or "")
+        if wifi_g:
+            glyphs.append(wifi_g)
+        power_g = _POWER_GLYPH.get(getattr(a, "power", None) or "")
+        if power_g:
+            glyphs.append(power_g)
+        video_g = _VIDEO_GLYPH.get(getattr(a, "video", None) or "")
+        if video_g:
+            glyphs.append(video_g)
+        if glyphs:
+            parts.append("".join(glyphs))
+        if not parts:
+            continue
+        leg_label = (
+            f"{getattr(leg.airline, 'name', leg.airline)}{getattr(leg, 'flight_number', '?')}"
+        )
+        lines.append(f"{leg_label:<6} " + " ".join(parts))
+    return "\n".join(lines)
 
 
 # ─────────────────────────────── commands ──────────────────────────────────
@@ -1203,6 +1340,83 @@ def airport(
     for loc in locs:
         t.add_row(loc.code, loc.display_name or "", loc.city_name or "", loc.timezone or "")
     console.print(t)
+
+
+@app.command()
+def seatmap(
+    origin: Annotated[str, typer.Argument(help="Origin IATA")],
+    destination: Annotated[str, typer.Argument(help="Destination IATA")],
+    flight: Annotated[
+        str,
+        typer.Argument(help="Flight number, bare or IATA-prefixed (e.g. AA100)"),
+    ],
+    date: Annotated[str, typer.Option("--date", help="Flight date YYYY-MM-DD")],
+    aircraft: Annotated[
+        str | None,
+        typer.Option("--aircraft", help="Aircraft type (e.g. 'Airbus A330') — improves match"),
+    ] = None,
+    carrier: Annotated[
+        str | None,
+        typer.Option(
+            "--carrier",
+            help="Carrier IATA. Inferred from flight# if it starts with letters.",
+        ),
+    ] = None,
+    fetch: Annotated[
+        bool,
+        typer.Option(
+            "--fetch/--no-fetch",
+            help="Resolve to seatmaps.com URL via one HTTP GET (default).",
+        ),
+    ] = True,
+) -> None:
+    """Get a seatmaps.com URL for a specific flight.
+
+    Mirrors what the Legrooms+ Chrome extension does on click. Without
+    --no-fetch, makes one GET to travelarrow.io/api/s and prints the
+    seatmaps.com URL it resolves to. With --no-fetch, just prints the
+    travelarrow URL itself (cheap, but you'll get JSON not a seatmap).
+    """
+    from .seatmap import fetch_seatmap_url, seatmap_api_url  # noqa: PLC0415
+
+    flight = flight.upper()
+    if carrier is None:
+        prefix = "".join(c for c in flight[:3] if c.isalpha())
+        if not prefix:
+            err.print("[red]Cannot infer carrier from flight number — pass --carrier IATA.[/]")
+            raise typer.Exit(2)
+        carrier = prefix
+
+    parsed = _parse_date(date)
+    api_url = seatmap_api_url(
+        origin=origin,
+        dest=destination,
+        flight_number=flight,
+        carrier=carrier,
+        date=parsed,
+        aircraft=aircraft,
+    )
+    if not fetch:
+        console.print(api_url)
+        return
+    try:
+        url = fetch_seatmap_url(
+            origin=origin,
+            dest=destination,
+            flight_number=flight,
+            carrier=carrier,
+            date=parsed,
+            aircraft=aircraft,
+        )
+    except Exception as e:
+        err.print(f"[red]Seatmap lookup failed:[/] {e}")
+        console.print(f"[dim]API URL:[/] {api_url}")
+        raise typer.Exit(1) from e
+    if url is None:
+        err.print("[yellow]No seatmap on file for this flight/aircraft.[/]")
+        console.print(f"[dim]API URL:[/] {api_url}")
+        raise typer.Exit(1)
+    console.print(url)
 
 
 if __name__ == "__main__":

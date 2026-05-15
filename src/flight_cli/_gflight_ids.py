@@ -42,13 +42,160 @@ _BASE_URL = SearchFlights.BASE_URL
 # Mirrors the PP browser extension's parser (chunk-5KW5VSHS.js: `a = n[17]`).
 _FLIGHT_ID_IDX = 17
 
+# Per-leg field indices in `data[0][2][i]`. Mirrors the Legrooms+ extension's
+# parser (load_flight_data.js function `u`). See docs/memories/legroom_recipe.md.
+_LEG_AMENITIES_IDX = 12  # array — bit positions decoded into wifi/power/video
+_LEG_LEGROOM_CLASS_IDX = 13  # int enum (see _LEGROOM_CLASS)
+_LEG_PITCH_IDX = 14  # int (inches)
+_LEG_CABIN_IDX = 16  # int enum (see _CABIN)
+_LEG_AIRCRAFT_IDX = 17  # string
+
+_LEGROOM_CLASS: dict[int, str] = {
+    1: "AVERAGE",
+    2: "BELOW",
+    3: "ABOVE",
+    4: "Extra Reclining",
+    5: "Lie Flat",
+    6: "Suite",
+    8: "Reclining",
+    9: "Angled Flat",
+}
+_CABIN: dict[int, str] = {1: "ECONOMY", 2: "PREMIUM", 3: "BUSINESS", 4: "FIRST"}
+
+
+@dataclass
+class LegAmenities:
+    """Per-leg legroom + amenity extract, decoded from data[0][2][i] indices 12-17."""
+
+    aircraft: str | None = None
+    pitch_inches: int | None = None
+    legroom_class: str | None = None
+    cabin: str | None = None
+    wifi: str | None = None  # "free" | "paid" | None (no ground-internet wifi)
+    power: str | None = None
+    video: str | None = None
+
+
+def _decode_power(amenities: Any) -> str | None:
+    """t[12] amenity array — [1] or [3] truthy → in-seat plug; [5] → USB.
+
+    Position [1] is the dominant power signal on current routes. [3] and [5]
+    are kept for legacy/edge-case routes the original Legrooms+ extension
+    mapped before Google's sparse-encoding shift (see legroom_recipe.md)."""
+    if not amenities:
+        return None
+    try:
+        if amenities[1] or amenities[3]:
+            return "plug"
+        if amenities[5]:
+            return "usb"
+    except (IndexError, TypeError):
+        return None
+    return None
+
+
+def _decode_video(amenities: Any) -> str | None:
+    """Three-state video enum, validated 2026-05 against Google Flights' UI:
+
+      - `[8]` True → "Live TV" (seatback, B6 DirecTV-style)         → "stream"
+      - `[9]` True → "On-demand video" (seatback IFE, DL / EK / UA) → "ondemand"
+      - `[10]` True → "Stream media to your device" (BYOD, AA / WN) → "byod"
+
+    Priority order matches Google's labelling preference: when more than one
+    delivery channel is available, the most-premium seatback option takes
+    the label slot. DIVERGES from Legrooms+ v11.5.0 (used [10] for stream).
+    """
+    if not amenities:
+        return None
+    try:
+        if amenities[8]:
+            return "stream"
+        if amenities[9]:
+            return "ondemand"
+        if amenities[10]:
+            return "byod"
+    except (IndexError, TypeError):
+        return None
+    return None
+
+
+_WIFI: dict[int, str] = {2: "free", 3: "paid"}
+
+
+def _decode_wifi(amenities: Any) -> str | None:
+    """`amenities[11]` is the ground-internet wifi enum: 1=none, 2=free, 3=paid.
+
+    Empirically calibrated 2026-05 by scraping Google Flights' detail-panel
+    labels for a sample of flights and correlating against the bit array:
+
+      - `[11]=1` → no "Wi-Fi" label (e.g. F9 Frontier)
+      - `[11]=2` → "Free Wi-Fi"  (e.g. AA / B6 / DL / KL / WN — modern US
+                  mainline + some international)
+      - `[11]=3` → "Wi-Fi for a fee" (e.g. EK / AS / UA / AC / OS — paid
+                  models, even where some elite tiers get it free)
+
+    DIVERGES from the Legrooms+ extension v11.5.0 (which reads `[0]`).
+    Position `[0]` is consistently None on 2026 responses — the extension's
+    wifi icon doesn't fire at all on current data. The real signal moved
+    to `[11]` and became a three-state enum (was a Boolean).
+
+    Returns None for "no wifi", "free", or "paid" — None is render-as-empty;
+    callers distinguish the two truthy states for UI presentation.
+    """
+    if not amenities:
+        return None
+    try:
+        raw = amenities[11]
+    except (IndexError, TypeError):
+        return None
+    return _WIFI.get(raw) if isinstance(raw, int) else None
+
+
+def _parse_pitch(raw: Any) -> int | None:
+    """Pitch arrives as '31 in' (Google's units-suffixed string) on most
+    routes, occasionally bare int. Normalize to int inches; None on
+    unrecognized shape."""
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
+        for token in raw.split():
+            if token.isdigit():
+                return int(token)
+    return None
+
+
+def _parse_leg_amenities(fl: list[Any]) -> LegAmenities:
+    """Defensive read of indices 12-17 from a leg tuple. Returns an
+    all-None LegAmenities if any single field is missing or wrong type —
+    Google's response shape drifts and a partial extract is better than
+    dropping the whole flight."""
+    amenities = fl[_LEG_AMENITIES_IDX] if len(fl) > _LEG_AMENITIES_IDX else None
+    legroom_raw = fl[_LEG_LEGROOM_CLASS_IDX] if len(fl) > _LEG_LEGROOM_CLASS_IDX else None
+    pitch_raw = fl[_LEG_PITCH_IDX] if len(fl) > _LEG_PITCH_IDX else None
+    cabin_raw = fl[_LEG_CABIN_IDX] if len(fl) > _LEG_CABIN_IDX else None
+    aircraft = fl[_LEG_AIRCRAFT_IDX] if len(fl) > _LEG_AIRCRAFT_IDX else None
+    return LegAmenities(
+        aircraft=aircraft if isinstance(aircraft, str) and aircraft else None,
+        pitch_inches=_parse_pitch(pitch_raw),
+        legroom_class=_LEGROOM_CLASS.get(legroom_raw) if isinstance(legroom_raw, int) else None,
+        cabin=_CABIN.get(cabin_raw) if isinstance(cabin_raw, int) else None,
+        wifi=_decode_wifi(amenities),
+        power=_decode_power(amenities),
+        video=_decode_video(amenities),
+    )
+
 
 @dataclass
 class GFlightWithId:
-    """fli's FlightResult plus Google's opaque flight_id for PP matching."""
+    """fli's FlightResult plus Google's opaque flight_id and per-leg amenities.
+
+    `amenities[i]` aligns with the i-th leg in `flight.legs` — same index
+    in both lists points to the same physical segment.
+    """
 
     flight: FlightResult
     flight_id: str
+    amenities: list[LegAmenities]
 
 
 def _parse_flight_with_id(data: list[Any]) -> GFlightWithId:
@@ -58,11 +205,12 @@ def _parse_flight_with_id(data: list[Any]) -> GFlightWithId:
     is the per-flight opaque ID; n[2] legs; n[9] duration; t[0][-1] price."""
     price, currency = SearchFlights._parse_price_info(data)  # pyright: ignore[reportPrivateUsage, reportUnknownMemberType]
     flight_id = data[0][_FLIGHT_ID_IDX] if len(data[0]) > _FLIGHT_ID_IDX else ""
+    leg_tuples: list[list[Any]] = data[0][2]
     flight = FlightResult(
         price=price,
         currency=currency,
         duration=data[0][9],
-        stops=len(data[0][2]) - 1,
+        stops=len(leg_tuples) - 1,
         legs=[
             FlightLeg(
                 airline=SearchFlights._parse_airline(fl[22][0]),  # pyright: ignore[reportPrivateUsage]
@@ -73,10 +221,11 @@ def _parse_flight_with_id(data: list[Any]) -> GFlightWithId:
                 arrival_datetime=SearchFlights._parse_datetime(fl[21], fl[10]),  # pyright: ignore[reportPrivateUsage]
                 duration=fl[11],
             )
-            for fl in data[0][2]
+            for fl in leg_tuples
         ],
     )
-    return GFlightWithId(flight=flight, flight_id=flight_id)
+    amenities = [_parse_leg_amenities(fl) for fl in leg_tuples]
+    return GFlightWithId(flight=flight, flight_id=flight_id, amenities=amenities)
 
 
 def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:

@@ -82,6 +82,24 @@ class SliceEndpoint(_Loose):
     code: str | None = None
 
 
+class LegInfo(_Loose):
+    """Per-leg amenities + legroom data from Google Flights /GetShoppingResults.
+
+    Populated by the gflight backend from `data[0][2][i]` indices 12-17 (the
+    same indices the Legrooms+ Chrome extension parses). Matrix itineraries
+    leave this empty — Matrix's payload doesn't carry pitch or amenity data.
+    Index in `Slice.legs` aligns with the same index in `Slice.flights`.
+    """
+
+    aircraft: str | None = None
+    pitch_inches: int | None = None
+    legroom_class: str | None = None  # AVERAGE / BELOW / ABOVE / Lie Flat / ...
+    cabin: str | None = None  # ECONOMY / PREMIUM / BUSINESS / FIRST
+    wifi: str | None = None  # "free" | "paid" | None (no ground-internet wifi)
+    power: str | None = None  # "plug" | "usb" | None
+    video: str | None = None  # "stream" | "ondemand" | None
+
+
 class Slice(_Loose):
     flights: list[str] = Field(default_factory=list[str])
     departure: str | None = None
@@ -95,6 +113,7 @@ class Slice(_Loose):
     # join key. None for Matrix cash itineraries — they don't expose an ID
     # PP recognizes, so those fall back to flight#+date / route+time joins.
     flight_id: str | None = None
+    legs: list[LegInfo] = Field(default_factory=list[LegInfo])
 
 
 class SliceCarrier(_Loose):
