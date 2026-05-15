@@ -52,7 +52,7 @@ async def _gather_one_leg(
     leg: LegQuery,
     *,
     cabins: tuple[str, ...],
-    num_passengers: int,
+    num_passengers: int = 1,
 ) -> list[AwardFlight]:
     """Run all providers concurrently for one leg, concatenate results."""
     results: list[list[AwardFlight]] = [[] for _ in providers]
