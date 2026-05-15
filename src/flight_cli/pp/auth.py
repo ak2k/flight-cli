@@ -289,35 +289,63 @@ def login_from_chrome() -> Tokens:
     return tokens_from_supabase_cookies(cookies)
 
 
+# Persistent browser profile for the PP login flow. Cloudflare uses cf_clearance
+# cookies that are bound to the browser fingerprint; persisting them across runs
+# means the user only has to clear the human-check once.
+BROWSER_PROFILE_DIR = (
+    Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache")))
+    / "flight-cli"
+    / "browser-profile"
+)
+
+
 def login_via_browser(
     *,
     timeout_secs: int = _DEFAULT_BROWSER_LOGIN_TIMEOUT_SECS,
     poll_interval_secs: float = 1.0,
 ) -> Tokens:
-    """Open a headed Playwright Chromium for the user to log into PointsPath.
+    """Open a headed Patchright Chromium for the user to log into PointsPath.
 
-    Independent of any user-facing Chrome session — this is the recommended
-    primary path. Polls for the Supabase auth-token cookie; returns as soon
-    as it appears, or raises PPAuthError on timeout / browser close.
+    Uses `patchright` (a Playwright fork that patches the CDP `Runtime.enable`
+    leak and `navigator.webdriver` exposure) so Cloudflare's bot fingerprint
+    check passes. Launches with `channel="chrome"` to use the real Chrome
+    binary (whose JA3/JA4 TLS fingerprint matches real Chrome traffic) and a
+    persistent context under ~/.cache/flight-cli/browser-profile so cf_clearance
+    cookies survive between login sessions.
+
+    Independent of any user-facing Chrome session. Polls for the Supabase
+    auth-token cookie; returns as soon as it appears, or raises PPAuthError
+    on timeout / browser close.
     """
     try:
-        from playwright.sync_api import Error as PlaywrightError  # noqa: PLC0415
-        from playwright.sync_api import sync_playwright  # noqa: PLC0415
+        from patchright.sync_api import Error as PlaywrightError  # noqa: PLC0415
+        from patchright.sync_api import sync_playwright  # noqa: PLC0415
     except ImportError as e:  # pragma: no cover — install-time concern
         raise PPAuthError(
-            "playwright isn't installed (needed for headed browser login). "
-            "Quickest path: rerun this command via "
-            "`uv run --with playwright flight auth pp login` "
-            "(plus a one-time `uvx --from playwright playwright install chromium`). "
-            "Alternatives: --from-chrome or --tokens-file PATH.",
+            "patchright isn't installed (needed for Cloudflare-resistant browser "
+            "login). Quickest path: rerun this command via "
+            "`uv run --with patchright flight auth pp login` "
+            "(plus a one-time `uvx --from patchright patchright install chrome`). "
+            "Alternatives: --from-chrome (reads cookies from your real Chrome) "
+            "or --tokens-file PATH.",
         ) from e
 
     import time  # noqa: PLC0415
 
+    BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
+        # launch_persistent_context (not launch + new_context) is the
+        # recommended Patchright pattern for Cloudflare: it persists cookies +
+        # storage between runs, and lets the browser appear as a fully real
+        # Chrome session.
+        context = p.chromium.launch_persistent_context(
+            user_data_dir=str(BROWSER_PROFILE_DIR),
+            channel="chrome",
+            headless=False,
+            no_viewport=True,
+        )
         try:
-            context = browser.new_context()
             page = context.new_page()
             page.goto(_PP_HOME_URL)
 
@@ -339,4 +367,4 @@ def login_via_browser(
                 "Re-run `flight auth pp login` and complete sign-in before the timeout.",
             )
         finally:
-            browser.close()
+            context.close()
