@@ -1,7 +1,15 @@
 """Join Matrix cash itineraries to PointsPath award flights.
 
-Match key: (normalized first-segment flight number, ISO departure date).
+Primary key: (normalized first-segment flight number, ISO departure date).
 Same key can appear at most once per side per day, so a dict-lookup is enough.
+
+Codeshare-fallback key: (origin, destination, departure datetime to minute).
+Matrix returns codeshares under the *marketing* flight number (e.g. AA6939
+JFK→LHR), while PointsPath returns the same physical aircraft under the
+*operating* flight number (e.g. BA174 — surfaced inside the American PP
+query, because PP attributes codeshares to the operator). Flight-number
+keys can't bridge that, but route+time can: both sources read the same
+airline-published schedule, so origin+dest+minute is a near-tight identity.
 
 Outputs MatchedFare records, one per cash itinerary, with optional award
 data attached. Caller renders.
@@ -23,6 +31,9 @@ if TYPE_CHECKING:
     )
 
 MatchKey = tuple[str, str]  # (FLIGHT_NUMBER_UPPER_NOSPACE, "YYYY-MM-DD")
+RouteTimeKey = tuple[str, str, str]  # (ORIGIN_UPPER, DEST_UPPER, "YYYY-MM-DDTHH:MM")
+
+_ISO_MINUTE_LEN = 16  # "YYYY-MM-DDTHH:MM"
 
 
 def _norm_fn(fn: str | None) -> str:
@@ -37,6 +48,15 @@ def _iso_date(s: str | None) -> str:
     # Matrix: "2026-06-09T22:00" / "2026-06-09 22:00"
     s = s.replace(" ", "T")
     return s[:10]
+
+
+def _iso_minute(s: str | None) -> str:
+    """Trim a datetime string to YYYY-MM-DDTHH:MM (minute precision). Tolerant
+    of the space-separator Matrix sometimes returns. '' on missing/short."""
+    if not s:
+        return ""
+    s = s.replace(" ", "T")
+    return s[:_ISO_MINUTE_LEN] if len(s) >= _ISO_MINUTE_LEN else ""
 
 
 def cash_match_key(it: Itinerary, slice_index: int = 0) -> MatchKey | None:
@@ -61,6 +81,32 @@ def cash_match_key(it: Itinerary, slice_index: int = 0) -> MatchKey | None:
 
 def award_match_key(of: OutboundFlight) -> MatchKey:
     return (_norm_fn(of.firstFlightNumber), _iso_date(of.localDepartureDateTime))
+
+
+def cash_route_time_key(it: Itinerary, slice_index: int = 0) -> RouteTimeKey | None:
+    """Codeshare-fallback key: origin, destination, minute-precision departure.
+
+    Doesn't require `slice.flights` to be populated — origin/dest/departure
+    are enough to anchor the same physical flight on the award side."""
+    itn = it.itinerary
+    if not itn or not itn.slices or slice_index >= len(itn.slices):
+        return None
+    s = itn.slices[slice_index]
+    o = ((s.origin.code if s.origin else None) or "").upper()
+    d = ((s.destination.code if s.destination else None) or "").upper()
+    t = _iso_minute(s.departure)
+    if not (o and d and t):
+        return None
+    return (o, d, t)
+
+
+def award_route_time_key(of: OutboundFlight) -> RouteTimeKey | None:
+    o = (of.origin or "").upper()
+    d = (of.destination or "").upper()
+    t = _iso_minute(of.localDepartureDateTime)
+    if not (o and d and t):
+        return None
+    return (o, d, t)
 
 
 @dataclass
@@ -123,7 +169,13 @@ def join(
     slice_index: int = 0,
     use_inbound: bool = False,
 ) -> list[MatchedFare]:
-    """Outer-join cash itineraries onto award flights by (flight#, date).
+    """Outer-join cash itineraries onto award flights.
+
+    Match strategy: primary by (flight#, date), then a route+time fallback to
+    catch codeshares (Matrix's marketing flight# won't equal PP's operating
+    flight#, but origin+dest+minute identifies the same physical flight).
+    Hits from both keys are unioned and deduped by OutboundFlight identity, so
+    non-codeshare flights aren't double-attached.
 
     Cash itineraries with no award match keep an empty `awards` list — caller
     decides whether to render them or filter to inner-join.
@@ -137,32 +189,50 @@ def join(
     """
     pricing_idx = _index_pricing(pricing)
 
-    # Build award index. One key may surface from multiple airlines (codeshares),
-    # so we keep a list per key.
-    award_idx: dict[MatchKey, list[tuple[str, OutboundFlight]]] = {}
+    # Build both award indexes in one pass over the flights. A single flight
+    # may appear under both — that's expected; per-itinerary dedup in the
+    # join loop keeps the output clean.
+    fn_idx: dict[MatchKey, list[tuple[str, OutboundFlight]]] = {}
+    rt_idx: dict[RouteTimeKey, list[tuple[str, OutboundFlight]]] = {}
     for airline, resp in award_by_airline.items():
         flights = resp.inboundFlights if use_inbound else resp.outboundFlights
         for of in flights:
-            k = award_match_key(of)
-            if not k[0]:
-                continue
-            award_idx.setdefault(k, []).append((airline, of))
+            fn_k = award_match_key(of)
+            if fn_k[0]:
+                fn_idx.setdefault(fn_k, []).append((airline, of))
+            rt_k = award_route_time_key(of)
+            if rt_k:
+                rt_idx.setdefault(rt_k, []).append((airline, of))
 
     out: list[MatchedFare] = []
     for it in search.solutions:
-        k = cash_match_key(it, slice_index=slice_index)
         awards: list[AwardOption] = []
-        if k and k in award_idx:
-            for airline, of in award_idx[k]:
-                pi = pricing_idx.get(airline)
-                awards.append(
-                    AwardOption(
-                        airline=airline,
-                        miles_to_cash_ratio=pi.milesToCashRatio if pi else 0.0,
-                        flight=of,
-                        cabins=_cabin_awards(of.perCabinMilesPricing),
-                        funding_banks=[b.bank for b in (pi.bankPointsInfos if pi else [])],
-                    )
+        seen_ids: set[int] = set()
+
+        # Collect (airline, OutboundFlight) hits from both keys, then convert
+        # to AwardOption once per unique flight.
+        hits: list[tuple[str, OutboundFlight]] = []
+        fn_k = cash_match_key(it, slice_index=slice_index)
+        if fn_k and fn_k in fn_idx:
+            hits.extend(fn_idx[fn_k])
+        rt_k = cash_route_time_key(it, slice_index=slice_index)
+        if rt_k and rt_k in rt_idx:
+            hits.extend(rt_idx[rt_k])
+
+        for airline, of in hits:
+            if id(of) in seen_ids:
+                continue
+            seen_ids.add(id(of))
+            pi = pricing_idx.get(airline)
+            awards.append(
+                AwardOption(
+                    airline=airline,
+                    miles_to_cash_ratio=pi.milesToCashRatio if pi else 0.0,
+                    flight=of,
+                    cabins=_cabin_awards(of.perCabinMilesPricing),
+                    funding_banks=[b.bank for b in (pi.bankPointsInfos if pi else [])],
                 )
+            )
+
         out.append(MatchedFare(itinerary=it, awards=awards))
     return out
