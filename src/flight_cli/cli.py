@@ -901,6 +901,14 @@ def _fmt_gflight_legroom(fli_legs: list[Any], amenities: list[Any]) -> str:
 
 # ─────────────────────────────── commands ──────────────────────────────────
 
+# rich_help_panel groups for grouped `--help` output. Same names used across
+# search/calendar/detail/fare/gflight so the user gets a consistent mental
+# map for where each kind of flag lives.
+_GROUP_ITINERARY = "Itinerary"
+_GROUP_FILTERING = "Filtering"
+_GROUP_OUTPUT = "Output"
+_GROUP_BACKEND = "Backend & providers"
+
 # Common-args helpers — these reduce repetition across commands.
 # These flags are hidden because almost nobody touches them in normal use;
 # defaults live in config.toml ([http] section) and can be overridden via
@@ -932,6 +940,7 @@ _PROVIDER_OPT = typer.Option(
         "Per-provider override, repeatable: 'pp.airlines=United,Delta'. "
         "Overrides ~/.config/flight-cli/config.toml [providers.<name>]."
     ),
+    rich_help_panel="Backend & providers",
 )
 
 
@@ -972,6 +981,7 @@ _FORMAT_OPT = typer.Option(
     "table",
     "--format",
     help=f"Output format: one of {'/'.join(_VALID_FORMATS)}.",
+    rich_help_panel=_GROUP_OUTPUT,
 )
 _JSON_OPT = typer.Option(
     False,
@@ -1009,10 +1019,18 @@ def search(
         str | None,
         typer.Argument(help="Destination IATA (comma-list ok)"),
     ] = None,
-    dep: Annotated[str | None, typer.Option("--dep", help="YYYY-MM-DD")] = None,
+    dep: Annotated[
+        str | None,
+        typer.Option("--dep", help="YYYY-MM-DD", rich_help_panel=_GROUP_ITINERARY),
+    ] = None,
     ret: Annotated[
         str | None,
-        typer.Option("--return", "-r", help="YYYY-MM-DD; omit for one-way"),
+        typer.Option(
+            "--return",
+            "-r",
+            help="YYYY-MM-DD; omit for one-way",
+            rich_help_panel=_GROUP_ITINERARY,
+        ),
     ] = None,
     slice_specs: Annotated[
         list[str] | None,
@@ -1020,6 +1038,7 @@ def search(
             "--slice",
             "-s",
             help="Multi-city: 'ORIG-DEST:DATE[:r=ROUTING:e=EXT]'. Repeat. (Matrix only)",
+            rich_help_panel=_GROUP_ITINERARY,
         ),
     ] = None,
     backend: Annotated[
@@ -1031,20 +1050,28 @@ def search(
                 "matrix when Matrix-only flags are set (routing/extension/slice/"
                 "time-of-day/extra pax types/PP config)."
             ),
+            rich_help_panel=_GROUP_BACKEND,
         ),
     ] = BACKEND_AUTO,
-    cabin: str = "economy",
-    adults: int = 1,
-    children: int = 0,
-    seniors: int = 0,
-    youth: int = 0,
-    inf_seat: Annotated[int, typer.Option("--inf-seat")] = 0,
-    inf_lap: Annotated[int, typer.Option("--inf-lap")] = 0,
+    cabin: str = typer.Option("economy", "--cabin", rich_help_panel=_GROUP_ITINERARY),
+    adults: int = typer.Option(1, "--adults", rich_help_panel=_GROUP_ITINERARY),
+    children: int = typer.Option(0, "--children", rich_help_panel=_GROUP_ITINERARY),
+    seniors: int = typer.Option(0, "--seniors", rich_help_panel=_GROUP_ITINERARY),
+    youth: int = typer.Option(0, "--youth", rich_help_panel=_GROUP_ITINERARY),
+    inf_seat: Annotated[
+        int,
+        typer.Option("--inf-seat", rich_help_panel=_GROUP_ITINERARY),
+    ] = 0,
+    inf_lap: Annotated[
+        int,
+        typer.Option("--inf-lap", rich_help_panel=_GROUP_ITINERARY),
+    ] = 0,
     routing: Annotated[
         str | None,
         typer.Option(
             "--routing",
             help="Routing language ('LH+', 'BA AA', '[F* X F*]'). Matrix only.",
+            rich_help_panel=_GROUP_FILTERING,
         ),
     ] = None,
     extension: Annotated[
@@ -1053,6 +1080,7 @@ def search(
             "--extension",
             "--ext",
             help="Extension codes ('MAXCONNECT 2:00', 'MAXSTOPS 1'). Matrix only.",
+            rich_help_panel=_GROUP_FILTERING,
         ),
     ] = None,
     depart_times: Annotated[
@@ -1060,46 +1088,70 @@ def search(
         typer.Option(
             "--depart-times",
             help="Preferred outbound times-of-day (comma list: morning,evening). Matrix only.",
+            rich_help_panel=_GROUP_FILTERING,
         ),
     ] = None,
     return_times: Annotated[
         str | None,
-        typer.Option("--return-times", help="Preferred return times-of-day. Matrix only."),
+        typer.Option(
+            "--return-times",
+            help="Preferred return times-of-day. Matrix only.",
+            rich_help_panel=_GROUP_FILTERING,
+        ),
     ] = None,
     stops: Annotated[
         int | None,
         typer.Option(
-            "--stops", help="Max extra stops beyond nonstop (0=nonstop only, 1=up to 1 stop, ...)"
+            "--stops",
+            help="Max extra stops beyond nonstop (0=nonstop only, 1=up to 1 stop, ...)",
+            rich_help_panel=_GROUP_ITINERARY,
         ),
     ] = None,
     allow_airport_changes: bool = typer.Option(
-        True, "--allow-airport-changes/--no-airport-changes"
+        True,
+        "--allow-airport-changes/--no-airport-changes",
+        rich_help_panel=_GROUP_FILTERING,
     ),
-    only_available: bool = typer.Option(True, "--only-available/--include-unavailable"),
+    only_available: bool = typer.Option(
+        True,
+        "--only-available/--include-unavailable",
+        rich_help_panel=_GROUP_FILTERING,
+    ),
     page_size: int = typer.Option(
-        10, "--n", "-n", help="Result count (matrix: page size; gflight: top_n)."
+        10,
+        "--n",
+        "-n",
+        help="Result count (matrix: page size; gflight: top_n).",
+        rich_help_panel=_GROUP_OUTPUT,
     ),
     rps: float | None = _RPS_OPT,
     impersonate: str | None = _IMPERSONATE_OPT,
     fmt: str = _FORMAT_OPT,
     json_out: bool = _JSON_OPT,
-    matrix_url: bool = typer.Option(True, "--matrix-url/--no-matrix-url"),
-    google_url: bool = typer.Option(True, "--google-url/--no-google-url"),
+    matrix_url: bool = typer.Option(
+        True, "--matrix-url/--no-matrix-url", rich_help_panel=_GROUP_OUTPUT
+    ),
+    google_url: bool = typer.Option(
+        True, "--google-url/--no-google-url", rich_help_panel=_GROUP_OUTPUT
+    ),
     no_cache: bool = _NO_CACHE_OPT,
     providers: str | None = typer.Option(
         None,
         "--providers",
         help=("CSV of award providers to use (e.g. 'pp'). Default: all configured providers."),
+        rich_help_panel=_GROUP_BACKEND,
     ),
     cash_only: bool = typer.Option(
         False,
         "--cash-only",
         help="Skip all award providers; just show the cash table.",
+        rich_help_panel=_GROUP_BACKEND,
     ),
     awards_only: bool = typer.Option(
         False,
         "--awards-only",
         help="Skip the cash table; show only the award provider output.",
+        rich_help_panel=_GROUP_BACKEND,
     ),
     provider_opt: list[str] | None = _PROVIDER_OPT,
     no_pp: bool = typer.Option(
@@ -1404,20 +1456,53 @@ def fare(
 
 
 def _parse_slice_spec(s: str) -> Leg:
-    """Parse 'JFK-LHR:2026-08-15[:r=LH+:e=MAXCONNECT 2:00]'."""
+    """Parse 'JFK-LHR:2026-08-15[:r=LH+:e=MAXCONNECT 2:00]'.
+
+    Error paths surface the specific failure (missing colon, malformed
+    origin-dest, unknown key prefix, bad date) instead of the generic
+    "should be ORIGIN-DEST:DATE[:r=...:e=...]" — that message is fine
+    for missing date but useless when the user typed `r-LH+` instead
+    of `r=LH+` (which the lookahead split otherwise silently ignores).
+    """
     parts = s.split(":", 2)
     if len(parts) < _SLICE_MIN_PARTS:
-        raise typer.BadParameter(f"slice {s!r} should be ORIGIN-DEST:DATE[:r=...:e=...]")
+        raise typer.BadParameter(
+            f"slice {s!r}: missing date — expected ORIGIN-DEST:DATE[:r=...:e=...]"
+        )
     od, dt = parts[0], parts[1]
+    if "-" not in od:
+        raise typer.BadParameter(
+            f"slice {s!r}: missing '-' between origin and destination "
+            f"(got {od!r}; expected e.g. JFK-LHR)"
+        )
     o, d = od.split("-", 1)
+    if not o or not d:
+        raise typer.BadParameter(
+            f"slice {s!r}: origin and destination must both be non-empty (got {od!r})"
+        )
+    # Inline date parse (don't route through _parse_date) so we control the
+    # error envelope. _parse_date raises typer.Exit with a separate err.print
+    # which would surface as a double-message in slice-specific BadParameter.
+    try:
+        parsed_date = datetime.strptime(dt, "%Y-%m-%d").date()
+    except ValueError as e:
+        raise typer.BadParameter(f"slice {s!r}: invalid date {dt!r} (expected YYYY-MM-DD)") from e
     routing = extension = None
     if len(parts) == _SLICE_MAX_PARTS:
+        # Chunks come in as r=... and e=... separated by ':' followed by the
+        # key prefix. Anything that doesn't start with r= or e= is a typo
+        # (the most common is r-VALUE instead of r=VALUE).
         for chunk in re.split(r":(?=[re]=)", parts[2]):
             if chunk.startswith("r="):
                 routing = chunk[2:]
             elif chunk.startswith("e="):
                 extension = chunk[2:]
-    return Leg.of(o, d, _parse_date(dt), route_language=routing, extension=extension)
+            else:
+                raise typer.BadParameter(
+                    f"slice {s!r}: unknown key prefix in {chunk!r}; "
+                    f"valid keys are r=ROUTING and e=EXTENSION (note the '=')"
+                )
+    return Leg.of(o, d, parsed_date, route_language=routing, extension=extension)
 
 
 @app.command()
@@ -1427,38 +1512,65 @@ def calendar(
         typer.Argument(help="Origin IATA (comma-list for multi-airport)"),
     ],
     destination: Annotated[str, typer.Argument(help="Destination IATA (comma-list)")],
-    start: Annotated[str, typer.Option("--start", help="Window start YYYY-MM-DD")],
+    start: Annotated[
+        str,
+        typer.Option("--start", help="Window start YYYY-MM-DD", rich_help_panel=_GROUP_ITINERARY),
+    ],
     end: Annotated[
         str | None,
-        typer.Option("--end", help="Window end (default: start+30d)"),
+        typer.Option(
+            "--end", help="Window end (default: start+30d)", rich_help_panel=_GROUP_ITINERARY
+        ),
     ] = None,
     duration: Annotated[
         str,
-        typer.Option("--duration", "-d", help="Nights, '5' or '5-7'"),
+        typer.Option(
+            "--duration", "-d", help="Nights, '5' or '5-7'", rich_help_panel=_GROUP_ITINERARY
+        ),
     ] = "5-7",
-    one_way: bool = typer.Option(False, "--one-way"),
-    cabin: str = "economy",
-    adults: int = 1,
-    children: int = 0,
-    seniors: int = 0,
-    youth: int = 0,
-    routing: str | None = typer.Option(None, "--routing"),
-    extension: str | None = typer.Option(None, "--extension", "--ext"),
-    routing_return: str | None = typer.Option(None, "--routing-ret"),
-    extension_return: str | None = typer.Option(None, "--ext-ret"),
-    depart_times: str | None = typer.Option(None, "--depart-times"),
-    return_times: str | None = typer.Option(None, "--return-times"),
-    stops: int | None = typer.Option(None, "--stops"),
-    allow_airport_changes: bool = typer.Option(
-        True, "--allow-airport-changes/--no-airport-changes"
+    one_way: bool = typer.Option(False, "--one-way", rich_help_panel=_GROUP_ITINERARY),
+    cabin: str = typer.Option("economy", "--cabin", rich_help_panel=_GROUP_ITINERARY),
+    adults: int = typer.Option(1, "--adults", rich_help_panel=_GROUP_ITINERARY),
+    children: int = typer.Option(0, "--children", rich_help_panel=_GROUP_ITINERARY),
+    seniors: int = typer.Option(0, "--seniors", rich_help_panel=_GROUP_ITINERARY),
+    youth: int = typer.Option(0, "--youth", rich_help_panel=_GROUP_ITINERARY),
+    routing: str | None = typer.Option(None, "--routing", rich_help_panel=_GROUP_FILTERING),
+    extension: str | None = typer.Option(
+        None, "--extension", "--ext", rich_help_panel=_GROUP_FILTERING
     ),
-    only_available: bool = typer.Option(True, "--only-available/--include-unavailable"),
+    routing_return: str | None = typer.Option(
+        None, "--routing-ret", rich_help_panel=_GROUP_FILTERING
+    ),
+    extension_return: str | None = typer.Option(
+        None, "--ext-ret", rich_help_panel=_GROUP_FILTERING
+    ),
+    depart_times: str | None = typer.Option(
+        None, "--depart-times", rich_help_panel=_GROUP_FILTERING
+    ),
+    return_times: str | None = typer.Option(
+        None, "--return-times", rich_help_panel=_GROUP_FILTERING
+    ),
+    stops: int | None = typer.Option(None, "--stops", rich_help_panel=_GROUP_ITINERARY),
+    allow_airport_changes: bool = typer.Option(
+        True,
+        "--allow-airport-changes/--no-airport-changes",
+        rich_help_panel=_GROUP_FILTERING,
+    ),
+    only_available: bool = typer.Option(
+        True,
+        "--only-available/--include-unavailable",
+        rich_help_panel=_GROUP_FILTERING,
+    ),
     rps: float | None = _RPS_OPT,
     impersonate: str | None = _IMPERSONATE_OPT,
     fmt: str = _FORMAT_OPT,
     json_out: bool = _JSON_OPT,
-    matrix_url: bool = typer.Option(True, "--matrix-url/--no-matrix-url"),
-    google_url: bool = typer.Option(False, "--google-url/--no-google-url"),
+    matrix_url: bool = typer.Option(
+        True, "--matrix-url/--no-matrix-url", rich_help_panel=_GROUP_OUTPUT
+    ),
+    google_url: bool = typer.Option(
+        False, "--google-url/--no-google-url", rich_help_panel=_GROUP_OUTPUT
+    ),
     no_cache: bool = _NO_CACHE_OPT,
 ) -> None:
     """Lowest-fare grid across a date window. Default round-trip; --one-way to flip."""
@@ -1521,38 +1633,70 @@ def calendar(
 def detail(
     origin: Annotated[str, typer.Argument()],
     destination: Annotated[str, typer.Argument()],
-    dep: Annotated[str, typer.Option("--dep", help="Departure YYYY-MM-DD")],
-    ret: Annotated[str | None, typer.Option("--return", "-r")] = None,
+    dep: Annotated[
+        str,
+        typer.Option("--dep", help="Departure YYYY-MM-DD", rich_help_panel=_GROUP_ITINERARY),
+    ],
+    ret: Annotated[
+        str | None,
+        typer.Option("--return", "-r", rich_help_panel=_GROUP_ITINERARY),
+    ] = None,
     start: Annotated[
         str | None,
-        typer.Option("--start", help="Original calendar window start (defaults to --dep)"),
+        typer.Option(
+            "--start",
+            help="Original calendar window start (defaults to --dep)",
+            rich_help_panel=_GROUP_ITINERARY,
+        ),
     ] = None,
     end: Annotated[
         str | None,
-        typer.Option("--end", help="Original calendar window end (defaults to start+30d)"),
+        typer.Option(
+            "--end",
+            help="Original calendar window end (defaults to start+30d)",
+            rich_help_panel=_GROUP_ITINERARY,
+        ),
     ] = None,
     duration: Annotated[
-        str, typer.Option("--duration", "-d", help="Original duration range")
+        str,
+        typer.Option(
+            "--duration",
+            "-d",
+            help="Original duration range",
+            rich_help_panel=_GROUP_ITINERARY,
+        ),
     ] = "5-7",
-    cabin: str = "economy",
-    adults: int = 1,
-    children: int = 0,
-    seniors: int = 0,
-    youth: int = 0,
-    routing: str | None = typer.Option(None, "--routing"),
-    extension: str | None = typer.Option(None, "--extension", "--ext"),
-    routing_return: str | None = typer.Option(None, "--routing-ret"),
-    extension_return: str | None = typer.Option(None, "--ext-ret"),
-    stops: int | None = typer.Option(None, "--stops"),
+    cabin: str = typer.Option("economy", "--cabin", rich_help_panel=_GROUP_ITINERARY),
+    adults: int = typer.Option(1, "--adults", rich_help_panel=_GROUP_ITINERARY),
+    children: int = typer.Option(0, "--children", rich_help_panel=_GROUP_ITINERARY),
+    seniors: int = typer.Option(0, "--seniors", rich_help_panel=_GROUP_ITINERARY),
+    youth: int = typer.Option(0, "--youth", rich_help_panel=_GROUP_ITINERARY),
+    routing: str | None = typer.Option(None, "--routing", rich_help_panel=_GROUP_FILTERING),
+    extension: str | None = typer.Option(
+        None, "--extension", "--ext", rich_help_panel=_GROUP_FILTERING
+    ),
+    routing_return: str | None = typer.Option(
+        None, "--routing-ret", rich_help_panel=_GROUP_FILTERING
+    ),
+    extension_return: str | None = typer.Option(
+        None, "--ext-ret", rich_help_panel=_GROUP_FILTERING
+    ),
+    stops: int | None = typer.Option(None, "--stops", rich_help_panel=_GROUP_ITINERARY),
     allow_airport_changes: bool = typer.Option(
-        True, "--allow-airport-changes/--no-airport-changes"
+        True,
+        "--allow-airport-changes/--no-airport-changes",
+        rich_help_panel=_GROUP_FILTERING,
     ),
     rps: float | None = _RPS_OPT,
     impersonate: str | None = _IMPERSONATE_OPT,
     fmt: str = _FORMAT_OPT,
     json_out: bool = _JSON_OPT,
-    matrix_url: bool = typer.Option(True, "--matrix-url/--no-matrix-url"),
-    google_url: bool = typer.Option(True, "--google-url/--no-google-url"),
+    matrix_url: bool = typer.Option(
+        True, "--matrix-url/--no-matrix-url", rich_help_panel=_GROUP_OUTPUT
+    ),
+    google_url: bool = typer.Option(
+        True, "--google-url/--no-google-url", rich_help_panel=_GROUP_OUTPUT
+    ),
     no_cache: bool = _NO_CACHE_OPT,
 ) -> None:
     """Phase-2 of the calendar flow: full itineraries for a picked date."""
