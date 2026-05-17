@@ -223,3 +223,82 @@ def test_invalid_provider_opt_format(_config_dir: Path) -> None:
             awards_only=False,
             provider_opt=("pp.airlines",),  # missing =
         )
+
+
+# ─────────────────────────── alias tests (work-2eoa) ───────────────────────
+
+
+def test_providers_filter_normalizes_aliases(_config_dir: Path) -> None:
+    """`--providers sa` and `--providers seats-aero` produce the same filter."""
+    sa_sel = _resolve_providers(
+        providers="sa",
+        cash_only=False,
+        awards_only=False,
+        provider_opt=(),
+    )
+    full_sel = _resolve_providers(
+        providers="seats-aero",
+        cash_only=False,
+        awards_only=False,
+        provider_opt=(),
+    )
+    assert sa_sel.provider_filter == full_sel.provider_filter == ("seats-aero",)
+
+
+def test_providers_pointspath_alias(_config_dir: Path) -> None:
+    sel = _resolve_providers(
+        providers="pointspath",
+        cash_only=False,
+        awards_only=False,
+        provider_opt=(),
+    )
+    assert sel.provider_filter == ("pp",)
+
+
+def test_providers_csv_mixes_aliases(_config_dir: Path) -> None:
+    sel = _resolve_providers(
+        providers="sa,pointspath",
+        cash_only=False,
+        awards_only=False,
+        provider_opt=(),
+    )
+    assert sel.provider_filter == ("seats-aero", "pp")
+
+
+def test_provider_opt_normalizes_alias_keys(_config_dir: Path) -> None:
+    """`--provider-opt sa.sources=american` lands at `seats-aero` canonical."""
+    sel = _resolve_providers(
+        providers=None,
+        cash_only=False,
+        awards_only=False,
+        provider_opt=("sa.sources=american,united",),
+    )
+    assert sel.provider_opts == {"seats-aero": {"sources": ["american", "united"]}}
+
+
+def test_config_toml_aliased_section_resolves(_config_dir: Path) -> None:
+    """`[providers.sa]` and `[providers.seats-aero]` both populate the
+    canonical key in the resolver's provider_opts."""
+    (_config_dir / "config.toml").write_text(
+        """\
+[providers.sa]
+sources = ["american"]
+"""
+    )
+    sel = _resolve_providers(
+        providers=None,
+        cash_only=False,
+        awards_only=False,
+        provider_opt=(),
+    )
+    assert sel.provider_opts == {"seats-aero": {"sources": ["american"]}}
+
+
+def test_seats_sources_helper_reads_canonical_key(_config_dir: Path) -> None:
+    sel = _resolve_providers(
+        providers=None,
+        cash_only=False,
+        awards_only=False,
+        provider_opt=("sa.sources=american,united",),
+    )
+    assert sel.seats_sources() == ("american", "united")

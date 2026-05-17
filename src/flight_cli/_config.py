@@ -45,16 +45,26 @@ def provider_options(name: str, *, config: dict[str, Any] | None = None) -> dict
     """Pull the `[providers.<name>]` table out of config, or {} if absent.
 
     Caller is responsible for type-coercing the values (lists stay as lists,
-    strings stay as strings — TOML's native typing is preserved)."""
+    strings stay as strings — TOML's native typing is preserved).
+
+    `name` is normalized through the alias map, AND all section keys in the
+    config are normalized before lookup — so `[providers.sa]` and
+    `[providers.seats-aero]` (and any of the aliased spellings) both work."""
     cfg = config if config is not None else load()
     providers_any: Any = cfg.get("providers", {})
     if not isinstance(providers_any, dict):
         return {}
     providers_dict = cast("dict[str, Any]", providers_any)
-    section_any: Any = providers_dict.get(name, {})
-    if not isinstance(section_any, dict):
-        return {}
-    return cast("dict[str, Any]", section_any)
+    target = canonical_provider(name)
+    # Walk all sections and pick whichever matches the canonical of `name`.
+    # Reverse lookup makes the user's config-file spelling forgiving without
+    # forcing them to know about the canonical names.
+    for section_name, section_any in providers_dict.items():
+        if canonical_provider(section_name) != target:
+            continue
+        if isinstance(section_any, dict):
+            return cast("dict[str, Any]", section_any)
+    return {}
 
 
 def parse_provider_opt_overrides(raw: list[str]) -> dict[str, dict[str, Any]]:
@@ -62,6 +72,17 @@ def parse_provider_opt_overrides(raw: list[str]) -> dict[str, dict[str, Any]]:
 
     `pp.airlines=United,Delta` → `{"pp": {"airlines": ["United", "Delta"]}}`.
     A bare scalar (no comma) stays a string; comma-list becomes list[str].
+
+    Provider names are normalized through the alias map — `sa.cabins=Business`
+    and `seats-aero.cabins=Business` both land at
+    `{"seats-aero": {"cabins": "Business"}}` so downstream consumers don't
+    have to know about user-visible spellings.
+
+    Note: seats.aero's brand contains a dot, but `seats.aero.cabins=X` parses
+    as provider="seats" / key="aero.cabins" (split on first dot). Users who
+    want the seats.aero brand spelling should write `'seats.aero.cabins=X'`
+    AND know that we'll split incorrectly; the documented forms are
+    `seats-aero` or `sa`.
 
     Repeated keys for the same provider merge at the outer dict; same inner
     key wins last (caller is responsible for order if it matters).
@@ -75,8 +96,8 @@ def parse_provider_opt_overrides(raw: list[str]) -> dict[str, dict[str, Any]]:
         if "." not in path:
             msg = f"--provider-opt {item!r} missing '.'; expected 'provider.key=value'"
             raise ValueError(msg)
-        provider, key = path.split(".", 1)
-        provider = provider.strip()
+        provider_raw, key = path.split(".", 1)
+        provider = canonical_provider(provider_raw)
         key = key.strip()
         if not provider or not key:
             msg = f"--provider-opt {item!r}: provider and key must be non-empty"
@@ -154,6 +175,42 @@ def cache_disabled(*, config: dict[str, Any] | None = None) -> bool:
         if isinstance(v, bool):
             return not v
     return False
+
+
+# ─────────────────────────── provider names & aliases ────────────────────
+
+# Canonical provider names used by the registry, config sections, and the
+# --providers CLI filter. The aliases below normalize a user-friendly spelling
+# (case-insensitive) onto the canonical name. Adding a new provider: add the
+# canonical name + any aliases here, register the provider in registry.py,
+# done. The naming is intentionally asymmetric — `pp` is the company's own
+# short identifier (everyone in points-world calls it PP), so the canonical
+# is `pp` and `pointspath` is the alias. Seats.aero has no widely-used
+# short form, so the canonical is `seats-aero` and `sa` is the short alias.
+_PROVIDER_ALIASES: dict[str, str] = {
+    "pp": "pp",
+    "pointspath": "pp",
+    "points-path": "pp",
+    "seats-aero": "seats-aero",
+    "seatsaero": "seats-aero",
+    "seats.aero": "seats-aero",
+    "sa": "seats-aero",
+}
+
+
+def canonical_provider(name: str) -> str:
+    """Normalize a user-supplied provider name to its canonical form.
+
+    Case-insensitive. Unknown names pass through unchanged (lowercased) so
+    upstream code can still emit clean error messages naming the typo."""
+    return _PROVIDER_ALIASES.get(name.strip().lower(), name.strip().lower())
+
+
+def known_canonical_providers() -> set[str]:
+    """Set of canonical provider names. Useful for `--providers X` validation
+    where X must match at least one known provider before we can sensibly
+    construct an instance."""
+    return set(_PROVIDER_ALIASES.values())
 
 
 # ─────────────────────────── provider options ─────────────────────────────
