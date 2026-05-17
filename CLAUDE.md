@@ -14,7 +14,13 @@ Our fixtures are the de facto spec.
 
 - **Install**: `uv venv && uv pip install -e .`
 - **Test**: `pytest tests/` (golden-file regression net, <0.1s)
-- **Smoke a live search**: `flight fare JFK LHR --dep 2026-08-15 --return 2026-08-22 -n 2`
+- **Pre-push gate**: `make check` — runs `ruff check`, `ruff format --check`,
+  `basedpyright src tests`, and `pytest`. This is what GitHub Actions runs as
+  the `check` job; if it passes locally, CI passes. `pyright` (vanilla) is
+  NOT the same tool — `basedpyright` is stricter (catches `reportUnknownVariableType`,
+  `reportUnusedFunction`, etc.). Running `pyright` locally is a false-positive
+  green; always use `make check`.
+- **Smoke a live search**: `flight search JFK LHR --dep 2026-08-15 --return 2026-08-22 -n 2`
 - **API key**: resolved at runtime from Matrix's SPA bundle and cached at
   `~/.cache/flight-cli/.matrix-key` (30-day TTL). Never hardcode keys in
   source. Override via `FLIGHT_API_KEY` env var.
