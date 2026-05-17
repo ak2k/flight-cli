@@ -677,7 +677,15 @@ def _run_matrix_path(
     """Matrix path: Alkali call → optional cash render → optional PP augmentation → URLs."""
     search = SpecificDateSearch(legs=legs, options=opts)
     # SpecificDateSearch → SearchResult by client._parse_response dispatch.
-    res = cast("SearchResult", _run(search, rps, impersonate, no_cache))
+    res = cast(
+        "SearchResult",
+        _run(
+            search,
+            _resolve_rps(rps),
+            _resolve_impersonate(impersonate),
+            _resolve_no_cache(no_cache),
+        ),
+    )
     if json_out and not run_pp:
         sys.stdout.write(json.dumps(res.raw, indent=2))
         return
@@ -894,8 +902,29 @@ def _fmt_gflight_legroom(fli_legs: list[Any], amenities: list[Any]) -> str:
 # ─────────────────────────────── commands ──────────────────────────────────
 
 # Common-args helpers — these reduce repetition across commands.
-_RPS_OPT = typer.Option(1.0, help="Requests per second")
-_IMPERSONATE_OPT = typer.Option("chrome", help="curl_cffi profile")
+# These flags are hidden because almost nobody touches them in normal use;
+# defaults live in config.toml ([http] section) and can be overridden via
+# FLIGHT_RPS / FLIGHT_IMPERSONATE env vars. The CLI flag still works for
+# one-off overrides — it's just no longer in --help. None sentinel means
+# "fall back to config/env"; explicit value overrides everything.
+_RPS_OPT = typer.Option(
+    None,
+    "--rps",
+    hidden=True,
+    help="Requests per second (default: 1.0; FLIGHT_RPS / config.toml).",
+)
+_IMPERSONATE_OPT = typer.Option(
+    None,
+    "--impersonate",
+    hidden=True,
+    help="curl_cffi profile (default: chrome; FLIGHT_IMPERSONATE / config.toml).",
+)
+_NO_CACHE_OPT = typer.Option(
+    False,
+    "--no-cache",
+    hidden=True,
+    help="Bypass the on-disk response cache (or set FLIGHT_NO_CACHE=1).",
+)
 _PROVIDER_OPT = typer.Option(
     None,
     "--provider-opt",
@@ -904,6 +933,70 @@ _PROVIDER_OPT = typer.Option(
         "Overrides ~/.config/flight-cli/config.toml [providers.<name>]."
     ),
 )
+
+
+def _resolve_rps(flag: float | None) -> float:
+    """CLI flag wins; otherwise fall back to env / config / default."""
+    if flag is not None:
+        return flag
+    try:
+        return _config.http_rps()
+    except ValueError as e:
+        err.print(f"[red]Bad rps configuration: {e}[/]")
+        raise typer.Exit(2) from e
+
+
+def _resolve_impersonate(flag: str | None) -> str:
+    if flag is not None:
+        return flag
+    return _config.http_impersonate()
+
+
+def _resolve_no_cache(flag: bool) -> bool:
+    """The CLI flag is a one-way toggle: passing --no-cache forces True.
+    Without it, env/config decide."""
+    if flag:
+        return True
+    return _config.cache_disabled()
+
+
+# ─────────────────────────── --format / --json ─────────────────────────────
+
+# Output formats currently implemented end-to-end. csv/tsv/yaml were in the
+# original work-4uls plan but deferred to a follow-up: the cash-itinerary
+# shape isn't naturally tabular without a flattening pass that deserves its
+# own design. Today's surface is the front door; emitters layer on later.
+_VALID_FORMATS = ("table", "json")
+
+_FORMAT_OPT = typer.Option(
+    "table",
+    "--format",
+    help=f"Output format: one of {'/'.join(_VALID_FORMATS)}.",
+)
+_JSON_OPT = typer.Option(
+    False,
+    "--json",
+    hidden=True,
+    help="[deprecated] Use --format json.",
+)
+
+
+def _resolve_format(*, fmt: str, json_flag: bool) -> str:
+    """Collapse --format + deprecated --json into a single format string.
+
+    `--json` forwards to `--format json` with a deprecation warning. Setting
+    both (--json --format X for X != json) is a hard error: ambiguous intent.
+    """
+    if json_flag:
+        err.print("[yellow]--json is deprecated; use --format json.[/]")
+        if fmt not in ("table", "json"):
+            err.print(f"[red]--json conflicts with --format {fmt!r}; pick one.[/]")
+            raise typer.Exit(2)
+        return "json"
+    if fmt not in _VALID_FORMATS:
+        err.print(f"[red]--format must be one of {'/'.join(_VALID_FORMATS)}; got {fmt!r}[/]")
+        raise typer.Exit(2)
+    return fmt
 
 
 @app.command()
@@ -986,12 +1079,13 @@ def search(
     page_size: int = typer.Option(
         10, "--n", "-n", help="Result count (matrix: page size; gflight: top_n)."
     ),
-    rps: float = _RPS_OPT,
-    impersonate: str = _IMPERSONATE_OPT,
-    json_out: bool = typer.Option(False, "--json"),
+    rps: float | None = _RPS_OPT,
+    impersonate: str | None = _IMPERSONATE_OPT,
+    fmt: str = _FORMAT_OPT,
+    json_out: bool = _JSON_OPT,
     matrix_url: bool = typer.Option(True, "--matrix-url/--no-matrix-url"),
     google_url: bool = typer.Option(True, "--google-url/--no-google-url"),
-    no_cache: bool = typer.Option(False, "--no-cache"),
+    no_cache: bool = _NO_CACHE_OPT,
     providers: str | None = typer.Option(
         None,
         "--providers",
@@ -1039,6 +1133,7 @@ def search(
     Matrix-only flag is set (routing/extension/multi-city slice/time-of-day/
     extra pax types/PP config). Force with --backend matrix|gflight.
     """
+    json_out = _resolve_format(fmt=fmt, json_flag=json_out) == "json"
     # Deprecated-flag warning surfaces at runtime since hidden=True hides the
     # banner from --help.
     if no_pp or pp_only or pp_airlines or pp_cabin:
@@ -1127,9 +1222,9 @@ def search(
     _run_matrix_path(
         legs=legs,
         opts=opts,
-        rps=rps,
-        impersonate=impersonate,
-        no_cache=no_cache,
+        rps=_resolve_rps(rps),
+        impersonate=_resolve_impersonate(impersonate),
+        no_cache=_resolve_no_cache(no_cache),
         json_out=json_out,
         matrix_url=matrix_url,
         google_url=google_url,
@@ -1195,12 +1290,13 @@ def fare(
     ),
     only_available: bool = typer.Option(True, "--only-available/--include-unavailable"),
     page_size: int = typer.Option(10, "--n", "-n"),
-    rps: float = _RPS_OPT,
-    impersonate: str = _IMPERSONATE_OPT,
-    json_out: bool = typer.Option(False, "--json"),
+    rps: float | None = _RPS_OPT,
+    impersonate: str | None = _IMPERSONATE_OPT,
+    fmt: str = _FORMAT_OPT,
+    json_out: bool = _JSON_OPT,
     matrix_url: bool = typer.Option(True, "--matrix-url/--no-matrix-url"),
     google_url: bool = typer.Option(True, "--google-url/--no-google-url"),
-    no_cache: bool = typer.Option(False, "--no-cache"),
+    no_cache: bool = _NO_CACHE_OPT,
     pp: bool = typer.Option(
         False,
         "--pp",
@@ -1232,6 +1328,7 @@ def fare(
     ),
 ) -> None:
     """[deprecated] Use `flight search` (or `flight search --backend matrix`)."""
+    json_out = _resolve_format(fmt=fmt, json_flag=json_out) == "json"
     err.print(
         "[yellow]`flight fare` is deprecated; use `flight search` "
         "(it auto-picks Matrix when Matrix-only flags are set).[/]",
@@ -1295,9 +1392,9 @@ def fare(
     _run_matrix_path(
         legs=legs,
         opts=opts,
-        rps=rps,
-        impersonate=impersonate,
-        no_cache=no_cache,
+        rps=_resolve_rps(rps),
+        impersonate=_resolve_impersonate(impersonate),
+        no_cache=_resolve_no_cache(no_cache),
         json_out=json_out,
         matrix_url=matrix_url,
         google_url=google_url,
@@ -1356,14 +1453,16 @@ def calendar(
         True, "--allow-airport-changes/--no-airport-changes"
     ),
     only_available: bool = typer.Option(True, "--only-available/--include-unavailable"),
-    rps: float = _RPS_OPT,
-    impersonate: str = _IMPERSONATE_OPT,
-    json_out: bool = typer.Option(False, "--json"),
+    rps: float | None = _RPS_OPT,
+    impersonate: str | None = _IMPERSONATE_OPT,
+    fmt: str = _FORMAT_OPT,
+    json_out: bool = _JSON_OPT,
     matrix_url: bool = typer.Option(True, "--matrix-url/--no-matrix-url"),
     google_url: bool = typer.Option(False, "--google-url/--no-google-url"),
-    no_cache: bool = typer.Option(False, "--no-cache"),
+    no_cache: bool = _NO_CACHE_OPT,
 ) -> None:
     """Lowest-fare grid across a date window. Default round-trip; --one-way to flip."""
+    json_out = _resolve_format(fmt=fmt, json_flag=json_out) == "json"
     origins = _parse_iata_list(origin)
     dests = _parse_iata_list(destination)
     sd = _parse_date(start)
@@ -1402,7 +1501,15 @@ def calendar(
     window = CalendarWindow(start=sd, end=ed, duration_min=dmin, duration_max=dmax)
     search = CalendarSearch(legs=legs, options=opts, window=window)
     # CalendarSearch → CalendarResult by client._parse_response dispatch.
-    res = cast("CalendarResult", _run(search, rps, impersonate, no_cache))
+    res = cast(
+        "CalendarResult",
+        _run(
+            search,
+            _resolve_rps(rps),
+            _resolve_impersonate(impersonate),
+            _resolve_no_cache(no_cache),
+        ),
+    )
     if json_out:
         sys.stdout.write(json.dumps(res.raw, indent=2))
         return
@@ -1440,14 +1547,16 @@ def detail(
     allow_airport_changes: bool = typer.Option(
         True, "--allow-airport-changes/--no-airport-changes"
     ),
-    rps: float = _RPS_OPT,
-    impersonate: str = _IMPERSONATE_OPT,
-    json_out: bool = typer.Option(False, "--json"),
+    rps: float | None = _RPS_OPT,
+    impersonate: str | None = _IMPERSONATE_OPT,
+    fmt: str = _FORMAT_OPT,
+    json_out: bool = _JSON_OPT,
     matrix_url: bool = typer.Option(True, "--matrix-url/--no-matrix-url"),
     google_url: bool = typer.Option(True, "--google-url/--no-google-url"),
-    no_cache: bool = typer.Option(False, "--no-cache"),
+    no_cache: bool = _NO_CACHE_OPT,
 ) -> None:
     """Phase-2 of the calendar flow: full itineraries for a picked date."""
+    json_out = _resolve_format(fmt=fmt, json_flag=json_out) == "json"
     origins = _parse_iata_list(origin)
     dests = _parse_iata_list(destination)
     dep_d = _parse_date(dep)
@@ -1483,7 +1592,15 @@ def detail(
     window = CalendarWindow(start=sd, end=ed, duration_min=dmin, duration_max=dmax)
     search = CalendarFollowup(legs=legs, options=opts, window=window)
     # CalendarFollowup → SearchResult by client._parse_response dispatch.
-    res = cast("SearchResult", _run(search, rps, impersonate, no_cache))
+    res = cast(
+        "SearchResult",
+        _run(
+            search,
+            _resolve_rps(rps),
+            _resolve_impersonate(impersonate),
+            _resolve_no_cache(no_cache),
+        ),
+    )
     if json_out:
         sys.stdout.write(json.dumps(res.raw, indent=2))
         return
@@ -1501,9 +1618,11 @@ def gflight(
     adults: int = 1,
     children: int = 0,
     top_n: Annotated[int, typer.Option("--n", "-n")] = 5,
-    json_out: bool = typer.Option(False, "--json"),
+    fmt: str = _FORMAT_OPT,
+    json_out: bool = _JSON_OPT,
 ) -> None:
     """[deprecated] Use `flight search --backend gflight` (or just `flight search`)."""
+    json_out = _resolve_format(fmt=fmt, json_flag=json_out) == "json"
     err.print(
         "[yellow]`flight gflight` is deprecated; use `flight search` "
         "(or `flight search --backend gflight` to force).[/]",
@@ -1529,12 +1648,13 @@ def gflight(
 @app.command()
 def airport(
     query: Annotated[str, typer.Argument(help="Partial name or IATA")],
-    impersonate: str = _IMPERSONATE_OPT,
+    impersonate: str | None = _IMPERSONATE_OPT,
 ) -> None:
     """Look up airports by partial name or IATA code."""
+    resolved_impersonate = _resolve_impersonate(impersonate)
 
     async def go() -> list[Location]:
-        async with MatrixClient(impersonate=impersonate) as c:
+        async with MatrixClient(impersonate=resolved_impersonate) as c:
             return await c.airports(query)
 
     locs = anyio.run(go)
