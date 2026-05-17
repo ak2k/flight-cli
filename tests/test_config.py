@@ -1,4 +1,4 @@
-# pyright: reportPrivateUsage=false
+# pyright: reportPrivateUsage=false, reportUnusedFunction=false
 """Tests for the user-level config.toml loader.
 
 The loader powers the new --providers / --provider-opt surface (work-4byx)
@@ -9,7 +9,6 @@ provider lookups by name, CLI override parsing, merge semantics.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -17,6 +16,8 @@ import pytest
 from flight_cli import _config
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from pytest import MonkeyPatch
 
 
@@ -59,9 +60,7 @@ airlines = ["United"]
 
 
 def test_provider_options_missing_providers_section(_config_dir: Path) -> None:
-    (_config_dir / "config.toml").write_text(
-        '[http]\nrps = 2.0\n'
-    )
+    (_config_dir / "config.toml").write_text("[http]\nrps = 2.0\n")
     assert _config.provider_options("pp") == {}
 
 
@@ -90,7 +89,7 @@ def test_parse_provider_opt_rejects_missing_eq() -> None:
 
 
 def test_parse_provider_opt_rejects_missing_dot() -> None:
-    with pytest.raises(ValueError, match="missing '.'"):
+    with pytest.raises(ValueError, match=r"missing '\.'"):
         _config.parse_provider_opt_overrides(["airlines=United"])
 
 

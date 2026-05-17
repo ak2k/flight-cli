@@ -246,7 +246,7 @@ def _pick_backend(
     return backend
 
 
-def _should_run_pp(*, no_pp: bool, pp_only: bool) -> bool:
+def _should_run_pp(*, no_pp: bool, pp_only: bool) -> bool:  # pyright: ignore[reportUnusedFunction]
     """Decide whether PP augmentation runs.
 
     Tokens present → True (unless --no-pp). Both backends support PP overlay
@@ -299,24 +299,24 @@ class ProviderSelection:
 
     def pp_airlines(self) -> str | None:
         """Backward-compat shim: PP's `airlines` as CSV (None = use default)."""
-        v = self.provider_opts.get("pp", {}).get("airlines")
+        v: Any = self.provider_opts.get("pp", {}).get("airlines")
         if v is None:
             return None
         if isinstance(v, list):
-            return ",".join(str(x) for x in v)
+            return ",".join(str(x) for x in cast("list[Any]", v))
         return str(v)
 
     def pp_cabins(self) -> str | None:
         """Backward-compat shim: PP's `cabins` as CSV (None = use default)."""
-        v = self.provider_opts.get("pp", {}).get("cabins")
+        v: Any = self.provider_opts.get("pp", {}).get("cabins")
         if v is None:
             return None
         if isinstance(v, list):
-            return ",".join(str(x) for x in v)
+            return ",".join(str(x) for x in cast("list[Any]", v))
         return str(v)
 
 
-def _resolve_providers(
+def _resolve_providers(  # noqa: PLR0912 — single-purpose validator + merge; splitting hurts readability
     *,
     providers: str | None,
     cash_only: bool,
@@ -339,11 +339,16 @@ def _resolve_providers(
         err.print("[red]--cash-only and --awards-only are mutually exclusive.[/]")
         raise typer.Exit(2)
     # Conflict checks across the old + new surface.
-    if legacy_no_pp and (cash_only or awards_only or providers is not None):
-        err.print("[red]--no-pp conflicts with the new --cash-only/--awards-only/--providers surface; use one.[/]")
+    new_surface_set = cash_only or awards_only or providers is not None
+    if legacy_no_pp and new_surface_set:
+        err.print(
+            "[red]--no-pp conflicts with --cash-only/--awards-only/--providers; use one.[/]",
+        )
         raise typer.Exit(2)
-    if legacy_pp_only and (cash_only or awards_only or providers is not None):
-        err.print("[red]--pp-only conflicts with the new --cash-only/--awards-only/--providers surface; use one.[/]")
+    if legacy_pp_only and new_surface_set:
+        err.print(
+            "[red]--pp-only conflicts with --cash-only/--awards-only/--providers; use one.[/]",
+        )
         raise typer.Exit(2)
     if legacy_no_pp and legacy_pp_only:
         err.print("[red]--no-pp and --pp-only are mutually exclusive.[/]")
@@ -370,11 +375,11 @@ def _resolve_providers(
         err.print(f"[red]Failed to load ~/.config/flight-cli/config.toml: {e}[/]")
         raise typer.Exit(2) from e
     base_opts: dict[str, dict[str, Any]] = {}
-    providers_section = config.get("providers", {}) if isinstance(config, dict) else {}
+    providers_section: Any = config.get("providers", {})
     if isinstance(providers_section, dict):
-        for name, opts in providers_section.items():
+        for name, opts in cast("dict[str, Any]", providers_section).items():
             if isinstance(opts, dict):
-                base_opts[name] = dict(opts)
+                base_opts[name] = dict(cast("dict[str, Any]", opts))
 
     try:
         cli_opts = _config.parse_provider_opt_overrides(list(provider_opt))
@@ -388,13 +393,9 @@ def _resolve_providers(
     # already has the override from cli_opts).
     pp_section: dict[str, Any] = dict(merged_opts.get("pp", {}))
     if legacy_pp_airlines is not None and "airlines" not in pp_section:
-        pp_section["airlines"] = [
-            v.strip() for v in legacy_pp_airlines.split(",") if v.strip()
-        ]
+        pp_section["airlines"] = [v.strip() for v in legacy_pp_airlines.split(",") if v.strip()]
     if legacy_pp_cabin is not None and "cabins" not in pp_section:
-        pp_section["cabins"] = [
-            v.strip() for v in legacy_pp_cabin.split(",") if v.strip()
-        ]
+        pp_section["cabins"] = [v.strip() for v in legacy_pp_cabin.split(",") if v.strip()]
     if pp_section:
         merged_opts["pp"] = pp_section
 
@@ -431,7 +432,8 @@ def _should_run_awards(sel: ProviderSelection) -> bool:
         # Filter excludes PP; nothing else is configured yet.
         if sel.awards_only:
             err.print(
-                f"[red]--awards-only set but --providers={sel.provider_filter} matches no configured provider.[/]",
+                f"[red]--awards-only set but --providers={sel.provider_filter} "
+                "matches no configured provider.[/]",
             )
             raise typer.Exit(2)
         return False
@@ -894,6 +896,14 @@ def _fmt_gflight_legroom(fli_legs: list[Any], amenities: list[Any]) -> str:
 # Common-args helpers — these reduce repetition across commands.
 _RPS_OPT = typer.Option(1.0, help="Requests per second")
 _IMPERSONATE_OPT = typer.Option("chrome", help="curl_cffi profile")
+_PROVIDER_OPT = typer.Option(
+    None,
+    "--provider-opt",
+    help=(
+        "Per-provider override, repeatable: 'pp.airlines=United,Delta'. "
+        "Overrides ~/.config/flight-cli/config.toml [providers.<name>]."
+    ),
+)
 
 
 @app.command()
@@ -985,10 +995,7 @@ def search(
     providers: str | None = typer.Option(
         None,
         "--providers",
-        help=(
-            "CSV of award providers to use (e.g. 'pp'). "
-            "Default: all configured providers."
-        ),
+        help=("CSV of award providers to use (e.g. 'pp'). Default: all configured providers."),
     ),
     cash_only: bool = typer.Option(
         False,
@@ -1000,14 +1007,7 @@ def search(
         "--awards-only",
         help="Skip the cash table; show only the award provider output.",
     ),
-    provider_opt: list[str] = typer.Option(
-        [],
-        "--provider-opt",
-        help=(
-            "Per-provider override, repeatable: 'pp.airlines=United,Delta'. "
-            "Overrides ~/.config/flight-cli/config.toml [providers.<name>]."
-        ),
-    ),
+    provider_opt: list[str] | None = _PROVIDER_OPT,
     no_pp: bool = typer.Option(
         False,
         "--no-pp",
@@ -1041,7 +1041,7 @@ def search(
     """
     # Deprecated-flag warning surfaces at runtime since hidden=True hides the
     # banner from --help.
-    if any(x for x in (no_pp, pp_only, pp_airlines, pp_cabin)):
+    if no_pp or pp_only or pp_airlines or pp_cabin:
         err.print(
             "[yellow]--no-pp/--pp-only/--pp-airlines/--pp-cabin are deprecated; "
             "use --cash-only / --awards-only / --provider-opt instead.[/]",
@@ -1050,7 +1050,7 @@ def search(
         providers=providers,
         cash_only=cash_only,
         awards_only=awards_only,
-        provider_opt=tuple(provider_opt),
+        provider_opt=tuple(provider_opt or ()),
         legacy_no_pp=no_pp,
         legacy_pp_only=pp_only,
         legacy_pp_airlines=pp_airlines,

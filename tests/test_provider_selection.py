@@ -1,4 +1,4 @@
-# pyright: reportPrivateUsage=false
+# pyright: reportPrivateUsage=false, reportUnusedFunction=false
 """Tests for the provider-selection resolver in cli.py.
 
 Covers:
@@ -10,7 +10,6 @@ Covers:
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -20,6 +19,8 @@ from flight_cli import _config
 from flight_cli.cli import _resolve_providers
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from pytest import MonkeyPatch
 
 
@@ -168,9 +169,7 @@ cabins = ["Economy"]
 
 
 def test_cli_override_wins_over_config(_config_dir: Path) -> None:
-    (_config_dir / "config.toml").write_text(
-        '[providers.pp]\nairlines = ["United"]\n'
-    )
+    (_config_dir / "config.toml").write_text('[providers.pp]\nairlines = ["United"]\n')
     sel = _resolve_providers(
         providers=None,
         cash_only=False,

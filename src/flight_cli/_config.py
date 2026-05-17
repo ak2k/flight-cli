@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 CONFIG_DIR_ENV = "FLIGHT_CLI_CONFIG_DIR"
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "flight-cli" / "config.toml"
@@ -46,13 +46,14 @@ def provider_options(name: str, *, config: dict[str, Any] | None = None) -> dict
     Caller is responsible for type-coercing the values (lists stay as lists,
     strings stay as strings — TOML's native typing is preserved)."""
     cfg = config if config is not None else load()
-    providers = cfg.get("providers", {})
-    if not isinstance(providers, dict):
+    providers_any: Any = cfg.get("providers", {})
+    if not isinstance(providers_any, dict):
         return {}
-    section = providers.get(name, {})
-    if not isinstance(section, dict):
+    providers_dict = cast("dict[str, Any]", providers_any)
+    section_any: Any = providers_dict.get(name, {})
+    if not isinstance(section_any, dict):
         return {}
-    return section
+    return cast("dict[str, Any]", section_any)
 
 
 def parse_provider_opt_overrides(raw: list[str]) -> dict[str, dict[str, Any]]:
@@ -86,9 +87,7 @@ def parse_provider_opt_overrides(raw: list[str]) -> dict[str, dict[str, Any]]:
     return out
 
 
-def merge_provider_options(
-    base: dict[str, Any], override: dict[str, Any]
-) -> dict[str, Any]:
+def merge_provider_options(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """Shallow merge: override's keys win, both at provider level and key level.
 
     Used to layer CLI --provider-opt on top of config.toml."""
