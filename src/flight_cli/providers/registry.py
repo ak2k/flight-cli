@@ -56,7 +56,7 @@ async def _construct_enabled(
             out.append(await PointsPathProvider.create(explicit_airlines=pp_airlines))
         except Exception as e:  # noqa: BLE001 — per-provider failures are non-fatal
             log.warning("provider_init_failed", provider="PointsPath", error=str(e))
-    allow_seats = provider_filter is None or _matches(provider_filter, "seats")
+    allow_seats = provider_filter is None or _matches(provider_filter, "seats-aero")
     if allow_seats and seats_is_configured():
         try:
             out.append(await SeatsAeroProvider.create(explicit_airlines=seats_sources))
@@ -65,9 +65,16 @@ async def _construct_enabled(
     return out
 
 
-def _matches(filter_: tuple[str, ...], name: str) -> bool:
-    """Case-insensitive membership test for the provider filter."""
-    return any(p.strip().lower() == name.lower() for p in filter_)
+def _matches(filter_: tuple[str, ...], canonical: str) -> bool:
+    """Case-insensitive membership test using the canonical-name alias map.
+
+    Filter entries are normalized through `canonical_provider`, so callers
+    pass canonical names (`"pp"`, `"seats-aero"`) and match user-supplied
+    aliases (`"pointspath"`, `"sa"`) without restating the alias table here.
+    """
+    from .._config import canonical_provider  # noqa: PLC0415 — avoid import cycle
+
+    return any(canonical_provider(p) == canonical for p in filter_)
 
 
 async def _gather_one_leg(

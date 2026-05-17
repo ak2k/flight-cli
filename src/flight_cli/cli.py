@@ -316,11 +316,13 @@ class ProviderSelection:
         return str(v)
 
     def seats_sources(self) -> tuple[str, ...] | None:
-        """Seats.aero mileage-program filter (`--provider-opt seats.sources=...`).
+        """Seats.aero mileage-program filter (`--provider-opt seats-aero.sources=...`).
 
         Maps to the API's `sources=` query param. None = no filter (return all
-        programs the route is monitored on)."""
-        v: Any = self.provider_opts.get("seats", {}).get("sources")
+        programs the route is monitored on). The canonical provider key is
+        `seats-aero`; user-facing aliases (`sa`, `seatsaero`, `seats.aero`)
+        are normalized at parse time so we only need to read one key here."""
+        v: Any = self.provider_opts.get("seats-aero", {}).get("sources")
         if v is None:
             return None
         if isinstance(v, list):
@@ -372,15 +374,20 @@ def _resolve_providers(  # noqa: PLR0912 — single-purpose validator + merge; s
     if legacy_pp_only:
         awards_only = True
 
-    # --providers parsing.
+    # --providers parsing. Normalize each entry through the alias map so
+    # `--providers sa,pointspath` ends up the same as `--providers seats-aero,pp`.
     provider_filter: tuple[str, ...] | None = None
     if providers is not None:
-        provider_filter = tuple(p.strip() for p in providers.split(",") if p.strip())
+        provider_filter = tuple(
+            _config.canonical_provider(p) for p in providers.split(",") if p.strip()
+        )
         if not provider_filter:
             err.print("[red]--providers cannot be empty.[/]")
             raise typer.Exit(2)
 
-    # Build provider_opts: config.toml < --provider-opt CLI.
+    # Build provider_opts: config.toml < --provider-opt CLI. Section names in
+    # the config are normalized through the alias map so user-facing spellings
+    # (`[providers.sa]`) land at the canonical key the registry expects.
     try:
         config = _config.load()
     except (OSError, ValueError) as e:
@@ -391,7 +398,7 @@ def _resolve_providers(  # noqa: PLR0912 — single-purpose validator + merge; s
     if isinstance(providers_section, dict):
         for name, opts in cast("dict[str, Any]", providers_section).items():
             if isinstance(opts, dict):
-                base_opts[name] = dict(cast("dict[str, Any]", opts))
+                base_opts[_config.canonical_provider(name)] = dict(cast("dict[str, Any]", opts))
 
     try:
         cli_opts = _config.parse_provider_opt_overrides(list(provider_opt))
@@ -438,28 +445,30 @@ def _should_run_awards(sel: ProviderSelection) -> bool:
 
     known: dict[str, bool] = {
         "pp": pp_is_configured(),
-        "seats": seats_is_configured(),
+        "seats-aero": seats_is_configured(),
     }
 
     if not has_any_configured():
         if sel.awards_only:
             err.print(
                 "[red]--awards-only set but no award provider is configured.[/] "
-                "Run `flight auth pp login` or `flight auth seats key <KEY>` first.",
+                "Run `flight auth pp login` or `flight auth seats-aero key <KEY>` first.",
             )
             raise typer.Exit(2)
         return False
-    if sel.provider_filter is not None:
-        # Filter matches at least one configured provider?
-        filter_lc = {p.strip().lower() for p in sel.provider_filter}
-        if not any(known.get(name, False) for name in filter_lc):
-            if sel.awards_only:
-                err.print(
-                    f"[red]--awards-only set but --providers={sel.provider_filter} "
-                    "matches no configured provider.[/]",
-                )
-                raise typer.Exit(2)
-            return False
+    # Filter matches at least one configured provider? Values are already
+    # canonical (normalized by _resolve_providers), so a direct membership
+    # check is enough here. None filter ⇒ "all enabled", short-circuits to True.
+    if sel.provider_filter is not None and not any(
+        known.get(name, False) for name in sel.provider_filter
+    ):
+        if sel.awards_only:
+            err.print(
+                f"[red]--awards-only set but --providers={sel.provider_filter} "
+                "matches no configured provider.[/]",
+            )
+            raise typer.Exit(2)
+        return False
     return True
 
 

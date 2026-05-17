@@ -115,3 +115,38 @@ def test_merge_provider_options_adds_new_provider() -> None:
         "pp": {"airlines": ["A"]},
         "seats": {"api_key": "k"},
     }
+
+
+# ─────────────────────────── canonical / aliases ──────────────────────────
+
+
+def test_canonical_provider_pp_aliases() -> None:
+    assert _config.canonical_provider("pp") == "pp"
+    assert _config.canonical_provider("PP") == "pp"
+    assert _config.canonical_provider("pointspath") == "pp"
+    assert _config.canonical_provider("Points-Path") == "pp"
+
+
+def test_canonical_provider_seats_aliases() -> None:
+    assert _config.canonical_provider("seats-aero") == "seats-aero"
+    assert _config.canonical_provider("sa") == "seats-aero"
+    assert _config.canonical_provider("seatsaero") == "seats-aero"
+    assert _config.canonical_provider("seats.aero") == "seats-aero"
+    assert _config.canonical_provider("SA") == "seats-aero"
+
+
+def test_canonical_provider_unknown_passes_through_lowercased() -> None:
+    """Unknown names lowercase but otherwise pass through, so callers can
+    surface a clear error naming exactly what the user typed."""
+    assert _config.canonical_provider("MysteryProvider") == "mysteryprovider"
+
+
+def test_parse_provider_opt_normalizes_alias(_config_dir: Path) -> None:
+    parsed = _config.parse_provider_opt_overrides(["sa.sources=american,united"])
+    assert parsed == {"seats-aero": {"sources": ["american", "united"]}}
+
+
+def test_known_canonical_providers_lists_both() -> None:
+    canonicals = _config.known_canonical_providers()
+    assert "pp" in canonicals
+    assert "seats-aero" in canonicals

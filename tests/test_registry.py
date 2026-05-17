@@ -107,22 +107,40 @@ def test_gather_one_leg_preserves_each_providers_full_output(count: int) -> None
     assert len(out) == count
 
 
-# ─────────────────────────── provider filter (work-4byx) ─────────────────
+# ─────────────────────────── provider filter (work-4byx + work-2eoa) ─────
 
 
-def test_matches_is_case_insensitive() -> None:
-    assert _matches(("pp",), "PP") is True
+def test_matches_filter_case_insensitive() -> None:
+    """Filter entries are case-normalized through the alias map."""
     assert _matches(("PP",), "pp") is True
     assert _matches(("Pp",), "pp") is True
 
 
-def test_matches_trims_whitespace() -> None:
+def test_matches_filter_trims_whitespace() -> None:
     assert _matches((" pp ",), "pp") is True
 
 
 def test_matches_returns_false_for_unknown_provider() -> None:
-    assert _matches(("pp",), "seats") is False
+    """An unknown filter name doesn't match any canonical."""
+    assert _matches(("pp",), "seats-aero") is False
 
 
 def test_matches_empty_filter_returns_false() -> None:
     assert _matches((), "pp") is False
+
+
+def test_matches_resolves_aliases_to_canonical() -> None:
+    """The point of the alias map: filter spelled in any user-friendly form
+    matches the canonical name the caller passes."""
+    assert _matches(("sa",), "seats-aero") is True
+    assert _matches(("seats.aero",), "seats-aero") is True
+    assert _matches(("seatsaero",), "seats-aero") is True
+    assert _matches(("pointspath",), "pp") is True
+    assert _matches(("Points-Path",), "pp") is True
+
+
+def test_matches_multi_filter_aliases() -> None:
+    """A CSV of aliases collapses correctly."""
+    f = ("sa", "pointspath")
+    assert _matches(f, "seats-aero") is True
+    assert _matches(f, "pp") is True

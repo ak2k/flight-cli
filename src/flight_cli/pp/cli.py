@@ -68,7 +68,11 @@ seats_auth_app = typer.Typer(
     no_args_is_help=True,
     help="Seats.aero API key management.",
 )
-auth_app.add_typer(seats_auth_app, name="seats")
+# Canonical mount point. `sa` is registered below as a convenience alias —
+# same sub-app, different name. Users can type either `flight auth seats-aero`
+# or `flight auth sa`; both reach the same commands.
+auth_app.add_typer(seats_auth_app, name="seats-aero")
+auth_app.add_typer(seats_auth_app, name="sa")
 
 
 @seats_auth_app.command("key")
@@ -93,7 +97,7 @@ def seats_whoami() -> None:
     key = _seats_auth.load_key()
     if key is None:
         err.print("[yellow]No Seats.aero key configured.[/]")
-        err.print(f"Run `flight auth seats key <KEY>` or set {_seats_auth.API_KEY_ENV}.")
+        err.print(f"Run `flight auth seats-aero key <KEY>` or set {_seats_auth.API_KEY_ENV}.")
         raise typer.Exit(1)
     source = (
         "env" if _seats_auth.os.environ.get(_seats_auth.API_KEY_ENV) else str(_seats_auth.KEY_PATH)

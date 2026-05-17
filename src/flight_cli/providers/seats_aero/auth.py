@@ -5,7 +5,7 @@ source paths, in order:
   1. SEATS_AERO_API_KEY env var — useful for one-off shells / CI / curl
      scripts that already source from sops.
   2. ~/.config/flight-cli/seats.json — persistent, set by
-     `flight auth seats key <KEY>`. 0600 perms.
+     `flight auth seats-aero key <KEY>` (or its `sa` alias). 0600 perms.
 
 No refresh, no expiry tracking. The Pro tier key is stable until rotated
 on the seats.aero side; we surface 401 errors at request time rather than
@@ -86,7 +86,7 @@ def get_key() -> str:
     if key is None:
         msg = (
             f"No Seats.aero API key configured. Set ${API_KEY_ENV} or run "
-            "`flight auth seats key <KEY>`."
+            "`flight auth seats-aero key <KEY>`."
         )
         raise SeatsAuthError(msg)
     return key
