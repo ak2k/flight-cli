@@ -31,6 +31,7 @@ log: BoundLogger = structlog.get_logger(__name__)  # pyright: ignore[reportAny]
 async def _construct_enabled(
     *,
     pp_airlines: tuple[str, ...] | None = None,
+    provider_filter: tuple[str, ...] | None = None,
 ) -> list[AwardProvider]:
     """Build the list of enabled provider instances.
 
@@ -38,14 +39,26 @@ async def _construct_enabled(
     configured providers get instantiated (which is when network/auth
     actually happens). Failures during construction are logged and swallowed
     so one provider's outage can't take down the others.
+
+    `provider_filter` (when non-None) restricts to a named subset. Matching
+    is case-insensitive against the provider's short name (e.g. "pp",
+    "seats"). A filter that names no configured providers yields an empty
+    list — the caller decides whether that's a hard error (--awards-only)
+    or silent skip (cash-only path).
     """
     out: list[AwardProvider] = []
-    if pp_is_configured():
+    allow_pp = provider_filter is None or _matches(provider_filter, "pp")
+    if allow_pp and pp_is_configured():
         try:
             out.append(await PointsPathProvider.create(explicit_airlines=pp_airlines))
         except Exception as e:  # noqa: BLE001 — per-provider failures are non-fatal
             log.warning("provider_init_failed", provider="PointsPath", error=str(e))
     return out
+
+
+def _matches(filter_: tuple[str, ...], name: str) -> bool:
+    """Case-insensitive membership test for the provider filter."""
+    return any(p.strip().lower() == name.lower() for p in filter_)
 
 
 async def _gather_one_leg(
@@ -90,6 +103,7 @@ async def gather_awards(
     num_passengers: int = 1,
     pp_airlines: tuple[str, ...] | None = None,
     cash_hints_per_leg: list[tuple[CashFlightHint, ...]] | None = None,
+    provider_filter: tuple[str, ...] | None = None,
 ) -> tuple[list[list[AwardFlight]], list[AwardProvider]]:
     """End-to-end registry call: construct enabled providers, fan out per leg.
 
@@ -106,7 +120,10 @@ async def gather_awards(
         providers is the constructed provider instances — the caller is
             responsible for closing them (PointsPath uses HTTP keepalive).
     """
-    providers = await _construct_enabled(pp_airlines=pp_airlines)
+    providers = await _construct_enabled(
+        pp_airlines=pp_airlines,
+        provider_filter=provider_filter,
+    )
     per_leg: list[list[AwardFlight]] = []
     for i, leg in enumerate(legs):
         hints: tuple[CashFlightHint, ...] = ()

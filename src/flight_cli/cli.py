@@ -24,6 +24,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from . import _config
 from .client import MatrixApiError, MatrixClient
 from .domain import (
     Cabin,
@@ -272,6 +273,171 @@ def _should_run_pp(*, no_pp: bool, pp_only: bool) -> bool:
     return True
 
 
+class ProviderSelection:
+    """Resolved provider selection: what runs, which subset, with what options.
+
+    `provider_filter` is a tuple of provider names to use (None = all enabled).
+    `cash_only` skips every award provider. `awards_only` suppresses the cash
+    table render. `provider_opts` is `{provider_name: {key: value}}` — e.g.
+    `{"pp": {"airlines": ["United", "Delta"], "cabins": ["Economy"]}}`.
+    """
+
+    __slots__ = ("awards_only", "cash_only", "provider_filter", "provider_opts")
+
+    def __init__(
+        self,
+        *,
+        provider_filter: tuple[str, ...] | None,
+        cash_only: bool,
+        awards_only: bool,
+        provider_opts: dict[str, dict[str, Any]],
+    ) -> None:
+        self.provider_filter = provider_filter
+        self.cash_only = cash_only
+        self.awards_only = awards_only
+        self.provider_opts = provider_opts
+
+    def pp_airlines(self) -> str | None:
+        """Backward-compat shim: PP's `airlines` as CSV (None = use default)."""
+        v = self.provider_opts.get("pp", {}).get("airlines")
+        if v is None:
+            return None
+        if isinstance(v, list):
+            return ",".join(str(x) for x in v)
+        return str(v)
+
+    def pp_cabins(self) -> str | None:
+        """Backward-compat shim: PP's `cabins` as CSV (None = use default)."""
+        v = self.provider_opts.get("pp", {}).get("cabins")
+        if v is None:
+            return None
+        if isinstance(v, list):
+            return ",".join(str(x) for x in v)
+        return str(v)
+
+
+def _resolve_providers(
+    *,
+    providers: str | None,
+    cash_only: bool,
+    awards_only: bool,
+    provider_opt: tuple[str, ...],
+    # deprecated aliases — forwarded into the new shape:
+    legacy_no_pp: bool = False,
+    legacy_pp_only: bool = False,
+    legacy_pp_airlines: str | None = None,
+    legacy_pp_cabin: str | None = None,
+) -> ProviderSelection:
+    """Resolve the new + deprecated provider flags into one ProviderSelection.
+
+    Precedence for per-provider options: config.toml < --provider-opt CLI.
+    Deprecated --pp-airlines / --pp-cabin map onto the --provider-opt path
+    so legacy invocations land in the same downstream shape.
+    """
+    # Conflict checks across the new surface.
+    if cash_only and awards_only:
+        err.print("[red]--cash-only and --awards-only are mutually exclusive.[/]")
+        raise typer.Exit(2)
+    # Conflict checks across the old + new surface.
+    if legacy_no_pp and (cash_only or awards_only or providers is not None):
+        err.print("[red]--no-pp conflicts with the new --cash-only/--awards-only/--providers surface; use one.[/]")
+        raise typer.Exit(2)
+    if legacy_pp_only and (cash_only or awards_only or providers is not None):
+        err.print("[red]--pp-only conflicts with the new --cash-only/--awards-only/--providers surface; use one.[/]")
+        raise typer.Exit(2)
+    if legacy_no_pp and legacy_pp_only:
+        err.print("[red]--no-pp and --pp-only are mutually exclusive.[/]")
+        raise typer.Exit(2)
+
+    # Forward legacy intent.
+    if legacy_no_pp:
+        cash_only = True
+    if legacy_pp_only:
+        awards_only = True
+
+    # --providers parsing.
+    provider_filter: tuple[str, ...] | None = None
+    if providers is not None:
+        provider_filter = tuple(p.strip() for p in providers.split(",") if p.strip())
+        if not provider_filter:
+            err.print("[red]--providers cannot be empty.[/]")
+            raise typer.Exit(2)
+
+    # Build provider_opts: config.toml < --provider-opt CLI.
+    try:
+        config = _config.load()
+    except (OSError, ValueError) as e:
+        err.print(f"[red]Failed to load ~/.config/flight-cli/config.toml: {e}[/]")
+        raise typer.Exit(2) from e
+    base_opts: dict[str, dict[str, Any]] = {}
+    providers_section = config.get("providers", {}) if isinstance(config, dict) else {}
+    if isinstance(providers_section, dict):
+        for name, opts in providers_section.items():
+            if isinstance(opts, dict):
+                base_opts[name] = dict(opts)
+
+    try:
+        cli_opts = _config.parse_provider_opt_overrides(list(provider_opt))
+    except ValueError as e:
+        err.print(f"[red]{e}[/]")
+        raise typer.Exit(2) from e
+    merged_opts = _config.merge_provider_options(base_opts, cli_opts)
+
+    # Forward legacy --pp-airlines / --pp-cabin into the merged opts.
+    # CLI --provider-opt still wins (no-op if user set both, since merged_opts
+    # already has the override from cli_opts).
+    pp_section: dict[str, Any] = dict(merged_opts.get("pp", {}))
+    if legacy_pp_airlines is not None and "airlines" not in pp_section:
+        pp_section["airlines"] = [
+            v.strip() for v in legacy_pp_airlines.split(",") if v.strip()
+        ]
+    if legacy_pp_cabin is not None and "cabins" not in pp_section:
+        pp_section["cabins"] = [
+            v.strip() for v in legacy_pp_cabin.split(",") if v.strip()
+        ]
+    if pp_section:
+        merged_opts["pp"] = pp_section
+
+    return ProviderSelection(
+        provider_filter=provider_filter,
+        cash_only=cash_only,
+        awards_only=awards_only,
+        provider_opts=merged_opts,
+    )
+
+
+def _should_run_awards(sel: ProviderSelection) -> bool:
+    """Award providers run iff (a) not --cash-only, (b) at least one is
+    configured, and (c) the filter (if any) names at least one configured
+    provider. Mirrors the old _should_run_pp semantics for the PP-only era;
+    generalizes naturally once more providers exist.
+    """
+    if sel.cash_only:
+        return False
+    # Today we only know about PP. has_any_configured() is provider-blind by
+    # construction (see providers/registry.py) so this stays correct when
+    # work-2eoa adds seats.aero.
+    from .providers.registry import has_any_configured  # noqa: PLC0415
+
+    if not has_any_configured():
+        if sel.awards_only:
+            err.print(
+                "[red]--awards-only set but no award provider is configured.[/] "
+                "Run `flight auth pp login --tokens-file ...` first.",
+            )
+            raise typer.Exit(2)
+        return False
+    if sel.provider_filter is not None and "pp" not in sel.provider_filter:
+        # Filter excludes PP; nothing else is configured yet.
+        if sel.awards_only:
+            err.print(
+                f"[red]--awards-only set but --providers={sel.provider_filter} matches no configured provider.[/]",
+            )
+            raise typer.Exit(2)
+        return False
+    return True
+
+
 # ─────────────────────────── shared execution ──────────────────────────────
 
 
@@ -504,9 +670,7 @@ def _run_matrix_path(
     matrix_url: bool,
     google_url: bool,
     run_pp: bool,
-    pp_only: bool,
-    pp_airlines: str | None,
-    pp_cabin: str | None,
+    sel: ProviderSelection,
 ) -> None:
     """Matrix path: Alkali call → optional cash render → optional PP augmentation → URLs."""
     search = SpecificDateSearch(legs=legs, options=opts)
@@ -515,7 +679,7 @@ def _run_matrix_path(
     if json_out and not run_pp:
         sys.stdout.write(json.dumps(res.raw, indent=2))
         return
-    if not pp_only:
+    if not sel.awards_only:
         _render_search(res)
     if run_pp:
         p = opts.pax
@@ -523,10 +687,11 @@ def _run_matrix_path(
             res,
             legs=_build_pp_legs(legs),
             num_passengers=p.adults + p.children + p.seniors + p.youth,
-            airlines=pp_airlines,
-            cabins=pp_cabin,
-            pp_only=pp_only,
+            airlines=sel.pp_airlines(),
+            cabins=sel.pp_cabins(),
+            pp_only=sel.awards_only,
             json_out=json_out,
+            provider_filter=sel.provider_filter,
         )
     _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
 
@@ -538,9 +703,7 @@ def _run_gflight_path(
     top_n: int,
     json_out: bool,
     run_pp: bool = False,
-    pp_only: bool = False,
-    pp_airlines: str | None = None,
-    pp_cabin: str | None = None,
+    sel: ProviderSelection | None = None,
 ) -> None:
     """Google Flights path: build fli filter → query → render. Single-leg or round-trip.
 
@@ -583,7 +746,8 @@ def _run_gflight_path(
         sys.stdout.write(json.dumps(out, indent=2, default=str))
         return
 
-    if not pp_only:
+    awards_only = sel.awards_only if sel is not None else False
+    if not awards_only:
         _render_gflight_table(results, legs=legs, top_n=top_n)
 
     if run_pp:
@@ -595,10 +759,11 @@ def _run_gflight_path(
             sr,
             legs=_build_pp_legs(legs),
             num_passengers=p.adults + p.children + p.seniors + p.youth,
-            airlines=pp_airlines,
-            cabins=pp_cabin,
-            pp_only=pp_only,
+            airlines=sel.pp_airlines() if sel is not None else None,
+            cabins=sel.pp_cabins() if sel is not None else None,
+            pp_only=awards_only,
             json_out=json_out,
+            provider_filter=sel.provider_filter if sel is not None else None,
         )
 
 
@@ -817,31 +982,55 @@ def search(
     matrix_url: bool = typer.Option(True, "--matrix-url/--no-matrix-url"),
     google_url: bool = typer.Option(True, "--google-url/--no-google-url"),
     no_cache: bool = typer.Option(False, "--no-cache"),
+    providers: str | None = typer.Option(
+        None,
+        "--providers",
+        help=(
+            "CSV of award providers to use (e.g. 'pp'). "
+            "Default: all configured providers."
+        ),
+    ),
+    cash_only: bool = typer.Option(
+        False,
+        "--cash-only",
+        help="Skip all award providers; just show the cash table.",
+    ),
+    awards_only: bool = typer.Option(
+        False,
+        "--awards-only",
+        help="Skip the cash table; show only the award provider output.",
+    ),
+    provider_opt: list[str] = typer.Option(
+        [],
+        "--provider-opt",
+        help=(
+            "Per-provider override, repeatable: 'pp.airlines=United,Delta'. "
+            "Overrides ~/.config/flight-cli/config.toml [providers.<name>]."
+        ),
+    ),
     no_pp: bool = typer.Option(
         False,
         "--no-pp",
-        help=(
-            "Skip PointsPath award augmentation even if tokens are present. "
-            "PP runs implicitly on matrix backend when valid tokens exist."
-        ),
+        hidden=True,
+        help="[deprecated] Use --cash-only.",
     ),
     pp_only: bool = typer.Option(
         False,
         "--pp-only",
-        help="Show only PointsPath award availability; skip Matrix cash table.",
+        hidden=True,
+        help="[deprecated] Use --awards-only.",
     ),
     pp_airlines: str | None = typer.Option(
         None,
         "--pp-airlines",
-        help=(
-            "CSV of PointsPath airline names (e.g. United,Delta). "
-            "Default: discovered from your account's enabled airline set."
-        ),
+        hidden=True,
+        help="[deprecated] Use --provider-opt pp.airlines=A,B.",
     ),
     pp_cabin: str | None = typer.Option(
         None,
         "--pp-cabin",
-        help="CSV of cabins to query (Economy,Business,First). Default: Economy,Business.",
+        hidden=True,
+        help="[deprecated] Use --provider-opt pp.cabins=Economy,Business.",
     ),
 ) -> None:
     """Specific-date flight search across Matrix and Google Flights backends.
@@ -850,6 +1039,23 @@ def search(
     Matrix-only flag is set (routing/extension/multi-city slice/time-of-day/
     extra pax types/PP config). Force with --backend matrix|gflight.
     """
+    # Deprecated-flag warning surfaces at runtime since hidden=True hides the
+    # banner from --help.
+    if any(x for x in (no_pp, pp_only, pp_airlines, pp_cabin)):
+        err.print(
+            "[yellow]--no-pp/--pp-only/--pp-airlines/--pp-cabin are deprecated; "
+            "use --cash-only / --awards-only / --provider-opt instead.[/]",
+        )
+    sel = _resolve_providers(
+        providers=providers,
+        cash_only=cash_only,
+        awards_only=awards_only,
+        provider_opt=tuple(provider_opt),
+        legacy_no_pp=no_pp,
+        legacy_pp_only=pp_only,
+        legacy_pp_airlines=pp_airlines,
+        legacy_pp_cabin=pp_cabin,
+    )
     resolved = _pick_backend(
         backend=backend,
         routing=routing,
@@ -906,21 +1112,18 @@ def search(
         page_size=page_size,
     )
 
+    run_awards = _should_run_awards(sel)
     if resolved == BACKEND_GFLIGHT:
-        run_pp = _should_run_pp(no_pp=no_pp, pp_only=pp_only)
         _run_gflight_path(
             legs=legs,
             opts=opts,
             top_n=page_size,
             json_out=json_out,
-            run_pp=run_pp,
-            pp_only=pp_only,
-            pp_airlines=pp_airlines,
-            pp_cabin=pp_cabin,
+            run_pp=run_awards,
+            sel=sel,
         )
         return
 
-    run_pp = _should_run_pp(no_pp=no_pp, pp_only=pp_only)
     _run_matrix_path(
         legs=legs,
         opts=opts,
@@ -930,10 +1133,8 @@ def search(
         json_out=json_out,
         matrix_url=matrix_url,
         google_url=google_url,
-        run_pp=run_pp,
-        pp_only=pp_only,
-        pp_airlines=pp_airlines,
-        pp_cabin=pp_cabin,
+        run_pp=run_awards,
+        sel=sel,
     )
 
 
@@ -1080,7 +1281,17 @@ def fare(
         show_only_available=only_available,
         page_size=page_size,
     )
-    run_pp = _should_run_pp(no_pp=no_pp, pp_only=pp_only)
+    sel = _resolve_providers(
+        providers=None,
+        cash_only=False,
+        awards_only=False,
+        provider_opt=(),
+        legacy_no_pp=no_pp,
+        legacy_pp_only=pp_only,
+        legacy_pp_airlines=pp_airlines,
+        legacy_pp_cabin=pp_cabin,
+    )
+    run_pp = _should_run_awards(sel)
     _run_matrix_path(
         legs=legs,
         opts=opts,
@@ -1091,9 +1302,7 @@ def fare(
         matrix_url=matrix_url,
         google_url=google_url,
         run_pp=run_pp,
-        pp_only=pp_only,
-        pp_airlines=pp_airlines,
-        pp_cabin=pp_cabin,
+        sel=sel,
     )
 
 
