@@ -18,6 +18,8 @@ import structlog
 
 from .pointspath.provider import PointsPathProvider
 from .pointspath.provider import is_configured as pp_is_configured
+from .seats_aero.auth import is_configured as seats_is_configured
+from .seats_aero.provider import SeatsAeroProvider
 
 if TYPE_CHECKING:
     from structlog.stdlib import BoundLogger
@@ -31,6 +33,7 @@ log: BoundLogger = structlog.get_logger(__name__)  # pyright: ignore[reportAny]
 async def _construct_enabled(
     *,
     pp_airlines: tuple[str, ...] | None = None,
+    seats_sources: tuple[str, ...] | None = None,
     provider_filter: tuple[str, ...] | None = None,
 ) -> list[AwardProvider]:
     """Build the list of enabled provider instances.
@@ -53,6 +56,12 @@ async def _construct_enabled(
             out.append(await PointsPathProvider.create(explicit_airlines=pp_airlines))
         except Exception as e:  # noqa: BLE001 — per-provider failures are non-fatal
             log.warning("provider_init_failed", provider="PointsPath", error=str(e))
+    allow_seats = provider_filter is None or _matches(provider_filter, "seats")
+    if allow_seats and seats_is_configured():
+        try:
+            out.append(await SeatsAeroProvider.create(explicit_airlines=seats_sources))
+        except Exception as e:  # noqa: BLE001 — per-provider failures are non-fatal
+            log.warning("provider_init_failed", provider="Seats.aero", error=str(e))
     return out
 
 
@@ -102,6 +111,7 @@ async def gather_awards(
     cabins: tuple[str, ...],
     num_passengers: int = 1,
     pp_airlines: tuple[str, ...] | None = None,
+    seats_sources: tuple[str, ...] | None = None,
     cash_hints_per_leg: list[tuple[CashFlightHint, ...]] | None = None,
     provider_filter: tuple[str, ...] | None = None,
 ) -> tuple[list[list[AwardFlight]], list[AwardProvider]]:
@@ -122,6 +132,7 @@ async def gather_awards(
     """
     providers = await _construct_enabled(
         pp_airlines=pp_airlines,
+        seats_sources=seats_sources,
         provider_filter=provider_filter,
     )
     per_leg: list[list[AwardFlight]] = []
@@ -144,6 +155,7 @@ async def gather_awards(
 def has_any_configured() -> bool:
     """Cheap check: is at least one provider's auto-enable predicate true?
 
-    Used by the CLI's `--pp-only`/`--no-pp` gating in `_should_run_pp` so we
-    can keep that decision provider-blind."""
-    return pp_is_configured()
+    Used by the CLI's `_should_run_awards` gating so the decision stays
+    provider-blind. Adding a third provider here is the same one-line
+    or-in."""
+    return pp_is_configured() or seats_is_configured()

@@ -109,6 +109,7 @@ ignore = [
 # (Matrix, PointsPath) — the attr names ARE the contract here.
 "src/flight_cli/wire.py" = ["N815"]
 "src/flight_cli/pp/models.py" = ["N815"]
+"src/flight_cli/providers/seats_aero/models.py" = ["N815"]
 
 [tool.ruff.format]
 docstring-code-format = true

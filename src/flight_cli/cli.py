@@ -315,6 +315,18 @@ class ProviderSelection:
             return ",".join(str(x) for x in cast("list[Any]", v))
         return str(v)
 
+    def seats_sources(self) -> tuple[str, ...] | None:
+        """Seats.aero mileage-program filter (`--provider-opt seats.sources=...`).
+
+        Maps to the API's `sources=` query param. None = no filter (return all
+        programs the route is monitored on)."""
+        v: Any = self.provider_opts.get("seats", {}).get("sources")
+        if v is None:
+            return None
+        if isinstance(v, list):
+            return tuple(str(x).strip() for x in cast("list[Any]", v))
+        return (str(v).strip(),)
+
 
 def _resolve_providers(  # noqa: PLR0912 — single-purpose validator + merge; splitting hurts readability
     *,
@@ -409,34 +421,45 @@ def _resolve_providers(  # noqa: PLR0912 — single-purpose validator + merge; s
 
 def _should_run_awards(sel: ProviderSelection) -> bool:
     """Award providers run iff (a) not --cash-only, (b) at least one is
-    configured, and (c) the filter (if any) names at least one configured
-    provider. Mirrors the old _should_run_pp semantics for the PP-only era;
-    generalizes naturally once more providers exist.
+    configured globally, and (c) the filter (if any) names at least one
+    configured provider.
+
+    Provider-blind by construction: every known provider has an
+    is_configured() check imported below; adding a new provider is one
+    import + one entry in the `known` map.
     """
     if sel.cash_only:
         return False
-    # Today we only know about PP. has_any_configured() is provider-blind by
-    # construction (see providers/registry.py) so this stays correct when
-    # work-2eoa adds seats.aero.
+    # Lazy-imported to avoid the registry/CLI import cycle and to keep PP's
+    # token-load (which touches disk) out of the cli module top-level.
+    from .providers.pointspath.provider import is_configured as pp_is_configured  # noqa: PLC0415
     from .providers.registry import has_any_configured  # noqa: PLC0415
+    from .providers.seats_aero.auth import is_configured as seats_is_configured  # noqa: PLC0415
+
+    known: dict[str, bool] = {
+        "pp": pp_is_configured(),
+        "seats": seats_is_configured(),
+    }
 
     if not has_any_configured():
         if sel.awards_only:
             err.print(
                 "[red]--awards-only set but no award provider is configured.[/] "
-                "Run `flight auth pp login --tokens-file ...` first.",
+                "Run `flight auth pp login` or `flight auth seats key <KEY>` first.",
             )
             raise typer.Exit(2)
         return False
-    if sel.provider_filter is not None and "pp" not in sel.provider_filter:
-        # Filter excludes PP; nothing else is configured yet.
-        if sel.awards_only:
-            err.print(
-                f"[red]--awards-only set but --providers={sel.provider_filter} "
-                "matches no configured provider.[/]",
-            )
-            raise typer.Exit(2)
-        return False
+    if sel.provider_filter is not None:
+        # Filter matches at least one configured provider?
+        filter_lc = {p.strip().lower() for p in sel.provider_filter}
+        if not any(known.get(name, False) for name in filter_lc):
+            if sel.awards_only:
+                err.print(
+                    f"[red]--awards-only set but --providers={sel.provider_filter} "
+                    "matches no configured provider.[/]",
+                )
+                raise typer.Exit(2)
+            return False
     return True
 
 
@@ -702,6 +725,7 @@ def _run_matrix_path(
             pp_only=sel.awards_only,
             json_out=json_out,
             provider_filter=sel.provider_filter,
+            seats_sources=sel.seats_sources(),
         )
     _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
 
@@ -774,6 +798,7 @@ def _run_gflight_path(
             pp_only=awards_only,
             json_out=json_out,
             provider_filter=sel.provider_filter if sel is not None else None,
+            seats_sources=sel.seats_sources() if sel is not None else None,
         )
 
 

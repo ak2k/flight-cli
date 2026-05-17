@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path  # noqa: TC003 - typer evaluates annotations at runtime
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -49,7 +49,7 @@ err = Console(stderr=True)
 auth_app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
-    help="Auth helpers per provider. Today: PointsPath only.",
+    help="Auth helpers per provider.",
 )
 pp_auth_app = typer.Typer(
     add_completion=False,
@@ -57,6 +57,90 @@ pp_auth_app = typer.Typer(
     help="PointsPath token management.",
 )
 auth_app.add_typer(pp_auth_app, name="pp")
+
+# Seats.aero sub-app is registered inline here to avoid a circular import
+# (providers/seats_aero/auth.py is leaner than pp/auth.py and we keep the
+# Typer wiring in this file rather than fanning out per-provider auth CLIs).
+from ..providers.seats_aero import auth as _seats_auth  # noqa: E402
+
+seats_auth_app = typer.Typer(
+    add_completion=False,
+    no_args_is_help=True,
+    help="Seats.aero API key management.",
+)
+auth_app.add_typer(seats_auth_app, name="seats")
+
+
+@seats_auth_app.command("key")
+def seats_key(api_key: Annotated[str, typer.Argument(help="Partner API key (pro_...)")]) -> None:
+    """Save a Seats.aero Pro API key to ~/.config/flight-cli/seats.json.
+
+    Overwrites any existing value. The file is written with 0600 perms.
+    Alternative: set the SEATS_AERO_API_KEY env var, which takes precedence
+    over the on-disk value at runtime.
+    """
+    _seats_auth.save_key(api_key)
+    console.print(f"[green]Saved Seats.aero key to {_seats_auth.KEY_PATH}.[/]")
+
+
+@seats_auth_app.command("whoami")
+def seats_whoami() -> None:
+    """Show whether a key is configured and probe the current quota.
+
+    Hits /partnerapi/search with a tiny query to grab the latest
+    X-RateLimit-Remaining header. Uses ~1 of your 1000/day quota.
+    """
+    key = _seats_auth.load_key()
+    if key is None:
+        err.print("[yellow]No Seats.aero key configured.[/]")
+        err.print(f"Run `flight auth seats key <KEY>` or set {_seats_auth.API_KEY_ENV}.")
+        raise typer.Exit(1)
+    source = (
+        "env" if _seats_auth.os.environ.get(_seats_auth.API_KEY_ENV) else str(_seats_auth.KEY_PATH)
+    )
+    console.print(f"[green]Seats.aero key configured[/] (source: {source})")
+
+    # Probe the quota. We import lazily to avoid pulling httpx unless asked.
+    from ..providers.seats_aero.client import SeatsAeroClient, SeatsAeroError  # noqa: PLC0415
+
+    async def _probe() -> None:
+        async with SeatsAeroClient(api_key=key) as c:
+            try:
+                # Smallest-possible call: JFK-LHR, today, take=1, no trips.
+                await c.search(
+                    origin="JFK",
+                    destination="LHR",
+                    start_date=datetime.now(UTC).date().isoformat(),
+                    end_date=datetime.now(UTC).date().isoformat(),
+                    include_trips=False,
+                    take=1,
+                )
+            except SeatsAeroError as e:
+                err.print(f"[red]Probe failed: HTTP {e.status}[/]")
+                raise typer.Exit(1) from e
+            rl = c.last_rate_limit
+            if rl is None:
+                console.print("[yellow]No rate-limit headers returned.[/]")
+            else:
+                console.print(
+                    f"Quota: {rl.remaining}/{rl.limit} remaining (resets in {rl.reset_seconds}s)"
+                )
+
+    anyio.run(_probe)
+
+
+@seats_auth_app.command("logout")
+def seats_logout() -> None:
+    """Delete the on-disk Seats.aero key file.
+
+    Does not affect SEATS_AERO_API_KEY env var (which takes precedence
+    when set). After logout, the provider's `is_configured()` returns
+    False and `flight search --providers seats` will error.
+    """
+    if _seats_auth.clear_key():
+        console.print(f"[green]Deleted {_seats_auth.KEY_PATH}.[/]")
+    else:
+        console.print("[yellow]No on-disk Seats.aero key to delete.[/]")
 
 
 @pp_auth_app.command("login")
@@ -196,19 +280,36 @@ def run_pp_for_search(
     pp_only: bool = False,
     json_out: bool = False,
     provider_filter: tuple[str, ...] | None = None,
+    seats_sources: tuple[str, ...] | None = None,
 ) -> None:
     """Run award augmentation through the provider registry, join against
-    `res`'s cash itineraries, render. Today the registry hands back
-    PointsPath only; future providers (seats.aero) join via the same path.
+    `res`'s cash itineraries, render. Registry hands back any configured
+    providers (PointsPath, Seats.aero, ...); the matcher is provider-blind.
 
     Errors are non-fatal — print and continue so the user still sees their
     cash results.
+
+    The `pp_only` arg is named for historical reasons; today it means
+    "render in awards-only mode" — applies to whatever providers were
+    selected, not just PP.
     """
-    try:
-        get_valid_tokens()  # validate + refresh up-front, surface a clear error
-    except PPAuthError as e:
-        err.print(f"[red]--pp: {e}[/]")
-        return
+    # PP tokens are required only if PP is actually going to run. Skip the
+    # pre-flight check when the filter excludes PP — otherwise a seats-only
+    # invocation errors here before seats even gets a chance to run.
+    pp_in_filter = provider_filter is None or any(
+        p.strip().lower() == "pp" for p in provider_filter
+    )
+    if pp_in_filter:
+        try:
+            get_valid_tokens()  # validate + refresh up-front, surface a clear error
+        except PPAuthError as e:
+            # Soft-warn if PP fails but other providers might still run.
+            # When PP is the only target (filter explicitly == "pp"), it's
+            # a hard error; otherwise log and continue.
+            if provider_filter == ("pp",):
+                err.print(f"[red]--pp: {e}[/]")
+                return
+            err.print(f"[yellow]PointsPath skipped: {e}[/]")
 
     cabin_list = tuple(_normalize_cabin(c) for c in _parse_csv(cabins, DEFAULT_CABINS))
     explicit_airlines = _parse_csv(airlines, ()) if airlines else None
@@ -227,6 +328,7 @@ def run_pp_for_search(
             num_passengers=num_passengers,
             cabins=cabin_list,
             pp_airlines=explicit_airlines,
+            seats_sources=seats_sources,
             cash_hints_per_leg=cash_hints_per_leg,
             provider_filter=provider_filter,
         )
