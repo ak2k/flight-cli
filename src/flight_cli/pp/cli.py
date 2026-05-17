@@ -195,6 +195,7 @@ def run_pp_for_search(
     cabins: str | None = None,
     pp_only: bool = False,
     json_out: bool = False,
+    provider_filter: tuple[str, ...] | None = None,
 ) -> None:
     """Run award augmentation through the provider registry, join against
     `res`'s cash itineraries, render. Today the registry hands back
@@ -227,6 +228,7 @@ def run_pp_for_search(
             cabins=cabin_list,
             pp_airlines=explicit_airlines,
             cash_hints_per_leg=cash_hints_per_leg,
+            provider_filter=provider_filter,
         )
 
     try:

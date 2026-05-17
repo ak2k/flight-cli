@@ -14,7 +14,7 @@ import anyio
 import pytest
 
 from flight_cli.providers.base import AwardFlight, AwardProvider, LegQuery
-from flight_cli.providers.registry import _gather_one_leg
+from flight_cli.providers.registry import _gather_one_leg, _matches
 
 if TYPE_CHECKING:
     from flight_cli.pp.client import CashFlightHint
@@ -105,3 +105,24 @@ def test_gather_one_leg_preserves_each_providers_full_output(count: int) -> None
 
     out: list[AwardFlight] = anyio.run(go)
     assert len(out) == count
+
+
+# ─────────────────────────── provider filter (work-4byx) ─────────────────
+
+
+def test_matches_is_case_insensitive() -> None:
+    assert _matches(("pp",), "PP") is True
+    assert _matches(("PP",), "pp") is True
+    assert _matches(("Pp",), "pp") is True
+
+
+def test_matches_trims_whitespace() -> None:
+    assert _matches((" pp ",), "pp") is True
+
+
+def test_matches_returns_false_for_unknown_provider() -> None:
+    assert _matches(("pp",), "seats") is False
+
+
+def test_matches_empty_filter_returns_false() -> None:
+    assert _matches((), "pp") is False

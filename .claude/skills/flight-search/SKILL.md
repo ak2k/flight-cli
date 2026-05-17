@@ -26,7 +26,10 @@ Global flags (every search-printing command):
 - `--json` — emit raw response JSON
 - `--no-cache` — bypass the on-disk response cache
 - `--matrix-url` / `--google-url` — toggle deep-link emission
-- `--no-pp` — skip the PointsPath award overlay even if tokens are logged in (PP runs implicitly on both matrix and gflight backends when tokens are present)
+- `--cash-only` — skip all award providers; show only the cash table
+- `--awards-only` — skip the cash table; show only the award provider output
+- `--providers pp[,seats]` — restrict to a named subset of award providers (default: all configured)
+- `--provider-opt KEY=VAL` — per-provider override, repeatable, e.g. `--provider-opt pp.airlines=United,Delta` or `--provider-opt pp.cabins=Economy,Business`. Defaults live in `~/.config/flight-cli/config.toml` under `[providers.<name>]` tables.
 
 ## Intent → flag cheat sheet
 
