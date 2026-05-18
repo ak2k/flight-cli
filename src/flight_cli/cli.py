@@ -26,7 +26,7 @@ from rich.console import Console
 from rich.table import Table
 
 from . import _config
-from ._multi_cabin import MultiCabinRow
+from ._multi_cabin import MultiCabinRow, parse_price
 from ._multi_cabin import merge as _merge_cabins
 from .client import MatrixApiError, MatrixClient
 from .domain import (
@@ -752,6 +752,7 @@ def _run_matrix_path(
             json_out=json_out,
             provider_filter=sel.provider_filter,
             seats_sources=sel.seats_sources(),
+            cash_per_cabin=_cash_per_cabin_single(res, opts.cabin),
         )
     _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
 
@@ -825,6 +826,7 @@ def _run_gflight_path(
             json_out=json_out,
             provider_filter=sel.provider_filter if sel is not None else None,
             seats_sources=sel.seats_sources() if sel is not None else None,
+            cash_per_cabin=_cash_per_cabin_single(sr, opts.cabin),
         )
 
 
@@ -853,6 +855,42 @@ def _pp_cabins_for_multi(sel: ProviderSelection, cabins: tuple[Cabin, ...]) -> s
     if user_set is not None:
         return user_set
     return ",".join(_derive_pp_cabins(cabins))
+
+
+def _cash_per_cabin_single(res: SearchResult, query_cabin: Cabin) -> dict[int, dict[str, float]]:
+    """Build the per-itinerary cash map for a single-cabin invocation.
+
+    The PP renderer needs to know which PP cabin name the cash field on each
+    itinerary corresponds to — otherwise it can't compute ¢/mi against the
+    right cash basis. For single-cabin runs the answer is the queried cabin
+    applied uniformly.
+    """
+    name = _CABIN_TO_PP_NAME[query_cabin]
+    out: dict[int, dict[str, float]] = {}
+    for it in res.solutions:
+        cash = parse_price(it.price)
+        if cash is not None:
+            out[id(it)] = {name: cash}
+    return out
+
+
+def _cash_per_cabin_multi(rows: list[MultiCabinRow]) -> dict[int, dict[str, float]]:
+    """Build the per-itinerary cash map for a multi-cabin merged result.
+
+    `rows` carries each itinerary alongside the prices observed in each cabin.
+    Object identity is preserved through the merge (and through PP's matcher
+    and de-dup), so `id(row.itinerary)` is a stable lookup key.
+    """
+    out: dict[int, dict[str, float]] = {}
+    for r in rows:
+        prices: dict[str, float] = {}
+        for cab, price in r.prices.items():
+            cash = parse_price(price)
+            if cash is not None:
+                prices[_CABIN_TO_PP_NAME[cab]] = cash
+        if prices:
+            out[id(r.itinerary)] = prices
+    return out
 
 
 def _run_matrix_multi(
@@ -1068,6 +1106,7 @@ def _run_matrix_path_multi(
             json_out=json_out,
             provider_filter=sel.provider_filter,
             seats_sources=sel.seats_sources(),
+            cash_per_cabin=_cash_per_cabin_multi(rows),
         )
 
     # Deep links are cabin-specific (Matrix's URL encodes one cabin). Emit the
@@ -1132,6 +1171,7 @@ def _run_gflight_path_multi(
             json_out=json_out,
             provider_filter=sel.provider_filter,
             seats_sources=sel.seats_sources(),
+            cash_per_cabin=_cash_per_cabin_multi(rows),
         )
 
 
