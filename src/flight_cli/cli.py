@@ -20,11 +20,14 @@ from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
 import anyio
+import anyio.to_thread
 import typer
 from rich.console import Console
 from rich.table import Table
 
 from . import _config
+from ._multi_cabin import MultiCabinRow
+from ._multi_cabin import merge as _merge_cabins
 from .client import MatrixApiError, MatrixClient
 from .domain import (
     Cabin,
@@ -167,6 +170,20 @@ def _resolve_cabin(name: str) -> Cabin:
         return aliases[norm]
     err.print(f"[red]Unknown cabin {name!r}; choose: economy, premium, business, first[/]")
     raise typer.Exit(2)
+
+
+def _resolve_cabin_list(csv: str) -> tuple[Cabin, ...]:
+    """Parse a comma-separated cabin list. Single-cabin invocations still
+    take this path — they emit a 1-tuple and the dispatcher routes them
+    back through the single-cabin code path unchanged."""
+    tokens = [t.strip() for t in csv.split(",") if t.strip()]
+    if not tokens:
+        err.print("[red]--cabin must name at least one cabin.[/]")
+        raise typer.Exit(2)
+    seen: dict[Cabin, None] = {}
+    for t in tokens:
+        seen.setdefault(_resolve_cabin(t), None)
+    return tuple(seen)
 
 
 def _build_options(
@@ -811,6 +828,338 @@ def _run_gflight_path(
         )
 
 
+# ─────────────────────────── multi-cabin orchestration ─────────────────────
+
+
+def _derive_pp_cabins(cash_cabins: tuple[Cabin, ...]) -> tuple[str, ...]:
+    """Map cash cabin list → PP cabin list for the PP overlay.
+
+    Adds First when Business is requested but First isn't: award seekers
+    treat business/first as a paired premium tier, and First is rare enough
+    that surfacing it costs almost nothing while filling a real research
+    gap. The reverse promotion (First → +Business) isn't applied — asking
+    for First means the user has already made that call.
+    """
+    out: list[str] = [_CABIN_TO_PP_NAME[c] for c in cash_cabins]
+    if Cabin.BUSINESS in cash_cabins and Cabin.FIRST not in cash_cabins:
+        out.append(_CABIN_TO_PP_NAME[Cabin.FIRST])
+    return tuple(out)
+
+
+def _pp_cabins_for_multi(sel: ProviderSelection, cabins: tuple[Cabin, ...]) -> str | None:
+    """PP cabins for a multi-cabin search. User's `--provider-opt pp.cabins=`
+    wins; otherwise derive from `--cabin` with the business→+first rule."""
+    user_set = sel.pp_cabins()
+    if user_set is not None:
+        return user_set
+    return ",".join(_derive_pp_cabins(cabins))
+
+
+def _run_matrix_multi(
+    *,
+    legs: tuple[Leg, ...],
+    opts: SearchOptions,
+    cabins: tuple[Cabin, ...],
+    rps: float,
+    impersonate: str,
+    no_cache: bool,
+) -> dict[Cabin, SearchResult]:
+    """Fan out N parallel Matrix queries (one per cabin), one shared client.
+
+    Per-cabin failures are soft: log + omit from the result dict (renderer
+    shows that column as all '—'). Connection-level / auth errors still
+    propagate so the user sees real outages.
+    """
+    results: dict[Cabin, SearchResult] = {}
+
+    async def query_cabin(client: MatrixClient, cab: Cabin) -> None:
+        cabin_opts = opts.model_copy(update={"cabin": cab})
+        search = SpecificDateSearch(legs=legs, options=cabin_opts)
+        try:
+            res = await client.execute(search, cache=not no_cache)
+        except MatrixApiError as e:
+            err.print(f"[yellow]Matrix {cab.value} query failed ({e.kind}): {e.message}[/]")
+            return
+        results[cab] = cast("SearchResult", res)
+
+    async def go() -> None:
+        async with (
+            MatrixClient(rps=rps, impersonate=impersonate) as client,
+            anyio.create_task_group() as tg,
+        ):
+            for cab in cabins:
+                tg.start_soon(query_cabin, client, cab)
+
+    try:
+        anyio.run(go)
+    except MatrixApiError as e:
+        err.print(f"[red]Matrix returned an error ({e.kind}):[/] {e.message}")
+        if e.request_id:
+            err.print(f"[dim]request_id: {e.request_id}[/]")
+        raise typer.Exit(1) from e
+    return results
+
+
+def _run_gflight_multi(
+    *,
+    legs: tuple[Leg, ...],
+    opts: SearchOptions,
+    cabins: tuple[Cabin, ...],
+    top_n: int,
+) -> dict[Cabin, list[Any]]:
+    """Fan out N parallel gflight queries (one per cabin). fli is sync, so
+    each query runs in a worker thread via `anyio.to_thread.run_sync`."""
+    from ._gflight_ids import search_with_ids  # noqa: PLC0415
+    from .fli_bridge import to_fli_filter  # noqa: PLC0415
+
+    results: dict[Cabin, list[Any]] = {}
+
+    def query_sync(cab: Cabin) -> list[Any]:
+        cabin_opts = opts.model_copy(update={"cabin": cab})
+        search = SpecificDateSearch(legs=legs, options=cabin_opts)
+        return search_with_ids(to_fli_filter(search), top_n=top_n) or []
+
+    async def query_cabin(cab: Cabin) -> None:
+        try:
+            results[cab] = await anyio.to_thread.run_sync(query_sync, cab)
+        except Exception as e:  # noqa: BLE001 — fli has no documented exception surface
+            err.print(f"[yellow]Google Flights {cab.value} query failed: {e}[/]")
+
+    async def go() -> None:
+        async with anyio.create_task_group() as tg:
+            for cab in cabins:
+                tg.start_soon(query_cabin, cab)
+
+    anyio.run(go)
+    return results
+
+
+def _gflight_to_search_result_per_cabin(
+    results_by_cabin: dict[Cabin, list[Any]],
+) -> dict[Cabin, SearchResult]:
+    """Adapt gflight's duck-typed fli results into the SearchResult shape so
+    the merge/render path is backend-agnostic. Reuses pp.gflight_adapter."""
+    from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
+
+    return {cab: fli_results_to_search_result(res) for cab, res in results_by_cabin.items()}
+
+
+def _render_multi_cabin_search(
+    rows: list[MultiCabinRow],
+    *,
+    cabins: tuple[Cabin, ...],
+    sort_by: Cabin,
+    title_prefix: str = "Itineraries",
+) -> None:
+    """Render multi-cabin merged rows. One row per itinerary, one $ column
+    per requested cabin, '—' for missing."""
+    if not rows:
+        console.print("[yellow]No itineraries.[/]")
+        return
+    # Use the first present price to surface a currency tag in the title.
+    ccy = ""
+    for row in rows:
+        for p in row.prices.values():
+            ccy_candidate, _ = _split_price(p)
+            if ccy_candidate:
+                ccy = ccy_candidate
+                break
+        if ccy:
+            break
+    ccy_tag = f" ({ccy})" if ccy else ""
+    cabin_labels = "+".join(_CABIN_TO_LETTER[c] for c in cabins)
+
+    t = Table(
+        title=f"{title_prefix} · {cabin_labels} (sorted by {_CABIN_TO_LETTER[sort_by]}){ccy_tag}",
+        show_header=True,
+        header_style="bold green",
+    )
+    t.add_column("#", justify="right")
+    t.add_column("carriers")
+    t.add_column("outbound")
+    t.add_column("return")
+    for cab in cabins:
+        t.add_column(f"{_CABIN_TO_LETTER[cab]} $", justify="right")
+
+    for i, row in enumerate(rows, 1):
+        itn = row.itinerary.itinerary
+        slcs: list[Slice] = itn.slices if itn else []
+        carriers = ",".join((c.code or "?") for c in (itn.carriers if itn else []))
+
+        def _fmt(s: Slice) -> str:
+            dep = s.departure or ""
+            arr = s.arrival or ""
+            dur_min = s.duration or 0
+            dur = f"{dur_min // 60}h{dur_min % 60:02d}m" if dur_min else ""
+            o = (s.origin.code if s.origin else None) or "?"
+            d = (s.destination.code if s.destination else None) or "?"
+            head = f"{o}→{d} {'/'.join(s.flights) or '?'} {dep[:16]}→{arr[:16]} {dur}"
+            tail = _fmt_legroom_lines(s)
+            return f"{head}\n{tail}" if tail else head
+
+        out_cell = _fmt(slcs[0]) if slcs else "—"
+        ret_cell = _fmt(slcs[1]) if len(slcs) > 1 else "—"
+        price_cells = [_amount(row.prices.get(cab)) for cab in cabins]
+        t.add_row(str(i), carriers or "?", out_cell, ret_cell, *price_cells)
+    console.print(t)
+
+
+def _validate_sort_cabin(sort_by: Cabin, cabins: tuple[Cabin, ...]) -> None:
+    if sort_by not in cabins:
+        names = ", ".join(c.value for c in cabins)
+        err.print(f"[red]--sort {sort_by.value!r} must be one of --cabin: {names}[/]")
+        raise typer.Exit(2)
+
+
+def _run_matrix_path_multi(
+    *,
+    legs: tuple[Leg, ...],
+    opts: SearchOptions,
+    cabins: tuple[Cabin, ...],
+    sort_by: Cabin,
+    top_n: int,
+    rps: float,
+    impersonate: str,
+    no_cache: bool,
+    json_out: bool,
+    matrix_url: bool,
+    google_url: bool,
+    run_pp: bool,
+    sel: ProviderSelection,
+) -> None:
+    """Matrix multi-cabin: N parallel cabin queries → client-side join → render."""
+    results_by_cabin = _run_matrix_multi(
+        legs=legs,
+        opts=opts,
+        cabins=cabins,
+        rps=_resolve_rps(rps),
+        impersonate=_resolve_impersonate(impersonate),
+        no_cache=_resolve_no_cache(no_cache),
+    )
+    if not results_by_cabin:
+        err.print("[red]All cabin queries failed.[/]")
+        raise typer.Exit(1)
+
+    if json_out and not run_pp:
+        # JSON shape: {cabin: raw} so consumers can re-merge if they want.
+        sys.stdout.write(
+            json.dumps({c.value: r.raw for c, r in results_by_cabin.items()}, indent=2)
+        )
+        return
+
+    rows = _merge_cabins(results_by_cabin, sort_by=sort_by, top_n=top_n)
+    if not sel.awards_only:
+        _render_multi_cabin_search(rows, cabins=cabins, sort_by=sort_by)
+
+    if run_pp:
+        # PP runs once against the merged result so award flights match against
+        # the full itinerary set we just rendered. Pick any one of the cabin
+        # results to source slices for cash_hints / matched-id lookups —
+        # itineraries that survived the merge are the union of all.
+        merged = _merge_results_into_one(results_by_cabin, rows)
+        p = opts.pax
+        run_pp_for_search(
+            merged,
+            legs=_build_pp_legs(legs),
+            num_passengers=p.adults + p.children + p.seniors + p.youth,
+            airlines=sel.pp_airlines(),
+            cabins=_pp_cabins_for_multi(sel, cabins),
+            pp_only=sel.awards_only,
+            json_out=json_out,
+            provider_filter=sel.provider_filter,
+            seats_sources=sel.seats_sources(),
+        )
+
+    # Deep links are cabin-specific (Matrix's URL encodes one cabin). Emit the
+    # link for the sort cabin — it's the "primary" surface in the rendered
+    # table and the one a user is most likely to click through to.
+    sort_opts = opts.model_copy(update={"cabin": sort_by})
+    _emit_urls(
+        SpecificDateSearch(legs=legs, options=sort_opts),
+        matrix_url=matrix_url,
+        google_url=google_url,
+    )
+
+
+def _run_gflight_path_multi(
+    *,
+    legs: tuple[Leg, ...],
+    opts: SearchOptions,
+    cabins: tuple[Cabin, ...],
+    sort_by: Cabin,
+    top_n: int,
+    json_out: bool,
+    run_pp: bool,
+    sel: ProviderSelection,
+) -> None:
+    """Google Flights multi-cabin: N parallel cabin queries (threadpool) → join → render."""
+    fli_by_cabin = _run_gflight_multi(legs=legs, opts=opts, cabins=cabins, top_n=top_n)
+    if not fli_by_cabin:
+        err.print("[red]All Google Flights cabin queries failed.[/]")
+        raise typer.Exit(1)
+
+    if json_out and not run_pp:
+        out: dict[str, Any] = {}
+        for cab, fli_results in fli_by_cabin.items():
+            cab_dumped: list[Any] = []
+            for r in fli_results:
+                items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
+                dumped = [
+                    {**g.flight.model_dump(mode="json"), "flight_id": g.flight_id} for g in items
+                ]
+                cab_dumped.append(dumped if isinstance(r, tuple) else dumped[0])
+            out[cab.value] = cab_dumped
+        sys.stdout.write(json.dumps(out, indent=2, default=str))
+        return
+
+    results_by_cabin = _gflight_to_search_result_per_cabin(fli_by_cabin)
+    rows = _merge_cabins(results_by_cabin, sort_by=sort_by, top_n=top_n)
+    if not sel.awards_only:
+        _render_multi_cabin_search(
+            rows, cabins=cabins, sort_by=sort_by, title_prefix="Google Flights"
+        )
+
+    if run_pp:
+        merged = _merge_results_into_one(results_by_cabin, rows)
+        p = opts.pax
+        run_pp_for_search(
+            merged,
+            legs=_build_pp_legs(legs),
+            num_passengers=p.adults + p.children + p.seniors + p.youth,
+            airlines=sel.pp_airlines(),
+            cabins=_pp_cabins_for_multi(sel, cabins),
+            pp_only=sel.awards_only,
+            json_out=json_out,
+            provider_filter=sel.provider_filter,
+            seats_sources=sel.seats_sources(),
+        )
+
+
+def _merge_results_into_one(
+    results_by_cabin: dict[Cabin, SearchResult],
+    rows: list[MultiCabinRow],
+) -> SearchResult:
+    """Build a single SearchResult whose `solutions` are the merged itineraries
+    in render order. Used as input to `run_pp_for_search` — PP matches by
+    flight#+date, so any per-cabin price difference doesn't affect the match
+    (PP attaches awards to flights, not fares)."""
+    # SearchResult is TYPE_CHECKING-only at module top — need a runtime import.
+    from .models import SearchResult  # noqa: PLC0415
+
+    # Pick any one of the per-cabin results to seed the carrier_stop_matrix /
+    # currency_notice — PP only reads `.solutions`, so the rest doesn't matter.
+    seed = next(iter(results_by_cabin.values()))
+    return SearchResult(
+        solutionCount=len(rows),
+        solutions=[r.itinerary for r in rows],
+        carrierStopMatrix=seed.carrier_stop_matrix,
+        currencyNotice=seed.currency_notice,
+        session=seed.session,
+        solutionSet=seed.solution_set,
+        raw=seed.raw,
+    )
+
+
 def _render_gflight_table(results: list[Any], *, legs: tuple[Leg, ...], top_n: int) -> None:
     """Render fli results as a rich table. Duck-typed: fli has no type stubs.
 
@@ -865,6 +1214,20 @@ def _render_gflight_table(results: list[Any], *, legs: tuple[Leg, ...], top_n: i
 # Angled Flat aren't comparable on pitch alone) so those stay as text.
 _LEGROOM_AS_COLOR = {"BELOW": "red", "ABOVE": "green"}
 _CABIN_LETTER = {"ECONOMY": "Y", "PREMIUM": "W", "BUSINESS": "J", "FIRST": "F"}
+# Domain Cabin enum → human label and PP API cabin string. Used for
+# multi-cabin column headers and PP cabin derivation.
+_CABIN_TO_LETTER: dict[Cabin, str] = {
+    Cabin.COACH: "Y",
+    Cabin.PREMIUM_COACH: "W",
+    Cabin.BUSINESS: "J",
+    Cabin.FIRST: "F",
+}
+_CABIN_TO_PP_NAME: dict[Cabin, str] = {
+    Cabin.COACH: "Economy",
+    Cabin.PREMIUM_COACH: "Premium economy",
+    Cabin.BUSINESS: "Business",
+    Cabin.FIRST: "First",
+}
 # 📶 for wifi is the only emoji (2-col) — wifi is the highest-value binary signal
 # and 📶 is universally read at-a-glance where ≋ is not. Power and video keep
 # 1-col Unicode pairs so the plug-vs-USB and stream-vs-ondemand distinctions
@@ -1087,7 +1450,25 @@ def search(
             rich_help_panel=_GROUP_BACKEND,
         ),
     ] = BACKEND_AUTO,
-    cabin: str = typer.Option("economy", "--cabin", rich_help_panel=_GROUP_ITINERARY),
+    cabin: str = typer.Option(
+        "economy",
+        "--cabin",
+        help=(
+            "Cabin, or comma list for multi-cabin compare ('economy,business'). "
+            "Multi-cabin renders one $ column per cabin; '—' means the itinerary "
+            "wasn't in that cabin's top-N (cabin unavailable OR priced out). "
+            "Bump -n for broader overlap across cabins."
+        ),
+        rich_help_panel=_GROUP_ITINERARY,
+    ),
+    sort_cabin: Annotated[
+        str | None,
+        typer.Option(
+            "--sort",
+            help="Cabin to sort multi-cabin results by. Default: first in --cabin.",
+            rich_help_panel=_GROUP_ITINERARY,
+        ),
+    ] = None,
     adults: int = typer.Option(1, "--adults", rich_help_panel=_GROUP_ITINERARY),
     children: int = typer.Option(0, "--children", rich_help_panel=_GROUP_ITINERARY),
     seniors: int = typer.Option(0, "--seniors", rich_help_panel=_GROUP_ITINERARY),
@@ -1279,8 +1660,19 @@ def search(
         err.print("[red]Specify --slice ... or origin destination --dep[/]")
         raise typer.Exit(2)
 
+    cabins_tuple = _resolve_cabin_list(cabin)
+    # _resolve_cabin_list raises typer.Exit on empty input, so cabins_tuple is
+    # never empty here. Bind `first_cabin` before any len-narrowing branches so
+    # basedpyright keeps the `tuple[Cabin, ...]` → Cabin inference.
+    first_cabin = cabins_tuple[0]
+    sort_by = _resolve_cabin(sort_cabin) if sort_cabin else first_cabin
+    if len(cabins_tuple) > 1:
+        _validate_sort_cabin(sort_by, cabins_tuple)
+
+    # `_build_options` seeds with the first cabin in the list; multi-cabin
+    # orchestrators clone opts per cabin via `model_copy(update={"cabin": ...})`.
     opts = _build_options(
-        cabin=cabin,
+        cabin=first_cabin.value,
         adults=adults,
         children=children,
         seniors=seniors,
@@ -1294,6 +1686,37 @@ def search(
     )
 
     run_awards = _should_run_awards(sel)
+
+    if len(cabins_tuple) > 1:
+        if resolved == BACKEND_GFLIGHT:
+            _run_gflight_path_multi(
+                legs=legs,
+                opts=opts,
+                cabins=cabins_tuple,
+                sort_by=sort_by,
+                top_n=page_size,
+                json_out=json_out,
+                run_pp=run_awards,
+                sel=sel,
+            )
+            return
+        _run_matrix_path_multi(
+            legs=legs,
+            opts=opts,
+            cabins=cabins_tuple,
+            sort_by=sort_by,
+            top_n=page_size,
+            rps=_resolve_rps(rps),
+            impersonate=_resolve_impersonate(impersonate),
+            no_cache=_resolve_no_cache(no_cache),
+            json_out=json_out,
+            matrix_url=matrix_url,
+            google_url=google_url,
+            run_pp=run_awards,
+            sel=sel,
+        )
+        return
+
     if resolved == BACKEND_GFLIGHT:
         _run_gflight_path(
             legs=legs,
