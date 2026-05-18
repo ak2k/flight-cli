@@ -22,6 +22,9 @@ from flight_cli._multi_cabin import (
     parse_price,
 )
 from flight_cli.cli import (
+    _MULTI_CABIN_QUERY_BUMP_CAP,
+    _MULTI_CABIN_QUERY_BUMP_FACTOR,
+    _bumped_query_top_n,
     _cash_per_cabin_multi,
     _cash_per_cabin_single,
     _derive_pp_cabins,
@@ -344,3 +347,31 @@ def test_cash_per_cabin_multi_skips_rows_with_no_parseable_cash():
     row.prices[Cabin.BUSINESS] = ""
     m = _cash_per_cabin_multi([row])
     assert id(it) not in m
+
+
+# ────────────────────── _bumped_query_top_n ────────────────────────────────
+
+
+def test_bumped_query_top_n_single_cabin_no_bump():
+    """Single cabin keeps the user's top_n verbatim — no bump applies."""
+    assert _bumped_query_top_n(5, cabin_count=1) == 5
+    assert _bumped_query_top_n(50, cabin_count=1) == 50
+    assert _bumped_query_top_n(0, cabin_count=1) == 0
+
+
+def test_bumped_query_top_n_multi_scales_by_factor():
+    assert _bumped_query_top_n(5, cabin_count=2) == 5 * _MULTI_CABIN_QUERY_BUMP_FACTOR
+
+
+def test_bumped_query_top_n_caps_at_ceiling():
+    """A user-bumped -n already at or above the cap doesn't get scaled —
+    bound the per-cabin response size regardless of cabin count."""
+    assert _bumped_query_top_n(50, cabin_count=2) == _MULTI_CABIN_QUERY_BUMP_CAP
+    assert _bumped_query_top_n(200, cabin_count=3) == _MULTI_CABIN_QUERY_BUMP_CAP
+
+
+def test_bumped_query_top_n_cabin_count_doesnt_compound():
+    """Three cabins doesn't widen further than two — overlap is pairwise, so
+    5x per cabin is enough regardless of cabin count."""
+    assert _bumped_query_top_n(5, cabin_count=3) == _bumped_query_top_n(5, cabin_count=2)
+    assert _bumped_query_top_n(5, cabin_count=4) == _bumped_query_top_n(5, cabin_count=2)
