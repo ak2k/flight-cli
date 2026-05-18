@@ -36,6 +36,8 @@ from .gflight_adapter import cash_hints_from_search_result
 from .match import MatchedFare, join
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from ..models import SearchResult
     from ..providers.base import AwardFlight, LegQuery
 
@@ -285,6 +287,7 @@ def run_pp_for_search(
     json_out: bool = False,
     provider_filter: tuple[str, ...] | None = None,
     seats_sources: tuple[str, ...] | None = None,
+    cash_per_cabin: Mapping[int, Mapping[str, float]] | None = None,
 ) -> None:
     """Run award augmentation through the provider registry, join against
     `res`'s cash itineraries, render. Registry hands back any configured
@@ -296,6 +299,13 @@ def run_pp_for_search(
     The `pp_only` arg is named for historical reasons; today it means
     "render in awards-only mode" — applies to whatever providers were
     selected, not just PP.
+
+    `cash_per_cabin` maps `id(itinerary) -> {pp_cabin_name: cash_usd}` so
+    the renderer can compute cents-per-mile per cabin against the right
+    cash basis (business miles vs business cash, not business miles vs
+    economy cash). Callers should build it from the cabins they queried —
+    single-cabin invocations pass a one-entry inner dict; multi-cabin
+    passes one entry per queried cabin. When None, no CPM is shown.
     """
     # PP tokens are required only if PP is actually going to run. Skip the
     # pre-flight check when the filter excludes PP — otherwise a seats-only
@@ -362,7 +372,12 @@ def run_pp_for_search(
             return
         for leg, matches in zip(legs, matches_per_leg, strict=True):
             console.print(f"\n[bold]Leg: {leg.label}[/]")
-            _render_matches(matches, cabin_list, slice_index=leg.slice_index)
+            _render_matches(
+                matches,
+                cabin_list,
+                slice_index=leg.slice_index,
+                cash_per_cabin=cash_per_cabin,
+            )
     finally:
         # Providers hold HTTP keepalive; close them so the event loop doesn't
         # warn about unclosed transports on exit.
@@ -409,8 +424,10 @@ def _fmt_miles(n: int) -> str:
     return f"{n / 1000:.1f}k" if n >= _MILES_K_THRESHOLD else str(n)
 
 
-def _fmt_award_cell(award_flights: list[AwardFlight], want_cabin: str) -> str:
-    """Render the best (lowest miles) offer across providers for one cabin."""
+def _best_award_for_cabin(
+    award_flights: list[AwardFlight], want_cabin: str
+) -> tuple[int, float, str, list[str]] | None:
+    """Cheapest (lowest miles) offer across providers for one cabin, or None."""
     best: tuple[int, float, str, list[str]] | None = None
     for af in award_flights:
         for ca in af.cabins:
@@ -419,10 +436,31 @@ def _fmt_award_cell(award_flights: list[AwardFlight], want_cabin: str) -> str:
             key = (ca.miles, ca.tax_usd, af.program, af.funding_banks)
             if best is None or key[0] < best[0]:
                 best = key
+    return best
+
+
+def _fmt_award_cell(
+    award_flights: list[AwardFlight], want_cabin: str, cash_usd: float | None = None
+) -> str:
+    """Render the best (lowest miles) offer across providers for one cabin.
+
+    When `cash_usd` is provided AND an award exists, append the cabin's
+    ¢/mi redemption value on a second line (dim-styled). Inline ¢/mi keeps
+    each cabin's miles cost + redemption value adjacent in the table
+    without growing the column count — the alternative (separate ¢/mi
+    columns per cabin) overflows narrow terminals in multi-cabin renders.
+    """
+    best = _best_award_for_cabin(award_flights, want_cabin)
     if best is None:
         return "—"
     miles, tax, program, _banks = best
-    return f"{_fmt_miles(miles)} {program} + ${tax:.0f}"
+    head = f"{_fmt_miles(miles)} {program} + ${tax:.0f}"
+    if cash_usd is None:
+        return head
+    cpm = _cents_per_mile(cash_usd, miles, tax)
+    if cpm is None:
+        return head
+    return f"{head}\n[dim]{cpm:.1f}¢/mi[/]"
 
 
 def _fmt_funding(award_flights: list[AwardFlight]) -> str:
@@ -474,12 +512,23 @@ def _dedupe_per_leg(matches: list[MatchedFare], slice_index: int = 0) -> list[Ma
 
 
 def _render_matches(
-    matches: list[MatchedFare], cabin_list: tuple[str, ...], *, slice_index: int = 0
+    matches: list[MatchedFare],
+    cabin_list: tuple[str, ...],
+    *,
+    slice_index: int = 0,
+    cash_per_cabin: Mapping[int, Mapping[str, float]] | None = None,
 ) -> None:
     matches = _dedupe_per_leg(matches, slice_index=slice_index)
     if not matches:
         console.print("[yellow]No matched fares.[/]")
         return
+    # Drop the funded-by column when multi-cabin is active: with N cabin
+    # columns each carrying a two-line cell (miles cost + ¢/mi), the
+    # funded-by string (typically 4-6 banks long) is the column most likely
+    # to wrap awkwardly and bloat row height. Single-cabin renders keep it
+    # since horizontal budget is fine there.
+    show_funding = len(cabin_list) <= 1
+
     t = Table(
         title="Cash + award (matched on flight # x date)",
         show_header=True,
@@ -489,8 +538,8 @@ def _render_matches(
     t.add_column("price", justify="right")
     for cab in cabin_list:
         t.add_column(cab, justify="right")
-    t.add_column("¢/mi (Y)", justify="right")
-    t.add_column("funded by")
+    if show_funding:
+        t.add_column("funded by")
 
     for m in matches:
         itn = m.itinerary.itinerary
@@ -499,27 +548,18 @@ def _render_matches(
         s = itn.slices[slice_index]
         flight = (s.flights or ["?"])[0]
         cash_str = m.itinerary.price or "—"
-        # Parse cash price for cpm calc. Matrix returns "USD530.00", "$1,078",
-        # "1,078 USD" etc. — strip currency tokens and grab the first number.
-        cash_val: float | None = _parse_cash(cash_str)
+        empty: Mapping[str, float] = {}
+        per_cabin_cash = cash_per_cabin.get(id(m.itinerary), empty) if cash_per_cabin else empty
 
         cells = [flight, cash_str]
-        cpm_str = "—"
         for cab in cabin_list:
-            cells.append(_fmt_award_cell(m.awards, cab))
-            if cab == "Economy" and cash_val is not None:
-                # CPM uses cheapest economy across providers.
-                best_y: tuple[int, float] | None = None
-                for af in m.awards:
-                    for ca in af.cabins:
-                        if ca.cabin == "Economy" and (best_y is None or ca.miles < best_y[0]):
-                            best_y = (ca.miles, ca.tax_usd)
-                if best_y is not None:
-                    cpm = _cents_per_mile(cash_val, best_y[0], best_y[1])
-                    if cpm is not None:
-                        cpm_str = f"{cpm:.1f}¢"
-        cells.append(cpm_str)
-        cells.append(_fmt_funding(m.awards))
+            # CPM is shown only when we have cash for THIS cabin specifically
+            # — otherwise the value would mix cabins (e.g. business miles vs
+            # economy cash) and mislead. Cabins without per-cabin cash render
+            # the award without a ¢/mi line.
+            cells.append(_fmt_award_cell(m.awards, cab, per_cabin_cash.get(cab)))
+        if show_funding:
+            cells.append(_fmt_funding(m.awards))
         t.add_row(*cells)
     console.print(t)
 

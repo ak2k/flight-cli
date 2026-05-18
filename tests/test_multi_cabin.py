@@ -22,6 +22,8 @@ from flight_cli._multi_cabin import (
     parse_price,
 )
 from flight_cli.cli import (
+    _cash_per_cabin_multi,
+    _cash_per_cabin_single,
     _derive_pp_cabins,
     _resolve_cabin_list,
 )
@@ -287,3 +289,58 @@ def test_multi_cabin_row_default_prices_empty():
     it = _itin(("AA100", "2026-08-15T09:00", "JFK", "LHR"))
     row = MultiCabinRow(itinerary=it)
     assert row.prices == {}
+
+
+# ───────────────────────── cash_per_cabin builders ─────────────────────────
+
+
+def test_cash_per_cabin_single_uses_queried_cabin_name():
+    a = _itin(("AA100", "2026-08-15T09:00", "JFK", "LHR"), price="USD600.00")
+    b = _itin(("BB200", "2026-08-15T10:00", "JFK", "LHR"), price="$1,200")
+    res = _result(a, b)
+    m = _cash_per_cabin_single(res, Cabin.BUSINESS)
+    assert m[id(a)] == {"Business": 600.0}
+    assert m[id(b)] == {"Business": 1200.0}
+
+
+def test_cash_per_cabin_single_skips_unparseable_cash():
+    no_price = Itinerary(
+        ext=ItineraryExt(price=None),
+        itinerary=ItineraryDetails(
+            slices=[Slice(flights=["XX1"], departure="2026-08-15T09:00")], carriers=[]
+        ),
+    )
+    has_price = _itin(("AA100", "2026-08-15T09:00", "JFK", "LHR"), price="USD600.00")
+    m = _cash_per_cabin_single(_result(no_price, has_price), Cabin.COACH)
+    assert id(no_price) not in m
+    assert m[id(has_price)] == {"Economy": 600.0}
+
+
+def test_cash_per_cabin_multi_keys_by_pp_cabin_names():
+    it = _itin(("AA100", "2026-08-15T09:00", "JFK", "LHR"), price="USD600.00")
+    row = MultiCabinRow(itinerary=it)
+    row.prices[Cabin.COACH] = "USD600.00"
+    row.prices[Cabin.BUSINESS] = "USD3000.00"
+    m = _cash_per_cabin_multi([row])
+    assert m[id(it)] == {"Economy": 600.0, "Business": 3000.0}
+
+
+def test_cash_per_cabin_multi_omits_cabins_without_parseable_cash():
+    it = _itin(("AA100", "2026-08-15T09:00", "JFK", "LHR"), price="USD600.00")
+    row = MultiCabinRow(itinerary=it)
+    row.prices[Cabin.COACH] = "USD600.00"
+    row.prices[Cabin.BUSINESS] = "—"  # the "missing" sentinel
+    m = _cash_per_cabin_multi([row])
+    # Business absent: no business cash → no business CPM in render.
+    assert m[id(it)] == {"Economy": 600.0}
+
+
+def test_cash_per_cabin_multi_skips_rows_with_no_parseable_cash():
+    """A row whose every cabin price is unparseable doesn't appear in the
+    map at all — callers don't need to defend against empty inner dicts."""
+    it = _itin(("AA100", "2026-08-15T09:00", "JFK", "LHR"))
+    row = MultiCabinRow(itinerary=it)
+    row.prices[Cabin.COACH] = "—"
+    row.prices[Cabin.BUSINESS] = ""
+    m = _cash_per_cabin_multi([row])
+    assert id(it) not in m
