@@ -832,6 +832,32 @@ def _run_gflight_path(
 
 # ─────────────────────────── multi-cabin orchestration ─────────────────────
 
+# When --cabin selects multiple cabins, each cabin's per-query top-N is bumped
+# so the client-side merge has overlap to work with. Cheapest economy and
+# cheapest business on a given route are often different carriers entirely
+# (e.g. JFK-LHR: VS in economy, FI in business) — a top-5 query per cabin
+# almost never overlaps, leaving the J column rendered as all "—".
+# Bumping per-cabin queries to ~25-50 itineraries lets the join surface
+# matching itineraries that exist in both cabins' results.
+#
+# Capped to bound response size (each itinerary costs bytes + parse time);
+# Matrix and gflight both tolerate page sizes in this range comfortably.
+_MULTI_CABIN_QUERY_BUMP_FACTOR = 5
+_MULTI_CABIN_QUERY_BUMP_CAP = 100
+
+
+def _bumped_query_top_n(top_n: int, cabin_count: int) -> int:
+    """Per-cabin query page size for a multi-cabin search.
+
+    Single-cabin invocations get `top_n` unchanged. Multi-cabin gets
+    `top_n * factor` capped at the bump ceiling. The visible row count
+    after merge is still `top_n` (renderer trims by sort cabin) — the
+    bump only widens the search space the join can draw from.
+    """
+    if cabin_count <= 1:
+        return top_n
+    return min(top_n * _MULTI_CABIN_QUERY_BUMP_FACTOR, _MULTI_CABIN_QUERY_BUMP_CAP)
+
 
 def _derive_pp_cabins(cash_cabins: tuple[Cabin, ...]) -> tuple[str, ...]:
     """Map cash cabin list → PP cabin list for the PP overlay.
@@ -1066,9 +1092,13 @@ def _run_matrix_path_multi(
     sel: ProviderSelection,
 ) -> None:
     """Matrix multi-cabin: N parallel cabin queries → client-side join → render."""
+    # Widen each per-cabin query so the join has overlap to render — top_n
+    # rows visible after merge, but each cabin's underlying query pulls
+    # `_bumped_query_top_n` candidates. See _bumped_query_top_n docstring.
+    query_opts = opts.model_copy(update={"page_size": _bumped_query_top_n(top_n, len(cabins))})
     results_by_cabin = _run_matrix_multi(
         legs=legs,
-        opts=opts,
+        opts=query_opts,
         cabins=cabins,
         rps=_resolve_rps(rps),
         impersonate=_resolve_impersonate(impersonate),
@@ -1132,7 +1162,9 @@ def _run_gflight_path_multi(
     sel: ProviderSelection,
 ) -> None:
     """Google Flights multi-cabin: N parallel cabin queries (threadpool) → join → render."""
-    fli_by_cabin = _run_gflight_multi(legs=legs, opts=opts, cabins=cabins, top_n=top_n)
+    # Widen per-cabin queries so the join has overlap; see _bumped_query_top_n.
+    query_top_n = _bumped_query_top_n(top_n, len(cabins))
+    fli_by_cabin = _run_gflight_multi(legs=legs, opts=opts, cabins=cabins, top_n=query_top_n)
     if not fli_by_cabin:
         err.print("[red]All Google Flights cabin queries failed.[/]")
         raise typer.Exit(1)
