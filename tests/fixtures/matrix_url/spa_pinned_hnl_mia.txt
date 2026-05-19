@@ -1,0 +1,15 @@
+# Captured 2026-05-19 by driving Matrix's SPA via research/record_user_session.py:
+#   uv run --script research/record_user_session.py \
+#     https://matrix.itasoftware.com/search \
+#     --fill=HNL,MIA,2026-10-14,2026-10-24 --pin
+# Source capture: research/capture/manual-1779203426/itinerary_url.txt
+#
+# The driver: form-fill round-trip → click Search → wait for results table
+# → click first $-priced anchor (cheapest row) → SPA navigates to /itinerary
+# with a `solution` block keyed by sessionId/rh/Si (Matrix's server-side
+# IDs returned in the /v1/search response as `session`, `solutionSet`, and
+# `solutionList.solutions[i].id` respectively).
+#
+# These IDs are session-scoped and stable only within the live result set;
+# the URL is reproducible byte-for-byte given the same Search + IDs.
+https://matrix.itasoftware.com/itinerary?search=eyJ0eXBlIjoicm91bmQtdHJpcCIsInNsaWNlcyI6W3sib3JpZ2luIjpbIkhOTCJdLCJkZXN0IjpbIk1JQSJdLCJkYXRlcyI6eyJzZWFyY2hEYXRlVHlwZSI6InNwZWNpZmljIiwiZGVwYXJ0dXJlRGF0ZSI6IjIwMjYtMTAtMTQiLCJkZXBhcnR1cmVEYXRlVHlwZSI6ImRlcGFydCIsImRlcGFydHVyZURhdGVNb2RpZmllciI6IjAiLCJkZXBhcnR1cmVEYXRlUHJlZmVycmVkVGltZXMiOltdLCJyZXR1cm5EYXRlIjoiMjAyNi0xMC0yNCIsInJldHVybkRhdGVUeXBlIjoiZGVwYXJ0IiwicmV0dXJuRGF0ZU1vZGlmaWVyIjoiMCIsInJldHVybkRhdGVQcmVmZXJyZWRUaW1lcyI6W119fV0sIm9wdGlvbnMiOnsiY2FiaW4iOiJDT0FDSCIsInN0b3BzIjoiLTEiLCJleHRyYVN0b3BzIjoiMSIsImFsbG93QWlycG9ydENoYW5nZXMiOiJ0cnVlIiwic2hvd09ubHlBdmFpbGFibGUiOiJ0cnVlIn0sInBheCI6eyJhZHVsdHMiOiIxIn0sInNvbHV0aW9uIjp7InNlc3Npb25JZCI6InYxSzBrUWZ1a2JFUnZNeFlGNnVZM3ZxRmYiLCJ4ZCI6dHJ1ZSwicmgiOiIwQmp2SHpUU3FNWDZSTGFqME1jNFVKNyIsIlNpIjoiTFcyZm5CWGF3NVRNckx5WXhaZlNqNDAwMSJ9fQ%3D%3D

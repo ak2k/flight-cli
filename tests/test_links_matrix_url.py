@@ -21,12 +21,14 @@ from typing import Any, cast
 
 from flight_cli.domain import (
     Cabin,
+    CalendarSearch,
+    CalendarWindow,
     Leg,
     Pax,
     SearchOptions,
     SpecificDateSearch,
 )
-from flight_cli.links import matrix_deep_link
+from flight_cli.links import matrix_deep_link, matrix_itinerary_url
 
 FIXTURE_DIR = pathlib.Path(__file__).parent / "fixtures" / "matrix_url"
 
@@ -97,6 +99,53 @@ def test_one_way_emits_single_slice_with_empty_return_date() -> None:
     dates: dict[str, Any] = only["dates"]
     assert dates["departureDate"] == "2026-11-03"
     assert dates["returnDate"] == ""
+
+
+def test_matrix_itinerary_url_byte_exact_matches_spa_capture() -> None:
+    """Pinned `/itinerary` URL is byte-identical to the SPA's emission.
+
+    Captured by driving the SPA: fill HNL->MIA round-trip 10/14-10/24,
+    click Search, click the cheapest `$680` result row -> SPA navigates
+    to `/itinerary?search=...` with a `solution` block carrying the
+    server-generated identifiers."""
+    s = SpecificDateSearch(
+        legs=(
+            Leg(origins=("HNL",), destinations=("MIA",), date=date(2026, 10, 14)),
+            Leg(origins=("MIA",), destinations=("HNL",), date=date(2026, 10, 24)),
+        ),
+        options=SearchOptions(cabin=Cabin.COACH, pax=Pax(adults=1)),
+    )
+    url = matrix_itinerary_url(
+        s,
+        solution_id="LW2fnBXaw5TMrLyYxZfSj4001",
+        session="v1K0kQfukbERvMxYF6uY3vqFf",
+        solution_set="0BjvHzTSqMX6RLaj0Mc4UJ7",
+    )
+    expected = _read_fixture_url("spa_pinned_hnl_mia.txt")
+    assert url == expected
+
+
+def test_matrix_itinerary_url_rejects_calendar_search() -> None:
+    """Calendar searches don't produce itinerary rows, so they can't be
+    pinned; calling the builder is a programming error rather than a
+    silent fallback."""
+    cal = CalendarSearch(
+        legs=(Leg(origins=("JFK",), destinations=("LHR",)),),
+        window=CalendarWindow(
+            start=date(2026, 9, 1),
+            end=date(2026, 9, 15),
+            duration_min=5,
+            duration_max=7,
+        ),
+        options=SearchOptions(cabin=Cabin.COACH, pax=Pax(adults=1)),
+    )
+    try:
+        matrix_itinerary_url(cal, solution_id="x", session="y", solution_set="z")
+    except TypeError as e:
+        assert "SpecificDateSearch" in str(e)
+    else:
+        msg = "expected TypeError for calendar search"
+        raise AssertionError(msg)
 
 
 def test_multi_city_keeps_one_slice_per_leg() -> None:
