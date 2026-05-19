@@ -107,6 +107,20 @@ class Slice(_Loose):
     duration: int | None = None
     origin: SliceEndpoint | None = None
     destination: SliceEndpoint | None = None
+    # Intermediate connection airports. Matrix's wire surface returns this
+    # per slice (one entry per stop, in order). gflight adapter synthesizes
+    # it from the inter-leg airports. Used by the pinned-itinerary URL
+    # builder to reconstruct per-segment origin/destination from
+    # slice-level data.
+    stops: list[SliceEndpoint] = Field(default_factory=list[SliceEndpoint])
+    # Per-segment departure dates ("YYYY-MM-DD") when known, empty
+    # otherwise. gflight populates this from per-leg `departure_datetime`
+    # (precise). Matrix's slice envelope doesn't expose per-leg dates, so
+    # Matrix-built slices leave it empty and the URL builder falls back to
+    # a heuristic (departure-date for all segments, arrival-date for the
+    # last segment when the slice spans midnight). Length, when non-empty,
+    # equals `len(flights)`.
+    segment_dates: list[str] = Field(default_factory=list[str])
     # Provider-supplied opaque ID for this leg (Google Flights data[0][17]).
     # Populated when the cash side is built from fli's response (gflight backend);
     # used by PP's enableGoogleFlightMatching to mint the matchedGoogleFlightId

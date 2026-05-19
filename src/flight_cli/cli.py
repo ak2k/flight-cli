@@ -41,7 +41,12 @@ from .domain import (
     SpecificDateSearch,
     TimeOfDay,
 )
-from .links import google_flights_url, matrix_deep_link
+from .links import (
+    extract_pin_segments_from_slice,
+    google_flights_pinned_url,
+    google_flights_url,
+    matrix_deep_link,
+)
 from .log import configure as configure_logging
 from .pp.auth import load_tokens
 from .pp.cli import auth_app, run_pp_for_search
@@ -511,7 +516,45 @@ def _run(
         raise typer.Exit(1) from e
 
 
-def _emit_urls(search: Search, *, matrix_url: bool, google_url: bool) -> None:
+def _try_pinned_gflight_url(search: Search, result: SearchResult | None) -> str | None:
+    """Build a Google Flights URL that pre-selects the cheapest itinerary
+    in `result`, if the data supports it. Returns None when the result is
+    empty, the search shape doesn't support pinning (calendar-grid mode),
+    or any slice can't be reduced to a segment list (see
+    `extract_pin_segments_from_slice` for the bail-out cases).
+    """
+    if result is None or not result.solutions:
+        return None
+    itn = result.solutions[0].itinerary
+    if itn is None or not itn.slices:
+        return None
+    out_segments = extract_pin_segments_from_slice(itn.slices[0])
+    if out_segments is None:
+        return None
+    ret_segments = None
+    if len(itn.slices) >= _ROUND_TRIP_LEGS:
+        ret_segments = extract_pin_segments_from_slice(itn.slices[1])
+        if ret_segments is None:
+            return None
+    try:
+        return google_flights_pinned_url(
+            search,
+            outbound_segments=out_segments,
+            return_segments=ret_segments,
+        )
+    except (TypeError, AssertionError):
+        # `google_flights_pinned_url` rejects calendar-mode searches and
+        # legs missing dates — both are expected non-pin cases, fall back.
+        return None
+
+
+def _emit_urls(
+    search: Search,
+    *,
+    matrix_url: bool,
+    google_url: bool,
+    result: SearchResult | None = None,
+) -> None:
     if matrix_url:
         console.print()
         console.print("[dim]Matrix deep-link:[/]")
@@ -521,8 +564,13 @@ def _emit_urls(search: Search, *, matrix_url: bool, google_url: bool) -> None:
         # That library has no documented exception surface — catch broadly so a
         # missing IATA or unsupported variant degrades the URL line, not the run.
         try:
-            console.print("[dim]Google Flights (tfs= structured):[/]")
-            console.print(f"  [link]{google_flights_url(search)}[/]")
+            pinned = _try_pinned_gflight_url(search, result)
+            if pinned is not None:
+                console.print("[dim]Google Flights (cheapest itinerary pinned):[/]")
+                console.print(f"  [link]{pinned}[/]")
+            else:
+                console.print("[dim]Google Flights (tfs= structured):[/]")
+                console.print(f"  [link]{google_flights_url(search)}[/]")
         except Exception as e:  # noqa: BLE001 - third-party undocumented errors; non-fatal fallback
             console.print(f"[dim]Google Flights link: {e}[/]")
 
@@ -754,7 +802,8 @@ def _run_matrix_path(
             seats_sources=sel.seats_sources(),
             cash_per_cabin=_cash_per_cabin_single(res, opts.cabin),
         )
-    _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
+    # `res` was cast to SearchResult at the top of this function; safe to pass through.
+    _emit_urls(search, matrix_url=matrix_url, google_url=google_url, result=res)
 
 
 def _run_gflight_path(
@@ -765,6 +814,8 @@ def _run_gflight_path(
     json_out: bool,
     run_pp: bool = False,
     sel: ProviderSelection | None = None,
+    matrix_url: bool = False,
+    google_url: bool = False,
 ) -> None:
     """Google Flights path: build fli filter → query → render. Single-leg or round-trip.
 
@@ -811,10 +862,13 @@ def _run_gflight_path(
     if not awards_only:
         _render_gflight_table(results, legs=legs, top_n=top_n)
 
-    if run_pp:
-        from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
+    # Always adapt to SearchResult shape so the URL emission has segment
+    # info for the pinned link (cheap: just shuffles existing fields).
+    from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
 
-        sr = fli_results_to_search_result(results)
+    sr = fli_results_to_search_result(results)
+
+    if run_pp:
         p = opts.pax
         run_pp_for_search(
             sr,
@@ -828,6 +882,13 @@ def _run_gflight_path(
             seats_sources=sel.seats_sources() if sel is not None else None,
             cash_per_cabin=_cash_per_cabin_single(sr, opts.cabin),
         )
+
+    _emit_urls(
+        SpecificDateSearch(legs=legs, options=opts),
+        matrix_url=matrix_url,
+        google_url=google_url,
+        result=sr,
+    )
 
 
 # ─────────────────────────── multi-cabin orchestration ─────────────────────
@@ -1459,6 +1520,23 @@ _JSON_OPT = typer.Option(
     help="[deprecated] Use --format json.",
 )
 
+# URL emission flags shared by `search` / `calendar` / `detail`.
+#
+# Both URLs encode the search criteria. The Google-Flights URL ALSO pins
+# the cheapest matched itinerary (deep link to that specific selection)
+# when an itinerary row is available; Matrix's URL only encodes the
+# search (Matrix's SPA doesn't surface a per-itinerary URL state).
+_MATRIX_URL_HELP = (
+    "Print the Matrix ITA search URL (pre-fills the search; Matrix's SPA "
+    "doesn't expose per-itinerary URL state, so this is the deepest link "
+    "available)."
+)
+_GOOGLE_URL_HELP = (
+    "Print the Google Flights URL. When a cheapest itinerary is resolved "
+    "from the results, the URL deep-links to that specific itinerary "
+    "(pins selected flights). Otherwise it pre-fills the search."
+)
+
 
 def _resolve_format(*, fmt: str, json_flag: bool) -> str:
     """Collapse --format + deprecated --json into a single format string.
@@ -1616,10 +1694,16 @@ def search(
     fmt: str = _FORMAT_OPT,
     json_out: bool = _JSON_OPT,
     matrix_url: bool = typer.Option(
-        True, "--matrix-url/--no-matrix-url", rich_help_panel=_GROUP_OUTPUT
+        True,
+        "--matrix-url/--no-matrix-url",
+        help=_MATRIX_URL_HELP,
+        rich_help_panel=_GROUP_OUTPUT,
     ),
     google_url: bool = typer.Option(
-        True, "--google-url/--no-google-url", rich_help_panel=_GROUP_OUTPUT
+        True,
+        "--google-url/--no-google-url",
+        help=_GOOGLE_URL_HELP,
+        rich_help_panel=_GROUP_OUTPUT,
     ),
     no_cache: bool = _NO_CACHE_OPT,
     providers: str | None = typer.Option(
@@ -1797,6 +1881,8 @@ def search(
             json_out=json_out,
             run_pp=run_awards,
             sel=sel,
+            matrix_url=matrix_url,
+            google_url=google_url,
         )
         return
 
@@ -2095,10 +2181,16 @@ def calendar(
     fmt: str = _FORMAT_OPT,
     json_out: bool = _JSON_OPT,
     matrix_url: bool = typer.Option(
-        True, "--matrix-url/--no-matrix-url", rich_help_panel=_GROUP_OUTPUT
+        True,
+        "--matrix-url/--no-matrix-url",
+        help=_MATRIX_URL_HELP,
+        rich_help_panel=_GROUP_OUTPUT,
     ),
     google_url: bool = typer.Option(
-        False, "--google-url/--no-google-url", rich_help_panel=_GROUP_OUTPUT
+        False,
+        "--google-url/--no-google-url",
+        help=_GOOGLE_URL_HELP + " (calendar mode emits the search URL only.)",
+        rich_help_panel=_GROUP_OUTPUT,
     ),
     no_cache: bool = _NO_CACHE_OPT,
 ) -> None:
@@ -2221,10 +2313,16 @@ def detail(
     fmt: str = _FORMAT_OPT,
     json_out: bool = _JSON_OPT,
     matrix_url: bool = typer.Option(
-        True, "--matrix-url/--no-matrix-url", rich_help_panel=_GROUP_OUTPUT
+        True,
+        "--matrix-url/--no-matrix-url",
+        help=_MATRIX_URL_HELP,
+        rich_help_panel=_GROUP_OUTPUT,
     ),
     google_url: bool = typer.Option(
-        True, "--google-url/--no-google-url", rich_help_panel=_GROUP_OUTPUT
+        True,
+        "--google-url/--no-google-url",
+        help=_GOOGLE_URL_HELP,
+        rich_help_panel=_GROUP_OUTPUT,
     ),
     no_cache: bool = _NO_CACHE_OPT,
 ) -> None:
@@ -2278,7 +2376,7 @@ def detail(
         sys.stdout.write(json.dumps(res.raw, indent=2))
         return
     _render_search(res)
-    _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
+    _emit_urls(search, matrix_url=matrix_url, google_url=google_url, result=res)
 
 
 @app.command(deprecated=True)
