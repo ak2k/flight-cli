@@ -74,8 +74,16 @@ def _pax_strs(pax: Pax) -> dict[str, str]:
     return d
 
 
-def _spa_specific_leg(leg: Leg) -> dict[str, Any]:
-    """SPA URL-state slice for a specific-date search."""
+def _spa_specific_leg(leg: Leg, *, return_leg: Leg | None = None) -> dict[str, Any]:
+    """SPA URL-state slice for a specific-date search.
+
+    For round-trip, pass the inbound leg as `return_leg` so the slice carries
+    both directions in a single record (the SPA's current schema as of 2026-05).
+    For one-way / multi-city, omit `return_leg`.
+    """
+    return_date = return_leg.date.isoformat() if return_leg and return_leg.date else ""
+    return_modifier = str(return_leg.date_minus if return_leg else leg.date_plus)
+    return_times = [t.value for t in return_leg.time_ranges] if return_leg else []
     return {
         "origin": list(leg.origins),
         "dest": list(leg.destinations),
@@ -85,12 +93,26 @@ def _spa_specific_leg(leg: Leg) -> dict[str, Any]:
             "departureDateType": "depart",
             "departureDateModifier": str(leg.date_minus),
             "departureDatePreferredTimes": [t.value for t in leg.time_ranges],
-            "returnDate": "",
+            "returnDate": return_date,
             "returnDateType": "depart",
-            "returnDateModifier": str(leg.date_plus),
-            "returnDatePreferredTimes": [],
+            "returnDateModifier": return_modifier,
+            "returnDatePreferredTimes": return_times,
         },
     }
+
+
+def _spa_specific_slices(legs: tuple[Leg, ...]) -> tuple[str, list[dict[str, Any]]]:
+    """Build (type, slices) for a specific-date SpecificDateSearch / followup.
+
+    Round-trip is encoded as a single slice carrying both dates — the SPA
+    drifted to this schema after the legacy two-slice form was deprecated.
+    """
+    n = len(legs)
+    if n == 1:
+        return "one-way", [_spa_specific_leg(legs[0])]
+    if n == _ROUND_TRIP_LEGS:
+        return "round-trip", [_spa_specific_leg(legs[0], return_leg=legs[1])]
+    return "multi-city", [_spa_specific_leg(leg) for leg in legs]
 
 
 def _spa_calendar_leg(
@@ -141,14 +163,10 @@ def matrix_deep_link(s: Search) -> str:
     """Build the matrix.itasoftware.com deep-link URL for any search variant."""
     match s:
         case SpecificDateSearch():
-            trip = (
-                "round-trip"
-                if len(s.legs) == _ROUND_TRIP_LEGS
-                else ("one-way" if len(s.legs) == 1 else "multi-city")
-            )
+            trip, slices = _spa_specific_slices(s.legs)
             payload = {
                 "type": trip,
-                "slices": [_spa_specific_leg(leg) for leg in s.legs],
+                "slices": slices,
                 "options": _spa_options_block(s.options),
                 "pax": _pax_strs(s.options.pax),
             }
@@ -178,10 +196,10 @@ def matrix_deep_link(s: Search) -> str:
             # The SPA URL for a followup is essentially a specific-date URL
             # for the picked dates — that's how you'd share "the itineraries
             # I'm looking at" with someone else.
-            trip = "round-trip" if len(s.legs) == _ROUND_TRIP_LEGS else "one-way"
+            trip, slices = _spa_specific_slices(s.legs)
             payload = {
                 "type": trip,
-                "slices": [_spa_specific_leg(leg) for leg in s.legs],
+                "slices": slices,
                 "options": _spa_options_block(s.options),
                 "pax": _pax_strs(s.options.pax),
             }
