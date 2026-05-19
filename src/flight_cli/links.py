@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import urllib.parse
 from datetime import date, timedelta
-from typing import Any, Literal, assert_never
+from typing import TYPE_CHECKING, Any, Literal, assert_never
 
 from .domain import (
     Cabin,
@@ -26,6 +27,9 @@ from .domain import (
     SearchOptions,
     SpecificDateSearch,
 )
+
+if TYPE_CHECKING:
+    from .models import Slice
 
 # ───────────────────────── Matrix deep-link URL ────────────────────────────
 
@@ -195,6 +199,299 @@ _CABIN_TFS: dict[Cabin, Literal["economy", "premium-economy", "business", "first
     Cabin.BUSINESS: "business",
     Cabin.FIRST: "first",
 }
+
+# Numeric tfs= cabin codes (field 9 in the pinned-itinerary protobuf).
+# Observed value for BUSINESS is 3 in the captured payload.
+_CABIN_TFS_INT: dict[Cabin, int] = {
+    Cabin.COACH: 1,
+    Cabin.PREMIUM_COACH: 2,
+    Cabin.BUSINESS: 3,
+    Cabin.FIRST: 4,
+}
+
+# tfs= trip-type enum (field 19).
+_GF_TRIP_ROUND_TRIP = 1
+_GF_TRIP_ONE_WAY = 2
+
+
+# ───────────────── Google Flights tfs= protobuf (RE'd) ──────────────────────
+#
+# The `tfs=` query param is a base64-encoded protobuf. Two flavors:
+#
+#   SEARCH-PRELOAD (the one fast_flights.TFSData generates): lands on a results
+#   list. Slices have date + origin/dest only.
+#
+#   PIN-ITINERARY (RE'd from headed-browser navigation capture in
+#   research/capture/manual-1779193717/): lands on a specific selected
+#   itinerary. Adds these fields vs. the search-preload form:
+#     - Top-level field 1 = 28 (some "mode" varint; constant in observed cases)
+#     - Top-level field 2 = 2  (constant)
+#     - Each slice (top-level field 3) gains repeated field 4 = segments:
+#         {1: origin_iata, 2: yyyy-mm-dd, 3: dest_iata, 5: carrier, 6: flt_no}
+#     - Slice pax-info fields 13/14 gain prefix `1: <pax_count>` varint
+#     - Top-level field 8 becomes packed/repeated `1` (one per adult/etc)
+#       rather than a single bytes blob.
+#     - Top-level field 16 = {1: 0xFFFFFFFFFFFFFFFF} (sentinel/marker)
+#
+# We hand-encode the pin payload via _PbWriter rather than introducing a
+# generated proto schema — the schema is private to Google Flights and the
+# field tags could shift; keeping the encoder tiny and inline makes any
+# future RE round cheap. Verification: byte-exact reproduction of captured
+# pinned `tfs=` payloads is asserted in tests/test_links.py.
+
+
+class _PbWriter:
+    """Minimal protobuf writer covering varint, length-delimited, and message
+    composition. Enough for the tfs= schema; no float/fixed/sint support."""
+
+    def __init__(self) -> None:
+        self.buf = bytearray()
+
+    _VARINT_CONT = 0x80
+    _VARINT_MASK = 0x7F
+
+    @staticmethod
+    def _varint(n: int) -> bytes:
+        out = bytearray()
+        while n > _PbWriter._VARINT_MASK:
+            out.append((n & _PbWriter._VARINT_MASK) | _PbWriter._VARINT_CONT)
+            n >>= 7
+        out.append(n & _PbWriter._VARINT_MASK)
+        return bytes(out)
+
+    def _tag(self, field: int, wire: int) -> None:
+        self.buf.extend(self._varint((field << 3) | wire))
+
+    def varint(self, field: int, value: int) -> None:
+        self._tag(field, 0)
+        self.buf.extend(self._varint(value))
+
+    def string(self, field: int, value: str) -> None:
+        data = value.encode("utf-8")
+        self._tag(field, 2)
+        self.buf.extend(self._varint(len(data)))
+        self.buf.extend(data)
+
+    def message(self, field: int, inner: _PbWriter) -> None:
+        data = bytes(inner.buf)
+        self._tag(field, 2)
+        self.buf.extend(self._varint(len(data)))
+        self.buf.extend(data)
+
+
+def _encode_gflight_pinned_tfs(
+    *,
+    slices: list[dict[str, Any]],
+    cabin: int,
+    adults: int,
+    children: int,
+    infants_in_seat: int,
+    infants_on_lap: int,
+) -> bytes:
+    """Encode the tfs= protobuf for a pinned-itinerary Google Flights URL.
+
+    `slices`: list of dicts shaped:
+        {
+            "date": "YYYY-MM-DD",
+            "origin": "HNL",
+            "destination": "MIA",
+            "segments": [
+                {"origin": "HNL", "date": "2026-10-14",
+                 "destination": "LAX", "carrier": "AA", "flight": "162"},
+                ...
+            ],
+        }
+    cabin: 1=ECONOMY, 2=PREMIUM_ECONOMY, 3=BUSINESS, 4=FIRST (TFS values).
+    pax counts: adults+children+inf_seat+inf_lap broken out per Google's wire
+    layout (field 8 is repeated varint, one per occupant).
+    """
+    w = _PbWriter()
+    # Mode markers — observed to be 28, 2 on every pinned URL we captured.
+    w.varint(1, 28)
+    w.varint(2, 2)
+
+    for sl in slices:
+        s = _PbWriter()
+        s.string(2, sl["date"])
+        for seg in sl["segments"]:
+            seg_w = _PbWriter()
+            seg_w.string(1, seg["origin"])
+            seg_w.string(2, seg["date"])
+            seg_w.string(3, seg["destination"])
+            seg_w.string(5, seg["carrier"])
+            seg_w.string(6, seg["flight"])
+            s.message(4, seg_w)
+        # Pax info — slice origin/destination. Field 1 is observed to be
+        # the constant `1` regardless of pax count (verified at adults=3:
+        # encoded as `1` not `3`). The repeated field 8 at top level
+        # encodes the per-pax-type count, not this varint.
+        origin_w = _PbWriter()
+        origin_w.varint(1, 1)
+        origin_w.string(2, sl["origin"])
+        s.message(13, origin_w)
+        dest_w = _PbWriter()
+        dest_w.varint(1, 1)
+        dest_w.string(2, sl["destination"])
+        s.message(14, dest_w)
+        w.message(3, s)
+
+    # Field 8: one repeated varint=1 per adult (and similar for other pax types
+    # observed in the captured payload — 3 adults → three "8: 1" entries).
+    # We replicate the observed pattern: emit one `1` per total occupant.
+    for _ in range(adults + children + infants_in_seat + infants_on_lap):
+        w.varint(8, 1)
+
+    w.varint(9, cabin)
+    w.varint(14, 1)
+
+    # Field 16: marker sub-message {1: 0xFFFFFFFFFFFFFFFF}
+    marker = _PbWriter()
+    marker.varint(1, (1 << 64) - 1)
+    w.message(16, marker)
+
+    # Field 19: trip type. TFS enum: 1 = round-trip, 2 = one-way.
+    trip_type = _GF_TRIP_ROUND_TRIP if len(slices) >= _ROUND_TRIP_LEGS else _GF_TRIP_ONE_WAY
+    w.varint(19, trip_type)
+
+    return bytes(w.buf)
+
+
+def google_flights_pinned_url(
+    s: Search,
+    *,
+    outbound_segments: list[dict[str, str]],
+    return_segments: list[dict[str, str]] | None = None,
+    currency: str = "USD",
+    language: str = "en",
+) -> str:
+    """Build a Google Flights URL that pre-selects a specific itinerary
+    (not just pre-filled search criteria).
+
+    `outbound_segments` / `return_segments` shape per segment:
+        {"origin": "HNL", "date": "2026-10-14",
+         "destination": "LAX", "carrier": "AA", "flight": "162"}
+
+    Verified against captured headed-browser navigation in
+    research/capture/manual-1779193717/. See `_encode_gflight_pinned_tfs`
+    docstring for the protobuf schema notes."""
+    if not isinstance(s, SpecificDateSearch | CalendarFollowup):
+        raise TypeError(
+            "google_flights_pinned_url only meaningful for specific-date / "
+            "calendar-followup searches (need per-leg dates).",
+        )
+    out = s.legs[0]
+    if out.date is None:
+        raise AssertionError("outbound leg.date must be set after validation")
+    slices = [
+        {
+            "date": out.date.isoformat(),
+            "origin": out.origins[0],
+            "destination": out.destinations[0],
+            "segments": outbound_segments,
+        }
+    ]
+    if return_segments is not None:
+        if len(s.legs) < _ROUND_TRIP_LEGS:
+            raise AssertionError(
+                "return_segments given but search has no return leg",
+            )
+        ret = s.legs[1]
+        if ret.date is None:
+            raise AssertionError(
+                "return_segments given but return leg has no date set",
+            )
+        slices.append(
+            {
+                "date": ret.date.isoformat(),
+                "origin": ret.origins[0],
+                "destination": ret.destinations[0],
+                "segments": return_segments,
+            }
+        )
+
+    p = s.options.pax
+    raw = _encode_gflight_pinned_tfs(
+        slices=slices,
+        cabin=_CABIN_TFS_INT[s.options.cabin],
+        adults=p.adults + p.seniors + p.youth,
+        children=p.children,
+        infants_in_seat=p.infants_in_seat,
+        infants_on_lap=p.infants_in_lap,
+    )
+    b64 = base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+    return (
+        f"https://www.google.com/travel/flights/search?"
+        f"tfs={urllib.parse.quote(b64)}&hl={language}&curr={currency}"
+    )
+
+
+_FLIGHT_NUMBER_RE = re.compile(r"^([A-Z][A-Z0-9])([0-9]+)$")
+
+
+def extract_pin_segments_from_slice(s: Slice) -> list[dict[str, str]] | None:
+    """Turn a parsed Matrix/gflight `Slice` into the segment-list shape
+    that `google_flights_pinned_url` wants.
+
+    Returns None if the slice doesn't carry enough data to deep-link
+    (no origin/destination, missing stops for a multi-leg slice, or a
+    flight identifier that doesn't parse as `<CARRIER><DIGITS>`).
+
+    Per-segment dates:
+    - If `s.segment_dates` is populated (gflight backend), use those —
+      exact per-leg dates from fli's `departure_datetime`.
+    - Otherwise (Matrix backend), fall back to a heuristic: all
+      segments take the slice departure date, except the last segment
+      of a slice whose arrival falls on a later calendar day — that
+      one takes the arrival date. Exact for non-overnight 1-stop
+      routings and 1-stop routings with a single overnight layover;
+      3+ segment slices with multiple midnight crossings may be off
+      by a day.
+    """
+    # Combined invariant check up front: required fields present,
+    # stops/flights topology valid, segment_dates either absent or
+    # matching length. Single bail-out → easier to reason about and
+    # keeps the per-segment loop focused on flight-number parsing.
+    n = len(s.flights)
+    origin_code = s.origin.code if s.origin else None
+    dest_code = s.destination.code if s.destination else None
+    has_exact_dates = bool(s.segment_dates)
+    if (
+        n == 0
+        or not s.departure
+        or not origin_code
+        or not dest_code
+        or n - 1 != len(s.stops)
+        or (has_exact_dates and len(s.segment_dates) != n)
+    ):
+        return None
+    dep_date = s.departure[:10]
+    arrival = s.arrival or s.departure
+    arr_date = arrival[:10]
+    dep_date = s.departure[:10]
+    arrival = s.arrival or s.departure
+    arr_date = arrival[:10]
+    out: list[dict[str, str]] = []
+    for i, fl in enumerate(s.flights):
+        m = _FLIGHT_NUMBER_RE.match(fl)
+        seg_origin = origin_code if i == 0 else s.stops[i - 1].code
+        seg_dest = dest_code if i == n - 1 else s.stops[i].code
+        if not m or not seg_origin or not seg_dest:
+            return None
+        carrier, flight_no = m.group(1), m.group(2)
+        if has_exact_dates:
+            seg_date = s.segment_dates[i]
+        else:
+            seg_date = arr_date if (i == n - 1 and arr_date != dep_date) else dep_date
+        out.append(
+            {
+                "origin": seg_origin,
+                "date": seg_date,
+                "destination": seg_dest,
+                "carrier": carrier,
+                "flight": flight_no,
+            }
+        )
+    return out
 
 
 def google_flights_url(s: Search, *, currency: str = "USD", language: str = "en") -> str:

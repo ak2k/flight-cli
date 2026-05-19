@@ -70,6 +70,15 @@ def _slice_from_flight_result(
     legs: list[Any] = list(fr.legs)
     first, last = legs[0], legs[-1]
     leg_infos: list[LegInfo] = [_leg_info(a) for a in (amenities or [])]
+    # Intermediate connection airports. For N legs there are N-1 stops:
+    # each inter-leg arrival_airport equals the next leg's
+    # departure_airport. Both are valid sources; we use arrival_airport.
+    stops = [SliceEndpoint(code=_airport_code(leg.arrival_airport)) for leg in legs[:-1]]
+    # Per-segment departure dates from each fli FlightResult.legs[i] —
+    # exact (not heuristic) since fli surfaces per-leg datetimes. Used by
+    # the pinned-URL encoder to avoid the same-date guess that's wrong on
+    # 3+ segment slices crossing midnight multiple times.
+    segment_dates = [leg.departure_datetime.date().isoformat() for leg in legs]
     return Slice(
         flights=[_flight_id_string(leg) for leg in legs],
         departure=first.departure_datetime.isoformat(),
@@ -77,6 +86,8 @@ def _slice_from_flight_result(
         duration=fr.duration,
         origin=SliceEndpoint(code=_airport_code(first.departure_airport)),
         destination=SliceEndpoint(code=_airport_code(last.arrival_airport)),
+        stops=stops,
+        segment_dates=segment_dates,
         flight_id=flight_id,
         legs=leg_infos,
     )
