@@ -51,6 +51,14 @@ go into detail and are loaded on demand.
   `data[0][2][i]` 12-17, enum decodings, amenity bit positions, and the
   seatmap URL contract (`/api/s` with M/D/YYYY dates). Read before
   touching `_gflight_ids._parse_leg_amenities` or `seatmap.py`.
+- [spa_capture_workflow.md](spa_capture_workflow.md) — Headed-browser
+  capture chassis (`research/record_user_session.py` with `--fill` /
+  `--fill-mc` / `--snapshot` / `--pin` modes), the two URL-state
+  schemas (Matrix `search=` JSON vs Google Flights `tfs=` protobuf),
+  Matrix `/itinerary` pinning ID flow (`session`/`solutionSet`/`id` →
+  `sessionId`/`rh`/`Si`), session-scoped lifetime caveat, and the
+  battle-tested SPA-driving gotchas. Read before doing any new RE or
+  recapture work.
 
 ## When to add a new memory file
 
