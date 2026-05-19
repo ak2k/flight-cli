@@ -1,0 +1,12 @@
+# Captured 2026-05-19 by driving Matrix's SPA via research/record_user_session.py:
+#   uv run --script research/record_user_session.py \
+#     https://matrix.itasoftware.com/search \
+#     --fill-mc=SFO/JFK/2026-09-01,JFK/LHR/2026-09-05,LHR/SFO/2026-09-12
+# Source capture: research/capture/manual-1779200446/fresh_spa_url_mc.txt
+# Notes:
+#  - Multi-city slice[0] inherits returnDate{Type,Modifier,PreferredTimes} from
+#    the prior Round Trip tab state (no returnDate field — value never set);
+#    slices added via Add Flight have only departure* fields. Our generator
+#    emits a benign superset (returnDate:"" plus return* fields on all slices),
+#    which the SPA tolerates.
+https://matrix.itasoftware.com/flights?search=eyJ0eXBlIjoibXVsdGktY2l0eSIsInNsaWNlcyI6W3sib3JpZ2luIjpbIlNGTyJdLCJkZXN0IjpbIkpGSyJdLCJkYXRlcyI6eyJzZWFyY2hEYXRlVHlwZSI6InNwZWNpZmljIiwiZGVwYXJ0dXJlRGF0ZSI6IjIwMjYtMDktMDEiLCJkZXBhcnR1cmVEYXRlVHlwZSI6ImRlcGFydCIsImRlcGFydHVyZURhdGVNb2RpZmllciI6IjAiLCJkZXBhcnR1cmVEYXRlUHJlZmVycmVkVGltZXMiOltdLCJyZXR1cm5EYXRlVHlwZSI6ImRlcGFydCIsInJldHVybkRhdGVNb2RpZmllciI6IjAiLCJyZXR1cm5EYXRlUHJlZmVycmVkVGltZXMiOltdfX0seyJvcmlnaW4iOlsiSkZLIl0sImRlc3QiOlsiTEhSIl0sImRhdGVzIjp7InNlYXJjaERhdGVUeXBlIjoic3BlY2lmaWMiLCJkZXBhcnR1cmVEYXRlIjoiMjAyNi0wOS0wNSIsImRlcGFydHVyZURhdGVUeXBlIjoiZGVwYXJ0IiwiZGVwYXJ0dXJlRGF0ZU1vZGlmaWVyIjoiMCIsImRlcGFydHVyZURhdGVQcmVmZXJyZWRUaW1lcyI6W119fSx7Im9yaWdpbiI6WyJMSFIiXSwiZGVzdCI6WyJTRk8iXSwiZGF0ZXMiOnsic2VhcmNoRGF0ZVR5cGUiOiJzcGVjaWZpYyIsImRlcGFydHVyZURhdGUiOiIyMDI2LTA5LTEyIiwiZGVwYXJ0dXJlRGF0ZVR5cGUiOiJkZXBhcnQiLCJkZXBhcnR1cmVEYXRlTW9kaWZpZXIiOiIwIiwiZGVwYXJ0dXJlRGF0ZVByZWZlcnJlZFRpbWVzIjpbXX19XSwib3B0aW9ucyI6eyJjYWJpbiI6IkNPQUNIIiwic3RvcHMiOiItMSIsImV4dHJhU3RvcHMiOiIxIiwiYWxsb3dBaXJwb3J0Q2hhbmdlcyI6InRydWUiLCJzaG93T25seUF2YWlsYWJsZSI6InRydWUifSwicGF4Ijp7ImFkdWx0cyI6IjEifX0%3D
