@@ -144,6 +144,7 @@ class ItineraryDetails(_Loose):
 class Itinerary(_Loose):
     """One bookable itinerary returned by /v1/search."""
 
+    id: str | None = None  # Matrix's solution id (used in /itinerary URL state)
     display_total: str | None = Field(None, alias="displayTotal")
     ext: ItineraryExt | None = None
     itinerary: ItineraryDetails | None = None

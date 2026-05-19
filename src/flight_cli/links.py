@@ -159,6 +159,52 @@ def _encode_payload(payload: dict[str, Any], path: str) -> str:
     return f"https://matrix.itasoftware.com/{path}?search={urllib.parse.quote(b)}"
 
 
+def matrix_itinerary_url(
+    s: Search,
+    *,
+    solution_id: str,
+    session: str,
+    solution_set: str,
+) -> str:
+    """Matrix `/itinerary` URL pre-selecting a specific solution.
+
+    Requires server-generated identifiers from the `/v1/search` response:
+
+    - `solution_id` → maps to the URL's `solution.Si`; comes from
+      `Itinerary.id` on the chosen row.
+    - `session` → maps to `solution.sessionId`; from `SearchResult.session`.
+    - `solution_set` → maps to `solution.rh`; from `SearchResult.solution_set`.
+
+    Only meaningful for specific-date searches; calendar / followup don't
+    produce itinerary rows and won't have valid identifiers. The URL is the
+    same shape as `matrix_deep_link()` plus the `solution` block, and it
+    routes to the SPA's `/itinerary` view (the page reached by clicking a
+    flight in the results table).
+
+    Session-scoped: Matrix's session/solutionSet/Si IDs expire on the server
+    side (~10-30 min observed); a stale URL fails with `Input error for
+    "bookingDetails" (SolutionSummarizer), "x.solution" is required` and the
+    UI shows no booking details. Re-run the search to get a fresh URL.
+    """
+    if not isinstance(s, SpecificDateSearch):
+        raise TypeError(f"matrix_itinerary_url requires SpecificDateSearch, got {type(s).__name__}")
+    trip, slices = _spa_specific_slices(s.legs)
+    payload = {
+        "type": trip,
+        "slices": slices,
+        "options": _spa_options_block(s.options),
+        "pax": _pax_strs(s.options.pax),
+        # Sub-key order matches the SPA's emission (sessionId, xd, rh, Si).
+        "solution": {
+            "sessionId": session,
+            "xd": True,
+            "rh": solution_set,
+            "Si": solution_id,
+        },
+    }
+    return _encode_payload(payload, "itinerary")
+
+
 def matrix_deep_link(s: Search) -> str:
     """Build the matrix.itasoftware.com deep-link URL for any search variant."""
     match s:

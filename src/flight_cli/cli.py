@@ -46,6 +46,7 @@ from .links import (
     google_flights_pinned_url,
     google_flights_url,
     matrix_deep_link,
+    matrix_itinerary_url,
 )
 from .log import configure as configure_logging
 from .pp.auth import load_tokens
@@ -516,6 +517,29 @@ def _run(
         raise typer.Exit(1) from e
 
 
+def _try_pinned_matrix_url(search: Search, result: SearchResult | None) -> str | None:
+    """Build a Matrix `/itinerary` URL pinning the cheapest solution, if the
+    result carries all three server-generated identifiers (session,
+    solutionSet, and the solution's own id). Returns None when any are
+    missing, the search shape doesn't support pinning, or the search isn't
+    a specific-date variant.
+    """
+    if result is None or not result.solutions:
+        return None
+    sol = result.solutions[0]
+    if not sol.id or not result.session or not result.solution_set:
+        return None
+    try:
+        return matrix_itinerary_url(
+            search,
+            solution_id=sol.id,
+            session=result.session,
+            solution_set=result.solution_set,
+        )
+    except TypeError:
+        return None
+
+
 def _try_pinned_gflight_url(search: Search, result: SearchResult | None) -> str | None:
     """Build a Google Flights URL that pre-selects the cheapest itinerary
     in `result`, if the data supports it. Returns None when the result is
@@ -557,8 +581,13 @@ def _emit_urls(
 ) -> None:
     if matrix_url:
         console.print()
-        console.print("[dim]Matrix deep-link:[/]")
-        console.print(f"  [link]{matrix_deep_link(search)}[/]")
+        pinned_m = _try_pinned_matrix_url(search, result)
+        if pinned_m is not None:
+            console.print("[dim]Matrix (cheapest itinerary pinned):[/]")
+            console.print(f"  [link]{pinned_m}[/]")
+        else:
+            console.print("[dim]Matrix deep-link:[/]")
+            console.print(f"  [link]{matrix_deep_link(search)}[/]")
     if google_url:
         # `google_flights_url` builds protobuf-encoded tfs= URLs via fast_flights.
         # That library has no documented exception surface — catch broadly so a

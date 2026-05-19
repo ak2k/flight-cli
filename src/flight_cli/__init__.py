@@ -13,7 +13,7 @@ from .domain import (
     SpecificDateSearch,
     TimeOfDay,
 )
-from .links import google_flights_url, matrix_deep_link
+from .links import google_flights_url, matrix_deep_link, matrix_itinerary_url
 from .models import (
     CalendarDay,
     CalendarResult,
@@ -47,6 +47,7 @@ __all__ = [
     "WireBody",
     "google_flights_url",
     "matrix_deep_link",
+    "matrix_itinerary_url",
     "resolve_api_key",
     "to_wire",
 ]
