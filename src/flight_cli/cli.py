@@ -556,34 +556,43 @@ async def _gather_calendar(
 
 
 def _run_calendar(
-    search: CalendarSearch, *, rps: float, impersonate: str, no_cache: bool
+    search: CalendarSearch,
+    *,
+    rps: float,
+    impersonate: str,
+    no_cache: bool,
+    max_per_query: int = 1,
+    max_concurrency: int = _CALENDAR_FANOUT_CONCURRENCY,
 ) -> tuple[CalendarResult, int]:
-    """Execute a calendar search. A multi-airport query is run as one sub-search
-    per (origin, destination), in parallel, and merged — Matrix under-reports the
-    combined multi-airport grid, so per-destination queries are the only way to
-    get complete results.
+    """Execute a calendar search. A multi-airport query is fanned out into
+    sub-searches of up to `max_per_query` destinations each, run in parallel
+    (≤ `max_concurrency` at a time), and merged — Matrix under-reports a combined
+    multi-airport grid, so the default of one destination per query is the only
+    size guaranteed complete.
 
-    Returns `(result, n_queries)` where `n_queries > 1` means the per-destination
-    path was used (for a one-line note). A single-airport calendar runs as one
-    query and returns `n_queries == 0`.
+    Returns `(result, n_queries)` where `n_queries > 1` means the fan-out path was
+    used (for a one-line note). A single-airport calendar runs as one query and
+    returns `n_queries == 0`.
     """
-    subs = split_calendar_search(search)
+    subs = split_calendar_search(search, max_per_query)
     n = len(subs)
     if n > _CALENDAR_FANOUT_MAX:
         err.print(
             f"[red]{n} origin/destination combinations is too many to query "
-            f"reliably[/] — Matrix under-reports a single combined grid, so narrow "
-            f"the airports or the date window and re-run."
+            f"reliably[/] — narrow the airports/window, or raise --max-per-query "
+            f"(at the cost of completeness)."
         )
         raise typer.Exit(2)
-    multi = bool(subs)  # split returns [] for a single (origin, destination)
-    conc = min(n, _CALENDAR_FANOUT_CONCURRENCY) if multi else 3
+    multi = bool(subs)  # split returns [] when one query already covers the request
+    conc = min(n, max(1, max_concurrency)) if multi else 3
+    if multi and max_per_query > 1:
+        err.print(
+            "[yellow]--max-per-query > 1: Matrix may under-report a "
+            "multi-destination request, so results could be incomplete.[/]"
+        )
     if multi and n > conc:
         rounds = (n + conc - 1) // conc
-        err.print(
-            f"[dim]Querying {n} destinations separately in ~{rounds} rounds; "
-            f"this may take a while.[/]"
-        )
+        err.print(f"[dim]Querying {n} groups in ~{rounds} rounds; this may take a while.[/]")
 
     async def go() -> tuple[CalendarResult, int]:
         async with MatrixClient(
@@ -2379,6 +2388,22 @@ def calendar(
         rich_help_panel=_GROUP_OUTPUT,
     ),
     no_cache: bool = _NO_CACHE_OPT,
+    max_per_query: int = typer.Option(
+        1,
+        "--max-per-query",
+        help=(
+            "Multi-airport calendar: max destinations per Matrix request. 1 "
+            "(default) queries each destination separately for complete results; "
+            "higher is fewer/faster requests but Matrix may under-report (incomplete)."
+        ),
+        rich_help_panel=_GROUP_BACKEND,
+    ),
+    max_concurrency: int = typer.Option(
+        12,
+        "--max-concurrency",
+        help="Max concurrent Matrix requests in the multi-airport calendar fan-out.",
+        rich_help_panel=_GROUP_BACKEND,
+    ),
 ) -> None:
     """Lowest-fare grid across a date window. Default round-trip; --one-way to flip."""
     json_out = _resolve_format(fmt=fmt, json_flag=json_out) == "json"
@@ -2426,6 +2451,8 @@ def calendar(
         rps=_resolve_rps(rps),
         impersonate=_resolve_impersonate(impersonate),
         no_cache=_resolve_no_cache(no_cache),
+        max_per_query=max_per_query,
+        max_concurrency=max_concurrency,
     )
     if json_out:
         sys.stdout.write(json.dumps(res.raw, indent=2))

@@ -1,8 +1,9 @@
-"""Calendar split-on-empty recovery (work-on0dw).
+"""Calendar per-destination fan-out + merge (work-on0dw).
 
-Matrix silently sheds multi-airport + routing calendar queries that exceed its
-per-query compute budget. We split into per-destination sub-searches and merge
-their grids. These tests cover the pure split + merge logic (no network).
+Matrix under-reports multi-airport calendar grids under compute-budget pressure,
+so a multi-airport calendar is queried one destination at a time (groupable via
+--max-per-query) and merged. These tests cover the split, merge, and
+`_run_calendar` orchestration (no network).
 """
 
 from __future__ import annotations
@@ -97,6 +98,25 @@ def test_split_preserves_extension_and_window() -> None:
 def test_split_multi_origin_is_cartesian() -> None:
     subs = split_calendar_search(_cal(["PAR", "FRA"], origins=("JFK", "EWR")))
     assert len(subs) == 4  # 2 origins x 2 destinations
+
+
+def test_split_groups_destinations_by_max_per_query() -> None:
+    subs = split_calendar_search(_cal(["VIE", "PAR", "FCO", "MAD"]), max_per_query=2)
+    assert len(subs) == 2  # 4 destinations / 2 per query
+    assert all(len(s.legs[0].destinations) == 2 for s in subs)
+    covered = {d for s in subs for d in s.legs[0].destinations}
+    assert covered == {"VIE", "PAR", "FCO", "MAD"}  # union still complete
+
+
+def test_split_max_per_query_uneven_last_group() -> None:
+    subs = split_calendar_search(_cal(["VIE", "PAR", "FCO"]), max_per_query=2)
+    assert len(subs) == 2  # [VIE,PAR] + [FCO]
+    assert sorted(len(s.legs[0].destinations) for s in subs) == [1, 2]
+
+
+def test_split_max_per_query_covering_all_is_noop() -> None:
+    # one query already covers it (k >= #destinations, single origin) → no split
+    assert split_calendar_search(_cal(["VIE", "PAR"]), max_per_query=5) == []
 
 
 # ───────────────────────────── is_empty ────────────────────────────────────
@@ -219,3 +239,38 @@ def test_run_calendar_refuses_absurd_fanout(monkeypatch: Any) -> None:
         cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
             _cal(dests, origins=origins), rps=10.0, impersonate="chrome", no_cache=True
         )
+
+
+class _CapturingClient(_PricedClient):
+    """Records the kwargs it was constructed with, to assert threaded settings."""
+
+    last_kwargs: ClassVar[dict[str, object]] = {}
+
+    def __init__(self, **kwargs: object) -> None:
+        type(self).last_kwargs = dict(kwargs)
+
+
+def test_run_calendar_max_per_query_reduces_queries(monkeypatch: Any) -> None:
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    res, n = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
+        _cal(["VIE", "PAR", "FCO", "MAD"]),
+        rps=10.0,
+        impersonate="chrome",
+        no_cache=True,
+        max_per_query=2,
+    )
+    assert n == 2  # 4 destinations in groups of 2
+    assert not is_empty_calendar(res)
+
+
+def test_run_calendar_threads_max_concurrency(monkeypatch: Any) -> None:
+    monkeypatch.setattr(cli, "MatrixClient", _CapturingClient)
+    cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
+        _cal(["VIE", "PAR", "FCO", "MAD"]),
+        rps=10.0,
+        impersonate="chrome",
+        no_cache=True,
+        max_concurrency=3,
+    )
+    # conc = min(n=4, max_concurrency=3) = 3
+    assert _CapturingClient.last_kwargs.get("concurrency") == 3

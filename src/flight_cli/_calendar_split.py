@@ -37,26 +37,31 @@ def is_empty_calendar(res: CalendarResult) -> bool:
     return res.solution_count == 0 or not res.priced_days
 
 
-def split_calendar_search(search: CalendarSearch) -> list[CalendarSearch]:
-    """One sub-search per (outbound origin, outbound destination) pair, mirrored
-    onto the return leg. Routing/extension/time-of-day and the window are
-    preserved. Returns [] when there is nothing to split (single origin and
-    destination each way)."""
+def split_calendar_search(search: CalendarSearch, max_per_query: int = 1) -> list[CalendarSearch]:
+    """One sub-search per (outbound origin, destination-group), grouping up to
+    `max_per_query` destinations per query. The default of 1 (one destination per
+    query) is the only size guaranteed complete — larger groups trade completeness
+    for fewer requests, since Matrix may under-report a multi-destination grid.
+
+    Routing/extension/time-of-day and the window are preserved; the return leg is
+    mirrored. Returns [] when a single query already covers the request (single
+    origin and destination, or `max_per_query` ≥ the destination count)."""
     out = search.legs[0]
     ret = search.legs[1] if len(search.legs) > 1 else None
-    pairs = [(o, d) for o in out.origins for d in out.destinations]
-    if len(pairs) <= 1:
-        return []
+    dests = out.destinations
+    k = max(1, max_per_query)
+    groups = [dests[i : i + k] for i in range(0, len(dests), k)]
     subs: list[CalendarSearch] = []
-    for o, d in pairs:
-        out_leg = out.model_copy(update={"origins": (o,), "destinations": (d,)})
-        if ret is not None:
-            ret_leg = ret.model_copy(update={"origins": (d,), "destinations": (o,)})
-            legs = (out_leg, ret_leg)
-        else:
-            legs = (out_leg,)
-        subs.append(search.model_copy(update={"legs": legs}))
-    return subs
+    for o in out.origins:
+        for g in groups:
+            out_leg = out.model_copy(update={"origins": (o,), "destinations": g})
+            if ret is not None:
+                ret_leg = ret.model_copy(update={"origins": g, "destinations": (o,)})
+                legs = (out_leg, ret_leg)
+            else:
+                legs = (out_leg,)
+            subs.append(search.model_copy(update={"legs": legs}))
+    return subs if len(subs) > 1 else []
 
 
 def _price_value(s: str | None) -> float | None:
