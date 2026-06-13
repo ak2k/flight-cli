@@ -202,11 +202,21 @@ Full detail at [`docs/memories/MEMORY.md`](./docs/memories/MEMORY.md).
    share the prefix but route to different backends. Bootstrap regex
    anchors on the bare `matrix` label so it excludes the variants; a
    first-match-any-AIzaSy approach would pick the People API key and 403.
-7. **Calendar brownouts are real, not our bug.** Matrix's own UI returns
-   empty grids for complex queries sometimes. The gflight backend has the
-   analogous failure: Google answers a cold curl_cffi session with an empty
-   body, so `_gflight_ids.search_with_ids` retries empties on the warming
-   session. Surface the error message clearly; retry; consider a simpler query.
+7. **Calendar compute-budget under-reporting.** Matrix's calendar engine
+   silently returns *fewer* solutions once a query exceeds its per-query compute
+   budget — cost grows roughly as (origins × destinations) × (departure days) ×
+   (routing complexity), and the ceiling is load-dependent. The failure is *not*
+   all-or-nothing: it degrades toward zero (measured: one destination alone = 155
+   solutions, but 3-dest = 12, 4-dest = 0; even a non-empty multi-airport result
+   undercounts the true union). It is *not* our encoding (byte-matches the SPA
+   fixture) and *not* transient (retrying doesn't help). So a combined
+   multi-airport calendar can't be trusted even when non-empty. `flight calendar`
+   therefore always runs a multi-airport query as one sub-search per
+   (origin, destination), in parallel (Matrix tolerates ≥16 concurrent with flat
+   latency), and merges the grids — the only way to get complete results
+   (`_calendar_split.py` + `cli._run_calendar`). The gflight backend has an
+   analogous empty-failure mode (cold curl_cffi session) handled separately by
+   retry + NID-cookie persistence in `_gflight_ids.py`.
 8. **Two-phase calendar flow.** `name: "calendar"` returns the date grid;
    user picks a date in the UI; `name: "calendarFollowup"` returns full
    itineraries for that date. Both use the same `/v1/search` endpoint.

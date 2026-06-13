@@ -26,6 +26,7 @@ from rich.console import Console
 from rich.table import Table
 
 from . import _config
+from ._calendar_split import is_empty_calendar, merge_calendar_results, split_calendar_search
 from ._multi_cabin import MultiCabinRow, parse_price
 from ._multi_cabin import merge as _merge_cabins
 from .client import MatrixApiError, MatrixClient
@@ -507,6 +508,101 @@ def _run(
     async def go() -> SearchResult | CalendarResult:
         async with MatrixClient(rps=rps, impersonate=impersonate) as c:
             return await c.execute(search, cache=not no_cache)
+
+    try:
+        return anyio.run(go)
+    except MatrixApiError as e:
+        err.print(f"[red]Matrix returned an error ({e.kind}):[/] {e.message}")
+        if e.request_id:
+            err.print(f"[dim]request_id: {e.request_id}[/]")
+        raise typer.Exit(1) from e
+
+
+# Matrix silently UNDER-REPORTS multi-airport calendar grids under compute-budget
+# pressure — even when the result is non-empty (a 3-destination query returned 12
+# solutions where one destination alone returns 155). The only query guaranteed
+# to fully price is a single (origin, destination), so a multi-airport calendar is
+# always run as one sub-search per (origin, destination) pair, in parallel, and
+# merged — the only way to get complete results.
+#
+# `split_calendar_search` returns the cartesian product of origins x destinations,
+# so the fan-out is |origins| x |destinations| (just |destinations| in the common
+# single-origin case). Matrix tolerates the concurrency (measured: ≥16 in flight,
+# flat latency, no throttling); we hold a touch under that and let larger lists
+# batch into multiple rounds. Above the hard max we refuse rather than silently
+# under-report — a coarser query would lose results, so we ask the user to narrow.
+_CALENDAR_FANOUT_CONCURRENCY = 12
+_CALENDAR_FANOUT_MAX = 36  # 3 rounds; beyond this, narrow the search
+
+
+async def _gather_calendar(
+    c: MatrixClient, subs: list[CalendarSearch], *, cache: bool
+) -> list[CalendarResult]:
+    """Run the per-destination sub-searches concurrently on one client (its
+    rate-limiter + semaphore bound the in-flight count). A sub-query that fails
+    just drops its destination from the merge rather than sinking the whole run."""
+    results: list[CalendarResult | None] = [None] * len(subs)
+
+    async def one(i: int, s: CalendarSearch) -> None:
+        try:
+            results[i] = cast("CalendarResult", await c.execute(s, cache=cache))
+        except Exception:  # noqa: BLE001 — a sub-query failure just drops that destination
+            results[i] = None
+
+    async with anyio.create_task_group() as tg:
+        for i, s in enumerate(subs):
+            tg.start_soon(one, i, s)
+    return [r for r in results if r is not None]
+
+
+def _run_calendar(
+    search: CalendarSearch,
+    *,
+    rps: float,
+    impersonate: str,
+    no_cache: bool,
+    max_per_query: int = 1,
+    max_concurrency: int = _CALENDAR_FANOUT_CONCURRENCY,
+) -> tuple[CalendarResult, int]:
+    """Execute a calendar search. A multi-airport query is fanned out into
+    sub-searches of up to `max_per_query` destinations each, run in parallel
+    (≤ `max_concurrency` at a time), and merged — Matrix under-reports a combined
+    multi-airport grid, so the default of one destination per query is the only
+    size guaranteed complete.
+
+    Returns `(result, n_queries)` where `n_queries > 1` means the fan-out path was
+    used (for a one-line note). A single-airport calendar runs as one query and
+    returns `n_queries == 0`.
+    """
+    subs = split_calendar_search(search, max_per_query)
+    n = len(subs)
+    if n > _CALENDAR_FANOUT_MAX:
+        err.print(
+            f"[red]{n} origin/destination combinations is too many to query "
+            f"reliably[/] — narrow the airports/window, or raise --max-per-query "
+            f"(at the cost of completeness)."
+        )
+        raise typer.Exit(2)
+    multi = bool(subs)  # split returns [] when one query already covers the request
+    conc = min(n, max(1, max_concurrency)) if multi else 3
+    if multi and max_per_query > 1:
+        err.print(
+            "[yellow]--max-per-query > 1: Matrix may under-report a "
+            "multi-destination request, so results could be incomplete.[/]"
+        )
+    if multi and n > conc:
+        rounds = (n + conc - 1) // conc
+        err.print(f"[dim]Querying {n} groups in ~{rounds} rounds; this may take a while.[/]")
+
+    async def go() -> tuple[CalendarResult, int]:
+        async with MatrixClient(
+            rps=max(rps, float(conc)), impersonate=impersonate, concurrency=conc
+        ) as c:
+            if not multi:
+                return cast("CalendarResult", await c.execute(search, cache=not no_cache)), 0
+            recovered = await _gather_calendar(c, subs, cache=not no_cache)
+            merged = merge_calendar_results(recovered)
+            return (merged, n) if not is_empty_calendar(merged) else (merged, 0)
 
     try:
         return anyio.run(go)
@@ -2292,6 +2388,22 @@ def calendar(
         rich_help_panel=_GROUP_OUTPUT,
     ),
     no_cache: bool = _NO_CACHE_OPT,
+    max_per_query: int = typer.Option(
+        1,
+        "--max-per-query",
+        help=(
+            "Multi-airport calendar: max destinations per Matrix request. 1 "
+            "(default) queries each destination separately for complete results; "
+            "higher is fewer/faster requests but Matrix may under-report (incomplete)."
+        ),
+        rich_help_panel=_GROUP_BACKEND,
+    ),
+    max_concurrency: int = typer.Option(
+        12,
+        "--max-concurrency",
+        help="Max concurrent Matrix requests in the multi-airport calendar fan-out.",
+        rich_help_panel=_GROUP_BACKEND,
+    ),
 ) -> None:
     """Lowest-fare grid across a date window. Default round-trip; --one-way to flip."""
     json_out = _resolve_format(fmt=fmt, json_flag=json_out) == "json"
@@ -2333,18 +2445,23 @@ def calendar(
     window = CalendarWindow(start=sd, end=ed, duration_min=dmin, duration_max=dmax)
     search = CalendarSearch(legs=legs, options=opts, window=window)
     # CalendarSearch → CalendarResult by client._parse_response dispatch.
-    res = cast(
-        "CalendarResult",
-        _run(
-            search,
-            _resolve_rps(rps),
-            _resolve_impersonate(impersonate),
-            _resolve_no_cache(no_cache),
-        ),
+    # On a multi-airport brownout, _run_calendar splits per-destination + merges.
+    res, n_split = _run_calendar(
+        search,
+        rps=_resolve_rps(rps),
+        impersonate=_resolve_impersonate(impersonate),
+        no_cache=_resolve_no_cache(no_cache),
+        max_per_query=max_per_query,
+        max_concurrency=max_concurrency,
     )
     if json_out:
         sys.stdout.write(json.dumps(res.raw, indent=2))
         return
+    if n_split:
+        console.print(
+            f"[dim]Queried {n_split} destinations separately and merged — Matrix "
+            f"under-reports the combined multi-airport calendar grid.[/]"
+        )
     _render_calendar(res, dmin=dmin, dmax=dmax, origin=origins, destination=dests, sd=sd, ed=ed)
     _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
 

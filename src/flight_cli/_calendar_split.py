@@ -1,0 +1,149 @@
+"""Query multi-airport calendars one destination at a time, then merge.
+
+Matrix's calendar engine silently UNDER-REPORTS a multi-airport grid once the
+query exceeds its per-query compute budget — and the failure is not all-or-
+nothing. Cost grows roughly as (origins x destinations) x (departure days) x
+(routing complexity); above the (load-dependent) ceiling Matrix returns *fewer*
+solutions, degrading toward zero, with no error or warning. Measured for
+MIA<->[...] +LH+ over a 30-day window: VIE=155 / PAR=27 / FCO=24 / MAD=17 alone,
+but 2-dest=155, 3-dest=12, 4-dest=0 — and even the non-empty 4-dest=155 is short
+of the true union (~223). So a combined multi-airport result can't be trusted
+even when it isn't empty; the only query guaranteed to fully price is a single
+(origin, destination).
+
+We therefore always run a multi-airport calendar as one sub-search per pair and
+merge. `split_calendar_search` produces those sub-searches (mirrored onto the
+return leg); `merge_calendar_results` re-assembles a single grid that is the
+per-departure-day lowest fare across destinations — what the combined grid is
+*supposed* to be — routed back through `CalendarResult.from_api` so it renders
+through the normal path. `is_empty_calendar` distinguishes a genuine no-flights
+result (every sub-search empty) from a recovered one.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+from .models import CalendarResult
+
+if TYPE_CHECKING:
+    from .domain import CalendarSearch
+
+
+def is_empty_calendar(res: CalendarResult) -> bool:
+    """Matrix's compute-budget shed presents as a structurally-valid result with
+    zero solutions / no priced days — not as an error."""
+    return res.solution_count == 0 or not res.priced_days
+
+
+def split_calendar_search(search: CalendarSearch, max_per_query: int = 1) -> list[CalendarSearch]:
+    """One sub-search per (outbound origin, destination-group), grouping up to
+    `max_per_query` destinations per query. The default of 1 (one destination per
+    query) is the only size guaranteed complete — larger groups trade completeness
+    for fewer requests, since Matrix may under-report a multi-destination grid.
+
+    Routing/extension/time-of-day and the window are preserved; the return leg is
+    mirrored. Returns [] when a single query already covers the request (single
+    origin and destination, or `max_per_query` ≥ the destination count)."""
+    out = search.legs[0]
+    ret = search.legs[1] if len(search.legs) > 1 else None
+    dests = out.destinations
+    k = max(1, max_per_query)
+    groups = [dests[i : i + k] for i in range(0, len(dests), k)]
+    subs: list[CalendarSearch] = []
+    for o in out.origins:
+        for g in groups:
+            out_leg = out.model_copy(update={"origins": (o,), "destinations": g})
+            if ret is not None:
+                ret_leg = ret.model_copy(update={"origins": g, "destinations": (o,)})
+                legs = (out_leg, ret_leg)
+            else:
+                legs = (out_leg,)
+            subs.append(search.model_copy(update={"legs": legs}))
+    return subs if len(subs) > 1 else []
+
+
+def _price_value(s: str | None) -> float | None:
+    """Numeric value of a Matrix price string ('USD595.00' -> 595.0)."""
+    if not s:
+        return None
+    i = next((j for j, c in enumerate(s) if c.isdigit() or c == "."), len(s))
+    try:
+        return float(s[i:])
+    except ValueError:
+        return None
+
+
+@dataclass
+class _Cell:
+    """Per (month, day) aggregate while merging destination grids."""
+
+    date: int
+    min_price: str
+    pv: float | None
+    sols: int = 0
+    durs: dict[int, tuple[str, float]] = field(default_factory=dict[int, tuple[str, float]])
+
+
+def merge_calendar_results(results: list[CalendarResult]) -> CalendarResult:
+    """Merge per-destination calendar grids into one: per (month, day) the lowest
+    fare across destinations, with each per-duration column also taken as the
+    cross-destination minimum and `solution_count` summed. The result is built
+    via `CalendarResult.from_api` so it renders identically to a native grid."""
+    cells: dict[tuple[int, int], _Cell] = {}
+    total_sols = 0
+    cheapest_pv: float | None = None
+    cheapest_notice: dict[str, Any] = {}
+    for res in results:
+        total_sols += res.solution_count
+        cpv = _price_value(res.cheapest_price)
+        if cpv is not None and (cheapest_pv is None or cpv < cheapest_pv):
+            cheapest_pv = cpv
+            cheapest_notice = (res.raw or {}).get("currencyNotice") or {}
+        for m in res.months:
+            for d in m.days:
+                if d.disabled or not d.min_price:
+                    continue
+                key = (m.month or 0, d.date)
+                pv = d.price_value
+                cell = cells.get(key)
+                if cell is None:
+                    cell = _Cell(date=d.date, min_price=d.min_price, pv=pv)
+                    cells[key] = cell
+                if pv is not None and (cell.pv is None or pv < cell.pv):
+                    cell.pv = pv
+                    cell.min_price = d.min_price
+                cell.sols += d.solution_count
+                for o in d.options:
+                    ov = _price_value(o.min_price)
+                    if ov is None:
+                        continue
+                    existing = cell.durs.get(o.trip_length)
+                    if existing is None or ov < existing[1]:
+                        cell.durs[o.trip_length] = (o.min_price, ov)
+    by_month: dict[int, list[dict[str, Any]]] = {}
+    for (month, _date), cell in cells.items():
+        day: dict[str, Any] = {
+            "date": cell.date,
+            "solutionCount": cell.sols,
+            "minPrice": cell.min_price,
+            "tripDuration": {
+                "options": [
+                    {"tripLength": dur, "minPrice": price}
+                    for dur, (price, _) in sorted(cell.durs.items())
+                ]
+            },
+        }
+        by_month.setdefault(month, []).append(day)
+    months = [
+        {"month": month, "weeks": [{"days": sorted(days, key=lambda x: x["date"])}]}
+        for month, days in sorted(by_month.items())
+    ]
+    return CalendarResult.from_api(
+        {
+            "solutionCount": total_sols,
+            "currencyNotice": cheapest_notice,
+            "calendar": {"months": months},
+        }
+    )
