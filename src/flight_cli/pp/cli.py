@@ -336,8 +336,15 @@ def run_pp_for_search(
         tuple(cash_hints_from_search_result(res, slice_index=leg.slice_index)) for leg in legs
     ]
 
-    async def _go() -> tuple[list[list[AwardFlight]], list[Any]]:
-        return await gather_awards(
+    async def _go() -> list[list[AwardFlight]]:
+        # Construct, query, AND close providers all within this single event
+        # loop. Providers hold async HTTP transports (curl_cffi/httpx) whose
+        # sockets are bound to the running loop; closing them in a *second*
+        # anyio.run() — after this loop has closed — makes their teardown fire
+        # `loop.call_soon` on a dead loop ("RuntimeError: Event loop is
+        # closed", a full traceback + exit 1 on every otherwise-successful
+        # run). `per_leg` is plain data, safe to return after close (work-dgmkv).
+        per_leg, providers = await gather_awards(
             legs=legs,
             num_passengers=num_passengers,
             cabins=cabin_list,
@@ -346,42 +353,41 @@ def run_pp_for_search(
             cash_hints_per_leg=cash_hints_per_leg,
             provider_filter=provider_filter,
         )
+        try:
+            return per_leg
+        finally:
+            await _aclose_all(providers)
 
     try:
-        per_leg, providers = anyio.run(_go)
+        per_leg = anyio.run(_go)
     except Exception as e:  # noqa: BLE001 — surface anything to user, don't crash CLI
         err.print(f"[red]--pp: award query failed: {e}[/]")
         return
 
-    try:
-        if pp_only:
-            if json_out:
-                sys.stdout.write(_serialize_pp_only_per_leg(per_leg, legs))
-                return
-            for leg, awards in zip(legs, per_leg, strict=True):
-                console.print(f"\n[bold]Leg: {leg.label}[/]")
-                _render_pp_only(awards)
-            return
-
-        matches_per_leg: list[list[MatchedFare]] = [
-            join(res, awards, slice_index=leg.slice_index)
-            for leg, awards in zip(legs, per_leg, strict=True)
-        ]
+    if pp_only:
         if json_out:
-            sys.stdout.write(_serialize_matches_per_leg(matches_per_leg, legs))
+            sys.stdout.write(_serialize_pp_only_per_leg(per_leg, legs))
             return
-        for leg, matches in zip(legs, matches_per_leg, strict=True):
+        for leg, awards in zip(legs, per_leg, strict=True):
             console.print(f"\n[bold]Leg: {leg.label}[/]")
-            _render_matches(
-                matches,
-                cabin_list,
-                slice_index=leg.slice_index,
-                cash_per_cabin=cash_per_cabin,
-            )
-    finally:
-        # Providers hold HTTP keepalive; close them so the event loop doesn't
-        # warn about unclosed transports on exit.
-        anyio.run(_aclose_all, providers)
+            _render_pp_only(awards)
+        return
+
+    matches_per_leg: list[list[MatchedFare]] = [
+        join(res, awards, slice_index=leg.slice_index)
+        for leg, awards in zip(legs, per_leg, strict=True)
+    ]
+    if json_out:
+        sys.stdout.write(_serialize_matches_per_leg(matches_per_leg, legs))
+        return
+    for leg, matches in zip(legs, matches_per_leg, strict=True):
+        console.print(f"\n[bold]Leg: {leg.label}[/]")
+        _render_matches(
+            matches,
+            cabin_list,
+            slice_index=leg.slice_index,
+            cash_per_cabin=cash_per_cabin,
+        )
 
 
 async def _aclose_all(providers: list[Any]) -> None:
