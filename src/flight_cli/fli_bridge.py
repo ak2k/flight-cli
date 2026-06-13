@@ -30,6 +30,7 @@ def to_fli_filter(s: Search) -> Any:
         Airport as FliAirport,
     )
     from fli.models.google_flights.base import (  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
+        MaxStops,
         SeatType,
         TripType,
     )
@@ -83,6 +84,18 @@ def to_fli_filter(s: Search) -> Any:
             assert_never(s)
 
     trip_map = {1: TripType.ONE_WAY, 2: TripType.ROUND_TRIP}
+
+    # Honor --stops on the gflight backend. `max_extra_stops` is "extra legs
+    # beyond nonstop" == stop count: 0 nonstop, 1 one-stop, ... fli's enum tops
+    # out at "2 or fewer", so 3+ (and None = no limit) fall through to ANY.
+    stops_map = {
+        0: MaxStops.NON_STOP,
+        1: MaxStops.ONE_STOP_OR_FEWER,
+        2: MaxStops.TWO_OR_FEWER_STOPS,
+    }
+    mx = s.options.max_extra_stops
+    stops = stops_map.get(mx, MaxStops.ANY) if mx is not None else MaxStops.ANY
+
     p = s.options.pax
     return FlightSearchFilters(
         passenger_info=PassengerInfo(
@@ -90,6 +103,7 @@ def to_fli_filter(s: Search) -> Any:
             children=p.children,
         ),
         flight_segments=segs,
+        stops=stops,
         seat_type=cab_map[s.options.cabin],
         trip_type=trip_map.get(len(segs), TripType.MULTI_CITY),
     )
