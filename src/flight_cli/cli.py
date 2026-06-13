@@ -26,6 +26,7 @@ from rich.console import Console
 from rich.table import Table
 
 from . import _config
+from ._calendar_split import is_empty_calendar, merge_calendar_results, split_calendar_search
 from ._multi_cabin import MultiCabinRow, parse_price
 from ._multi_cabin import merge as _merge_cabins
 from .client import MatrixApiError, MatrixClient
@@ -507,6 +508,69 @@ def _run(
     async def go() -> SearchResult | CalendarResult:
         async with MatrixClient(rps=rps, impersonate=impersonate) as c:
             return await c.execute(search, cache=not no_cache)
+
+    try:
+        return anyio.run(go)
+    except MatrixApiError as e:
+        err.print(f"[red]Matrix returned an error ({e.kind}):[/] {e.message}")
+        if e.request_id:
+            err.print(f"[dim]request_id: {e.request_id}[/]")
+        raise typer.Exit(1) from e
+
+
+# Cap the per-destination fan-out so a huge airport list can't explode into a
+# storm of sub-queries; above this we surface the original empty instead.
+_MAX_CALENDAR_SPLIT = 6
+
+
+async def _gather_calendar(
+    c: MatrixClient, subs: list[CalendarSearch], *, cache: bool
+) -> list[CalendarResult]:
+    """Run the per-destination sub-searches concurrently on one client (its
+    rate-limiter + semaphore throttle them). A sub-query that fails just drops
+    its destination from the merge rather than sinking the whole recovery."""
+    results: list[CalendarResult | None] = [None] * len(subs)
+
+    async def one(i: int, s: CalendarSearch) -> None:
+        try:
+            results[i] = cast("CalendarResult", await c.execute(s, cache=cache))
+        except Exception:  # noqa: BLE001 — a sub-query failure just drops that destination
+            results[i] = None
+
+    async with anyio.create_task_group() as tg:
+        for i, s in enumerate(subs):
+            tg.start_soon(one, i, s)
+    return [r for r in results if r is not None]
+
+
+def _run_calendar(
+    search: CalendarSearch, *, rps: float, impersonate: str, no_cache: bool
+) -> tuple[CalendarResult, int]:
+    """Execute a calendar search; if Matrix sheds it (empty) and it is a
+    multi-airport query, transparently split per-destination, run the
+    sub-searches in parallel on the same client, and merge the grids.
+
+    Returns `(result, n_split)` where `n_split > 0` means the split path
+    recovered the grid (for a one-line note to the user). A genuinely
+    flight-less query — where the sub-searches are also empty — returns the
+    original empty result with `n_split == 0`.
+    """
+
+    async def go() -> tuple[CalendarResult, int]:
+        async with MatrixClient(rps=rps, impersonate=impersonate) as c:
+            res = cast("CalendarResult", await c.execute(search, cache=not no_cache))
+            if not is_empty_calendar(res):
+                return res, 0
+            subs = split_calendar_search(search)
+            if not subs or len(subs) > _MAX_CALENDAR_SPLIT:
+                return res, 0
+            recovered = await _gather_calendar(c, subs, cache=not no_cache)
+            if not recovered:
+                return res, 0
+            merged = merge_calendar_results(recovered)
+            if is_empty_calendar(merged):
+                return res, 0  # genuinely flight-less — surface the original empty
+            return merged, len(subs)
 
     try:
         return anyio.run(go)
@@ -2333,18 +2397,21 @@ def calendar(
     window = CalendarWindow(start=sd, end=ed, duration_min=dmin, duration_max=dmax)
     search = CalendarSearch(legs=legs, options=opts, window=window)
     # CalendarSearch → CalendarResult by client._parse_response dispatch.
-    res = cast(
-        "CalendarResult",
-        _run(
-            search,
-            _resolve_rps(rps),
-            _resolve_impersonate(impersonate),
-            _resolve_no_cache(no_cache),
-        ),
+    # On a multi-airport brownout, _run_calendar splits per-destination + merges.
+    res, n_split = _run_calendar(
+        search,
+        rps=_resolve_rps(rps),
+        impersonate=_resolve_impersonate(impersonate),
+        no_cache=_resolve_no_cache(no_cache),
     )
     if json_out:
         sys.stdout.write(json.dumps(res.raw, indent=2))
         return
+    if n_split:
+        console.print(
+            f"[dim]Combined multi-airport query exceeded Matrix's calendar compute "
+            f"budget; recovered by splitting into {n_split} per-destination searches.[/]"
+        )
     _render_calendar(res, dmin=dmin, dmax=dmax, origin=origins, destination=dests, sd=sd, ed=ed)
     _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
 

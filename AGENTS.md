@@ -202,11 +202,18 @@ Full detail at [`docs/memories/MEMORY.md`](./docs/memories/MEMORY.md).
    share the prefix but route to different backends. Bootstrap regex
    anchors on the bare `matrix` label so it excludes the variants; a
    first-match-any-AIzaSy approach would pick the People API key and 403.
-7. **Calendar brownouts are real, not our bug.** Matrix's own UI returns
-   empty grids for complex queries sometimes. The gflight backend has the
-   analogous failure: Google answers a cold curl_cffi session with an empty
-   body, so `_gflight_ids.search_with_ids` retries empties on the warming
-   session. Surface the error message clearly; retry; consider a simpler query.
+7. **Calendar compute-budget sheds ("brownouts").** Matrix's calendar engine
+   silently returns 0 solutions (HTTP 200, no error or warning) once a query
+   exceeds its per-query compute budget — cost grows roughly as
+   (origins × destinations) × (departure days) × (routing complexity), and the
+   ceiling is load-dependent (the same query that sheds under load prices fine
+   later). It is *not* our encoding (byte-matches the SPA fixture) and *not*
+   transient-per-request (retrying the same query in-window doesn't recover it).
+   `flight calendar` auto-recovers: on an empty multi-airport result it splits
+   per-destination, runs the sub-searches in parallel, and merges the grids
+   (`_calendar_split.py` + `cli._run_calendar`). The gflight backend has an
+   analogous empty-failure mode (cold curl_cffi session) handled separately by
+   retry + NID-cookie persistence in `_gflight_ids.py`.
 8. **Two-phase calendar flow.** `name: "calendar"` returns the date grid;
    user picks a date in the UI; `name: "calendarFollowup"` returns full
    itineraries for that date. Both use the same `/v1/search` endpoint.
