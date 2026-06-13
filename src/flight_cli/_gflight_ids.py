@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -37,6 +38,17 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 _BASE_URL = SearchFlights.BASE_URL
+
+# Google Flights' API intermittently answers a cold curl_cffi session with an
+# empty body (HTTP 200, no error to retry on). fli's client is a process-wide
+# singleton that warms up by acquiring a cookie on its first successful call —
+# but each one-shot `flight` invocation starts a fresh process with a cold
+# session, so its single request frequently comes back empty. Empirically
+# (None,None,123,123 on identical inputs; [0,123,123,0,123,123] over one warming
+# client) the empty almost always clears within a couple of retries on the SAME
+# session. A FRESH session does NOT help — it stays cold — so we retry in place.
+_EMPTY_RETRY_ATTEMPTS = 4
+_EMPTY_RETRY_BACKOFF_S = 1.0  # multiplied by attempt number: 1s, 2s, 3s between tries
 
 # Position of the opaque per-flight ID in Google Flights' API row array.
 # Mirrors the PP browser extension's parser (chunk-5KW5VSHS.js: `a = n[17]`).
@@ -256,6 +268,25 @@ def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
     return out
 
 
+def _one_call_with_retry(filters: FlightSearchFilters) -> list[GFlightWithId]:
+    """`_one_call`, but retried on an empty result to ride out the cold-session
+    empties described at `_EMPTY_RETRY_ATTEMPTS`.
+
+    Retries reuse fli's shared (warming) client — that's the whole point; a
+    fresh session would stay cold. A genuinely flight-less leg pays a few quick
+    retries of latency, which is rare and preferable to a spurious "no results".
+    """
+    result: list[GFlightWithId] = []
+    for attempt in range(1, _EMPTY_RETRY_ATTEMPTS + 1):
+        result = _one_call(filters)
+        if result:
+            return result
+        if attempt < _EMPTY_RETRY_ATTEMPTS:
+            log.debug("empty gflight response; retry %d/%d", attempt, _EMPTY_RETRY_ATTEMPTS)
+            time.sleep(_EMPTY_RETRY_BACKOFF_S * attempt)
+    return result
+
+
 def search_with_ids(
     filters: FlightSearchFilters,
     *,
@@ -267,7 +298,7 @@ def search_with_ids(
     Round-trip / multi-city follow the same iterative leg-selection pattern
     as fli: query first leg, pick top_n, drive each through the rest. Each
     `GFlightWithId` in a returned tuple has its own per-leg flight_id."""
-    first = _one_call(filters)
+    first = _one_call_with_retry(filters)
     if not first:
         return None
 
