@@ -1,12 +1,17 @@
 # Agent instructions
 
 Contract for agents working in this repo. Read first; overrides defaults.
+This is the single source of agent guidance — `CLAUDE.md` is a symlink to this
+file, so Claude Code, Codex, and any other agent read the same contract.
 
 This project follows the [`ak2k/python-starter`](https://github.com/ak2k/python-starter)
-template (Profile A — distributable CLI). See also `CLAUDE.md` for
-flight-cli-specific load-bearing quirks (Matrix wire-format gotchas, SPA
-capture workflow, two-phase calendar flow) — read both before non-trivial
-work.
+template (Profile A — distributable CLI). It is a power-user CLI wrapping ITA
+Matrix's undocumented Alkali backend: a pydantic discriminated union →
+match-based wire adapters → thin typer CLI shells, with golden-file regression
+tests and `basedpyright`-strict type checking. As of 2026-05 an exhaustive
+web search turned up zero other public wrappers of this endpoint
+(see [`docs/memories/public_alkali_wrapper.md`](./docs/memories/public_alkali_wrapper.md));
+our fixtures are the de facto spec.
 
 ## Stack (one per concern; substitutes are bans)
 
@@ -38,26 +43,44 @@ choice that fits the rest of the stack — don't substitute.
 | SQL | `sqlalchemy 2.0` Core | — |
 | Async file I/O | `anyio.Path` | — |
 
-## Inner loop
+## Workflow
 
-```
-make fix     # autofix + full check
-make check   # full check (CI runs this)
-```
+- **Install**: `uv venv && uv pip install -e .` (Python 3.12+).
+- **Test**: `pytest tests/` — golden-file regression net, runs in <0.1s.
+- **Inner loop**:
+  ```
+  make fix     # autofix + full check
+  make check   # full check (CI runs this)
+  ```
+  Both must be green. `make check` runs `ruff check`, `ruff format --check`,
+  `basedpyright src tests`, and `pytest` — exactly the GitHub Actions `check`
+  job, so green locally ⇒ green in CI. `filterwarnings = ["error"]` and
+  `xfail_strict = true` are load-bearing: deprecation warnings and unexpected
+  passes are real failures, not noise.
+- **Use `basedpyright`, not vanilla `pyright`.** `basedpyright` is stricter
+  (catches `reportUnknownVariableType`, `reportUnusedFunction`, etc.). Running
+  `pyright` alone is a false-green; always gate on `make check`.
+- **Smoke test against the live backend**:
+  ```
+  flight search JFK LHR --dep 2026-08-15 --return 2026-08-22 -n 2
+  ```
+  If `make check` is green but the smoke test fails, suspect the API key
+  cache (`~/.cache/flight-cli/.matrix-key`, 30-day TTL) or a Matrix brownout
+  (see quirk #7 below). The key is resolved at runtime from Matrix's SPA
+  bundle — never hardcode it; override via the `FLIGHT_API_KEY` env var.
 
-Both must be green. `filterwarnings = ["error"]` and `xfail_strict = true`
-are load-bearing — deprecation warnings and unexpected passes are real
-failures, not noise.
+## Editing rules
 
-Smoke test against the live backend:
-
-```
-flight fare JFK LHR --dep 2026-08-15 --return 2026-08-22 -n 2
-```
-
-If `make check` is green but the smoke test fails, suspect the API key
-cache (`~/.cache/flight-cli/.matrix-key`) or a Matrix brownout (see
-`CLAUDE.md` quirk #7).
+- **Run pytest after any change to `wire.py`, `links.py`, `domain.py`.** The
+  golden-file tests at `tests/fixtures/` catch field-name and ordering
+  regressions in <100ms — exactly the class of bugs that hit us during the
+  initial build.
+- **New SPA captures go in `research/`** (gitignored). Use
+  `research/record_user_session.py` to drive a real browser, capture a wire
+  body, drop it into `tests/fixtures/`, and write a reconstruction test.
+- **Never commit anything under `research/`.** It's the paper trail;
+  `tests/fixtures/` is the tracked canonical set.
+- **No hardcoded credentials** — `_api_key.py` does runtime resolution.
 
 ## Principles
 
@@ -125,7 +148,10 @@ cache (`~/.cache/flight-cli/.matrix-key`) or a Matrix brownout (see
 8. **Async runtime is anyio.** Not raw asyncio. Compose with sync at the
    edges via `anyio.from_thread` / `anyio.to_thread`. CLI entrypoints use
    `anyio.run(coro_fn)` (not `asyncio.run(coro_fn())`). Concurrency
-   primitives: `anyio.Semaphore`, `anyio.create_task_group()`.
+   primitives: `anyio.Semaphore`, `anyio.create_task_group()`. Providers
+   and clients that hold async transports must be created, used, and
+   closed within a single `anyio.run` — spanning their lifecycle across
+   two `anyio.run` calls tears their sockets down on a dead loop.
 
 ## Appropriate divergence
 
@@ -148,18 +174,64 @@ Tunings applied versus the strict-service default:
 
 ## flight-cli load-bearing quirks (read before touching wire.py)
 
-Full detail in [`CLAUDE.md`](./CLAUDE.md) and
-[`docs/memories/MEMORY.md`](./docs/memories/MEMORY.md). One-line summaries:
+Full detail at [`docs/memories/MEMORY.md`](./docs/memories/MEMORY.md).
 
-- `routeLanguage` ≠ `commandLine` (two distinct wire fields).
-- Per-mode field rules: specific-date emits `dateModifier` + `isArrivalDate`; calendar omits.
-- `maxLegsRelativeToMin` defaults to 1, not 10.
-- Calendar brownouts are real; not our bug.
-- Two-phase calendar flow: `calendar` returns grid; `calendarFollowup` returns itineraries.
-- Multiple AIza keys in the SPA bundle — only the bare `matrix` label is the prod key.
+1. **`routeLanguage` ≠ `commandLine`.** Matrix slice has TWO distinct fields:
+   `routeLanguage` for routing language (`"LH+"`, `"BA AA"`, `"[F* X F*]"`)
+   and `commandLine` for extension codes (`"MAXCONNECT 2:00"`, `"MAXSTOPS 1"`).
+   Confusing them returns `QPX Warning. Illegal COMMAND-LINE prefix`. Full
+   references: [`routing_language.md`](./docs/memories/routing_language.md) +
+   [`extension_codes.md`](./docs/memories/extension_codes.md).
+2. **Per-mode field rules.** Specific-date emits `dateModifier` +
+   `isArrivalDate` always; calendar + followup omit them. Followup omits
+   `inputs.filter`. Calendar has `page: {size}`; specific + followup have
+   `page: {current, size}`.
+3. **`maxLegsRelativeToMin` defaults to 1**, not 10. Matches the SPA's
+   "No limit" UI default. User override via `--stops N`.
+4. **`timeRanges` is more flexible than the 6 named buckets.** Matrix
+   accepts arbitrary `{min: "HH:MM", max: "HH:MM"}` ranges and multi-range
+   arrays. The 6-bucket UI is one interface; the underlying API takes any
+   well-formed range with `min < max`. Zero-padded and single-digit hours
+   both work.
+5. **Summarizer order is asserted by golden-file tests.** The captured
+   SPA order is `["carrierStopMatrix", "currencyNotice", "solutionList", ...]`.
+   Don't reorder unless you also rebase the fixtures.
+6. **Multiple AIza keys in the SPA bundle.** Only the entry tagged
+   `matrix` (e.g. `.matrix="AIza..."` or `"matrix":"AIza..."`) is the prod
+   search key — siblings `matrix-nightly` / `matrix-uat` / `matrix-dev`
+   share the prefix but route to different backends. Bootstrap regex
+   anchors on the bare `matrix` label so it excludes the variants; a
+   first-match-any-AIzaSy approach would pick the People API key and 403.
+7. **Calendar brownouts are real, not our bug.** Matrix's own UI returns
+   empty grids for complex queries sometimes. The gflight backend has the
+   analogous failure: Google answers a cold curl_cffi session with an empty
+   body, so `_gflight_ids.search_with_ids` retries empties on the warming
+   session. Surface the error message clearly; retry; consider a simpler query.
+8. **Two-phase calendar flow.** `name: "calendar"` returns the date grid;
+   user picks a date in the UI; `name: "calendarFollowup"` returns full
+   itineraries for that date. Both use the same `/v1/search` endpoint.
 
 When in doubt: capture a real SPA body via `research/record_user_session.py`
 and write a reconstruction test in `tests/test_wire_round_trip.py`.
+
+## Adding a search mode
+
+1. New pydantic class in `domain.py` (extend `_SearchBase`, add `kind`
+   Literal, register in the `Search` union).
+2. Add a `case` in `wire.to_wire()`, `client._parse_response`,
+   `links.matrix_deep_link`, `links.google_flights_url`, `fli_bridge.to_fli_filter`.
+3. `assert_never` ensures pyright catches forgotten branches.
+4. Capture a real SPA body to use as a golden-file fixture.
+5. Write a reconstruction test in `tests/test_wire_round_trip.py`.
+
+## Adding a search backend or award provider
+
+The backend (Matrix vs Google Flights) is selected by `_pick_backend` in
+`cli.py`, not encoded in the command name. Award providers (PointsPath,
+seats.aero) live behind the `AwardProvider` protocol in `providers/base.py`
+and are fanned out per leg by `providers/registry.py:gather_awards`. A new
+provider implements the protocol, registers in `_construct_enabled`, and the
+leg fan-out picks it up — the matcher and renderers stay provider-blind.
 
 ## Known gotchas (non-obvious from the toolchain)
 
@@ -172,3 +244,15 @@ and write a reconstruction test in `tests/test_wire_round_trip.py`.
 - Domain `InputValidationError`-style errors should never shadow
   `pydantic.ValidationError` — keep our errors named distinctly
   (`MatrixApiError`, `ApiKeyResolutionError`).
+
+## Agent skill
+
+`.claude/skills/flight-search/SKILL.md` packages the routing-language grammar,
+extension-code reference, airport-group expansions, and worked examples —
+enough that an agent can translate a user's flight-search intent into the right
+CLI invocation on the first try. It triggers on flight-search-shaped requests
+in any Claude Code session working in this repo.
+
+## Project memory
+
+See [`docs/memories/MEMORY.md`](./docs/memories/MEMORY.md) for the topic index.

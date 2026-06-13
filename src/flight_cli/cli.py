@@ -517,16 +517,34 @@ def _run(
         raise typer.Exit(1) from e
 
 
-def _try_pinned_matrix_url(search: Search, result: SearchResult | None) -> str | None:
-    """Build a Matrix `/itinerary` URL pinning the cheapest solution, if the
-    result carries all three server-generated identifiers (session,
-    solutionSet, and the solution's own id). Returns None when any are
-    missing, the search shape doesn't support pinning, or the search isn't
-    a specific-date variant.
-    """
+def _pinned_solution_index(result: SearchResult | None, pick: int | None) -> int | None:
+    """0-based index into `result.solutions` of the itinerary to pin in a deep
+    link. `pick` is the 1-based itinerary number the user saw in the table;
+    None pins the cheapest (row 1). Out-of-range picks warn and fall back to
+    the cheapest rather than emit a wrong or broken link. None when there's
+    nothing to pin."""
     if result is None or not result.solutions:
         return None
-    sol = result.solutions[0]
+    if pick is None:
+        return 0
+    if pick < 1 or pick > len(result.solutions):
+        console.print(
+            f"[yellow]--pick {pick} is out of range (1-{len(result.solutions)}); "
+            f"pinning the cheapest itinerary instead.[/]"
+        )
+        return 0
+    return pick - 1
+
+
+def _try_pinned_matrix_url(search: Search, result: SearchResult | None, idx: int) -> str | None:
+    """Build a Matrix `/itinerary` URL pinning solution `idx`, if the result
+    carries all three server-generated identifiers (session, solutionSet, and
+    the solution's own id). Returns None when any are missing, the search shape
+    doesn't support pinning, or the search isn't a specific-date variant.
+    """
+    if result is None or idx >= len(result.solutions):
+        return None
+    sol = result.solutions[idx]
     if not sol.id or not result.session or not result.solution_set:
         return None
     try:
@@ -540,16 +558,16 @@ def _try_pinned_matrix_url(search: Search, result: SearchResult | None) -> str |
         return None
 
 
-def _try_pinned_gflight_url(search: Search, result: SearchResult | None) -> str | None:
-    """Build a Google Flights URL that pre-selects the cheapest itinerary
-    in `result`, if the data supports it. Returns None when the result is
-    empty, the search shape doesn't support pinning (calendar-grid mode),
-    or any slice can't be reduced to a segment list (see
-    `extract_pin_segments_from_slice` for the bail-out cases).
+def _try_pinned_gflight_url(search: Search, result: SearchResult | None, idx: int) -> str | None:
+    """Build a Google Flights URL that pre-selects itinerary `idx` in `result`,
+    if the data supports it. Returns None when the result is empty, the search
+    shape doesn't support pinning (calendar-grid mode), or any slice can't be
+    reduced to a segment list (see `extract_pin_segments_from_slice` for the
+    bail-out cases).
     """
-    if result is None or not result.solutions:
+    if result is None or idx >= len(result.solutions):
         return None
-    itn = result.solutions[0].itinerary
+    itn = result.solutions[idx].itinerary
     if itn is None or not itn.slices:
         return None
     out_segments = extract_pin_segments_from_slice(itn.slices[0])
@@ -578,12 +596,21 @@ def _emit_urls(
     matrix_url: bool,
     google_url: bool,
     result: SearchResult | None = None,
+    pick: int | None = None,
 ) -> None:
+    idx = _pinned_solution_index(result, pick)
+    # Only claim "#N" when we actually honored the user's pick; an out-of-range
+    # pick falls back to idx 0 and must not mislabel the cheapest as "#N".
+    pinned_label = (
+        f"itinerary #{pick}"
+        if (idx is not None and pick is not None and idx == pick - 1)
+        else "cheapest itinerary"
+    )
     if matrix_url:
         console.print()
-        pinned_m = _try_pinned_matrix_url(search, result)
+        pinned_m = _try_pinned_matrix_url(search, result, idx) if idx is not None else None
         if pinned_m is not None:
-            console.print("[dim]Matrix (cheapest itinerary pinned):[/]")
+            console.print(f"[dim]Matrix ({pinned_label} pinned):[/]")
             console.print(f"  [link]{pinned_m}[/]")
         else:
             console.print("[dim]Matrix deep-link:[/]")
@@ -593,9 +620,9 @@ def _emit_urls(
         # That library has no documented exception surface — catch broadly so a
         # missing IATA or unsupported variant degrades the URL line, not the run.
         try:
-            pinned = _try_pinned_gflight_url(search, result)
+            pinned = _try_pinned_gflight_url(search, result, idx) if idx is not None else None
             if pinned is not None:
-                console.print("[dim]Google Flights (cheapest itinerary pinned):[/]")
+                console.print(f"[dim]Google Flights ({pinned_label} pinned):[/]")
                 console.print(f"  [link]{pinned}[/]")
             else:
                 console.print("[dim]Google Flights (tfs= structured):[/]")
@@ -605,6 +632,59 @@ def _emit_urls(
 
 
 # ─────────────────────────── result renderers ──────────────────────────────
+
+
+def _parse_iso(s: str) -> datetime | None:
+    """Best-effort parse of a slice timestamp ("YYYY-MM-DDTHH:MM[:SS]")."""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        try:
+            return datetime.fromisoformat(s[:16])
+        except ValueError:
+            return None
+
+
+def _fmt_slice_times(dep: str, arr: str) -> str:
+    """Compact, unambiguous departure→arrival for an itinerary cell.
+
+    Shows the departure date once, the two clock times, and a `+Nd` marker
+    when the arrival lands on a later calendar day. Without the marker an
+    overnight return reads as "arrives before it departs" once the cell is
+    squeezed (work-72syf). Falls back to raw ISO — which still carries both
+    dates — when a timestamp can't be parsed.
+    """
+    d = _parse_iso(dep)
+    a = _parse_iso(arr)
+    if d is None or a is None:
+        return f"{dep[:16]}→{arr[:16]}"
+    day_off = (a.date() - d.date()).days
+    suffix = f" +{day_off}d" if day_off > 0 else (f" {day_off}d" if day_off < 0 else "")
+    return f"{d:%b%d %H:%M}→{a:%H:%M}{suffix}"
+
+
+def _fmt_slice_route(s: Slice) -> str:
+    """Origin→destination threading any intermediate connection airports, so a
+    1-stop itinerary shows its connection city instead of hiding it."""
+    o = (s.origin.code if s.origin else None) or "?"
+    d = (s.destination.code if s.destination else None) or "?"
+    vias = [e.code for e in s.stops if e and e.code]
+    return "→".join([o, *vias, d])
+
+
+def _fmt_slice_cell(s: Slice) -> str:
+    """One itinerary slice as a table cell: route (with connection cities),
+    flight numbers, compact unambiguous times, duration, then per-leg legroom
+    lines. Shared by the single-cabin and multi-cabin itinerary tables."""
+    dur_min = s.duration or 0
+    dur = f"{dur_min // 60}h{dur_min % 60:02d}m" if dur_min else ""
+    flights = "/".join(s.flights) or "?"
+    times = _fmt_slice_times(s.departure or "", s.arrival or "")
+    head = " ".join(p for p in (_fmt_slice_route(s), flights, times, dur) if p)
+    tail = _fmt_legroom_lines(s)
+    return f"{head}\n{tail}" if tail else head
 
 
 def _render_search(res: SearchResult) -> None:
@@ -650,19 +730,8 @@ def _render_search(res: SearchResult) -> None:
         slcs: list[Slice] = itn.slices if itn else []
         it_carriers = ",".join((c.code or "?") for c in (itn.carriers if itn else []))
 
-        def _fmt(s: Slice) -> str:
-            dep = s.departure or ""
-            arr = s.arrival or ""
-            dur_min = s.duration or 0
-            dur = f"{dur_min // 60}h{dur_min % 60:02d}m" if dur_min else ""
-            o = (s.origin.code if s.origin else None) or "?"
-            d = (s.destination.code if s.destination else None) or "?"
-            head = f"{o}→{d} {'/'.join(s.flights) or '?'} {dep[:16]}→{arr[:16]} {dur}"
-            tail = _fmt_legroom_lines(s)
-            return f"{head}\n{tail}" if tail else head
-
-        out = _fmt(slcs[0]) if slcs else "—"
-        ret = _fmt(slcs[1]) if len(slcs) > 1 else "—"
+        out = _fmt_slice_cell(slcs[0]) if slcs else "—"
+        ret = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
         st.add_row(str(i), _amount(it.price), it_carriers or "?", out, ret)
     console.print(st)
 
@@ -799,6 +868,7 @@ def _run_matrix_path(
     google_url: bool,
     run_pp: bool,
     sel: ProviderSelection,
+    pick: int | None = None,
 ) -> None:
     """Matrix path: Alkali call → optional cash render → optional PP augmentation → URLs."""
     search = SpecificDateSearch(legs=legs, options=opts)
@@ -832,7 +902,7 @@ def _run_matrix_path(
             cash_per_cabin=_cash_per_cabin_single(res, opts.cabin),
         )
     # `res` was cast to SearchResult at the top of this function; safe to pass through.
-    _emit_urls(search, matrix_url=matrix_url, google_url=google_url, result=res)
+    _emit_urls(search, matrix_url=matrix_url, google_url=google_url, result=res, pick=pick)
 
 
 def _run_gflight_path(
@@ -845,6 +915,7 @@ def _run_gflight_path(
     sel: ProviderSelection | None = None,
     matrix_url: bool = False,
     google_url: bool = False,
+    pick: int | None = None,
 ) -> None:
     """Google Flights path: build fli filter → query → render. Single-leg or round-trip.
 
@@ -917,6 +988,7 @@ def _run_gflight_path(
         matrix_url=matrix_url,
         google_url=google_url,
         result=sr,
+        pick=pick,
     )
 
 
@@ -1140,19 +1212,8 @@ def _render_multi_cabin_search(
         slcs: list[Slice] = itn.slices if itn else []
         carriers = ",".join((c.code or "?") for c in (itn.carriers if itn else []))
 
-        def _fmt(s: Slice) -> str:
-            dep = s.departure or ""
-            arr = s.arrival or ""
-            dur_min = s.duration or 0
-            dur = f"{dur_min // 60}h{dur_min % 60:02d}m" if dur_min else ""
-            o = (s.origin.code if s.origin else None) or "?"
-            d = (s.destination.code if s.destination else None) or "?"
-            head = f"{o}→{d} {'/'.join(s.flights) or '?'} {dep[:16]}→{arr[:16]} {dur}"
-            tail = _fmt_legroom_lines(s)
-            return f"{head}\n{tail}" if tail else head
-
-        out_cell = _fmt(slcs[0]) if slcs else "—"
-        ret_cell = _fmt(slcs[1]) if len(slcs) > 1 else "—"
+        out_cell = _fmt_slice_cell(slcs[0]) if slcs else "—"
+        ret_cell = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
         price_cells = [_amount(row.prices.get(cab)) for cab in cabins]
         t.add_row(str(i), carriers or "?", out_cell, ret_cell, *price_cells)
     console.print(t)
@@ -1734,6 +1795,13 @@ def search(
         help=_GOOGLE_URL_HELP,
         rich_help_panel=_GROUP_OUTPUT,
     ),
+    pick: int | None = typer.Option(
+        None,
+        "--pick",
+        help="Pin itinerary #N (1-based, as shown in the table) in the "
+        "--matrix-url/--google-url deep links. Default: cheapest.",
+        rich_help_panel=_GROUP_OUTPUT,
+    ),
     no_cache: bool = _NO_CACHE_OPT,
     providers: str | None = typer.Option(
         None,
@@ -1912,6 +1980,7 @@ def search(
             sel=sel,
             matrix_url=matrix_url,
             google_url=google_url,
+            pick=pick,
         )
         return
 
@@ -1926,6 +1995,7 @@ def search(
         google_url=google_url,
         run_pp=run_awards,
         sel=sel,
+        pick=pick,
     )
 
 

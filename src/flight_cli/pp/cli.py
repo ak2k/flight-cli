@@ -336,8 +336,15 @@ def run_pp_for_search(
         tuple(cash_hints_from_search_result(res, slice_index=leg.slice_index)) for leg in legs
     ]
 
-    async def _go() -> tuple[list[list[AwardFlight]], list[Any]]:
-        return await gather_awards(
+    async def _go() -> list[list[AwardFlight]]:
+        # Construct, query, AND close providers all within this single event
+        # loop. Providers hold async HTTP transports (curl_cffi/httpx) whose
+        # sockets are bound to the running loop; closing them in a *second*
+        # anyio.run() — after this loop has closed — makes their teardown fire
+        # `loop.call_soon` on a dead loop ("RuntimeError: Event loop is
+        # closed", a full traceback + exit 1 on every otherwise-successful
+        # run). `per_leg` is plain data, safe to return after close (work-dgmkv).
+        per_leg, providers = await gather_awards(
             legs=legs,
             num_passengers=num_passengers,
             cabins=cabin_list,
@@ -346,42 +353,41 @@ def run_pp_for_search(
             cash_hints_per_leg=cash_hints_per_leg,
             provider_filter=provider_filter,
         )
+        try:
+            return per_leg
+        finally:
+            await _aclose_all(providers)
 
     try:
-        per_leg, providers = anyio.run(_go)
+        per_leg = anyio.run(_go)
     except Exception as e:  # noqa: BLE001 — surface anything to user, don't crash CLI
         err.print(f"[red]--pp: award query failed: {e}[/]")
         return
 
-    try:
-        if pp_only:
-            if json_out:
-                sys.stdout.write(_serialize_pp_only_per_leg(per_leg, legs))
-                return
-            for leg, awards in zip(legs, per_leg, strict=True):
-                console.print(f"\n[bold]Leg: {leg.label}[/]")
-                _render_pp_only(awards)
-            return
-
-        matches_per_leg: list[list[MatchedFare]] = [
-            join(res, awards, slice_index=leg.slice_index)
-            for leg, awards in zip(legs, per_leg, strict=True)
-        ]
+    if pp_only:
         if json_out:
-            sys.stdout.write(_serialize_matches_per_leg(matches_per_leg, legs))
+            sys.stdout.write(_serialize_pp_only_per_leg(per_leg, legs))
             return
-        for leg, matches in zip(legs, matches_per_leg, strict=True):
+        for leg, awards in zip(legs, per_leg, strict=True):
             console.print(f"\n[bold]Leg: {leg.label}[/]")
-            _render_matches(
-                matches,
-                cabin_list,
-                slice_index=leg.slice_index,
-                cash_per_cabin=cash_per_cabin,
-            )
-    finally:
-        # Providers hold HTTP keepalive; close them so the event loop doesn't
-        # warn about unclosed transports on exit.
-        anyio.run(_aclose_all, providers)
+            _render_pp_only(awards)
+        return
+
+    matches_per_leg: list[list[MatchedFare]] = [
+        join(res, awards, slice_index=leg.slice_index)
+        for leg, awards in zip(legs, per_leg, strict=True)
+    ]
+    if json_out:
+        sys.stdout.write(_serialize_matches_per_leg(matches_per_leg, legs))
+        return
+    for leg, matches in zip(legs, matches_per_leg, strict=True):
+        console.print(f"\n[bold]Leg: {leg.label}[/]")
+        _render_matches(
+            matches,
+            cabin_list,
+            slice_index=leg.slice_index,
+            cash_per_cabin=cash_per_cabin,
+        )
 
 
 async def _aclose_all(providers: list[Any]) -> None:
@@ -422,6 +428,28 @@ _MILES_K_THRESHOLD = 1000  # render as "30.0k" once we cross 1000 miles
 
 def _fmt_miles(n: int) -> str:
     return f"{n / 1000:.1f}k" if n >= _MILES_K_THRESHOLD else str(n)
+
+
+def _fmt_stops(n: int) -> str:
+    """Glanceable stop count for the award tables: 'nonstop' vs 'N stop(s)'.
+
+    The single most important attribute when comparing redemptions is whether
+    an award is nonstop — and it was invisible in the table before (work-72syf).
+    """
+    if n <= 0:
+        return "nonstop"
+    return f"{n} stop" + ("s" if n > 1 else "")
+
+
+def _fmt_iso_compact(s: str) -> str:
+    """'2026-08-15T13:53' → 'Aug15 13:53'. Compact so the column stops getting
+    ellipsized to '→2026-0…'. Passes the raw (minute-trimmed) value through
+    when it can't be parsed."""
+    try:
+        dt = datetime.fromisoformat(s[:16])
+    except ValueError:
+        return s[:16]
+    return f"{dt:%b%d %H:%M}"
 
 
 def _best_award_for_cabin(
@@ -534,24 +562,28 @@ def _render_matches(
         show_header=True,
         header_style="bold cyan",
     )
-    t.add_column("flight")
+    t.add_column("flight", overflow="fold")
+    t.add_column("stops")
     t.add_column("price", justify="right")
     for cab in cabin_list:
         t.add_column(cab, justify="right")
     if show_funding:
-        t.add_column("funded by")
+        t.add_column("funded by", overflow="fold")
 
     for m in matches:
         itn = m.itinerary.itinerary
         if not itn or not itn.slices or len(itn.slices) <= slice_index:
             continue
         s = itn.slices[slice_index]
-        flight = (s.flights or ["?"])[0]
+        # Show every marketing flight# in the slice (not just the first) so a
+        # connection is visible; `stops` makes nonstop-vs-connection explicit.
+        flight = "/".join(s.flights) if s.flights else "?"
+        stops_n = len(s.stops) if s.stops else max(len(s.flights) - 1, 0)
         cash_str = m.itinerary.price or "—"
         empty: Mapping[str, float] = {}
         per_cabin_cash = cash_per_cabin.get(id(m.itinerary), empty) if cash_per_cabin else empty
 
-        cells = [flight, cash_str]
+        cells = [flight, _fmt_stops(stops_n), cash_str]
         for cab in cabin_list:
             # CPM is shown only when we have cash for THIS cabin specifically
             # — otherwise the value would mix cabins (e.g. business miles vs
@@ -571,7 +603,8 @@ def _render_pp_only(awards: list[AwardFlight]) -> None:
     """One leg's provider-merged awards as a flat table. Multi-provider
     today is degenerate (PP only); the table just shows `provider | program`
     so when seats.aero lands the surface doesn't need to change."""
-    rows: list[tuple[str, str, str, str, str, str, int, float, str]] = []
+    # (source, program, flight, route, num_connections, departs, cabin, miles, tax, funded)
+    rows: list[tuple[str, str, str, str, int, str, str, int, float, str]] = []
     for af in awards:
         for c in af.cabins:
             if c.miles <= 0:
@@ -582,6 +615,7 @@ def _render_pp_only(awards: list[AwardFlight]) -> None:
                     af.program,
                     af.flight_number,
                     f"{af.origin}→{af.destination}",
+                    af.num_connections,
                     af.departure[:16],
                     c.cabin,
                     c.miles,
@@ -589,13 +623,35 @@ def _render_pp_only(awards: list[AwardFlight]) -> None:
                     ", ".join(af.funding_banks),
                 ),
             )
-    rows.sort(key=lambda r: (r[4], r[6]))  # by departure, then miles
+    rows.sort(key=lambda r: (r[5], r[7]))  # by departure, then miles
     t = Table(title="Award availability", show_header=True, header_style="bold cyan")
-    cols = ("source", "program", "flight", "route", "departs", "cabin", "miles", "tax", "funded by")
-    for col in cols:
-        t.add_column(col)
+    # `fold` (not the default ellipsis) on the wordy columns so program/route
+    # stay legible instead of truncating to 'Ameri…' / 'MCO→M…'. `source` is a
+    # fixed short token ("PointsPath"/"seats.aero") — leave it unfolded so it
+    # doesn't wrap awkwardly under width pressure.
+    t.add_column("source")
+    t.add_column("program", overflow="fold")
+    t.add_column("flight")
+    t.add_column("route", overflow="fold")
+    t.add_column("stops")
+    t.add_column("departs")
+    t.add_column("cabin")
+    t.add_column("miles", justify="right")
+    t.add_column("tax", justify="right")
+    t.add_column("funded by", overflow="fold")
     for r in rows:
-        t.add_row(r[0], r[1], r[2], r[3], r[4], r[5], _fmt_miles(r[6]), f"${r[7]:.0f}", r[8])
+        t.add_row(
+            r[0],
+            r[1],
+            r[2],
+            r[3],
+            _fmt_stops(r[4]),
+            _fmt_iso_compact(r[5]),
+            r[6],
+            _fmt_miles(r[7]),
+            f"${r[8]:.0f}",
+            r[9],
+        )
     console.print(t)
 
 
