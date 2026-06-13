@@ -11,9 +11,6 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, ClassVar, override
 
-import pytest
-import typer
-
 from flight_cli import cli
 from flight_cli._calendar_split import (
     is_empty_calendar,
@@ -229,16 +226,17 @@ def test_run_calendar_all_empty_is_not_masked(monkeypatch: Any) -> None:
     assert is_empty_calendar(res)
 
 
-def test_run_calendar_refuses_absurd_fanout(monkeypatch: Any) -> None:
-    # 7 origins x 6 destinations = 42 (origin,dest) pairs > the hard cap: refuse
-    # rather than silently under-report a single combined grid.
-    monkeypatch.setattr(cli, "MatrixClient", _EmptyClient)  # must not be reached
+def test_run_calendar_large_fanout_proceeds(monkeypatch: Any) -> None:
+    # 7 origins x 6 destinations = 42 (origin,dest) pairs: there is no hard cap —
+    # it warns and proceeds (the user's call), rather than refusing.
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
     origins = ("JFK", "EWR", "LGA", "BOS", "PHL", "IAD", "BWI")
     dests = ["LHR", "CDG", "FRA", "AMS", "MAD", "FCO"]
-    with pytest.raises(typer.Exit):
-        cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
-            _cal(dests, origins=origins), rps=10.0, impersonate="chrome", no_cache=True
-        )
+    res, n = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
+        _cal(dests, origins=origins), rps=10.0, impersonate="chrome", no_cache=True
+    )
+    assert n == 42  # fanned out, not refused
+    assert not is_empty_calendar(res)
 
 
 class _CapturingClient(_PricedClient):
