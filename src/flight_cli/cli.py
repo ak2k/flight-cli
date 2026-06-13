@@ -522,13 +522,17 @@ def _run(
 # pressure — even when the result is non-empty (a 3-destination query returned 12
 # solutions where one destination alone returns 155). The only query guaranteed
 # to fully price is a single (origin, destination), so a multi-airport calendar is
-# always run as one sub-search per destination, in parallel, and merged — that is
-# the only way to get complete results. Matrix tolerates the concurrency
-# (measured: ≥16 simultaneous, flat latency, no throttling); we cap a touch under
-# that. An airport list larger than the ceiling falls back to a single combined
-# query (possibly under-reported) rather than a request storm.
+# always run as one sub-search per (origin, destination) pair, in parallel, and
+# merged — the only way to get complete results.
+#
+# `split_calendar_search` returns the cartesian product of origins x destinations,
+# so the fan-out is |origins| x |destinations| (just |destinations| in the common
+# single-origin case). Matrix tolerates the concurrency (measured: ≥16 in flight,
+# flat latency, no throttling); we hold a touch under that and let larger lists
+# batch into multiple rounds. Above the hard max we refuse rather than silently
+# under-report — a coarser query would lose results, so we ask the user to narrow.
 _CALENDAR_FANOUT_CONCURRENCY = 12
-_CALENDAR_FANOUT_CEILING = 24
+_CALENDAR_FANOUT_MAX = 36  # 3 rounds; beyond this, narrow the search
 
 
 async def _gather_calendar(
@@ -564,19 +568,32 @@ def _run_calendar(
     query and returns `n_queries == 0`.
     """
     subs = split_calendar_search(search)
-    multi = bool(subs) and len(subs) <= _CALENDAR_FANOUT_CEILING
-    conc = min(len(subs), _CALENDAR_FANOUT_CONCURRENCY) if multi else 3
+    n = len(subs)
+    if n > _CALENDAR_FANOUT_MAX:
+        err.print(
+            f"[red]{n} origin/destination combinations is too many to query "
+            f"reliably[/] — Matrix under-reports a single combined grid, so narrow "
+            f"the airports or the date window and re-run."
+        )
+        raise typer.Exit(2)
+    multi = bool(subs)  # split returns [] for a single (origin, destination)
+    conc = min(n, _CALENDAR_FANOUT_CONCURRENCY) if multi else 3
+    if multi and n > conc:
+        rounds = (n + conc - 1) // conc
+        err.print(
+            f"[dim]Querying {n} destinations separately in ~{rounds} rounds; "
+            f"this may take a while.[/]"
+        )
 
     async def go() -> tuple[CalendarResult, int]:
         async with MatrixClient(
             rps=max(rps, float(conc)), impersonate=impersonate, concurrency=conc
         ) as c:
             if not multi:
-                # Single airport (nothing to split) or an oversized list: one query.
                 return cast("CalendarResult", await c.execute(search, cache=not no_cache)), 0
             recovered = await _gather_calendar(c, subs, cache=not no_cache)
             merged = merge_calendar_results(recovered)
-            return (merged, len(subs)) if not is_empty_calendar(merged) else (merged, 0)
+            return (merged, n) if not is_empty_calendar(merged) else (merged, 0)
 
     try:
         return anyio.run(go)
