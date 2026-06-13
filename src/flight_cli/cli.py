@@ -529,10 +529,9 @@ def _run(
 # so the fan-out is |origins| x |destinations| (just |destinations| in the common
 # single-origin case). Matrix tolerates the concurrency (measured: ≥16 in flight,
 # flat latency, no throttling); we hold a touch under that and let larger lists
-# batch into multiple rounds. Above the hard max we refuse rather than silently
-# under-report — a coarser query would lose results, so we ask the user to narrow.
+# batch into multiple rounds. There is no hard cap — a large fan-out is the user's
+# call; we warn loudly (and the concurrency limit keeps it a Ctrl-C-able drip).
 _CALENDAR_FANOUT_CONCURRENCY = 12
-_CALENDAR_FANOUT_MAX = 36  # 3 rounds; beyond this, narrow the search
 
 
 async def _gather_calendar(
@@ -576,13 +575,6 @@ def _run_calendar(
     """
     subs = split_calendar_search(search, max_per_query)
     n = len(subs)
-    if n > _CALENDAR_FANOUT_MAX:
-        err.print(
-            f"[red]{n} origin/destination combinations is too many to query "
-            f"reliably[/] — narrow the airports/window, or raise --max-per-query "
-            f"(at the cost of completeness)."
-        )
-        raise typer.Exit(2)
     multi = bool(subs)  # split returns [] when one query already covers the request
     conc = min(n, max(1, max_concurrency)) if multi else 3
     if multi and max_per_query > 1:
@@ -591,8 +583,15 @@ def _run_calendar(
             "multi-destination request, so results could be incomplete.[/]"
         )
     if multi and n > conc:
+        # No hard cap — a big fan-out is the user's call. The concurrency limit
+        # keeps it a Ctrl-C-able drip rather than a burst; warn loudly so the
+        # scale (and the wait) is visible before it runs.
         rounds = (n + conc - 1) // conc
-        err.print(f"[dim]Querying {n} groups in ~{rounds} rounds; this may take a while.[/]")
+        err.print(
+            f"[yellow]Querying {n} origin/destination groups in ~{rounds} rounds "
+            f"({conc} at a time); this may take a while — Ctrl-C to abort, or pass "
+            f"--max-per-query to send fewer, larger requests.[/]"
+        )
 
     async def go() -> tuple[CalendarResult, int]:
         async with MatrixClient(
