@@ -182,8 +182,9 @@ src/flight_cli/
                    + pinned (--pick N) deep-link encoders
   client.py        MatrixClient.execute(search)
   fli_bridge.py    Google Flights handoff via the `flights` (fli) pypi package
-  _gflight_ids.py  gflight query wrapper: captures opaque flight ids,
-                   retries cold-session empties on the warming client
+  _gflight_ids.py  gflight query wrapper: captures opaque flight ids;
+                   persists the session NID cookie (TTL'd) so each run starts
+                   warm, and retries cold-session empties as a fallback
   cli.py           typer commands (search / calendar / detail / airport + auth)
   models.py        response models
   _http.py         httpx + curl_cffi + aiolimiter + stamina
