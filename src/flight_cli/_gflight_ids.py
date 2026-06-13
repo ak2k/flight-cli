@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import pathlib
 import time
 from copy import deepcopy
 from dataclasses import dataclass
@@ -49,6 +51,27 @@ _BASE_URL = SearchFlights.BASE_URL
 # session. A FRESH session does NOT help — it stays cold — so we retry in place.
 _EMPTY_RETRY_ATTEMPTS = 4
 _EMPTY_RETRY_BACKOFF_S = 1.0  # multiplied by attempt number: 1s, 2s, 3s between tries
+
+# Persisted gflight session cookies. The cold-session empties above are almost
+# entirely "the session is missing Google's NID cookie" — a long-lived (~6mo)
+# session cookie a browser keeps across restarts. Empirically, seeding a saved
+# NID onto a fresh session drops the cold-start empty rate from ~40% to ~0%, so
+# we persist it after a successful call and reload it at startup. Every
+# subsequent one-shot `flight` process then starts warm; the retry above stays
+# as the fallback for the first-ever run and NID rotation.
+#
+# We persist ONLY the named cookies below (and only on the google.com domain),
+# not the whole jar: NID is the one we've validated, and replaying an unknown
+# stale anti-bot/consent cookie could do more harm than good. Add a name here if
+# a future capture shows another session cookie is load-bearing.
+_GOOGLE_DOMAIN_SUFFIX = "google.com"
+_PERSIST_COOKIE_NAMES = frozenset({"NID"})
+# Re-warm a fresh NID periodically rather than ride one identity indefinitely —
+# a hedge in case Google ever keys rate-limiting on the cookie. The retry above
+# absorbs the single cold start when this lapses.
+_COOKIE_TTL_S = 14 * 24 * 3600  # 14 days
+# Once-per-process latches (a dict so we mutate rather than rebind a global).
+_cookie_state: dict[str, bool] = {"seeded": False, "persisted": False}
 
 # Position of the opaque per-flight ID in Google Flights' API row array.
 # Mirrors the PP browser extension's parser (chunk-5KW5VSHS.js: `a = n[17]`).
@@ -240,9 +263,82 @@ def _parse_flight_with_id(data: list[Any]) -> GFlightWithId:
     return GFlightWithId(flight=flight, flight_id=flight_id, amenities=amenities)
 
 
+def _cookie_path() -> pathlib.Path:
+    """Where the warmed gflight session cookies live — the shared CLI cache dir
+    (same `MATRIX_CACHE_DIR` override the response cache honors)."""
+    cache_dir = pathlib.Path(
+        os.environ.get("MATRIX_CACHE_DIR") or pathlib.Path.home() / ".cache" / "flight-cli"
+    )
+    return cache_dir / "gflight-cookies.json"
+
+
+def _seed_cookies_once(client: Any) -> None:
+    """Load saved Google cookies onto the shared session, once per process,
+    before the first request — so a fresh CLI invocation starts warm instead of
+    cold. Best-effort: missing/corrupt cache or a cookie-set failure leaves the
+    session as-is (the retry then warms it)."""
+    if _cookie_state["seeded"]:
+        return
+    _cookie_state["seeded"] = True
+    try:
+        payload: dict[str, Any] = json.loads(_cookie_path().read_text())
+        saved_at = float(payload["saved_at"])
+        saved = payload["cookies"]  # untrusted Any; iterated defensively below
+    except OSError:
+        return  # no saved cookies yet (first-ever run)
+    except (ValueError, TypeError, KeyError):
+        log.debug("ignoring unparseable gflight cookie cache")
+        return
+    if time.time() - saved_at > _COOKIE_TTL_S:
+        log.debug("gflight cookie cache past TTL; re-warming")
+        return
+    try:
+        for c in saved:
+            client._client.cookies.set(
+                c["name"],
+                c["value"],
+                domain=c.get("domain", ".google.com"),
+                path=c.get("path", "/"),
+            )
+    except Exception as e:  # noqa: BLE001 — seeding is best-effort (corrupt/odd cache, never fatal)
+        log.debug("could not seed gflight cookies: %s", e)
+
+
+def _persist_cookies(client: Any) -> None:
+    """Write the session's allowlisted Google cookies (NID) to disk after a warm
+    call, once per process, so the next invocation starts warm. Best-effort."""
+    if _cookie_state["persisted"]:
+        return
+    try:
+        cookies = [
+            {
+                "name": str(ck.name),
+                "value": str(ck.value or ""),
+                "domain": str(ck.domain or ".google.com"),
+                "path": str(ck.path or "/"),
+            }
+            for ck in client._client.cookies.jar  # pyright: ignore[reportAny]  # fli/curl_cffi untyped
+            if str(ck.name) in _PERSIST_COOKIE_NAMES
+            and _GOOGLE_DOMAIN_SUFFIX in str(ck.domain or "")
+        ]
+    except Exception as e:  # noqa: BLE001 — cookie read is best-effort, never fatal
+        log.debug("could not read session cookies to persist: %s", e)
+        return
+    if not cookies:
+        return
+    path = _cookie_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"saved_at": time.time(), "cookies": cookies}, indent=2))
+        _cookie_state["persisted"] = True
+    except OSError as e:
+        log.debug("could not persist gflight cookies: %s", e)
+
+
 def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
     """Single HTTP round-trip to Google's endpoint; flat list of one leg's flights."""
     client = get_client()
+    _seed_cookies_once(client)
     encoded = filters.encode()
     resp = client.post(
         url=_BASE_URL,
@@ -254,6 +350,9 @@ def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
     parsed = json.loads(resp.text.lstrip(")]}'"))[0][2]
     if not parsed:
         return []
+    # A truthy `parsed` means Google answered a warm session — save its cookies
+    # (NID) so the next one-shot CLI process starts warm instead of cold.
+    _persist_cookies(client)
     inner = json.loads(parsed)
     flights_data: list[Any] = [
         item for i in (2, 3) if isinstance(inner[i], list) for item in inner[i][0]
