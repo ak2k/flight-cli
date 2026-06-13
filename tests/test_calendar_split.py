@@ -138,16 +138,16 @@ def test_merge_keeps_same_date_in_different_months_distinct() -> None:
     assert len(merged.priced_days) == 2  # Sep-7 and Oct-7 must not collide
 
 
-# ───────────────── orchestration: _run_calendar split-on-empty ──────────────
-# Deterministic end-to-end of the split path (no network): a fake client returns
-# empty for the multi-destination combined query and populated grids for the
-# single-destination sub-queries, so _run_calendar must split, merge, recover.
+# ───────────────── orchestration: _run_calendar per-destination ─────────────
+# Deterministic end-to-end (no network): a multi-airport calendar must fan out to
+# one query per destination and merge; a single airport runs one query; an
+# all-empty fan-out is surfaced as a genuine empty (not masked as "recovered").
 
 _EMPTY: dict[str, Any] = {"solutionCount": 0, "calendar": {"months": []}}
 
 
-class _FakeClient:
-    """Combined (multi-dest) query → empty; per-destination sub-query → priced."""
+class _PricedClient:
+    """Every (single-destination) query returns a priced grid keyed by destination."""
 
     _PRICE: ClassVar[dict[str, str]] = {
         "VIE": "USD800.00",
@@ -158,7 +158,7 @@ class _FakeClient:
 
     def __init__(self, **_kwargs: object) -> None: ...
 
-    async def __aenter__(self) -> _FakeClient:
+    async def __aenter__(self) -> _PricedClient:
         return self
 
     async def __aexit__(self, *_exc: object) -> None:
@@ -166,50 +166,42 @@ class _FakeClient:
 
     async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
         _ = cache
-        dests = search.legs[0].destinations
-        if len(dests) != 1:  # combined multi-destination query → shed (empty)
-            return CalendarResult.from_api(_EMPTY)
-        price = self._PRICE.get(dests[0], "USD999.00")
+        dest = next(iter(search.legs[0].destinations), "?")
+        price = self._PRICE.get(dest, "USD999.00")
         return _result({9: {7: (price, 3, {5: price, 7: price})}}, cheapest=price)
 
 
-class _HealthyClient(_FakeClient):
-    @override
-    async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
-        _ = (search, cache)
-        return _result({9: {7: ("USD500.00", 2, {5: "USD500.00"})}}, cheapest="USD500.00")
-
-
-class _AllEmptyClient(_FakeClient):
+class _EmptyClient(_PricedClient):
     @override
     async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
         _ = (search, cache)
         return CalendarResult.from_api(_EMPTY)
 
 
-def test_run_calendar_recovers_via_split_on_empty(monkeypatch: Any) -> None:
-    monkeypatch.setattr(cli, "MatrixClient", _FakeClient)
-    res, n_split = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
+def test_run_calendar_fans_out_multi_airport_and_merges(monkeypatch: Any) -> None:
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    res, n = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
         _cal(["VIE", "PAR", "FCO", "MAD"]), rps=10.0, impersonate="chrome", no_cache=True
     )
-    assert n_split == 4  # split into 4 per-destination searches
+    assert n == 4  # one query per destination
     assert not is_empty_calendar(res)
     assert res.cheapest_price == "USD600.00"  # PAR is the cheapest destination
 
 
-def test_run_calendar_no_split_when_combined_succeeds(monkeypatch: Any) -> None:
-    monkeypatch.setattr(cli, "MatrixClient", _HealthyClient)
-    res, n_split = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
-        _cal(["VIE", "PAR"]), rps=10.0, impersonate="chrome", no_cache=True
+def test_run_calendar_single_airport_runs_one_query(monkeypatch: Any) -> None:
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    res, n = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
+        _cal(["PAR"]), rps=10.0, impersonate="chrome", no_cache=True
     )
-    assert n_split == 0
+    assert n == 0  # nothing to fan out
     assert not is_empty_calendar(res)
 
 
-def test_run_calendar_genuine_empty_is_not_masked(monkeypatch: Any) -> None:
-    monkeypatch.setattr(cli, "MatrixClient", _AllEmptyClient)
-    res, n_split = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
+def test_run_calendar_all_empty_is_not_masked(monkeypatch: Any) -> None:
+    monkeypatch.setattr(cli, "MatrixClient", _EmptyClient)
+    res, n = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
         _cal(["VIE", "PAR"]), rps=10.0, impersonate="chrome", no_cache=True
     )
-    assert n_split == 0  # sub-queries also empty → genuinely flight-less
+    assert n == 0  # every destination empty → genuinely flight-less
+    assert is_empty_calendar(res)
     assert is_empty_calendar(res)

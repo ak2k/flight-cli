@@ -518,17 +518,25 @@ def _run(
         raise typer.Exit(1) from e
 
 
-# Cap the per-destination fan-out so a huge airport list can't explode into a
-# storm of sub-queries; above this we surface the original empty instead.
-_MAX_CALENDAR_SPLIT = 6
+# Matrix silently UNDER-REPORTS multi-airport calendar grids under compute-budget
+# pressure — even when the result is non-empty (a 3-destination query returned 12
+# solutions where one destination alone returns 155). The only query guaranteed
+# to fully price is a single (origin, destination), so a multi-airport calendar is
+# always run as one sub-search per destination, in parallel, and merged — that is
+# the only way to get complete results. Matrix tolerates the concurrency
+# (measured: ≥16 simultaneous, flat latency, no throttling); we cap a touch under
+# that. An airport list larger than the ceiling falls back to a single combined
+# query (possibly under-reported) rather than a request storm.
+_CALENDAR_FANOUT_CONCURRENCY = 12
+_CALENDAR_FANOUT_CEILING = 24
 
 
 async def _gather_calendar(
     c: MatrixClient, subs: list[CalendarSearch], *, cache: bool
 ) -> list[CalendarResult]:
     """Run the per-destination sub-searches concurrently on one client (its
-    rate-limiter + semaphore throttle them). A sub-query that fails just drops
-    its destination from the merge rather than sinking the whole recovery."""
+    rate-limiter + semaphore bound the in-flight count). A sub-query that fails
+    just drops its destination from the merge rather than sinking the whole run."""
     results: list[CalendarResult | None] = [None] * len(subs)
 
     async def one(i: int, s: CalendarSearch) -> None:
@@ -546,31 +554,29 @@ async def _gather_calendar(
 def _run_calendar(
     search: CalendarSearch, *, rps: float, impersonate: str, no_cache: bool
 ) -> tuple[CalendarResult, int]:
-    """Execute a calendar search; if Matrix sheds it (empty) and it is a
-    multi-airport query, transparently split per-destination, run the
-    sub-searches in parallel on the same client, and merge the grids.
+    """Execute a calendar search. A multi-airport query is run as one sub-search
+    per (origin, destination), in parallel, and merged — Matrix under-reports the
+    combined multi-airport grid, so per-destination queries are the only way to
+    get complete results.
 
-    Returns `(result, n_split)` where `n_split > 0` means the split path
-    recovered the grid (for a one-line note to the user). A genuinely
-    flight-less query — where the sub-searches are also empty — returns the
-    original empty result with `n_split == 0`.
+    Returns `(result, n_queries)` where `n_queries > 1` means the per-destination
+    path was used (for a one-line note). A single-airport calendar runs as one
+    query and returns `n_queries == 0`.
     """
+    subs = split_calendar_search(search)
+    multi = bool(subs) and len(subs) <= _CALENDAR_FANOUT_CEILING
+    conc = min(len(subs), _CALENDAR_FANOUT_CONCURRENCY) if multi else 3
 
     async def go() -> tuple[CalendarResult, int]:
-        async with MatrixClient(rps=rps, impersonate=impersonate) as c:
-            res = cast("CalendarResult", await c.execute(search, cache=not no_cache))
-            if not is_empty_calendar(res):
-                return res, 0
-            subs = split_calendar_search(search)
-            if not subs or len(subs) > _MAX_CALENDAR_SPLIT:
-                return res, 0
+        async with MatrixClient(
+            rps=max(rps, float(conc)), impersonate=impersonate, concurrency=conc
+        ) as c:
+            if not multi:
+                # Single airport (nothing to split) or an oversized list: one query.
+                return cast("CalendarResult", await c.execute(search, cache=not no_cache)), 0
             recovered = await _gather_calendar(c, subs, cache=not no_cache)
-            if not recovered:
-                return res, 0
             merged = merge_calendar_results(recovered)
-            if is_empty_calendar(merged):
-                return res, 0  # genuinely flight-less — surface the original empty
-            return merged, len(subs)
+            return (merged, len(subs)) if not is_empty_calendar(merged) else (merged, 0)
 
     try:
         return anyio.run(go)
@@ -2409,8 +2415,8 @@ def calendar(
         return
     if n_split:
         console.print(
-            f"[dim]Combined multi-airport query exceeded Matrix's calendar compute "
-            f"budget; recovered by splitting into {n_split} per-destination searches.[/]"
+            f"[dim]Queried {n_split} destinations separately and merged — Matrix "
+            f"under-reports the combined multi-airport calendar grid.[/]"
         )
     _render_calendar(res, dmin=dmin, dmax=dmax, origin=origins, destination=dests, sd=sd, ed=ed)
     _emit_urls(search, matrix_url=matrix_url, google_url=google_url)

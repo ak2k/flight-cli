@@ -1,20 +1,23 @@
-"""Recover Matrix calendar "brownouts" on multi-airport queries by splitting.
+"""Query multi-airport calendars one destination at a time, then merge.
 
-Matrix's calendar engine silently returns 0 solutions (HTTP 200, no error or
-warning) once a query exceeds its per-query compute budget — cost grows roughly
-as (origins x destinations) x (departure days) x (routing complexity). A
-multi-destination + routing query over a wide window crosses it even though each
-single-destination sub-query prices fine. Measured: MIA<->[VIE,PAR,FCO,MAD] +LH+
-over a 30-day window = 0, but VIE=155 / PAR=27 / FCO=24 / MAD=17 alone, 3-dest=12,
-2-dest=155; narrowing the window 30->7 days recovers (0->4). The shed is
-deterministic, so retrying the same query never helps — splitting the airport set
-into cheaper per-(origin, destination) sub-searches and merging their grids does.
+Matrix's calendar engine silently UNDER-REPORTS a multi-airport grid once the
+query exceeds its per-query compute budget — and the failure is not all-or-
+nothing. Cost grows roughly as (origins x destinations) x (departure days) x
+(routing complexity); above the (load-dependent) ceiling Matrix returns *fewer*
+solutions, degrading toward zero, with no error or warning. Measured for
+MIA<->[...] +LH+ over a 30-day window: VIE=155 / PAR=27 / FCO=24 / MAD=17 alone,
+but 2-dest=155, 3-dest=12, 4-dest=0 — and even the non-empty 4-dest=155 is short
+of the true union (~223). So a combined multi-airport result can't be trusted
+even when it isn't empty; the only query guaranteed to fully price is a single
+(origin, destination).
 
-`split_calendar_search` produces one sub-search per (outbound origin, outbound
-destination) pair, mirrored onto the return leg. `merge_calendar_results`
-re-assembles a single grid that is the per-departure-day lowest fare across
-destinations — exactly what the combined grid represents — and routes it back
-through `CalendarResult.from_api` so it renders through the normal path.
+We therefore always run a multi-airport calendar as one sub-search per pair and
+merge. `split_calendar_search` produces those sub-searches (mirrored onto the
+return leg); `merge_calendar_results` re-assembles a single grid that is the
+per-departure-day lowest fare across destinations — what the combined grid is
+*supposed* to be — routed back through `CalendarResult.from_api` so it renders
+through the normal path. `is_empty_calendar` distinguishes a genuine no-flights
+result (every sub-search empty) from a recovered one.
 """
 
 from __future__ import annotations
