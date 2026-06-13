@@ -78,6 +78,20 @@ choice that fits the rest of the stack — don't substitute.
 - **New SPA captures go in `research/`** (gitignored). Use
   `research/record_user_session.py` to drive a real browser, capture a wire
   body, drop it into `tests/fixtures/`, and write a reconstruction test.
+- **Driving the live Matrix UI requires a stealth browser — headless is
+  blocked.** `matrix.itasoftware.com` runs Google's `waa-pa` bot-attestation;
+  a headless Chromium loads the SPA shell but the search never fires (the grid
+  just spins). Use the **patchright real-Chrome path** — the same pattern as
+  `pp/auth.py:login_via_browser`:
+  `p.chromium.launch_persistent_context(channel="chrome", headless=False,
+  user_data_dir=...)` under `uv run --with patchright` (one-time
+  `uvx --from patchright patchright install chrome`). Pre-fill the search by
+  navigating to a `links.matrix_deep_link(search)` URL — no manual clicking
+  needed. Capture gotcha: the SPA routes its search through
+  `content-alkalicore-pa.googleapis.com/batch` (multipart), **not** the direct
+  `content-alkalimatrix-pa.googleapis.com/v1/search` our client posts to — match
+  the `batch` host. (And note: a multi-airport + routing calendar can spin
+  >135s even in the real UI — quirk #7's compute-budget wall is real there too.)
 - **Never commit anything under `research/`.** It's the paper trail;
   `tests/fixtures/` is the tracked canonical set.
 - **No hardcoded credentials** — `_api_key.py` does runtime resolution.
