@@ -430,6 +430,28 @@ def _fmt_miles(n: int) -> str:
     return f"{n / 1000:.1f}k" if n >= _MILES_K_THRESHOLD else str(n)
 
 
+def _fmt_stops(n: int) -> str:
+    """Glanceable stop count for the award tables: 'nonstop' vs 'N stop(s)'.
+
+    The single most important attribute when comparing redemptions is whether
+    an award is nonstop — and it was invisible in the table before (work-72syf).
+    """
+    if n <= 0:
+        return "nonstop"
+    return f"{n} stop" + ("s" if n > 1 else "")
+
+
+def _fmt_iso_compact(s: str) -> str:
+    """'2026-08-15T13:53' → 'Aug15 13:53'. Compact so the column stops getting
+    ellipsized to '→2026-0…'. Passes the raw (minute-trimmed) value through
+    when it can't be parsed."""
+    try:
+        dt = datetime.fromisoformat(s[:16])
+    except ValueError:
+        return s[:16]
+    return f"{dt:%b%d %H:%M}"
+
+
 def _best_award_for_cabin(
     award_flights: list[AwardFlight], want_cabin: str
 ) -> tuple[int, float, str, list[str]] | None:
@@ -540,24 +562,28 @@ def _render_matches(
         show_header=True,
         header_style="bold cyan",
     )
-    t.add_column("flight")
+    t.add_column("flight", overflow="fold")
+    t.add_column("stops")
     t.add_column("price", justify="right")
     for cab in cabin_list:
         t.add_column(cab, justify="right")
     if show_funding:
-        t.add_column("funded by")
+        t.add_column("funded by", overflow="fold")
 
     for m in matches:
         itn = m.itinerary.itinerary
         if not itn or not itn.slices or len(itn.slices) <= slice_index:
             continue
         s = itn.slices[slice_index]
-        flight = (s.flights or ["?"])[0]
+        # Show every marketing flight# in the slice (not just the first) so a
+        # connection is visible; `stops` makes nonstop-vs-connection explicit.
+        flight = "/".join(s.flights) if s.flights else "?"
+        stops_n = len(s.stops) if s.stops else max(len(s.flights) - 1, 0)
         cash_str = m.itinerary.price or "—"
         empty: Mapping[str, float] = {}
         per_cabin_cash = cash_per_cabin.get(id(m.itinerary), empty) if cash_per_cabin else empty
 
-        cells = [flight, cash_str]
+        cells = [flight, _fmt_stops(stops_n), cash_str]
         for cab in cabin_list:
             # CPM is shown only when we have cash for THIS cabin specifically
             # — otherwise the value would mix cabins (e.g. business miles vs
@@ -577,7 +603,8 @@ def _render_pp_only(awards: list[AwardFlight]) -> None:
     """One leg's provider-merged awards as a flat table. Multi-provider
     today is degenerate (PP only); the table just shows `provider | program`
     so when seats.aero lands the surface doesn't need to change."""
-    rows: list[tuple[str, str, str, str, str, str, int, float, str]] = []
+    # (source, program, flight, route, num_connections, departs, cabin, miles, tax, funded)
+    rows: list[tuple[str, str, str, str, int, str, str, int, float, str]] = []
     for af in awards:
         for c in af.cabins:
             if c.miles <= 0:
@@ -588,6 +615,7 @@ def _render_pp_only(awards: list[AwardFlight]) -> None:
                     af.program,
                     af.flight_number,
                     f"{af.origin}→{af.destination}",
+                    af.num_connections,
                     af.departure[:16],
                     c.cabin,
                     c.miles,
@@ -595,13 +623,35 @@ def _render_pp_only(awards: list[AwardFlight]) -> None:
                     ", ".join(af.funding_banks),
                 ),
             )
-    rows.sort(key=lambda r: (r[4], r[6]))  # by departure, then miles
+    rows.sort(key=lambda r: (r[5], r[7]))  # by departure, then miles
     t = Table(title="Award availability", show_header=True, header_style="bold cyan")
-    cols = ("source", "program", "flight", "route", "departs", "cabin", "miles", "tax", "funded by")
-    for col in cols:
-        t.add_column(col)
+    # `fold` (not the default ellipsis) on the wordy columns so program/route
+    # stay legible instead of truncating to 'Ameri…' / 'MCO→M…'. `source` is a
+    # fixed short token ("PointsPath"/"seats.aero") — leave it unfolded so it
+    # doesn't wrap awkwardly under width pressure.
+    t.add_column("source")
+    t.add_column("program", overflow="fold")
+    t.add_column("flight")
+    t.add_column("route", overflow="fold")
+    t.add_column("stops")
+    t.add_column("departs")
+    t.add_column("cabin")
+    t.add_column("miles", justify="right")
+    t.add_column("tax", justify="right")
+    t.add_column("funded by", overflow="fold")
     for r in rows:
-        t.add_row(r[0], r[1], r[2], r[3], r[4], r[5], _fmt_miles(r[6]), f"${r[7]:.0f}", r[8])
+        t.add_row(
+            r[0],
+            r[1],
+            r[2],
+            r[3],
+            _fmt_stops(r[4]),
+            _fmt_iso_compact(r[5]),
+            r[6],
+            _fmt_miles(r[7]),
+            f"${r[8]:.0f}",
+            r[9],
+        )
     console.print(t)
 
 

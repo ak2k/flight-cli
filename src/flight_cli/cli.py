@@ -607,6 +607,59 @@ def _emit_urls(
 # ─────────────────────────── result renderers ──────────────────────────────
 
 
+def _parse_iso(s: str) -> datetime | None:
+    """Best-effort parse of a slice timestamp ("YYYY-MM-DDTHH:MM[:SS]")."""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        try:
+            return datetime.fromisoformat(s[:16])
+        except ValueError:
+            return None
+
+
+def _fmt_slice_times(dep: str, arr: str) -> str:
+    """Compact, unambiguous departure→arrival for an itinerary cell.
+
+    Shows the departure date once, the two clock times, and a `+Nd` marker
+    when the arrival lands on a later calendar day. Without the marker an
+    overnight return reads as "arrives before it departs" once the cell is
+    squeezed (work-72syf). Falls back to raw ISO — which still carries both
+    dates — when a timestamp can't be parsed.
+    """
+    d = _parse_iso(dep)
+    a = _parse_iso(arr)
+    if d is None or a is None:
+        return f"{dep[:16]}→{arr[:16]}"
+    day_off = (a.date() - d.date()).days
+    suffix = f" +{day_off}d" if day_off > 0 else (f" {day_off}d" if day_off < 0 else "")
+    return f"{d:%b%d %H:%M}→{a:%H:%M}{suffix}"
+
+
+def _fmt_slice_route(s: Slice) -> str:
+    """Origin→destination threading any intermediate connection airports, so a
+    1-stop itinerary shows its connection city instead of hiding it."""
+    o = (s.origin.code if s.origin else None) or "?"
+    d = (s.destination.code if s.destination else None) or "?"
+    vias = [e.code for e in s.stops if e and e.code]
+    return "→".join([o, *vias, d])
+
+
+def _fmt_slice_cell(s: Slice) -> str:
+    """One itinerary slice as a table cell: route (with connection cities),
+    flight numbers, compact unambiguous times, duration, then per-leg legroom
+    lines. Shared by the single-cabin and multi-cabin itinerary tables."""
+    dur_min = s.duration or 0
+    dur = f"{dur_min // 60}h{dur_min % 60:02d}m" if dur_min else ""
+    flights = "/".join(s.flights) or "?"
+    times = _fmt_slice_times(s.departure or "", s.arrival or "")
+    head = " ".join(p for p in (_fmt_slice_route(s), flights, times, dur) if p)
+    tail = _fmt_legroom_lines(s)
+    return f"{head}\n{tail}" if tail else head
+
+
 def _render_search(res: SearchResult) -> None:
     if res.solution_count == 0:
         console.print("[yellow]No solutions returned.[/]")
@@ -650,19 +703,8 @@ def _render_search(res: SearchResult) -> None:
         slcs: list[Slice] = itn.slices if itn else []
         it_carriers = ",".join((c.code or "?") for c in (itn.carriers if itn else []))
 
-        def _fmt(s: Slice) -> str:
-            dep = s.departure or ""
-            arr = s.arrival or ""
-            dur_min = s.duration or 0
-            dur = f"{dur_min // 60}h{dur_min % 60:02d}m" if dur_min else ""
-            o = (s.origin.code if s.origin else None) or "?"
-            d = (s.destination.code if s.destination else None) or "?"
-            head = f"{o}→{d} {'/'.join(s.flights) or '?'} {dep[:16]}→{arr[:16]} {dur}"
-            tail = _fmt_legroom_lines(s)
-            return f"{head}\n{tail}" if tail else head
-
-        out = _fmt(slcs[0]) if slcs else "—"
-        ret = _fmt(slcs[1]) if len(slcs) > 1 else "—"
+        out = _fmt_slice_cell(slcs[0]) if slcs else "—"
+        ret = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
         st.add_row(str(i), _amount(it.price), it_carriers or "?", out, ret)
     console.print(st)
 
@@ -1140,19 +1182,8 @@ def _render_multi_cabin_search(
         slcs: list[Slice] = itn.slices if itn else []
         carriers = ",".join((c.code or "?") for c in (itn.carriers if itn else []))
 
-        def _fmt(s: Slice) -> str:
-            dep = s.departure or ""
-            arr = s.arrival or ""
-            dur_min = s.duration or 0
-            dur = f"{dur_min // 60}h{dur_min % 60:02d}m" if dur_min else ""
-            o = (s.origin.code if s.origin else None) or "?"
-            d = (s.destination.code if s.destination else None) or "?"
-            head = f"{o}→{d} {'/'.join(s.flights) or '?'} {dep[:16]}→{arr[:16]} {dur}"
-            tail = _fmt_legroom_lines(s)
-            return f"{head}\n{tail}" if tail else head
-
-        out_cell = _fmt(slcs[0]) if slcs else "—"
-        ret_cell = _fmt(slcs[1]) if len(slcs) > 1 else "—"
+        out_cell = _fmt_slice_cell(slcs[0]) if slcs else "—"
+        ret_cell = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
         price_cells = [_amount(row.prices.get(cab)) for cab in cabins]
         t.add_row(str(i), carriers or "?", out_cell, ret_cell, *price_cells)
     console.print(t)
