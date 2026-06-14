@@ -22,7 +22,7 @@ import pathlib
 import time
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from fli.models import (  # pyright: ignore[reportMissingTypeStubs]
     FlightLeg,
@@ -85,6 +85,20 @@ _LEG_PITCH_IDX = 14  # int (inches)
 _LEG_CABIN_IDX = 16  # int enum (see _CABIN)
 _LEG_AIRCRAFT_IDX = 17  # string
 
+# Carrier identity (distinct from amenities). A leg tuple separates the OPERATING
+# carrier (fl[22], the metal) from the MARKETING/booking carrier (fl[15], what a
+# passenger books under). fl[18] is truthy when the operating carrier self-markets
+# under its own code; falsy on operated-for (regional feeder) legs. Matrix surfaces
+# the marketing identity too, so reading the booking carrier here keeps flight
+# numbers consistent across backends.
+_LEG_MARKETING_IDX = 15  # list[[code, number, _, name]] of selling carriers (None if none)
+_LEG_SELF_MARKETED_IDX = 18  # truthy -> operating carrier markets under its own code
+_LEG_OPERATING_IDX = 22  # [code, number, _, name] of the operating carrier
+# Field layout within a [code, number, _, name] carrier tuple.
+_CARRIER_CODE_IDX = 0
+_CARRIER_NUMBER_IDX = 1
+_CARRIER_NAME_IDX = 3
+
 _LEGROOM_CLASS: dict[int, str] = {
     1: "AVERAGE",
     2: "BELOW",
@@ -109,6 +123,12 @@ class LegAmenities:
     wifi: str | None = None  # "free" | "paid" | None (no ground-internet wifi)
     power: str | None = None
     video: str | None = None
+    # Carrier identity beyond fli's FlightLeg (which now carries the booking
+    # carrier). Operating carrier drives the "operated by" label + the `O:`
+    # routing filter; the marketing-carrier set drives marketing-carrier matches.
+    operating_carrier: str | None = None  # IATA code of the metal, e.g. "EN"
+    operating_carrier_name: str | None = None  # e.g. "Air Dolomiti"
+    marketing_carriers: tuple[str, ...] = ()  # IATA codes from fl[15] (selling carriers)
 
 
 def _decode_power(amenities: Any) -> str | None:
@@ -199,16 +219,67 @@ def _parse_pitch(raw: Any) -> int | None:
     return None
 
 
+def _carrier_entry(raw: Any) -> tuple[str | None, str | None, str | None]:
+    """(code, number, name) from a `[code, number, _, name]` carrier tuple.
+    All-None on any malformed shape — Google's response drifts."""
+    if not isinstance(raw, list):
+        return None, None, None
+    items = cast("list[Any]", raw)
+    if len(items) <= _CARRIER_NUMBER_IDX:  # a valid entry has at least code + number
+        return None, None, None
+    code = items[_CARRIER_CODE_IDX]
+    number = items[_CARRIER_NUMBER_IDX]
+    name = items[_CARRIER_NAME_IDX] if len(items) > _CARRIER_NAME_IDX else None
+    return (
+        code if isinstance(code, str) else None,
+        number if isinstance(number, str) else None,
+        name if isinstance(name, str) else None,
+    )
+
+
+def _marketing_codes(fl: list[Any]) -> tuple[str, ...]:
+    """IATA codes of the marketing (selling) carriers from fl[15], in order."""
+    raw = fl[_LEG_MARKETING_IDX] if len(fl) > _LEG_MARKETING_IDX else None
+    if not isinstance(raw, list):
+        return ()
+    entries = cast("list[Any]", raw)
+    return tuple(code for entry in entries if (code := _carrier_entry(entry)[0]))
+
+
+def _resolve_booking(fl: list[Any]) -> tuple[str | None, str | None]:
+    """The (carrier code, flight number) a passenger books under.
+
+    On an operated-for leg (a regional flies metal sold under a mainline's code:
+    fl[15] present AND fl[18] falsy) that's the marketing carrier (fl[15][0]).
+    Otherwise the operating carrier self-markets (fl[18] truthy) or there's no
+    codeshare (fl[15] empty), so it's the operating carrier (fl[22]). Matrix
+    surfaces this same marketing identity, so aligning here lets the cross-backend
+    flight#+date join fire on codeshares. Ground-truthed 2026-06-13 vs GF's own
+    headline: OS36 (fl18=[true] -> Austrian), Air Dolomiti EN8858 (fl18=null ->
+    Lufthansa LH9498), SWISS LX39 (no fl15 -> SWISS)."""
+    marketing = fl[_LEG_MARKETING_IDX] if len(fl) > _LEG_MARKETING_IDX else None
+    self_marketed = bool(fl[_LEG_SELF_MARKETED_IDX]) if len(fl) > _LEG_SELF_MARKETED_IDX else False
+    if isinstance(marketing, list) and marketing and not self_marketed:
+        code, number, _ = _carrier_entry(marketing[0])
+        if code and number:
+            return code, number
+    operating = fl[_LEG_OPERATING_IDX] if len(fl) > _LEG_OPERATING_IDX else None
+    code, number, _ = _carrier_entry(operating)
+    return code, number
+
+
 def _parse_leg_amenities(fl: list[Any]) -> LegAmenities:
-    """Defensive read of indices 12-17 from a leg tuple. Returns an
-    all-None LegAmenities if any single field is missing or wrong type —
-    Google's response shape drifts and a partial extract is better than
-    dropping the whole flight."""
+    """Defensive read of a leg tuple: amenities (indices 12-17) plus carrier
+    identity (operating fl[22], marketing fl[15]). Returns an all-None/empty
+    LegAmenities for any field that's missing or the wrong type — Google's
+    response shape drifts and a partial extract beats dropping the flight."""
     amenities = fl[_LEG_AMENITIES_IDX] if len(fl) > _LEG_AMENITIES_IDX else None
     legroom_raw = fl[_LEG_LEGROOM_CLASS_IDX] if len(fl) > _LEG_LEGROOM_CLASS_IDX else None
     pitch_raw = fl[_LEG_PITCH_IDX] if len(fl) > _LEG_PITCH_IDX else None
     cabin_raw = fl[_LEG_CABIN_IDX] if len(fl) > _LEG_CABIN_IDX else None
     aircraft = fl[_LEG_AIRCRAFT_IDX] if len(fl) > _LEG_AIRCRAFT_IDX else None
+    operating_raw = fl[_LEG_OPERATING_IDX] if len(fl) > _LEG_OPERATING_IDX else None
+    op_code, _, op_name = _carrier_entry(operating_raw)
     return LegAmenities(
         aircraft=aircraft if isinstance(aircraft, str) and aircraft else None,
         pitch_inches=_parse_pitch(pitch_raw),
@@ -217,6 +288,9 @@ def _parse_leg_amenities(fl: list[Any]) -> LegAmenities:
         wifi=_decode_wifi(amenities),
         power=_decode_power(amenities),
         video=_decode_video(amenities),
+        operating_carrier=op_code,
+        operating_carrier_name=op_name,
+        marketing_carriers=_marketing_codes(fl),
     )
 
 
@@ -246,21 +320,32 @@ def _parse_flight_with_id(data: list[Any]) -> GFlightWithId:
         currency=currency,
         duration=data[0][9],
         stops=len(leg_tuples) - 1,
-        legs=[
-            FlightLeg(
-                airline=SearchFlights._parse_airline(fl[22][0]),  # pyright: ignore[reportPrivateUsage]
-                flight_number=fl[22][1],
-                departure_airport=SearchFlights._parse_airport(fl[3]),  # pyright: ignore[reportPrivateUsage]
-                arrival_airport=SearchFlights._parse_airport(fl[6]),  # pyright: ignore[reportPrivateUsage]
-                departure_datetime=SearchFlights._parse_datetime(fl[20], fl[8]),  # pyright: ignore[reportPrivateUsage]
-                arrival_datetime=SearchFlights._parse_datetime(fl[21], fl[10]),  # pyright: ignore[reportPrivateUsage]
-                duration=fl[11],
-            )
-            for fl in leg_tuples
-        ],
+        legs=[_flight_leg(fl) for fl in leg_tuples],
     )
     amenities = [_parse_leg_amenities(fl) for fl in leg_tuples]
     return GFlightWithId(flight=flight, flight_id=flight_id, amenities=amenities)
+
+
+def _flight_leg(fl: list[Any]) -> FlightLeg:
+    """Build fli's FlightLeg using the BOOKING carrier (see `_resolve_booking`)
+    as airline/flight_number — not the operating carrier — so the surfaced flight
+    matches what a passenger books (and what Matrix returns). The operating
+    carrier is preserved separately on `LegAmenities`."""
+    book_code, book_number = _resolve_booking(fl)
+    if book_code is None:
+        # No operating or marketing carrier in the tuple — malformed leg. Raise
+        # so _one_call's except skips this flight, matching the prior behaviour
+        # of indexing a missing fl[22][0].
+        raise ValueError("leg tuple missing carrier identity")
+    return FlightLeg(
+        airline=SearchFlights._parse_airline(book_code),  # pyright: ignore[reportPrivateUsage]
+        flight_number=book_number or "",
+        departure_airport=SearchFlights._parse_airport(fl[3]),  # pyright: ignore[reportPrivateUsage]
+        arrival_airport=SearchFlights._parse_airport(fl[6]),  # pyright: ignore[reportPrivateUsage]
+        departure_datetime=SearchFlights._parse_datetime(fl[20], fl[8]),  # pyright: ignore[reportPrivateUsage]
+        arrival_datetime=SearchFlights._parse_datetime(fl[21], fl[10]),  # pyright: ignore[reportPrivateUsage]
+        duration=fl[11],
+    )
 
 
 def _cookie_path() -> pathlib.Path:
