@@ -1017,6 +1017,69 @@ def _run_matrix_path(
     _emit_urls(search, matrix_url=matrix_url, google_url=google_url, result=res, pick=pick)
 
 
+def _gflight_results(legs: tuple[Leg, ...], opts: SearchOptions, top_n: int) -> list[Any]:
+    """Query Google Flights for `legs`, honoring routing/extension: Tier-1
+    predicates narrow the fli query natively, the Tier-2 post-filter drops
+    violating solutions. Returns the (filtered) raw fli result list.
+
+    `search` applies the same routing/extension to every leg, so the first leg's
+    constraints cover the trip for the native query; the post-filter is per slice.
+    """
+    from ._gf_postfilter import surviving_indices  # noqa: PLC0415
+    from ._gflight_ids import search_with_ids  # noqa: PLC0415
+    from .fli_bridge import apply_gf_native_filters, to_fli_filter  # noqa: PLC0415
+    from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
+    from .routing_predicates import classify  # noqa: PLC0415
+
+    fli_filter = to_fli_filter(SpecificDateSearch(legs=legs, options=opts))
+    out_constraints = classify(legs[0].route_language, legs[0].extension) if legs else None
+    if out_constraints and out_constraints.predicates:
+        apply_gf_native_filters(fli_filter, out_constraints.predicates)
+    results: list[Any] = search_with_ids(fli_filter, top_n=top_n) or []
+    per_slice_preds = [list(classify(lg.route_language, lg.extension).predicates) for lg in legs]
+    if results and any(per_slice_preds):
+        keep = set(surviving_indices(fli_results_to_search_result(results), per_slice_preds))
+        results = [r for i, r in enumerate(results) if i in keep]
+    return results
+
+
+_MERGE_SOURCE_TAG = {"both": "GF+MX", "matrix": "MX", "gf": "GF"}
+
+
+def _render_merged(rows: list[Any], *, legs: tuple[Leg, ...], top_n: int) -> None:
+    """Render the reconciled GF+Matrix view: one row per itinerary with the GF
+    and Matrix prices attributed side-by-side and a source tag."""
+    origin = legs[0].origins[0] if legs[0].origins else "?"
+    destination = legs[0].destinations[0] if legs[0].destinations else "?"
+    has_return = len(legs) >= _ROUND_TRIP_LEGS
+    t = Table(
+        title=f"Google Flights + Matrix · {origin}→{destination}"
+        + (" + return" if has_return else ""),
+        show_header=True,
+        header_style="bold green",
+    )
+    t.add_column("#", justify="right")
+    t.add_column("src")
+    t.add_column("Matrix", justify="right")
+    t.add_column("Google", justify="right")
+    t.add_column("outbound")
+    t.add_column("return")
+    for i, row in enumerate(rows[:top_n], 1):
+        itn = row.itinerary.itinerary
+        slcs: list[Slice] = itn.slices if itn else []
+        out = _fmt_slice_cell(slcs[0]) if slcs else "—"
+        ret = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
+        t.add_row(
+            str(i),
+            _MERGE_SOURCE_TAG.get(row.source, row.source),
+            _amount(row.matrix_price),
+            _amount(row.gf_price),
+            out,
+            ret,
+        )
+    console.print(t)
+
+
 def _run_gflight_path(
     *,
     legs: tuple[Leg, ...],
@@ -1035,47 +1098,17 @@ def _run_gflight_path(
     the existing PP matcher + renderer reuse cleanly. PP runs on the same
     (origin, dest, date) per leg as the matrix path.
     """
-    # fli is heavy (selenium/selectolax); lazy-import so the rest of flight_cli
-    # doesn't pay the startup cost when not used. `search_with_ids` wraps fli's
-    # encoder + client but parses the response ourselves to capture the opaque
-    # per-flight ID (data[0][17]) — that's what PP's enableGoogleFlightMatching
-    # joins against to produce matchedGoogleFlightId in its response.
-    from ._gf_postfilter import surviving_indices  # noqa: PLC0415
-    from ._gflight_ids import search_with_ids  # noqa: PLC0415
-    from .fli_bridge import apply_gf_native_filters, to_fli_filter  # noqa: PLC0415
     from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
-    from .routing_predicates import classify  # noqa: PLC0415
 
-    search = SpecificDateSearch(legs=legs, options=opts)
-    fli_filter = to_fli_filter(search)
-    # `search` applies the same routing/extension to every leg, so the first leg's
-    # constraints cover the trip. Native filters narrow the GF query (Tier 1); the
-    # post-filter below is the correctness backstop and honors Tier-2 predicates
-    # GF can't request (operating carrier, -CODESHARE, marketing exclude, ...).
-    out_constraints = classify(legs[0].route_language, legs[0].extension) if legs else None
-    if out_constraints and out_constraints.predicates:
-        apply_gf_native_filters(fli_filter, out_constraints.predicates)
     try:
-        # Returns GFlightWithId | tuple[GFlightWithId, ...]. The .flight attribute
-        # exposes fli's FlightResult; .flight_id is Google's opaque ID.
-        results: list[Any] = search_with_ids(fli_filter, top_n=top_n) or []
+        results = _gflight_results(legs, opts, top_n)
     except Exception as e:
         err.print(f"[red]Google Flights query failed:[/] {e}")
         raise typer.Exit(1) from e
 
     if not results:
-        console.print("[yellow]Google Flights returned no results.[/]")
+        console.print("[yellow]Google Flights: no results (or none matched the routing).[/]")
         return
-
-    # Drop solutions that violate the routing/extension (per slice). Filter the
-    # raw results and the adapted SearchResult in lockstep (1:1, same order).
-    per_slice_preds = [list(classify(lg.route_language, lg.extension).predicates) for lg in legs]
-    if any(per_slice_preds):
-        keep = set(surviving_indices(fli_results_to_search_result(results), per_slice_preds))
-        results = [r for i, r in enumerate(results) if i in keep]
-        if not results:
-            console.print("[yellow]No Google Flights results matched the routing constraints.[/]")
-            return
 
     # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType,
     #                 reportUnknownArgumentType, reportUnknownParameterType]
@@ -1120,6 +1153,99 @@ def _run_gflight_path(
         google_url=google_url,
         result=sr,
         pick=pick,
+    )
+
+
+def _run_enriched_path(
+    *,
+    legs: tuple[Leg, ...],
+    opts: SearchOptions,
+    top_n: int,
+    run_pp: bool,
+    sel: ProviderSelection | None,
+    matrix_url: bool,
+    google_url: bool,
+    pick: int | None,
+    rps: float,
+    impersonate: str,
+    no_cache: bool,
+) -> None:
+    """GF-serveable query, progressive: dispatch Google Flights + Matrix
+    concurrently under one event loop, paint GF immediately (~1s), then repaint a
+    reconciled GF+Matrix table once Matrix lands (~45s). PP/awards + URLs run on
+    the Matrix (authoritative) result. `--fast` skips this for GF-only speed."""
+    from ._enrich import merge_results  # noqa: PLC0415
+    from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
+
+    matrix_search = SpecificDateSearch(legs=legs, options=opts)
+    awards_only = sel.awards_only if sel is not None else False
+    state: dict[str, Any] = {}
+
+    async def _matrix(c: MatrixClient) -> None:
+        try:
+            state["matrix"] = await c.execute(matrix_search, cache=not no_cache)
+        except MatrixApiError as e:
+            state["matrix_err"] = e
+
+    async def _go() -> None:
+        async with (
+            MatrixClient(rps=rps, impersonate=impersonate) as c,
+            anyio.create_task_group() as tg,
+        ):
+            tg.start_soon(_matrix, c)
+            # Google Flights is sync (curl_cffi) — run it in a worker thread so the
+            # Matrix request progresses concurrently on the event loop.
+            try:
+                gf = await anyio.to_thread.run_sync(_gflight_results, legs, opts, top_n)
+            except Exception as e:  # noqa: BLE001 - reported below; Matrix may still succeed
+                state["gf_err"] = e
+                gf = []
+            state["gf"] = gf
+            # First paint, while Matrix is still in flight.
+            if gf and not awards_only:
+                _render_gflight_table(gf, legs=legs, top_n=top_n)
+                console.print("[dim]…refining with Matrix (authoritative fares)…[/]")
+            elif not gf and "gf_err" not in state:
+                console.print("[yellow]Google Flights: no results; awaiting Matrix…[/]")
+
+    anyio.run(_go)
+
+    gf: list[Any] = state.get("gf") or []
+    if "gf_err" in state:
+        err.print(f"[yellow]Google Flights query failed:[/] {state['gf_err']}")
+    matrix_res = state.get("matrix")
+    if matrix_res is None:
+        # Matrix failed; the GF table (if any) was already painted.
+        e = state.get("matrix_err")
+        if e is not None:
+            err.print(f"[red]Matrix returned an error ({e.kind}):[/] {e.message}")
+        if not gf:
+            raise typer.Exit(1)
+        return
+    matrix_res = cast("SearchResult", matrix_res)
+
+    # Repaint: reconciled GF + Matrix, prices attributed.
+    if not awards_only:
+        merged = merge_results(fli_results_to_search_result(gf), matrix_res)
+        _render_merged(merged, legs=legs, top_n=top_n)
+
+    if run_pp:
+        p = opts.pax
+        run_pp_for_search(
+            matrix_res,
+            legs=_build_pp_legs(legs),
+            num_passengers=p.adults + p.children + p.seniors + p.youth,
+            airlines=sel.pp_airlines() if sel is not None else None,
+            cabins=sel.pp_cabins() if sel is not None else None,
+            pp_only=awards_only,
+            json_out=False,
+            provider_filter=sel.provider_filter if sel is not None else None,
+            seats_sources=sel.seats_sources() if sel is not None else None,
+            cash_per_cabin=_cash_per_cabin_single(matrix_res, opts.cabin),
+        )
+
+    _emit_urls(
+        matrix_search, matrix_url=matrix_url, google_url=google_url, result=matrix_res, pick=pick
     )
 
 
@@ -1934,6 +2060,15 @@ def search(
         rich_help_panel=_GROUP_OUTPUT,
     ),
     no_cache: bool = _NO_CACHE_OPT,
+    fast: bool = typer.Option(
+        False,
+        "--fast/--enrich",
+        "--no-enrich/--no-fast",
+        help="Skip Matrix enrichment: show only the fast Google Flights result "
+        "(~1s) instead of also reconciling against Matrix. Default: enrich when "
+        "Google Flights can serve the query.",
+        rich_help_panel=_GROUP_BACKEND,
+    ),
     providers: str | None = typer.Option(
         None,
         "--providers",
@@ -2105,6 +2240,24 @@ def search(
         return
 
     if resolved == BACKEND_GFLIGHT:
+        # GF can serve this query — paint it fast (~1s), then enrich against
+        # Matrix (authoritative) and repaint a merged table. `--fast` (or JSON
+        # output, which wants a single stable shape) takes the GF-only path.
+        if not fast and not json_out:
+            _run_enriched_path(
+                legs=legs,
+                opts=opts,
+                top_n=page_size,
+                run_pp=run_awards,
+                sel=sel,
+                matrix_url=matrix_url,
+                google_url=google_url,
+                pick=pick,
+                rps=_resolve_rps(rps),
+                impersonate=_resolve_impersonate(impersonate),
+                no_cache=_resolve_no_cache(no_cache),
+            )
+            return
         _run_gflight_path(
             legs=legs,
             opts=opts,
