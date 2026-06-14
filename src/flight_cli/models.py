@@ -98,6 +98,12 @@ class LegInfo(_Loose):
     wifi: str | None = None  # "free" | "paid" | None (no ground-internet wifi)
     power: str | None = None  # "plug" | "usb" | None
     video: str | None = None  # "stream" | "ondemand" | None
+    # Carrier identity for the routing post-filter (gflight only; Matrix legs
+    # leave these empty). `Slice.flights[i]` carries the booking carrier+number;
+    # these add the operating carrier (fl[22]) and the marketing/codeshare set
+    # (fl[15]) so `O:` / `-CODESHARE` / marketing-exclude can be evaluated.
+    operating_carrier: str | None = None  # IATA code of the metal, e.g. "EN"
+    marketing_carriers: list[str] = Field(default_factory=list[str])  # selling carrier codes
 
 
 class Slice(_Loose):
