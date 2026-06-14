@@ -1098,10 +1098,17 @@ def _run_gflight_path(
     the existing PP matcher + renderer reuse cleanly. PP runs on the same
     (origin, dest, date) per leg as the matrix path.
     """
+    from ._gflight_ids import GfThrottledError  # noqa: PLC0415
     from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
 
     try:
         results = _gflight_results(legs, opts, top_n)
+    except GfThrottledError as e:
+        err.print(
+            "[yellow]Google Flights is rate-limiting this IP.[/] Wait a moment and "
+            "retry, or use [bold]--backend matrix[/]."
+        )
+        raise typer.Exit(1) from e
     except Exception as e:
         err.print(f"[red]Google Flights query failed:[/] {e}")
         raise typer.Exit(1) from e
@@ -1214,7 +1221,13 @@ def _run_enriched_path(
 
     gf: list[Any] = state.get("gf") or []
     if "gf_err" in state:
-        err.print(f"[yellow]Google Flights query failed:[/] {state['gf_err']}")
+        from ._gflight_ids import GfThrottledError  # noqa: PLC0415
+
+        e = state["gf_err"]
+        if isinstance(e, GfThrottledError):
+            console.print("[dim]Google Flights rate-limited — showing Matrix only.[/]")
+        else:
+            err.print(f"[yellow]Google Flights query failed:[/] {e}")
     matrix_res = state.get("matrix")
     if matrix_res is None:
         # Matrix failed; the GF table (if any) was already painted.

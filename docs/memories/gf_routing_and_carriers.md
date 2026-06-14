@@ -87,3 +87,40 @@ sellable as LH matches `LH+` even if its primary number is UA). To keep that
 honest, `_leg_display` relabels a codeshare match to the matched identity —
 `LH9403 (op UA58)` under `--routing LH+` — using `marketing_flights` +
 `_match_carriers` (marketing-include filters only).
+
+## GF date-grid (calendar) — `fli.search.dates.SearchDates`
+
+Google's `GetCalendarGraph` RPC returns a whole date window's cheapest-per-date
+prices in ONE call, and `DateSearchFilters` carries the full Tier-1 filter set
+(airlines, stops, layover, max_duration, cabin, times, price). Verified
+2026-06-14: `airlines=LH` / `stops=NON_STOP` change the grid prices, so Tier-1
+filters ARE honored. It returns `{date, price}` only — **no itineraries** — so
+Tier-2 (`O:`/`-CODESHARE`/`~UA`/flight#) can't be post-filtered on a grid; those
+calendars go to Matrix. This is the throttle-friendly calendar primitive (1 call
+vs a per-date fan-out), so we prefer it; **no GF fan-out is needed** (Matrix's
+`_calendar_split` already fans out for Tier-2 / multi-airport).
+
+**fli bug (bd work-bcdex):** `SearchDates.search()` splits windows >61 days into
+chunks but rebuilds `DateSearchFilters` per chunk copying only
+trip_type/passenger_info/segments/stops/seat_type/airlines/dates/duration —
+**dropping `layover_restrictions`/`max_duration`/`price_limit`/`emissions`/`bags`
+on chunks 2+.** When wiring the date-grid calendar, don't use fli's chunking: cap
+each call to ≤61 days and chunk ourselves with the full filter set (or keep
+windows ≤61d). Regression-test it; consider an upstream fix.
+
+## GF throttle (per-IP, dynamic) — handle reactively, not with a fixed cap
+
+Measured 2026-06-14 (instrumented, distinguishing genuine `code-13` from
+transport errors): the GF RPC throttle is **per-IP and dynamic**, with two
+limits — a per-second burst cap (~3–4 at ~10/s, but it floated as high as 30 a
+run earlier) and a rolling allowance (~25–30 calls per ~2–3 min ≈ 10–12/min) —
+and **fast recovery** (the call right after a block often returns data). Because
+the ceiling moves, a fixed rate limiter is the wrong tool. The design is a
+closed loop: `_classify` detects a real block (HTTP 200 + `ErrorResponse`/code-13
+body, vs a transport exception, vs cold-session empty), and `_one_call_with_retry`
+backs off + retries on a genuine block (typed `GfThrottledError` on exhaustion).
+One-shot `flight` processes can't share a proactive budget, but they DO share the
+`code-13` signal, so per-process reactive backoff self-regulates even across
+concurrent invocations. In the woven flow a persistent GF throttle degrades to
+Matrix-only rather than erroring. (Datacenter VPN exits — e.g. PIA — are
+pre-flagged and blocked on sight; only residential IPs work.)

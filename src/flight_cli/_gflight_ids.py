@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import pathlib
+import random
 import time
 from copy import deepcopy
 from dataclasses import dataclass
@@ -51,6 +52,32 @@ _BASE_URL = SearchFlights.BASE_URL
 # session. A FRESH session does NOT help — it stays cold — so we retry in place.
 _EMPTY_RETRY_ATTEMPTS = 4
 _EMPTY_RETRY_BACKOFF_S = 1.0  # multiplied by attempt number: 1s, 2s, 3s between tries
+
+# A genuine throttle is distinct from the cold-session empty above: Google
+# answers HTTP 200 with an error envelope (code-13 / `ErrorResponse`) instead of
+# data — it's rate-limiting this IP. Measured 2026-06-14, the limit is DYNAMIC
+# (the ceiling drifts run-to-run) with FAST recovery, so a fixed rate cap is the
+# wrong tool: we back off exponentially and retry, surfacing GfThrottledError
+# only when that's exhausted (the caller can then degrade to Matrix). Backoff is
+# jittered so concurrent one-shot `flight` processes — which share the per-IP
+# signal but can't share a budget — don't all retry in lockstep and re-trip it.
+_THROTTLE_RETRY_ATTEMPTS = 4
+_THROTTLE_BACKOFF_S = 1.0  # exponential base: ~1, 2, 4, 8s (plus 0-50% jitter)
+
+
+class GfThrottledError(Exception):
+    """Google Flights rate-limited this IP (HTTP 200 + code-13 ErrorResponse).
+
+    Distinct from a transport error and from a cold-session empty. Recovery is
+    usually fast; callers may retry shortly or fall back to Matrix."""
+
+
+def _is_throttle_block(body: str) -> bool:
+    """True when a non-data GF response is a genuine throttle (error envelope),
+    not a cold-session / no-results empty. The throttle body carries a
+    `type.googleapis.com/...ErrorResponse` marker; an empty body does not."""
+    return "ErrorResponse" in body or "type.googleapis.com" in body
+
 
 # Persisted gflight session cookies. The cold-session empties above are almost
 # entirely "the session is missing Google's NID cookie" — a long-lived (~6mo)
@@ -448,9 +475,12 @@ def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
         allow_redirects=True,
     )
     resp.raise_for_status()
-    parsed = json.loads(resp.text.lstrip(")]}'"))[0][2]
+    body = resp.text
+    parsed = json.loads(body.lstrip(")]}'"))[0][2]
     if not parsed:
-        return []
+        if _is_throttle_block(body):
+            raise GfThrottledError("Google Flights rate-limited the request")
+        return []  # cold-session empty, or a genuinely flight-less leg
     # A truthy `parsed` means Google answered a warm session — save its cookies
     # (NID) so the next one-shot CLI process starts warm instead of cold.
     _persist_cookies(client)
@@ -469,22 +499,41 @@ def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
 
 
 def _one_call_with_retry(filters: FlightSearchFilters) -> list[GFlightWithId]:
-    """`_one_call`, but retried on an empty result to ride out the cold-session
-    empties described at `_EMPTY_RETRY_ATTEMPTS`.
+    """`_one_call` with two distinct retry policies (see the constants above):
 
-    Retries reuse fli's shared (warming) client — that's the whole point; a
-    fresh session would stay cold. A genuinely flight-less leg pays a few quick
-    retries of latency, which is rare and preferable to a spurious "no results".
-    """
-    result: list[GFlightWithId] = []
-    for attempt in range(1, _EMPTY_RETRY_ATTEMPTS + 1):
-        result = _one_call(filters)
+    - cold-session **empty** -> a few quick, linearly-spaced retries on the same
+      (warming) client; a fresh session would stay cold. Returns `[]` if it never
+      warms (or the leg is genuinely flight-less).
+    - genuine **throttle** (GfThrottledError) -> exponential, jittered backoff;
+      re-raised when exhausted so the caller can degrade to Matrix.
+
+    Transport errors propagate (fli's client already retried them)."""
+    empty_attempts = 0
+    throttle_attempts = 0
+    while True:
+        try:
+            result = _one_call(filters)
+        except GfThrottledError:
+            throttle_attempts += 1
+            if throttle_attempts > _THROTTLE_RETRY_ATTEMPTS:
+                raise
+            base = _THROTTLE_BACKOFF_S * (2 ** (throttle_attempts - 1))
+            backoff = base * (1 + random.random() * 0.5)  # noqa: S311 — jitter, not crypto
+            log.debug(
+                "gflight throttled; backoff %.1fs (retry %d/%d)",
+                backoff,
+                throttle_attempts,
+                _THROTTLE_RETRY_ATTEMPTS,
+            )
+            time.sleep(backoff)
+            continue
         if result:
             return result
-        if attempt < _EMPTY_RETRY_ATTEMPTS:
-            log.debug("empty gflight response; retry %d/%d", attempt, _EMPTY_RETRY_ATTEMPTS)
-            time.sleep(_EMPTY_RETRY_BACKOFF_S * attempt)
-    return result
+        empty_attempts += 1
+        if empty_attempts >= _EMPTY_RETRY_ATTEMPTS:
+            return result  # never warmed, or genuinely no flights
+        log.debug("empty gflight response; retry %d/%d", empty_attempts, _EMPTY_RETRY_ATTEMPTS)
+        time.sleep(_EMPTY_RETRY_BACKOFF_S * empty_attempts)
 
 
 def search_with_ids(
