@@ -87,22 +87,29 @@ def _leg_carriers(slc: Slice) -> list[tuple[set[str], str | None]]:
 
 def _carrier_pred_passes(slc: Slice, pred: CarrierPred) -> bool:
     legs = _leg_carriers(slc)
-    if pred.operating and not pred.exclude:  # O:/OPAIRLINES — all legs operated by one of these
-        return all(op in pred.codes for _, op in legs)
-    if pred.operating and pred.exclude:  # -OPAIRLINES — no leg operated by these
-        return not any(op in pred.codes for _, op in legs)
-    # marketing exclude (~UA / -AIRLINES) — no leg sold by an excluded carrier
-    return not any(marketing & pred.codes for marketing, _ in legs)
+    if pred.operating:
+        if pred.exclude:  # -OPAIRLINES — no leg operated by these
+            return not any(op in pred.codes for _, op in legs)
+        return all(op in pred.codes for _, op in legs)  # O:/OPAIRLINES — all operated by these
+    if pred.exclude:  # ~UA / -AIRLINES — no leg sold by an excluded carrier
+        return not any(marketing & pred.codes for marketing, _ in legs)
+    # marketing include (LH+ / AIRLINES) — every leg sold by an allowed carrier.
+    # Applied natively too; this is the correctness backstop if an fli code didn't map.
+    return all(marketing & pred.codes for marketing, _ in legs)
 
 
 def _slice_passes(slc: Slice, predicates: Iterable[Predicate]) -> bool:
     for p in predicates:
         if isinstance(p, CarrierPred):
-            if p.tier is Tier.GF_POSTFILTER and not _carrier_pred_passes(slc, p):
+            if not _carrier_pred_passes(slc, p):
                 return False
-        elif isinstance(p, ConnectionAirportPred) and p.exclude:
+        elif isinstance(p, ConnectionAirportPred):
             stop_codes = {s.code.upper() for s in slc.stops if s.code}
-            if stop_codes & p.codes:
+            if p.exclude:
+                if stop_codes & p.codes:  # ~DFW / -CITIES — no connection at an excluded airport
+                    return False
+            elif stop_codes and not (stop_codes <= p.codes):
+                # connect-at include: every connection must be an allowed airport
                 return False
         elif isinstance(p, ExcludeCodesharePred):
             for marketing, op in _leg_carriers(slc):
@@ -114,6 +121,16 @@ def _slice_passes(slc: Slice, predicates: Iterable[Predicate]) -> bool:
             if not any(c == p.carrier and p.low <= n <= p.high for c, n in flights):
                 return False
     return True
+
+
+def surviving_indices(
+    result: SearchResult, per_slice_predicates: Sequence[Sequence[Predicate]]
+) -> list[int]:
+    """Indices of solutions that pass the per-slice predicates — lets a caller
+    filter a parallel list (e.g. the raw fli results) in lockstep."""
+    return [
+        i for i, it in enumerate(result.solutions) if _itinerary_passes(it, per_slice_predicates)
+    ]
 
 
 def _itinerary_passes(it: Itinerary, per_slice_predicates: Sequence[Sequence[Predicate]]) -> bool:

@@ -171,6 +171,8 @@ def apply_gf_native_filters(filters: Any, predicates: Iterable[Predicate]) -> bo
     airlines: list[Any] = []
     layover_airports: list[Any] = []
     layover_max: int | None = None
+    airlines_ok = True
+    airports_ok = True
 
     for p in predicates:
         if isinstance(p, CarrierPred):
@@ -180,13 +182,13 @@ def apply_gf_native_filters(filters: Any, predicates: Iterable[Predicate]) -> bo
                 try:
                     airlines.append(SearchFlights._parse_airline(code))  # pyright: ignore[reportPrivateUsage]
                 except AttributeError:
-                    return False  # code unknown to fli -> fall back to Matrix
+                    airlines_ok = False  # unknown to fli; the post-filter enforces it instead
         elif isinstance(p, AlliancePred):
             for token in sorted(p.codes):
                 try:
                     airlines.append(Airline[token.upper().replace("-", "_")])
                 except KeyError:
-                    return False
+                    airlines_ok = False
         elif isinstance(p, ConnectionAirportPred):
             if p.exclude:
                 continue  # Tier-2
@@ -194,7 +196,7 @@ def apply_gf_native_filters(filters: Any, predicates: Iterable[Predicate]) -> bo
                 try:
                     layover_airports.append(getattr(Airport, code))
                 except AttributeError:
-                    return False
+                    airports_ok = False
         elif isinstance(p, StopsPred):
             filters.stops = _fli_max_stops(p.max_stops)
         elif isinstance(p, MaxDurationPred):
@@ -202,10 +204,14 @@ def apply_gf_native_filters(filters: Any, predicates: Iterable[Predicate]) -> bo
         elif isinstance(p, ConnectTimePred) and p.max_minutes is not None:
             layover_max = p.max_minutes
 
-    if airlines:
+    # Apply a code-list dimension only if EVERY code mapped — a partial list
+    # would narrow the query and drop the unmapped carrier's/airport's flights
+    # (under-return). When skipped, the post-filter enforces it from result data.
+    if airlines and airlines_ok:
         filters.airlines = airlines
-    if layover_airports or layover_max is not None:
+    use_airports = bool(layover_airports) and airports_ok
+    if use_airports or layover_max is not None:
         filters.layover_restrictions = LayoverRestrictions(
-            airports=layover_airports or None, max_duration=layover_max
+            airports=layover_airports if use_airports else None, max_duration=layover_max
         )
-    return True
+    return airlines_ok and airports_ok

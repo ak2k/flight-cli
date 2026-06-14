@@ -247,23 +247,40 @@ def _pick_backend(
 ) -> str:
     """Resolve --backend to a concrete backend.
 
-    auto: matrix iff a Matrix-only flag is set, else gflight.
-    Matrix-only set: --routing/--extension/--slice/--depart-times/--return-times,
-    any pax type beyond adults+children. PP overlay rides both backends now —
-    plain `--pp-only` stays on gflight for speed + ULCC inventory.
+    auto: matrix iff the request needs it, else gflight (~1s vs Matrix's ~45s).
+    `--routing`/`--extension` no longer force Matrix on their own — they're
+    parsed and classified, and Google Flights serves them when it can honor
+    every constraint (native filters + result post-filter; see routing_predicates
+    + _gf_postfilter). Only fare-construction (fare basis / booking class) or a
+    constraint GF can't reconstruct sends routing to Matrix. Hard-Matrix flags —
+    `--slice` (multi-city), `--depart-times`/`--return-times`, any pax type beyond
+    adults+children — always force Matrix (the GF bridge doesn't map them yet).
 
-    Explicit --backend matrix: matrix. --backend gflight: gflight, unless a
-    Matrix-only flag is also set (error — the request is inexpressible on fli)."""
-    matrix_only = bool(routing or extension or slice_specs or depart_times or return_times) or (
+    Explicit --backend matrix: matrix. --backend gflight: gflight, unless the
+    request is inexpressible on GF (error)."""
+    from ._gf_postfilter import gf_can_serve  # noqa: PLC0415
+    from .routing_predicates import classify  # noqa: PLC0415
+
+    hard_matrix = bool(slice_specs or depart_times or return_times) or (
         seniors > 0 or youth > 0 or inf_seat > 0 or inf_lap > 0
     )
+    routing_needs_matrix = bool(routing or extension) and not gf_can_serve(
+        classify(routing, extension)
+    )
+    matrix_only = hard_matrix or routing_needs_matrix
+
     if backend == BACKEND_AUTO:
         return BACKEND_MATRIX if matrix_only else BACKEND_GFLIGHT
     if backend == BACKEND_GFLIGHT and matrix_only:
+        reason = (
+            "--slice/--depart-times/--return-times or an extra pax type"
+            if hard_matrix
+            else "a --routing/--extension constraint Google Flights can't honor "
+            "(fare basis, booking class, or similar)"
+        )
         raise typer.BadParameter(
-            "--backend gflight is incompatible with Matrix-only flags "
-            "(--routing/--extension/--slice/--depart-times/--return-times/"
-            "extra pax types). Drop them, or use --backend matrix.",
+            f"--backend gflight can't serve this request: {reason}. "
+            "Drop it, or use --backend matrix.",
         )
     if backend not in _VALID_BACKENDS:
         raise typer.BadParameter(f"--backend must be one of {_VALID_BACKENDS}; got {backend!r}")
@@ -1023,14 +1040,25 @@ def _run_gflight_path(
     # encoder + client but parses the response ourselves to capture the opaque
     # per-flight ID (data[0][17]) — that's what PP's enableGoogleFlightMatching
     # joins against to produce matchedGoogleFlightId in its response.
+    from ._gf_postfilter import surviving_indices  # noqa: PLC0415
     from ._gflight_ids import search_with_ids  # noqa: PLC0415
-    from .fli_bridge import to_fli_filter  # noqa: PLC0415
+    from .fli_bridge import apply_gf_native_filters, to_fli_filter  # noqa: PLC0415
+    from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
+    from .routing_predicates import classify  # noqa: PLC0415
 
     search = SpecificDateSearch(legs=legs, options=opts)
+    fli_filter = to_fli_filter(search)
+    # `search` applies the same routing/extension to every leg, so the first leg's
+    # constraints cover the trip. Native filters narrow the GF query (Tier 1); the
+    # post-filter below is the correctness backstop and honors Tier-2 predicates
+    # GF can't request (operating carrier, -CODESHARE, marketing exclude, ...).
+    out_constraints = classify(legs[0].route_language, legs[0].extension) if legs else None
+    if out_constraints and out_constraints.predicates:
+        apply_gf_native_filters(fli_filter, out_constraints.predicates)
     try:
         # Returns GFlightWithId | tuple[GFlightWithId, ...]. The .flight attribute
         # exposes fli's FlightResult; .flight_id is Google's opaque ID.
-        results: list[Any] = search_with_ids(to_fli_filter(search), top_n=top_n) or []
+        results: list[Any] = search_with_ids(fli_filter, top_n=top_n) or []
     except Exception as e:
         err.print(f"[red]Google Flights query failed:[/] {e}")
         raise typer.Exit(1) from e
@@ -1038,6 +1066,16 @@ def _run_gflight_path(
     if not results:
         console.print("[yellow]Google Flights returned no results.[/]")
         return
+
+    # Drop solutions that violate the routing/extension (per slice). Filter the
+    # raw results and the adapted SearchResult in lockstep (1:1, same order).
+    per_slice_preds = [list(classify(lg.route_language, lg.extension).predicates) for lg in legs]
+    if any(per_slice_preds):
+        keep = set(surviving_indices(fli_results_to_search_result(results), per_slice_preds))
+        results = [r for i, r in enumerate(results) if i in keep]
+        if not results:
+            console.print("[yellow]No Google Flights results matched the routing constraints.[/]")
+            return
 
     # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType,
     #                 reportUnknownArgumentType, reportUnknownParameterType]
@@ -1059,8 +1097,6 @@ def _run_gflight_path(
 
     # Always adapt to SearchResult shape so the URL emission has segment
     # info for the pinned link (cheap: just shuffles existing fields).
-    from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
-
     sr = fli_results_to_search_result(results)
 
     if run_pp:
@@ -2036,7 +2072,10 @@ def search(
     run_awards = _should_run_awards(sel)
 
     if len(cabins_tuple) > 1:
-        if resolved == BACKEND_GFLIGHT:
+        # The multi-cabin gflight path doesn't apply the routing/extension
+        # filters yet, so a constrained multi-cabin search goes to Matrix to
+        # honor the routing correctly (the single-cabin gflight path filters).
+        if resolved == BACKEND_GFLIGHT and not (routing or extension):
             _run_gflight_path_multi(
                 legs=legs,
                 opts=opts,

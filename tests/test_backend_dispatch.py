@@ -47,9 +47,7 @@ def test_auto_plain_search_picks_gflight() -> None:
 @pytest.mark.parametrize(
     "flag,value",
     [
-        ("routing", "LH+"),
-        ("extension", "MAXCONNECT 2:00"),
-        ("slice_specs", ["JFK-LHR:2026-08-15"]),
+        ("slice_specs", ["JFK-LHR:2026-08-15"]),  # multi-city
         ("depart_times", "morning"),
         ("return_times", "evening"),
         ("seniors", 1),
@@ -58,9 +56,40 @@ def test_auto_plain_search_picks_gflight() -> None:
         ("inf_lap", 1),
     ],
 )
-def test_auto_matrix_only_flag_picks_matrix(flag: str, value: object) -> None:
-    # pyright: ignore[reportArgumentType] — `flag` is a parametrize key; types are
-    # heterogeneous (str/int/list/bool). _call's kwargs accept object.
+def test_auto_hard_matrix_flag_picks_matrix(flag: str, value: object) -> None:
+    """Flags the GF bridge can't map at all always force Matrix."""
+    assert _call(**{flag: value}) == BACKEND_MATRIX  # pyright: ignore[reportArgumentType]
+
+
+@pytest.mark.parametrize(
+    "flag,value",
+    [
+        ("routing", "LH+"),  # marketing carrier (native)
+        ("routing", "F* X:FRA F*"),  # via airport (native)
+        ("routing", "O:LH+"),  # operating carrier (Tier-2 post-filter)
+        ("extension", "MAXCONNECT 2:00"),  # layover max (native)
+        ("extension", "ALLIANCE star-alliance; MAXSTOPS 1"),  # native
+        ("extension", "-CODESHARE"),  # Tier-2 post-filter
+    ],
+)
+def test_auto_gf_serveable_routing_picks_gflight(flag: str, value: object) -> None:
+    """Routing/extension GF can honor (native + post-filter) stays on gflight."""
+    assert _call(**{flag: value}) == BACKEND_GFLIGHT  # pyright: ignore[reportArgumentType]
+
+
+@pytest.mark.parametrize(
+    "flag,value",
+    [
+        ("extension", "F bc=y"),  # fare basis (Tier 3)
+        ("extension", "MAXMILES 8000"),  # mileage (Tier 3)
+        ("routing", "BA AA"),  # ordered carrier chain — not GF-expressible
+        ("extension", "MINCONNECT 1:00"),  # min layover — unsupported Tier-2
+        ("extension", "-REDEYES"),  # red-eyes — unsupported Tier-2 (no per-seg times)
+    ],
+)
+def test_auto_non_serveable_routing_picks_matrix(flag: str, value: object) -> None:
+    """Routing GF can't honor (fare construction, ordered chains, unsupported
+    Tier-2) falls back to Matrix."""
     assert _call(**{flag: value}) == BACKEND_MATRIX  # pyright: ignore[reportArgumentType]
 
 
@@ -75,15 +104,23 @@ def test_auto_matrix_only_flag_picks_matrix(flag: str, value: object) -> None:
 def test_explicit_matrix_always_wins() -> None:
     assert _call(BACKEND_MATRIX) == BACKEND_MATRIX
     assert _call(BACKEND_MATRIX, routing="LH+") == BACKEND_MATRIX
+    assert _call(BACKEND_MATRIX, extension="F bc=y") == BACKEND_MATRIX
 
 
 def test_explicit_gflight_with_plain_search() -> None:
     assert _call(BACKEND_GFLIGHT) == BACKEND_GFLIGHT
 
 
-def test_explicit_gflight_rejects_matrix_only_flags() -> None:
-    with pytest.raises(typer.BadParameter, match="incompatible"):
-        _call(BACKEND_GFLIGHT, routing="LH+")
+def test_explicit_gflight_allows_gf_serveable_routing() -> None:
+    assert _call(BACKEND_GFLIGHT, routing="LH+") == BACKEND_GFLIGHT
+    assert _call(BACKEND_GFLIGHT, extension="MAXCONNECT 2:00") == BACKEND_GFLIGHT
+
+
+def test_explicit_gflight_rejects_unserveable_request() -> None:
+    with pytest.raises(typer.BadParameter, match="can't serve"):
+        _call(BACKEND_GFLIGHT, extension="F bc=y")
+    with pytest.raises(typer.BadParameter, match="can't serve"):
+        _call(BACKEND_GFLIGHT, slice_specs=["JFK-LHR:2026-08-15"])
 
 
 def test_unknown_backend_rejected() -> None:
