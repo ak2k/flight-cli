@@ -104,6 +104,7 @@ class LegInfo(_Loose):
     # (fl[15]) so `O:` / `-CODESHARE` / marketing-exclude can be evaluated.
     operating_carrier: str | None = None  # IATA code of the metal, e.g. "EN"
     marketing_carriers: list[str] = Field(default_factory=list[str])  # selling carrier codes
+    marketing_flights: list[str] = Field(default_factory=list[str])  # full codeshare flight #s
 
 
 class Slice(_Loose):

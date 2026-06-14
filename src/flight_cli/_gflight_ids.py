@@ -129,6 +129,7 @@ class LegAmenities:
     operating_carrier: str | None = None  # IATA code of the metal, e.g. "EN"
     operating_carrier_name: str | None = None  # e.g. "Air Dolomiti"
     marketing_carriers: tuple[str, ...] = ()  # IATA codes from fl[15] (selling carriers)
+    marketing_flights: tuple[str, ...] = ()  # full marketing flight #s, e.g. "LH9407"
 
 
 def _decode_power(amenities: Any) -> str | None:
@@ -246,6 +247,20 @@ def _marketing_codes(fl: list[Any]) -> tuple[str, ...]:
     return tuple(code for entry in entries if (code := _carrier_entry(entry)[0]))
 
 
+def _marketing_flights(fl: list[Any]) -> tuple[str, ...]:
+    """Full marketing flight numbers from fl[15] (e.g. 'LH9407') — the codeshare
+    identities a flight is also sold under. Used for codeshare-aware display."""
+    raw = fl[_LEG_MARKETING_IDX] if len(fl) > _LEG_MARKETING_IDX else None
+    if not isinstance(raw, list):
+        return ()
+    out: list[str] = []
+    for entry in cast("list[Any]", raw):
+        code, number, _ = _carrier_entry(entry)
+        if code and number:
+            out.append(f"{code}{number}")
+    return tuple(out)
+
+
 def _resolve_booking(fl: list[Any]) -> tuple[str | None, str | None]:
     """The (carrier code, flight number) a passenger books under.
 
@@ -291,6 +306,7 @@ def _parse_leg_amenities(fl: list[Any]) -> LegAmenities:
         operating_carrier=op_code,
         operating_carrier_name=op_name,
         marketing_carriers=_marketing_codes(fl),
+        marketing_flights=_marketing_flights(fl),
     )
 
 

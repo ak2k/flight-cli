@@ -1126,7 +1126,7 @@ def _run_gflight_path(
 
     awards_only = sel.awards_only if sel is not None else False
     if not awards_only:
-        _render_gflight_table(results, legs=legs, top_n=top_n)
+        _render_gflight_table(results, legs=legs, top_n=top_n, match_carriers=_match_carriers(legs))
 
     # Always adapt to SearchResult shape so the URL emission has segment
     # info for the pinned link (cheap: just shuffles existing fields).
@@ -1203,7 +1203,9 @@ def _run_enriched_path(
             state["gf"] = gf
             # First paint, while Matrix is still in flight.
             if gf and not awards_only:
-                _render_gflight_table(gf, legs=legs, top_n=top_n)
+                _render_gflight_table(
+                    gf, legs=legs, top_n=top_n, match_carriers=_match_carriers(legs)
+                )
                 console.print("[dim]…refining with Matrix (authoritative fares)…[/]")
             elif not gf and "gf_err" not in state:
                 console.print("[yellow]Google Flights: no results; awaiting Matrix…[/]")
@@ -1640,11 +1642,49 @@ def _merge_results_into_one(
     )
 
 
-def _render_gflight_table(results: list[Any], *, legs: tuple[Leg, ...], top_n: int) -> None:
+def _match_carriers(legs: tuple[Leg, ...]) -> frozenset[str]:
+    """Marketing carrier codes the user filtered on (for codeshare-aware display).
+    Empty when there's no marketing-carrier include filter — operating (`O:`) and
+    exclude filters don't trigger codeshare relabeling."""
+    from .routing_predicates import CarrierPred, classify  # noqa: PLC0415
+
+    codes: set[str] = set()
+    for lg in legs:
+        for p in classify(lg.route_language, lg.extension).predicates:
+            if isinstance(p, CarrierPred) and not p.operating and not p.exclude:
+                codes |= p.codes
+    return frozenset(codes)
+
+
+def _leg_display(leg: Any, amenity: Any, match_carriers: frozenset[str]) -> str:
+    """Per-leg label '<carrier> <num>'. If the booking carrier isn't in the user's
+    carrier filter but the leg is sold under a codeshare that IS (e.g. UA58 sold as
+    LH9407 under `--routing LH+`), show the matched identity: 'LH9407 (op UA58)'."""
+    code = getattr(leg.airline, "name", "") or ""
+    number = getattr(leg, "flight_number", "?")
+    booking = f"{code} {number}"
+    if not match_carriers or code in match_carriers:
+        return booking
+    raw_mf = getattr(amenity, "marketing_flights", ()) if amenity else ()
+    mflights: tuple[str, ...] = tuple(raw_mf or ())
+    for mf in mflights:
+        if mf[:2].upper() in match_carriers:
+            return f"{mf} (op {code}{number})"
+    return booking
+
+
+def _render_gflight_table(
+    results: list[Any],
+    *,
+    legs: tuple[Leg, ...],
+    top_n: int,
+    match_carriers: frozenset[str] = frozenset(),
+) -> None:
     """Render fli results as a rich table. Duck-typed: fli has no type stubs.
 
     Accepts our `GFlightWithId` wrappers — `.flight` is fli's FlightResult,
-    `.amenities` is per-leg legroom data parsed from Google's response."""
+    `.amenities` is per-leg legroom data parsed from Google's response.
+    `match_carriers` enables codeshare-aware leg labels (see `_leg_display`)."""
     origin = legs[0].origins[0] if legs[0].origins else "?"
     destination = legs[0].destinations[0] if legs[0].destinations else "?"
     has_return = len(legs) >= _ROUND_TRIP_LEGS
@@ -1667,8 +1707,8 @@ def _render_gflight_table(results: list[Any], *, legs: tuple[Leg, ...], top_n: i
             amenities = getattr(g, "amenities", []) or []
             label = f"{i}{'a' if j == 0 else 'b'}" if len(items) > 1 else str(i)
             legs_str = " → ".join(
-                f"{getattr(leg.airline, 'name', leg.airline)} {getattr(leg, 'flight_number', '?')}"
-                for leg in fr.legs
+                _leg_display(leg, amenities[k] if k < len(amenities) else None, match_carriers)
+                for k, leg in enumerate(fr.legs)
             )
             mins = fr.duration
             dur = f"{mins // 60}h{mins % 60:02d}m"

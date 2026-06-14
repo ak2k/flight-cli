@@ -61,6 +61,7 @@ def _leg_info(a: LegAmenities) -> LegInfo:
         video=a.video,
         operating_carrier=a.operating_carrier,
         marketing_carriers=list(a.marketing_carriers),
+        marketing_flights=list(a.marketing_flights),
     )
 
 

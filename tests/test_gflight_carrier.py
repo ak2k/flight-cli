@@ -97,6 +97,7 @@ def test_amenities_capture_operating_and_marketing_codeshare() -> None:
     assert a.operating_carrier == "EN"
     assert a.operating_carrier_name == "Air Dolomiti"
     assert a.marketing_carriers == ("LH",)
+    assert a.marketing_flights == ("LH9498",)
 
 
 def test_amenities_mainline_has_no_marketing_partners() -> None:
@@ -107,7 +108,9 @@ def test_amenities_mainline_has_no_marketing_partners() -> None:
 
 
 def test_amenities_multi_codeshare_collects_all_marketing_codes() -> None:
-    assert _parse_leg_amenities(_AF83).marketing_carriers == ("DL", "KL")
+    a = _parse_leg_amenities(_AF83)
+    assert a.marketing_carriers == ("DL", "KL")
+    assert a.marketing_flights == ("DL83", "KL1066")
 
 
 def test_amenities_carrier_fields_none_on_empty_leg() -> None:
