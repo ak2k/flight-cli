@@ -29,10 +29,12 @@ def test_routing_carrier_include() -> None:
     assert p.tier is Tier.GF_NATIVE
 
 
-def test_routing_carrier_exclude() -> None:
+def test_routing_carrier_exclude_is_postfilter() -> None:
+    """Exclude has no GF allow-list knob (it'd need the route's carrier set to
+    complement), so it's honored as a reliable post-filter."""
     (p,) = parse_routing("~UA+")
     assert p == CarrierPred(frozenset({"UA"}), exclude=True, operating=False)
-    assert p.tier is Tier.GF_NATIVE
+    assert p.tier is Tier.GF_POSTFILTER
 
 
 def test_routing_operating_carrier_is_postfilter() -> None:

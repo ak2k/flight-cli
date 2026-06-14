@@ -55,7 +55,10 @@ class CarrierPred:
 
     @property
     def tier(self) -> Tier:
-        return Tier.GF_POSTFILTER if self.operating else Tier.GF_NATIVE
+        # Marketing *include* is a native GF filter. Exclude would need the
+        # route's carrier set to complement, and operating has no GF query knob —
+        # both are reliable post-filters on the result instead.
+        return Tier.GF_NATIVE if not (self.operating or self.exclude) else Tier.GF_POSTFILTER
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,7 +76,12 @@ class ConnectionAirportPred:
 
     codes: frozenset[str]
     exclude: bool
-    tier: Tier = field(default=Tier.GF_NATIVE, init=False)
+
+    @property
+    def tier(self) -> Tier:
+        # Include = native connecting-airports filter; exclude is a post-filter
+        # (GF's connecting-airports control is an allow-list, not a deny-list).
+        return Tier.GF_POSTFILTER if self.exclude else Tier.GF_NATIVE
 
 
 @dataclass(frozen=True, slots=True)
