@@ -34,6 +34,8 @@ from fli.search.client import get_client  # pyright: ignore[reportMissingTypeStu
 from fli.search.flights import SearchFlights  # pyright: ignore[reportMissingTypeStubs]
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from fli.models.google_flights.flights import (  # pyright: ignore[reportMissingTypeStubs]
         FlightSearchFilters,
     )
@@ -498,12 +500,13 @@ def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
     return out
 
 
-def _one_call_with_retry(filters: FlightSearchFilters) -> list[GFlightWithId]:
-    """`_one_call` with two distinct retry policies (see the constants above):
+def retry_throttled[T](call: Callable[[], T]) -> T:
+    """Run a GF call under two distinct retry policies (see the constants above);
+    shared by the search and date-grid paths.
 
-    - cold-session **empty** -> a few quick, linearly-spaced retries on the same
-      (warming) client; a fresh session would stay cold. Returns `[]` if it never
-      warms (or the leg is genuinely flight-less).
+    - cold-session **falsy result** -> a few quick, linearly-spaced retries on the
+      same (warming) client; a fresh session would stay cold. Returns the falsy
+      result if it never warms.
     - genuine **throttle** (GfThrottledError) -> exponential, jittered backoff;
       re-raised when exhausted so the caller can degrade to Matrix.
 
@@ -512,7 +515,7 @@ def _one_call_with_retry(filters: FlightSearchFilters) -> list[GFlightWithId]:
     throttle_attempts = 0
     while True:
         try:
-            result = _one_call(filters)
+            result = call()
         except GfThrottledError:
             throttle_attempts += 1
             if throttle_attempts > _THROTTLE_RETRY_ATTEMPTS:
@@ -531,9 +534,14 @@ def _one_call_with_retry(filters: FlightSearchFilters) -> list[GFlightWithId]:
             return result
         empty_attempts += 1
         if empty_attempts >= _EMPTY_RETRY_ATTEMPTS:
-            return result  # never warmed, or genuinely no flights
+            return result  # never warmed, or genuinely empty
         log.debug("empty gflight response; retry %d/%d", empty_attempts, _EMPTY_RETRY_ATTEMPTS)
         time.sleep(_EMPTY_RETRY_BACKOFF_S * empty_attempts)
+
+
+def _one_call_with_retry(filters: FlightSearchFilters) -> list[GFlightWithId]:
+    """`_one_call` wrapped in the shared throttle / cold-session retry."""
+    return retry_throttled(lambda: _one_call(filters))
 
 
 def search_with_ids(
