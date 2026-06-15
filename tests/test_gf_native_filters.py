@@ -30,8 +30,8 @@ def _filters() -> Any:
         passenger_info=PassengerInfo(adults=1),
         flight_segments=[
             FlightSegment(
-                departure_airport=[[Airport.JFK, 0]],
-                arrival_airport=[[Airport.LHR, 0]],
+                departure_airport=[[Airport["JFK"], 0]],
+                arrival_airport=[[Airport["LHR"], 0]],
                 travel_date="2026-08-15",
             )
         ],

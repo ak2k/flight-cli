@@ -164,8 +164,11 @@ def apply_gf_native_filters(filters: Any, predicates: Iterable[Predicate]) -> bo
     from fli.models.google_flights.base import (  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
         LayoverRestrictions,
     )
-    from fli.search.flights import (  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
-        SearchFlights,
+
+    # DIVERGE: fli's airline row-decoder moved to a private module in 0.9.0;
+    # same AttributeError-on-unknown contract the except below relies on.
+    from fli.search._decoders import (  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
+        _parse_airline,  # pyright: ignore[reportPrivateUsage]
     )
 
     airlines: list[Any] = []
@@ -180,7 +183,7 @@ def apply_gf_native_filters(filters: Any, predicates: Iterable[Predicate]) -> bo
                 continue  # Tier-2 — honored by the result post-filter
             for code in sorted(p.codes):
                 try:
-                    airlines.append(SearchFlights._parse_airline(code))  # pyright: ignore[reportPrivateUsage]
+                    airlines.append(_parse_airline(code))
                 except AttributeError:
                     airlines_ok = False  # unknown to fli; the post-filter enforces it instead
         elif isinstance(p, AlliancePred):
