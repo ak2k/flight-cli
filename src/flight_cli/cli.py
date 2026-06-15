@@ -893,6 +893,36 @@ def _fmt_legroom_lines(s: Slice) -> str:
     return "\n".join(r for r in rows if r)
 
 
+def _render_date_grid(
+    grid: dict[str, float],
+    *,
+    origin: tuple[str, ...],
+    destination: tuple[str, ...],
+    sd: date,
+    ed: date,
+) -> None:
+    """Render the GF native date-grid: cheapest fare per departure day (USD),
+    sorted cheapest-first. One-way only (the grid's shape)."""
+    if not grid:
+        return
+    console.print(
+        f"[bold]{len(grid)} priced days[/]  · cheapest: "
+        f"[bold cyan]{min(grid.values()):.0f} (USD)[/]  · "
+        f"window {sd.isoformat()} → {ed.isoformat()}"
+    )
+    t = Table(
+        title=f"{','.join(origin)} → {','.join(destination)}: "
+        "lowest fare per departure day (Google Flights)",
+        show_header=True,
+        header_style="bold green",
+    )
+    t.add_column("departure", justify="right")
+    t.add_column("min (USD)", justify="right")
+    for day, price in sorted(grid.items(), key=lambda kv: kv[1]):
+        t.add_row(day, f"{price:.0f}")
+    console.print(t)
+
+
 def _render_calendar(
     res: CalendarResult,
     *,
@@ -2632,6 +2662,15 @@ def calendar(
         rich_help_panel=_GROUP_OUTPUT,
     ),
     no_cache: bool = _NO_CACHE_OPT,
+    fast: bool = typer.Option(
+        False,
+        "--fast/--enrich",
+        "--no-enrich/--no-fast",
+        help="Skip the Matrix enrichment: show only the fast Google Flights "
+        "date-grid (one-way, single-airport, Tier-1 filters) instead of also "
+        "running the authoritative Matrix calendar.",
+        rich_help_panel=_GROUP_BACKEND,
+    ),
     max_per_query: int = typer.Option(
         1,
         "--max-per-query",
@@ -2688,6 +2727,38 @@ def calendar(
     )
     window = CalendarWindow(start=sd, end=ed, duration_min=dmin, duration_max=dmax)
     search = CalendarSearch(legs=legs, options=opts, window=window)
+
+    # Fast layer: the GF native date-grid (~1s, throttle-friendly, dodges Matrix's
+    # compute-budget under-reporting) for one-way / single-airport / Tier-1-only
+    # windows. Paint it first, then enrich with the authoritative Matrix calendar
+    # (full per-duration grid). `--fast` stops after the grid. The cheap pre-check
+    # avoids importing the fli-heavy module for the Matrix-only cases.
+    if not json_out and one_way and len(origins) == 1 and len(dests) == 1:
+        from ._gf_dategrid import date_grid, grid_can_serve  # noqa: PLC0415
+
+        if grid_can_serve(search):
+            from ._gflight_ids import GfThrottledError  # noqa: PLC0415
+
+            grid: dict[str, float] = {}
+            try:
+                grid = date_grid(search)
+            except GfThrottledError:
+                console.print("[dim]Google Flights rate-limited — Matrix only.[/]")
+            except Exception as e:  # noqa: BLE001 — GF is the optional fast layer; Matrix still runs
+                err.print(f"[yellow]Google Flights date-grid failed:[/] {e}")
+            if grid:
+                _render_date_grid(grid, origin=origins, destination=dests, sd=sd, ed=ed)
+            if fast:
+                if grid:
+                    _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
+                else:
+                    console.print("[yellow]No Google Flights grid; drop --fast for Matrix.[/]")
+                return
+            if grid:
+                console.print("[dim]…refining with Matrix (full grid + durations)…[/]")
+
+    # Matrix (authoritative; also the only path for round-trip, multi-airport,
+    # Tier-2/3 routing, or when the grid was empty/throttled).
     # CalendarSearch → CalendarResult by client._parse_response dispatch.
     # On a multi-airport brownout, _run_calendar splits per-destination + merges.
     res, n_split = _run_calendar(
