@@ -45,6 +45,13 @@ go into detail and are loaded on demand.
   the wrong hint shape. Recipe (real `data[0][17]` from fli + IATA-prefixed
   flight#, human-readable airline name, space-separated times), empirical
   proof, and wire-through implementation notes.
+- [gf_routing_and_carriers.md](gf_routing_and_carriers.md) — How
+  `--routing`/`--extension` reach Google Flights: the `fl[15]`/`fl[18]`/`fl[22]`
+  booking-carrier rule (marketing vs operating), the Tier-1/2/3 classification
+  (`routing_predicates`), the GF-serve gate + post-filter backstop
+  (`_gf_postfilter`), the concurrent GF-fast-paint + Matrix-enrich flow
+  (`_run_enriched_path`), and codeshare-aware display. Read before touching
+  `routing_predicates.py`, `_gf_postfilter.py`, or `_gflight_ids` carrier parsing.
 - [legroom_recipe.md](legroom_recipe.md) — Per-leg legroom + amenities +
   aircraft come back in-band in Google Flights' own response (no
   travelarrow.io API call needed for the data itself). Index map for

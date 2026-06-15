@@ -59,6 +59,9 @@ def _leg_info(a: LegAmenities) -> LegInfo:
         wifi=a.wifi,
         power=a.power,
         video=a.video,
+        operating_carrier=a.operating_carrier,
+        marketing_carriers=list(a.marketing_carriers),
+        marketing_flights=list(a.marketing_flights),
     )
 
 

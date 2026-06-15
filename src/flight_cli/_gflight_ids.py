@@ -19,10 +19,11 @@ import json
 import logging
 import os
 import pathlib
+import random
 import time
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from fli.models import (  # pyright: ignore[reportMissingTypeStubs]
     FlightLeg,
@@ -33,6 +34,8 @@ from fli.search.client import get_client  # pyright: ignore[reportMissingTypeStu
 from fli.search.flights import SearchFlights  # pyright: ignore[reportMissingTypeStubs]
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from fli.models.google_flights.flights import (  # pyright: ignore[reportMissingTypeStubs]
         FlightSearchFilters,
     )
@@ -51,6 +54,32 @@ _BASE_URL = SearchFlights.BASE_URL
 # session. A FRESH session does NOT help — it stays cold — so we retry in place.
 _EMPTY_RETRY_ATTEMPTS = 4
 _EMPTY_RETRY_BACKOFF_S = 1.0  # multiplied by attempt number: 1s, 2s, 3s between tries
+
+# A genuine throttle is distinct from the cold-session empty above: Google
+# answers HTTP 200 with an error envelope (code-13 / `ErrorResponse`) instead of
+# data — it's rate-limiting this IP. Measured 2026-06-14, the limit is DYNAMIC
+# (the ceiling drifts run-to-run) with FAST recovery, so a fixed rate cap is the
+# wrong tool: we back off exponentially and retry, surfacing GfThrottledError
+# only when that's exhausted (the caller can then degrade to Matrix). Backoff is
+# jittered so concurrent one-shot `flight` processes — which share the per-IP
+# signal but can't share a budget — don't all retry in lockstep and re-trip it.
+_THROTTLE_RETRY_ATTEMPTS = 4
+_THROTTLE_BACKOFF_S = 1.0  # exponential base: ~1, 2, 4, 8s (plus 0-50% jitter)
+
+
+class GfThrottledError(Exception):
+    """Google Flights rate-limited this IP (HTTP 200 + code-13 ErrorResponse).
+
+    Distinct from a transport error and from a cold-session empty. Recovery is
+    usually fast; callers may retry shortly or fall back to Matrix."""
+
+
+def _is_throttle_block(body: str) -> bool:
+    """True when a non-data GF response is a genuine throttle (error envelope),
+    not a cold-session / no-results empty. The throttle body carries a
+    `type.googleapis.com/...ErrorResponse` marker; an empty body does not."""
+    return "ErrorResponse" in body or "type.googleapis.com" in body
+
 
 # Persisted gflight session cookies. The cold-session empties above are almost
 # entirely "the session is missing Google's NID cookie" — a long-lived (~6mo)
@@ -85,6 +114,20 @@ _LEG_PITCH_IDX = 14  # int (inches)
 _LEG_CABIN_IDX = 16  # int enum (see _CABIN)
 _LEG_AIRCRAFT_IDX = 17  # string
 
+# Carrier identity (distinct from amenities). A leg tuple separates the OPERATING
+# carrier (fl[22], the metal) from the MARKETING/booking carrier (fl[15], what a
+# passenger books under). fl[18] is truthy when the operating carrier self-markets
+# under its own code; falsy on operated-for (regional feeder) legs. Matrix surfaces
+# the marketing identity too, so reading the booking carrier here keeps flight
+# numbers consistent across backends.
+_LEG_MARKETING_IDX = 15  # list[[code, number, _, name]] of selling carriers (None if none)
+_LEG_SELF_MARKETED_IDX = 18  # truthy -> operating carrier markets under its own code
+_LEG_OPERATING_IDX = 22  # [code, number, _, name] of the operating carrier
+# Field layout within a [code, number, _, name] carrier tuple.
+_CARRIER_CODE_IDX = 0
+_CARRIER_NUMBER_IDX = 1
+_CARRIER_NAME_IDX = 3
+
 _LEGROOM_CLASS: dict[int, str] = {
     1: "AVERAGE",
     2: "BELOW",
@@ -109,6 +152,13 @@ class LegAmenities:
     wifi: str | None = None  # "free" | "paid" | None (no ground-internet wifi)
     power: str | None = None
     video: str | None = None
+    # Carrier identity beyond fli's FlightLeg (which now carries the booking
+    # carrier). Operating carrier drives the "operated by" label + the `O:`
+    # routing filter; the marketing-carrier set drives marketing-carrier matches.
+    operating_carrier: str | None = None  # IATA code of the metal, e.g. "EN"
+    operating_carrier_name: str | None = None  # e.g. "Air Dolomiti"
+    marketing_carriers: tuple[str, ...] = ()  # IATA codes from fl[15] (selling carriers)
+    marketing_flights: tuple[str, ...] = ()  # full marketing flight #s, e.g. "LH9407"
 
 
 def _decode_power(amenities: Any) -> str | None:
@@ -199,16 +249,81 @@ def _parse_pitch(raw: Any) -> int | None:
     return None
 
 
+def _carrier_entry(raw: Any) -> tuple[str | None, str | None, str | None]:
+    """(code, number, name) from a `[code, number, _, name]` carrier tuple.
+    All-None on any malformed shape — Google's response drifts."""
+    if not isinstance(raw, list):
+        return None, None, None
+    items = cast("list[Any]", raw)
+    if len(items) <= _CARRIER_NUMBER_IDX:  # a valid entry has at least code + number
+        return None, None, None
+    code = items[_CARRIER_CODE_IDX]
+    number = items[_CARRIER_NUMBER_IDX]
+    name = items[_CARRIER_NAME_IDX] if len(items) > _CARRIER_NAME_IDX else None
+    return (
+        code if isinstance(code, str) else None,
+        number if isinstance(number, str) else None,
+        name if isinstance(name, str) else None,
+    )
+
+
+def _marketing_codes(fl: list[Any]) -> tuple[str, ...]:
+    """IATA codes of the marketing (selling) carriers from fl[15], in order."""
+    raw = fl[_LEG_MARKETING_IDX] if len(fl) > _LEG_MARKETING_IDX else None
+    if not isinstance(raw, list):
+        return ()
+    entries = cast("list[Any]", raw)
+    return tuple(code for entry in entries if (code := _carrier_entry(entry)[0]))
+
+
+def _marketing_flights(fl: list[Any]) -> tuple[str, ...]:
+    """Full marketing flight numbers from fl[15] (e.g. 'LH9407') — the codeshare
+    identities a flight is also sold under. Used for codeshare-aware display."""
+    raw = fl[_LEG_MARKETING_IDX] if len(fl) > _LEG_MARKETING_IDX else None
+    if not isinstance(raw, list):
+        return ()
+    out: list[str] = []
+    for entry in cast("list[Any]", raw):
+        code, number, _ = _carrier_entry(entry)
+        if code and number:
+            out.append(f"{code}{number}")
+    return tuple(out)
+
+
+def _resolve_booking(fl: list[Any]) -> tuple[str | None, str | None]:
+    """The (carrier code, flight number) a passenger books under.
+
+    On an operated-for leg (a regional flies metal sold under a mainline's code:
+    fl[15] present AND fl[18] falsy) that's the marketing carrier (fl[15][0]).
+    Otherwise the operating carrier self-markets (fl[18] truthy) or there's no
+    codeshare (fl[15] empty), so it's the operating carrier (fl[22]). Matrix
+    surfaces this same marketing identity, so aligning here lets the cross-backend
+    flight#+date join fire on codeshares. Ground-truthed 2026-06-13 vs GF's own
+    headline: OS36 (fl18=[true] -> Austrian), Air Dolomiti EN8858 (fl18=null ->
+    Lufthansa LH9498), SWISS LX39 (no fl15 -> SWISS)."""
+    marketing = fl[_LEG_MARKETING_IDX] if len(fl) > _LEG_MARKETING_IDX else None
+    self_marketed = bool(fl[_LEG_SELF_MARKETED_IDX]) if len(fl) > _LEG_SELF_MARKETED_IDX else False
+    if isinstance(marketing, list) and marketing and not self_marketed:
+        code, number, _ = _carrier_entry(marketing[0])
+        if code and number:
+            return code, number
+    operating = fl[_LEG_OPERATING_IDX] if len(fl) > _LEG_OPERATING_IDX else None
+    code, number, _ = _carrier_entry(operating)
+    return code, number
+
+
 def _parse_leg_amenities(fl: list[Any]) -> LegAmenities:
-    """Defensive read of indices 12-17 from a leg tuple. Returns an
-    all-None LegAmenities if any single field is missing or wrong type —
-    Google's response shape drifts and a partial extract is better than
-    dropping the whole flight."""
+    """Defensive read of a leg tuple: amenities (indices 12-17) plus carrier
+    identity (operating fl[22], marketing fl[15]). Returns an all-None/empty
+    LegAmenities for any field that's missing or the wrong type — Google's
+    response shape drifts and a partial extract beats dropping the flight."""
     amenities = fl[_LEG_AMENITIES_IDX] if len(fl) > _LEG_AMENITIES_IDX else None
     legroom_raw = fl[_LEG_LEGROOM_CLASS_IDX] if len(fl) > _LEG_LEGROOM_CLASS_IDX else None
     pitch_raw = fl[_LEG_PITCH_IDX] if len(fl) > _LEG_PITCH_IDX else None
     cabin_raw = fl[_LEG_CABIN_IDX] if len(fl) > _LEG_CABIN_IDX else None
     aircraft = fl[_LEG_AIRCRAFT_IDX] if len(fl) > _LEG_AIRCRAFT_IDX else None
+    operating_raw = fl[_LEG_OPERATING_IDX] if len(fl) > _LEG_OPERATING_IDX else None
+    op_code, _, op_name = _carrier_entry(operating_raw)
     return LegAmenities(
         aircraft=aircraft if isinstance(aircraft, str) and aircraft else None,
         pitch_inches=_parse_pitch(pitch_raw),
@@ -217,6 +332,10 @@ def _parse_leg_amenities(fl: list[Any]) -> LegAmenities:
         wifi=_decode_wifi(amenities),
         power=_decode_power(amenities),
         video=_decode_video(amenities),
+        operating_carrier=op_code,
+        operating_carrier_name=op_name,
+        marketing_carriers=_marketing_codes(fl),
+        marketing_flights=_marketing_flights(fl),
     )
 
 
@@ -246,21 +365,32 @@ def _parse_flight_with_id(data: list[Any]) -> GFlightWithId:
         currency=currency,
         duration=data[0][9],
         stops=len(leg_tuples) - 1,
-        legs=[
-            FlightLeg(
-                airline=SearchFlights._parse_airline(fl[22][0]),  # pyright: ignore[reportPrivateUsage]
-                flight_number=fl[22][1],
-                departure_airport=SearchFlights._parse_airport(fl[3]),  # pyright: ignore[reportPrivateUsage]
-                arrival_airport=SearchFlights._parse_airport(fl[6]),  # pyright: ignore[reportPrivateUsage]
-                departure_datetime=SearchFlights._parse_datetime(fl[20], fl[8]),  # pyright: ignore[reportPrivateUsage]
-                arrival_datetime=SearchFlights._parse_datetime(fl[21], fl[10]),  # pyright: ignore[reportPrivateUsage]
-                duration=fl[11],
-            )
-            for fl in leg_tuples
-        ],
+        legs=[_flight_leg(fl) for fl in leg_tuples],
     )
     amenities = [_parse_leg_amenities(fl) for fl in leg_tuples]
     return GFlightWithId(flight=flight, flight_id=flight_id, amenities=amenities)
+
+
+def _flight_leg(fl: list[Any]) -> FlightLeg:
+    """Build fli's FlightLeg using the BOOKING carrier (see `_resolve_booking`)
+    as airline/flight_number — not the operating carrier — so the surfaced flight
+    matches what a passenger books (and what Matrix returns). The operating
+    carrier is preserved separately on `LegAmenities`."""
+    book_code, book_number = _resolve_booking(fl)
+    if book_code is None:
+        # No operating or marketing carrier in the tuple — malformed leg. Raise
+        # so _one_call's except skips this flight, matching the prior behaviour
+        # of indexing a missing fl[22][0].
+        raise ValueError("leg tuple missing carrier identity")
+    return FlightLeg(
+        airline=SearchFlights._parse_airline(book_code),  # pyright: ignore[reportPrivateUsage]
+        flight_number=book_number or "",
+        departure_airport=SearchFlights._parse_airport(fl[3]),  # pyright: ignore[reportPrivateUsage]
+        arrival_airport=SearchFlights._parse_airport(fl[6]),  # pyright: ignore[reportPrivateUsage]
+        departure_datetime=SearchFlights._parse_datetime(fl[20], fl[8]),  # pyright: ignore[reportPrivateUsage]
+        arrival_datetime=SearchFlights._parse_datetime(fl[21], fl[10]),  # pyright: ignore[reportPrivateUsage]
+        duration=fl[11],
+    )
 
 
 def _cookie_path() -> pathlib.Path:
@@ -347,9 +477,12 @@ def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
         allow_redirects=True,
     )
     resp.raise_for_status()
-    parsed = json.loads(resp.text.lstrip(")]}'"))[0][2]
+    body = resp.text
+    parsed = json.loads(body.lstrip(")]}'"))[0][2]
     if not parsed:
-        return []
+        if _is_throttle_block(body):
+            raise GfThrottledError("Google Flights rate-limited the request")
+        return []  # cold-session empty, or a genuinely flight-less leg
     # A truthy `parsed` means Google answered a warm session — save its cookies
     # (NID) so the next one-shot CLI process starts warm instead of cold.
     _persist_cookies(client)
@@ -367,23 +500,48 @@ def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
     return out
 
 
-def _one_call_with_retry(filters: FlightSearchFilters) -> list[GFlightWithId]:
-    """`_one_call`, but retried on an empty result to ride out the cold-session
-    empties described at `_EMPTY_RETRY_ATTEMPTS`.
+def retry_throttled[T](call: Callable[[], T]) -> T:
+    """Run a GF call under two distinct retry policies (see the constants above);
+    shared by the search and date-grid paths.
 
-    Retries reuse fli's shared (warming) client — that's the whole point; a
-    fresh session would stay cold. A genuinely flight-less leg pays a few quick
-    retries of latency, which is rare and preferable to a spurious "no results".
-    """
-    result: list[GFlightWithId] = []
-    for attempt in range(1, _EMPTY_RETRY_ATTEMPTS + 1):
-        result = _one_call(filters)
+    - cold-session **falsy result** -> a few quick, linearly-spaced retries on the
+      same (warming) client; a fresh session would stay cold. Returns the falsy
+      result if it never warms.
+    - genuine **throttle** (GfThrottledError) -> exponential, jittered backoff;
+      re-raised when exhausted so the caller can degrade to Matrix.
+
+    Transport errors propagate (fli's client already retried them)."""
+    empty_attempts = 0
+    throttle_attempts = 0
+    while True:
+        try:
+            result = call()
+        except GfThrottledError:
+            throttle_attempts += 1
+            if throttle_attempts > _THROTTLE_RETRY_ATTEMPTS:
+                raise
+            base = _THROTTLE_BACKOFF_S * (2 ** (throttle_attempts - 1))
+            backoff = base * (1 + random.random() * 0.5)  # noqa: S311 — jitter, not crypto
+            log.debug(
+                "gflight throttled; backoff %.1fs (retry %d/%d)",
+                backoff,
+                throttle_attempts,
+                _THROTTLE_RETRY_ATTEMPTS,
+            )
+            time.sleep(backoff)
+            continue
         if result:
             return result
-        if attempt < _EMPTY_RETRY_ATTEMPTS:
-            log.debug("empty gflight response; retry %d/%d", attempt, _EMPTY_RETRY_ATTEMPTS)
-            time.sleep(_EMPTY_RETRY_BACKOFF_S * attempt)
-    return result
+        empty_attempts += 1
+        if empty_attempts >= _EMPTY_RETRY_ATTEMPTS:
+            return result  # never warmed, or genuinely empty
+        log.debug("empty gflight response; retry %d/%d", empty_attempts, _EMPTY_RETRY_ATTEMPTS)
+        time.sleep(_EMPTY_RETRY_BACKOFF_S * empty_attempts)
+
+
+def _one_call_with_retry(filters: FlightSearchFilters) -> list[GFlightWithId]:
+    """`_one_call` wrapped in the shared throttle / cold-session retry."""
+    return retry_throttled(lambda: _one_call(filters))
 
 
 def search_with_ids(
