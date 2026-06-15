@@ -23,7 +23,7 @@ dependencies = [
     "structlog>=24",
     "typer>=0.12",
     "rich>=13",
-    "flights>=0.8",         # fli — drives Google Flights for booking handoff
+    "flights>=0.9",         # fli — drives Google Flights for booking handoff
     "fast-flights>=2.2",    # tfs= URL encoder (Google Flights deep-link)
     "rookiepy>=0.5",        # reads Chrome cookies for `auth pp login --from-chrome`
 ]

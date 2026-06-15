@@ -320,7 +320,7 @@ requires-dist = [
     { name = "aiolimiter", specifier = ">=1.1" },
     { name = "anyio", specifier = ">=4" },
     { name = "fast-flights", specifier = ">=2.2" },
-    { name = "flights", specifier = ">=0.8" },
+    { name = "flights", specifier = ">=0.9" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "httpx-curl-cffi", specifier = ">=0.1.5" },
     { name = "patchright", marker = "extra == 'browser-login'", specifier = ">=1.59" },
@@ -345,7 +345,7 @@ dev = [
 
 [[package]]
 name = "flights"
-version = "0.8.5"
+version = "0.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "babel" },
@@ -358,9 +358,9 @@ dependencies = [
     { name = "tenacity" },
     { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/49/a4/781bf3eb1cd51a01fe5c69104570cc888e645009522733267ac98fec7f39/flights-0.8.5.tar.gz", hash = "sha256:fed27974af8320b64529fd5a2fc87f809c42e820e538a1b1ed55e4afd0b73528", size = 11032932, upload-time = "2026-05-12T17:22:42.938Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9a/dd/47a9eb94ca786a774b2e8121a9a4d160caa3afe76bd11609aa0a08dc7cc0/flights-0.9.0.tar.gz", hash = "sha256:fdef6cd892482fbc17171450d6eb51341f48ad10528c4f71fe97677afb0f0533", size = 11278056, upload-time = "2026-05-21T05:56:10.735Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/47/71/d71f8b72497806b1481e50dda8e6fc1258da05effca52fd20b471b66625e/flights-0.8.5-py3-none-any.whl", hash = "sha256:4b459a8e6abccb6e4456f1979f9daf74bbec7bb8cabda0fb271b0c9af7e9e5a1", size = 148963, upload-time = "2026-05-12T17:22:41.025Z" },
+    { url = "https://files.pythonhosted.org/packages/c4/9e/6e22650251d423e91cb204b62c596d36c36b063f58801e83b0679d2e26a9/flights-0.9.0-py3-none-any.whl", hash = "sha256:77a7cf2a2d8324706edd2bf1fc320fc9165d51ab059275b13f858475defd9beb", size = 188177, upload-time = "2026-05-21T05:56:08.673Z" },
 ]
 
 [[package]]

@@ -100,13 +100,17 @@ calendars go to Matrix. This is the throttle-friendly calendar primitive (1 call
 vs a per-date fan-out), so we prefer it; **no GF fan-out is needed** (Matrix's
 `_calendar_split` already fans out for Tier-2 / multi-airport).
 
-**fli bug (bd work-bcdex):** `SearchDates.search()` splits windows >61 days into
-chunks but rebuilds `DateSearchFilters` per chunk copying only
+**fli `SearchDates` >61-day chunk filter-drop (fixed upstream in 0.9.0):** in fli
+≤0.8.5, `SearchDates.search()` split windows >61 days into chunks but rebuilt
+`DateSearchFilters` per chunk copying only
 trip_type/passenger_info/segments/stops/seat_type/airlines/dates/duration —
 **dropping `layover_restrictions`/`max_duration`/`price_limit`/`emissions`/`bags`
-on chunks 2+.** When wiring the date-grid calendar, don't use fli's chunking: cap
-each call to ≤61 days and chunk ourselves with the full filter set (or keep
-windows ≤61d). Regression-test it; consider an upstream fix.
+on chunks 2+.** fli 0.9.0 fixed this upstream (the per-chunk rebuild now copies all
+14 `DateSearchFilters` fields); we require `flights>=0.9` as of PR #30. bd
+work-bcdex and work-aua4v (the upstream-it follow-up) are both closed. `_gf_dategrid`
+still caps each call to ≤61 days and chunks ourselves with the full filter set —
+now redundant but harmless; bd work-orp1i tracks simplifying it to lean on fli's
+chunking.
 
 ## GF throttle (per-IP, dynamic) — handle reactively, not with a fixed cap
 

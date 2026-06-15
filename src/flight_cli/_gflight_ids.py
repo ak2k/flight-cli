@@ -30,6 +30,17 @@ from fli.models import (  # pyright: ignore[reportMissingTypeStubs]
     FlightResult,
 )
 from fli.models.google_flights.base import TripType  # pyright: ignore[reportMissingTypeStubs]
+
+# DIVERGE: fli moved its API-row decoders to a private module in 0.9.0. These
+# three (airline/airport/datetime) are purpose-built for decoding GF response
+# rows — same signatures + AttributeError-on-unknown as the old SearchFlights
+# static methods, with no public equivalent (core.parsers has no datetime
+# parser), so this is a drop-in repoint.
+from fli.search._decoders import (  # pyright: ignore[reportMissingTypeStubs]
+    _parse_airline,  # pyright: ignore[reportPrivateUsage]
+    _parse_airport,  # pyright: ignore[reportPrivateUsage]
+    _parse_datetime,  # pyright: ignore[reportPrivateUsage]
+)
 from fli.search.client import get_client  # pyright: ignore[reportMissingTypeStubs]
 from fli.search.flights import SearchFlights  # pyright: ignore[reportMissingTypeStubs]
 
@@ -383,12 +394,12 @@ def _flight_leg(fl: list[Any]) -> FlightLeg:
         # of indexing a missing fl[22][0].
         raise ValueError("leg tuple missing carrier identity")
     return FlightLeg(
-        airline=SearchFlights._parse_airline(book_code),  # pyright: ignore[reportPrivateUsage]
+        airline=_parse_airline(book_code),
         flight_number=book_number or "",
-        departure_airport=SearchFlights._parse_airport(fl[3]),  # pyright: ignore[reportPrivateUsage]
-        arrival_airport=SearchFlights._parse_airport(fl[6]),  # pyright: ignore[reportPrivateUsage]
-        departure_datetime=SearchFlights._parse_datetime(fl[20], fl[8]),  # pyright: ignore[reportPrivateUsage]
-        arrival_datetime=SearchFlights._parse_datetime(fl[21], fl[10]),  # pyright: ignore[reportPrivateUsage]
+        departure_airport=_parse_airport(fl[3]),
+        arrival_airport=_parse_airport(fl[6]),
+        departure_datetime=_parse_datetime(fl[20], fl[8]),
+        arrival_datetime=_parse_datetime(fl[21], fl[10]),
         duration=fl[11],
     )
 
