@@ -112,19 +112,32 @@ still caps each call to ≤61 days and chunks ourselves with the full filter set
 now redundant but harmless; bd work-orp1i tracks simplifying it to lean on fli's
 chunking.
 
-## GF throttle (per-IP, dynamic) — handle reactively, not with a fixed cap
+## GF throttle (per client-context, dynamic) — handle reactively, not with a fixed cap
 
-Measured 2026-06-14 (instrumented, distinguishing genuine `code-13` from
-transport errors): the GF RPC throttle is **per-IP and dynamic**, with two
-limits — a per-second burst cap (~3–4 at ~10/s, but it floated as high as 30 a
-run earlier) and a rolling allowance (~25–30 calls per ~2–3 min ≈ 10–12/min) —
-and **fast recovery** (the call right after a block often returns data). Because
-the ceiling moves, a fixed rate limiter is the wrong tool. The design is a
-closed loop: `_classify` detects a real block (HTTP 200 + `ErrorResponse`/code-13
-body, vs a transport exception, vs cold-session empty), and `_one_call_with_retry`
-backs off + retries on a genuine block (typed `GfThrottledError` on exhaustion).
-One-shot `flight` processes can't share a proactive budget, but they DO share the
-`code-13` signal, so per-process reactive backoff self-regulates even across
-concurrent invocations. In the woven flow a persistent GF throttle degrades to
-Matrix-only rather than erroring. (Datacenter VPN exits — e.g. PIA — are
-pre-flagged and blocked on sight; only residential IPs work.)
+The budget is keyed on **client context, not just IP.** Verified 2026-06-15
+(`research/experiment_gf_patchright.py` + `capture_gf_request.py`): a real Chrome
+(patchright, `channel=chrome`) pulled 10/10 `GetShoppingResults` from an IP that
+was *simultaneously* `code-13` throttling our curl_cffi client (re-probed the same
+minute). curl_cffi's chrome146 TLS fingerprint passes the edge (we reach the
+backend — a structured error, not a CAPTCHA), but the generous budget is gated
+behind dynamic, JS-generated session proof the SPA sends and we don't: URL
+`f.sid`/`bl`, a token embedded in `f.req`, and the `x-goog-batchexecute-bgr`
+per-request integrity token (plus `x-same-domain`/`origin`/`referer`, `accept: */*`
+vs our navigation `text/html`, high-entropy client hints, and `OTZ`/`__Secure-BUCKET`
+cookies beyond `NID`). No `x-client-data` and no `at` XSRF token are involved. So a
+thin curl_cffi client gets a deliberately small budget that static header mirroring
+can't fully close (bd work-udpp1). Datacenter VPN exits — e.g. PIA — are also
+pre-flagged and blocked on sight; only residential IPs work.
+
+Measured 2026-06-14 for the curl_cffi path (instrumented, distinguishing genuine
+`code-13` from transport errors): two limits — a per-second burst cap (~3–4 at
+~10/s, but it floated as high as 30 a run earlier) and a rolling allowance (~25–30
+calls per ~2–3 min ≈ 10–12/min) — and **fast recovery** (the call right after a
+block often returns data). Because the ceiling moves, a fixed rate limiter is the
+wrong tool. The design is a closed loop: `_classify` detects a real block (HTTP 200
++ `ErrorResponse`/code-13 body, vs a transport exception, vs cold-session empty),
+and `_one_call_with_retry` backs off + retries on a genuine block (typed
+`GfThrottledError` on exhaustion). One-shot `flight` processes can't share a
+proactive budget, but they DO share the `code-13` signal, so per-process reactive
+backoff self-regulates even across concurrent invocations. In the woven flow a
+persistent GF throttle degrades to Matrix-only rather than erroring.
