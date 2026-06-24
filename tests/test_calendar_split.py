@@ -17,6 +17,8 @@ from flight_cli._calendar_split import (
     merge_calendar_results,
     split_calendar_search,
 )
+from flight_cli._gflight_ids import GfThrottledError
+from flight_cli.client import MatrixApiError
 from flight_cli.domain import Cabin, CalendarSearch, CalendarWindow, Leg, SearchOptions
 from flight_cli.models import CalendarResult
 
@@ -272,3 +274,93 @@ def test_run_calendar_threads_max_concurrency(monkeypatch: Any) -> None:
     )
     # conc = min(n=4, max_concurrency=3) = 3
     assert _CapturingClient.last_kwargs.get("concurrency") == 3
+
+
+# ──────────── orchestration: _run_calendar_enriched (concurrent weave) ───────
+# The one-way / single-airport calendar dispatches the GF date-grid and the
+# Matrix calendar concurrently (work-6nrqf). These assert the weave paints both
+# and isolates per-backend failures — no network, fakes for both backends.
+
+
+def _oneway_cal() -> CalendarSearch:
+    return CalendarSearch(
+        legs=(Leg.of(["JFK"], ["LHR"]),),
+        options=SearchOptions(cabin=Cabin.COACH),
+        window=W,
+    )
+
+
+def _spy_renderers(monkeypatch: Any) -> dict[str, int]:
+    """Replace the calendar renderers + URL emitter with call-counting spies."""
+    calls: dict[str, int] = {"grid": 0, "calendar": 0}
+
+    def _grid(*_a: object, **_k: object) -> None:
+        calls["grid"] += 1
+
+    def _cal_render(*_a: object, **_k: object) -> None:
+        calls["calendar"] += 1
+
+    def _noop(*_a: object, **_k: object) -> None:
+        return None
+
+    monkeypatch.setattr(cli, "_render_date_grid", _grid)
+    monkeypatch.setattr(cli, "_render_calendar", _cal_render)
+    monkeypatch.setattr(cli, "_emit_urls", _noop)
+    return calls
+
+
+def _run_enriched() -> None:
+    cli._run_calendar_enriched(  # pyright: ignore[reportPrivateUsage]
+        _oneway_cal(),
+        origins=("JFK",),
+        dests=("LHR",),
+        sd=W.start,
+        ed=W.end,
+        dmin=5,
+        dmax=7,
+        rps=10.0,
+        impersonate="chrome",
+        no_cache=True,
+        matrix_url=False,
+        google_url=False,
+    )
+
+
+def _fake_grid(_search: object) -> dict[str, float]:
+    return {"2026-09-09": 600.0}
+
+
+def test_calendar_enriched_paints_grid_then_matrix(monkeypatch: Any) -> None:
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _fake_grid)
+    calls = _spy_renderers(monkeypatch)
+    _run_enriched()
+    assert calls["grid"] == 1  # GF grid painted (fast, first)
+    assert calls["calendar"] == 1  # authoritative Matrix calendar painted
+
+
+def test_calendar_enriched_gf_throttle_still_paints_matrix(monkeypatch: Any) -> None:
+    def _throttle(_search: object) -> dict[str, float]:
+        raise GfThrottledError("rate-limited")
+
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _throttle)
+    calls = _spy_renderers(monkeypatch)
+    _run_enriched()
+    assert calls["grid"] == 0  # throttled → no grid
+    assert calls["calendar"] == 1  # Matrix still ran + painted (error isolation)
+
+
+def test_calendar_enriched_matrix_error_with_grid_does_not_raise(monkeypatch: Any) -> None:
+    class _ErrClient(_PricedClient):
+        @override
+        async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
+            _ = (search, cache)
+            raise MatrixApiError("boom", kind="internal")
+
+    monkeypatch.setattr(cli, "MatrixClient", _ErrClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _fake_grid)
+    calls = _spy_renderers(monkeypatch)
+    _run_enriched()  # grid was shown → must NOT raise typer.Exit
+    assert calls["grid"] == 1
+    assert calls["calendar"] == 0  # Matrix errored → no calendar paint

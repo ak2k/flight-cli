@@ -629,6 +629,88 @@ def _run_calendar(
         raise typer.Exit(1) from e
 
 
+def _run_calendar_enriched(
+    search: CalendarSearch,
+    *,
+    origins: tuple[str, ...],
+    dests: tuple[str, ...],
+    sd: date,
+    ed: date,
+    dmin: int,
+    dmax: int,
+    rps: float,
+    impersonate: str,
+    no_cache: bool,
+    matrix_url: bool,
+    google_url: bool,
+) -> None:
+    """GF-serveable calendar (one-way, single-airport), progressive: dispatch the
+    Google Flights date-grid and the Matrix calendar CONCURRENTLY under one event
+    loop, paint the GF grid immediately (~1s) while Matrix is in flight, then paint
+    the authoritative Matrix calendar (~45s) — total ≈ max(GF, Matrix), not the sum.
+    Mirrors `_run_enriched_path` (the search-path weave). `--fast` never reaches here
+    (the command serves the grid alone for that). The `grid_can_serve` gate guarantees
+    a single-airport query, so the Matrix side is one `execute` (no fan-out)."""
+    from ._gf_dategrid import date_grid  # noqa: PLC0415
+    from ._gflight_ids import GfThrottledError  # noqa: PLC0415
+
+    # Single-airport calendar runs as one Matrix query; mirror `_run_calendar`'s
+    # non-multi concurrency/rps so the request paces identically.
+    conc = 3
+    state: dict[str, Any] = {}
+
+    async def _matrix(c: MatrixClient) -> None:
+        try:
+            state["matrix"] = await c.execute(search, cache=not no_cache)
+        except MatrixApiError as e:
+            state["matrix_err"] = e
+
+    async def _go() -> None:
+        async with (
+            MatrixClient(rps=max(rps, float(conc)), impersonate=impersonate, concurrency=conc) as c,
+            anyio.create_task_group() as tg,
+        ):
+            tg.start_soon(_matrix, c)
+            # The GF date-grid is sync (curl_cffi) — run it in a worker thread so the
+            # Matrix calendar request progresses concurrently on the event loop.
+            grid: dict[str, float] = {}
+            try:
+                grid = await anyio.to_thread.run_sync(date_grid, search)
+            except GfThrottledError:
+                state["gf_throttled"] = True
+            except Exception as e:  # noqa: BLE001 — GF is the optional fast layer; Matrix still runs
+                state["gf_err"] = e
+            state["grid"] = grid
+            # First paint, while Matrix is still in flight.
+            if grid:
+                _render_date_grid(grid, origin=origins, destination=dests, sd=sd, ed=ed)
+                console.print("[dim]…refining with Matrix (full grid + durations)…[/]")
+            elif state.get("gf_throttled"):
+                console.print("[dim]Google Flights rate-limited — awaiting Matrix calendar…[/]")
+            elif "gf_err" in state:
+                err.print(f"[yellow]Google Flights date-grid failed:[/] {state['gf_err']}")
+                console.print("[dim]…awaiting Matrix calendar…[/]")
+            else:
+                console.print("[dim]…awaiting Matrix calendar…[/]")
+
+    anyio.run(_go)
+
+    matrix_res = state.get("matrix")
+    if matrix_res is None:
+        # Matrix failed; the GF grid (if any) was already painted.
+        e = state.get("matrix_err")
+        if e is not None:
+            err.print(f"[red]Matrix returned an error ({e.kind}):[/] {e.message}")
+            if e.request_id:
+                err.print(f"[dim]request_id: {e.request_id}[/]")
+        if not state.get("grid"):
+            raise typer.Exit(1)
+        return
+    res = cast("CalendarResult", matrix_res)
+    _render_calendar(res, dmin=dmin, dmax=dmax, origin=origins, destination=dests, sd=sd, ed=ed)
+    _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
+
+
 def _pinned_solution_index(result: SearchResult | None, pick: int | None) -> int | None:
     """0-based index into `result.solutions` of the itinerary to pin in a deep
     link. `pick` is the 1-based itinerary number the user saw in the table;
@@ -2734,9 +2816,30 @@ def calendar(
     # (full per-duration grid). `--fast` stops after the grid. The cheap pre-check
     # avoids importing the fli-heavy module for the Matrix-only cases.
     if not json_out and one_way and len(origins) == 1 and len(dests) == 1:
-        from ._gf_dategrid import date_grid, grid_can_serve  # noqa: PLC0415
+        from ._gf_dategrid import grid_can_serve  # noqa: PLC0415
 
         if grid_can_serve(search):
+            if not fast:
+                # Progressive weave: dispatch the GF date-grid and the Matrix
+                # calendar concurrently, paint the grid first (~1s), then the
+                # authoritative Matrix calendar — total ≈ Matrix alone.
+                _run_calendar_enriched(
+                    search,
+                    origins=origins,
+                    dests=dests,
+                    sd=sd,
+                    ed=ed,
+                    dmin=dmin,
+                    dmax=dmax,
+                    rps=_resolve_rps(rps),
+                    impersonate=_resolve_impersonate(impersonate),
+                    no_cache=_resolve_no_cache(no_cache),
+                    matrix_url=matrix_url,
+                    google_url=google_url,
+                )
+                return
+            # --fast: Google Flights date-grid only (no Matrix).
+            from ._gf_dategrid import date_grid  # noqa: PLC0415
             from ._gflight_ids import GfThrottledError  # noqa: PLC0415
 
             grid: dict[str, float] = {}
@@ -2748,14 +2851,10 @@ def calendar(
                 err.print(f"[yellow]Google Flights date-grid failed:[/] {e}")
             if grid:
                 _render_date_grid(grid, origin=origins, destination=dests, sd=sd, ed=ed)
-            if fast:
-                if grid:
-                    _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
-                else:
-                    console.print("[yellow]No Google Flights grid; drop --fast for Matrix.[/]")
-                return
-            if grid:
-                console.print("[dim]…refining with Matrix (full grid + durations)…[/]")
+                _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
+            else:
+                console.print("[yellow]No Google Flights grid; drop --fast for Matrix.[/]")
+            return
 
     # Matrix (authoritative; also the only path for round-trip, multi-airport,
     # Tier-2/3 routing, or when the grid was empty/throttled).
