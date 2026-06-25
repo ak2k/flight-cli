@@ -629,6 +629,21 @@ def _run_calendar(
         raise typer.Exit(1) from e
 
 
+def _report_calendar_matrix_failure(state: dict[str, Any]) -> None:
+    """Print the right stderr message for a Matrix calendar that returned no result:
+    a known `MatrixApiError`, an unexpected non-MatrixApiError stashed by the weave's
+    `_matrix` task, or a cancel/never-completed fall-through."""
+    e = state.get("matrix_err")
+    if e is not None:
+        err.print(f"[red]Matrix returned an error ({e.kind}):[/] {e.message}")
+        if e.request_id:
+            err.print(f"[dim]request_id: {e.request_id}[/]")
+    elif state.get("matrix_unexpected") is not None:
+        err.print(f"[red]Matrix calendar failed:[/] {state['matrix_unexpected']}")
+    else:
+        err.print("[yellow]Matrix calendar did not complete.[/]")
+
+
 def _run_calendar_enriched(
     search: CalendarSearch,
     *,
@@ -664,6 +679,13 @@ def _run_calendar_enriched(
             state["matrix"] = await c.execute(search, cache=not no_cache)
         except MatrixApiError as e:
             state["matrix_err"] = e
+        except Exception as e:  # noqa: BLE001
+            # An unexpected Matrix failure (e.g. a raw httpx transport/status error that
+            # execute() doesn't wrap) must NOT propagate out of this task and tear down
+            # the group — that would cancel the still-pending grid paint and surface a
+            # bare traceback. Stash it and report after the weave so the GF grid still
+            # shows (per-backend isolation, mirroring the MatrixApiError path).
+            state["matrix_unexpected"] = e
 
     async def _go() -> None:
         async with (
@@ -698,11 +720,7 @@ def _run_calendar_enriched(
     matrix_res = state.get("matrix")
     if matrix_res is None:
         # Matrix failed; the GF grid (if any) was already painted.
-        e = state.get("matrix_err")
-        if e is not None:
-            err.print(f"[red]Matrix returned an error ({e.kind}):[/] {e.message}")
-            if e.request_id:
-                err.print(f"[dim]request_id: {e.request_id}[/]")
+        _report_calendar_matrix_failure(state)
         if not state.get("grid"):
             raise typer.Exit(1)
         return
