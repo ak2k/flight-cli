@@ -29,7 +29,7 @@ from ._dispatch import BACKEND_AUTO, BACKEND_GFLIGHT, BACKEND_MATRIX, ProviderSe
 from ._dispatch import pick_backend as _pick_backend
 from ._dispatch import resolve_providers as _resolve_providers
 from ._dispatch import should_run_awards as _should_run_awards
-from ._multi_cabin import MultiCabinRow, parse_price
+from ._multi_cabin import MultiCabinRow
 from ._multi_cabin import merge as _merge_cabins
 from ._parsing import (
     ROUND_TRIP_LEGS as _ROUND_TRIP_LEGS,
@@ -64,6 +64,14 @@ from ._parsing import (
 from ._parsing import (
     split_price as _split_price,
 )
+from ._pp_glue import MULTI_CABIN_QUERY_BUMP_CAP as _MULTI_CABIN_QUERY_BUMP_CAP
+from ._pp_glue import MULTI_CABIN_QUERY_BUMP_FACTOR as _MULTI_CABIN_QUERY_BUMP_FACTOR
+from ._pp_glue import build_pp_legs as _build_pp_legs
+from ._pp_glue import bumped_query_top_n as _bumped_query_top_n
+from ._pp_glue import cash_per_cabin_multi as _cash_per_cabin_multi
+from ._pp_glue import cash_per_cabin_single as _cash_per_cabin_single
+from ._pp_glue import derive_pp_cabins as _derive_pp_cabins
+from ._pp_glue import pp_cabins_for_multi as _pp_cabins_for_multi
 from ._runtime_opts import FORMAT_OPT as _FORMAT_OPT
 from ._runtime_opts import IMPERSONATE_OPT as _IMPERSONATE_OPT
 from ._runtime_opts import JSON_OPT as _JSON_OPT
@@ -94,7 +102,6 @@ from .domain import (
 from .log import configure as configure_logging
 from .pp.auth import load_tokens
 from .pp.cli import auth_app, run_pp_for_search
-from .providers.base import LegQuery
 
 if TYPE_CHECKING:
     from .models import CalendarResult, LegInfo, Location, SearchResult, Slice
@@ -107,6 +114,9 @@ if TYPE_CHECKING:
 # listed here so ruff keeps the re-export instead of pruning it as dead.
 __all__ = [
     "BACKEND_MATRIX",
+    "_MULTI_CABIN_QUERY_BUMP_CAP",
+    "_MULTI_CABIN_QUERY_BUMP_FACTOR",
+    "_derive_pp_cabins",
     "_pinned_solution_index",
     "_try_pinned_gflight_url",
     "_try_pinned_matrix_url",
@@ -609,36 +619,6 @@ def _render_calendar(
 # ─────────────────────────── backend execution ─────────────────────────────
 
 
-def _build_pp_legs(legs: tuple[Leg, ...]) -> list[LegQuery]:
-    """One PP query per Matrix leg. slice_index lets the matcher join PP
-    award results to the correct Itinerary slice in each Matrix solution."""
-    out: list[LegQuery] = []
-    for i, leg in enumerate(legs):
-        if not leg.date or not leg.origins or not leg.destinations:
-            continue
-        n = len(legs)
-        kind = (
-            "outbound"
-            if i == 0 and n > 1
-            else "return"
-            if i == 1 and n == _ROUND_TRIP_LEGS
-            else f"leg {i + 1}"
-            if n > _ROUND_TRIP_LEGS
-            else "one-way"
-        )
-        iso = leg.date.isoformat()
-        out.append(
-            LegQuery(
-                origin=leg.origins[0],
-                destination=leg.destinations[0],
-                date=iso,
-                slice_index=i,
-                label=f"{kind} {leg.origins[0]}→{leg.destinations[0]} {iso}",
-            ),
-        )
-    return out
-
-
 def _run_matrix_path(
     *,
     legs: tuple[Leg, ...],
@@ -936,92 +916,6 @@ def _run_enriched_path(
 
 
 # ─────────────────────────── multi-cabin orchestration ─────────────────────
-
-# When --cabin selects multiple cabins, each cabin's per-query top-N is bumped
-# so the client-side merge has overlap to work with. Cheapest economy and
-# cheapest business on a given route are often different carriers entirely
-# (e.g. JFK-LHR: VS in economy, FI in business) — a top-5 query per cabin
-# almost never overlaps, leaving the J column rendered as all "—".
-# Bumping per-cabin queries to ~25-50 itineraries lets the join surface
-# matching itineraries that exist in both cabins' results.
-#
-# Capped to bound response size (each itinerary costs bytes + parse time);
-# Matrix and gflight both tolerate page sizes in this range comfortably.
-_MULTI_CABIN_QUERY_BUMP_FACTOR = 5
-_MULTI_CABIN_QUERY_BUMP_CAP = 100
-
-
-def _bumped_query_top_n(top_n: int, cabin_count: int) -> int:
-    """Per-cabin query page size for a multi-cabin search.
-
-    Single-cabin invocations get `top_n` unchanged. Multi-cabin gets
-    `top_n * factor` capped at the bump ceiling. The visible row count
-    after merge is still `top_n` (renderer trims by sort cabin) — the
-    bump only widens the search space the join can draw from.
-    """
-    if cabin_count <= 1:
-        return top_n
-    return min(top_n * _MULTI_CABIN_QUERY_BUMP_FACTOR, _MULTI_CABIN_QUERY_BUMP_CAP)
-
-
-def _derive_pp_cabins(cash_cabins: tuple[Cabin, ...]) -> tuple[str, ...]:
-    """Map cash cabin list → PP cabin list for the PP overlay.
-
-    Adds First when Business is requested but First isn't: award seekers
-    treat business/first as a paired premium tier, and First is rare enough
-    that surfacing it costs almost nothing while filling a real research
-    gap. The reverse promotion (First → +Business) isn't applied — asking
-    for First means the user has already made that call.
-    """
-    out: list[str] = [_CABIN_TO_PP_NAME[c] for c in cash_cabins]
-    if Cabin.BUSINESS in cash_cabins and Cabin.FIRST not in cash_cabins:
-        out.append(_CABIN_TO_PP_NAME[Cabin.FIRST])
-    return tuple(out)
-
-
-def _pp_cabins_for_multi(sel: ProviderSelection, cabins: tuple[Cabin, ...]) -> str | None:
-    """PP cabins for a multi-cabin search. User's `--provider-opt pp.cabins=`
-    wins; otherwise derive from `--cabin` with the business→+first rule."""
-    user_set = sel.pp_cabins()
-    if user_set is not None:
-        return user_set
-    return ",".join(_derive_pp_cabins(cabins))
-
-
-def _cash_per_cabin_single(res: SearchResult, query_cabin: Cabin) -> dict[int, dict[str, float]]:
-    """Build the per-itinerary cash map for a single-cabin invocation.
-
-    The PP renderer needs to know which PP cabin name the cash field on each
-    itinerary corresponds to — otherwise it can't compute ¢/mi against the
-    right cash basis. For single-cabin runs the answer is the queried cabin
-    applied uniformly.
-    """
-    name = _CABIN_TO_PP_NAME[query_cabin]
-    out: dict[int, dict[str, float]] = {}
-    for it in res.solutions:
-        cash = parse_price(it.price)
-        if cash is not None:
-            out[id(it)] = {name: cash}
-    return out
-
-
-def _cash_per_cabin_multi(rows: list[MultiCabinRow]) -> dict[int, dict[str, float]]:
-    """Build the per-itinerary cash map for a multi-cabin merged result.
-
-    `rows` carries each itinerary alongside the prices observed in each cabin.
-    Object identity is preserved through the merge (and through PP's matcher
-    and de-dup), so `id(row.itinerary)` is a stable lookup key.
-    """
-    out: dict[int, dict[str, float]] = {}
-    for r in rows:
-        prices: dict[str, float] = {}
-        for cab, price in r.prices.items():
-            cash = parse_price(price)
-            if cash is not None:
-                prices[_CABIN_TO_PP_NAME[cab]] = cash
-        if prices:
-            out[id(r.itinerary)] = prices
-    return out
 
 
 def _run_matrix_multi(
@@ -1418,19 +1312,12 @@ def _render_gflight_table(
 # Angled Flat aren't comparable on pitch alone) so those stay as text.
 _LEGROOM_AS_COLOR = {"BELOW": "red", "ABOVE": "green"}
 _CABIN_LETTER = {"ECONOMY": "Y", "PREMIUM": "W", "BUSINESS": "J", "FIRST": "F"}
-# Domain Cabin enum → human label and PP API cabin string. Used for
-# multi-cabin column headers and PP cabin derivation.
+# Domain Cabin enum → human label. Used for multi-cabin column headers.
 _CABIN_TO_LETTER: dict[Cabin, str] = {
     Cabin.COACH: "Y",
     Cabin.PREMIUM_COACH: "W",
     Cabin.BUSINESS: "J",
     Cabin.FIRST: "F",
-}
-_CABIN_TO_PP_NAME: dict[Cabin, str] = {
-    Cabin.COACH: "Economy",
-    Cabin.PREMIUM_COACH: "Premium economy",
-    Cabin.BUSINESS: "Business",
-    Cabin.FIRST: "First",
 }
 # 📶 for wifi is the only emoji (2-col) — wifi is the highest-value binary signal
 # and 📶 is universally read at-a-glance where ≋ is not. Power and video keep
