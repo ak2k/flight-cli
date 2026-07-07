@@ -11,12 +11,17 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, ClassVar, override
 
+import pytest
+import typer
+
 from flight_cli import cli
 from flight_cli._calendar_split import (
     is_empty_calendar,
     merge_calendar_results,
     split_calendar_search,
 )
+from flight_cli._gflight_ids import GfThrottledError
+from flight_cli.client import MatrixApiError
 from flight_cli.domain import Cabin, CalendarSearch, CalendarWindow, Leg, SearchOptions
 from flight_cli.models import CalendarResult
 
@@ -272,3 +277,164 @@ def test_run_calendar_threads_max_concurrency(monkeypatch: Any) -> None:
     )
     # conc = min(n=4, max_concurrency=3) = 3
     assert _CapturingClient.last_kwargs.get("concurrency") == 3
+
+
+# ──────────── orchestration: _run_calendar_enriched (concurrent weave) ───────
+# The one-way / single-airport calendar dispatches the GF date-grid and the
+# Matrix calendar concurrently (work-6nrqf). These assert the weave paints both
+# and isolates per-backend failures — no network, fakes for both backends.
+
+
+def _oneway_cal() -> CalendarSearch:
+    return CalendarSearch(
+        legs=(Leg.of(["JFK"], ["LHR"]),),
+        options=SearchOptions(cabin=Cabin.COACH),
+        window=W,
+    )
+
+
+def _spy_renderers(monkeypatch: Any) -> dict[str, int]:
+    """Replace the calendar renderers + URL emitter with call-counting spies."""
+    calls: dict[str, int] = {"grid": 0, "calendar": 0}
+
+    def _grid(*_a: object, **_k: object) -> None:
+        calls["grid"] += 1
+
+    def _cal_render(*_a: object, **_k: object) -> None:
+        calls["calendar"] += 1
+
+    def _noop(*_a: object, **_k: object) -> None:
+        return None
+
+    monkeypatch.setattr(cli, "_render_date_grid", _grid)
+    monkeypatch.setattr(cli, "_render_calendar", _cal_render)
+    monkeypatch.setattr(cli, "_emit_urls", _noop)
+    return calls
+
+
+def _run_enriched() -> None:
+    cli._run_calendar_enriched(  # pyright: ignore[reportPrivateUsage]
+        _oneway_cal(),
+        origins=("JFK",),
+        dests=("LHR",),
+        sd=W.start,
+        ed=W.end,
+        dmin=5,
+        dmax=7,
+        rps=10.0,
+        impersonate="chrome",
+        no_cache=True,
+        matrix_url=False,
+        google_url=False,
+    )
+
+
+def _fake_grid(_search: object) -> dict[str, float]:
+    return {"2026-09-09": 600.0}
+
+
+def test_calendar_enriched_paints_grid_then_matrix(monkeypatch: Any) -> None:
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _fake_grid)
+    calls = _spy_renderers(monkeypatch)
+    _run_enriched()
+    assert calls["grid"] == 1  # GF grid painted (fast, first)
+    assert calls["calendar"] == 1  # authoritative Matrix calendar painted
+
+
+def test_calendar_enriched_gf_throttle_still_paints_matrix(monkeypatch: Any) -> None:
+    def _throttle(_search: object) -> dict[str, float]:
+        raise GfThrottledError("rate-limited")
+
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _throttle)
+    calls = _spy_renderers(monkeypatch)
+    _run_enriched()
+    assert calls["grid"] == 0  # throttled → no grid
+    assert calls["calendar"] == 1  # Matrix still ran + painted (error isolation)
+
+
+def test_calendar_enriched_matrix_error_with_grid_does_not_raise(monkeypatch: Any) -> None:
+    class _ErrClient(_PricedClient):
+        @override
+        async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
+            _ = (search, cache)
+            raise MatrixApiError("boom", kind="internal")
+
+    monkeypatch.setattr(cli, "MatrixClient", _ErrClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _fake_grid)
+    calls = _spy_renderers(monkeypatch)
+    _run_enriched()  # grid was shown → must NOT raise typer.Exit
+    assert calls["grid"] == 1
+    assert calls["calendar"] == 0  # Matrix errored → no calendar paint
+
+
+def test_calendar_enriched_unexpected_matrix_error_still_shows_grid(monkeypatch: Any) -> None:
+    # A NON-MatrixApiError from execute() (e.g. a raw httpx transport/status error)
+    # must not tear down the task group / cancel the grid paint — the grid still shows
+    # and the command does not raise (per-backend isolation for every failure class).
+    class _RawErrClient(_PricedClient):
+        @override
+        async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
+            _ = (search, cache)
+            raise RuntimeError("raw transport blip")  # NOT a MatrixApiError
+
+    monkeypatch.setattr(cli, "MatrixClient", _RawErrClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _fake_grid)
+    calls = _spy_renderers(monkeypatch)
+    _run_enriched()  # must NOT raise / traceback — grid was shown
+    assert calls["grid"] == 1  # grid still painted despite the unexpected Matrix error
+    assert calls["calendar"] == 0
+
+
+def test_calendar_enriched_both_backends_fail_exits_nonzero(monkeypatch: Any) -> None:
+    # GF throttled AND Matrix errored → nothing to show → typer.Exit(1).
+    class _ErrClient(_PricedClient):
+        @override
+        async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
+            _ = (search, cache)
+            raise MatrixApiError("boom", kind="internal")
+
+    def _throttle(_search: object) -> dict[str, float]:
+        raise GfThrottledError("rate-limited")
+
+    monkeypatch.setattr(cli, "MatrixClient", _ErrClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _throttle)
+    _spy_renderers(monkeypatch)
+    with pytest.raises(typer.Exit):
+        _run_enriched()
+
+
+def test_calendar_enriched_generic_gf_error_still_paints_matrix(monkeypatch: Any) -> None:
+    # A non-throttle GF failure routes through the broad except → Matrix still paints.
+    def _boom(_search: object) -> dict[str, float]:
+        raise RuntimeError("network blip")
+
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _boom)
+    calls = _spy_renderers(monkeypatch)
+    _run_enriched()
+    assert calls["grid"] == 0  # GF errored → no grid
+    assert calls["calendar"] == 1  # Matrix still painted (error isolation)
+
+
+def test_calendar_enriched_paints_grid_before_matrix(monkeypatch: Any) -> None:
+    # The progressive-reveal contract: the GF grid is painted BEFORE the Matrix calendar.
+    order: list[str] = []
+
+    def _grid(*_a: object, **_k: object) -> None:
+        order.append("grid")
+
+    def _cal_render(*_a: object, **_k: object) -> None:
+        order.append("calendar")
+
+    def _noop(*_a: object, **_k: object) -> None:
+        return None
+
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _fake_grid)
+    monkeypatch.setattr(cli, "_render_date_grid", _grid)
+    monkeypatch.setattr(cli, "_render_calendar", _cal_render)
+    monkeypatch.setattr(cli, "_emit_urls", _noop)
+    _run_enriched()
+    assert order == ["grid", "calendar"]
