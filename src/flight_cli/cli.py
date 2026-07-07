@@ -315,6 +315,26 @@ def _report_calendar_matrix_failure(state: dict[str, Any]) -> None:
         err.print("[yellow]Matrix calendar did not complete.[/]")
 
 
+async def _matrix_into_state(
+    c: MatrixClient, search: Search, state: dict[str, Any], *, cache: bool
+) -> None:
+    """Run a Matrix `execute` inside a progressive weave and stash the outcome in
+    `state`, isolating BOTH failure classes so neither escapes the task group:
+    a known `MatrixApiError` → `state["matrix_err"]`, and any other exception
+    (e.g. a raw httpx transport/status error that `execute()` doesn't wrap) →
+    `state["matrix_unexpected"]`. Letting either propagate would cancel the
+    still-pending Google Flights paint and surface a bare traceback. Both the
+    search weave (`_run_enriched_path`) and the calendar weave
+    (`_run_calendar_enriched`) route their Matrix task through this one contract
+    so the isolation can't drift between them."""
+    try:
+        state["matrix"] = await c.execute(search, cache=cache)
+    except MatrixApiError as e:
+        state["matrix_err"] = e
+    except Exception as e:  # noqa: BLE001 — isolate any unexpected Matrix failure; reported after the weave
+        state["matrix_unexpected"] = e
+
+
 def _run_calendar_enriched(
     search: CalendarSearch,
     *,
@@ -346,17 +366,7 @@ def _run_calendar_enriched(
     state: dict[str, Any] = {}
 
     async def _matrix(c: MatrixClient) -> None:
-        try:
-            state["matrix"] = await c.execute(search, cache=not no_cache)
-        except MatrixApiError as e:
-            state["matrix_err"] = e
-        except Exception as e:  # noqa: BLE001
-            # An unexpected Matrix failure (e.g. a raw httpx transport/status error that
-            # execute() doesn't wrap) must NOT propagate out of this task and tear down
-            # the group — that would cancel the still-pending grid paint and surface a
-            # bare traceback. Stash it and report after the weave so the GF grid still
-            # shows (per-backend isolation, mirroring the MatrixApiError path).
-            state["matrix_unexpected"] = e
+        await _matrix_into_state(c, search, state, cache=not no_cache)
 
     async def _go() -> None:
         async with (
@@ -587,10 +597,7 @@ def _run_enriched_path(
     state: dict[str, Any] = {}
 
     async def _matrix(c: MatrixClient) -> None:
-        try:
-            state["matrix"] = await c.execute(matrix_search, cache=not no_cache)
-        except MatrixApiError as e:
-            state["matrix_err"] = e
+        await _matrix_into_state(c, matrix_search, state, cache=not no_cache)
 
     async def _go() -> None:
         async with (
@@ -628,10 +635,14 @@ def _run_enriched_path(
             err.print(f"[yellow]Google Flights query failed:[/] {e}")
     matrix_res = state.get("matrix")
     if matrix_res is None:
-        # Matrix failed; the GF table (if any) was already painted.
+        # Matrix failed; the GF table (if any) was already painted. Report both a
+        # known MatrixApiError and an unexpected non-MatrixApiError stashed by the
+        # weave's `_matrix` task (mirrors `_report_calendar_matrix_failure`).
         e = state.get("matrix_err")
         if e is not None:
             err.print(f"[red]Matrix returned an error ({e.kind}):[/] {e.message}")
+        elif state.get("matrix_unexpected") is not None:
+            err.print(f"[red]Matrix search failed:[/] {state['matrix_unexpected']}")
         if not gf:
             raise typer.Exit(1)
         return
