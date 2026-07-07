@@ -22,11 +22,11 @@ from typing import TYPE_CHECKING, Annotated, Any, cast
 import anyio
 import anyio.to_thread
 import typer
-from rich.console import Console
 from rich.table import Table
 
 from . import _config
 from ._calendar_split import is_empty_calendar, merge_calendar_results, split_calendar_search
+from ._console import console, err
 from ._multi_cabin import MultiCabinRow, parse_price
 from ._multi_cabin import merge as _merge_cabins
 from .client import MatrixApiError, MatrixClient
@@ -85,8 +85,6 @@ app = typer.Typer(
     add_completion=False, rich_markup_mode="rich", help="CLI for ITA Matrix's Alkali backend."
 )
 app.add_typer(auth_app, name="auth")
-console = Console()
-err = Console(stderr=True)
 
 
 @app.callback()
