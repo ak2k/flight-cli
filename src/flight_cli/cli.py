@@ -61,6 +61,16 @@ from ._parsing import (
 from ._parsing import (
     split_price as _split_price,
 )
+from ._runtime_opts import FORMAT_OPT as _FORMAT_OPT
+from ._runtime_opts import IMPERSONATE_OPT as _IMPERSONATE_OPT
+from ._runtime_opts import JSON_OPT as _JSON_OPT
+from ._runtime_opts import NO_CACHE_OPT as _NO_CACHE_OPT
+from ._runtime_opts import PROVIDER_OPT as _PROVIDER_OPT
+from ._runtime_opts import RPS_OPT as _RPS_OPT
+from ._runtime_opts import resolve_format as _resolve_format
+from ._runtime_opts import resolve_impersonate as _resolve_impersonate
+from ._runtime_opts import resolve_no_cache as _resolve_no_cache
+from ._runtime_opts import resolve_rps as _resolve_rps
 from .client import MatrixApiError, MatrixClient
 from .domain import (
     Cabin,
@@ -1858,87 +1868,6 @@ _GROUP_FILTERING = "Filtering"
 _GROUP_OUTPUT = "Output"
 _GROUP_BACKEND = "Backend & providers"
 
-# Common-args helpers — these reduce repetition across commands.
-# These flags are hidden because almost nobody touches them in normal use;
-# defaults live in config.toml ([http] section) and can be overridden via
-# FLIGHT_RPS / FLIGHT_IMPERSONATE env vars. The CLI flag still works for
-# one-off overrides — it's just no longer in --help. None sentinel means
-# "fall back to config/env"; explicit value overrides everything.
-_RPS_OPT = typer.Option(
-    None,
-    "--rps",
-    hidden=True,
-    help="Requests per second (default: 1.0; FLIGHT_RPS / config.toml).",
-)
-_IMPERSONATE_OPT = typer.Option(
-    None,
-    "--impersonate",
-    hidden=True,
-    help="curl_cffi profile (default: chrome; FLIGHT_IMPERSONATE / config.toml).",
-)
-_NO_CACHE_OPT = typer.Option(
-    False,
-    "--no-cache",
-    hidden=True,
-    help="Bypass the on-disk response cache (or set FLIGHT_NO_CACHE=1).",
-)
-_PROVIDER_OPT = typer.Option(
-    None,
-    "--provider-opt",
-    help=(
-        "Per-provider override, repeatable: 'pp.airlines=United,Delta'. "
-        "Overrides ~/.config/flight-cli/config.toml [providers.<name>]."
-    ),
-    rich_help_panel="Backend & providers",
-)
-
-
-def _resolve_rps(flag: float | None) -> float:
-    """CLI flag wins; otherwise fall back to env / config / default."""
-    if flag is not None:
-        return flag
-    try:
-        return _config.http_rps()
-    except ValueError as e:
-        err.print(f"[red]Bad rps configuration: {e}[/]")
-        raise typer.Exit(2) from e
-
-
-def _resolve_impersonate(flag: str | None) -> str:
-    if flag is not None:
-        return flag
-    return _config.http_impersonate()
-
-
-def _resolve_no_cache(flag: bool) -> bool:
-    """The CLI flag is a one-way toggle: passing --no-cache forces True.
-    Without it, env/config decide."""
-    if flag:
-        return True
-    return _config.cache_disabled()
-
-
-# ─────────────────────────── --format / --json ─────────────────────────────
-
-# Output formats currently implemented end-to-end. csv/tsv/yaml were in the
-# original work-4uls plan but deferred to a follow-up: the cash-itinerary
-# shape isn't naturally tabular without a flattening pass that deserves its
-# own design. Today's surface is the front door; emitters layer on later.
-_VALID_FORMATS = ("table", "json")
-
-_FORMAT_OPT = typer.Option(
-    "table",
-    "--format",
-    help=f"Output format: one of {'/'.join(_VALID_FORMATS)}.",
-    rich_help_panel=_GROUP_OUTPUT,
-)
-_JSON_OPT = typer.Option(
-    False,
-    "--json",
-    hidden=True,
-    help="[deprecated] Use --format json.",
-)
-
 # URL emission flags shared by `search` / `calendar` / `detail`.
 #
 # Both URLs encode the search criteria. The Google-Flights URL ALSO pins
@@ -1955,24 +1884,6 @@ _GOOGLE_URL_HELP = (
     "from the results, the URL deep-links to that specific itinerary "
     "(pins selected flights). Otherwise it pre-fills the search."
 )
-
-
-def _resolve_format(*, fmt: str, json_flag: bool) -> str:
-    """Collapse --format + deprecated --json into a single format string.
-
-    `--json` forwards to `--format json` with a deprecation warning. Setting
-    both (--json --format X for X != json) is a hard error: ambiguous intent.
-    """
-    if json_flag:
-        err.print("[yellow]--json is deprecated; use --format json.[/]")
-        if fmt not in ("table", "json"):
-            err.print(f"[red]--json conflicts with --format {fmt!r}; pick one.[/]")
-            raise typer.Exit(2)
-        return "json"
-    if fmt not in _VALID_FORMATS:
-        err.print(f"[red]--format must be one of {'/'.join(_VALID_FORMATS)}; got {fmt!r}[/]")
-        raise typer.Exit(2)
-    return fmt
 
 
 @app.command()
