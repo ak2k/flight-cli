@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
 import anyio
@@ -31,12 +31,6 @@ from ._dispatch import resolve_providers as _resolve_providers
 from ._dispatch import should_run_awards as _should_run_awards
 from ._multi_cabin import MultiCabinRow
 from ._multi_cabin import merge as _merge_cabins
-from ._parsing import (
-    ROUND_TRIP_LEGS as _ROUND_TRIP_LEGS,
-)
-from ._parsing import (
-    amount as _amount,
-)
 from ._parsing import (
     build_options as _build_options,
 )
@@ -61,9 +55,6 @@ from ._parsing import (
 from ._parsing import (
     resolve_cabin_list as _resolve_cabin_list,
 )
-from ._parsing import (
-    split_price as _split_price,
-)
 from ._pp_glue import MULTI_CABIN_QUERY_BUMP_CAP as _MULTI_CABIN_QUERY_BUMP_CAP
 from ._pp_glue import MULTI_CABIN_QUERY_BUMP_FACTOR as _MULTI_CABIN_QUERY_BUMP_FACTOR
 from ._pp_glue import build_pp_legs as _build_pp_legs
@@ -72,6 +63,17 @@ from ._pp_glue import cash_per_cabin_multi as _cash_per_cabin_multi
 from ._pp_glue import cash_per_cabin_single as _cash_per_cabin_single
 from ._pp_glue import derive_pp_cabins as _derive_pp_cabins
 from ._pp_glue import pp_cabins_for_multi as _pp_cabins_for_multi
+from ._render import fmt_slice_cell as _fmt_slice_cell
+from ._render import fmt_slice_route as _fmt_slice_route
+from ._render import fmt_slice_times as _fmt_slice_times
+from ._render import leg_display as _leg_display
+from ._render import match_carriers as _match_carriers
+from ._render import render_calendar as _render_calendar
+from ._render import render_date_grid as _render_date_grid
+from ._render import render_gflight_table as _render_gflight_table
+from ._render import render_merged as _render_merged
+from ._render import render_multi_cabin_search as _render_multi_cabin_search
+from ._render import render_search as _render_search
 from ._runtime_opts import FORMAT_OPT as _FORMAT_OPT
 from ._runtime_opts import IMPERSONATE_OPT as _IMPERSONATE_OPT
 from ._runtime_opts import JSON_OPT as _JSON_OPT
@@ -104,7 +106,7 @@ from .pp.auth import load_tokens
 from .pp.cli import auth_app, run_pp_for_search
 
 if TYPE_CHECKING:
-    from .models import CalendarResult, LegInfo, Location, SearchResult, Slice
+    from .models import CalendarResult, Location, SearchResult
 
 # Names re-exported for the test suite: `cli.py` was decomposed into `_console`,
 # `_parsing`, `_dispatch`, `_runtime_opts`, `_urls`, `_pp_glue`, and `_render`,
@@ -117,6 +119,10 @@ __all__ = [
     "_MULTI_CABIN_QUERY_BUMP_CAP",
     "_MULTI_CABIN_QUERY_BUMP_FACTOR",
     "_derive_pp_cabins",
+    "_fmt_slice_cell",
+    "_fmt_slice_route",
+    "_fmt_slice_times",
+    "_leg_display",
     "_pinned_solution_index",
     "_try_pinned_gflight_url",
     "_try_pinned_matrix_url",
@@ -394,228 +400,6 @@ def _run_calendar_enriched(
     _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
 
 
-# ─────────────────────────── result renderers ──────────────────────────────
-
-
-def _parse_iso(s: str) -> datetime | None:
-    """Best-effort parse of a slice timestamp ("YYYY-MM-DDTHH:MM[:SS]")."""
-    if not s:
-        return None
-    try:
-        return datetime.fromisoformat(s)
-    except ValueError:
-        try:
-            return datetime.fromisoformat(s[:16])
-        except ValueError:
-            return None
-
-
-def _fmt_slice_times(dep: str, arr: str) -> str:
-    """Compact, unambiguous departure→arrival for an itinerary cell.
-
-    Shows the departure date once, the two clock times, and a `+Nd` marker
-    when the arrival lands on a later calendar day. Without the marker an
-    overnight return reads as "arrives before it departs" once the cell is
-    squeezed (work-72syf). Falls back to raw ISO — which still carries both
-    dates — when a timestamp can't be parsed.
-    """
-    d = _parse_iso(dep)
-    a = _parse_iso(arr)
-    if d is None or a is None:
-        return f"{dep[:16]}→{arr[:16]}"
-    day_off = (a.date() - d.date()).days
-    suffix = f" +{day_off}d" if day_off > 0 else (f" {day_off}d" if day_off < 0 else "")
-    return f"{d:%b%d %H:%M}→{a:%H:%M}{suffix}"
-
-
-def _fmt_slice_route(s: Slice) -> str:
-    """Origin→destination threading any intermediate connection airports, so a
-    1-stop itinerary shows its connection city instead of hiding it."""
-    o = (s.origin.code if s.origin else None) or "?"
-    d = (s.destination.code if s.destination else None) or "?"
-    vias = [e.code for e in s.stops if e and e.code]
-    return "→".join([o, *vias, d])
-
-
-def _fmt_slice_cell(s: Slice) -> str:
-    """One itinerary slice as a table cell: route (with connection cities),
-    flight numbers, compact unambiguous times, duration, then per-leg legroom
-    lines. Shared by the single-cabin and multi-cabin itinerary tables."""
-    dur_min = s.duration or 0
-    dur = f"{dur_min // 60}h{dur_min % 60:02d}m" if dur_min else ""
-    flights = "/".join(s.flights) or "?"
-    times = _fmt_slice_times(s.departure or "", s.arrival or "")
-    head = " ".join(p for p in (_fmt_slice_route(s), flights, times, dur) if p)
-    tail = _fmt_legroom_lines(s)
-    return f"{head}\n{tail}" if tail else head
-
-
-def _render_search(res: SearchResult) -> None:
-    if res.solution_count == 0:
-        console.print("[yellow]No solutions returned.[/]")
-        return
-    ccy, cheapest = _split_price(res.cheapest_price)
-    ccy_tag = f" ({ccy})" if ccy else ""
-    console.print(
-        f"[bold]{res.solution_count} solutions[/]  · "
-        f"cheapest: [bold cyan]{cheapest or '—'}{ccy_tag}[/]"
-    )
-
-    cm = res.carrier_stop_matrix
-    if cm and cm.columns and cm.rows:
-        t = Table(
-            title=f"Carrier x stops grid{ccy_tag}",
-            show_header=True,
-            header_style="bold magenta",
-        )
-        t.add_column("stops")
-        for col in cm.columns:
-            code = col.label.code if col.label else "?"
-            sn = (col.label.short_name or "") if col.label else ""
-            t.add_column(f"{code or '?'}\n{sn[:14]}")
-        for row in cm.rows:
-            cells = [str(row.label) if row.label is not None else "?"]
-            for c in row.cells:
-                p = _amount(c.min_price)
-                mark = "★" if c.min_price_in_grid else ("·" if c.min_price_in_row else "")
-                cells.append(f"{p} {mark}")
-            t.add_row(*cells)
-        console.print(t)
-
-    st = Table(title=f"Itineraries{ccy_tag}", show_header=True, header_style="bold green")
-    st.add_column("#", justify="right")
-    st.add_column("price", justify="right")
-    st.add_column("carriers")
-    st.add_column("outbound")
-    st.add_column("return")
-    for i, it in enumerate(res.solutions[:10], 1):
-        itn = it.itinerary
-        slcs: list[Slice] = itn.slices if itn else []
-        it_carriers = ",".join((c.code or "?") for c in (itn.carriers if itn else []))
-
-        out = _fmt_slice_cell(slcs[0]) if slcs else "—"
-        ret = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
-        st.add_row(str(i), _amount(it.price), it_carriers or "?", out, ret)
-    console.print(st)
-
-
-# ───────────────── legroom formatters (gflight-populated; Matrix slices noop) ──
-
-
-def _fmt_legroom_one(flight_no: str, leg: LegInfo) -> str:
-    """Per-leg summary. Returns '' when no legroom fields are populated
-    (Matrix path — Matrix's response doesn't carry legroom). Uses the
-    same color-not-text policy as `_fmt_gflight_legroom`."""
-    parts: list[str] = []
-    cabin_short = _CABIN_LETTER.get(leg.cabin or "", "")
-    if cabin_short:
-        parts.append(cabin_short)
-    if leg.pitch_inches is not None:
-        token = f'{leg.pitch_inches}"'
-        color = _LEGROOM_AS_COLOR.get(leg.legroom_class or "")
-        if color:
-            token = f"[{color}]{token}[/]"
-        parts.append(token)
-    if leg.legroom_class and leg.legroom_class not in {"AVERAGE", "BELOW", "ABOVE"}:
-        parts.append(leg.legroom_class)
-    amenities: list[str] = []
-    w = _WIFI_GLYPH.get(leg.wifi or "")
-    if w:
-        amenities.append(w)
-    p = _POWER_GLYPH.get(leg.power or "")
-    if p:
-        amenities.append(p)
-    v = _VIDEO_GLYPH.get(leg.video or "")
-    if v:
-        amenities.append(v)
-    if amenities:
-        parts.append("".join(amenities))
-    if not parts:
-        return ""
-    return f"  {flight_no:<6} " + " ".join(parts)
-
-
-def _fmt_legroom_lines(s: Slice) -> str:
-    """Per-leg lines under a slice cell, one row per physical flight in the slice.
-    Empty when no legroom data populated (Matrix path)."""
-    if not s.legs:
-        return ""
-    rows = [_fmt_legroom_one(s.flights[i], leg) for i, leg in enumerate(s.legs)]
-    return "\n".join(r for r in rows if r)
-
-
-def _render_date_grid(
-    grid: dict[str, float],
-    *,
-    origin: tuple[str, ...],
-    destination: tuple[str, ...],
-    sd: date,
-    ed: date,
-) -> None:
-    """Render the GF native date-grid: cheapest fare per departure day (USD),
-    sorted cheapest-first. One-way only (the grid's shape)."""
-    if not grid:
-        return
-    console.print(
-        f"[bold]{len(grid)} priced days[/]  · cheapest: "
-        f"[bold cyan]{min(grid.values()):.0f} (USD)[/]  · "
-        f"window {sd.isoformat()} → {ed.isoformat()}"
-    )
-    t = Table(
-        title=f"{','.join(origin)} → {','.join(destination)}: "
-        "lowest fare per departure day (Google Flights)",
-        show_header=True,
-        header_style="bold green",
-    )
-    t.add_column("departure", justify="right")
-    t.add_column("min (USD)", justify="right")
-    for day, price in sorted(grid.items(), key=lambda kv: kv[1]):
-        t.add_row(day, f"{price:.0f}")
-    console.print(t)
-
-
-def _render_calendar(
-    res: CalendarResult,
-    *,
-    dmin: int,
-    dmax: int,
-    origin: tuple[str, ...],
-    destination: tuple[str, ...],
-    sd: date,
-    ed: date,
-) -> None:
-    if res.solution_count == 0 or not res.priced_days:
-        console.print(
-            "[yellow]Calendar empty.[/] Matrix's calendar mode "
-            "brownouts regularly; retry, or use [bold]flight fare[/] "
-            "for a single date."
-        )
-        return
-    ccy, cheapest = _split_price(res.cheapest_price)
-    ccy_tag = f" ({ccy})" if ccy else ""
-    console.print(
-        f"[bold]{res.solution_count} solutions[/]  · "
-        f"overall cheapest: [bold cyan]{cheapest or '—'}{ccy_tag}[/]  · "
-        f"window {sd.isoformat()} → {ed.isoformat()}  · "
-        f"duration {dmin}-{dmax} nights"
-    )
-    title = f"{','.join(origin)} → {','.join(destination)}: lowest fare per departure day{ccy_tag}"
-    t = Table(title=title, show_header=True, header_style="bold green")
-    t.add_column("departure", justify="right")
-    t.add_column("min", justify="right")
-    for dur in range(dmin, dmax + 1):
-        t.add_column(f"{dur}n", justify="right")
-    t.add_column("sols", justify="right")
-    for d in sorted(res.priced_days, key=lambda x: x.price_value or 9e9):
-        row = [str(d.date), _amount(d.min_price)]
-        opts = {o.trip_length: o.min_price for o in d.options}
-        for dur in range(dmin, dmax + 1):
-            row.append(_amount(opts.get(dur)))
-        row.append(str(d.solution_count))
-        t.add_row(*row)
-    console.print(t)
-
-
 # ─────────────────────────── backend execution ─────────────────────────────
 
 
@@ -692,43 +476,6 @@ def _gflight_results(legs: tuple[Leg, ...], opts: SearchOptions, top_n: int) -> 
         keep = set(surviving_indices(fli_results_to_search_result(results), per_slice_preds))
         results = [r for i, r in enumerate(results) if i in keep]
     return results
-
-
-_MERGE_SOURCE_TAG = {"both": "GF+MX", "matrix": "MX", "gf": "GF"}
-
-
-def _render_merged(rows: list[Any], *, legs: tuple[Leg, ...], top_n: int) -> None:
-    """Render the reconciled GF+Matrix view: one row per itinerary with the GF
-    and Matrix prices attributed side-by-side and a source tag."""
-    origin = legs[0].origins[0] if legs[0].origins else "?"
-    destination = legs[0].destinations[0] if legs[0].destinations else "?"
-    has_return = len(legs) >= _ROUND_TRIP_LEGS
-    t = Table(
-        title=f"Google Flights + Matrix · {origin}→{destination}"
-        + (" + return" if has_return else ""),
-        show_header=True,
-        header_style="bold green",
-    )
-    t.add_column("#", justify="right")
-    t.add_column("src")
-    t.add_column("Matrix", justify="right")
-    t.add_column("Google", justify="right")
-    t.add_column("outbound")
-    t.add_column("return")
-    for i, row in enumerate(rows[:top_n], 1):
-        itn = row.itinerary.itinerary
-        slcs: list[Slice] = itn.slices if itn else []
-        out = _fmt_slice_cell(slcs[0]) if slcs else "—"
-        ret = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
-        t.add_row(
-            str(i),
-            _MERGE_SOURCE_TAG.get(row.source, row.source),
-            _amount(row.matrix_price),
-            _amount(row.gf_price),
-            out,
-            ret,
-        )
-    console.print(t)
 
 
 def _run_gflight_path(
@@ -1007,55 +754,6 @@ def _gflight_to_search_result_per_cabin(
     return {cab: fli_results_to_search_result(res) for cab, res in results_by_cabin.items()}
 
 
-def _render_multi_cabin_search(
-    rows: list[MultiCabinRow],
-    *,
-    cabins: tuple[Cabin, ...],
-    sort_by: Cabin,
-    title_prefix: str = "Itineraries",
-) -> None:
-    """Render multi-cabin merged rows. One row per itinerary, one $ column
-    per requested cabin, '—' for missing."""
-    if not rows:
-        console.print("[yellow]No itineraries.[/]")
-        return
-    # Use the first present price to surface a currency tag in the title.
-    ccy = ""
-    for row in rows:
-        for p in row.prices.values():
-            ccy_candidate, _ = _split_price(p)
-            if ccy_candidate:
-                ccy = ccy_candidate
-                break
-        if ccy:
-            break
-    ccy_tag = f" ({ccy})" if ccy else ""
-    cabin_labels = "+".join(_CABIN_TO_LETTER[c] for c in cabins)
-
-    t = Table(
-        title=f"{title_prefix} · {cabin_labels} (sorted by {_CABIN_TO_LETTER[sort_by]}){ccy_tag}",
-        show_header=True,
-        header_style="bold green",
-    )
-    t.add_column("#", justify="right")
-    t.add_column("carriers")
-    t.add_column("outbound")
-    t.add_column("return")
-    for cab in cabins:
-        t.add_column(f"{_CABIN_TO_LETTER[cab]} $", justify="right")
-
-    for i, row in enumerate(rows, 1):
-        itn = row.itinerary.itinerary
-        slcs: list[Slice] = itn.slices if itn else []
-        carriers = ",".join((c.code or "?") for c in (itn.carriers if itn else []))
-
-        out_cell = _fmt_slice_cell(slcs[0]) if slcs else "—"
-        ret_cell = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
-        price_cells = [_amount(row.prices.get(cab)) for cab in cabins]
-        t.add_row(str(i), carriers or "?", out_cell, ret_cell, *price_cells)
-    console.print(t)
-
-
 def _validate_sort_cabin(sort_by: Cabin, cabins: tuple[Cabin, ...]) -> None:
     if sort_by not in cabins:
         names = ", ".join(c.value for c in cabins)
@@ -1218,173 +916,6 @@ def _merge_results_into_one(
         solutionSet=seed.solution_set,
         raw=seed.raw,
     )
-
-
-def _match_carriers(legs: tuple[Leg, ...]) -> frozenset[str]:
-    """Marketing carrier codes the user filtered on (for codeshare-aware display).
-    Empty when there's no marketing-carrier include filter — operating (`O:`) and
-    exclude filters don't trigger codeshare relabeling."""
-    from .routing_predicates import CarrierPred, classify  # noqa: PLC0415
-
-    codes: set[str] = set()
-    for lg in legs:
-        for p in classify(lg.route_language, lg.extension).predicates:
-            if isinstance(p, CarrierPred) and not p.operating and not p.exclude:
-                codes |= p.codes
-    return frozenset(codes)
-
-
-def _leg_display(leg: Any, amenity: Any, match_carriers: frozenset[str]) -> str:
-    """Per-leg label '<carrier> <num>'. If the booking carrier isn't in the user's
-    carrier filter but the leg is sold under a codeshare that IS (e.g. UA58 sold as
-    LH9407 under `--routing LH+`), show the matched identity: 'LH9407 (op UA58)'."""
-    code = getattr(leg.airline, "name", "") or ""
-    number = getattr(leg, "flight_number", "?")
-    booking = f"{code} {number}"
-    if not match_carriers or code in match_carriers:
-        return booking
-    raw_mf = getattr(amenity, "marketing_flights", ()) if amenity else ()
-    mflights: tuple[str, ...] = tuple(raw_mf or ())
-    for mf in mflights:
-        if mf[:2].upper() in match_carriers:
-            return f"{mf} (op {code}{number})"
-    return booking
-
-
-def _render_gflight_table(
-    results: list[Any],
-    *,
-    legs: tuple[Leg, ...],
-    top_n: int,
-    match_carriers: frozenset[str] = frozenset(),
-) -> None:
-    """Render fli results as a rich table. Duck-typed: fli has no type stubs.
-
-    Accepts our `GFlightWithId` wrappers — `.flight` is fli's FlightResult,
-    `.amenities` is per-leg legroom data parsed from Google's response.
-    `match_carriers` enables codeshare-aware leg labels (see `_leg_display`)."""
-    origin = legs[0].origins[0] if legs[0].origins else "?"
-    destination = legs[0].destinations[0] if legs[0].destinations else "?"
-    has_return = len(legs) >= _ROUND_TRIP_LEGS
-    t = Table(
-        title=f"Google Flights · {origin}→{destination}" + (" + return" if has_return else ""),
-        show_header=True,
-        header_style="bold green",
-    )
-    t.add_column("#", justify="right")
-    t.add_column("price", justify="right")
-    t.add_column("stops", justify="right")
-    t.add_column("duration")
-    t.add_column("legs")
-    t.add_column("legroom")
-    any_legroom = False
-    for i, r in enumerate(results[:top_n], 1):
-        items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
-        for j, g in enumerate(items):
-            fr = g.flight  # unwrap GFlightWithId → fli FlightResult
-            amenities = getattr(g, "amenities", []) or []
-            label = f"{i}{'a' if j == 0 else 'b'}" if len(items) > 1 else str(i)
-            legs_str = " → ".join(
-                _leg_display(leg, amenities[k] if k < len(amenities) else None, match_carriers)
-                for k, leg in enumerate(fr.legs)
-            )
-            mins = fr.duration
-            dur = f"{mins // 60}h{mins % 60:02d}m"
-            legroom_str = _fmt_gflight_legroom(fr.legs, amenities)
-            if legroom_str:
-                any_legroom = True
-            t.add_row(
-                label,
-                f"{fr.currency or 'USD'}{fr.price:.2f}",
-                str(fr.stops),
-                dur,
-                legs_str,
-                legroom_str,
-            )
-    console.print(t)
-    if any_legroom:
-        console.print(_LEGROOM_KEY)
-
-
-# AVERAGE/BELOW/ABOVE are pitch-relative judgments — collapse them to color on
-# the inches token so the eye picks out squeeze rows without text noise. The
-# named premium-cabin enums describe seat construction (Lie Flat vs Suite vs
-# Angled Flat aren't comparable on pitch alone) so those stay as text.
-_LEGROOM_AS_COLOR = {"BELOW": "red", "ABOVE": "green"}
-_CABIN_LETTER = {"ECONOMY": "Y", "PREMIUM": "W", "BUSINESS": "J", "FIRST": "F"}
-# Domain Cabin enum → human label. Used for multi-cabin column headers.
-_CABIN_TO_LETTER: dict[Cabin, str] = {
-    Cabin.COACH: "Y",
-    Cabin.PREMIUM_COACH: "W",
-    Cabin.BUSINESS: "J",
-    Cabin.FIRST: "F",
-}
-# 📶 for wifi is the only emoji (2-col) — wifi is the highest-value binary signal
-# and 📶 is universally read at-a-glance where ≋ is not. Power and video keep
-# 1-col Unicode pairs so the plug-vs-USB and stream-vs-ondemand distinctions
-# don't bloat the column. See `_LEGROOM_KEY` for the rendered legend.
-_WIFI_GLYPH = {"free": "📶", "paid": "[yellow]📶$[/]"}
-# ↯ is more lightning-y (= plug power); ⌁ reads more like a connector (= USB).
-_POWER_GLYPH = {"plug": "↯", "usb": "⌁"}
-# ◰ (quadrant square) evokes a phone screen — stands in for BYOD streaming.
-_VIDEO_GLYPH = {"stream": "▶", "ondemand": "▷", "byod": "◰"}
-_LEGROOM_KEY = (
-    "[dim]Legroom glyphs: "
-    f"{_WIFI_GLYPH['free']} free wifi · "
-    f"{_WIFI_GLYPH['paid']}[dim] paid wifi · "
-    f"{_POWER_GLYPH['plug']} in-seat plug · "
-    f"{_POWER_GLYPH['usb']} USB only · "
-    f"{_VIDEO_GLYPH['stream']} live TV · "
-    f"{_VIDEO_GLYPH['ondemand']} on-demand · "
-    f"{_VIDEO_GLYPH['byod']} stream-to-device · "
-    "[red]red[/dim] = BELOW · [green]green[/] = ABOVE"
-    "[/]"
-)
-
-
-def _fmt_gflight_legroom(fli_legs: list[Any], amenities: list[Any]) -> str:
-    """One line per physical leg: `<cabin> <pitch>" [seat-type] <amenities>`.
-
-    `amenities[i]` is a LegAmenities instance from _gflight_ids; misaligned
-    or empty inputs render as ''."""
-    lines: list[str] = []
-    for i, leg in enumerate(fli_legs):
-        a = amenities[i] if i < len(amenities) else None
-        if a is None:
-            continue
-        parts: list[str] = []
-        cabin = _CABIN_LETTER.get(getattr(a, "cabin", None) or "", "")
-        if cabin:
-            parts.append(cabin)
-        pitch = getattr(a, "pitch_inches", None)
-        cls = getattr(a, "legroom_class", None)
-        if pitch is not None:
-            tok = f'{pitch}"'
-            color = _LEGROOM_AS_COLOR.get(cls or "")
-            if color:
-                tok = f"[{color}]{tok}[/]"
-            parts.append(tok)
-        if cls and cls not in {"AVERAGE", "BELOW", "ABOVE"}:
-            parts.append(cls)
-        glyphs: list[str] = []
-        wifi_g = _WIFI_GLYPH.get(getattr(a, "wifi", None) or "")
-        if wifi_g:
-            glyphs.append(wifi_g)
-        power_g = _POWER_GLYPH.get(getattr(a, "power", None) or "")
-        if power_g:
-            glyphs.append(power_g)
-        video_g = _VIDEO_GLYPH.get(getattr(a, "video", None) or "")
-        if video_g:
-            glyphs.append(video_g)
-        if glyphs:
-            parts.append("".join(glyphs))
-        if not parts:
-            continue
-        leg_label = (
-            f"{getattr(leg.airline, 'name', leg.airline)}{getattr(leg, 'flight_number', '?')}"
-        )
-        lines.append(f"{leg_label:<6} " + " ".join(parts))
-    return "\n".join(lines)
 
 
 # ─────────────────────────────── commands ──────────────────────────────────
