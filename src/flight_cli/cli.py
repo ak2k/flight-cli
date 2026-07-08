@@ -14,21 +14,82 @@ Commands:
 from __future__ import annotations
 
 import json
-import re
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
 import anyio
 import anyio.to_thread
 import typer
-from rich.console import Console
 from rich.table import Table
 
-from . import _config
 from ._calendar_split import is_empty_calendar, merge_calendar_results, split_calendar_search
-from ._multi_cabin import MultiCabinRow, parse_price
+from ._console import console, err
+from ._dispatch import BACKEND_AUTO, BACKEND_GFLIGHT, BACKEND_MATRIX, ProviderSelection
+from ._dispatch import pick_backend as _pick_backend
+from ._dispatch import resolve_providers as _resolve_providers
+from ._dispatch import should_run_awards as _should_run_awards
+from ._multi_cabin import MultiCabinRow
 from ._multi_cabin import merge as _merge_cabins
+from ._parsing import (
+    build_options as _build_options,
+)
+from ._parsing import (
+    parse_date as _parse_date,
+)
+from ._parsing import (
+    parse_duration as _parse_duration,
+)
+from ._parsing import (
+    parse_iata_list as _parse_iata_list,
+)
+from ._parsing import (
+    parse_slice_spec as _parse_slice_spec,
+)
+from ._parsing import (
+    parse_times as _parse_times,
+)
+from ._parsing import (
+    resolve_cabin as _resolve_cabin,
+)
+from ._parsing import (
+    resolve_cabin_list as _resolve_cabin_list,
+)
+from ._pp_glue import MULTI_CABIN_QUERY_BUMP_CAP as _MULTI_CABIN_QUERY_BUMP_CAP
+from ._pp_glue import MULTI_CABIN_QUERY_BUMP_FACTOR as _MULTI_CABIN_QUERY_BUMP_FACTOR
+from ._pp_glue import build_pp_legs as _build_pp_legs
+from ._pp_glue import bumped_query_top_n as _bumped_query_top_n
+from ._pp_glue import cash_per_cabin_multi as _cash_per_cabin_multi
+from ._pp_glue import cash_per_cabin_single as _cash_per_cabin_single
+from ._pp_glue import derive_pp_cabins as _derive_pp_cabins
+from ._pp_glue import pp_cabins_for_multi as _pp_cabins_for_multi
+from ._render import fmt_slice_cell as _fmt_slice_cell
+from ._render import fmt_slice_route as _fmt_slice_route
+from ._render import fmt_slice_times as _fmt_slice_times
+from ._render import leg_display as _leg_display
+from ._render import match_carriers as _match_carriers
+from ._render import render_calendar as _render_calendar
+from ._render import render_date_grid as _render_date_grid
+from ._render import render_gflight_table as _render_gflight_table
+from ._render import render_merged as _render_merged
+from ._render import render_multi_cabin_search as _render_multi_cabin_search
+from ._render import render_search as _render_search
+from ._runtime_opts import FORMAT_OPT as _FORMAT_OPT
+from ._runtime_opts import IMPERSONATE_OPT as _IMPERSONATE_OPT
+from ._runtime_opts import JSON_OPT as _JSON_OPT
+from ._runtime_opts import NO_CACHE_OPT as _NO_CACHE_OPT
+from ._runtime_opts import PROVIDER_OPT as _PROVIDER_OPT
+from ._runtime_opts import RPS_OPT as _RPS_OPT
+from ._runtime_opts import resolve_format as _resolve_format
+from ._runtime_opts import resolve_impersonate as _resolve_impersonate
+from ._runtime_opts import resolve_no_cache as _resolve_no_cache
+from ._runtime_opts import resolve_rps as _resolve_rps
+from ._urls import GOOGLE_URL_HELP as _GOOGLE_URL_HELP
+from ._urls import MATRIX_URL_HELP as _MATRIX_URL_HELP
+from ._urls import emit_urls as _emit_urls
+from ._urls import pinned_solution_index as _pinned_solution_index
+from ._urls import try_pinned_gflight_url as _try_pinned_gflight_url
+from ._urls import try_pinned_matrix_url as _try_pinned_matrix_url
 from .client import MatrixApiError, MatrixClient
 from .domain import (
     Cabin,
@@ -36,57 +97,46 @@ from .domain import (
     CalendarSearch,
     CalendarWindow,
     Leg,
-    Pax,
     Search,
     SearchOptions,
     SpecificDateSearch,
-    TimeOfDay,
-)
-from .links import (
-    extract_pin_segments_from_slice,
-    google_flights_pinned_url,
-    google_flights_url,
-    matrix_deep_link,
-    matrix_itinerary_url,
 )
 from .log import configure as configure_logging
 from .pp.auth import load_tokens
 from .pp.cli import auth_app, run_pp_for_search
-from .providers.base import LegQuery
 
 if TYPE_CHECKING:
-    from .models import CalendarResult, LegInfo, Location, SearchResult, Slice
+    from .models import CalendarResult, Location, SearchResult
 
-# Tuple-length sentinels for `--slice` parser (`ORIGIN-DEST:DATE[:r=...:e=...]`).
-_SLICE_MIN_PARTS = 2
-_SLICE_MAX_PARTS = 3
-_ROUND_TRIP_LEGS = 2  # 2 legs = round-trip; 1 = one-way; >2 = multi-city
-
-# Matrix returns prices as 'USD877.00' (ISO-4217 prefix + decimal). We split
-# the prefix off for rendering so tables can show the currency once in the
-# title and keep cells uncluttered.
-_PRICE_RE = re.compile(r"^([A-Z]{3})(.+)$")
-
-
-def _split_price(s: str | None) -> tuple[str, str]:
-    """Return (currency, amount). ('', s) if no recognizable prefix."""
-    if not s:
-        return "", s or ""
-    m = _PRICE_RE.match(s)
-    return (m.group(1), m.group(2)) if m else ("", s)
-
-
-def _amount(s: str | None) -> str:
-    """Strip the currency prefix; pass-through for placeholders like '—'."""
-    return _split_price(s)[1] if s else "—"
+# DIVERGE: names re-exported for the test suite (don't "fix" this back). `cli.py`
+# was decomposed into `_console`, `_parsing`, `_dispatch`, `_runtime_opts`,
+# `_urls`, `_pp_glue`, and `_render`, but the tests still
+# `from flight_cli.cli import <name>` and monkeypatch `cli.<name>`. Every moved
+# definition is imported back above so it stays a `flight_cli.cli` attribute; the
+# ones with no remaining in-module caller are listed here so ruff keeps the
+# re-export instead of pruning it as dead. This convention converges in the
+# deferred phase-2 extraction — once the orchestration/weaves leave `cli.py`, the
+# tests patch the submodules directly (the `_gf_dategrid`/`_calendar_split`
+# precedent) and this shim goes away.
+__all__ = [
+    "BACKEND_MATRIX",
+    "_MULTI_CABIN_QUERY_BUMP_CAP",
+    "_MULTI_CABIN_QUERY_BUMP_FACTOR",
+    "_derive_pp_cabins",
+    "_fmt_slice_cell",
+    "_fmt_slice_route",
+    "_fmt_slice_times",
+    "_leg_display",
+    "_pinned_solution_index",
+    "_try_pinned_gflight_url",
+    "_try_pinned_matrix_url",
+]
 
 
 app = typer.Typer(
     add_completion=False, rich_markup_mode="rich", help="CLI for ITA Matrix's Alkali backend."
 )
 app.add_typer(auth_app, name="auth")
-console = Console()
-err = Console(stderr=True)
 
 
 @app.callback()
@@ -108,183 +158,7 @@ def main(
     configure_logging(level)
 
 
-# ─────────────────────────── argument parsers ──────────────────────────────
-
-
-def _parse_date(s: str) -> date:
-    try:
-        return datetime.strptime(s, "%Y-%m-%d").date()
-    except ValueError as e:
-        err.print(f"[red]bad date {s!r}; use YYYY-MM-DD[/]")
-        raise typer.Exit(2) from e
-
-
-def _parse_duration(s: str) -> tuple[int, int]:
-    s = s.replace("..", "-").strip()
-    if "-" in s:
-        lo, hi = s.split("-", 1)
-        return int(lo), int(hi)
-    n = int(s)
-    return n, n
-
-
-def _parse_iata_list(s: str) -> tuple[str, ...]:
-    return tuple(a.strip().upper() for a in s.split(",") if a.strip())
-
-
-def _parse_times(s: str | None) -> tuple[TimeOfDay, ...]:
-    if not s:
-        return ()
-    out: list[TimeOfDay] = []
-    aliases = {
-        "early": TimeOfDay.EARLY_MORNING,
-        "early_morning": TimeOfDay.EARLY_MORNING,
-        "morning": TimeOfDay.MORNING,
-        "midday": TimeOfDay.MIDDAY,
-        "noon": TimeOfDay.MIDDAY,
-        "afternoon": TimeOfDay.AFTERNOON,
-        "evening": TimeOfDay.EVENING,
-        "night": TimeOfDay.NIGHT,
-    }
-    for raw in s.split(","):
-        key = raw.strip().lower().replace("-", "_")
-        if key not in aliases:
-            err.print(
-                f"[red]bad time-of-day {raw!r}; choose: "
-                f"early,morning,midday,afternoon,evening,night[/]"
-            )
-            raise typer.Exit(2)
-        out.append(aliases[key])
-    return tuple(out)
-
-
-def _resolve_cabin(name: str) -> Cabin:
-    norm = name.lower().replace("_", "").replace("-", "").replace(" ", "")
-    aliases = {
-        "coach": Cabin.COACH,
-        "economy": Cabin.COACH,
-        "y": Cabin.COACH,
-        "premiumcoach": Cabin.PREMIUM_COACH,
-        "premiumeconomy": Cabin.PREMIUM_COACH,
-        "premium": Cabin.PREMIUM_COACH,
-        "w": Cabin.PREMIUM_COACH,
-        "business": Cabin.BUSINESS,
-        "j": Cabin.BUSINESS,
-        "first": Cabin.FIRST,
-        "f": Cabin.FIRST,
-    }
-    if norm in aliases:
-        return aliases[norm]
-    err.print(f"[red]Unknown cabin {name!r}; choose: economy, premium, business, first[/]")
-    raise typer.Exit(2)
-
-
-def _resolve_cabin_list(csv: str) -> tuple[Cabin, ...]:
-    """Parse a comma-separated cabin list. Single-cabin invocations still
-    take this path — they emit a 1-tuple and the dispatcher routes them
-    back through the single-cabin code path unchanged."""
-    tokens = [t.strip() for t in csv.split(",") if t.strip()]
-    if not tokens:
-        err.print("[red]--cabin must name at least one cabin.[/]")
-        raise typer.Exit(2)
-    seen: dict[Cabin, None] = {}
-    for t in tokens:
-        seen.setdefault(_resolve_cabin(t), None)
-    return tuple(seen)
-
-
-def _build_options(
-    *,
-    cabin: str,
-    adults: int,
-    children: int,
-    seniors: int,
-    youth: int,
-    infants_in_seat: int,
-    infants_in_lap: int,
-    stops: int | None,
-    allow_airport_changes: bool,
-    show_only_available: bool,
-    page_size: int = 25,
-) -> SearchOptions:
-    return SearchOptions(
-        cabin=_resolve_cabin(cabin),
-        pax=Pax(
-            adults=adults,
-            children=children,
-            seniors=seniors,
-            youth=youth,
-            infants_in_seat=infants_in_seat,
-            infants_in_lap=infants_in_lap,
-        ),
-        max_extra_stops=stops,
-        allow_airport_changes=allow_airport_changes,
-        show_only_available=show_only_available,
-        page_size=page_size,
-    )
-
-
 # ─────────────────────────── backend dispatch ──────────────────────────────
-
-BACKEND_AUTO = "auto"
-BACKEND_MATRIX = "matrix"
-BACKEND_GFLIGHT = "gflight"
-_VALID_BACKENDS = (BACKEND_AUTO, BACKEND_MATRIX, BACKEND_GFLIGHT)
-
-
-def _pick_backend(
-    *,
-    backend: str,
-    routing: str | None,
-    extension: str | None,
-    slice_specs: list[str] | None,
-    depart_times: str | None,
-    return_times: str | None,
-    seniors: int,
-    youth: int,
-    inf_seat: int,
-    inf_lap: int,
-) -> str:
-    """Resolve --backend to a concrete backend.
-
-    auto: matrix iff the request needs it, else gflight (~1s vs Matrix's ~45s).
-    `--routing`/`--extension` no longer force Matrix on their own — they're
-    parsed and classified, and Google Flights serves them when it can honor
-    every constraint (native filters + result post-filter; see routing_predicates
-    + _gf_postfilter). Only fare-construction (fare basis / booking class) or a
-    constraint GF can't reconstruct sends routing to Matrix. Hard-Matrix flags —
-    `--slice` (multi-city), `--depart-times`/`--return-times`, any pax type beyond
-    adults+children — always force Matrix (the GF bridge doesn't map them yet).
-
-    Explicit --backend matrix: matrix. --backend gflight: gflight, unless the
-    request is inexpressible on GF (error)."""
-    from ._gf_postfilter import gf_can_serve  # noqa: PLC0415
-    from .routing_predicates import classify  # noqa: PLC0415
-
-    hard_matrix = bool(slice_specs or depart_times or return_times) or (
-        seniors > 0 or youth > 0 or inf_seat > 0 or inf_lap > 0
-    )
-    routing_needs_matrix = bool(routing or extension) and not gf_can_serve(
-        classify(routing, extension)
-    )
-    matrix_only = hard_matrix or routing_needs_matrix
-
-    if backend == BACKEND_AUTO:
-        return BACKEND_MATRIX if matrix_only else BACKEND_GFLIGHT
-    if backend == BACKEND_GFLIGHT and matrix_only:
-        reason = (
-            "--slice/--depart-times/--return-times or an extra pax type"
-            if hard_matrix
-            else "a --routing/--extension constraint Google Flights can't honor "
-            "(fare basis, booking class, or similar)"
-        )
-        raise typer.BadParameter(
-            f"--backend gflight can't serve this request: {reason}. "
-            "Drop it, or use --backend matrix.",
-        )
-    if backend not in _VALID_BACKENDS:
-        raise typer.BadParameter(f"--backend must be one of {_VALID_BACKENDS}; got {backend!r}")
-    return backend
 
 
 def _should_run_pp(*, no_pp: bool, pp_only: bool) -> bool:  # pyright: ignore[reportUnusedFunction]
@@ -308,205 +182,6 @@ def _should_run_pp(*, no_pp: bool, pp_only: bool) -> bool:  # pyright: ignore[re
             err.print(
                 "[red]--pp-only set but no PointsPath tokens.[/] "
                 "Run `flight auth pp login --tokens-file ...` first.",
-            )
-            raise typer.Exit(2)
-        return False
-    return True
-
-
-class ProviderSelection:
-    """Resolved provider selection: what runs, which subset, with what options.
-
-    `provider_filter` is a tuple of provider names to use (None = all enabled).
-    `cash_only` skips every award provider. `awards_only` suppresses the cash
-    table render. `provider_opts` is `{provider_name: {key: value}}` — e.g.
-    `{"pp": {"airlines": ["United", "Delta"], "cabins": ["Economy"]}}`.
-    """
-
-    __slots__ = ("awards_only", "cash_only", "provider_filter", "provider_opts")
-
-    def __init__(
-        self,
-        *,
-        provider_filter: tuple[str, ...] | None,
-        cash_only: bool,
-        awards_only: bool,
-        provider_opts: dict[str, dict[str, Any]],
-    ) -> None:
-        self.provider_filter = provider_filter
-        self.cash_only = cash_only
-        self.awards_only = awards_only
-        self.provider_opts = provider_opts
-
-    def pp_airlines(self) -> str | None:
-        """Backward-compat shim: PP's `airlines` as CSV (None = use default)."""
-        v: Any = self.provider_opts.get("pp", {}).get("airlines")
-        if v is None:
-            return None
-        if isinstance(v, list):
-            return ",".join(str(x) for x in cast("list[Any]", v))
-        return str(v)
-
-    def pp_cabins(self) -> str | None:
-        """Backward-compat shim: PP's `cabins` as CSV (None = use default)."""
-        v: Any = self.provider_opts.get("pp", {}).get("cabins")
-        if v is None:
-            return None
-        if isinstance(v, list):
-            return ",".join(str(x) for x in cast("list[Any]", v))
-        return str(v)
-
-    def seats_sources(self) -> tuple[str, ...] | None:
-        """Seats.aero mileage-program filter (`--provider-opt seats-aero.sources=...`).
-
-        Maps to the API's `sources=` query param. None = no filter (return all
-        programs the route is monitored on). The canonical provider key is
-        `seats-aero`; user-facing aliases (`sa`, `seatsaero`, `seats.aero`)
-        are normalized at parse time so we only need to read one key here."""
-        v: Any = self.provider_opts.get("seats-aero", {}).get("sources")
-        if v is None:
-            return None
-        if isinstance(v, list):
-            return tuple(str(x).strip() for x in cast("list[Any]", v))
-        return (str(v).strip(),)
-
-
-def _resolve_providers(  # noqa: PLR0912 — single-purpose validator + merge; splitting hurts readability
-    *,
-    providers: str | None,
-    cash_only: bool,
-    awards_only: bool,
-    provider_opt: tuple[str, ...],
-    # deprecated aliases — forwarded into the new shape:
-    legacy_no_pp: bool = False,
-    legacy_pp_only: bool = False,
-    legacy_pp_airlines: str | None = None,
-    legacy_pp_cabin: str | None = None,
-) -> ProviderSelection:
-    """Resolve the new + deprecated provider flags into one ProviderSelection.
-
-    Precedence for per-provider options: config.toml < --provider-opt CLI.
-    Deprecated --pp-airlines / --pp-cabin map onto the --provider-opt path
-    so legacy invocations land in the same downstream shape.
-    """
-    # Conflict checks across the new surface.
-    if cash_only and awards_only:
-        err.print("[red]--cash-only and --awards-only are mutually exclusive.[/]")
-        raise typer.Exit(2)
-    # Conflict checks across the old + new surface.
-    new_surface_set = cash_only or awards_only or providers is not None
-    if legacy_no_pp and new_surface_set:
-        err.print(
-            "[red]--no-pp conflicts with --cash-only/--awards-only/--providers; use one.[/]",
-        )
-        raise typer.Exit(2)
-    if legacy_pp_only and new_surface_set:
-        err.print(
-            "[red]--pp-only conflicts with --cash-only/--awards-only/--providers; use one.[/]",
-        )
-        raise typer.Exit(2)
-    if legacy_no_pp and legacy_pp_only:
-        err.print("[red]--no-pp and --pp-only are mutually exclusive.[/]")
-        raise typer.Exit(2)
-
-    # Forward legacy intent.
-    if legacy_no_pp:
-        cash_only = True
-    if legacy_pp_only:
-        awards_only = True
-
-    # --providers parsing. Normalize each entry through the alias map so
-    # `--providers sa,pointspath` ends up the same as `--providers seats-aero,pp`.
-    provider_filter: tuple[str, ...] | None = None
-    if providers is not None:
-        provider_filter = tuple(
-            _config.canonical_provider(p) for p in providers.split(",") if p.strip()
-        )
-        if not provider_filter:
-            err.print("[red]--providers cannot be empty.[/]")
-            raise typer.Exit(2)
-
-    # Build provider_opts: config.toml < --provider-opt CLI. Section names in
-    # the config are normalized through the alias map so user-facing spellings
-    # (`[providers.sa]`) land at the canonical key the registry expects.
-    try:
-        config = _config.load()
-    except (OSError, ValueError) as e:
-        err.print(f"[red]Failed to load ~/.config/flight-cli/config.toml: {e}[/]")
-        raise typer.Exit(2) from e
-    base_opts: dict[str, dict[str, Any]] = {}
-    providers_section: Any = config.get("providers", {})
-    if isinstance(providers_section, dict):
-        for name, opts in cast("dict[str, Any]", providers_section).items():
-            if isinstance(opts, dict):
-                base_opts[_config.canonical_provider(name)] = dict(cast("dict[str, Any]", opts))
-
-    try:
-        cli_opts = _config.parse_provider_opt_overrides(list(provider_opt))
-    except ValueError as e:
-        err.print(f"[red]{e}[/]")
-        raise typer.Exit(2) from e
-    merged_opts = _config.merge_provider_options(base_opts, cli_opts)
-
-    # Forward legacy --pp-airlines / --pp-cabin into the merged opts.
-    # CLI --provider-opt still wins (no-op if user set both, since merged_opts
-    # already has the override from cli_opts).
-    pp_section: dict[str, Any] = dict(merged_opts.get("pp", {}))
-    if legacy_pp_airlines is not None and "airlines" not in pp_section:
-        pp_section["airlines"] = [v.strip() for v in legacy_pp_airlines.split(",") if v.strip()]
-    if legacy_pp_cabin is not None and "cabins" not in pp_section:
-        pp_section["cabins"] = [v.strip() for v in legacy_pp_cabin.split(",") if v.strip()]
-    if pp_section:
-        merged_opts["pp"] = pp_section
-
-    return ProviderSelection(
-        provider_filter=provider_filter,
-        cash_only=cash_only,
-        awards_only=awards_only,
-        provider_opts=merged_opts,
-    )
-
-
-def _should_run_awards(sel: ProviderSelection) -> bool:
-    """Award providers run iff (a) not --cash-only, (b) at least one is
-    configured globally, and (c) the filter (if any) names at least one
-    configured provider.
-
-    Provider-blind by construction: every known provider has an
-    is_configured() check imported below; adding a new provider is one
-    import + one entry in the `known` map.
-    """
-    if sel.cash_only:
-        return False
-    # Lazy-imported to avoid the registry/CLI import cycle and to keep PP's
-    # token-load (which touches disk) out of the cli module top-level.
-    from .providers.pointspath.provider import is_configured as pp_is_configured  # noqa: PLC0415
-    from .providers.registry import has_any_configured  # noqa: PLC0415
-    from .providers.seats_aero.auth import is_configured as seats_is_configured  # noqa: PLC0415
-
-    known: dict[str, bool] = {
-        "pp": pp_is_configured(),
-        "seats-aero": seats_is_configured(),
-    }
-
-    if not has_any_configured():
-        if sel.awards_only:
-            err.print(
-                "[red]--awards-only set but no award provider is configured.[/] "
-                "Run `flight auth pp login` or `flight auth seats-aero key <KEY>` first.",
-            )
-            raise typer.Exit(2)
-        return False
-    # Filter matches at least one configured provider? Values are already
-    # canonical (normalized by _resolve_providers), so a direct membership
-    # check is enough here. None filter ⇒ "all enabled", short-circuits to True.
-    if sel.provider_filter is not None and not any(
-        known.get(name, False) for name in sel.provider_filter
-    ):
-        if sel.awards_only:
-            err.print(
-                f"[red]--awards-only set but --providers={sel.provider_filter} "
-                "matches no configured provider.[/]",
             )
             raise typer.Exit(2)
         return False
@@ -644,6 +319,26 @@ def _report_calendar_matrix_failure(state: dict[str, Any]) -> None:
         err.print("[yellow]Matrix calendar did not complete.[/]")
 
 
+async def _matrix_into_state(
+    c: MatrixClient, search: Search, state: dict[str, Any], *, cache: bool
+) -> None:
+    """Run a Matrix `execute` inside a progressive weave and stash the outcome in
+    `state`, isolating BOTH failure classes so neither escapes the task group:
+    a known `MatrixApiError` → `state["matrix_err"]`, and any other exception
+    (e.g. a raw httpx transport/status error that `execute()` doesn't wrap) →
+    `state["matrix_unexpected"]`. Letting either propagate would cancel the
+    still-pending Google Flights paint and surface a bare traceback. Both the
+    search weave (`_run_enriched_path`) and the calendar weave
+    (`_run_calendar_enriched`) route their Matrix task through this one contract
+    so the isolation can't drift between them."""
+    try:
+        state["matrix"] = await c.execute(search, cache=cache)
+    except MatrixApiError as e:
+        state["matrix_err"] = e
+    except Exception as e:  # noqa: BLE001 — isolate any unexpected Matrix failure; reported after the weave
+        state["matrix_unexpected"] = e
+
+
 def _run_calendar_enriched(
     search: CalendarSearch,
     *,
@@ -675,17 +370,7 @@ def _run_calendar_enriched(
     state: dict[str, Any] = {}
 
     async def _matrix(c: MatrixClient) -> None:
-        try:
-            state["matrix"] = await c.execute(search, cache=not no_cache)
-        except MatrixApiError as e:
-            state["matrix_err"] = e
-        except Exception as e:  # noqa: BLE001
-            # An unexpected Matrix failure (e.g. a raw httpx transport/status error that
-            # execute() doesn't wrap) must NOT propagate out of this task and tear down
-            # the group — that would cancel the still-pending grid paint and surface a
-            # bare traceback. Stash it and report after the weave so the GF grid still
-            # shows (per-backend isolation, mirroring the MatrixApiError path).
-            state["matrix_unexpected"] = e
+        await _matrix_into_state(c, search, state, cache=not no_cache)
 
     async def _go() -> None:
         async with (
@@ -729,373 +414,7 @@ def _run_calendar_enriched(
     _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
 
 
-def _pinned_solution_index(result: SearchResult | None, pick: int | None) -> int | None:
-    """0-based index into `result.solutions` of the itinerary to pin in a deep
-    link. `pick` is the 1-based itinerary number the user saw in the table;
-    None pins the cheapest (row 1). Out-of-range picks warn and fall back to
-    the cheapest rather than emit a wrong or broken link. None when there's
-    nothing to pin."""
-    if result is None or not result.solutions:
-        return None
-    if pick is None:
-        return 0
-    if pick < 1 or pick > len(result.solutions):
-        console.print(
-            f"[yellow]--pick {pick} is out of range (1-{len(result.solutions)}); "
-            f"pinning the cheapest itinerary instead.[/]"
-        )
-        return 0
-    return pick - 1
-
-
-def _try_pinned_matrix_url(search: Search, result: SearchResult | None, idx: int) -> str | None:
-    """Build a Matrix `/itinerary` URL pinning solution `idx`, if the result
-    carries all three server-generated identifiers (session, solutionSet, and
-    the solution's own id). Returns None when any are missing, the search shape
-    doesn't support pinning, or the search isn't a specific-date variant.
-    """
-    if result is None or idx >= len(result.solutions):
-        return None
-    sol = result.solutions[idx]
-    if not sol.id or not result.session or not result.solution_set:
-        return None
-    try:
-        return matrix_itinerary_url(
-            search,
-            solution_id=sol.id,
-            session=result.session,
-            solution_set=result.solution_set,
-        )
-    except TypeError:
-        return None
-
-
-def _try_pinned_gflight_url(search: Search, result: SearchResult | None, idx: int) -> str | None:
-    """Build a Google Flights URL that pre-selects itinerary `idx` in `result`,
-    if the data supports it. Returns None when the result is empty, the search
-    shape doesn't support pinning (calendar-grid mode), or any slice can't be
-    reduced to a segment list (see `extract_pin_segments_from_slice` for the
-    bail-out cases).
-    """
-    if result is None or idx >= len(result.solutions):
-        return None
-    itn = result.solutions[idx].itinerary
-    if itn is None or not itn.slices:
-        return None
-    out_segments = extract_pin_segments_from_slice(itn.slices[0])
-    if out_segments is None:
-        return None
-    ret_segments = None
-    if len(itn.slices) >= _ROUND_TRIP_LEGS:
-        ret_segments = extract_pin_segments_from_slice(itn.slices[1])
-        if ret_segments is None:
-            return None
-    try:
-        return google_flights_pinned_url(
-            search,
-            outbound_segments=out_segments,
-            return_segments=ret_segments,
-        )
-    except (TypeError, AssertionError):
-        # `google_flights_pinned_url` rejects calendar-mode searches and
-        # legs missing dates — both are expected non-pin cases, fall back.
-        return None
-
-
-def _emit_urls(
-    search: Search,
-    *,
-    matrix_url: bool,
-    google_url: bool,
-    result: SearchResult | None = None,
-    pick: int | None = None,
-) -> None:
-    idx = _pinned_solution_index(result, pick)
-    # Only claim "#N" when we actually honored the user's pick; an out-of-range
-    # pick falls back to idx 0 and must not mislabel the cheapest as "#N".
-    pinned_label = (
-        f"itinerary #{pick}"
-        if (idx is not None and pick is not None and idx == pick - 1)
-        else "cheapest itinerary"
-    )
-    if matrix_url:
-        console.print()
-        pinned_m = _try_pinned_matrix_url(search, result, idx) if idx is not None else None
-        if pinned_m is not None:
-            console.print(f"[dim]Matrix ({pinned_label} pinned):[/]")
-            console.print(f"  [link]{pinned_m}[/]")
-        else:
-            console.print("[dim]Matrix deep-link:[/]")
-            console.print(f"  [link]{matrix_deep_link(search)}[/]")
-    if google_url:
-        # `google_flights_url` builds protobuf-encoded tfs= URLs via fast_flights.
-        # That library has no documented exception surface — catch broadly so a
-        # missing IATA or unsupported variant degrades the URL line, not the run.
-        try:
-            pinned = _try_pinned_gflight_url(search, result, idx) if idx is not None else None
-            if pinned is not None:
-                console.print(f"[dim]Google Flights ({pinned_label} pinned):[/]")
-                console.print(f"  [link]{pinned}[/]")
-            else:
-                console.print("[dim]Google Flights (tfs= structured):[/]")
-                console.print(f"  [link]{google_flights_url(search)}[/]")
-        except Exception as e:  # noqa: BLE001 - third-party undocumented errors; non-fatal fallback
-            console.print(f"[dim]Google Flights link: {e}[/]")
-
-
-# ─────────────────────────── result renderers ──────────────────────────────
-
-
-def _parse_iso(s: str) -> datetime | None:
-    """Best-effort parse of a slice timestamp ("YYYY-MM-DDTHH:MM[:SS]")."""
-    if not s:
-        return None
-    try:
-        return datetime.fromisoformat(s)
-    except ValueError:
-        try:
-            return datetime.fromisoformat(s[:16])
-        except ValueError:
-            return None
-
-
-def _fmt_slice_times(dep: str, arr: str) -> str:
-    """Compact, unambiguous departure→arrival for an itinerary cell.
-
-    Shows the departure date once, the two clock times, and a `+Nd` marker
-    when the arrival lands on a later calendar day. Without the marker an
-    overnight return reads as "arrives before it departs" once the cell is
-    squeezed (work-72syf). Falls back to raw ISO — which still carries both
-    dates — when a timestamp can't be parsed.
-    """
-    d = _parse_iso(dep)
-    a = _parse_iso(arr)
-    if d is None or a is None:
-        return f"{dep[:16]}→{arr[:16]}"
-    day_off = (a.date() - d.date()).days
-    suffix = f" +{day_off}d" if day_off > 0 else (f" {day_off}d" if day_off < 0 else "")
-    return f"{d:%b%d %H:%M}→{a:%H:%M}{suffix}"
-
-
-def _fmt_slice_route(s: Slice) -> str:
-    """Origin→destination threading any intermediate connection airports, so a
-    1-stop itinerary shows its connection city instead of hiding it."""
-    o = (s.origin.code if s.origin else None) or "?"
-    d = (s.destination.code if s.destination else None) or "?"
-    vias = [e.code for e in s.stops if e and e.code]
-    return "→".join([o, *vias, d])
-
-
-def _fmt_slice_cell(s: Slice) -> str:
-    """One itinerary slice as a table cell: route (with connection cities),
-    flight numbers, compact unambiguous times, duration, then per-leg legroom
-    lines. Shared by the single-cabin and multi-cabin itinerary tables."""
-    dur_min = s.duration or 0
-    dur = f"{dur_min // 60}h{dur_min % 60:02d}m" if dur_min else ""
-    flights = "/".join(s.flights) or "?"
-    times = _fmt_slice_times(s.departure or "", s.arrival or "")
-    head = " ".join(p for p in (_fmt_slice_route(s), flights, times, dur) if p)
-    tail = _fmt_legroom_lines(s)
-    return f"{head}\n{tail}" if tail else head
-
-
-def _render_search(res: SearchResult) -> None:
-    if res.solution_count == 0:
-        console.print("[yellow]No solutions returned.[/]")
-        return
-    ccy, cheapest = _split_price(res.cheapest_price)
-    ccy_tag = f" ({ccy})" if ccy else ""
-    console.print(
-        f"[bold]{res.solution_count} solutions[/]  · "
-        f"cheapest: [bold cyan]{cheapest or '—'}{ccy_tag}[/]"
-    )
-
-    cm = res.carrier_stop_matrix
-    if cm and cm.columns and cm.rows:
-        t = Table(
-            title=f"Carrier x stops grid{ccy_tag}",
-            show_header=True,
-            header_style="bold magenta",
-        )
-        t.add_column("stops")
-        for col in cm.columns:
-            code = col.label.code if col.label else "?"
-            sn = (col.label.short_name or "") if col.label else ""
-            t.add_column(f"{code or '?'}\n{sn[:14]}")
-        for row in cm.rows:
-            cells = [str(row.label) if row.label is not None else "?"]
-            for c in row.cells:
-                p = _amount(c.min_price)
-                mark = "★" if c.min_price_in_grid else ("·" if c.min_price_in_row else "")
-                cells.append(f"{p} {mark}")
-            t.add_row(*cells)
-        console.print(t)
-
-    st = Table(title=f"Itineraries{ccy_tag}", show_header=True, header_style="bold green")
-    st.add_column("#", justify="right")
-    st.add_column("price", justify="right")
-    st.add_column("carriers")
-    st.add_column("outbound")
-    st.add_column("return")
-    for i, it in enumerate(res.solutions[:10], 1):
-        itn = it.itinerary
-        slcs: list[Slice] = itn.slices if itn else []
-        it_carriers = ",".join((c.code or "?") for c in (itn.carriers if itn else []))
-
-        out = _fmt_slice_cell(slcs[0]) if slcs else "—"
-        ret = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
-        st.add_row(str(i), _amount(it.price), it_carriers or "?", out, ret)
-    console.print(st)
-
-
-# ───────────────── legroom formatters (gflight-populated; Matrix slices noop) ──
-
-
-def _fmt_legroom_one(flight_no: str, leg: LegInfo) -> str:
-    """Per-leg summary. Returns '' when no legroom fields are populated
-    (Matrix path — Matrix's response doesn't carry legroom). Uses the
-    same color-not-text policy as `_fmt_gflight_legroom`."""
-    parts: list[str] = []
-    cabin_short = _CABIN_LETTER.get(leg.cabin or "", "")
-    if cabin_short:
-        parts.append(cabin_short)
-    if leg.pitch_inches is not None:
-        token = f'{leg.pitch_inches}"'
-        color = _LEGROOM_AS_COLOR.get(leg.legroom_class or "")
-        if color:
-            token = f"[{color}]{token}[/]"
-        parts.append(token)
-    if leg.legroom_class and leg.legroom_class not in {"AVERAGE", "BELOW", "ABOVE"}:
-        parts.append(leg.legroom_class)
-    amenities: list[str] = []
-    w = _WIFI_GLYPH.get(leg.wifi or "")
-    if w:
-        amenities.append(w)
-    p = _POWER_GLYPH.get(leg.power or "")
-    if p:
-        amenities.append(p)
-    v = _VIDEO_GLYPH.get(leg.video or "")
-    if v:
-        amenities.append(v)
-    if amenities:
-        parts.append("".join(amenities))
-    if not parts:
-        return ""
-    return f"  {flight_no:<6} " + " ".join(parts)
-
-
-def _fmt_legroom_lines(s: Slice) -> str:
-    """Per-leg lines under a slice cell, one row per physical flight in the slice.
-    Empty when no legroom data populated (Matrix path)."""
-    if not s.legs:
-        return ""
-    rows = [_fmt_legroom_one(s.flights[i], leg) for i, leg in enumerate(s.legs)]
-    return "\n".join(r for r in rows if r)
-
-
-def _render_date_grid(
-    grid: dict[str, float],
-    *,
-    origin: tuple[str, ...],
-    destination: tuple[str, ...],
-    sd: date,
-    ed: date,
-) -> None:
-    """Render the GF native date-grid: cheapest fare per departure day (USD),
-    sorted cheapest-first. One-way only (the grid's shape)."""
-    if not grid:
-        return
-    console.print(
-        f"[bold]{len(grid)} priced days[/]  · cheapest: "
-        f"[bold cyan]{min(grid.values()):.0f} (USD)[/]  · "
-        f"window {sd.isoformat()} → {ed.isoformat()}"
-    )
-    t = Table(
-        title=f"{','.join(origin)} → {','.join(destination)}: "
-        "lowest fare per departure day (Google Flights)",
-        show_header=True,
-        header_style="bold green",
-    )
-    t.add_column("departure", justify="right")
-    t.add_column("min (USD)", justify="right")
-    for day, price in sorted(grid.items(), key=lambda kv: kv[1]):
-        t.add_row(day, f"{price:.0f}")
-    console.print(t)
-
-
-def _render_calendar(
-    res: CalendarResult,
-    *,
-    dmin: int,
-    dmax: int,
-    origin: tuple[str, ...],
-    destination: tuple[str, ...],
-    sd: date,
-    ed: date,
-) -> None:
-    if res.solution_count == 0 or not res.priced_days:
-        console.print(
-            "[yellow]Calendar empty.[/] Matrix's calendar mode "
-            "brownouts regularly; retry, or use [bold]flight fare[/] "
-            "for a single date."
-        )
-        return
-    ccy, cheapest = _split_price(res.cheapest_price)
-    ccy_tag = f" ({ccy})" if ccy else ""
-    console.print(
-        f"[bold]{res.solution_count} solutions[/]  · "
-        f"overall cheapest: [bold cyan]{cheapest or '—'}{ccy_tag}[/]  · "
-        f"window {sd.isoformat()} → {ed.isoformat()}  · "
-        f"duration {dmin}-{dmax} nights"
-    )
-    title = f"{','.join(origin)} → {','.join(destination)}: lowest fare per departure day{ccy_tag}"
-    t = Table(title=title, show_header=True, header_style="bold green")
-    t.add_column("departure", justify="right")
-    t.add_column("min", justify="right")
-    for dur in range(dmin, dmax + 1):
-        t.add_column(f"{dur}n", justify="right")
-    t.add_column("sols", justify="right")
-    for d in sorted(res.priced_days, key=lambda x: x.price_value or 9e9):
-        row = [str(d.date), _amount(d.min_price)]
-        opts = {o.trip_length: o.min_price for o in d.options}
-        for dur in range(dmin, dmax + 1):
-            row.append(_amount(opts.get(dur)))
-        row.append(str(d.solution_count))
-        t.add_row(*row)
-    console.print(t)
-
-
 # ─────────────────────────── backend execution ─────────────────────────────
-
-
-def _build_pp_legs(legs: tuple[Leg, ...]) -> list[LegQuery]:
-    """One PP query per Matrix leg. slice_index lets the matcher join PP
-    award results to the correct Itinerary slice in each Matrix solution."""
-    out: list[LegQuery] = []
-    for i, leg in enumerate(legs):
-        if not leg.date or not leg.origins or not leg.destinations:
-            continue
-        n = len(legs)
-        kind = (
-            "outbound"
-            if i == 0 and n > 1
-            else "return"
-            if i == 1 and n == _ROUND_TRIP_LEGS
-            else f"leg {i + 1}"
-            if n > _ROUND_TRIP_LEGS
-            else "one-way"
-        )
-        iso = leg.date.isoformat()
-        out.append(
-            LegQuery(
-                origin=leg.origins[0],
-                destination=leg.destinations[0],
-                date=iso,
-                slice_index=i,
-                label=f"{kind} {leg.origins[0]}→{leg.destinations[0]} {iso}",
-            ),
-        )
-    return out
 
 
 def _run_matrix_path(
@@ -1171,43 +490,6 @@ def _gflight_results(legs: tuple[Leg, ...], opts: SearchOptions, top_n: int) -> 
         keep = set(surviving_indices(fli_results_to_search_result(results), per_slice_preds))
         results = [r for i, r in enumerate(results) if i in keep]
     return results
-
-
-_MERGE_SOURCE_TAG = {"both": "GF+MX", "matrix": "MX", "gf": "GF"}
-
-
-def _render_merged(rows: list[Any], *, legs: tuple[Leg, ...], top_n: int) -> None:
-    """Render the reconciled GF+Matrix view: one row per itinerary with the GF
-    and Matrix prices attributed side-by-side and a source tag."""
-    origin = legs[0].origins[0] if legs[0].origins else "?"
-    destination = legs[0].destinations[0] if legs[0].destinations else "?"
-    has_return = len(legs) >= _ROUND_TRIP_LEGS
-    t = Table(
-        title=f"Google Flights + Matrix · {origin}→{destination}"
-        + (" + return" if has_return else ""),
-        show_header=True,
-        header_style="bold green",
-    )
-    t.add_column("#", justify="right")
-    t.add_column("src")
-    t.add_column("Matrix", justify="right")
-    t.add_column("Google", justify="right")
-    t.add_column("outbound")
-    t.add_column("return")
-    for i, row in enumerate(rows[:top_n], 1):
-        itn = row.itinerary.itinerary
-        slcs: list[Slice] = itn.slices if itn else []
-        out = _fmt_slice_cell(slcs[0]) if slcs else "—"
-        ret = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
-        t.add_row(
-            str(i),
-            _MERGE_SOURCE_TAG.get(row.source, row.source),
-            _amount(row.matrix_price),
-            _amount(row.gf_price),
-            out,
-            ret,
-        )
-    console.print(t)
 
 
 def _run_gflight_path(
@@ -1319,10 +601,7 @@ def _run_enriched_path(
     state: dict[str, Any] = {}
 
     async def _matrix(c: MatrixClient) -> None:
-        try:
-            state["matrix"] = await c.execute(matrix_search, cache=not no_cache)
-        except MatrixApiError as e:
-            state["matrix_err"] = e
+        await _matrix_into_state(c, matrix_search, state, cache=not no_cache)
 
     async def _go() -> None:
         async with (
@@ -1360,10 +639,14 @@ def _run_enriched_path(
             err.print(f"[yellow]Google Flights query failed:[/] {e}")
     matrix_res = state.get("matrix")
     if matrix_res is None:
-        # Matrix failed; the GF table (if any) was already painted.
+        # Matrix failed; the GF table (if any) was already painted. Report both a
+        # known MatrixApiError and an unexpected non-MatrixApiError stashed by the
+        # weave's `_matrix` task (mirrors `_report_calendar_matrix_failure`).
         e = state.get("matrix_err")
         if e is not None:
             err.print(f"[red]Matrix returned an error ({e.kind}):[/] {e.message}")
+        elif state.get("matrix_unexpected") is not None:
+            err.print(f"[red]Matrix search failed:[/] {state['matrix_unexpected']}")
         if not gf:
             raise typer.Exit(1)
         return
@@ -1395,92 +678,6 @@ def _run_enriched_path(
 
 
 # ─────────────────────────── multi-cabin orchestration ─────────────────────
-
-# When --cabin selects multiple cabins, each cabin's per-query top-N is bumped
-# so the client-side merge has overlap to work with. Cheapest economy and
-# cheapest business on a given route are often different carriers entirely
-# (e.g. JFK-LHR: VS in economy, FI in business) — a top-5 query per cabin
-# almost never overlaps, leaving the J column rendered as all "—".
-# Bumping per-cabin queries to ~25-50 itineraries lets the join surface
-# matching itineraries that exist in both cabins' results.
-#
-# Capped to bound response size (each itinerary costs bytes + parse time);
-# Matrix and gflight both tolerate page sizes in this range comfortably.
-_MULTI_CABIN_QUERY_BUMP_FACTOR = 5
-_MULTI_CABIN_QUERY_BUMP_CAP = 100
-
-
-def _bumped_query_top_n(top_n: int, cabin_count: int) -> int:
-    """Per-cabin query page size for a multi-cabin search.
-
-    Single-cabin invocations get `top_n` unchanged. Multi-cabin gets
-    `top_n * factor` capped at the bump ceiling. The visible row count
-    after merge is still `top_n` (renderer trims by sort cabin) — the
-    bump only widens the search space the join can draw from.
-    """
-    if cabin_count <= 1:
-        return top_n
-    return min(top_n * _MULTI_CABIN_QUERY_BUMP_FACTOR, _MULTI_CABIN_QUERY_BUMP_CAP)
-
-
-def _derive_pp_cabins(cash_cabins: tuple[Cabin, ...]) -> tuple[str, ...]:
-    """Map cash cabin list → PP cabin list for the PP overlay.
-
-    Adds First when Business is requested but First isn't: award seekers
-    treat business/first as a paired premium tier, and First is rare enough
-    that surfacing it costs almost nothing while filling a real research
-    gap. The reverse promotion (First → +Business) isn't applied — asking
-    for First means the user has already made that call.
-    """
-    out: list[str] = [_CABIN_TO_PP_NAME[c] for c in cash_cabins]
-    if Cabin.BUSINESS in cash_cabins and Cabin.FIRST not in cash_cabins:
-        out.append(_CABIN_TO_PP_NAME[Cabin.FIRST])
-    return tuple(out)
-
-
-def _pp_cabins_for_multi(sel: ProviderSelection, cabins: tuple[Cabin, ...]) -> str | None:
-    """PP cabins for a multi-cabin search. User's `--provider-opt pp.cabins=`
-    wins; otherwise derive from `--cabin` with the business→+first rule."""
-    user_set = sel.pp_cabins()
-    if user_set is not None:
-        return user_set
-    return ",".join(_derive_pp_cabins(cabins))
-
-
-def _cash_per_cabin_single(res: SearchResult, query_cabin: Cabin) -> dict[int, dict[str, float]]:
-    """Build the per-itinerary cash map for a single-cabin invocation.
-
-    The PP renderer needs to know which PP cabin name the cash field on each
-    itinerary corresponds to — otherwise it can't compute ¢/mi against the
-    right cash basis. For single-cabin runs the answer is the queried cabin
-    applied uniformly.
-    """
-    name = _CABIN_TO_PP_NAME[query_cabin]
-    out: dict[int, dict[str, float]] = {}
-    for it in res.solutions:
-        cash = parse_price(it.price)
-        if cash is not None:
-            out[id(it)] = {name: cash}
-    return out
-
-
-def _cash_per_cabin_multi(rows: list[MultiCabinRow]) -> dict[int, dict[str, float]]:
-    """Build the per-itinerary cash map for a multi-cabin merged result.
-
-    `rows` carries each itinerary alongside the prices observed in each cabin.
-    Object identity is preserved through the merge (and through PP's matcher
-    and de-dup), so `id(row.itinerary)` is a stable lookup key.
-    """
-    out: dict[int, dict[str, float]] = {}
-    for r in rows:
-        prices: dict[str, float] = {}
-        for cab, price in r.prices.items():
-            cash = parse_price(price)
-            if cash is not None:
-                prices[_CABIN_TO_PP_NAME[cab]] = cash
-        if prices:
-            out[id(r.itinerary)] = prices
-    return out
 
 
 def _run_matrix_multi(
@@ -1570,55 +767,6 @@ def _gflight_to_search_result_per_cabin(
     from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
 
     return {cab: fli_results_to_search_result(res) for cab, res in results_by_cabin.items()}
-
-
-def _render_multi_cabin_search(
-    rows: list[MultiCabinRow],
-    *,
-    cabins: tuple[Cabin, ...],
-    sort_by: Cabin,
-    title_prefix: str = "Itineraries",
-) -> None:
-    """Render multi-cabin merged rows. One row per itinerary, one $ column
-    per requested cabin, '—' for missing."""
-    if not rows:
-        console.print("[yellow]No itineraries.[/]")
-        return
-    # Use the first present price to surface a currency tag in the title.
-    ccy = ""
-    for row in rows:
-        for p in row.prices.values():
-            ccy_candidate, _ = _split_price(p)
-            if ccy_candidate:
-                ccy = ccy_candidate
-                break
-        if ccy:
-            break
-    ccy_tag = f" ({ccy})" if ccy else ""
-    cabin_labels = "+".join(_CABIN_TO_LETTER[c] for c in cabins)
-
-    t = Table(
-        title=f"{title_prefix} · {cabin_labels} (sorted by {_CABIN_TO_LETTER[sort_by]}){ccy_tag}",
-        show_header=True,
-        header_style="bold green",
-    )
-    t.add_column("#", justify="right")
-    t.add_column("carriers")
-    t.add_column("outbound")
-    t.add_column("return")
-    for cab in cabins:
-        t.add_column(f"{_CABIN_TO_LETTER[cab]} $", justify="right")
-
-    for i, row in enumerate(rows, 1):
-        itn = row.itinerary.itinerary
-        slcs: list[Slice] = itn.slices if itn else []
-        carriers = ",".join((c.code or "?") for c in (itn.carriers if itn else []))
-
-        out_cell = _fmt_slice_cell(slcs[0]) if slcs else "—"
-        ret_cell = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
-        price_cells = [_amount(row.prices.get(cab)) for cab in cabins]
-        t.add_row(str(i), carriers or "?", out_cell, ret_cell, *price_cells)
-    console.print(t)
 
 
 def _validate_sort_cabin(sort_by: Cabin, cabins: tuple[Cabin, ...]) -> None:
@@ -1785,180 +933,6 @@ def _merge_results_into_one(
     )
 
 
-def _match_carriers(legs: tuple[Leg, ...]) -> frozenset[str]:
-    """Marketing carrier codes the user filtered on (for codeshare-aware display).
-    Empty when there's no marketing-carrier include filter — operating (`O:`) and
-    exclude filters don't trigger codeshare relabeling."""
-    from .routing_predicates import CarrierPred, classify  # noqa: PLC0415
-
-    codes: set[str] = set()
-    for lg in legs:
-        for p in classify(lg.route_language, lg.extension).predicates:
-            if isinstance(p, CarrierPred) and not p.operating and not p.exclude:
-                codes |= p.codes
-    return frozenset(codes)
-
-
-def _leg_display(leg: Any, amenity: Any, match_carriers: frozenset[str]) -> str:
-    """Per-leg label '<carrier> <num>'. If the booking carrier isn't in the user's
-    carrier filter but the leg is sold under a codeshare that IS (e.g. UA58 sold as
-    LH9407 under `--routing LH+`), show the matched identity: 'LH9407 (op UA58)'."""
-    code = getattr(leg.airline, "name", "") or ""
-    number = getattr(leg, "flight_number", "?")
-    booking = f"{code} {number}"
-    if not match_carriers or code in match_carriers:
-        return booking
-    raw_mf = getattr(amenity, "marketing_flights", ()) if amenity else ()
-    mflights: tuple[str, ...] = tuple(raw_mf or ())
-    for mf in mflights:
-        if mf[:2].upper() in match_carriers:
-            return f"{mf} (op {code}{number})"
-    return booking
-
-
-def _render_gflight_table(
-    results: list[Any],
-    *,
-    legs: tuple[Leg, ...],
-    top_n: int,
-    match_carriers: frozenset[str] = frozenset(),
-) -> None:
-    """Render fli results as a rich table. Duck-typed: fli has no type stubs.
-
-    Accepts our `GFlightWithId` wrappers — `.flight` is fli's FlightResult,
-    `.amenities` is per-leg legroom data parsed from Google's response.
-    `match_carriers` enables codeshare-aware leg labels (see `_leg_display`)."""
-    origin = legs[0].origins[0] if legs[0].origins else "?"
-    destination = legs[0].destinations[0] if legs[0].destinations else "?"
-    has_return = len(legs) >= _ROUND_TRIP_LEGS
-    t = Table(
-        title=f"Google Flights · {origin}→{destination}" + (" + return" if has_return else ""),
-        show_header=True,
-        header_style="bold green",
-    )
-    t.add_column("#", justify="right")
-    t.add_column("price", justify="right")
-    t.add_column("stops", justify="right")
-    t.add_column("duration")
-    t.add_column("legs")
-    t.add_column("legroom")
-    any_legroom = False
-    for i, r in enumerate(results[:top_n], 1):
-        items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
-        for j, g in enumerate(items):
-            fr = g.flight  # unwrap GFlightWithId → fli FlightResult
-            amenities = getattr(g, "amenities", []) or []
-            label = f"{i}{'a' if j == 0 else 'b'}" if len(items) > 1 else str(i)
-            legs_str = " → ".join(
-                _leg_display(leg, amenities[k] if k < len(amenities) else None, match_carriers)
-                for k, leg in enumerate(fr.legs)
-            )
-            mins = fr.duration
-            dur = f"{mins // 60}h{mins % 60:02d}m"
-            legroom_str = _fmt_gflight_legroom(fr.legs, amenities)
-            if legroom_str:
-                any_legroom = True
-            t.add_row(
-                label,
-                f"{fr.currency or 'USD'}{fr.price:.2f}",
-                str(fr.stops),
-                dur,
-                legs_str,
-                legroom_str,
-            )
-    console.print(t)
-    if any_legroom:
-        console.print(_LEGROOM_KEY)
-
-
-# AVERAGE/BELOW/ABOVE are pitch-relative judgments — collapse them to color on
-# the inches token so the eye picks out squeeze rows without text noise. The
-# named premium-cabin enums describe seat construction (Lie Flat vs Suite vs
-# Angled Flat aren't comparable on pitch alone) so those stay as text.
-_LEGROOM_AS_COLOR = {"BELOW": "red", "ABOVE": "green"}
-_CABIN_LETTER = {"ECONOMY": "Y", "PREMIUM": "W", "BUSINESS": "J", "FIRST": "F"}
-# Domain Cabin enum → human label and PP API cabin string. Used for
-# multi-cabin column headers and PP cabin derivation.
-_CABIN_TO_LETTER: dict[Cabin, str] = {
-    Cabin.COACH: "Y",
-    Cabin.PREMIUM_COACH: "W",
-    Cabin.BUSINESS: "J",
-    Cabin.FIRST: "F",
-}
-_CABIN_TO_PP_NAME: dict[Cabin, str] = {
-    Cabin.COACH: "Economy",
-    Cabin.PREMIUM_COACH: "Premium economy",
-    Cabin.BUSINESS: "Business",
-    Cabin.FIRST: "First",
-}
-# 📶 for wifi is the only emoji (2-col) — wifi is the highest-value binary signal
-# and 📶 is universally read at-a-glance where ≋ is not. Power and video keep
-# 1-col Unicode pairs so the plug-vs-USB and stream-vs-ondemand distinctions
-# don't bloat the column. See `_LEGROOM_KEY` for the rendered legend.
-_WIFI_GLYPH = {"free": "📶", "paid": "[yellow]📶$[/]"}
-# ↯ is more lightning-y (= plug power); ⌁ reads more like a connector (= USB).
-_POWER_GLYPH = {"plug": "↯", "usb": "⌁"}
-# ◰ (quadrant square) evokes a phone screen — stands in for BYOD streaming.
-_VIDEO_GLYPH = {"stream": "▶", "ondemand": "▷", "byod": "◰"}
-_LEGROOM_KEY = (
-    "[dim]Legroom glyphs: "
-    f"{_WIFI_GLYPH['free']} free wifi · "
-    f"{_WIFI_GLYPH['paid']}[dim] paid wifi · "
-    f"{_POWER_GLYPH['plug']} in-seat plug · "
-    f"{_POWER_GLYPH['usb']} USB only · "
-    f"{_VIDEO_GLYPH['stream']} live TV · "
-    f"{_VIDEO_GLYPH['ondemand']} on-demand · "
-    f"{_VIDEO_GLYPH['byod']} stream-to-device · "
-    "[red]red[/dim] = BELOW · [green]green[/] = ABOVE"
-    "[/]"
-)
-
-
-def _fmt_gflight_legroom(fli_legs: list[Any], amenities: list[Any]) -> str:
-    """One line per physical leg: `<cabin> <pitch>" [seat-type] <amenities>`.
-
-    `amenities[i]` is a LegAmenities instance from _gflight_ids; misaligned
-    or empty inputs render as ''."""
-    lines: list[str] = []
-    for i, leg in enumerate(fli_legs):
-        a = amenities[i] if i < len(amenities) else None
-        if a is None:
-            continue
-        parts: list[str] = []
-        cabin = _CABIN_LETTER.get(getattr(a, "cabin", None) or "", "")
-        if cabin:
-            parts.append(cabin)
-        pitch = getattr(a, "pitch_inches", None)
-        cls = getattr(a, "legroom_class", None)
-        if pitch is not None:
-            tok = f'{pitch}"'
-            color = _LEGROOM_AS_COLOR.get(cls or "")
-            if color:
-                tok = f"[{color}]{tok}[/]"
-            parts.append(tok)
-        if cls and cls not in {"AVERAGE", "BELOW", "ABOVE"}:
-            parts.append(cls)
-        glyphs: list[str] = []
-        wifi_g = _WIFI_GLYPH.get(getattr(a, "wifi", None) or "")
-        if wifi_g:
-            glyphs.append(wifi_g)
-        power_g = _POWER_GLYPH.get(getattr(a, "power", None) or "")
-        if power_g:
-            glyphs.append(power_g)
-        video_g = _VIDEO_GLYPH.get(getattr(a, "video", None) or "")
-        if video_g:
-            glyphs.append(video_g)
-        if glyphs:
-            parts.append("".join(glyphs))
-        if not parts:
-            continue
-        leg_label = (
-            f"{getattr(leg.airline, 'name', leg.airline)}{getattr(leg, 'flight_number', '?')}"
-        )
-        lines.append(f"{leg_label:<6} " + " ".join(parts))
-    return "\n".join(lines)
-
-
 # ─────────────────────────────── commands ──────────────────────────────────
 
 # rich_help_panel groups for grouped `--help` output. Same names used across
@@ -1968,122 +942,6 @@ _GROUP_ITINERARY = "Itinerary"
 _GROUP_FILTERING = "Filtering"
 _GROUP_OUTPUT = "Output"
 _GROUP_BACKEND = "Backend & providers"
-
-# Common-args helpers — these reduce repetition across commands.
-# These flags are hidden because almost nobody touches them in normal use;
-# defaults live in config.toml ([http] section) and can be overridden via
-# FLIGHT_RPS / FLIGHT_IMPERSONATE env vars. The CLI flag still works for
-# one-off overrides — it's just no longer in --help. None sentinel means
-# "fall back to config/env"; explicit value overrides everything.
-_RPS_OPT = typer.Option(
-    None,
-    "--rps",
-    hidden=True,
-    help="Requests per second (default: 1.0; FLIGHT_RPS / config.toml).",
-)
-_IMPERSONATE_OPT = typer.Option(
-    None,
-    "--impersonate",
-    hidden=True,
-    help="curl_cffi profile (default: chrome; FLIGHT_IMPERSONATE / config.toml).",
-)
-_NO_CACHE_OPT = typer.Option(
-    False,
-    "--no-cache",
-    hidden=True,
-    help="Bypass the on-disk response cache (or set FLIGHT_NO_CACHE=1).",
-)
-_PROVIDER_OPT = typer.Option(
-    None,
-    "--provider-opt",
-    help=(
-        "Per-provider override, repeatable: 'pp.airlines=United,Delta'. "
-        "Overrides ~/.config/flight-cli/config.toml [providers.<name>]."
-    ),
-    rich_help_panel="Backend & providers",
-)
-
-
-def _resolve_rps(flag: float | None) -> float:
-    """CLI flag wins; otherwise fall back to env / config / default."""
-    if flag is not None:
-        return flag
-    try:
-        return _config.http_rps()
-    except ValueError as e:
-        err.print(f"[red]Bad rps configuration: {e}[/]")
-        raise typer.Exit(2) from e
-
-
-def _resolve_impersonate(flag: str | None) -> str:
-    if flag is not None:
-        return flag
-    return _config.http_impersonate()
-
-
-def _resolve_no_cache(flag: bool) -> bool:
-    """The CLI flag is a one-way toggle: passing --no-cache forces True.
-    Without it, env/config decide."""
-    if flag:
-        return True
-    return _config.cache_disabled()
-
-
-# ─────────────────────────── --format / --json ─────────────────────────────
-
-# Output formats currently implemented end-to-end. csv/tsv/yaml were in the
-# original work-4uls plan but deferred to a follow-up: the cash-itinerary
-# shape isn't naturally tabular without a flattening pass that deserves its
-# own design. Today's surface is the front door; emitters layer on later.
-_VALID_FORMATS = ("table", "json")
-
-_FORMAT_OPT = typer.Option(
-    "table",
-    "--format",
-    help=f"Output format: one of {'/'.join(_VALID_FORMATS)}.",
-    rich_help_panel=_GROUP_OUTPUT,
-)
-_JSON_OPT = typer.Option(
-    False,
-    "--json",
-    hidden=True,
-    help="[deprecated] Use --format json.",
-)
-
-# URL emission flags shared by `search` / `calendar` / `detail`.
-#
-# Both URLs encode the search criteria. The Google-Flights URL ALSO pins
-# the cheapest matched itinerary (deep link to that specific selection)
-# when an itinerary row is available; Matrix's URL only encodes the
-# search (Matrix's SPA doesn't surface a per-itinerary URL state).
-_MATRIX_URL_HELP = (
-    "Print the Matrix ITA search URL (pre-fills the search; Matrix's SPA "
-    "doesn't expose per-itinerary URL state, so this is the deepest link "
-    "available)."
-)
-_GOOGLE_URL_HELP = (
-    "Print the Google Flights URL. When a cheapest itinerary is resolved "
-    "from the results, the URL deep-links to that specific itinerary "
-    "(pins selected flights). Otherwise it pre-fills the search."
-)
-
-
-def _resolve_format(*, fmt: str, json_flag: bool) -> str:
-    """Collapse --format + deprecated --json into a single format string.
-
-    `--json` forwards to `--format json` with a deprecation warning. Setting
-    both (--json --format X for X != json) is a hard error: ambiguous intent.
-    """
-    if json_flag:
-        err.print("[yellow]--json is deprecated; use --format json.[/]")
-        if fmt not in ("table", "json"):
-            err.print(f"[red]--json conflicts with --format {fmt!r}; pick one.[/]")
-            raise typer.Exit(2)
-        return "json"
-    if fmt not in _VALID_FORMATS:
-        err.print(f"[red]--format must be one of {'/'.join(_VALID_FORMATS)}; got {fmt!r}[/]")
-        raise typer.Exit(2)
-    return fmt
 
 
 @app.command()
@@ -2637,56 +1495,6 @@ def fare(
         run_pp=run_pp,
         sel=sel,
     )
-
-
-def _parse_slice_spec(s: str) -> Leg:
-    """Parse 'JFK-LHR:2026-08-15[:r=LH+:e=MAXCONNECT 2:00]'.
-
-    Error paths surface the specific failure (missing colon, malformed
-    origin-dest, unknown key prefix, bad date) instead of the generic
-    "should be ORIGIN-DEST:DATE[:r=...:e=...]" — that message is fine
-    for missing date but useless when the user typed `r-LH+` instead
-    of `r=LH+` (which the lookahead split otherwise silently ignores).
-    """
-    parts = s.split(":", 2)
-    if len(parts) < _SLICE_MIN_PARTS:
-        raise typer.BadParameter(
-            f"slice {s!r}: missing date — expected ORIGIN-DEST:DATE[:r=...:e=...]"
-        )
-    od, dt = parts[0], parts[1]
-    if "-" not in od:
-        raise typer.BadParameter(
-            f"slice {s!r}: missing '-' between origin and destination "
-            f"(got {od!r}; expected e.g. JFK-LHR)"
-        )
-    o, d = od.split("-", 1)
-    if not o or not d:
-        raise typer.BadParameter(
-            f"slice {s!r}: origin and destination must both be non-empty (got {od!r})"
-        )
-    # Inline date parse (don't route through _parse_date) so we control the
-    # error envelope. _parse_date raises typer.Exit with a separate err.print
-    # which would surface as a double-message in slice-specific BadParameter.
-    try:
-        parsed_date = datetime.strptime(dt, "%Y-%m-%d").date()
-    except ValueError as e:
-        raise typer.BadParameter(f"slice {s!r}: invalid date {dt!r} (expected YYYY-MM-DD)") from e
-    routing = extension = None
-    if len(parts) == _SLICE_MAX_PARTS:
-        # Chunks come in as r=... and e=... separated by ':' followed by the
-        # key prefix. Anything that doesn't start with r= or e= is a typo
-        # (the most common is r-VALUE instead of r=VALUE).
-        for chunk in re.split(r":(?=[re]=)", parts[2]):
-            if chunk.startswith("r="):
-                routing = chunk[2:]
-            elif chunk.startswith("e="):
-                extension = chunk[2:]
-            else:
-                raise typer.BadParameter(
-                    f"slice {s!r}: unknown key prefix in {chunk!r}; "
-                    f"valid keys are r=ROUTING and e=EXTENSION (note the '=')"
-                )
-    return Leg.of(o, d, parsed_date, route_language=routing, extension=extension)
 
 
 @app.command()
