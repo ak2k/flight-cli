@@ -108,12 +108,16 @@ from .pp.cli import auth_app, run_pp_for_search
 if TYPE_CHECKING:
     from .models import CalendarResult, Location, SearchResult
 
-# Names re-exported for the test suite: `cli.py` was decomposed into `_console`,
-# `_parsing`, `_dispatch`, `_runtime_opts`, `_urls`, `_pp_glue`, and `_render`,
-# but the tests still `from flight_cli.cli import <name>` and monkeypatch
-# `cli.<name>`. Every moved definition is imported back above so it stays a
-# `flight_cli.cli` attribute; the ones with no remaining in-module caller are
-# listed here so ruff keeps the re-export instead of pruning it as dead.
+# DIVERGE: names re-exported for the test suite (don't "fix" this back). `cli.py`
+# was decomposed into `_console`, `_parsing`, `_dispatch`, `_runtime_opts`,
+# `_urls`, `_pp_glue`, and `_render`, but the tests still
+# `from flight_cli.cli import <name>` and monkeypatch `cli.<name>`. Every moved
+# definition is imported back above so it stays a `flight_cli.cli` attribute; the
+# ones with no remaining in-module caller are listed here so ruff keeps the
+# re-export instead of pruning it as dead. This convention converges in the
+# deferred phase-2 extraction — once the orchestration/weaves leave `cli.py`, the
+# tests patch the submodules directly (the `_gf_dategrid`/`_calendar_split`
+# precedent) and this shim goes away.
 __all__ = [
     "BACKEND_MATRIX",
     "_MULTI_CABIN_QUERY_BUMP_CAP",
