@@ -443,3 +443,181 @@ def test_cash_without_flight_id_skips_matched_id_path():
     matches = join(res, awards)
     # Joins via flight#+date heuristic, not matched-id.
     assert len(matches[0].awards) == 1
+
+
+# ────────────── carrier corroboration on the route+time fallback ──────────────
+#
+# Regression: a live MSY→MIA search attached a 9.1k Delta SkyMiles price to
+# American's AA3539. Delta cannot ticket AA metal — no interline award
+# agreement — and the two are genuinely different aircraft that happen to
+# push back at the same minute. Route+time alone can't tell them apart.
+
+
+def test_join_route_time_rejects_different_carrier_at_same_minute():
+    """The bug, reduced. AA3539 and DL1424 both depart MSY→MIA at 10:45 on
+    2026-09-09. Only the American award may attach."""
+    res = SearchResult(
+        solutions=[
+            _itin(("AA3539", "2026-09-09T10:45:00", "MSY", "MIA")),
+        ]
+    )
+    awards = [
+        _award(
+            "DL1424",
+            "2026-09-09T10:45:00",
+            program="Delta",
+            miles=9100,
+            origin="MSY",
+            dest="MIA",
+        ),
+    ]
+    matches = join(res, awards)
+    assert matches[0].awards == []
+
+
+def test_join_route_time_keeps_same_carrier_at_same_minute():
+    """The other half of the collision: the AA-programmed award on the same
+    route+minute still attaches."""
+    res = SearchResult(
+        solutions=[
+            _itin(("AA3539", "2026-09-09T10:45:00", "MSY", "MIA")),
+        ]
+    )
+    awards = [
+        _award(
+            "AA3539",
+            "2026-09-09T10:45:00",
+            program="American",
+            origin="MSY",
+            dest="MIA",
+        ),
+    ]
+    matches = join(res, awards)
+    assert len(matches[0].awards) == 1
+    assert matches[0].awards[0].program == "American"
+
+
+def test_join_route_time_partitions_a_real_collision():
+    """Both flights present at once, as the live payload had them: each cash
+    itinerary keeps only its own carrier's award."""
+    res = SearchResult(
+        solutions=[
+            _itin(("AA3539", "2026-09-09T10:45:00", "MSY", "MIA")),
+            _itin(("DL1424", "2026-09-09T10:45:00", "MSY", "MIA")),
+        ]
+    )
+    awards = [
+        _award("DL1424", "2026-09-09T10:45:00", program="Delta", origin="MSY", dest="MIA"),
+        _award("AA3539", "2026-09-09T10:45:00", program="American", origin="MSY", dest="MIA"),
+    ]
+    matches = join(res, awards)
+    assert [a.program for a in matches[0].awards] == ["American"]
+    assert [a.program for a in matches[1].awards] == ["Delta"]
+
+
+def test_join_route_time_still_bridges_oneworld_codeshare():
+    """The fallback's reason for existing must survive the guard: AA-marketed
+    / BA-operated is a partner pair, so it still joins."""
+    res = SearchResult(
+        solutions=[
+            _itin(("AA6939", "2026-08-15T18:40:00", "JFK", "LHR")),
+        ]
+    )
+    awards = [
+        _award("BA174", "2026-08-15T18:40:00", program="American", origin="JFK", dest="LHR"),
+    ]
+    matches = join(res, awards)
+    assert len(matches[0].awards) == 1
+    assert matches[0].awards[0].flight_number == "BA174"
+
+
+def test_join_route_time_rejects_cross_alliance_pair():
+    """United (Star) must not pick up an American (oneworld) award, even on
+    an identical route+minute."""
+    res = SearchResult(
+        solutions=[
+            _itin(("UA1122", "2026-08-15T18:40:00", "JFK", "LHR")),
+        ]
+    )
+    awards = [
+        _award("AA100", "2026-08-15T18:40:00", program="American", origin="JFK", dest="LHR"),
+    ]
+    matches = join(res, awards)
+    assert matches[0].awards == []
+
+
+def test_join_route_time_allows_non_alliance_bilateral():
+    """Delta/Virgin Atlantic codeshare across alliance lines via the JV."""
+    res = SearchResult(
+        solutions=[
+            _itin(("DL4321", "2026-08-15T18:40:00", "JFK", "LHR")),
+        ]
+    )
+    awards = [
+        _award("VS26", "2026-08-15T18:40:00", program="Delta", origin="JFK", dest="LHR"),
+    ]
+    matches = join(res, awards)
+    assert len(matches[0].awards) == 1
+
+
+def test_join_route_time_skipped_when_cash_slice_has_no_flight_number():
+    """No cash flight number ⇒ no carrier to corroborate against ⇒ the
+    fallback can't fire. Fails closed: a wrong join invents an unbookable
+    price, a missed join just shows no award."""
+    res = SearchResult(
+        solutions=[
+            Itinerary(
+                displayTotal="USD500.00",
+                itinerary=ItineraryDetails(
+                    slices=[
+                        Slice(
+                            flights=[],
+                            departure="2026-09-09T10:45:00",
+                            origin=SliceEndpoint(code="MSY"),
+                            destination=SliceEndpoint(code="MIA"),
+                        ),
+                    ],
+                    carriers=[],
+                ),
+            ),
+        ]
+    )
+    awards = [
+        _award("AA3539", "2026-09-09T10:45:00", program="American", origin="MSY", dest="MIA"),
+    ]
+    matches = join(res, awards)
+    assert matches[0].awards == []
+
+
+def test_join_flight_number_key_needs_no_carrier_corroboration():
+    """The guard is scoped to the route+time fallback. An exact (flight#,
+    date) hit is self-corroborating and must be untouched — including when
+    the award's *program* differs from the operating carrier, which is the
+    normal partner-redemption case (Alaska miles on an AA flight)."""
+    res = SearchResult(
+        solutions=[
+            _itin(("AA867", "2026-09-09T06:00:00", "MSY", "MIA")),
+        ]
+    )
+    awards = [
+        _award(
+            "AA867",
+            "2026-09-09T06:00:00",
+            program="Alaska",
+            miles=4500,
+            origin="MSY",
+            dest="MIA",
+        ),
+    ]
+    matches = join(res, awards)
+    assert len(matches[0].awards) == 1
+    assert matches[0].awards[0].program == "Alaska"
+
+
+def test_same_metal_helper_rejects_unparseable_carrier():
+    from flight_cli.pp.match import same_metal
+
+    assert same_metal("AA3539", "AA3539") is True
+    assert same_metal("AA3539", "DL1424") is False
+    assert same_metal("", "AA3539") is False
+    assert same_metal("AA", "AA3539") is False  # too short to carry a number
