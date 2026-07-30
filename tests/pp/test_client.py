@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import time
 from typing import Any
 
 from flight_cli.pp.client import (
@@ -103,17 +104,56 @@ def test_unsupported_cache_roundtrips(tmp_path: pathlib.Path, monkeypatch: Any) 
     remember_unsupported_airline("ThaiAirways")  # idempotent
     assert load_unsupported_airlines() == frozenset({"ANA", "ThaiAirways"})
     written: Any = json.loads(cache.read_text())
-    assert written == ["ANA", "ThaiAirways"]
+    assert sorted(written) == ["ANA", "ThaiAirways"]
 
 
 def test_unsupported_cache_expires(tmp_path: pathlib.Path, monkeypatch: Any) -> None:
     """Past the TTL the note is ignored, so PP re-adding an airline (or a tier
     change) heals without the user clearing anything."""
     cache = tmp_path / "unsupported.json"
-    cache.write_text(json.dumps(["ANA"]))
+    cache.write_text(json.dumps({"ANA": time.time()}))
     monkeypatch.setattr("flight_cli.pp.client.UNSUPPORTED_CACHE", cache)
     monkeypatch.setattr("flight_cli.pp.client.UNSUPPORTED_TTL_SECS", -1)
     assert load_unsupported_airlines() == frozenset()
+
+
+def test_unsupported_entries_expire_independently(tmp_path: pathlib.Path, monkeypatch: Any) -> None:
+    """Each entry ages on its own clock.
+
+    Keying the TTL off the file mtime meant that learning ANY new airline
+    refreshed every existing entry. Since a run that learns one airline
+    rewrites the file, in steady state nothing ever expired and the cache
+    could not self-heal.
+    """
+    cache = tmp_path / "unsupported.json"
+    monkeypatch.setattr("flight_cli.pp.client.UNSUPPORTED_CACHE", cache)
+    monkeypatch.setattr("flight_cli.pp.client.UNSUPPORTED_TTL_SECS", 100)
+    now = time.time()
+    cache.write_text(json.dumps({"ANA": now - 500}))  # already stale
+    remember_unsupported_airline("Finnair")  # rewrites the file, mtime = now
+    assert load_unsupported_airlines() == frozenset({"Finnair"})
+
+
+def test_unsupported_cache_reads_legacy_list_format(
+    tmp_path: pathlib.Path, monkeypatch: Any
+) -> None:
+    """The first version wrote a flat list. Upgrading must not re-query every
+    unsupported airline; the entries are treated as learned now."""
+    cache = tmp_path / "unsupported.json"
+    cache.write_text(json.dumps(["ANA", "Southwest"]))
+    monkeypatch.setattr("flight_cli.pp.client.UNSUPPORTED_CACHE", cache)
+    assert load_unsupported_airlines() == frozenset({"ANA", "Southwest"})
+
+
+def test_remember_preserves_existing_timestamps(tmp_path: pathlib.Path, monkeypatch: Any) -> None:
+    """Adding an entry must not restamp its siblings."""
+    cache = tmp_path / "unsupported.json"
+    monkeypatch.setattr("flight_cli.pp.client.UNSUPPORTED_CACHE", cache)
+    original = time.time() - 42
+    cache.write_text(json.dumps({"ANA": original}))
+    remember_unsupported_airline("Finnair")
+    written: Any = json.loads(cache.read_text())
+    assert written["ANA"] == original
 
 
 def test_unsupported_cache_tolerates_corrupt_file(tmp_path: pathlib.Path, monkeypatch: Any) -> None:
@@ -122,7 +162,25 @@ def test_unsupported_cache_tolerates_corrupt_file(tmp_path: pathlib.Path, monkey
     monkeypatch.setattr("flight_cli.pp.client.UNSUPPORTED_CACHE", cache)
     cache.write_text("not json{")
     assert load_unsupported_airlines() == frozenset()
-    cache.write_text('{"airlines": ["ANA"]}')  # wrong shape
+    cache.write_text("[1, 2, 3]")  # right container, wrong element type
     assert load_unsupported_airlines() == frozenset()
-    cache.write_text('["ANA", 42, null]')  # mixed types
+    cache.write_text('["ANA", 42, null]')  # legacy list, mixed types
     assert load_unsupported_airlines() == frozenset({"ANA"})
+    cache.write_text('{"ANA": "yesterday"}')  # non-numeric timestamp
+    assert load_unsupported_airlines() == frozenset()
+    cache.write_text('{"ANA": true}')  # bool is not a timestamp
+    assert load_unsupported_airlines() == frozenset()
+
+
+def test_remember_survives_unwritable_cache(tmp_path: pathlib.Path, monkeypatch: Any) -> None:
+    """A cache-write failure is swallowed: the run continues and simply
+    re-queries that airline next time."""
+    unwritable = tmp_path / "nodir" / "sub" / "unsupported.json"
+    monkeypatch.setattr("flight_cli.pp.client.UNSUPPORTED_CACHE", unwritable)
+
+    def _boom(*_a: Any, **_kw: Any) -> None:
+        raise OSError("read-only fs")
+
+    monkeypatch.setattr("flight_cli.pp.client.Path.mkdir", _boom)
+    remember_unsupported_airline("ANA")  # must not raise
+    assert load_unsupported_airlines() == frozenset()

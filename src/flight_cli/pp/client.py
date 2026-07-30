@@ -333,34 +333,71 @@ def is_unsupported_airline_response(status: int, body: str) -> bool:
     return "unsupported airline" in body.lower()
 
 
+def _load_unsupported_raw() -> dict[str, float]:
+    """`{airline: epoch_seconds_learned}`, unfiltered. {} on any read problem.
+
+    Tolerates the legacy flat-list format written by the first version of this
+    cache by treating those entries as learned now — one extra TTL period of
+    staleness on upgrade, versus re-querying every unsupported airline again.
+    """
+    try:
+        raw: Any = json.loads(UNSUPPORTED_CACHE.read_text())
+    except (OSError, ValueError):
+        return {}
+    if isinstance(raw, list):  # legacy: ["ANA", "Finnair", ...]
+        now = time.time()
+        return {x: now for x in cast("list[Any]", raw) if isinstance(x, str)}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, float] = {}
+    for k, v in cast("dict[Any, Any]", raw).items():
+        if isinstance(k, str) and isinstance(v, (int, float)) and not isinstance(v, bool):
+            out[k] = float(v)
+    return out
+
+
 def load_unsupported_airlines() -> frozenset[str]:
-    """Airlines the server rejected as unsupported, if the note is still fresh.
+    """Airlines the server rejected as unsupported, whose note is still fresh.
+
+    Each entry carries its OWN learned-at timestamp. Keying the TTL off the
+    file's mtime instead would mean any new rejection refreshed every existing
+    entry — and since a run that learns one airline rewrites the file, entries
+    would never expire in steady state, defeating the self-healing the TTL is
+    there to provide.
 
     Any read problem (missing, corrupt, wrong shape) yields the empty set —
     the cost of a stale-empty result is one wasted round-trip per airline,
     versus wrongly suppressing a working airline's awards.
     """
-    try:
-        if time.time() - UNSUPPORTED_CACHE.stat().st_mtime >= UNSUPPORTED_TTL_SECS:
-            return frozenset()
-        raw: Any = json.loads(UNSUPPORTED_CACHE.read_text())
-    except (OSError, ValueError):
-        return frozenset()
-    if not isinstance(raw, list):
-        return frozenset()
-    return frozenset(x for x in cast("list[Any]", raw) if isinstance(x, str))
+    cutoff = time.time() - UNSUPPORTED_TTL_SECS
+    return frozenset(a for a, learned_at in _load_unsupported_raw().items() if learned_at > cutoff)
 
 
 def remember_unsupported_airline(airline: str) -> None:
-    """Add one airline to the unsupported note. Best-effort: a failure here
-    only costs the next run a redundant request."""
-    current = set(load_unsupported_airlines())
+    """Stamp one airline as unsupported as of now. Best-effort: a failure here
+    only costs the next run a redundant request.
+
+    Existing entries keep their original timestamps so each expires on its own
+    schedule.
+
+    NOTE: read-modify-write with no lock. Safe within one process — there is no
+    `await` between the read and the write, so anyio's cooperative scheduling
+    serializes concurrent callers in `airline_search_many`. Keep it that way:
+    introducing an async file API here would open a real lost-update race.
+    Across two concurrent CLI invocations a lost update is possible, and costs
+    exactly one redundant request next run.
+    """
+    current = _load_unsupported_raw()
     if airline in current:
         return
-    current.add(airline)
+    current[airline] = time.time()
     try:
         UNSUPPORTED_CACHE.parent.mkdir(parents=True, exist_ok=True)
-        UNSUPPORTED_CACHE.write_text(json.dumps(sorted(current), indent=2))
+        # Write-then-rename: a crash mid-write leaves the old file intact
+        # rather than a truncated one that reads as an empty cache.
+        tmp = UNSUPPORTED_CACHE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(dict(sorted(current.items())), indent=2))
+        tmp.replace(UNSUPPORTED_CACHE)
     except OSError as e:
         log.debug("pp_unsupported_cache_write_failed", error=str(e))
 

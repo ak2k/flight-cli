@@ -877,3 +877,153 @@ def test_same_metal_rejects_award_side_empty_flight_number():
     price the user might try to book."""
     assert same_metal("AA3539", "") is False
     assert same_metal("AA3539", None) is False
+
+
+# ─────────── multi-stop slices + wire-format timestamps (review r2) ───────────
+
+
+def _itin_multi(
+    flights: list[str],
+    dep: str,
+    o: str,
+    d: str,
+    stops: list[str],
+    arrival: str | None = None,
+) -> Itinerary:
+    """A connecting itinerary: N flights, N-1 intermediate stops."""
+    s = Slice(
+        flights=flights,
+        departure=dep,
+        arrival=arrival,
+        origin=SliceEndpoint(code=o),
+        destination=SliceEndpoint(code=d),
+        stops=[SliceEndpoint(code=c) for c in stops],
+    )
+    return Itinerary(
+        displayTotal="USD500.00",
+        itinerary=ItineraryDetails(slices=[s], carriers=[]),
+    )
+
+
+def test_join_matches_one_stop_award_to_one_stop_cash():
+    """The stop-count check is an equality, not a nonstop-only filter: a
+    connecting cash slice must still match its own connecting award."""
+    res = SearchResult(
+        solutions=[
+            _itin_multi(["DL2542", "DL719"], "2026-09-09T13:00:00", "MSY", "MIA", ["ATL"]),
+        ]
+    )
+    awards = [
+        _award(
+            "DL2542",
+            "2026-09-09T13:00:00",
+            program="Delta",
+            origin="MSY",
+            dest="MIA",
+            num_connections=1,
+        ),
+    ]
+    matches = join(res, awards)
+    assert len(matches[0].awards) == 1
+
+
+def test_join_rejects_nonstop_award_on_connecting_cash_row():
+    """The other direction: a nonstop award is a different (better) product
+    than the 1-stop cash itinerary it would render against."""
+    res = SearchResult(
+        solutions=[
+            _itin_multi(["DL2542", "DL719"], "2026-09-09T13:00:00", "MSY", "MIA", ["ATL"]),
+        ]
+    )
+    awards = [
+        _award(
+            "DL2542",
+            "2026-09-09T13:00:00",
+            program="Delta",
+            origin="MSY",
+            dest="MIA",
+            num_connections=0,
+        ),
+    ]
+    matches = join(res, awards)
+    assert matches[0].awards == []
+
+
+def test_slice_stop_count_falls_back_to_segment_count():
+    """`stops` is authoritative when Matrix populates it; the gflight adapter
+    may not, so a 2-segment slice with no `stops` still counts as 1."""
+    from flight_cli.pp.match import _slice_stop_count  # pyright: ignore[reportPrivateUsage]
+
+    populated = Slice(flights=["DL1", "DL2"], stops=[SliceEndpoint(code="ATL")])
+    assert _slice_stop_count(populated) == 1
+    derived = Slice(flights=["DL1", "DL2"])  # no stops[]
+    assert _slice_stop_count(derived) == 1
+    nonstop = Slice(flights=["DL1"])
+    assert _slice_stop_count(nonstop) == 0
+
+
+def test_arrival_match_survives_matrix_utc_offset_wire_format():
+    """Matrix emits offset-aware local times ('2026-09-09T09:04-04:00') whose
+    offset can even differ from the departure's ('...T06:00-05:00' for the same
+    flight), while PointsPath emits naive local ('2026-09-09T09:04:00'). Both
+    are local-at-the-airport and `_iso_minute` truncates before the offset, so
+    they compare equal — this pins that, since a format drift here would
+    silently turn the arrival discriminator into a no-op."""
+    res = SearchResult(
+        solutions=[
+            _itin(("AA867", "2026-09-09T06:00-05:00", "MSY", "MIA", "2026-09-09T09:04-04:00")),
+        ]
+    )
+    awards = [
+        _award(
+            "AA867",
+            "2026-09-09T06:00:00",
+            program="American",
+            origin="MSY",
+            dest="MIA",
+            arrival="2026-09-09T09:04:00",
+        ),
+        # Same route+departure, different aircraft (later arrival) — must not win.
+        _award(
+            "AA999",
+            "2026-09-09T06:00:00",
+            program="Alaska",
+            miles=1000,
+            origin="MSY",
+            dest="MIA",
+            arrival="2026-09-09T10:30:00",
+        ),
+    ]
+    matches = join(res, awards)
+    assert [a.flight_number for a in matches[0].awards] == ["AA867"]
+
+
+def test_cash_first_flight_number_direct():
+    """Direct coverage of the guard branches, matching its siblings."""
+    from flight_cli.pp.match import cash_first_flight_number
+
+    it = _itin(("ua 146", "2026-06-09T22:00:00", "JFK", "LHR"))
+    assert cash_first_flight_number(it) == "UA146"
+    assert cash_first_flight_number(it, slice_index=5) == ""
+    no_flights = Itinerary(itinerary=ItineraryDetails(slices=[Slice(flights=[])]))
+    assert cash_first_flight_number(no_flights) == ""
+
+
+def test_match_keys_require_complete_route():
+    """A slice or award missing origin/destination yields no key rather than a
+    partial one that could collide with an unrelated flight."""
+    partial = Itinerary(
+        itinerary=ItineraryDetails(
+            slices=[
+                Slice(
+                    flights=["AA100"],
+                    departure="2026-08-15T18:00:00",
+                    origin=SliceEndpoint(code="JFK"),
+                    destination=None,
+                ),
+            ],
+        ),
+    )
+    assert cash_match_key(partial) is None
+    assert award_match_key(_award("AA100", "2026-08-15T18:00:00", origin="", dest="LHR")) is None
+    assert award_match_key(_award("AA100", "", origin="JFK", dest="LHR")) is None

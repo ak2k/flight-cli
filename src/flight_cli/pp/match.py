@@ -245,6 +245,14 @@ def _iso_minute(s: str | None) -> str:
     return s[:_ISO_MINUTE_LEN] if len(s) >= _ISO_MINUTE_LEN else ""
 
 
+def _cash_slice(it: Itinerary, slice_index: int) -> Slice | None:
+    """Bounds-checked slice access — the guard every cash_* key repeats."""
+    itn = it.itinerary
+    if not itn or not itn.slices or slice_index >= len(itn.slices):
+        return None
+    return itn.slices[slice_index]
+
+
 def cash_match_key(it: Itinerary, slice_index: int = 0) -> MatchKey | None:
     """Build the match key from a Matrix itinerary's slice's first flight.
 
@@ -256,10 +264,9 @@ def cash_match_key(it: Itinerary, slice_index: int = 0) -> MatchKey | None:
     origin/dest an `AA100 JFK→LHR 18:00` cash row matched an `AA100 MIA→DFW
     06:30` award — same number, same date, different flight.
     """
-    itn = it.itinerary
-    if not itn or not itn.slices or slice_index >= len(itn.slices):
+    s = _cash_slice(it, slice_index)
+    if s is None:
         return None
-    s = itn.slices[slice_index]
     flights = s.flights or []
     if not flights:
         return None
@@ -289,10 +296,9 @@ def cash_route_time_key(it: Itinerary, slice_index: int = 0) -> RouteTimeKey | N
     are enough to anchor a candidate. The carrier corroboration that makes
     the candidate a *match* is applied separately in `join` (`same_metal`),
     which does need `flights[0]`."""
-    itn = it.itinerary
-    if not itn or not itn.slices or slice_index >= len(itn.slices):
+    s = _cash_slice(it, slice_index)
+    if s is None:
         return None
-    s = itn.slices[slice_index]
     o = ((s.origin.code if s.origin else None) or "").upper()
     d = ((s.destination.code if s.destination else None) or "").upper()
     t = _iso_minute(s.departure)
@@ -303,10 +309,10 @@ def cash_route_time_key(it: Itinerary, slice_index: int = 0) -> RouteTimeKey | N
 
 def cash_first_flight_number(it: Itinerary, slice_index: int = 0) -> str:
     """First marketing flight number on the slice, '' when absent."""
-    itn = it.itinerary
-    if not itn or not itn.slices or slice_index >= len(itn.slices):
+    s = _cash_slice(it, slice_index)
+    if s is None:
         return ""
-    flights = itn.slices[slice_index].flights or []
+    flights = s.flights or []
     return _norm_fn(flights[0]) if flights else ""
 
 
@@ -336,14 +342,6 @@ def cash_matched_id_key(it: Itinerary, slice_index: int = 0) -> str | None:
         return None
     fid = itn.slices[slice_index].flight_id
     return fid or None
-
-
-def _cash_slice(it: Itinerary, slice_index: int) -> Slice | None:
-    """Bounds-checked slice access — the guard every cash_* key repeats."""
-    itn = it.itinerary
-    if not itn or not itn.slices or slice_index >= len(itn.slices):
-        return None
-    return itn.slices[slice_index]
 
 
 def join(
