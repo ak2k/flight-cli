@@ -84,6 +84,16 @@ def _cabin_label(slug: str) -> str:
     return _CABIN_LABELS.get(slug.lower(), slug.title())
 
 
+def _segment_flight_numbers(flight_numbers: str) -> list[str]:
+    """`"AA4671, BA216"` -> `["AA4671", "BA216"]` — every segment, in order.
+
+    The matcher needs the whole list to tell apart journeys that share a first
+    segment: seats.aero returns both "AA1444, BA216" and "AA1444, AA100" on one
+    JFK->LHR date, and keying on segment 0 alone collapses them.
+    """
+    return [n.strip().upper().replace(" ", "") for n in flight_numbers.split(",") if n.strip()]
+
+
 def _local_naive(ts: str) -> str:
     """Strip seats.aero's spurious 'Z' suffix.
 
@@ -144,6 +154,7 @@ def _group_trips_to_awards(
                 departure=_local_naive(t.DepartsAt),
                 arrival=_local_naive(t.ArrivesAt),
                 flight_number=_first_flight_number(t.FlightNumbers),
+                segment_flight_numbers=_segment_flight_numbers(t.FlightNumbers),
                 num_connections=t.Stops,
                 provider="Seats.aero",
                 program=_program_label(t.Source),

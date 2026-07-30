@@ -75,6 +75,7 @@ def _award(
     matched_id: str = "",
     num_connections: int = 0,
     arrival: str | None = None,
+    segment_flight_numbers: list[str] | None = None,
 ) -> AwardFlight:
     return AwardFlight(
         origin=origin,
@@ -89,6 +90,7 @@ def _award(
         funding_banks=funding_banks or ["Chase", "Bilt"],
         cabins=[CabinAward(cabin=cabin, miles=miles, tax_usd=tax, tax_currency="USD")],
         matched_google_flight_id=matched_id,
+        segment_flight_numbers=segment_flight_numbers or [],
     )
 
 
@@ -1276,3 +1278,210 @@ def test_matched_id_path_still_bridges_a_real_codeshare():
     ]
     matches = join(res, awards)
     assert len(matches[0].awards) == 1
+
+
+# ─────────── codex adversarial pass: buckets on the other two keys ───────────
+
+
+def test_matched_id_bucket_is_resolved_not_just_filtered_on_return_leg():
+    """Codex P0. Several awards can share one matchedGoogleFlightId. Filtering
+    that bucket with `same_metal` alone still admits a partner beside the true
+    same-carrier award, and the renderer's lowest-miles pick then shows the
+    partner's 7.5k Alaska price on an American row. Return leg, because
+    slice_index=1 had almost no coverage."""
+    it = Itinerary(
+        displayTotal="USD500.00",
+        itinerary=ItineraryDetails(
+            slices=[
+                Slice(
+                    flights=["AA100"],
+                    departure="2026-08-15T18:00:00",
+                    origin=SliceEndpoint(code="JFK"),
+                    destination=SliceEndpoint(code="LAX"),
+                ),
+                Slice(
+                    flights=["AA117"],
+                    departure="2026-08-20T10:00:00",
+                    origin=SliceEndpoint(code="LAX"),
+                    destination=SliceEndpoint(code="JFK"),
+                    flight_id="RET1",
+                ),
+            ],
+            carriers=[],
+        ),
+    )
+    awards = [
+        _award(
+            "AA117",
+            "2026-08-20T10:00:00",
+            program="American",
+            miles=25000,
+            origin="LAX",
+            dest="JFK",
+            matched_id="RET1",
+        ),
+        _award(
+            "AS19",
+            "2026-08-20T10:00:00",
+            program="Alaska",
+            miles=7500,
+            origin="LAX",
+            dest="JFK",
+            matched_id="RET1",
+        ),
+    ]
+    matches = join(SearchResult(solutions=[it]), awards, slice_index=1)
+    assert [a.program for a in matches[0].awards] == ["American"]
+
+
+def test_segment_disagreement_separates_journeys_sharing_first_flight():
+    """Codex P0. seats.aero returns both "AA1444, BA216" and "AA1444, AA100"
+    on one JFK->LHR date. Every key here identifies a journey by segment 0, so
+    without the full segment list they collapse and the cheaper journey's fare
+    prints on the other's row."""
+    res = SearchResult(
+        solutions=[
+            _itin_multi(
+                ["AA1444", "BA216"],
+                "2026-08-15T18:00:00",
+                "JFK",
+                "LHR",
+                ["BOS"],
+                arrival="2026-08-16T06:55:00",
+            ),
+        ]
+    )
+    awards = [
+        _award(
+            "AA1444",
+            "2026-08-15T18:00:00",
+            program="American Airlines",
+            miles=60000,
+            origin="JFK",
+            dest="LHR",
+            arrival="2026-08-16T06:55:00",
+            num_connections=1,
+            segment_flight_numbers=["AA1444", "BA216"],
+        ),
+        _award(
+            "AA1444",
+            "2026-08-15T18:00:00",
+            program="American Airlines",
+            miles=12000,
+            origin="JFK",
+            dest="LHR",
+            arrival="2026-08-16T06:55:00",
+            num_connections=1,
+            segment_flight_numbers=["AA1444", "AA100"],
+        ),
+    ]
+    matches = join(res, awards)
+    assert [a.cabins[0].miles for a in matches[0].awards] == [60000]
+
+
+def test_segment_check_admits_providers_that_omit_segments():
+    """PointsPath sends only the first flight number. An empty segment list is
+    absence of evidence, so it must not be read as disagreement."""
+    res = SearchResult(
+        solutions=[
+            _itin_multi(
+                ["AA1444", "BA216"],
+                "2026-08-15T18:00:00",
+                "JFK",
+                "LHR",
+                ["BOS"],
+                arrival="2026-08-16T06:55:00",
+            ),
+        ]
+    )
+    awards = [
+        _award(
+            "AA1444",
+            "2026-08-15T18:00:00",
+            program="American",
+            miles=60000,
+            origin="JFK",
+            dest="LHR",
+            arrival="2026-08-16T06:55:00",
+            num_connections=1,
+        ),
+    ]
+    matches = join(res, awards)
+    assert len(matches[0].awards) == 1
+
+
+def test_exact_arrival_match_beats_cheaper_sibling_with_no_arrival():
+    """Codex P0. A no-arrival sibling used to sit beside the award that
+    positively confirmed the cash flight, and its lower price won the cell —
+    silently preferring the unverified candidate over the verified one."""
+    res = SearchResult(
+        solutions=[
+            _itin_multi(
+                ["AA1444", "BA216"],
+                "2026-08-15T18:00:00",
+                "JFK",
+                "LHR",
+                ["BOS"],
+                arrival="2026-08-16T06:55:00",
+            ),
+        ]
+    )
+    awards = [
+        _award(
+            "AA1444",
+            "2026-08-15T18:00:00",
+            program="American Airlines",
+            miles=60000,
+            origin="JFK",
+            dest="LHR",
+            arrival="2026-08-16T06:55:00",
+            num_connections=1,
+        ),
+        _award(
+            "AA1444",
+            "2026-08-15T18:00:00",
+            program="American Airlines",
+            miles=10000,
+            origin="JFK",
+            dest="LHR",
+            arrival="",
+            num_connections=1,
+        ),
+    ]
+    matches = join(res, awards)
+    assert [a.cabins[0].miles for a in matches[0].awards] == [60000]
+
+
+def test_arrival_never_picks_between_carriers():
+    """The inverse trap. Arrival separates two rotations of the SAME carrier;
+    it must not choose between carriers, or a partner that merely omits its
+    arrival loses to an unrelated carrier that happens to publish a matching
+    one. Cash AA6939 + BA174 (no arrival) + AS99 (matching arrival) is
+    unresolvable, not an Alaska match."""
+    res = SearchResult(
+        solutions=[
+            _itin(("AA6939", "2026-08-15T18:40:00", "JFK", "LHR", "2026-08-16T06:30:00")),
+        ]
+    )
+    awards = [
+        _award(
+            "BA174",
+            "2026-08-15T18:40:00",
+            program="American",
+            miles=60000,
+            origin="JFK",
+            dest="LHR",
+            arrival="",
+        ),
+        _award(
+            "AS99",
+            "2026-08-15T18:40:00",
+            program="Alaska",
+            miles=7500,
+            origin="JFK",
+            dest="LHR",
+            arrival="2026-08-16T06:30:00",
+        ),
+    ]
+    matches = join(res, awards)
+    assert matches[0].awards == []

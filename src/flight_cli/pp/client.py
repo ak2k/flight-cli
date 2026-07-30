@@ -367,16 +367,20 @@ def _load_unsupported_raw() -> dict[str, float]:
     """`{airline: epoch_seconds_learned}`, unfiltered. {} on any read problem.
 
     Tolerates the legacy flat-list format written by the first version of this
-    cache by treating those entries as learned now — one extra TTL period of
-    staleness on upgrade, versus re-querying every unsupported airline again.
+    cache, dating those entries from the FILE's mtime — the only real timestamp
+    they have. Stamping them `now` instead would restamp on every read, so a
+    legacy file could never age out and the entries would be immortal.
     """
     try:
         raw: Any = json.loads(UNSUPPORTED_CACHE.read_text())
     except (OSError, ValueError):
         return {}
     if isinstance(raw, list):  # legacy: ["ANA", "Finnair", ...]
-        now = time.time()
-        return {x: now for x in cast("list[Any]", raw) if isinstance(x, str)}
+        try:
+            learned_at = UNSUPPORTED_CACHE.stat().st_mtime
+        except OSError:
+            return {}
+        return {x: learned_at for x in cast("list[Any]", raw) if isinstance(x, str)}
     if not isinstance(raw, dict):
         return {}
     out: dict[str, float] = {}

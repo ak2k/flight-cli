@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import time
 from typing import Any
@@ -137,12 +138,25 @@ def test_unsupported_entries_expire_independently(tmp_path: pathlib.Path, monkey
 def test_unsupported_cache_reads_legacy_list_format(
     tmp_path: pathlib.Path, monkeypatch: Any
 ) -> None:
-    """The first version wrote a flat list. Upgrading must not re-query every
-    unsupported airline; the entries are treated as learned now."""
+    """The first version wrote a flat list. A freshly-written one is honoured,
+    so upgrading doesn't re-query every unsupported airline."""
     cache = tmp_path / "unsupported.json"
     cache.write_text(json.dumps(["ANA", "Southwest"]))
     monkeypatch.setattr("flight_cli.pp.client.UNSUPPORTED_CACHE", cache)
     assert load_unsupported_airlines() == frozenset({"ANA", "Southwest"})
+
+
+def test_legacy_list_entries_expire_by_file_mtime(tmp_path: pathlib.Path, monkeypatch: Any) -> None:
+    """Legacy entries carry no timestamp, so they are dated from the file's
+    mtime. Stamping them `now` on each read made them immortal: every read
+    refreshed them, so a legacy file could never age out."""
+    cache = tmp_path / "unsupported.json"
+    cache.write_text(json.dumps(["ANA"]))
+    monkeypatch.setattr("flight_cli.pp.client.UNSUPPORTED_CACHE", cache)
+    monkeypatch.setattr("flight_cli.pp.client.UNSUPPORTED_TTL_SECS", 100)
+    old = time.time() - 500
+    os.utime(cache, (old, old))
+    assert load_unsupported_airlines() == frozenset()
 
 
 def test_remember_preserves_existing_timestamps(tmp_path: pathlib.Path, monkeypatch: Any) -> None:
