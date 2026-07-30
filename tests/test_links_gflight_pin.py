@@ -233,7 +233,10 @@ def test_pin_source_follows_the_rendered_merged_order() -> None:
     """
     from types import SimpleNamespace
 
-    from flight_cli.cli import _pin_source_from_merged
+    # DIVERGE: reportPrivateUsage — pinning the row-ordering contract is
+    # exactly the case for reaching into a module-internal helper; exporting
+    # it publicly to satisfy the rule would widen the API for a test.
+    from flight_cli.cli import _pin_source_from_merged  # pyright: ignore[reportPrivateUsage]
     from flight_cli.models import (
         Itinerary,
         ItineraryDetails,
@@ -269,7 +272,8 @@ def test_pin_source_follows_the_rendered_merged_order() -> None:
 
     pin = _pin_source_from_merged(merged, 10, src)
 
-    assert [s.itinerary.slices[0].flights[0] for s in pin.solutions] == ["DL300", "AA500"]
+    flights = [s.itinerary.slices[0].flights[0] for s in pin.solutions if s.itinerary is not None]
+    assert flights == ["DL300", "AA500"]
     # Server-generated identifiers must survive, or the Matrix pinned URL
     # silently degrades to a plain deep link.
     assert pin.session == "S"
