@@ -176,25 +176,45 @@ def _slice_stop_count(s: Slice) -> int:
     return max(len(s.flights) - 1, 0)
 
 
-def _pick_metal(cash_fn: str, candidates: list[AwardFlight]) -> list[AwardFlight]:
-    """Resolve one route+time bucket to the awards that are plausibly the
-    cash flight's own metal.
+def _pick_metal(
+    cash_fn: str,
+    cash_arrival: str,
+    candidates: list[AwardFlight],
+) -> list[AwardFlight]:
+    """Resolve one route+time bucket to the awards that are the cash flight's
+    own metal.
 
-    A bucket keyed on (origin, destination, minute) can hold several genuinely
-    different aircraft — same-alliance carriers compete head-to-head on dense
-    routes, so AA118 and AS17 can both leave JFK for LAX at 10:45. Accepting
-    every partner in the bucket is what let a 7.5k Alaska price render on the
-    American row.
+    A bucket keyed on (origin, destination, departure minute) can hold several
+    genuinely different aircraft — same-alliance carriers compete head-to-head
+    on dense routes, so AA118 and AS17 can both leave JFK for LAX at 10:45.
+    Accepting every partner in the bucket is what let a 7.5k Alaska price
+    render on the American row.
 
-    Resolution:
-      1. If any candidate is the *same carrier* as the cash flight, that IS
-         the flight — keep only those and discard the partners beside it.
-      2. Otherwise the bucket is codeshare-shaped (the fallback's reason for
-         existing: marketing AA6939 ↔ operating BA174). Accept it only when
-         the surviving partners resolve to a single carrier; two different
-         partner carriers in one bucket means we cannot tell which is the
-         metal, so we take neither.
+    Resolution, in order:
+      1. **Arrival time.** Two aircraft sharing a departure minute on the same
+         route essentially never share an arrival minute too — both sides read
+         the same published schedule, so this is the real identity. Measured
+         on a live MSY→MIA/FLL payload: keying on route+departure alone left 3
+         multi-carrier buckets out of 41; adding arrival left 0 out of 91.
+         When the cash side supplies an arrival, it filters the bucket, and
+         that is normally enough to resolve it outright.
+      2. **Same carrier wins.** A same-carrier award at this route+minute IS
+         the flight; partners beside it are different metal.
+      3. **Single partner.** Otherwise the bucket is codeshare-shaped (the
+         fallback's reason for existing: marketing AA6939 ↔ operating BA174).
+         Accept only when the survivors resolve to ONE carrier — two distinct
+         partner carriers means we cannot tell which is the metal.
+
+    Steps 2-3 still run after step 1 because arrival is not guaranteed:
+    `Slice.arrival` is optional and award providers may omit it, so the
+    carrier logic remains the backstop when the times are missing.
     """
+    if cash_arrival:
+        timed = [af for af in candidates if _iso_minute(af.arrival) == cash_arrival]
+        # Only trust the filter when it actually resolved something; an award
+        # side that omits arrival would otherwise wipe the bucket.
+        if timed:
+            candidates = timed
     exact = [af for af in candidates if same_carrier(cash_fn, af.flight_number)]
     if exact:
         return exact
@@ -393,7 +413,8 @@ def join(
         rt_k = cash_route_time_key(it, slice_index=slice_index)
         if rt_k:
             cash_fn = cash_first_flight_number(it, slice_index=slice_index)
-            candidates.extend(_pick_metal(cash_fn, list(rt_idx.get(rt_k, ()))))
+            cash_arr = _iso_minute(s.arrival) if s else ""
+            candidates.extend(_pick_metal(cash_fn, cash_arr, list(rt_idx.get(rt_k, ()))))
 
         matched: list[AwardFlight] = []
         seen_ids: set[int] = set()

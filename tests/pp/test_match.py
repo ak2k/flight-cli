@@ -24,17 +24,19 @@ from flight_cli.pp.match import (
 from flight_cli.providers.base import AwardFlight, CabinAward
 
 
-def _itin(*slices_data: tuple[str, str, str, str]) -> Itinerary:
+def _itin(*slices_data: tuple[str, ...]) -> Itinerary:
     """Build an Itinerary with the given slices. Each tuple is
-    (flight_number, departure_iso, origin_iata, destination_iata)."""
+    (flight_number, departure_iso, origin_iata, destination_iata) with an
+    optional 5th element for arrival_iso."""
     slcs = [
         Slice(
-            flights=[fn],
-            departure=dep,
-            origin=SliceEndpoint(code=o),
-            destination=SliceEndpoint(code=d),
+            flights=[t[0]],
+            departure=t[1],
+            origin=SliceEndpoint(code=t[2]),
+            destination=SliceEndpoint(code=t[3]),
+            arrival=(t[4] if len(t) > 4 else None),
         )
-        for fn, dep, o, d in slices_data
+        for t in slices_data
     ]
     return Itinerary(
         displayTotal="USD500.00",
@@ -72,12 +74,13 @@ def _award(
     miles_to_cash_ratio: float = 0.0125,
     matched_id: str = "",
     num_connections: int = 0,
+    arrival: str | None = None,
 ) -> AwardFlight:
     return AwardFlight(
         origin=origin,
         destination=dest,
         departure=dep,
-        arrival=dep,
+        arrival=arrival if arrival is not None else dep,
         flight_number=fn,
         num_connections=num_connections,
         provider="PointsPath",
@@ -246,26 +249,50 @@ def test_join_route_time_fallback_requires_minute_precision():
     assert matches[0].awards == []
 
 
-def test_join_exact_carrier_award_suppresses_partner_in_same_bucket():
-    """Characterization of a deliberate fail-closed choice.
+def test_join_arrival_time_resolves_codeshare_and_partner_in_one_bucket():
+    """Arrival time is the real identity, so the codeshare bucket resolves
+    rather than failing closed.
 
-    Cash AA6939 with two awards in the same route+time bucket: BA174 (the
-    operating carrier of the codeshare) and AA6939 (the marketing number).
-    The old behavior attached both, on the premise that they describe one
-    aircraft.
-
-    We can no longer assume that. This bucket is structurally IDENTICAL to
-    the collision case — cash AA118 with awards AA118 (American) and AS17
-    (Alaska) — where the two awards are different aircraft that merely share
-    a departure minute. From (route, time, flight number) alone the two are
-    indistinguishable, so resolving them differently is not possible here.
-
-    We keep the exact-carrier award and drop the partner. The cost is a
-    hidden second booking option for one physical seat; the alternative cost
-    is rendering another aircraft's price on this row. Only `operating_carrier`
-    ground truth (models.py:105, gflight backend only) can tell these apart —
-    when the join learns to read it, this test should flip back.
+    Cash AA6939 arrives 06:30. The BA174 award is the same physical aircraft
+    (same arrival) and attaches; an AS99 award sharing only the departure
+    minute is a different aircraft (different arrival) and does not. Keying
+    on route+departure alone could not tell these apart — on a live MSY
+    payload that key left 3 multi-carrier buckets of 41, and adding arrival
+    left 0 of 91.
     """
+    res = SearchResult(
+        solutions=[
+            _itin(("AA6939", "2026-08-15T18:40:00", "JFK", "LHR", "2026-08-16T06:30:00")),
+        ]
+    )
+    awards = [
+        _award(
+            "BA174",
+            "2026-08-15T18:40:00",
+            program="American",
+            origin="JFK",
+            dest="LHR",
+            arrival="2026-08-16T06:30:00",
+        ),
+        _award(
+            "AS99",
+            "2026-08-15T18:40:00",
+            program="Alaska",
+            miles=7500,
+            origin="JFK",
+            dest="LHR",
+            arrival="2026-08-16T07:55:00",
+        ),
+    ]
+    matches = join(res, awards)
+    assert [a.flight_number for a in matches[0].awards] == ["BA174"]
+
+
+def test_join_falls_back_to_carrier_logic_when_arrival_missing():
+    """Arrival is optional on both sides (`Slice.arrival` is nullable and a
+    provider may omit it), so the carrier resolution stays the backstop. With
+    no arrival anywhere, cash AA6939 + a BA174 and an AA6939 award is
+    unresolvable by time, and same-carrier-wins keeps only AA6939."""
     res = SearchResult(
         solutions=[
             _itin(("AA6939", "2026-08-15T18:40:00", "JFK", "LHR")),
@@ -276,8 +303,25 @@ def test_join_exact_carrier_award_suppresses_partner_in_same_bucket():
         _award("AA6939", "2026-08-15T18:40:00", program="VirginAtlantic", origin="JFK", dest="LHR"),
     ]
     matches = join(res, awards)
-    programs = {ao.program for ao in matches[0].awards}
-    assert programs == {"VirginAtlantic"}
+    assert {a.program for a in matches[0].awards} == {"VirginAtlantic"}
+
+
+def test_join_arrival_filter_does_not_wipe_bucket_when_awards_omit_arrival():
+    """A cash arrival paired with awards that carry none must not zero the
+    bucket — the filter only applies when it actually matched something."""
+    res = SearchResult(
+        solutions=[
+            _itin(("AA6939", "2026-08-15T18:40:00", "JFK", "LHR", "2026-08-16T06:30:00")),
+        ]
+    )
+    awards = [
+        _award(
+            "BA174", "2026-08-15T18:40:00", program="American", origin="JFK", dest="LHR", arrival=""
+        ),
+    ]
+    matches = join(res, awards)
+    assert len(matches[0].awards) == 1
+    assert matches[0].awards[0].flight_number == "BA174"
 
 
 # ────────────────────────────── join semantics ─────────────────────────────
