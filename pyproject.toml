@@ -26,6 +26,7 @@ dependencies = [
     "flights>=0.9",         # fli — drives Google Flights for booking handoff
     "fast-flights>=2.2",    # tfs= URL encoder (Google Flights deep-link)
     "rookiepy>=0.5",        # reads Chrome cookies for `auth pp login --from-chrome`
+    "diskcache>=5.6",       # HTTP response cache: per-entry TTL, LRU, SQLite/WAL
 ]
 
 [project.optional-dependencies]
