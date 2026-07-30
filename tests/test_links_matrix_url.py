@@ -1,3 +1,7 @@
+# pyright: reportPrivateUsage=false
+# DIVERGE: these pin wire-format contracts of the SPA slice builder, which is
+# module-internal by design. Exporting it to satisfy the rule would widen the
+# API for a test.
 """Regression tests for `matrix_deep_link()` — the SPA URL-state encoder.
 
 Round-trip ground truth was captured 2026-05-19 by driving Matrix's SPA via
@@ -228,3 +232,50 @@ def test_same_day_nonstop_unchanged() -> None:
     )
     assert segs is not None
     assert [x["date"] for x in segs] == ["2026-09-09"]
+
+
+# ───────── a 2-leg search is only a round trip if it actually returns ─────────
+
+
+def test_open_jaw_is_multi_city_not_a_collapsed_round_trip() -> None:
+    """Round-trip's SPA encoding folds both legs into ONE slice with two dates,
+    which cannot express a second route. Treating any 2-leg search as a round
+    trip therefore DELETED the second leg: SFO->JFK plus LAX->HNL encoded as
+    SFO->JFK with a return date, and LAX/HNL vanished entirely."""
+    from flight_cli.domain import Leg
+    from flight_cli.links import _spa_specific_slices  # pyright: ignore[reportPrivateUsage]
+
+    legs = (
+        Leg(origins=("SFO",), destinations=("JFK",), date=date(2026, 9, 1)),
+        Leg(origins=("LAX",), destinations=("HNL",), date=date(2026, 9, 5)),
+    )
+    trip, slices = _spa_specific_slices(legs)
+    assert trip == "multi-city"
+    assert [(s["origin"][0], s["dest"][0]) for s in slices] == [("SFO", "JFK"), ("LAX", "HNL")]
+
+
+def test_true_round_trip_still_folds_into_one_slice() -> None:
+    from flight_cli.domain import Leg
+    from flight_cli.links import _spa_specific_slices  # pyright: ignore[reportPrivateUsage]
+
+    legs = (
+        Leg(origins=("SFO",), destinations=("JFK",), date=date(2026, 9, 1)),
+        Leg(origins=("JFK",), destinations=("SFO",), date=date(2026, 9, 5)),
+    )
+    trip, slices = _spa_specific_slices(legs)
+    assert trip == "round-trip"
+    assert len(slices) == 1
+    assert slices[0]["dates"]["returnDate"] == "2026-09-05"
+
+
+def test_half_open_jaw_is_multi_city() -> None:
+    """Returns from where it landed but not to where it started."""
+    from flight_cli.domain import Leg
+    from flight_cli.links import _spa_specific_slices  # pyright: ignore[reportPrivateUsage]
+
+    legs = (
+        Leg(origins=("SFO",), destinations=("JFK",), date=date(2026, 9, 1)),
+        Leg(origins=("JFK",), destinations=("LAX",), date=date(2026, 9, 5)),
+    )
+    trip, _ = _spa_specific_slices(legs)
+    assert trip == "multi-city"

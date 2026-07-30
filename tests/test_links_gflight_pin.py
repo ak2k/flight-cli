@@ -1,3 +1,7 @@
+# pyright: reportPrivateUsage=false
+# DIVERGE: these pin wire-format contracts of the pinned-tfs encoder, which is
+# module-internal by design. Exporting it to satisfy the rule would widen the
+# API for a test.
 """Byte-exact regression test for the Google Flights pinned-itinerary
 `tfs=` protobuf encoder.
 
@@ -15,6 +19,7 @@ this test fails immediately and tells us to re-RE."""
 from __future__ import annotations
 
 import pathlib
+from typing import Any
 
 from flight_cli.links import (
     _encode_gflight_pinned_tfs,  # pyright: ignore[reportPrivateUsage]  # test-only: lock byte-exact regression
@@ -278,3 +283,96 @@ def test_pin_source_follows_the_rendered_merged_order() -> None:
     # silently degrades to a plain deep link.
     assert pin.session == "S"
     assert pin.solution_set == "SS"
+
+
+# ───────── multi-city and passenger types survive into the pinned link ─────────
+
+
+def _pin_slice(origin: str, dest: str, date: str) -> dict[str, Any]:
+    return {
+        "date": date,
+        "origin": origin,
+        "destination": dest,
+        "segments": [
+            {
+                "origin": origin,
+                "date": date,
+                "destination": dest,
+                "carrier": "AA",
+                "flight": "100",
+            },
+        ],
+    }
+
+
+def _field8_values(buf: bytes) -> list[int]:
+    """Every top-level field-8 varint (tag byte 0x40) — the per-occupant types."""
+    out: list[int] = []
+    i = 0
+    while i < len(buf):
+        if buf[i] == 0x40:
+            out.append(buf[i + 1])
+            i += 2
+        else:
+            i += 1
+    return out
+
+
+def test_passenger_types_are_not_all_encoded_as_adults() -> None:
+    """Field 8 carries each occupant's TYPE (Google's Passenger enum, read from
+    fast_flights' generated protobuf: ADULT=1, CHILD=2, INFANT_IN_SEAT=3,
+    INFANT_ON_LAP=4). Emitting a bare 1 for everyone made a pinned link for
+    1 adult + 1 child search and price as 2 adults — a different, costlier
+    itinerary than the row the user picked."""
+    from flight_cli.links import _encode_gflight_pinned_tfs  # pyright: ignore[reportPrivateUsage]
+
+    buf = _encode_gflight_pinned_tfs(
+        slices=[_pin_slice("SFO", "JFK", "2026-09-01")],
+        cabin=1,
+        adults=1,
+        children=1,
+        infants_in_seat=1,
+        infants_on_lap=1,
+    )
+    assert _field8_values(buf) == [1, 2, 3, 4]
+
+
+def test_two_adults_still_encode_as_two_adults() -> None:
+    from flight_cli.links import _encode_gflight_pinned_tfs  # pyright: ignore[reportPrivateUsage]
+
+    buf = _encode_gflight_pinned_tfs(
+        slices=[_pin_slice("SFO", "JFK", "2026-09-01")],
+        cabin=1,
+        adults=2,
+        children=0,
+        infants_in_seat=0,
+        infants_on_lap=0,
+    )
+    assert _field8_values(buf) == [1, 1]
+
+
+def test_three_leg_itinerary_is_multi_city_not_round_trip() -> None:
+    """`>= 2 slices` meant round-trip, so Google read only the first two and
+    leg 3 vanished from a link still described as "pinned"."""
+    from flight_cli.links import (  # pyright: ignore[reportPrivateUsage]
+        _GF_TRIP_MULTI_CITY,
+        _GF_TRIP_ONE_WAY,
+        _GF_TRIP_ROUND_TRIP,
+        _encode_gflight_pinned_tfs,
+    )
+
+    def trip_type(n_slices: int) -> int:
+        route = [("SFO", "JFK"), ("JFK", "LHR"), ("LHR", "SFO")][:n_slices]
+        buf = _encode_gflight_pinned_tfs(
+            slices=[_pin_slice(o, d, "2026-09-01") for o, d in route],
+            cabin=1,
+            adults=1,
+            children=0,
+            infants_in_seat=0,
+            infants_on_lap=0,
+        )
+        return buf[-1]  # field 19 is the last varint written
+
+    assert trip_type(1) == _GF_TRIP_ONE_WAY
+    assert trip_type(2) == _GF_TRIP_ROUND_TRIP
+    assert trip_type(3) == _GF_TRIP_MULTI_CITY
