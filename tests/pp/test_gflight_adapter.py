@@ -278,3 +278,35 @@ def test_cash_hints_skip_slices_without_flight_id() -> None:
     )
     hints = cash_hints_from_search_result(sr)
     assert hints == []
+
+
+# ───────── a price-less row must not take down the whole search ─────────
+
+
+def test_price_string_tolerates_unsurfaced_price() -> None:
+    """fli types `FlightResult.price` as `NonNegativeFloat | None` — "None when
+    not surfaced", which Google does on some premium round-trip rows."""
+    from flight_cli.pp.gflight_adapter import _price_string
+
+    assert _price_string(_result(None, currency="USD")) == ""  # pyright: ignore[reportArgumentType]
+    assert _price_string(_result(877.0)) == "USD877.00"
+
+
+def test_one_priceless_row_does_not_discard_the_whole_response() -> None:
+    """The crash was `TypeError: unsupported format string passed to
+    NoneType.__format__`, raised while building the SearchResult — so ONE
+    price-less row destroyed every other itinerary in the response, not just
+    its own."""
+    dep = datetime(2026, 8, 15, 18, 0)
+    arr = datetime(2026, 8, 16, 6, 0)
+    priceless = _result(None, _leg("100", "JFK", "LHR", dep, arr))  # pyright: ignore[reportArgumentType]
+    priced = _result(877.0, _leg("200", "JFK", "LHR", dep, arr))
+
+    sr = fli_results_to_search_result([priceless, priced])  # pyright: ignore[reportArgumentType]
+
+    assert sr.solution_count == 2
+    prices = [(s.ext.price if s.ext else None) for s in sr.solutions]
+    assert prices == ["", "USD877.00"]
+    # The cheapest-price notice ignores the unpriced row rather than crashing.
+    assert sr.currency_notice.ext is not None
+    assert sr.currency_notice.ext.price == "USD877.00"

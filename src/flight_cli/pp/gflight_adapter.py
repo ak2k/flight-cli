@@ -97,7 +97,19 @@ def _slice_from_flight_result(
 
 
 def _price_string(fr: Any) -> str:
-    """Match Matrix's price format ('USD877.00') so match._parse_cash works."""
+    """Match Matrix's price format ('USD877.00') so match._parse_cash works.
+
+    fli types `FlightResult.price` as `NonNegativeFloat | None` — "None when
+    not surfaced", which Google does for some premium round-trip rows that
+    carry an empty price head. Formatting that unconditionally raised
+    `TypeError: unsupported format string passed to NoneType.__format__` and
+    took down the whole search, discarding every other itinerary in the
+    response. Returning '' instead keeps the row: the itinerary, its flights
+    and its award overlay are all still useful with the cash price shown as
+    unavailable.
+    """
+    if fr.price is None:
+        return ""
     currency = fr.currency or "USD"
     return f"{currency}{fr.price:.2f}"
 
@@ -142,8 +154,8 @@ def fli_results_to_search_result(results: Sequence[Any]) -> SearchResult:
                 itinerary=ItineraryDetails(slices=slices, carriers=[]),
             ),
         )
-        p: float = first_fr.price
-        if cheapest_price is None or p < cheapest_price:
+        p: float | None = first_fr.price
+        if p is not None and (cheapest_price is None or p < cheapest_price):
             cheapest_price = p
             cheapest_currency = first_fr.currency or "USD"
 
