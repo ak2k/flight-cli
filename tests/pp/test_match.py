@@ -1485,3 +1485,128 @@ def test_arrival_never_picks_between_carriers():
     ]
     matches = join(res, awards)
     assert matches[0].awards == []
+
+
+# ───────── codex correctness pass: single resolution over the union ─────────
+
+
+def test_one_bucket_cannot_readmit_what_another_rejected():
+    """Codex P0, and the architectural one.
+
+    Resolving each key's bucket separately and unioning the winners lets a
+    bucket that sees only part of the field decide on partial information.
+    Cash AA6939 with a BA174 award (found by route+time) and an AS99 award
+    (found by matched-ID): route+time sees two different partner carriers and
+    correctly abstains, but the matched-ID bucket sees AS99 alone, calls it an
+    unambiguous single partner, and admits it — rendering 7.5k Alaska on an
+    American row. Keys are discovery; resolution is one judgment over
+    everything they found.
+    """
+    it = _itin_with_id("AA6939", "2026-08-15T18:40:00", "JFK", "LHR", flight_id="F1")
+    awards = [
+        _award(
+            "BA174",
+            "2026-08-15T18:40:00",
+            program="American",
+            miles=60000,
+            origin="JFK",
+            dest="LHR",
+        ),
+        _award(
+            "AS99",
+            "2026-08-15T18:40:00",
+            program="Alaska",
+            miles=7500,
+            origin="JFK",
+            dest="LHR",
+            matched_id="F1",
+        ),
+    ]
+    matches = join(SearchResult(solutions=[it]), awards)
+    assert matches[0].awards == []
+
+
+def test_same_carrier_different_number_needs_arrival_proof():
+    """Codex P0. An airline does not sell one departure under two of its own
+    numbers, so AA999 is not cash AA867 — only a genuine codeshare (different
+    carrier) explains a number mismatch. Without a matching arrival it must
+    fail closed, not ride in on the missing-arrival allowance."""
+    res = SearchResult(
+        solutions=[
+            _itin(("AA867", "2026-09-09T06:00:00", "MSY", "MIA", "2026-09-09T09:04:00")),
+        ]
+    )
+    awards = [
+        _award(
+            "AA999",
+            "2026-09-09T06:00:00",
+            program="American",
+            miles=9000,
+            origin="MSY",
+            dest="MIA",
+            arrival="",
+        ),
+    ]
+    matches = join(res, awards)
+    assert matches[0].awards == []
+
+
+def test_same_carrier_different_number_accepted_with_matching_arrival():
+    """The other side: a renumbered award for the same departure is accepted
+    once its arrival positively confirms the flight."""
+    res = SearchResult(
+        solutions=[
+            _itin(("AA867", "2026-09-09T06:00:00", "MSY", "MIA", "2026-09-09T09:04:00")),
+        ]
+    )
+    awards = [
+        _award(
+            "AA999",
+            "2026-09-09T06:00:00",
+            program="American",
+            miles=9000,
+            origin="MSY",
+            dest="MIA",
+            arrival="2026-09-09T09:04:00",
+        ),
+    ]
+    matches = join(res, awards)
+    assert [a.flight_number for a in matches[0].awards] == ["AA999"]
+
+
+def test_wrong_stop_count_candidate_cannot_suppress_a_valid_codeshare():
+    """Codex P2. Connection count is an objective property, so mismatches are
+    dropped BEFORE resolution. Filtering them afterwards let an ineligible
+    candidate make the field look ambiguous and suppress a codeshare that
+    would have won on its own."""
+    res = SearchResult(
+        solutions=[
+            _itin(("AA6939", "2026-08-15T18:40:00", "JFK", "LHR", "2026-08-16T06:30:00")),
+        ]
+    )
+    awards = [
+        # Valid nonstop codeshare — should win.
+        _award(
+            "BA174",
+            "2026-08-15T18:40:00",
+            program="American",
+            miles=60000,
+            origin="JFK",
+            dest="LHR",
+            arrival="2026-08-16T06:30:00",
+        ),
+        # Ineligible: 1 stop against a nonstop cash slice. A second carrier,
+        # so pre-filtering is what stops it looking like carrier ambiguity.
+        _award(
+            "AS99",
+            "2026-08-15T18:40:00",
+            program="Alaska",
+            miles=7500,
+            origin="JFK",
+            dest="LHR",
+            arrival="2026-08-16T06:30:00",
+            num_connections=1,
+        ),
+    ]
+    matches = join(res, awards)
+    assert [a.flight_number for a in matches[0].awards] == ["BA174"]

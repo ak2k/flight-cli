@@ -33,6 +33,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from ..models import Itinerary, SearchResult, Slice
     from ..providers.base import AwardFlight
 
@@ -207,10 +209,27 @@ def _pick_metal(
     carrier rule ever sees it. That renders another aircraft's price on the
     row, which is the exact defect this function exists to prevent.
     """
-    exact = [af for af in candidates if same_carrier(cash_fn, af.flight_number)]
+    # Stage 1 requires the FULL flight number, not just the carrier prefix.
+    # `same_carrier` only compares the IATA prefix, so treating that as "this
+    # IS the flight" let AA999 claim exact-match priority over cash AA867 and
+    # skip straight to `_narrow`, which admits a missing arrival when nothing
+    # matched exactly. A different number on the same carrier is a different
+    # flight; it belongs in the partner stage where ambiguity is judged.
+    exact = [af for af in candidates if _norm_fn(af.flight_number) == _norm_fn(cash_fn)]
     if exact:
         return _narrow(exact, cash_arrival)
     partners = [af for af in candidates if same_metal(cash_fn, af.flight_number)]
+    # A DIFFERENT number on the SAME carrier is simply a different flight —
+    # an airline does not sell one departure under two of its own numbers.
+    # Only a genuine codeshare (different carrier) explains a number mismatch,
+    # so a same-carrier candidate that reached this stage must prove itself
+    # with a matching arrival; absence of evidence is not enough for it.
+    partners = [
+        af
+        for af in partners
+        if not same_carrier(cash_fn, af.flight_number)
+        or (cash_arrival and _iso_minute(af.arrival) == cash_arrival)
+    ]
     # Arrival is used in two distinct ways here, and conflating them is a bug.
     # Eliminating a candidate whose arrival CONTRADICTS the cash flight is
     # sound — that is positive evidence of different metal. Letting arrival
@@ -475,47 +494,52 @@ def join(
         cash_arr = _iso_minute(s.arrival) if s else ""
         cash_flights = list(s.flights or []) if s else []
 
-        def resolve(
-            bucket: list[AwardFlight],
-            _fn: str = cash_fn,
-            _arr: str = cash_arr,
-            _fl: list[str] = cash_flights,
-        ) -> list[AwardFlight]:
-            return _pick_metal(_fn, _arr, _by_segments(bucket, _fl))
-
-        candidates: list[AwardFlight] = []
+        # Gather the raw candidates from every applicable key FIRST, then run
+        # one resolution pass over the union.
+        #
+        # Resolving each bucket separately and unioning the winners is wrong:
+        # the resolver's job is to decide among competing claims, so a bucket
+        # that only sees part of the field decides on partial information. A
+        # concrete failure — cash AA6939 with a BA174 award (route+time) and an
+        # AS99 award (matched-ID): route+time sees two different partner
+        # carriers, correctly calls it ambiguous and yields nothing, but the
+        # matched-ID bucket sees AS99 alone, calls it an unambiguous single
+        # partner, and admits it. The union then renders 7.5k Alaska on an
+        # American row — precisely the rejection one bucket had just made.
+        #
+        # The keys are *discovery* mechanisms; resolution is a single judgment
+        # over everything they found.
+        # `mid`: PP mints this ID from a hint we supplied and its own matcher
+        # is documented as loose, so an echoed ID is a claim, not proof.
+        # `fn`: (flight#, date, route) keys on segment 0 only, so connecting
+        # journeys sharing a first flight collapse together.
+        # `rt`: route+departure-minute; two carriers can share both.
+        # None of the three is an identity on its own.
+        hits: list[Sequence[AwardFlight]] = []
         mid_k = cash_matched_id_key(it, slice_index=slice_index)
         if mid_k:
-            # PP mints this ID from a hint we supplied, and its own matcher is
-            # documented as deliberately loose, so an echoed ID is a claim and
-            # not proof — several awards can share one ID. Resolve the bucket
-            # exactly as the route+time bucket is resolved: filtering it with
-            # `same_metal` alone still admits a partner beside the true
-            # same-carrier award, and the renderer's lowest-miles pick then
-            # shows the partner's price.
-            candidates.extend(resolve(list(mid_idx.get(mid_k, ()))))
+            hits.append(mid_idx.get(mid_k, ()))
         fn_k = cash_match_key(it, slice_index=slice_index)
         if fn_k:
-            # (flight#, date, route) is NOT one journey. The key uses the first
-            # segment only, so every connecting itinerary that starts on this
-            # flight collapses together: the seats.aero fixture has three
-            # distinct AA1444 JFK→LHR journeys on one key, arriving 06:55,
-            # 09:05 and 12:50. Unresolved, the renderer's lowest-miles pick
-            # quotes the 12:50 journey's fare on the 06:55 row.
-            candidates.extend(resolve(list(fn_idx.get(fn_k, ()))))
+            hits.append(fn_idx.get(fn_k, ()))
         rt_k = cash_route_time_key(it, slice_index=slice_index)
         if rt_k:
-            candidates.extend(resolve(list(rt_idx.get(rt_k, ()))))
+            hits.append(rt_idx.get(rt_k, ()))
 
-        matched: list[AwardFlight] = []
-        seen_ids: set[int] = set()
-        for af in candidates:
-            if id(af) in seen_ids:
-                continue
-            if af.num_connections != cash_stops:
-                continue
-            seen_ids.add(id(af))
-            matched.append(af)
+        raw: list[AwardFlight] = []
+        seen_raw: set[int] = set()
+        for hit in hits:
+            for af in hit:
+                if id(af) not in seen_raw:
+                    seen_raw.add(id(af))
+                    raw.append(af)
 
+        # Connection count is an objective property of the journey, so drop
+        # mismatches BEFORE resolution — otherwise an ineligible candidate can
+        # make the field look ambiguous and suppress a valid codeshare that
+        # would have won on its own.
+        raw = [af for af in raw if af.num_connections == cash_stops]
+
+        matched = _pick_metal(cash_fn, cash_arr, _by_segments(raw, cash_flights))
         out.append(MatchedFare(itinerary=it, awards=matched))
     return out

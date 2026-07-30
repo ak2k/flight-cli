@@ -422,9 +422,14 @@ def remember_unsupported_airline(airline: str) -> None:
     exactly one redundant request next run.
     """
     current = _load_unsupported_raw()
-    if airline in current:
+    now = time.time()
+    # Re-stamp an EXPIRED entry. Returning early on mere presence meant a
+    # lapsed airline was re-queried, rejected, and then still looked stale on
+    # the next run — so it was re-queried forever, exactly what this cache
+    # exists to avoid.
+    if current.get(airline, 0.0) > now - UNSUPPORTED_TTL_SECS:
         return
-    current[airline] = time.time()
+    current[airline] = now
     try:
         UNSUPPORTED_CACHE.parent.mkdir(parents=True, exist_ok=True)
         # Write-then-rename: a crash mid-write leaves the old file intact

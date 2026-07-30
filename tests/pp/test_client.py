@@ -198,3 +198,34 @@ def test_remember_survives_unwritable_cache(tmp_path: pathlib.Path, monkeypatch:
     monkeypatch.setattr("flight_cli.pp.client.Path.mkdir", _boom)
     remember_unsupported_airline("ANA")  # must not raise
     assert load_unsupported_airlines() == frozenset()
+
+
+def test_expired_entry_is_restamped_on_a_fresh_rejection(
+    tmp_path: pathlib.Path, monkeypatch: Any
+) -> None:
+    """An entry past its TTL is re-queried; when the server rejects it again
+    the note must be refreshed. Returning early on mere presence left it
+    permanently stale, so the airline was re-queried on every run."""
+    cache = tmp_path / "unsupported.json"
+    monkeypatch.setattr("flight_cli.pp.client.UNSUPPORTED_CACHE", cache)
+    monkeypatch.setattr("flight_cli.pp.client.UNSUPPORTED_TTL_SECS", 100)
+    stale = time.time() - 500
+    cache.write_text(json.dumps({"ANA": stale}))
+    assert load_unsupported_airlines() == frozenset()  # expired
+    remember_unsupported_airline("ANA")
+    assert load_unsupported_airlines() == frozenset({"ANA"})  # refreshed
+    written: Any = json.loads(cache.read_text())
+    assert written["ANA"] > stale
+
+
+def test_fresh_entry_is_not_restamped(tmp_path: pathlib.Path, monkeypatch: Any) -> None:
+    """A still-fresh entry keeps its original timestamp, so repeated
+    rejections can't extend it indefinitely past the TTL."""
+    cache = tmp_path / "unsupported.json"
+    monkeypatch.setattr("flight_cli.pp.client.UNSUPPORTED_CACHE", cache)
+    monkeypatch.setattr("flight_cli.pp.client.UNSUPPORTED_TTL_SECS", 100)
+    original = time.time() - 10
+    cache.write_text(json.dumps({"ANA": original}))
+    remember_unsupported_airline("ANA")
+    written: Any = json.loads(cache.read_text())
+    assert written["ANA"] == original
