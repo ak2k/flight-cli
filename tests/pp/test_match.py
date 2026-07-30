@@ -19,6 +19,7 @@ from flight_cli.pp.match import (
     cash_match_key,
     cash_route_time_key,
     join,
+    same_metal,
 )
 from flight_cli.providers.base import AwardFlight, CabinAward
 
@@ -65,11 +66,12 @@ def _award(
     miles: int = 47000,
     tax: float = 250.0,
     cabin: str = "Economy",
-    origin: str = "EWR",
+    origin: str = "JFK",
     dest: str = "LHR",
     funding_banks: list[str] | None = None,
     miles_to_cash_ratio: float = 0.0125,
     matched_id: str = "",
+    num_connections: int = 0,
 ) -> AwardFlight:
     return AwardFlight(
         origin=origin,
@@ -77,7 +79,7 @@ def _award(
         departure=dep,
         arrival=dep,
         flight_number=fn,
-        num_connections=0,
+        num_connections=num_connections,
         provider="PointsPath",
         program=program,
         miles_to_cash_ratio=miles_to_cash_ratio,
@@ -92,7 +94,7 @@ def _award(
 
 def test_cash_match_key_uppercases_and_strips_whitespace():
     it = _itin(("ua 146", "2026-06-09T22:00:00", "JFK", "LHR"))
-    assert cash_match_key(it) == ("UA146", "2026-06-09")
+    assert cash_match_key(it) == ("UA146", "2026-06-09", "JFK", "LHR")
 
 
 def test_cash_match_key_empty_when_no_flights():
@@ -103,7 +105,7 @@ def test_cash_match_key_empty_when_no_flights():
 def test_cash_match_key_handles_space_separated_iso():
     """Some Matrix payloads return 'YYYY-MM-DD HH:MM' instead of ISO 'T'."""
     it = _itin(("UA146", "2026-06-09 22:00", "JFK", "LHR"))
-    assert cash_match_key(it) == ("UA146", "2026-06-09")
+    assert cash_match_key(it) == ("UA146", "2026-06-09", "JFK", "LHR")
 
 
 def test_cash_match_key_uses_slice_index_for_return_leg():
@@ -111,8 +113,8 @@ def test_cash_match_key_uses_slice_index_for_return_leg():
         ("UA146", "2026-06-09T22:00:00", "JFK", "LHR"),  # outbound
         ("UA147", "2026-06-12T10:00:00", "LHR", "JFK"),  # return
     )
-    assert cash_match_key(it, slice_index=0) == ("UA146", "2026-06-09")
-    assert cash_match_key(it, slice_index=1) == ("UA147", "2026-06-12")
+    assert cash_match_key(it, slice_index=0) == ("UA146", "2026-06-09", "JFK", "LHR")
+    assert cash_match_key(it, slice_index=1) == ("UA147", "2026-06-12", "LHR", "JFK")
 
 
 def test_cash_match_key_out_of_range_slice_returns_none():
@@ -122,7 +124,7 @@ def test_cash_match_key_out_of_range_slice_returns_none():
 
 def test_award_match_key_normalizes_consistently():
     af = _award("ua 146", "2026-06-09T22:00:00")
-    assert award_match_key(af) == ("UA146", "2026-06-09")
+    assert award_match_key(af) == ("UA146", "2026-06-09", "JFK", "LHR")
 
 
 # ───────────────────────── route+time key ──────────────────────────────────
@@ -244,25 +246,38 @@ def test_join_route_time_fallback_requires_minute_precision():
     assert matches[0].awards == []
 
 
-def test_join_route_time_unions_with_flight_number_match():
-    """If two providers' awards describe overlapping metal — one matches by
-    flight number, the other matches by route+time — both attach to the same
-    cash itinerary."""
+def test_join_exact_carrier_award_suppresses_partner_in_same_bucket():
+    """Characterization of a deliberate fail-closed choice.
+
+    Cash AA6939 with two awards in the same route+time bucket: BA174 (the
+    operating carrier of the codeshare) and AA6939 (the marketing number).
+    The old behavior attached both, on the premise that they describe one
+    aircraft.
+
+    We can no longer assume that. This bucket is structurally IDENTICAL to
+    the collision case — cash AA118 with awards AA118 (American) and AS17
+    (Alaska) — where the two awards are different aircraft that merely share
+    a departure minute. From (route, time, flight number) alone the two are
+    indistinguishable, so resolving them differently is not possible here.
+
+    We keep the exact-carrier award and drop the partner. The cost is a
+    hidden second booking option for one physical seat; the alternative cost
+    is rendering another aircraft's price on this row. Only `operating_carrier`
+    ground truth (models.py:105, gflight backend only) can tell these apart —
+    when the join learns to read it, this test should flip back.
+    """
     res = SearchResult(
         solutions=[
             _itin(("AA6939", "2026-08-15T18:40:00", "JFK", "LHR")),
         ]
     )
     awards = [
-        # Same metal under the OPERATING number (matches via route+time):
         _award("BA174", "2026-08-15T18:40:00", program="American", origin="JFK", dest="LHR"),
-        # Hypothetical second source reporting the cash marketing number directly
-        # (matches via primary key):
         _award("AA6939", "2026-08-15T18:40:00", program="VirginAtlantic", origin="JFK", dest="LHR"),
     ]
     matches = join(res, awards)
     programs = {ao.program for ao in matches[0].awards}
-    assert programs == {"American", "VirginAtlantic"}
+    assert programs == {"VirginAtlantic"}
 
 
 # ────────────────────────────── join semantics ─────────────────────────────
@@ -615,9 +630,206 @@ def test_join_flight_number_key_needs_no_carrier_corroboration():
 
 
 def test_same_metal_helper_rejects_unparseable_carrier():
-    from flight_cli.pp.match import same_metal
-
     assert same_metal("AA3539", "AA3539") is True
     assert same_metal("AA3539", "DL1424") is False
     assert same_metal("", "AA3539") is False
     assert same_metal("AA", "AA3539") is False  # too short to carry a number
+
+
+# ───────── review round 2: bucket resolution, regionals, stop count ─────────
+#
+# The first fix gated the route+time fallback on `same_metal` and claimed the
+# collision class was closed. It wasn't: same-alliance carriers compete on the
+# same route at the same minute more often than cross-alliance ones do, so the
+# guard relocated the bug instead of removing it — and made it less visible
+# (an Alaska price on an AA row reads plausible; a Delta price did not).
+
+
+def test_join_rejects_intra_alliance_collision_via_exact_carrier_preference():
+    """The relocated bug. Cash AA118 JFK->LAX 10:45 with two awards in the
+    bucket: the real AA118 award and an AS17 award (different aircraft, same
+    minute, both oneworld). Only the American award may attach — otherwise
+    the renderer's lowest-miles pick shows 7.5k Alaska on the AA row."""
+    res = SearchResult(
+        solutions=[
+            _itin(("AA118", "2026-08-15T10:45:00", "JFK", "LAX")),
+        ]
+    )
+    awards = [
+        _award(
+            "AA118",
+            "2026-08-15T10:45:00",
+            program="American",
+            miles=25000,
+            origin="JFK",
+            dest="LAX",
+        ),
+        _award(
+            "AS17", "2026-08-15T10:45:00", program="Alaska", miles=7500, origin="JFK", dest="LAX"
+        ),
+    ]
+    matches = join(res, awards)
+    assert [a.program for a in matches[0].awards] == ["American"]
+
+
+def test_join_rejects_ambiguous_multi_partner_bucket():
+    """No exact-carrier award, and two DIFFERENT partner carriers share the
+    bucket. We cannot tell which is the cash flight's metal, so neither
+    attaches — guessing would be a coin flip on a price the user might book."""
+    res = SearchResult(
+        solutions=[
+            _itin(("AA118", "2026-08-15T10:45:00", "JFK", "LAX")),
+        ]
+    )
+    awards = [
+        _award("AS17", "2026-08-15T10:45:00", program="Alaska", origin="JFK", dest="LAX"),
+        _award("BA99", "2026-08-15T10:45:00", program="British Airways", origin="JFK", dest="LAX"),
+    ]
+    matches = join(res, awards)
+    assert matches[0].awards == []
+
+
+def test_join_still_bridges_unambiguous_codeshare():
+    """The fallback's reason for existing survives: a single partner carrier
+    alone in the bucket (no competing exact-carrier award) still joins."""
+    res = SearchResult(
+        solutions=[
+            _itin(("AA6939", "2026-08-15T18:40:00", "JFK", "LHR")),
+        ]
+    )
+    awards = [
+        _award("BA174", "2026-08-15T18:40:00", program="American", origin="JFK", dest="LHR"),
+    ]
+    matches = join(res, awards)
+    assert len(matches[0].awards) == 1
+    assert matches[0].awards[0].flight_number == "BA174"
+
+
+def test_join_bridges_mainline_marketed_regional_operated():
+    """The dominant real codeshare shape, and the repo's own documented
+    example (docs/memories/gf_routing_and_carriers.md): LH9498 marketed,
+    EN8858 (Air Dolomiti) operated. An alliance-only table rejected this —
+    a feeder is not an alliance member."""
+    res = SearchResult(
+        solutions=[
+            _itin(("LH9498", "2026-08-15T09:15:00", "FRA", "FLR")),
+        ]
+    )
+    awards = [
+        _award("EN8858", "2026-08-15T09:15:00", program="United", origin="FRA", dest="FLR"),
+    ]
+    matches = join(res, awards)
+    assert len(matches[0].awards) == 1
+    assert matches[0].awards[0].flight_number == "EN8858"
+
+
+def test_regional_operator_mapping_is_directional_not_symmetric():
+    """MQ and OH are both American regionals but have no relationship with
+    each other. A symmetric table would wrongly pair them."""
+    assert same_metal("AA3539", "MQ3539") is True  # mainline -> its regional
+    assert same_metal("MQ3539", "OH1234") is False  # two regionals of the same mainline
+    assert same_metal("MQ3539", "DL1424") is False  # regional -> unrelated mainline
+
+
+def test_join_rejects_connecting_award_on_nonstop_cash_row():
+    """A 1-stop award is cheaper than the nonstop it would render beside, so
+    it wins the lowest-miles pick — and the row still prints 'nonstop',
+    because stops come from the cash slice. Connection count must agree."""
+    res = SearchResult(
+        solutions=[
+            _itin(("AA100", "2026-08-15T18:30:00", "JFK", "LHR")),
+        ]
+    )
+    awards = [
+        _award(
+            "AA100",
+            "2026-08-15T18:30:00",
+            program="American",
+            miles=12000,
+            origin="JFK",
+            dest="LHR",
+            num_connections=1,
+        ),
+    ]
+    matches = join(res, awards)
+    assert matches[0].awards == []
+
+
+def test_join_accepts_award_whose_stop_count_agrees():
+    """The other side of the stop-count check: a genuine nonstop award on a
+    nonstop cash row still attaches."""
+    res = SearchResult(
+        solutions=[
+            _itin(("AA100", "2026-08-15T18:30:00", "JFK", "LHR")),
+        ]
+    )
+    awards = [
+        _award(
+            "AA100",
+            "2026-08-15T18:30:00",
+            program="American",
+            origin="JFK",
+            dest="LHR",
+            num_connections=0,
+        ),
+    ]
+    matches = join(res, awards)
+    assert len(matches[0].awards) == 1
+
+
+def test_join_flight_number_key_requires_matching_route():
+    """Flight numbers repeat across a carrier's daily rotations, so
+    (flight#, date) alone is not an identity: an AA100 JFK->LHR cash row
+    used to attach an AA100 MIA->DFW award."""
+    res = SearchResult(
+        solutions=[
+            _itin(("AA100", "2026-08-15T18:00:00", "JFK", "LHR")),
+        ]
+    )
+    awards = [
+        _award(
+            "AA100", "2026-08-15T06:30:00", program="American", miles=7500, origin="MIA", dest="DFW"
+        ),
+    ]
+    matches = join(res, awards)
+    assert matches[0].awards == []
+
+
+def test_partner_groups_have_no_unintended_transitivity():
+    """Membership is tested per-group, so overlapping groups (DL is in both
+    SkyTeam and the DL/VS bilateral) must not chain: VS must not reach AF."""
+    assert same_metal("DL1", "VS2") is True  # direct bilateral
+    assert same_metal("VS1", "AF2") is False  # would require chaining through DL
+    assert same_metal("B61", "AA2") is False  # via AS: B6-AS bilateral, AS-AA oneworld
+    assert same_metal("EK1", "AA2") is False  # via QF: EK-QF bilateral, QF-AA oneworld
+
+
+def test_partner_group_codes_are_well_formed():
+    """Structural pin: a malformed entry would silently never match, since
+    `_carrier` only ever produces two-character prefixes."""
+    # DIVERGE: reportPrivateUsage — these are module-internal reference
+    # tables, not API. A structural test is exactly the case where reaching
+    # in is correct; exporting them publicly to satisfy the rule would widen
+    # the surface for a test's benefit.
+    from flight_cli.pp.match import (
+        _PARTNER_GROUPS,  # pyright: ignore[reportPrivateUsage]
+        _REGIONAL_OPERATORS,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    for group in _PARTNER_GROUPS:
+        assert len(group) >= 2, f"degenerate group: {group}"
+        for code in group:
+            assert len(code) == 2, f"not a 2-char IATA code: {code!r}"
+    for mainline, regionals in _REGIONAL_OPERATORS.items():
+        assert len(mainline) == 2, f"not a 2-char IATA code: {mainline!r}"
+        for code in regionals:
+            assert len(code) == 2, f"not a 2-char IATA code: {code!r}"
+            assert code != mainline, f"{mainline} lists itself as its own regional"
+
+
+def test_same_metal_rejects_award_side_empty_flight_number():
+    """Fails closed on an unparseable award-side carrier, mirroring the
+    cash-side case. A missed match shows no award; a wrong one invents a
+    price the user might try to book."""
+    assert same_metal("AA3539", "") is False
+    assert same_metal("AA3539", None) is False
