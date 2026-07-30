@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from http import HTTPStatus
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import anyio
 import httpx
@@ -43,6 +43,23 @@ PRICING_TTL_SECS = 24 * 3600
 EXT_CONFIG_CACHE = Path.home() / ".cache" / "flight-cli" / "pp_extension_config.json"
 EXT_CONFIG_TTL_SECS = 7 * 24 * 3600
 EXT_CONFIG_VERSION = "1.10.4"
+
+# Airlines the server has told us it does not support, learned at runtime.
+#
+# PP's /api/pricing-info advertises a superset of what /api/airline-search will
+# actually serve: ~10 of its entries (ANA, BritishAirways, CathayPacific, …)
+# have no `enable<Airline>` feature flag, so `enabled_airlines` treats them as
+# always-on and every search fans out to them and collects a 400 "unsupported
+# airline". That is ~10 wasted round-trips and ~20 warning lines per run.
+#
+# A hardcoded exclusion list would be wrong: the two conditions look identical
+# from the flags alone. AirFrance also has no exact-name flag (only
+# `enableAirFranceV2`) and DOES serve results, so "no flag" cannot be the
+# predicate. Instead we record the server's own verdict — a 400 naming the
+# airline as unsupported — and skip that airline until the TTL expires. The
+# list self-heals when PP adds support or the user's tier changes.
+UNSUPPORTED_CACHE = Path.home() / ".cache" / "flight-cli" / "pp_unsupported_airlines.json"
+UNSUPPORTED_TTL_SECS = 7 * 24 * 3600
 
 # Airlines observed firing in a single GFlights international search. Used as
 # the default fan-out set when --pp-airlines isn't provided. Real catalog
@@ -219,12 +236,20 @@ class PPClient:
         if r.status_code == HTTPStatus.NO_CONTENT or not r.content:
             return AirlineSearchResponse()
         if r.status_code >= HTTPStatus.BAD_REQUEST:
-            log.warning(
-                "pp_airline_search_failed",
-                airline=airline,
-                status=r.status_code,
-                body=r.text[:200],
-            )
+            if is_unsupported_airline_response(r.status_code, r.text):
+                # A permanent "we don't serve this airline", not a transient
+                # failure — remember it so later runs skip the call entirely.
+                # Logged at debug: it's an expected steady state, not a problem
+                # the user can act on.
+                remember_unsupported_airline(airline)
+                log.debug("pp_airline_unsupported", airline=airline)
+            else:
+                log.warning(
+                    "pp_airline_search_failed",
+                    airline=airline,
+                    status=r.status_code,
+                    body=r.text[:200],
+                )
             return AirlineSearchResponse()
         return AirlineSearchResponse.model_validate(r.json())
 
@@ -233,8 +258,16 @@ class PPClient:
         spec: SearchSpec,
         airlines: tuple[str, ...],
     ) -> dict[str, AirlineSearchResponse]:
-        """Fan out one request per airline; concurrency-bounded by the semaphore."""
+        """Fan out one request per airline; concurrency-bounded by the semaphore.
+
+        Airlines the server has previously rejected as unsupported are skipped
+        without a request — see `UNSUPPORTED_CACHE`.
+        """
         out: dict[str, AirlineSearchResponse] = {}
+        skip = load_unsupported_airlines()
+        to_call = tuple(a for a in airlines if a not in skip)
+        if skipped := tuple(a for a in airlines if a in skip):
+            log.debug("pp_airline_search_skipped_unsupported", airlines=skipped)
 
         async def runner(airline: str) -> None:
             try:
@@ -243,7 +276,7 @@ class PPClient:
                 log.warning("pp_airline_search_exception", airline=airline, error=str(e))
 
         async with anyio.create_task_group() as tg:
-            for a in airlines:
+            for a in to_call:
                 tg.start_soon(runner, a)
         return out
 
@@ -285,6 +318,51 @@ class PPClient:
 # `enableAirFranceV2`). Sub-feature flags like `enableDeltaTakeOff15` or
 # `enableSpiritSaversClub` carry trailing words and so don't match.
 _AIRLINE_FLAG_RE = re.compile(r"^enable(?P<name>[A-Z][A-Za-z]+?)(?:V\d+)?$")
+
+
+def is_unsupported_airline_response(status: int, body: str) -> bool:
+    """True when a 4xx says the airline itself isn't served, as opposed to a
+    transient/auth/route-specific failure.
+
+    Deliberately narrow: it must be a 400 AND the body must name the airline
+    as unsupported. Broadening this to "any 4xx" would let a rate-limit or an
+    expired token permanently blacklist a working airline.
+    """
+    if status != HTTPStatus.BAD_REQUEST:
+        return False
+    return "unsupported airline" in body.lower()
+
+
+def load_unsupported_airlines() -> frozenset[str]:
+    """Airlines the server rejected as unsupported, if the note is still fresh.
+
+    Any read problem (missing, corrupt, wrong shape) yields the empty set —
+    the cost of a stale-empty result is one wasted round-trip per airline,
+    versus wrongly suppressing a working airline's awards.
+    """
+    try:
+        if time.time() - UNSUPPORTED_CACHE.stat().st_mtime >= UNSUPPORTED_TTL_SECS:
+            return frozenset()
+        raw: Any = json.loads(UNSUPPORTED_CACHE.read_text())
+    except (OSError, ValueError):
+        return frozenset()
+    if not isinstance(raw, list):
+        return frozenset()
+    return frozenset(x for x in cast("list[Any]", raw) if isinstance(x, str))
+
+
+def remember_unsupported_airline(airline: str) -> None:
+    """Add one airline to the unsupported note. Best-effort: a failure here
+    only costs the next run a redundant request."""
+    current = set(load_unsupported_airlines())
+    if airline in current:
+        return
+    current.add(airline)
+    try:
+        UNSUPPORTED_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        UNSUPPORTED_CACHE.write_text(json.dumps(sorted(current), indent=2))
+    except OSError as e:
+        log.debug("pp_unsupported_cache_write_failed", error=str(e))
 
 
 def enabled_airlines(
