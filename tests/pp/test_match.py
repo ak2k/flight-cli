@@ -1610,3 +1610,141 @@ def test_wrong_stop_count_candidate_cannot_suppress_a_valid_codeshare():
     ]
     matches = join(res, awards)
     assert [a.flight_number for a in matches[0].awards] == ["BA174"]
+
+
+# ───────── journey shape: connection airports (the cross-provider signal) ─────────
+
+
+def _award_stops(
+    fn: str,
+    dep: str,
+    arr: str,
+    miles: int,
+    stops: list[str],
+    *,
+    conns: int = 1,
+    segs: list[str] | None = None,
+) -> AwardFlight:
+    return AwardFlight(
+        origin="MSY",
+        destination="LHR",
+        departure=dep,
+        arrival=arr,
+        flight_number=fn,
+        num_connections=conns,
+        provider="PointsPath",
+        program="American",
+        miles_to_cash_ratio=0.0125,
+        funding_banks=["Chase"],
+        stop_airports=stops,
+        segment_flight_numbers=segs or [],
+        cabins=[CabinAward(cabin="Economy", miles=miles, tax_usd=5.6, tax_currency="USD")],
+    )
+
+
+def _cash_conn(flights: list[str], dep: str, stops: list[str], arr: str) -> Itinerary:
+    return Itinerary(
+        displayTotal="USD900.00",
+        itinerary=ItineraryDetails(
+            slices=[
+                Slice(
+                    flights=flights,
+                    departure=dep,
+                    arrival=arr,
+                    origin=SliceEndpoint(code="MSY"),
+                    destination=SliceEndpoint(code="LHR"),
+                    stops=[SliceEndpoint(code=c) for c in stops],
+                ),
+            ],
+            carriers=[],
+        ),
+    )
+
+
+def test_connection_airport_separates_pointspath_journeys():
+    """PointsPath sends no segment list, so segment numbers can't separate its
+    journeys — but it does send `stops`, and Matrix fills the comparable
+    `Slice.stops`. Live MSY->LHR has four AA1650 journeys sharing a 12:22
+    departure and one connection, differing only in hub and arrival.
+    """
+    res = SearchResult(
+        solutions=[
+            _cash_conn(["AA1650", "AA100"], "2026-09-09T12:22:00", ["DFW"], "2026-09-10T06:20:00")
+        ]
+    )
+    awards = [
+        _award_stops("AA1650", "2026-09-09T12:22:00", "2026-09-10T06:20:00", 60000, ["DFW"]),
+        # Cheaper, so it would win the renderer's pick — but it routes via ORD.
+        _award_stops("AA1650", "2026-09-09T12:22:00", "2026-09-10T06:20:00", 9000, ["ORD"]),
+    ]
+    matches = join(res, awards)
+    assert [a.cabins[0].miles for a in matches[0].awards] == [60000]
+
+
+def test_missing_stop_airports_is_not_disagreement():
+    """A provider that omits connection airports must still match — absence of
+    evidence is not contradiction."""
+    res = SearchResult(
+        solutions=[
+            _cash_conn(["AA1650", "AA100"], "2026-09-09T12:22:00", ["DFW"], "2026-09-10T06:20:00")
+        ]
+    )
+    awards = [
+        _award_stops("AA1650", "2026-09-09T12:22:00", "2026-09-10T06:20:00", 60000, []),
+    ]
+    matches = join(res, awards)
+    assert len(matches[0].awards) == 1
+
+
+def test_both_shape_signals_apply_together():
+    """Connection airports and segment numbers are independent checks; either
+    one contradicting is enough to drop a candidate."""
+    res = SearchResult(
+        solutions=[
+            _cash_conn(["AA1650", "AA100"], "2026-09-09T12:22:00", ["DFW"], "2026-09-10T06:20:00")
+        ]
+    )
+    awards = [
+        # Right hub, wrong second segment.
+        _award_stops(
+            "AA1650",
+            "2026-09-09T12:22:00",
+            "2026-09-10T06:20:00",
+            9000,
+            ["DFW"],
+            segs=["AA1650", "AA999"],
+        ),
+        _award_stops(
+            "AA1650",
+            "2026-09-09T12:22:00",
+            "2026-09-10T06:20:00",
+            60000,
+            ["DFW"],
+            segs=["AA1650", "AA100"],
+        ),
+    ]
+    matches = join(res, awards)
+    assert [a.cabins[0].miles for a in matches[0].awards] == [60000]
+
+
+def test_nonstop_cash_row_is_unaffected_by_shape_checks():
+    """A nonstop has nothing past segment 0 to contradict, so the shape checks
+    must not filter anything."""
+    res = SearchResult(
+        solutions=[
+            _itin(("AA867", "2026-09-09T06:00:00", "MSY", "MIA", "2026-09-09T09:04:00")),
+        ]
+    )
+    awards = [
+        _award(
+            "AA867",
+            "2026-09-09T06:00:00",
+            program="American",
+            miles=25000,
+            origin="MSY",
+            dest="MIA",
+            arrival="2026-09-09T09:04:00",
+        ),
+    ]
+    matches = join(res, awards)
+    assert len(matches[0].awards) == 1

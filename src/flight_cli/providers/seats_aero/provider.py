@@ -155,6 +155,7 @@ def _group_trips_to_awards(
                 arrival=_local_naive(t.ArrivesAt),
                 flight_number=_first_flight_number(t.FlightNumbers),
                 segment_flight_numbers=_segment_flight_numbers(t.FlightNumbers),
+                stop_airports=[c.upper() for c in t.Connections],
                 num_connections=t.Stops,
                 provider="Seats.aero",
                 program=_program_label(t.Source),

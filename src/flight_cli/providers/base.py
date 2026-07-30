@@ -76,6 +76,16 @@ class AwardFlight:
     # row. Empty when the provider can't say, which the matcher treats as
     # "no segment evidence" rather than agreement.
     segment_flight_numbers: list[str] = field(default_factory=list[str])
+    # Connection airport codes in order (["DFW"]); empty for a nonstop OR when
+    # the provider doesn't say. Distinguishing those two states is the caller's
+    # job — see `_by_journey_shape`, which pairs this with `num_connections`.
+    #
+    # This is the ONLY journey-shape signal PointsPath gives beyond the first
+    # flight number, and Matrix populates the directly comparable
+    # `Slice.stops`, so it works cross-provider where segment numbers (which
+    # only seats.aero sends) do not. Live MSY->LHR has four distinct AA1650
+    # journeys sharing a departure minute and connection count.
+    stop_airports: list[str] = field(default_factory=list[str])
 
     # provider/program metadata — used for rendering only
     provider: str = ""  # display name, e.g. "PointsPath", "seats.aero"

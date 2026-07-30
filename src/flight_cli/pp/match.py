@@ -32,11 +32,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+import structlog
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ..models import Itinerary, SearchResult, Slice
     from ..providers.base import AwardFlight
+
+if TYPE_CHECKING:
+    from structlog.stdlib import BoundLogger
+
+log: BoundLogger = structlog.get_logger(__name__)  # pyright: ignore[reportAny]
 
 # (FLIGHT_NUMBER_UPPER_NOSPACE, "YYYY-MM-DD", ORIGIN_UPPER, DEST_UPPER)
 MatchKey = tuple[str, str, str, str]
@@ -219,6 +226,21 @@ def _pick_metal(
     if exact:
         return _narrow(exact, cash_arrival)
     partners = [af for af in candidates if same_metal(cash_fn, af.flight_number)]
+    # The hand-curated tables are the weakest evidence in this module, and by
+    # construction they only decide a match when nothing stronger applied.
+    # That makes a stale entry fail SILENTLY — the wrong price just appears.
+    # Log every table-arbitrated match so the failure mode is greppable, and
+    # so we can tell from real traffic whether these tables still earn their
+    # keep (measured 2026-07: 0 of 471 live awards lacked an arrival, i.e.
+    # this path effectively never fires today).
+    for af in partners:
+        if not same_carrier(cash_fn, af.flight_number):
+            log.debug(
+                "award_match_via_partner_table",
+                cash_flight=cash_fn,
+                award_flight=af.flight_number,
+                program=af.program,
+            )
     # A DIFFERENT number on the SAME carrier is simply a different flight —
     # an airline does not sell one departure under two of its own numbers.
     # Only a genuine codeshare (different carrier) explains a number mismatch,
@@ -245,28 +267,49 @@ def _pick_metal(
     return _narrow(partners, cash_arrival)
 
 
-def _by_segments(candidates: list[AwardFlight], cash_flights: list[str]) -> list[AwardFlight]:
-    """Drop candidates whose segment list contradicts the cash slice's.
+def _by_journey_shape(
+    candidates: list[AwardFlight],
+    cash_flights: list[str],
+    cash_stop_airports: list[str],
+) -> list[AwardFlight]:
+    """Drop candidates whose journey shape contradicts the cash slice's.
 
     Every key in this module identifies a journey by its FIRST segment, so two
-    journeys that share a first flight and diverge afterwards collapse together:
-    seats.aero returns both "AA1444, BA216" and "AA1444, AA100" on one
-    JFK→LHR date, and the renderer's lowest-miles pick then prints the cheaper
-    journey's fare on the other's row.
+    journeys that share a first flight and diverge afterwards collapse
+    together. Both are real in live data: seats.aero returns "AA1444, BA216"
+    and "AA1444, AA100" on one JFK→LHR date, and PointsPath returns four
+    distinct AA1650 MSY→LHR journeys sharing a 12:22 departure and one stop,
+    separable only by where they connect and when they land.
 
-    Only providers that supply the full list are judged — PointsPath sends just
-    the first flight number, and an empty list means "no evidence", not
-    disagreement. Applied only when the cash slice itself is multi-segment: on
-    a nonstop there is nothing beyond segment 0 to contradict.
+    Two independent signals, because no single one is available everywhere:
+
+    * **Connection airports** — Matrix fills `Slice.stops` and BOTH award
+      providers supply the equivalent, so this is the cross-provider check.
+      Only compared when the cash side is a connection and the candidate says
+      something; empty on the award side is "no evidence", not agreement.
+    * **Segment flight numbers** — stronger (it pins each leg, not just the
+      hub) but seats.aero-only; PointsPath sends the first number alone.
+
+    Each is skipped when its evidence is absent, so a provider that supplies
+    neither is judged by the carrier and arrival rules as before — no match is
+    lost that used to succeed.
     """
-    if len(cash_flights) < _MIN_MULTI_SEGMENT:
-        return candidates
-    want = [_norm_fn(f) for f in cash_flights]
-    return [
-        af
-        for af in candidates
-        if not af.segment_flight_numbers or [_norm_fn(f) for f in af.segment_flight_numbers] == want
-    ]
+    if len(cash_flights) < _MIN_MULTI_SEGMENT and not cash_stop_airports:
+        return candidates  # nonstop: nothing past segment 0 to contradict
+    want_stops = [c.upper() for c in cash_stop_airports]
+    want_flights = [_norm_fn(f) for f in cash_flights]
+    out: list[AwardFlight] = []
+    for af in candidates:
+        if want_stops and af.stop_airports and [c.upper() for c in af.stop_airports] != want_stops:
+            continue
+        if (
+            len(want_flights) >= _MIN_MULTI_SEGMENT
+            and af.segment_flight_numbers
+            and [_norm_fn(f) for f in af.segment_flight_numbers] != want_flights
+        ):
+            continue
+        out.append(af)
+    return out
 
 
 def _drop_contradicted(candidates: list[AwardFlight], cash_arrival: str) -> list[AwardFlight]:
@@ -493,6 +536,7 @@ def join(
         cash_fn = cash_first_flight_number(it, slice_index=slice_index)
         cash_arr = _iso_minute(s.arrival) if s else ""
         cash_flights = list(s.flights or []) if s else []
+        cash_stop_airports = [(e.code or "") for e in (s.stops or [])] if s else []
 
         # Gather the raw candidates from every applicable key FIRST, then run
         # one resolution pass over the union.
@@ -540,6 +584,10 @@ def join(
         # would have won on its own.
         raw = [af for af in raw if af.num_connections == cash_stops]
 
-        matched = _pick_metal(cash_fn, cash_arr, _by_segments(raw, cash_flights))
+        matched = _pick_metal(
+            cash_fn,
+            cash_arr,
+            _by_journey_shape(raw, cash_flights, cash_stop_airports),
+        )
         out.append(MatchedFare(itinerary=it, awards=matched))
     return out

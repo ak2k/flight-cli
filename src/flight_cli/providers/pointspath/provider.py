@@ -74,6 +74,7 @@ def _flight_to_award(
         arrival=of.localArrivalDateTime,
         flight_number=of.firstFlightNumber,
         num_connections=of.numConnections,
+        stop_airports=[c.upper() for c in of.stops],
         provider="PointsPath",
         program=program,
         miles_to_cash_ratio=miles_to_cash_ratio,

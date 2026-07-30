@@ -62,12 +62,18 @@ class OutboundFlight(_Loose):
     firstFlightNumber: str
     googleAirlineName: str | None = None
     numConnections: int = 0
+    # Connection airport codes in order, e.g. ["DFW"]. Empty for a nonstop.
+    # PP has always sent this; `extra="ignore"` was silently dropping it. It's
+    # the only journey-shape signal PP gives beyond the first flight number,
+    # and Matrix populates the comparable `Slice.stops`.
+    stops: list[str] = []
     externalId: str | None = None
     matchedGoogleFlightId: str | None = None
     matchedGoogleFlightCashPriceUsd: float | None = None
     perCabinMilesPricing: list[PerCabinMilesPricing] = []
 
     _none_pricing = field_validator("perCabinMilesPricing", mode="before")(_none_to_empty_list)
+    _none_stops = field_validator("stops", mode="before")(_none_to_empty_list)
 
 
 class AirlineSearchResponse(_Loose):
