@@ -1027,3 +1027,137 @@ def test_match_keys_require_complete_route():
     assert cash_match_key(partial) is None
     assert award_match_key(_award("AA100", "2026-08-15T18:00:00", origin="", dest="LHR")) is None
     assert award_match_key(_award("AA100", "", origin="JFK", dest="LHR")) is None
+
+
+# ───────── arrival must narrow WITHIN carrier stages, not ahead of them ─────────
+#
+# The arrival discriminator was first applied to the whole bucket before the
+# carrier rules ran. That let a wrong-carrier award whose arrival happened to
+# match survive while the CORRECT same-carrier award — one that merely omitted
+# its arrival — was deleted before the exact-carrier rule ever saw it, putting
+# another aircraft's price on the row. Ordering here is load-bearing.
+
+
+def test_arrival_filter_does_not_delete_correct_metal_in_mixed_bucket():
+    """The P0. Cash AA6939 arrives 06:30. BA174 is the right metal but omits
+    its arrival; AS99 is different metal that happens to arrive 06:30.
+    Filtering by arrival first left only AS99 and rendered 7.5k Alaska on the
+    American row."""
+    res = SearchResult(
+        solutions=[
+            _itin(("AA6939", "2026-08-15T18:40:00", "JFK", "LHR", "2026-08-16T06:30:00")),
+        ]
+    )
+    awards = [
+        _award(
+            "BA174",
+            "2026-08-15T18:40:00",
+            program="American",
+            miles=60000,
+            origin="JFK",
+            dest="LHR",
+            arrival="",
+        ),
+        _award(
+            "AS99",
+            "2026-08-15T18:40:00",
+            program="Alaska",
+            miles=7500,
+            origin="JFK",
+            dest="LHR",
+            arrival="2026-08-16T06:30:00",
+        ),
+    ]
+    matches = join(res, awards)
+    assert [a.program for a in matches[0].awards] != ["Alaska"]
+    # Two distinct partner carriers with incomplete arrival data is genuinely
+    # unresolvable, so the safe answer is no award at all.
+    assert matches[0].awards == []
+
+
+def test_arrival_filter_abstains_on_partial_coverage_keeping_exact_carrier():
+    """Same shape, but the same-carrier award is the one missing an arrival.
+    It must still win — partial arrival coverage is not evidence."""
+    res = SearchResult(
+        solutions=[
+            _itin(("AA118", "2026-08-15T10:45:00", "JFK", "LAX", "2026-08-15T14:05:00")),
+        ]
+    )
+    awards = [
+        _award(
+            "AA118",
+            "2026-08-15T10:45:00",
+            program="American",
+            miles=25000,
+            origin="JFK",
+            dest="LAX",
+            arrival="",
+        ),
+        _award(
+            "AS17",
+            "2026-08-15T10:45:00",
+            program="Alaska",
+            miles=7500,
+            origin="JFK",
+            dest="LAX",
+            arrival="2026-08-15T14:05:00",
+        ),
+    ]
+    matches = join(res, awards)
+    assert [a.program for a in matches[0].awards] == ["American"]
+
+
+def test_arrival_separates_same_carrier_rotations():
+    """What arrival is actually for: two AA flights the carrier rules cannot
+    tell apart, sharing a departure minute. Only the matching arrival wins."""
+    res = SearchResult(
+        solutions=[
+            _itin(("AA867", "2026-09-09T06:00-05:00", "MSY", "MIA", "2026-09-09T09:04-04:00")),
+        ]
+    )
+    awards = [
+        _award(
+            "AA867",
+            "2026-09-09T06:00:00",
+            program="American",
+            miles=25000,
+            origin="MSY",
+            dest="MIA",
+            arrival="2026-09-09T09:04:00",
+        ),
+        _award(
+            "AA999",
+            "2026-09-09T06:00:00",
+            program="American",
+            miles=9000,
+            origin="MSY",
+            dest="MIA",
+            arrival="2026-09-09T10:30:00",
+        ),
+    ]
+    matches = join(res, awards)
+    assert [a.flight_number for a in matches[0].awards] == ["AA867"]
+
+
+def test_arrival_drift_does_not_drop_the_only_candidate():
+    """Schedule sources disagree by a few minutes in real data (a live
+    cross-check found AA106 at 19:20 vs 19:15). When nothing matches the cash
+    arrival, keep the bucket rather than zeroing it — the carrier rules are
+    better evidence than a minute-precision timestamp."""
+    res = SearchResult(
+        solutions=[
+            _itin(("AA106", "2026-08-15T19:20:00", "JFK", "LHR", "2026-08-16T07:30:00")),
+        ]
+    )
+    awards = [
+        _award(
+            "AA106",
+            "2026-08-15T19:20:00",
+            program="American",
+            origin="JFK",
+            dest="LHR",
+            arrival="2026-08-16T07:25:00",
+        ),
+    ]
+    matches = join(res, awards)
+    assert len(matches[0].awards) == 1

@@ -191,39 +191,62 @@ def _pick_metal(
     render on the American row.
 
     Resolution, in order:
-      1. **Arrival time.** Two aircraft sharing a departure minute on the same
-         route essentially never share an arrival minute too — both sides read
-         the same published schedule, so this is the real identity. Measured
-         on a live MSY→MIA/FLL payload: keying on route+departure alone left 3
-         multi-carrier buckets out of 41; adding arrival left 0 out of 91.
-         When the cash side supplies an arrival, it filters the bucket, and
-         that is normally enough to resolve it outright.
-      2. **Same carrier wins.** A same-carrier award at this route+minute IS
+      1. **Same carrier wins.** A same-carrier award at this route+minute IS
          the flight; partners beside it are different metal.
-      3. **Single partner.** Otherwise the bucket is codeshare-shaped (the
+      2. **Single partner.** Otherwise the bucket is codeshare-shaped (the
          fallback's reason for existing: marketing AA6939 ↔ operating BA174).
          Accept only when the survivors resolve to ONE carrier — two distinct
          partner carriers means we cannot tell which is the metal.
 
-    Steps 2-3 still run after step 1 because arrival is not guaranteed:
-    `Slice.arrival` is optional and award providers may omit it, so the
-    carrier logic remains the backstop when the times are missing.
+    Arrival time narrows WITHIN each stage rather than ahead of them (see
+    `_narrow`). Ordering matters and getting it wrong is not a near-miss:
+    filtering the whole bucket by arrival first lets a wrong-carrier award
+    whose arrival happens to match survive while the correct same-carrier
+    award — one that merely omits its arrival — is deleted before the
+    carrier rule ever sees it. That renders another aircraft's price on the
+    row, which is the exact defect this function exists to prevent.
     """
-    if cash_arrival:
-        timed = [af for af in candidates if _iso_minute(af.arrival) == cash_arrival]
-        # Only trust the filter when it actually resolved something; an award
-        # side that omits arrival would otherwise wipe the bucket.
-        if timed:
-            candidates = timed
     exact = [af for af in candidates if same_carrier(cash_fn, af.flight_number)]
     if exact:
-        return exact
-    partners = [af for af in candidates if same_metal(cash_fn, af.flight_number)]
+        return _narrow(exact, cash_arrival)
+    partners = _narrow(
+        [af for af in candidates if same_metal(cash_fn, af.flight_number)],
+        cash_arrival,
+    )
     if not partners:
         return []
     if len({_carrier(af.flight_number) for af in partners}) > 1:
         return []
     return partners
+
+
+def _narrow(candidates: list[AwardFlight], cash_arrival: str) -> list[AwardFlight]:
+    """Keep only the candidates arriving at the cash flight's arrival minute.
+
+    Two aircraft sharing a departure minute on the same route essentially never
+    share an arrival minute too, so this separates same-carrier rotations the
+    carrier rules cannot. Measured on a live MSY→MIA/FLL payload: route+departure
+    alone left 3 multi-carrier buckets of 41; adding arrival left 0 of 91.
+
+    Abstains — returns the input untouched — unless the cash side has an
+    arrival AND *every* candidate has one. Partial coverage is the dangerous
+    case: filtering a mixed bucket silently drops the awards that merely omit
+    the field, which is how a correct match gets deleted in favour of a wrong
+    one. Both sides being fully populated is the only state where a
+    non-match is real evidence of different metal rather than missing data.
+
+    Note both sides express local time at the airport: Matrix sends an offset
+    ('...T09:04-04:00'), PointsPath naive ('...T09:04:00'), seats.aero a
+    misleading 'Z' on what is also local. `_iso_minute` truncates all three to
+    the same wall-clock key. If a caller ever starts genuinely parsing these
+    as instants, seats.aero's fake 'Z' becomes a real ~offset-sized bug.
+    """
+    if not cash_arrival:
+        return candidates
+    if not all(_iso_minute(af.arrival) for af in candidates):
+        return candidates
+    timed = [af for af in candidates if _iso_minute(af.arrival) == cash_arrival]
+    return timed or candidates
 
 
 def _iso_date(s: str | None) -> str:
