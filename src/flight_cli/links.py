@@ -531,9 +531,6 @@ def extract_pin_segments_from_slice(s: Slice) -> list[dict[str, str]] | None:
     dep_date = s.departure[:10]
     arrival = s.arrival or s.departure
     arr_date = arrival[:10]
-    dep_date = s.departure[:10]
-    arrival = s.arrival or s.departure
-    arr_date = arrival[:10]
     out: list[dict[str, str]] = []
     for i, fl in enumerate(s.flights):
         m = _FLIGHT_NUMBER_RE.match(fl)
@@ -545,7 +542,16 @@ def extract_pin_segments_from_slice(s: Slice) -> list[dict[str, str]] | None:
         if has_exact_dates:
             seg_date = s.segment_dates[i]
         else:
-            seg_date = arr_date if (i == n - 1 and arr_date != dep_date) else dep_date
+            # A segment is dated by when it DEPARTS. The last segment of a
+            # multi-segment slice departs on the arrival date only when the
+            # slice spans midnight — and a NONSTOP is never that case, even
+            # though it satisfies `i == n - 1`: it departs on the departure
+            # date by definition. Treating an overnight nonstop as arrival-
+            # dated pinned BA178 JFK->LHR (dep 2026-12-31, arr 2027-01-01) to
+            # 2027-01-01, sending the user to a search for the wrong day.
+            spans_midnight = arr_date != dep_date
+            is_last_of_many = n > 1 and i == n - 1
+            seg_date = arr_date if (is_last_of_many and spans_midnight) else dep_date
         out.append(
             {
                 "origin": seg_origin,

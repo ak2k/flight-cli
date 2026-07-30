@@ -28,7 +28,8 @@ from flight_cli.domain import (
     SearchOptions,
     SpecificDateSearch,
 )
-from flight_cli.links import matrix_deep_link, matrix_itinerary_url
+from flight_cli.links import extract_pin_segments_from_slice, matrix_deep_link, matrix_itinerary_url
+from flight_cli.models import Slice, SliceEndpoint
 
 FIXTURE_DIR = pathlib.Path(__file__).parent / "fixtures" / "matrix_url"
 
@@ -174,3 +175,56 @@ def test_multi_city_keeps_one_slice_per_leg() -> None:
         assert dates["departureDate"] == iso
         # Multi-city slices keep returnDate empty — our benign superset.
         assert dates["returnDate"] == ""
+
+
+# ───────── pinned segment dates: a segment is dated by when it DEPARTS ─────────
+
+
+def _slice(
+    flights: list[str], dep: str, arr: str, o: str, d: str, stops: list[str] | None = None
+) -> Slice:
+    return Slice(
+        flights=flights,
+        departure=dep,
+        arrival=arr,
+        origin=SliceEndpoint(code=o),
+        destination=SliceEndpoint(code=d),
+        stops=[SliceEndpoint(code=c) for c in (stops or [])],
+    )
+
+
+def test_overnight_nonstop_is_dated_by_departure() -> None:
+    """A nonstop satisfies `i == n - 1`, so the last-segment rule dated it by
+    ARRIVAL — pinning BA178 JFK->LHR (dep 2026-12-31, arr 2027-01-01) to
+    2027-01-01 and sending the user to a search for the wrong day, across a
+    year boundary."""
+    segs = extract_pin_segments_from_slice(
+        _slice(["BA178"], "2026-12-31T22:00-05:00", "2027-01-01T10:00+00:00", "JFK", "LHR"),
+    )
+    assert segs is not None
+    assert [x["date"] for x in segs] == ["2026-12-31"]
+
+
+def test_overnight_connection_still_dates_its_last_leg_by_arrival() -> None:
+    """The rule the nonstop case was over-applying is real for a genuine
+    connection: the second leg does depart on the following day."""
+    segs = extract_pin_segments_from_slice(
+        _slice(
+            ["AA100", "BA200"],
+            "2026-12-31T18:00-05:00",
+            "2027-01-01T14:00+00:00",
+            "JFK",
+            "LHR",
+            ["BOS"],
+        ),
+    )
+    assert segs is not None
+    assert [x["date"] for x in segs] == ["2026-12-31", "2027-01-01"]
+
+
+def test_same_day_nonstop_unchanged() -> None:
+    segs = extract_pin_segments_from_slice(
+        _slice(["AA867"], "2026-09-09T06:00-05:00", "2026-09-09T09:04-04:00", "MSY", "MIA"),
+    )
+    assert segs is not None
+    assert [x["date"] for x in segs] == ["2026-09-09"]
