@@ -84,6 +84,23 @@ def _cabin_label(slug: str) -> str:
     return _CABIN_LABELS.get(slug.lower(), slug.title())
 
 
+def _local_naive(ts: str) -> str:
+    """Strip seats.aero's spurious 'Z' suffix.
+
+    Their `DepartsAt`/`ArrivesAt` are labelled UTC but carry LOCAL time at each
+    airport. Fixture arithmetic proves it: JFK→LHR nonstops read ~12.1h block
+    time when the Z is honoured, against a real ~7h — and 09:35 local JFK plus
+    7h is 21:35 London, which is the 21:40 they report.
+
+    The matcher compares these against Matrix cash times, which are local too,
+    so passing the Z through would be a latent ~offset-sized error the moment
+    anything parses these as instants instead of truncating the suffix away.
+    Normalizing here keeps `AwardFlight.departure`/`.arrival` meaning one
+    thing — naive local — across every provider.
+    """
+    return ts.removesuffix("Z")
+
+
 def _first_flight_number(flight_numbers: str) -> str:
     """`"AA4671, BA216"` → `"AA4671"`. The matcher keys on the first
     marketing flight number, same convention as PointsPath. Multi-segment
@@ -124,8 +141,8 @@ def _group_trips_to_awards(
             grouped[key] = AwardFlight(
                 origin=t.OriginAirport,
                 destination=t.DestinationAirport,
-                departure=t.DepartsAt,
-                arrival=t.ArrivesAt,
+                departure=_local_naive(t.DepartsAt),
+                arrival=_local_naive(t.ArrivesAt),
                 flight_number=_first_flight_number(t.FlightNumbers),
                 num_connections=t.Stops,
                 provider="Seats.aero",

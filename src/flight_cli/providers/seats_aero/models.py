@@ -57,7 +57,11 @@ class SeatsAvailabilityTrip(_Loose):
 
     OriginAirport: str
     DestinationAirport: str
-    DepartsAt: str  # ISO 8601 UTC, e.g. "2026-08-15T06:30:00Z"
+    # MISLABELLED UPSTREAM: carries a 'Z' suffix but the value is LOCAL time
+    # at the airport, not UTC. Verified against this repo's own fixture —
+    # honouring the Z gives ~12.1h JFK→LHR nonstops against a real ~7h.
+    # `provider._local_naive` strips the suffix on the way into AwardFlight.
+    DepartsAt: str  # naive local despite the 'Z', e.g. "2026-08-15T06:30:00Z"
     ArrivesAt: str
     Cabin: str  # lowercase: "economy", "premium", "business", "first"
     FlightNumbers: str  # comma list, in segment order

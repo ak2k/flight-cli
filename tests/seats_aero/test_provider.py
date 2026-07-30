@@ -128,3 +128,17 @@ def test_group_converts_tax_cents_to_usd() -> None:
 
 def test_group_empty_input_returns_empty() -> None:
     assert _group_trips_to_awards([], tax_currency="USD") == []
+
+
+def test_seats_aero_timestamps_are_normalized_to_naive_local() -> None:
+    """seats.aero labels DepartsAt/ArrivesAt as UTC with a 'Z', but the values
+    are local time at each airport — honouring the Z yields ~12.1h JFK->LHR
+    nonstops against a real ~7h. The provider strips the suffix so
+    AwardFlight timestamps mean naive-local for every provider, matching what
+    Matrix and PointsPath supply and what the matcher compares.
+    """
+    from flight_cli.providers.seats_aero.provider import _local_naive
+
+    assert _local_naive("2026-08-15T06:30:00Z") == "2026-08-15T06:30:00"
+    assert _local_naive("2026-08-15T06:30:00") == "2026-08-15T06:30:00"
+    assert _local_naive("") == ""

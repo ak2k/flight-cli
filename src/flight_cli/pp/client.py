@@ -37,6 +37,23 @@ _JsonDict = dict[str, Any]
 
 API_BASE = "https://api.pointspath.com"
 
+
+class PPApiError(Exception):
+    """A PointsPath endpoint returned an unusable response.
+
+    Exists so `httpx.HTTPStatusError` never reaches a caller (AGENTS.md
+    Principle 1 — boundaries fail loudly, in domain terms). Per-airline
+    failures are non-fatal and handled inline; this is for the catalog
+    endpoints, where a failure means the award overlay cannot be built.
+    """
+
+    def __init__(self, message: str, *, endpoint: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.endpoint = endpoint
+        self.status = status
+
+
 PRICING_CACHE = Path.home() / ".cache" / "flight-cli" / "pp_pricing.json"
 PRICING_TTL_SECS = 24 * 3600
 
@@ -286,7 +303,7 @@ class PPClient:
             if age < PRICING_TTL_SECS:
                 return PricingInfoResponse.model_validate(json.loads(PRICING_CACHE.read_text()))
         r = await self._request("GET", "/api/pricing-info")
-        r.raise_for_status()
+        _raise_for_status(r, "/api/pricing-info")
         PRICING_CACHE.parent.mkdir(parents=True, exist_ok=True)
         PRICING_CACHE.write_text(r.text)
         return PricingInfoResponse.model_validate(r.json())
@@ -307,7 +324,7 @@ class PPClient:
             "/api/extension-config",
             params={"v": EXT_CONFIG_VERSION},
         )
-        r.raise_for_status()
+        _raise_for_status(r, "/api/extension-config")
         EXT_CONFIG_CACHE.parent.mkdir(parents=True, exist_ok=True)
         EXT_CONFIG_CACHE.write_text(r.text)
         return r.json()
@@ -318,6 +335,19 @@ class PPClient:
 # `enableAirFranceV2`). Sub-feature flags like `enableDeltaTakeOff15` or
 # `enableSpiritSaversClub` carry trailing words and so don't match.
 _AIRLINE_FLAG_RE = re.compile(r"^enable(?P<name>[A-Z][A-Za-z]+?)(?:V\d+)?$")
+
+
+def _raise_for_status(r: httpx.Response, endpoint: str) -> None:
+    """Translate a failed response into `PPApiError` at the boundary, so
+    `httpx.HTTPStatusError` never escapes this module."""
+    try:
+        _ = r.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        raise PPApiError(
+            f"{endpoint} returned HTTP {r.status_code}",
+            endpoint=endpoint,
+            status=r.status_code,
+        ) from e
 
 
 def is_unsupported_airline_response(status: int, body: str) -> bool:
