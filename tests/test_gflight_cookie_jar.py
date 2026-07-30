@@ -160,3 +160,52 @@ def test_persist_skips_when_no_allowlisted_cookie(
     warm = _FakeClient([_JarCookie("AEC", "x", ".google.com")])  # Google but not NID
     gfid._persist_cookies(warm)
     assert not (tmp_path / "gflight-cookies.json").exists()
+
+
+# ───────── the jar must resolve against the REAL fli client ─────────
+
+
+def test_cookie_jar_resolves_against_the_installed_fli_client() -> None:
+    """Regression: this module reached for `Client._client`, which fli 0.9
+    replaced with a per-thread `Client._session()`. The AttributeError landed
+    in a best-effort `except` and was logged at debug, so NID seeding AND
+    persistence became silent no-ops — every process started cold, against a
+    documented ~40% cold-start empty rate versus ~0% warm.
+
+    Deliberately exercised against the real installed client rather than a
+    stub: a stub would have kept passing through the upstream rename, which is
+    exactly how this went unnoticed.
+    """
+    from fli.search.client import get_client  # pyright: ignore[reportMissingTypeStubs]
+
+    from flight_cli._gflight_ids import _cookie_jar
+
+    jar = _cookie_jar(get_client())  # pyright: ignore[reportUnknownArgumentType]
+    assert hasattr(jar, "set")
+    assert hasattr(jar, "jar")
+
+
+def test_cookie_jar_seeding_is_observable() -> None:
+    """A seeded cookie must actually be readable back — the property the
+    silent no-op destroyed."""
+    from fli.search.client import get_client  # pyright: ignore[reportMissingTypeStubs]
+
+    from flight_cli._gflight_ids import _cookie_jar
+
+    jar = _cookie_jar(get_client())  # pyright: ignore[reportUnknownArgumentType]
+    jar.set("NID", "sentinel-value", domain=".google.com", path="/")
+    names = [str(c.name) for c in jar.jar]
+    assert "NID" in names
+
+
+def test_cookie_jar_raises_when_no_known_shape() -> None:
+    """Fails loudly on a future rename instead of degrading to a no-op again."""
+    import pytest
+
+    from flight_cli._gflight_ids import _cookie_jar
+
+    class _Alien:
+        pass
+
+    with pytest.raises(AttributeError):
+        _ = _cookie_jar(_Alien())
