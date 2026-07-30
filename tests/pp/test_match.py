@@ -1139,11 +1139,20 @@ def test_arrival_separates_same_carrier_rotations():
     assert [a.flight_number for a in matches[0].awards] == ["AA867"]
 
 
-def test_arrival_drift_does_not_drop_the_only_candidate():
-    """Schedule sources disagree by a few minutes in real data (a live
-    cross-check found AA106 at 19:20 vs 19:15). When nothing matches the cash
-    arrival, keep the bucket rather than zeroing it — the carrier rules are
-    better evidence than a minute-precision timestamp."""
+def test_arrival_disagreement_drops_the_award_even_if_it_is_the_only_one():
+    """Disagreeing arrival is evidence of different metal, and we act on it
+    even when that leaves the row with no award.
+
+    Real schedule sources do drift: a cross-check of the seats.aero fixture
+    against the live Matrix cache found AA106 differing by 5 minutes (19:20 vs
+    19:15). So this WILL cost some legitimate matches. That trade is deliberate
+    — a dropped award shows an empty cell the user can investigate, while a
+    re-admitted one prints a confident price for another aircraft. Absence of
+    evidence (no arrival at all) is still admitted; only contradiction is not.
+
+    If drift turns out to be common in practice, the fix is a tolerance window
+    here, not restoring a wholesale fallback.
+    """
     res = SearchResult(
         solutions=[
             _itin(("AA106", "2026-08-15T19:20:00", "JFK", "LHR", "2026-08-16T07:30:00")),
@@ -1157,6 +1166,112 @@ def test_arrival_drift_does_not_drop_the_only_candidate():
             origin="JFK",
             dest="LHR",
             arrival="2026-08-16T07:25:00",
+        ),
+    ]
+    matches = join(res, awards)
+    assert matches[0].awards == []
+
+
+def test_arrival_missing_on_award_is_still_admitted():
+    """Absence of evidence is not evidence: an award that omits its arrival
+    stays eligible and is resolved by the carrier rules."""
+    res = SearchResult(
+        solutions=[
+            _itin(("AA106", "2026-08-15T19:20:00", "JFK", "LHR", "2026-08-16T07:30:00")),
+        ]
+    )
+    awards = [
+        _award(
+            "AA106", "2026-08-15T19:20:00", program="American", origin="JFK", dest="LHR", arrival=""
+        ),
+    ]
+    matches = join(res, awards)
+    assert len(matches[0].awards) == 1
+
+
+def test_primary_key_resolves_sibling_journeys_by_arrival():
+    """The second P0. (flight#, date, origin, dest) keys on the FIRST segment,
+    so every connecting journey starting on that flight collapses onto one
+    key. The repo's seats.aero fixture holds three distinct AA1444 JFK->LHR
+    journeys (arriving 06:55, 09:05, 12:50) — unresolved, the renderer's
+    lowest-miles pick quotes the 12:50 journey's fare on the 06:55 row."""
+    res = SearchResult(
+        solutions=[
+            _itin_multi(
+                ["AA1444", "AA200"],
+                "2026-08-15T18:00:00",
+                "JFK",
+                "LHR",
+                ["BOS"],
+                arrival="2026-08-16T06:55:00",
+            ),
+        ]
+    )
+    awards = [
+        _award(
+            "AA1444",
+            "2026-08-15T18:00:00",
+            program="American Airlines",
+            miles=115500,
+            origin="JFK",
+            dest="LHR",
+            arrival="2026-08-16T06:55:00",
+            num_connections=1,
+        ),
+        _award(
+            "AA1444",
+            "2026-08-15T18:00:00",
+            program="American Airlines",
+            miles=104000,
+            origin="JFK",
+            dest="LHR",
+            arrival="2026-08-16T12:50:00",
+            num_connections=1,
+        ),
+    ]
+    matches = join(res, awards)
+    assert [a.cabins[0].miles for a in matches[0].awards] == [115500]
+
+
+def test_matched_id_path_requires_carrier_corroboration():
+    """The third P0. PP mints matchedGoogleFlightId from a hint we supply and
+    its matcher is documented as loose, so the echoed ID is a claim, not proof.
+    A Delta award must not ride it onto an American row."""
+    res = SearchResult(
+        solutions=[
+            _itin_with_id("AA3539", "2026-09-09T10:45:00", "MSY", "MIA", flight_id="XyZ123"),
+        ]
+    )
+    awards = [
+        _award(
+            "DL1424",
+            "2026-09-09T10:45:00",
+            program="Delta",
+            miles=9100,
+            origin="MSY",
+            dest="MIA",
+            matched_id="XyZ123",
+        ),
+    ]
+    matches = join(res, awards)
+    assert matches[0].awards == []
+
+
+def test_matched_id_path_still_bridges_a_real_codeshare():
+    """...but the path keeps working for the codeshare it exists to serve."""
+    res = SearchResult(
+        solutions=[
+            _itin_with_id("AA6939", "2026-08-15T18:40:00", "JFK", "LHR", flight_id="XyZ123"),
+        ]
+    )
+    awards = [
+        _award(
+            "BA174",
+            "2026-08-15T18:40:00",
+            program="American",
+            origin="JFK",
+            dest="LHR",
+            matched_id="XyZ123",
         ),
     ]
     matches = join(res, awards)

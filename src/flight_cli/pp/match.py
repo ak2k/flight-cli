@@ -228,12 +228,13 @@ def _narrow(candidates: list[AwardFlight], cash_arrival: str) -> list[AwardFligh
     carrier rules cannot. Measured on a live MSY→MIA/FLL payload: route+departure
     alone left 3 multi-carrier buckets of 41; adding arrival left 0 of 91.
 
-    Abstains — returns the input untouched — unless the cash side has an
-    arrival AND *every* candidate has one. Partial coverage is the dangerous
-    case: filtering a mixed bucket silently drops the awards that merely omit
-    the field, which is how a correct match gets deleted in favour of a wrong
-    one. Both sides being fully populated is the only state where a
-    non-match is real evidence of different metal rather than missing data.
+    Per-candidate, not all-or-nothing. A candidate is kept when it agrees with
+    the cash arrival OR carries no arrival at all: a missing arrival is absence
+    of evidence, while a *disagreeing* arrival is evidence of different metal.
+    Judging each candidate on its own data avoids two failure modes an
+    all-or-nothing filter has — one member missing an arrival disabling the
+    filter for the whole bucket, and a bucket where every arrival disagrees
+    (the strongest possible evidence) being restored wholesale.
 
     Note both sides express local time at the airport: Matrix sends an offset
     ('...T09:04-04:00'), PointsPath naive ('...T09:04:00'), seats.aero a
@@ -243,10 +244,7 @@ def _narrow(candidates: list[AwardFlight], cash_arrival: str) -> list[AwardFligh
     """
     if not cash_arrival:
         return candidates
-    if not all(_iso_minute(af.arrival) for af in candidates):
-        return candidates
-    timed = [af for af in candidates if _iso_minute(af.arrival) == cash_arrival]
-    return timed or candidates
+    return [af for af in candidates if _iso_minute(af.arrival) in ("", cash_arrival)]
 
 
 def _iso_date(s: str | None) -> str:
@@ -424,17 +422,36 @@ def join(
         s = _cash_slice(it, slice_index)
         cash_stops = _slice_stop_count(s) if s else 0
 
+        cash_fn = cash_first_flight_number(it, slice_index=slice_index)
+        cash_arr = _iso_minute(s.arrival) if s else ""
+
         candidates: list[AwardFlight] = []
         mid_k = cash_matched_id_key(it, slice_index=slice_index)
         if mid_k:
-            candidates.extend(mid_idx.get(mid_k, ()))
+            # PP mints this ID from a hint we supplied, and its own matcher is
+            # documented as deliberately loose, so an echoed ID is a claim and
+            # not proof. Corroborate the carrier before trusting it —
+            # `same_metal` rather than exact, since bridging codeshares is the
+            # reason this path exists. Route already agrees: the ID is derived
+            # from the cash slice.
+            candidates.extend(
+                _narrow(
+                    [af for af in mid_idx.get(mid_k, ()) if same_metal(cash_fn, af.flight_number)],
+                    cash_arr,
+                ),
+            )
         fn_k = cash_match_key(it, slice_index=slice_index)
         if fn_k:
-            candidates.extend(fn_idx.get(fn_k, ()))
+            # (flight#, date, route) is NOT one journey. The key uses the first
+            # segment only, so every connecting itinerary that starts on this
+            # flight collapses together: the seats.aero fixture has three
+            # distinct AA1444 JFK→LHR journeys on one key, arriving 06:55,
+            # 09:05 and 12:50. Unresolved, the renderer's lowest-miles pick
+            # quotes the 12:50 journey's fare on the 06:55 row. Arrival is what
+            # separates them.
+            candidates.extend(_narrow(list(fn_idx.get(fn_k, ())), cash_arr))
         rt_k = cash_route_time_key(it, slice_index=slice_index)
         if rt_k:
-            cash_fn = cash_first_flight_number(it, slice_index=slice_index)
-            cash_arr = _iso_minute(s.arrival) if s else ""
             candidates.extend(_pick_metal(cash_fn, cash_arr, list(rt_idx.get(rt_k, ()))))
 
         matched: list[AwardFlight] = []
