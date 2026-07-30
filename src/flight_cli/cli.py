@@ -50,12 +50,13 @@ from .links import (
     matrix_itinerary_url,
 )
 from .log import configure as configure_logging
+from .models import SearchResult
 from .pp.auth import load_tokens
 from .pp.cli import auth_app, run_pp_for_search
 from .providers.base import LegQuery
 
 if TYPE_CHECKING:
-    from .models import CalendarResult, LegInfo, Location, SearchResult, Slice
+    from .models import CalendarResult, LegInfo, Location, Slice
 
 # Tuple-length sentinels for `--slice` parser (`ORIGIN-DEST:DATE[:r=...:e=...]`).
 _SLICE_MIN_PARTS = 2
@@ -802,6 +803,51 @@ def _try_pinned_gflight_url(search: Search, result: SearchResult | None, idx: in
         return None
 
 
+def _overlay_awards(
+    matrix_res: SearchResult,
+    *,
+    legs: tuple[Leg, ...],
+    opts: Any,
+    sel: Any,
+    awards_only: bool,
+) -> None:
+    """Render the award overlay for an already-fetched Matrix result."""
+    p = opts.pax
+    run_pp_for_search(
+        matrix_res,
+        legs=_build_pp_legs(legs),
+        num_passengers=p.adults + p.children + p.seniors + p.youth,
+        airlines=sel.pp_airlines() if sel is not None else None,
+        cabins=sel.pp_cabins() if sel is not None else None,
+        pp_only=awards_only,
+        json_out=False,
+        provider_filter=sel.provider_filter if sel is not None else None,
+        seats_sources=sel.seats_sources() if sel is not None else None,
+        cash_per_cabin=_cash_per_cabin_single(matrix_res, opts.cabin),
+    )
+
+
+def _pin_source_from_merged(rows: list[Any], top_n: int, src: SearchResult) -> SearchResult:
+    """The itineraries `--pick N` should index: exactly the rows rendered.
+
+    `--pick N` names a row number the user just read off the merged GF+Matrix
+    table. Pinning from `matrix_res` instead indexes a DIFFERENT sequence —
+    a Google-only row is cheaper, so it sorts early and shifts every row after
+    it, and the emitted link then pins an itinerary the user never selected.
+    Since that link is the handoff to an actual booking, the two orderings
+    must be the same list.
+    """
+    kept = rows[:top_n]
+    # `session` / `solution_set` are server-generated and required to build a
+    # Matrix pinned itinerary URL, so they must survive the re-key.
+    return SearchResult(  # pyright: ignore[reportCallIssue]  # DIVERGE: Field(alias=...) confuses basedpyright into requiring aliased names
+        solutionCount=len(kept),
+        solutions=[r.itinerary for r in kept],
+        session=src.session,
+        solutionSet=src.solution_set,
+    )
+
+
 def _emit_urls(
     search: Search,
     *,
@@ -1369,28 +1415,20 @@ def _run_enriched_path(
         return
     matrix_res = cast("SearchResult", matrix_res)
 
-    # Repaint: reconciled GF + Matrix, prices attributed.
+    # Repaint: reconciled GF + Matrix, prices attributed. `--pick` indexes the
+    # rendered merged rows; with no merged table (awards-only) it falls back to
+    # Matrix's own ordering, which is then what the user saw.
+    pin_res = matrix_res
     if not awards_only:
         merged = merge_results(fli_results_to_search_result(gf), matrix_res)
         _render_merged(merged, legs=legs, top_n=top_n)
+        pin_res = _pin_source_from_merged(merged, top_n, matrix_res)
 
     if run_pp:
-        p = opts.pax
-        run_pp_for_search(
-            matrix_res,
-            legs=_build_pp_legs(legs),
-            num_passengers=p.adults + p.children + p.seniors + p.youth,
-            airlines=sel.pp_airlines() if sel is not None else None,
-            cabins=sel.pp_cabins() if sel is not None else None,
-            pp_only=awards_only,
-            json_out=False,
-            provider_filter=sel.provider_filter if sel is not None else None,
-            seats_sources=sel.seats_sources() if sel is not None else None,
-            cash_per_cabin=_cash_per_cabin_single(matrix_res, opts.cabin),
-        )
+        _overlay_awards(matrix_res, legs=legs, opts=opts, sel=sel, awards_only=awards_only)
 
     _emit_urls(
-        matrix_search, matrix_url=matrix_url, google_url=google_url, result=matrix_res, pick=pick
+        matrix_search, matrix_url=matrix_url, google_url=google_url, result=pin_res, pick=pick
     )
 
 
