@@ -376,3 +376,27 @@ def test_three_leg_itinerary_is_multi_city_not_round_trip() -> None:
     assert trip_type(1) == _GF_TRIP_ONE_WAY
     assert trip_type(2) == _GF_TRIP_ROUND_TRIP
     assert trip_type(3) == _GF_TRIP_MULTI_CITY
+
+
+def test_stop_limit_reaches_the_google_search_url() -> None:
+    """`max_stops` is a TFSData-level field, not per-FlightData. Omitting it
+    made a `--stops 0` link byte-identical to an unconstrained one, so a
+    nonstop-only result table handed the user a page that also offered
+    connections."""
+    from datetime import date
+
+    from flight_cli.domain import Leg, SearchOptions, SpecificDateSearch
+    from flight_cli.links import google_flights_url
+
+    def url(max_extra_stops: int | None) -> str:
+        return google_flights_url(
+            SpecificDateSearch(
+                legs=(Leg(origins=("JFK",), destinations=("LHR",), date=date(2026, 9, 1)),),
+                options=SearchOptions(max_extra_stops=max_extra_stops),
+            ),
+        )
+
+    nonstop, one_stop, unconstrained = url(0), url(1), url(None)
+    assert nonstop != unconstrained
+    assert nonstop != one_stop
+    assert one_stop != unconstrained

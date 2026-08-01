@@ -676,6 +676,11 @@ def google_flights_url(s: Search, *, currency: str = "USD", language: str = "en"
             infants_in_seat=p.infants_in_seat,
             infants_on_lap=p.infants_in_lap,
         ),
+        # The stop limit is a TFSData-level field, not per-FlightData. Omitting
+        # it made a `--stops 0` link byte-identical to an unconstrained one, so
+        # a nonstop-only result table handed the user a page that also offered
+        # connections.
+        max_stops=s.options.max_extra_stops,
     )
     b64 = td.as_b64().decode()
     return (
