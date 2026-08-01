@@ -68,12 +68,28 @@ _PROGRAM_LABELS: dict[str, str] = {
 # Seats.aero cabin slug → CabinAward.cabin string. Aligns with PointsPath's
 # "Economy"/"Business"/"First"/"Premium" labels so the renderer doesn't
 # have to disambiguate by provider.
+# Values MUST match the CLI's canonical cabin vocabulary (`_CABIN_ALIASES` in
+# pp/cli.py), because the renderer selects awards by exact cabin-string
+# equality. "Premium" did not equal the canonical "Premium economy", so every
+# seats.aero premium award silently vanished from that column.
 _CABIN_LABELS: dict[str, str] = {
     "economy": "Economy",
-    "premium": "Premium",
+    "premium": "Premium economy",
     "business": "Business",
     "first": "First",
 }
+
+
+# Canonical cabin label -> seats.aero's own query slug. The outbound filter
+# needs the inverse of `_CABIN_LABELS`, and a bare `.lower()` no longer works
+# now that the canonical name is "Premium economy": the API expects "premium",
+# so lowercasing sent "premium economy" and the filter silently matched
+# nothing.
+_CABIN_SLUGS: dict[str, str] = {label: slug for slug, label in _CABIN_LABELS.items()}
+
+
+def _cabin_slug(label: str) -> str:
+    return _CABIN_SLUGS.get(label, label.lower())
 
 
 def _program_label(slug: str) -> str:
@@ -249,7 +265,7 @@ class SeatsAeroProvider:
         usual.
         """
         _ = num_passengers, cash_hints
-        cabin_slugs = tuple(c.lower() for c in cabins) if cabins else None
+        cabin_slugs = tuple(_cabin_slug(c) for c in cabins) if cabins else None
         try:
             page = await self._client.search(
                 origin=leg.origin,

@@ -142,3 +142,25 @@ def test_seats_aero_timestamps_are_normalized_to_naive_local() -> None:
     assert _local_naive("2026-08-15T06:30:00Z") == "2026-08-15T06:30:00"
     assert _local_naive("2026-08-15T06:30:00") == "2026-08-15T06:30:00"
     assert _local_naive("") == ""
+
+
+def test_cabin_labels_match_the_cli_canonical_vocabulary() -> None:
+    """The renderer selects awards by exact cabin-string equality, so a
+    provider label that differs from the CLI's canonical name makes those
+    awards vanish from the column. seats.aero's "Premium" never equalled
+    "Premium economy"."""
+    from flight_cli.pp.cli import _normalize_cabin
+    from flight_cli.providers.seats_aero.provider import _cabin_label
+
+    for slug in ("economy", "premium", "business", "first"):
+        assert _cabin_label(slug) == _normalize_cabin(slug)
+
+
+def test_cabin_slug_round_trips_for_the_outbound_filter() -> None:
+    """The API filter needs seats.aero's own slug. A bare `.lower()` sent
+    "premium economy" once the canonical label gained a space, and matched
+    nothing."""
+    from flight_cli.providers.seats_aero.provider import _cabin_label, _cabin_slug
+
+    for slug in ("economy", "premium", "business", "first"):
+        assert _cabin_slug(_cabin_label(slug)) == slug

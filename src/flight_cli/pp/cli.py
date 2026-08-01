@@ -454,7 +454,7 @@ def _fmt_iso_compact(s: str) -> str:
 
 def _best_award_for_cabin(
     award_flights: list[AwardFlight], want_cabin: str
-) -> tuple[int, float, str, list[str]] | None:
+) -> tuple[int, float, str, list[str], str] | None:
     """Cheapest offer across providers for one cabin, or None.
 
     Ranked on (miles, tax) — miles first, since that is the scarce currency,
@@ -466,12 +466,12 @@ def _best_award_for_cabin(
     presenting one under the plain "Economy" heading overstates what the
     traveller gets. `_basic_economy_award_for_cabin` surfaces them explicitly.
     """
-    best: tuple[int, float, str, list[str]] | None = None
+    best: tuple[int, float, str, list[str], str] | None = None
     for af in award_flights:
         for ca in af.cabins:
             if ca.cabin != want_cabin or ca.is_basic_economy:
                 continue
-            key = (ca.miles, ca.tax_usd, af.program, af.funding_banks)
+            key = (ca.miles, ca.tax_usd, af.program, af.funding_banks, ca.tax_currency)
             if best is None or (key[0], key[1]) < (best[0], best[1]):
                 best = key
     return best
@@ -479,16 +479,16 @@ def _best_award_for_cabin(
 
 def _basic_economy_award_for_cabin(
     award_flights: list[AwardFlight], want_cabin: str
-) -> tuple[int, float, str, list[str]] | None:
+) -> tuple[int, float, str, list[str], str] | None:
     """Cheapest BASIC-economy offer for one cabin — the fares
     `_best_award_for_cabin` deliberately skips. Rendered with an explicit
     label so the restriction is visible rather than implied."""
-    best: tuple[int, float, str, list[str]] | None = None
+    best: tuple[int, float, str, list[str], str] | None = None
     for af in award_flights:
         for ca in af.cabins:
             if ca.cabin != want_cabin or not ca.is_basic_economy:
                 continue
-            key = (ca.miles, ca.tax_usd, af.program, af.funding_banks)
+            key = (ca.miles, ca.tax_usd, af.program, af.funding_banks, ca.tax_currency)
             if best is None or (key[0], key[1]) < (best[0], best[1]):
                 best = key
     return best
@@ -514,9 +514,18 @@ def _fmt_award_cell(
         label = " [dim](basic)[/]"
     if best is None:
         return "—"
-    miles, tax, program, _banks = best
-    head = f"{_fmt_miles(miles)} {program} + ${tax:.0f}{label}"
+    miles, tax, program, _banks, tax_ccy = best
+    # Print the tax in the currency it is actually denominated in. Formatting a
+    # EUR amount as "$" both misstates it and invites the reader to add it to a
+    # USD fare.
+    tax_str = f"${tax:.0f}" if tax_ccy in ("", "USD") else f"{tax:.0f} {tax_ccy}"
+    head = f"{_fmt_miles(miles)} {program} + {tax_str}{label}"
     if cash_usd is None:
+        return head
+    # ¢/mi nets the tax off a USD cash fare, so a non-USD tax would silently
+    # subtract the wrong magnitude. Suppress rather than convert: we have no
+    # rate source, and a wrong valuation is worse than a missing one.
+    if tax_ccy not in ("", "USD"):
         return head
     cpm = _cents_per_mile(cash_usd, miles, tax)
     if cpm is None:
@@ -534,7 +543,7 @@ def _fmt_funding(award_flights: list[AwardFlight], cabins: tuple[str, ...] = ())
     shows; `cabins` empty keeps the old union for callers with no cabin
     context.
     """
-    winners: list[tuple[int, float, str, list[str]]] = []
+    winners: list[tuple[int, float, str, list[str], str]] = []
     for cab in cabins:
         for pick in (
             _best_award_for_cabin(award_flights, cab),

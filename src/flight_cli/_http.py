@@ -159,11 +159,30 @@ class HttpTransport:
 
     # ────────────────────────── cache helpers ─────────────────────────────
 
-    def _cache_key(self, url: str, body: dict[str, Any] | None) -> str:
+    def _cache_key(
+        self,
+        method: str,
+        url: str,
+        params: dict[str, Any] | None,
+        body: dict[str, Any] | None,
+    ) -> str:
+        """Hash a canonical envelope of everything that varies the response.
+
+        Method is included so a GET and a POST to one URL can never share an
+        entry. Params are hashed as structured pairs rather than flattened into
+        the URL: the old `"&".join(f"{k}={v}")` was unescaped, so a value
+        CONTAINING a separator forged another request's key — `{"a": "1&b=2"}`
+        and `{"a": "1", "b": "2"}` produced the identical hash, and whichever
+        ran first served the other its flight data.
+        """
+        envelope = {
+            "method": method.upper(),
+            "url": url,
+            "params": sorted((str(k), str(v)) for k, v in (params or {}).items()),
+            "body": body,
+        }
         h = hashlib.sha256()
-        h.update(url.encode())
-        if body is not None:
-            h.update(json.dumps(body, sort_keys=True, separators=(",", ":")).encode())
+        h.update(json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode())
         return h.hexdigest()[:24]
 
     async def _cache_get(self, key: str) -> dict[str, Any] | None:
@@ -192,10 +211,7 @@ class HttpTransport:
     async def get_json(
         self, url: str, *, params: dict[str, Any] | None = None, cache: bool = True
     ) -> dict[str, Any]:
-        cache_key = self._cache_key(
-            url + "?" + "&".join(f"{k}={v}" for k, v in (params or {}).items()),
-            None,
-        )
+        cache_key = self._cache_key("GET", url, params, None)
         if cache and self._cache_read:
             hit = await self._cache_get(cache_key)
             if hit is not None:
@@ -238,10 +254,7 @@ class HttpTransport:
         # bodies; we strip that field before hashing so two semantically equal
         # requests share a cache entry.
         body_for_hash = {k: v for k, v in body.items() if k != "bgProgramResponse"}
-        cache_key = self._cache_key(
-            url + "?" + "&".join(f"{k}={v}" for k, v in (params or {}).items()),
-            body_for_hash,
-        )
+        cache_key = self._cache_key("POST", url, params, body_for_hash)
         if cache and self._cache_read:
             hit = await self._cache_get(cache_key)
             if hit is not None:

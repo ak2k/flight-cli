@@ -133,7 +133,7 @@ def test_best_award_for_cabin_picks_cheapest_in_miles():
     ]
     best = _best_award_for_cabin(awards, "Economy")
     assert best is not None
-    miles, _tax, program, _banks = best
+    miles, _tax, program, _banks, _ccy = best
     assert (miles, program) == (30_000, "Cheap")
 
 
@@ -333,3 +333,31 @@ def test_json_return_leg_describes_the_return_slice() -> None:
     assert payload[0]["flight"] == "BA200"
     assert payload[0]["origin"] == "LHR"
     assert payload[0]["destination"] == "JFK"
+
+
+def test_non_usd_tax_is_labelled_and_suppresses_cpm() -> None:
+    """A EUR tax printed as "$" both misstates the amount and invites adding it
+    to a USD fare. ¢/mi nets tax off USD cash, so a foreign tax would subtract
+    the wrong magnitude — suppressed rather than converted, since there is no
+    rate source and a wrong valuation is worse than a missing one."""
+    usd = _fmt_award_cell([_ra("American", 30000, 6.0)], "Economy", 500.0)
+    assert "$6" in usd
+    assert "¢/mi" in usd
+
+    eur = AwardFlight(
+        origin="JFK",
+        destination="LHR",
+        departure="d",
+        arrival="a",
+        flight_number="AA100",
+        num_connections=0,
+        provider="X",
+        program="American",
+        miles_to_cash_ratio=0.0125,
+        funding_banks=["Chase"],
+        cabins=[CabinAward(cabin="Economy", miles=30000, tax_usd=180.0, tax_currency="EUR")],
+    )
+    cell = _fmt_award_cell([eur], "Economy", 500.0)
+    assert "180 EUR" in cell
+    assert "$" not in cell
+    assert "¢/mi" not in cell

@@ -127,3 +127,33 @@ def test_cache_read_disabled_always_refetches(tmp_path: pathlib.Path) -> None:
 
     anyio.run(go)
     assert calls[0] == 2
+
+
+# ──────────────────────── cache key is unambiguous ────────────────────────
+
+
+def test_param_value_containing_a_separator_cannot_forge_another_key(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The key flattened params with an unescaped `"&".join(f"{k}={v}")`, so a
+    VALUE containing a separator produced another request's hash — whichever
+    ran first served the other its flight data."""
+    t = HttpTransport(cache_dir=tmp_path)
+    injected = t._cache_key("GET", "https://x.test/s", {"a": "1&b=2"}, None)
+    genuine = t._cache_key("GET", "https://x.test/s", {"a": "1", "b": "2"}, None)
+    assert injected != genuine
+
+
+def test_get_and_post_never_share_an_entry(tmp_path: pathlib.Path) -> None:
+    t = HttpTransport(cache_dir=tmp_path)
+    assert t._cache_key("GET", "https://x.test/s", None, None) != t._cache_key(
+        "POST", "https://x.test/s", None, None
+    )
+
+
+def test_param_order_does_not_change_the_key(tmp_path: pathlib.Path) -> None:
+    """Same request, different dict ordering, must hit the same entry."""
+    t = HttpTransport(cache_dir=tmp_path)
+    assert t._cache_key("GET", "https://x.test/s", {"b": "2", "a": "1"}, None) == t._cache_key(
+        "GET", "https://x.test/s", {"a": "1", "b": "2"}, None
+    )
