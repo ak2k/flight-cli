@@ -28,14 +28,28 @@ mirrors that, so our links stay byte-identical to the app's own in both cases
 
 ## Capture recipe
 
-Headless is blocked by `waa-pa` bot attestation; use real Chrome via
-patchright (`AGENTS.md` has the full pattern). Watch two things at once:
+`research/capture_matrix_spa.py` does this **unattended** — re-run it whenever
+the SPA changes:
 
-- `page.url` → decode the `search=` base64 for URL state
-- `page.on("request")` filtered to `alkali`/`batch` → the API body
+    uv run --with patchright python research/capture_matrix_spa.py
 
-Selector notes: `mat-input-*` ids are regenerated per render and useless;
-`input[placeholder="Routing"]` / `"Extension"` are stable. Driving the whole
-form programmatically is unreliable — the Search button stays disabled unless
-the airport/date fields commit the way the Angular form expects. Filling the
-routing boxes and having a human complete the search worked.
+Headless is blocked by `waa-pa` bot attestation, so it drives real Chrome via
+patchright, but needs no human. It records both surfaces at once: `page.url`
+(decode the `search=` base64) and `page.on("request")` filtered to
+`alkali`/`batch` (the API body).
+
+Four form-driving traps, each of which silently leaves Search **disabled**:
+
+1. Airports are an autocomplete — type, then **click the `mat-option`**.
+   `fill()` leaves the underlying model empty.
+2. The date input has **no placeholder**; select it by
+   `input.mat-datepicker-input`.
+3. The date must be typed with **`press_sequentially`**. `fill()` sets the
+   visible value but does not fire the events Angular's form model listens
+   for, so Search stays disabled with a date plainly showing — the most
+   misleading of the four.
+4. `mat-input-*` ids are regenerated per render. Never select on them;
+   `input[placeholder="Routing"]` / `"Extension"` are stable.
+
+Order matters too: pick airports **before** switching to One way, or the date
+control isn't rendered yet.
