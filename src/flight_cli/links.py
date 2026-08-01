@@ -90,14 +90,45 @@ def _spa_specific_leg(leg: Leg, *, return_leg: Leg | None = None) -> dict[str, A
         "dates": {
             "searchDateType": "specific",
             "departureDate": leg.date.isoformat() if leg.date else "",
-            "departureDateType": "depart",
+            # "depart" | "arrive" — the SPA's encoding of arrival-date intent,
+            # the URL-state counterpart of the API's `isArrivalDate` bool.
+            "departureDateType": "arrive" if leg.is_arrival_date else "depart",
             "departureDateModifier": str(leg.date_minus),
             "departureDatePreferredTimes": [t.value for t in leg.time_ranges],
             "returnDate": return_date,
-            "returnDateType": "depart",
+            "returnDateType": "arrive" if (return_leg and return_leg.is_arrival_date) else "depart",
             "returnDateModifier": return_modifier,
             "returnDatePreferredTimes": return_times,
         },
+        **_spa_routing_fields(leg, return_leg),
+    }
+
+
+def _spa_routing_fields(leg: Leg, return_leg: Leg | None) -> dict[str, str]:
+    """Routing-language / extension-code keys for a SPA URL-state slice.
+
+    The SPA names these `routing` / `ext` — NOT the `routeLanguage` /
+    `commandLine` the /batch API uses for the same values. Both shapes were
+    captured from the real UI: with codes set the slice carries all four keys
+    (`routingRet` / `extRet` hold the inbound leg's own codes); with none set
+    it omits them entirely, which is what the tracked fixtures show. We mirror
+    that, so a link is byte-identical to what the app itself would produce.
+
+    Dropping these meant a link built from `--routing BA+ --ext "MAXSTOPS 0"`
+    opened an UNCONSTRAINED search — offering the user itineraries the CLI had
+    deliberately excluded.
+    """
+    routing = leg.route_language or ""
+    ext = leg.extension or ""
+    routing_ret = (return_leg.route_language or "") if return_leg else ""
+    ext_ret = (return_leg.extension or "") if return_leg else ""
+    if not any((routing, ext, routing_ret, ext_ret)):
+        return {}
+    return {
+        "routing": routing,
+        "ext": ext,
+        "routingRet": routing_ret,
+        "extRet": ext_ret,
     }
 
 

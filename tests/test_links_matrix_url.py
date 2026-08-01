@@ -279,3 +279,93 @@ def test_half_open_jaw_is_multi_city() -> None:
     )
     trip, _ = _spa_specific_slices(legs)
     assert trip == "multi-city"
+
+
+# ───────── routing / extension / arrival-date reach the deep link ─────────
+
+
+def _decoded(s: object) -> dict[str, Any]:
+    import base64
+    import json
+    import urllib.parse
+
+    from flight_cli.links import matrix_deep_link
+
+    q = urllib.parse.unquote(matrix_deep_link(s).split("search=", 1)[1])  # pyright: ignore[reportArgumentType]
+    return json.loads(base64.b64decode(q + "=="))
+
+
+def test_routing_and_extension_reach_the_matrix_link() -> None:
+    """Field names captured from the real SPA (2026-08): the URL state calls
+    these `routing` / `ext`, NOT the `routeLanguage` / `commandLine` the /batch
+    API uses for the same values — see docs/memories/matrix_spa_url_state.md.
+
+    Dropping them meant a link built from `--routing BA+ --ext "MAXSTOPS 0"`
+    opened an UNCONSTRAINED search, showing itineraries the CLI had excluded.
+    """
+    from flight_cli.domain import Leg, SpecificDateSearch
+
+    s = SpecificDateSearch(
+        legs=(
+            Leg(
+                origins=("JFK",),
+                destinations=("LHR",),
+                date=date(2026, 9, 1),
+                route_language="BA+",
+                extension="MAXSTOPS 0",
+            ),
+        ),
+    )
+    sl = _decoded(s)["slices"][0]
+    assert sl["routing"] == "BA+"
+    assert sl["ext"] == "MAXSTOPS 0"
+
+
+def test_return_leg_carries_its_own_routing_codes() -> None:
+    """The SPA folds a round trip into one slice, so the inbound leg's codes
+    live in the separate `routingRet` / `extRet` fields."""
+    from flight_cli.domain import Leg, SpecificDateSearch
+
+    s = SpecificDateSearch(
+        legs=(
+            Leg(
+                origins=("JFK",),
+                destinations=("LHR",),
+                date=date(2026, 9, 1),
+                route_language="BA+",
+                extension="MAXSTOPS 0",
+            ),
+            Leg(
+                origins=("LHR",),
+                destinations=("JFK",),
+                date=date(2026, 9, 8),
+                route_language="AA+",
+                extension="MAXCONNECT 2:00",
+            ),
+        ),
+    )
+    sl = _decoded(s)["slices"][0]
+    assert (sl["routing"], sl["ext"]) == ("BA+", "MAXSTOPS 0")
+    assert (sl["routingRet"], sl["extRet"]) == ("AA+", "MAXCONNECT 2:00")
+
+
+def test_arrival_date_intent_survives_into_the_link() -> None:
+    """The URL-state counterpart of the API's `isArrivalDate` bool is the
+    string `departureDateType: "arrive"`."""
+    from flight_cli.domain import Leg, SpecificDateSearch
+
+    def date_type(is_arrival: bool) -> str:
+        s = SpecificDateSearch(
+            legs=(
+                Leg(
+                    origins=("JFK",),
+                    destinations=("LHR",),
+                    date=date(2026, 9, 1),
+                    is_arrival_date=is_arrival,
+                ),
+            ),
+        )
+        return _decoded(s)["slices"][0]["dates"]["departureDateType"]
+
+    assert date_type(True) == "arrive"
+    assert date_type(False) == "depart"
