@@ -46,6 +46,11 @@ class CabinAward:
     tax_usd: float
     tax_currency: str
     is_basic_economy: bool | None = None
+    # Seats the provider says are left at this price, when it says. None means
+    # "not reported" — NOT "none available"; PointsPath doesn't expose it and
+    # seats.aero's value is often 0 through staleness rather than sell-out.
+    # The renderer uses it only to flag an award that cannot seat the party.
+    remaining_seats: int | None = None
 
 
 @dataclass

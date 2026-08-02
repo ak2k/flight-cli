@@ -101,3 +101,92 @@ def test_infants_reach_the_google_flights_bridge() -> None:
     priced one fewer seat than the Matrix side of the same run."""
     pi = _fli_pax(adults=2, children=1, infants_in_seat=1, infants_in_lap=1)
     assert (pi.adults, pi.children, pi.infants_in_seat, pi.infants_on_lap) == (2, 1, 1, 1)
+
+
+# ───────── the Google link states how it differs from the search ─────────
+
+
+def test_multi_airport_and_routing_search_gets_caveats() -> None:
+    """`fast_flights`' tfs= format takes one airport pair and has no routing
+    field, so a multi-airport routed search silently degrades: rows flying
+    EWR->LGW under `--routing AA+` sat beside a link searching JFK->LHR
+    unconstrained, while the Matrix link on the same output was faithful."""
+    from flight_cli.cli import _gflight_url_caveats
+
+    s = SpecificDateSearch(
+        legs=(
+            Leg(
+                origins=("JFK", "EWR", "LGA"),
+                destinations=("LHR", "LGW"),
+                date=date(2026, 9, 1),
+                route_language="AA+",
+                extension="f bc=J",
+            ),
+        ),
+    )
+    notes = _gflight_url_caveats(s)
+    assert any("multi-airport" in n and "JFK→LHR" in n for n in notes)
+    assert any("routing/extension" in n for n in notes)
+
+
+def test_plain_search_gets_no_caveats() -> None:
+    """A search the link CAN express must not be annotated."""
+    from flight_cli.cli import _gflight_url_caveats
+
+    s = SpecificDateSearch(
+        legs=(Leg(origins=("JFK",), destinations=("LHR",), date=date(2026, 9, 1)),),
+    )
+    assert _gflight_url_caveats(s) == []
+
+
+# ───────── an award without enough seats is flagged, not hidden ─────────
+
+
+def _award(miles: int, seats: int | None) -> Any:
+    from flight_cli.providers.base import AwardFlight, CabinAward
+
+    return AwardFlight(
+        origin="JFK",
+        destination="LHR",
+        departure="d",
+        arrival="a",
+        flight_number="AA100",
+        num_connections=0,
+        provider="Seats.aero",
+        program="American Airlines",
+        miles_to_cash_ratio=0.0125,
+        funding_banks=["Chase"],
+        cabins=[
+            CabinAward(
+                cabin="Business",
+                miles=miles,
+                tax_usd=5.6,
+                tax_currency="USD",
+                remaining_seats=seats,
+            ),
+        ],
+    )
+
+
+def test_award_with_fewer_seats_than_the_party_is_flagged() -> None:
+    """seats.aero reports RemainingSeats and the provider discarded it, so a
+    57,500-mile business award with ONE seat rendered as available to a party
+    of four."""
+    from flight_cli.pp.cli import _fmt_award_cell
+
+    cell = _fmt_award_cell([_award(57_500, 1)], "Business", None, 4)
+    assert "1 seat" in cell
+
+
+def test_sufficient_seats_are_not_flagged() -> None:
+    from flight_cli.pp.cli import _fmt_award_cell
+
+    assert "seat" not in _fmt_award_cell([_award(57_500, 4)], "Business", None, 4)
+
+
+def test_unreported_seat_count_is_not_treated_as_zero() -> None:
+    """None means "not reported" — PointsPath never reports it, and
+    seats.aero's 0 is usually staleness. Neither is a claim of no seats."""
+    from flight_cli.pp.cli import _fmt_award_cell
+
+    assert "seat" not in _fmt_award_cell([_award(57_500, None)], "Business", None, 4)

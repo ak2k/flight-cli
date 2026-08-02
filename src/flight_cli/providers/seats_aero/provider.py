@@ -162,6 +162,9 @@ def _group_trips_to_awards(
             miles=t.MileageCost,
             tax_usd=t.TotalTaxes / 100.0,  # seats.aero returns cents
             tax_currency=tax_currency,
+            # 0 is seats.aero's "unknown/stale", not a hard zero — see the
+            # field comment in models.py — so don't turn it into a claim.
+            remaining_seats=t.RemainingSeats or None,
         )
         if af is None:
             grouped[key] = AwardFlight(

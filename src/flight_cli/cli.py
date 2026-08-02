@@ -560,16 +560,35 @@ async def _gather_calendar(
     just drops its destination from the merge rather than sinking the whole run."""
     results: list[CalendarResult | None] = [None] * len(subs)
 
+    failures: list[tuple[int, str]] = []
+
     async def one(i: int, s: CalendarSearch) -> None:
         try:
             results[i] = cast("CalendarResult", await c.execute(s, cache=cache))
-        except Exception:  # noqa: BLE001 — a sub-query failure just drops that destination
+        except Exception as e:  # noqa: BLE001 — a sub-query failure just drops that destination
             results[i] = None
+            failures.append((i, str(e) or type(e).__name__))
 
     async with anyio.create_task_group() as tg:
         for i, s in enumerate(subs):
             tg.start_soon(one, i, s)
+
+    # A dropped sub-query silently removes its destination from the grid, so
+    # "cheapest destination" would be computed over an incomplete set and
+    # presented as the answer. Name what is missing.
+    for i, msg in sorted(failures):
+        route = _calendar_route_label(subs[i])
+        err.print(f"[yellow]{route}: sub-query failed, omitted from the grid — {msg}[/]")
+
     return [r for r in results if r is not None]
+
+
+def _calendar_route_label(s: CalendarSearch) -> str:
+    """`JFK,EWR→LHR` for a sub-query, for failure messages."""
+    if not s.legs:
+        return "?"
+    leg = s.legs[0]
+    return f"{','.join(leg.origins)}→{','.join(leg.destinations)}"
 
 
 def _run_calendar(
@@ -619,7 +638,9 @@ def _run_calendar(
                 return cast("CalendarResult", await c.execute(search, cache=not no_cache)), 0
             recovered = await _gather_calendar(c, subs, cache=not no_cache)
             merged = merge_calendar_results(recovered)
-            return (merged, n) if not is_empty_calendar(merged) else (merged, 0)
+            # Count what SUCCEEDED. Returning `n` (the requested fan-out size)
+            # reported a complete merge even when sub-queries had been dropped.
+            return (merged, len(recovered)) if not is_empty_calendar(merged) else (merged, 0)
 
     try:
         return anyio.run(go)
@@ -894,11 +915,39 @@ def _emit_urls(
             else:
                 console.print("[dim]Google Flights (tfs= structured):[/]")
                 console.print(f"  [link]{google_flights_url(search)}[/]")
+                for note in _gflight_url_caveats(search):
+                    console.print(f"  [yellow]note: {note}[/]")
         except Exception as e:  # noqa: BLE001 - third-party undocumented errors; non-fatal fallback
             console.print(f"[dim]Google Flights link: {e}[/]")
 
 
 # ─────────────────────────── result renderers ──────────────────────────────
+
+
+def _gflight_url_caveats(search: Search) -> list[str]:
+    """Ways the emitted Google link is NARROWER than the search it came from.
+
+    `fast_flights`' tfs= encoder takes exactly one origin and one destination
+    per leg and has no routing-language field, so a multi-airport or routed
+    search silently degrades: rows flying EWR->LGW under `--routing AA+` sat
+    beside a link that searched JFK->LHR unconstrained, and nothing said so.
+    The Matrix link on the same output IS faithful, which made the two
+    disagree with no explanation.
+
+    We still emit the link — it is a useful starting point, and booking hands
+    off to Google — but the ways it differs are now stated.
+    """
+    legs: tuple[Leg, ...] = getattr(search, "legs", ()) or ()
+    notes: list[str] = []
+    if legs and any(len(lg.origins) > 1 or len(lg.destinations) > 1 for lg in legs):
+        first = legs[0]
+        notes.append(
+            f"multi-airport search narrowed to {first.origins[0]}→{first.destinations[0]} "
+            "(Google's link format takes one airport pair)"
+        )
+    if any(lg.route_language or lg.extension for lg in legs):
+        notes.append("routing/extension codes are not expressible in a Google link")
+    return notes
 
 
 def _parse_iso(s: str) -> datetime | None:
@@ -1955,7 +2004,11 @@ def _render_gflight_table(
                 any_legroom = True
             t.add_row(
                 label,
-                f"{fr.currency or 'USD'}{fr.price:.2f}",
+                # fli types `price` as `NonNegativeFloat | None` ("None when
+                # not surfaced"). The gflight adapter already tolerates that;
+                # this renderer formatted it unguarded and raised TypeError,
+                # so one price-less row took down the whole cash table.
+                (f"{fr.currency or 'USD'}{fr.price:.2f}" if fr.price is not None else "—"),
                 str(fr.stops),
                 dur,
                 legs_str,
@@ -2986,7 +3039,7 @@ def calendar(
         return
     if n_split:
         console.print(
-            f"[dim]Queried {n_split} destinations separately and merged — Matrix "
+            f"[dim]Queried {n_split} origin/destination groups separately and merged — Matrix "
             f"under-reports the combined multi-airport calendar grid.[/]"
         )
     _render_calendar(res, dmin=dmin, dmax=dmax, origin=origins, destination=dests, sd=sd, ed=ed)

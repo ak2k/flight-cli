@@ -133,7 +133,7 @@ def test_best_award_for_cabin_picks_cheapest_in_miles():
     ]
     best = _best_award_for_cabin(awards, "Economy")
     assert best is not None
-    miles, _tax, program, _banks, _ccy = best
+    miles, _tax, program, _banks, _ccy, _seats = best
     assert (miles, program) == (30_000, "Cheap")
 
 
