@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -172,3 +173,60 @@ def test_login_from_chrome_uses_rookiepy(
     t = login_from_chrome()
     assert t.user_email == "chrome@example.com"
     assert seen_domains == [["pointspath.com"]], "Should scope read to pointspath.com only"
+
+
+# ───────── the token file is never briefly world-readable ─────────
+
+
+def test_token_file_is_created_0600_not_widened_then_tightened(
+    tmp_path: pathlib.Path, monkeypatch: Any
+) -> None:
+    """`write_text` creates at the process umask (0644 by default), so writing
+    then chmod'ing left a bearer token to a paid account world-readable for the
+    window between the two calls. The file must be created 0600."""
+    import stat
+
+    from flight_cli.pp import auth as auth_mod
+
+    monkeypatch.setattr(auth_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(auth_mod, "TOKENS_PATH", tmp_path / "pp.json")
+
+    modes: list[int] = []
+    real_open = os.open
+
+    def spy(path: Any, flags: int, mode: int = 0o777, **kw: Any) -> int:
+        if str(path).endswith("pp.json"):
+            modes.append(mode)
+        return real_open(path, flags, mode, **kw)
+
+    monkeypatch.setattr(os, "open", spy)
+    auth_mod.save_tokens(
+        auth_mod.Tokens(
+            access_token="A",  # noqa: S106 — dummy test value
+            refresh_token="R",  # noqa: S106 — dummy test value
+            expires_at=9_999_999_999,
+            user_email="x@y.z",
+        ),
+    )
+    # Requested at creation, not applied afterwards.
+    assert modes == [0o600]
+    final = stat.S_IMODE((tmp_path / "pp.json").stat().st_mode)
+    assert final == 0o600
+
+
+def test_saved_tokens_round_trip(tmp_path: pathlib.Path, monkeypatch: Any) -> None:
+    from flight_cli.pp import auth as auth_mod
+
+    monkeypatch.setattr(auth_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(auth_mod, "TOKENS_PATH", tmp_path / "pp.json")
+    original = auth_mod.Tokens(
+        access_token="ACCESS",  # noqa: S106 — dummy test value
+        refresh_token="REFRESH",  # noqa: S106 — dummy test value
+        expires_at=9_999_999_999,
+        user_email="x@y.z",
+    )
+    auth_mod.save_tokens(original)
+    loaded = auth_mod.load_tokens()
+    assert loaded is not None
+    assert loaded.access_token == "ACCESS"  # noqa: S105 — asserting a dummy round-trip
+    assert loaded.user_email == "x@y.z"
