@@ -111,9 +111,16 @@ def to_fli_filter(s: Search) -> Any:
 
     p = s.options.pax
     return FlightSearchFilters(
+        # fli's PassengerInfo takes all four types and permits adults=0, so
+        # pass the party through as asked. The old `or 1` SYNTHESIZED an adult
+        # for a child-only search — pricing a 2-passenger trip nobody
+        # requested — and infants were dropped entirely, so an infant-in-seat
+        # search silently priced one fewer seat than the Matrix side.
         passenger_info=PassengerInfo(
-            adults=(p.adults + p.seniors + p.youth) or 1,
+            adults=p.adults + p.seniors + p.youth,
             children=p.children,
+            infants_in_seat=p.infants_in_seat,
+            infants_on_lap=p.infants_in_lap,
         ),
         flight_segments=segs,
         stops=stops,

@@ -730,7 +730,11 @@ def _run_calendar_enriched(
     _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
 
 
-def _pinned_solution_index(result: SearchResult | None, pick: int | None) -> int | None:
+def _pinned_solution_index(
+    result: SearchResult | None,
+    pick: int | None,
+    rendered: int | None = None,
+) -> int | None:
     """0-based index into `result.solutions` of the itinerary to pin in a deep
     link. `pick` is the 1-based itinerary number the user saw in the table;
     None pins the cheapest (row 1). Out-of-range picks warn and fall back to
@@ -740,9 +744,13 @@ def _pinned_solution_index(result: SearchResult | None, pick: int | None) -> int
         return None
     if pick is None:
         return 0
-    if pick < 1 or pick > len(result.solutions):
+    # Bound by what the user could actually SEE. Validating against
+    # `len(result.solutions)` accepted a `--pick` beyond the rendered table and
+    # then labelled the link "itinerary #N pinned" for a row never displayed.
+    upper = len(result.solutions) if rendered is None else min(rendered, len(result.solutions))
+    if pick < 1 or pick > upper:
         console.print(
-            f"[yellow]--pick {pick} is out of range (1-{len(result.solutions)}); "
+            f"[yellow]--pick {pick} is out of range (1-{upper}); "
             f"pinning the cheapest itinerary instead.[/]"
         )
         return 0
@@ -816,7 +824,7 @@ def _overlay_awards(
     run_pp_for_search(
         matrix_res,
         legs=_build_pp_legs(legs),
-        num_passengers=p.adults + p.children + p.seniors + p.youth,
+        num_passengers=_seated_pax(p),
         airlines=sel.pp_airlines() if sel is not None else None,
         cabins=sel.pp_cabins() if sel is not None else None,
         pp_only=awards_only,
@@ -855,8 +863,9 @@ def _emit_urls(
     google_url: bool,
     result: SearchResult | None = None,
     pick: int | None = None,
+    rendered: int | None = None,
 ) -> None:
-    idx = _pinned_solution_index(result, pick)
+    idx = _pinned_solution_index(result, pick, rendered)
     # Only claim "#N" when we actually honored the user's pick; an out-of-range
     # pick falls back to idx 0 and must not mislabel the cheapest as "#N".
     pinned_label = (
@@ -945,7 +954,29 @@ def _fmt_slice_cell(s: Slice) -> str:
     return f"{head}\n{tail}" if tail else head
 
 
-def _render_search(res: SearchResult) -> None:
+def _seated_pax(p: Pax) -> int:
+    """Occupants needing their own seat.
+
+    An infant IN SEAT buys a seat, so it counts; only a LAP infant does not.
+    Omitting it made the award query ask for fewer seats than the cash query
+    on the same run, so an award with too little availability rendered as
+    bookable for the party.
+    """
+    return p.adults + p.children + p.seniors + p.youth + p.infants_in_seat
+
+
+_DEFAULT_RENDER_LIMIT = 10  # matches the `-n/--page-size` default
+
+
+def _render_search(res: SearchResult, limit: int = _DEFAULT_RENDER_LIMIT) -> None:
+    """Render the itinerary table, showing at most `limit` rows.
+
+    `limit` MUST be the same bound `--pick` is validated against. It was
+    hardcoded to 10 while `--pick` checked against `len(res.solutions)`, so
+    `-n 15 --pick 15` printed 10 rows and then emitted a booking link labelled
+    "itinerary #15 pinned" for a row the user never saw — with no out-of-range
+    warning, because 15 was in range for the unrendered list.
+    """
     if res.solution_count == 0:
         console.print("[yellow]No solutions returned.[/]")
         return
@@ -983,7 +1014,7 @@ def _render_search(res: SearchResult) -> None:
     st.add_column("carriers")
     st.add_column("outbound")
     st.add_column("return")
-    for i, it in enumerate(res.solutions[:10], 1):
+    for i, it in enumerate(res.solutions[:limit], 1):
         itn = it.itinerary
         slcs: list[Slice] = itn.slices if itn else []
         it_carriers = ",".join((c.code or "?") for c in (itn.carriers if itn else []))
@@ -1174,13 +1205,13 @@ def _run_matrix_path(
         sys.stdout.write(json.dumps(res.raw, indent=2))
         return
     if not sel.awards_only:
-        _render_search(res)
+        _render_search(res, opts.page_size)
     if run_pp:
         p = opts.pax
         run_pp_for_search(
             res,
             legs=_build_pp_legs(legs),
-            num_passengers=p.adults + p.children + p.seniors + p.youth,
+            num_passengers=_seated_pax(p),
             airlines=sel.pp_airlines(),
             cabins=sel.pp_cabins(),
             pp_only=sel.awards_only,
@@ -1190,7 +1221,20 @@ def _run_matrix_path(
             cash_per_cabin=_cash_per_cabin_single(res, opts.cabin),
         )
     # `res` was cast to SearchResult at the top of this function; safe to pass through.
-    _emit_urls(search, matrix_url=matrix_url, google_url=google_url, result=res, pick=pick)
+    _emit_urls(
+        search,
+        matrix_url=matrix_url,
+        google_url=google_url,
+        result=res,
+        pick=pick,
+        rendered=opts.page_size,
+    )
+
+
+# How much deeper to fetch when a Tier-2 routing post-filter will discard rows.
+# Bounded rather than unlimited: Google's own result depth is finite and each
+# extra page costs a round trip.
+_POSTFILTER_OVERFETCH = 5
 
 
 def _gflight_results(legs: tuple[Leg, ...], opts: SearchOptions, top_n: int) -> list[Any]:
@@ -1211,12 +1255,20 @@ def _gflight_results(legs: tuple[Leg, ...], opts: SearchOptions, top_n: int) -> 
     out_constraints = classify(legs[0].route_language, legs[0].extension) if legs else None
     if out_constraints and out_constraints.predicates:
         apply_gf_native_filters(fli_filter, out_constraints.predicates)
-    results: list[Any] = search_with_ids(fli_filter, top_n=top_n) or []
     per_slice_preds = [list(classify(lg.route_language, lg.extension).predicates) for lg in legs]
+
+    # Fetch deeper than we need when a Tier-2 post-filter will run, because it
+    # drops rows AFTER truncation: `-n 1 --routing AA+` fetched exactly one
+    # itinerary, discarded it for violating the routing, and reported "no
+    # results" while a qualifying one sat at rank 2. Over-fetching lets the
+    # filter choose from a real candidate pool; the final slice below still
+    # honours the user's `top_n`.
+    fetch_n = top_n * _POSTFILTER_OVERFETCH if any(per_slice_preds) else top_n
+    results: list[Any] = search_with_ids(fli_filter, top_n=fetch_n) or []
     if results and any(per_slice_preds):
         keep = set(surviving_indices(fli_results_to_search_result(results), per_slice_preds))
         results = [r for i, r in enumerate(results) if i in keep]
-    return results
+    return results[:top_n]
 
 
 _MERGE_SOURCE_TAG = {"both": "GF+MX", "matrix": "MX", "gf": "GF"}
@@ -1320,7 +1372,7 @@ def _run_gflight_path(
         run_pp_for_search(
             sr,
             legs=_build_pp_legs(legs),
-            num_passengers=p.adults + p.children + p.seniors + p.youth,
+            num_passengers=_seated_pax(p),
             airlines=sel.pp_airlines() if sel is not None else None,
             cabins=sel.pp_cabins() if sel is not None else None,
             pp_only=awards_only,
@@ -1428,7 +1480,12 @@ def _run_enriched_path(
         _overlay_awards(matrix_res, legs=legs, opts=opts, sel=sel, awards_only=awards_only)
 
     _emit_urls(
-        matrix_search, matrix_url=matrix_url, google_url=google_url, result=pin_res, pick=pick
+        matrix_search,
+        matrix_url=matrix_url,
+        google_url=google_url,
+        result=pin_res,
+        pick=pick,
+        rendered=top_n,
     )
 
 
@@ -1720,7 +1777,7 @@ def _run_matrix_path_multi(
         run_pp_for_search(
             merged,
             legs=_build_pp_legs(legs),
-            num_passengers=p.adults + p.children + p.seniors + p.youth,
+            num_passengers=_seated_pax(p),
             airlines=sel.pp_airlines(),
             cabins=_pp_cabins_for_multi(sel, cabins),
             pp_only=sel.awards_only,
@@ -1787,7 +1844,7 @@ def _run_gflight_path_multi(
         run_pp_for_search(
             merged,
             legs=_build_pp_legs(legs),
-            num_passengers=p.adults + p.children + p.seniors + p.youth,
+            num_passengers=_seated_pax(p),
             airlines=sel.pp_airlines(),
             cabins=_pp_cabins_for_multi(sel, cabins),
             pp_only=sel.awards_only,
