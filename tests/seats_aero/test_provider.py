@@ -128,3 +128,39 @@ def test_group_converts_tax_cents_to_usd() -> None:
 
 def test_group_empty_input_returns_empty() -> None:
     assert _group_trips_to_awards([], tax_currency="USD") == []
+
+
+def test_seats_aero_timestamps_are_normalized_to_naive_local() -> None:
+    """seats.aero labels DepartsAt/ArrivesAt as UTC with a 'Z', but the values
+    are local time at each airport — honouring the Z yields ~12.1h JFK->LHR
+    nonstops against a real ~7h. The provider strips the suffix so
+    AwardFlight timestamps mean naive-local for every provider, matching what
+    Matrix and PointsPath supply and what the matcher compares.
+    """
+    from flight_cli.providers.seats_aero.provider import _local_naive
+
+    assert _local_naive("2026-08-15T06:30:00Z") == "2026-08-15T06:30:00"
+    assert _local_naive("2026-08-15T06:30:00") == "2026-08-15T06:30:00"
+    assert _local_naive("") == ""
+
+
+def test_cabin_labels_match_the_cli_canonical_vocabulary() -> None:
+    """The renderer selects awards by exact cabin-string equality, so a
+    provider label that differs from the CLI's canonical name makes those
+    awards vanish from the column. seats.aero's "Premium" never equalled
+    "Premium economy"."""
+    from flight_cli.pp.cli import _normalize_cabin
+    from flight_cli.providers.seats_aero.provider import _cabin_label
+
+    for slug in ("economy", "premium", "business", "first"):
+        assert _cabin_label(slug) == _normalize_cabin(slug)
+
+
+def test_cabin_slug_round_trips_for_the_outbound_filter() -> None:
+    """The API filter needs seats.aero's own slug. A bare `.lower()` sent
+    "premium economy" once the canonical label gained a space, and matched
+    nothing."""
+    from flight_cli.providers.seats_aero.provider import _cabin_label, _cabin_slug
+
+    for slug in ("economy", "premium", "business", "first"):
+        assert _cabin_slug(_cabin_label(slug)) == slug

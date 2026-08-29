@@ -46,6 +46,11 @@ class CabinAward:
     tax_usd: float
     tax_currency: str
     is_basic_economy: bool | None = None
+    # Seats the provider says are left at this price, when it says. None means
+    # "not reported" — NOT "none available"; PointsPath doesn't expose it and
+    # seats.aero's value is often 0 through staleness rather than sell-out.
+    # The renderer uses it only to flag an award that cannot seat the party.
+    remaining_seats: int | None = None
 
 
 @dataclass
@@ -67,6 +72,25 @@ class AwardFlight:
     arrival: str
     flight_number: str
     num_connections: int = 0
+    # Every segment's marketing flight number, in order, when the provider
+    # supplies them (seats.aero does; PointsPath returns only the first).
+    # `flight_number` is segment 0, so two journeys that share a first segment
+    # and diverge afterwards are indistinguishable without this — seats.aero
+    # returns both "AA1444, BA216" and "AA1444, AA100" on one route+date, and
+    # collapsing them lets the cheaper journey's price render on the other's
+    # row. Empty when the provider can't say, which the matcher treats as
+    # "no segment evidence" rather than agreement.
+    segment_flight_numbers: list[str] = field(default_factory=list[str])
+    # Connection airport codes in order (["DFW"]); empty for a nonstop OR when
+    # the provider doesn't say. Distinguishing those two states is the caller's
+    # job — see `_by_journey_shape`, which pairs this with `num_connections`.
+    #
+    # This is the ONLY journey-shape signal PointsPath gives beyond the first
+    # flight number, and Matrix populates the directly comparable
+    # `Slice.stops`, so it works cross-provider where segment numbers (which
+    # only seats.aero sends) do not. Live MSY->LHR has four distinct AA1650
+    # journeys sharing a departure minute and connection count.
+    stop_airports: list[str] = field(default_factory=list[str])
 
     # provider/program metadata — used for rendering only
     provider: str = ""  # display name, e.g. "PointsPath", "seats.aero"

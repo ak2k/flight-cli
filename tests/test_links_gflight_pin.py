@@ -1,3 +1,7 @@
+# pyright: reportPrivateUsage=false
+# DIVERGE: these pin wire-format contracts of the pinned-tfs encoder, which is
+# module-internal by design. Exporting it to satisfy the rule would widen the
+# API for a test.
 """Byte-exact regression test for the Google Flights pinned-itinerary
 `tfs=` protobuf encoder.
 
@@ -15,6 +19,7 @@ this test fails immediately and tells us to re-RE."""
 from __future__ import annotations
 
 import pathlib
+from typing import Any
 
 from flight_cli.links import (
     _encode_gflight_pinned_tfs,  # pyright: ignore[reportPrivateUsage]  # test-only: lock byte-exact regression
@@ -219,3 +224,179 @@ def test_extract_pin_segments_bails_on_missing_data() -> None:
         stops=[],  # 2 flights but 0 stops — invalid topology
     )
     assert extract_pin_segments_from_slice(s) is None
+
+
+# ───────── --pick must index the rows the user actually saw ─────────
+
+
+def test_pin_source_follows_the_rendered_merged_order() -> None:
+    """`--pick N` names a row from the merged GF+Matrix table. Pinning from
+    `matrix_res` indexed a DIFFERENT sequence: a Google-only row is cheaper, so
+    it sorts first and shifts every Matrix row down by one — `--pick 2` then
+    linked the itinerary shown at row 1. That link is the handoff to a real
+    booking.
+    """
+    from types import SimpleNamespace
+
+    # DIVERGE: reportPrivateUsage — pinning the row-ordering contract is
+    # exactly the case for reaching into a module-internal helper; exporting
+    # it publicly to satisfy the rule would widen the API for a test.
+    from flight_cli.cli import _pin_source_from_merged  # pyright: ignore[reportPrivateUsage]
+    from flight_cli.models import (
+        Itinerary,
+        ItineraryDetails,
+        SearchResult,
+        Slice,
+        SliceEndpoint,
+    )
+
+    def _itin(fn: str) -> Itinerary:
+        return Itinerary(
+            displayTotal="USD500.00",
+            itinerary=ItineraryDetails(
+                slices=[
+                    Slice(
+                        flights=[fn],
+                        departure="2026-09-09T06:00:00",
+                        origin=SliceEndpoint(code="MSY"),
+                        destination=SliceEndpoint(code="MIA"),
+                    ),
+                ],
+                carriers=[],
+            ),
+        )
+
+    gf_only = _itin("DL300")  # cheaper: sorts to merged row 1
+    matrix_a = _itin("AA500")
+    merged = [SimpleNamespace(itinerary=gf_only), SimpleNamespace(itinerary=matrix_a)]
+
+    # Matrix's own list has AA500 first — the ordering that used to be pinned.
+    src = SearchResult(  # pyright: ignore[reportCallIssue]
+        solutionCount=1, solutions=[matrix_a], session="S", solutionSet="SS"
+    )
+
+    pin = _pin_source_from_merged(merged, 10, src)
+
+    flights = [s.itinerary.slices[0].flights[0] for s in pin.solutions if s.itinerary is not None]
+    assert flights == ["DL300", "AA500"]
+    # Server-generated identifiers must survive, or the Matrix pinned URL
+    # silently degrades to a plain deep link.
+    assert pin.session == "S"
+    assert pin.solution_set == "SS"
+
+
+# ───────── multi-city and passenger types survive into the pinned link ─────────
+
+
+def _pin_slice(origin: str, dest: str, date: str) -> dict[str, Any]:
+    return {
+        "date": date,
+        "origin": origin,
+        "destination": dest,
+        "segments": [
+            {
+                "origin": origin,
+                "date": date,
+                "destination": dest,
+                "carrier": "AA",
+                "flight": "100",
+            },
+        ],
+    }
+
+
+def _field8_values(buf: bytes) -> list[int]:
+    """Every top-level field-8 varint (tag byte 0x40) — the per-occupant types."""
+    out: list[int] = []
+    i = 0
+    while i < len(buf):
+        if buf[i] == 0x40:
+            out.append(buf[i + 1])
+            i += 2
+        else:
+            i += 1
+    return out
+
+
+def test_passenger_types_are_not_all_encoded_as_adults() -> None:
+    """Field 8 carries each occupant's TYPE (Google's Passenger enum, read from
+    fast_flights' generated protobuf: ADULT=1, CHILD=2, INFANT_IN_SEAT=3,
+    INFANT_ON_LAP=4). Emitting a bare 1 for everyone made a pinned link for
+    1 adult + 1 child search and price as 2 adults — a different, costlier
+    itinerary than the row the user picked."""
+    from flight_cli.links import _encode_gflight_pinned_tfs  # pyright: ignore[reportPrivateUsage]
+
+    buf = _encode_gflight_pinned_tfs(
+        slices=[_pin_slice("SFO", "JFK", "2026-09-01")],
+        cabin=1,
+        adults=1,
+        children=1,
+        infants_in_seat=1,
+        infants_on_lap=1,
+    )
+    assert _field8_values(buf) == [1, 2, 3, 4]
+
+
+def test_two_adults_still_encode_as_two_adults() -> None:
+    from flight_cli.links import _encode_gflight_pinned_tfs  # pyright: ignore[reportPrivateUsage]
+
+    buf = _encode_gflight_pinned_tfs(
+        slices=[_pin_slice("SFO", "JFK", "2026-09-01")],
+        cabin=1,
+        adults=2,
+        children=0,
+        infants_in_seat=0,
+        infants_on_lap=0,
+    )
+    assert _field8_values(buf) == [1, 1]
+
+
+def test_three_leg_itinerary_is_multi_city_not_round_trip() -> None:
+    """`>= 2 slices` meant round-trip, so Google read only the first two and
+    leg 3 vanished from a link still described as "pinned"."""
+    from flight_cli.links import (  # pyright: ignore[reportPrivateUsage]
+        _GF_TRIP_MULTI_CITY,
+        _GF_TRIP_ONE_WAY,
+        _GF_TRIP_ROUND_TRIP,
+        _encode_gflight_pinned_tfs,
+    )
+
+    def trip_type(n_slices: int) -> int:
+        route = [("SFO", "JFK"), ("JFK", "LHR"), ("LHR", "SFO")][:n_slices]
+        buf = _encode_gflight_pinned_tfs(
+            slices=[_pin_slice(o, d, "2026-09-01") for o, d in route],
+            cabin=1,
+            adults=1,
+            children=0,
+            infants_in_seat=0,
+            infants_on_lap=0,
+        )
+        return buf[-1]  # field 19 is the last varint written
+
+    assert trip_type(1) == _GF_TRIP_ONE_WAY
+    assert trip_type(2) == _GF_TRIP_ROUND_TRIP
+    assert trip_type(3) == _GF_TRIP_MULTI_CITY
+
+
+def test_stop_limit_reaches_the_google_search_url() -> None:
+    """`max_stops` is a TFSData-level field, not per-FlightData. Omitting it
+    made a `--stops 0` link byte-identical to an unconstrained one, so a
+    nonstop-only result table handed the user a page that also offered
+    connections."""
+    from datetime import date
+
+    from flight_cli.domain import Leg, SearchOptions, SpecificDateSearch
+    from flight_cli.links import google_flights_url
+
+    def url(max_extra_stops: int | None) -> str:
+        return google_flights_url(
+            SpecificDateSearch(
+                legs=(Leg(origins=("JFK",), destinations=("LHR",), date=date(2026, 9, 1)),),
+                options=SearchOptions(max_extra_stops=max_extra_stops),
+            ),
+        )
+
+    nonstop, one_stop, unconstrained = url(0), url(1), url(None)
+    assert nonstop != unconstrained
+    assert nonstop != one_stop
+    assert one_stop != unconstrained

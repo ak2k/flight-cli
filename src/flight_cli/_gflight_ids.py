@@ -434,8 +434,9 @@ def _seed_cookies_once(client: Any) -> None:
         log.debug("gflight cookie cache past TTL; re-warming")
         return
     try:
+        jar = _cookie_jar(client)
         for c in saved:
-            client._client.cookies.set(
+            jar.set(
                 c["name"],
                 c["value"],
                 domain=c.get("domain", ".google.com"),
@@ -443,6 +444,27 @@ def _seed_cookies_once(client: Any) -> None:
             )
     except Exception as e:  # noqa: BLE001 — seeding is best-effort (corrupt/odd cache, never fatal)
         log.debug("could not seed gflight cookies: %s", e)
+
+
+def _cookie_jar(client: Any) -> Any:
+    """The session cookie jar, across fli client shapes.
+
+    fli <=0.8 exposed `Client._client`; 0.9 replaced it with a per-thread
+    `Client._session()`. Both hand back an object with the same `.set()` /
+    `.jar` interface. Reaching for the old attribute silently raised
+    AttributeError into this module's best-effort `except`, which turned NID
+    seeding AND persistence into no-ops — so every process started cold, and
+    the comments above put the cold-start empty rate at ~40% versus ~0% warm.
+
+    Raises AttributeError when neither shape is present, so a future upstream
+    rename fails loudly at the callers' `except` + debug log rather than
+    degrading silently forever.
+    """
+    session = getattr(client, "_client", None)
+    if session is None:
+        # fli 0.9: per-thread session accessor replaced the old `_client` attr.
+        session = client._session()  # pyright: ignore[reportAny]
+    return session.cookies  # pyright: ignore[reportAny]
 
 
 def _persist_cookies(client: Any) -> None:
@@ -458,7 +480,7 @@ def _persist_cookies(client: Any) -> None:
                 "domain": str(ck.domain or ".google.com"),
                 "path": str(ck.path or "/"),
             }
-            for ck in client._client.cookies.jar  # pyright: ignore[reportAny]  # fli/curl_cffi untyped
+            for ck in _cookie_jar(client).jar  # pyright: ignore[reportAny]  # fli/curl_cffi untyped
             if str(ck.name) in _PERSIST_COOKIE_NAMES
             and _GOOGLE_DOMAIN_SUFFIX in str(ck.domain or "")
         ]

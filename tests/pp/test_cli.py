@@ -3,18 +3,25 @@
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
 import pytest
 
+from flight_cli.models import Itinerary, ItineraryDetails, Slice, SliceEndpoint
 from flight_cli.pp.cli import (
     _best_award_for_cabin,
     _fmt_award_cell,
+    _fmt_funding,
     _fmt_iso_compact,
     _fmt_stops,
     _normalize_cabin,
     _parse_cash,
     _parse_csv,
     _render_pp_only,
+    _serialize_matches,
 )
+from flight_cli.pp.match import MatchedFare
 from flight_cli.providers.base import AwardFlight, CabinAward
 
 # ───────────────────────────── _parse_cash ─────────────────────────────────
@@ -126,7 +133,7 @@ def test_best_award_for_cabin_picks_cheapest_in_miles():
     ]
     best = _best_award_for_cabin(awards, "Economy")
     assert best is not None
-    miles, _tax, program, _banks = best
+    miles, _tax, program, _banks, _ccy, _seats = best
     assert (miles, program) == (30_000, "Cheap")
 
 
@@ -229,3 +236,128 @@ def test_award_table_does_not_truncate_program_name(monkeypatch: pytest.MonkeyPa
     assert "American Airlines" in text
     # Compact, unambiguous departure time (not raw '2026-08-15T13:53').
     assert "Aug15 13:53" in text
+
+
+# ───────── renderer: a cell must be a true statement about its row ─────────
+
+
+def _ra(
+    program: str,
+    miles: int,
+    tax: float = 6.0,
+    *,
+    cabin: str = "Economy",
+    basic: bool | None = None,
+    banks: list[str] | None = None,
+) -> AwardFlight:
+    return AwardFlight(
+        origin="JFK",
+        destination="LHR",
+        departure="2026-08-15T18:00:00",
+        arrival="2026-08-16T06:00:00",
+        flight_number="AA100",
+        num_connections=0,
+        provider="PointsPath",
+        program=program,
+        miles_to_cash_ratio=0.0125,
+        funding_banks=banks or ["Chase"],
+        cabins=[
+            CabinAward(
+                cabin=cabin,
+                miles=miles,
+                tax_usd=tax,
+                tax_currency="USD",
+                is_basic_economy=basic,
+            ),
+        ],
+    )
+
+
+def test_equal_miles_tie_breaks_on_cash_out_of_pocket() -> None:
+    """Ranking on miles alone let provider order decide between a 30k + $500
+    offer and an identical 30k + $6 one."""
+    cell = _fmt_award_cell([_ra("Pricey", 30000, 500.0), _ra("Cheap", 30000, 6.0)], "Economy")
+    assert "Cheap" in cell
+    assert "$6" in cell
+
+
+def test_basic_economy_is_not_rendered_as_unrestricted_economy() -> None:
+    """A basic-economy award carries different seat, bag and change rights, so
+    showing it under the plain Economy heading overstates what is bought."""
+    unrestricted = _fmt_award_cell([_ra("Real", 9500)], "Economy")
+    assert "(basic)" not in unrestricted
+
+    basic_only = _fmt_award_cell([_ra("American", 9500, basic=True)], "Economy")
+    assert "(basic)" in basic_only
+
+
+def test_unrestricted_award_wins_over_a_cheaper_basic_one() -> None:
+    """The cheaper basic fare must not silently displace a real one."""
+    cell = _fmt_award_cell([_ra("Cheap", 5000, basic=True), _ra("Real", 9500)], "Economy")
+    assert "Real" in cell
+    assert "(basic)" not in cell
+
+
+def test_funding_column_describes_only_the_displayed_award() -> None:
+    """Unioning banks across every attached award implied that programs
+    funding hidden, costlier offers also funded the winning one."""
+    awards = [_ra("Amex", 30000, banks=["Amex"]), _ra("Chase", 40000, banks=["Chase"])]
+    assert _fmt_funding(awards, ("Economy",)) == "Amex"
+
+
+def test_json_return_leg_describes_the_return_slice() -> None:
+    """`_serialize_matches` hardcoded slices[0], so the `--json` return leg
+    reported the OUTBOUND flight number and route beside the return leg's
+    awards, under a label saying "return"."""
+    it = Itinerary(
+        displayTotal="USD500.00",
+        itinerary=ItineraryDetails(
+            slices=[
+                Slice(
+                    flights=["AA100"],
+                    departure="2026-08-15T18:00:00",
+                    origin=SliceEndpoint(code="JFK"),
+                    destination=SliceEndpoint(code="LHR"),
+                ),
+                Slice(
+                    flights=["BA200"],
+                    departure="2026-08-22T10:00:00",
+                    origin=SliceEndpoint(code="LHR"),
+                    destination=SliceEndpoint(code="JFK"),
+                ),
+            ],
+            carriers=[],
+        ),
+    )
+    payload: Any = json.loads(_serialize_matches([MatchedFare(itinerary=it, awards=[])], 1))
+    assert payload[0]["flight"] == "BA200"
+    assert payload[0]["origin"] == "LHR"
+    assert payload[0]["destination"] == "JFK"
+
+
+def test_non_usd_tax_is_labelled_and_suppresses_cpm() -> None:
+    """A EUR tax printed as "$" both misstates the amount and invites adding it
+    to a USD fare. ¢/mi nets tax off USD cash, so a foreign tax would subtract
+    the wrong magnitude — suppressed rather than converted, since there is no
+    rate source and a wrong valuation is worse than a missing one."""
+    usd = _fmt_award_cell([_ra("American", 30000, 6.0)], "Economy", 500.0)
+    assert "$6" in usd
+    assert "¢/mi" in usd
+
+    eur = AwardFlight(
+        origin="JFK",
+        destination="LHR",
+        departure="d",
+        arrival="a",
+        flight_number="AA100",
+        num_connections=0,
+        provider="X",
+        program="American",
+        miles_to_cash_ratio=0.0125,
+        funding_banks=["Chase"],
+        cabins=[CabinAward(cabin="Economy", miles=30000, tax_usd=180.0, tax_currency="EUR")],
+    )
+    cell = _fmt_award_cell([eur], "Economy", 500.0)
+    assert "180 EUR" in cell
+    assert "$" not in cell
+    assert "¢/mi" not in cell

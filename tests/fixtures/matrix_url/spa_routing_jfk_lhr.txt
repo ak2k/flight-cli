@@ -1,0 +1,46 @@
+# Captured 2026-08-01 by driving the real Matrix SPA (patchright + real
+# Chrome), one-way JFK->LHR with Routing='BA+' and Extension='MAXSTOPS 0'
+# set in Advanced controls. This is the shape the app writes into its own
+# URL when routing codes ARE set; the other fixtures in this directory are
+# captures with none set, where the SPA omits the four keys entirely.
+#
+# Note the names differ from the /batch API, which calls the same values
+# routeLanguage / commandLine.
+
+{
+ "type": "one-way",
+ "slices": [
+  {
+   "origin": [
+    "JFK"
+   ],
+   "dest": [
+    "LHR"
+   ],
+   "routing": "BA+",
+   "ext": "MAXSTOPS 0",
+   "routingRet": "",
+   "extRet": "",
+   "dates": {
+    "searchDateType": "specific",
+    "departureDate": "2026-08-10",
+    "departureDateType": "depart",
+    "departureDateModifier": "0",
+    "departureDatePreferredTimes": [],
+    "returnDateType": "depart",
+    "returnDateModifier": "0",
+    "returnDatePreferredTimes": []
+   }
+  }
+ ],
+ "options": {
+  "cabin": "COACH",
+  "stops": "-1",
+  "extraStops": "1",
+  "allowAirportChanges": "true",
+  "showOnlyAvailable": "true"
+ },
+ "pax": {
+  "adults": "1"
+ }
+}

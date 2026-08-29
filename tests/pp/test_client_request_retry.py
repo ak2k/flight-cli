@@ -8,19 +8,19 @@ MockTransport so regressions surface immediately."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import anyio
 import httpx
+import pytest
 
 from flight_cli.pp import client as client_mod
 from flight_cli.pp.auth import Tokens
-from flight_cli.pp.client import API_BASE, PPClient
+from flight_cli.pp.client import API_BASE, PPApiError, PPClient
 
 if TYPE_CHECKING:
+    import pathlib
     from collections.abc import Callable
-
-    import pytest
 
 
 def _tokens(access: str = "OLD_TOKEN") -> Tokens:
@@ -159,3 +159,40 @@ def test_double_401_returns_second_response_without_third_attempt(
     assert r.status_code == 401
     assert len(refresh_calls) == 1, "refresh runs once even when retry also 401s"
     assert len(captured) == 2, "retry-once semantics: no third request"
+
+
+# ───────────── catalog endpoints wrap HTTP failures in a domain error ─────────────
+
+
+def test_pricing_info_raises_domain_error_not_httpx(
+    tmp_path: pathlib.Path, monkeypatch: Any
+) -> None:
+    """AGENTS.md Principle 1: httpx.HTTPStatusError must not reach a caller."""
+    monkeypatch.setattr("flight_cli.pp.client.PRICING_CACHE", tmp_path / "pricing.json")
+    handler, _ = _scripted_handler([httpx.Response(500, text="boom")])
+
+    async def go() -> None:
+        pp = _client_with_transport(_tokens(), httpx.MockTransport(handler))
+        with pytest.raises(PPApiError) as ei:
+            _ = await pp.pricing_info()
+        assert ei.value.status == 500
+        assert ei.value.endpoint == "/api/pricing-info"
+        assert isinstance(ei.value.__cause__, httpx.HTTPStatusError)
+        await pp.aclose()
+
+    anyio.run(go)
+
+
+def test_extension_config_raises_domain_error_not_httpx(
+    tmp_path: pathlib.Path, monkeypatch: Any
+) -> None:
+    monkeypatch.setattr("flight_cli.pp.client.EXT_CONFIG_CACHE", tmp_path / "ext.json")
+    handler, _ = _scripted_handler([httpx.Response(503, text="down")])
+
+    async def go() -> None:
+        pp = _client_with_transport(_tokens(), httpx.MockTransport(handler))
+        with pytest.raises(PPApiError):
+            _ = await pp.extension_config()
+        await pp.aclose()
+
+    anyio.run(go)

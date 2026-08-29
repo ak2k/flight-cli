@@ -387,6 +387,7 @@ def run_pp_for_search(
             cabin_list,
             slice_index=leg.slice_index,
             cash_per_cabin=cash_per_cabin,
+            num_passengers=num_passengers,
         )
 
 
@@ -454,21 +455,65 @@ def _fmt_iso_compact(s: str) -> str:
 
 def _best_award_for_cabin(
     award_flights: list[AwardFlight], want_cabin: str
-) -> tuple[int, float, str, list[str]] | None:
-    """Cheapest (lowest miles) offer across providers for one cabin, or None."""
-    best: tuple[int, float, str, list[str]] | None = None
+) -> tuple[int, float, str, list[str], str, int | None] | None:
+    """Cheapest offer across providers for one cabin, or None.
+
+    Ranked on (miles, tax) — miles first, since that is the scarce currency,
+    but ties broken on cash out-of-pocket. Comparing miles alone let a
+    30k + $500 offer beat an identical 30k + $6 one purely on provider order.
+
+    Basic-economy fares are excluded here rather than silently rendered as
+    unrestricted Economy: they carry different seat, bag and change rights, so
+    presenting one under the plain "Economy" heading overstates what the
+    traveller gets. `_basic_economy_award_for_cabin` surfaces them explicitly.
+    """
+    best: tuple[int, float, str, list[str], str, int | None] | None = None
     for af in award_flights:
         for ca in af.cabins:
-            if ca.cabin != want_cabin:
+            if ca.cabin != want_cabin or ca.is_basic_economy:
                 continue
-            key = (ca.miles, ca.tax_usd, af.program, af.funding_banks)
-            if best is None or key[0] < best[0]:
+            key = (
+                ca.miles,
+                ca.tax_usd,
+                af.program,
+                af.funding_banks,
+                ca.tax_currency,
+                ca.remaining_seats,
+            )
+            if best is None or (key[0], key[1]) < (best[0], best[1]):
+                best = key
+    return best
+
+
+def _basic_economy_award_for_cabin(
+    award_flights: list[AwardFlight], want_cabin: str
+) -> tuple[int, float, str, list[str], str, int | None] | None:
+    """Cheapest BASIC-economy offer for one cabin — the fares
+    `_best_award_for_cabin` deliberately skips. Rendered with an explicit
+    label so the restriction is visible rather than implied."""
+    best: tuple[int, float, str, list[str], str, int | None] | None = None
+    for af in award_flights:
+        for ca in af.cabins:
+            if ca.cabin != want_cabin or not ca.is_basic_economy:
+                continue
+            key = (
+                ca.miles,
+                ca.tax_usd,
+                af.program,
+                af.funding_banks,
+                ca.tax_currency,
+                ca.remaining_seats,
+            )
+            if best is None or (key[0], key[1]) < (best[0], best[1]):
                 best = key
     return best
 
 
 def _fmt_award_cell(
-    award_flights: list[AwardFlight], want_cabin: str, cash_usd: float | None = None
+    award_flights: list[AwardFlight],
+    want_cabin: str,
+    cash_usd: float | None = None,
+    pax: int = 1,
 ) -> str:
     """Render the best (lowest miles) offer across providers for one cabin.
 
@@ -479,11 +524,35 @@ def _fmt_award_cell(
     columns per cabin) overflows narrow terminals in multi-cabin renders.
     """
     best = _best_award_for_cabin(award_flights, want_cabin)
+    label = ""
+    if best is None:
+        # Nothing unrestricted — show the basic-economy fare rather than an
+        # empty cell, but say so.
+        best = _basic_economy_award_for_cabin(award_flights, want_cabin)
+        label = " [dim](basic)[/]"
     if best is None:
         return "—"
-    miles, tax, program, _banks = best
-    head = f"{_fmt_miles(miles)} {program} + ${tax:.0f}"
+    miles, tax, program, _banks, tax_ccy, seats = best
+    # Print the tax in the currency it is actually denominated in. Formatting a
+    # EUR amount as "$" both misstates it and invites the reader to add it to a
+    # USD fare.
+    tax_str = f"${tax:.0f}" if tax_ccy in ("", "USD") else f"{tax:.0f} {tax_ccy}"
+    # An award with fewer seats than the party cannot be booked for it. The
+    # provider reports this; we were discarding it, so a 1-seat fare rendered
+    # as available for a party of four. `None` means "not reported" (PointsPath
+    # never does), so only an affirmative shortfall is flagged.
+    short = (
+        f" [yellow]({seats} seat{'s' if seats != 1 else ''})[/]"
+        if (seats is not None and pax > 0 and seats < pax)
+        else ""
+    )
+    head = f"{_fmt_miles(miles)} {program} + {tax_str}{label}{short}"
     if cash_usd is None:
+        return head
+    # ¢/mi nets the tax off a USD cash fare, so a non-USD tax would silently
+    # subtract the wrong magnitude. Suppress rather than convert: we have no
+    # rate source, and a wrong valuation is worse than a missing one.
+    if tax_ccy not in ("", "USD"):
         return head
     cpm = _cents_per_mile(cash_usd, miles, tax)
     if cpm is None:
@@ -491,11 +560,31 @@ def _fmt_award_cell(
     return f"{head}\n[dim]{cpm:.1f}¢/mi[/]"
 
 
-def _fmt_funding(award_flights: list[AwardFlight]) -> str:
+def _fmt_funding(award_flights: list[AwardFlight], cabins: tuple[str, ...] = ()) -> str:
+    """Transfer partners that fund the award(s) actually DISPLAYED.
+
+    Unioning banks across every attached award claimed that programs funding
+    hidden, more-expensive offers also funded the winning one: a 30k Amex
+    winner beside a hidden 40k Chase offer rendered "Amex, Chase", implying
+    Chase points could buy the 30k fare. Restricted to the offers the row
+    shows; `cabins` empty keeps the old union for callers with no cabin
+    context.
+    """
+    winners: list[tuple[int, float, str, list[str], str, int | None]] = []
+    for cab in cabins:
+        for pick in (
+            _best_award_for_cabin(award_flights, cab),
+            _basic_economy_award_for_cabin(award_flights, cab),
+        ):
+            if pick is not None:
+                winners.append(pick)
+    sources: list[list[str]] = (
+        [w[3] for w in winners] if cabins else [af.funding_banks for af in award_flights]
+    )
     banks: list[str] = []
     seen: set[str] = set()
-    for af in award_flights:
-        for b in af.funding_banks:
+    for group in sources:
+        for b in group:
             if b not in seen:
                 seen.add(b)
                 banks.append(b)
@@ -545,6 +634,7 @@ def _render_matches(
     *,
     slice_index: int = 0,
     cash_per_cabin: Mapping[int, Mapping[str, float]] | None = None,
+    num_passengers: int = 1,
 ) -> None:
     matches = _dedupe_per_leg(matches, slice_index=slice_index)
     if not matches:
@@ -589,9 +679,9 @@ def _render_matches(
             # — otherwise the value would mix cabins (e.g. business miles vs
             # economy cash) and mislead. Cabins without per-cabin cash render
             # the award without a ¢/mi line.
-            cells.append(_fmt_award_cell(m.awards, cab, per_cabin_cash.get(cab)))
+            cells.append(_fmt_award_cell(m.awards, cab, per_cabin_cash.get(cab), num_passengers))
         if show_funding:
-            cells.append(_fmt_funding(m.awards))
+            cells.append(_fmt_funding(m.awards, tuple(cabin_list)))
         t.add_row(*cells)
     console.print(t)
 
@@ -680,11 +770,19 @@ def _serialize_award(af: AwardFlight) -> dict[str, Any]:
     }
 
 
-def _serialize_matches(matches: list[MatchedFare]) -> str:
+def _serialize_matches(matches: list[MatchedFare], slice_index: int = 0) -> str:
+    """`slice_index` selects the leg to describe — it MUST match the leg whose
+    awards are being serialized. Hardcoding slice 0 made the `--json` return
+    leg report the OUTBOUND flight number, route and departure beside the
+    return leg's awards, while the wrapper labelled it "return"."""
     out: list[dict[str, Any]] = []
     for m in matches:
         itn = m.itinerary.itinerary
-        s = itn.slices[0] if itn and itn.slices else None
+        s = (
+            itn.slices[slice_index]
+            if itn and itn.slices and slice_index < len(itn.slices)
+            else None
+        )
         out.append(
             {
                 "flight": (s.flights[0] if s and s.flights else None),
@@ -706,7 +804,7 @@ def _serialize_matches_per_leg(
             {
                 "leg": leg.label,
                 "slice_index": leg.slice_index,
-                "matches": json.loads(_serialize_matches(matches)),
+                "matches": json.loads(_serialize_matches(matches, leg.slice_index)),
             }
             for leg, matches in zip(legs, matches_per_leg, strict=True)
         ],

@@ -68,12 +68,28 @@ _PROGRAM_LABELS: dict[str, str] = {
 # Seats.aero cabin slug → CabinAward.cabin string. Aligns with PointsPath's
 # "Economy"/"Business"/"First"/"Premium" labels so the renderer doesn't
 # have to disambiguate by provider.
+# Values MUST match the CLI's canonical cabin vocabulary (`_CABIN_ALIASES` in
+# pp/cli.py), because the renderer selects awards by exact cabin-string
+# equality. "Premium" did not equal the canonical "Premium economy", so every
+# seats.aero premium award silently vanished from that column.
 _CABIN_LABELS: dict[str, str] = {
     "economy": "Economy",
-    "premium": "Premium",
+    "premium": "Premium economy",
     "business": "Business",
     "first": "First",
 }
+
+
+# Canonical cabin label -> seats.aero's own query slug. The outbound filter
+# needs the inverse of `_CABIN_LABELS`, and a bare `.lower()` no longer works
+# now that the canonical name is "Premium economy": the API expects "premium",
+# so lowercasing sent "premium economy" and the filter silently matched
+# nothing.
+_CABIN_SLUGS: dict[str, str] = {label: slug for slug, label in _CABIN_LABELS.items()}
+
+
+def _cabin_slug(label: str) -> str:
+    return _CABIN_SLUGS.get(label, label.lower())
 
 
 def _program_label(slug: str) -> str:
@@ -82,6 +98,33 @@ def _program_label(slug: str) -> str:
 
 def _cabin_label(slug: str) -> str:
     return _CABIN_LABELS.get(slug.lower(), slug.title())
+
+
+def _segment_flight_numbers(flight_numbers: str) -> list[str]:
+    """`"AA4671, BA216"` -> `["AA4671", "BA216"]` — every segment, in order.
+
+    The matcher needs the whole list to tell apart journeys that share a first
+    segment: seats.aero returns both "AA1444, BA216" and "AA1444, AA100" on one
+    JFK->LHR date, and keying on segment 0 alone collapses them.
+    """
+    return [n.strip().upper().replace(" ", "") for n in flight_numbers.split(",") if n.strip()]
+
+
+def _local_naive(ts: str) -> str:
+    """Strip seats.aero's spurious 'Z' suffix.
+
+    Their `DepartsAt`/`ArrivesAt` are labelled UTC but carry LOCAL time at each
+    airport. Fixture arithmetic proves it: JFK→LHR nonstops read ~12.1h block
+    time when the Z is honoured, against a real ~7h — and 09:35 local JFK plus
+    7h is 21:35 London, which is the 21:40 they report.
+
+    The matcher compares these against Matrix cash times, which are local too,
+    so passing the Z through would be a latent ~offset-sized error the moment
+    anything parses these as instants instead of truncating the suffix away.
+    Normalizing here keeps `AwardFlight.departure`/`.arrival` meaning one
+    thing — naive local — across every provider.
+    """
+    return ts.removesuffix("Z")
 
 
 def _first_flight_number(flight_numbers: str) -> str:
@@ -119,14 +162,19 @@ def _group_trips_to_awards(
             miles=t.MileageCost,
             tax_usd=t.TotalTaxes / 100.0,  # seats.aero returns cents
             tax_currency=tax_currency,
+            # 0 is seats.aero's "unknown/stale", not a hard zero — see the
+            # field comment in models.py — so don't turn it into a claim.
+            remaining_seats=t.RemainingSeats or None,
         )
         if af is None:
             grouped[key] = AwardFlight(
                 origin=t.OriginAirport,
                 destination=t.DestinationAirport,
-                departure=t.DepartsAt,
-                arrival=t.ArrivesAt,
+                departure=_local_naive(t.DepartsAt),
+                arrival=_local_naive(t.ArrivesAt),
                 flight_number=_first_flight_number(t.FlightNumbers),
+                segment_flight_numbers=_segment_flight_numbers(t.FlightNumbers),
+                stop_airports=[c.upper() for c in t.Connections],
                 num_connections=t.Stops,
                 provider="Seats.aero",
                 program=_program_label(t.Source),
@@ -220,7 +268,7 @@ class SeatsAeroProvider:
         usual.
         """
         _ = num_passengers, cash_hints
-        cabin_slugs = tuple(c.lower() for c in cabins) if cabins else None
+        cabin_slugs = tuple(_cabin_slug(c) for c in cabins) if cabins else None
         try:
             page = await self._client.search(
                 origin=leg.origin,

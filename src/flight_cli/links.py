@@ -90,14 +90,45 @@ def _spa_specific_leg(leg: Leg, *, return_leg: Leg | None = None) -> dict[str, A
         "dates": {
             "searchDateType": "specific",
             "departureDate": leg.date.isoformat() if leg.date else "",
-            "departureDateType": "depart",
+            # "depart" | "arrive" — the SPA's encoding of arrival-date intent,
+            # the URL-state counterpart of the API's `isArrivalDate` bool.
+            "departureDateType": "arrive" if leg.is_arrival_date else "depart",
             "departureDateModifier": str(leg.date_minus),
             "departureDatePreferredTimes": [t.value for t in leg.time_ranges],
             "returnDate": return_date,
-            "returnDateType": "depart",
+            "returnDateType": "arrive" if (return_leg and return_leg.is_arrival_date) else "depart",
             "returnDateModifier": return_modifier,
             "returnDatePreferredTimes": return_times,
         },
+        **_spa_routing_fields(leg, return_leg),
+    }
+
+
+def _spa_routing_fields(leg: Leg, return_leg: Leg | None) -> dict[str, str]:
+    """Routing-language / extension-code keys for a SPA URL-state slice.
+
+    The SPA names these `routing` / `ext` — NOT the `routeLanguage` /
+    `commandLine` the /batch API uses for the same values. Both shapes were
+    captured from the real UI: with codes set the slice carries all four keys
+    (`routingRet` / `extRet` hold the inbound leg's own codes); with none set
+    it omits them entirely, which is what the tracked fixtures show. We mirror
+    that, so a link is byte-identical to what the app itself would produce.
+
+    Dropping these meant a link built from `--routing BA+ --ext "MAXSTOPS 0"`
+    opened an UNCONSTRAINED search — offering the user itineraries the CLI had
+    deliberately excluded.
+    """
+    routing = leg.route_language or ""
+    ext = leg.extension or ""
+    routing_ret = (return_leg.route_language or "") if return_leg else ""
+    ext_ret = (return_leg.extension or "") if return_leg else ""
+    if not any((routing, ext, routing_ret, ext_ret)):
+        return {}
+    return {
+        "routing": routing,
+        "ext": ext,
+        "routingRet": routing_ret,
+        "extRet": ext_ret,
     }
 
 
@@ -110,9 +141,26 @@ def _spa_specific_slices(legs: tuple[Leg, ...]) -> tuple[str, list[dict[str, Any
     n = len(legs)
     if n == 1:
         return "one-way", [_spa_specific_leg(legs[0])]
-    if n == _ROUND_TRIP_LEGS:
+    if n == _ROUND_TRIP_LEGS and _is_inverse_pair(legs[0], legs[1]):
         return "round-trip", [_spa_specific_leg(legs[0], return_leg=legs[1])]
     return "multi-city", [_spa_specific_leg(leg) for leg in legs]
+
+
+def _is_inverse_pair(out: Leg, ret: Leg) -> bool:
+    """Whether two legs form a true round trip — the return departs where the
+    outbound landed AND lands where it started.
+
+    Round-trip's SPA encoding folds both legs into ONE slice carrying two
+    dates, which structurally cannot express a second route. Treating any
+    2-leg search as a round trip therefore DELETED the second leg: SFO->JFK
+    plus LAX->HNL encoded as SFO->JFK with a return date, and LAX/HNL simply
+    vanished from the emitted link. Multi-city keeps a slice per leg, so
+    anything that isn't a genuine inverse belongs there.
+
+    Multi-airport legs count as inverse only when the sets match exactly; a
+    partial overlap is an itinerary we cannot faithfully fold.
+    """
+    return set(out.destinations) == set(ret.origins) and set(out.origins) == set(ret.destinations)
 
 
 def _spa_calendar_leg(
@@ -276,6 +324,15 @@ _CABIN_TFS_INT: dict[Cabin, int] = {
 # tfs= trip-type enum (field 19).
 _GF_TRIP_ROUND_TRIP = 1
 _GF_TRIP_ONE_WAY = 2
+_GF_TRIP_MULTI_CITY = 3
+
+# tfs= field 8 is a repeated varint, one entry per occupant, carrying the
+# passenger TYPE. Values are Google's own `Passenger` enum, read out of
+# fast_flights' generated protobuf (flights_pb2.Passenger) rather than guessed.
+_GF_PAX_ADULT = 1
+_GF_PAX_CHILD = 2
+_GF_PAX_INFANT_IN_SEAT = 3
+_GF_PAX_INFANT_ON_LAP = 4
 
 
 # ───────────────── Google Flights tfs= protobuf (RE'd) ──────────────────────
@@ -399,11 +456,18 @@ def _encode_gflight_pinned_tfs(
         s.message(14, dest_w)
         w.message(3, s)
 
-    # Field 8: one repeated varint=1 per adult (and similar for other pax types
-    # observed in the captured payload — 3 adults → three "8: 1" entries).
-    # We replicate the observed pattern: emit one `1` per total occupant.
-    for _ in range(adults + children + infants_in_seat + infants_on_lap):
-        w.varint(8, 1)
+    # Field 8: one repeated varint per occupant, carrying that occupant's TYPE.
+    # Emitting a bare `1` for everyone encoded children and infants as ADULTS,
+    # so a pinned link for 1 adult + 1 child priced and searched as 2 adults —
+    # a different, more expensive itinerary than the row the user picked.
+    for _type, _count in (
+        (_GF_PAX_ADULT, adults),
+        (_GF_PAX_CHILD, children),
+        (_GF_PAX_INFANT_IN_SEAT, infants_in_seat),
+        (_GF_PAX_INFANT_ON_LAP, infants_on_lap),
+    ):
+        for _ in range(_count):
+            w.varint(8, _type)
 
     w.varint(9, cabin)
     w.varint(14, 1)
@@ -413,8 +477,16 @@ def _encode_gflight_pinned_tfs(
     marker.varint(1, (1 << 64) - 1)
     w.message(16, marker)
 
-    # Field 19: trip type. TFS enum: 1 = round-trip, 2 = one-way.
-    trip_type = _GF_TRIP_ROUND_TRIP if len(slices) >= _ROUND_TRIP_LEGS else _GF_TRIP_ONE_WAY
+    # Field 19: trip type. TFS enum: 1 = round-trip, 2 = one-way, 3 = multi-city.
+    # `>= 2` meant round-trip, so a three-leg itinerary was labelled a round
+    # trip; Google then read only the first two slices and the third leg was
+    # silently dropped from a link we still described as "pinned".
+    if len(slices) == 1:
+        trip_type = _GF_TRIP_ONE_WAY
+    elif len(slices) == _ROUND_TRIP_LEGS:
+        trip_type = _GF_TRIP_ROUND_TRIP
+    else:
+        trip_type = _GF_TRIP_MULTI_CITY
     w.varint(19, trip_type)
 
     return bytes(w.buf)
@@ -531,9 +603,6 @@ def extract_pin_segments_from_slice(s: Slice) -> list[dict[str, str]] | None:
     dep_date = s.departure[:10]
     arrival = s.arrival or s.departure
     arr_date = arrival[:10]
-    dep_date = s.departure[:10]
-    arrival = s.arrival or s.departure
-    arr_date = arrival[:10]
     out: list[dict[str, str]] = []
     for i, fl in enumerate(s.flights):
         m = _FLIGHT_NUMBER_RE.match(fl)
@@ -545,7 +614,16 @@ def extract_pin_segments_from_slice(s: Slice) -> list[dict[str, str]] | None:
         if has_exact_dates:
             seg_date = s.segment_dates[i]
         else:
-            seg_date = arr_date if (i == n - 1 and arr_date != dep_date) else dep_date
+            # A segment is dated by when it DEPARTS. The last segment of a
+            # multi-segment slice departs on the arrival date only when the
+            # slice spans midnight — and a NONSTOP is never that case, even
+            # though it satisfies `i == n - 1`: it departs on the departure
+            # date by definition. Treating an overnight nonstop as arrival-
+            # dated pinned BA178 JFK->LHR (dep 2026-12-31, arr 2027-01-01) to
+            # 2027-01-01, sending the user to a search for the wrong day.
+            spans_midnight = arr_date != dep_date
+            is_last_of_many = n > 1 and i == n - 1
+            seg_date = arr_date if (is_last_of_many and spans_midnight) else dep_date
         out.append(
             {
                 "origin": seg_origin,
@@ -629,6 +707,11 @@ def google_flights_url(s: Search, *, currency: str = "USD", language: str = "en"
             infants_in_seat=p.infants_in_seat,
             infants_on_lap=p.infants_in_lap,
         ),
+        # The stop limit is a TFSData-level field, not per-FlightData. Omitting
+        # it made a `--stops 0` link byte-identical to an unconstrained one, so
+        # a nonstop-only result table handed the user a page that also offered
+        # connections.
+        max_stops=s.options.max_extra_stops,
     )
     b64 = td.as_b64().decode()
     return (

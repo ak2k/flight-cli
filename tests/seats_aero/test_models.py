@@ -67,7 +67,9 @@ def test_with_trips_trip_fields() -> None:
     t = trips[0]
     # FlightNumbers is a comma-joined string in segment order.
     assert "," in t.FlightNumbers or "-" not in t.FlightNumbers
-    # DepartsAt is ISO 8601 UTC.
+    # DepartsAt arrives with a 'Z' suffix — which upstream mislabels: the
+    # value is local time at the airport. Pinned as the raw wire shape; the
+    # provider strips it (see test_seats_aero_timestamps_are_normalized_local).
     assert t.DepartsAt.endswith("Z") or "+" in t.DepartsAt
     # Cabin is lowercased.
     assert t.Cabin in {"economy", "premium", "business", "first"}

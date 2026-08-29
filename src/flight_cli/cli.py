@@ -50,12 +50,13 @@ from .links import (
     matrix_itinerary_url,
 )
 from .log import configure as configure_logging
+from .models import SearchResult
 from .pp.auth import load_tokens
 from .pp.cli import auth_app, run_pp_for_search
 from .providers.base import LegQuery
 
 if TYPE_CHECKING:
-    from .models import CalendarResult, LegInfo, Location, SearchResult, Slice
+    from .models import CalendarResult, LegInfo, Location, Slice
 
 # Tuple-length sentinels for `--slice` parser (`ORIGIN-DEST:DATE[:r=...:e=...]`).
 _SLICE_MIN_PARTS = 2
@@ -559,16 +560,35 @@ async def _gather_calendar(
     just drops its destination from the merge rather than sinking the whole run."""
     results: list[CalendarResult | None] = [None] * len(subs)
 
+    failures: list[tuple[int, str]] = []
+
     async def one(i: int, s: CalendarSearch) -> None:
         try:
             results[i] = cast("CalendarResult", await c.execute(s, cache=cache))
-        except Exception:  # noqa: BLE001 — a sub-query failure just drops that destination
+        except Exception as e:  # noqa: BLE001 — a sub-query failure just drops that destination
             results[i] = None
+            failures.append((i, str(e) or type(e).__name__))
 
     async with anyio.create_task_group() as tg:
         for i, s in enumerate(subs):
             tg.start_soon(one, i, s)
+
+    # A dropped sub-query silently removes its destination from the grid, so
+    # "cheapest destination" would be computed over an incomplete set and
+    # presented as the answer. Name what is missing.
+    for i, msg in sorted(failures):
+        route = _calendar_route_label(subs[i])
+        err.print(f"[yellow]{route}: sub-query failed, omitted from the grid — {msg}[/]")
+
     return [r for r in results if r is not None]
+
+
+def _calendar_route_label(s: CalendarSearch) -> str:
+    """`JFK,EWR→LHR` for a sub-query, for failure messages."""
+    if not s.legs:
+        return "?"
+    leg = s.legs[0]
+    return f"{','.join(leg.origins)}→{','.join(leg.destinations)}"
 
 
 def _run_calendar(
@@ -618,7 +638,9 @@ def _run_calendar(
                 return cast("CalendarResult", await c.execute(search, cache=not no_cache)), 0
             recovered = await _gather_calendar(c, subs, cache=not no_cache)
             merged = merge_calendar_results(recovered)
-            return (merged, n) if not is_empty_calendar(merged) else (merged, 0)
+            # Count what SUCCEEDED. Returning `n` (the requested fan-out size)
+            # reported a complete merge even when sub-queries had been dropped.
+            return (merged, len(recovered)) if not is_empty_calendar(merged) else (merged, 0)
 
     try:
         return anyio.run(go)
@@ -729,7 +751,11 @@ def _run_calendar_enriched(
     _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
 
 
-def _pinned_solution_index(result: SearchResult | None, pick: int | None) -> int | None:
+def _pinned_solution_index(
+    result: SearchResult | None,
+    pick: int | None,
+    rendered: int | None = None,
+) -> int | None:
     """0-based index into `result.solutions` of the itinerary to pin in a deep
     link. `pick` is the 1-based itinerary number the user saw in the table;
     None pins the cheapest (row 1). Out-of-range picks warn and fall back to
@@ -739,9 +765,13 @@ def _pinned_solution_index(result: SearchResult | None, pick: int | None) -> int
         return None
     if pick is None:
         return 0
-    if pick < 1 or pick > len(result.solutions):
+    # Bound by what the user could actually SEE. Validating against
+    # `len(result.solutions)` accepted a `--pick` beyond the rendered table and
+    # then labelled the link "itinerary #N pinned" for a row never displayed.
+    upper = len(result.solutions) if rendered is None else min(rendered, len(result.solutions))
+    if pick < 1 or pick > upper:
         console.print(
-            f"[yellow]--pick {pick} is out of range (1-{len(result.solutions)}); "
+            f"[yellow]--pick {pick} is out of range (1-{upper}); "
             f"pinning the cheapest itinerary instead.[/]"
         )
         return 0
@@ -802,6 +832,51 @@ def _try_pinned_gflight_url(search: Search, result: SearchResult | None, idx: in
         return None
 
 
+def _overlay_awards(
+    matrix_res: SearchResult,
+    *,
+    legs: tuple[Leg, ...],
+    opts: Any,
+    sel: Any,
+    awards_only: bool,
+) -> None:
+    """Render the award overlay for an already-fetched Matrix result."""
+    p = opts.pax
+    run_pp_for_search(
+        matrix_res,
+        legs=_build_pp_legs(legs),
+        num_passengers=_seated_pax(p),
+        airlines=sel.pp_airlines() if sel is not None else None,
+        cabins=sel.pp_cabins() if sel is not None else None,
+        pp_only=awards_only,
+        json_out=False,
+        provider_filter=sel.provider_filter if sel is not None else None,
+        seats_sources=sel.seats_sources() if sel is not None else None,
+        cash_per_cabin=_cash_per_cabin_single(matrix_res, opts.cabin),
+    )
+
+
+def _pin_source_from_merged(rows: list[Any], top_n: int, src: SearchResult) -> SearchResult:
+    """The itineraries `--pick N` should index: exactly the rows rendered.
+
+    `--pick N` names a row number the user just read off the merged GF+Matrix
+    table. Pinning from `matrix_res` instead indexes a DIFFERENT sequence —
+    a Google-only row is cheaper, so it sorts early and shifts every row after
+    it, and the emitted link then pins an itinerary the user never selected.
+    Since that link is the handoff to an actual booking, the two orderings
+    must be the same list.
+    """
+    kept = rows[:top_n]
+    # `session` / `solution_set` are server-generated and required to build a
+    # Matrix pinned itinerary URL, so they must survive the re-key.
+    return SearchResult(  # pyright: ignore[reportCallIssue]  # DIVERGE: Field(alias=...) confuses basedpyright into requiring aliased names
+        solutionCount=len(kept),
+        solutions=[r.itinerary for r in kept],
+        session=src.session,
+        solutionSet=src.solution_set,
+    )
+
+
 def _emit_urls(
     search: Search,
     *,
@@ -809,8 +884,9 @@ def _emit_urls(
     google_url: bool,
     result: SearchResult | None = None,
     pick: int | None = None,
+    rendered: int | None = None,
 ) -> None:
-    idx = _pinned_solution_index(result, pick)
+    idx = _pinned_solution_index(result, pick, rendered)
     # Only claim "#N" when we actually honored the user's pick; an out-of-range
     # pick falls back to idx 0 and must not mislabel the cheapest as "#N".
     pinned_label = (
@@ -839,11 +915,39 @@ def _emit_urls(
             else:
                 console.print("[dim]Google Flights (tfs= structured):[/]")
                 console.print(f"  [link]{google_flights_url(search)}[/]")
+                for note in _gflight_url_caveats(search):
+                    console.print(f"  [yellow]note: {note}[/]")
         except Exception as e:  # noqa: BLE001 - third-party undocumented errors; non-fatal fallback
             console.print(f"[dim]Google Flights link: {e}[/]")
 
 
 # ─────────────────────────── result renderers ──────────────────────────────
+
+
+def _gflight_url_caveats(search: Search) -> list[str]:
+    """Ways the emitted Google link is NARROWER than the search it came from.
+
+    `fast_flights`' tfs= encoder takes exactly one origin and one destination
+    per leg and has no routing-language field, so a multi-airport or routed
+    search silently degrades: rows flying EWR->LGW under `--routing AA+` sat
+    beside a link that searched JFK->LHR unconstrained, and nothing said so.
+    The Matrix link on the same output IS faithful, which made the two
+    disagree with no explanation.
+
+    We still emit the link — it is a useful starting point, and booking hands
+    off to Google — but the ways it differs are now stated.
+    """
+    legs: tuple[Leg, ...] = getattr(search, "legs", ()) or ()
+    notes: list[str] = []
+    if legs and any(len(lg.origins) > 1 or len(lg.destinations) > 1 for lg in legs):
+        first = legs[0]
+        notes.append(
+            f"multi-airport search narrowed to {first.origins[0]}→{first.destinations[0]} "
+            "(Google's link format takes one airport pair)"
+        )
+    if any(lg.route_language or lg.extension for lg in legs):
+        notes.append("routing/extension codes are not expressible in a Google link")
+    return notes
 
 
 def _parse_iso(s: str) -> datetime | None:
@@ -899,7 +1003,29 @@ def _fmt_slice_cell(s: Slice) -> str:
     return f"{head}\n{tail}" if tail else head
 
 
-def _render_search(res: SearchResult) -> None:
+def _seated_pax(p: Pax) -> int:
+    """Occupants needing their own seat.
+
+    An infant IN SEAT buys a seat, so it counts; only a LAP infant does not.
+    Omitting it made the award query ask for fewer seats than the cash query
+    on the same run, so an award with too little availability rendered as
+    bookable for the party.
+    """
+    return p.adults + p.children + p.seniors + p.youth + p.infants_in_seat
+
+
+_DEFAULT_RENDER_LIMIT = 10  # matches the `-n/--page-size` default
+
+
+def _render_search(res: SearchResult, limit: int = _DEFAULT_RENDER_LIMIT) -> None:
+    """Render the itinerary table, showing at most `limit` rows.
+
+    `limit` MUST be the same bound `--pick` is validated against. It was
+    hardcoded to 10 while `--pick` checked against `len(res.solutions)`, so
+    `-n 15 --pick 15` printed 10 rows and then emitted a booking link labelled
+    "itinerary #15 pinned" for a row the user never saw — with no out-of-range
+    warning, because 15 was in range for the unrendered list.
+    """
     if res.solution_count == 0:
         console.print("[yellow]No solutions returned.[/]")
         return
@@ -937,7 +1063,7 @@ def _render_search(res: SearchResult) -> None:
     st.add_column("carriers")
     st.add_column("outbound")
     st.add_column("return")
-    for i, it in enumerate(res.solutions[:10], 1):
+    for i, it in enumerate(res.solutions[:limit], 1):
         itn = it.itinerary
         slcs: list[Slice] = itn.slices if itn else []
         it_carriers = ",".join((c.code or "?") for c in (itn.carriers if itn else []))
@@ -1128,13 +1254,13 @@ def _run_matrix_path(
         sys.stdout.write(json.dumps(res.raw, indent=2))
         return
     if not sel.awards_only:
-        _render_search(res)
+        _render_search(res, opts.page_size)
     if run_pp:
         p = opts.pax
         run_pp_for_search(
             res,
             legs=_build_pp_legs(legs),
-            num_passengers=p.adults + p.children + p.seniors + p.youth,
+            num_passengers=_seated_pax(p),
             airlines=sel.pp_airlines(),
             cabins=sel.pp_cabins(),
             pp_only=sel.awards_only,
@@ -1144,7 +1270,20 @@ def _run_matrix_path(
             cash_per_cabin=_cash_per_cabin_single(res, opts.cabin),
         )
     # `res` was cast to SearchResult at the top of this function; safe to pass through.
-    _emit_urls(search, matrix_url=matrix_url, google_url=google_url, result=res, pick=pick)
+    _emit_urls(
+        search,
+        matrix_url=matrix_url,
+        google_url=google_url,
+        result=res,
+        pick=pick,
+        rendered=opts.page_size,
+    )
+
+
+# How much deeper to fetch when a Tier-2 routing post-filter will discard rows.
+# Bounded rather than unlimited: Google's own result depth is finite and each
+# extra page costs a round trip.
+_POSTFILTER_OVERFETCH = 5
 
 
 def _gflight_results(legs: tuple[Leg, ...], opts: SearchOptions, top_n: int) -> list[Any]:
@@ -1165,12 +1304,20 @@ def _gflight_results(legs: tuple[Leg, ...], opts: SearchOptions, top_n: int) -> 
     out_constraints = classify(legs[0].route_language, legs[0].extension) if legs else None
     if out_constraints and out_constraints.predicates:
         apply_gf_native_filters(fli_filter, out_constraints.predicates)
-    results: list[Any] = search_with_ids(fli_filter, top_n=top_n) or []
     per_slice_preds = [list(classify(lg.route_language, lg.extension).predicates) for lg in legs]
+
+    # Fetch deeper than we need when a Tier-2 post-filter will run, because it
+    # drops rows AFTER truncation: `-n 1 --routing AA+` fetched exactly one
+    # itinerary, discarded it for violating the routing, and reported "no
+    # results" while a qualifying one sat at rank 2. Over-fetching lets the
+    # filter choose from a real candidate pool; the final slice below still
+    # honours the user's `top_n`.
+    fetch_n = top_n * _POSTFILTER_OVERFETCH if any(per_slice_preds) else top_n
+    results: list[Any] = search_with_ids(fli_filter, top_n=fetch_n) or []
     if results and any(per_slice_preds):
         keep = set(surviving_indices(fli_results_to_search_result(results), per_slice_preds))
         results = [r for i, r in enumerate(results) if i in keep]
-    return results
+    return results[:top_n]
 
 
 _MERGE_SOURCE_TAG = {"both": "GF+MX", "matrix": "MX", "gf": "GF"}
@@ -1274,7 +1421,7 @@ def _run_gflight_path(
         run_pp_for_search(
             sr,
             legs=_build_pp_legs(legs),
-            num_passengers=p.adults + p.children + p.seniors + p.youth,
+            num_passengers=_seated_pax(p),
             airlines=sel.pp_airlines() if sel is not None else None,
             cabins=sel.pp_cabins() if sel is not None else None,
             pp_only=awards_only,
@@ -1369,28 +1516,25 @@ def _run_enriched_path(
         return
     matrix_res = cast("SearchResult", matrix_res)
 
-    # Repaint: reconciled GF + Matrix, prices attributed.
+    # Repaint: reconciled GF + Matrix, prices attributed. `--pick` indexes the
+    # rendered merged rows; with no merged table (awards-only) it falls back to
+    # Matrix's own ordering, which is then what the user saw.
+    pin_res = matrix_res
     if not awards_only:
         merged = merge_results(fli_results_to_search_result(gf), matrix_res)
         _render_merged(merged, legs=legs, top_n=top_n)
+        pin_res = _pin_source_from_merged(merged, top_n, matrix_res)
 
     if run_pp:
-        p = opts.pax
-        run_pp_for_search(
-            matrix_res,
-            legs=_build_pp_legs(legs),
-            num_passengers=p.adults + p.children + p.seniors + p.youth,
-            airlines=sel.pp_airlines() if sel is not None else None,
-            cabins=sel.pp_cabins() if sel is not None else None,
-            pp_only=awards_only,
-            json_out=False,
-            provider_filter=sel.provider_filter if sel is not None else None,
-            seats_sources=sel.seats_sources() if sel is not None else None,
-            cash_per_cabin=_cash_per_cabin_single(matrix_res, opts.cabin),
-        )
+        _overlay_awards(matrix_res, legs=legs, opts=opts, sel=sel, awards_only=awards_only)
 
     _emit_urls(
-        matrix_search, matrix_url=matrix_url, google_url=google_url, result=matrix_res, pick=pick
+        matrix_search,
+        matrix_url=matrix_url,
+        google_url=google_url,
+        result=pin_res,
+        pick=pick,
+        rendered=top_n,
     )
 
 
@@ -1682,7 +1826,7 @@ def _run_matrix_path_multi(
         run_pp_for_search(
             merged,
             legs=_build_pp_legs(legs),
-            num_passengers=p.adults + p.children + p.seniors + p.youth,
+            num_passengers=_seated_pax(p),
             airlines=sel.pp_airlines(),
             cabins=_pp_cabins_for_multi(sel, cabins),
             pp_only=sel.awards_only,
@@ -1749,7 +1893,7 @@ def _run_gflight_path_multi(
         run_pp_for_search(
             merged,
             legs=_build_pp_legs(legs),
-            num_passengers=p.adults + p.children + p.seniors + p.youth,
+            num_passengers=_seated_pax(p),
             airlines=sel.pp_airlines(),
             cabins=_pp_cabins_for_multi(sel, cabins),
             pp_only=sel.awards_only,
@@ -1860,7 +2004,11 @@ def _render_gflight_table(
                 any_legroom = True
             t.add_row(
                 label,
-                f"{fr.currency or 'USD'}{fr.price:.2f}",
+                # fli types `price` as `NonNegativeFloat | None` ("None when
+                # not surfaced"). The gflight adapter already tolerates that;
+                # this renderer formatted it unguarded and raised TypeError,
+                # so one price-less row took down the whole cash table.
+                (f"{fr.currency or 'USD'}{fr.price:.2f}" if fr.price is not None else "—"),
                 str(fr.stops),
                 dur,
                 legs_str,
@@ -2891,7 +3039,7 @@ def calendar(
         return
     if n_split:
         console.print(
-            f"[dim]Queried {n_split} destinations separately and merged — Matrix "
+            f"[dim]Queried {n_split} origin/destination groups separately and merged — Matrix "
             f"under-reports the combined multi-airport calendar grid.[/]"
         )
     _render_calendar(res, dmin=dmin, dmax=dmax, origin=origins, destination=dests, sd=sd, ed=ed)

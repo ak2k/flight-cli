@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from http import HTTPStatus
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import anyio
 import httpx
@@ -37,12 +37,46 @@ _JsonDict = dict[str, Any]
 
 API_BASE = "https://api.pointspath.com"
 
+
+class PPApiError(Exception):
+    """A PointsPath endpoint returned an unusable response.
+
+    Exists so `httpx.HTTPStatusError` never reaches a caller (AGENTS.md
+    Principle 1 — boundaries fail loudly, in domain terms). Per-airline
+    failures are non-fatal and handled inline; this is for the catalog
+    endpoints, where a failure means the award overlay cannot be built.
+    """
+
+    def __init__(self, message: str, *, endpoint: str, status: int | None = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.endpoint = endpoint
+        self.status = status
+
+
 PRICING_CACHE = Path.home() / ".cache" / "flight-cli" / "pp_pricing.json"
 PRICING_TTL_SECS = 24 * 3600
 
 EXT_CONFIG_CACHE = Path.home() / ".cache" / "flight-cli" / "pp_extension_config.json"
 EXT_CONFIG_TTL_SECS = 7 * 24 * 3600
 EXT_CONFIG_VERSION = "1.10.4"
+
+# Airlines the server has told us it does not support, learned at runtime.
+#
+# PP's /api/pricing-info advertises a superset of what /api/airline-search will
+# actually serve: ~10 of its entries (ANA, BritishAirways, CathayPacific, …)
+# have no `enable<Airline>` feature flag, so `enabled_airlines` treats them as
+# always-on and every search fans out to them and collects a 400 "unsupported
+# airline". That is ~10 wasted round-trips and ~20 warning lines per run.
+#
+# A hardcoded exclusion list would be wrong: the two conditions look identical
+# from the flags alone. AirFrance also has no exact-name flag (only
+# `enableAirFranceV2`) and DOES serve results, so "no flag" cannot be the
+# predicate. Instead we record the server's own verdict — a 400 naming the
+# airline as unsupported — and skip that airline until the TTL expires. The
+# list self-heals when PP adds support or the user's tier changes.
+UNSUPPORTED_CACHE = Path.home() / ".cache" / "flight-cli" / "pp_unsupported_airlines.json"
+UNSUPPORTED_TTL_SECS = 7 * 24 * 3600
 
 # Airlines observed firing in a single GFlights international search. Used as
 # the default fan-out set when --pp-airlines isn't provided. Real catalog
@@ -219,12 +253,20 @@ class PPClient:
         if r.status_code == HTTPStatus.NO_CONTENT or not r.content:
             return AirlineSearchResponse()
         if r.status_code >= HTTPStatus.BAD_REQUEST:
-            log.warning(
-                "pp_airline_search_failed",
-                airline=airline,
-                status=r.status_code,
-                body=r.text[:200],
-            )
+            if is_unsupported_airline_response(r.status_code, r.text):
+                # A permanent "we don't serve this airline", not a transient
+                # failure — remember it so later runs skip the call entirely.
+                # Logged at debug: it's an expected steady state, not a problem
+                # the user can act on.
+                remember_unsupported_airline(airline)
+                log.debug("pp_airline_unsupported", airline=airline)
+            else:
+                log.warning(
+                    "pp_airline_search_failed",
+                    airline=airline,
+                    status=r.status_code,
+                    body=r.text[:200],
+                )
             return AirlineSearchResponse()
         return AirlineSearchResponse.model_validate(r.json())
 
@@ -233,8 +275,16 @@ class PPClient:
         spec: SearchSpec,
         airlines: tuple[str, ...],
     ) -> dict[str, AirlineSearchResponse]:
-        """Fan out one request per airline; concurrency-bounded by the semaphore."""
+        """Fan out one request per airline; concurrency-bounded by the semaphore.
+
+        Airlines the server has previously rejected as unsupported are skipped
+        without a request — see `UNSUPPORTED_CACHE`.
+        """
         out: dict[str, AirlineSearchResponse] = {}
+        skip = load_unsupported_airlines()
+        to_call = tuple(a for a in airlines if a not in skip)
+        if skipped := tuple(a for a in airlines if a in skip):
+            log.debug("pp_airline_search_skipped_unsupported", airlines=skipped)
 
         async def runner(airline: str) -> None:
             try:
@@ -243,7 +293,7 @@ class PPClient:
                 log.warning("pp_airline_search_exception", airline=airline, error=str(e))
 
         async with anyio.create_task_group() as tg:
-            for a in airlines:
+            for a in to_call:
                 tg.start_soon(runner, a)
         return out
 
@@ -253,7 +303,7 @@ class PPClient:
             if age < PRICING_TTL_SECS:
                 return PricingInfoResponse.model_validate(json.loads(PRICING_CACHE.read_text()))
         r = await self._request("GET", "/api/pricing-info")
-        r.raise_for_status()
+        _raise_for_status(r, "/api/pricing-info")
         PRICING_CACHE.parent.mkdir(parents=True, exist_ok=True)
         PRICING_CACHE.write_text(r.text)
         return PricingInfoResponse.model_validate(r.json())
@@ -274,7 +324,7 @@ class PPClient:
             "/api/extension-config",
             params={"v": EXT_CONFIG_VERSION},
         )
-        r.raise_for_status()
+        _raise_for_status(r, "/api/extension-config")
         EXT_CONFIG_CACHE.parent.mkdir(parents=True, exist_ok=True)
         EXT_CONFIG_CACHE.write_text(r.text)
         return r.json()
@@ -285,6 +335,110 @@ class PPClient:
 # `enableAirFranceV2`). Sub-feature flags like `enableDeltaTakeOff15` or
 # `enableSpiritSaversClub` carry trailing words and so don't match.
 _AIRLINE_FLAG_RE = re.compile(r"^enable(?P<name>[A-Z][A-Za-z]+?)(?:V\d+)?$")
+
+
+def _raise_for_status(r: httpx.Response, endpoint: str) -> None:
+    """Translate a failed response into `PPApiError` at the boundary, so
+    `httpx.HTTPStatusError` never escapes this module."""
+    try:
+        _ = r.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        raise PPApiError(
+            f"{endpoint} returned HTTP {r.status_code}",
+            endpoint=endpoint,
+            status=r.status_code,
+        ) from e
+
+
+def is_unsupported_airline_response(status: int, body: str) -> bool:
+    """True when a 4xx says the airline itself isn't served, as opposed to a
+    transient/auth/route-specific failure.
+
+    Deliberately narrow: it must be a 400 AND the body must name the airline
+    as unsupported. Broadening this to "any 4xx" would let a rate-limit or an
+    expired token permanently blacklist a working airline.
+    """
+    if status != HTTPStatus.BAD_REQUEST:
+        return False
+    return "unsupported airline" in body.lower()
+
+
+def _load_unsupported_raw() -> dict[str, float]:
+    """`{airline: epoch_seconds_learned}`, unfiltered. {} on any read problem.
+
+    Tolerates the legacy flat-list format written by the first version of this
+    cache, dating those entries from the FILE's mtime — the only real timestamp
+    they have. Stamping them `now` instead would restamp on every read, so a
+    legacy file could never age out and the entries would be immortal.
+    """
+    try:
+        raw: Any = json.loads(UNSUPPORTED_CACHE.read_text())
+    except (OSError, ValueError):
+        return {}
+    if isinstance(raw, list):  # legacy: ["ANA", "Finnair", ...]
+        try:
+            learned_at = UNSUPPORTED_CACHE.stat().st_mtime
+        except OSError:
+            return {}
+        return {x: learned_at for x in cast("list[Any]", raw) if isinstance(x, str)}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, float] = {}
+    for k, v in cast("dict[Any, Any]", raw).items():
+        if isinstance(k, str) and isinstance(v, (int, float)) and not isinstance(v, bool):
+            out[k] = float(v)
+    return out
+
+
+def load_unsupported_airlines() -> frozenset[str]:
+    """Airlines the server rejected as unsupported, whose note is still fresh.
+
+    Each entry carries its OWN learned-at timestamp. Keying the TTL off the
+    file's mtime instead would mean any new rejection refreshed every existing
+    entry — and since a run that learns one airline rewrites the file, entries
+    would never expire in steady state, defeating the self-healing the TTL is
+    there to provide.
+
+    Any read problem (missing, corrupt, wrong shape) yields the empty set —
+    the cost of a stale-empty result is one wasted round-trip per airline,
+    versus wrongly suppressing a working airline's awards.
+    """
+    cutoff = time.time() - UNSUPPORTED_TTL_SECS
+    return frozenset(a for a, learned_at in _load_unsupported_raw().items() if learned_at > cutoff)
+
+
+def remember_unsupported_airline(airline: str) -> None:
+    """Stamp one airline as unsupported as of now. Best-effort: a failure here
+    only costs the next run a redundant request.
+
+    Existing entries keep their original timestamps so each expires on its own
+    schedule.
+
+    NOTE: read-modify-write with no lock. Safe within one process — there is no
+    `await` between the read and the write, so anyio's cooperative scheduling
+    serializes concurrent callers in `airline_search_many`. Keep it that way:
+    introducing an async file API here would open a real lost-update race.
+    Across two concurrent CLI invocations a lost update is possible, and costs
+    exactly one redundant request next run.
+    """
+    current = _load_unsupported_raw()
+    now = time.time()
+    # Re-stamp an EXPIRED entry. Returning early on mere presence meant a
+    # lapsed airline was re-queried, rejected, and then still looked stale on
+    # the next run — so it was re-queried forever, exactly what this cache
+    # exists to avoid.
+    if current.get(airline, 0.0) > now - UNSUPPORTED_TTL_SECS:
+        return
+    current[airline] = now
+    try:
+        UNSUPPORTED_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        # Write-then-rename: a crash mid-write leaves the old file intact
+        # rather than a truncated one that reads as an empty cache.
+        tmp = UNSUPPORTED_CACHE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(dict(sorted(current.items())), indent=2))
+        tmp.replace(UNSUPPORTED_CACHE)
+    except OSError as e:
+        log.debug("pp_unsupported_cache_write_failed", error=str(e))
 
 
 def enabled_airlines(

@@ -37,6 +37,7 @@ htmlcov/
 # `research/*` not `research/` so git can still see inside the dir.
 research/*
 !research/extract_help_docs.py
+!research/capture_matrix_spa.py
 
 # Claude Code per-session agent state. Project-shared `.claude/settings.json`
 # and `.claude/skills/` ARE checked in; per-machine override stays local.
