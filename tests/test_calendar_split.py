@@ -974,11 +974,14 @@ def test_calendar_one_way_note_survives_json_output(
         ("5-7\n", "use nights as"),
         ("5-7\r", "use nights as"),
         ("5\n-7", "use nights as"),
-        # `int()` REFUSES 4300+ digits (CPython's int/str cap), so an unbounded
-        # match reaches it and tracebacks where this should be a usage error.
-        ("9" * 4301, "use nights as"),
-        ("5-" + "9" * 4301, "use nights as"),
-        ("1000000000", "use nights as"),  # ten digits: past the bound, still typed
+        # A bound that is a number and only too WIDE gets told the width. `int()`
+        # refuses 4300+ digits (CPython's int/str cap), so an unbounded match
+        # tracebacks where this should be a usage error — and answering a
+        # ten-digit range with "use nights as '5' or '5-7'" would hand back the
+        # shape the user already used.
+        ("9" * 4301, "each bound is at most 9 digits"),
+        ("5-" + "9" * 4301, "each bound is at most 9 digits"),
+        ("1000000000", "each bound is at most 9 digits"),  # the first refused width
     ],
 )
 def test_calendar_round_trip_bad_duration_is_a_typed_error(
@@ -1117,13 +1120,16 @@ def test_parse_errors_truncate_an_oversized_value(
     with pytest.raises(typer.Exit) as excinfo:
         _calendar_fast(fast=False, one_way=False, **kwargs)
     message = _flat(capsys.readouterr().err)
+    value = next(iter(kwargs.values()))
     assert excinfo.value.exit_code == 2  # still a typed usage error
     assert flag in message  # and still says which flag
     assert "…" in message  # cut, and visibly so
+    # And bounded, which the ellipsis alone does not say: a message that echoed the
+    # whole value and appended "…" satisfies the line above and nothing else here.
+    assert len(message) < len(cli._quote(value)) + 200  # pyright: ignore[reportPrivateUsage]
     # What the cap actually governs: the value the user typed, measured where the
     # cap applies — before `repr`, which is where one code point stops being one
     # character. Plus one for the ellipsis.
-    value = next(iter(kwargs.values()))
     shown = cli._elide(value)  # pyright: ignore[reportPrivateUsage] — the cap IS the unit
     assert len(shown) <= cli._MAX_ECHOED_VALUE + 1  # pyright: ignore[reportPrivateUsage] — as above
 
@@ -1132,12 +1138,29 @@ def test_parse_errors_truncate_an_oversized_value(
 # ESC and CSI drive the terminal, and `escape` neutralises `[` alone: it leaves an
 # ESC to clear the screen or repaint the line above, and a bidi override to reorder
 # what is left. A redirected stderr keeps every byte for whatever reads it next.
-_DRIVES_THE_TERMINAL = "\x1b[2J\x9b31m\x7f\u202e"
+_DRIVES_THE_TERMINAL = "\x1b[2J\x9b31m\x7f\u202e\u2067\u2028\u2029\u200e\u200f\u061c"
 _READS_AS_TEXT = "café ¥1200 → [/x]"
-# The code points that do the driving, as opposed to the letters they steer.
-# Asserted individually: `[`, `2` and `J` are ordinary text once the ESC is gone,
-# and rich emits its own ESC sequences when it is styling for a terminal.
-_DRIVERS = ("\x1b[2J", "\x1b", "\x9b", "\x7f", "\u202e")
+# The code points that do the driving, as opposed to the letters they steer:
+# a clear-screen, its 7-bit and 8-bit introducers, DEL, an override, an isolate,
+# the two separators `str.splitlines` breaks on, and the three bidi marks.
+# Asserted individually, because `[`, `2` and `J` are ordinary text once the ESC
+# is gone.
+_DRIVERS = (
+    "\x1b[2J",
+    "\x1b",
+    "\x9b",
+    "\x7f",
+    "\u202e",
+    "\u2067",
+    "\u2028",
+    "\u2029",
+    "\u200e",
+    "\u200f",
+    "\u061c",
+)
+# rich emits its own ESC sequences when it is styling for a terminal, so the bare
+# introducer is the one driver a styled stream cannot be asked about.
+_DRIVERS_ON_A_TTY = tuple(d for d in _DRIVERS if d != "\x1b")
 # Rich's own colour codes, which it interleaves with the text when styling for a
 # terminal — `café ¥1200` comes back in three styled pieces. Only SGR sequences,
 # so a payload's `ESC [ 2J` would survive this and fail the assertion above.
@@ -1168,14 +1191,14 @@ def test_matrix_error_strips_terminal_control_characters(
     _run_enriched()  # a grid was painted, so no Exit — only the report
     written = buffer.getvalue()
 
-    # Never, on either stream: a clear-screen, an 8-bit CSI, a DEL, a bidi override.
-    for driver in ("\x1b[2J", "\x9b", "\x7f", "\u202e"):
+    # Never, on either stream: a clear-screen, an 8-bit CSI, a DEL, a bidi control.
+    for driver in _DRIVERS_ON_A_TTY:
         assert driver not in written, f"{driver!r} reached the console"
     if not force_terminal:
         # Redirected, nothing emits ESC — not rich's styling, and not the payload.
         assert "\x1b" not in written
     assert "café ¥1200" in _SGR.sub("", written)  # the readable half survives
-    assert "input" in written and "31m" in written  # kind, and the CSI's inert remains
+    assert "input" in written  # and the kind field is still readable
     _ = capsys.readouterr()
 
 
@@ -1188,6 +1211,11 @@ def test_safe_text_keeps_the_sentence_and_drops_the_drivers() -> None:
         assert driver not in out, f"{driver!r} survived"
     assert "café ¥1200 →" in out
     assert "\\[/x]" in out  # still escaped, not just stripped
+    # Strip THEN escape, and only a control character INSIDE a tag tells the two
+    # orders apart: `escape` sees a tag only where `[` is followed by `[a-z#/@]`,
+    # so the NUL hides `[red]` from it and stripping afterwards yields
+    # "[red]x\\[/]" — a live red style, from a message that should read as text.
+    assert safe_text("[\x00red]x[/]") == "\\[red]x\\[/]"
     assert safe_text("kept\tby\ntab and newline") == "kept\tby\ntab and newline"
     long_sentence = "why it failed. " * 40
     assert safe_text(long_sentence) == long_sentence  # never truncated, unlike _quote
@@ -1268,7 +1296,7 @@ def test_detail_matrix_error_strips_terminal_control_characters(
         _detail()
     assert excinfo.value.exit_code == 1
     written = buffer.getvalue()
-    for driver in ("\x1b[2J", "\x9b", "\x7f", "\u202e"):
+    for driver in _DRIVERS_ON_A_TTY:
         assert driver not in written, f"{driver!r} reached the console"
     if not force_terminal:
         assert "\x1b" not in written
@@ -1297,7 +1325,7 @@ def test_calendar_fast_refusal_strips_terminal_control_characters(
         _calendar_fast()
     assert excinfo.value.exit_code == 1
     written = buffer.getvalue()
-    for driver in ("\x1b[2J", "\x9b", "\x7f", "\u202e"):
+    for driver in _DRIVERS_ON_A_TTY:
         assert driver not in written, f"{driver!r} reached the console"
     if not force_terminal:
         assert "\x1b" not in written
@@ -1447,35 +1475,28 @@ def test_detail_round_trip_bad_duration_is_a_typed_error(
 #
 # Polarity is inverted on purpose. An opt-IN list of functions to scan goes stale
 # the moment a print moves into a new helper — the helper is simply not listed,
-# and the scan stays green. Everything is scanned unless its enclosing function
-# is named below, so the default for new code is "checked".
+# and the scan stays green. Everything is scanned unless the top-level function it
+# sits in is named below, so the default for new code is "checked".
 
-# Paths another unit owns. Each entry is a promise that the value is not ours to
-# escape, not that it is safe.
+# Functions this scan does not cover. A reason is a promise that the value is not
+# this path's to escape, or that its shape cannot carry markup — never that a sink
+# is safe: a Rich Table parses markup in every cell and in its title.
+#
+# Keyed on the TOP-LEVEL function, so a nested helper inherits the exemption of
+# the command it belongs to and cannot pick one up by reusing a name.
 _ESCAPE_OUT_OF_SCOPE = {
-    # These four ARE escaped — on the u1a branch, which is editing them now. A
-    # second escape here would conflict at merge, so they are excluded until the
-    # consolidation unit enrols them.
-    "_emit_urls": "escaped on the u1a branch; enrolled by the docs/consolidation unit after merge",
-    "_pinned_solution_index": (
-        "escaped on the u1a branch; enrolled by the docs/consolidation unit after merge"
-    ),
-    "_try_pinned_matrix_url": (
-        "escaped on the u1a branch; enrolled by the docs/consolidation unit after merge"
-    ),
-    "_try_pinned_gflight_url": (
-        "escaped on the u1a branch; enrolled by the docs/consolidation unit after merge"
-    ),
-    "_render_search": "search renderable (Rich Table)",
-    "_render_calendar": "calendar renderable (Rich Table)",
-    "_render_date_grid": "date-grid renderable (Rich Table)",
+    "_emit_urls": "deep links and a link-failure line, owned by the URL path",
+    "_pinned_solution_index": "prints only the integers it computed",
+    "_render_search": "Rich Table plus a summary line carrying a price the search path owns",
+    "_render_calendar": "Rich Table plus a summary line of module-computed counts and dates",
+    "_render_date_grid": "Rich Table plus a summary line of module-computed counts and dates",
     "_render_merged": "merged-result renderable (Rich Table)",
     "_render_gflight_table": "Google Flights renderable (Rich Table)",
     "_render_multi_cabin_search": "multi-cabin renderable (Rich Table)",
     "_run_enriched_path": "search-path weave",
     "_run_gflight_path": "Google Flights search path",
     "_run_matrix_multi": "multi-cabin fan-out",
-    "query_cabin": "multi-cabin per-cabin query",
+    "_run_gflight_multi": "Google Flights multi-cabin fan-out",
     "_validate_sort_cabin": "--sort validation",
     "_should_run_awards": "provider selection",
     "_resolve_providers": "provider/config loading",
@@ -1487,6 +1508,15 @@ _ESCAPE_OUT_OF_SCOPE = {
 # quotes a value the user typed; and `_safe_text`, which strips the control
 # characters `escape` leaves alone in text from somewhere else.
 _SAFE_WRAPPERS = frozenset({"escape", "_quote", "_safe_text"})
+# The two that strip as well as escape. `escape` neutralises `[` and nothing else,
+# so it is sufficient only where the value cannot carry an ESC, an 8-bit CSI or a
+# bidi control in the first place.
+_STRIPPING_WRAPPERS = frozenset({"_quote", "_safe_text"})
+
+# Bare names that hold a sentence built out of remote or user text, whatever the
+# local is called: a `--fast` blocker and the reasons it is made of both quote
+# `--routing` back verbatim.
+_CARRIES_CONTROL_CHARACTERS = frozenset({"blocker", "reason"})
 
 # Names that are this module's own — counters it computed, constants it wrote —
 # and so are never user text. Matched by IDENTIFIER, never by source text: an
@@ -1505,26 +1535,6 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("calendar", "_GF_GRID_UNAVAILABLE_NOTE"),
         ("_run_calendar_enriched", "_GF_GRID_UNAVAILABLE_WEAVE_NOTE"),
         ("_resolve_format", "_FORMAT_CHOICES"),
-    }
-)
-
-# Rich's own rendering knobs, which never carry content.
-_NON_CONTENT_KEYWORDS = frozenset(
-    {
-        "sep",
-        "end",
-        "style",
-        "justify",
-        "overflow",
-        "no_wrap",
-        "emoji",
-        "markup",
-        "highlight",
-        "width",
-        "height",
-        "crop",
-        "soft_wrap",
-        "new_line_start",
     }
 )
 
@@ -1556,8 +1566,36 @@ def _is_ours(name: ast.expr, chain: list[str]) -> bool:
     return any((fn, name.id) in _PRINTABLE_IDENTIFIERS for fn in chain)
 
 
-def _is_safe_field(value: ast.expr, chain: list[str]) -> bool:
-    """A printed f-string field is safe when it is wrapped, or is one of ours.
+def _caught_exception_names(tree: ast.Module) -> frozenset[str]:
+    """The names `except ... as <name>` binds anywhere in the source.
+
+    An attribute of one is text from somewhere else by construction — a Matrix
+    `kind` or `message`, an exception's own fields — so a wrapper that only
+    escapes markup leaves whatever drives a terminal.
+    """
+    return frozenset(
+        h.name for h in ast.walk(tree) if isinstance(h, ast.ExceptHandler) and h.name is not None
+    )
+
+
+def _carries_control_characters(value: ast.expr, caught: frozenset[str]) -> bool:
+    """Whether this expression can hold a control character `escape` leaves alone.
+
+    `str(...)` is transparent: `escape(str(e.kind))` is the same value as
+    `escape(e.kind)` for this question.
+    """
+    if isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id == "str":
+        return any(_carries_control_characters(a, caught) for a in value.args)
+    if isinstance(value, ast.Attribute):
+        return isinstance(value.value, ast.Name) and value.value.id in caught
+    if isinstance(value, ast.Name):
+        return value.id in _CARRIES_CONTROL_CHARACTERS
+    return False
+
+
+def _is_safe_field(value: ast.expr, chain: list[str], caught: frozenset[str]) -> bool:
+    """A printed f-string field is safe when it is wrapped in a wrapper strong
+    enough for what it holds, or is one of ours.
 
     Judged on the AST shape — an `ast.Call` whose `func` is an `ast.Name` in
     `_SAFE_WRAPPERS` — never on the source text. `escape` and `not_escape` share
@@ -1565,11 +1603,23 @@ def _is_safe_field(value: ast.expr, chain: list[str]) -> bool:
     entirely; both read as safe to a string comparison.
     """
     if isinstance(value, ast.Call):
-        return isinstance(value.func, ast.Name) and value.func.id in _SAFE_WRAPPERS
+        if not (isinstance(value.func, ast.Name) and value.func.id in _SAFE_WRAPPERS):
+            return False
+        if value.func.id in _STRIPPING_WRAPPERS:
+            return True
+        return not any(_carries_control_characters(a, caught) for a in value.args)
     return _is_ours(value, chain)
 
 
-def _argument_faults(src: str, arg: ast.expr, chain: list[str]) -> list[str]:
+def _spec_has_field(spec: ast.expr | None) -> bool:
+    """Whether a format spec interpolates anything. `f"{escape(a):{e}}"` makes `e`
+    the padding character, which reaches rich without passing the wrapper."""
+    return spec is not None and any(isinstance(n, ast.FormattedValue) for n in ast.walk(spec))
+
+
+def _argument_faults(
+    src: str, arg: ast.expr, chain: list[str], caught: frozenset[str]
+) -> list[str]:
     """Why this print argument could reach rich unescaped, or nothing."""
     if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
         return []  # a literal the author wrote
@@ -1578,13 +1628,22 @@ def _argument_faults(src: str, arg: ast.expr, chain: list[str]) -> list[str]:
         for part in arg.values:
             if isinstance(part, ast.Constant):
                 continue
-            if isinstance(part, ast.FormattedValue) and _is_safe_field(part.value, chain):
-                continue
             shown = ast.get_source_segment(src, part) or ast.dump(part)
-            faults.append(f"unwrapped f-string field {shown}")
+            if not isinstance(part, ast.FormattedValue):
+                faults.append(f"unwrapped f-string field {shown}")
+            elif part.conversion != -1:
+                # `!r` and `!a` run AFTER the wrapper, and `repr` doubles the
+                # backslash `escape` prepended — rich then reads one literal
+                # backslash followed by a live tag. `_quote` exists because the
+                # only safe order is the other one.
+                faults.append(f"f-string field converted after wrapping: {shown}")
+            elif _spec_has_field(part.format_spec):
+                faults.append(f"unwrapped field in the format spec of {shown}")
+            elif not _is_safe_field(part.value, chain, caught):
+                faults.append(f"unwrapped f-string field {shown}")
         return faults
-    if _is_ours(arg, chain):
-        return []
+    if _is_safe_field(arg, chain, caught):
+        return []  # a wrapper call, or one of ours, standing as the whole argument
     shown = ast.get_source_segment(src, arg) or ast.dump(arg)
     return [f"{type(arg).__name__} argument {shown}"]
 
@@ -1594,11 +1653,12 @@ def escape_scan(src: str) -> list[str]:
 
     Checks positional AND keyword arguments, and demands a literal, a fully
     wrapped f-string, or an allowlisted name. A local holding a message, a
-    `.format()`, a `%`, or a concatenation is none of those, and each was a way
-    past the earlier field-only scan.
+    `.format()`, a `%`, or a concatenation is none of those, and neither is a
+    field whose conversion or format spec runs after the wrapper.
     """
     tree = ast.parse(src)
     chains = _enclosing_functions(tree)
+    caught = _caught_exception_names(tree)
     faults: list[str] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -1610,14 +1670,15 @@ def escape_scan(src: str) -> list[str]:
         if not prints:
             continue
         chain = chains.get(node, [])
-        if any(name in _ESCAPE_OUT_OF_SCOPE for name in chain):
+        if chain and chain[-1] in _ESCAPE_OUT_OF_SCOPE:
             continue
         where = chain[0] if chain else "<module>"
         args = list(node.args)
-        args += [k.value for k in node.keywords if k.arg not in _NON_CONTENT_KEYWORDS]
+        args += [k.value for k in node.keywords]
         for arg in args:
             faults += [
-                f"{where}:{node.lineno} {fault}" for fault in _argument_faults(src, arg, chain)
+                f"{where}:{node.lineno} {fault}"
+                for fault in _argument_faults(src, arg, chain, caught)
             ]
     return faults
 
@@ -1646,9 +1707,23 @@ def test_out_of_scope_names_real_functions() -> None:
     assert defined >= allowed, allowed - defined
 
 
+def test_out_of_scope_entries_are_all_load_bearing() -> None:
+    """An entry that exempts nothing reads like a decision and is not one: it
+    survives every audit and pre-exempts whatever prints its function grows next.
+    Removing any single entry has to make the scan speak."""
+    src = Path(cli.__file__).read_text(encoding="utf-8")
+    inert: list[str] = []
+    for name in list(_ESCAPE_OUT_OF_SCOPE):
+        with pytest.MonkeyPatch.context() as mp:
+            mp.delitem(_ESCAPE_OUT_OF_SCOPE, name)
+            if not escape_scan(src):
+                inert.append(name)
+    assert not inert, f"these entries exempt nothing; delete them: {inert}"
+
+
 def test_escape_scan_finds_every_known_bypass() -> None:
-    """The scan's own regression net. Each source below slipped past the earlier
-    field-only version, which looked at f-string fields and nothing else."""
+    """The scan's own regression net: one source per shape that reaches rich
+    holding text it did not escape, or escaped too weakly."""
     bypasses = {
         "local variable": 'def calendar():\n    msg = f"{e}"\n    err.print(msg)\n',
         "keyword argument": 'def calendar():\n    err.print(text=f"{e}")\n',
@@ -1667,6 +1742,33 @@ def test_escape_scan_finds_every_known_bypass() -> None:
         # counter in `_run_calendar`; anywhere else it is just a local, and a
         # local is what a user value looks like once it has been assigned.
         "allowlisted name in the wrong function": 'def detail():\n    err.print(f"{n}")\n',
+        # `escape` neutralises markup and nothing else. An attribute of a caught
+        # exception is text from somewhere else, and a blocker sentence quotes
+        # `--routing` back; both need the control characters gone too.
+        "escape on a caught exception's field": (
+            "def calendar():\n"
+            "    try:\n"
+            "        go()\n"
+            "    except MatrixApiError as e:\n"
+            '        err.print(f"[red]error ({escape(str(e.kind))})[/]")\n'
+        ),
+        "escape on a blocker sentence": (
+            'def calendar():\n    err.print(f"this is {escape(blocker)}[/]")\n'
+        ),
+        # `!r` runs after the wrapper: `repr` doubles the backslash `escape`
+        # prepended and hands the tag straight back to the markup parser.
+        "conversion applied after the wrapper": (
+            'def calendar():\n    err.print(f"{_safe_text(e)!r}")\n'
+        ),
+        # A format spec is interpolated too, and its field becomes the fill.
+        "unwrapped field inside a format spec": (
+            'def calendar():\n    err.print(f"{escape(a):{e}}")\n'
+        ),
+        # The exemption belongs to the top-level function, so a nested helper
+        # that happens to reuse an excluded name is still scanned.
+        "nested helper reusing an excluded name": (
+            'def calendar():\n    def _render_search():\n        err.print(f"{e}")\n'
+        ),
     }
     missed = [name for name, source in bypasses.items() if not escape_scan(source)]
     assert not missed, f"the scan does not catch: {missed}"
@@ -1677,8 +1779,13 @@ def test_escape_scan_passes_clean_source() -> None:
     clean = (
         "def calendar():\n"
         '    err.print("[red]a plain literal[/]")\n'
-        '    err.print(f"[red]error ({escape(str(e.kind))})[/]")\n'
+        # A date cannot carry a control character, so escaping the markup is all
+        # there is to do.
+        '    err.print(f"[red]window {escape(sd.isoformat())}[/]")\n'
         '    err.print(f"[dim]{_GF_GRID_UNAVAILABLE_NOTE}[/]")\n'  # allowed HERE
+        # Either kind of safe value may stand as the whole argument.
+        "    err.print(_GF_GRID_UNAVAILABLE_NOTE)\n"
+        "    err.print(_safe_text(e))\n"
         "def _parse_duration():\n"
         '    err.print(f"[red]bad duration {_quote(s)}[/]")\n'
         '    err.print(f"max ({hi}) is below min ({lo})", style="red")\n'  # allowed HERE

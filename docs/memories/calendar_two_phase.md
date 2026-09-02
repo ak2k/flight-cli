@@ -87,10 +87,12 @@ line, never a traceback.
 Whether a one-way value counts as "the default" is a textual comparison, over the
 spellings `_normalize_duration` folds together: `..` for `-`, blanks around either
 bound, and the zero-padded or signed writings of a number. A bound is only
-canonicalized if it is one to nine digits — the width `int()` will take without
-refusing — so `0000000005-0000000007` is ten digits a side, stays as typed, and
-draws the "ignored" line. True, and only cosmetic: a one-way ignores the value
-either way, and the same spelling on a round trip is a typed exit 2.
+canonicalized if it is one to nine digits, which is our bound, not `int()`'s —
+`int()` refuses only at 4300+ digits (CPython's int/str conversion cap), and nine
+is chosen as past any trip anyone will take and comfortably inside that. So
+`0000000005-0000000007` is ten digits a side, stays as typed, and draws the
+"ignored" line. True, and only cosmetic: a one-way ignores the value either way,
+and the same spelling on a round trip is a typed exit 2 naming the width.
 
 ## Why bother with followup vs. just calling `name: "specificDatesSlice"`?
 

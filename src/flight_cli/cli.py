@@ -155,7 +155,12 @@ def _safe_text(value: object) -> str:
     For text we did not write and the user did not type — a Matrix error message,
     an exception's `str()`. Neither quoted nor truncated, unlike `_quote`: this is
     a sentence someone needs to read whole, and the part that explains the failure
-    is as often at the end as the start."""
+    is as often at the end as the start.
+
+    Strip before escape, never after. `escape` only sees a tag where `[` is
+    followed by `[a-z#/@]`, so a control character between the brackets hides the
+    tag from it, and stripping afterwards uncovers a live one: `"[\x00red]x"`
+    comes out of the other order as `"[red]x"`, styled."""
     text = escape(str(value).translate(_CTRL))
     if not text.strip() and isinstance(value, BaseException):
         # `httpx.ConnectTimeout("")` stringifies to nothing, which would leave a
@@ -209,6 +214,10 @@ def _parse_date(s: str) -> date:
 # `\Z` not `$`, which admits one trailing newline — `--duration '5-7\n'` then
 # reads as the default range.
 _RE_DURATION_BOUND = re.compile(r"\A[+-]?\d{1,9}\Z")
+# The same bound without the width, to tell "not a number" from "too many digits":
+# "use nights as '5' or '5-7'" describes the SHAPE, and `1000000000` is already in
+# that shape, so answering it with the shape hands back what the user just typed.
+_RE_NUMERIC_BOUND = re.compile(r"\A[+-]?\d+\Z")
 
 
 def _canonical_bound(part: str) -> str:
@@ -244,7 +253,10 @@ def _parse_duration(s: str) -> tuple[int, int]:
     if len(parts) == 1:
         parts *= 2  # a bare '5' is the degenerate range 5-5
     if len(parts) != _DURATION_BOUNDS or not all(_RE_DURATION_BOUND.match(p) for p in parts):
-        err.print(f"[red]bad duration {_quote(s)}; use nights as '5' or '5-7'[/]")
+        if len(parts) == _DURATION_BOUNDS and all(_RE_NUMERIC_BOUND.match(p) for p in parts):
+            err.print(f"[red]bad duration {_quote(s)}: each bound is at most 9 digits[/]")
+        else:
+            err.print(f"[red]bad duration {_quote(s)}; use nights as '5' or '5-7'[/]")
         raise typer.Exit(2)
     lo, hi = int(parts[0]), int(parts[1])
     if hi < lo:

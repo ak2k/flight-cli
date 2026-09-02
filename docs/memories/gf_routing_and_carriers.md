@@ -162,19 +162,21 @@ Those reason strings quote the user's `--routing` / `--extension` text verbatim,
 and `err` is a markup-enabled console: `--routing 'BA[/weird]AA'` raised
 `MarkupError` where it should have refused, and a `[bold]` form ate the token the
 reader needed to see. `routing_predicates` has no console to escape for, so the
-escape belongs at the render sites. The rule, **for the functions
+sanitizing belongs at the render sites. Sources stay plain and every render site
+sanitizes exactly once. The rule, **for the functions
 `tests/test_calendar_split.py::escape_scan` covers**: anything reaching
 `err.print` or `console.print` from user input or an exception message is wrapped
-in `rich.markup.escape` — the blocker, the date-grid failure text, every argument
-parser's own message, and Matrix's `kind` / `message` / `request_id`, which echo
-the routing string back verbatim ("Illegal COMMAND-LINE prefix: BA[/weird]AA") on
-the path with no refusal to catch it first.
+— `_quote` for a value the user typed, `_safe_text` for anything remote, and bare
+`rich.markup.escape` only where the text cannot carry a control character. That
+covers the blocker, the date-grid failure text, every argument parser's own
+message, the calendar's prices, and Matrix's `kind` / `message` / `request_id`,
+which echo the routing string back verbatim ("Illegal COMMAND-LINE prefix:
+BA[/weird]AA") on the path with no refusal to catch it first.
 
-Not yet everywhere. `_emit_urls`, the pinned-URL helpers, and the search,
-multi-cabin and seatmap paths are escaped on the **search branch**, not this one,
-so this branch excludes them from the scan by name rather than escaping them
-twice and conflicting at merge. The consolidation unit enrols them afterwards,
-and `_ESCAPE_OUT_OF_SCOPE` is the list of what is left.
+Not everywhere. The URL emitter and the search, multi-cabin and seatmap paths
+belong to other surfaces, so they are excluded from the scan by name rather than
+sanitized twice; `_ESCAPE_OUT_OF_SCOPE` is the list, and each entry says what its
+prints actually carry.
 
 `tests/test_calendar_split.py::escape_scan` parses cli.py and walks its AST, so a
 new print in a covered function fails the suite. Its polarity is inverted —
@@ -183,14 +185,20 @@ the moment a print moves into a new helper. It judges each argument by AST shape
 never by source text: a string comparison reads `not_escape(x)` and
 `shell.escape(x)` as safe. Its allowlist of the module's own values is keyed per
 FUNCTION, since `n` is a fan-out counter in one place and could be anything in
-another. Ten synthetic sources, one per known bypass, keep it honest.
+another, and its exclusions are keyed on the TOP-LEVEL function, so a nested
+helper cannot pick one up by reusing a name. A regression corpus of one synthetic
+source per known bypass keeps it honest, and a second test removes each exclusion
+in turn to prove none of them exempts nothing.
 
 `escape` is not the whole job for text from somewhere else. It neutralises `[`
 and nothing more, so an ESC or an 8-bit CSI inside a Matrix error message still
 clears the screen or repaints the line above it, a DEL rubs out what precedes it,
 and a bidi override reorders the rest — and a redirected stderr keeps every byte
 for whatever reads the file next. `_safe_text` drops those code points (C0 bar
-tab and newline, DEL, C1, the bidi overrides and isolates) and then escapes. It
+tab and newline, DEL, C1, the two separators `str.splitlines` breaks on, and the
+bidi marks, overrides and isolates) and then escapes — in that order, because
+`escape` only sees a tag where `[` is followed by `[a-z#/@]`, so a control
+character between the brackets would hide a live `[red]` from it. It
 neither quotes nor truncates, unlike `_quote`: a remote error is a sentence
 someone has to read whole, and the half that explains the failure is as often at
 the end as at the start.
