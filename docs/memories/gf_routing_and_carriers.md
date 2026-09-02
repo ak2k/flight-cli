@@ -103,17 +103,22 @@ its first statement, ahead of `get_client()`: zero POSTs, zero sleeps, and
 weave `cli._run_calendar_enriched` prints one note — the observation plus the bd
 id, not a cause — and then waits for Matrix. The note can only promise to wait,
 not to deliver: it is printed while the Matrix request is still in flight, and
-Matrix can still fail after it. Under `--fast` every no-grid outcome — gate,
-throttle, or a bad airport/date in the broad except — prints "No Google Flights
-grid; drop --fast for Matrix." once and exits 1, so a wrapper doing `--fast ||
-fallback` can trust the exit code; `--fast` means "the GF grid alone, ~1s" and
-quietly running the ~45s Matrix calendar under it would change what the flag
-means. The grid paint in the weave and `_render_date_grid` are runtime-dead
-until the gate flips; `_run_calendar_enriched` itself still runs (it is what
-paints Matrix). **Flipping back is `_GRID_RPC_GATED = False`** — one module
-constant, a flag rather than an unconditional raise so basedpyright still checks
-the transport body (`SearchDates.BASE_URL` and `DateSearchFilters.encode()` have
-no other caller here, and `flights` is pinned with an open floor). Flip it when
+Matrix can still fail after it. On a grid-servable, non-JSON one-way query,
+every no-grid outcome under `--fast` — gate, throttle, an empty grid, or a bad
+airport/date in the broad except — prints "No Google Flights grid; drop --fast
+for Matrix." once and exits 1, so a wrapper doing `--fast || fallback` can trust
+the exit code; `--fast` means "the GF grid alone, ~1s" and quietly running the
+~45s Matrix calendar under it would change what the flag means. That contract
+stops at the branch gate (`not json_out and one_way` + single airports +
+`grid_can_serve`): with `--json`, round-trip, multi-airport or Tier-2 routing,
+`--fast` is silently inert and the Matrix calendar runs to exit 0 — a known gap,
+tracked as work-h70kv.9, not fixed here. The grid paint in the weave and
+`_render_date_grid` are runtime-dead until the gate flips;
+`_run_calendar_enriched` itself still runs (it is what paints Matrix).
+**Flipping back is `_GRID_RPC_GATED = False`** — one module constant, a flag
+rather than an unconditional raise so basedpyright still checks the transport
+body (`SearchDates.BASE_URL` and `DateSearchFilters.encode()` have no other
+caller here, and `flights` is pinned with an open floor). Flip it when
 the RPC answers a plain client again, or when an attested transport lands
 (work-udpp1).
 A per-date page fan-out (the transport upstream fli#230 uses for search) is the

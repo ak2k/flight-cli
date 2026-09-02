@@ -55,6 +55,23 @@ def _is_retryable(exc: Exception) -> bool:
     return False
 
 
+def _is_error_body(value: Any) -> bool:
+    """Whether a decoded response body is one of Matrix's HTTP-200 failures.
+
+    Matrix reports errors as 200 + a top-level `error` object, so caching one
+    replays a brownout until the cache dir is cleared (`_cache_get` has no expiry);
+    the giveaway is an identical request_id returning instantly on a retry
+    (work-h70kv.8). Same dict test as `client._raise_if_api_error`, so what we
+    refuse to cache is exactly what that would have raised on. `value` is whatever
+    `r.json()` decoded and is typed Any at every call site, so the shape is checked
+    before it is indexed — a JSON array is a body, not an error.
+    """
+    if not isinstance(value, dict):
+        return False
+    body = cast("dict[str, Any]", value)
+    return isinstance(body.get("error"), dict)
+
+
 class HttpTransport:
     """Wraps httpx + curl_cffi with rate-limit, retry, and optional disk cache.
 
@@ -134,12 +151,8 @@ class HttpTransport:
             log.warning("cache_read_failed", key=key, error=str(e))
             return None
 
-    def _cache_put(self, key: str, value: dict[str, Any]) -> None:
-        # Matrix reports failures as HTTP 200 with a top-level `error` object, so
-        # without this a brownout gets cached and replayed for the whole TTL —
-        # the giveaway is an identical request_id returning instantly on a retry
-        # (work-h70kv.8). A failure is never worth keeping; let the next run ask.
-        if value.get("error") is not None:
+    def _cache_put(self, key: str, value: Any) -> None:
+        if _is_error_body(value):
             log.debug("cache_write_skipped", key=key, reason="error body")
             return
         try:

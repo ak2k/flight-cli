@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import json
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from fli.models.airport import Airport  # pyright: ignore[reportMissingTypeStubs]
 from fli.models.google_flights.base import (  # pyright: ignore[reportMissingTypeStubs]
@@ -71,10 +71,11 @@ _MAX_GRID_DAYS = 61  # GetCalendarGraph's per-request span limit
 # rather than an unconditional raise so basedpyright still checks the transport
 # below: `SearchDates.BASE_URL` and `DateSearchFilters.encode()` have no other
 # caller here, and `flights` is pinned with an open floor, so an fli bump could
-# otherwise break the flip-back with green CI. NOT `Final`: basedpyright narrows a
-# Final to its literal value and treats everything past the raise as unreachable
-# again — measured, `Final[bool]` included.
-_GRID_RPC_GATED: bool = True
+# otherwise break the flip-back with green CI. Not `Final[bool]` — that narrows to
+# the literal and the body below goes unchecked (measured). Bare `Final` keeping it
+# checked is basedpyright 1.39.4's inference for an un-subscripted Final, so
+# re-measure on a basedpyright bump — same open-floor caveat as `flights`.
+_GRID_RPC_GATED: Final = True
 
 _CABIN_TO_SEAT = {
     Cabin.COACH: SeatType.ECONOMY,
@@ -185,8 +186,7 @@ def date_grid(search: CalendarSearch) -> dict[str, float]:
     """Cheapest price per departure date across the window (caller ensures
     `grid_can_serve`). Chunks to <=61 days with the FULL filter set, throttle-
     retries each, and merges. Raises GfThrottledError if the throttle persists —
-    and, while `_GRID_RPC_GATED`, GfGridUnavailableError on the first chunk, which
-    is the only exception it can currently raise."""
+    and, while `_GRID_RPC_GATED`, GfGridUnavailableError on the first chunk."""
     leg = search.legs[0]
     predicates = list(classify(leg.route_language, leg.extension).predicates)
     out: dict[str, float] = {}

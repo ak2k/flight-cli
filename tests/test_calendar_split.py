@@ -556,10 +556,9 @@ def test_calendar_fast_throttled_exits_one(
 def test_calendar_fast_bad_airport_exits_one(
     monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # An unknown IATA blows up in `_grid_filters`, BEFORE the gate, so it lands in the
-    # broad except. That used to print the same 'drop --fast' line and exit 0 — the
-    # opposite of the contract for a wrapper doing `--fast || fallback`. Real
-    # `date_grid` here (offline: it never reaches a client), so the path is genuine.
+    # A bad IATA raises in `_grid_filters`, before the gate, so it lands in the broad
+    # except; that branch must still exit 1. Real `date_grid` here (offline: it never
+    # reaches a client), so the path is genuine.
     monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
     calls = _spy_renderers(monkeypatch)
     with pytest.raises(typer.Exit) as excinfo:
@@ -569,3 +568,24 @@ def test_calendar_fast_bad_airport_exits_one(
     assert calls["grid"] == 0
     assert "date-grid failed" in _flat(cap.err)  # the reason, on stderr
     assert "drop --fast for Matrix" in _flat(cap.out)  # the outcome, on stdout
+
+
+def test_calendar_fast_empty_grid_exits_one(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The fifth no-grid branch, and the one that goes live the moment the gate flips:
+    # date_grid returns {} with no exception (a window Google has no fares for, or a
+    # cold session that never warmed). No handler runs, so only the exit says so.
+    def _empty(_search: object) -> dict[str, float]:
+        return {}
+
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _empty)
+    calls = _spy_renderers(monkeypatch)
+    with pytest.raises(typer.Exit) as excinfo:
+        _calendar_fast()
+    out = _flat(capsys.readouterr().out)
+    assert excinfo.value.exit_code == 1
+    assert calls["grid"] == 0  # nothing to paint
+    assert calls["calendar"] == 0
+    assert out.count("drop --fast for Matrix") == 1

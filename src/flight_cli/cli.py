@@ -2854,6 +2854,10 @@ def calendar(
     # windows. Paint it first, then enrich with the authoritative Matrix calendar
     # (full per-duration grid). `--fast` stops after the grid. The cheap pre-check
     # avoids importing the fli-heavy module for the Matrix-only cases.
+    # Everything `--fast` promises — the grid alone, and exit 1 when there is none —
+    # is scoped to this branch: a grid-servable, non-JSON one-way query. With --json,
+    # round-trip, multi-airport or Tier-2 routing the flag is silently inert and the
+    # Matrix calendar below runs to exit 0 (work-h70kv.9).
     if not json_out and one_way and len(origins) == 1 and len(dests) == 1:
         from ._gf_dategrid import grid_can_serve  # noqa: PLC0415
 
