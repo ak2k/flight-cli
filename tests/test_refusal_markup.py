@@ -319,3 +319,28 @@ def test_hostile_routing_reaches_the_explicit_path_without_backslashes(
     # backslash, and typer would print that backslash straight at the user.
     leaked = _as_quoted(routing).replace("[", "\\[")
     assert leaked not in message, f"a rich escape leaked into plain text: {message!r}"
+
+
+def test_the_awards_only_refusal_escapes_the_providers_the_user_typed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--awards-only --providers '[/x]'` quotes the filter back while telling
+    the user it matched nothing configured."""
+    from flight_cli import cli
+
+    buf = io.StringIO()
+    monkeypatch.setattr(cli, "err", Console(file=buf, width=400, no_color=True, highlight=False))
+    # A provider IS configured, so the refusal is about the filter matching
+    # none of them — which is the branch that quotes the filter back.
+    monkeypatch.setattr(
+        "flight_cli.providers.registry.has_any_configured", lambda: True, raising=True
+    )
+    sel = cli.ProviderSelection(
+        awards_only=True,
+        cash_only=False,
+        provider_filter=("[/x]",),
+        provider_opts={},
+    )
+    with pytest.raises(typer.Exit):
+        cli._should_run_awards(sel)
+    assert "[/x]" in buf.getvalue()

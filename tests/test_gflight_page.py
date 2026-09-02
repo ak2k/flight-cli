@@ -801,3 +801,48 @@ def test_a_throttled_pinned_leg_stops_the_fan_out(client: Any) -> None:
     with pytest.raises(GfThrottledError):
         gfid.search_with_ids(_round_trip_filters(), top_n=50)
     assert len(fake.gets) == 1 + (gfid._THROTTLE_RETRY_ATTEMPTS + 1) == 6
+
+
+# ───────────────────── recursion, both places it can bite ──────────────────
+
+
+def _nested(depth: int) -> list[Any]:
+    """A list nested `depth` deep, built iteratively — building it recursively
+    would hit the limit here rather than in the code under test."""
+    root: list[Any] = []
+    cur = root
+    for _ in range(depth):
+        nxt: list[Any] = []
+        cur.append(nxt)
+        cur = nxt
+    return root
+
+
+def test_a_blob_nested_past_the_json_limit_is_skipped_not_fatal(client: Any) -> None:
+    """`json.loads` recurses once per nesting level and gives out near 10k, so
+    a deep blob raises RecursionError where every other bad blob raises
+    ValueError. Skipping it is what lets the next blob still be read."""
+    deep = "[" * 12000 + "]" * 12000
+    html = _page(deep) + _page(_ds1("ds1_jfk_lax_3rows.json"))
+    client(_FakeResponse(text=html))
+    assert len(gfid._one_call(_FILTERS)) == 3
+
+
+def test_a_row_that_recurses_the_decoder_is_a_typed_outcome() -> None:
+    """fli reports a bad price by formatting the value into its message, and
+    repr of a deeply nested list recurses — so the error REPORTING overflows
+    before the error exists.
+
+    Unreachable from a real page: `json.loads` refuses at 9998 levels and repr
+    survives to about 15k, so `_extract_ds1` rejects any blob deep enough to
+    trigger this. Pinned anyway because the row decoder is called on values
+    that did not come through `json.loads` — the misplaced-block probe feeds it
+    arbitrary metadata — and because the tuple entry is free."""
+    payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
+    for row in payload[2][0] + payload[3][0]:
+        row[1] = [[_nested(20000)], "USD"]  # the price head fli reprs on failure
+    with pytest.raises(RecursionError):
+        gfid._parse_flight_with_id(payload[2][0][0])
+    # The row loop's own guard is what has to classify it.
+    assert isinstance(RecursionError(), gfid._ROW_PARSE_ERRORS)
+    assert not gfid._holds_flight_rows([payload[2][0]])  # the probe survives it too

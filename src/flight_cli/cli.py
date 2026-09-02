@@ -553,7 +553,7 @@ def _should_run_awards(sel: ProviderSelection) -> bool:
     ):
         if sel.awards_only:
             err.print(
-                f"[red]--awards-only set but --providers={sel.provider_filter} "
+                f"[red]--awards-only set but --providers={escape(str(sel.provider_filter))} "
                 "matches no configured provider.[/]",
             )
             raise typer.Exit(2)
@@ -1241,7 +1241,13 @@ def _gflight_json_row(g: Any) -> dict[str, Any]:
 
 class _GfRefusal(NamedTuple):
     """How one Google Flights refusal reads: `note` where Matrix still answers
-    and the refusal is a footnote, `message` where it is the whole outcome."""
+    and the refusal is a footnote, `message` where it is the whole outcome.
+
+    The two fields are not interchangeable, and the difference is markup.
+    `message` is PRE-RENDERED rich markup — it carries its own tags and any
+    exception text in it is already escaped, so print it as-is and never escape
+    it again. `note` is PLAIN text with no tags, so a caller embedding it in
+    markup of its own must escape it there."""
 
     note: str
     message: str
@@ -3180,6 +3186,12 @@ def gflight(
     # bad airport must not be reported after a line claiming the query is already
     # on its way.
     origins, destinations = _parse_iata_list(origin), _parse_iata_list(destination)
+    if not origins or not destinations:
+        # `_parse_iata_list` drops empty entries, so "" and "," both arrive here
+        # as an empty tuple. `Leg.of` would build a leg with no airports at all
+        # rather than reject it.
+        err.print("[red]origin and destination are required.[/]")
+        raise typer.Exit(2)
     legs = (Leg.of(origins, destinations, _parse_date(dep)),)
     if ret:
         legs += (Leg.of(destinations, origins, _parse_date(ret)),)
@@ -3318,7 +3330,10 @@ def seatmap(
         aircraft=aircraft,
     )
     if not fetch:
-        console.print(api_url)
+        # Escaped, not bare: this URL is printed to be copied, and rich would
+        # read a bracketed segment as markup and drop it from what the user
+        # pastes — a wrong URL is worse than a loud failure.
+        console.print(escape(api_url))
         return
     try:
         url = fetch_seatmap_url(
@@ -3337,7 +3352,7 @@ def seatmap(
         err.print("[yellow]No seatmap on file for this flight/aircraft.[/]")
         console.print(f"[dim]API URL:[/] {escape(api_url)}")
         raise typer.Exit(1)
-    console.print(url)
+    console.print(escape(url))
 
 
 if __name__ == "__main__":

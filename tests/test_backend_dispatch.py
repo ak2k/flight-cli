@@ -332,3 +332,31 @@ def test_gflight_alias_validates_airports_before_it_names_a_backend(
     assert "Using Matrix" not in result.output
     assert isinstance(result.exception, ValidationError)
     assert "Not a 3-letter IATA code: 'XXXX'" in str(result.exception)
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        pytest.param("", id="empty"),
+        pytest.param(",", id="comma-only"),
+        pytest.param(" , ", id="blanks"),
+    ],
+)
+def test_gflight_alias_rejects_an_empty_airport_list(
+    monkeypatch: pytest.MonkeyPatch, origin: str
+) -> None:
+    """`_parse_iata_list` drops empty entries, so these all arrive as an empty
+    tuple. A leg with no airports at all is not a query anyone can answer."""
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    def _unreached(**_kw: object) -> None:
+        raise AssertionError("a backend ran on a query with no airports")
+
+    monkeypatch.setattr(cli, "_run_gflight_path", _unreached)
+    monkeypatch.setattr(cli, "_run_matrix_path", _unreached)
+    result = CliRunner().invoke(cli.app, ["gflight", origin, "MIA", "--dep", _future_dep()])
+
+    assert result.exit_code == 2
+    assert "origin and destination are required" in result.output

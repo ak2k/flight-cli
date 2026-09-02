@@ -415,3 +415,30 @@ def test_a_tampered_cache_cannot_inject_arbitrary_cookies(
     fresh = _FakeClient([])
     gfid._seed_cookies_once(fresh)
     assert fresh._session().cookies.set_calls == [("NID", "legitimate", ".google.com", "/")]
+
+
+def test_the_temp_file_is_owner_only_while_it_is_being_written(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Asserting the mode after the rename cannot tell `os.open(..., 0o600)`
+    from a chmod applied afterwards — both end at 0600. The window is what
+    matters: the NID is on disk from the first byte written, so the mode is
+    checked mid-write, before the rename.
+
+    Same interception point as the interrupt test: inside `json.dump`, with the
+    file created and the payload written."""
+    _reset(monkeypatch, tmp_path)
+    real_dump = json.dump
+    modes: list[int] = []
+
+    def _inspect(obj: object, fh: Any, **kw: Any) -> None:
+        real_dump(obj, fh, **kw)
+        fh.flush()
+        for temp in tmp_path.glob("*.tmp"):
+            modes.append(stat.S_IMODE(temp.stat().st_mode))
+
+    monkeypatch.setattr(gfid.json, "dump", _inspect)
+    gfid._persist_cookies(_FakeClient([_JarCookie("NID", "532=abc", ".google.com")]))
+
+    assert modes == [0o600], f"the temp was readable mid-write: {[oct(m) for m in modes]}"
+    assert stat.S_IMODE((tmp_path / "gflight-cookies.json").stat().st_mode) == 0o600

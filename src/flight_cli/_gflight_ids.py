@@ -188,7 +188,14 @@ _SHAPE_ERROR_SAMPLE_REASONS = 3
 # loop still crashed on would read as "no rows anywhere" on one page and a raw
 # traceback on the next. OverflowError (an int too large to convert, e.g. a
 # price block holding 10**100) and TypeError (a null where a sequence is
-# indexed) are here because live payloads produce both.
+# indexed) are here because live payloads produce both. RecursionError joins
+# them because fli's own decoder formats the offending value into its message
+# (`raise ValueError(f"...{raw_price!r}")`), and repr of a deeply nested list
+# recurses — the error REPORTING blows the stack before the error is raised.
+# Measured on CPython 3.12: repr gives out around 15k nesting levels, and
+# `json.loads` refuses at 9998, so a PAGE can't reach it — `_extract_ds1`
+# rejects the blob first. It is here for callers that build rows another way,
+# and because a typed miss costs a traceback while this costs one tuple entry.
 _ROW_PARSE_ERRORS = (
     AttributeError,
     KeyError,
@@ -196,6 +203,7 @@ _ROW_PARSE_ERRORS = (
     IndexError,
     TypeError,
     OverflowError,
+    RecursionError,
 )
 
 
@@ -228,8 +236,12 @@ def _extract_ds1(html: str) -> list[Any] | None:
             continue
         try:
             payload: Any = json.loads(data.group(1))
-        except ValueError:
-            log.debug("ds:1 blob is not valid JSON")
+        except (ValueError, RecursionError):
+            # RecursionError as well as ValueError: `json.loads` recurses per
+            # nesting level, so a blob nested past roughly ten thousand deep
+            # exhausts the stack instead of reporting bad JSON. Either way this
+            # blob is unreadable and the next one may not be.
+            log.debug("ds:1 blob is not readable JSON")
             continue
         if not isinstance(payload, list):
             continue

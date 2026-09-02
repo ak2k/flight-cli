@@ -24,11 +24,11 @@ LEVELS: dict[str, int] = {
 }
 
 # `_gflight_ids` logs through stdlib `logging`, not structlog (its own DIVERGE
-# comment says why). Nothing configures the stdlib root, so those records found
-# no handler and `-vv` showed none of them; a warning surfaced only through
-# `logging.lastResort`. The handler below is attached to the `flight_cli`
-# logger, never the root, so raising our own verbosity does not also switch on
-# every third-party library that logs.
+# comment says why), and nothing else in the package configures the stdlib
+# root. Without the handler below those records reach no handler at all: `-vv`
+# prints none of them and a warning escapes only through `logging.lastResort`.
+# It attaches to the `flight_cli` logger, never the root, so raising our own
+# verbosity does not also switch on every third-party library that logs.
 _STDLIB_ROOT = "flight_cli"
 _HANDLER_NAME = "flight-cli-stderr"
 
