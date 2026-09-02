@@ -306,12 +306,19 @@ def _pick_backend(
     if routing or extension:
         reasons.extend(page_can_encode(classify(routing, extension).predicates)[1])
 
+    # The same reasons go out two ways, and only one of them is markup. A
+    # reason quotes the user's --routing string verbatim, so one square bracket
+    # decides between a MarkupError traceback and a backslash the user can see.
     if backend == BACKEND_AUTO:
         if not reasons:
             return BACKEND_GFLIGHT
-        err.print(f"[dim]Using Matrix: Google Flights can't serve {_join_reasons(reasons)}.[/]")
+        err.print(
+            f"[dim]Using Matrix: Google Flights can't serve {escape(_join_reasons(reasons))}.[/]"
+        )
         return BACKEND_MATRIX
     if backend == BACKEND_GFLIGHT and reasons:
+        # typer renders a BadParameter as plain Text, never markup — escaping
+        # here would print the backslashes instead of hiding them.
         raise typer.BadParameter(
             f"--backend gflight can't serve this request: {_join_reasons(reasons)}. "
             "Drop it, or use --backend matrix.",
@@ -473,7 +480,7 @@ def _resolve_providers(  # noqa: PLR0912 — single-purpose validator + merge; s
     try:
         config = _config.load()
     except (OSError, ValueError) as e:
-        err.print(f"[red]Failed to load ~/.config/flight-cli/config.toml: {e}[/]")
+        err.print(f"[red]Failed to load ~/.config/flight-cli/config.toml: {escape(str(e))}[/]")
         raise typer.Exit(2) from e
     base_opts: dict[str, dict[str, Any]] = {}
     providers_section: Any = config.get("providers", {})
@@ -485,7 +492,7 @@ def _resolve_providers(  # noqa: PLR0912 — single-purpose validator + merge; s
     try:
         cli_opts = _config.parse_provider_opt_overrides(list(provider_opt))
     except ValueError as e:
-        err.print(f"[red]{e}[/]")
+        err.print(f"[red]{escape(str(e))}[/]")
         raise typer.Exit(2) from e
     merged_opts = _config.merge_provider_options(base_opts, cli_opts)
 
@@ -570,9 +577,9 @@ def _run(
     try:
         return anyio.run(go)
     except MatrixApiError as e:
-        err.print(f"[red]Matrix returned an error ({e.kind}):[/] {e.message}")
+        err.print(f"[red]Matrix returned an error ({escape(e.kind)}):[/] {escape(e.message)}")
         if e.request_id:
-            err.print(f"[dim]request_id: {e.request_id}[/]")
+            err.print(f"[dim]request_id: {escape(e.request_id)}[/]")
         raise typer.Exit(1) from e
 
 
@@ -863,11 +870,11 @@ def _emit_urls(
         console.print()
         pinned_m = _try_pinned_matrix_url(search, result, idx) if idx is not None else None
         if pinned_m is not None:
-            console.print(f"[dim]Matrix ({pinned_label} pinned):[/]")
-            console.print(f"  [link]{pinned_m}[/]")
+            console.print(f"[dim]Matrix ({escape(pinned_label)} pinned):[/]")
+            console.print(f"  [link]{escape(pinned_m)}[/]")
         else:
             console.print("[dim]Matrix deep-link:[/]")
-            console.print(f"  [link]{matrix_deep_link(search)}[/]")
+            console.print(f"  [link]{escape(matrix_deep_link(search))}[/]")
     if google_url:
         # `google_flights_url` builds protobuf-encoded tfs= URLs via fast_flights.
         # That library has no documented exception surface — catch broadly so a
@@ -875,13 +882,13 @@ def _emit_urls(
         try:
             pinned = _try_pinned_gflight_url(search, result, idx) if idx is not None else None
             if pinned is not None:
-                console.print(f"[dim]Google Flights ({pinned_label} pinned):[/]")
-                console.print(f"  [link]{pinned}[/]")
+                console.print(f"[dim]Google Flights ({escape(pinned_label)} pinned):[/]")
+                console.print(f"  [link]{escape(pinned)}[/]")
             else:
                 console.print("[dim]Google Flights (tfs= structured):[/]")
-                console.print(f"  [link]{google_flights_url(search)}[/]")
+                console.print(f"  [link]{escape(google_flights_url(search))}[/]")
         except Exception as e:  # noqa: BLE001 - third-party undocumented errors; non-fatal fallback
-            console.print(f"[dim]Google Flights link: {e}[/]")
+            console.print(f"[dim]Google Flights link: {escape(str(e))}[/]")
 
 
 # ─────────────────────────── result renderers ──────────────────────────────
@@ -1460,7 +1467,7 @@ def _run_enriched_path(
             # Matrix is still running and authoritative, so a GF refusal is a
             # note, not a failure — but it stays named: the merged table below
             # would otherwise look like Google simply had nothing cheaper.
-            console.print(f"[dim]{_gf_refusal(e).note} — showing Matrix only.[/]")
+            console.print(f"[dim]{escape(_gf_refusal(e).note)} — showing Matrix only.[/]")
         else:
             err.print(f"[yellow]Google Flights query failed:[/] {escape(str(e))}")
     matrix_res = state.get("matrix")
@@ -1611,7 +1618,10 @@ def _run_matrix_multi(
         try:
             res = await client.execute(search, cache=not no_cache)
         except MatrixApiError as e:
-            err.print(f"[yellow]Matrix {cab.value} query failed ({e.kind}): {e.message}[/]")
+            err.print(
+                f"[yellow]Matrix {escape(cab.value)} query failed "
+                f"({escape(e.kind)}): {escape(e.message)}[/]"
+            )
             return
         results[cab] = cast("SearchResult", res)
 
@@ -1626,9 +1636,9 @@ def _run_matrix_multi(
     try:
         anyio.run(go)
     except MatrixApiError as e:
-        err.print(f"[red]Matrix returned an error ({e.kind}):[/] {e.message}")
+        err.print(f"[red]Matrix returned an error ({escape(e.kind)}):[/] {escape(e.message)}")
         if e.request_id:
-            err.print(f"[dim]request_id: {e.request_id}[/]")
+            err.print(f"[dim]request_id: {escape(e.request_id)}[/]")
         raise typer.Exit(1) from e
     return results
 
@@ -1656,7 +1666,9 @@ def _run_gflight_multi(
         except GfBackendError as e:
             # A typed refusal is why this cabin's column will be missing; the
             # bare handler below would print it as an unexplained failure.
-            err.print(f"[yellow]Google Flights {cab.value}: {_gf_refusal(e).note}.[/]")
+            err.print(
+                f"[yellow]Google Flights {escape(cab.value)}: {escape(_gf_refusal(e).note)}.[/]"
+            )
         except Exception as e:  # noqa: BLE001 — fli has no documented exception surface
             err.print(f"[yellow]Google Flights {cab.value} query failed: {escape(str(e))}[/]")
 
@@ -1731,7 +1743,9 @@ def _render_multi_cabin_search(
 def _validate_sort_cabin(sort_by: Cabin, cabins: tuple[Cabin, ...]) -> None:
     if sort_by not in cabins:
         names = ", ".join(c.value for c in cabins)
-        err.print(f"[red]--sort {sort_by.value!r} must be one of --cabin: {names}[/]")
+        err.print(
+            f"[red]--sort {escape(repr(sort_by.value))} must be one of --cabin: {escape(names)}[/]"
+        )
         raise typer.Exit(2)
 
 
@@ -2116,7 +2130,7 @@ def _resolve_rps(flag: float | None) -> float:
     try:
         return _config.http_rps()
     except ValueError as e:
-        err.print(f"[red]Bad rps configuration: {e}[/]")
+        err.print(f"[red]Bad rps configuration: {escape(str(e))}[/]")
         raise typer.Exit(2) from e
 
 
@@ -3314,12 +3328,12 @@ def seatmap(
             aircraft=aircraft,
         )
     except Exception as e:
-        err.print(f"[red]Seatmap lookup failed:[/] {e}")
-        console.print(f"[dim]API URL:[/] {api_url}")
+        err.print(f"[red]Seatmap lookup failed:[/] {escape(str(e))}")
+        console.print(f"[dim]API URL:[/] {escape(api_url)}")
         raise typer.Exit(1) from e
     if url is None:
         err.print("[yellow]No seatmap on file for this flight/aircraft.[/]")
-        console.print(f"[dim]API URL:[/] {api_url}")
+        console.print(f"[dim]API URL:[/] {escape(api_url)}")
         raise typer.Exit(1)
     console.print(url)
 
