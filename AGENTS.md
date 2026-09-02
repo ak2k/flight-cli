@@ -144,6 +144,14 @@ choice that fits the rest of the stack — don't substitute.
      is the signal, not line coverage.
    - See "Appropriate divergence" table for the Profile-A→A/B-edge
      tunings (reportAny, Pydantic `extra` on boundary models).
+   - `_gf_browser.py` writes its "opening Chrome" notice to a
+     module-level `Console(stderr=True)` instead of leaving user-facing
+     output to `cli`. A browser launch is a visible window and seconds of
+     latency; at the launch site no caller can forget to announce it.
+   - Neither patchright extra runs `patchright install chrome`. Both
+     drive the *installed* real Chrome via `channel="chrome"` — a
+     bundled Chromium would have the same thin fingerprint the curl_cffi
+     rung already has, so downloading ~150 MB would buy nothing.
 
 5. **Ask when guessing.** Unknown Matrix wire shape, new SPA capture
    needed, irresolvable type error → ask. Don't invent the shape; capture

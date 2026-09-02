@@ -91,13 +91,26 @@ search with a plausible-looking "no results" — the exact failure this whole
 design is built to avoid. Re-widening `3.6`/`3.7`/`3.15`/`3.17`/`3.18` is the
 obvious next step and is tracked in bd work-h70kv.
 
+**That page has two rungs.** Rung 1 is the curl_cffi GET above. Rung 2
+(`--gf-transport browser`) drives a real Chrome to the *same* URL and hands its
+`response.text()` to the *same* parser — Google's rate budget is keyed on client
+context, not IP, so real Chrome survives the throttle that blocks the thin
+client. `_one_call_laddered(filters, transport)` picks the rung; `_fetch_page`
+and `GfBrowserSession.get_html` both feed `_rows_from_page_html`, which is the
+only place a refusal is diagnosed. A rung supplies bytes, never interpretation.
+`auto` is accepted today and identical to `http`; escalate-on-throttle is a
+follow-up. Details, measurements and traps: [gf_browser_rung.md](gf_browser_rung.md).
+
 **Refusals are typed** (`_gf_errors`): `GfThrottledError` (final URL contains
 `/sorry/`, or HTTP 429), `GfConsentError` (no `ds:1` *and* consent markers —
 checked in that order, because a real results page links to the consent domain
 in its footer), `GfPageShapeError` (no readable `ds:1`, or rows present and none
-parsed, with sampled reasons). A page that decodes with zero rows returns `[]`
-and is Google's authoritative answer, so the search path passes
-`retry_empty=False` and spends exactly one GET on it.
+parsed, with sampled reasons), and `GfBrowserUnavailableError` (rung 2 could
+not produce bytes at all — no Chrome, a locked profile, a dead navigation). A
+page that decodes with zero rows returns `[]` and is Google's authoritative
+answer, so the search path passes `retry_empty=False` and spends exactly one GET
+on it. Any non-2xx that is not a throttle is a `GfPageShapeError`, so a 5xx
+degrades to Matrix instead of surfacing curl_cffi's own exception.
 
 ## Tier model: who honors each constraint
 
