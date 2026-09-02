@@ -644,11 +644,9 @@ def _report_calendar_matrix_failure(state: dict[str, Any]) -> None:
         err.print("[yellow]Matrix calendar did not complete.[/]")
 
 
-# Printed whenever the GF date-grid declines to run because its RPC is gated
-# (`_gf_dategrid.GfGridUnavailableError`). It states the observation and where it
-# is tracked — not a cause — so a reader can tell "we didn't get a grid" from "there
-# are no cheap fares". The weave adds the second sentence because it goes on to show
-# Matrix; `--fast` has no Matrix to show, so it prints the first sentence alone.
+# Says "no grid" rather than staying silent, which a reader would take for "no
+# cheap fares". Two constants because `--fast` has no Matrix to show, so the
+# weave's closing sentence would be a lie there.
 _GF_GRID_UNAVAILABLE_NOTE = (
     "Google Flights price grid unavailable: the calendar RPC currently returns "
     "no data to this client (tracked in work-h70kv.5)."
@@ -680,9 +678,8 @@ def _run_calendar_enriched(
     a single-airport query, so the Matrix side is one `execute` (no fan-out).
 
     While the GF grid RPC is gated (`GfGridUnavailableError`), the grid arm raises
-    before it opens a client, so in practice this prints the unavailable note and
-    the Matrix calendar alone — the grid paint below is runtime-dead until the gate
-    flips. Everything else about the weave is unchanged."""
+    before it opens a client, so the first-paint branch below is runtime-dead and
+    what a user sees is the unavailable note plus the Matrix calendar."""
     from ._gf_dategrid import GfGridUnavailableError, date_grid  # noqa: PLC0415
     from ._gflight_ids import GfThrottledError  # noqa: PLC0415
 
@@ -718,9 +715,8 @@ def _run_calendar_enriched(
             except GfThrottledError:
                 state["gf_throttled"] = True
             except GfGridUnavailableError:
-                # A standing gate, not a failure and not retryable — note it once and
-                # let Matrix price the window. Must sit ahead of the broad except,
-                # which would report it as "date-grid failed: …".
+                # Ahead of the broad except, which would report a standing gate as
+                # "date-grid failed: …". Matrix still prices the window.
                 state["gf_unavailable"] = True
             except Exception as e:  # noqa: BLE001 — GF is the optional fast layer; Matrix still runs
                 state["gf_err"] = e
@@ -2859,8 +2855,6 @@ def calendar(
     # windows. Paint it first, then enrich with the authoritative Matrix calendar
     # (full per-duration grid). `--fast` stops after the grid. The cheap pre-check
     # avoids importing the fli-heavy module for the Matrix-only cases.
-    # The grid RPC is gated today (work-h70kv.5), so what this actually does is note
-    # that and paint Matrix alone; `--fast` has nothing to serve and exits 1.
     if not json_out and one_way and len(origins) == 1 and len(dests) == 1:
         from ._gf_dategrid import grid_can_serve  # noqa: PLC0415
 
@@ -2894,11 +2888,9 @@ def calendar(
             except GfThrottledError:
                 console.print("[dim]Google Flights rate-limited — Matrix only.[/]")
             except GfGridUnavailableError:
-                # `--fast` promises the GF grid alone in ~1s. With its RPC gated there is
-                # nothing fast to serve, and quietly running the ~45s Matrix calendar
-                # instead would change what the flag means — so say why, point at the
-                # flag to drop, and exit non-zero. Ahead of the broad except, which
-                # would report a standing gate as a transport failure.
+                # Exit non-zero rather than fall back: `--fast` means the GF grid alone
+                # in ~1s, so quietly running the ~45s Matrix calendar would change what
+                # the flag means. Ahead of the broad except, as in the weave.
                 console.print(f"[dim]{_GF_GRID_UNAVAILABLE_NOTE}[/]")
                 console.print("[yellow]No Google Flights grid; drop --fast for Matrix.[/]")
                 raise typer.Exit(1) from None

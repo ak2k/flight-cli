@@ -1,13 +1,13 @@
 """Google Flights native date-grid (SearchDates / GetCalendarGraph) for fast,
 Tier-1 calendars.
 
-**Gated off since 2026-08.** GetCalendarGraph answers HTTP 200 with an empty
-payload to any client that can't sign `x-goog-batchexecute-bgr` (BotGuard), and
-an empty payload is not a throttle, so the shared retry read it as a cold session
-and spent 4 POSTs + ~6s of backoff per chunk to learn nothing. `_one_grid_call`
-now raises `GfGridUnavailableError` before it opens a client, so callers degrade
-to Matrix at once and say why (work-h70kv.5). Deleting that one raise re-enables
-the transport below it, which is otherwise unchanged.
+**Gated off since 2026-08 (work-h70kv.5).** GetCalendarGraph answers HTTP 200
+with an empty payload to any client that can't sign `x-goog-batchexecute-bgr`
+(BotGuard). An empty payload is not a throttle, so the shared retry reads it as a
+cold session and burns 4 POSTs + ~6s of backoff per chunk to learn nothing —
+hence the `GfGridUnavailableError` at the top of `_one_grid_call`. Deleting that
+one raise re-enables the transport below it, as does an attested transport
+landing (work-udpp1).
 
 When the RPC answers, it returns cheapest-price-per-date for a whole window in
 ONE call — far faster than Matrix's calendar, and it sidesteps Matrix's
@@ -77,10 +77,10 @@ _CABIN_TO_SEAT = {
 class GfGridUnavailableError(Exception):
     """Google Flights' date-grid RPC won't answer a plain HTTP client.
 
-    A standing gate, not a transient: unlike `GfThrottledError` (rate-limited —
-    backoff helps) and the cold-session empty (a retry on the same client helps),
-    nothing this process can do makes the next call succeed. Callers degrade to
-    Matrix immediately and tell the user which backend priced the grid."""
+    A standing gate, not a transient: unlike `GfThrottledError` (backoff helps)
+    or a cold-session empty (a retry on the same client helps), nothing this
+    process can do makes the next call succeed — so callers degrade to Matrix at
+    once instead of retrying, and say which backend priced the grid."""
 
 
 def grid_can_serve(search: CalendarSearch) -> bool:
@@ -144,15 +144,10 @@ def _parse_grid(parsed: str) -> dict[str, float]:
 
 
 def _one_grid_call(filters: Any) -> dict[str, float]:
-    """One GetCalendarGraph round-trip -> {date: price}. Currently always raises
-    GfGridUnavailableError before touching the network (see the module docstring).
-    Everything after the raise is the transport unchanged, kept for the flip-back:
-    it raises GfThrottledError on a genuine code-13 block and returns {} on a
-    cold-session empty."""
-    # Remove this raise when GetCalendarGraph returns rows to a plain client again,
-    # or when an attested transport lands (work-h70kv.5 / work-udpp1 notes). It sits
-    # ahead of `get_client()` so `retry_throttled` — which catches only
-    # GfThrottledError — propagates it with zero POSTs and zero backoff sleeps.
+    """One GetCalendarGraph round-trip -> {date: price}. Raises GfThrottledError
+    on a genuine code-13 block; returns {} on a cold-session empty."""
+    # First statement, ahead of `get_client()`: `retry_throttled` catches only
+    # GfThrottledError, so this propagates with zero POSTs and zero backoff sleeps.
     raise GfGridUnavailableError(
         "Google Flights' calendar RPC (GetCalendarGraph) returns no data to this client"
     )
