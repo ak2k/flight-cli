@@ -312,3 +312,29 @@ def test_search_page_url_carries_locale_and_the_encoded_tfs() -> None:
     assert url.startswith("https://www.google.com/travel/flights?tfs=")
     assert "&hl=en&gl=US&curr=USD" in url
     assert "=" not in url.split("tfs=")[1].split("&")[0]  # base64 padding stripped
+
+
+def test_every_filter_field_is_claimed_by_exactly_one_set() -> None:
+    """The allowlist is only an allowlist if nothing escapes it. A future fli
+    minor adding a filter must fail HERE, loudly, not encode as if unset."""
+    from flight_cli.links import (
+        _TFS_ENCODED_FIELDS,
+        _TFS_IGNORED_FIELDS,
+        _TFS_REFUSED_FIELDS,
+    )
+
+    refused = {field for field, _ in _TFS_REFUSED_FIELDS}
+    claimed = _TFS_ENCODED_FIELDS | refused | _TFS_IGNORED_FIELDS
+    assert claimed == set(FlightSearchFilters.model_fields)
+    assert not (_TFS_ENCODED_FIELDS & refused)
+
+
+def test_a_filter_field_fli_grows_later_is_refused() -> None:
+    """Simulates the fli bump: a field none of the three sets claims."""
+
+    class _Grown(FlightSearchFilters):
+        surprise_filter: int = 0
+
+    f = _Grown(**_filters().model_dump())
+    with pytest.raises(GfTfsUnsupportedError, match="surprise_filter"):
+        build_search_tfs(f)

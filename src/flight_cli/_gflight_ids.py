@@ -54,6 +54,9 @@ from fli.search._decoders import (  # pyright: ignore[reportMissingTypeStubs]
     _parse_datetime,  # pyright: ignore[reportPrivateUsage]
 )
 from fli.search.client import get_client  # pyright: ignore[reportMissingTypeStubs]
+from fli.search.exceptions import (  # pyright: ignore[reportMissingTypeStubs]
+    SearchHTTPError,
+)
 from fli.search.flights import SearchFlights  # pyright: ignore[reportMissingTypeStubs]
 
 from ._gf_errors import (
@@ -109,22 +112,30 @@ def _is_throttle_block(body: str) -> bool:  # pyright: ignore[reportUnusedFuncti
     return "ErrorResponse" in body or "type.googleapis.com" in body
 
 
-# The search page's block is a redirect to Google's captcha interstitial, or a
-# plain 429 — neither carries a `ds:1` blob, so both would otherwise read as an
-# empty board.
+# The search page's block is Google's captcha interstitial — reached by redirect
+# to `/sorry/`, or served in place with HTTP 200. Neither carries a `ds:1` blob,
+# so both would otherwise read as an empty board.
 _SORRY_PATH = "/sorry/"
+# The same interstitial served at the requested URL with HTTP 200 — no redirect
+# to key off, so the body is the only tell.
+_SORRY_MARKERS = ("Our systems have detected unusual traffic",)
 # Consent interstitial markers. EU/EEA egress lands here; the page has no
 # `ds:1`, so without this it would be indistinguishable from a shape change.
 _CONSENT_MARKERS = ("consent.google.com", "/consent?continue=", "CONSENT_PAGE")
 
 # `AF_initDataCallback({key: 'ds:1', hash: '..', data:[...], sideChannel: {}});`
-# — the search page inlines the flight rows here. Three literal regexes because
-# the blob is JavaScript, not JSON: only `data:` holds a JSON value. Whitespace
-# around the `, sideChannel` separator is matched loosely; anything else about
+# — the search page inlines the flight rows here. Literal regexes because the
+# blob is JavaScript, not JSON: only `data:` holds a JSON value. Anything about
 # the shape drifting is a `GfPageShapeError`, never an empty result.
-_DS_BLOB_RE = re.compile(r"AF_initDataCallback\((\{.*?\})\);", re.S)
+#
+# The blob terminates on the `sideChannel` KEY, not on `});`: row payloads carry
+# arbitrary Google copy, and one airline name or airport string containing `});`
+# would otherwise cut the capture short and fail the whole search.
+_DS_BLOB_RE = re.compile(r"AF_initDataCallback\((\{.*?),\s*sideChannel\s*:", re.S)
 _DS_KEY_RE = re.compile(r"key:\s*'([^']+)'")
-_DS_DATA_RE = re.compile(r"data:\s*(.*?)\s*,\s*sideChannel", re.S)
+# Greedy to the end of the captured head — `data:` is the last key before
+# `sideChannel`, so everything after the first one is the payload.
+_DS_DATA_RE = re.compile(r"data:\s*(.*)$", re.S)
 _DS_FLIGHTS_KEY = "ds:1"
 # `ds:1[2]` is Google's own top-flights board, `[3]` the rest. Concatenated in
 # that order so the page's ranking survives — we can't reproduce it.
@@ -138,6 +149,9 @@ def _extract_ds1(html: str) -> list[Any] | None:
 
     Shaped like the RPC's own payload, so callers index `payload[2]` /
     `payload[3]` for flight rows."""
+    # `continue`, never an early `return`: the page may carry more than one
+    # `ds:1` blob, and giving up on the first undecodable one would report a
+    # readable board as a shape change.
     for match in _DS_BLOB_RE.finditer(html):
         blob = match.group(1)
         key = _DS_KEY_RE.search(blob)
@@ -145,22 +159,28 @@ def _extract_ds1(html: str) -> list[Any] | None:
             continue
         data = _DS_DATA_RE.search(blob)
         if not data:
-            return None
+            continue
         try:
             payload: Any = json.loads(data.group(1))
         except ValueError:
             log.debug("ds:1 blob is not valid JSON")
-            return None
-        return cast("list[Any]", payload) if isinstance(payload, list) else None
+            continue
+        if isinstance(payload, list):
+            return cast("list[Any]", payload)
     return None
 
 
-def _is_page_throttled(*, status_code: int, final_url: str) -> bool:
+def _is_page_throttled(*, final_url: str, html: str) -> bool:
     """True when Google blocked the fetch rather than serving a board.
 
     Checked BEFORE parsing: a block renders as zero rows, and "Google is
-    throttling us" must never reach the user as "no flights on this route"."""
-    return status_code == HTTPStatus.TOO_MANY_REQUESTS or _SORRY_PATH in final_url
+    throttling us" must never reach the user as "no flights on this route".
+
+    Both signals are needed. The interstitial usually arrives as a redirect to
+    `/sorry/`, but Google also serves it with HTTP 200 at the requested URL, and
+    that variant is only visible in the body. An HTTP 429 never reaches here at
+    all — fli's client raises it (see `_one_call`)."""
+    return _SORRY_PATH in final_url or any(marker in html for marker in _SORRY_MARKERS)
 
 
 def _is_consent_page(*, final_url: str, html: str) -> bool:
@@ -179,6 +199,13 @@ def _is_consent_page(*, final_url: str, html: str) -> bool:
 # we persist it after a successful call and reload it at startup. Every
 # subsequent one-shot `flight` process then starts warm; the retry above stays
 # as the fallback for the first-ever run and NID rotation.
+#
+# The jar lives on fli's `Client._session()`, which is a `threading.local` —
+# each worker thread gets its OWN curl_cffi session. The multi-cabin fan-out and
+# the enrich path both query from threads, so seeding warms only the thread that
+# calls it; the once-per-process latches below mean the first thread to arrive
+# wins. That is enough for the one-shot CLI (the seed happens on whichever
+# thread makes the first request) and is why these helpers are best-effort.
 #
 # We persist ONLY the named cookies below (and only on the google.com domain),
 # not the whole jar: NID is the one we've validated, and replaying an unknown
@@ -515,7 +542,7 @@ def _seed_cookies_once(client: Any) -> None:
         return
     try:
         for c in saved:
-            client._client.cookies.set(
+            client._session().cookies.set(
                 c["name"],
                 c["value"],
                 domain=c.get("domain", ".google.com"),
@@ -538,7 +565,7 @@ def _persist_cookies(client: Any) -> None:
                 "domain": str(ck.domain or ".google.com"),
                 "path": str(ck.path or "/"),
             }
-            for ck in client._client.cookies.jar  # pyright: ignore[reportAny]  # fli/curl_cffi untyped
+            for ck in client._session().cookies.jar  # pyright: ignore[reportAny]  # fli/curl_cffi untyped
             if str(ck.name) in _PERSIST_COOKIE_NAMES
             and _GOOGLE_DOMAIN_SUFFIX in str(ck.domain or "")
         ]
@@ -556,14 +583,25 @@ def _persist_cookies(client: Any) -> None:
         log.debug("could not persist gflight cookies: %s", e)
 
 
-def _rows_from_ds1(payload: list[Any]) -> list[Any]:
-    """The flight rows inlined in a `ds:1` payload, top-flights board first."""
+def _rows_from_ds1(payload: list[Any]) -> tuple[list[Any], int]:
+    """The flight rows inlined in a `ds:1` payload (top-flights board first),
+    and how many of the two row blocks were present at all.
+
+    The count is the discriminator between "Google says this leg has no
+    flights" and "the payload moved". A genuinely empty board still carries a
+    list at BOTH indices (`[[]]` at 2 and 3, checked against a live capture);
+    a payload whose blocks have moved carries a list at neither, and without
+    the count both look identical — zero rows."""
     rows: list[Any] = []
+    blocks_seen = 0
     for index in _DS_ROW_BLOCKS:
         block = payload[index] if len(payload) > index else None
-        if isinstance(block, list) and block and isinstance(block[0], list):
+        if not isinstance(block, list):
+            continue
+        blocks_seen += 1
+        if block and isinstance(block[0], list):
             rows.extend(cast("list[Any]", block[0]))
-    return rows
+    return rows, blocks_seen
 
 
 def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
@@ -575,12 +613,19 @@ def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
     client = get_client()
     _seed_cookies_once(client)
     url = google_flights_search_page_url(build_search_tfs(filters))
-    resp = client.get(url, impersonate="chrome", allow_redirects=True)
+    # fli's `Client.get` calls `raise_for_status()` itself and wraps whatever it
+    # catches in `SearchHTTPError`, so a 429 never comes back as a response for
+    # us to inspect — it arrives here as an exception or not at all.
+    try:
+        resp = client.get(url, impersonate="chrome", allow_redirects=True)
+    except SearchHTTPError as e:
+        if e.status_code == HTTPStatus.TOO_MANY_REQUESTS:
+            raise GfThrottledError("Google Flights rate-limited the request") from e
+        raise
     final_url = str(resp.url)
-    if _is_page_throttled(status_code=resp.status_code, final_url=final_url):
-        raise GfThrottledError("Google Flights rate-limited the request")
-    resp.raise_for_status()
     html = resp.text
+    if _is_page_throttled(final_url=final_url, html=html):
+        raise GfThrottledError("Google Flights rate-limited the request")
     payload = _extract_ds1(html)
     if payload is None:
         if _is_consent_page(final_url=final_url, html=html):
@@ -593,7 +638,9 @@ def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
     # A decoded payload means Google answered a warm session — save its cookies
     # (NID) so the next one-shot CLI process starts warm instead of cold.
     _persist_cookies(client)
-    rows = _rows_from_ds1(payload)
+    rows, blocks_seen = _rows_from_ds1(payload)
+    if not blocks_seen:
+        raise GfPageShapeError("ds:1 has no row blocks at [2]/[3]; the payload layout changed")
     if not rows:
         return []  # Google's own answer: this leg has no flights.
     out: list[GFlightWithId] = []

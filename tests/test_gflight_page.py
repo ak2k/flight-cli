@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import json
 import pathlib
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import pytest
+from fli.search.exceptions import SearchHTTPError
 
 from flight_cli import _gflight_ids as gfid
 from flight_cli._gf_errors import GfConsentError, GfPageShapeError, GfThrottledError
@@ -57,26 +58,35 @@ _SHAPE_CHANGE_PAGE = (
 )
 
 
-class _FakeResponse:
-    def __init__(self, *, text: str, status_code: int = 200, url: str = "") -> None:
-        self.text = text
-        self.status_code = status_code
-        self.url = url or "https://www.google.com/travel/flights?tfs=abc"
+class _NullCookies:
+    """Enough of curl_cffi's cookie API for the seed/persist helpers."""
 
-    def raise_for_status(self) -> None:
-        if self.status_code >= 400:
-            raise AssertionError(f"unexpected status {self.status_code}")
+    jar: ClassVar[list[Any]] = []
+
+    def set(self, *_a: object, **_kw: object) -> None:
+        return None
+
+
+class _FakeResponse:
+    """The shape fli's client hands back — it has already called
+    `raise_for_status()`, so a response reaching us is always 2xx."""
+
+    def __init__(self, *, text: str, url: str = "") -> None:
+        self.text = text
+        self.url = url or "https://www.google.com/travel/flights?tfs=abc"
 
 
 class _FakeClient:
     """Counts GETs so a test can assert the request budget, not just the value."""
 
-    def __init__(self, response: _FakeResponse) -> None:
+    def __init__(self, response: _FakeResponse | Exception) -> None:
         self.response = response
         self.gets: list[str] = []
 
     def get(self, url: str, **_kw: object) -> _FakeResponse:
         self.gets.append(url)
+        if isinstance(self.response, Exception):
+            raise self.response
         return self.response
 
 
@@ -96,7 +106,7 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> Any:
 
     monkeypatch.setattr(gfid.time, "sleep", _no_sleep)
 
-    def install(response: _FakeResponse) -> _FakeClient:
+    def install(response: _FakeResponse | Exception) -> _FakeClient:
         fake = _FakeClient(response)
         monkeypatch.setattr(gfid, "get_client", lambda: fake)
         return fake
@@ -110,7 +120,8 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> Any:
 def test_extract_ds1_reads_the_flights_blob_past_other_keys() -> None:
     payload = gfid._extract_ds1(_page(_ds1("ds1_jfk_lax_3rows.json")))
     assert payload is not None
-    assert len(gfid._rows_from_ds1(payload)) == 3
+    assert gfid._rows_from_ds1(payload) == (gfid._rows_from_ds1(payload)[0], 2)
+    assert len(gfid._rows_from_ds1(payload)[0]) == 3
 
 
 def test_extract_ds1_returns_none_when_the_key_is_absent() -> None:
@@ -126,7 +137,7 @@ def test_rows_keep_the_top_flights_block_first() -> None:
     that order is the only way the page's ordering survives — we can't
     reproduce the blended rank locally."""
     payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
-    rows = gfid._rows_from_ds1(payload)
+    rows, _ = gfid._rows_from_ds1(payload)
     assert rows[0] is payload[2][0][0]
     assert rows[1] is payload[3][0][0]
 
@@ -166,9 +177,87 @@ def test_sorry_redirect_raises_throttled(client: Any) -> None:
 
 
 def test_http_429_raises_throttled(client: Any) -> None:
-    client(_FakeResponse(text="", status_code=429))
+    """fli's own client calls `raise_for_status()` and wraps the failure, so a
+    429 reaches us as `SearchHTTPError` — never as a response to inspect."""
+    client(SearchHTTPError("rate limited", status_code=429))
     with pytest.raises(GfThrottledError):
         gfid._one_call(_FILTERS)
+
+
+def test_other_http_errors_are_not_mistaken_for_throttling(client: Any) -> None:
+    client(SearchHTTPError("server error", status_code=500))
+    with pytest.raises(SearchHTTPError):
+        gfid._one_call(_FILTERS)
+
+
+def test_real_fli_client_turns_a_429_into_a_typed_throttle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The wiring the fake can't prove: fli's REAL `Client.get` in front of a
+    stubbed session, so the `raise_for_status()` -> `SearchHTTPError` ->
+    `GfThrottledError` chain is exercised end to end."""
+    from curl_cffi.requests import exceptions as curl_exc
+    from fli.search.client import Client
+
+    monkeypatch.setenv("MATRIX_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(gfid, "_cookie_state", {"seeded": False, "persisted": False})
+
+    def _stub(_filters: Any) -> bytes:
+        return b"\x08\x1c"
+
+    monkeypatch.setattr(gfid, "build_search_tfs", _stub)
+
+    class _Resp:
+        status_code = 429
+
+        def raise_for_status(self) -> None:
+            raise curl_exc.HTTPError("429 Too Many Requests", response=self)
+
+    class _Session:
+        cookies = _NullCookies()
+
+        def get(self, _url: str, **_kw: object) -> _Resp:
+            return _Resp()
+
+    session = _Session()
+    real = Client()
+    monkeypatch.setattr(real, "_session", lambda: session)
+    monkeypatch.setattr(gfid, "get_client", lambda: real)
+
+    with pytest.raises(GfThrottledError):
+        gfid._one_call(_FILTERS)
+
+
+def test_sorry_body_at_the_original_url_raises_throttled(client: Any) -> None:
+    """Google also serves the interstitial in place, with no redirect to key
+    off — the body is the only tell, and without it this reads as a shape
+    change."""
+    client(_FakeResponse(text=_SORRY_PAGE))
+    with pytest.raises(GfThrottledError):
+        gfid._one_call(_FILTERS)
+
+
+def test_relocated_row_blocks_raise_page_shape(client: Any) -> None:
+    """A payload that decodes but whose row blocks moved off [2]/[3] yields no
+    rows — indistinguishable from an empty board without the block count."""
+    client(_FakeResponse(text=_page(_ds1("ds1_blocks_relocated.json"))))
+    with pytest.raises(GfPageShapeError, match=r"no row blocks"):
+        gfid._one_call(_FILTERS)
+
+
+def test_brace_in_a_row_string_does_not_truncate_the_blob(client: Any) -> None:
+    """`});` inside benign Google copy used to cut the capture short and fail
+    the whole search."""
+    fake = client(_FakeResponse(text=_page(_ds1("ds1_brace_in_string.json"))))
+    assert len(gfid._one_call(_FILTERS)) == 3
+    assert len(fake.gets) == 1
+
+
+def test_second_ds1_is_consulted_when_the_first_is_undecodable() -> None:
+    html = _page("[[,]]") + _page(_ds1("ds1_jfk_lax_3rows.json"))
+    payload = gfid._extract_ds1(html)
+    assert payload is not None
+    assert len(gfid._rows_from_ds1(payload)[0]) == 3
 
 
 def test_consent_page_raises_consent(client: Any) -> None:

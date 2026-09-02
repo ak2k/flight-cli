@@ -1,4 +1,6 @@
-# pyright: reportPrivateUsage=false
+# pyright: reportPrivateUsage=false, reportUnknownVariableType=false
+# pyright: reportUnknownLambdaType=false, reportUnknownMemberType=false
+# Profile-B edge: curl_cffi's Session is generic and ships no stubs.
 """Persisted gflight session cookies (work-4bje3).
 
 The cold-session empties are almost entirely a missing Google `NID` cookie.
@@ -49,8 +51,15 @@ class _FakeSession:
 
 
 class _FakeClient:
+    """Mirrors fli's `Client`: the jar hangs off `_session()`, which is backed by
+    a `threading.local` — there is no `_client` attribute (reaching for one made
+    both helpers silent no-ops until work-h70kv.5 round 1)."""
+
     def __init__(self, cookies: list[_JarCookie] | None = None) -> None:
-        self._client = _FakeSession(cookies or [])
+        self._sessions = _FakeSession(cookies or [])
+
+    def _session(self) -> _FakeSession:
+        return self._sessions
 
 
 def _reset(monkeypatch: pytest.MonkeyPatch, cache_dir: Path) -> None:
@@ -86,14 +95,14 @@ def test_persist_then_seed_round_trips_only_nid(
     gfid._cookie_state["seeded"] = False
     fresh = _FakeClient([])
     gfid._seed_cookies_once(fresh)
-    assert fresh._client.cookies.set_calls == [("NID", "532=abc", ".google.com", "/")]
+    assert fresh._session().cookies.set_calls == [("NID", "532=abc", ".google.com", "/")]
 
 
 def test_seed_with_no_saved_file_is_a_noop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _reset(monkeypatch, tmp_path)
     fresh = _FakeClient([])
     gfid._seed_cookies_once(fresh)  # first-ever run, no file → no error
-    assert fresh._client.cookies.set_calls == []
+    assert fresh._session().cookies.set_calls == []
 
 
 def test_seed_ignores_stale_cache_past_ttl(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -105,7 +114,7 @@ def test_seed_ignores_stale_cache_past_ttl(monkeypatch: pytest.MonkeyPatch, tmp_
     )
     fresh = _FakeClient([])
     gfid._seed_cookies_once(fresh)
-    assert fresh._client.cookies.set_calls == []  # stale → re-warm, don't seed
+    assert fresh._session().cookies.set_calls == []  # stale → re-warm, don't seed
 
 
 def test_seed_uses_fresh_cache_within_ttl(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -117,7 +126,7 @@ def test_seed_uses_fresh_cache_within_ttl(monkeypatch: pytest.MonkeyPatch, tmp_p
     )
     fresh = _FakeClient([])
     gfid._seed_cookies_once(fresh)
-    assert fresh._client.cookies.set_calls == [("NID", "v", ".google.com", "/")]
+    assert fresh._session().cookies.set_calls == [("NID", "v", ".google.com", "/")]
 
 
 def test_seed_runs_only_once_per_process(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -130,7 +139,7 @@ def test_seed_runs_only_once_per_process(monkeypatch: pytest.MonkeyPatch, tmp_pa
     fresh = _FakeClient([])
     gfid._seed_cookies_once(fresh)
     gfid._seed_cookies_once(fresh)  # second call is a no-op
-    assert len(fresh._client.cookies.set_calls) == 1
+    assert len(fresh._session().cookies.set_calls) == 1
 
 
 def test_persist_runs_only_once_per_process(
@@ -139,7 +148,7 @@ def test_persist_runs_only_once_per_process(
     _reset(monkeypatch, tmp_path)
     warm = _FakeClient([_JarCookie("NID", "v1", ".google.com")])
     gfid._persist_cookies(warm)
-    warm._client.cookies.jar.append(_JarCookie("NID", "v2", ".google.com"))
+    warm._session().cookies.jar.append(_JarCookie("NID", "v2", ".google.com"))
     gfid._persist_cookies(warm)  # one write per process
     payload = json.loads((tmp_path / "gflight-cookies.json").read_text())
     assert payload["cookies"][0]["value"] == "v1"
@@ -150,7 +159,7 @@ def test_seed_ignores_corrupt_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     (tmp_path / "gflight-cookies.json").write_text("{not valid json")
     fresh = _FakeClient([])
     gfid._seed_cookies_once(fresh)  # must not raise
-    assert fresh._client.cookies.set_calls == []
+    assert fresh._session().cookies.set_calls == []
 
 
 def test_persist_skips_when_no_allowlisted_cookie(
@@ -160,3 +169,28 @@ def test_persist_skips_when_no_allowlisted_cookie(
     warm = _FakeClient([_JarCookie("AEC", "x", ".google.com")])  # Google but not NID
     gfid._persist_cookies(warm)
     assert not (tmp_path / "gflight-cookies.json").exists()
+
+
+def test_persist_then_seed_round_trips_through_fli_s_real_client(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The wiring a hand-rolled fake can't prove: fli's REAL `Client`, with only
+    its session stubbed, must expose the jar where these helpers reach for it."""
+    from curl_cffi import requests as curl_requests
+    from fli.search.client import Client
+
+    _reset(monkeypatch, tmp_path)
+    session = curl_requests.Session()
+    session.cookies.set("NID", "round-trip-value", domain=".google.com")
+
+    writer = Client()
+    monkeypatch.setattr(writer, "_session", lambda: session)
+    gfid._persist_cookies(writer)
+    assert (tmp_path / "gflight-cookies.json").exists()
+
+    monkeypatch.setattr(gfid, "_cookie_state", {"seeded": False, "persisted": False})
+    reader_session = curl_requests.Session()
+    reader = Client()
+    monkeypatch.setattr(reader, "_session", lambda: reader_session)
+    gfid._seed_cookies_once(reader)
+    assert reader_session.cookies.get("NID") == "round-trip-value"

@@ -56,17 +56,23 @@ def test_is_throttle_block_false_on_empty_or_data() -> None:
 
 def test_is_page_throttled_on_sorry_redirect() -> None:
     assert _is_page_throttled(
-        status_code=200, final_url="https://www.google.com/sorry/index?continue=x"
+        final_url="https://www.google.com/sorry/index?continue=x", html="<html>captcha</html>"
     )
 
 
-def test_is_page_throttled_on_429() -> None:
-    assert _is_page_throttled(status_code=429, final_url="https://www.google.com/travel/flights")
+def test_is_page_throttled_on_the_interstitial_served_in_place() -> None:
+    """Google also serves the block at the requested URL with HTTP 200, leaving
+    the body as the only tell. An HTTP 429 never reaches this predicate — fli's
+    client raises it (see `_one_call`)."""
+    assert _is_page_throttled(
+        final_url="https://www.google.com/travel/flights?tfs=abc",
+        html="<html>Our systems have detected unusual traffic</html>",
+    )
 
 
 def test_is_page_throttled_false_on_a_served_page() -> None:
     assert not _is_page_throttled(
-        status_code=200, final_url="https://www.google.com/travel/flights?tfs=abc"
+        final_url="https://www.google.com/travel/flights?tfs=abc", html="<html>results</html>"
     )
 
 
