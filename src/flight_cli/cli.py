@@ -1643,8 +1643,7 @@ def _run_gflight_multi(
     each query runs in a worker thread via `anyio.to_thread.run_sync`.
 
     Each cabin runs the SAME query builder as the single-cabin path, so the
-    native filters and the Tier-2 post-filter can't drift apart — they did once,
-    and the multi-cabin board silently answered a constrained search."""
+    native filters and the Tier-2 post-filter cannot drift apart."""
     results: dict[Cabin, list[Any]] = {}
 
     def query_sync(cab: Cabin) -> list[Any]:
@@ -3172,11 +3171,8 @@ def gflight(
         youth=0,
         inf_seat=0,
         inf_lap=0,
-        # This alias takes a single IATA code per side — `Leg.of` would reject a
-        # list before a backend was ever chosen — so there is no airport set for
-        # the picker to weigh.
-        origin=None,
-        destination=None,
+        origin=origin,
+        destination=destination,
         stops=None,
     )
     legs = (Leg.of(origin, destination, _parse_date(dep)),)
