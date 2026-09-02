@@ -33,8 +33,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import pathlib
 import random
 import re
 import threading
@@ -66,6 +64,7 @@ from fli.search.exceptions import (  # pyright: ignore[reportMissingTypeStubs]
 )
 from fli.search.flights import SearchFlights  # pyright: ignore[reportMissingTypeStubs]
 
+from ._gf_common import PageFetch, cache_dir
 from ._gf_errors import (
     GfConsentError,
     GfPageShapeError,
@@ -75,6 +74,7 @@ from ._gf_errors import (
 from .links import build_search_tfs, google_flights_search_page_url
 
 if TYPE_CHECKING:
+    import pathlib
     from collections.abc import Callable
 
     from fli.models.google_flights.flights import (  # pyright: ignore[reportMissingTypeStubs]
@@ -533,15 +533,6 @@ def _flight_leg(fl: list[Any]) -> FlightLeg:
     )
 
 
-def cache_dir() -> pathlib.Path:
-    """The shared CLI cache dir, honoring the same `MATRIX_CACHE_DIR` override
-    the response cache does. Rung 2's browser profile resolves from here too, so
-    a test that redirects the cache redirects both."""
-    return pathlib.Path(
-        os.environ.get("MATRIX_CACHE_DIR") or pathlib.Path.home() / ".cache" / "flight-cli"
-    )
-
-
 def _cookie_path() -> pathlib.Path:
     """Where the warmed gflight session cookies live."""
     return cache_dir() / "gflight-cookies.json"
@@ -677,16 +668,6 @@ def search_page_url(filters: FlightSearchFilters) -> str:
     """The public search-page URL for `filters` — the one address both rungs
     fetch, so neither can drift into asking Google a different question."""
     return google_flights_search_page_url(build_search_tfs(filters))
-
-
-class PageFetch(NamedTuple):
-    """One fetch of the search page, whichever rung made it — and the whole of
-    the evidence `_rows_from_page_html` rules on, so the parser cannot tell the
-    rungs apart."""
-
-    html: str
-    final_url: str
-    status_code: int
 
 
 def _fetch_page(filters: FlightSearchFilters) -> PageFetch:
@@ -896,7 +877,12 @@ def _one_call_browser(filters: FlightSearchFilters, *, headed: bool) -> list[GFl
     Imported through the module, not `from ._gf_browser import session`: the
     attribute is looked up per call, which is what lets a test substitute the
     session without a browser anywhere in the process."""
-    from . import _gf_browser  # noqa: PLC0415 — patchright is optional; keep it off the http path
+    # Deferred for ONE reason now: `_gf_browser` pulls the optional patchright
+    # extra, which must stay off the http path. It is no longer also breaking an
+    # import cycle — `_gf_common` holds what both rungs share — so hoisting this
+    # to the top of the file would cost an optional dependency, not raise
+    # ImportError on a half-initialized module.
+    from . import _gf_browser  # noqa: PLC0415 — see above
 
     return _rows_from_page_html(
         _gf_browser.session(headed=headed).get_html(search_page_url(filters))

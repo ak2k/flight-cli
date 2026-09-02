@@ -41,8 +41,8 @@ from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 
+from ._gf_common import PageFetch, cache_dir
 from ._gf_errors import BROWSER_DEFAULT_REMEDY, GfBrowserUnavailableError
-from ._gflight_ids import PageFetch, cache_dir
 
 if TYPE_CHECKING:
     import pathlib
@@ -142,7 +142,9 @@ def _playwright_factory() -> Callable[[], Any]:
     function so that any test which would have launched a browser fails
     instead."""
     try:
-        from patchright.sync_api import sync_playwright  # noqa: PLC0415
+        # Deferred: patchright is an optional extra, and importing it at module
+        # scope would make `flight` unrunnable for everyone who never uses rung 2.
+        from patchright.sync_api import sync_playwright  # noqa: PLC0415 — see above
     except ImportError as e:
         raise GfBrowserUnavailableError(
             "Google Flights' browser rung needs patchright, which isn't installed.",

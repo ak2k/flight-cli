@@ -449,9 +449,11 @@ def test_multi_cabin_fan_out_honours_an_encodable_constraint(
     from flight_cli.domain import SearchOptions as _SearchOptions
 
     seen: list[Any] = []
+    rungs: list[Any] = []
 
-    def _capture(filters: Any, top_n: int) -> list[Any]:
+    def _capture(filters: Any, top_n: int, transport: Any) -> list[Any]:
         seen.append(filters)
+        rungs.append(transport)
         return []
 
     monkeypatch.setattr(gfid, "search_with_ids", _capture)
@@ -463,6 +465,10 @@ def test_multi_cabin_fan_out_honours_an_encodable_constraint(
     )
     assert seen, "the fan-out never queried"
     assert seen[0].stops.name == "ONE_STOP_OR_FEWER"
+    # The fan-out names rung 1 now instead of omitting the argument. Same value,
+    # so nothing about the fan-out changed — and the profile lock means it must
+    # stay rung 1: a thread per cabin cannot each hold the one Chrome profile.
+    assert rungs == [gfid.HTTP_TRANSPORT]
 
 
 def _dispatch(monkeypatch: pytest.MonkeyPatch, *args: str) -> tuple[list[str], str]:

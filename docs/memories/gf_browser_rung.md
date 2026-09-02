@@ -36,10 +36,15 @@ marker, a missing `ds:1`, the status Chrome does report — is decided
 downstream, so both rungs reach identical verdicts from identical evidence.
 
 Classification order inside `_rows_from_page_html` is load-bearing: throttle
-(`/sorry/` or 429) → any other non-2xx as `GfPageShapeError` → missing `ds:1`
-with consent markers as `GfConsentError` → missing `ds:1` as a shape error →
-rows. Every one of those would otherwise decode as zero rows and read to the
-user as "no flights on this route".
+(`/sorry/` or 429) → any other non-2xx as `GfUpstreamStatusError` → missing
+`ds:1` with consent markers as `GfConsentError` → missing `ds:1` as a shape
+error → rows. Every one of those would otherwise decode as zero rows and read to
+the user as "no flights on this route". The 429 test has to come first, or the
+non-2xx branch claims it and loses the one fact a caller can act on.
+
+A non-2xx is deliberately NOT a shape error. "Google changed the page" sends a
+reader to re-derive the extract; "Google declined to serve" is usually an outage
+and needs no code change at all.
 
 Parity is measured, not assumed. 2026-09-02, JFK-LAX 2026-10-14, same URL, same
 minute: curl_cffi 30 rows / first `flight_id` `fuqYmc`; headless Chrome 30 rows
@@ -51,9 +56,15 @@ minute: curl_cffi 30 rows / first `flight_id` `fuqYmc`; headless Chrome 30 rows
 - **`response.text()`, never `page.content()`.** `content()` serializes the live
   DOM, which Google's own JavaScript has already rewritten. `text()` is the HTTP
   response body — the same bytes curl_cffi sees, `ds:1` blob intact.
-- **`wait_until="commit"`.** `response.text()` waits for the body regardless, so
-  a later readiness state buys nothing. Measured 2026-09-02: `commit` and
-  `domcontentloaded` returned the same 30 rows and the same first id.
+- **`wait_until="domcontentloaded"`, not `commit`.** Both return the same 30
+  rows and the same first id (measured 2026-09-02), so this is not about what
+  arrives — it is about what bounds it. `response.text()` takes **no timeout at
+  any layer**: patchright sends the body request with no deadline, and the
+  driver arms its timer only when one is supplied, so a stalled body read hangs
+  forever with nothing to interrupt it. `commit` returns before the body exists
+  and leaves that read outside `goto`'s 30 s ceiling; `domcontentloaded` puts it
+  inside. That ceiling is the only timeout rung 2 has, and a default round trip
+  makes 11 of these reads.
 - **No warm-up navigation.** The June RPC experiment always landed on
   `google.com/travel/flights` first. Probed 2026-09-02 on two *fresh* profiles
   (headless and headed): the `tfs=` deep link returned rows directly, no consent
@@ -73,8 +84,16 @@ object touched from a thread other than its creator raises `greenlet.error` and
 strands a live Chrome. So the session is **thread-local**, created lazily by
 `_gf_browser.session(headed=…)`, and closed in `_gflight_results`' `finally` —
 the owning thread, on every path that function returns from. Every leg of one
-search runs in that thread, so a round trip's four navigations share one launch
-(and one "opening Chrome" line). `atexit` gets only a best-effort close, and is
+search runs in that thread, so all of a round trip's navigations share one
+launch (and one "opening Chrome" line).
+
+**A round trip costs 1 + min(top_n, board rows) navigations**, not four: the
+outbound board, then one pinned return leg per outbound carried forward. `-n`
+defaults to 10, so the DEFAULT round trip is **11 navigations**, and `-n 25` is
+26. Measured with a recorder in place of the session: `-n 1` → 2, `-n 3` → 4,
+`-n 10` → 11. At the 30 s nav ceiling the default worst case is 330 s. The
+earlier "four navigations" figure came from a `top_n=1` fixture and described
+the test, not the CLI. `atexit` gets only a best-effort close, and is
 structurally same-thread: thread-local storage means interpreter shutdown on the
 main thread cannot see a worker's session.
 
@@ -109,22 +128,66 @@ concurrent sessions.
 produce bytes — no patchright, no Chrome, locked profile, nav timeout, null
 response, unreadable body. `remedy` is a separate attribute, and **both**
 renderings in `_gf_refusal` have to carry it. The full `message` gets it free
-inside `str(e)`. The one-line `note` must append `e.remedy` itself, and that is
-the one that matters most: the enrich path is the default search and prints only
-the note, so a user with no patchright learns what to install there or nowhere.
+inside `str(e)`. The one-line `note` must append both `e.reason` AND `e.remedy`
+itself, and that is the one that matters most: the enrich path is the default
+search and prints only the note. Built from the remedy alone it read "Retry" for
+all four launch-time failures at once — one useless line, with the only
+actionable one (install Chrome) never named.
+
+**Every interpolated string in a refusal is `escape`d.** The app runs typer with
+`rich_markup_mode="rich"`, so `[browser]` in a remedy is read as a style tag and
+DELETED: the install hint printed `uv pip install 'flight-cli'`, a command that
+installs the package without the extra and leaves the user exactly where they
+started. Worse, patchright's driver text is arbitrary — a `[/x]` it never opened
+raises `MarkupError` from `print`, turning a typed refusal that should degrade
+to Matrix into a crash. Literal markup in those templates is ours and stays
+unescaped; anything off an exception is data. Same trap in `--gf-transport`'s
+help string, where the fix is a backslash in the literal (`flight-cli\[browser]`).
+
+A launch failure is not diagnosed from the profile state alone. A `SIGKILL`ed
+run leaves `Singleton*` behind indefinitely, so `_profile_is_locked` keeps
+returning true and every later failure read as a lock — a user with no Chrome
+would delete lock files, retry, and hit the same wall with the real cause still
+unnamed. The driver text has to name the singleton too. And `_profile_is_locked`
+answering an `OSError` with "unlocked" is the deliberate direction: erring the
+other way refuses the rung and tells the user to delete files the process just
+proved it cannot see.
 
 ## What it costs
 
 Measured 2026-09-02 on this Mac: cold launch plus one navigation, start to
-rendered table, **under 3 s**; a round trip's launch plus four navigations under
-7 s. That is far cheaper than the ~60 s the design brief budgeted, and still
-far cheaper than Matrix (~45 s). The 30 s nav timeout is a ceiling, not a
-typical cost.
+rendered table, **under 3 s**; a `-n 1` round trip (launch plus two navigations)
+under 7 s. That is far cheaper than the ~60 s the design brief budgeted, and
+still far cheaper than Matrix (~45 s). The 30 s nav timeout is a ceiling, not a
+typical cost — but see the navigation count above before assuming a default
+round trip is as cheap as the one that was timed.
 
 **Single-cabin only.** `--gf-transport browser` with a multi-cabin `--cabin`
 list prints a dim line and uses http. The fan-out runs a thread per cabin, and
 Chromium single-instances the profile directory, so the second cabin would fail
 on the first one's lock — one profile is the constraint, not a missing wire.
+
+## The shared leaf
+
+`PageFetch` and `cache_dir()` live in `_gf_common.py`, which imports nothing
+from this package. They were in `_gflight_ids`, and that made the two rungs
+import each other: `_gf_browser` needs the record type the parser reads and the
+cache dir its profile sits under, while `_gflight_ids` reaches `_gf_browser` to
+run rung 2. Only the deferred import inside `_one_call_browser` hid it, and both
+are defined well below that module's import block — so hoisting the import to
+the top of the file raised `ImportError` on a half-initialized module, a failure
+that looks exactly like a broken optional dependency and sends the reader
+somewhere else entirely.
+
+That deferred import stays, but it now means ONE thing: patchright is an
+optional extra and must stay off the http path. `_gf_errors` solves the same
+shape of problem for the refusal types and says so in its own docstring; these
+are values rather than exceptions, so they get a leaf named for what they are.
+
+`import flight_cli.cli` still loads neither `_gflight_ids` nor `_gf_browser` —
+`_gf_errors` alone, for the exception catches. That is what keeps fli's 64 ms
+off a Matrix-only search, and `test_resolving_a_transport_does_not_load_the_
+google_flights_stack` holds the line in a subprocess.
 
 ## Tests never launch a browser
 
@@ -138,10 +201,19 @@ installs its own fake playwright has already replaced the same seam, so the
 marker would only widen the hole. It is for the one test that calls the real
 `_playwright_factory` to prove a missing patchright names its install.
 
+The opt-out reads the **marker** (`request.node.get_closest_marker`), not
+`request.keywords`. `keywords` also carries the node's name, its parametrize ids
+and its containing directory, so on that predicate a test merely *parametrized*
+with the string `gf_browser` disarmed the guard for itself with no marker in
+sight — and a directory rename would have done it to a whole subtree.
+
 Two seams make the ladder testable, and both are easy to break by "tidying":
 `_gflight_ids` reaches rung 2 as `from . import _gf_browser` then
-`_gf_browser.session(...)`, so the attribute is looked up per call; rewriting it
-as `from ._gf_browser import session` would silently defeat every ladder test.
+`_gf_browser.session(...)`, so the attribute is looked up per call. Rewriting it
+as `from ._gf_browser import session` binds the function at import time, and
+every ladder test that substitutes `_gf_browser.session` would then be
+monkeypatching a name the code under test no longer reads — so the tests keep
+passing while proving nothing.
 And `_one_call_with_retry` calls the module-global `_one_call`, which is what
 lets the throttle tests substitute it.
 

@@ -6,7 +6,10 @@ same `_rows_from_page_html` decides what they mean, so a `/sorry/` page fetched
 through Chrome is a throttle for exactly the reason it is over curl_cffi. And
 **no test launches a browser** — the autouse guard in `conftest.py` replaces the
 launcher for every test here except the handful marked `gf_browser`, which drive
-a fake playwright object graph and never open a window.
+a fake playwright object graph and never start a driver process. Rung 2 runs
+headless in under 3 s, so the cost is not the reason; a test that reached the
+real launcher would hit the live network and disprove the property the CLI
+advertises, that `--gf-transport http` never consults a browser.
 
 Nothing in this file touches the network.
 """
@@ -105,8 +108,12 @@ class _FakeChromium:
         self._context = context
         self._launch_error = launch_error
         self.launch_kwargs: dict[str, Any] = {}
+        # Counted, not just recorded: reuse is the whole reason the session is
+        # an object, and "one launch" is otherwise asserted by nothing.
+        self.launches = 0
 
     def launch_persistent_context(self, **kwargs: Any) -> _FakeContext:
+        self.launches += 1
         self.launch_kwargs = kwargs
         if self._launch_error is not None:
             raise self._launch_error
@@ -117,8 +124,10 @@ class _FakePlaywright:
     def __init__(self, chromium: _FakeChromium) -> None:
         self.chromium = chromium
         self.stopped = False
+        self.starts = 0
 
     def start(self) -> _FakePlaywright:
+        self.starts += 1
         return self
 
     def stop(self) -> None:
@@ -272,11 +281,17 @@ def test_relocated_rows_through_the_browser_are_a_shape_refusal() -> None:
 
 
 class _RecordingSession:
-    """Stands in for a `GfBrowserSession`: counts navigations, serves fixtures."""
+    """Stands in for a `GfBrowserSession`: counts navigations and closes, serves
+    fixtures. Never launches anything, so a test using it proves what the ladder
+    does without a browser in the process."""
 
     def __init__(self, result: Any = None) -> None:
         self.urls: list[str] = []
+        self.closes = 0
         self._result = result
+
+    def close(self) -> None:
+        self.closes += 1
 
     def get_html(self, url: str) -> Any:
         self.urls.append(url)
@@ -405,6 +420,11 @@ def test_a_navigation_becomes_rows_and_the_launch_is_announced(
     rows = gfid._rows_from_page_html(fetch)
     assert len(rows) == 3  # the navigation's bytes go straight into the one parser
     assert _page_of(pw).gotos == [(_PAGE_URL, "domcontentloaded", 30_000)] * 2
+    # The claim is "one launch, TWO navs". Without these two counters the first
+    # half was asserted by nothing: a session that relaunched Chrome on every
+    # navigation would have passed every other line in this test.
+    assert pw.chromium.launches == 1
+    assert pw.starts == 1
     assert capsys.readouterr().err.count("opening Chrome") == 1
     assert pw.chromium._context.closed and pw.stopped
 
@@ -556,6 +576,52 @@ def test_close_is_idempotent_and_survives_a_failing_teardown(
     assert pw.stopped
 
 
+def test_a_round_trip_pays_for_one_launch_and_navigates_per_leg(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The economics of the rung: the launch is the expensive part (~2-5 s) and
+    a round trip pays it once, however many legs it pins. Driven through the
+    real `GfBrowserSession` on a fake playwright, so the launch count is a
+    measurement rather than a restatement of the ladder's monkeypatching."""
+    pw = _install(monkeypatch, tmp_path)
+    monkeypatch.setattr(gfb, "_sessions", threading.local())
+
+    def _rung_one(_f: Any) -> list[GFlightWithId]:
+        raise AssertionError("rung 2 fell back into rung 1's GET")
+
+    monkeypatch.setattr(gfid, "_one_call", _rung_one)
+    out = gfid.search_with_ids(
+        _filters(round_trip=True), top_n=1, transport=gfid.GfTransport(mode="browser")
+    )
+    assert out is not None
+    assert pw.chromium.launches == 1
+    assert pw.starts == 1
+    assert len(_page_of(pw).gotos) == 2  # outbound, then the one pinned return
+    assert capsys.readouterr().err.count("opening Chrome") == 1
+    gfb.close_thread_session()
+
+
+def test_an_unreadable_profile_dir_is_treated_as_unlocked(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The contract: an `OSError` reading the profile means UNLOCKED.
+
+    Erring the other way would refuse the rung outright and tell the user to
+    delete files the process just proved it cannot see. Reporting "not locked"
+    lets the launch proceed and produce the real error, whatever it is."""
+    profile = tmp_path / "gf-browser-profile"
+    profile.mkdir(parents=True)
+
+    def _boom(_self: pathlib.Path, _pattern: str) -> object:
+        raise PermissionError("profile is not readable")
+
+    monkeypatch.setattr(pathlib.Path, "glob", _boom)
+    assert gfb._profile_is_locked(profile) is False
+    # And the launch failure that follows names the real cause, not the lock.
+    e = gfb._launch_failure(profile, "Chromium distribution 'chrome' is not found.")
+    assert "Singleton*" not in str(e)
+
+
 # ─────────────────── one session per thread, closed by that thread ─────────────
 
 
@@ -594,6 +660,75 @@ def test_closing_clears_the_slot_so_the_next_search_relaunches(
     assert gfb.session(headed=False) is not first
 
 
+# ───────────── the finally that owns the session's life ───────────────────────
+
+
+def _drive_gflight_results(
+    monkeypatch: pytest.MonkeyPatch, *, mode: str, blow_up: Exception | None = None
+) -> list[int]:
+    """Run the real `_gflight_results` on `mode` with rung 2 replaced by a
+    recorder, and report how many times its session was closed.
+
+    Calls the function under test rather than the CLI seam above it: every
+    existing browser test stubs `_run_gflight_path` out entirely, which is why
+    the `finally` that closes Chrome had no coverage at all."""
+    from flight_cli import cli
+
+    closed: list[int] = []
+
+    class _Session:
+        def close(self) -> None:
+            closed.append(1)
+
+    session = _Session()
+
+    def _hand_out(*, headed: bool) -> _Session:
+        assert headed is False
+        return session
+
+    monkeypatch.setattr(gfb, "session", _hand_out)
+    monkeypatch.setattr(gfb, "_sessions", threading.local())
+    # `close_thread_session` closes the THREAD's session, so the thread-local
+    # has to hold the same object the ladder was handed.
+    gfb._sessions.current = session
+
+    def _search(*_a: Any, **_kw: Any) -> list[Any]:
+        if blow_up is not None:
+            raise blow_up
+        return []
+
+    monkeypatch.setattr(gfid, "search_with_ids", _search)
+    legs = (Leg(origins=("JFK",), destinations=("LAX",), date=date(2026, 10, 14)),)
+    try:
+        cli._gflight_results(legs, SearchOptions(), 5, mode, False)
+    except Exception as e:  # the raising case is half the contract
+        assert e is blow_up
+    return closed
+
+
+def test_the_browser_session_is_closed_when_the_search_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A playwright object may only be closed by its creating thread, and the
+    enrich path runs the query in an `anyio` worker — so this `finally` is the
+    only guarantee a Chrome does not outlive the search."""
+    assert _drive_gflight_results(monkeypatch, mode="browser") == [1]
+
+
+def test_the_browser_session_is_closed_when_the_search_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The case that matters more: a refusal mid-search must not strand Chrome.
+    The exception still propagates — the close is not allowed to replace it."""
+    assert _drive_gflight_results(monkeypatch, mode="browser", blow_up=RuntimeError("boom")) == [1]
+
+
+def test_an_http_search_never_reaches_for_the_closer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Rung 1 opens nothing to close, and touching the closer would import the
+    optional patchright extra on the path that must never need it."""
+    assert _drive_gflight_results(monkeypatch, mode="http") == []
+
+
 # ─────────────────────────────── the guard itself ──────────────────────────────
 
 
@@ -606,6 +741,19 @@ def test_the_suite_refuses_to_launch_a_real_browser() -> None:
     with pytest.raises(BaseException, match="real browser launcher") as e:
         gfb._playwright_factory()
     assert not isinstance(e.value, Exception)
+
+
+@pytest.mark.parametrize("label", ["gf_browser", "plain"])
+def test_a_parametrize_id_cannot_disarm_the_browser_guard(label: str) -> None:
+    """`request.keywords` is not the marker set — it also carries node names,
+    parametrize ids and the containing directory. On that predicate THIS test,
+    on its first parameter, opted itself out of the guard without a marker and
+    could have reached the real launcher and the live network.
+
+    The `plain` parameter is the control: both must be guarded identically."""
+    assert label in {"gf_browser", "plain"}
+    with pytest.raises(BaseException, match="real browser launcher"):
+        gfb._playwright_factory()
 
 
 # ───────────────────────────── the CLI option ──────────────────────────────────
@@ -904,8 +1052,9 @@ def test_a_single_cabin_browser_search_prints_no_downgrade(
 
 
 def test_the_default_transport_is_rung_one() -> None:
-    """A default of `browser` would open a window on an ordinary search; a
-    default of `auto` would promise an escalation that does not exist yet."""
+    """A default of `browser` would put a Chrome launch and a live navigation in
+    the path of every ordinary search; a default of `auto` would promise an
+    escalation that does not exist yet."""
     assert gfid.HTTP_TRANSPORT.mode == "http"
     assert gfid.HTTP_TRANSPORT.headed is False
     assert gfid.GfTransport() == gfid.HTTP_TRANSPORT

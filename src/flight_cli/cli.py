@@ -1193,11 +1193,21 @@ def _run_matrix_path(
     _emit_urls(search, matrix_url=matrix_url, google_url=google_url, result=res, pick=pick)
 
 
+# The Google Flights search page has two transports. `http` is the curl_cffi
+# GET the backend has always used. `browser` drives a real Chrome to the same
+# URL, which earns a far larger rate budget when Google throttles the thin
+# client. `auto` is the shape the escalate-on-throttle rung will take and is
+# `http` until then, so a script written against it keeps working when it lands.
+_GF_TRANSPORT_HTTP = "http"
+_GF_TRANSPORT_BROWSER = "browser"
+_VALID_GF_TRANSPORTS = ("auto", _GF_TRANSPORT_HTTP, _GF_TRANSPORT_BROWSER)
+
+
 def _gflight_results(
     legs: tuple[Leg, ...],
     opts: SearchOptions,
     top_n: int,
-    gf_mode: str | None = None,
+    gf_mode: str = _GF_TRANSPORT_HTTP,
     gf_headed: bool = False,
 ) -> list[Any]:
     """Query Google Flights for `legs`, honoring routing/extension: Tier-1
@@ -1215,37 +1225,41 @@ def _gflight_results(
     profile-lock refusal names the interrupted-run case.
     """
     from ._gf_postfilter import surviving_indices  # noqa: PLC0415
-    from ._gflight_ids import TRANSPORT_HTTP, GfTransport, search_with_ids  # noqa: PLC0415
+
+    # `_gflight_ids` imports fli (64 ms). A Matrix-only search must not pay for
+    # it, and this function is the first point that already has.
+    from ._gflight_ids import (  # noqa: PLC0415 — see above
+        TRANSPORT_HTTP,
+        GfTransport,
+        search_with_ids,
+    )
     from .fli_bridge import apply_gf_native_filters, to_fli_filter  # noqa: PLC0415
     from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
     from .routing_predicates import classify  # noqa: PLC0415
 
     # Built here rather than at the CLI seam: this is the first point that has
     # already paid for `_gflight_ids`.
-    # `mode` is a Literal, and `gf_mode` reaches here as a plain `str` from
-    # typer. `_resolve_gf_transport` is the validator — it rejected anything
-    # outside the Literal before dispatch — so this narrows rather than assumes.
-    transport = (
-        None
-        if gf_mode is None
-        else GfTransport(mode=cast("GfTransportMode", gf_mode), headed=gf_headed)
-    )
+    # Always built, never a sentinel. `GfTransport(mode="http")` IS
+    # `search_with_ids`' own default, so the old `None` branch distinguished two
+    # equal values and made every reader check which one this was.
+    #
+    # `mode` is a Literal and `gf_mode` arrives as a plain `str` from typer.
+    # `_resolve_gf_transport` is the validator — it rejected anything outside the
+    # Literal before dispatch — so this narrows rather than assumes.
+    transport = GfTransport(mode=cast("GfTransportMode", gf_mode), headed=gf_headed)
     fli_filter = to_fli_filter(SpecificDateSearch(legs=legs, options=opts))
     out_constraints = classify(legs[0].route_language, legs[0].extension) if legs else None
     if out_constraints and out_constraints.predicates:
         apply_gf_native_filters(fli_filter, out_constraints.predicates)
     try:
-        # Forwarded only when this caller was actually given one. The
-        # multi-cabin fan-out passes none, and `search_with_ids` already
-        # defaults to rung 1, so naming the default here would add nothing.
-        results: list[Any] = (
-            search_with_ids(fli_filter, top_n=top_n)
-            if transport is None
-            else search_with_ids(fli_filter, top_n=top_n, transport=transport)
-        ) or []
+        results: list[Any] = search_with_ids(fli_filter, top_n=top_n, transport=transport) or []
     finally:
-        if transport is not None and transport.mode != TRANSPORT_HTTP:
-            from ._gf_browser import close_thread_session  # noqa: PLC0415
+        # Rung 1 opens nothing to close, and reaching for the closer would import
+        # the optional patchright extra on the http path.
+        if transport.mode != TRANSPORT_HTTP:
+            # Reached only on a non-http run, so an http search never imports
+            # the optional patchright extra.
+            from ._gf_browser import close_thread_session  # noqa: PLC0415 — see above
 
             close_thread_session()
     per_slice_preds = [list(classify(lg.route_language, lg.extension).predicates) for lg in legs]
@@ -1271,16 +1285,6 @@ def _gflight_json_row(g: Any) -> dict[str, Any]:
         # this write silently replaces it and needs its own key.
         leg["amenities"] = asdict(a)
     return row
-
-
-# The Google Flights search page has two transports. `http` is the curl_cffi
-# GET the backend has always used. `browser` drives a real Chrome to the same
-# URL, which earns a far larger rate budget when Google throttles the thin
-# client. `auto` is the shape the escalate-on-throttle rung will take and is
-# `http` until then, so a script written against it keeps working when it lands.
-_GF_TRANSPORT_HTTP = "http"
-_GF_TRANSPORT_BROWSER = "browser"
-_VALID_GF_TRANSPORTS = ("auto", _GF_TRANSPORT_HTTP, _GF_TRANSPORT_BROWSER)
 
 
 class _GfRefusal(NamedTuple):
@@ -1421,7 +1425,7 @@ def _run_gflight_path(
     matrix_url: bool = False,
     google_url: bool = False,
     pick: int | None = None,
-    gf_mode: str | None = None,
+    gf_mode: str = _GF_TRANSPORT_HTTP,
     gf_headed: bool = False,
 ) -> None:
     """Google Flights path: build fli filter → query → render. Single-leg or round-trip.
@@ -1430,15 +1434,15 @@ def _run_gflight_path(
     the existing PP matcher + renderer reuse cleanly. PP runs on the same
     (origin, dest, date) per leg as the matrix path.
 
-    `gf_mode=None` is rung 1 — the deprecated `gflight` command has no
-    transport flag.
+    `gf_mode` defaults to rung 1 — the deprecated `gflight` command has no
+    transport flag, so it never asks for another.
     """
     from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
 
     try:
         results = _gflight_results(legs, opts, top_n, gf_mode, gf_headed)
     except GfBackendError as e:
-        err.print(_gf_refusal(e, transport=gf_mode or _GF_TRANSPORT_HTTP).message)
+        err.print(_gf_refusal(e, transport=gf_mode).message)
         raise typer.Exit(1) from e
     except Exception as e:
         err.print(f"[red]Google Flights query failed:[/] {escape(str(e))}")
@@ -1507,7 +1511,7 @@ def _run_enriched_path(
     rps: float,
     impersonate: str,
     no_cache: bool,
-    gf_mode: str | None = None,
+    gf_mode: str = _GF_TRANSPORT_HTTP,
     gf_headed: bool = False,
 ) -> None:
     """GF-serveable query, progressive: dispatch Google Flights + Matrix
@@ -1562,8 +1566,7 @@ def _run_enriched_path(
             # note, not a failure — but it stays named: the merged table below
             # would otherwise look like Google simply had nothing cheaper.
             console.print(
-                f"[dim]{_gf_refusal(e, transport=gf_mode or _GF_TRANSPORT_HTTP).note}"
-                " — showing Matrix only.[/]"
+                f"[dim]{_gf_refusal(e, transport=gf_mode).note} — showing Matrix only.[/]"
             )
         else:
             err.print(f"[yellow]Google Flights query failed:[/] {escape(str(e))}")

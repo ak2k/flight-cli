@@ -1,11 +1,11 @@
 """Suite-wide guards.
 
 The load-bearing one: **no test launches a browser.** Rung 2 of the Google
-Flights transport opens a real Chrome, and a test that reached it would open a
-window, hit the live network, and take tens of seconds — but worse, it would
-quietly disprove the property the CLI advertises, that `--gf-transport http`
-never consults a browser. So the launcher seam is replaced, for every test, by
-a callable that fails whichever test touched it.
+Flights transport opens a real Chrome — headless, and under 3 s, so the cost is
+not what makes this matter. A test that reached it would hit the live network,
+and would quietly disprove the property the CLI advertises: that
+`--gf-transport http` never consults a browser. So the launcher seam is
+replaced, for every test, by a callable that fails whichever test touched it.
 
 `pytest.fail` raises a `BaseException`, deliberately: production code wraps
 launch failures in `except Exception`, and a guard the code under test could
@@ -18,6 +18,7 @@ one — opt out with `@pytest.mark.gf_browser`.
 from __future__ import annotations
 
 import threading
+from typing import cast
 
 import pytest
 
@@ -36,7 +37,17 @@ def _no_browser_launch(  # pyright: ignore[reportUnusedFunction] - autouse pytes
     run would decide what every later one sees."""
     monkeypatch.setattr(_gf_browser, "_notice_state", {"printed": False})
     monkeypatch.setattr(_gf_browser, "_sessions", threading.local())
-    if "gf_browser" in request.keywords:
+    # The MARKER, not `request.keywords`. `keywords` also carries the node's
+    # name, its parametrize ids and its containing directory — so a test
+    # parametrized with the string "gf_browser", or any test under a directory
+    # of that name, silently opted itself out of the guard and could reach the
+    # real launcher.
+    # pyright: ignore comments — `request.node` is `Any` in pytest's stubs.
+    marker = cast(  # pyright: ignore[reportUnknownArgumentType]
+        "object | None",
+        request.node.get_closest_marker("gf_browser"),  # pyright: ignore[reportUnknownMemberType]
+    )
+    if marker is not None:
         return
 
     def _forbidden() -> object:
