@@ -73,6 +73,17 @@ a body only when there is a return leg. Send it one-way and Matrix answers HTTP
 verified live 2026-09-02, the identical bodies without it return a grid and 10
 solutions respectively (work-h70kv.7).
 
+That makes `--duration` moot on a one-way, and the CLI resolves the trip shape
+BEFORE parsing it (`cli._resolve_duration`, used by `calendar` and `detail`
+alike). Order matters: parsing first meant `--duration 9-3` on a one-way hit
+`CalendarWindow`'s reversed-range validator and printed a pydantic traceback for
+a flag that was about to be ignored — two contradictory answers to one flag. A
+one-way now prints a single dim "ignored" line on **stderr** (every `--format`,
+so `--format json` still sees it and stdout still carries only the document) and
+takes the default range, which nothing downstream reads. Round-trip does read it,
+so a reversed or unparseable range there is a typed usage error: exit 2 and one
+line, never a traceback.
+
 ## Why bother with followup vs. just calling `name: "specificDatesSlice"`?
 
 Both work; both return the same shape. The SPA uses `calendarFollowup`

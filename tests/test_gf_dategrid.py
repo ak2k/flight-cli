@@ -10,7 +10,14 @@ from typing import Any
 import pytest
 
 from flight_cli import _gf_dategrid
-from flight_cli._gf_dategrid import GfGridUnavailableError, _parse_grid, date_grid, grid_can_serve
+from flight_cli._gf_dategrid import (
+    GfGridUnavailableError,
+    _one_grid_call,
+    _parse_grid,
+    date_grid,
+    grid_can_serve,
+    grid_routing_blocker,
+)
 from flight_cli.domain import CalendarSearch, CalendarWindow, Leg
 
 
@@ -79,6 +86,7 @@ def test_date_grid_chunks_over_61_days_and_merges(monkeypatch: pytest.MonkeyPatc
         from_iso, _to = filters
         return {from_iso: 100.0}
 
+    monkeypatch.setattr(_gf_dategrid, "_GRID_RPC_GATED", False)  # the chunker is below it
     monkeypatch.setattr(_gf_dategrid, "_grid_filters", fake_filters)
     monkeypatch.setattr(_gf_dategrid, "_one_grid_call", fake_call)
 
@@ -104,6 +112,7 @@ def test_date_grid_single_chunk_under_61_days(monkeypatch: pytest.MonkeyPatch) -
     def fake_filters(*_a: object) -> object:
         return None
 
+    monkeypatch.setattr(_gf_dategrid, "_GRID_RPC_GATED", False)  # the chunker is below it
     monkeypatch.setattr(_gf_dategrid, "_grid_filters", fake_filters)
     monkeypatch.setattr(_gf_dategrid, "_one_grid_call", fake_call)
     date_grid(_cal())  # 16-day window -> single chunk
@@ -113,28 +122,91 @@ def test_date_grid_single_chunk_under_61_days(monkeypatch: pytest.MonkeyPatch) -
 # ─────────────── RPC gate: no network, no retry sleeps (work-h70kv.5) ──
 
 
-def test_date_grid_raises_without_touching_the_client(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The gate is checked before `get_client()`, so a servable window costs zero
-    POSTs and zero cold-session backoff — `retry_throttled` catches only
-    GfThrottledError, so GfGridUnavailableError propagates on the first call."""
-    clients = {"n": 0}
+class _ExplodingClient:
+    def post(self, *_a: object, **_k: object) -> None:
+        raise AssertionError("the gated date-grid must not reach the network")
 
-    class _ExplodingClient:
-        def post(self, *_a: object, **_k: object) -> None:
-            raise AssertionError("the gated date-grid must not reach the network")
+
+def _no_client(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    """Count `get_client()` calls and make any request through one fail loudly."""
+    clients = {"n": 0}
 
     def _fake_get_client() -> _ExplodingClient:
         clients["n"] += 1
         return _ExplodingClient()
 
     monkeypatch.setattr(_gf_dategrid, "get_client", _fake_get_client)
+    return clients
 
-    # A window `_grid_filters` will actually build: fli's FlightSegment rejects a
-    # travel_date in the past, and this test has to get past filter-building to
-    # reach the gate at all.
+
+def test_date_grid_raises_without_touching_the_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The gate is checked before `get_client()`, so a servable window costs zero
+    POSTs and zero cold-session backoff — `retry_throttled` catches only
+    GfThrottledError, so GfGridUnavailableError propagates on the first call."""
+    clients = _no_client(monkeypatch)
     start = date.today() + timedelta(days=30)
     cal = _cal(start=start, end=start + timedelta(days=15))
     assert grid_can_serve(cal)  # the gate only matters on a window GF would serve
     with pytest.raises(GfGridUnavailableError):
         date_grid(cal)
     assert clients["n"] == 0  # no client was even constructed
+
+
+def test_date_grid_refuses_city_codes_before_building_fli_filters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A city code reaches the gate, not `getattr(Airport, ...)`.
+
+    fli's `Airport` enum holds airports only — NYC/LON/PAR/CHI are not members —
+    so building filters for one raises AttributeError, which the callers' broad
+    `except` reports as "date-grid failed: type object 'Airport' has no attribute
+    'NYC'". That names a transport fault for a request the gate was never going to
+    send. SFO/FRA everywhere else in this file is why that went unnoticed."""
+    clients = _no_client(monkeypatch)
+    start = date.today() + timedelta(days=30)
+    cal = _cal(legs=(Leg.of(["NYC"], ["LHR"]),), start=start, end=start + timedelta(days=15))
+    assert grid_can_serve(cal)  # one-way, single-airport, no routing: GF would serve it
+    with pytest.raises(GfGridUnavailableError):
+        date_grid(cal)
+    assert clients["n"] == 0
+
+
+def test_date_grid_refuses_a_past_window_before_building_fli_filters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same shape, other trigger: `FlightSegment` rejects a past travel_date, and
+    that pydantic error would be reported as a date-grid transport failure too."""
+    clients = _no_client(monkeypatch)
+    start = date.today() - timedelta(days=60)
+    with pytest.raises(GfGridUnavailableError):
+        date_grid(_cal(start=start, end=start + timedelta(days=15)))
+    assert clients["n"] == 0
+
+
+def test_one_grid_call_still_refuses_while_gated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`date_grid`'s raise makes this one unreachable through it; it stays as the
+    guard for any other caller, and it is what keeps the gate off the network."""
+    clients = _no_client(monkeypatch)
+    with pytest.raises(GfGridUnavailableError):
+        _one_grid_call(object())
+    assert clients["n"] == 0
+
+
+# ─────────────── which tier declined, for the --fast refusal ───────────────
+
+
+def test_grid_routing_blocker_separates_tier2_from_matrix_only() -> None:
+    """Both tiers send a calendar to Matrix; only one of them is Tier-2, and the
+    `--fast` refusal quotes this phrase."""
+    assert grid_routing_blocker(_cal()) is None  # no routing: not the reason
+    assert grid_routing_blocker(_cal(routing="LH+")) is None  # Tier-1: not the reason
+    assert grid_routing_blocker(_cal(routing="O:LH+")) == "Tier-2 routing"
+
+    booking_class = grid_routing_blocker(_cal(ext="F bc=y"))
+    assert booking_class is not None
+    assert "Tier-2" not in booking_class  # fare construction is Tier-3, not a post-filter
+    assert booking_class.startswith("Matrix-only routing")
+    assert "F bc=y" in booking_class  # and it says which constraint
+
+    ordered = grid_routing_blocker(_cal(routing="BA AA"))
+    assert ordered is not None and "Tier-2" not in ordered

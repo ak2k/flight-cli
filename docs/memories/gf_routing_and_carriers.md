@@ -97,22 +97,43 @@ carries a signed `x-goog-batchexecute-bgr` (BotGuard) header — the same gate t
 took out `GetShoppingResults`. An empty payload is not a throttle
 (`_is_throttle_block` needs an RPC error marker), so `retry_throttled` read it as
 a cold session and spent 4 POSTs + ~6s of backoff per ≤61-day chunk to return
-`{}`. `_gf_dategrid._one_grid_call` therefore raises `GfGridUnavailableError` as
-its first statement, ahead of `get_client()`: zero POSTs, zero sleeps, and
-`retry_throttled` (which catches only `GfThrottledError`) propagates it. The
-weave `cli._run_calendar_enriched` prints one note — the observation plus the bd
-id, not a cause — and then waits for Matrix. The note can only promise to wait,
-not to deliver: it is printed while the Matrix request is still in flight, and
-Matrix can still fail after it. **`--fast` never exits 0 without a grid.** Every
-no-grid outcome — gate, throttle, an empty grid, or a bad airport/date in the
+`{}`. `_gf_dategrid.date_grid` therefore raises `GfGridUnavailableError` before the
+chunk loop, and `_one_grid_call` keeps the same raise as its first statement,
+ahead of `get_client()`: zero POSTs, zero sleeps, and `retry_throttled` (which
+catches only `GfThrottledError`) propagates it. The raise has to sit at the TOP
+of `date_grid`, not just in `_one_grid_call`: the loop builds `_grid_filters`
+first, and that resolves airports through fli's `Airport` enum and dates through
+`FlightSegment`. A city code (NYC/LON/PAR/CHI) is not an `Airport` member and a
+window opening in the past fails travel-date validation, so either one raises
+into the callers' broad `except` and prints `date-grid failed: type object
+'Airport' has no attribute 'NYC'` — a transport fault named for a request no
+transport was going to carry.
+
+The weave `cli._run_calendar_enriched` prints one note — the observation plus the
+bd id, not a cause — and then waits for Matrix. The note can only promise to
+wait, not to deliver: it is printed while the Matrix request is still in flight,
+and Matrix can still fail after it. **`--fast` never exits 0 without a grid.**
+Every no-grid outcome — gate, throttle, an empty grid, or anything reaching the
 broad except — prints "No Google Flights grid; drop --fast for Matrix." once and
-exits 1; and when the grid branch does not apply at all (JSON output, a round-trip
-window, a multi-airport route, or Tier-2 routing) `--fast` refuses up front on
-**stderr**, naming the shape, before any Matrix call or JSON write — stdout under a
-JSON request carries a document or nothing, never prose (work-h70kv.9). So a wrapper doing
-`--fast || fallback` can trust the exit code unconditionally: `--fast` means "the
-GF grid alone, ~1s", and answering it with the ~45s Matrix calendar — silently or
-otherwise — would change what the flag means. The grid paint in the weave and
+exits 1. While the gate stands, a bad airport or date is one of the gate's own
+exits rather than the broad except's, so what the user reads is the standing
+reason; the broad except keeps the same exit code for whatever a live transport
+throws once the gate flips. When the grid branch does not apply at all (JSON
+output, a round-trip window, a multi-airport route, or routing above Tier-1)
+`--fast` refuses up front on **stderr**, naming the shape, before any Matrix call
+or JSON write — stdout under a JSON request carries a document or nothing, never
+prose (work-h70kv.9). So a wrapper doing `--fast || fallback` can trust the exit
+code unconditionally: `--fast` means "the GF grid alone, ~1s", and answering it
+with the ~45s Matrix calendar — silently or otherwise — would change what the
+flag means.
+
+The routing branch of that refusal names the tier that actually declined.
+`grid_can_serve` is False for Tier-2 and Tier-3 alike, so `grid_routing_blocker`
+re-reads the predicates: "Tier-2 routing" only when Tier-2 is what stopped it,
+otherwise "Matrix-only routing (<reason>)". Calling a booking class or an ordered
+routing "Tier-2" points the reader at a post-filter that was never the problem.
+
+The grid paint in the weave and
 `_render_date_grid` are runtime-dead until the gate flips;
 `_run_calendar_enriched` itself still runs (it is what paints Matrix).
 
@@ -123,8 +144,11 @@ guard, which is why the gate is a flag and not an unconditional raise (a raise, 
 `Final[bool]`, both make basedpyright treat the body as unreachable; measured).
 The procedure: capture a real envelope into `tests/fixtures/`, add an ungated
 contract test over it (request URL, encoded body, and the success / empty /
-throttle branches of `_one_grid_call`), run a live smoke, then flip. Do that when
-the RPC answers a plain client again, or when an attested transport lands
+throttle branches of `_one_grid_call`), teach `_grid_filters` to map or refuse
+city codes (they are not in fli's `Airport` enum, and while the gate stands it is
+the only thing between them and an `AttributeError`), run a live smoke, then
+flip. Do that when the RPC answers a plain client again, or when an attested
+transport lands
 (work-udpp1).
 A per-date page fan-out (the transport upstream fli#230 uses for search) is the
 other candidate; it is tracked, not built — 61 page GETs of ~3.6 MB per chunk is

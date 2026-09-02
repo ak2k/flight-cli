@@ -72,8 +72,10 @@ _MAX_GRID_DAYS = 61  # GetCalendarGraph's per-request span limit
 # one on, and inventing the shape is forbidden (AGENTS.md rule 5), so type-checking
 # is all that guards it. Re-enable procedure: (1) capture a real envelope into
 # tests/fixtures/, (2) add an ungated contract test over it — request URL, encoded
-# body, and the success / empty / throttle branches of `_one_grid_call`, (3) run a
-# live smoke, (4) then flip. Tracked on work-h70kv.5.
+# body, and the success / empty / throttle branches of `_one_grid_call`, (3) teach
+# `_grid_filters` to map or refuse city codes — NYC/LON/PAR/CHI are not in fli's
+# `Airport` enum, and while the gate stands it is the only thing between them and an
+# AttributeError, (4) run a live smoke, (5) then flip. Tracked on work-h70kv.5.
 #
 # A flag rather than an unconditional raise precisely so basedpyright keeps checking
 # that code: `SearchDates.BASE_URL` and `DateSearchFilters.encode()` have no other
@@ -83,6 +85,8 @@ _MAX_GRID_DAYS = 61  # GetCalendarGraph's per-request span limit
 # basedpyright 1.39.4's inference for an un-subscripted Final, so re-measure on a
 # basedpyright bump — same open-floor caveat as `flights`.
 _GRID_RPC_GATED: Final = True
+
+_GRID_GATED_MSG = "Google Flights' calendar RPC (GetCalendarGraph) returns no data to this client"
 
 _CABIN_TO_SEAT = {
     Cabin.COACH: SeatType.ECONOMY,
@@ -114,6 +118,27 @@ def grid_can_serve(search: CalendarSearch) -> bool:
         return False
     constraints = classify(leg.route_language, leg.extension)
     return all(p.tier is Tier.GF_NATIVE for p in constraints.predicates)
+
+
+def grid_routing_blocker(search: CalendarSearch) -> str | None:
+    """Name the routing constraint keeping the date-grid off this calendar, or
+    None when every predicate is Tier-1 (so routing is not the reason).
+
+    A diagnostic only — `grid_can_serve` owns the decision, and also rejects
+    shapes routing says nothing about (round trip, multi-airport). Both tiers
+    above Tier-1 send a calendar to Matrix, but for different reasons: Tier-2 is
+    post-filterable and merely needs the itineraries the grid does not return,
+    while Tier-3 is fare construction Google can neither request nor reconstruct.
+    Calling a booking class "Tier-2" sends the reader looking for a post-filter
+    that was never the problem.
+    """
+    leg = search.legs[0]
+    constraints = classify(leg.route_language, leg.extension)
+    if reasons := constraints.matrix_reasons:
+        return f"Matrix-only routing ({'; '.join(reasons)})"
+    if constraints.tier2:
+        return "Tier-2 routing"
+    return None
 
 
 def _grid_filters(
@@ -164,12 +189,13 @@ def _parse_grid(parsed: str) -> dict[str, float]:
 def _one_grid_call(filters: Any) -> dict[str, float]:
     """One GetCalendarGraph round-trip -> {date: price}. Raises GfThrottledError
     on a genuine code-13 block; returns {} on a cold-session empty."""
-    # First statement, ahead of `get_client()`: `retry_throttled` catches only
-    # GfThrottledError, so this propagates with zero POSTs and zero backoff sleeps.
+    # Defense in depth: `date_grid` already refuses while gated, so this is
+    # unreachable through it. It guards any future caller that builds filters
+    # itself, and it is what keeps a gated grid off the network — first statement,
+    # ahead of `get_client()`, and `retry_throttled` catches only GfThrottledError,
+    # so it propagates with zero POSTs and zero backoff sleeps.
     if _GRID_RPC_GATED:
-        raise GfGridUnavailableError(
-            "Google Flights' calendar RPC (GetCalendarGraph) returns no data to this client"
-        )
+        raise GfGridUnavailableError(_GRID_GATED_MSG)
     client = get_client()
     _seed_cookies_once(client)
     resp = client.post(
@@ -193,7 +219,17 @@ def date_grid(search: CalendarSearch) -> dict[str, float]:
     """Cheapest price per departure date across the window (caller ensures
     `grid_can_serve`). Chunks to <=61 days with the FULL filter set, throttle-
     retries each, and merges. Raises GfThrottledError if the throttle persists —
-    and, while `_GRID_RPC_GATED`, GfGridUnavailableError on the first chunk."""
+    and, while `_GRID_RPC_GATED`, GfGridUnavailableError before anything else."""
+    # Ahead of the chunk loop, so no fli model is built for a grid that cannot be
+    # priced. `_grid_filters` resolves airports through fli's `Airport` enum and
+    # dates through `FlightSegment`, both of which reject inputs this command
+    # accepts: a city code (NYC/LON/PAR) is not in that enum, and a window opening
+    # in the past fails travel-date validation. Either one raises, and the callers'
+    # broad `except` reports the standing gate as "date-grid failed: type object
+    # 'Airport' has no attribute 'NYC'" — a transport-shaped error for a request no
+    # transport was going to carry.
+    if _GRID_RPC_GATED:
+        raise GfGridUnavailableError(_GRID_GATED_MSG)
     leg = search.legs[0]
     predicates = list(classify(leg.route_language, leg.extension).predicates)
     out: dict[str, float] = {}

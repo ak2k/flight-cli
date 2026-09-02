@@ -8,6 +8,7 @@ so a multi-airport calendar is queried one destination at a time (groupable via
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from typing import Any, ClassVar, override
 
@@ -286,9 +287,9 @@ def test_run_calendar_threads_max_concurrency(monkeypatch: Any) -> None:
 # and isolates per-backend failures — no network, fakes for both backends.
 
 
-def _oneway_cal() -> CalendarSearch:
+def _oneway_cal(origin: str = "JFK") -> CalendarSearch:
     return CalendarSearch(
-        legs=(Leg.of(["JFK"], ["LHR"]),),
+        legs=(Leg.of([origin], ["LHR"]),),
         options=SearchOptions(cabin=Cabin.COACH),
         window=W,
     )
@@ -313,10 +314,10 @@ def _spy_renderers(monkeypatch: Any) -> dict[str, int]:
     return calls
 
 
-def _run_enriched() -> None:
+def _run_enriched(origin: str = "JFK") -> None:
     cli._run_calendar_enriched(  # pyright: ignore[reportPrivateUsage]
-        _oneway_cal(),
-        origins=("JFK",),
+        _oneway_cal(origin),
+        origins=(origin,),
         dests=("LHR",),
         sd=W.start,
         ed=W.end,
@@ -477,6 +478,26 @@ def test_calendar_enriched_grid_unavailable_notes_once_and_paints_matrix(
     assert "date-grid failed" not in cap.err
 
 
+def test_calendar_enriched_city_code_gets_the_gate_note_not_an_attribute_error(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """NYC is a place a user can ask for and fli's `Airport` enum has no member
+    for. Real `date_grid` here: the gate has to answer before `_grid_filters` does,
+    or the weave's broad except turns a standing gate into `date-grid failed: type
+    object 'Airport' has no attribute 'NYC'` — and Matrix still prices it either
+    way, so the note is the whole difference the user sees."""
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    calls = _spy_renderers(monkeypatch)
+    _run_enriched(origin="NYC")
+    cap = capsys.readouterr()
+    assert calls["calendar"] == 1  # Matrix priced the window regardless
+    assert calls["grid"] == 0
+    out = _flat(cap.out)
+    assert out.count("price grid unavailable") == 1
+    assert "date-grid failed" not in _flat(cap.err)
+    assert "no attribute" not in _flat(cap.err)
+
+
 def _calendar_fast(**overrides: Any) -> None:
     """Drive the `calendar` command function directly (no CliRunner in this repo).
     Every typer.Option default has to be passed explicitly — an unpassed one is an
@@ -553,20 +574,48 @@ def test_calendar_fast_throttled_exits_one(
     assert out.count("drop --fast for Matrix") == 1  # said once, by the single exit
 
 
-def test_calendar_fast_bad_airport_exits_one(
-    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("origin", ["NYC", "ZZZ"])
+def test_calendar_fast_unresolvable_origin_gets_the_gate_note(
+    origin: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # A bad IATA raises in `_grid_filters`, before the gate, so it lands in the broad
-    # except; that branch must still exit 1. Real `date_grid` here (offline: it never
-    # reaches a client), so the path is genuine.
+    # Neither a city code (NYC — a real place fli's `Airport` enum has no member
+    # for) nor a bad IATA can be resolved into an fli filter, and while the gate
+    # stands neither would have been priced anyway. The gate answers first, so what
+    # the user reads is the standing reason and not `type object 'Airport' has no
+    # attribute 'NYC'` dressed up as a transport failure. Real `date_grid` here
+    # (offline: it never reaches a client), so the path is genuine.
     monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
     calls = _spy_renderers(monkeypatch)
     with pytest.raises(typer.Exit) as excinfo:
-        _calendar_fast(origin="ZZZ")
+        _calendar_fast(origin=origin)
+    cap = capsys.readouterr()
+    assert excinfo.value.exit_code == 1  # no grid is still no grid
+    assert calls["grid"] == 0
+    assert "no attribute" not in _flat(cap.err)  # not an AttributeError in prose
+    assert "date-grid failed" not in _flat(cap.err)
+    out = _flat(cap.out)
+    assert out.count("price grid unavailable") == 1
+    assert "drop --fast for Matrix" in out
+
+
+def test_calendar_fast_unexpected_grid_error_exits_one(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The broad except still has to exit 1 for a reason with no handler of its own
+    # (the shape a live transport fault takes once the gate flips).
+    def _boom_grid(_search: object) -> dict[str, float]:
+        raise RuntimeError("connection reset by peer")
+
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _boom_grid)
+    calls = _spy_renderers(monkeypatch)
+    with pytest.raises(typer.Exit) as excinfo:
+        _calendar_fast()
     cap = capsys.readouterr()
     assert excinfo.value.exit_code == 1
     assert calls["grid"] == 0
     assert "date-grid failed" in _flat(cap.err)  # the reason, on stderr
+    assert "connection reset by peer" in _flat(cap.err)
     assert "drop --fast for Matrix" in _flat(cap.out)  # the outcome, on stdout
 
 
@@ -704,3 +753,198 @@ def test_fast_refuses_tier2_routing(monkeypatch: Any, capsys: pytest.CaptureFixt
     assert "this is Tier-2 routing" in _flat(cap.err)  # a noun, like the other three
     assert cap.out == ""
     assert calls["calendar"] == 0  # refused before any Matrix work
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "quoted"),
+    [
+        ({"extension": "F bc=y"}, "F bc=y"),  # booking class: fare construction
+        ({"routing": "BA AA"}, "BA AA"),  # ordered routing: not GF-expressible
+    ],
+)
+def test_fast_refuses_tier3_without_calling_it_tier2(
+    kwargs: dict[str, Any], quoted: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `grid_can_serve` is False for Tier-2 and Tier-3 alike, so the refusal has to
+    # ask which. Tier-2 is post-filterable and only wants the itineraries a grid
+    # does not carry; Tier-3 is fare construction GF can neither request nor
+    # reconstruct. Naming the wrong one sends the reader after a fix that does not
+    # exist.
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    calls = _spy_renderers(monkeypatch)
+    with pytest.raises(typer.Exit) as excinfo:
+        _calendar_fast(**kwargs)
+    cap = capsys.readouterr()
+    assert excinfo.value.exit_code == 1
+    msg = _flat(cap.err)
+    assert "Tier-2" not in msg
+    assert "this is Matrix-only routing" in msg
+    assert quoted in msg  # and it names the constraint that did it
+    assert cap.out == ""
+    assert calls["calendar"] == 0  # refused before any Matrix work
+
+
+# ──────────── --duration is resolved against the trip shape (one-way) ───────
+# The trip LENGTH exists only between an outbound and a return: `_set_trip_length`
+# and `_spa_calendar_leg` both attach it round-trip only. So a one-way must decide
+# the shape BEFORE parsing the number — validating a value it is about to ignore
+# answered `--duration 9-3` with a pydantic ValidationError traceback for a flag
+# that changed nothing.
+
+
+class _RecordingClient(_PricedClient):
+    """`_PricedClient` that keeps the search Matrix was actually handed."""
+
+    seen: ClassVar[list[CalendarSearch]] = []
+
+    @override
+    async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
+        type(self).seen.append(search)
+        return await super().execute(search, cache=cache)
+
+
+def test_calendar_one_way_ignores_a_reversed_duration_without_a_traceback(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _RecordingClient.seen = []
+    monkeypatch.setattr(cli, "MatrixClient", _RecordingClient)
+    calls = _spy_renderers(monkeypatch)
+    _calendar_fast(fast=False, duration="9-3")  # returns: no typer.Exit, no exception
+    cap = capsys.readouterr()
+    assert calls["calendar"] == 1  # the window was priced
+    err_out = _flat(cap.err)
+    assert err_out.count("--duration is ignored") == 1  # said once
+    assert "ValidationError" not in err_out
+    # Ignored means ignored: the window carries the default, not 9-3, and nothing
+    # downstream reads it on a one-way anyway.
+    window = _RecordingClient.seen[0].window
+    assert (window.duration_min, window.duration_max) == (5, 7)
+
+
+def test_calendar_one_way_default_duration_is_silent(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # An explicit `5-7` is indistinguishable from the default, so the note would be
+    # noise on every plain one-way calendar.
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    _spy_renderers(monkeypatch)
+    _calendar_fast(fast=False)
+    assert "--duration is ignored" not in _flat(capsys.readouterr().err)
+
+
+def test_calendar_one_way_note_survives_json_output(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `--format json` is exactly when a dropped flag is least visible, and stderr is
+    # where the remark can go without putting prose in front of `jq`.
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    _spy_renderers(monkeypatch)
+    _calendar_fast(fast=False, fmt="json", duration="9-3")
+    cap = capsys.readouterr()
+    assert "--duration is ignored" in _flat(cap.err)
+    assert json.loads(cap.out)  # stdout is still a document, not prose
+
+
+@pytest.mark.parametrize(
+    ("duration", "phrase"),
+    [
+        ("9-3", "max (3) is below min (9)"),  # reversed range
+        ("abc", "use nights as"),  # not a number at all
+        ("5-", "use nights as"),  # half a range
+    ],
+)
+def test_calendar_round_trip_bad_duration_is_a_typed_error(
+    duration: str, phrase: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Round-trip DOES read the number, so a bad one is a usage error — exit 2 and a
+    # line, not the pydantic traceback `CalendarWindow`'s validator raises.
+    _RecordingClient.seen = []
+    monkeypatch.setattr(cli, "MatrixClient", _RecordingClient)
+    _spy_renderers(monkeypatch)
+    with pytest.raises(typer.Exit) as excinfo:
+        _calendar_fast(fast=False, one_way=False, duration=duration)
+    cap = capsys.readouterr()
+    assert excinfo.value.exit_code == 2  # usage, not failure
+    err_out = _flat(cap.err)
+    assert phrase in err_out
+    assert "ValidationError" not in err_out and "Traceback" not in err_out
+    assert _RecordingClient.seen == []  # refused before any Matrix work
+
+
+def _detail(**overrides: Any) -> None:
+    """Drive the `detail` command function directly. Same rule as `_calendar_fast`:
+    every typer.Option default has to be passed explicitly."""
+    kwargs: dict[str, Any] = {
+        "origin": "JFK",
+        "destination": "LAX",
+        "dep": "2026-10-01",
+        "ret": None,
+        "start": None,
+        "end": None,
+        "duration": "5-7",
+        "cabin": "economy",
+        "adults": 1,
+        "children": 0,
+        "seniors": 0,
+        "youth": 0,
+        "routing": None,
+        "extension": None,
+        "routing_return": None,
+        "extension_return": None,
+        "stops": None,
+        "allow_airport_changes": True,
+        "rps": 10.0,
+        "impersonate": "chrome",
+        "fmt": "table",
+        "json_out": False,
+        "matrix_url": False,
+        "google_url": False,
+        "no_cache": True,
+    }
+    kwargs.update(overrides)
+    cli.detail(**kwargs)
+
+
+def _stub_detail_run(monkeypatch: Any) -> list[Any]:
+    """Replace the Matrix round-trip with a recorder; `detail`'s renderer and URL
+    emitter go with it, since neither is under test here."""
+    seen: list[Any] = []
+
+    def _run(search: Any, *_a: object, **_k: object) -> Any:
+        seen.append(search)
+        return object()
+
+    def _noop(*_a: object, **_k: object) -> None:
+        return None
+
+    monkeypatch.setattr(cli, "_run", _run)
+    monkeypatch.setattr(cli, "_render_search", _noop)
+    monkeypatch.setattr(cli, "_emit_urls", _noop)
+    return seen
+
+
+def test_detail_one_way_ignores_a_reversed_duration_without_a_traceback(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `detail` without `--return` is the same one-way shape as the calendar, and it
+    # carried the same defect with no ignored-option note at all.
+    seen = _stub_detail_run(monkeypatch)
+    _detail(duration="9-3")
+    err_out = _flat(capsys.readouterr().err)
+    assert err_out.count("--duration is ignored") == 1
+    assert "ValidationError" not in err_out
+    assert len(seen) == 1  # the followup ran
+    assert (seen[0].window.duration_min, seen[0].window.duration_max) == (5, 7)
+
+
+def test_detail_round_trip_bad_duration_is_a_typed_error(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seen = _stub_detail_run(monkeypatch)
+    with pytest.raises(typer.Exit) as excinfo:
+        _detail(ret="2026-10-08", duration="9-3")
+    err_out = _flat(capsys.readouterr().err)
+    assert excinfo.value.exit_code == 2
+    assert "max (3) is below min (9)" in err_out
+    assert "ValidationError" not in err_out
+    assert seen == []  # refused before any Matrix work

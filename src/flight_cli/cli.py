@@ -61,7 +61,9 @@ if TYPE_CHECKING:
 _SLICE_MIN_PARTS = 2
 _SLICE_MAX_PARTS = 3
 _ROUND_TRIP_LEGS = 2  # 2 legs = round-trip; 1 = one-way; >2 = multi-city
-_DEFAULT_CALENDAR_DURATION = "5-7"  # `calendar --duration` default; round-trip only
+# `--duration` default for `calendar` and `detail`. Shared so both can tell an
+# explicit value from an unset one when the trip is one-way and the value is moot.
+_DEFAULT_CALENDAR_DURATION = "5-7"
 
 # Matrix returns prices as 'USD877.00' (ISO-4217 prefix + decimal). We split
 # the prefix off for rendering so tables can show the currency once in the
@@ -121,12 +123,43 @@ def _parse_date(s: str) -> date:
 
 
 def _parse_duration(s: str) -> tuple[int, int]:
-    s = s.replace("..", "-").strip()
-    if "-" in s:
-        lo, hi = s.split("-", 1)
-        return int(lo), int(hi)
-    n = int(s)
-    return n, n
+    """Nights as '5' or '5-7' (also '5..7'). Every failure is a typed CLI error:
+    the pair feeds `CalendarWindow`, whose validator rejects a reversed range with
+    a pydantic ValidationError, and a stack trace is not an answer to a mistyped
+    flag."""
+    t = s.replace("..", "-").strip()
+    lo_s, sep, hi_s = t.partition("-")
+    if not sep:
+        hi_s = lo_s  # a bare '5' is the degenerate range 5-5
+    try:
+        lo, hi = int(lo_s), int(hi_s)
+    except ValueError as e:
+        err.print(f"[red]bad duration {s!r}; use nights as '5' or '5-7'[/]")
+        raise typer.Exit(2) from e
+    if hi < lo:
+        err.print(f"[red]bad duration {s!r}: max ({hi}) is below min ({lo})[/]")
+        raise typer.Exit(2)
+    return lo, hi
+
+
+def _resolve_duration(duration: str, *, round_trip: bool) -> tuple[int, int]:
+    """Trip length for the calendar window, resolved against the trip shape.
+
+    A one-way has no length to bound, and nothing reads the number: the wire body
+    (`_set_trip_length`) and the SPA URL (`_spa_calendar_leg`) both attach it only
+    when there is a return leg. So the shape is resolved BEFORE the value is
+    parsed — telling someone their `--duration 9-3` is backwards, and then
+    ignoring it, is two contradictory answers to one flag.
+
+    The note goes to stderr under every `--format`: it is a remark about the
+    command line, and stdout under `--format json` carries a document or nothing.
+    An explicit `--duration 5-7` is indistinguishable from the default and passes
+    unremarked — also the one case where nothing looks different."""
+    if round_trip:
+        return _parse_duration(duration)
+    if duration != _DEFAULT_CALENDAR_DURATION:
+        err.print("[dim]--duration is ignored for a one-way trip.[/]")
+    return _parse_duration(_DEFAULT_CALENDAR_DURATION)
 
 
 def _parse_iata_list(s: str) -> tuple[str, ...]:
@@ -1075,10 +1108,15 @@ def _grid_branch_blocker(
         return "a round-trip window"
     if len(origins) > 1 or len(dests) > 1:
         return "a multi-airport route"
-    from ._gf_dategrid import grid_can_serve  # noqa: PLC0415
+    from ._gf_dategrid import grid_can_serve, grid_routing_blocker  # noqa: PLC0415
 
     if not grid_can_serve(search):
-        return "Tier-2 routing"
+        # `grid_can_serve` is False for Tier-2 AND Tier-3, so ask which: the grid
+        # returns no itineraries (Tier-2's problem) and cannot reach fare
+        # construction at all (Tier-3's), and only one of those is a routing tier
+        # the reader can do anything about. The fallback covers a future gate
+        # condition that routing does not explain.
+        return grid_routing_blocker(search) or "a constraint the price grid can't honor"
     return None
 
 
@@ -2867,7 +2905,7 @@ def calendar(
     dests = _parse_iata_list(destination)
     sd = _parse_date(start)
     ed = _parse_date(end) if end else sd + timedelta(days=30)
-    dmin, dmax = _parse_duration(duration)
+    dmin, dmax = _resolve_duration(duration, round_trip=not one_way)
     out_times = _parse_times(depart_times)
     ret_times = _parse_times(return_times)
 
@@ -2900,13 +2938,6 @@ def calendar(
     )
     window = CalendarWindow(start=sd, end=ed, duration_min=dmin, duration_max=dmax)
     search = CalendarSearch(legs=legs, options=opts, window=window)
-
-    if one_way and duration != _DEFAULT_CALENDAR_DURATION and not json_out:
-        # `-d` is the trip LENGTH, which a one-way body never carries, so it changes
-        # neither the request nor the output. Say so instead of dropping it silently.
-        # An explicit `-d 5-7` is indistinguishable from the default here and passes
-        # unremarked — also the one case where nothing looks different.
-        console.print("[dim]--duration is ignored for one-way calendars.[/]")
 
     # Fast layer: the GF native date-grid (~1s, throttle-friendly, dodges Matrix's
     # compute-budget under-reporting) for one-way / single-airport / Tier-1-only
@@ -3047,10 +3078,10 @@ def detail(
         typer.Option(
             "--duration",
             "-d",
-            help="Original duration range",
+            help="Original duration range (round-trip only — ignored without --return)",
             rich_help_panel=_GROUP_ITINERARY,
         ),
-    ] = "5-7",
+    ] = _DEFAULT_CALENDAR_DURATION,
     cabin: str = typer.Option("economy", "--cabin", rich_help_panel=_GROUP_ITINERARY),
     adults: int = typer.Option(1, "--adults", rich_help_panel=_GROUP_ITINERARY),
     children: int = typer.Option(0, "--children", rich_help_panel=_GROUP_ITINERARY),
@@ -3098,7 +3129,7 @@ def detail(
     ret_d = _parse_date(ret) if ret else None
     sd = _parse_date(start) if start else dep_d
     ed = _parse_date(end) if end else sd + timedelta(days=30)
-    dmin, dmax = _parse_duration(duration)
+    dmin, dmax = _resolve_duration(duration, round_trip=ret_d is not None)
 
     legs = (Leg.of(origins, dests, dep_d, route_language=routing, extension=extension),)
     if ret_d:
