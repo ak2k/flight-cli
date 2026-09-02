@@ -406,13 +406,61 @@ def test_relocated_row_blocks_raise_page_shape(client: Any) -> None:
         gfid._one_call(_FILTERS)
 
 
-def test_a_bad_leading_row_does_not_hide_a_relocation(client: Any) -> None:
-    """One unparseable row at the head of a moved block is exactly what a shape
-    change looks like, so a probe that reads only the first row answers "not
-    rows" on the very payloads it exists to catch."""
+@pytest.mark.parametrize("bad_rows", [1, 3, 7])
+def test_bad_leading_rows_do_not_hide_a_relocation(client: Any, bad_rows: int) -> None:
+    """Unparseable rows at the head of a moved block are exactly what a shape
+    change looks like, so any probe that stops after a fixed number of rows
+    answers "not rows" on the very payloads it exists to catch. Reading every
+    row is what makes the number of them irrelevant."""
     payload = json.loads(_ds1("ds1_blocks_relocated.json"))
     for index in (4, 5):
-        payload[index][0].insert(0, ["not-a-row"])
+        for _ in range(bad_rows):
+            payload[index][0].insert(0, ["not-a-row"])
+    client(_FakeResponse(text=_page(json.dumps(payload))))
+    with pytest.raises(GfPageShapeError, match=r"holds flight rows at \[4, 5\]"):
+        gfid._one_call(_FILTERS)
+
+
+def test_an_empty_list_at_one_index_is_absent_not_junk(client: Any) -> None:
+    """A bare `[]` carries no rows and claims nothing, so it reads like `None`:
+    the board is whatever the other index holds. Refusing it would fail a
+    round-trip page over a value that says the same thing as the shape Google
+    already serves."""
+    payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
+    payload[2] = []
+    board = gfid._rows_from_ds1(payload)
+    assert board.blocks_seen == 1
+    assert board.misplaced == ()
+    client(_FakeResponse(text=_page(json.dumps(payload))))
+    out = gfid._one_call(_FILTERS)
+    assert len(out) == 2  # exactly what [3] carries
+    assert all(g.flight_id for g in out)
+
+
+def test_a_zero_row_board_that_had_a_block_is_an_empty_not_a_refusal(
+    client: Any, caplog: Any
+) -> None:
+    """A block that was where we read and held nothing is Google's answer for a
+    flight-less search. Refusing on the row count alone turns that into a shape
+    change the moment any metadata block happens to parse."""
+    payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
+    payload[5] = copy.deepcopy(payload[2])  # a block elsewhere that really parses
+    payload[2] = [[]]  # a block, holding no rows
+    payload[3] = [[]]
+    board = gfid._rows_from_ds1(payload)
+    assert board.blocks_seen == 2
+    assert board.misplaced == (5,)
+    client(_FakeResponse(text=_page(json.dumps(payload))))
+    with caplog.at_level(logging.WARNING, logger="flight_cli._gflight_ids"):
+        assert gfid._one_call(_FILTERS) == []
+    assert "carried row-shaped blocks outside [2, 3] at [5]; served 0 rows" in caplog.text
+
+
+def test_a_relocation_with_no_block_left_behind_still_raises(client: Any) -> None:
+    """The other arm: rows elsewhere and no block at all where we read. Nothing
+    about that page says "flight-less" — it says the board moved."""
+    payload = json.loads(_ds1("ds1_blocks_relocated.json"))
+    assert payload[2] is None and payload[3] is None
     client(_FakeResponse(text=_page(json.dumps(payload))))
     with pytest.raises(GfPageShapeError, match=r"holds flight rows at \[4, 5\]"):
         gfid._one_call(_FILTERS)

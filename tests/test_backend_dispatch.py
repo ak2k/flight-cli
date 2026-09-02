@@ -251,6 +251,11 @@ def test_unknown_backend_rejected() -> None:
 # ───────────── deprecated `flight gflight` alias (work-h70kv.5) ─────────────
 
 
+def _future_dep() -> str:
+    """A departure date the model will accept whatever day the suite runs."""
+    return (date.today() + timedelta(days=45)).isoformat()
+
+
 def _gflight_alias(monkeypatch: pytest.MonkeyPatch, *args: str) -> tuple[list[str], str]:
     """Run the deprecated alias with both backends stubbed, reporting its pick."""
     from typer.testing import CliRunner
@@ -292,26 +297,38 @@ def test_gflight_alias_takes_matrix_for_a_child_passenger(
     assert "a passenger type beyond adults" in output
 
 
-def test_gflight_alias_rejects_a_bad_airport_before_announcing_a_backend(
+def test_gflight_alias_splits_a_multi_airport_argument_like_search(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`_pick_backend` prints the backend it chose. Running it first told the
-    user their multi-airport query was on its way to Matrix, then killed the
-    command on the same argument — a line that was never true."""
+    """`JFK,LAX` is a two-airport origin, which the picker routes to Matrix.
+
+    The alias handed the comma string to `Leg.of` whole, so the user got a
+    pydantic traceback panel for a query `flight search` answers."""
+    called, output = _gflight_alias(monkeypatch, "JFK,LAX", "MIA", "--dep", _future_dep())
+    assert called == ["matrix"]
+    assert "a multi-airport origin/destination" in output
+    assert "validation error" not in output.lower()
+
+
+def test_gflight_alias_validates_airports_before_it_names_a_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A backend line is a claim that the query is on its way. An airport the
+    model rejects must surface before that line, not after it."""
     from typer.testing import CliRunner
 
     from flight_cli import cli
-
-    dep = (date.today() + timedelta(days=45)).isoformat()
 
     def _unreached(**_kw: object) -> None:
         raise AssertionError("a backend ran on a query that never validated")
 
     monkeypatch.setattr(cli, "_run_gflight_path", _unreached)
     monkeypatch.setattr(cli, "_run_matrix_path", _unreached)
-    result = CliRunner().invoke(cli.app, ["gflight", "JFK,LAX", "MIA", "--dep", dep])
+    # Multi-airport (so the picker WOULD announce Matrix) with one code the
+    # model rejects — the ordering is only observable when both are true.
+    result = CliRunner().invoke(cli.app, ["gflight", "JFK,XXXX", "MIA", "--dep", _future_dep()])
 
     assert result.exit_code != 0
     assert "Using Matrix" not in result.output
     assert isinstance(result.exception, ValidationError)
-    assert "Not a 3-letter IATA code: 'JFK,LAX'" in str(result.exception)
+    assert "Not a 3-letter IATA code: 'XXXX'" in str(result.exception)

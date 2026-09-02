@@ -36,6 +36,14 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import TYPE_CHECKING, assert_never
 
+# A `reason` is display text that quotes the user's own --routing/--extension
+# string back to them, and every renderer of it is a rich Console. Escaping
+# where the text is BUILT is what keeps one square bracket in a routing string
+# from raising MarkupError at whichever of the several render sites gets it.
+# repr() first, then escape: the quotes are part of the message, the brackets
+# inside them are not markup.
+from rich.markup import escape
+
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
@@ -289,7 +297,9 @@ def parse_routing(routing: str) -> list[Predicate]:
         core = [t for t in tokens if not _RE_PLACEHOLDER.match(t)]
         if len(core) == 1 and (airport := _airport_pred(core[0])):
             return [airport]
-    return [UnsupportedPred(token=routing, reason=f"routing {routing!r} not GF-expressible")]
+    return [
+        UnsupportedPred(token=routing, reason=f"routing {escape(repr(routing))} not GF-expressible")
+    ]
 
 
 # ─────────────────────────── extension parser ──────────────────────────
@@ -336,7 +346,7 @@ def _parse_extension_code(directive: str) -> Predicate | None:  # noqa: PLR0911,
             codes = frozenset(c.lower() for c in " ".join(args).split("|") if c.strip())
             if codes <= _ALLIANCES:
                 return AlliancePred(codes=codes)
-            return UnsupportedPred(token=raw, reason=f"unknown alliance in {raw!r}")
+            return UnsupportedPred(token=raw, reason=f"unknown alliance in {escape(repr(raw))}")
         case "AIRLINES" if args:
             return CarrierPred(_carrier_codes(args), exclude=False, operating=False)
         case "-AIRLINES" if args:
@@ -348,7 +358,9 @@ def _parse_extension_code(directive: str) -> Predicate | None:  # noqa: PLR0911,
         case "-CITIES" if args:
             return ConnectionAirportPred(_carrier_codes(args), exclude=True)
         case _:
-            return UnsupportedPred(token=raw, reason=f"extension {raw!r} not expressible on GF")
+            return UnsupportedPred(
+                token=raw, reason=f"extension {escape(repr(raw))} not expressible on GF"
+            )
 
 
 def parse_extension(extension: str) -> list[Predicate]:

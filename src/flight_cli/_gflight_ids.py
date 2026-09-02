@@ -75,6 +75,12 @@ if TYPE_CHECKING:
         FlightSearchFilters,
     )
 
+# DIVERGE: stdlib logging, where the rest of the package uses structlog (see
+# AGENTS.md's stack table and `_http.py`). The refusal classification here is
+# exercised almost entirely through fixtures, and `caplog` — pytest's own
+# capture, which every one of those tests asserts on — sees stdlib records only.
+# `log.configure()` attaches a stderr handler to the `flight_cli` logger so
+# these lines still reach a `-v`/`-vv` run; without it they go nowhere.
 log = logging.getLogger(__name__)
 
 # Google Flights' RPC endpoints intermittently answer a cold curl_cffi session
@@ -167,10 +173,6 @@ _ROW_PARSE_ERRORS = (
     TypeError,
     OverflowError,
 )
-# How many rows of a candidate block to try before calling it "not rows". One
-# malformed row at the head of a genuinely relocated block would otherwise hide
-# the whole relocation.
-_ROW_PROBE_DEPTH = 3
 
 
 def _extract_ds1(html: str) -> list[Any] | None:
@@ -618,11 +620,22 @@ def _persist_cookies(client: Any) -> None:
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(json.dumps({"saved_at": time.time(), "cookies": cookies}, indent=2))
+        # `os.open` with the mode, not a write-then-chmod: the rename below
+        # carries this inode and its mode onto the cache, so a mode fixed after
+        # the fact would leave a live Google session cookie world-readable for
+        # the length of the write. O_EXCL because a temp we did not create is
+        # not ours to overwrite.
+        fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            json.dump({"saved_at": time.time(), "cookies": cookies}, fh, indent=2)
         tmp.replace(path)  # os.replace under the hood: one atomic rename
         _cookie_state["persisted"] = True
     except OSError as e:
         log.debug("could not persist gflight cookies: %s", e)
+    finally:
+        # A successful rename already consumed the temp; this is what removes it
+        # on every other exit, including a KeyboardInterrupt mid-write. Nothing
+        # else sweeps the cache directory, and the temp holds the NID.
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
 
@@ -647,21 +660,34 @@ def _looks_like_a_row_block(block: Any) -> bool:
     return isinstance(cast("list[Any]", block)[0], list)
 
 
+def _is_an_absent_board(block: Any) -> bool:
+    """Does `block` mean "Google put no board at this index"?
+
+    `None` is the shape measured live — a flight-less search carries it at both
+    indices, a pinned return leg at `[2]` alone. A bare `[]` claims exactly the
+    same thing with the same amount of data, so it reads the same way: the board
+    is whatever the other index holds. `[[]]` is different and NOT absent — it is
+    a block that exists and carries no rows."""
+    return block is None or (isinstance(block, list) and not cast("list[Any]", block))
+
+
 def _holds_flight_rows(block: Any) -> bool:
-    """Strict test: does any of `block`'s leading rows PARSE as a flight row?
+    """Strict test: does ANY row in `block` parse as a flight row?
 
     Used only away from those indices, to spot rows that moved. `ds:1` carries
-    several other list-of-list-of-list structures — on every page measured,
-    indices 1, 7, 11, 14, 17, 25, 26 and 30 among them — so the structural test
+    several other list-of-list-of-list structures — indices 1, 6, 7, 11, 14, 17,
+    25, 26 and 30, the union across the three captures — so the structural test
     above would call those relocated rows and refuse every ordinary page.
 
-    Reads down to `_ROW_PROBE_DEPTH` rows rather than only the first: one
-    unparseable row at the head is exactly what a shape change looks like, so
-    stopping there would let a real relocation pass as metadata."""
+    Reads every row, not a leading window: a relocated block whose first rows
+    are unparseable is exactly the shape a layout change arrives in, and any
+    fixed depth is a number an unlucky payload sits just past. The decoy blocks
+    hold 2-7 rows and the scan runs in well under a millisecond, so full depth
+    costs nothing worth a cutoff."""
     if not _looks_like_a_row_block(block):
         return False
     inner = cast("list[Any]", cast("list[Any]", block)[0])
-    for row in inner[:_ROW_PROBE_DEPTH]:
+    for row in inner:
         try:
             _parse_flight_with_id(row)
         except _ROW_PARSE_ERRORS:
@@ -685,7 +711,13 @@ def _rows_from_ds1(payload: list[Any]) -> _Ds1Board:
     Raises GfPageShapeError when the payload cannot hold a board at all: too
     short to reach `[3]`, or carrying something at `[2]`/`[3]` that is neither
     absent nor row-shaped. Enumeration alone never visits a missing index, so
-    without the arity check a truncated payload reads as a served empty board."""
+    without the arity check a truncated payload reads as a served empty board.
+
+    The arity floor is exactly `max(_DS_ROW_BLOCKS) + 1` and asks nothing of the
+    rest of the payload. A served page can be short (27 entries measured) and a
+    real board can be entirely absent — the flight-less capture carries `None`
+    at both indices — so there is no index whose presence proves the page is
+    intact, and a sentinel requirement would refuse pages Google still serves."""
     if len(payload) <= max(_DS_ROW_BLOCKS):
         raise GfPageShapeError(
             f"ds:1 decoded to {len(payload)} top-level entries, too few to hold a "
@@ -696,10 +728,9 @@ def _rows_from_ds1(payload: list[Any]) -> _Ds1Board:
     misplaced: list[int] = []
     for index, block in enumerate(payload):
         if index in _DS_ROW_BLOCKS:
-            # `None` is Google's own "no board here" (a flight-less search, or a
-            # pinned leg that serves everything at `[3]`). Anything else that
-            # isn't row-shaped is a value we've never been served and can't read.
-            if block is None:
+            # Anything not absent and not row-shaped is a value we've never been
+            # served and can't read.
+            if _is_an_absent_board(block):
                 continue
             if not _looks_like_a_row_block(block):
                 raise GfPageShapeError(
@@ -748,10 +779,11 @@ def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
     # (NID) so the next one-shot CLI process starts warm instead of cold.
     _persist_cookies(client)
     board = _rows_from_ds1(payload)
-    if board.misplaced and not board.rows:
-        # Rows exist, just not where we read them, and we served none. This is
-        # the one layout change the payload can actually prove; an absent board
-        # cannot be told apart from a flight-less one.
+    if board.misplaced and not board.rows and not board.blocks_seen:
+        # Rows found elsewhere, and NO block at all where we read. A block that
+        # was there and held nothing is Google's answer for a flight-less
+        # search, so refusing on the row count alone turns a genuine empty into
+        # a shape change whenever a metadata block happens to parse.
         raise GfPageShapeError(
             f"ds:1 holds flight rows at {list(board.misplaced)}, not at "
             f"{list(_DS_ROW_BLOCKS)} (found {board.blocks_seen} there); "

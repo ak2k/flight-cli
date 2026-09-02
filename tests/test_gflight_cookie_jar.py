@@ -14,6 +14,8 @@ No network here: a tiny fake client mirrors fli's `Client`, whose jar hangs off
 from __future__ import annotations
 
 import json
+import pathlib
+import stat
 import threading
 import time
 from typing import TYPE_CHECKING, Any, cast, override
@@ -211,6 +213,41 @@ def test_concurrent_persists_never_leave_a_partial_file(
     assert not torn, f"a reader saw {len(torn)} partial cookie caches, e.g. {torn[:2]}"
     assert json.loads(path.read_text())["cookies"][0]["name"] == "NID"
     assert list(tmp_path.glob("*.tmp")) == [], "scratch files outlived the write"
+
+
+def test_the_cache_is_owner_only_even_over_a_world_readable_predecessor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The NID is a live Google session cookie, so the cache carries the same
+    0600 the token stores do. The rename puts the temp file's own inode in
+    place, so the mode has to be right on the temp — an existing 0644 cache is
+    replaced, not chmod'ed."""
+    _reset(monkeypatch, tmp_path)
+    path = tmp_path / "gflight-cookies.json"
+    path.write_text("{}")
+    path.chmod(0o644)
+
+    gfid._persist_cookies(_FakeClient([_JarCookie("NID", "532=abc", ".google.com")]))
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert json.loads(path.read_text())["cookies"][0]["name"] == "NID"
+
+
+def test_a_failed_rename_leaves_no_temp_holding_the_cookie(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Nothing sweeps the cache directory, so a temp that survives a failure is
+    a stray copy of the NID sitting there until someone notices."""
+    _reset(monkeypatch, tmp_path)
+
+    def _boom(self: Path, _target: object) -> None:
+        raise OSError("rename failed")
+
+    monkeypatch.setattr(pathlib.Path, "replace", _boom)
+    gfid._persist_cookies(_FakeClient([_JarCookie("NID", "532=abc", ".google.com")]))
+
+    assert list(tmp_path.glob("*.tmp")) == []
+    assert not (tmp_path / "gflight-cookies.json").exists()
 
 
 def test_seed_ignores_corrupt_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -24,6 +24,7 @@ import anyio
 import anyio.to_thread
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from . import _config
@@ -1266,18 +1267,18 @@ def _gf_refusal(e: Exception) -> _GfRefusal:
             return _GfRefusal(
                 "Google Flights' page shape changed",
                 "[red]Google Flights' page shape changed[/] — no rows could be read. "
-                f"Use [bold]--backend matrix[/]. ({e})",
+                f"Use [bold]--backend matrix[/]. ({escape(str(e))})",
             )
         case GfTfsUnsupportedError():
             # Generic note: `page_can_encode` keeps these queries off Google
             # Flights, so the enrich path never has one to render.
             return _GfRefusal(
                 _GF_DECLINED,
-                f"[red]Google Flights can't express this search:[/] {e.reason}. "
+                f"[red]Google Flights can't express this search:[/] {escape(e.reason)}. "
                 "Use [bold]--backend matrix[/].",
             )
         case _:
-            return _GfRefusal(_GF_DECLINED, f"[red]{_GF_DECLINED}:[/] {e}")
+            return _GfRefusal(_GF_DECLINED, f"[red]{_GF_DECLINED}:[/] {escape(str(e))}")
 
 
 _MERGE_SOURCE_TAG = {"both": "GF+MX", "matrix": "MX", "gf": "GF"}
@@ -1343,7 +1344,7 @@ def _run_gflight_path(
         err.print(_gf_refusal(e).message)
         raise typer.Exit(1) from e
     except Exception as e:
-        err.print(f"[red]Google Flights query failed:[/] {e}")
+        err.print(f"[red]Google Flights query failed:[/] {escape(str(e))}")
         raise typer.Exit(1) from e
 
     if not results:
@@ -1461,13 +1462,13 @@ def _run_enriched_path(
             # would otherwise look like Google simply had nothing cheaper.
             console.print(f"[dim]{_gf_refusal(e).note} — showing Matrix only.[/]")
         else:
-            err.print(f"[yellow]Google Flights query failed:[/] {e}")
+            err.print(f"[yellow]Google Flights query failed:[/] {escape(str(e))}")
     matrix_res = state.get("matrix")
     if matrix_res is None:
         # Matrix failed; the GF table (if any) was already painted.
         e = state.get("matrix_err")
         if e is not None:
-            err.print(f"[red]Matrix returned an error ({e.kind}):[/] {e.message}")
+            err.print(f"[red]Matrix returned an error ({e.kind}):[/] {escape(e.message)}")
         if not gf:
             raise typer.Exit(1)
         return
@@ -1657,7 +1658,7 @@ def _run_gflight_multi(
             # bare handler below would print it as an unexplained failure.
             err.print(f"[yellow]Google Flights {cab.value}: {_gf_refusal(e).note}.[/]")
         except Exception as e:  # noqa: BLE001 — fli has no documented exception surface
-            err.print(f"[yellow]Google Flights {cab.value} query failed: {e}[/]")
+            err.print(f"[yellow]Google Flights {cab.value} query failed: {escape(str(e))}[/]")
 
     async def go() -> None:
         async with anyio.create_task_group() as tg:
@@ -3155,12 +3156,17 @@ def gflight(
         "[yellow]`flight gflight` is deprecated; use `flight search` "
         "(or `flight search --backend gflight` to force).[/]",
     )
-    # Legs first: `_pick_backend` announces the backend it chose, and a bad
-    # airport argument must not be reported after a line claiming the query is
-    # already on its way.
-    legs = (Leg.of(origin, destination, _parse_date(dep)),)
+    # Airports split the way `search` splits them, so `JFK,LAX` is a
+    # multi-airport query the picker routes to Matrix rather than a string
+    # `Leg.of` rejects as one bad IATA code.
+    #
+    # Legs first: `_pick_backend` announces the backend it chose, and a genuinely
+    # bad airport must not be reported after a line claiming the query is already
+    # on its way.
+    origins, destinations = _parse_iata_list(origin), _parse_iata_list(destination)
+    legs = (Leg.of(origins, destinations, _parse_date(dep)),)
     if ret:
-        legs += (Leg.of(destination, origin, _parse_date(ret)),)
+        legs += (Leg.of(destinations, origins, _parse_date(ret)),)
     # This alias has no --backend flag, so it resolves like `search` on auto
     # rather than forcing Google Flights: `--children N` can't be priced on the
     # page transport, and taking the backend that can price it beats erroring on
