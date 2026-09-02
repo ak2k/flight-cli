@@ -435,6 +435,59 @@ def test_multi_cabin_json_carries_legroom_like_the_single_cabin_path(
     assert dumped["legs"][0]["legroom_class"]
 
 
+@pytest.mark.parametrize(
+    ("legs_wanted", "cabins_wanted", "shown"),
+    [
+        pytest.param(2, 2, True, id="a-round-trip-across-two-cabins"),
+        pytest.param(1, 2, False, id="one-way-has-no-pinned-fan-out"),
+        pytest.param(2, 1, False, id="one-cabin-has-nothing-to-join"),
+    ],
+)
+def test_a_multi_cabin_round_trip_says_what_its_join_is_drawn_from(
+    monkeypatch: pytest.MonkeyPatch, legs_wanted: int, cabins_wanted: int, shown: bool
+) -> None:
+    """`_PINNED_FANOUT_CAP` decides what the cabin join can even see, so a blank
+    cabin cell on a round trip means "these ten outbounds had no fare in both
+    cabins" and reads as "that fare does not exist". Only where the cap bites:
+    a one-way pins nothing and a single cabin joins nothing."""
+    import io as _io
+    from datetime import date as _date
+
+    from rich.console import Console as _Console
+
+    from flight_cli import cli
+    from flight_cli.domain import Cabin as _Cabin
+    from flight_cli.domain import Leg as _Leg
+    from flight_cli.domain import SearchOptions as _SearchOptions
+
+    buf = _io.StringIO()
+    monkeypatch.setattr(cli, "err", _Console(file=buf, width=400, no_color=True, highlight=False))
+
+    row = _one_gflight_row()
+    cabins = (_Cabin.COACH, _Cabin.BUSINESS)[:cabins_wanted]
+
+    def _fan_out(**_kw: Any) -> dict[Any, list[Any]]:
+        return dict.fromkeys(cabins, [row])
+
+    monkeypatch.setattr(cli, "_run_gflight_multi", _fan_out)
+    legs = (_Leg.of("JFK", "LAX", _date(2026, 10, 14)),)
+    if legs_wanted == 2:  # noqa: PLR2004 — a round trip is two legs
+        legs += (_Leg.of("LAX", "JFK", _date(2026, 10, 21)),)
+    cli._run_gflight_path_multi(
+        legs=legs,
+        opts=_SearchOptions(cabin=_Cabin.COACH),
+        cabins=cabins,
+        sort_by=_Cabin.COACH,
+        top_n=5,
+        json_out=True,
+        run_pp=False,
+        sel=cli._resolve_providers(
+            providers=None, cash_only=True, awards_only=False, provider_opt=()
+        ),
+    )
+    assert ("10 cheapest outbounds" in buf.getvalue()) is shown, buf.getvalue()
+
+
 def test_multi_cabin_fan_out_honours_an_encodable_constraint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
