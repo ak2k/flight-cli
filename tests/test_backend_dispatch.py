@@ -369,9 +369,9 @@ def test_a_command_that_builds_a_leg_rejects_a_blank_airport_list(
 ) -> None:
     """`_parse_iata_list` drops blank entries, so these arrive as an empty tuple
     while the argument itself stays truthy and satisfies a plain `if origin`.
-    Every command that builds a leg has to reject that the same way: `search`
-    and `fare` used to reach a backend and fail inside it with an index
-    error."""
+    Every command that builds a leg has to reject that the same way, or a leg
+    with no airports reaches a backend and fails deep inside it with an index
+    error instead."""
     assert "origin and destination are required" in _no_backend_runs(monkeypatch, command, origin)
 
 
