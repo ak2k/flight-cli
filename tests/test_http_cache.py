@@ -8,6 +8,7 @@ back instantly on a retry (work-h70kv.8)."""
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
 import anyio
@@ -16,6 +17,8 @@ from flight_cli._http import HttpTransport
 
 if TYPE_CHECKING:
     import pathlib
+
+    import pytest
 
 _ERROR_BODY: dict[str, Any] = {
     "error": {"message": "Internal server error.", "type": "internal"},
@@ -56,3 +59,44 @@ def test_non_error_shapes_still_cache(tmp_path: pathlib.Path) -> None:
     anyio.run(_go)
     assert (tmp_path / "list.json").exists()  # not a dict -> not an error body
     assert (tmp_path / "odd.json").exists()  # `error` must be an object, as in client.py
+
+
+def test_stale_error_body_is_evicted_on_read(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write-side guard cannot help an entry cached before it landed, and the
+    cache never expires — so a brownout stored back then would be replayed forever
+    without a network call. Seed one under the key `post_json` computes, then drive
+    the real read path: it must miss, go out, and overwrite."""
+    url = "https://example.invalid/v1/search"
+    params = {"key": "k", "alt": "json"}
+    body: dict[str, Any] = {"name": "calendar", "inputs": {"startDate": "2026-10-10"}}
+    posts = {"n": 0}
+    seeded: dict[str, pathlib.Path] = {}
+
+    class _FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return _GOOD_BODY
+
+    async def _fake_post(*_a: object, **_k: object) -> _FakeResponse:
+        posts["n"] += 1
+        return _FakeResponse()
+
+    async def _go() -> dict[str, Any]:
+        async with HttpTransport(cache_dir=tmp_path, rps=1.0) as h:
+            # Exactly the key post_json derives for this request.
+            key = h._cache_key(url + "?" + "&".join(f"{k}={v}" for k, v in params.items()), body)
+            seeded["path"] = h._cache_path(key)
+            seeded["path"].write_text(json.dumps(_ERROR_BODY))  # written before the guard
+            monkeypatch.setattr(h._client, "post", _fake_post)
+            return await h.post_json(url, body, params=params)
+
+    got = anyio.run(_go)
+    assert posts["n"] == 1  # the stale error was a MISS -> the request went out
+    assert got == _GOOD_BODY
+    assert json.loads(seeded["path"].read_text()) == _GOOD_BODY  # and it was overwritten

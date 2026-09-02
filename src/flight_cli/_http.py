@@ -147,10 +147,24 @@ class HttpTransport:
         if not p.exists():
             return None
         try:
-            return cast("dict[str, Any]", json.loads(p.read_text()))
+            data = cast("dict[str, Any]", json.loads(p.read_text()))
         except (OSError, json.JSONDecodeError) as e:
             log.warning("cache_read_failed", key=key, error=str(e))
             return None
+        if _is_error_body(data):
+            # The write-side guard in `_cache_put` only protects entries written
+            # since it landed, and there is no expiry — so a brownout cached before
+            # it would be replayed forever without ever touching the network.
+            # Evict and report a miss: the request goes out, and a good body
+            # overwrites this one (work-h70kv.8).
+            log.debug("cache_evicted", key=key, reason="error body")
+            try:
+                p.unlink(missing_ok=True)
+            except OSError as e:
+                # A read-only cache dir must degrade to a miss, not break the read.
+                log.warning("cache_evict_failed", key=key, error=str(e))
+            return None
+        return data
 
     def _cache_put(self, key: str, value: Any) -> None:
         if _is_error_body(value):

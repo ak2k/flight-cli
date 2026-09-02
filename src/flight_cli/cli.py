@@ -61,6 +61,7 @@ if TYPE_CHECKING:
 _SLICE_MIN_PARTS = 2
 _SLICE_MAX_PARTS = 3
 _ROUND_TRIP_LEGS = 2  # 2 legs = round-trip; 1 = one-way; >2 = multi-city
+_DEFAULT_CALENDAR_DURATION = "5-7"  # `calendar --duration` default; round-trip only
 
 # Matrix returns prices as 'USD877.00' (ISO-4217 prefix + decimal). We split
 # the prefix off for rendering so tables can show the currency once in the
@@ -746,7 +747,16 @@ def _run_calendar_enriched(
             raise typer.Exit(1)
         return
     res = cast("CalendarResult", matrix_res)
-    _render_calendar(res, dmin=dmin, dmax=dmax, origin=origins, destination=dests, sd=sd, ed=ed)
+    _render_calendar(
+        res,
+        dmin=dmin,
+        dmax=dmax,
+        origin=origins,
+        destination=dests,
+        sd=sd,
+        ed=ed,
+        round_trip=len(search.legs) == _ROUND_TRIP_LEGS,
+    )
     _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
 
 
@@ -1053,7 +1063,13 @@ def _render_calendar(
     destination: tuple[str, ...],
     sd: date,
     ed: date,
+    round_trip: bool,
 ) -> None:
+    """Render the lowest-fare grid. `round_trip` decides whether the trip-LENGTH
+    dimension exists at all: `wire._set_trip_length` attaches `layover` only when
+    there is a return leg, so a one-way request never asked for per-night prices
+    and Matrix never sent any. Showing the columns anyway prints a wall of '—'
+    under a duration range the backend never saw."""
     if res.solution_count == 0 or not res.priced_days:
         console.print(
             "[yellow]Calendar empty.[/] Matrix's calendar mode "
@@ -1063,24 +1079,27 @@ def _render_calendar(
         return
     ccy, cheapest = _split_price(res.cheapest_price)
     ccy_tag = f" ({ccy})" if ccy else ""
+    duration_note = f"  · duration {dmin}-{dmax} nights" if round_trip else ""
     console.print(
         f"[bold]{res.solution_count} solutions[/]  · "
         f"overall cheapest: [bold cyan]{cheapest or '—'}{ccy_tag}[/]  · "
-        f"window {sd.isoformat()} → {ed.isoformat()}  · "
-        f"duration {dmin}-{dmax} nights"
+        f"window {sd.isoformat()} → {ed.isoformat()}"
+        f"{duration_note}"
     )
     title = f"{','.join(origin)} → {','.join(destination)}: lowest fare per departure day{ccy_tag}"
     t = Table(title=title, show_header=True, header_style="bold green")
     t.add_column("departure", justify="right")
     t.add_column("min", justify="right")
-    for dur in range(dmin, dmax + 1):
-        t.add_column(f"{dur}n", justify="right")
+    if round_trip:
+        for dur in range(dmin, dmax + 1):
+            t.add_column(f"{dur}n", justify="right")
     t.add_column("sols", justify="right")
     for d in sorted(res.priced_days, key=lambda x: x.price_value or 9e9):
         row = [str(d.date), _amount(d.min_price)]
-        opts = {o.trip_length: o.min_price for o in d.options}
-        for dur in range(dmin, dmax + 1):
-            row.append(_amount(opts.get(dur)))
+        if round_trip:
+            opts = {o.trip_length: o.min_price for o in d.options}
+            for dur in range(dmin, dmax + 1):
+                row.append(_amount(opts.get(dur)))
         row.append(str(d.solution_count))
         t.add_row(*row)
     console.print(t)
@@ -2730,9 +2749,13 @@ def calendar(
     duration: Annotated[
         str,
         typer.Option(
-            "--duration", "-d", help="Nights, '5' or '5-7'", rich_help_panel=_GROUP_ITINERARY
+            "--duration",
+            "-d",
+            help="Nights between the outbound and the return, '5' or '5-7'. "
+            "Round-trip only — a one-way calendar has no trip length.",
+            rich_help_panel=_GROUP_ITINERARY,
         ),
-    ] = "5-7",
+    ] = _DEFAULT_CALENDAR_DURATION,
     one_way: bool = typer.Option(False, "--one-way", rich_help_panel=_GROUP_ITINERARY),
     cabin: str = typer.Option("economy", "--cabin", rich_help_panel=_GROUP_ITINERARY),
     adults: int = typer.Option(1, "--adults", rich_help_panel=_GROUP_ITINERARY),
@@ -2849,6 +2872,13 @@ def calendar(
     window = CalendarWindow(start=sd, end=ed, duration_min=dmin, duration_max=dmax)
     search = CalendarSearch(legs=legs, options=opts, window=window)
 
+    if one_way and duration != _DEFAULT_CALENDAR_DURATION and not json_out:
+        # `-d` is the trip LENGTH, which a one-way body never carries, so it changes
+        # neither the request nor the output. Say so instead of dropping it silently.
+        # An explicit `-d 5-7` is indistinguishable from the default here and passes
+        # unremarked — also the one case where nothing looks different.
+        console.print("[dim]--duration is ignored for one-way calendars.[/]")
+
     # Fast layer: the GF native date-grid (~1s, throttle-friendly, dodges Matrix's
     # compute-budget under-reporting) for one-way / single-airport / Tier-1-only
     # windows. Paint it first, then enrich with the authoritative Matrix calendar
@@ -2931,7 +2961,16 @@ def calendar(
             f"[dim]Queried {n_split} destinations separately and merged — Matrix "
             f"under-reports the combined multi-airport calendar grid.[/]"
         )
-    _render_calendar(res, dmin=dmin, dmax=dmax, origin=origins, destination=dests, sd=sd, ed=ed)
+    _render_calendar(
+        res,
+        dmin=dmin,
+        dmax=dmax,
+        origin=origins,
+        destination=dests,
+        sd=sd,
+        ed=ed,
+        round_trip=len(search.legs) == _ROUND_TRIP_LEGS,
+    )
     _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
 
 

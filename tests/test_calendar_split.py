@@ -590,3 +590,56 @@ def test_calendar_fast_empty_grid_exits_one(
     assert calls["grid"] == 0  # nothing to paint
     assert calls["calendar"] == 0
     assert out.count("drop --fast for Matrix") == 1
+
+
+# ──────────── one-way calendars have no trip length to render ───────────────
+# `wire._set_trip_length` attaches `layover` round-trip only, so a one-way request
+# never asks for per-night prices and Matrix never returns any. The REAL renderer
+# is driven here — the spies above only count calls (work-h70kv.10).
+
+
+def test_render_calendar_one_way_omits_nights_and_columns(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A day with NO tripDuration options, which is what a one-way calendar returns.
+    res = _result({10: {14: ("USD179.00", 2, {})}}, cheapest="USD179.00")
+    cli._render_calendar(  # pyright: ignore[reportPrivateUsage] — the renderer IS the unit
+        res,
+        dmin=3,
+        dmax=5,
+        origin=("JFK",),
+        destination=("LAX",),
+        sd=date(2026, 10, 10),
+        ed=date(2026, 10, 20),
+        round_trip=False,
+    )
+    out = _flat(capsys.readouterr().out)
+    assert "nights" not in out  # no duration range the backend never saw
+    for dur in ("3n", "4n", "5n"):
+        assert dur not in out  # and no column of em-dashes under it
+    assert "departure" in out and "sols" in out  # the real columns stay
+    assert "179.00" in out
+
+
+def test_render_calendar_round_trip_keeps_nights_and_columns(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    res = _result(
+        {10: {14: ("USD478.00", 6, {3: "USD599.00", 4: "USD503.00", 5: "USD478.00"})}},
+        cheapest="USD478.00",
+    )
+    cli._render_calendar(  # pyright: ignore[reportPrivateUsage] — the renderer IS the unit
+        res,
+        dmin=3,
+        dmax=5,
+        origin=("JFK",),
+        destination=("LAX",),
+        sd=date(2026, 10, 10),
+        ed=date(2026, 10, 20),
+        round_trip=True,
+    )
+    out = _flat(capsys.readouterr().out)
+    assert "duration 3-5 nights" in out
+    for dur in ("3n", "4n", "5n"):
+        assert dur in out
+    assert "599.00" in out  # the per-night prices are actually placed
