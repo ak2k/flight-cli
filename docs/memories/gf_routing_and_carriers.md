@@ -143,6 +143,7 @@ Every one of these is a multi-megabyte page GET, so the count is the cost:
 | round trip | 1 + min(top_n, rows on the board, `_PINNED_FANOUT_CAP` = 10) |
 | multi-cabin | the above, times the cabin count |
 | a persistently throttled leg | `_THROTTLE_RETRY_ATTEMPTS` + 1 = 5, then it aborts |
+| a transport blip | up to 3 GETs per leg (`_TRANSPORT_RETRY_ATTEMPTS` + 1) |
 
 Two things make those numbers hold. `_fetch_page` goes through fli's SESSION,
 not `Client.get` — which is wrapped in `@retry(stop_after_attempt(3))`, so a
@@ -158,9 +159,19 @@ catch `GfThrottledError` in its pinning loop, so the remaining pins are never
 fetched. That is deliberate — the throttle is per-IP, so the next leg would hit
 the same wall.
 
-The cost of owning the ladder: fli's `Client.get` also retried transport errors
-three times, and nothing does now. A connection reset fails the leg instead of
-being retried. The enriched path still answers from Matrix.
+Owning the ladder meant re-homing one thing fli's `Client.get` did for us: it
+also retried transport errors three times. `retry_throttled` now has a third
+arm for a curl-level failure — a reset connection, a read timeout — on a
+deliberately smaller budget than the throttle arm. A throttle is a wall that
+lifts on its own; a transport failure that survives three attempts is usually
+the network being down, and a long backoff there only delays the Matrix
+fallback the user is going to get anyway. When the budget is spent it becomes a
+plain `GfBackendError`, so the enriched path degrades to Matrix and
+`--backend gflight` prints a typed line rather than a curl traceback.
+
+Only curl-level failures are retried. An exception from our own code propagates
+on the first try — retrying a bug three times and relabelling it a transport
+problem is how a defect becomes unfindable.
 
 **Where a served page puts its rows varies, so no count of blocks is a validity
 test.** Six live pages, measured 2026-09-02:

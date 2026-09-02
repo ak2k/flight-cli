@@ -110,6 +110,15 @@ _THROTTLE_BACKOFF_S = 1.0  # exponential base: ~1, 2, 4, 8s (plus 0-50% jitter)
 # because it bypasses `Client.get`. A search page is multi-megabyte.
 _REQUEST_TIMEOUT_S = 60.0
 
+# A reset connection or a read timeout is worth a couple of quick retries and
+# nothing more. fli's `Client.get` used to retry these three times; bypassing it
+# to own the throttle ladder took that with it, so a single blip failed the leg.
+# Deliberately smaller than the throttle budget: a throttle is a wall that lifts
+# on its own, while a transport failure that survives three attempts is usually
+# the network being down, and spending a long backoff on it just delays the
+# Matrix fallback the user is going to get anyway.
+_TRANSPORT_RETRY_ATTEMPTS = 2
+
 
 def _is_throttle_block(body: str) -> bool:  # pyright: ignore[reportUnusedFunction]  # read by _gf_dategrid, not here
     """True when a non-data GF **RPC** response is a genuine throttle (error
@@ -841,6 +850,30 @@ def _rows_from_ds1(payload: list[Any]) -> _Ds1Board:
     return _Ds1Board(rows, blocks_seen, tuple(misplaced))
 
 
+class _RetryableTransportError(GfBackendError):
+    """A curl-level failure `retry_throttled` may try again.
+
+    Internal to this module: `retry_throttled` converts it to a plain
+    `GfBackendError` once the budget is spent, so callers only ever see the
+    base type. It subclasses `GfBackendError` anyway, so that if it ever did
+    escape an un-laddered path it would degrade to Matrix rather than reach the
+    user as an untyped traceback."""
+
+
+def _is_transport_failure(e: BaseException) -> bool:
+    """Is this curl failing to complete a request, rather than a page we read?
+
+    The import is deferred and on the error path only: `curl_cffi` costs ~100ms
+    cold, and by the time an exception comes back from the session it is
+    certainly loaded. `CurlError` is the broadest curl-level base — every
+    connection reset, DNS failure, timeout and TLS error descends from it — and
+    it is imported from `curl_cffi` itself, where it is exported, rather than
+    from `requests.exceptions`, which only re-exports it."""
+    from curl_cffi import CurlError  # noqa: PLC0415
+
+    return isinstance(e, CurlError)
+
+
 def _fetch_page(client: Any, url: str) -> Any:
     """GET the search page through fli's session, bypassing fli's `Client.get`.
 
@@ -863,12 +896,17 @@ def _fetch_page(client: Any, url: str) -> Any:
     leg instead of being retried three times. That is the deliberate cost of
     owning the ladder; the enriched path still answers from Matrix."""
     client._rate_limiter.acquire()  # pyright: ignore[reportAny]
-    return client._session().get(  # pyright: ignore[reportAny]
-        url,
-        impersonate="chrome",
-        allow_redirects=True,
-        timeout=_REQUEST_TIMEOUT_S,
-    )
+    try:
+        return client._session().get(  # pyright: ignore[reportAny]
+            url,
+            impersonate="chrome",
+            allow_redirects=True,
+            timeout=_REQUEST_TIMEOUT_S,
+        )
+    except Exception as e:
+        if _is_transport_failure(e):
+            raise _RetryableTransportError(str(e)) from e
+        raise
 
 
 def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
@@ -979,12 +1017,34 @@ def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
     authoritative rather than cold: the search page either decodes or raises, so
     re-fetching a multi-megabyte page can only return the same zero rows.
 
-    Transport errors propagate (fli's client already retried them)."""
+    - **transport failure** (a reset connection, a read timeout) -> the same
+      backoff, on a smaller budget. This arm exists because the search path
+      stopped going through fli's `Client.get`, which used to retry these; the
+      throttle ladder took over and a single blip would otherwise fail the leg.
+      When the budget is spent it becomes a plain `GfBackendError`, so the
+      enriched path degrades to Matrix and `--backend gflight` prints a typed
+      line instead of a curl traceback."""
     empty_attempts = 0
     throttle_attempts = 0
+    transport_attempts = 0
     while True:
         try:
             result = call()
+        except _RetryableTransportError as e:
+            transport_attempts += 1
+            if transport_attempts > _TRANSPORT_RETRY_ATTEMPTS:
+                raise GfBackendError(f"Google Flights could not be reached: {e}") from e
+            base = _THROTTLE_BACKOFF_S * (2 ** (transport_attempts - 1))
+            backoff = base * (1 + random.random() * 0.5)  # noqa: S311 — jitter, not crypto
+            log.debug(
+                "gflight transport failure (%s); backoff %.1fs (retry %d/%d)",
+                e,
+                backoff,
+                transport_attempts,
+                _TRANSPORT_RETRY_ATTEMPTS,
+            )
+            time.sleep(backoff)
+            continue
         except GfThrottledError:
             throttle_attempts += 1
             if throttle_attempts > _THROTTLE_RETRY_ATTEMPTS:

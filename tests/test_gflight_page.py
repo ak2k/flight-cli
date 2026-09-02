@@ -846,3 +846,57 @@ def test_a_row_that_recurses_the_decoder_is_a_typed_outcome() -> None:
     # The row loop's own guard is what has to classify it.
     assert isinstance(RecursionError(), gfid._ROW_PARSE_ERRORS)
     assert not gfid._holds_flight_rows([payload[2][0]])  # the probe survives it too
+
+
+# ─────────────────── transport failures: our ladder, briefly ────────────────
+
+
+def _transport_error(message: str = "connection reset by peer") -> Exception:
+    """A real curl_cffi exception, not a stand-in — the classifier keys off
+    curl's own base class, so a look-alike would pass a test the code fails."""
+    from curl_cffi.requests import exceptions as curl_exc
+
+    return curl_exc.ConnectionError(message)
+
+
+def test_a_transient_transport_failure_is_retried_then_served(client: Any) -> None:
+    """Bypassing fli's `Client.get` to own the throttle ladder also dropped its
+    transport retry, so one reset connection failed the leg. Ours covers it on
+    a small budget: two blips, then the page."""
+    fake = client(
+        _transport_error(),
+        _transport_error(),
+        _FakeResponse(text=_page(_ds1("ds1_jfk_lax_3rows.json"))),
+    )
+    assert len(gfid._one_call_with_retry(_FILTERS)) == 3
+    assert len(fake.gets) == 3
+
+
+def test_a_persistent_transport_failure_is_typed_not_a_traceback(client: Any) -> None:
+    """A network that stays down is not worth a long backoff — the user is
+    going to get the Matrix fallback either way, and a curl traceback is not a
+    refusal. Exactly `_TRANSPORT_RETRY_ATTEMPTS` retries, then a typed line."""
+    fake = client(_transport_error("dns lookup failed"))
+    with pytest.raises(GfBackendError) as excinfo:
+        gfid._one_call_with_retry(_FILTERS)
+    assert not isinstance(excinfo.value, GfThrottledError)
+    assert "dns lookup failed" in str(excinfo.value)
+    assert len(fake.gets) == gfid._TRANSPORT_RETRY_ATTEMPTS + 1 == 3
+
+
+def test_a_transport_failure_degrades_to_matrix_rather_than_crashing() -> None:
+    """The seam that matters: `GfBackendError` is what the enriched path
+    catches to keep Matrix authoritative and what `_gf_refusal` renders as a
+    typed line. An escaping curl error would be neither."""
+    assert issubclass(gfid._RetryableTransportError, GfBackendError)
+    assert gfid._is_transport_failure(_transport_error())
+    assert not gfid._is_transport_failure(ValueError("not a transport problem"))
+
+
+def test_a_non_transport_exception_is_not_retried(client: Any) -> None:
+    """The budget covers curl failing to complete a request, nothing else. A
+    bug in our own code must not be retried three times and relabelled."""
+    fake = client(RuntimeError("a bug, not a blip"))
+    with pytest.raises(RuntimeError):
+        gfid._one_call_with_retry(_FILTERS)
+    assert len(fake.gets) == 1
