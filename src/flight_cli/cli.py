@@ -248,6 +248,7 @@ def _pick_backend(
     slice_specs: list[str] | None,
     depart_times: str | None,
     return_times: str | None,
+    stops: int | None,
     children: int,
     seniors: int,
     youth: int,
@@ -267,7 +268,9 @@ def _pick_backend(
     constrained search with a plausible-looking "no results".
 
     Hard-Matrix flags always force Matrix: `--slice` (multi-city),
-    `--depart-times`/`--return-times`, any pax type beyond adults (the page's
+    `--depart-times`/`--return-times`, a `--stops` ceiling above two (fli maps
+    it to "any", so the tfs field would be omitted and the constraint lost),
+    any pax type beyond adults (the page's
     passenger field has kind codes for children and infants that we have never
     verified against a live priced search), and a multi-airport
     `--origin`/`--destination` set (the GF bridge flattens those to the first
@@ -279,7 +282,11 @@ def _pick_backend(
 
     Explicit --backend matrix: matrix. --backend gflight: gflight, unless the
     request is inexpressible on GF (error)."""
-    from .routing_predicates import classify, page_can_encode  # noqa: PLC0415
+    from .routing_predicates import (  # noqa: PLC0415
+        MAX_ENCODABLE_STOPS,
+        classify,
+        page_can_encode,
+    )
 
     reasons: list[str] = []
     if slice_specs:
@@ -290,6 +297,11 @@ def _pick_backend(
         reasons.append("a passenger type beyond adults")
     if len(_parse_iata_list(origin or "")) > 1 or len(_parse_iata_list(destination or "")) > 1:
         reasons.append("a multi-airport origin/destination")
+    if stops is not None and stops > MAX_ENCODABLE_STOPS:
+        # Same ceiling as the routing-language spelling below, and the same
+        # wording: fli's MaxStops maps anything higher to ANY, which omits the
+        # tfs field, so `--stops 3` would encode byte-identically to no --stops.
+        reasons.append(f"a stop ceiling above {MAX_ENCODABLE_STOPS} ({stops})")
     if routing or extension:
         reasons.extend(page_can_encode(classify(routing, extension).predicates)[1])
 
@@ -1630,29 +1642,21 @@ def _run_gflight_multi(
     """Fan out N parallel gflight queries (one per cabin). fli is sync, so
     each query runs in a worker thread via `anyio.to_thread.run_sync`.
 
-    Routing/extension predicates are applied natively, exactly as the
-    single-cabin path does: `_pick_backend` only routes here when
-    `page_can_encode` accepted every one, so dropping them would silently
-    widen a constrained multi-cabin search."""
-    from ._gflight_ids import search_with_ids  # noqa: PLC0415
-    from .fli_bridge import apply_gf_native_filters, to_fli_filter  # noqa: PLC0415
-    from .routing_predicates import classify  # noqa: PLC0415
-
+    Each cabin runs the SAME query builder as the single-cabin path, so the
+    native filters and the Tier-2 post-filter can't drift apart — they did once,
+    and the multi-cabin board silently answered a constrained search."""
     results: dict[Cabin, list[Any]] = {}
-    constraints = classify(legs[0].route_language, legs[0].extension) if legs else None
-    predicates = list(constraints.predicates) if constraints else []
 
     def query_sync(cab: Cabin) -> list[Any]:
-        cabin_opts = opts.model_copy(update={"cabin": cab})
-        search = SpecificDateSearch(legs=legs, options=cabin_opts)
-        fli_filter = to_fli_filter(search)
-        if predicates:
-            apply_gf_native_filters(fli_filter, predicates)
-        return search_with_ids(fli_filter, top_n=top_n) or []
+        return _gflight_results(legs, opts.model_copy(update={"cabin": cab}), top_n)
 
     async def query_cabin(cab: Cabin) -> None:
         try:
             results[cab] = await anyio.to_thread.run_sync(query_sync, cab)
+        except GfBackendError as e:
+            # A typed refusal is why this cabin's column will be missing; the
+            # bare handler below would print it as an unexplained failure.
+            err.print(f"[yellow]Google Flights {cab.value}: {_gf_refusal(e).note}.[/]")
         except Exception as e:  # noqa: BLE001 — fli has no documented exception surface
             err.print(f"[yellow]Google Flights {cab.value} query failed: {e}[/]")
 
@@ -2428,6 +2432,7 @@ def search(
         slice_specs=slice_specs,
         depart_times=depart_times,
         return_times=return_times,
+        stops=stops,
         children=children,
         seniors=seniors,
         youth=youth,
@@ -2495,9 +2500,9 @@ def search(
 
     if len(cabins_tuple) > 1:
         # `_pick_backend` already refused anything the page can't encode, so a
-        # constraint that survived to here is one the multi-cabin fan-out
-        # honours natively. Re-testing `routing or extension` (as this once did)
-        # would drop an encodable constraint to Matrix with no reason printed.
+        # constraint that survived to here is one the fan-out honours natively.
+        # Re-testing `routing or extension` here would drop it to Matrix with no
+        # reason printed.
         if resolved == BACKEND_GFLIGHT:
             _run_gflight_path_multi(
                 legs=legs,
@@ -3153,9 +3158,8 @@ def gflight(
     )
     # This alias has no --backend flag, so it resolves like `search` on auto
     # rather than forcing Google Flights: `--children N` can't be priced on the
-    # page transport, and erroring where this used to (wrongly) answer would be
-    # a worse regression than quietly taking the backend that can price it.
-    # `_pick_backend` prints the reason either way.
+    # page transport, and taking the backend that can price it beats erroring on
+    # a query the alias accepts. `_pick_backend` prints the reason either way.
     resolved = _pick_backend(
         backend=BACKEND_AUTO,
         routing=None,
@@ -3168,8 +3172,12 @@ def gflight(
         youth=0,
         inf_seat=0,
         inf_lap=0,
-        origin=origin,
-        destination=destination,
+        # This alias takes a single IATA code per side — `Leg.of` would reject a
+        # list before a backend was ever chosen — so there is no airport set for
+        # the picker to weigh.
+        origin=None,
+        destination=None,
+        stops=None,
     )
     legs = (Leg.of(origin, destination, _parse_date(dep)),)
     if ret:
@@ -3185,6 +3193,7 @@ def gflight(
         stops=None,
         allow_airport_changes=True,
         show_only_available=True,
+        page_size=top_n,
     )
     if resolved == BACKEND_MATRIX:
         _run_matrix_path(
