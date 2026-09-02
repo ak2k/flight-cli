@@ -124,25 +124,51 @@ A page that decodes with zero rows returns `[]` and is Google's authoritative
 answer, so the search path passes `retry_empty=False` and spends exactly one GET
 on it.
 
-**How many row blocks a served page carries varies, so "both indices" is NOT a
-validity test.** Measured live 2026-09-02:
+**Where a served page puts its rows varies, so no count of blocks is a validity
+test.** Six live pages, measured 2026-09-02:
 
-| page | `ds:1[2]` | `ds:1[3]` |
-|---|---|---|
-| initial one-way / outbound search | top-flights board (JFK-LAX: 3 rows) | the rest (27 rows) |
-| leg pinned via tfs 3.4 (a round-trip's return fetch) | **`None`** | the whole board (3 rows) |
-| flight-less board | `[[]]` | `[[]]` |
+| page | `ds:1[2]` | `ds:1[3]` | arity |
+|---|---|---|---|
+| JFK-LAX one-way | 3 rows | 27 rows | 32 |
+| HNL-MIA round-trip outbound, business | 3 rows | 5 rows | 31 |
+| HNL-MIA round-trip outbound, first | 2 rows | 4 rows | 31 |
+| HNL-MIA pinned return (business) | **`None`** | 3 rows | 27 |
+| HNL-MIA pinned return (first) | 3 rows | 2 rows | 27 |
+| HNL-MIA one-way nonstop, no nonstop exists | **`None`** | **`None`** | 32 |
 
-A pinned page has no top-flights ranking to show for a board that answers an
-already-chosen outbound, so it simply omits `[2]`. Requiring both blocks refused
-every round-trip return leg as a "page shape change" — a real result turned into
-a refusal, which is the same class of bug as the one this guard exists to catch,
-pointing the other way.
+Two things follow, and both cost a release-blocking bug to learn. A pinned leg
+**may** omit `[2]` — the business return did, the first-class return did not, so
+do not build a rule on it or on a story about top-flights ranking. And a
+genuinely flight-less board is an ordinary results page with no flight cards and
+**no block at either index** — refusing that reports "the page shape changed"
+for a route that simply has nothing matching. Two synthetic shapes are also
+pinned in the fixtures (an empty block `[[]]` at both indices, and at one); they
+have never been seen in the wild and are labelled as synthetic, but an empty
+block must not read as a refusal if Google starts sending one.
 
-The only honest shape signal is therefore **neither index holding anything
-row-shaped**: an empty block and a missing block are indistinguishable from the
-rows alone, so a single empty block stays an authoritative empty. The 0-of-N
-parse guard below still catches a row layout that moved.
+So the guard is a POSITIVE scan rather than a count. `_rows_from_ds1` collects
+rows from `[2]`/`[3]` structurally, and separately probes every OTHER top-level
+index for a block whose first element actually parses as a flight row:
+
+- rows only at `[2]`/`[3]` → those rows (however many blocks carried them)
+- nothing row-shaped anywhere → `[]`, an authoritative empty
+- rows found outside `[2]`/`[3]` → `GfPageShapeError`, a real relocation
+
+The two probes differ on purpose. Away from `[2]`/`[3]` the test must PARSE a
+row, because `ds:1` carries other list-of-list-of-list structures on every page
+(indices 1, 7, 14 and 17 among them) and a nesting-depth test would report a
+relocation on every ordinary page. At `[2]`/`[3]` the test must NOT require a
+parse, or a block whose rows have all changed shape would drop to an empty board
+instead of reaching the 0-of-N parse guard below, which is what catches a moved
+ROW layout.
+
+**What this does not detect, stated plainly:** a partial relocation — rows
+leaving `[2]` while `[3]` still parses — yields a short board and nothing
+notices. There is no signal for it: one block is an ordinary served shape (the
+business pinned return), so a missing block cannot be told from a board that
+never had one. An earlier revision refused single-block pages to catch this and
+broke every round-trip instead. Under-returning silently is the accepted cost;
+the alternative measured worse.
 
 ## Tier model: who honors each constraint
 

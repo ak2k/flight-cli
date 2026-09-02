@@ -36,7 +36,7 @@ import time
 from copy import deepcopy
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from fli.models import (  # pyright: ignore[reportMissingTypeStubs]
     FlightLeg,
@@ -598,39 +598,67 @@ def _persist_cookies(client: Any) -> None:
         log.debug("could not persist gflight cookies: %s", e)
 
 
-def _rows_from_ds1(payload: list[Any]) -> tuple[list[Any], int]:
-    """The flight rows inlined in a `ds:1` payload (top-flights board first),
-    and how many of the two indices actually held a row-shaped block.
+class _Ds1Board(NamedTuple):
+    """What a decoded `ds:1` payload holds, and where."""
 
-    How many blocks a SERVED page carries varies by request, measured live
-    2026-09-02:
+    rows: list[Any]
+    blocks_seen: int  # row blocks at the indices we read
+    misplaced: tuple[int, ...]  # row blocks anywhere else
 
-      - initial one-way / outbound search — `[2]` Google's top-flights board
-        AND `[3]` the rest (JFK-LAX: 3 + 27 rows; HNL-MIA business: 3 + 5)
-      - a leg pinned through tfs field 3.4, i.e. the return-leg fetch of a
-        round-trip expansion — `[2]` is **None** and the whole board is at
-        `[3]` (3 rows). There is no top-flights ranking to show for a board
-        that answers an already-chosen outbound.
-      - a flight-less board — a row block that is present but empty (`[[]]`).
 
-    So the count is NOT a "both indices or the layout moved" test; one block is
-    a perfectly ordinary served page. It only separates "Google gave us a board,
-    possibly empty" from "neither index holds anything row-shaped", which is the
-    single honest shape signal here — an empty block and a missing block are
-    indistinguishable from the rows alone."""
+def _looks_like_a_row_block(block: Any) -> bool:
+    """Structural test: is `block` shaped `[[…], …]`?
+
+    Used only at the indices we already read, where position vouches for the
+    block. Deliberately does NOT require the rows to parse — a block whose rows
+    have all changed shape must reach the 0-of-N guard in `_one_call` and be
+    reported as a layout change, not silently drop to an empty board."""
+    if not isinstance(block, list) or not block:
+        return False
+    return isinstance(cast("list[Any]", block)[0], list)
+
+
+def _holds_flight_rows(block: Any) -> bool:
+    """Strict test: does `block`'s first element PARSE as a flight row?
+
+    Used only away from those indices, to spot rows that moved. `ds:1` carries
+    several other list-of-list-of-list structures — on every page measured,
+    indices 1, 7, 14 and 17 among them — so the structural test above would
+    call those relocated rows and refuse every ordinary page."""
+    if not _looks_like_a_row_block(block):
+        return False
+    inner = cast("list[Any]", cast("list[Any]", block)[0])
+    if not inner:
+        return False
+    try:
+        _parse_flight_with_id(inner[0])
+    except (AttributeError, KeyError, ValueError, IndexError, TypeError):
+        return False
+    return True
+
+
+def _rows_from_ds1(payload: list[Any]) -> _Ds1Board:
+    """The flight rows inlined in a `ds:1` payload, top-flights board first,
+    plus where else in the payload flight rows turned up.
+
+    How many row blocks a SERVED page carries varies by request — see the
+    shapes table in docs/memories/gf_routing_and_carriers.md — so counting them
+    is not a validity test, and a board with no flights at all is served with
+    nothing at either index. The only layout change the payload can actually
+    prove is rows appearing somewhere we don't read, so the scan is positive:
+    collect from the indices we read, and probe every other index for rows that
+    moved. The two use different tests, on purpose — see each."""
     rows: list[Any] = []
     blocks_seen = 0
-    for index in _DS_ROW_BLOCKS:
-        block = payload[index] if len(payload) > index else None
-        if not isinstance(block, list) or not block or not isinstance(block[0], list):
-            continue
-        # Counted only here: a list that isn't shaped `[[…rows…], …]` is not a
-        # row block, and counting it would let a moved payload pass the guard.
-        # An empty `[[]]` still counts — that is a flight-less board, and it
-        # must stay an authoritative empty rather than a refusal.
-        blocks_seen += 1
-        rows.extend(cast("list[Any]", block[0]))
-    return rows, blocks_seen
+    misplaced: list[int] = []
+    for index, block in enumerate(payload):
+        if index in _DS_ROW_BLOCKS:
+            if _looks_like_a_row_block(block):
+                blocks_seen += 1
+                rows.extend(cast("list[Any]", cast("list[Any]", block)[0]))
+        elif _holds_flight_rows(block):
+            misplaced.append(index)
+    return _Ds1Board(rows, blocks_seen, tuple(misplaced))
 
 
 def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
@@ -667,12 +695,17 @@ def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
     # A decoded payload means Google answered a warm session — save its cookies
     # (NID) so the next one-shot CLI process starts warm instead of cold.
     _persist_cookies(client)
-    rows, blocks_seen = _rows_from_ds1(payload)
-    if not blocks_seen:
-        # Neither index holds anything row-shaped. Requiring BOTH would be
-        # wrong: a pinned return-leg page legitimately serves `[2] = None` with
-        # the entire board at `[3]` (see `_rows_from_ds1`).
-        raise GfPageShapeError("ds:1 held no row block at [2] or [3]; the payload layout changed")
+    board = _rows_from_ds1(payload)
+    if board.misplaced:
+        # Rows exist, just not where we read them. This is the one layout
+        # change the payload can actually prove; an absent board cannot be told
+        # apart from a flight-less one.
+        raise GfPageShapeError(
+            f"ds:1 holds flight rows at {list(board.misplaced)}, not at "
+            f"{list(_DS_ROW_BLOCKS)} (found {board.blocks_seen} there); "
+            "the payload layout changed"
+        )
+    rows = board.rows
     if not rows:
         return []  # Google's own answer: this leg has no flights.
     out: list[GFlightWithId] = []

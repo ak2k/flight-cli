@@ -42,9 +42,10 @@ class GfConsentError(GfBackendError):
 class GfPageShapeError(GfBackendError):
     """The search page loaded but no longer carries the rows we read.
 
-    Either the `ds:1` blob is absent/undecodable, or it decoded and not one of
-    its N rows parsed. Both mean Google changed the page and the extract needs
-    re-deriving — never that the route has no flights."""
+    The `ds:1` blob is absent or undecodable; or it decoded but holds its
+    flight rows somewhere other than the indices we read; or rows were found
+    and not one of the N parsed. All mean Google changed the page and the
+    extract needs re-deriving — never that the route has no flights."""
 
 
 class GfTfsUnsupportedError(GfBackendError):

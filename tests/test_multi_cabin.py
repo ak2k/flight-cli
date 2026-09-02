@@ -392,7 +392,7 @@ def _one_gflight_row() -> Any:
     fixture = (
         _pathlib.Path(__file__).parent / "fixtures" / "gflight_page" / "ds1_jfk_lax_3rows.json"
     )
-    rows, _blocks = gfid._rows_from_ds1(_json.loads(fixture.read_text()))
+    rows = gfid._rows_from_ds1(_json.loads(fixture.read_text())).rows
     return gfid._parse_flight_with_id(rows[0])
 
 
