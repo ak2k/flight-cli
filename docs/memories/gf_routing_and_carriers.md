@@ -133,8 +133,9 @@ follow-up. Details, measurements and traps: [gf_browser_rung.md](gf_browser_rung
   report (fli raises first on the other one).
 - `GfBrowserUnavailableError` — rung 2 could not produce bytes at all: no
   patchright, no Chrome, a profile another `flight` holds, a dead navigation.
-  Never a statement about the route. It carries its own remedy text, because
-  `cli` renders a refusal type it has no case for as `str(e)` and nothing else.
+  Never a statement about the route. Its `remedy` is a separate attribute that
+  BOTH renderings must carry: the message quotes `str(e)`, and the note the
+  default enrich path prints has to append it explicitly.
 
 A page that decodes with zero rows returns `[]` and is Google's authoritative
 answer, so the search path passes `retry_empty=False` and spends exactly one GET

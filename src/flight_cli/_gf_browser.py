@@ -46,8 +46,8 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 # DIVERGE: a transport module writing to the console. The launch notice lives at
-# the launch site, not in `cli`, because opening Chrome is a visible window and
-# tens of seconds of latency — the one thing no caller may forget to announce.
+# the launch site, not in `cli`, because launching Chrome costs seconds a caller
+# would otherwise wait through unexplained — the one thing none may forget.
 _err = Console(stderr=True)
 
 _NAV_TIMEOUT_MS = 30_000
@@ -133,8 +133,9 @@ _notice_state: dict[str, bool] = {"printed": False}
 def _announce() -> None:
     """One line, once per process, before the first launch.
 
-    Rung 2 opens a window and can take the better part of a minute; without
-    this the user watches a silent terminal and an unexplained Chrome."""
+    Rung 2 costs a browser launch and a few seconds per search; without this
+    the user watches a silent terminal, and with --gf-headed an unexplained
+    Chrome window."""
     if _notice_state["printed"]:
         return
     _notice_state["printed"] = True

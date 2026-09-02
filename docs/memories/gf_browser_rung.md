@@ -107,10 +107,11 @@ concurrent sessions.
 
 `GfBrowserUnavailableError(GfBackendError)` covers every way rung 2 fails to
 produce bytes — no patchright, no Chrome, locked profile, nav timeout, null
-response, unreadable body. It carries `remedy` text **inside the message**,
-because `cli`'s `_gf_refusal` renders an unrecognized subclass as `str(e)` and
-nothing else; a remedy kept in the renderer would never print. Both the note and
-the full message have a `GfBrowserUnavailableError` arm.
+response, unreadable body. `remedy` is a separate attribute, and **both**
+renderings in `_gf_refusal` have to carry it. The full `message` gets it free
+inside `str(e)`. The one-line `note` must append `e.remedy` itself, and that is
+the one that matters most: the enrich path is the default search and prints only
+the note, so a user with no patchright learns what to install there or nowhere.
 
 ## What it costs
 
@@ -120,13 +121,22 @@ rendered table, **under 3 s**; a round trip's launch plus four navigations under
 far cheaper than Matrix (~45 s). The 30 s nav timeout is a ceiling, not a
 typical cost.
 
+**Single-cabin only.** `--gf-transport browser` with a multi-cabin `--cabin`
+list prints a dim line and uses http. The fan-out runs a thread per cabin, and
+Chromium single-instances the profile directory, so the second cabin would fail
+on the first one's lock — one profile is the constraint, not a missing wire.
+
 ## Tests never launch a browser
 
 `tests/conftest.py` replaces `_gf_browser._playwright_factory` for **every**
-test with a callable that `pytest.fail`s; `@pytest.mark.gf_browser` opts out and
-those tests drive a fake playwright object graph. `pytest.fail` raises a
-`BaseException` on purpose — production code wraps launch failures in `except
-Exception`, and a guard the code under test could swallow would be no guard.
+test with a callable that `pytest.fail`s. `pytest.fail` raises a `BaseException`
+on purpose — production code wraps launch failures in `except Exception`, and a
+guard the code under test could swallow would be no guard.
+
+`@pytest.mark.gf_browser` opts out, and almost nothing needs it: a test that
+installs its own fake playwright has already replaced the same seam, so the
+marker would only widen the hole. It is for the one test that calls the real
+`_playwright_factory` to prove a missing patchright names its install.
 
 Two seams make the ladder testable, and both are easy to break by "tidying":
 `_gflight_ids` reaches rung 2 as `from . import _gf_browser` then

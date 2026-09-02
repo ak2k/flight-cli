@@ -146,8 +146,9 @@ choice that fits the rest of the stack — don't substitute.
      tunings (reportAny, Pydantic `extra` on boundary models).
    - `_gf_browser.py` writes its "opening Chrome" notice to a
      module-level `Console(stderr=True)` instead of leaving user-facing
-     output to `cli`. A browser launch is a visible window and seconds of
-     latency; at the launch site no caller can forget to announce it.
+     output to `cli`. A browser launch costs a few seconds the user would
+     otherwise wait through unexplained; at the launch site no caller can
+     forget to announce it.
    - Neither patchright extra runs `patchright install chrome`. Both
      drive the *installed* real Chrome via `channel="chrome"` — a
      bundled Chromium would have the same thin fingerprint the curl_cffi

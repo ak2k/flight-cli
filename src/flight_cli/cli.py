@@ -64,7 +64,6 @@ from .pp.cli import auth_app, run_pp_for_search
 from .providers.base import LegQuery
 
 if TYPE_CHECKING:
-    from ._gflight_ids import GfTransport
     from .models import CalendarResult, LegInfo, Location, SearchResult, Slice
 
 # Tuple-length sentinels for `--slice` parser (`ORIGIN-DEST:DATE[:r=...:e=...]`).
@@ -1193,7 +1192,8 @@ def _gflight_results(
     legs: tuple[Leg, ...],
     opts: SearchOptions,
     top_n: int,
-    transport: GfTransport | None = None,
+    gf_mode: str | None = None,
+    gf_headed: bool = False,
 ) -> list[Any]:
     """Query Google Flights for `legs`, honoring routing/extension: Tier-1
     predicates narrow the fli query natively, the Tier-2 post-filter drops
@@ -1210,12 +1210,14 @@ def _gflight_results(
     profile-lock refusal names the interrupted-run case.
     """
     from ._gf_postfilter import surviving_indices  # noqa: PLC0415
-    from ._gflight_ids import HTTP_TRANSPORT, TRANSPORT_HTTP, search_with_ids  # noqa: PLC0415
+    from ._gflight_ids import TRANSPORT_HTTP, GfTransport, search_with_ids  # noqa: PLC0415
     from .fli_bridge import apply_gf_native_filters, to_fli_filter  # noqa: PLC0415
     from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
     from .routing_predicates import classify  # noqa: PLC0415
 
-    resolved_transport = transport or HTTP_TRANSPORT
+    # Built here rather than at the CLI seam: this is the first point that has
+    # already paid for `_gflight_ids`.
+    transport = None if gf_mode is None else GfTransport(mode=gf_mode, headed=gf_headed)
     fli_filter = to_fli_filter(SpecificDateSearch(legs=legs, options=opts))
     out_constraints = classify(legs[0].route_language, legs[0].extension) if legs else None
     if out_constraints and out_constraints.predicates:
@@ -1230,7 +1232,7 @@ def _gflight_results(
             else search_with_ids(fli_filter, top_n=top_n, transport=transport)
         ) or []
     finally:
-        if resolved_transport.mode != TRANSPORT_HTTP:
+        if transport is not None and transport.mode != TRANSPORT_HTTP:
             from ._gf_browser import close_thread_session  # noqa: PLC0415
 
             close_thread_session()
@@ -1291,11 +1293,12 @@ def _gf_refusal(e: Exception) -> _GfRefusal:
                 "Use [bold]--backend matrix[/].",
             )
         case GfBrowserUnavailableError():
-            # `str(e)` is already the whole story (what failed + what to do),
-            # written that way because the `case _:` arm below prints nothing
-            # else — so this arm adds the note, not more words.
+            # The note carries the remedy too. It is not the short form of the
+            # message here: the enrich path is the DEFAULT search, and it prints
+            # only the note — so without this a user whose browser rung cannot
+            # start would never be told what to install.
             return _GfRefusal(
-                "Google Flights' browser rung is unavailable",
+                f"Google Flights' browser rung is unavailable — {e.remedy}",
                 f"[yellow]{e}[/]",
             )
         case GfPageShapeError():
@@ -1364,7 +1367,8 @@ def _run_gflight_path(
     matrix_url: bool = False,
     google_url: bool = False,
     pick: int | None = None,
-    transport: GfTransport | None = None,
+    gf_mode: str | None = None,
+    gf_headed: bool = False,
 ) -> None:
     """Google Flights path: build fli filter → query → render. Single-leg or round-trip.
 
@@ -1372,13 +1376,13 @@ def _run_gflight_path(
     the existing PP matcher + renderer reuse cleanly. PP runs on the same
     (origin, dest, date) per leg as the matrix path.
 
-    `transport=None` is rung 1 — the deprecated `gflight` command has no
+    `gf_mode=None` is rung 1 — the deprecated `gflight` command has no
     transport flag.
     """
     from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
 
     try:
-        results = _gflight_results(legs, opts, top_n, transport)
+        results = _gflight_results(legs, opts, top_n, gf_mode, gf_headed)
     except GfBackendError as e:
         err.print(_gf_refusal(e).message)
         raise typer.Exit(1) from e
@@ -1449,7 +1453,8 @@ def _run_enriched_path(
     rps: float,
     impersonate: str,
     no_cache: bool,
-    transport: GfTransport | None = None,
+    gf_mode: str | None = None,
+    gf_headed: bool = False,
 ) -> None:
     """GF-serveable query, progressive: dispatch Google Flights + Matrix
     concurrently under one event loop, paint GF immediately (~1s), then repaint a
@@ -1477,7 +1482,9 @@ def _run_enriched_path(
             # Google Flights is sync (curl_cffi) — run it in a worker thread so the
             # Matrix request progresses concurrently on the event loop.
             try:
-                gf = await anyio.to_thread.run_sync(_gflight_results, legs, opts, top_n, transport)
+                gf = await anyio.to_thread.run_sync(
+                    _gflight_results, legs, opts, top_n, gf_mode, gf_headed
+                )
             except Exception as e:  # noqa: BLE001 - reported below; Matrix may still succeed
                 state["gf_err"] = e
                 gf = []
@@ -2181,22 +2188,24 @@ def _resolve_no_cache(flag: bool) -> bool:
 # client. `auto` is the shape the escalate-on-throttle rung will take and is
 # `http` until then, so a script written against it keeps working when it lands.
 _GF_TRANSPORT_HTTP = "http"
-_VALID_GF_TRANSPORTS = ("auto", _GF_TRANSPORT_HTTP, "browser")
+_GF_TRANSPORT_BROWSER = "browser"
+_VALID_GF_TRANSPORTS = ("auto", _GF_TRANSPORT_HTTP, _GF_TRANSPORT_BROWSER)
 
 
-def _resolve_gf_transport(mode: str, *, headed: bool) -> GfTransport:
-    """Validate `--gf-transport` and pair it with `--gf-headed`.
+def _resolve_gf_transport(mode: str) -> str:
+    """Validate `--gf-transport`, returning the mode unchanged.
 
-    Validation happens before the import so a typo costs a message rather than
-    the ~200 ms of loading the Google Flights stack."""
+    A string, not a `GfTransport`, because every search validates this while only
+    a Google Flights search should pay for `_gflight_ids` — building the value
+    here would put fli's import on the Matrix path too, measured at 64 ms on top
+    of an already-loaded `cli`. `_gflight_results` builds it instead; that is
+    the first point which has already paid."""
     if mode not in _VALID_GF_TRANSPORTS:
         raise typer.BadParameter(
             f"unknown transport {mode!r}; expected one of {'/'.join(_VALID_GF_TRANSPORTS)}",
             param_hint="--gf-transport",
         )
-    from ._gflight_ids import GfTransport  # noqa: PLC0415
-
-    return GfTransport(mode=mode, headed=headed)
+    return mode
 
 
 # ─────────────────────────── --format / --json ─────────────────────────────
@@ -2427,10 +2436,11 @@ def search(
         "--gf-transport",
         help=(
             "How the Google Flights backend fetches its search page: "
-            "[bold]http[/] (default) is one curl_cffi GET; [bold]browser[/] drives a real "
-            "Chrome to the same URL, which survives the rate limit that blocks http but "
-            "opens a window and costs tens of seconds; [bold]auto[/] is identical to http "
-            "today (escalate-on-throttle lands separately). Needs "
+            "[bold]http[/] (default) is one curl_cffi GET; [bold]browser[/] launches a real "
+            "Chrome (headless unless [bold]--gf-headed[/]) against the same URL, a few "
+            "seconds per search, and survives the rate limit that blocks http; "
+            "[bold]auto[/] is identical to http today (escalate-on-throttle lands "
+            "separately). Single-cabin searches only. Needs "
             "[bold]pip install 'flight-cli[browser]'[/] for browser."
         ),
         rich_help_panel=_GROUP_BACKEND,
@@ -2583,7 +2593,17 @@ def search(
     run_awards = _should_run_awards(sel)
     # Validated for every backend, so a typo is caught whether or not this
     # particular query happens to reach Google Flights.
-    transport = _resolve_gf_transport(gf_transport, headed=gf_headed)
+    gf_transport = _resolve_gf_transport(gf_transport)
+
+    if len(cabins_tuple) > 1 and gf_transport == _GF_TRANSPORT_BROWSER:
+        # Not threaded into the fan-out on purpose: each cabin is a separate
+        # thread, and Chromium single-instances the profile directory, so the
+        # second cabin would fail on the first one's lock. Saying so beats a
+        # silent downgrade.
+        err.print(
+            "[dim]--gf-transport browser applies to single-cabin searches; "
+            "multi-cabin uses http.[/]"
+        )
 
     if len(cabins_tuple) > 1:
         # `_pick_backend` already refused anything the page can't encode, so a
@@ -2636,7 +2656,8 @@ def search(
                 rps=_resolve_rps(rps),
                 impersonate=_resolve_impersonate(impersonate),
                 no_cache=_resolve_no_cache(no_cache),
-                transport=transport,
+                gf_mode=gf_transport,
+                gf_headed=gf_headed,
             )
             return
         _run_gflight_path(
@@ -2649,7 +2670,8 @@ def search(
             matrix_url=matrix_url,
             google_url=google_url,
             pick=pick,
-            transport=transport,
+            gf_mode=gf_transport,
+            gf_headed=gf_headed,
         )
         return
 

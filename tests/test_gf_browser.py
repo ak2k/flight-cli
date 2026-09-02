@@ -196,8 +196,9 @@ def test_fetch_page_reports_a_2xx_by_construction(monkeypatch: pytest.MonkeyPatc
 
 
 def test_a_server_error_is_a_typed_shape_refusal() -> None:
-    """A 5xx used to surface as curl_cffi's own `HTTPError`, which the Matrix
-    fallback seam does not catch. Typed, it degrades like every other refusal."""
+    """A non-2xx is a shape refusal, so it degrades to Matrix through the seam
+    every other refusal uses. Only a navigation gets here with one — fli raises
+    on a non-2xx before the curl_cffi rung can report it."""
     with pytest.raises(GfPageShapeError, match="HTTP 503"):
         gfid._rows_from_page_html(gfid.PageFetch("", _PAGE_URL, 503))
 
@@ -347,7 +348,6 @@ def test_a_browser_refusal_is_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
 # ───────────────────── the session: launch, navigate, close ────────────────────
 
 
-@pytest.mark.gf_browser
 def test_a_navigation_becomes_rows_and_the_launch_is_announced(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -364,7 +364,6 @@ def test_a_navigation_becomes_rows_and_the_launch_is_announced(
     assert pw.chromium._context.closed and pw.stopped
 
 
-@pytest.mark.gf_browser
 def test_the_context_is_launched_against_real_chrome_and_our_own_profile(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
@@ -386,7 +385,6 @@ def test_the_context_is_launched_against_real_chrome_and_our_own_profile(
     assert pathlib.Path(kwargs["user_data_dir"]) != BROWSER_PROFILE_DIR
 
 
-@pytest.mark.gf_browser
 def test_an_explicit_binary_replaces_the_channel(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
@@ -401,7 +399,6 @@ def test_an_explicit_binary_replaces_the_channel(
     assert "channel" not in pw.chromium.launch_kwargs
 
 
-@pytest.mark.gf_browser
 @pytest.mark.parametrize(
     "outcome,expected",
     [
@@ -423,7 +420,6 @@ def test_a_failed_navigation_is_a_typed_refusal(
     assert ". Retry, or use `--gf-transport http`" in str(e.value)
 
 
-@pytest.mark.gf_browser
 def test_an_unreadable_body_is_a_typed_refusal(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
@@ -441,7 +437,6 @@ def test_an_unreadable_body_is_a_typed_refusal(
             session.get_html(_PAGE_URL)
 
 
-@pytest.mark.gf_browser
 def test_a_launch_failure_names_the_browser_not_the_route(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
@@ -452,7 +447,6 @@ def test_a_launch_failure_names_the_browser_not_the_route(
     assert "Chromium is not installed" in str(e.value)
 
 
-@pytest.mark.gf_browser
 def test_a_locked_profile_says_so_and_says_how_to_clear_it(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
@@ -477,7 +471,6 @@ def test_a_locked_profile_says_so_and_says_how_to_clear_it(
     assert (profile / "SingletonLock").is_symlink()
 
 
-@pytest.mark.gf_browser
 def test_a_failed_launch_leaves_no_driver_running(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
@@ -500,7 +493,6 @@ def test_a_missing_patchright_names_the_install(monkeypatch: pytest.MonkeyPatch)
     assert "flight-cli[browser]" in str(e.value)
 
 
-@pytest.mark.gf_browser
 def test_close_is_idempotent_and_survives_a_failing_teardown(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
@@ -576,15 +568,122 @@ def test_the_suite_refuses_to_launch_a_real_browser() -> None:
 
 @pytest.mark.parametrize("mode", ["auto", "http", "browser"])
 def test_every_documented_transport_resolves(mode: str) -> None:
-    resolved = _resolve_gf_transport(mode, headed=True)
-    assert (resolved.mode, resolved.headed) == (mode, True)
+    assert _resolve_gf_transport(mode) == mode
 
 
 def test_an_unknown_transport_is_rejected_by_name() -> None:
     import typer
 
     with pytest.raises(typer.BadParameter, match="chrome"):
-        _resolve_gf_transport("chrome", headed=False)
+        _resolve_gf_transport("chrome")
+
+
+def test_resolving_a_transport_does_not_load_the_google_flights_stack() -> None:
+    """Every search validates this flag, including Matrix-only ones, so it must
+    not drag in `_gflight_ids` — that module costs fli's import, and a Matrix
+    search has no use for it. `_gflight_results` builds the value instead."""
+    import subprocess
+    import sys
+
+    probe = (
+        "import sys, flight_cli.cli as c;"
+        "c._resolve_gf_transport('browser');"
+        "print('flight_cli._gflight_ids' in sys.modules)"
+    )
+    out = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+    )
+    assert out.stdout.strip() == "False"
+
+
+def test_the_refusal_note_carries_the_remedy_too() -> None:
+    """The enrich path is the DEFAULT search and prints only the note.
+
+    So the note is not a shorter message here — a user whose browser rung will
+    not start learns what to install from this string or from nothing."""
+    from flight_cli.cli import _gf_refusal
+
+    refusal = _gf_refusal(
+        GfBrowserUnavailableError("Chrome is missing.", remedy="Install the thing.")
+    )
+    assert "Install the thing." in refusal.note
+    assert "Install the thing." in refusal.message
+
+
+def test_a_multi_cabin_browser_search_says_it_is_using_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Chromium single-instances the profile dir, so a thread-per-cabin fan-out
+    cannot each hold one. Downgrading is right; doing it silently is not.
+
+    The dispatch is stubbed out: this is about the line the user sees, and the
+    real one would query two backends over the network."""
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    dispatched: list[str] = []
+
+    def _stub(**_kw: Any) -> None:
+        dispatched.append("multi")
+
+    monkeypatch.setattr(cli, "_run_matrix_path_multi", _stub)
+    monkeypatch.setattr(cli, "_run_gflight_path_multi", _stub)
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "search",
+            "JFK",
+            "LAX",
+            "--dep",
+            "2026-10-14",
+            "--cabin",
+            "coach,business",
+            "--gf-transport",
+            "browser",
+            "--cash-only",
+            "-n",
+            "1",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert dispatched == ["multi"]
+    assert result.output.count("multi-cabin uses http") == 1  # said once, not per cabin
+
+
+def test_a_single_cabin_browser_search_prints_no_downgrade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The counterpart: the line must not fire where the browser rung is live."""
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    def _stub(**_kw: Any) -> None:
+        return None
+
+    monkeypatch.setattr(cli, "_run_gflight_path", _stub)
+    monkeypatch.setattr(cli, "_run_enriched_path", _stub)
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "search",
+            "JFK",
+            "LAX",
+            "--dep",
+            "2026-10-14",
+            "--gf-transport",
+            "browser",
+            "--cash-only",
+            "-n",
+            "1",
+            "--fast",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "multi-cabin" not in result.output
 
 
 def test_the_default_transport_is_rung_one() -> None:

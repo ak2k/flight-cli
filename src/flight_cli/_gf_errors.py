@@ -57,9 +57,10 @@ class GfBrowserUnavailableError(GfBackendError):
     """Rung 2 — a real Chrome navigating the same search page — could not run.
 
     Never a statement about the route: Chrome failed to launch, the navigation
-    failed, or it handed back no body. Carries its own remedy text because both
-    refusal renderers in `cli` print an unrecognized subclass as `str(e)` and
-    nothing else — a remedy kept in the renderer would never reach the user.
+    failed, or it handed back no body. `remedy` is kept as its own attribute
+    because the two renderings in `cli` need it in different places — the full
+    message quotes `str(e)`, and the one-line note the enrich path prints has to
+    append `e.remedy` itself or the user never learns what to install.
     """
 
     def __init__(self, reason: str, *, remedy: str = _BROWSER_DEFAULT_REMEDY) -> None:

@@ -29,17 +29,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Heavier interactive-login path. Patchright is a Playwright fork that
-# patches CDP leaks + navigator.webdriver detection so Cloudflare's bot
-# fingerprint check passes — required for the PP login flow (Cloudflare-
-# protected). Package itself is small; `patchright install chrome` is what
-# pulls the real Chrome binary (~150MB) and is only needed for the headed
-# login path, so it's not auto-installed.
-browser-login = ["patchright>=1.59"]
-# Same package, different reason: `--gf-transport browser` drives a real Chrome
-# through Google Flights' search page when the curl_cffi rung is rate-limited.
-# Kept as its own extra so the name says which feature you're installing for.
+# Patchright is a Playwright fork that patches CDP leaks + navigator.webdriver
+# detection, so it passes both bot checks this project meets: Cloudflare's on the
+# PointsPath login, and Google's on the `--gf-transport browser` search rung.
+# The package itself is small. `patchright install chrome` is what pulls a
+# browser (~150MB) and is deliberately NOT run: both paths drive the installed
+# real Chrome through `channel="chrome"`.
 browser = ["patchright>=1.59"]
+# The login flow needs exactly what the search rung needs, so it points at that
+# extra rather than repeating the pin — two copies of a version floor drift.
+browser-login = ["flight-cli[browser]"]
 
 [dependency-groups]
 dev = [
