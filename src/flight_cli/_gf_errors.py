@@ -47,6 +47,29 @@ class GfPageShapeError(GfBackendError):
     re-deriving — never that the route has no flights."""
 
 
+# Every other remedy this module offers is a flag the user can already see in
+# `--help`; this one has to be spelled out because the browser rung is the only
+# transport that can fail for reasons outside Google (no Chrome, a locked
+# profile), and the fix is local rather than "try the other backend".
+_BROWSER_DEFAULT_REMEDY = "Retry, or use `--gf-transport http` (or `--backend matrix`)."
+
+
+class GfBrowserUnavailableError(GfBackendError):
+    """Rung 2 — a real Chrome navigating the same search page — could not run.
+
+    Never a statement about the route: Chrome failed to launch, the navigation
+    failed, or it handed back no body. Carries its own remedy text because both
+    refusal renderers in `cli` print an unrecognized subclass as `str(e)` and
+    nothing else — a remedy kept in the renderer would never reach the user.
+    """
+
+    def __init__(self, reason: str, *, remedy: str = _BROWSER_DEFAULT_REMEDY) -> None:
+        """Name what failed, and what the user can do about it."""
+        self.reason = reason
+        self.remedy = remedy
+        super().__init__(f"{reason} {remedy}")
+
+
 class GfTfsUnsupportedError(GfBackendError):
     """A filter the `tfs` search-page encoder cannot express.
 

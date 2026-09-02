@@ -21,6 +21,12 @@ returns with distinct flight_ids.
 
 The board the page serves is Google's default (~30 rows per leg) with no
 back-fill, so a top-N above that returns fewer rows than asked for.
+
+That page has two transports (`GfTransport`, `_one_call_laddered`): rung 1 is
+the curl_cffi GET below, rung 2 is a real Chrome navigating the same URL
+(`_gf_browser`), which earns a far larger rate budget. Both go through
+`_rows_from_page_html` — one parser, one set of verdicts about what a block
+means. A rung supplies bytes; it never gets to interpret them.
 """
 
 from __future__ import annotations
@@ -702,18 +708,77 @@ def _one_call_with_retry(filters: FlightSearchFilters) -> list[GFlightWithId]:
     return retry_throttled(lambda: _one_call(filters), retry_empty=False)
 
 
+TRANSPORT_AUTO = "auto"
+TRANSPORT_HTTP = "http"
+TRANSPORT_BROWSER = "browser"
+
+
+@dataclass(frozen=True)
+class GfTransport:
+    """Which rung of the search-page transport a query may use.
+
+    - `http` — rung 1 only: one curl_cffi GET under the throttle backoff.
+    - `browser` — rung 2 only: one real-Chrome navigation, no rung-1 fallback.
+    - `auto` — today identical to `http`. The escalate-on-persistent-throttle
+      rung lands separately; the mode exists now so the CLI surface and every
+      call site are already the shape it needs.
+
+    Frozen, and defaulting to `http`, so a call site nobody updated keeps the
+    behaviour it had before rung 2 existed.
+    """
+
+    mode: str = TRANSPORT_HTTP
+    headed: bool = False
+
+
+HTTP_TRANSPORT = GfTransport()
+
+
+def _one_call_browser(filters: FlightSearchFilters, *, headed: bool) -> list[GFlightWithId]:
+    """Rung 2: one real-Chrome navigation of the same URL, read by the same parser.
+
+    No retry ladder around it. Rung 2 costs a browser launch and up to a 30 s
+    navigation, and a refusal it hits is terminal — re-driving Chrome through
+    rung 1's backoff would spend ~22 s more to be told the same thing.
+
+    Imported through the module, not `from ._gf_browser import session`: the
+    attribute is looked up per call, which is what lets a test substitute the
+    session without a browser anywhere in the process."""
+    from . import _gf_browser  # noqa: PLC0415 — patchright is optional; keep it off the http path
+
+    fetch = _gf_browser.session(headed=headed).get_html(search_page_url(filters))
+    return _rows_from_page_html(
+        fetch.html, final_url=fetch.final_url, status_code=fetch.status_code
+    )
+
+
+def _one_call_laddered(filters: FlightSearchFilters, transport: GfTransport) -> list[GFlightWithId]:
+    """One leg on the rung `transport` asks for.
+
+    The single place that knows which rungs exist, so `search_with_ids` — and
+    the recursion that drives a round trip's return legs — never has to."""
+    if transport.mode == TRANSPORT_BROWSER:
+        return _one_call_browser(filters, headed=transport.headed)
+    return _one_call_with_retry(filters)
+
+
 def search_with_ids(
     filters: FlightSearchFilters,
     *,
     top_n: int = 5,
+    transport: GfTransport = HTTP_TRANSPORT,
 ) -> list[GFlightWithId | tuple[GFlightWithId, ...]] | None:
     """Drop-in for fli's `SearchFlights().search()` but each result carries
     its Google Flights opaque flight_id.
 
     Round-trip / multi-city follow the same iterative leg-selection pattern
     as fli: query first leg, pick top_n, drive each through the rest. Each
-    `GFlightWithId` in a returned tuple has its own per-leg flight_id."""
-    first = _one_call_with_retry(filters)
+    `GFlightWithId` in a returned tuple has its own per-leg flight_id.
+
+    `transport` rides the recursion so every leg of one trip runs on the same
+    rung — a round trip that opened Chrome for its outbound must not silently
+    drop back to curl_cffi for the returns."""
+    first = _one_call_laddered(filters, transport)
     if not first:
         return None
 
@@ -730,7 +795,7 @@ def search_with_ids(
     for picked in first[:top_n]:
         next_filters = deepcopy(filters)
         next_filters.flight_segments[selected_count].selected_flight = picked.flight
-        nxt = search_with_ids(next_filters, top_n=top_n)
+        nxt = search_with_ids(next_filters, top_n=top_n, transport=transport)
         if nxt is None:
             continue
         for nx in nxt:

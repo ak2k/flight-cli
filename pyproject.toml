@@ -36,6 +36,10 @@ dependencies = [
 # pulls the real Chrome binary (~150MB) and is only needed for the headed
 # login path, so it's not auto-installed.
 browser-login = ["patchright>=1.59"]
+# Same package, different reason: `--gf-transport browser` drives a real Chrome
+# through Google Flights' search page when the curl_cffi rung is rate-limited.
+# Kept as its own extra so the name says which feature you're installing for.
+browser = ["patchright>=1.59"]
 
 [dependency-groups]
 dev = [
@@ -143,6 +147,7 @@ markers = [
     # Pre-declare custom markers here; `--strict-markers` rejects undeclared ones.
     # "slow: marks tests as slow (deselect with -m 'not slow')",
     # "integration: requires external services",
+    "gf_browser: drives the GF browser rung's launcher seam with a fake; opts out of the conftest guard that fails any other test reaching it",
 ]
 
 # --- coverage ---
