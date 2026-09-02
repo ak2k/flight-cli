@@ -114,8 +114,12 @@ bd id, not a cause — and then waits for Matrix. The note can only promise to
 wait, not to deliver: it is printed while the Matrix request is still in flight,
 and Matrix can still fail after it. **`--fast` never exits 0 without a grid.**
 Every no-grid outcome — gate, throttle, an empty grid, or anything reaching the
-broad except — prints "No Google Flights grid; drop --fast for Matrix." once and
-exits 1. While the gate stands, a bad airport or date is one of the gate's own
+broad except — prints "No Google Flights grid; drop --fast for Matrix." once, on
+**stderr**, and exits 1. Every `--fast` refusal goes that way, the up-front ones
+and this one alike, so stdout under `--fast` carries a grid or nothing and a
+caller never has to parse the stream to learn which it got. The weave's note is
+the exception that proves it: that one is on stdout because a Matrix calendar
+follows it there. While the gate stands, a bad airport or date is one of the gate's own
 exits rather than the broad except's, so what the user reads is the standing
 reason; the broad except keeps the same exit code for whatever a live transport
 throws once the gate flips. When the grid branch does not apply at all (JSON

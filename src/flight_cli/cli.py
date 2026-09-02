@@ -3054,11 +3054,16 @@ def calendar(
         # or date landing in the broad except — has to leave the same way, or a
         # wrapper doing `--fast || fallback` reads success where it should read
         # failure.
+        #
+        # All of it on stderr, like the up-front refusals in `_grid_branch_blocker`:
+        # a `--fast` run leaves stdout carrying a grid or nothing at all, so a
+        # caller can read the stream without first parsing it to find out whether
+        # this was an answer or an explanation.
         except GfThrottledError:
-            console.print("[dim]Google Flights rate-limited; no grid to show.[/]")
+            err.print("[dim]Google Flights rate-limited; no grid to show.[/]")
         except GfGridUnavailableError:
             # Ahead of the broad except, as in the weave.
-            console.print(f"[dim]{_GF_GRID_UNAVAILABLE_NOTE}[/]")
+            err.print(f"[dim]{_GF_GRID_UNAVAILABLE_NOTE}[/]")
         except Exception as e:  # noqa: BLE001 — GF is the optional fast layer; Matrix still runs
             err.print(f"[yellow]Google Flights date-grid failed:[/] {escape(str(e))}")
         if grid:
@@ -3067,7 +3072,7 @@ def calendar(
         else:
             # `--fast` means the GF grid alone in ~1s; quietly running the ~45s
             # Matrix calendar instead would change what the flag means.
-            console.print("[yellow]No Google Flights grid; drop --fast for Matrix.[/]")
+            err.print("[yellow]No Google Flights grid; drop --fast for Matrix.[/]")
             raise typer.Exit(1)
         return
 

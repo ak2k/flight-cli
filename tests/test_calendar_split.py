@@ -480,8 +480,10 @@ def test_calendar_enriched_paints_grid_before_matrix(monkeypatch: Any) -> None:
 
 # ──────────── GF date-grid RPC gate: honest degrade (work-h70kv.5) ──────────
 # GetCalendarGraph returns no rows to a plain HTTP client, so `date_grid` raises
-# GfGridUnavailableError. The weave must say so once and still paint Matrix;
-# `--fast` has no Matrix to fall back to, so it says so and exits non-zero.
+# GfGridUnavailableError. The weave must say so once and still paint Matrix, on
+# stdout, where its Matrix calendar follows. `--fast` has no Matrix to fall back
+# to, so it says so on STDERR and exits non-zero: stdout under `--fast` carries a
+# grid or nothing, the same contract the up-front refusals keep.
 
 
 def _flat(s: str) -> str:
@@ -582,12 +584,14 @@ def test_calendar_fast_grid_unavailable_notes_and_exits_one(
     calls = _spy_renderers(monkeypatch)
     with pytest.raises(typer.Exit) as excinfo:
         _calendar_fast()
-    out = _flat(capsys.readouterr().out)
+    cap = capsys.readouterr()
+    err_out = _flat(cap.err)
     assert excinfo.value.exit_code == 1  # --fast had nothing to serve
     assert calls["grid"] == 0
     assert calls["calendar"] == 0  # --fast never silently runs the ~45s Matrix calendar
-    assert out.count("price grid unavailable") == 1
-    assert "drop --fast for Matrix" in out
+    assert err_out.count("price grid unavailable") == 1
+    assert "drop --fast for Matrix" in err_out
+    assert cap.out == ""  # a --fast run leaves stdout a grid or nothing
 
 
 def test_calendar_fast_throttled_exits_one(
@@ -603,11 +607,13 @@ def test_calendar_fast_throttled_exits_one(
     calls = _spy_renderers(monkeypatch)
     with pytest.raises(typer.Exit) as excinfo:
         _calendar_fast()
-    out = _flat(capsys.readouterr().out)
+    cap = capsys.readouterr()
+    err_out = _flat(cap.err)
     assert excinfo.value.exit_code == 1
     assert calls["grid"] == 0
-    assert "rate-limited; no grid to show." in out
-    assert out.count("drop --fast for Matrix") == 1  # said once, by the single exit
+    assert "rate-limited; no grid to show." in err_out
+    assert err_out.count("drop --fast for Matrix") == 1  # said once, by the single exit
+    assert cap.out == ""
 
 
 @pytest.mark.parametrize("origin", ["NYC", "ZZZ"])
@@ -627,11 +633,12 @@ def test_calendar_fast_unresolvable_origin_gets_the_gate_note(
     cap = capsys.readouterr()
     assert excinfo.value.exit_code == 1  # no grid is still no grid
     assert calls["grid"] == 0
-    assert "no attribute" not in _flat(cap.err)  # not an AttributeError in prose
-    assert "date-grid failed" not in _flat(cap.err)
-    out = _flat(cap.out)
-    assert out.count("price grid unavailable") == 1
-    assert "drop --fast for Matrix" in out
+    err_out = _flat(cap.err)
+    assert "no attribute" not in err_out  # not an AttributeError in prose
+    assert "date-grid failed" not in err_out
+    assert err_out.count("price grid unavailable") == 1
+    assert "drop --fast for Matrix" in err_out
+    assert cap.out == ""
 
 
 def test_calendar_fast_unexpected_grid_error_exits_one(
@@ -650,9 +657,11 @@ def test_calendar_fast_unexpected_grid_error_exits_one(
     cap = capsys.readouterr()
     assert excinfo.value.exit_code == 1
     assert calls["grid"] == 0
-    assert "date-grid failed" in _flat(cap.err)  # the reason, on stderr
-    assert "connection reset by peer" in _flat(cap.err)
-    assert "drop --fast for Matrix" in _flat(cap.out)  # the outcome, on stdout
+    err_out = _flat(cap.err)
+    assert "date-grid failed" in err_out  # the reason
+    assert "connection reset by peer" in err_out
+    assert "drop --fast for Matrix" in err_out  # and the outcome, on the same stream
+    assert cap.out == ""
 
 
 def test_calendar_fast_empty_grid_exits_one(
@@ -670,11 +679,12 @@ def test_calendar_fast_empty_grid_exits_one(
     calls = _spy_renderers(monkeypatch)
     with pytest.raises(typer.Exit) as excinfo:
         _calendar_fast()
-    out = _flat(capsys.readouterr().out)
+    cap = capsys.readouterr()
     assert excinfo.value.exit_code == 1
     assert calls["grid"] == 0  # nothing to paint
     assert calls["calendar"] == 0
-    assert out.count("drop --fast for Matrix") == 1
+    assert _flat(cap.err).count("drop --fast for Matrix") == 1
+    assert cap.out == ""
 
 
 # ──────────── one-way calendars have no trip length to render ───────────────
