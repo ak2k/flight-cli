@@ -116,9 +116,10 @@ shared so the two sites can't drift): the routing-language `MAXSTOPS 3` through
   catches that and re-raises 429 as a throttle. Anything else re-raises.
 - `GfConsentError` — no `ds:1` *and* consent markers, checked in that order,
   because a real results page links to the consent domain in its footer.
-- `GfPageShapeError` — no readable `ds:1`; or `ds:1` decoded but held no
-  row-shaped block at EITHER `[2]` or `[3]`; or rows present and none parsed
-  (with sampled reasons).
+- `GfPageShapeError` — no readable `ds:1`; or a payload too short to reach
+  `[3]`; or a value at `[2]`/`[3]` that is neither absent nor row-shaped; or
+  rows found outside `[2]`/`[3]` with none served; or rows present and none
+  parsed (with sampled reasons).
 
 A page that decodes with zero rows returns `[]` and is Google's authoritative
 answer, so the search path passes `retry_empty=False` and spends exactly one GET
@@ -148,27 +149,50 @@ block must not read as a refusal if Google starts sending one.
 
 So the guard is a POSITIVE scan rather than a count. `_rows_from_ds1` collects
 rows from `[2]`/`[3]` structurally, and separately probes every OTHER top-level
-index for a block whose first element actually parses as a flight row:
+index for a block whose leading rows actually parse as flight rows:
 
 - rows only at `[2]`/`[3]` → those rows (however many blocks carried them)
 - nothing row-shaped anywhere → `[]`, an authoritative empty
-- rows found outside `[2]`/`[3]` → `GfPageShapeError`, a real relocation
+- rows found outside `[2]`/`[3]` and **none served** → `GfPageShapeError`
+- rows found outside `[2]`/`[3]` **plus a served board** → the served rows, and
+  a `log.warning` naming the indices
+- a payload too short to reach `[3]`, or a value at `[2]`/`[3]` that is neither
+  absent nor row-shaped → `GfPageShapeError`
+
+That last case is not pedantry. Enumerating a list never visits an index that
+isn't there, so a truncated or junk `ds:1` (`[]`, `[null]`) would otherwise fall
+straight through the scan and be served to the user as "no flights on this
+route" at exit 0.
 
 The two probes differ on purpose. Away from `[2]`/`[3]` the test must PARSE a
 row, because `ds:1` carries other list-of-list-of-list structures on every page
-(indices 1, 7, 14 and 17 among them) and a nesting-depth test would report a
-relocation on every ordinary page. At `[2]`/`[3]` the test must NOT require a
-parse, or a block whose rows have all changed shape would drop to an empty board
-instead of reaching the 0-of-N parse guard below, which is what catches a moved
-ROW layout.
+(indices 1, 6, 7, 11, 14, 17, 25, 26 and 30 across the three captures) and a
+nesting-depth test would report a relocation on every ordinary page. It reads
+down to three rows rather than only the first, because one malformed row at the
+head of a genuinely relocated block is exactly what a shape change looks like.
+At `[2]`/`[3]` the test must NOT require a parse, or a block whose rows have all
+changed shape would drop to an empty board instead of reaching the 0-of-N parse
+guard below, which is what catches a moved ROW layout. Both share one tuple of
+"this did not decode" exception types (`_ROW_PARSE_ERRORS`), so a widening —
+`OverflowError` from an absurd price, `TypeError` from a null legs field — can't
+land in one and miss the other.
 
 **What this does not detect, stated plainly:** a partial relocation — rows
-leaving `[2]` while `[3]` still parses — yields a short board and nothing
-notices. There is no signal for it: one block is an ordinary served shape (the
-business pinned return), so a missing block cannot be told from a board that
-never had one. An earlier revision refused single-block pages to catch this and
-broke every round-trip instead. Under-returning silently is the accepted cost;
-the alternative measured worse.
+leaving `[2]` while `[3]` still parses — yields a short board. There is no
+signal that proves it: one block is an ordinary served shape (the business
+pinned return), so a missing block cannot be told from a board that never had
+one. An earlier revision refused single-block pages to catch this and broke
+every round-trip instead. Under-returning is the accepted cost; the alternative
+measured worse.
+
+Refusing on the misplaced-block probe alone was the other tempting fix, and it
+is worse for the same reason. Live pages carry 7 to 11 blocks that are
+row-shaped by structure, so a Google row-schema change that makes any ONE of
+them parse would refuse a board we can already serve completely. So a partial
+relocation now under-returns **with a `log.warning` naming the indices** rather
+than refusing: the user keeps their results, and the next maintainer has the
+indices to re-derive from. Only a relocation that leaves nothing at `[2]`/`[3]`
+raises.
 
 ## Tier model: who honors each constraint
 
@@ -191,12 +215,18 @@ single-segment carriers (`LH` without `+`/`*`), country filters, and count
 placeholders escalate the whole routing to Tier 3 — never partially honored.
 
 **The tiers are the DATE GRID's question** — it still POSTs
-`GetCalendarGraph`, so `_gf_dategrid.grid_can_serve` reads them directly, and
-`gf_can_serve` states the same rule: no Tier-3 predicate, and every Tier-2 one
-post-filterable. Native filters are a pure *optimization* there — if an fli
-carrier/airport code doesn't map, that query dimension is skipped (no
+`GetCalendarGraph`, so `_gf_dategrid.grid_can_serve` reads them directly, and it
+is **Tier-1-only**: the grid returns prices per date, not itineraries, so there
+is nothing for a Tier-2 predicate to post-filter and any Tier-2 predicate sends
+the whole calendar to Matrix. Native filters are a pure *optimization* there —
+if an fli carrier/airport code doesn't map, that query dimension is skipped (no
 under-return) and the post-filter (a string-based backstop that also enforces
 marketing-include + connect-at) is the correctness guarantee.
+
+`_gf_postfilter.gf_can_serve` is the looser rule — no Tier-3, but Tier-2 is
+admitted as long as this module can evaluate it — and it has **no production
+caller**: `_pick_backend` asks `page_can_encode` instead. Only its own tests
+reach it. Re-wire it or delete it; don't cite it as the gate.
 
 **The SEARCH gate is `page_can_encode`**, above: strictly narrower, because the
 page's tfs= parameter has no field for most of Tier 1 and the ~30-row board

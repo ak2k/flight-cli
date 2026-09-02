@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, cast, override
 
 import flight_cli._gflight_ids as gfid
 
@@ -59,6 +59,19 @@ class _FakeClient:
 
     def _session(self) -> _FakeSession:
         return self._sessions
+
+
+class _NeverLatched(dict[str, bool]):
+    """A `_cookie_state` that always reads as "not yet persisted".
+
+    The once-per-process latch in `_persist_cookies` is an unsynchronised
+    check-then-set, so under the multi-cabin fan-out two threads can already be
+    inside the write together. Holding the latch open forces that race on every
+    iteration instead of once in eight runs."""
+
+    @override
+    def __getitem__(self, key: str) -> bool:
+        return False
 
 
 def _reset(monkeypatch: pytest.MonkeyPatch, cache_dir: Path) -> None:
@@ -151,6 +164,53 @@ def test_persist_runs_only_once_per_process(
     gfid._persist_cookies(warm)  # one write per process
     payload = json.loads((tmp_path / "gflight-cookies.json").read_text())
     assert payload["cookies"][0]["value"] == "v1"
+
+
+def test_concurrent_persists_never_leave_a_partial_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A reader that catches another thread mid-write gets a truncated file, and
+    the seeder's own latch is already set by then — so that thread stays cold
+    for the rest of the process. Rename-into-place is what removes the window."""
+    _reset(monkeypatch, tmp_path)
+    monkeypatch.setattr(gfid, "_cookie_state", _NeverLatched())
+    path = tmp_path / "gflight-cookies.json"
+    writers_done = threading.Event()
+    torn: list[str] = []
+
+    def write(tag: str) -> None:
+        for i in range(50):
+            # A value long enough that a partial write is visibly short.
+            cookie = _JarCookie("NID", f"{tag}{i:03d}" * 40, ".google.com")
+            gfid._persist_cookies(_FakeClient([cookie]))
+
+    def read() -> None:
+        while not writers_done.is_set():
+            try:
+                text = path.read_text()
+            except OSError:
+                continue
+            try:
+                payload = cast("dict[str, Any]", json.loads(text))
+            except ValueError:
+                torn.append(text[-60:])
+                continue
+            if payload["cookies"][0]["name"] != "NID":
+                torn.append(text[-60:])
+
+    reader = threading.Thread(target=read)
+    reader.start()
+    writers = [threading.Thread(target=write, args=(tag,)) for tag in ("a", "b")]
+    for th in writers:
+        th.start()
+    for th in writers:
+        th.join()
+    writers_done.set()
+    reader.join()
+
+    assert not torn, f"a reader saw {len(torn)} partial cookie caches, e.g. {torn[:2]}"
+    assert json.loads(path.read_text())["cookies"][0]["name"] == "NID"
+    assert list(tmp_path.glob("*.tmp")) == [], "scratch files outlived the write"
 
 
 def test_seed_ignores_corrupt_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

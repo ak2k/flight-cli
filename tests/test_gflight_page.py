@@ -8,17 +8,26 @@ captcha interstitial, a consent wall, a re-shaped page — renders as zero rows,
 so the load-bearing behavior under test is that none of them can reach the user
 as "no flights on this route".
 
-Fixtures are real captures (2026-09-02) trimmed to three rows with the session
-id scrubbed — the top-level arity and the row blocks are kept, and the ~3.5 MB
-of UI copy and airport metadata no code reads is dropped. Two page shapes are
-pinned because Google serves both: an initial JFK-LAX search (a row block at
-`[2]` AND `[3]`) and a pinned return leg (`[2] = None`, the whole board at
-`[3]`).
+FIXTURE POLICY: **scrub secrets, not structure.** Fixtures are real captures
+(2026-09-02) trimmed to three rows with the top-level session id at `[0][4]`
+replaced; nothing else is nulled or reshaped. Most of these were additionally
+slimmed by dropping the metadata blocks no code reads, which is safe for what
+they pin but makes them useless for the misplaced-block scan — with indices
+1-31 all `None`, `misplaced == ()` holds no matter what the scan does.
+`ds1_metadata_blocks_kept.json` is the counterweight: a whole capture, all 31
+indices intact including the nine blocks that are row-shaped by structure, at
+39 KB. Slim a new fixture only if you know which invariant it is for.
+
+Two page shapes are pinned because Google serves both: an initial JFK-LAX search
+(a row block at `[2]` AND `[3]`) and a pinned return leg (`[2] = None`, the
+whole board at `[3]`).
 """
 
 from __future__ import annotations
 
+import copy
 import json
+import logging
 import pathlib
 import threading
 from typing import Any, ClassVar, cast
@@ -310,14 +319,83 @@ def test_metadata_blocks_are_not_mistaken_for_relocated_rows() -> None:
     assert not gfid._holds_flight_rows([["metadata", "strings"]])
 
 
-def test_a_block_that_is_not_a_row_list_is_not_a_board(client: Any) -> None:
-    """Junk at both indices is neither rows nor a relocation — nothing
-    row-shaped exists anywhere, so it reads as an empty board."""
+# The nine indices this capture serves that ARE row-shaped by structure — the
+# whole reason the probe has to parse. Asserted first so a future re-trim that
+# strips them fails loudly here instead of quietly making the test below pass
+# for no reason.
+_METADATA_DECOYS = (1, 6, 7, 11, 14, 17, 25, 26, 30)
+
+
+def test_a_capture_with_every_metadata_block_intact_reports_no_relocation(client: Any) -> None:
+    """The fixture the other ds1_*.json files can't be: a whole 31-index page,
+    nothing nulled. On the slimmed fixtures `misplaced == ()` is true however
+    the scan behaves, because there is nothing left to mistake for rows."""
+    payload = json.loads(_ds1("ds1_metadata_blocks_kept.json"))
+    decoys = tuple(
+        i
+        for i, block in enumerate(payload)
+        if i not in gfid._DS_ROW_BLOCKS and gfid._looks_like_a_row_block(block)
+    )
+    assert decoys == _METADATA_DECOYS, "fixture was re-trimmed; it no longer pins anything"
+    board = gfid._rows_from_ds1(payload)
+    assert board.misplaced == ()
+    assert board.blocks_seen == 2
+    assert len(board.rows) == 3
+    fake = client(_FakeResponse(text=_page(_ds1("ds1_metadata_blocks_kept.json"))))
+    out = gfid._one_call(_FILTERS)
+    assert len(out) == 3
+    assert all(g.flight_id for g in out)
+    assert len(fake.gets) == 1
+
+
+def test_a_block_that_is_not_a_row_list_is_a_shape_change(client: Any) -> None:
+    """Junk at the indices we read is a value Google has never served. Reading
+    it as an empty board would report "no flights on this route" for a page we
+    simply can no longer parse."""
     payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
     payload[2] = ["not-a-row-block"]
     payload[3] = ["nor-this"]
     client(_FakeResponse(text=_page(json.dumps(payload))))
+    with pytest.raises(GfPageShapeError, match=r"ds:1\[2\] holds list"):
+        gfid._one_call(_FILTERS)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param("[]", id="nothing-at-all"),
+        pytest.param("[null]", id="one-entry"),
+        pytest.param("[null,null,null]", id="one-short-of-3"),
+        pytest.param('[null,null,null,["x"]]', id="list-of-strings-at-3"),
+        pytest.param('[0,0,"junk",[[]]]', id="bare-string-at-2"),
+        pytest.param('[0,0,{"a":1},[[]]]', id="object-at-2"),
+        pytest.param("[0,0,7,[[]]]", id="int-at-2"),
+    ],
+)
+def test_a_truncated_or_junk_payload_is_a_shape_change(client: Any, payload: str) -> None:
+    """Iterating a list never visits an index that isn't there, so without an
+    arity check the first three of these decode, skip the scan entirely and
+    reach the user as an authoritative "no flights" at exit 0."""
+    client(_FakeResponse(text=_page(payload)))
+    with pytest.raises(GfPageShapeError):
+        gfid._one_call(_FILTERS)
+
+
+def test_the_shortest_payload_that_can_hold_a_board_is_read_not_refused(client: Any) -> None:
+    """The boundary the arity check sits on: at arity 4 index [3] exists, so an
+    absent board there is Google's answer rather than a truncation."""
+    client(_FakeResponse(text=_page("[0,0,null,null]")))
     assert gfid._one_call(_FILTERS) == []
+
+
+def test_an_absent_board_records_the_types_it_saw(client: Any, caplog: Any) -> None:
+    """An absent board and a board we failed to recognise look identical from
+    the outside, so the types at the two indices are the only thing a later
+    reader has to tell them apart with."""
+    client(_FakeResponse(text=_page(_ds1("ds1_flightless_board.json"))))
+    with caplog.at_level(logging.DEBUG, logger="flight_cli._gflight_ids"):
+        assert gfid._one_call(_FILTERS) == []
+    assert "carried no row block at [2, 3] (types ['NoneType', 'NoneType'])" in caplog.text
 
 
 def test_relocated_row_blocks_raise_page_shape(client: Any) -> None:
@@ -326,6 +404,71 @@ def test_relocated_row_blocks_raise_page_shape(client: Any) -> None:
     client(_FakeResponse(text=_page(_ds1("ds1_blocks_relocated.json"))))
     with pytest.raises(GfPageShapeError, match=r"holds flight rows at \[4, 5\]"):
         gfid._one_call(_FILTERS)
+
+
+def test_a_bad_leading_row_does_not_hide_a_relocation(client: Any) -> None:
+    """One unparseable row at the head of a moved block is exactly what a shape
+    change looks like, so a probe that reads only the first row answers "not
+    rows" on the very payloads it exists to catch."""
+    payload = json.loads(_ds1("ds1_blocks_relocated.json"))
+    for index in (4, 5):
+        payload[index][0].insert(0, ["not-a-row"])
+    client(_FakeResponse(text=_page(json.dumps(payload))))
+    with pytest.raises(GfPageShapeError, match=r"holds flight rows at \[4, 5\]"):
+        gfid._one_call(_FILTERS)
+
+
+def test_a_served_board_with_row_shaped_blocks_elsewhere_is_served_with_a_warning(
+    client: Any, caplog: Any
+) -> None:
+    """Live pages carry 7-11 blocks that are row-shaped by structure, so
+    refusing whenever one of them happens to parse would throw away a board we
+    answered completely. The warning is what keeps it findable."""
+    payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
+    payload[5] = copy.deepcopy(payload[2])
+    client(_FakeResponse(text=_page(json.dumps(payload))))
+    with caplog.at_level(logging.WARNING, logger="flight_cli._gflight_ids"):
+        out = gfid._one_call(_FILTERS)
+    assert len(out) == 3
+    assert "carried row-shaped blocks outside [2, 3] at [5]; served 3 rows" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "raised"),
+    [
+        pytest.param([0, 2, 0, 20], [10**100, 1, 1], OverflowError, id="year-past-a-c-long"),
+        pytest.param([0, 2], None, TypeError, id="null-legs-field"),
+    ],
+)
+def test_a_row_the_decoder_cannot_survive_is_typed_not_a_traceback(
+    client: Any, field: list[int], value: Any, raised: type[Exception]
+) -> None:
+    """The row decoder reaches into untrusted remote data, and neither of these
+    is an exception the original guard listed. A traceback here is the same
+    outcome as a crash — the query dies and the user gets no typed refusal."""
+    payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
+    for row in payload[2][0] + payload[3][0]:
+        target = row
+        for key in field[:-1]:
+            target = target[key]
+        target[field[-1]] = value
+    with pytest.raises(raised):
+        gfid._parse_flight_with_id(payload[2][0][0])  # the edit really does raise it
+    client(_FakeResponse(text=_page(json.dumps(payload))))
+    with pytest.raises(GfPageShapeError, match="none of 3 Google Flights rows parsed"):
+        gfid._one_call(_FILTERS)
+
+
+def test_the_probe_survives_the_same_rows_away_from_the_board(client: Any) -> None:
+    """Same rows, parked at an index the probe scans rather than at [2]/[3].
+    The probe feeds arbitrary metadata to the row decoder on every page, so it
+    must classify a row it cannot decode, never propagate the failure."""
+    payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
+    payload[5] = copy.deepcopy(payload[2])
+    payload[5][0][0][0][2][0][20] = [10**100, 1, 1]
+    assert gfid._holds_flight_rows(payload[5]) is False
+    client(_FakeResponse(text=_page(json.dumps(payload))))
+    assert len(gfid._one_call(_FILTERS)) == 3
 
 
 def test_brace_in_a_row_string_does_not_truncate_the_blob(client: Any) -> None:

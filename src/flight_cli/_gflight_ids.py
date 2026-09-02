@@ -25,6 +25,7 @@ back-fill, so a top-N above that returns fewer rows than asked for.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -152,6 +153,24 @@ _DS_FLIGHTS_KEY = "ds:1"
 # that order so the page's ranking survives — we can't reproduce it.
 _DS_ROW_BLOCKS = (2, 3)
 _SHAPE_ERROR_SAMPLE_REASONS = 3
+# What "this data is not a decodable flight row" means, in ONE place. The probe
+# and the row loop must agree: a decode failure the probe swallowed but the row
+# loop still crashed on would read as "no rows anywhere" on one page and a raw
+# traceback on the next. OverflowError (an int too large to convert, e.g. a
+# price block holding 10**100) and TypeError (a null where a sequence is
+# indexed) are here because live payloads produce both.
+_ROW_PARSE_ERRORS = (
+    AttributeError,
+    KeyError,
+    ValueError,
+    IndexError,
+    TypeError,
+    OverflowError,
+)
+# How many rows of a candidate block to try before calling it "not rows". One
+# malformed row at the head of a genuinely relocated block would otherwise hide
+# the whole relocation.
+_ROW_PROBE_DEPTH = 3
 
 
 def _extract_ds1(html: str) -> list[Any] | None:
@@ -590,12 +609,22 @@ def _persist_cookies(client: Any) -> None:
     if not cookies:
         return
     path = _cookie_path()
+    # The multi-cabin fan-out runs several threads through here, and the
+    # once-per-process latch above is an unsynchronised check-then-set, so two
+    # of them can reach this write. Rename-into-place is what keeps that
+    # harmless: a reader either sees the previous whole file or the new whole
+    # file, never the bytes in between. The temp name carries pid and thread id
+    # so two writers cannot share a scratch file either.
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"saved_at": time.time(), "cookies": cookies}, indent=2))
+        tmp.write_text(json.dumps({"saved_at": time.time(), "cookies": cookies}, indent=2))
+        tmp.replace(path)  # os.replace under the hood: one atomic rename
         _cookie_state["persisted"] = True
     except OSError as e:
         log.debug("could not persist gflight cookies: %s", e)
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
 
 
 class _Ds1Board(NamedTuple):
@@ -619,22 +648,26 @@ def _looks_like_a_row_block(block: Any) -> bool:
 
 
 def _holds_flight_rows(block: Any) -> bool:
-    """Strict test: does `block`'s first element PARSE as a flight row?
+    """Strict test: does any of `block`'s leading rows PARSE as a flight row?
 
     Used only away from those indices, to spot rows that moved. `ds:1` carries
     several other list-of-list-of-list structures — on every page measured,
-    indices 1, 7, 14 and 17 among them — so the structural test above would
-    call those relocated rows and refuse every ordinary page."""
+    indices 1, 7, 11, 14, 17, 25, 26 and 30 among them — so the structural test
+    above would call those relocated rows and refuse every ordinary page.
+
+    Reads down to `_ROW_PROBE_DEPTH` rows rather than only the first: one
+    unparseable row at the head is exactly what a shape change looks like, so
+    stopping there would let a real relocation pass as metadata."""
     if not _looks_like_a_row_block(block):
         return False
     inner = cast("list[Any]", cast("list[Any]", block)[0])
-    if not inner:
-        return False
-    try:
-        _parse_flight_with_id(inner[0])
-    except (AttributeError, KeyError, ValueError, IndexError, TypeError):
-        return False
-    return True
+    for row in inner[:_ROW_PROBE_DEPTH]:
+        try:
+            _parse_flight_with_id(row)
+        except _ROW_PARSE_ERRORS:
+            continue
+        return True
+    return False
 
 
 def _rows_from_ds1(payload: list[Any]) -> _Ds1Board:
@@ -647,15 +680,34 @@ def _rows_from_ds1(payload: list[Any]) -> _Ds1Board:
     nothing at either index. The only layout change the payload can actually
     prove is rows appearing somewhere we don't read, so the scan is positive:
     collect from the indices we read, and probe every other index for rows that
-    moved. The two use different tests, on purpose — see each."""
+    moved. The two use different tests, on purpose — see each.
+
+    Raises GfPageShapeError when the payload cannot hold a board at all: too
+    short to reach `[3]`, or carrying something at `[2]`/`[3]` that is neither
+    absent nor row-shaped. Enumeration alone never visits a missing index, so
+    without the arity check a truncated payload reads as a served empty board."""
+    if len(payload) <= max(_DS_ROW_BLOCKS):
+        raise GfPageShapeError(
+            f"ds:1 decoded to {len(payload)} top-level entries, too few to hold a "
+            f"board at {list(_DS_ROW_BLOCKS)}; the payload layout changed"
+        )
     rows: list[Any] = []
     blocks_seen = 0
     misplaced: list[int] = []
     for index, block in enumerate(payload):
         if index in _DS_ROW_BLOCKS:
-            if _looks_like_a_row_block(block):
-                blocks_seen += 1
-                rows.extend(cast("list[Any]", cast("list[Any]", block)[0]))
+            # `None` is Google's own "no board here" (a flight-less search, or a
+            # pinned leg that serves everything at `[3]`). Anything else that
+            # isn't row-shaped is a value we've never been served and can't read.
+            if block is None:
+                continue
+            if not _looks_like_a_row_block(block):
+                raise GfPageShapeError(
+                    f"ds:1[{index}] holds {type(block).__name__}, not a row block "
+                    "and not absent; the payload layout changed"
+                )
+            blocks_seen += 1
+            rows.extend(cast("list[Any]", cast("list[Any]", block)[0]))
         elif _holds_flight_rows(block):
             misplaced.append(index)
     return _Ds1Board(rows, blocks_seen, tuple(misplaced))
@@ -696,24 +748,44 @@ def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
     # (NID) so the next one-shot CLI process starts warm instead of cold.
     _persist_cookies(client)
     board = _rows_from_ds1(payload)
-    if board.misplaced:
-        # Rows exist, just not where we read them. This is the one layout
-        # change the payload can actually prove; an absent board cannot be told
-        # apart from a flight-less one.
+    if board.misplaced and not board.rows:
+        # Rows exist, just not where we read them, and we served none. This is
+        # the one layout change the payload can actually prove; an absent board
+        # cannot be told apart from a flight-less one.
         raise GfPageShapeError(
             f"ds:1 holds flight rows at {list(board.misplaced)}, not at "
             f"{list(_DS_ROW_BLOCKS)} (found {board.blocks_seen} there); "
             "the payload layout changed"
         )
+    if board.misplaced:
+        # A served board plus something row-shaped elsewhere. Live pages carry
+        # 7-11 candidate blocks each, so refusing here would fail a query we can
+        # already answer; the log is what makes a real partial relocation
+        # findable without costing the user their results.
+        log.warning(
+            "ds:1 carried row-shaped blocks outside %s at %s; served %d rows",
+            list(_DS_ROW_BLOCKS),
+            list(board.misplaced),
+            len(board.rows),
+        )
     rows = board.rows
     if not rows:
+        if not board.blocks_seen:
+            # No block at either index. Indistinguishable from a genuinely
+            # flight-less board, so it is served as an empty — the types are the
+            # only thing left to re-derive the layout from if it was not one.
+            log.debug(
+                "ds:1 carried no row block at %s (types %s); reading the board as empty",
+                list(_DS_ROW_BLOCKS),
+                [type(payload[i]).__name__ for i in _DS_ROW_BLOCKS],
+            )
         return []  # Google's own answer: this leg has no flights.
     out: list[GFlightWithId] = []
     reasons: list[str] = []
     for fd in rows:
         try:
             out.append(_parse_flight_with_id(fd))
-        except (AttributeError, KeyError, ValueError, IndexError) as e:
+        except _ROW_PARSE_ERRORS as e:
             log.debug("skipping flight with unparseable data: %s", e)
             reasons.append(f"{type(e).__name__}: {e}")
             continue
