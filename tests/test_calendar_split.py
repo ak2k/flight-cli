@@ -9,13 +9,16 @@ so a multi-airport calendar is queried one destination at a time (groupable via
 from __future__ import annotations
 
 import ast
+import io
 import json
+import re
 from datetime import date
 from pathlib import Path
 from typing import Any, ClassVar, override
 
 import pytest
 import typer
+from rich.console import Console
 
 from flight_cli import cli
 from flight_cli._calendar_split import (
@@ -965,8 +968,9 @@ def test_calendar_one_way_note_survives_json_output(
         # is matched against digits rather than handed to `int()` to be lenient.
         ("5-\x1c7", "use nights as"),
         ("5\x1d-7", "use nights as"),
-        # `\Z`, not `$`: `$` matches before one trailing newline, so `5-7\n` read
-        # as the default range — and a pipeline hands over exactly that.
+        # A bound is digits and nothing else, line endings included: `\Z` anchors
+        # where `$` would match before a trailing newline, which is exactly what a
+        # pipeline hands over.
         ("5-7\n", "use nights as"),
         ("5-7\r", "use nights as"),
         ("5\n-7", "use nights as"),
@@ -1124,6 +1128,71 @@ def test_parse_errors_truncate_an_oversized_value(
     assert len(shown) <= cli._MAX_ECHOED_VALUE + 1  # pyright: ignore[reportPrivateUsage] — as above
 
 
+# Text from somewhere else — a Matrix message, an exception — is not just markup.
+# ESC and CSI drive the terminal, and `escape` neutralises `[` alone: it leaves an
+# ESC to clear the screen or repaint the line above, and a bidi override to reorder
+# what is left. A redirected stderr keeps every byte for whatever reads it next.
+_DRIVES_THE_TERMINAL = "\x1b[2J\x9b31m\x7f\u202e"
+_READS_AS_TEXT = "café ¥1200 → [/x]"
+# The code points that do the driving, as opposed to the letters they steer.
+# Asserted individually: `[`, `2` and `J` are ordinary text once the ESC is gone,
+# and rich emits its own ESC sequences when it is styling for a terminal.
+_DRIVERS = ("\x1b[2J", "\x1b", "\x9b", "\x7f", "\u202e")
+# Rich's own colour codes, which it interleaves with the text when styling for a
+# terminal — `café ¥1200` comes back in three styled pieces. Only SGR sequences,
+# so a payload's `ESC [ 2J` would survive this and fail the assertion above.
+_SGR = re.compile(r"\x1b\[[0-9;]*m")
+
+
+@pytest.mark.parametrize("force_terminal", [False, True])
+def test_matrix_error_strips_terminal_control_characters(
+    force_terminal: bool, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Redirected or on a terminal, the same bytes are dropped: whether stderr is
+    a tty changes the styling, not what the payload can do to whoever renders it."""
+    message = f"{_READS_AS_TEXT}{_DRIVES_THE_TERMINAL}"
+
+    class _ErrClient(_PricedClient):
+        @override
+        async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
+            _ = (search, cache)
+            raise MatrixApiError(
+                message, kind=f"input{_DRIVES_THE_TERMINAL}", request_id="r\x1b[1m"
+            )
+
+    buffer = io.StringIO()
+    monkeypatch.setattr(cli, "MatrixClient", _ErrClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _fake_grid)
+    monkeypatch.setattr(cli, "err", Console(file=buffer, force_terminal=force_terminal, width=200))
+    _spy_renderers(monkeypatch)
+    _run_enriched()  # a grid was painted, so no Exit — only the report
+    written = buffer.getvalue()
+
+    # Never, on either stream: a clear-screen, an 8-bit CSI, a DEL, a bidi override.
+    for driver in ("\x1b[2J", "\x9b", "\x7f", "\u202e"):
+        assert driver not in written, f"{driver!r} reached the console"
+    if not force_terminal:
+        # Redirected, nothing emits ESC — not rich's styling, and not the payload.
+        assert "\x1b" not in written
+    assert "café ¥1200" in _SGR.sub("", written)  # the readable half survives
+    assert "input" in written and "31m" in written  # kind, and the CSI's inert remains
+    _ = capsys.readouterr()
+
+
+def test_safe_text_keeps_the_sentence_and_drops_the_drivers() -> None:
+    """`_safe_text` is for a sentence someone has to read: no quoting, no cut. The
+    part that explains a failure is as often at the end as at the start."""
+    safe_text = cli._safe_text  # pyright: ignore[reportPrivateUsage] — the helper IS the unit
+    out = safe_text(f"{_READS_AS_TEXT}{_DRIVES_THE_TERMINAL}")
+    for driver in _DRIVERS:
+        assert driver not in out, f"{driver!r} survived"
+    assert "café ¥1200 →" in out
+    assert "\\[/x]" in out  # still escaped, not just stripped
+    assert safe_text("kept\tby\ntab and newline") == "kept\tby\ntab and newline"
+    long_sentence = "why it failed. " * 40
+    assert safe_text(long_sentence) == long_sentence  # never truncated, unlike _quote
+
+
 def test_quote_keeps_a_normal_value_whole() -> None:
     """Truncation is for the pathological case; an ordinary mistyped value is
     short, and cutting it would hide the typo the message exists to show."""
@@ -1265,9 +1334,10 @@ _ESCAPE_OUT_OF_SCOPE = {
     "seatmap": "seatmap command",
 }
 
-# The two ways a value is made safe to print: `escape`, or `_quote`, which
-# truncates for display and then quotes and escapes.
-_SAFE_WRAPPERS = frozenset({"escape", "_quote"})
+# The ways a value is made safe to print: `escape`; `_quote`, which elides and
+# quotes a value the user typed; and `_safe_text`, which strips the control
+# characters `escape` leaves alone in text from somewhere else.
+_SAFE_WRAPPERS = frozenset({"escape", "_quote", "_safe_text"})
 
 # Names that are this module's own — counters it computed, constants it wrote —
 # and so are never user text. Matched by IDENTIFIER, never by source text: an

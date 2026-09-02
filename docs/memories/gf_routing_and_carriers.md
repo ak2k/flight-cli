@@ -176,13 +176,24 @@ so this branch excludes them from the scan by name rather than escaping them
 twice and conflicting at merge. The consolidation unit enrols them afterwards,
 and `_ESCAPE_OUT_OF_SCOPE` is the list of what is left.
 
-The scan reads the source, so a new print in a covered function fails the suite.
-Its polarity is inverted — everything is scanned unless excluded by name — because
-an opt-in list goes stale the moment a print moves into a new helper. It judges
-each argument by AST shape, never by source text: a string comparison reads
-`not_escape(x)` and `shell.escape(x)` as safe. Its allowlist of the module's own
-values is keyed per FUNCTION, since `n` is a fan-out counter in one place and
-could be anything in another.
+`tests/test_calendar_split.py::escape_scan` parses cli.py and walks its AST, so a
+new print in a covered function fails the suite. Its polarity is inverted —
+everything is scanned unless excluded by name — because an opt-in list goes stale
+the moment a print moves into a new helper. It judges each argument by AST shape,
+never by source text: a string comparison reads `not_escape(x)` and
+`shell.escape(x)` as safe. Its allowlist of the module's own values is keyed per
+FUNCTION, since `n` is a fan-out counter in one place and could be anything in
+another. Ten synthetic sources, one per known bypass, keep it honest.
+
+`escape` is not the whole job for text from somewhere else. It neutralises `[`
+and nothing more, so an ESC or an 8-bit CSI inside a Matrix error message still
+clears the screen or repaints the line above it, a DEL rubs out what precedes it,
+and a bidi override reorders the rest — and a redirected stderr keeps every byte
+for whatever reads the file next. `_safe_text` drops those code points (C0 bar
+tab and newline, DEL, C1, the bidi overrides and isolates) and then escapes. It
+neither quotes nor truncates, unlike `_quote`: a remote error is a sentence
+someone has to read whole, and the half that explains the failure is as often at
+the end as at the start.
 
 The argument parsers go through one `_quote` helper: `_elide` cuts a value past 60
 characters, then `repr`, then `escape`. The message exists to show WHICH value was

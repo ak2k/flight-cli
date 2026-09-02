@@ -119,6 +119,30 @@ def main(
 _MAX_ECHOED_VALUE = 60  # characters of a rejected value worth showing back
 
 
+# Characters that drive a terminal rather than appear in it. `escape` neutralises
+# `[` and nothing else, so an ESC or CSI inside remote text still clears the
+# screen, repositions the cursor, or repaints what came before it — and a
+# redirected stderr keeps every byte for whatever reads the file next.
+_CTRL = {
+    **{c: None for c in range(0x20) if c not in (0x09, 0x0A)},  # C0, keeping tab and newline
+    0x7F: None,  # DEL
+    **{c: None for c in range(0x80, 0xA0)},  # C1, including the 8-bit CSI
+    **{c: None for c in range(0x202A, 0x202F)},  # bidi embeddings and overrides
+    **{c: None for c in range(0x2066, 0x206A)},  # bidi isolates
+}
+
+
+def _safe_text(value: object) -> str:
+    """Remote sentence-shaped text, ready for a console: control characters
+    dropped, then markup escaped.
+
+    For text we did not write and the user did not type — a Matrix error message,
+    an exception's `str()`. Neither quoted nor truncated, unlike `_quote`: this is
+    a sentence someone needs to read whole, and the part that explains the failure
+    is as often at the end as the start."""
+    return escape(str(value).translate(_CTRL))
+
+
 def _elide(value: str) -> str:
     """A value cut to `_MAX_ECHOED_VALUE` code points, with an ellipsis if cut.
 
@@ -648,9 +672,9 @@ def _print_matrix_error(e: MatrixApiError) -> None:
     console. Used by the two calendar sites only: `_run`, the multi-cabin fan-out
     and the search path have the same block, and consolidating those means
     editing code another unit is changing right now."""
-    err.print(f"[red]Matrix returned an error ({escape(str(e.kind))}):[/] {escape(str(e.message))}")
+    err.print(f"[red]Matrix returned an error ({_safe_text(e.kind)}):[/] {_safe_text(e.message)}")
     if e.request_id:
-        err.print(f"[dim]request_id: {escape(str(e.request_id))}[/]")
+        err.print(f"[dim]request_id: {_safe_text(e.request_id)}[/]")
 
 
 # Matrix silently UNDER-REPORTS multi-airport calendar grids under compute-budget
@@ -753,7 +777,7 @@ def _report_calendar_matrix_failure(state: dict[str, Any]) -> None:
     if e is not None:
         _print_matrix_error(cast("MatrixApiError", e))
     elif state.get("matrix_unexpected") is not None:
-        err.print(f"[red]Matrix calendar failed:[/] {escape(str(state['matrix_unexpected']))}")
+        err.print(f"[red]Matrix calendar failed:[/] {_safe_text(state['matrix_unexpected'])}")
     else:
         err.print("[yellow]Matrix calendar did not complete.[/]")
 
@@ -846,7 +870,7 @@ def _run_calendar_enriched(
                 console.print(f"[dim]{_GF_GRID_UNAVAILABLE_WEAVE_NOTE}[/]")
             elif "gf_err" in state:
                 err.print(
-                    f"[yellow]Google Flights date-grid failed:[/] {escape(str(state['gf_err']))}"
+                    f"[yellow]Google Flights date-grid failed:[/] {_safe_text(state['gf_err'])}"
                 )
                 console.print("[dim]…awaiting Matrix calendar…[/]")
             else:
@@ -3093,7 +3117,7 @@ def calendar(
             # Ahead of the broad except, as in the weave.
             err.print(f"[dim]{_GF_GRID_UNAVAILABLE_NOTE}[/]")
         except Exception as e:  # noqa: BLE001 — GF is the optional fast layer; Matrix still runs
-            err.print(f"[yellow]Google Flights date-grid failed:[/] {escape(str(e))}")
+            err.print(f"[yellow]Google Flights date-grid failed:[/] {_safe_text(e)}")
         if grid:
             _render_date_grid(grid, origin=origins, destination=dests, sd=sd, ed=ed)
             _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
