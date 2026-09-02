@@ -225,6 +225,27 @@ def test_browser_bytes_and_http_bytes_reach_the_same_rows() -> None:
     assert all(a.legroom_class for r in rows for a in r.amenities)
 
 
+def test_a_flightless_board_through_the_browser_is_an_authoritative_empty() -> None:
+    """Rung 2 must inherit the verdict rung 1 reaches on the same bytes: a board
+    served with no row block at either index is a route with nothing matching,
+    not a layout change. Refusing it would degrade a browser search to Matrix
+    for a question Google already answered."""
+    rows = gfid._rows_from_page_html(
+        gfid.PageFetch(_page("ds1_flightless_board.json"), _PAGE_URL, 200)
+    )
+    assert rows == []
+
+
+def test_relocated_rows_through_the_browser_are_a_shape_refusal() -> None:
+    """The other half of the same inheritance: rows found off `[2]`/`[3]` is the
+    one relocation a payload can prove, and it must refuse on rung 2 too rather
+    than read as an empty board."""
+    with pytest.raises(GfPageShapeError, match="the payload layout changed"):
+        gfid._rows_from_page_html(
+            gfid.PageFetch(_page("ds1_blocks_relocated.json"), _PAGE_URL, 200)
+        )
+
+
 # ───────────────────────────── the ladder ──────────────────────────────────────
 
 
@@ -698,6 +719,7 @@ def test_the_fixture_is_the_shape_the_page_serves() -> None:
     """Guards the helper above: if the fixture stops being a three-row `ds:1`
     payload, every parity assertion here becomes vacuous."""
     payload = json.loads((FIXTURE_DIR / "ds1_jfk_lax_3rows.json").read_text())
-    rows, blocks_seen = gfid._rows_from_ds1(payload)
-    assert len(rows) == 3
-    assert blocks_seen == 2  # both row blocks present, so an empty board would be authoritative
+    board = gfid._rows_from_ds1(payload)
+    assert len(board.rows) == 3
+    assert board.blocks_seen == 2  # both row blocks present, so an empty board is authoritative
+    assert board.misplaced == ()  # no relocated rows, so the parser reaches the rows at all

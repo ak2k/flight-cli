@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import threading
 from typing import Any, ClassVar, cast
 
 import pytest
@@ -93,11 +94,20 @@ class _FakeClient:
         return self.response
 
 
+def _reset_cookie_latches(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    """Point the cookie cache at a temp dir and re-arm BOTH latches.
+
+    Seeding latches per thread, so a test that leaves it set silently disables
+    seeding for every later test in the process."""
+    monkeypatch.setenv("MATRIX_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(gfid, "_cookie_state", {"persisted": False})
+    monkeypatch.setattr(gfid, "_seed_latch", threading.local())
+
+
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> Any:
     """Install a fake GF client and keep cookie seeding off the real cache."""
-    monkeypatch.setenv("MATRIX_CACHE_DIR", str(tmp_path))
-    monkeypatch.setattr(gfid, "_cookie_state", {"seeded": False, "persisted": False})
+    _reset_cookie_latches(monkeypatch, tmp_path)
 
     def _stub_tfs(_filters: Any) -> bytes:
         return b"\x08\x1c"
@@ -123,8 +133,9 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> Any:
 def test_extract_ds1_reads_the_flights_blob_past_other_keys() -> None:
     payload = gfid._extract_ds1(_page(_ds1("ds1_jfk_lax_3rows.json")))
     assert payload is not None
-    rows, blocks_seen = gfid._rows_from_ds1(payload)
+    rows, blocks_seen, misplaced = gfid._rows_from_ds1(payload)
     assert blocks_seen == 2
+    assert misplaced == ()
     assert rows == payload[2][0] + payload[3][0]
     assert len(rows) == 3
 
@@ -142,7 +153,7 @@ def test_rows_keep_the_top_flights_block_first() -> None:
     that order is the only way the page's ordering survives — we can't
     reproduce the blended rank locally."""
     payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
-    rows, _ = gfid._rows_from_ds1(payload)
+    rows = gfid._rows_from_ds1(payload).rows
     assert rows[0] is payload[2][0][0]
     assert rows[1] is payload[3][0][0]
 
@@ -204,8 +215,7 @@ def test_real_fli_client_turns_a_429_into_a_typed_throttle(
     from curl_cffi.requests import exceptions as curl_exc
     from fli.search.client import Client
 
-    monkeypatch.setenv("MATRIX_CACHE_DIR", str(tmp_path))
-    monkeypatch.setattr(gfid, "_cookie_state", {"seeded": False, "persisted": False})
+    _reset_cookie_latches(monkeypatch, tmp_path)
 
     def _stub(_filters: Any) -> bytes:
         return b"\x08\x1c"
@@ -254,11 +264,10 @@ def test_sorry_body_at_the_original_url_raises_throttled(client: Any) -> None:
 
 
 def test_a_pinned_return_leg_page_serves_one_block(client: Any) -> None:
-    """A leg pinned through tfs 3.4 legitimately carries `[2] = None` with the
-    whole board at `[3]` — there is no top-flights ranking to show for a board
-    answering an already-chosen outbound. Captured live 2026-09-02 from the
-    HNL-MIA round-trip expansion; requiring both blocks refused it as a shape
-    change and cost the user a real result."""
+    """A served page may omit `[2]` and carry its whole board at `[3]`.
+
+    Captured live 2026-09-02 from an HNL-MIA round-trip expansion. One row
+    block is an ordinary served page, not a shape change."""
     payload = json.loads(_ds1("ds1_return_leg_pinned.json"))
     assert payload[2] is None, "fixture must keep the served shape"
     fake = client(_FakeResponse(text=_page(_ds1("ds1_return_leg_pinned.json"))))
@@ -268,32 +277,54 @@ def test_a_pinned_return_leg_page_serves_one_block(client: Any) -> None:
     assert len(fake.gets) == 1
 
 
-def test_a_single_empty_block_is_an_authoritative_empty(client: Any) -> None:
-    """The pinned shape with nothing in it: one block, zero rows. An empty
-    block and a missing block are indistinguishable from the rows alone, so
-    this has to be Google's answer rather than a refusal."""
-    payload = json.loads(_ds1("ds1_single_block_empty.json"))
-    assert payload[2] is None and payload[3] == [[]]
-    client(_FakeResponse(text=_page(_ds1("ds1_single_block_empty.json"))))
+def test_a_flightless_board_is_an_authoritative_empty(client: Any) -> None:
+    """MEASURED: an HNL-MIA nonstop-only search, where no nonstop exists, is
+    served as an ordinary results page with no flight cards — `[2]` and `[3]`
+    both `None`. Refusing that reports "the page shape changed" for a route
+    that simply has no matching flights."""
+    payload = json.loads(_ds1("ds1_flightless_board.json"))
+    assert payload[2] is None and payload[3] is None
+    client(_FakeResponse(text=_page(_ds1("ds1_flightless_board.json"))))
     assert gfid._one_call(_FILTERS) == []
 
 
-def test_a_block_that_is_not_a_row_list_does_not_count(client: Any) -> None:
-    """A list at the right index whose [0] isn't a row list is not a row
-    block — counting it would let a moved payload pass the guard."""
+@pytest.mark.parametrize("fixture", ["ds1_zero_rows.json", "ds1_single_block_empty.json"])
+def test_synthetic_empty_block_shapes_are_authoritative_empties(client: Any, fixture: str) -> None:
+    """SYNTHETIC shapes, hand-edited from the JFK-LAX capture — an empty row
+    block at both indices, and at one. Neither has been seen in the wild (the
+    measured flight-less board carries no block at all), but an empty block
+    must never read as a refusal if Google starts sending one."""
+    client(_FakeResponse(text=_page(_ds1(fixture))))
+    assert gfid._one_call(_FILTERS) == []
+
+
+def test_metadata_blocks_are_not_mistaken_for_relocated_rows() -> None:
+    """`ds:1` carries other list-of-list-of-list structures on every page (1, 7,
+    14, 17 among them). A nesting-depth test would call those relocated rows
+    and refuse every ordinary page, so the probe parses instead."""
+    payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
+    board = gfid._rows_from_ds1(payload)
+    assert board.misplaced == ()
+    assert board.blocks_seen == 2
+    assert not gfid._holds_flight_rows(["not-a-row-block"])
+    assert not gfid._holds_flight_rows([["metadata", "strings"]])
+
+
+def test_a_block_that_is_not_a_row_list_is_not_a_board(client: Any) -> None:
+    """Junk at both indices is neither rows nor a relocation — nothing
+    row-shaped exists anywhere, so it reads as an empty board."""
     payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
     payload[2] = ["not-a-row-block"]
     payload[3] = ["nor-this"]
     client(_FakeResponse(text=_page(json.dumps(payload))))
-    with pytest.raises(GfPageShapeError, match=r"no row block at \[2\] or \[3\]"):
-        gfid._one_call(_FILTERS)
+    assert gfid._one_call(_FILTERS) == []
 
 
 def test_relocated_row_blocks_raise_page_shape(client: Any) -> None:
     """A payload that decodes but whose row blocks moved off [2]/[3] yields no
     rows — indistinguishable from an empty board without the block count."""
     client(_FakeResponse(text=_page(_ds1("ds1_blocks_relocated.json"))))
-    with pytest.raises(GfPageShapeError, match=r"no row block at \[2\] or \[3\]"):
+    with pytest.raises(GfPageShapeError, match=r"holds flight rows at \[4, 5\]"):
         gfid._one_call(_FILTERS)
 
 
@@ -309,7 +340,7 @@ def test_second_ds1_is_consulted_when_the_first_is_undecodable() -> None:
     html = _page("[[,]]") + _page(_ds1("ds1_jfk_lax_3rows.json"))
     payload = gfid._extract_ds1(html)
     assert payload is not None
-    assert len(gfid._rows_from_ds1(payload)[0]) == 3
+    assert len(gfid._rows_from_ds1(payload).rows) == 3
 
 
 def test_consent_page_raises_consent(client: Any) -> None:

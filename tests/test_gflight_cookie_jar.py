@@ -92,7 +92,6 @@ def test_persist_then_seed_round_trips_only_nid(
     assert payload["saved_at"] <= time.time()  # stamped now
 
     # A brand-new (cold) process reloads and seeds the NID onto its fresh session.
-    gfid._cookie_state["seeded"] = False
     fresh = _FakeClient([])
     gfid._seed_cookies_once(fresh)
     assert fresh._session().cookies.set_calls == [("NID", "532=abc", ".google.com", "/")]

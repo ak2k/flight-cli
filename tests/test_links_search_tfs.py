@@ -1,5 +1,3 @@
-# pyright: reportPrivateUsage=false, reportMissingTypeStubs=false
-# pyright: reportUnknownMemberType=false, reportUnknownArgumentType=false
 """The search-page `tfs=` encoder: one writer, an allowlist, no silent drops.
 
 `build_search_tfs` shares `_encode_gflight_pinned_tfs` with the pinned booking
@@ -317,11 +315,12 @@ def test_search_page_url_carries_locale_and_the_encoded_tfs() -> None:
 def test_every_filter_field_is_claimed_by_exactly_one_set() -> None:
     """The allowlist is only an allowlist if nothing escapes it. A future fli
     minor adding a filter must fail HERE, loudly, not encode as if unset."""
+    # The three sets ARE the unit under test, so reaching for them is the point.
     from flight_cli.links import (
-        _TFS_ENCODED_FIELDS,
-        _TFS_IGNORED_FIELDS,
-        _TFS_REFUSED_FIELDS,
-        _TFS_REFUSED_PAX,
+        _TFS_ENCODED_FIELDS,  # pyright: ignore[reportPrivateUsage]
+        _TFS_IGNORED_FIELDS,  # pyright: ignore[reportPrivateUsage]
+        _TFS_REFUSED_FIELDS,  # pyright: ignore[reportPrivateUsage]
+        _TFS_REFUSED_PAX,  # pyright: ignore[reportPrivateUsage]
     )
 
     refused = {field for field, _ in _TFS_REFUSED_FIELDS}
