@@ -3155,6 +3155,12 @@ def gflight(
         "[yellow]`flight gflight` is deprecated; use `flight search` "
         "(or `flight search --backend gflight` to force).[/]",
     )
+    # Legs first: `_pick_backend` announces the backend it chose, and a bad
+    # airport argument must not be reported after a line claiming the query is
+    # already on its way.
+    legs = (Leg.of(origin, destination, _parse_date(dep)),)
+    if ret:
+        legs += (Leg.of(destination, origin, _parse_date(ret)),)
     # This alias has no --backend flag, so it resolves like `search` on auto
     # rather than forcing Google Flights: `--children N` can't be priced on the
     # page transport, and taking the backend that can price it beats erroring on
@@ -3175,9 +3181,6 @@ def gflight(
         destination=destination,
         stops=None,
     )
-    legs = (Leg.of(origin, destination, _parse_date(dep)),)
-    if ret:
-        legs += (Leg.of(destination, origin, _parse_date(ret)),)
     opts = _build_options(
         cabin=cabin,
         adults=adults,

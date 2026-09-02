@@ -13,10 +13,10 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 import pytest
-from fli.models import FlightLeg, FlightResult
-from fli.models.airline import Airline
-from fli.models.airport import Airport
-from fli.models.google_flights.base import (
+from fli.models import FlightLeg, FlightResult  # pyright: ignore[reportMissingTypeStubs]
+from fli.models.airline import Airline  # pyright: ignore[reportMissingTypeStubs]
+from fli.models.airport import Airport  # pyright: ignore[reportMissingTypeStubs]
+from fli.models.google_flights.base import (  # pyright: ignore[reportMissingTypeStubs]
     Alliance,
     BagsFilter,
     EmissionsFilter,
@@ -30,7 +30,9 @@ from fli.models.google_flights.base import (
     TimeRestrictions,
     TripType,
 )
-from fli.models.google_flights.flights import FlightSearchFilters
+from fli.models.google_flights.flights import (  # pyright: ignore[reportMissingTypeStubs]
+    FlightSearchFilters,
+)
 
 from flight_cli._gf_errors import GfTfsUnsupportedError
 from flight_cli.links import build_search_tfs, google_flights_search_page_url

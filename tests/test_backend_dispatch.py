@@ -15,8 +15,11 @@ results"."""
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 import pytest
 import typer
+from pydantic import ValidationError
 
 from flight_cli.cli import (
     BACKEND_AUTO,
@@ -287,3 +290,28 @@ def test_gflight_alias_takes_matrix_for_a_child_passenger(
     )
     assert called == ["matrix"]
     assert "a passenger type beyond adults" in output
+
+
+def test_gflight_alias_rejects_a_bad_airport_before_announcing_a_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_pick_backend` prints the backend it chose. Running it first told the
+    user their multi-airport query was on its way to Matrix, then killed the
+    command on the same argument — a line that was never true."""
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    dep = (date.today() + timedelta(days=45)).isoformat()
+
+    def _unreached(**_kw: object) -> None:
+        raise AssertionError("a backend ran on a query that never validated")
+
+    monkeypatch.setattr(cli, "_run_gflight_path", _unreached)
+    monkeypatch.setattr(cli, "_run_matrix_path", _unreached)
+    result = CliRunner().invoke(cli.app, ["gflight", "JFK,LAX", "MIA", "--dep", dep])
+
+    assert result.exit_code != 0
+    assert "Using Matrix" not in result.output
+    assert isinstance(result.exception, ValidationError)
+    assert "Not a 3-letter IATA code: 'JFK,LAX'" in str(result.exception)
