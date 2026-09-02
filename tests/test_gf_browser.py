@@ -16,6 +16,7 @@ Nothing in this file touches the network.
 
 from __future__ import annotations
 
+import io
 import json
 import pathlib
 import sys
@@ -26,6 +27,7 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 
 from flight_cli import _gf_browser as gfb
+from flight_cli import _gf_common as gfc
 from flight_cli import _gflight_ids as gfid
 from flight_cli._gf_errors import (
     GfBackendError,
@@ -41,6 +43,7 @@ from flight_cli.fli_bridge import to_fli_filter
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from flight_cli._gf_common import GfTransportMode
     from flight_cli._gflight_ids import GFlightWithId
 
 FIXTURE_DIR = pathlib.Path(__file__).parent / "fixtures" / "gflight_page"
@@ -219,6 +222,20 @@ def test_a_server_error_is_its_own_refusal_not_a_shape_error() -> None:
     assert e.value.status_code == 503
     assert not isinstance(e.value, GfPageShapeError)
     # Still a GfBackendError, so the Matrix-fallback seams keep catching it.
+    assert isinstance(e.value, GfBackendError)
+
+
+@pytest.mark.parametrize("status", [199, 302, 304, 399])
+def test_a_sub_400_non_2xx_is_the_same_refusal_as_a_500(status: int) -> None:
+    """The boundary is non-2xx, not `>= 400`. Chrome reaches this with a 304 out
+    of the persistent profile's cache, or a redirect it declined to follow —
+    neither carries a page, so reading them as "Google Flights' page shape
+    changed" is the misdiagnosis `GfUpstreamStatusError` exists to prevent, and
+    it points the next reader at an extract bug during an outage."""
+    with pytest.raises(GfUpstreamStatusError) as e:
+        gfid._rows_from_page_html(gfid.PageFetch("", _PAGE_URL, status))
+    assert e.value.status_code == status
+    assert not isinstance(e.value, GfPageShapeError)
     assert isinstance(e.value, GfBackendError)
 
 
@@ -576,6 +593,61 @@ def test_close_is_idempotent_and_survives_a_failing_teardown(
     assert pw.stopped
 
 
+def test_a_ctrl_c_in_teardown_still_stops_the_driver(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The regression `_swallow`'s `BaseException` catch exists to prevent: an
+    interrupt escaping the context close would skip `playwright.stop()`, which
+    is what kills the node driver, and leave Chrome running as an orphan.
+
+    A `RuntimeError` here proves nothing — the narrower `except Exception` this
+    replaced caught that identically."""
+    pw = _install(monkeypatch, tmp_path)
+    session = gfb.GfBrowserSession(headed=False)
+    session.get_html(_PAGE_URL)
+
+    def _interrupt() -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(pw.chromium._context, "close", _interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        session.close()
+    assert pw.stopped
+
+
+def test_a_ctrl_c_in_teardown_is_not_dropped_on_the_way_out(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """`--fast --gf-transport browser` tears Chrome down after a SUCCESSFUL
+    search, on the main thread, where a Ctrl-C can land. Swallowing it there
+    would have the CLI carry on and render a table for a run the user already
+    asked to stop.
+
+    Ordering is the whole point: the interrupt surfaces only after both teardown
+    steps have run, so stopping the run never costs a stranded browser."""
+    pw = _install(monkeypatch, tmp_path)
+    session = gfb.GfBrowserSession(headed=False)
+    session.get_html(_PAGE_URL)
+    order: list[str] = []
+
+    def _interrupt() -> None:
+        order.append("context")
+        raise KeyboardInterrupt
+
+    def _stop() -> None:
+        order.append("driver")
+        pw.stopped = True
+
+    monkeypatch.setattr(pw.chromium._context, "close", _interrupt)
+    monkeypatch.setattr(pw, "stop", _stop)
+    with pytest.raises(KeyboardInterrupt):
+        session.close()
+    assert order == ["context", "driver"]
+    # Idempotent afterwards: the second close has nothing left and must not
+    # re-raise an interrupt the caller has already seen.
+    session.close()
+
+
 def test_a_round_trip_pays_for_one_launch_and_navigates_per_leg(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -664,7 +736,7 @@ def test_closing_clears_the_slot_so_the_next_search_relaunches(
 
 
 def _drive_gflight_results(
-    monkeypatch: pytest.MonkeyPatch, *, mode: str, blow_up: Exception | None = None
+    monkeypatch: pytest.MonkeyPatch, *, mode: GfTransportMode, blow_up: Exception | None = None
 ) -> list[int]:
     """Run the real `_gflight_results` on `mode` with rung 2 replaced by a
     recorder, and report how many times its session was closed.
@@ -724,8 +796,9 @@ def test_the_browser_session_is_closed_when_the_search_raises(
 
 
 def test_an_http_search_never_reaches_for_the_closer(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Rung 1 opens nothing to close, and touching the closer would import the
-    optional patchright extra on the path that must never need it."""
+    """Rung 1 opens nothing to close. The call would be a no-op, but reaching
+    for it at all would read as though an http search might hold a Chrome —
+    the one thing this transport promises it never does."""
     assert _drive_gflight_results(monkeypatch, mode="http") == []
 
 
@@ -759,8 +832,11 @@ def test_a_parametrize_id_cannot_disarm_the_browser_guard(label: str) -> None:
 # ───────────────────────────── the CLI option ──────────────────────────────────
 
 
-@pytest.mark.parametrize("mode", ["auto", "http", "browser"])
+@pytest.mark.parametrize("mode", gfc.VALID_TRANSPORT_MODES)
 def test_every_documented_transport_resolves(mode: str) -> None:
+    """Parametrized over the accepted set itself rather than a copy of it, so a
+    rung added to `GfTransportMode` arrives here without anyone remembering to
+    list it."""
     assert _resolve_gf_transport(mode) == mode
 
 
@@ -771,22 +847,90 @@ def test_an_unknown_transport_is_rejected_by_name() -> None:
         _resolve_gf_transport("chrome")
 
 
+def test_the_cli_and_the_ladder_name_the_same_transports() -> None:
+    """One definition, said out loud. The CLI used to spell the three modes a
+    fourth time, with nothing pinning them to `GfTransportMode` — so a rename on
+    either side surfaced at `_one_call_laddered`'s runtime raise, on the first
+    user who happened to pick the renamed mode, rather than in this suite."""
+    from typing import get_args
+
+    from flight_cli import cli
+
+    assert get_args(gfid.GfTransportMode.__value__) == cli.VALID_TRANSPORT_MODES
+    assert set(cli.VALID_TRANSPORT_MODES) == {"auto", cli.TRANSPORT_HTTP, cli.TRANSPORT_BROWSER}
+    for mode in cli.VALID_TRANSPORT_MODES:
+        assert gfid.GfTransport(mode=mode).mode == mode
+
+
+@pytest.mark.parametrize("mode", gfc.VALID_TRANSPORT_MODES)
+def test_every_documented_transport_has_a_rung(
+    monkeypatch: pytest.MonkeyPatch, mode: GfTransportMode
+) -> None:
+    """`assert_never` makes a forgotten rung a basedpyright error; this is the
+    runtime half of the same claim. A mode the CLI accepts and the ladder has no
+    branch for used to reach the user as a bare `ValueError` out of the middle
+    of a query."""
+    rungs: list[str] = []
+
+    def _http(_filters: Any) -> list[Any]:
+        rungs.append("http")
+        return []
+
+    def _browser(_filters: Any, *, headed: bool) -> list[Any]:
+        assert headed is False
+        rungs.append("browser")
+        return []
+
+    monkeypatch.setattr(gfid, "_one_call_with_retry", _http)
+    monkeypatch.setattr(gfid, "_one_call_browser", _browser)
+    assert gfid._one_call_laddered(cast("Any", None), gfid.GfTransport(mode=mode)) == []
+    assert len(rungs) == 1, f"{mode} reached {rungs} rungs"
+
+
 def test_resolving_a_transport_does_not_load_the_google_flights_stack() -> None:
     """Every search validates this flag, including Matrix-only ones, so it must
     not drag in `_gflight_ids` — that module costs fli's import, and a Matrix
-    search has no use for it. `_gflight_results` builds the value instead."""
+    search has no use for it. `_gflight_results` builds the value instead.
+
+    `_gf_common` is loaded, and that is the point of it: the vocabulary this
+    validates against lives in a leaf that imports only the standard library, so
+    naming and narrowing the modes costs a Matrix search nothing."""
     import subprocess
     import sys
 
     probe = (
         "import sys, flight_cli.cli as c;"
         "c._resolve_gf_transport('browser');"
-        "print('flight_cli._gflight_ids' in sys.modules)"
+        "print(sorted(m for m in sys.modules if m.startswith('flight_cli._gf')))"
     )
     out = subprocess.run(  # noqa: S603
         [sys.executable, "-c", probe], capture_output=True, text=True, check=True
     )
-    assert out.stdout.strip() == "False"
+    assert out.stdout.strip() == "['flight_cli._gf_common', 'flight_cli._gf_errors']"
+
+
+def test_importing_rung_two_does_not_import_patchright() -> None:
+    """What makes `_gflight_ids`' plain `from . import _gf_browser` free, and
+    what the deferred import it replaced claimed falsely: rung 2's MODULE costs
+    no optional dependency. The guarded import lives inside
+    `_playwright_factory` and runs at launch.
+
+    Run in a subprocess because this suite has already imported both. The first
+    half of the assertion is what keeps the second honest — patchright is in the
+    dev group, so "not loaded" is a fact about the import and not about a
+    missing package."""
+    import subprocess
+    import sys
+
+    probe = (
+        "import importlib.util, sys, flight_cli._gf_browser;"
+        "print(importlib.util.find_spec('patchright') is not None,"
+        " any(m.startswith('patchright') for m in sys.modules))"
+    )
+    out = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+    )
+    assert out.stdout.strip() == "True False"
 
 
 def test_the_refusal_note_carries_the_remedy_too() -> None:
@@ -808,8 +952,6 @@ def _render(markup: str) -> str:
 
     Asserting on the template instead would pass while the terminal shows
     something else — which is exactly how `[browser]` went missing."""
-    import io
-
     from rich.console import Console
 
     buf = io.StringIO()
@@ -845,6 +987,98 @@ def test_driver_text_carrying_markup_renders_verbatim() -> None:
     for text in (_render(f"[dim]{refusal.note}[/]"), _render(refusal.message)):
         assert "[/x]" in text
         assert "[/y]" in text
+
+
+def _capture_err(monkeypatch: pytest.MonkeyPatch) -> io.StringIO:
+    """Replace `cli.err` with a wide, colourless console over a buffer.
+
+    Wide on purpose: an assertion on a substring that rich wrapped mid-token
+    fails for a reason that has nothing to do with what is under test."""
+    from rich.console import Console
+
+    from flight_cli import cli
+
+    buf = io.StringIO()
+    monkeypatch.setattr(
+        cli, "err", Console(file=buf, width=1000, force_terminal=False, no_color=True)
+    )
+    return buf
+
+
+def _one_leg() -> tuple[Leg, ...]:
+    return (Leg(origins=("JFK",), destinations=("LAX",), date=date(2026, 10, 14)),)
+
+
+def test_an_untyped_crash_carrying_markup_survives_the_fast_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The generic handler prints whatever fli or a driver put in the message,
+    and that text is arbitrary. A closing tag it never opened raises
+    `MarkupError` out of `print`, so a one-line "the query failed" becomes a
+    traceback — on the path whose whole job is to fail readably."""
+    import typer
+
+    from flight_cli import cli
+
+    buf = _capture_err(monkeypatch)
+
+    def _boom(*_a: Any, **_kw: Any) -> list[Any]:
+        raise RuntimeError("fli said [/x] no")
+
+    monkeypatch.setattr(cli, "_gflight_results", _boom)
+    with pytest.raises(typer.Exit):
+        cli._run_gflight_path(legs=_one_leg(), opts=SearchOptions(), top_n=5, json_out=False)
+    assert "[/x]" in buf.getvalue()
+
+
+def test_an_untyped_crash_carrying_markup_survives_the_enriched_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same trap on the DEFAULT path. Here the crash is meant to be a footnote —
+    Matrix is still authoritative — so a `MarkupError` raised while printing it
+    would take down a search that had another backend to fall back to.
+
+    Matrix is failed too, so the assertion lands on the early-exit branch rather
+    than on a merge and render of results this test never built."""
+    import typer
+
+    from flight_cli import cli
+    from flight_cli.client import MatrixApiError
+
+    buf = _capture_err(monkeypatch)
+
+    class _DeadMatrix:
+        def __init__(self, **_kw: Any) -> None: ...
+
+        async def __aenter__(self) -> _DeadMatrix:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> bool:
+            return False
+
+        async def execute(self, *_a: Any, **_kw: Any) -> Any:
+            raise MatrixApiError("matrix is unreachable", kind="server")
+
+    def _boom(*_a: Any, **_kw: Any) -> list[Any]:
+        raise RuntimeError("fli said [/x] no")
+
+    monkeypatch.setattr(cli, "MatrixClient", _DeadMatrix)
+    monkeypatch.setattr(cli, "_gflight_results", _boom)
+    with pytest.raises(typer.Exit):
+        cli._run_enriched_path(
+            legs=_one_leg(),
+            opts=SearchOptions(),
+            top_n=5,
+            run_pp=False,
+            sel=None,
+            matrix_url=False,
+            google_url=False,
+            pick=None,
+            rps=1.0,
+            impersonate="chrome",
+            no_cache=True,
+        )
+    assert "[/x]" in buf.getvalue()
 
 
 def test_the_help_text_keeps_the_extra_and_installs_with_uv() -> None:
@@ -921,10 +1155,10 @@ def test_a_browser_throttle_does_not_promise_a_retry_it_will_not_make() -> None:
     """Rung 2 runs no retry ladder, so "wait a moment and retry" describes a
     recovery the caller does not have. And neither wording blames the IP: the
     budget is per client context, which is the premise of the whole rung."""
-    from flight_cli.cli import _GF_TRANSPORT_BROWSER, _gf_refusal
+    from flight_cli.cli import TRANSPORT_BROWSER, _gf_refusal
 
     http = _gf_refusal(GfThrottledError("x"))
-    browser = _gf_refusal(GfThrottledError("x"), transport=_GF_TRANSPORT_BROWSER)
+    browser = _gf_refusal(GfThrottledError("x"), transport=TRANSPORT_BROWSER)
     assert "does not" in _render(browser.message)
     assert "--backend matrix" in _render(browser.message)
     assert "retry" in _render(http.message).lower()

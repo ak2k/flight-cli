@@ -59,9 +59,9 @@ go into detail and are loaded on demand.
 - [gf_browser_rung.md](gf_browser_rung.md) — The second search transport:
   `--gf-transport browser` drives a real Chrome to the URL rung 1 GETs, because
   Google's rate budget is keyed on client context, not IP. Measured parity
-  between the two rungs, why `response.text()` / `wait_until="commit"` / no
-  warm-up / `channel="chrome"`, the thread-local session and what survives a
-  Ctrl-C, the profile lock and its recovery, and the conftest guard that keeps
+  between the two rungs, why `response.text()` / `wait_until="domcontentloaded"`
+  / no warm-up / `channel="chrome"`, the thread-local session and what survives
+  a Ctrl-C, the profile lock and its recovery, and the conftest guard that keeps
   tests from launching a browser. Read before touching `_gf_browser.py` or
   `_gflight_ids._one_call_laddered`.
 - [legroom_recipe.md](legroom_recipe.md) — Per-leg legroom + amenities +

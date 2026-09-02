@@ -146,7 +146,7 @@ markers = [
     # Pre-declare custom markers here; `--strict-markers` rejects undeclared ones.
     # "slow: marks tests as slow (deselect with -m 'not slow')",
     # "integration: requires external services",
-    "gf_browser: drives the GF browser rung's launcher seam with a fake; opts out of the conftest guard that fails any other test reaching it",
+    "gf_browser: exercises the launcher seam itself (a missing patchright, the guard) and so must reach _playwright_factory; opts out of the conftest guard, and NOT a way to let a test start Chrome — a test that installs its own fake playwright has already replaced that seam and must stay unmarked",
 ]
 
 # --- coverage ---

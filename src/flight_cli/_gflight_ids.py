@@ -40,7 +40,7 @@ import time
 from copy import deepcopy
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, assert_never, cast
 
 from fli.models import (  # pyright: ignore[reportMissingTypeStubs]
     FlightLeg,
@@ -64,7 +64,14 @@ from fli.search.exceptions import (  # pyright: ignore[reportMissingTypeStubs]
 )
 from fli.search.flights import SearchFlights  # pyright: ignore[reportMissingTypeStubs]
 
-from ._gf_common import PageFetch, cache_dir
+# Rung 2, imported like anything else. It costs 0.2 ms and pulls no optional
+# dependency — patchright is loaded inside `_playwright_factory`, at launch —
+# and `_gf_common` broke the cycle that used to force this import into a
+# function body. Imported as a module, not `from ._gf_browser import session`,
+# so `_one_call_browser` looks the attribute up per call and a test can
+# substitute the session without a browser anywhere in the process.
+from . import _gf_browser
+from ._gf_common import TRANSPORT_HTTP, GfTransportMode, PageFetch, cache_dir
 from ._gf_errors import (
     GfConsentError,
     GfPageShapeError,
@@ -706,7 +713,7 @@ def _rows_from_page_html(page: PageFetch) -> list[GFlightWithId]:
     rungs go through; a rung supplies bytes, never interpretation.
 
     The order is load-bearing. The captcha interstitial is a throttle before it
-    is anything else; only then does a non-2xx become a shape error; only then
+    is anything else; only then is a non-2xx Google declining to serve; only then
     is a missing `ds:1` read as consent; only then is an absent row block one.
     Every one of those would otherwise decode as zero rows and reach the user
     as "no flights on this route".
@@ -724,8 +731,12 @@ def _rows_from_page_html(page: PageFetch) -> list[GFlightWithId]:
         final_url=final_url, html=html
     ):
         raise GfThrottledError("Google Flights rate-limited the request")
-    if status_code >= HTTPStatus.BAD_REQUEST:
-        # Not a shape error: nothing was served to re-derive an extract from.
+    if not HTTPStatus.OK <= status_code < HTTPStatus.MULTIPLE_CHOICES:
+        # Non-2xx, not `>= 400`: a 304 out of the persistent profile's cache or
+        # a redirect Chrome did not follow carries no page either, and reading
+        # that as a shape error sends the next reader hunting an extract bug
+        # during an outage. Not a shape error at all — nothing was served to
+        # re-derive an extract from.
         raise GfUpstreamStatusError(status_code)
     payload = _extract_ds1(html)
     if payload is None:
@@ -836,13 +847,6 @@ def _one_call_with_retry(filters: FlightSearchFilters) -> list[GFlightWithId]:
     return retry_throttled(lambda: _one_call(filters), retry_empty=False)
 
 
-TRANSPORT_AUTO = "auto"
-TRANSPORT_HTTP = "http"
-TRANSPORT_BROWSER = "browser"
-
-type GfTransportMode = Literal["auto", "http", "browser"]
-
-
 @dataclass(frozen=True)
 class GfTransport:
     """Which rung of the search-page transport a query may use.
@@ -855,9 +859,10 @@ class GfTransport:
 
     Frozen, and defaulting to `http`, so an unpassed `transport` is rung 1.
 
-    `mode` is a `Literal` so that adding a rung without teaching
-    `_one_call_laddered` about it is a type error rather than a silent
-    downgrade to rung 1.
+    `mode` is a `Literal` (`_gf_common.GfTransportMode`) so that adding a rung
+    without teaching `_one_call_laddered` about it is a type error rather than a
+    silent downgrade to rung 1. `_one_call_laddered`'s `assert_never` is what
+    makes that promise true.
     """
 
     mode: GfTransportMode = TRANSPORT_HTTP
@@ -874,16 +879,9 @@ def _one_call_browser(filters: FlightSearchFilters, *, headed: bool) -> list[GFl
     navigation, and a refusal it hits is terminal — re-driving Chrome through
     rung 1's backoff would spend ~22 s more to be told the same thing.
 
-    Imported through the module, not `from ._gf_browser import session`: the
-    attribute is looked up per call, which is what lets a test substitute the
-    session without a browser anywhere in the process."""
-    # Deferred for ONE reason now: `_gf_browser` pulls the optional patchright
-    # extra, which must stay off the http path. It is no longer also breaking an
-    # import cycle — `_gf_common` holds what both rungs share — so hoisting this
-    # to the top of the file would cost an optional dependency, not raise
-    # ImportError on a half-initialized module.
-    from . import _gf_browser  # noqa: PLC0415 — see above
-
+    Reached through the module attribute, never a name bound at import time, so
+    a test can substitute the session without a browser anywhere in the
+    process."""
     return _rows_from_page_html(
         _gf_browser.session(headed=headed).get_html(search_page_url(filters))
     )
@@ -895,15 +893,23 @@ def _one_call_laddered(filters: FlightSearchFilters, transport: GfTransport) -> 
     The single place that knows which rungs exist, so `search_with_ids` — and
     the recursion that drives a round trip's return legs — never has to.
 
-    Exhaustive on purpose. `auto` is spelled out beside `http` rather than
-    swept up by a trailing `else`, so a fourth mode reaching here raises
-    instead of quietly running the rung the user did not ask for — the failure
-    that would otherwise look like the browser rung simply not working."""
-    if transport.mode == TRANSPORT_BROWSER:
-        return _one_call_browser(filters, headed=transport.headed)
-    if transport.mode in (TRANSPORT_HTTP, TRANSPORT_AUTO):
-        return _one_call_with_retry(filters)
-    raise ValueError(f"unknown Google Flights transport mode {transport.mode!r}")
+    Exhaustive, and checked: `auto` is spelled out beside `http` rather than
+    swept up by a trailing `else`, and `assert_never` makes a fourth mode that
+    never reached here a basedpyright error at the point it is added. Without
+    that, a forgotten rung ships green and quietly runs the transport the user
+    did not ask for — a failure that reads as the browser rung simply not
+    working.
+
+    Literal patterns rather than the `TRANSPORT_*` constants: a bare name in a
+    `case` is a capture pattern, so `case TRANSPORT_BROWSER` would bind every
+    mode and match all of them."""
+    match transport.mode:
+        case "browser":
+            return _one_call_browser(filters, headed=transport.headed)
+        case "http" | "auto":
+            return _one_call_with_retry(filters)
+        case _:
+            assert_never(transport.mode)
 
 
 def search_with_ids(

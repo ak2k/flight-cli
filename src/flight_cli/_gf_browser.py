@@ -221,16 +221,25 @@ class GfBrowserSession:
         return PageFetch(html=html, final_url=final_url, status_code=status_code)
 
     def close(self) -> None:
-        """Shut the context and the driver down; swallow every failure.
+        """Shut the context and the driver down.
 
-        Idempotent, and called from a `finally` — a close that raised would
-        replace the search's own error with a teardown one."""
+        Idempotent, and called from a `finally`, so every `Exception` a teardown
+        step raises is logged and dropped: raising one here would replace the
+        search's own error with it.
+
+        A `BaseException` that is not an `Exception` — in practice a
+        `KeyboardInterrupt` — is the exception to that. Both steps still run, and
+        it is re-raised once they have. Dropping it would let `--fast` finish
+        rendering a table after the user asked the process to stop."""
         context, playwright = self._context, self._playwright
         self._page = self._context = self._playwright = None
-        if context is not None:
-            _swallow("context", context.close)
-        if playwright is not None:
-            _swallow("driver", playwright.stop)
+        # Both steps run before anything is re-raised. Stopping the driver is
+        # what kills the node subprocess; skipping it strands a live Chrome.
+        from_context = _swallow("context", context.close) if context is not None else None
+        from_driver = _swallow("driver", playwright.stop) if playwright is not None else None
+        interrupt = from_context or from_driver
+        if interrupt is not None:
+            raise interrupt
 
     def _ensure_page(self) -> Any:
         """This session's page, launching Chrome on first use."""
@@ -262,28 +271,34 @@ class GfBrowserSession:
         return self._page
 
 
-def _swallow(what: str, shutdown: Callable[[], object]) -> None:
-    """Run one teardown step, logging rather than raising. Teardown runs from a
-    `finally`, where a raise would replace the real error with this one.
+def _swallow(what: str, shutdown: Callable[[], object]) -> BaseException | None:
+    """Run one teardown step, logging rather than raising, and hand back the one
+    thing the caller must not lose: a `BaseException` that is not an
+    `Exception`. Anything else returns `None`.
 
-    `BaseException`, not `Exception`, and NOT re-raised. `close` runs two of
-    these in sequence, so anything escaping the first skips the driver shutdown
-    and strands a live Chrome — the exact outcome this module exists to
-    prevent. A `KeyboardInterrupt` arriving mid-teardown is the realistic way in.
+    Teardown runs from a `finally`, where a raise would replace the real error
+    with this one — so a failing `close()` is logged and dropped.
+
+    The catch is `BaseException`, not `Exception`, because `close` runs two of
+    these in sequence: anything escaping the first would skip the driver
+    shutdown and strand a live Chrome, the exact outcome this module exists to
+    prevent. A `KeyboardInterrupt` arriving mid-teardown is the realistic way
+    in, and returning it rather than dropping it is what lets `close` finish
+    both steps AND still stop the run the user interrupted. Signals are
+    delivered to the main thread, so that window is `--fast` and `atexit`; the
+    enriched path tears down from an anyio worker, where none can land.
 
     Deliberately the opposite choice from `_ensure_page`, which catches
     `Exception` narrowly so the suite's `pytest.fail` guard — a `BaseException`
     on purpose — cannot be swallowed by the code under test. The guard raises
     from `_playwright_factory`, outside any `_swallow`, so the breadth here
-    cannot reach it.
-
-    The cost, stated: a Ctrl-C landing inside a teardown that is not already
-    unwinding is dropped. Teardown is microseconds and the process is leaving
-    anyway; a stranded Chrome outlives it."""
+    cannot reach it."""
     try:
         shutdown()
-    except BaseException as e:  # noqa: BLE001 — see the docstring: never fatal, never re-raised
+    except BaseException as e:  # noqa: BLE001 — see the docstring: never fatal here
         log.debug("could not close the gflight browser %s: %s", what, e)
+        return None if isinstance(e, Exception) else e
+    return None
 
 
 def _launch_target() -> dict[str, str]:
@@ -339,10 +354,15 @@ def _close_at_exit() -> None:
     one: `_sessions` is thread-local, so an interpreter shutdown running on the
     main thread sees only a main-thread session. A worker thread's session is
     closed by that worker or not at all — reaching across would raise
-    `greenlet.error` and strand the Chrome it was trying to kill."""
+    `greenlet.error` and strand the Chrome it was trying to kill.
+
+    `BaseException`, unlike the caller's `finally`: `close` re-raises a Ctrl-C
+    so a run still in progress stops, and at interpreter shutdown there is no
+    run left to stop — only a traceback for a process that was already
+    leaving."""
     try:
         close_thread_session()
-    except Exception as e:  # noqa: BLE001 — the interpreter is going away; nothing to report to
+    except BaseException as e:  # noqa: BLE001 — the interpreter is going away; nothing to report to
         log.debug("atexit close of the gflight browser session failed: %s", e)
 
 

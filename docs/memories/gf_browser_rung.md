@@ -169,23 +169,38 @@ on the first one's lock — one profile is the constraint, not a missing wire.
 
 ## The shared leaf
 
-`PageFetch` and `cache_dir()` live in `_gf_common.py`, which imports nothing
-from this package. They were in `_gflight_ids`, and that made the two rungs
-import each other: `_gf_browser` needs the record type the parser reads and the
-cache dir its profile sits under, while `_gflight_ids` reaches `_gf_browser` to
-run rung 2. Only the deferred import inside `_one_call_browser` hid it, and both
-are defined well below that module's import block — so hoisting the import to
-the top of the file raised `ImportError` on a half-initialized module, a failure
-that looks exactly like a broken optional dependency and sends the reader
-somewhere else entirely.
+`PageFetch`, `cache_dir()` and the transport vocabulary (`GfTransportMode`, the
+`TRANSPORT_*` constants, `VALID_TRANSPORT_MODES`) live in `_gf_common.py`, which
+imports nothing from this package. The first two were in `_gflight_ids`, and that
+made the two rungs import each other: `_gf_browser` needs the record type the
+parser reads and the cache dir its profile sits under, while `_gflight_ids`
+reaches `_gf_browser` to run rung 2. Only the deferred import inside
+`_one_call_browser` hid it, and both are defined well below that module's import
+block — so hoisting the import to the top of the file raised `ImportError` on a
+half-initialized module, a failure that looks exactly like a broken optional
+dependency and sends the reader somewhere else entirely.
 
-That deferred import stays, but it now means ONE thing: patchright is an
-optional extra and must stay off the http path. `_gf_errors` solves the same
-shape of problem for the refusal types and says so in its own docstring; these
-are values rather than exceptions, so they get a leaf named for what they are.
+With the cycle gone the deferred import went too. `_gflight_ids` imports
+`_gf_browser` at the top of the file like any other module: it costs 0.2 ms and
+pulls no optional dependency, because the guarded `patchright` import lives
+inside `_playwright_factory` and runs at launch, not at import. An earlier
+version of this memo and three comments claimed the deferral kept patchright off
+the http path; it never did — `import flight_cli._gf_browser` leaves `sys.modules`
+patchright-free with the extra installed.
+
+The vocabulary is here for a second reason: `cli` validates `--gf-transport` on
+EVERY search, Matrix-only ones included, and `_gflight_ids` costs fli's import
+(75 ms). A standard-library-only leaf is free, so `cli._resolve_gf_transport`
+derives the modes it accepts from `get_args(GfTransportMode.__value__)` and
+returns the narrowed type — one definition, no `cast` at any call site.
+
+`_gf_errors` solves the same shape of problem for the refusal types and says so
+in its own docstring; these are values rather than exceptions, so they get a leaf
+named for what they are.
 
 `import flight_cli.cli` still loads neither `_gflight_ids` nor `_gf_browser` —
-`_gf_errors` alone, for the exception catches. That is what keeps fli's 64 ms
+`_gf_errors` and `_gf_common` alone, for the exception catches and the transport
+vocabulary, neither of which imports anything outside the standard library. That is what keeps fli's 64 ms
 off a Matrix-only search, and `test_resolving_a_transport_does_not_load_the_
 google_flights_stack` holds the line in a subprocess.
 

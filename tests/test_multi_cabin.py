@@ -471,6 +471,75 @@ def test_multi_cabin_fan_out_honours_an_encodable_constraint(
     assert rungs == [gfid.HTTP_TRANSPORT]
 
 
+def _fan_out_over(monkeypatch: pytest.MonkeyPatch, failure: BaseException) -> str:
+    """Run the real fan-out with every cabin's query raising `failure`, and
+    return what the user was told on stderr.
+
+    A wide, colourless console so an assertion cannot fail on rich's wrapping,
+    and markup left ON because surviving the markup pass is the point."""
+    import io
+    from datetime import date as _date
+
+    from rich.console import Console
+
+    from flight_cli import _gflight_ids as gfid
+    from flight_cli import cli
+    from flight_cli.domain import Cabin as _Cabin
+    from flight_cli.domain import Leg as _Leg
+    from flight_cli.domain import SearchOptions as _SearchOptions
+
+    buf = io.StringIO()
+    monkeypatch.setattr(
+        cli, "err", Console(file=buf, width=1000, force_terminal=False, no_color=True)
+    )
+
+    def _raise(*_a: Any, **_kw: Any) -> list[Any]:
+        raise failure
+
+    monkeypatch.setattr(gfid, "search_with_ids", _raise)
+    out = cli._run_gflight_multi(
+        legs=(_Leg.of("JFK", "LAX", _date(2026, 10, 14)),),
+        opts=_SearchOptions(cabin=_Cabin.COACH),
+        cabins=(_Cabin.COACH, _Cabin.BUSINESS),
+        top_n=5,
+    )
+    assert out == {}, "a cabin that raised must not land a column"
+    return buf.getvalue()
+
+
+def test_a_cabin_that_refuses_is_named_and_carries_the_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A typed refusal is WHY a cabin's column is missing, and the fan-out has to
+    say both halves. Without the cabin name the user cannot tell which column
+    went; without the refusal's own note it reads as an unexplained failure and
+    Google Flights looks like it simply had nothing in business class."""
+    from flight_cli import cli
+    from flight_cli._gf_errors import GfThrottledError
+
+    text = _fan_out_over(monkeypatch, GfThrottledError("Google Flights rate-limited the request"))
+    assert "COACH" in text
+    assert "BUSINESS" in text
+    # Compared against the production wording rather than a copy of it, so a
+    # reworded refusal does not need this test edited to keep passing.
+    assert text.count(cli._gf_refusal(GfThrottledError("x")).note) == 2
+    # The note alone would still be found if the typed branch were deleted: the
+    # generic handler prints `str(e)`, which contains the same words. What tells
+    # the two apart is that only the generic one says "query failed".
+    assert "query failed" not in text
+
+
+def test_a_cabin_crash_carrying_markup_renders_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
+    """fli has no documented exception surface, so this handler prints arbitrary
+    text through a markup-mode console. A closing tag the text never opened
+    raises `MarkupError` from inside the task group, which turns one cabin's
+    failure into the whole fan-out's — including the cabins that succeeded."""
+    text = _fan_out_over(monkeypatch, RuntimeError("fli said [/x] no"))
+    assert text.count("[/x]") == 2
+    assert "COACH" in text
+    assert "BUSINESS" in text
+
+
 def _dispatch(monkeypatch: pytest.MonkeyPatch, *args: str) -> tuple[list[str], str]:
     """Run the real `flight search` with both multi-cabin backends stubbed, and
     report which one it chose. Driven through CliRunner because calling the
