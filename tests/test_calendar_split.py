@@ -755,6 +755,25 @@ def test_fast_refuses_tier2_routing(monkeypatch: Any, capsys: pytest.CaptureFixt
     assert calls["calendar"] == 0  # refused before any Matrix work
 
 
+@pytest.mark.parametrize("ext", ["-CODESHARE", "MINCONNECT 1:00"])
+def test_fast_refuses_a_tier2_extension_without_calling_it_routing(
+    ext: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Same tier, other flag. The phrase completes "this is …" so the reader knows
+    # which option to go edit, and `--routing` is not set on this command line.
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    calls = _spy_renderers(monkeypatch)
+    with pytest.raises(typer.Exit) as excinfo:
+        _calendar_fast(extension=ext)
+    cap = capsys.readouterr()
+    assert excinfo.value.exit_code == 1
+    msg = _flat(cap.err)
+    assert "this is a Tier-2 extension code" in msg
+    assert "routing" not in msg
+    assert cap.out == ""
+    assert calls["calendar"] == 0  # refused before any Matrix work
+
+
 @pytest.mark.parametrize(
     ("kwargs", "quoted"),
     [
@@ -786,10 +805,10 @@ def test_fast_refuses_tier3_without_calling_it_tier2(
 
 # ──────────── --duration is resolved against the trip shape (one-way) ───────
 # The trip LENGTH exists only between an outbound and a return: `_set_trip_length`
-# and `_spa_calendar_leg` both attach it round-trip only. So a one-way must decide
-# the shape BEFORE parsing the number — validating a value it is about to ignore
-# answered `--duration 9-3` with a pydantic ValidationError traceback for a flag
-# that changed nothing.
+# and `_spa_calendar_leg` both attach it round-trip only. A one-way therefore
+# decides the shape BEFORE parsing the number, so `--duration` is either read or
+# reported as ignored, never both. `--duration` never raises out of a command: on
+# a one-way it is a note and exit 0, on a round trip a bad value is exit 2.
 
 
 class _RecordingClient(_PricedClient):
@@ -851,6 +870,7 @@ def test_calendar_one_way_note_survives_json_output(
         ("9-3", "max (3) is below min (9)"),  # reversed range
         ("abc", "use nights as"),  # not a number at all
         ("5-", "use nights as"),  # half a range
+        ("5 7", "use nights as"),  # two numbers, no separator: not a range
     ],
 )
 def test_calendar_round_trip_bad_duration_is_a_typed_error(
@@ -869,6 +889,42 @@ def test_calendar_round_trip_bad_duration_is_a_typed_error(
     assert phrase in err_out
     assert "ValidationError" not in err_out and "Traceback" not in err_out
     assert _RecordingClient.seen == []  # refused before any Matrix work
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("5", (5, 5)),  # a bare number is the degenerate range
+        ("07", (7, 7)),  # zero-padded, still one number
+        ("0", (0, 0)),  # the floor CalendarWindow allows
+        ("5-7", (5, 7)),
+        ("5..7", (5, 7)),  # the SPA's range spelling
+        (" 5 - 7 ", (5, 7)),  # blanks around either end
+        ("3-3", (3, 3)),  # an explicit degenerate range
+    ],
+)
+def test_parse_duration_accepts_every_spelling_of_a_valid_range(
+    raw: str, expected: tuple[int, int]
+) -> None:
+    """The half of `_parse_duration` the error tests never reach. `--duration 5`
+    is the documented short form and the CLI has no other way to ask for one
+    night count, so the bare-number branch is a contract, not an implementation
+    detail."""
+    assert cli._parse_duration(raw) == expected  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("spelling", ["5-7", "5..7", " 5-7 ", "5 - 7", "5-  7"])
+def test_calendar_one_way_is_silent_for_every_spelling_of_the_default(
+    spelling: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A value that means the default changes nothing, so it is not worth a line —
+    the note exists to explain a value the user will otherwise look for in the
+    output. The comparison normalizes exactly what `_parse_duration` normalizes,
+    so the two agree on which spellings are the same range."""
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    _spy_renderers(monkeypatch)
+    _calendar_fast(fast=False, duration=spelling)
+    assert "--duration is ignored" not in _flat(capsys.readouterr().err)
 
 
 def _detail(**overrides: Any) -> None:
@@ -926,8 +982,8 @@ def _stub_detail_run(monkeypatch: Any) -> list[Any]:
 def test_detail_one_way_ignores_a_reversed_duration_without_a_traceback(
     monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # `detail` without `--return` is the same one-way shape as the calendar, and it
-    # carried the same defect with no ignored-option note at all.
+    # `detail` without `--return` is the same one-way shape as the calendar, and
+    # answers `--duration` the same way: one note, the default range, exit 0.
     seen = _stub_detail_run(monkeypatch)
     _detail(duration="9-3")
     err_out = _flat(capsys.readouterr().err)

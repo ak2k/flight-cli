@@ -35,6 +35,23 @@ def _cal(
     )
 
 
+class _ExplodingClient:
+    def post(self, *_a: object, **_k: object) -> None:
+        raise AssertionError("the gated date-grid must not reach the network")
+
+
+def _no_client(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    """Count `get_client()` calls and make any request through one fail loudly."""
+    clients = {"n": 0}
+
+    def _fake_get_client() -> _ExplodingClient:
+        clients["n"] += 1
+        return _ExplodingClient()
+
+    monkeypatch.setattr(_gf_dategrid, "get_client", _fake_get_client)
+    return clients
+
+
 # ─────────────────────────── gate ──────────────────────────────────────
 
 
@@ -86,7 +103,11 @@ def test_date_grid_chunks_over_61_days_and_merges(monkeypatch: pytest.MonkeyPatc
         from_iso, _to = filters
         return {from_iso: 100.0}
 
-    monkeypatch.setattr(_gf_dategrid, "_GRID_RPC_GATED", False)  # the chunker is below it
+    # Opening the gate is what lets these two reach the chunk loop, and it is also
+    # the one thing standing between this suite and a live batchexecute POST. The
+    # transport is stubbed below, so this only has to fail loudly if that changes.
+    clients = _no_client(monkeypatch)
+    monkeypatch.setattr(_gf_dategrid, "_GRID_RPC_GATED", False)
     monkeypatch.setattr(_gf_dategrid, "_grid_filters", fake_filters)
     monkeypatch.setattr(_gf_dategrid, "_one_grid_call", fake_call)
 
@@ -100,6 +121,7 @@ def test_date_grid_chunks_over_61_days_and_merges(monkeypatch: pytest.MonkeyPatc
         span = date.fromisoformat(to_iso).toordinal() - date.fromisoformat(from_iso).toordinal() + 1
         assert span <= _gf_dategrid._MAX_GRID_DAYS
     assert out == {"2026-08-10": 100.0, "2026-10-10": 100.0}
+    assert clients["n"] == 0  # an open gate still never dialed Google
 
 
 def test_date_grid_single_chunk_under_61_days(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -112,31 +134,19 @@ def test_date_grid_single_chunk_under_61_days(monkeypatch: pytest.MonkeyPatch) -
     def fake_filters(*_a: object) -> object:
         return None
 
-    monkeypatch.setattr(_gf_dategrid, "_GRID_RPC_GATED", False)  # the chunker is below it
+    # Opening the gate is what lets these two reach the chunk loop, and it is also
+    # the one thing standing between this suite and a live batchexecute POST. The
+    # transport is stubbed below, so this only has to fail loudly if that changes.
+    clients = _no_client(monkeypatch)
+    monkeypatch.setattr(_gf_dategrid, "_GRID_RPC_GATED", False)
     monkeypatch.setattr(_gf_dategrid, "_grid_filters", fake_filters)
     monkeypatch.setattr(_gf_dategrid, "_one_grid_call", fake_call)
     date_grid(_cal())  # 16-day window -> single chunk
     assert calls["n"] == 1
+    assert clients["n"] == 0  # an open gate still never dialed Google
 
 
 # ─────────────── RPC gate: no network, no retry sleeps (work-h70kv.5) ──
-
-
-class _ExplodingClient:
-    def post(self, *_a: object, **_k: object) -> None:
-        raise AssertionError("the gated date-grid must not reach the network")
-
-
-def _no_client(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
-    """Count `get_client()` calls and make any request through one fail loudly."""
-    clients = {"n": 0}
-
-    def _fake_get_client() -> _ExplodingClient:
-        clients["n"] += 1
-        return _ExplodingClient()
-
-    monkeypatch.setattr(_gf_dategrid, "get_client", _fake_get_client)
-    return clients
 
 
 def test_date_grid_raises_without_touching_the_client(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -158,10 +168,10 @@ def test_date_grid_refuses_city_codes_before_building_fli_filters(
     """A city code reaches the gate, not `getattr(Airport, ...)`.
 
     fli's `Airport` enum holds airports only — NYC/LON/PAR/CHI are not members —
-    so building filters for one raises AttributeError, which the callers' broad
-    `except` reports as "date-grid failed: type object 'Airport' has no attribute
-    'NYC'". That names a transport fault for a request the gate was never going to
-    send. SFO/FRA everywhere else in this file is why that went unnoticed."""
+    so building filters for one raises AttributeError, and the callers' broad
+    `except` renders that as "date-grid failed: type object 'Airport' has no
+    attribute 'NYC'": a transport fault named for a request the gate never sends.
+    Every other case in this file uses SFO/FRA, which the enum does hold."""
     clients = _no_client(monkeypatch)
     start = date.today() + timedelta(days=30)
     cal = _cal(legs=(Leg.of(["NYC"], ["LHR"]),), start=start, end=start + timedelta(days=15))
@@ -198,8 +208,9 @@ def test_one_grid_call_still_refuses_while_gated(monkeypatch: pytest.MonkeyPatch
 def test_grid_routing_blocker_separates_tier2_from_matrix_only() -> None:
     """Both tiers send a calendar to Matrix; only one of them is Tier-2, and the
     `--fast` refusal quotes this phrase."""
-    assert grid_routing_blocker(_cal()) is None  # no routing: not the reason
+    assert grid_routing_blocker(_cal()) is None  # nothing set: not the reason
     assert grid_routing_blocker(_cal(routing="LH+")) is None  # Tier-1: not the reason
+    assert grid_routing_blocker(_cal(ext="MAXCONNECT 2:00")) is None  # Tier-1 extension
     assert grid_routing_blocker(_cal(routing="O:LH+")) == "Tier-2 routing"
 
     booking_class = grid_routing_blocker(_cal(ext="F bc=y"))
@@ -210,3 +221,31 @@ def test_grid_routing_blocker_separates_tier2_from_matrix_only() -> None:
 
     ordered = grid_routing_blocker(_cal(routing="BA AA"))
     assert ordered is not None and "Tier-2" not in ordered
+
+
+@pytest.mark.parametrize("ext", ["-CODESHARE", "MINCONNECT 1:00", "-REDEYES"])
+def test_grid_routing_blocker_names_the_source_flag_for_tier2_extensions(ext: str) -> None:
+    """The phrase tells the reader which flag to go edit, so a Tier-2 EXTENSION
+    code must not be reported as routing. `classify` flattens both sources into
+    one predicate set that no longer remembers which carried what, so the two are
+    classified separately."""
+    blocker = grid_routing_blocker(_cal(ext=ext))
+    assert blocker == "a Tier-2 extension code"
+    assert "routing" not in blocker
+
+
+def test_grid_routing_blocker_prefers_routing_when_both_sources_are_tier2() -> None:
+    """One phrase completes one sentence, so a query carrying both names the
+    routing side; the extension is still there to find once that one is gone."""
+    assert grid_routing_blocker(_cal(routing="O:LH+", ext="-CODESHARE")) == "Tier-2 routing"
+
+
+def test_grid_routing_blocker_reports_matrix_only_from_either_source() -> None:
+    """Tier-3 outranks Tier-2 whichever flag carries it: the grid cannot serve the
+    query at all, so the post-filterable half is not the news."""
+    both = grid_routing_blocker(_cal(routing="BA AA", ext="F bc=y"))
+    assert both is not None
+    assert both.startswith("Matrix-only routing")
+    assert "BA AA" in both and "F bc=y" in both  # every reason, not just the first
+    mixed = grid_routing_blocker(_cal(routing="O:LH+", ext="F bc=y"))
+    assert mixed is not None and mixed.startswith("Matrix-only routing")

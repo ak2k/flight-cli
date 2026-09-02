@@ -6,9 +6,11 @@ Tier-1 calendars.
 client that can't sign `x-goog-batchexecute-bgr` (BotGuard). An empty payload is
 not a throttle, so the shared retry reads it as a cold session and burns 4 POSTs
 + ~6s of backoff per chunk to learn nothing — hence the `GfGridUnavailableError`
-at the top of `_one_grid_call`, behind `_GRID_RPC_GATED`. Flipping that flag back
-to False re-enables the transport below it, as does an attested transport landing
-(work-udpp1).
+behind `_GRID_RPC_GATED`, raised at two sites: the top of `date_grid` (the primary
+one, ahead of the chunk loop so no fli model is built for a window that cannot be
+priced) and the top of `_one_grid_call` (defense in depth, and what keeps a gated
+grid off the network). Flipping that flag back to False re-enables the transport
+below them, as does an attested transport landing (work-udpp1).
 
 When the RPC answers, it returns cheapest-price-per-date for a whole window in
 ONE call — far faster than Matrix's calendar, and it sidesteps Matrix's
@@ -121,23 +123,36 @@ def grid_can_serve(search: CalendarSearch) -> bool:
 
 
 def grid_routing_blocker(search: CalendarSearch) -> str | None:
-    """Name the routing constraint keeping the date-grid off this calendar, or
-    None when every predicate is Tier-1 (so routing is not the reason).
+    """Name the constraint keeping the date-grid off this calendar, or None when
+    every predicate is Tier-1 (so no constraint is the reason).
 
     A diagnostic only — `grid_can_serve` owns the decision, and also rejects
-    shapes routing says nothing about (round trip, multi-airport). Both tiers
-    above Tier-1 send a calendar to Matrix, but for different reasons: Tier-2 is
+    shapes no constraint speaks to (round trip, multi-airport). Both tiers above
+    Tier-1 send a calendar to Matrix, but for different reasons: Tier-2 is
     post-filterable and merely needs the itineraries the grid does not return,
     while Tier-3 is fare construction Google can neither request nor reconstruct.
     Calling a booking class "Tier-2" sends the reader looking for a post-filter
     that was never the problem.
+
+    `--routing` and `--extension` are classified separately because the phrase
+    names the flag to go edit, and `classify` flattens both into one predicate
+    set that no longer remembers which one carried what. `-CODESHARE` and
+    `MINCONNECT` are Tier-2 extension codes, not routing.
     """
     leg = search.legs[0]
-    constraints = classify(leg.route_language, leg.extension)
-    if reasons := constraints.matrix_reasons:
-        return f"Matrix-only routing ({'; '.join(reasons)})"
-    if constraints.tier2:
+    routing_c = classify(leg.route_language, None)
+    ext_c = classify(None, leg.extension)
+    # Keyed on the TIER, not on `UnsupportedPred`: `grid_can_serve` decides by
+    # tier, and a Tier-3 predicate of some other class would otherwise fall
+    # through to a Tier-2 phrase. `matrix_reasons` supplies the text where it can
+    # (only `UnsupportedPred` carries one), never the branch.
+    if routing_c.requires_matrix or ext_c.requires_matrix:
+        reasons = routing_c.matrix_reasons + ext_c.matrix_reasons
+        return f"Matrix-only routing ({'; '.join(reasons)})" if reasons else "Matrix-only routing"
+    if routing_c.tier2:
         return "Tier-2 routing"
+    if ext_c.tier2:
+        return "a Tier-2 extension code"
     return None
 
 

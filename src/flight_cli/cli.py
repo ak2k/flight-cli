@@ -122,12 +122,23 @@ def _parse_date(s: str) -> date:
         raise typer.Exit(2) from e
 
 
+def _normalize_duration(s: str) -> str:
+    """One form for the spellings of a nights range that mean the same thing:
+    `..` for `-`, and blanks around either bound. Shared with `_resolve_duration`,
+    which decides whether a value differs from the default without parsing it, so
+    the parser and that comparison agree on which spellings are one range.
+
+    Blanks go per bound rather than everywhere, because `5 7` is not a range and
+    has to stay the parse error it is."""
+    return "-".join(part.strip() for part in s.replace("..", "-").strip().split("-"))
+
+
 def _parse_duration(s: str) -> tuple[int, int]:
     """Nights as '5' or '5-7' (also '5..7'). Every failure is a typed CLI error:
     the pair feeds `CalendarWindow`, whose validator rejects a reversed range with
     a pydantic ValidationError, and a stack trace is not an answer to a mistyped
     flag."""
-    t = s.replace("..", "-").strip()
+    t = _normalize_duration(s)
     lo_s, sep, hi_s = t.partition("-")
     if not sep:
         hi_s = lo_s  # a bare '5' is the degenerate range 5-5
@@ -153,11 +164,13 @@ def _resolve_duration(duration: str, *, round_trip: bool) -> tuple[int, int]:
 
     The note goes to stderr under every `--format`: it is a remark about the
     command line, and stdout under `--format json` carries a document or nothing.
-    An explicit `--duration 5-7` is indistinguishable from the default and passes
-    unremarked — also the one case where nothing looks different."""
+    A value spelling the default is indistinguishable from the default and passes
+    unremarked — also the one case where nothing looks different. That comparison
+    runs on `_normalize_duration`, not on parsed ints: parsing here would fail on
+    a bad range and hand a one-way the very error this function exists to avoid."""
     if round_trip:
         return _parse_duration(duration)
-    if duration != _DEFAULT_CALENDAR_DURATION:
+    if _normalize_duration(duration) != _DEFAULT_CALENDAR_DURATION:
         err.print("[dim]--duration is ignored for a one-way trip.[/]")
     return _parse_duration(_DEFAULT_CALENDAR_DURATION)
 
