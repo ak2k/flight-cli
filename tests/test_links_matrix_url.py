@@ -174,3 +174,43 @@ def test_multi_city_keeps_one_slice_per_leg() -> None:
         assert dates["departureDate"] == iso
         # Multi-city slices keep returnDate empty — our benign superset.
         assert dates["returnDate"] == ""
+
+
+# ─────────── calendar URLs: trip length is round-trip-only state ────────────
+# `dates.duration` is the nights between outbound and return. On a one-way link it
+# made two identical searches produce different URLs, and opening one handed the SPA
+# the trip-length state Matrix answers with a 200 + "Internal server error"
+# (work-h70kv.7).
+
+
+def _calendar_url_dates(*, one_way: bool, dmin: int, dmax: int) -> dict[str, Any]:
+    legs = (Leg(origins=("JFK",), destinations=("LHR",)),)
+    if not one_way:
+        legs += (Leg(origins=("LHR",), destinations=("JFK",)),)
+    cal = CalendarSearch(
+        legs=legs,
+        window=CalendarWindow(
+            start=date(2026, 9, 1), end=date(2026, 9, 15), duration_min=dmin, duration_max=dmax
+        ),
+        options=SearchOptions(cabin=Cabin.COACH, pax=Pax(adults=1)),
+    )
+    payload = _decode_search(matrix_deep_link(cal))
+    return cast("dict[str, Any]", payload["slices"][0]["dates"])
+
+
+def test_one_way_calendar_url_omits_duration() -> None:
+    dates = _calendar_url_dates(one_way=True, dmin=3, dmax=5)
+    assert "duration" not in dates
+    assert dates["departureDate"] == "2026-09-01"  # the rest of the slice is intact
+
+
+def test_one_way_calendar_url_is_invariant_to_duration() -> None:
+    # The CLI announces -d as ignored for one-way; the hand-off link must agree.
+    assert _calendar_url_dates(one_way=True, dmin=3, dmax=5) == _calendar_url_dates(
+        one_way=True, dmin=1, dmax=14
+    )
+
+
+def test_round_trip_calendar_url_keeps_duration() -> None:
+    assert _calendar_url_dates(one_way=False, dmin=3, dmax=5)["duration"] == "3-5"
+    assert _calendar_url_dates(one_way=False, dmin=5, dmax=5)["duration"] == "5"

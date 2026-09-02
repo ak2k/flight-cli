@@ -67,15 +67,21 @@ if TYPE_CHECKING:
 
 _MAX_GRID_DAYS = 61  # GetCalendarGraph's per-request span limit
 
-# Flip to False when GetCalendarGraph answers a plain client again, or when an
-# attested transport lands (work-udpp1) — that is the whole re-enable. A flag
-# rather than an unconditional raise so basedpyright still checks the transport
-# below: `SearchDates.BASE_URL` and `DateSearchFilters.encode()` have no other
+# Flipping this to False is necessary but NOT sufficient. No test executes the
+# transport below the gate: there is no captured GetCalendarGraph envelope to build
+# one on, and inventing the shape is forbidden (AGENTS.md rule 5), so type-checking
+# is all that guards it. Re-enable procedure: (1) capture a real envelope into
+# tests/fixtures/, (2) add an ungated contract test over it — request URL, encoded
+# body, and the success / empty / throttle branches of `_one_grid_call`, (3) run a
+# live smoke, (4) then flip. Tracked on work-h70kv.5.
+#
+# A flag rather than an unconditional raise precisely so basedpyright keeps checking
+# that code: `SearchDates.BASE_URL` and `DateSearchFilters.encode()` have no other
 # caller here, and `flights` is pinned with an open floor, so an fli bump could
-# otherwise break the flip-back with green CI. Not `Final[bool]` — that narrows to
-# the literal and the body below goes unchecked (measured). Bare `Final` keeping it
-# checked is basedpyright 1.39.4's inference for an un-subscripted Final, so
-# re-measure on a basedpyright bump — same open-floor caveat as `flights`.
+# otherwise rot the flip-back with green CI. Not `Final[bool]` — that narrows to the
+# literal and the body goes unchecked (measured). Bare `Final` keeping it checked is
+# basedpyright 1.39.4's inference for an un-subscripted Final, so re-measure on a
+# basedpyright bump — same open-floor caveat as `flights`.
 _GRID_RPC_GATED: Final = True
 
 _CABIN_TO_SEAT = {

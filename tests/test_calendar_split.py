@@ -643,3 +643,57 @@ def test_render_calendar_round_trip_keeps_nights_and_columns(
     for dur in ("3n", "4n", "5n"):
         assert dur in out
     assert "599.00" in out  # the per-night prices are actually placed
+
+
+# ──────────── --fast fails closed outside the grid branch (work-h70kv.9) ────
+# `--fast` promises the GF grid alone in ~1s. Where the grid branch does not apply
+# it used to fall through to the ~45s Matrix calendar and exit 0, so a wrapper doing
+# `--fast || fallback` read Matrix output as a fast grid. Each shape now refuses.
+
+
+def test_fast_refuses_round_trip(monkeypatch: Any, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    calls = _spy_renderers(monkeypatch)
+    with pytest.raises(typer.Exit) as excinfo:
+        _calendar_fast(one_way=False)
+    out = _flat(capsys.readouterr().out)
+    assert excinfo.value.exit_code == 1
+    assert "--fast applies only to one-way" in out
+    assert "a round-trip window" in out
+    assert calls["calendar"] == 0  # refused before any Matrix work
+
+
+def test_fast_refuses_json_output(monkeypatch: Any, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    calls = _spy_renderers(monkeypatch)
+    with pytest.raises(typer.Exit) as excinfo:
+        _calendar_fast(fmt="json")
+    cap = capsys.readouterr()
+    assert excinfo.value.exit_code == 1
+    assert "JSON output" in _flat(cap.out)
+    assert "{" not in cap.out  # no JSON document may reach stdout on the refusal path
+    assert calls["calendar"] == 0  # refused before any Matrix work
+
+
+def test_fast_refuses_multi_airport(monkeypatch: Any, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    calls = _spy_renderers(monkeypatch)
+    with pytest.raises(typer.Exit) as excinfo:
+        _calendar_fast(destination="LHR,CDG")
+    out = _flat(capsys.readouterr().out)
+    assert excinfo.value.exit_code == 1
+    assert "a multi-airport route" in out
+    assert calls["calendar"] == 0  # refused before any Matrix work
+
+
+def test_fast_refuses_tier2_routing(monkeypatch: Any, capsys: pytest.CaptureFixture[str]) -> None:
+    # `O:LH+` is an operating-carrier predicate: the grid has no itineraries to
+    # post-filter, so `grid_can_serve` declines and only Matrix could answer.
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    calls = _spy_renderers(monkeypatch)
+    with pytest.raises(typer.Exit) as excinfo:
+        _calendar_fast(routing="O:LH+")
+    out = _flat(capsys.readouterr().out)
+    assert excinfo.value.exit_code == 1
+    assert "routing the grid can't honor" in out
+    assert calls["calendar"] == 0  # refused before any Matrix work

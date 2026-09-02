@@ -1054,6 +1054,33 @@ def _render_date_grid(
     console.print(t)
 
 
+def _grid_branch_blocker(
+    search: CalendarSearch,
+    *,
+    json_out: bool,
+    one_way: bool,
+    origins: tuple[str, ...],
+    dests: tuple[str, ...],
+) -> str | None:
+    """Why the GF date-grid can't serve this calendar, or None if it can.
+
+    The string is user-facing: it completes "this is …" in the `--fast` refusal, so
+    it names the shape rather than the flag. Ordered cheapest-first so the fli-heavy
+    `_gf_dategrid` import is still skipped for the Matrix-only shapes.
+    """
+    if json_out:
+        return "JSON output"
+    if not one_way:
+        return "a round-trip window"
+    if len(origins) > 1 or len(dests) > 1:
+        return "a multi-airport route"
+    from ._gf_dategrid import grid_can_serve  # noqa: PLC0415
+
+    if not grid_can_serve(search):
+        return "routing the grid can't honor"
+    return None
+
+
 def _render_calendar(
     res: CalendarResult,
     *,
@@ -2812,7 +2839,8 @@ def calendar(
         "--no-enrich/--no-fast",
         help="Skip the Matrix enrichment: show only the fast Google Flights "
         "date-grid (one-way, single-airport, Tier-1 filters) instead of also "
-        "running the authoritative Matrix calendar.",
+        "running the authoritative Matrix calendar. Exits 1 rather than falling "
+        "back, so a no-grid result is never mistaken for a fast one.",
         rich_help_panel=_GROUP_BACKEND,
     ),
     max_per_query: int = typer.Option(
@@ -2882,64 +2910,70 @@ def calendar(
     # Fast layer: the GF native date-grid (~1s, throttle-friendly, dodges Matrix's
     # compute-budget under-reporting) for one-way / single-airport / Tier-1-only
     # windows. Paint it first, then enrich with the authoritative Matrix calendar
-    # (full per-duration grid). `--fast` stops after the grid. The cheap pre-check
-    # avoids importing the fli-heavy module for the Matrix-only cases.
-    # Everything `--fast` promises — the grid alone, and exit 1 when there is none —
-    # is scoped to this branch: a grid-servable, non-JSON one-way query. With --json,
-    # round-trip, multi-airport or Tier-2 routing the flag is silently inert and the
-    # Matrix calendar below runs to exit 0 (work-h70kv.9).
-    if not json_out and one_way and len(origins) == 1 and len(dests) == 1:
-        from ._gf_dategrid import grid_can_serve  # noqa: PLC0415
-
-        if grid_can_serve(search):
-            if not fast:
-                # Progressive weave: dispatch the GF date-grid and the Matrix
-                # calendar concurrently, paint the grid first (~1s), then the
-                # authoritative Matrix calendar — total ≈ Matrix alone.
-                _run_calendar_enriched(
-                    search,
-                    origins=origins,
-                    dests=dests,
-                    sd=sd,
-                    ed=ed,
-                    dmin=dmin,
-                    dmax=dmax,
-                    rps=_resolve_rps(rps),
-                    impersonate=_resolve_impersonate(impersonate),
-                    no_cache=_resolve_no_cache(no_cache),
-                    matrix_url=matrix_url,
-                    google_url=google_url,
-                )
-                return
-            # --fast: Google Flights date-grid only (no Matrix).
-            from ._gf_dategrid import GfGridUnavailableError, date_grid  # noqa: PLC0415
-            from ._gflight_ids import GfThrottledError  # noqa: PLC0415
-
-            grid: dict[str, float] = {}
-            try:
-                grid = date_grid(search)
-            # Each handler only says WHY there is no grid; the single exit below says
-            # THAT there is none. Under `--fast` there is no Matrix to fall back to, so
-            # every no-grid outcome — gate, throttle, an empty grid, or a bad airport
-            # or date landing in the broad except — has to leave the same way, or a
-            # wrapper doing `--fast || fallback` reads success where it should read
-            # failure.
-            except GfThrottledError:
-                console.print("[dim]Google Flights rate-limited; no grid to show.[/]")
-            except GfGridUnavailableError:
-                # Ahead of the broad except, as in the weave.
-                console.print(f"[dim]{_GF_GRID_UNAVAILABLE_NOTE}[/]")
-            except Exception as e:  # noqa: BLE001 — GF is the optional fast layer; Matrix still runs
-                err.print(f"[yellow]Google Flights date-grid failed:[/] {e}")
-            if grid:
-                _render_date_grid(grid, origin=origins, destination=dests, sd=sd, ed=ed)
-                _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
-            else:
-                # `--fast` means the GF grid alone in ~1s; quietly running the ~45s
-                # Matrix calendar instead would change what the flag means.
-                console.print("[yellow]No Google Flights grid; drop --fast for Matrix.[/]")
-                raise typer.Exit(1)
+    # (full per-duration grid). `--fast` stops after the grid.
+    blocker = _grid_branch_blocker(
+        search, json_out=json_out, one_way=one_way, origins=origins, dests=dests
+    )
+    if fast and blocker is not None:
+        # `--fast` exists only inside the branch below. Everywhere else there is no
+        # grid to serve, so it fails closed instead of letting the ~45s Matrix calendar
+        # answer in its place at exit 0 — a wrapper doing `--fast || fallback` would
+        # read that as the grid it asked for (work-h70kv.9). Ahead of every Matrix call
+        # and of the JSON writer, so neither runs.
+        console.print(
+            "[yellow]--fast applies only to one-way, single-airport, non-JSON "
+            f"calendars; this is {blocker}. Run without --fast for Matrix.[/]"
+        )
+        raise typer.Exit(1)
+    if blocker is None:
+        if not fast:
+            # Progressive weave: dispatch the GF date-grid and the Matrix
+            # calendar concurrently, paint the grid first (~1s), then the
+            # authoritative Matrix calendar — total ≈ Matrix alone.
+            _run_calendar_enriched(
+                search,
+                origins=origins,
+                dests=dests,
+                sd=sd,
+                ed=ed,
+                dmin=dmin,
+                dmax=dmax,
+                rps=_resolve_rps(rps),
+                impersonate=_resolve_impersonate(impersonate),
+                no_cache=_resolve_no_cache(no_cache),
+                matrix_url=matrix_url,
+                google_url=google_url,
+            )
             return
+        # --fast: Google Flights date-grid only (no Matrix).
+        from ._gf_dategrid import GfGridUnavailableError, date_grid  # noqa: PLC0415
+        from ._gflight_ids import GfThrottledError  # noqa: PLC0415
+
+        grid: dict[str, float] = {}
+        try:
+            grid = date_grid(search)
+        # Each handler only says WHY there is no grid; the single exit below says
+        # THAT there is none. Under `--fast` there is no Matrix to fall back to, so
+        # every no-grid outcome — gate, throttle, an empty grid, or a bad airport
+        # or date landing in the broad except — has to leave the same way, or a
+        # wrapper doing `--fast || fallback` reads success where it should read
+        # failure.
+        except GfThrottledError:
+            console.print("[dim]Google Flights rate-limited; no grid to show.[/]")
+        except GfGridUnavailableError:
+            # Ahead of the broad except, as in the weave.
+            console.print(f"[dim]{_GF_GRID_UNAVAILABLE_NOTE}[/]")
+        except Exception as e:  # noqa: BLE001 — GF is the optional fast layer; Matrix still runs
+            err.print(f"[yellow]Google Flights date-grid failed:[/] {e}")
+        if grid:
+            _render_date_grid(grid, origin=origins, destination=dests, sd=sd, ed=ed)
+            _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
+        else:
+            # `--fast` means the GF grid alone in ~1s; quietly running the ~45s
+            # Matrix calendar instead would change what the flag means.
+            console.print("[yellow]No Google Flights grid; drop --fast for Matrix.[/]")
+            raise typer.Exit(1)
+        return
 
     # Matrix (authoritative; also the only path for round-trip, multi-airport,
     # Tier-2/3 routing, or when the grid was empty/throttled).

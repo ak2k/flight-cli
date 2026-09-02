@@ -103,22 +103,26 @@ its first statement, ahead of `get_client()`: zero POSTs, zero sleeps, and
 weave `cli._run_calendar_enriched` prints one note — the observation plus the bd
 id, not a cause — and then waits for Matrix. The note can only promise to wait,
 not to deliver: it is printed while the Matrix request is still in flight, and
-Matrix can still fail after it. On a grid-servable, non-JSON one-way query,
-every no-grid outcome under `--fast` — gate, throttle, an empty grid, or a bad
-airport/date in the broad except — prints "No Google Flights grid; drop --fast
-for Matrix." once and exits 1, so a wrapper doing `--fast || fallback` can trust
-the exit code; `--fast` means "the GF grid alone, ~1s" and quietly running the
-~45s Matrix calendar under it would change what the flag means. That contract
-stops at the branch gate (`not json_out and one_way` + single airports +
-`grid_can_serve`): with `--json`, round-trip, multi-airport or Tier-2 routing,
-`--fast` is silently inert and the Matrix calendar runs to exit 0 — a known gap,
-tracked as work-h70kv.9, not fixed here. The grid paint in the weave and
+Matrix can still fail after it. **`--fast` never exits 0 without a grid.** Every
+no-grid outcome — gate, throttle, an empty grid, or a bad airport/date in the
+broad except — prints "No Google Flights grid; drop --fast for Matrix." once and
+exits 1; and when the grid branch does not apply at all (`--json`, round-trip,
+multi-airport, or routing the grid can't honor) `--fast` refuses up front, naming
+the shape, before any Matrix call or JSON write (work-h70kv.9). So a wrapper doing
+`--fast || fallback` can trust the exit code unconditionally: `--fast` means "the
+GF grid alone, ~1s", and answering it with the ~45s Matrix calendar — silently or
+otherwise — would change what the flag means. The grid paint in the weave and
 `_render_date_grid` are runtime-dead until the gate flips;
 `_run_calendar_enriched` itself still runs (it is what paints Matrix).
-**Flipping back is `_GRID_RPC_GATED = False`** — one module constant, a flag
-rather than an unconditional raise so basedpyright still checks the transport
-body (`SearchDates.BASE_URL` and `DateSearchFilters.encode()` have no other
-caller here, and `flights` is pinned with an open floor). Flip it when
+
+**Re-enabling is not just `_GRID_RPC_GATED = False`.** Nothing executes the
+transport below the gate — there is no captured GetCalendarGraph envelope to test
+it against, and inventing the shape is forbidden — so type-checking is its only
+guard, which is why the gate is a flag and not an unconditional raise (a raise, and
+`Final[bool]`, both make basedpyright treat the body as unreachable; measured).
+The procedure: capture a real envelope into `tests/fixtures/`, add an ungated
+contract test over it (request URL, encoded body, and the success / empty /
+throttle branches of `_one_grid_call`), run a live smoke, then flip. Do that when
 the RPC answers a plain client again, or when an attested transport lands
 (work-udpp1).
 A per-date page fan-out (the transport upstream fli#230 uses for search) is the

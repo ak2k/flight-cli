@@ -152,17 +152,14 @@ class HttpTransport:
             log.warning("cache_read_failed", key=key, error=str(e))
             return None
         if _is_error_body(data):
-            # The write-side guard in `_cache_put` only protects entries written
-            # since it landed, and there is no expiry — so a brownout cached before
-            # it would be replayed forever without ever touching the network.
-            # Evict and report a miss: the request goes out, and a good body
-            # overwrites this one (work-h70kv.8).
-            log.debug("cache_evicted", key=key, reason="error body")
-            try:
-                p.unlink(missing_ok=True)
-            except OSError as e:
-                # A read-only cache dir must degrade to a miss, not break the read.
-                log.warning("cache_evict_failed", key=key, error=str(e))
+            # The write-side guard in `_cache_put` only protects entries written since
+            # it landed, and there is no expiry — so a brownout cached before it would
+            # be replayed forever without ever touching the network. Report a miss and
+            # leave the file alone: the request goes out and the successful
+            # `_cache_put` overwrites this same path. Deleting it here would race a
+            # concurrent process that has already replaced it with a good body
+            # (work-h70kv.8).
+            log.debug("cache_miss_error_body", key=key)
             return None
         return data
 

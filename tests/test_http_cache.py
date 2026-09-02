@@ -61,13 +61,15 @@ def test_non_error_shapes_still_cache(tmp_path: pathlib.Path) -> None:
     assert (tmp_path / "odd.json").exists()  # `error` must be an object, as in client.py
 
 
-def test_stale_error_body_is_evicted_on_read(
+def test_stale_error_body_reads_as_a_miss_and_is_overwritten(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The write-side guard cannot help an entry cached before it landed, and the
     cache never expires — so a brownout stored back then would be replayed forever
     without a network call. Seed one under the key `post_json` computes, then drive
-    the real read path: it must miss, go out, and overwrite."""
+    the real read path: it must miss, go out, and let the good body overwrite it.
+    The read deliberately does NOT unlink: a concurrent process may already have
+    replaced the file with a good body, and deleting it would throw that away."""
     url = "https://example.invalid/v1/search"
     params = {"key": "k", "alt": "json"}
     body: dict[str, Any] = {"name": "calendar", "inputs": {"startDate": "2026-10-10"}}
@@ -99,4 +101,5 @@ def test_stale_error_body_is_evicted_on_read(
     got = anyio.run(_go)
     assert posts["n"] == 1  # the stale error was a MISS -> the request went out
     assert got == _GOOD_BODY
-    assert json.loads(seeded["path"].read_text()) == _GOOD_BODY  # and it was overwritten
+    assert seeded["path"].exists()  # not deleted on the read...
+    assert json.loads(seeded["path"].read_text()) == _GOOD_BODY  # ...just overwritten
