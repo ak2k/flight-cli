@@ -467,11 +467,11 @@ def test_a_multi_cabin_round_trip_says_what_its_join_is_drawn_from(
     cabins = (_Cabin.COACH, _Cabin.BUSINESS)[:cabins_wanted]
 
     def _fan_out(**_kw: Any) -> dict[Any, list[Any]]:
-        return dict.fromkeys(cabins, [row])
+        return {cab: [row] for cab in cabins}
 
     monkeypatch.setattr(cli, "_run_gflight_multi", _fan_out)
     legs = (_Leg.of("JFK", "LAX", _date(2026, 10, 14)),)
-    if legs_wanted == 2:  # noqa: PLR2004 — a round trip is two legs
+    if legs_wanted > 1:
         legs += (_Leg.of("LAX", "JFK", _date(2026, 10, 21)),)
     cli._run_gflight_path_multi(
         legs=legs,
