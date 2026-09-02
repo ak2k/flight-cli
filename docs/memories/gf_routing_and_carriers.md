@@ -106,9 +106,10 @@ not to deliver: it is printed while the Matrix request is still in flight, and
 Matrix can still fail after it. **`--fast` never exits 0 without a grid.** Every
 no-grid outcome — gate, throttle, an empty grid, or a bad airport/date in the
 broad except — prints "No Google Flights grid; drop --fast for Matrix." once and
-exits 1; and when the grid branch does not apply at all (`--json`, round-trip,
-multi-airport, or routing the grid can't honor) `--fast` refuses up front, naming
-the shape, before any Matrix call or JSON write (work-h70kv.9). So a wrapper doing
+exits 1; and when the grid branch does not apply at all (JSON output, a round-trip
+window, a multi-airport route, or Tier-2 routing) `--fast` refuses up front on
+**stderr**, naming the shape, before any Matrix call or JSON write — stdout under a
+JSON request carries a document or nothing, never prose (work-h70kv.9). So a wrapper doing
 `--fast || fallback` can trust the exit code unconditionally: `--fast` means "the
 GF grid alone, ~1s", and answering it with the ~45s Matrix calendar — silently or
 otherwise — would change what the flag means. The grid paint in the weave and

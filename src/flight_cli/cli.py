@@ -1065,8 +1065,9 @@ def _grid_branch_blocker(
     """Why the GF date-grid can't serve this calendar, or None if it can.
 
     The string is user-facing: it completes "this is …" in the `--fast` refusal, so
-    it names the shape rather than the flag. Ordered cheapest-first so the fli-heavy
-    `_gf_dategrid` import is still skipped for the Matrix-only shapes.
+    every branch returns a noun phrase naming the shape, not the flag. Ordered
+    cheapest-first so the fli-heavy `_gf_dategrid` import is still skipped for the
+    Matrix-only shapes.
     """
     if json_out:
         return "JSON output"
@@ -1077,7 +1078,7 @@ def _grid_branch_blocker(
     from ._gf_dategrid import grid_can_serve  # noqa: PLC0415
 
     if not grid_can_serve(search):
-        return "routing the grid can't honor"
+        return "Tier-2 routing"
     return None
 
 
@@ -2920,7 +2921,12 @@ def calendar(
         # answer in its place at exit 0 — a wrapper doing `--fast || fallback` would
         # read that as the grid it asked for (work-h70kv.9). Ahead of every Matrix call
         # and of the JSON writer, so neither runs.
-        console.print(
+        #
+        # On stderr, not stdout: one of the shapes this refuses IS `--format json`, and
+        # a caller piping to `jq` must get a JSON document or an empty stdout, never
+        # prose. The other shapes go the same way so the stream doesn't depend on which
+        # condition failed.
+        err.print(
             "[yellow]--fast applies only to one-way, single-airport, non-JSON "
             f"calendars; this is {blocker}. Run without --fast for Matrix.[/]"
         )

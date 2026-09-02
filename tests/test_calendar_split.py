@@ -656,10 +656,13 @@ def test_fast_refuses_round_trip(monkeypatch: Any, capsys: pytest.CaptureFixture
     calls = _spy_renderers(monkeypatch)
     with pytest.raises(typer.Exit) as excinfo:
         _calendar_fast(one_way=False)
-    out = _flat(capsys.readouterr().out)
+    cap = capsys.readouterr()
     assert excinfo.value.exit_code == 1
-    assert "--fast applies only to one-way" in out
-    assert "a round-trip window" in out
+    # The refusal is a diagnostic, so it goes to stderr on EVERY shape — one of the
+    # shapes it refuses is `--format json`, and the stream must not depend on which.
+    assert "--fast applies only to one-way" in _flat(cap.err)
+    assert "a round-trip window" in _flat(cap.err)
+    assert cap.out == ""
     assert calls["calendar"] == 0  # refused before any Matrix work
 
 
@@ -670,8 +673,10 @@ def test_fast_refuses_json_output(monkeypatch: Any, capsys: pytest.CaptureFixtur
         _calendar_fast(fmt="json")
     cap = capsys.readouterr()
     assert excinfo.value.exit_code == 1
-    assert "JSON output" in _flat(cap.out)
-    assert "{" not in cap.out  # no JSON document may reach stdout on the refusal path
+    assert "JSON output" in _flat(cap.err)
+    # Under a JSON request stdout carries a JSON document or nothing — never prose,
+    # or a caller piping to `jq` gets a parse error instead of an empty result.
+    assert cap.out == ""
     assert calls["calendar"] == 0  # refused before any Matrix work
 
 
@@ -680,9 +685,10 @@ def test_fast_refuses_multi_airport(monkeypatch: Any, capsys: pytest.CaptureFixt
     calls = _spy_renderers(monkeypatch)
     with pytest.raises(typer.Exit) as excinfo:
         _calendar_fast(destination="LHR,CDG")
-    out = _flat(capsys.readouterr().out)
+    cap = capsys.readouterr()
     assert excinfo.value.exit_code == 1
-    assert "a multi-airport route" in out
+    assert "a multi-airport route" in _flat(cap.err)
+    assert cap.out == ""
     assert calls["calendar"] == 0  # refused before any Matrix work
 
 
@@ -693,7 +699,8 @@ def test_fast_refuses_tier2_routing(monkeypatch: Any, capsys: pytest.CaptureFixt
     calls = _spy_renderers(monkeypatch)
     with pytest.raises(typer.Exit) as excinfo:
         _calendar_fast(routing="O:LH+")
-    out = _flat(capsys.readouterr().out)
+    cap = capsys.readouterr()
     assert excinfo.value.exit_code == 1
-    assert "routing the grid can't honor" in out
+    assert "this is Tier-2 routing" in _flat(cap.err)  # a noun, like the other three
+    assert cap.out == ""
     assert calls["calendar"] == 0  # refused before any Matrix work
