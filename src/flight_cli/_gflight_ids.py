@@ -64,12 +64,14 @@ from fli.search.exceptions import (  # pyright: ignore[reportMissingTypeStubs]
 )
 from fli.search.flights import SearchFlights  # pyright: ignore[reportMissingTypeStubs]
 
-# Rung 2, imported like anything else. It costs 0.2 ms and pulls no optional
-# dependency — patchright is loaded inside `_playwright_factory`, at launch —
-# and `_gf_common` broke the cycle that used to force this import into a
-# function body. Imported as a module, not `from ._gf_browser import session`,
-# so `_one_call_browser` looks the attribute up per call and a test can
-# substitute the session without a browser anywhere in the process.
+# Rung 2, imported like anything else. The whole cost of doing so: 0.2 ms, one
+# `rich.Console` built at module scope, and one process-wide `atexit` hook that
+# does nothing unless a browser was launched. No optional dependency —
+# patchright is imported inside `_playwright_factory`, at launch — and
+# `_gf_common` broke the cycle that used to force this import into a function
+# body. Imported as a module, not `from ._gf_browser import session`, so
+# `_one_call_browser` looks the attribute up per call and a test can substitute
+# the session without a browser anywhere in the process.
 from . import _gf_browser
 from ._gf_common import TRANSPORT_HTTP, GfTransportMode, PageFetch, cache_dir
 from ._gf_errors import (

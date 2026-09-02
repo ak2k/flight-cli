@@ -16,6 +16,7 @@ Nothing in this file touches the network.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import pathlib
@@ -648,6 +649,67 @@ def test_a_ctrl_c_in_teardown_is_not_dropped_on_the_way_out(
     session.close()
 
 
+@pytest.mark.parametrize(
+    "escaping",
+    [asyncio.CancelledError, SystemExit, GeneratorExit],
+    ids=["CancelledError", "SystemExit", "GeneratorExit"],
+)
+def test_a_base_exception_that_is_not_the_user_is_swallowed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, escaping: type[BaseException]
+) -> None:
+    """Teardown hands back a `KeyboardInterrupt` and nothing else. It is the only
+    one of these that is the user's instruction rather than somebody else's
+    control flow, and teardown is not where the rest get decided.
+
+    A re-raised `asyncio.CancelledError` would escape the enriched path's
+    `except Exception` and cancel the task group, taking a Matrix query that was
+    still running and still authoritative with it. `SystemExit` and
+    `GeneratorExit` belong to the interpreter and to the generator that raised
+    them. Every one of them still has to leave the driver stopped."""
+    pw = _install(monkeypatch, tmp_path)
+    session = gfb.GfBrowserSession(headed=False)
+    session.get_html(_PAGE_URL)
+
+    def _explode() -> None:
+        raise escaping
+
+    monkeypatch.setattr(pw.chromium._context, "close", _explode)
+    session.close()
+    assert pw.stopped
+
+
+def test_the_driver_stops_even_when_the_context_step_escapes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """`_swallow` catches everything it is handed, so the only way the first step
+    escapes is a signal delivered in the gap between the two calls. The `finally`
+    is what covers that window: without it the interrupt leaves the node driver
+    running, and Chrome outlives the process that launched it.
+
+    Raised from the seam rather than sent as a real signal — a test that raced
+    `os.kill` against two function calls would pass or fail on timing."""
+    pw = _install(monkeypatch, tmp_path)
+    session = gfb.GfBrowserSession(headed=False)
+    session.get_html(_PAGE_URL)
+    real = gfb._swallow
+    steps: list[str] = []
+
+    def _interrupt_after_the_context(
+        what: str, shutdown: Callable[[], object]
+    ) -> KeyboardInterrupt | None:
+        steps.append(what)
+        result = real(what, shutdown)
+        if what == "context":
+            raise KeyboardInterrupt
+        return result
+
+    monkeypatch.setattr(gfb, "_swallow", _interrupt_after_the_context)
+    with pytest.raises(KeyboardInterrupt):
+        session.close()
+    assert steps == ["context", "driver"]
+    assert pw.stopped
+
+
 def test_a_round_trip_pays_for_one_launch_and_navigates_per_leg(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -848,15 +910,17 @@ def test_an_unknown_transport_is_rejected_by_name() -> None:
 
 
 def test_the_cli_and_the_ladder_name_the_same_transports() -> None:
-    """One definition, said out loud. The CLI used to spell the three modes a
-    fourth time, with nothing pinning them to `GfTransportMode` — so a rename on
-    either side surfaced at `_one_call_laddered`'s runtime raise, on the first
-    user who happened to pick the renamed mode, rather than in this suite."""
-    from typing import get_args
+    """One definition, said out loud: the CLI, the ladder and the leaf hold the
+    same objects rather than three copies that happen to agree today.
 
+    The CLI used to spell the three modes a fourth time, with nothing pinning
+    them to `GfTransportMode` — so a rename on either side surfaced at
+    `_one_call_laddered`'s runtime raise, on the first user who happened to pick
+    the renamed mode, rather than in this suite."""
     from flight_cli import cli
 
-    assert get_args(gfid.GfTransportMode.__value__) == cli.VALID_TRANSPORT_MODES
+    assert gfid.GfTransportMode is gfc.GfTransportMode
+    assert cli.VALID_TRANSPORT_MODES is gfc.VALID_TRANSPORT_MODES
     assert set(cli.VALID_TRANSPORT_MODES) == {"auto", cli.TRANSPORT_HTTP, cli.TRANSPORT_BROWSER}
     for mode in cli.VALID_TRANSPORT_MODES:
         assert gfid.GfTransport(mode=mode).mode == mode
@@ -901,12 +965,17 @@ def test_resolving_a_transport_does_not_load_the_google_flights_stack() -> None:
     probe = (
         "import sys, flight_cli.cli as c;"
         "c._resolve_gf_transport('browser');"
-        "print(sorted(m for m in sys.modules if m.startswith('flight_cli._gf')))"
+        "print(sorted(m for m in sys.modules if m.startswith('flight_cli._gf')));"
+        "print(any(m == 'fli' or m.startswith('fli.') for m in sys.modules))"
     )
     out = subprocess.run(  # noqa: S603
         [sys.executable, "-c", probe], capture_output=True, text=True, check=True
     )
-    assert out.stdout.strip() == "['flight_cli._gf_common', 'flight_cli._gf_errors']"
+    loaded, fli_loaded = out.stdout.strip().splitlines()
+    assert loaded == "['flight_cli._gf_common', 'flight_cli._gf_errors']"
+    # The module list is a proxy for the cost; this is the cost. A future import
+    # that reaches fli by some other route would keep the line above green.
+    assert fli_loaded == "False"
 
 
 def test_importing_rung_two_does_not_import_patchright() -> None:

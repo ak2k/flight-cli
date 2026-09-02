@@ -200,9 +200,10 @@ named for what they are.
 
 `import flight_cli.cli` still loads neither `_gflight_ids` nor `_gf_browser` —
 `_gf_errors` and `_gf_common` alone, for the exception catches and the transport
-vocabulary, neither of which imports anything outside the standard library. That is what keeps fli's 64 ms
-off a Matrix-only search, and `test_resolving_a_transport_does_not_load_the_
-google_flights_stack` holds the line in a subprocess.
+vocabulary, neither of which imports anything outside the standard library. That
+is what keeps fli's 75 ms off a Matrix-only search, and
+`test_resolving_a_transport_does_not_load_the_google_flights_stack` holds the
+line in a subprocess.
 
 ## Tests never launch a browser
 

@@ -227,16 +227,24 @@ class GfBrowserSession:
         step raises is logged and dropped: raising one here would replace the
         search's own error with it.
 
-        A `BaseException` that is not an `Exception` — in practice a
-        `KeyboardInterrupt` — is the exception to that. Both steps still run, and
-        it is re-raised once they have. Dropping it would let `--fast` finish
-        rendering a table after the user asked the process to stop."""
+        A `KeyboardInterrupt` is the one exception to that. The driver shutdown
+        still runs, and the interrupt surfaces after it. Dropping it would let
+        `--fast` finish rendering a table after the user asked the process to
+        stop."""
         context, playwright = self._context, self._playwright
         self._page = self._context = self._playwright = None
-        # Both steps run before anything is re-raised. Stopping the driver is
-        # what kills the node subprocess; skipping it strands a live Chrome.
-        from_context = _swallow("context", context.close) if context is not None else None
-        from_driver = _swallow("driver", playwright.stop) if playwright is not None else None
+        from_context: KeyboardInterrupt | None = None
+        from_driver: KeyboardInterrupt | None = None
+        try:
+            if context is not None:
+                from_context = _swallow("context", context.close)
+        finally:
+            # What the `finally` buys, and the only thing it does: the driver
+            # shutdown runs even when a signal lands in the gap between the two
+            # steps. It is what kills the node subprocess, so skipping it leaves
+            # a Chrome running that nothing will come back for.
+            if playwright is not None:
+                from_driver = _swallow("driver", playwright.stop)
         interrupt = from_context or from_driver
         if interrupt is not None:
             raise interrupt
@@ -271,10 +279,10 @@ class GfBrowserSession:
         return self._page
 
 
-def _swallow(what: str, shutdown: Callable[[], object]) -> BaseException | None:
+def _swallow(what: str, shutdown: Callable[[], object]) -> KeyboardInterrupt | None:
     """Run one teardown step, logging rather than raising, and hand back the one
-    thing the caller must not lose: a `BaseException` that is not an
-    `Exception`. Anything else returns `None`.
+    thing the caller must not lose: a `KeyboardInterrupt`. Everything else,
+    `Exception` or not, is logged and returns `None`.
 
     Teardown runs from a `finally`, where a raise would replace the real error
     with this one — so a failing `close()` is logged and dropped.
@@ -282,11 +290,18 @@ def _swallow(what: str, shutdown: Callable[[], object]) -> BaseException | None:
     The catch is `BaseException`, not `Exception`, because `close` runs two of
     these in sequence: anything escaping the first would skip the driver
     shutdown and strand a live Chrome, the exact outcome this module exists to
-    prevent. A `KeyboardInterrupt` arriving mid-teardown is the realistic way
-    in, and returning it rather than dropping it is what lets `close` finish
-    both steps AND still stop the run the user interrupted. Signals are
-    delivered to the main thread, so that window is `--fast` and `atexit`; the
-    enriched path tears down from an anyio worker, where none can land.
+    prevent. Signals are delivered to the main thread, so the realistic way one
+    arrives is a Ctrl-C on `--fast` or at `atexit`; the enriched path tears down
+    from an anyio worker.
+
+    Only the interrupt is handed back, because it is the only one of these that
+    is the user's instruction rather than someone else's control flow.
+    Re-raising an `asyncio.CancelledError` out of teardown would escape the
+    enriched path's `except Exception` and cancel the task group, taking a
+    Matrix query that was still running and still authoritative with it;
+    `SystemExit` and `GeneratorExit` belong to the interpreter and to the
+    generator that raised them. A teardown step is not where any of those gets
+    decided.
 
     Deliberately the opposite choice from `_ensure_page`, which catches
     `Exception` narrowly so the suite's `pytest.fail` guard — a `BaseException`
@@ -297,7 +312,7 @@ def _swallow(what: str, shutdown: Callable[[], object]) -> BaseException | None:
         shutdown()
     except BaseException as e:  # noqa: BLE001 — see the docstring: never fatal here
         log.debug("could not close the gflight browser %s: %s", what, e)
-        return None if isinstance(e, Exception) else e
+        return e if isinstance(e, KeyboardInterrupt) else None
     return None
 
 

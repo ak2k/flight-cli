@@ -34,10 +34,11 @@ from typing import Literal, NamedTuple, get_args
 # so a script written against it keeps working when that rung lands.
 type GfTransportMode = Literal["auto", "http", "browser"]
 
-# Annotated rather than bare: a typo in one of these is a basedpyright error
-# here, instead of a mode the CLI accepts and `_one_call_laddered` has no rung
-# for.
-TRANSPORT_AUTO: GfTransportMode = "auto"
+# The two modes anything compares against by name. `auto` is spelled in the
+# `Literal` and in `VALID_TRANSPORT_MODES` only: nothing branches on it, and the
+# ladder dispatches on bare literals anyway, because a name in a `case` captures
+# rather than compares. Annotated rather than bare, so a typo is a basedpyright
+# error here instead of a mode the CLI offers and no rung answers.
 TRANSPORT_HTTP: GfTransportMode = "http"
 TRANSPORT_BROWSER: GfTransportMode = "browser"
 
