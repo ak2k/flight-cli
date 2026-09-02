@@ -64,7 +64,14 @@ trip. Returns full itineraries (same shape as a specific-date search).
 | `slices[].dateModifier` | omitted | omitted (!) |
 | `inputs.filter` | `{}` (empty obj) | omitted entirely |
 | `inputs.page` | `{size}` | `{current:1, size}` |
-| `inputs.startDate` / `endDate` / `layover` | present | present (preserves context) |
+| `inputs.startDate` / `endDate` | present | present (preserves context) |
+| `inputs.layover` | round-trip only | round-trip only |
+
+`layover` is the trip LENGTH (nights between outbound and return), so it goes on
+a body only when there is a return leg. Send it one-way and Matrix answers HTTP
+200 `"Internal server error"` for both `calendar` and `calendarFollowup` —
+verified live 2026-09-02, the identical bodies without it return a grid and 10
+solutions respectively (work-h70kv.7).
 
 ## Why bother with followup vs. just calling `name: "specificDatesSlice"`?
 

@@ -61,8 +61,9 @@ def _is_error_body(value: Any) -> bool:
     Matrix reports errors as 200 + a top-level `error` object, so caching one
     replays a brownout until the cache dir is cleared (`_cache_get` has no expiry);
     the giveaway is an identical request_id returning instantly on a retry
-    (work-h70kv.8). Same dict test as `client._raise_if_api_error`, so what we
-    refuse to cache is exactly what that would have raised on. `value` is whatever
+    (work-h70kv.8). The same dict test as `client._raise_if_api_error`'s first
+    clause — deliberately a superset: we also refuse an `error` object with neither
+    `message` nor `code`, which that function lets through. `value` is whatever
     `r.json()` decoded and is typed Any at every call site, so the shape is checked
     before it is indexed — a JSON array is a body, not an error.
     """

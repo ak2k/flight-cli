@@ -6,8 +6,9 @@ Tier-1 calendars.
 client that can't sign `x-goog-batchexecute-bgr` (BotGuard). An empty payload is
 not a throttle, so the shared retry reads it as a cold session and burns 4 POSTs
 + ~6s of backoff per chunk to learn nothing — hence the `GfGridUnavailableError`
-at the top of `_one_grid_call`. Flipping that flag back to False re-enables the
-transport below it, as does an attested transport landing (work-udpp1).
+at the top of `_one_grid_call`, behind `_GRID_RPC_GATED`. Flipping that flag back
+to False re-enables the transport below it, as does an attested transport landing
+(work-udpp1).
 
 When the RPC answers, it returns cheapest-price-per-date for a whole window in
 ONE call — far faster than Matrix's calendar, and it sidesteps Matrix's

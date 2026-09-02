@@ -573,9 +573,10 @@ def test_calendar_fast_bad_airport_exits_one(
 def test_calendar_fast_empty_grid_exits_one(
     monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # The fifth no-grid branch, and the one that goes live the moment the gate flips:
-    # date_grid returns {} with no exception (a window Google has no fares for, or a
-    # cold session that never warmed). No handler runs, so only the exit says so.
+    # The fourth no-grid outcome — the one with no handler — and the one that goes
+    # live the moment the gate flips: date_grid returns {} with no exception (a
+    # window Google has no fares for, or a cold session that never warmed). Nothing
+    # explains it, so only the exit says so.
     def _empty(_search: object) -> dict[str, float]:
         return {}
 

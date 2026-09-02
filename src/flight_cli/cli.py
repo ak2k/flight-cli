@@ -2890,9 +2890,10 @@ def calendar(
                 grid = date_grid(search)
             # Each handler only says WHY there is no grid; the single exit below says
             # THAT there is none. Under `--fast` there is no Matrix to fall back to, so
-            # every no-grid outcome — gate, throttle, or a bad airport/date landing in
-            # the broad except — has to leave the same way, or a wrapper doing
-            # `--fast || fallback` reads success where it should read failure.
+            # every no-grid outcome — gate, throttle, an empty grid, or a bad airport
+            # or date landing in the broad except — has to leave the same way, or a
+            # wrapper doing `--fast || fallback` reads success where it should read
+            # failure.
             except GfThrottledError:
                 console.print("[dim]Google Flights rate-limited; no grid to show.[/]")
             except GfGridUnavailableError:

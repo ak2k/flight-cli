@@ -30,10 +30,20 @@ catches it.
 | `slices[].isArrivalDate` | always (even `false`) | omitted | omitted |
 | `inputs.filter` | `{}` | `{}` | OMITTED |
 | `inputs.page` | `{current:1, size}` | `{size}` | `{current:1, size}` |
-| `inputs.startDate / endDate / layover` | omitted | required | required |
+| `inputs.startDate / endDate` | omitted | required | required |
+| `inputs.layover` | omitted | round-trip only | round-trip only |
+
+`inputs.layover` is the trip-LENGTH range (nights between the outbound and the
+return), so a one-way body has nothing to measure — and Matrix does not ignore
+it: a one-way `calendar` or `calendarFollowup` carrying it comes back HTTP 200
+`"Internal server error"` (work-h70kv.7).
 
 Golden-file tests at `tests/fixtures/` will fail loudly if you over-emit
-or under-emit these.
+or under-emit these — except the `layover` row. Every captured fixture is
+round-trip or `wholeTrip`; none is `calendarOneWay`, so the fixtures cannot see
+that row. Its guard is `tests/test_wire_round_trip.py`:
+`test_one_way_calendar_omits_trip_length`, `test_one_way_followup_omits_trip_length`
+and `test_round_trip_calendar_keeps_trip_length`.
 
 ## Summarizer ORDER matters for tests (not for the server)
 
