@@ -120,8 +120,10 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> Any:
 def test_extract_ds1_reads_the_flights_blob_past_other_keys() -> None:
     payload = gfid._extract_ds1(_page(_ds1("ds1_jfk_lax_3rows.json")))
     assert payload is not None
-    assert gfid._rows_from_ds1(payload) == (gfid._rows_from_ds1(payload)[0], 2)
-    assert len(gfid._rows_from_ds1(payload)[0]) == 3
+    rows, blocks_seen = gfid._rows_from_ds1(payload)
+    assert blocks_seen == 2
+    assert rows == payload[2][0] + payload[3][0]
+    assert len(rows) == 3
 
 
 def test_extract_ds1_returns_none_when_the_key_is_absent() -> None:
@@ -224,6 +226,17 @@ def test_real_fli_client_turns_a_429_into_a_typed_throttle(
     monkeypatch.setattr(real, "_session", lambda: session)
     monkeypatch.setattr(gfid, "get_client", lambda: real)
 
+    # fli wraps `get` in `@retry(stop_after_attempt(3), wait_exponential())`, so
+    # the real backoff runs here. Tenacity's documented hook skips the waits;
+    # the three attempts (and the request budget they cost) still happen.
+    def _no_backoff(_seconds: float) -> None:
+        return None
+
+    # `Client.get` is decorated, so `.retry` is tenacity's controller — present
+    # at runtime, invisible to a type checker looking at a plain function.
+    retry_controller: Any = Client.get.retry  # pyright: ignore[reportFunctionMemberAccess]
+    monkeypatch.setattr(retry_controller, "sleep", _no_backoff)
+
     with pytest.raises(GfThrottledError):
         gfid._one_call(_FILTERS)
 
@@ -237,17 +250,36 @@ def test_sorry_body_at_the_original_url_raises_throttled(client: Any) -> None:
         gfid._one_call(_FILTERS)
 
 
+def test_partially_relocated_row_blocks_raise_page_shape(client: Any) -> None:
+    """Rows leave [2] while [3] still holds a list: zero rows, exactly like an
+    empty board. Requiring BOTH blocks is what tells the two apart."""
+    client(_FakeResponse(text=_page(_ds1("ds1_blocks_partial.json"))))
+    with pytest.raises(GfPageShapeError, match=r"carried 1 of 2 row blocks"):
+        gfid._one_call(_FILTERS)
+
+
+def test_a_block_that_is_not_a_row_list_does_not_count(client: Any) -> None:
+    """A list at the right index whose [0] isn't a row list is not a row
+    block — counting it would let a moved payload pass the guard."""
+    payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
+    payload[2] = ["not-a-row-block"]
+    payload[3] = ["nor-this"]
+    client(_FakeResponse(text=_page(json.dumps(payload))))
+    with pytest.raises(GfPageShapeError, match=r"carried 0 of 2 row blocks"):
+        gfid._one_call(_FILTERS)
+
+
 def test_relocated_row_blocks_raise_page_shape(client: Any) -> None:
     """A payload that decodes but whose row blocks moved off [2]/[3] yields no
     rows — indistinguishable from an empty board without the block count."""
     client(_FakeResponse(text=_page(_ds1("ds1_blocks_relocated.json"))))
-    with pytest.raises(GfPageShapeError, match=r"no row blocks"):
+    with pytest.raises(GfPageShapeError, match=r"carried 0 of 2 row blocks"):
         gfid._one_call(_FILTERS)
 
 
 def test_brace_in_a_row_string_does_not_truncate_the_blob(client: Any) -> None:
-    """`});` inside benign Google copy used to cut the capture short and fail
-    the whole search."""
+    """`});` inside benign Google copy must not cut the capture short — the
+    blob terminates on the `sideChannel` key for exactly this reason."""
     fake = client(_FakeResponse(text=_page(_ds1("ds1_brace_in_string.json"))))
     assert len(gfid._one_call(_FILTERS)) == 3
     assert len(fake.gets) == 1

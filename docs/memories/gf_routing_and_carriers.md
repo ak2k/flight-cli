@@ -98,10 +98,12 @@ is pinned with an open floor (`>=0.9`), so a minor that adds a filter would
 otherwise encode as if the new field were unset — dropping a constraint the user
 asked for, silently.
 
-One more trap in `page_can_encode`: a stop ceiling only encodes up to **two**.
-fli's `MaxStops` tops out at `TWO_OR_FEWER_STOPS`, so `MAXSTOPS 3` maps to `ANY`
-and omits field 3.5 entirely — certifying it as page-servable would drop the
-constraint with neither a native filter nor a printed reason.
+One more trap: a stop ceiling only encodes up to **two**. fli's `MaxStops` tops
+out at `TWO_OR_FEWER_STOPS`, so a ceiling of 3+ maps to `ANY` and omits field
+3.5 entirely — `--stops 3` then encodes byte-identically to no `--stops` at all.
+Both spellings hit the same ceiling (`routing_predicates.MAX_ENCODABLE_STOPS`,
+shared so the two sites can't drift): the routing-language `MAXSTOPS 3` through
+`page_can_encode`, and the `--stops` flag through `_pick_backend` directly.
 
 **Refusals are typed** (`_gf_errors`):
 
@@ -114,15 +116,18 @@ constraint with neither a native filter nor a printed reason.
   catches that and re-raises 429 as a throttle. Anything else re-raises.
 - `GfConsentError` — no `ds:1` *and* consent markers, checked in that order,
   because a real results page links to the consent domain in its footer.
-- `GfPageShapeError` — no readable `ds:1`; or `ds:1` decoded but carried no row
-  block at `[2]`/`[3]`; or rows present and none parsed (with sampled reasons).
+- `GfPageShapeError` — no readable `ds:1`; or `ds:1` decoded but carried fewer
+  than BOTH row blocks at `[2]`/`[3]`; or rows present and none parsed (with
+  sampled reasons).
 
 A page that decodes with zero rows returns `[]` and is Google's authoritative
 answer, so the search path passes `retry_empty=False` and spends exactly one GET
 on it. The discriminator against a moved payload is that a genuinely empty board
-still carries a LIST at both row indices (`[[]]` at 2 and 3, checked against a
-live capture) — zero blocks present means the layout changed, not that the route
-has no service.
+still carries a row block — a list shaped `[[…]]` — at BOTH indices (`[[]]` at 2
+and 3, checked against a live capture). Anything less than both means the layout
+changed, not that the route has no service. Requiring both is what catches a
+PARTIAL relocation, where rows leave `[2]` and `[3]` still holds a list: that
+yields zero rows, exactly like an empty board.
 
 ## Tier model: who honors each constraint
 

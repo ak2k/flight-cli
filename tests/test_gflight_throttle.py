@@ -3,7 +3,8 @@
 
 Two transports, two block signals: the date grid still POSTs an RPC and reads a
 code-13 error envelope out of the body (`_is_throttle_block`); the search path
-GETs a page and reads the status line and final URL (`_is_page_throttled`).
+GETs a page and reads the final URL and the body (`_is_page_throttled`), because
+an outright 429 is raised by fli's client and never reaches that predicate.
 `retry_throttled` backs off the same way for both.
 """
 

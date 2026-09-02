@@ -375,8 +375,10 @@ def parse_extension(extension: str) -> list[Predicate]:
 # a constrained search with "no results".
 
 
-# fli's MaxStops enum stops at TWO_OR_FEWER_STOPS; anything above is ANY.
-_MAX_ENCODABLE_STOPS = 2
+# fli's MaxStops enum stops at TWO_OR_FEWER_STOPS; anything above is ANY, which
+# omits tfs field 3.5 entirely. Public because `cli._pick_backend` applies the
+# same ceiling to `--stops`, and two copies would drift.
+MAX_ENCODABLE_STOPS = 2
 
 
 def _page_reason(pred: Predicate) -> str | None:  # noqa: PLR0911, PLR0912 — one arm per predicate type
@@ -385,10 +387,10 @@ def _page_reason(pred: Predicate) -> str | None:  # noqa: PLR0911, PLR0912 — o
         # fli's MaxStops tops out at "two or fewer", so a higher ceiling maps to
         # ANY, which omits tfs field 3.5 entirely. Certifying it as encodable
         # would drop the constraint with neither a native filter nor a reason.
-        case StopsPred() if pred.max_stops <= _MAX_ENCODABLE_STOPS:
+        case StopsPred() if pred.max_stops <= MAX_ENCODABLE_STOPS:
             return None
         case StopsPred():
-            return f"a stop ceiling above {_MAX_ENCODABLE_STOPS} ({pred.max_stops})"
+            return f"a stop ceiling above {MAX_ENCODABLE_STOPS} ({pred.max_stops})"
         case UnsupportedPred():
             return pred.reason
         case CarrierPred():
