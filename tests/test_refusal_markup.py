@@ -9,13 +9,16 @@ backend picker prints. Either one containing `[/x]` ended the command in a
 `MarkupError` traceback instead of the refusal it was trying to explain.
 
 THE RULE: reason strings and exception text are PLAIN TEXT wherever they are
-built, and EVERY render site escapes what it interpolates (repr first, then
-escape). Escaping at the source cannot work, for two independent reasons. The
+built, and EVERY render site escapes what it interpolates exactly once. The
 same reason goes out two ways from `_pick_backend` — a rich Console on the auto
 path, a `typer.BadParameter` on the explicit path, and typer renders that as
-plain `Text` — so a pre-escaped reason satisfies the first and shows the user a
-literal backslash in the second. And the calendar paths escape at their own
-render sites, so a reason escaped at the source would be escaped twice.
+plain `Text` — so a reason escaped where it is built satisfies the first and
+shows the user a literal backslash in the second.
+
+Text that came from somewhere else entirely — a Matrix error, an exception's
+`str()` — goes through `_safe_text` instead of a bare `escape`: markup is not
+the only thing a console reacts to, and neither `kind` nor `request_id` is
+guaranteed to be a string.
 
 Three groups of tests below, one per half of the rule: `matrix_reasons` is plain
 at the source; both `_pick_backend` arms are correct on the same hostile input;
@@ -93,7 +96,7 @@ def _hostile_matrix_error() -> Any:
     from flight_cli.client import MatrixApiError
 
     return MatrixApiError(
-        f"QPX Warning. Bad route [/spec]{_ESCAPES}", kind="in[put]", request_id="Or[FG]wFzk"
+        f"QPX Warning. Bad route [/spec]{_ESCAPES}", kind="in[put]", request_id="Or[bold]wFzk"
     )
 
 
@@ -184,8 +187,8 @@ def test_a_routing_reason_is_plain_text_at_its_source(routing: str) -> None:
 
     This is the half of the rule the render-site tests cannot see. A reason
     escaped here reads correctly through a rich Console and wrongly everywhere
-    else — typer's plain-text errors, and the calendar paths, which escape at
-    their own render sites and would escape it a second time."""
+    else — typer renders its errors as plain text, so the user is shown the
+    backslash."""
     _assert_plain_at_source(classify(routing, None).matrix_reasons, routing)
 
 
@@ -246,7 +249,7 @@ def test_hostile_extension_reaches_the_auto_path_verbatim(
     [
         pytest.param(
             _hostile_matrix_error,
-            ("QPX Warning. Bad route [/spec]", "in[put]", "Or[FG]wFzk"),
+            ("QPX Warning. Bad route [/spec]", "in[put]", "Or[bold]wFzk"),
             id="markup-and-control-bytes",
         ),
         pytest.param(
@@ -525,7 +528,12 @@ def test_the_awards_only_refusal_escapes_the_providers_the_user_typed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`--awards-only --providers '[/x]'` quotes the filter back while telling
-    the user it matched nothing configured."""
+    the user it matched nothing configured.
+
+    Both markup shapes, because they fail differently: rich RAISES on the
+    unmatched closing tag and silently DROPS the valid opening one, so the
+    dropping shape is the one that proves the filter survived rather than that
+    nothing crashed."""
     from flight_cli import cli
 
     buf = io.StringIO()
@@ -538,12 +546,14 @@ def test_the_awards_only_refusal_escapes_the_providers_the_user_typed(
     sel = cli.ProviderSelection(
         awards_only=True,
         cash_only=False,
-        provider_filter=("[/x]",),
+        provider_filter=("[/x]", "[bold]"),
         provider_opts={},
     )
     with pytest.raises(typer.Exit):
         cli._should_run_awards(sel)
-    assert "[/x]" in buf.getvalue()
+    printed = buf.getvalue()
+    for fragment in ("[/x]", "[bold]"):
+        assert fragment in printed, f"{fragment!r} was mangled: {printed!r}"
 
 
 @pytest.mark.parametrize("fetch", [False, True], ids=["url-only", "resolved"])

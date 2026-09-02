@@ -216,8 +216,14 @@ _CONSENT_PATH = "/consent"
 _GOOGLE_HOST_RE = re.compile(rf"^(?:[a-z0-9-]+\.)*google\.{_TLD}$", re.IGNORECASE)
 # The interstitial SUBMITS the user's choice to the consent host. A results page
 # can link to that host; only the consent page itself posts a form to it.
+#
+# `[^<>]`, not `[^>]`: the attribute run belongs to ONE open tag, so it stops at
+# the next tag boundary either way. Letting it cross `<` lets every `<form` in a
+# two-megabyte body rescan the whole rest of the document looking for an
+# `action=` that is not there — quadratic, and measured at seconds on a body
+# holding a few thousand of them.
 _CONSENT_FORM_RE = re.compile(
-    rf"<form\b[^>]*\baction=[\"']https://consent\.google\.{_TLD}/", re.IGNORECASE
+    rf"<form\b[^<>]*\baction=[\"']https://consent\.google\.{_TLD}/", re.IGNORECASE
 )
 
 # `AF_initDataCallback({key: 'ds:1', hash: '..', data:[...], sideChannel: {}});`
@@ -371,8 +377,9 @@ def _is_page_throttled(*, final_url: str, html: str) -> bool:
 
     Both signals are needed. The interstitial usually arrives as a redirect to
     `/sorry/`, but Google also serves it with HTTP 200 at the requested URL, and
-    that variant is only visible in the body. An HTTP 429 never reaches here at
-    all — fli's client raises it (see `_one_call`).
+    that variant is only visible in the body. An HTTP 429 is a third shape and
+    is not this predicate's job: it arrives as a status on the response, which
+    `_one_call` reads directly.
 
     The URL half reads the PATH, not the whole string: our own request URL
     carries a base64 `tfs=` parameter, and a substring test over the query
@@ -391,9 +398,10 @@ def _is_consent_page(*, final_url: str, html: str) -> bool:
     form that submits TO the consent host. A results page links to that domain;
     it never posts to it.
 
-    Still only meaningful once `ds:1` has come back missing — `_one_call` checks
-    in that order — but it no longer answers "consent wall" for any page that
-    merely mentions the domain."""
+    Only meaningful once `ds:1` has come back missing, and `_one_call` checks in
+    that order. Neither signal is a bare substring: a results page that merely
+    mentions the domain is not a consent wall, and answering that it is sends
+    the user to fix a problem they do not have."""
     parsed = _split_url(final_url)
     host = (parsed.hostname or "").lower()
     if _CONSENT_HOST_RE.match(host):
@@ -821,8 +829,16 @@ def _persist_cookies(client: Any) -> None:
     created = False
     try:
         # 0700 explicitly: `mkdir` takes the umask otherwise, and the directory
-        # holds a live Google session cookie.
+        # holds a live Google session cookie. The mode on `mkdir` only applies
+        # when THIS call creates the directory, and whichever of this CLI's
+        # caches writes first is the one that creates it — the Matrix response
+        # cache shares the same root and asks for no mode at all. So the mode is
+        # enforced here rather than assumed. Suppressed because the directory
+        # may belong to another user on a shared box, where a private cache is
+        # not ours to fix and a search is still worth serving.
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with contextlib.suppress(OSError):
+            path.parent.chmod(0o700)
         # `os.open` with the mode, not a write-then-chmod: the rename below
         # carries this inode and its mode onto the cache, so a mode fixed after
         # the fact would leave a live Google session cookie world-readable for
@@ -987,25 +1003,25 @@ def _fetch_page(client: Any, url: str) -> Any:
 
     DIVERGE, and the reason is a request budget. `Client.get` is wrapped in
     `@retry(stop_after_attempt(3))` and calls `raise_for_status()`, so a
-    persistently throttled leg cost three fli attempts inside each of our
+    persistently throttled leg would cost three fli attempts inside each of our
     throttle retries — up to fifteen multi-megabyte GETs for one leg, and a
-    multi-cabin round trip multiplies that by the cabin count. Two ladders
-    stacked on the same signal is not a policy anyone chose. `retry_throttled`
-    is now the only one, so throttle handling lives where the classification
+    multi-cabin round trip multiplies that by the cabin count. `retry_throttled`
+    is the only ladder, so throttle handling lives where the classification
     does.
 
     What comes back is the raw response: this function does not raise on a
-    non-2xx, because a 429 IS the signal and swallowing it into an exception is
-    what hid it from us before. The caller classifies the status.
+    non-2xx, because a 429 IS the signal and an exception hides it from the
+    classifier. The caller reads the status.
 
-    Kept from `Client.get`: the shared 10 req/sec token bucket (a
-    process-global budget the fan-out threads share) and its request timeout.
-    NOT kept: fli's transport-error retry — a connection reset now fails the
-    leg instead of being retried three times. That is the deliberate cost of
-    owning the ladder; the enriched path still answers from Matrix."""
-    client._rate_limiter.acquire()  # pyright: ignore[reportAny]
+    Kept from `Client.get`: the shared 10 req/sec token bucket, a process-global
+    budget the fan-out threads share, and fli's own `REQUEST_TIMEOUT`. Its
+    transport retry is not kept but is re-homed: a curl-level failure comes back
+    as `_RetryableTransportError`, which `retry_throttled` retries on a budget of
+    its own — `_TRANSPORT_RETRY_ATTEMPTS`, so three GETs per leg — and then
+    turns into a plain `GfBackendError`."""
+    client._rate_limiter.acquire()  # pyright: ignore[reportAny]  # fli/curl_cffi untyped
     try:
-        return client._session().get(  # pyright: ignore[reportAny]
+        return client._session().get(  # pyright: ignore[reportAny]  # fli/curl_cffi untyped
             url,
             impersonate="chrome",
             allow_redirects=True,
@@ -1031,8 +1047,8 @@ def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
     url = google_flights_search_page_url(build_search_tfs(filters))
     resp = _fetch_page(client, url)
     status = int(resp.status_code)  # pyright: ignore[reportAny]  # fli/curl_cffi untyped
-    final_url = str(resp.url)  # pyright: ignore[reportAny]
-    html = cast("str", resp.text)  # pyright: ignore[reportAny]
+    final_url = str(resp.url)  # pyright: ignore[reportAny]  # fli/curl_cffi untyped
+    html = cast("str", resp.text)  # pyright: ignore[reportAny]  # fli/curl_cffi untyped
     if status == HTTPStatus.TOO_MANY_REQUESTS or _is_page_throttled(final_url=final_url, html=html):
         raise GfThrottledError("Google Flights rate-limited the request")
     if status >= HTTPStatus.BAD_REQUEST:
@@ -1131,12 +1147,11 @@ def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
     re-fetching a multi-megabyte page can only return the same zero rows.
 
     - **transport failure** (a reset connection, a read timeout) -> the same
-      backoff, on a smaller budget. This arm exists because the search path
-      stopped going through fli's `Client.get`, which used to retry these; the
-      throttle ladder took over and a single blip would otherwise fail the leg.
-      When the budget is spent it becomes a plain `GfBackendError`, so the
-      enriched path degrades to Matrix and `--backend gflight` prints a typed
-      line instead of a curl traceback."""
+      backoff, on a smaller budget. Nothing below this ladder retries one:
+      `_fetch_page` goes to fli's session rather than `Client.get`, so without
+      this arm a single blip fails the leg. When the budget is spent it becomes
+      a plain `GfBackendError`, so the enriched path degrades to Matrix and
+      `--backend gflight` prints a typed line instead of a curl traceback."""
     empty_attempts = 0
     throttle_attempts = 0
     transport_attempts = 0
@@ -1192,11 +1207,14 @@ def _one_call_with_retry(filters: FlightSearchFilters) -> list[GFlightWithId]:
 # more multi-megabyte page GET, so this is a REQUEST budget, not a result limit.
 #
 # The multi-cabin path bumps top_n (`_MULTI_CABIN_QUERY_BUMP_FACTOR`, 5x, capped
-# at 100) to widen the pool it filters, which was free when this was an RPC and
-# is not free on the page transport: at top_n=100 a two-cabin round trip would
-# fan out to ~2 x 31 page fetches. The default `-n 10` is unchanged by this cap;
-# above it, the round trip returns combinations for the ten best outbounds
-# rather than for all of them.
+# at 100) to widen the pool it filters. That is free on an RPC and expensive
+# here: at top_n=100 a two-cabin round trip fans out to ~2 x 31 page fetches.
+# The default `-n 10` sits exactly on this cap and is unchanged by it; above it,
+# the round trip returns combinations for the ten best outbounds rather than for
+# all of them, and `cli._MULTI_CABIN_JOIN_NOTE` says so where it shows.
+#
+# Multi-city never reaches this: `cli._pick_backend` routes a multi-city query
+# to Matrix, so the recursion below only ever runs the two legs of a round trip.
 _PINNED_FANOUT_CAP = 10
 
 

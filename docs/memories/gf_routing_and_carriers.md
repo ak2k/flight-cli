@@ -110,10 +110,11 @@ shared so the two sites can't drift): the routing-language `MAXSTOPS 3` through
 - `GfThrottledError` — the captcha interstitial, which arrives three ways. A
   redirect puts `/sorry/` in the final URL; Google also serves the same page
   in place with HTTP 200, where the body marker ("Our systems have detected
-  unusual traffic") is the only tell; and an outright **HTTP 429 never reaches
-  our code as a response at all**. fli's `Client.get` calls `raise_for_status()`
-  itself and wraps whatever it catches in `SearchHTTPError`, so `_one_call`
-  catches that and re-raises 429 as a throttle. Anything else re-raises.
+  unusual traffic") is the only tell; and an outright **HTTP 429, which arrives
+  as a RESPONSE**. `_fetch_page` goes through fli's session rather than
+  `Client.get`, so nothing calls `raise_for_status()` on our behalf and
+  `_one_call` reads `resp.status_code` itself — which is what lets the ladder
+  see a throttle instead of a wrapped transport error.
 - `GfConsentError` — no `ds:1` *and* consent markers, checked in that order,
   because a real results page links to the consent domain in its footer.
 - `GfPageShapeError` — no readable `ds:1`; or a payload too short to reach
@@ -126,12 +127,21 @@ answer, so the search path passes `retry_empty=False` and spends exactly one GET
 on it.
 
 **A page may carry more than one `ds:1` blob**, and this one hydrates in stages,
-so `_extract_ds1` decodes them ALL and picks the first that structurally holds a
-row block at `[2]`/`[3]` — falling back to the first decodable blob when none
-does, so a genuinely flight-less page stays flight-less. Taking the first
-decodable blob was a bet on position: a placeholder emitted above the populated
-one read as an authoritative empty (or tripped the arity guard) while the real
-board sat further down the document, unexamined.
+so `_extract_ds1` decodes them ALL and serves the one carrying the most rows at
+`[2]`/`[3]`, earliest blob on a tie. Choosing by position is a bet: a
+placeholder emitted above the populated blob reads as an authoritative empty (or
+trips the arity guard) while the real board sits further down the document,
+unexamined. Choosing on "carries a row block" is the same bet one level down,
+because a staged blob can carry an empty husk `[[]]`, or one row where the
+settled board carries thirty.
+
+The count is **structural**, exactly like the scan at those indices: rows are
+counted, never parsed, so a board whose rows have all changed shape still wins
+and reaches the 0-of-N guard as a layout change rather than losing to a husk.
+With no blob carrying rows the fallback takes the first one long enough to reach
+`[3]`, then the first decodable one at all — so a genuinely flight-less page
+stays flight-less and a truncated placeholder above it does not become a shape
+error.
 
 ### Request budget
 
@@ -144,6 +154,8 @@ Every one of these is a multi-megabyte page GET, so the count is the cost:
 | multi-cabin | the above, times the cabin count |
 | a persistently throttled leg | `_THROTTLE_RETRY_ATTEMPTS` + 1 = 5, then it aborts |
 | a transport blip | up to 3 GETs per leg (`_TRANSPORT_RETRY_ATTEMPTS` + 1) |
+| a leg that both throttles and blips | 1 + `_THROTTLE_RETRY_ATTEMPTS` + `_TRANSPORT_RETRY_ATTEMPTS` = 7 |
+| a persistently throttled multi-cabin fan-out | one ladder for the group: 5 + (cabins - 1) |
 
 Two things make those numbers hold. `_fetch_page` goes through fli's SESSION,
 not `Client.get` — which is wrapped in `@retry(stop_after_attempt(3))`, so a
@@ -154,10 +166,31 @@ widen the pool it filters, which was free on the old RPC and would otherwise
 mean ~2 x 31 page fetches for a two-cabin round trip. The default `-n 10` is
 unchanged by the cap.
 
-A throttle aborts the whole search after ONE ladder: `search_with_ids` does not
-catch `GfThrottledError` in its pinning loop, so the remaining pins are never
-fetched. That is deliberate — the throttle is per-IP, so the next leg would hit
-the same wall.
+The bump therefore widens the leg-1 rows each cabin keeps and NOT the round-trip
+pins, so **Google Flights joins cabins on each cabin's 10 cheapest outbounds;
+'—' means no shared itinerary, not no fare.** `cli._run_gflight_path_multi`
+prints that sentence on a multi-cabin round trip, because an empty cabin cell
+otherwise reads as "that fare does not exist". Widening the join means pinning
+on the intersection of the cabins' outbounds rather than raising the cap; that
+is a separate design and is tracked on bd work-h70kv.
+
+The two counters are independent, so one leg can spend both budgets: four 429s,
+two transport blips and a final 429 costs 7 GETs. That is the ceiling, and it is
+deliberate — a wall that lifts and a network that drops are different failures,
+and sharing one counter would let a blip eat the throttle budget.
+
+A throttle aborts the whole search after ONE ladder per cabin: `search_with_ids`
+does not catch `GfThrottledError` in its pinning loop, so the remaining pins are
+never fetched. That is deliberate — the throttle is per-IP, so the next leg
+would hit the same wall.
+
+Per **cabin** is not per **search**, and the multi-cabin fan-out runs a cabin
+per thread. Four cabins laddering separately spend 4 x 5 = 20 multi-megabyte
+GETs against an IP that is already refusing us, to learn what the first ladder
+learned. `_gflight_ids.shared_throttle_ladder` — armed by `cli._run_gflight_multi`
+around the fan-out — gives the whole group one ladder to draw retry numbers
+from: the first worker to exhaust it trips it, and every other worker's next
+throttle re-raises without another GET.
 
 Owning the ladder meant re-homing one thing fli's `Client.get` did for us: it
 also retried transport errors three times. `retry_throttled` now has a third
@@ -169,9 +202,18 @@ fallback the user is going to get anyway. When the budget is spent it becomes a
 plain `GfBackendError`, so the enriched path degrades to Matrix and
 `--backend gflight` prints a typed line rather than a curl traceback.
 
-Only curl-level failures are retried. An exception from our own code propagates
-on the first try — retrying a bug three times and relabelling it a transport
-problem is how a defect becomes unfindable.
+Only a failure to REACH Google is retried — `curl_cffi`'s `ConnectionError` and
+`Timeout`, which is DNS, TLS, a reset socket, connect and read timeouts.
+Everything else propagates on the first try, including the rest of curl's own
+`CurlError` tree (`InvalidURL`, `InvalidSchema`, `SessionClosed`,
+`CookieConflict`, `ImpersonateError`, `TooManyRedirects`). Those name a request
+WE built wrongly — the shape a `build_search_tfs` regression takes — and
+retrying a bug three times and relabelling it "Google could not be reached" is
+how a defect becomes unfindable.
+
+The request timeout is fli's own `REQUEST_TIMEOUT`, imported rather than copied:
+it is the value that reads and validates `FLI_TIMEOUT`, and a duplicate constant
+here silently ignores whatever the user set.
 
 **Where a served page puts its rows varies, so no count of blocks is a validity
 test.** Six live pages, measured 2026-09-02:
@@ -193,7 +235,9 @@ genuinely flight-less board is an ordinary results page with no flight cards and
 for a route that simply has nothing matching. Two synthetic shapes are also
 pinned in the fixtures (an empty block `[[]]` at both indices, and at one); they
 have never been seen in the wild and are labelled as synthetic, but an empty
-block must not read as a refusal if Google starts sending one.
+block at those indices with nothing misplaced must not read as a refusal if
+Google starts sending one. It must not win a blob contest either — an empty husk
+carries no rows, which is why `_extract_ds1` counts rows rather than blocks.
 
 So the guard is a POSITIVE scan rather than a count. `_rows_from_ds1` collects
 rows from `[2]`/`[3]` structurally, and separately probes every OTHER top-level
@@ -201,17 +245,19 @@ index for a block whose leading rows actually parse as flight rows:
 
 - rows only at `[2]`/`[3]` → those rows (however many blocks carried them)
 - nothing row-shaped anywhere → `[]`, an authoritative empty
-- rows found outside `[2]`/`[3]` and **no block at either index** →
+- rows found outside `[2]`/`[3]` and **none served from them** →
   `GfPageShapeError`
-- rows found outside `[2]`/`[3]` **with a block at either index** → whatever
-  that block held, even zero rows, and a `log.warning` naming the indices
+- rows found outside `[2]`/`[3]` **with rows also served** → the served rows,
+  and a `log.warning` naming the indices
 - a payload too short to reach `[3]`, or a value at `[2]`/`[3]` that is neither
   absent nor row-shaped → `GfPageShapeError`
 
 `None` and a bare `[]` both count as ABSENT at `[2]`/`[3]`: neither carries rows
 and neither claims anything, and `None` is the shape Google actually sends.
-`[[]]` is a different fact — a block that exists and holds no rows — and it
-counts as a block, which is what the refusal predicate above turns on.
+`[[]]` is a different fact — a block that exists and holds no rows. Either way
+it serves no rows, and served rows are the only thing the refusal predicate
+turns on; `blocks_seen` is carried for the message and the debug line, not for
+the decision.
 
 That last case is not pedantry. Enumerating a list never visits an index that
 isn't there, so a truncated or junk `ds:1` (`[]`, `[null]`) would otherwise fall

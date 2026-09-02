@@ -45,6 +45,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 from typing import Any, ClassVar, cast
 
 import pytest
@@ -795,15 +796,43 @@ def test_missing_ds1_raises_page_shape(client: Any) -> None:
         gfid._one_call(_FILTERS)
 
 
-def test_zero_of_n_rows_parsing_raises_page_shape_with_reasons(client: Any) -> None:
-    """Rows present and none parsed is a moved row layout, a different fact
-    from an empty board — and the sampled reasons are what makes it fixable."""
+def _unparseable_board() -> str:
+    """A page whose two rows are row-shaped and neither of them parses."""
     payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
     payload[2] = [[["not-a-row"], ["nor-this"]]]
     payload[3] = [[]]
-    client(_FakeResponse(text=_page(json.dumps(payload))))
-    with pytest.raises(GfPageShapeError, match="none of 2 Google Flights rows parsed"):
+    return _page(json.dumps(payload))
+
+
+def test_zero_of_n_rows_parsing_raises_page_shape_with_reasons(client: Any) -> None:
+    """Rows present and none parsed is a moved row layout, a different fact
+    from an empty board — and the sampled reasons are what makes it fixable, so
+    the reason string is asserted rather than just the headline."""
+    client(_FakeResponse(text=_unparseable_board()))
+    with pytest.raises(GfPageShapeError, match="none of 2 Google Flights rows parsed") as excinfo:
         gfid._one_call(_FILTERS)
+    reported = str(excinfo.value)
+    assert "sample reasons: ValueError: ValueError(" in reported, reported
+
+
+def test_a_sampled_reason_cannot_write_page_bytes_at_the_terminal(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reasons are quoted (`!r`), not interpolated. They carry text the PAGE
+    chose — a decoder reports a bad value by formatting it into its message —
+    and a raw ESC or C1 byte on its way to a terminal is not a diagnostic."""
+
+    def _raise_with_page_bytes(_data: Any) -> Any:
+        raise ValueError("bad value \x1b[2J\x9b31m")
+
+    monkeypatch.setattr(gfid, "_parse_flight_with_id", _raise_with_page_bytes)
+    client(_FakeResponse(text=_unparseable_board()))
+    with pytest.raises(GfPageShapeError) as excinfo:
+        gfid._one_call(_FILTERS)
+    reported = str(excinfo.value)
+    assert "\\x1b" in reported, reported
+    assert "\x1b" not in reported
+    assert "\x9b" not in reported
 
 
 def test_a_real_results_page_is_not_read_as_consent(client: Any) -> None:
@@ -880,6 +909,37 @@ def test_consent_is_decided_by_the_url_not_by_a_substring(final_url: str, expect
     assert gfid._is_consent_page(final_url=final_url, html="") is expected
 
 
+def test_the_consent_form_scan_does_not_blow_up_on_unterminated_tags(client: Any) -> None:
+    """The body is two megabytes of untrusted markup and a `<form` in it need
+    not be closed. Letting the attribute run cross a tag boundary makes every
+    one of them rescan the rest of the document, which is quadratic — measured
+    in seconds on a few thousand, and the classifier runs on every page that
+    comes back without a `ds:1`."""
+    hostile = "<form " * 12_000
+    start = time.perf_counter()
+    assert not gfid._is_consent_page(final_url="https://www.google.com/travel", html=hostile)
+    assert time.perf_counter() - start < 1.5
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(_CONSENT_PAGE, id="the-committed-consent-shape"),
+        pytest.param(
+            '<form method="POST" class="consent" action="https://consent.google.com/save">x</form>',
+            id="several-attributes-before-the-action",
+        ),
+        pytest.param(
+            "<form action='https://consent.google.co.uk/save'>x</form>", id="single-quoted-cctld"
+        ),
+    ],
+)
+def test_every_consent_form_shape_is_still_recognised(body: str) -> None:
+    """The bound must not narrow what it matches: an open tag's attributes never
+    contain a tag boundary, so nothing real changes."""
+    assert gfid._is_consent_page(final_url="https://www.google.com/travel/flights", html=body)
+
+
 def test_a_throttle_is_decided_by_the_url_path_not_the_query() -> None:
     """Same shape of bug one function over: `/sorry/` inside the `tfs=`
     parameter is our own request, not Google's captcha."""
@@ -905,9 +965,20 @@ def _board_of(n: int) -> str:
 
 def _round_trip_filters() -> Any:
     """Two unselected segments, which is what drives the pinning recursion."""
-    from fli.models import Airport, FlightSegment, MaxStops, PassengerInfo, SeatType
-    from fli.models.google_flights.base import TripType as _TripType
-    from fli.models.google_flights.flights import FlightSearchFilters
+    from fli.models import (  # pyright: ignore[reportMissingTypeStubs]
+        # fli ships no stubs; these are fixture builders, not typed API use.
+        Airport,
+        FlightSegment,
+        MaxStops,
+        PassengerInfo,
+        SeatType,
+    )
+    from fli.models.google_flights.base import (  # pyright: ignore[reportMissingTypeStubs]
+        TripType as _TripType,  # fli ships no stubs
+    )
+    from fli.models.google_flights.flights import (  # pyright: ignore[reportMissingTypeStubs]
+        FlightSearchFilters,  # fli ships no stubs
+    )
 
     dep = (datetime.date.today() + datetime.timedelta(days=45)).isoformat()
     ret = (datetime.date.today() + datetime.timedelta(days=52)).isoformat()

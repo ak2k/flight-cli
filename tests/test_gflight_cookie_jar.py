@@ -295,7 +295,9 @@ def test_persist_then_seed_round_trips_through_fli_s_real_client(
     """The wiring a hand-rolled fake can't prove: fli's REAL `Client`, with only
     its session stubbed, must expose the jar where these helpers reach for it."""
     from curl_cffi import requests as curl_requests
-    from fli.search.client import Client
+    from fli.search.client import (  # pyright: ignore[reportMissingTypeStubs]
+        Client,  # fli ships no stubs; nothing here reads a typed fli API
+    )
 
     _reset(monkeypatch, tmp_path)
     # curl_cffi's Session is generic and unstubbed — Profile-B edge.
@@ -403,13 +405,25 @@ def test_an_allowlisted_google_domain_is_still_seeded(
     assert fresh._session().cookies.set_calls == [("NID", "legitimate", domain, "/")]
 
 
-def test_the_cache_directory_is_owner_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("premade", [False, True], ids=["fresh", "already-there-and-0755"])
+def test_the_cache_directory_is_owner_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, premade: bool
+) -> None:
     """`mkdir` takes the umask unless told otherwise, and this directory holds a
-    live Google session cookie."""
+    live Google session cookie.
+
+    The pre-made case is the one that happens in practice: the Matrix response
+    cache shares this root and creates it with no mode, so on any machine that
+    has run a Matrix search the `mkdir` here is a no-op and its mode never
+    applies. A test that only ever sees a fresh directory cannot tell."""
     cache_dir = tmp_path / "fresh"
     _reset(monkeypatch, cache_dir)
+    if premade:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_dir.chmod(0o755)
     gfid._persist_cookies(_FakeClient([_JarCookie("NID", "532=abc", ".google.com")]))
     assert stat.S_IMODE(cache_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE((cache_dir / "gflight-cookies.json").stat().st_mode) == 0o600
 
 
 @pytest.mark.parametrize(
