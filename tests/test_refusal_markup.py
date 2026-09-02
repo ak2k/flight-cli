@@ -8,13 +8,18 @@ taken verbatim from the row (`fli/search/_decoders.py`). And the user's own
 backend picker prints. Either one containing `[/x]` ended the command in a
 `MarkupError` traceback instead of the refusal it was trying to explain.
 
-Escaping happens at the RENDER site, never where the text is built, and that is
-load-bearing rather than a style choice: the same reason string goes out two
-ways. `_pick_backend` prints it through a rich Console on the auto path, and
-raises it inside a `typer.BadParameter` on the explicit path — which typer
-renders as plain `Text`, no markup. A reason escaped at its source satisfies the
-first and shows the user a literal backslash in the second. Both arms are
-asserted below, on the same input, for exactly that reason.
+THE RULE: reason strings and exception text are PLAIN TEXT wherever they are
+built, and EVERY render site escapes what it interpolates (repr first, then
+escape). Escaping at the source cannot work, for two independent reasons. The
+same reason goes out two ways from `_pick_backend` — a rich Console on the auto
+path, a `typer.BadParameter` on the explicit path, and typer renders that as
+plain `Text` — so a pre-escaped reason satisfies the first and shows the user a
+literal backslash in the second. And the calendar paths escape at their own
+render sites, so a reason escaped at the source would be escaped twice.
+
+Three groups of tests below, one per half of the rule: `matrix_reasons` is plain
+at the source; both `_pick_backend` arms are correct on the same hostile input;
+and remote exception text survives the render sites that print it.
 """
 
 from __future__ import annotations
@@ -39,6 +44,7 @@ from flight_cli.cli import (
     _gf_refusal,
     _pick_backend,
 )
+from flight_cli.routing_predicates import classify
 
 if TYPE_CHECKING:
     from flight_cli import cli as cli_mod
@@ -113,6 +119,45 @@ def _pick(
         stops=None,
     )
     return resolved, buf.getvalue()
+
+
+def test_the_reported_routing_string_has_no_backslash_in_its_reason() -> None:
+    """The reported case, asserted literally against the whole string."""
+    (reason,) = classify("BA[/weird]AA", None).matrix_reasons
+    assert reason == "routing 'BA[/weird]AA' not GF-expressible"
+    assert "\\" not in reason
+
+
+def _assert_plain_at_source(reasons: tuple[str, ...], typed: str) -> None:
+    """A reason quotes `typed` exactly as repr writes it, and no more.
+
+    Not a blanket "contains no backslash": repr doubles a backslash the user
+    typed, which is repr's job. What must not appear is a SECOND layer — rich's
+    escape, applied on top — so the check is for the escaped form of the quoted
+    string rather than for the character."""
+    assert reasons, "an unparseable value must produce a reason"
+    joined = " ".join(reasons)
+    quoted = _as_quoted(typed)
+    assert quoted in joined
+    leaked = quoted.replace("[", "\\[")
+    assert leaked not in joined, f"a renderer's escape was baked in at the source: {joined!r}"
+
+
+@pytest.mark.parametrize("routing", _HOSTILE_ROUTING)
+def test_a_routing_reason_is_plain_text_at_its_source(routing: str) -> None:
+    """`classify` builds the reason; it must hand back what the user typed with
+    no renderer's escaping baked in.
+
+    This is the half of the rule the render-site tests cannot see. A reason
+    escaped here reads correctly through a rich Console and wrongly everywhere
+    else — typer's plain-text errors, and the calendar paths, which escape at
+    their own render sites and would escape it a second time."""
+    _assert_plain_at_source(classify(routing, None).matrix_reasons, routing)
+
+
+@pytest.mark.parametrize("extension", _HOSTILE_EXTENSION)
+def test_an_extension_reason_is_plain_text_at_its_source(extension: str) -> None:
+    _assert_plain_at_source(classify(None, extension).matrix_reasons, extension)
 
 
 @pytest.mark.parametrize(
