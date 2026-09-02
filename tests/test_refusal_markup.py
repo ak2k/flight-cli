@@ -265,7 +265,11 @@ def test_the_enriched_path_escapes_every_field_of_a_matrix_error(
     buf = io.StringIO()
     monkeypatch.setattr(cli, "err", Console(file=buf, width=400, no_color=True, highlight=False))
     monkeypatch.setattr(cli, "MatrixClient", _FailingMatrix)
-    monkeypatch.setattr(cli, "_gflight_results", lambda *_a, **_kw: [])
+
+    def _no_gf_rows(*_a: object, **_kw: object) -> list[Any]:
+        return []
+
+    monkeypatch.setattr(cli, "_gflight_results", _no_gf_rows)
 
     legs = (cli.Leg.of(("JFK",), ("LAX",), date.today() + timedelta(days=45)),)
     opts = cli._build_options(
