@@ -1191,22 +1191,12 @@ def test_safe_text_keeps_the_sentence_and_drops_the_drivers() -> None:
     assert safe_text("kept\tby\ntab and newline") == "kept\tby\ntab and newline"
     long_sentence = "why it failed. " * 40
     assert safe_text(long_sentence) == long_sentence  # never truncated, unlike _quote
-
-
-def test_quote_keeps_a_normal_value_whole() -> None:
-    """Truncation is for the pathological case; an ordinary mistyped value is
-    short, and cutting it would hide the typo the message exists to show."""
-    quote = cli._quote  # pyright: ignore[reportPrivateUsage] — the helper IS the unit
-    elide = cli._elide  # pyright: ignore[reportPrivateUsage] — as above
-    cap = cli._MAX_ECHOED_VALUE  # pyright: ignore[reportPrivateUsage] — as above
-    assert quote("5-7") == "'5-7'"
-    assert elide("9" * cap) == "9" * cap  # exactly the cap is not cut
-    assert elide("9" * (cap + 1)) == "9" * cap + "…"  # one over is
-    assert quote("9" * (cap + 1)).endswith("…'")
-    # A backslash costs one code point going in and two coming out of `repr`, so
-    # the cap has to be applied to the value, not to what is printed.
-    assert len(elide("\\" * (cap + 1))) == cap + 1
-    assert len(quote("\\" * (cap + 1))) > 2 * cap
+    # An exception is the one value that can say nothing and still have to be
+    # reported; anything else that is blank is blank because someone chose it.
+    assert safe_text(TimeoutError("")) == "TimeoutError"
+    assert safe_text(ValueError("\x00\x01")) == "ValueError"  # blank once sanitized
+    assert safe_text("") == ""
+    assert safe_text("   ") == "   "
 
 
 def _detail(**overrides: Any) -> None:
@@ -1241,6 +1231,166 @@ def _detail(**overrides: Any) -> None:
     }
     kwargs.update(overrides)
     cli.detail(**kwargs)
+
+
+class _MatrixErrorClient:
+    """Every query fails the way Matrix fails: a typed error whose three fields
+    carry whatever the backend chose to echo back."""
+
+    def __init__(self, **_kwargs: object) -> None: ...
+
+    async def __aenter__(self) -> _MatrixErrorClient:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+    async def execute(self, search: object, *, cache: bool = True) -> object:
+        _ = (search, cache)
+        raise MatrixApiError(
+            f"Illegal COMMAND-LINE prefix: {_DRIVES_THE_TERMINAL}",
+            kind=f"input{_DRIVES_THE_TERMINAL}",
+            request_id=f"r{_DRIVES_THE_TERMINAL}",
+        )
+
+
+@pytest.mark.parametrize("force_terminal", [False, True])
+def test_detail_matrix_error_strips_terminal_control_characters(
+    force_terminal: bool, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`detail` runs its query through `_run`, which reports a Matrix error through
+    the same helper the calendar uses: one backend message cannot repaint the
+    terminal on one command and read as text on another."""
+    buffer = io.StringIO()
+    monkeypatch.setattr(cli, "MatrixClient", _MatrixErrorClient)
+    monkeypatch.setattr(cli, "err", Console(file=buffer, force_terminal=force_terminal, width=200))
+    with pytest.raises(typer.Exit) as excinfo:
+        _detail()
+    assert excinfo.value.exit_code == 1
+    written = buffer.getvalue()
+    for driver in ("\x1b[2J", "\x9b", "\x7f", "\u202e"):
+        assert driver not in written, f"{driver!r} reached the console"
+    if not force_terminal:
+        assert "\x1b" not in written
+    flat = _flat(_SGR.sub("", written))
+    assert "Illegal COMMAND-LINE prefix" in flat  # message
+    assert "input" in flat  # kind
+    assert "request_id" in flat  # and the third field goes the same way
+
+
+@pytest.mark.parametrize("force_terminal", [False, True])
+def test_calendar_fast_refusal_strips_terminal_control_characters(
+    force_terminal: bool, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The refusal quotes a blocker sentence back. What that sentence carries is the
+    blocker's business, so the render site strips control characters itself rather
+    than depending on how a reason was spelled where it was built."""
+
+    def _driving_blocker(*_a: object, **_k: object) -> str:
+        return f"Matrix-only routing ({_DRIVES_THE_TERMINAL})"
+
+    buffer = io.StringIO()
+    monkeypatch.setattr(cli, "_grid_branch_blocker", _driving_blocker)
+    monkeypatch.setattr(cli, "err", Console(file=buffer, force_terminal=force_terminal, width=200))
+    _spy_renderers(monkeypatch)
+    with pytest.raises(typer.Exit) as excinfo:
+        _calendar_fast()
+    assert excinfo.value.exit_code == 1
+    written = buffer.getvalue()
+    for driver in ("\x1b[2J", "\x9b", "\x7f", "\u202e"):
+        assert driver not in written, f"{driver!r} reached the console"
+    if not force_terminal:
+        assert "\x1b" not in written
+    assert "Matrix-only routing" in _flat(_SGR.sub("", written))
+    assert capsys.readouterr().out == ""  # a refusal leaves stdout empty
+
+
+def test_a_matrix_failure_that_says_nothing_still_names_itself(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A transport exception can stringify to nothing (`httpx.ConnectTimeout("")`),
+    and "Matrix calendar failed:" followed by a blank tells the reader less than
+    the class name does."""
+
+    class _SilentClient(_PricedClient):
+        @override
+        async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
+            _ = (search, cache)
+            raise TimeoutError("")
+
+    monkeypatch.setattr(cli, "MatrixClient", _SilentClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _fake_grid)
+    calls = _spy_renderers(monkeypatch)
+    _run_enriched()  # the grid painted, so the Matrix half only reports
+    cap = capsys.readouterr()
+    assert calls["grid"] == 1
+    assert "Matrix calendar failed: TimeoutError" in _flat(cap.err)
+
+
+@pytest.mark.parametrize("value", ["[/x]", "[bold]x"])
+def test_bad_rps_configuration_is_a_typed_error_that_shows_the_value(
+    value: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`FLIGHT_RPS` reaches a markup console inside the ValueError `float()` raised,
+    which repr's the setting into its own message. An unbalanced tag there answered
+    a misconfiguration with a MarkupError traceback, and a well-formed one ate the
+    value the message exists to name. Reached from `calendar` and from `detail`."""
+    _RecordingClient.seen = []
+    monkeypatch.setenv("FLIGHT_RPS", value)
+    monkeypatch.setattr(cli, "MatrixClient", _RecordingClient)
+    _spy_renderers(monkeypatch)
+    with pytest.raises(typer.Exit) as excinfo:
+        _calendar_fast(fast=False, one_way=False, rps=None)
+    assert excinfo.value.exit_code == 2  # a typed usage error, not a traceback
+    message = _flat(capsys.readouterr().err)
+    assert f"FLIGHT_RPS='{value}'" in message  # verbatim, tags and all
+    assert "is not a number" in message
+    assert _RecordingClient.seen == []  # refused before any Matrix work
+
+
+def test_calendar_summary_and_cells_survive_a_markup_price(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`cheapest_price` and every `minPrice` are Matrix's strings verbatim, and the
+    summary line and the table cells both parse markup: an unbalanced tag lost a
+    query that had succeeded, and a well-formed one ate the number."""
+    res = _result(
+        {9: {7: ("[/x]USD500.00", 1, {5: "[bold]USD501.00", 7: "USD502.00"})}},
+        cheapest="[bold]USD421 [/x]",
+    )
+    buffer = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, width=300))
+    cli._render_calendar(  # pyright: ignore[reportPrivateUsage] — the render site IS the unit
+        res,
+        dmin=5,
+        dmax=7,
+        origin=("JFK",),
+        destination=("LHR",),
+        sd=W.start,
+        ed=W.end,
+        round_trip=True,
+    )
+    written = _flat(buffer.getvalue())
+    assert "[bold]USD421 [/x]" in written  # the summary line, shown not parsed
+    assert "[/x]USD500.00" in written  # the min cell
+    assert "[bold]USD501.00" in written  # a per-duration cell
+    _ = capsys.readouterr()
+
+
+def test_quote_keeps_a_normal_value_whole() -> None:
+    """Truncation is for the pathological case; an ordinary mistyped value is
+    short, and cutting it would hide the typo the message exists to show."""
+    quote = cli._quote  # pyright: ignore[reportPrivateUsage] — the helper IS the unit
+    elide = cli._elide  # pyright: ignore[reportPrivateUsage] — as above
+    cap = cli._MAX_ECHOED_VALUE  # pyright: ignore[reportPrivateUsage] — as above
+    assert quote("5-7") == "'5-7'"
+    assert elide("9" * cap) == "9" * cap  # exactly the cap is not cut
+    assert elide("9" * (cap + 1)) == "9" * cap + "…"  # one over is
+    assert quote("9" * (cap + 1)).endswith("…'")
+    # A backslash costs one code point going in and two coming out of `repr`, so
+    # the cap has to be applied to the value, not to what is printed.
+    assert len(elide("\\" * (cap + 1))) == cap + 1
+    assert len(quote("\\" * (cap + 1))) > 2 * cap
 
 
 def _stub_detail_run(monkeypatch: Any) -> list[Any]:
@@ -1329,7 +1479,6 @@ _ESCAPE_OUT_OF_SCOPE = {
     "_validate_sort_cabin": "--sort validation",
     "_should_run_awards": "provider selection",
     "_resolve_providers": "provider/config loading",
-    "_resolve_rps": "rps config loading",
     "airport": "airport lookup command",
     "seatmap": "seatmap command",
 }

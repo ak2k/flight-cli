@@ -82,8 +82,14 @@ def _split_price(s: str | None) -> tuple[str, str]:
 
 
 def _amount(s: str | None) -> str:
-    """Strip the currency prefix; pass-through for placeholders like '—'."""
-    return _split_price(s)[1] if s else "—"
+    """The amount with its currency prefix stripped, ready for a markup console;
+    '—' where there is no price.
+
+    Sanitized here rather than at each print site: Matrix chooses the whole string
+    and every caller drops it into a Rich table cell or a summary line, both of
+    which parse markup — an unbalanced `[/x]` there raises `MarkupError` and loses
+    a query that succeeded."""
+    return _safe_text(_split_price(s)[1]) if s else "—"
 
 
 app = typer.Typer(
@@ -127,8 +133,18 @@ _CTRL = {
     **{c: None for c in range(0x20) if c not in (0x09, 0x0A)},  # C0, keeping tab and newline
     0x7F: None,  # DEL
     **{c: None for c in range(0x80, 0xA0)},  # C1, including the 8-bit CSI
-    **{c: None for c in range(0x202A, 0x202F)},  # bidi embeddings and overrides
-    **{c: None for c in range(0x2066, 0x206A)},  # bidi isolates
+    # `str.splitlines` breaks on these two as it does on `\n`, so one message
+    # carrying one arrives at a log reader or a `readlines` caller as two records.
+    0x2028: None,  # LINE SEPARATOR
+    0x2029: None,  # PARAGRAPH SEPARATOR
+    # Bidi. The marks reorder the run they sit in and the embeddings, overrides
+    # and isolates reorder everything up to their terminator, so any of them can
+    # make a sentence read back as something it does not say.
+    0x061C: None,  # ARABIC LETTER MARK
+    0x200E: None,  # LEFT-TO-RIGHT MARK
+    0x200F: None,  # RIGHT-TO-LEFT MARK
+    **{c: None for c in range(0x202A, 0x202F)},  # embeddings and overrides
+    **{c: None for c in range(0x2066, 0x206A)},  # isolates
 }
 
 
@@ -140,7 +156,14 @@ def _safe_text(value: object) -> str:
     an exception's `str()`. Neither quoted nor truncated, unlike `_quote`: this is
     a sentence someone needs to read whole, and the part that explains the failure
     is as often at the end as the start."""
-    return escape(str(value).translate(_CTRL))
+    text = escape(str(value).translate(_CTRL))
+    if not text.strip() and isinstance(value, BaseException):
+        # `httpx.ConnectTimeout("")` stringifies to nothing, which would leave a
+        # reporter saying "Matrix calendar failed:" and stopping. The class name is
+        # the only thing such an exception carries. A blank from anywhere else is a
+        # value someone chose, and stays blank.
+        return escape(type(value).__name__)
+    return text
 
 
 def _elide(value: str) -> str:
@@ -653,25 +676,19 @@ def _run(
     try:
         return anyio.run(go)
     except MatrixApiError as e:
-        # Matrix echoes the routing string back inside `message` ("Illegal
-        # COMMAND-LINE prefix: BA[/weird]AA"), so this carries user text onto a
-        # markup console like every other reporter on these paths.
-        err.print(
-            f"[red]Matrix returned an error ({escape(str(e.kind))}):[/] {escape(str(e.message))}"
-        )
-        if e.request_id:
-            err.print(f"[dim]request_id: {escape(str(e.request_id))}[/]")
+        _print_matrix_error(e)
         raise typer.Exit(1) from e
 
 
 def _print_matrix_error(e: MatrixApiError) -> None:
-    """Report a Matrix error to stderr, escaped.
+    """Report a Matrix error to stderr: control characters dropped, markup escaped.
 
     Matrix echoes the routing string back inside `message` ("Illegal COMMAND-LINE
-    prefix: BA[/weird]AA"), so all three fields carry user text onto a markup
-    console. Used by the two calendar sites only: `_run`, the multi-cabin fan-out
-    and the search path have the same block, and consolidating those means
-    editing code another unit is changing right now."""
+    prefix: BA[/weird]AA"), so all three fields carry remote text onto a markup
+    console. The calendar sites and `_run` — which serves `detail` and the search
+    path — all report through here, so one Matrix error reads the same whichever
+    command asked for it. The multi-cabin fan-out and the search weave keep their
+    own copies, which do neither."""
     err.print(f"[red]Matrix returned an error ({_safe_text(e.kind)}):[/] {_safe_text(e.message)}")
     if e.request_id:
         err.print(f"[dim]request_id: {_safe_text(e.request_id)}[/]")
@@ -1251,12 +1268,14 @@ def _render_calendar(
             "for a single date."
         )
         return
+    # Matrix chose the whole price string. This line parses markup and so does
+    # the table title below, which carries the currency half a second time.
     ccy, cheapest = _split_price(res.cheapest_price)
-    ccy_tag = f" ({ccy})" if ccy else ""
+    ccy_tag = f" ({_safe_text(ccy)})" if ccy else ""
     duration_note = f"  · duration {dmin}-{dmax} nights" if round_trip else ""
     console.print(
         f"[bold]{res.solution_count} solutions[/]  · "
-        f"overall cheapest: [bold cyan]{cheapest or '—'}{ccy_tag}[/]  · "
+        f"overall cheapest: [bold cyan]{_safe_text(cheapest or '—')}{ccy_tag}[/]  · "
         f"window {sd.isoformat()} → {ed.isoformat()}"
         f"{duration_note}"
     )
@@ -2225,7 +2244,7 @@ def _resolve_rps(flag: float | None) -> float:
     try:
         return _config.http_rps()
     except ValueError as e:
-        err.print(f"[red]Bad rps configuration: {e}[/]")
+        err.print(f"[red]Bad rps configuration: {_safe_text(e)}[/]")
         raise typer.Exit(2) from e
 
 
@@ -3070,7 +3089,7 @@ def calendar(
         # condition failed.
         err.print(
             "[yellow]--fast applies only to one-way, single-airport, non-JSON "
-            f"calendars; this is {escape(blocker)}. Run without --fast for Matrix.[/]"
+            f"calendars; this is {_safe_text(blocker)}. Run without --fast for Matrix.[/]"
         )
         raise typer.Exit(1)
     if blocker is None:
