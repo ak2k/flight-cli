@@ -1,16 +1,27 @@
-"""Wrapper around fli's Google Flights search that ALSO captures the opaque
-`flightId` Google emits at index [17] of each flight row.
+"""Google Flights search that ALSO captures the opaque `flightId` Google emits
+at index [17] of each flight row.
 
-fli's `SearchFlights._parse_flights_data` parses legs, price, duration, stops —
-but drops `data[0][17]`. PointsPath's `enableGoogleFlightMatching` mode joins
-its award catalog against exactly that opaque ID (see PP browser extension
+fli's row decoder parses legs, price, duration, stops — but drops
+`data[0][17]`. PointsPath's `enableGoogleFlightMatching` mode joins its award
+catalog against exactly that opaque ID (see PP browser extension
 chunk-5KW5VSHS.js: `flightId: a` where `a = n[17]`). Without it, PP returns
 an empty result for hint-based queries; with it, `matchedGoogleFlightId`
 echoes back populated.
 
-We re-use fli's `FlightSearchFilters.encode()` + curl_cffi client so the
-request shape stays in lockstep with upstream; only the response parser
-diverges (extends fli's by one field).
+Transport is the PUBLIC SEARCH PAGE, not the `GetShoppingResults` RPC. Since
+2026-08 that RPC requires an `x-goog-batchexecute-bgr` header signed by the
+page's own JavaScript over the exact request bytes, so a plain HTTP client
+gets HTTP 200 with a payload-less `wrb.fr` row and error 13 — which the old
+code read as "no flights on this route". `https://www.google.com/travel/
+flights?tfs=…` inlines the identical rows in its `AF_initDataCallback` `ds:1`
+blob (`[2]` = Google's top-flights board, `[3]` = the rest), so the row parser
+below is untouched and only the fetch + the refusal classification changed.
+Verified live 2026-09-02: flight_id at data[0][17], 33-element leg tuples,
+leg[13] legroom class present, round-trip pins return correctly-directed
+returns with distinct flight_ids.
+
+The board the page serves is Google's default (~30 rows per leg) with no
+back-fill, so a top-N above that returns fewer rows than the RPC did.
 """
 
 from __future__ import annotations
@@ -20,9 +31,11 @@ import logging
 import os
 import pathlib
 import random
+import re
 import time
 from copy import deepcopy
 from dataclasses import dataclass
+from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, cast
 
 from fli.models import (  # pyright: ignore[reportMissingTypeStubs]
@@ -44,6 +57,13 @@ from fli.search._decoders import (  # pyright: ignore[reportMissingTypeStubs]
 from fli.search.client import get_client  # pyright: ignore[reportMissingTypeStubs]
 from fli.search.flights import SearchFlights  # pyright: ignore[reportMissingTypeStubs]
 
+from ._gf_errors import (
+    GfConsentError,
+    GfPageShapeError,
+    GfThrottledError,
+)
+from .links import build_search_tfs, google_flights_search_page_url
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -53,43 +73,104 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-_BASE_URL = SearchFlights.BASE_URL
-
-# Google Flights' API intermittently answers a cold curl_cffi session with an
-# empty body (HTTP 200, no error to retry on). fli's client is a process-wide
-# singleton that warms up by acquiring a cookie on its first successful call —
-# but each one-shot `flight` invocation starts a fresh process with a cold
-# session, so its single request frequently comes back empty. Empirically
-# (None,None,123,123 on identical inputs; [0,123,123,0,123,123] over one warming
-# client) the empty almost always clears within a couple of retries on the SAME
-# session. A FRESH session does NOT help — it stays cold — so we retry in place.
+# Google Flights' RPC endpoints intermittently answer a cold curl_cffi session
+# with an empty body (HTTP 200, no error to retry on). fli's client is a
+# process-wide singleton that warms up by acquiring a cookie on its first
+# successful call — but each one-shot `flight` invocation starts a fresh process
+# with a cold session, so its single request frequently comes back empty.
+# Empirically (None,None,123,123 on identical inputs; [0,123,123,0,123,123] over
+# one warming client) the empty almost always clears within a couple of retries
+# on the SAME session. A FRESH session does NOT help — it stays cold — so we
+# retry in place. The date grid still POSTs an RPC and still needs this; the
+# search page does not (see `retry_throttled`'s `retry_empty`).
 _EMPTY_RETRY_ATTEMPTS = 4
 _EMPTY_RETRY_BACKOFF_S = 1.0  # multiplied by attempt number: 1s, 2s, 3s between tries
 
 # A genuine throttle is distinct from the cold-session empty above: Google
-# answers HTTP 200 with an error envelope (code-13 / `ErrorResponse`) instead of
-# data — it's rate-limiting this IP. Measured 2026-06-14, the limit is DYNAMIC
-# (the ceiling drifts run-to-run) with FAST recovery, so a fixed rate cap is the
-# wrong tool: we back off exponentially and retry, surfacing GfThrottledError
-# only when that's exhausted (the caller can then degrade to Matrix). Backoff is
-# jittered so concurrent one-shot `flight` processes — which share the per-IP
-# signal but can't share a budget — don't all retry in lockstep and re-trip it.
+# rate-limits this IP, answering the RPC with an error envelope (code-13 /
+# `ErrorResponse`) or the search page with a `/sorry/` captcha. Measured
+# 2026-06-14, the limit is DYNAMIC (the ceiling drifts run-to-run) with FAST
+# recovery, so a fixed rate cap is the wrong tool: we back off exponentially and
+# retry, surfacing GfThrottledError only when that's exhausted (the caller can
+# then degrade to Matrix). Backoff is jittered so concurrent one-shot `flight`
+# processes — which share the per-IP signal but can't share a budget — don't all
+# retry in lockstep and re-trip it.
 _THROTTLE_RETRY_ATTEMPTS = 4
 _THROTTLE_BACKOFF_S = 1.0  # exponential base: ~1, 2, 4, 8s (plus 0-50% jitter)
 
 
-class GfThrottledError(Exception):
-    """Google Flights rate-limited this IP (HTTP 200 + code-13 ErrorResponse).
+def _is_throttle_block(body: str) -> bool:  # pyright: ignore[reportUnusedFunction]  # read by _gf_dategrid, not here
+    """True when a non-data GF **RPC** response is a genuine throttle (error
+    envelope), not a cold-session / no-results empty. The throttle body carries
+    a `type.googleapis.com/...ErrorResponse` marker; an empty body does not.
 
-    Distinct from a transport error and from a cold-session empty. Recovery is
-    usually fast; callers may retry shortly or fall back to Matrix."""
-
-
-def _is_throttle_block(body: str) -> bool:
-    """True when a non-data GF response is a genuine throttle (error envelope),
-    not a cold-session / no-results empty. The throttle body carries a
-    `type.googleapis.com/...ErrorResponse` marker; an empty body does not."""
+    Lives here because the date grid — still an RPC POST — imports it from this
+    module. The search page's own refusals are classified by
+    `_is_page_throttled` / `_is_consent_page` below."""
     return "ErrorResponse" in body or "type.googleapis.com" in body
+
+
+# The search page's block is a redirect to Google's captcha interstitial, or a
+# plain 429 — neither carries a `ds:1` blob, so both would otherwise read as an
+# empty board.
+_SORRY_PATH = "/sorry/"
+# Consent interstitial markers. EU/EEA egress lands here; the page has no
+# `ds:1`, so without this it would be indistinguishable from a shape change.
+_CONSENT_MARKERS = ("consent.google.com", "/consent?continue=", "CONSENT_PAGE")
+
+# `AF_initDataCallback({key: 'ds:1', hash: '..', data:[...], sideChannel: {}});`
+# — the search page inlines the flight rows here. Three literal regexes because
+# the blob is JavaScript, not JSON: only `data:` holds a JSON value. Whitespace
+# around the `, sideChannel` separator is matched loosely; anything else about
+# the shape drifting is a `GfPageShapeError`, never an empty result.
+_DS_BLOB_RE = re.compile(r"AF_initDataCallback\((\{.*?\})\);", re.S)
+_DS_KEY_RE = re.compile(r"key:\s*'([^']+)'")
+_DS_DATA_RE = re.compile(r"data:\s*(.*?)\s*,\s*sideChannel", re.S)
+_DS_FLIGHTS_KEY = "ds:1"
+# `ds:1[2]` is Google's own top-flights board, `[3]` the rest. Concatenated in
+# that order so the page's ranking survives — we can't reproduce it.
+_DS_ROW_BLOCKS = (2, 3)
+_SHAPE_ERROR_SAMPLE_REASONS = 3
+
+
+def _extract_ds1(html: str) -> list[Any] | None:
+    """The decoded `ds:1` payload from a rendered search page, or None when the
+    page doesn't carry one in the shape we read.
+
+    Returns the same structure the RPC used to hand back, so callers keep
+    indexing `payload[2]` / `payload[3]` for flight rows."""
+    for match in _DS_BLOB_RE.finditer(html):
+        blob = match.group(1)
+        key = _DS_KEY_RE.search(blob)
+        if not key or key.group(1) != _DS_FLIGHTS_KEY:
+            continue
+        data = _DS_DATA_RE.search(blob)
+        if not data:
+            return None
+        try:
+            payload: Any = json.loads(data.group(1))
+        except ValueError:
+            log.debug("ds:1 blob is not valid JSON")
+            return None
+        return cast("list[Any]", payload) if isinstance(payload, list) else None
+    return None
+
+
+def _is_page_throttled(*, status_code: int, final_url: str) -> bool:
+    """True when Google blocked the fetch rather than serving a board.
+
+    Checked BEFORE parsing: a block renders as zero rows, and "Google is
+    throttling us" must never reach the user as "no flights on this route"."""
+    return status_code == HTTPStatus.TOO_MANY_REQUESTS or _SORRY_PATH in final_url
+
+
+def _is_consent_page(*, final_url: str, html: str) -> bool:
+    """True when the consent interstitial was served instead of the page.
+
+    Only meaningful once `ds:1` has already come back missing: a real results
+    page links to Google's consent domain in its footer, so these markers on
+    their own don't mean the board is absent."""
+    return any(marker in final_url or marker in html for marker in _CONSENT_MARKERS)
 
 
 # Persisted gflight session cookies. The cold-session empties above are almost
@@ -476,42 +557,69 @@ def _persist_cookies(client: Any) -> None:
         log.debug("could not persist gflight cookies: %s", e)
 
 
+def _rows_from_ds1(payload: list[Any]) -> list[Any]:
+    """The flight rows inlined in a `ds:1` payload, top-flights board first."""
+    rows: list[Any] = []
+    for index in _DS_ROW_BLOCKS:
+        block = payload[index] if len(payload) > index else None
+        if isinstance(block, list) and block and isinstance(block[0], list):
+            rows.extend(cast("list[Any]", block[0]))
+    return rows
+
+
 def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
-    """Single HTTP round-trip to Google's endpoint; flat list of one leg's flights."""
+    """One GET of the public search page; flat list of one leg's flights.
+
+    Refusals are typed and raised (`GfThrottledError` / `GfConsentError` /
+    `GfPageShapeError`); a page that decodes with zero rows returns `[]`, which
+    is Google's authoritative answer and not retried."""
     client = get_client()
     _seed_cookies_once(client)
-    encoded = filters.encode()
-    resp = client.post(
-        url=_BASE_URL,
-        data=f"f.req={encoded}",
-        impersonate="chrome",
-        allow_redirects=True,
-    )
+    url = google_flights_search_page_url(build_search_tfs(filters))
+    resp = client.get(url, impersonate="chrome", allow_redirects=True)
+    status_code = int(resp.status_code)
+    final_url = str(getattr(resp, "url", "") or "")
+    if _is_page_throttled(status_code=status_code, final_url=final_url):
+        raise GfThrottledError("Google Flights rate-limited the request")
     resp.raise_for_status()
-    body = resp.text
-    parsed = json.loads(body.lstrip(")]}'"))[0][2]
-    if not parsed:
-        if _is_throttle_block(body):
-            raise GfThrottledError("Google Flights rate-limited the request")
-        return []  # cold-session empty, or a genuinely flight-less leg
-    # A truthy `parsed` means Google answered a warm session — save its cookies
+    html = resp.text
+    payload = _extract_ds1(html)
+    if payload is None:
+        if _is_consent_page(final_url=final_url, html=html):
+            raise GfConsentError(
+                "Google served its consent page instead of search results (no flight rows to read)"
+            )
+        raise GfPageShapeError(
+            "Google Flights' search page carried no readable ds:1 payload; the page shape changed"
+        )
+    # A decoded payload means Google answered a warm session — save its cookies
     # (NID) so the next one-shot CLI process starts warm instead of cold.
     _persist_cookies(client)
-    inner = json.loads(parsed)
-    flights_data: list[Any] = [
-        item for i in (2, 3) if isinstance(inner[i], list) for item in inner[i][0]
-    ]
+    rows = _rows_from_ds1(payload)
+    if not rows:
+        return []  # Google's own answer: this leg has no flights.
     out: list[GFlightWithId] = []
-    for fd in flights_data:
+    reasons: list[str] = []
+    for fd in rows:
         try:
             out.append(_parse_flight_with_id(fd))
         except (AttributeError, KeyError, ValueError, IndexError) as e:
             log.debug("skipping flight with unparseable data: %s", e)
+            reasons.append(f"{type(e).__name__}: {e}")
             continue
+    if not out:
+        # Rows were there and none of them parsed — the row layout moved, which
+        # is a different fact from "this route has no flights". Sampled reasons
+        # give the next reader something to re-derive the indices from.
+        sample = "; ".join(reasons[:_SHAPE_ERROR_SAMPLE_REASONS])
+        raise GfPageShapeError(
+            f"none of {len(rows)} Google Flights rows parsed; "
+            f"the row shape changed (sample reasons: {sample})"
+        )
     return out
 
 
-def retry_throttled[T](call: Callable[[], T]) -> T:
+def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
     """Run a GF call under two distinct retry policies (see the constants above);
     shared by the search and date-grid paths.
 
@@ -520,6 +628,10 @@ def retry_throttled[T](call: Callable[[], T]) -> T:
       result if it never warms.
     - genuine **throttle** (GfThrottledError) -> exponential, jittered backoff;
       re-raised when exhausted so the caller can degrade to Matrix.
+
+    `retry_empty=False` turns the first policy off, for callers whose empty is
+    authoritative rather than cold: the search page either decodes or raises, so
+    re-fetching a multi-megabyte page can only return the same zero rows.
 
     Transport errors propagate (fli's client already retried them)."""
     empty_attempts = 0
@@ -541,7 +653,7 @@ def retry_throttled[T](call: Callable[[], T]) -> T:
             )
             time.sleep(backoff)
             continue
-        if result:
+        if result or not retry_empty:
             return result
         empty_attempts += 1
         if empty_attempts >= _EMPTY_RETRY_ATTEMPTS:
@@ -551,8 +663,9 @@ def retry_throttled[T](call: Callable[[], T]) -> T:
 
 
 def _one_call_with_retry(filters: FlightSearchFilters) -> list[GFlightWithId]:
-    """`_one_call` wrapped in the shared throttle / cold-session retry."""
-    return retry_throttled(lambda: _one_call(filters))
+    """`_one_call` under the throttle retry only — a parsed-empty page is an
+    answer, so it costs exactly one GET and no sleep."""
+    return retry_throttled(lambda: _one_call(filters), retry_empty=False)
 
 
 def search_with_ids(

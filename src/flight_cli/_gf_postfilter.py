@@ -2,10 +2,11 @@
 can't express natively.
 
 Runs only on the gflight path (Matrix legs don't carry the per-leg carrier
-identity these predicates need). The gate (`gf_can_serve`) only routes a query
-to GF when every Tier-2 predicate here is *supported* — anything this module
-can't evaluate (min-layover, red-eyes, overnight stops) escalates the whole
-query to Matrix rather than being silently dropped.
+identity these predicates need), as the correctness backstop behind whichever
+gate routed the query: `gf_can_serve` for the date grid's RPC, and
+`routing_predicates.page_can_encode` for the search page, which is stricter
+still. Anything this module can't evaluate (min-layover, red-eyes, overnight
+stops) escalates the whole query to Matrix rather than being silently dropped.
 
 Supported Tier-2 predicates:
   - operating carrier include/exclude (`O:LH+`, `OPAIRLINES`, `-OPAIRLINES`)

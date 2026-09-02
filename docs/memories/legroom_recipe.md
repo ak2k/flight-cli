@@ -4,11 +4,21 @@ How `flight search` (gflight backend) surfaces per-leg legroom, cabin, and
 in-flight amenities, mirroring what the Legrooms+ Chrome extension shows.
 
 **Headline finding (work-5ewe, 2026-05):** This data isn't fetched from a
-third-party API. Google Flights' own `/GetShoppingResults` response already
-carries it in the per-leg tuple at `data[0][2][i]` indices 12–17. The
-Legrooms+ extension's `load_flight_data.js` hooks XHR and parses exactly
-these indices. Our gflight backend hits the same endpoint (via `fli`), so
-the same fields are available — we just had to read them.
+third-party API. Google Flights carries it in the per-leg tuple at
+`data[0][2][i]` indices 12–17. The Legrooms+ extension's `load_flight_data.js`
+hooks XHR and parses exactly these indices — we just had to read them.
+
+**Source changed, indices did not (work-h70kv, 2026-09):** the rows used to come
+from the `/GetShoppingResults` response; that RPC is gated now, so the search
+path reads the same rows out of the `ds:1` blob the public search page inlines
+(see `gf_routing_and_carriers.md`). Re-verified live 2026-09-02 against a JFK-LAX
+board: 33-element leg tuples, every index in the table below present and the same
+type. `_parse_leg_amenities` is unchanged.
+
+One nuance worth knowing before chasing a "missing legroom" bug: Google itself
+sends `leg[13] = null` on some rows — measured on cheap SFO-MIA business fares,
+where the leg is otherwise complete (33 elements, `leg[16] == 3`). A `None`
+legroom class there is an honest absence, not a parse failure.
 
 ## Per-leg tuple indices
 

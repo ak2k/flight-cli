@@ -6,7 +6,11 @@
   base64-protobuf payload. Click-through to actual booking.
 
 Both dispatch on the Search variant via `match` (with `assert_never` for
-exhaustiveness checking)."""
+exhaustiveness checking).
+
+The same tfs= writer also builds the gflight backend's *transport* URL —
+`build_search_tfs` + `google_flights_search_page_url`, fetched by
+`_gflight_ids` — so the pin and the search encode through one code path."""
 
 from __future__ import annotations
 
@@ -15,8 +19,9 @@ import json
 import re
 import urllib.parse
 from datetime import date, timedelta
-from typing import TYPE_CHECKING, Any, Literal, assert_never
+from typing import TYPE_CHECKING, Any, Literal, assert_never, cast
 
+from ._gf_errors import GfTfsUnsupportedError
 from .domain import (
     Cabin,
     CalendarFollowup,
@@ -351,14 +356,20 @@ def _encode_gflight_pinned_tfs(
     children: int,
     infants_in_seat: int,
     infants_on_lap: int,
+    pin_max_u64: bool = True,
 ) -> bytes:
-    """Encode the tfs= protobuf for a pinned-itinerary Google Flights URL.
+    """Encode the tfs= protobuf for a Google Flights URL.
+
+    One writer serves both flavors. A pinned booking link keeps `pin_max_u64`
+    (field 16), which Google's own pinned URLs carry and the byte-exact fixture
+    asserts; the search page doesn't need it and `build_search_tfs` omits it.
 
     `slices`: list of dicts shaped:
         {
             "date": "YYYY-MM-DD",
             "origin": "HNL",
             "destination": "MIA",
+            "max_stops": 0,          # optional, zero-based ceiling; see below
             "segments": [
                 {"origin": "HNL", "date": "2026-10-14",
                  "destination": "LAX", "carrier": "AA", "flight": "162"},
@@ -377,6 +388,12 @@ def _encode_gflight_pinned_tfs(
     for sl in slices:
         s = _PbWriter()
         s.string(2, sl["date"])
+        # Stop ceiling is ZERO-based here (0 = nonstop) and absent means "any";
+        # writing 0 for "any" would pin every search to nonstop. Emitted before
+        # the selected legs to match the field order Google's own URLs carry.
+        max_stops = sl.get("max_stops")
+        if max_stops is not None:
+            s.varint(5, max_stops)
         for seg in sl["segments"]:
             seg_w = _PbWriter()
             seg_w.string(1, seg["origin"])
@@ -408,16 +425,175 @@ def _encode_gflight_pinned_tfs(
     w.varint(9, cabin)
     w.varint(14, 1)
 
-    # Field 16: marker sub-message {1: 0xFFFFFFFFFFFFFFFF}
-    marker = _PbWriter()
-    marker.varint(1, (1 << 64) - 1)
-    w.message(16, marker)
+    if pin_max_u64:
+        # Field 16: marker sub-message {1: 0xFFFFFFFFFFFFFFFF}
+        marker = _PbWriter()
+        marker.varint(1, (1 << 64) - 1)
+        w.message(16, marker)
 
     # Field 19: trip type. TFS enum: 1 = round-trip, 2 = one-way.
     trip_type = _GF_TRIP_ROUND_TRIP if len(slices) >= _ROUND_TRIP_LEGS else _GF_TRIP_ONE_WAY
     w.varint(19, trip_type)
 
     return bytes(w.buf)
+
+
+# ───────────── Google Flights search-page tfs= (transport) ─────────────────
+#
+# Since 2026-08 Google's `GetShoppingResults` RPC requires an
+# `x-goog-batchexecute-bgr` header signed by the page's own JavaScript over the
+# exact request bytes, so a plain HTTP client gets HTTP 200 and a payload-less
+# `wrb.fr` row. The public search page is not gated that way and inlines the
+# same leg rows, addressed by this tfs= parameter instead of the f.req JSON —
+# so `_gflight_ids` fetches the page and reads `ds:1` (see that module).
+#
+# The encoder below is deliberately an ALLOWLIST. fli's FlightSearchFilters
+# carries a dozen filters this transport has no field for, and honouring some
+# of a user's constraints while dropping the rest is a silent wrong answer.
+# `routing_predicates.page_can_encode` keeps those queries on Matrix; anything
+# that reaches here anyway raises.
+
+# Filters with no tfs= field, checked against fli's own model default rather
+# than truthiness: fli populates sort_by, emissions, exclude_basic_economy and
+# show_all_results on EVERY filter, so `if filters.sort_by` would refuse every
+# search. Each entry is (field name, how to describe it to a user).
+_TFS_REFUSED_FIELDS: tuple[tuple[str, str], ...] = (
+    ("airlines", "a carrier include list"),
+    ("airlines_exclude", "a carrier exclude list"),
+    ("alliances", "an alliance filter"),
+    ("alliances_exclude", "an alliance exclude filter"),
+    ("layover_restrictions", "a layover airport or duration restriction"),
+    ("max_duration", "a maximum itinerary duration"),
+    ("price_limit", "a price cap"),
+    ("bags", "a bag-count fare adjustment"),
+    ("emissions", "an emissions filter"),
+    ("exclude_basic_economy", "a basic-economy exclusion"),
+    ("sort_by", "a server-side sort order"),
+)
+# `show_all_results` is deliberately absent: it defaults to True and there is
+# no tfs= field for it. The page serves Google's default board (~30 rows per
+# leg, measured 2026-09-02) with no back-fill, so a top-N above that returns
+# fewer rows than the RPC used to. That's a documented ceiling, not a dropped
+# constraint — nothing the user asked for goes unhonoured.
+
+# Non-adult passengers ride tfs field 8 under distinct kind codes (2 child,
+# 3 infant-in-seat, 4 infant-on-lap) that we have never verified against a
+# live priced search. Emitting `1` for them — what the pinned writer does,
+# where every occupant is already a chosen traveller — would price a child as
+# an adult, so search refuses them and the backend picker sends them to Matrix.
+_TFS_REFUSED_PAX: tuple[tuple[str, str], ...] = (
+    ("children", "a child passenger"),
+    ("infants_in_seat", "an infant-in-seat passenger"),
+    ("infants_on_lap", "an infant-on-lap passenger"),
+)
+
+_TFS_MULTI_CITY = 3  # fli TripType.MULTI_CITY — the page inlines no rows for it
+
+
+def _tfs_iata(value: Any) -> str:
+    """Bare IATA code for an fli `Airport`/`Airline` enum (or a plain string).
+
+    fli maps codes to display NAMES (`Airline._0B.value == "Blue Air"`) and
+    underscore-prefixes the digit-leading ones, so the enum *name* minus that
+    prefix is the code — the same rule fli's own request serializer uses."""
+    name = getattr(value, "name", None)
+    return str(name if name is not None else value).removeprefix("_")
+
+
+def _tfs_field_is_default(filters: Any, field: str) -> bool:
+    """True when `field` still holds the value pydantic seeded it with.
+
+    Read off the class, not the instance: pydantic v2 deprecates
+    `instance.model_fields`, and `filterwarnings = ["error"]` turns that into a
+    test failure."""
+    spec = cast("dict[str, Any]", type(filters).model_fields).get(field)
+    if spec is None:
+        return True  # fli dropped the field; there is nothing to refuse
+    return bool(getattr(filters, field, None) == spec.default)
+
+
+def _tfs_slice(segment: Any, *, max_stops: int | None) -> dict[str, Any]:
+    """One tfs= slice from an fli FlightSegment, refusing what it can't carry."""
+    if segment.time_restrictions is not None:
+        raise GfTfsUnsupportedError("time_restrictions", "a departure/arrival time window")
+    origins = [_tfs_iata(entry[0]) for entry in segment.departure_airport]
+    destinations = [_tfs_iata(entry[0]) for entry in segment.arrival_airport]
+    if len(origins) != 1 or len(destinations) != 1:
+        raise GfTfsUnsupportedError("flight_segments", "more than one airport per leg")
+    selected = segment.selected_flight
+    return {
+        "date": segment.travel_date,
+        "origin": origins[0],
+        "destination": destinations[0],
+        "max_stops": max_stops,
+        # A pinned leg (round-trip expansion sets `selected_flight` on the
+        # outbound and re-fetches) becomes repeated field 3.4, which is how the
+        # page is asked for returns against a chosen outbound.
+        "segments": [
+            {
+                "origin": _tfs_iata(leg.departure_airport),
+                "date": leg.departure_datetime.strftime("%Y-%m-%d"),
+                "destination": _tfs_iata(leg.arrival_airport),
+                "carrier": _tfs_iata(leg.airline),
+                "flight": str(leg.flight_number),
+            }
+            for leg in selected.legs
+        ]
+        if selected is not None
+        else [],
+    }
+
+
+def build_search_tfs(filters: Any) -> bytes:
+    """Encode an fli `FlightSearchFilters` as the search page's tfs= protobuf.
+
+    Raises `GfTfsUnsupportedError` for any filter this transport has no field
+    for — see `_TFS_REFUSED_FIELDS` for why that's an allowlist and not a
+    truthiness scan."""
+    if filters.trip_type.value == _TFS_MULTI_CITY:
+        raise GfTfsUnsupportedError(
+            "trip_type",
+            "a multi-city trip (Google loads those rows through the gated RPC)",
+        )
+    for field, description in _TFS_REFUSED_FIELDS:
+        if not _tfs_field_is_default(filters, field):
+            raise GfTfsUnsupportedError(field, description)
+    for field, description in _TFS_REFUSED_PAX:
+        if getattr(filters.passenger_info, field, 0):
+            raise GfTfsUnsupportedError(field, description)
+
+    # fli's MaxStops is one-based (ANY=0, NON_STOP=1, …); tfs field 3.5 is
+    # zero-based and omitted for "any".
+    stops = filters.stops.value
+    max_stops = stops - 1 if stops else None
+    return _encode_gflight_pinned_tfs(
+        slices=[_tfs_slice(seg, max_stops=max_stops) for seg in filters.flight_segments],
+        cabin=filters.seat_type.value,
+        adults=filters.passenger_info.adults,
+        children=0,
+        infants_in_seat=0,
+        infants_on_lap=0,
+        pin_max_u64=False,
+    )
+
+
+def google_flights_search_page_url(
+    tfs: bytes,
+    *,
+    currency: str = "USD",
+    language: str = "en",
+    country: str = "US",
+) -> str:
+    """The public search-page URL `_gflight_ids` GETs for a tfs= payload.
+
+    `gl=` is explicit because the page's row set and its consent behaviour both
+    key off the resolved country, and IP geolocation is not stable enough to
+    leave it implicit."""
+    b64 = base64.urlsafe_b64encode(tfs).rstrip(b"=").decode()
+    return (
+        f"https://www.google.com/travel/flights?tfs={urllib.parse.quote(b64)}"
+        f"&hl={language}&gl={country}&curr={currency}"
+    )
 
 
 def google_flights_pinned_url(

@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -22,10 +22,15 @@ from flight_cli.domain import Cabin, Leg, SearchOptions, SpecificDateSearch
 from flight_cli.fli_bridge import to_fli_filter
 from flight_cli.models import SearchResult
 
+# fli's FlightSegment validator rejects a past travel date, so the fixture date
+# is derived from today rather than pinned — a literal rots the suite the day
+# it passes.
+_TRAVEL_DATE = date.today() + timedelta(days=45)
+
 
 def _search(max_extra_stops: int | None) -> SpecificDateSearch:
     return SpecificDateSearch(
-        legs=(Leg.of("JFK", "LHR", date(2026, 8, 15)),),
+        legs=(Leg.of("JFK", "LHR", _TRAVEL_DATE),),
         options=SearchOptions(cabin=Cabin.COACH, max_extra_stops=max_extra_stops),
     )
 
@@ -95,8 +100,8 @@ def test_no_solutions_returns_none() -> None:
 def _slice_dict(flight: str) -> dict[str, object]:
     return {
         "flights": [flight],
-        "departure": "2026-08-15T09:00:00",
-        "arrival": "2026-08-15T12:00:00",
+        "departure": f"{_TRAVEL_DATE.isoformat()}T09:00:00",
+        "arrival": f"{_TRAVEL_DATE.isoformat()}T12:00:00",
         "origin": {"code": "JFK"},
         "destination": {"code": "LAX"},
         "stops": [],
@@ -105,7 +110,7 @@ def _slice_dict(flight: str) -> dict[str, object]:
 
 def _oneway_search() -> SpecificDateSearch:
     return SpecificDateSearch(
-        legs=(Leg.of("JFK", "LAX", date(2026, 8, 15)),),
+        legs=(Leg.of("JFK", "LAX", _TRAVEL_DATE),),
         options=SearchOptions(cabin=Cabin.COACH),
     )
 

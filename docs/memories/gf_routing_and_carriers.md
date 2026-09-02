@@ -2,8 +2,9 @@
 
 How `--routing`/`--extension` reach Google Flights, and the carrier-identity
 indices that make it correct. Read before touching `routing_predicates.py`,
-`_gf_postfilter.py`, `fli_bridge.apply_gf_native_filters`, or
-`_gflight_ids._parse_leg_amenities` / `_flight_leg`.
+`_gf_postfilter.py`, `fli_bridge.apply_gf_native_filters`,
+`links.build_search_tfs`, or `_gflight_ids._parse_leg_amenities` /
+`_flight_leg`.
 
 ## Booking carrier: `fl[15]` (marketing) vs `fl[22]` (operating)
 
@@ -38,6 +39,66 @@ codes (`marketing_carriers`), and the full marketing flight #s
 (`marketing_flights`, e.g. `LH9407`) for the `O:` filter, `-CODESHARE`, and
 codeshare-aware display. All flow through `LegInfo`.
 
+## Search transport: the public page's `tfs=`, not `GetShoppingResults`
+
+Since 2026-08 the `FlightsFrontendService` RPCs require an
+`x-goog-batchexecute-bgr` header the page's own JavaScript signs over the exact
+request bytes, so a captured token can't be replayed. Every plain HTTP client
+gets HTTP 200 with a payload-less `wrb.fr` row carrying error 13 — which the old
+`_one_call` read as an empty leg and printed as "no results".
+
+The **search path** therefore GETs
+`https://www.google.com/travel/flights?tfs=<proto>&hl=en&gl=US&curr=USD` and
+reads the rows Google inlines in the page's `AF_initDataCallback` blob keyed
+`ds:1`: `[2][0]` is Google's own top-flights board, `[3][0]` the rest. Verified
+live 2026-09-02 (JFK-LAX): 3 + 27 = 30 rows, `data[0][17]` flight_id present,
+33-element leg tuples, `leg[13]` legroom class present — so
+`_parse_flight_with_id` and `_parse_leg_amenities` are untouched, and every
+index in the "Legroom + amenities" recipe still applies.
+
+`links.build_search_tfs` writes that parameter on the SAME `_PbWriter` the
+pinned booking link uses; the only difference is `pin_max_u64=False` (field 16
+is a deep-link marker the page doesn't need), so the byte-exact pin fixture
+guards both. Field layout, reverse-engineered and cross-checked against fli
+PR #230:
+
+```
+1  = 28 (constant)          8  = passenger kind, repeated (adult = 1)
+2  = 2 (constant)           9  = cabin class
+3  = segment, repeated      14 = 1 (constant)
+3.2  = departure date       16 = max-uint64 pin (booking deep links only)
+3.4  = selected leg, rep.   19 = 2 one-way, 1 round-trip (3 multi-city is unusable)
+3.5  = stop ceiling         3.13 = origin   3.14 = destination
+3.6/3.7 = carrier incl/excl (NOT written yet — see below)
+3.15 = layover airports     3.17/3.18 = min/max layover minutes
+```
+
+Two traps in that layout. **`3.5` is zero-based** while fli's `MaxStops` is
+one-based (ANY=0, NON_STOP=1, …), so it's `enum.value - 1` and **omitted** for
+ANY — writing a literal 0 pins every search to nonstop. **Carrier codes come
+from the enum NAME, not its value**: fli maps codes to display names
+(`Airline._0B.value == "Blue Air"`) and underscore-prefixes digit-leading ones,
+so `airline.name.removeprefix("_")` is the code.
+
+**What the page costs us.** It serves Google's default board (~30 rows/leg) with
+no back-fill, so a `-n` above that returns fewer rows than the RPC did, and a
+round-trip costs one page fetch per pinned outbound. More importantly the tfs
+parameter carries far fewer filters than `f.req` did, so `routing_predicates.
+page_can_encode` is a SECOND, narrower gate in front of the Tier model below:
+today only a stop ceiling encodes, and everything else routes to Matrix with its
+reason printed. Post-filtering a fixed 30-row board would answer a constrained
+search with a plausible-looking "no results" — the exact failure this whole
+design is built to avoid. Re-widening `3.6`/`3.7`/`3.15`/`3.17`/`3.18` is the
+obvious next step and is tracked in bd work-h70kv.
+
+**Refusals are typed** (`_gf_errors`): `GfThrottledError` (final URL contains
+`/sorry/`, or HTTP 429), `GfConsentError` (no `ds:1` *and* consent markers —
+checked in that order, because a real results page links to the consent domain
+in its footer), `GfPageShapeError` (no readable `ds:1`, or rows present and none
+parsed, with sampled reasons). A page that decodes with zero rows returns `[]`
+and is Google's authoritative answer, so the search path passes
+`retry_empty=False` and spends exactly one GET on it.
+
 ## Tier model: who honors each constraint
 
 `routing_predicates.classify(routing, extension)` parses both DSLs into a flat
@@ -58,12 +119,18 @@ the `F* X:LHR F*` via-airport idiom). Ordered chains (`BA AA`, `DFW DEN`), bare
 single-segment carriers (`LH` without `+`/`*`), country filters, and count
 placeholders escalate the whole routing to Tier 3 — never partially honored.
 
-**The gate** (`_pick_backend` → `_gf_postfilter.gf_can_serve`): GF serves a query
-iff it has no Tier-3 predicate AND every Tier-2 predicate is post-filterable.
-Native filters are a pure *optimization* — if an fli carrier/airport code doesn't
-map, that query dimension is skipped (no under-return) and the post-filter (a
-string-based backstop that also enforces marketing-include + connect-at) is the
-correctness guarantee.
+**The tiers are the DATE GRID's question** — it still POSTs
+`GetCalendarGraph`, so `_gf_dategrid.grid_can_serve` reads them directly, and
+`gf_can_serve` states the same rule: no Tier-3 predicate, and every Tier-2 one
+post-filterable. Native filters are a pure *optimization* there — if an fli
+carrier/airport code doesn't map, that query dimension is skipped (no
+under-return) and the post-filter (a string-based backstop that also enforces
+marketing-include + connect-at) is the correctness guarantee.
+
+**The SEARCH gate is `page_can_encode`**, above: strictly narrower, because the
+page's tfs= parameter has no field for most of Tier 1 and the ~30-row board
+makes post-filtering Tier 2 unsafe. `_gf_postfilter` stays wired in as the
+backstop; it just has less to do.
 
 Time-based Tier-2 predicates (`MINCONNECT`, `-REDEYES`, `-OVERNIGHTS`) currently
 escalate to Matrix — `_gf_postfilter` can't evaluate them yet (no per-segment
@@ -113,6 +180,13 @@ now redundant but harmless; bd work-orp1i tracks simplifying it to lean on fli's
 chunking.
 
 ## GF throttle (per client-context, dynamic) — handle reactively, not with a fixed cap
+
+Everything measured below was measured against the **RPC** transport, which is
+what the date grid still uses. The search page is a different endpoint with a
+different budget and a different block signal (a `/sorry/` redirect or a 429,
+not a code-13 body), so treat the numbers as the grid's and re-measure before
+quoting them for the page. The reactive design carries over unchanged: both
+raise `GfThrottledError` into the same `retry_throttled` backoff.
 
 The budget is keyed on **client context, not just IP.** Verified 2026-06-15
 (`research/experiment_gf_patchright.py` + `capture_gf_request.py`): a real Chrome

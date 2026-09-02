@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
@@ -240,51 +241,71 @@ def _pick_backend(
     slice_specs: list[str] | None,
     depart_times: str | None,
     return_times: str | None,
+    children: int = 0,
     seniors: int,
     youth: int,
     inf_seat: int,
     inf_lap: int,
+    origin: str | None = None,
+    destination: str | None = None,
 ) -> str:
     """Resolve --backend to a concrete backend.
 
     auto: matrix iff the request needs it, else gflight (~1s vs Matrix's ~45s).
-    `--routing`/`--extension` no longer force Matrix on their own — they're
-    parsed and classified, and Google Flights serves them when it can honor
-    every constraint (native filters + result post-filter; see routing_predicates
-    + _gf_postfilter). Only fare-construction (fare basis / booking class) or a
-    constraint GF can't reconstruct sends routing to Matrix. Hard-Matrix flags —
-    `--slice` (multi-city), `--depart-times`/`--return-times`, any pax type beyond
-    adults+children — always force Matrix (the GF bridge doesn't map them yet).
+    `--routing`/`--extension` don't force Matrix on their own — they're parsed
+    and classified, and Google Flights serves them when the search page's tfs=
+    parameter can encode every one (`page_can_encode`). A constraint it can't
+    carry goes to Matrix WITH ITS REASON PRINTED, rather than being post-
+    filtered out of Google's fixed ~30-row board, which would answer a
+    constrained search with a plausible-looking "no results".
+
+    Hard-Matrix flags always force Matrix: `--slice` (multi-city),
+    `--depart-times`/`--return-times`, any pax type beyond adults (the page's
+    passenger field has kind codes for children and infants that we have never
+    verified against a live priced search), and a multi-airport
+    `--origin`/`--destination` set (the GF bridge flattens those to the first
+    code, so serving them on GF would silently drop the rest).
+
+    Whatever the cause, `auto` names it on stderr. Silently taking the 45x
+    slower backend leaves the user with no way to tell a constraint they could
+    drop from one they can't.
 
     Explicit --backend matrix: matrix. --backend gflight: gflight, unless the
     request is inexpressible on GF (error)."""
-    from ._gf_postfilter import gf_can_serve  # noqa: PLC0415
-    from .routing_predicates import classify  # noqa: PLC0415
+    from .routing_predicates import classify, page_can_encode  # noqa: PLC0415
 
-    hard_matrix = bool(slice_specs or depart_times or return_times) or (
-        seniors > 0 or youth > 0 or inf_seat > 0 or inf_lap > 0
-    )
-    routing_needs_matrix = bool(routing or extension) and not gf_can_serve(
-        classify(routing, extension)
-    )
-    matrix_only = hard_matrix or routing_needs_matrix
+    reasons: list[str] = []
+    if slice_specs:
+        reasons.append("a multi-city itinerary")
+    if depart_times or return_times:
+        reasons.append("a departure/arrival time window")
+    if children or seniors or youth or inf_seat or inf_lap:
+        reasons.append("a passenger type beyond adults")
+    if len(_parse_iata_list(origin or "")) > 1 or len(_parse_iata_list(destination or "")) > 1:
+        reasons.append("a multi-airport origin/destination")
+    if routing or extension:
+        reasons.extend(page_can_encode(classify(routing, extension).predicates)[1])
 
     if backend == BACKEND_AUTO:
-        return BACKEND_MATRIX if matrix_only else BACKEND_GFLIGHT
-    if backend == BACKEND_GFLIGHT and matrix_only:
-        reason = (
-            "--slice/--depart-times/--return-times or an extra pax type"
-            if hard_matrix
-            else "a --routing/--extension constraint Google Flights can't honor "
-            "(fare basis, booking class, or similar)"
-        )
+        if not reasons:
+            return BACKEND_GFLIGHT
+        err.print(f"[dim]Using Matrix: Google Flights can't serve {_join_reasons(reasons)}.[/]")
+        return BACKEND_MATRIX
+    if backend == BACKEND_GFLIGHT and reasons:
         raise typer.BadParameter(
-            f"--backend gflight can't serve this request: {reason}. "
+            f"--backend gflight can't serve this request: {_join_reasons(reasons)}. "
             "Drop it, or use --backend matrix.",
         )
     if backend not in _VALID_BACKENDS:
         raise typer.BadParameter(f"--backend must be one of {_VALID_BACKENDS}; got {backend!r}")
     return backend
+
+
+def _join_reasons(items: list[str]) -> str:
+    """Human list join: 'a', 'a and b', 'a, b and c'."""
+    if len(items) <= 1:
+        return "".join(items)
+    return f"{', '.join(items[:-1])} and {items[-1]}"
 
 
 def _should_run_pp(*, no_pp: bool, pp_only: bool) -> bool:  # pyright: ignore[reportUnusedFunction]
@@ -1173,6 +1194,81 @@ def _gflight_results(legs: tuple[Leg, ...], opts: SearchOptions, top_n: int) -> 
     return results
 
 
+def _gflight_json_row(g: Any) -> dict[str, Any]:
+    """One `--format json` itinerary: fli's FlightResult plus the two things
+    only this backend knows — Google's opaque `flight_id` and the per-leg
+    legroom/amenity extract, which the human table already shows but JSON
+    consumers previously had no way to reach."""
+    row: dict[str, Any] = {**g.flight.model_dump(mode="json"), "flight_id": g.flight_id}
+    legs: list[Any] = row.get("legs") or []
+    amenities: list[Any] = list(g.amenities)
+    for i, leg in enumerate(legs):
+        if i >= len(amenities):
+            break  # misaligned extract: leave the leg as fli dumped it
+        a = amenities[i]
+        leg["legroom_class"] = a.legroom_class
+        leg["amenities"] = asdict(a)
+    return row
+
+
+def _gf_refusal_message(e: Exception) -> str:
+    """One user-facing line per typed Google Flights refusal.
+
+    Each names a different wall and a different next move — collapsing them
+    into one message ("Google Flights failed") is how a page-shape regression
+    gets mistaken for a route with no service."""
+    from ._gf_errors import (  # noqa: PLC0415
+        GfConsentError,
+        GfPageShapeError,
+        GfTfsUnsupportedError,
+        GfThrottledError,
+    )
+
+    match e:
+        case GfThrottledError():
+            return (
+                "[yellow]Google Flights is rate-limiting this IP.[/] Wait a moment and "
+                "retry, or use [bold]--backend matrix[/]."
+            )
+        case GfConsentError():
+            return (
+                "[yellow]Google served its consent page instead of flight results.[/] "
+                "Use [bold]--backend matrix[/]."
+            )
+        case GfPageShapeError():
+            return (
+                "[red]Google Flights' page shape changed[/] — no rows could be read. "
+                f"Use [bold]--backend matrix[/]. ({e})"
+            )
+        case GfTfsUnsupportedError():
+            return (
+                f"[red]Google Flights can't express this search:[/] {e.reason}. "
+                "Use [bold]--backend matrix[/]."
+            )
+        case _:
+            return f"[red]Google Flights declined the request:[/] {e}"
+
+
+def _gf_refusal_note(e: Exception) -> str:
+    """Short form of `_gf_refusal_message` for the enrich path, where Matrix
+    still answers and the refusal is a footnote rather than the outcome."""
+    from ._gf_errors import (  # noqa: PLC0415
+        GfConsentError,
+        GfPageShapeError,
+        GfThrottledError,
+    )
+
+    match e:
+        case GfThrottledError():
+            return "Google Flights rate-limited"
+        case GfConsentError():
+            return "Google Flights served its consent page"
+        case GfPageShapeError():
+            return "Google Flights' page shape changed"
+        case _:
+            return "Google Flights declined the request"
+
+
 _MERGE_SOURCE_TAG = {"both": "GF+MX", "matrix": "MX", "gf": "GF"}
 
 
@@ -1228,16 +1324,13 @@ def _run_gflight_path(
     the existing PP matcher + renderer reuse cleanly. PP runs on the same
     (origin, dest, date) per leg as the matrix path.
     """
-    from ._gflight_ids import GfThrottledError  # noqa: PLC0415
+    from ._gf_errors import GfBackendError  # noqa: PLC0415
     from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
 
     try:
         results = _gflight_results(legs, opts, top_n)
-    except GfThrottledError as e:
-        err.print(
-            "[yellow]Google Flights is rate-limiting this IP.[/] Wait a moment and "
-            "retry, or use [bold]--backend matrix[/]."
-        )
+    except GfBackendError as e:
+        err.print(_gf_refusal_message(e))
         raise typer.Exit(1) from e
     except Exception as e:
         err.print(f"[red]Google Flights query failed:[/] {e}")
@@ -1256,7 +1349,7 @@ def _run_gflight_path(
         out: list[Any] = []
         for r in results:
             items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
-            dumped = [{**g.flight.model_dump(mode="json"), "flight_id": g.flight_id} for g in items]
+            dumped = [_gflight_json_row(g) for g in items]
             out.append(dumped if isinstance(r, tuple) else dumped[0])
         sys.stdout.write(json.dumps(out, indent=2, default=str))
         return
@@ -1351,11 +1444,14 @@ def _run_enriched_path(
 
     gf: list[Any] = state.get("gf") or []
     if "gf_err" in state:
-        from ._gflight_ids import GfThrottledError  # noqa: PLC0415
+        from ._gf_errors import GfBackendError  # noqa: PLC0415
 
         e = state["gf_err"]
-        if isinstance(e, GfThrottledError):
-            console.print("[dim]Google Flights rate-limited — showing Matrix only.[/]")
+        if isinstance(e, GfBackendError):
+            # Matrix is still running and authoritative, so a GF refusal is a
+            # note, not a failure — but it stays named: the merged table below
+            # would otherwise look like Google simply had nothing cheaper.
+            console.print(f"[dim]{_gf_refusal_note(e)} — showing Matrix only.[/]")
         else:
             err.print(f"[yellow]Google Flights query failed:[/] {e}")
     matrix_res = state.get("matrix")
@@ -2327,10 +2423,13 @@ def search(
         slice_specs=slice_specs,
         depart_times=depart_times,
         return_times=return_times,
+        children=children,
         seniors=seniors,
         youth=youth,
         inf_seat=inf_seat,
         inf_lap=inf_lap,
+        origin=origin,
+        destination=destination,
     )
     if slice_specs:
         legs = tuple(_parse_slice_spec(s) for s in slice_specs)

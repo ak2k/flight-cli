@@ -46,15 +46,20 @@ go into detail and are loaded on demand.
   flight#, human-readable airline name, space-separated times), empirical
   proof, and wire-through implementation notes.
 - [gf_routing_and_carriers.md](gf_routing_and_carriers.md) — How
-  `--routing`/`--extension` reach Google Flights: the `fl[15]`/`fl[18]`/`fl[22]`
+  `--routing`/`--extension` reach Google Flights: the search-page `tfs=`
+  transport that replaced the gated `GetShoppingResults` RPC (field layout, the
+  zero-based stop ceiling, typed refusals), the `fl[15]`/`fl[18]`/`fl[22]`
   booking-carrier rule (marketing vs operating), the Tier-1/2/3 classification
-  (`routing_predicates`), the GF-serve gate + post-filter backstop
+  (`routing_predicates`) that the date grid still uses, the narrower
+  `page_can_encode` gate the search path uses, the post-filter backstop
   (`_gf_postfilter`), the concurrent GF-fast-paint + Matrix-enrich flow
   (`_run_enriched_path`), and codeshare-aware display. Read before touching
-  `routing_predicates.py`, `_gf_postfilter.py`, or `_gflight_ids` carrier parsing.
+  `routing_predicates.py`, `_gf_postfilter.py`, `links.build_search_tfs`, or
+  `_gflight_ids` carrier parsing.
 - [legroom_recipe.md](legroom_recipe.md) — Per-leg legroom + amenities +
-  aircraft come back in-band in Google Flights' own response (no
-  travelarrow.io API call needed for the data itself). Index map for
+  aircraft come back in-band in Google Flights' own rows — now read from the
+  search page's `ds:1` blob, with the indices unchanged (no travelarrow.io API
+  call needed for the data itself). Index map for
   `data[0][2][i]` 12-17, enum decodings, amenity bit positions, and the
   seatmap URL contract (`/api/s` with M/D/YYYY dates). Read before
   touching `_gflight_ids._parse_leg_amenities` or `seatmap.py`.
