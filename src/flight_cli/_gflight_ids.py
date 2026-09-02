@@ -56,7 +56,10 @@ from fli.search._decoders import (  # pyright: ignore[reportMissingTypeStubs]
     _parse_airport,  # pyright: ignore[reportPrivateUsage]
     _parse_datetime,  # pyright: ignore[reportPrivateUsage]
 )
-from fli.search.client import get_client  # pyright: ignore[reportMissingTypeStubs]
+from fli.search.client import (  # pyright: ignore[reportMissingTypeStubs]
+    REQUEST_TIMEOUT,
+    get_client,
+)
 from fli.search.flights import SearchFlights  # pyright: ignore[reportMissingTypeStubs]
 
 from ._gf_errors import (
@@ -68,7 +71,7 @@ from ._gf_errors import (
 from .links import build_search_tfs, google_flights_search_page_url
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Generator
 
     from fli.models.google_flights.flights import (  # pyright: ignore[reportMissingTypeStubs]
         FlightSearchFilters,
@@ -106,18 +109,69 @@ _EMPTY_RETRY_BACKOFF_S = 1.0  # multiplied by attempt number: 1s, 2s, 3s between
 # retry in lockstep and re-trip it.
 _THROTTLE_RETRY_ATTEMPTS = 4
 _THROTTLE_BACKOFF_S = 1.0  # exponential base: ~1, 2, 4, 8s (plus 0-50% jitter)
-# Mirrors fli's own `REQUEST_TIMEOUT`, which `_fetch_page` no longer inherits
-# because it bypasses `Client.get`. A search page is multi-megabyte.
-_REQUEST_TIMEOUT_S = 60.0
 
 # A reset connection or a read timeout is worth a couple of quick retries and
-# nothing more. fli's `Client.get` used to retry these three times; bypassing it
-# to own the throttle ladder took that with it, so a single blip failed the leg.
-# Deliberately smaller than the throttle budget: a throttle is a wall that lifts
-# on its own, while a transport failure that survives three attempts is usually
-# the network being down, and spending a long backoff on it just delays the
-# Matrix fallback the user is going to get anyway.
+# nothing more. Nothing below this budget retries one: `_fetch_page` goes to
+# fli's session rather than `Client.get` and its three attempts, so a single
+# blip would otherwise fail the leg. Deliberately smaller than the throttle
+# budget: a throttle is a wall that lifts on its own, while a transport failure
+# that survives three attempts is usually the network being down, and spending a
+# long backoff on it just delays the Matrix fallback the user is going to get
+# anyway.
 _TRANSPORT_RETRY_ATTEMPTS = 2
+
+
+class _SharedThrottleLadder:
+    """One throttle ladder, drawn on by every worker of a fan-out.
+
+    Google's throttle is per-IP, so cabins querying at once share one wall and
+    laddering against it separately spends the cabin count times the requests to
+    learn the same thing. Workers take their retry numbers from here instead, so
+    the fan-out backs off once and then gives up together."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._spent = 0
+
+    def next_attempt(self) -> int | None:
+        """The attempt number the next retry backs off on, or None once the
+        shared budget is gone and the throttle has to be re-raised."""
+        with self._lock:
+            if self._spent >= _THROTTLE_RETRY_ATTEMPTS:
+                return None
+            self._spent += 1
+            return self._spent
+
+
+# The ladder the current fan-out shares, or None when nothing is fanning out.
+# Module-level rather than thread-local because the workers ARE threads and the
+# signal they share is per-IP; a dict so the scope below mutates rather than
+# rebinds a global.
+_fanout_ladder: dict[str, _SharedThrottleLadder | None] = {"current": None}
+
+
+@contextlib.contextmanager
+def shared_throttle_ladder() -> Generator[None]:
+    """Make every GF call inside this block draw its throttle retries from ONE
+    ladder — for a caller that issues several searches at once.
+
+    Outside it each call ladders on its own, which is what a lone search wants:
+    there is nobody else to share the wall with."""
+    previous = _fanout_ladder["current"]
+    _fanout_ladder["current"] = _SharedThrottleLadder()
+    try:
+        yield
+    finally:
+        _fanout_ladder["current"] = previous
+
+
+def _throttle_attempt(own_attempt: int) -> int | None:
+    """The attempt number this retry backs off on, or None when the budget is
+    spent and the throttle has to be re-raised."""
+    ladder = _fanout_ladder["current"]
+    if ladder is not None:
+        return ladder.next_attempt()
+    return own_attempt if own_attempt <= _THROTTLE_RETRY_ATTEMPTS else None
 
 
 def _is_throttle_block(body: str) -> bool:  # pyright: ignore[reportUnusedFunction]  # read by _gf_dategrid, not here
@@ -223,17 +277,29 @@ def _extract_ds1(html: str) -> list[Any] | None:
     Shaped like the RPC's own payload, so callers index `payload[2]` /
     `payload[3]` for flight rows.
 
-    A page may carry more than one `ds:1` blob, so ALL of them are decoded and
-    the one holding a board wins. Taking the first decodable blob was a
-    positional bet: a placeholder emitted before the populated one — Google
-    hydrates parts of this page in stages — would be served as an authoritative
-    empty, or trip the arity guard, while the real board sat further down the
-    document and was never looked at. Choosing by content instead of position
-    costs one pass over blobs that are already in memory.
+    A page may carry more than one `ds:1` blob — Google hydrates parts of this
+    page in stages — so ALL of them are decoded and the one carrying the most
+    rows wins, earliest blob on a tie. Choosing by position is a bet: a
+    placeholder emitted before the populated blob is served as an authoritative
+    empty, or trips the arity guard, while the real board sits further down the
+    document unread. Choosing on "carries a row block" is the same bet one level
+    down, because a staged blob can carry an empty husk `[[]]`, or one row where
+    the settled board carries thirty. Counting costs one pass over blobs that
+    are already in memory.
 
-    When no blob holds a board, the first decodable one is returned unchanged,
-    so a genuinely flight-less page stays a flight-less page rather than
-    becoming a missing `ds:1`."""
+    The count is STRUCTURAL, exactly like the scan that follows it: rows are
+    counted, never parsed, so a board whose rows have all changed shape still
+    wins and reaches the 0-of-N guard as a layout change instead of losing to a
+    husk.
+
+    With no blob carrying rows the first one long enough to reach `[3]` is
+    returned, and failing that the first decodable one at all: a genuinely
+    flight-less page stays a flight-less page rather than becoming a missing
+    `ds:1`, and a truncated placeholder above it does not become a shape
+    error."""
+    best: list[Any] | None = None
+    best_rows = 0
+    long_enough: list[Any] | None = None
     first_decodable: list[Any] | None = None
     for match in _DS_BLOB_RE.finditer(html):
         blob = match.group(1)
@@ -255,22 +321,46 @@ def _extract_ds1(html: str) -> list[Any] | None:
         if not isinstance(payload, list):
             continue
         decoded = cast("list[Any]", payload)
-        if _holds_a_board(decoded):
-            return decoded
+        rows = _board_row_count(decoded)
+        if rows > best_rows:  # strictly greater, so a tie keeps the earlier blob
+            best, best_rows = decoded, rows
+        if long_enough is None and len(decoded) > max(_DS_ROW_BLOCKS):
+            long_enough = decoded
         if first_decodable is None:
             first_decodable = decoded
-    return first_decodable
+    if best is not None:
+        return best
+    return long_enough if long_enough is not None else first_decodable
 
 
-def _holds_a_board(payload: list[Any]) -> bool:
-    """Does this payload carry a row block at `[2]` or `[3]`?
+def _board_row_count(payload: list[Any]) -> int:
+    """How many rows this payload carries at `[2]` and `[3]` together.
 
-    Structural, like the scan at those indices: a block whose rows have all
-    changed shape must still count as a board here, or a row-layout change
-    would send us to a placeholder blob instead of reaching the 0-of-N guard."""
-    return any(
-        index < len(payload) and _looks_like_a_row_block(payload[index]) for index in _DS_ROW_BLOCKS
-    )
+    Structural, like the scan at those indices: rows are counted, not parsed, so
+    a block whose rows have all changed shape still counts as the board it is
+    and reaches the 0-of-N guard. An empty husk `[[]]` is a block that exists
+    and holds nothing, so it counts as the zero rows it has — the whole point of
+    counting rather than asking whether a block is there."""
+    total = 0
+    for index in _DS_ROW_BLOCKS:
+        if index < len(payload) and _looks_like_a_row_block(payload[index]):
+            total += len(cast("list[Any]", cast("list[Any]", payload[index])[0]))
+    return total
+
+
+def _split_url(url: str) -> urllib.parse.SplitResult:
+    """`urlsplit`, with an unparseable URL reading as no URL at all.
+
+    `urlsplit` raises on a malformed authority — a bracketed host that is not an
+    IPv6 literal is the reachable one, since the URL comes back from a redirect
+    we did not build. Both classifiers below already answer "no" for a URL that
+    carries no marker and fall through to their body signals, and that is the
+    right answer for a URL nobody can read; ending the whole search on it is
+    not."""
+    try:
+        return urllib.parse.urlsplit(url)
+    except ValueError:
+        return urllib.parse.SplitResult("", "", "", "", "")
 
 
 def _is_page_throttled(*, final_url: str, html: str) -> bool:
@@ -289,7 +379,7 @@ def _is_page_throttled(*, final_url: str, html: str) -> bool:
     string would call a served page a block on the right three bytes. The body
     half stays a substring because its marker is a whole English sentence, not a
     token that turns up in ordinary markup."""
-    path = urllib.parse.urlsplit(final_url).path
+    path = _split_url(final_url).path
     return _SORRY_PATH in path or any(marker in html for marker in _SORRY_MARKERS)
 
 
@@ -304,7 +394,7 @@ def _is_consent_page(*, final_url: str, html: str) -> bool:
     Still only meaningful once `ds:1` has come back missing — `_one_call` checks
     in that order — but it no longer answers "consent wall" for any page that
     merely mentions the domain."""
-    parsed = urllib.parse.urlsplit(final_url)
+    parsed = _split_url(final_url)
     host = (parsed.hostname or "").lower()
     if _CONSENT_HOST_RE.match(host):
         return True
@@ -332,7 +422,7 @@ def _is_consent_page(*, final_url: str, html: str) -> bool:
 # not the whole jar: NID is the one we've validated, and replaying an unknown
 # stale anti-bot/consent cookie could do more harm than good. Add a name here if
 # a future capture shows another session cookie is load-bearing.
-_GOOGLE_DOMAIN_SUFFIX = "google.com"
+_GOOGLE_DOMAIN = "google.com"
 _PERSIST_COOKIE_NAMES = frozenset({"NID"})
 # Re-warm a fresh NID periodically rather than ride one identity indefinitely —
 # a hedge in case Google ever keys rate-limiting on the cookie. The retry above
@@ -344,6 +434,19 @@ _cookie_state: dict[str, bool] = {"seeded": False, "persisted": False}
 # Seeding guards a per-thread session, so its latch is per-thread. Tests reset it
 # by rebinding this to a fresh `threading.local()`.
 _seed_latch = threading.local()
+
+
+def _is_google_domain(domain: str) -> bool:
+    """Is this cookie domain `google.com` itself, or one of its subdomains?
+
+    A domain-wide cookie carries a leading dot, so that goes first. A substring
+    test accepts `google.com.evil.example` and `notgoogle.com`: whatever can
+    write the cookie cache could then have a cookie of an allowlisted name
+    seeded onto a live session for a host we never talk to. Widen HERE, in one
+    place both the read and the write side call, if a ccTLD NID ever matters."""
+    d = domain.lstrip(".").lower()
+    return d == _GOOGLE_DOMAIN or d.endswith(f".{_GOOGLE_DOMAIN}")
+
 
 # Position of the opaque per-flight ID in Google Flights' API row array.
 # Mirrors the PP browser extension's parser (chunk-5KW5VSHS.js: `a = n[17]`).
@@ -673,7 +776,7 @@ def _seed_cookies_once(client: Any) -> None:
             # way in. The cache is a plain file in a shared directory: anything
             # that can edit it could otherwise add a cookie of any name for any
             # domain and have this seed it onto a live session.
-            if name not in _PERSIST_COOKIE_NAMES or _GOOGLE_DOMAIN_SUFFIX not in domain:
+            if name not in _PERSIST_COOKIE_NAMES or not _is_google_domain(domain):
                 log.debug("ignoring non-allowlisted cookie %r for %r in the cache", name, domain)
                 continue
             client._session().cookies.set(
@@ -700,8 +803,7 @@ def _persist_cookies(client: Any) -> None:
                 "path": str(ck.path or "/"),
             }
             for ck in client._session().cookies.jar  # pyright: ignore[reportAny]  # fli/curl_cffi untyped
-            if str(ck.name) in _PERSIST_COOKIE_NAMES
-            and _GOOGLE_DOMAIN_SUFFIX in str(ck.domain or "")
+            if str(ck.name) in _PERSIST_COOKIE_NAMES and _is_google_domain(str(ck.domain or ""))
         ]
     except Exception as e:  # noqa: BLE001 — cookie read is best-effort, never fatal
         log.debug("could not read session cookies to persist: %s", e)
@@ -861,17 +963,23 @@ class _RetryableTransportError(GfBackendError):
 
 
 def _is_transport_failure(e: BaseException) -> bool:
-    """Is this curl failing to complete a request, rather than a page we read?
+    """Is this curl failing to REACH Google, rather than a page we read?
+
+    Exactly two families, because only these clear on a second attempt:
+    `ConnectionError` (DNS, TLS, a reset socket) and `Timeout` (connect and
+    read). curl's broader `CurlError` base also covers `InvalidURL`,
+    `InvalidSchema`, `SessionClosed`, `CookieConflict`, `ImpersonateError` and
+    `TooManyRedirects` — faults in the request WE built, which is the shape a
+    `build_search_tfs` regression takes. Retrying those three times and
+    relabelling them "Google could not be reached" is how such a defect becomes
+    unfindable.
 
     The import is deferred and on the error path only: `curl_cffi` costs ~100ms
     cold, and by the time an exception comes back from the session it is
-    certainly loaded. `CurlError` is the broadest curl-level base — every
-    connection reset, DNS failure, timeout and TLS error descends from it — and
-    it is imported from `curl_cffi` itself, where it is exported, rather than
-    from `requests.exceptions`, which only re-exports it."""
-    from curl_cffi import CurlError  # noqa: PLC0415
+    certainly loaded."""
+    from curl_cffi.requests import exceptions as curl_exc  # noqa: PLC0415
 
-    return isinstance(e, CurlError)
+    return isinstance(e, curl_exc.ConnectionError | curl_exc.Timeout)
 
 
 def _fetch_page(client: Any, url: str) -> Any:
@@ -901,7 +1009,10 @@ def _fetch_page(client: Any, url: str) -> Any:
             url,
             impersonate="chrome",
             allow_redirects=True,
-            timeout=_REQUEST_TIMEOUT_S,
+            # fli's own value, imported rather than copied: it is the one that
+            # reads and validates `FLI_TIMEOUT`, and a duplicate here silently
+            # ignores whatever the user set. A search page is multi-megabyte.
+            timeout=REQUEST_TIMEOUT,
         )
     except Exception as e:
         if _is_transport_failure(e):
@@ -1011,7 +1122,9 @@ def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
       same (warming) client; a fresh session would stay cold. Returns the falsy
       result if it never warms.
     - genuine **throttle** (GfThrottledError) -> exponential, jittered backoff;
-      re-raised when exhausted so the caller can degrade to Matrix.
+      re-raised when exhausted so the caller can degrade to Matrix. Inside a
+      `shared_throttle_ladder` scope that budget belongs to the whole fan-out
+      rather than to this call.
 
     `retry_empty=False` turns the first policy off, for callers whose empty is
     authoritative rather than cold: the search page either decodes or raises, so
@@ -1047,14 +1160,15 @@ def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
             continue
         except GfThrottledError:
             throttle_attempts += 1
-            if throttle_attempts > _THROTTLE_RETRY_ATTEMPTS:
+            attempt = _throttle_attempt(throttle_attempts)
+            if attempt is None:
                 raise
-            base = _THROTTLE_BACKOFF_S * (2 ** (throttle_attempts - 1))
+            base = _THROTTLE_BACKOFF_S * (2 ** (attempt - 1))
             backoff = base * (1 + random.random() * 0.5)  # noqa: S311 — jitter, not crypto
             log.debug(
                 "gflight throttled; backoff %.1fs (retry %d/%d)",
                 backoff,
-                throttle_attempts,
+                attempt,
                 _THROTTLE_RETRY_ATTEMPTS,
             )
             time.sleep(backoff)
@@ -1101,7 +1215,11 @@ def search_with_ids(
 
     Round-trip / multi-city follow the same iterative leg-selection pattern
     as fli: query first leg, pick top_n, drive each through the rest. Each
-    `GFlightWithId` in a returned tuple has its own per-leg flight_id."""
+    `GFlightWithId` in a returned tuple has its own per-leg flight_id.
+
+    A pin whose return board refuses is dropped with a warning and the rest are
+    still fetched; the refusal is only raised when EVERY pin failed. A throttle
+    is the exception — it is per-IP, so it aborts the fan-out."""
     first = _one_call_with_retry(filters)
     if not first:
         return None
@@ -1116,10 +1234,24 @@ def search_with_ids(
         return list(first)
 
     combos: list[GFlightWithId | tuple[GFlightWithId, ...]] = []
-    for picked in first[: _pinned_fanout(top_n)]:
+    pins = first[: _pinned_fanout(top_n)]
+    refused: list[GfBackendError] = []
+    for picked in pins:
         next_filters = deepcopy(filters)
         next_filters.flight_segments[selected_count].selected_flight = picked.flight
-        nxt = search_with_ids(next_filters, top_n=top_n)
+        try:
+            nxt = search_with_ids(next_filters, top_n=top_n)
+        except GfThrottledError:
+            # Per-IP: every remaining pin would walk into the same wall, and
+            # the caller has a Matrix fallback that this only delays.
+            raise
+        except GfBackendError as e:
+            # One outbound's return board is one query of many, and the pins
+            # are independent. Unwinding here would throw away every
+            # combination already fetched and answer a partly-served trip with
+            # nothing at all.
+            refused.append(e)
+            continue
         if nxt is None:
             continue
         for nx in nxt:
@@ -1127,4 +1259,8 @@ def search_with_ids(
                 combos.append((picked, *nx))
             else:
                 combos.append((picked, nx))
+    if refused:
+        if len(refused) == len(pins):
+            raise refused[-1]  # nothing was served; the refusal IS the outcome
+        log.warning("%d of %d return boards unavailable: %s", len(refused), len(pins), refused[-1])
     return combos or None

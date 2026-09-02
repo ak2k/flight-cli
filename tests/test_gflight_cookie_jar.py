@@ -379,6 +379,30 @@ def test_a_temp_we_did_not_create_is_left_alone(
     assert not (tmp_path / "gflight-cookies.json").exists()
 
 
+@pytest.mark.parametrize(
+    "domain",
+    [
+        pytest.param(".google.com", id="the-domain-wide-form-google-sends"),
+        pytest.param("google.com", id="host-only"),
+        pytest.param("www.google.com", id="a-subdomain"),
+    ],
+)
+def test_an_allowlisted_google_domain_is_still_seeded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, domain: str
+) -> None:
+    """Tightening the domain check must not stop seeding the cookie it exists
+    for. A domain-wide cookie carries the leading dot Google writes."""
+    _reset(monkeypatch, tmp_path)
+    _write_cache(
+        tmp_path,
+        [{"name": "NID", "value": "legitimate", "domain": domain, "path": "/"}],
+        saved_at=time.time(),
+    )
+    fresh = _FakeClient([])
+    gfid._seed_cookies_once(fresh)
+    assert fresh._session().cookies.set_calls == [("NID", "legitimate", domain, "/")]
+
+
 def test_the_cache_directory_is_owner_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """`mkdir` takes the umask unless told otherwise, and this directory holds a
     live Google session cookie."""
@@ -394,6 +418,10 @@ def test_the_cache_directory_is_owner_only(monkeypatch: pytest.MonkeyPatch, tmp_
         pytest.param("SID", ".google.com", id="a-google-cookie-not-on-the-allowlist"),
         pytest.param("NID", ".evil.example", id="the-right-name-for-another-domain"),
         pytest.param("__Secure-1PSID", ".google.com", id="an-auth-cookie-name"),
+        # A substring test accepts both of these. The first is a host anyone can
+        # register under a domain they own; the second only LOOKS like a suffix.
+        pytest.param("NID", "google.com.evil.example", id="google-com-as-a-prefix"),
+        pytest.param("NID", "notgoogle.com", id="a-suffix-that-is-not-a-label"),
     ],
 )
 def test_a_tampered_cache_cannot_inject_arbitrary_cookies(

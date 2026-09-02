@@ -120,6 +120,30 @@ def main(
 # ─────────────────────────── argument parsers ──────────────────────────────
 
 
+# Characters that drive a terminal rather than appear in it. `escape` neutralises
+# `[` and nothing else, so an ESC or CSI inside remote text still clears the
+# screen, repositions the cursor, or repaints what came before it — and a
+# redirected stderr keeps every byte for whatever reads the file next.
+_CTRL = {
+    **{c: None for c in range(0x20) if c not in (0x09, 0x0A)},  # C0, keeping tab and newline
+    0x7F: None,  # DEL
+    **{c: None for c in range(0x80, 0xA0)},  # C1, including the 8-bit CSI
+    **{c: None for c in range(0x202A, 0x202F)},  # bidi embeddings and overrides
+    **{c: None for c in range(0x2066, 0x206A)},  # bidi isolates
+}
+
+
+def _safe_text(value: object) -> str:
+    """Remote sentence-shaped text, ready for a console: control characters
+    dropped, then markup escaped.
+
+    For text we did not write and the user did not type — a Matrix error message,
+    an exception's `str()`. Neither quoted nor truncated, unlike `_quote`: this is
+    a sentence someone needs to read whole, and the part that explains the failure
+    is as often at the end as the start."""
+    return escape(str(value).translate(_CTRL))
+
+
 def _parse_date(s: str) -> date:
     try:
         return datetime.strptime(s, "%Y-%m-%d").date()
@@ -139,6 +163,20 @@ def _parse_duration(s: str) -> tuple[int, int]:
 
 def _parse_iata_list(s: str) -> tuple[str, ...]:
     return tuple(a.strip().upper() for a in s.split(",") if a.strip())
+
+
+def _require_airports(origin: str, destination: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Both airport lists, parsed — or exit 2 rather than build an empty leg.
+
+    `_parse_iata_list` drops blank entries, so `""` and `","` arrive as an empty
+    tuple while the argument itself is still truthy and passes a plain `if
+    origin`. `Leg.of` accepts a leg with no airports at all out of that, and the
+    query only fails much later, inside a backend, as an index error."""
+    origins, destinations = _parse_iata_list(origin), _parse_iata_list(destination)
+    if not origins or not destinations:
+        err.print("[red]origin and destination are required.[/]")
+        raise typer.Exit(2)
+    return origins, destinations
 
 
 def _parse_times(s: str | None) -> tuple[TimeOfDay, ...]:
@@ -577,9 +615,11 @@ def _run(
     try:
         return anyio.run(go)
     except MatrixApiError as e:
-        err.print(f"[red]Matrix returned an error ({escape(e.kind)}):[/] {escape(e.message)}")
+        err.print(
+            f"[red]Matrix returned an error ({_safe_text(e.kind)}):[/] {_safe_text(e.message)}"
+        )
         if e.request_id:
-            err.print(f"[dim]request_id: {escape(e.request_id)}[/]")
+            err.print(f"[dim]request_id: {_safe_text(e.request_id)}[/]")
         raise typer.Exit(1) from e
 
 
@@ -888,7 +928,7 @@ def _emit_urls(
                 console.print("[dim]Google Flights (tfs= structured):[/]")
                 console.print(f"  [link]{escape(google_flights_url(search))}[/]")
         except Exception as e:  # noqa: BLE001 - third-party undocumented errors; non-fatal fallback
-            console.print(f"[dim]Google Flights link: {escape(str(e))}[/]")
+            console.print(f"[dim]Google Flights link: {_safe_text(e)}[/]")
 
 
 # ─────────────────────────── result renderers ──────────────────────────────
@@ -1280,7 +1320,7 @@ def _gf_refusal(e: Exception) -> _GfRefusal:
             return _GfRefusal(
                 "Google Flights' page shape changed",
                 "[red]Google Flights' page shape changed[/] — no rows could be read. "
-                f"Use [bold]--backend matrix[/]. ({escape(str(e))})",
+                f"Use [bold]--backend matrix[/]. ({_safe_text(e)})",
             )
         case GfTfsUnsupportedError():
             # Generic note: `page_can_encode` keeps these queries off Google
@@ -1291,7 +1331,7 @@ def _gf_refusal(e: Exception) -> _GfRefusal:
                 "Use [bold]--backend matrix[/].",
             )
         case _:
-            return _GfRefusal(_GF_DECLINED, f"[red]{_GF_DECLINED}:[/] {escape(str(e))}")
+            return _GfRefusal(_GF_DECLINED, f"[red]{_GF_DECLINED}:[/] {_safe_text(e)}")
 
 
 _MERGE_SOURCE_TAG = {"both": "GF+MX", "matrix": "MX", "gf": "GF"}
@@ -1357,7 +1397,7 @@ def _run_gflight_path(
         err.print(_gf_refusal(e).message)
         raise typer.Exit(1) from e
     except Exception as e:
-        err.print(f"[red]Google Flights query failed:[/] {escape(str(e))}")
+        err.print(f"[red]Google Flights query failed:[/] {_safe_text(e)}")
         raise typer.Exit(1) from e
 
     if not results:
@@ -1473,15 +1513,17 @@ def _run_enriched_path(
             # Matrix is still running and authoritative, so a GF refusal is a
             # note, not a failure — but it stays named: the merged table below
             # would otherwise look like Google simply had nothing cheaper.
-            console.print(f"[dim]{escape(_gf_refusal(e).note)} — showing Matrix only.[/]")
+            console.print(f"[dim]{_safe_text(_gf_refusal(e).note)} — showing Matrix only.[/]")
         else:
-            err.print(f"[yellow]Google Flights query failed:[/] {escape(str(e))}")
+            err.print(f"[yellow]Google Flights query failed:[/] {_safe_text(e)}")
     matrix_res = state.get("matrix")
     if matrix_res is None:
         # Matrix failed; the GF table (if any) was already painted.
         e = state.get("matrix_err")
         if e is not None:
-            err.print(f"[red]Matrix returned an error ({escape(e.kind)}):[/] {escape(e.message)}")
+            err.print(
+                f"[red]Matrix returned an error ({_safe_text(e.kind)}):[/] {_safe_text(e.message)}"
+            )
         if not gf:
             raise typer.Exit(1)
         return
@@ -1519,13 +1561,27 @@ def _run_enriched_path(
 # cheapest business on a given route are often different carriers entirely
 # (e.g. JFK-LHR: VS in economy, FI in business) — a top-5 query per cabin
 # almost never overlaps, leaving the J column rendered as all "—".
-# Bumping per-cabin queries to ~25-50 itineraries lets the join surface
-# matching itineraries that exist in both cabins' results.
+#
+# What the bump widens is how many LEG-1 rows each cabin keeps. It does NOT
+# widen a round trip's pinned fan-out on the page transport: every pin is
+# another multi-megabyte page GET, so `_gflight_ids._PINNED_FANOUT_CAP` clamps
+# that to ten outbounds per cabin whatever this returns. A multi-cabin round
+# trip is therefore joined on each cabin's ten cheapest outbounds, which is
+# what `_MULTI_CABIN_JOIN_NOTE` tells the user.
 #
 # Capped to bound response size (each itinerary costs bytes + parse time);
 # Matrix and gflight both tolerate page sizes in this range comfortably.
 _MULTI_CABIN_QUERY_BUMP_FACTOR = 5
 _MULTI_CABIN_QUERY_BUMP_CAP = 100
+
+# Printed once for a multi-cabin round trip on the page transport, where the pin
+# cap decides what the join can even see. Without it an empty cabin cell reads
+# as "that fare does not exist" when it means "these ten outbounds had no fare
+# in both cabins". Plain text with nothing interpolated, so nothing to escape.
+_MULTI_CABIN_JOIN_NOTE = (
+    "Google Flights joins cabins on each cabin's 10 cheapest outbounds; "
+    "'—' means no shared itinerary, not no fare."
+)
 
 
 def _bumped_query_top_n(top_n: int, cabin_count: int) -> int:
@@ -1535,6 +1591,9 @@ def _bumped_query_top_n(top_n: int, cabin_count: int) -> int:
     `top_n * factor` capped at the bump ceiling. The visible row count
     after merge is still `top_n` (renderer trims by sort cabin) — the
     bump only widens the search space the join can draw from.
+
+    On the page transport a round trip's pinned fan-out is capped on its own
+    budget, so raising this does not widen the outbounds such a join sees.
     """
     if cabin_count <= 1:
         return top_n
@@ -1626,7 +1685,7 @@ def _run_matrix_multi(
         except MatrixApiError as e:
             err.print(
                 f"[yellow]Matrix {escape(cab.value)} query failed "
-                f"({escape(e.kind)}): {escape(e.message)}[/]"
+                f"({_safe_text(e.kind)}): {_safe_text(e.message)}[/]"
             )
             return
         results[cab] = cast("SearchResult", res)
@@ -1642,9 +1701,11 @@ def _run_matrix_multi(
     try:
         anyio.run(go)
     except MatrixApiError as e:
-        err.print(f"[red]Matrix returned an error ({escape(e.kind)}):[/] {escape(e.message)}")
+        err.print(
+            f"[red]Matrix returned an error ({_safe_text(e.kind)}):[/] {_safe_text(e.message)}"
+        )
         if e.request_id:
-            err.print(f"[dim]request_id: {escape(e.request_id)}[/]")
+            err.print(f"[dim]request_id: {_safe_text(e.request_id)}[/]")
         raise typer.Exit(1) from e
     return results
 
@@ -1660,7 +1721,12 @@ def _run_gflight_multi(
     each query runs in a worker thread via `anyio.to_thread.run_sync`.
 
     Each cabin runs the SAME query builder as the single-cabin path, so the
-    native filters and the Tier-2 post-filter cannot drift apart."""
+    native filters and the Tier-2 post-filter cannot drift apart. They also
+    share ONE throttle ladder: Google's wall is per-IP, so a cabin per thread
+    laddering against it separately spends the cabin count times the requests to
+    be told the same thing."""
+    from ._gflight_ids import shared_throttle_ladder  # noqa: PLC0415
+
     results: dict[Cabin, list[Any]] = {}
 
     def query_sync(cab: Cabin) -> list[Any]:
@@ -1673,11 +1739,11 @@ def _run_gflight_multi(
             # A typed refusal is why this cabin's column will be missing; the
             # bare handler below would print it as an unexplained failure.
             err.print(
-                f"[yellow]Google Flights {escape(cab.value)}: {escape(_gf_refusal(e).note)}.[/]"
+                f"[yellow]Google Flights {escape(cab.value)}: {_safe_text(_gf_refusal(e).note)}.[/]"
             )
         except Exception as e:  # noqa: BLE001 — fli has no documented exception surface
             err.print(
-                f"[yellow]Google Flights {escape(cab.value)} query failed: {escape(str(e))}[/]"
+                f"[yellow]Google Flights {escape(cab.value)} query failed: {_safe_text(e)}[/]"
             )
 
     async def go() -> None:
@@ -1685,7 +1751,8 @@ def _run_gflight_multi(
             for cab in cabins:
                 tg.start_soon(query_cabin, cab)
 
-    anyio.run(go)
+    with shared_throttle_ladder():
+        anyio.run(go)
     return results
 
 
@@ -1844,6 +1911,8 @@ def _run_gflight_path_multi(
     sel: ProviderSelection,
 ) -> None:
     """Google Flights multi-cabin: N parallel cabin queries (threadpool) → join → render."""
+    if len(legs) >= _ROUND_TRIP_LEGS and len(cabins) > 1:
+        err.print(f"[dim]{_MULTI_CABIN_JOIN_NOTE}[/]")
     # Widen per-cabin queries so the join has overlap; see _bumped_query_top_n.
     query_top_n = _bumped_query_top_n(top_n, len(cabins))
     fli_by_cabin = _run_gflight_multi(legs=legs, opts=opts, cabins=cabins, top_n=query_top_n)
@@ -2466,12 +2535,13 @@ def search(
     if slice_specs:
         legs = tuple(_parse_slice_spec(s) for s in slice_specs)
     elif origin and destination and dep:
+        origins, destinations = _require_airports(origin, destination)
         out_times = _parse_times(depart_times)
         ret_times = _parse_times(return_times)
         legs = (
             Leg.of(
-                _parse_iata_list(origin),
-                _parse_iata_list(destination),
+                origins,
+                destinations,
                 _parse_date(dep),
                 route_language=routing,
                 extension=extension,
@@ -2481,8 +2551,8 @@ def search(
         if ret:
             legs += (
                 Leg.of(
-                    _parse_iata_list(destination),
-                    _parse_iata_list(origin),
+                    destinations,
+                    origins,
                     _parse_date(ret),
                     route_language=routing,
                     extension=extension,
@@ -2706,12 +2776,13 @@ def fare(
     if slice_specs:
         legs = tuple(_parse_slice_spec(s) for s in slice_specs)
     elif origin and destination and dep:
+        origins, destinations = _require_airports(origin, destination)
         out_times = _parse_times(depart_times)
         ret_times = _parse_times(return_times)
         legs = (
             Leg.of(
-                _parse_iata_list(origin),
-                _parse_iata_list(destination),
+                origins,
+                destinations,
                 _parse_date(dep),
                 route_language=routing,
                 extension=extension,
@@ -2721,8 +2792,8 @@ def fare(
         if ret:
             legs += (
                 Leg.of(
-                    _parse_iata_list(destination),
-                    _parse_iata_list(origin),
+                    destinations,
+                    origins,
                     _parse_date(ret),
                     route_language=routing,
                     extension=extension,
@@ -3185,13 +3256,7 @@ def gflight(
     # Legs first: `_pick_backend` announces the backend it chose, and a genuinely
     # bad airport must not be reported after a line claiming the query is already
     # on its way.
-    origins, destinations = _parse_iata_list(origin), _parse_iata_list(destination)
-    if not origins or not destinations:
-        # `_parse_iata_list` drops empty entries, so "" and "," both arrive here
-        # as an empty tuple. `Leg.of` would build a leg with no airports at all
-        # rather than reject it.
-        err.print("[red]origin and destination are required.[/]")
-        raise typer.Exit(2)
+    origins, destinations = _require_airports(origin, destination)
     legs = (Leg.of(origins, destinations, _parse_date(dep)),)
     if ret:
         legs += (Leg.of(destinations, origins, _parse_date(ret)),)
@@ -3333,7 +3398,7 @@ def seatmap(
         # Escaped, not bare: this URL is printed to be copied, and rich would
         # read a bracketed segment as markup and drop it from what the user
         # pastes — a wrong URL is worse than a loud failure.
-        console.print(escape(api_url))
+        console.print(_safe_text(api_url))
         return
     try:
         url = fetch_seatmap_url(
@@ -3345,14 +3410,14 @@ def seatmap(
             aircraft=aircraft,
         )
     except Exception as e:
-        err.print(f"[red]Seatmap lookup failed:[/] {escape(str(e))}")
-        console.print(f"[dim]API URL:[/] {escape(api_url)}")
+        err.print(f"[red]Seatmap lookup failed:[/] {_safe_text(e)}")
+        console.print(f"[dim]API URL:[/] {_safe_text(api_url)}")
         raise typer.Exit(1) from e
     if url is None:
         err.print("[yellow]No seatmap on file for this flight/aircraft.[/]")
-        console.print(f"[dim]API URL:[/] {escape(api_url)}")
+        console.print(f"[dim]API URL:[/] {_safe_text(api_url)}")
         raise typer.Exit(1)
-    console.print(escape(url))
+    console.print(_safe_text(url))
 
 
 if __name__ == "__main__":

@@ -334,19 +334,8 @@ def test_gflight_alias_validates_airports_before_it_names_a_backend(
     assert "Not a 3-letter IATA code: 'XXXX'" in str(result.exception)
 
 
-@pytest.mark.parametrize(
-    "origin",
-    [
-        pytest.param("", id="empty"),
-        pytest.param(",", id="comma-only"),
-        pytest.param(" , ", id="blanks"),
-    ],
-)
-def test_gflight_alias_rejects_an_empty_airport_list(
-    monkeypatch: pytest.MonkeyPatch, origin: str
-) -> None:
-    """`_parse_iata_list` drops empty entries, so these all arrive as an empty
-    tuple. A leg with no airports at all is not a query anyone can answer."""
+def _no_backend_runs(monkeypatch: pytest.MonkeyPatch, command: str, origin: str) -> str:
+    """Invoke `command` with a blank origin and every backend booby-trapped."""
     from typer.testing import CliRunner
 
     from flight_cli import cli
@@ -354,9 +343,51 @@ def test_gflight_alias_rejects_an_empty_airport_list(
     def _unreached(**_kw: object) -> None:
         raise AssertionError("a backend ran on a query with no airports")
 
-    monkeypatch.setattr(cli, "_run_gflight_path", _unreached)
-    monkeypatch.setattr(cli, "_run_matrix_path", _unreached)
-    result = CliRunner().invoke(cli.app, ["gflight", origin, "MIA", "--dep", _future_dep()])
+    for path in (
+        "_run_gflight_path",
+        "_run_matrix_path",
+        "_run_gflight_path_multi",
+        "_run_matrix_path_multi",
+        "_run_enriched_path",
+    ):
+        monkeypatch.setattr(cli, path, _unreached)
+    result = CliRunner().invoke(cli.app, [command, origin, "MIA", "--dep", _future_dep()])
+    assert result.exit_code == 2, result.output
+    return result.output
 
-    assert result.exit_code == 2
-    assert "origin and destination are required" in result.output
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        pytest.param(",", id="comma-only"),
+        pytest.param(" , ", id="blanks"),
+    ],
+)
+@pytest.mark.parametrize("command", ["gflight", "search", "fare"])
+def test_a_command_that_builds_a_leg_rejects_a_blank_airport_list(
+    monkeypatch: pytest.MonkeyPatch, command: str, origin: str
+) -> None:
+    """`_parse_iata_list` drops blank entries, so these arrive as an empty tuple
+    while the argument itself stays truthy and satisfies a plain `if origin`.
+    Every command that builds a leg has to reject that the same way: `search`
+    and `fare` used to reach a backend and fail inside it with an index
+    error."""
+    assert "origin and destination are required" in _no_backend_runs(monkeypatch, command, origin)
+
+
+@pytest.mark.parametrize("command", ["gflight", "search", "fare"])
+def test_an_absent_origin_is_refused_by_whichever_arm_owns_it(
+    monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    """An empty string is falsy, so on `search` and `fare` it never reaches the
+    airport check — it is a query with no origin at all, and the arm that asks
+    for one answers first. `gflight` takes origin positionally and has no such
+    arm. Both exits are 2 and both name what is missing; pinned so the
+    difference stays a choice."""
+    output = _no_backend_runs(monkeypatch, command, "")
+    expected = (
+        "origin and destination are required"
+        if command == "gflight"
+        else "origin destination --dep"
+    )
+    assert expected in output

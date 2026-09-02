@@ -39,7 +39,11 @@ import copy
 import datetime
 import json
 import logging
+import os
 import pathlib
+import subprocess
+import sys
+import textwrap
 import threading
 from typing import Any, ClassVar, cast
 
@@ -130,9 +134,11 @@ class _FakeSession:
         self._responses = responses
         self.gets = gets
         self.cookies = _NullCookies()
+        self.last_kwargs: dict[str, Any] = {}
 
     def get(self, url: str, **_kw: object) -> _FakeResponse:
         self.gets.append(url)
+        self.last_kwargs = dict(_kw)
         # The last entry repeats, so "429 forever" is one element.
         response = self._responses[min(len(self.gets) - 1, len(self._responses) - 1)]
         if isinstance(response, Exception):
@@ -208,6 +214,72 @@ def test_extract_ds1_returns_none_when_the_key_is_absent() -> None:
 
 def test_extract_ds1_returns_none_on_undecodable_data() -> None:
     assert gfid._extract_ds1(_page("[[,]]")) is None
+
+
+@pytest.mark.parametrize("name", sorted(p.name for p in FIXTURE_DIR.glob("*.json")))
+def test_a_page_carrying_one_blob_still_yields_exactly_that_blob(name: str) -> None:
+    """Choosing among blobs must not change what a page with only one gives
+    back. Every committed capture — the six live ones and the two synthetic
+    husks — decodes to itself."""
+    raw = _ds1(name)
+    assert gfid._extract_ds1(_page(raw)) == json.loads(raw)
+
+
+def test_the_blob_with_the_most_rows_wins_whichever_way_round_it_sits(client: Any) -> None:
+    """Google hydrates this page in stages, so a partly-filled board can be
+    emitted above OR below the settled one. Position decides nothing; the row
+    count does."""
+    for html in (_board_of(1) + _board_of(3), _board_of(3) + _board_of(1)):
+        client(_FakeResponse(text=html))
+        assert len(gfid._one_call(_FILTERS)) == 3
+
+
+def test_an_empty_husk_loses_to_the_board_that_carries_rows(client: Any) -> None:
+    """The husk `[[]]` is a row block that holds nothing. Asking only whether a
+    blob HAS a block hands the search to it and reports an authoritative empty
+    for a route Google served thirty flights on."""
+    husk = json.dumps([0, 0, [[]], None] + [None] * 28)
+    client(_FakeResponse(text=_page(husk) + _page(_ds1("ds1_jfk_lax_3rows.json"))))
+    assert len(gfid._one_call(_FILTERS)) == 3
+
+
+def test_the_chosen_blob_is_counted_structurally_not_parsed(client: Any) -> None:
+    """The count must NOT ask whether rows parse. A board whose rows have all
+    moved carries the most rows of anything on the page and has to win, so the
+    0-of-N guard reports the layout change — losing it to a smaller board that
+    still parses answers a shape change with a short, plausible table."""
+    moved = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
+    moved[2] = [[["moved-schema-row"], ["another"]]]
+    moved[3] = None
+    client(_FakeResponse(text=_page(json.dumps(moved)) + _board_of(1)))
+    with pytest.raises(GfPageShapeError, match="none of 2 Google Flights rows parsed"):
+        gfid._one_call(_FILTERS)
+
+
+def test_a_tie_on_row_count_keeps_the_earlier_blob() -> None:
+    """Nothing distinguishes two equally-full boards, so the document order is
+    the tie-break rather than "whichever the loop saw last"."""
+    earlier = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
+    later = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
+    earlier[0], later[0] = "earlier", "later"
+    chosen = gfid._extract_ds1(_page(json.dumps(earlier)) + _page(json.dumps(later)))
+    assert chosen is not None
+    assert chosen[0] == "earlier"
+
+
+def test_a_truncated_placeholder_above_a_flight_less_board_stays_an_empty(client: Any) -> None:
+    """With no blob carrying rows the fallback must skip a payload too short to
+    reach `[3]`. Taking the first decodable one refuses a page Google served
+    correctly: the flight-less capture carries `None` at both indices."""
+    client(_FakeResponse(text=_page("[]") + _page(_ds1("ds1_flightless_board.json"))))
+    assert gfid._one_call(_FILTERS) == []
+
+
+def test_with_nothing_long_enough_the_first_decodable_blob_is_still_returned() -> None:
+    """Last rung of the fallback. A page of nothing but truncated blobs has no
+    good answer, and reporting the first one keeps `_rows_from_ds1` the single
+    place that decides a payload is too short to be a board."""
+    assert gfid._extract_ds1(_page("[1]") + _page("[2]")) == [1]
 
 
 def test_a_placeholder_blob_before_the_real_one_does_not_win(client: Any) -> None:
@@ -322,6 +394,95 @@ def test_a_persistent_throttle_costs_exactly_one_ladder(client: Any) -> None:
     # Every GET still takes a token from fli's process-wide bucket; bypassing
     # `Client.get` must not bypass the rate limit the fan-out threads share.
     assert fake._rate_limiter.acquisitions == len(fake.gets)
+
+
+def test_a_leg_that_both_throttles_and_blips_spends_both_budgets(client: Any) -> None:
+    """The two counters are independent on purpose — a wall that lifts and a
+    network that drops are different failures — so one leg can spend both. The
+    ceiling is the number the request budget has to be read from."""
+    fake = client(
+        _FakeResponse(text="", status_code=429),
+        _FakeResponse(text="", status_code=429),
+        _FakeResponse(text="", status_code=429),
+        _FakeResponse(text="", status_code=429),
+        _transport_error(),
+        _transport_error(),
+        _FakeResponse(text="", status_code=429),
+    )
+    with pytest.raises(GfThrottledError):
+        gfid._one_call_with_retry(_FILTERS)
+    assert len(fake.gets) == 1 + gfid._THROTTLE_RETRY_ATTEMPTS + gfid._TRANSPORT_RETRY_ATTEMPTS == 7
+
+
+def _one_ladders_worth_of_sleep() -> float:
+    """The most one throttle ladder can sleep, jitter at its ceiling."""
+    return sum(
+        gfid._THROTTLE_BACKOFF_S * (2 ** (attempt - 1)) * 1.5
+        for attempt in range(1, gfid._THROTTLE_RETRY_ATTEMPTS + 1)
+    )
+
+
+def _multi_cabin_legs() -> Any:
+    from flight_cli.domain import Leg
+
+    return (Leg.of("JFK", "LAX", datetime.date.today() + datetime.timedelta(days=45)),)
+
+
+def _fan_out(monkeypatch: pytest.MonkeyPatch, *cabins: Any) -> tuple[dict[Any, Any], list[float]]:
+    """Run the real cabin fan-out with its stderr swallowed, reporting what it
+    returned and every backoff it slept."""
+    import io
+
+    from rich.console import Console
+
+    from flight_cli import cli
+    from flight_cli.domain import SearchOptions
+
+    slept: list[float] = []
+    monkeypatch.setattr(gfid.time, "sleep", slept.append)
+    monkeypatch.setattr(cli, "err", Console(file=io.StringIO(), width=400))
+    out = cli._run_gflight_multi(
+        legs=_multi_cabin_legs(),
+        opts=SearchOptions(cabin=cabins[0]),
+        cabins=tuple(cabins),
+        top_n=5,
+    )
+    return out, slept
+
+
+def test_a_persistent_throttle_costs_one_ladder_for_the_WHOLE_cabin_fan_out(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Four cabins each running their own ladder spend 4 x 5 = 20 multi-megabyte
+    GETs against an IP that is already refusing us, and four ladders' worth of
+    backoff, to learn the one thing the first ladder learned. The wall is
+    per-IP, so the budget is too: one ladder, plus the requests each cabin had
+    already put in flight before anyone saw a 429."""
+    from flight_cli.domain import Cabin
+
+    fake = client(_FakeResponse(text="", status_code=429))
+    cabins = (Cabin.COACH, Cabin.PREMIUM_COACH, Cabin.BUSINESS, Cabin.FIRST)
+    out, slept = _fan_out(monkeypatch, *cabins)
+
+    assert out == {}, "a throttled fan-out has no cabin to render"
+    one_ladder = gfid._THROTTLE_RETRY_ATTEMPTS + 1
+    assert len(fake.gets) <= one_ladder + (len(cabins) - 1) == 8
+    assert sum(slept) <= _one_ladders_worth_of_sleep()
+
+
+def test_a_single_cabin_fan_out_still_gets_a_whole_ladder(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sharing a ladder must not shorten one. With nobody to share with, the
+    lone cabin spends exactly what a plain search spends."""
+    from flight_cli.domain import Cabin
+
+    fake = client(_FakeResponse(text="", status_code=429))
+    out, slept = _fan_out(monkeypatch, Cabin.COACH)
+
+    assert out == {}
+    assert len(fake.gets) == gfid._THROTTLE_RETRY_ATTEMPTS + 1
+    assert len(slept) == gfid._THROTTLE_RETRY_ATTEMPTS
 
 
 def test_the_page_get_does_not_go_through_flis_retrying_wrapper(client: Any) -> None:
@@ -803,6 +964,60 @@ def test_a_throttled_pinned_leg_stops_the_fan_out(client: Any) -> None:
     assert len(fake.gets) == 1 + (gfid._THROTTLE_RETRY_ATTEMPTS + 1) == 6
 
 
+def _moved_row_page() -> str:
+    """A page whose rows are row-shaped and none of them parse — the shape a
+    return board refuses in."""
+    moved = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
+    moved[2] = [[["moved-schema-row"]]]
+    moved[3] = None
+    return _page(json.dumps(moved))
+
+
+def test_one_refused_return_board_does_not_discard_the_pins_already_fetched(
+    client: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Each pin is an independent query, and a round trip is worth answering
+    partly. Unwinding on the second of three turns a trip with two priced
+    return boards into no answer at all — and hands the user a page-shape
+    refusal for a page that mostly worked."""
+    fake = client(
+        _FakeResponse(text=_board_of(3)),  # the outbound board
+        _FakeResponse(text=_board_of(1)),  # pin 1 returns
+        _FakeResponse(text=_moved_row_page()),  # pin 2 refuses
+        _FakeResponse(text=_board_of(1)),  # pin 3 returns
+    )
+    with caplog.at_level(logging.WARNING, logger="flight_cli._gflight_ids"):
+        out = gfid.search_with_ids(_round_trip_filters(), top_n=3)
+    assert out is not None
+    assert len(out) == 2
+    assert len(fake.gets) == 4
+    assert "1 of 3 return boards unavailable" in caplog.text
+
+
+def test_a_refusal_on_every_pin_is_still_the_outcome(client: Any) -> None:
+    """Continuing past one bad board must not turn a wholly failed round trip
+    into a silent `None` the caller renders as "no results"."""
+    client(
+        _FakeResponse(text=_board_of(3)),
+        _FakeResponse(text=_SHAPE_CHANGE_PAGE),  # every pin, forever
+    )
+    with pytest.raises(GfPageShapeError):
+        gfid.search_with_ids(_round_trip_filters(), top_n=3)
+
+
+def test_a_throttle_on_a_later_pin_still_aborts_the_fan_out(client: Any) -> None:
+    """The continue-past-a-refusal rule stops at the throttle: it is per-IP, so
+    pin 3 would spend another ladder against the same wall."""
+    fake = client(
+        _FakeResponse(text=_board_of(3)),
+        _FakeResponse(text=_board_of(1)),  # pin 1 returns
+        _FakeResponse(text="", status_code=429),  # pin 2 onwards
+    )
+    with pytest.raises(GfThrottledError):
+        gfid.search_with_ids(_round_trip_filters(), top_n=3)
+    assert len(fake.gets) == 2 + (gfid._THROTTLE_RETRY_ATTEMPTS + 1) == 7
+
+
 # ───────────────────── recursion, both places it can bite ──────────────────
 
 
@@ -893,10 +1108,89 @@ def test_a_transport_failure_degrades_to_matrix_rather_than_crashing() -> None:
     assert not gfid._is_transport_failure(ValueError("not a transport problem"))
 
 
-def test_a_non_transport_exception_is_not_retried(client: Any) -> None:
-    """The budget covers curl failing to complete a request, nothing else. A
-    bug in our own code must not be retried three times and relabelled."""
-    fake = client(RuntimeError("a bug, not a blip"))
-    with pytest.raises(RuntimeError):
+def _curl_error(name: str) -> Exception:
+    """One of curl_cffi's non-transport failures, by name."""
+    from curl_cffi.requests import exceptions as curl_exc
+
+    return cast("Exception", getattr(curl_exc, name)(f"{name} from a request we built"))
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["InvalidURL", "InvalidSchema", "SessionClosed", "CookieConflict", "TooManyRedirects"],
+)
+def test_a_curl_error_that_is_not_a_failure_to_connect_is_not_a_blip(name: str) -> None:
+    """These all descend from curl's `CurlError` base and none of them clears on
+    a second attempt: each names a request WE built wrongly. Keying the retry on
+    that base is what turns a `build_search_tfs` regression into three GETs and
+    the words "Google could not be reached"."""
+    assert not gfid._is_transport_failure(_curl_error(name))
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(RuntimeError("a bug, not a blip"), id="our-own-bug"),
+        pytest.param(_curl_error("InvalidURL"), id="a-url-we-built-wrong"),
+    ],
+)
+def test_a_non_transport_exception_is_not_retried(client: Any, error: Exception) -> None:
+    """The budget covers curl failing to REACH Google, nothing else. A bug in
+    the request we sent must not be retried three times and relabelled."""
+    fake = client(error)
+    with pytest.raises(type(error)):
         gfid._one_call_with_retry(_FILTERS)
     assert len(fake.gets) == 1
+
+
+def test_the_page_get_carries_flis_own_request_timeout(client: Any) -> None:
+    """A GET with no timeout at all hangs on a half-open socket until the OS
+    gives up, and the enriched path waits on it. `_fetch_page` bypasses
+    `Client.get`, so it has to pass the value `Client.get` would have."""
+    from fli.search.client import REQUEST_TIMEOUT  # pyright: ignore[reportMissingTypeStubs]
+
+    fake = client(_FakeResponse(text=_page(_ds1("ds1_jfk_lax_3rows.json"))))
+    gfid._one_call(_FILTERS)
+    assert fake._session().last_kwargs["timeout"] == REQUEST_TIMEOUT
+
+
+def test_the_configured_request_timeout_reaches_the_session_get() -> None:
+    """`FLI_TIMEOUT` is read and validated by fli at import, so the value is
+    frozen the moment `fli.search.client` loads — a fresh process is the only
+    way to see the environment reach the socket. Copying fli's default into a
+    constant of our own looked equivalent and silently dropped this."""
+    probe = textwrap.dedent(
+        """
+        import json, sys
+        from flight_cli import _gflight_ids as gfid
+
+        seen = {}
+
+        class _Session:
+            def get(self, url, **kw):
+                seen["timeout"] = kw["timeout"]
+                return "a page nobody reads"
+
+        class _Bucket:
+            def acquire(self, *a, **kw):
+                return True
+
+        class _Client:
+            _rate_limiter = _Bucket()
+
+            def _session(self):
+                return _Session()
+
+        gfid._fetch_page(_Client(), "https://www.google.com/travel/flights")
+        json.dump(seen, sys.stdout)
+        """
+    )
+    done = subprocess.run(  # noqa: S603 — this interpreter, a literal script
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "FLI_TIMEOUT": "5"},
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout) == {"timeout": 5.0}

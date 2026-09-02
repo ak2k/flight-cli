@@ -102,16 +102,43 @@ def test_a_bad_format_string_does_not_kill_the_command() -> None:
 
 def test_a_missing_stderr_does_not_kill_the_command(monkeypatch: pytest.MonkeyPatch) -> None:
     """`sys.stderr` is None under pythonw and can be replaced by anything at
-    all mid-run. A log line is not worth a crash."""
+    all mid-run. A log line is not worth a crash.
+
+    `configure()` is called too, not just the handler: it asks stderr whether it
+    is a terminal to decide on colour, so the CLI's very first line of work
+    raised an AttributeError before anything had a chance to log."""
+    log_mod.configure()
     handler = log_mod._StderrHandler()
     handler.setFormatter(logging.Formatter("%(message)s"))
     monkeypatch.setattr(sys, "stderr", None)
+    log_mod.configure()  # must not raise
     handler.handle(_record("a warning nobody can read"))  # must not raise
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        pytest.param(None, id="pythonw-has-no-stderr"),
+        pytest.param(object(), id="something-that-is-not-a-stream"),
+    ],
+)
+def test_configure_survives_a_stderr_that_cannot_say_whether_it_is_a_tty(
+    monkeypatch: pytest.MonkeyPatch, stderr: object
+) -> None:
+    """Colour is a presentation choice. Nothing about it is worth ending the
+    command on, so anything that cannot answer is simply not a terminal."""
+    monkeypatch.setattr(sys, "stderr", stderr)
+    log_mod.configure("debug")
+    assert log_mod._stderr_wants_colour() is False
 
 
 def test_a_recursion_error_is_not_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
     """The one exception stdlib re-raises: swallowing it would loop, because
-    `handleError` writes to the same stream that just overflowed."""
+    `handleError` writes to the same stream that just overflowed.
+
+    `raiseExceptions` is turned off first, so the guard is the only thing that
+    can produce this. Left on — pytest's default — `handleError` re-raises from
+    the fake stream itself and the test passes with the guard deleted."""
 
     class _Recursing:
         def write(self, _s: str) -> int:
@@ -120,5 +147,6 @@ def test_a_recursion_error_is_not_swallowed(monkeypatch: pytest.MonkeyPatch) -> 
     handler = log_mod._StderrHandler()
     handler.setFormatter(logging.Formatter("%(message)s"))
     monkeypatch.setattr(sys, "stderr", _Recursing())
+    monkeypatch.setattr(logging, "raiseExceptions", False)
     with pytest.raises(RecursionError):
         handler.handle(_record("boom"))

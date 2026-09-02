@@ -80,6 +80,40 @@ def _as_quoted(value: str) -> str:
     return repr(value)[1:-1]
 
 
+# Bytes that a terminal ACTS on. `escape` neutralises `[` and nothing else, so
+# these survive it: the first clears the screen and homes the cursor, the second
+# is the 8-bit CSI doing the same thing in one byte, and the last two reverse the
+# reading order of everything printed after them. A redirected stderr keeps them
+# for whatever reads the file next.
+_ESCAPES = "\x1b[2J\x1b[1;1H\x9b31m\u202e\u2066"
+
+
+def _hostile_matrix_error() -> Any:
+    """Remote text carrying every shape a console reacts to."""
+    from flight_cli.client import MatrixApiError
+
+    return MatrixApiError(
+        f"QPX Warning. Bad route [/spec]{_ESCAPES}", kind="in[put]", request_id="Or[FG]wFzk"
+    )
+
+
+def _unstringly_matrix_error() -> Any:
+    """`kind` and `request_id` are lifted out of the remote JSON with no
+    coercion, so a `type` of `{"code": 5}` reaches the renderer as a dict —
+    where `escape()` alone raises TypeError and the refusal becomes a
+    traceback."""
+    from flight_cli.client import MatrixApiError
+
+    return MatrixApiError("m", kind=cast("Any", {"code": 5}), request_id=cast("Any", 7))
+
+
+def _assert_drives_no_terminal(printed: str) -> None:
+    """Nothing in `printed` can move a cursor, clear a screen, or flip the
+    reading order."""
+    for ctrl in ("\x1b", "\x9b", "\u202e", "\u2066"):
+        assert ctrl not in printed, f"{ctrl!r} reached the terminal: {printed!r}"
+
+
 def _render(markup: str) -> str:
     """Render through a real Console, which is where MarkupError comes from —
     a plain string comparison would pass on text that cannot be printed."""
@@ -207,43 +241,72 @@ def test_hostile_extension_reaches_the_auto_path_verbatim(
     assert _as_quoted(extension) in printed, f"the extension string was mangled: {printed!r}"
 
 
-def test_a_matrix_error_carrying_markup_is_printable(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("build", "fragments"),
+    [
+        pytest.param(
+            _hostile_matrix_error,
+            ("QPX Warning. Bad route [/spec]", "in[put]", "Or[FG]wFzk"),
+            id="markup-and-control-bytes",
+        ),
+        pytest.param(
+            _unstringly_matrix_error, ("code", "5", "7"), id="fields-that-are-not-strings"
+        ),
+    ],
+)
+def test_a_matrix_error_carrying_markup_is_printable(
+    monkeypatch: pytest.MonkeyPatch, build: Any, fragments: tuple[str, ...]
+) -> None:
     """Matrix's rejections are quoted back verbatim too — the QPX layer answers
     a bad route with its own prose, and nothing sanitises it on the way here.
-    `_run` is the shared search and detail entry point that prints it."""
+    `_run` is the shared search and detail entry point that prints it, and the
+    only one that prints all three fields."""
     from flight_cli import cli
-    from flight_cli.client import MatrixApiError
 
     buf = io.StringIO()
     monkeypatch.setattr(cli, "err", Console(file=buf, width=400, no_color=True, highlight=False))
 
     def _boom(*_a: object, **_kw: object) -> object:
-        raise MatrixApiError(
-            "QPX Warning. Bad route [/spec]", kind="in[put]", request_id="Or[FG]wFzk"
-        )
+        raise cast("Exception", build())
 
     monkeypatch.setattr(cli.anyio, "run", _boom)
     with pytest.raises(typer.Exit):
         cli._run(cast("Any", None), rps=1.0, impersonate="chrome", no_cache=True)
 
     printed = buf.getvalue()
-    for fragment in ("QPX Warning. Bad route [/spec]", "in[put]", "Or[FG]wFzk"):
+    for fragment in fragments:
         assert fragment in printed, f"{fragment!r} was mangled: {printed!r}"
+    _assert_drives_no_terminal(printed)
 
 
+@pytest.mark.parametrize(
+    ("build", "fragments"),
+    [
+        pytest.param(
+            _hostile_matrix_error,
+            ("QPX Warning. Bad route [/spec]", "in[put]"),
+            id="markup-and-control-bytes",
+        ),
+        pytest.param(_unstringly_matrix_error, ("code", "5"), id="fields-that-are-not-strings"),
+    ],
+)
 def test_the_enriched_path_escapes_every_field_of_a_matrix_error(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, build: Any, fragments: tuple[str, ...]
 ) -> None:
     """The enriched path prints the same Matrix error as `_run`, from its own
     line, and it escaped the message while leaving `kind` bare.
 
     That is the failure mode a line-level `grep -v escape` cannot see: the line
     already said `escape`, so it looked done. Every field is asserted here, not
-    just the one that was wrong."""
+    just the one that was wrong.
+
+    This path prints `kind` and `message` only, so `request_id` is asserted at
+    `_run` instead — the same helper builds the error for both."""
     from datetime import date, timedelta
 
     from flight_cli import cli
-    from flight_cli.client import MatrixApiError
+
+    error = cast("Exception", build())
 
     class _FailingMatrix:
         """Matrix's client, refusing. Nothing here reaches the network — the
@@ -258,9 +321,7 @@ def test_the_enriched_path_escapes_every_field_of_a_matrix_error(
             return False
 
         async def execute(self, _search: object, **_kw: object) -> object:
-            raise MatrixApiError(
-                "QPX Warning. Bad route [/spec]", kind="in[put]", request_id="Or[FG]x"
-            )
+            raise error
 
     buf = io.StringIO()
     monkeypatch.setattr(cli, "err", Console(file=buf, width=400, no_color=True, highlight=False))
@@ -300,8 +361,147 @@ def test_the_enriched_path_escapes_every_field_of_a_matrix_error(
         )
 
     printed = buf.getvalue()
-    for fragment in ("QPX Warning. Bad route [/spec]", "in[put]"):
+    for fragment in fragments:
         assert fragment in printed, f"{fragment!r} was mangled: {printed!r}"
+    _assert_drives_no_terminal(printed)
+
+
+# The dangerous markup shape for a fragment that must SURVIVE: rich raises on an
+# unmatched closing tag but silently DROPS a valid opening one, so a probe built
+# from `[/x]` proves only that nothing crashed.
+_DROPPED = "[bold]x"
+
+
+def _gf_legs_and_opts() -> tuple[Any, Any]:
+    from datetime import date, timedelta
+
+    from flight_cli import cli
+
+    legs = (cli.Leg.of(("JFK",), ("LAX",), date.today() + timedelta(days=45)),)
+    opts = cli._build_options(
+        cabin="economy",
+        adults=1,
+        children=0,
+        seniors=0,
+        youth=0,
+        infants_in_seat=0,
+        infants_in_lap=0,
+        stops=None,
+        allow_airport_changes=True,
+        show_only_available=True,
+    )
+    return legs, opts
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        pytest.param(
+            GfPageShapeError(f"none of 2 rows parsed (AttributeError: {_DROPPED}){_ESCAPES}"),
+            "Google Flights' page shape changed",
+            id="a-typed-refusal-reads-as-its-own-note",
+        ),
+        pytest.param(
+            RuntimeError(f"boom {_DROPPED}{_ESCAPES}"),
+            f"boom {_DROPPED}",
+            id="an-untyped-failure-is-quoted-back",
+        ),
+    ],
+)
+def test_the_cabin_fan_out_reports_why_a_column_is_missing(
+    monkeypatch: pytest.MonkeyPatch, error: Exception, expected: str
+) -> None:
+    """Both arms of the fan-out's handler, which nothing reached before: a
+    stubbed `search_with_ids` that returns rows never enters either. A typed
+    refusal is answered with its own note, and anything else is quoted back —
+    the cabin's column goes missing either way, and an unexplained gap is the
+    outcome this handler exists to prevent."""
+    from flight_cli import _gflight_ids as gfid
+    from flight_cli import cli
+    from flight_cli.domain import Cabin
+
+    buf = io.StringIO()
+    monkeypatch.setattr(cli, "err", Console(file=buf, width=400, no_color=True, highlight=False))
+
+    def _boom(*_a: object, **_kw: object) -> object:
+        raise error
+
+    monkeypatch.setattr(gfid, "search_with_ids", _boom)
+    legs, opts = _gf_legs_and_opts()
+    assert cli._run_gflight_multi(legs=legs, opts=opts, cabins=(Cabin.COACH,), top_n=5) == {}
+
+    printed = buf.getvalue()
+    assert "COACH" in printed, f"the cabin went unnamed: {printed!r}"
+    assert expected in printed, f"{expected!r} was mangled: {printed!r}"
+    _assert_drives_no_terminal(printed)
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        pytest.param(
+            GfThrottledError(f"rate-limited {_DROPPED}{_ESCAPES}"),
+            "Google Flights rate-limited",
+            id="a-typed-refusal-reads-as-its-own-note",
+        ),
+        pytest.param(
+            RuntimeError(f"boom {_DROPPED}{_ESCAPES}"),
+            f"boom {_DROPPED}",
+            id="an-untyped-failure-is-quoted-back",
+        ),
+    ],
+)
+def test_the_enriched_path_reports_a_google_flights_refusal_as_a_footnote(
+    monkeypatch: pytest.MonkeyPatch, error: Exception, expected: str
+) -> None:
+    """Matrix is still authoritative here, so a Google Flights failure is a
+    note beside a table rather than the outcome — but it stays named, or the
+    merged table just looks like Google had nothing cheaper."""
+    from flight_cli import cli
+
+    buf = io.StringIO()
+    captured = Console(file=buf, width=400, no_color=True, highlight=False)
+    monkeypatch.setattr(cli, "err", captured)
+    monkeypatch.setattr(cli, "console", captured)
+
+    class _EmptyMatrix:
+        def __init__(self, **_kw: object) -> None: ...
+
+        async def __aenter__(self) -> _EmptyMatrix:
+            return self
+
+        async def __aexit__(self, *_a: object) -> bool:
+            return False
+
+        async def execute(self, _search: object, **_kw: object) -> object:
+            from flight_cli.client import MatrixApiError
+
+            raise MatrixApiError("no fares", kind="input")
+
+    def _boom(*_a: object, **_kw: object) -> object:
+        raise error
+
+    monkeypatch.setattr(cli, "MatrixClient", _EmptyMatrix)
+    monkeypatch.setattr(cli, "_gflight_results", _boom)
+    legs, opts = _gf_legs_and_opts()
+    with pytest.raises(typer.Exit):
+        cli._run_enriched_path(
+            legs=legs,
+            opts=opts,
+            top_n=3,
+            run_pp=False,
+            sel=None,
+            matrix_url=False,
+            google_url=False,
+            pick=None,
+            rps=1.0,
+            impersonate="chrome",
+            no_cache=True,
+        )
+
+    printed = buf.getvalue()
+    assert expected in printed, f"{expected!r} was mangled: {printed!r}"
+    _assert_drives_no_terminal(printed)
 
 
 @pytest.mark.parametrize("routing", _HOSTILE_ROUTING)

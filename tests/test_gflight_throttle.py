@@ -86,6 +86,31 @@ def test_is_consent_page_false_on_an_ordinary_page() -> None:
     assert not _is_consent_page(final_url="https://www.google.com/travel/flights", html="<html>")
 
 
+_MALFORMED_URL = "https://[::1/travel/flights"  # an unclosed IPv6 literal
+
+
+def test_a_malformed_final_url_classifies_as_neither_wall() -> None:
+    """`urlsplit` raises on an authority it cannot parse, and the final URL
+    comes back from a redirect we did not build. Both classifiers already
+    answer "no" for a URL carrying no marker; a URL nobody can read is the same
+    answer, not a traceback out of the middle of a search."""
+    assert not _is_page_throttled(final_url=_MALFORMED_URL, html="<html>results</html>")
+    assert not _is_consent_page(final_url=_MALFORMED_URL, html="<html>results</html>")
+
+
+def test_a_malformed_url_still_lets_the_body_decide() -> None:
+    """Falling through must reach the body signals, not short-circuit past
+    them: the interstitial served in place is only visible there."""
+    assert _is_page_throttled(
+        final_url=_MALFORMED_URL,
+        html="<html>Our systems have detected unusual traffic</html>",
+    )
+    assert _is_consent_page(
+        final_url=_MALFORMED_URL,
+        html='<form action="https://consent.google.com/save">',
+    )
+
+
 # ─────────────────────────── throttle retry ────────────────────────────
 
 

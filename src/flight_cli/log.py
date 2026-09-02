@@ -56,6 +56,18 @@ class _StderrHandler(logging.Handler):
             self.handleError(record)
 
 
+def _stderr_wants_colour() -> bool:
+    """Whether to colour stderr, for a stderr that may not be a stream at all.
+
+    `sys.stderr` is None under pythonw, and any program may rebind or close it,
+    so asking it directly turns the CLI's own startup into an AttributeError
+    before it has run anything. Anything that cannot answer is not a terminal."""
+    try:
+        return bool(sys.stderr.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
 def _configure_stdlib(lvl: int) -> None:
     """Put a stderr handler on the `flight_cli` stdlib logger at `lvl`.
 
@@ -90,7 +102,7 @@ def configure(level: str = "warning") -> None:
         structlog.processors.TimeStamper(fmt="%H:%M:%S", utc=False),
         structlog.processors.StackInfoRenderer(),
         structlog.dev.set_exc_info,
-        structlog.dev.ConsoleRenderer(colors=sys.stderr.isatty()),
+        structlog.dev.ConsoleRenderer(colors=_stderr_wants_colour()),
     ]
     structlog.configure(
         processors=processors,
