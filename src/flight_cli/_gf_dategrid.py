@@ -122,19 +122,19 @@ def grid_can_serve(search: CalendarSearch) -> bool:
     return all(p.tier is Tier.GF_NATIVE for p in constraints.predicates)
 
 
-def _decliner_phrase(
-    routing_only: str, extension_only: str, both: str, *, routing: bool, extension: bool
-) -> str:
-    """Pick the phrase naming whichever of `--routing` / `--extension` declined.
+def _decliner_phrase(tier: str, *, routing: bool, extension_count: int) -> str:
+    """The phrase naming whichever of `--routing` / `--extension` declined, for a
+    sentence that continues "this is …".
 
-    Callers pass all three spellings because English will not compose them: the
-    routing phrase is a mass noun and the extension phrase takes an article.
-    At least one flag must have declined, so the `extension_only` fallback is the
-    remaining case, not a default.
+    `--routing` takes one string and is a mass noun; `--extension` takes a
+    `;`-separated list, so its half is counted and carries an article only when a
+    single directive declined. At least one side must have declined — the caller
+    checks that — so a bare extension phrase is the remaining case, not a default.
     """
-    if routing and extension:
-        return both
-    return routing_only if routing else extension_only
+    if not extension_count:
+        return f"{tier} routing"
+    codes = f"a {tier} extension code" if extension_count == 1 else f"{tier} extension codes"
+    return f"both {tier} routing and {codes}" if routing else codes
 
 
 def grid_routing_blocker(search: CalendarSearch) -> str | None:
@@ -155,7 +155,8 @@ def grid_routing_blocker(search: CalendarSearch) -> str | None:
     `MINCONNECT` are Tier-2 extension codes, not routing; a booking class is a
     Matrix-only extension code, not Matrix-only routing. Both tiers name the
     source by the same rule, so the reader learns which flag to edit whichever
-    tier stopped the query.
+    tier stopped the query, and `--extension` takes a `;`-separated list, so the
+    phrase agrees in number with how many of its directives declined.
     """
     leg = search.legs[0]
     routing_c = classify(leg.route_language, None)
@@ -166,23 +167,18 @@ def grid_routing_blocker(search: CalendarSearch) -> str | None:
     # (only `UnsupportedPred` carries one), never the branch.
     if routing_c.requires_matrix or ext_c.requires_matrix:
         head = _decliner_phrase(
-            "Matrix-only routing",
-            "a Matrix-only extension code",
-            "Matrix-only routing and extension codes",
+            "Matrix-only",
             routing=routing_c.requires_matrix,
-            extension=ext_c.requires_matrix,
+            extension_count=len(ext_c.matrix_only),
         )
-        # Every reason, not just the first: a query can be Matrix-only twice over,
-        # and fixing one flag would leave the refusal unchanged and unexplained.
+        # Every reason, not just the first: a query can be Matrix-only several
+        # times over, and fixing one would leave the refusal unchanged and
+        # unexplained. This is also the count the phrase agrees in number with.
         reasons = routing_c.matrix_reasons + ext_c.matrix_reasons
         return f"{head} ({'; '.join(reasons)})" if reasons else head
     if routing_c.tier2 or ext_c.tier2:
         return _decliner_phrase(
-            "Tier-2 routing",
-            "a Tier-2 extension code",
-            "Tier-2 routing and extension codes",
-            routing=bool(routing_c.tier2),
-            extension=bool(ext_c.tier2),
+            "Tier-2", routing=bool(routing_c.tier2), extension_count=len(ext_c.tier2)
         )
     return None
 

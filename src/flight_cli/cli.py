@@ -23,6 +23,7 @@ import anyio
 import anyio.to_thread
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from . import _config
@@ -61,6 +62,7 @@ if TYPE_CHECKING:
 _SLICE_MIN_PARTS = 2
 _SLICE_MAX_PARTS = 3
 _ROUND_TRIP_LEGS = 2  # 2 legs = round-trip; 1 = one-way; >2 = multi-city
+_DURATION_BOUNDS = 2  # a nights range is min and max, never a third bound
 # `--duration` default for `calendar` and `detail`. Shared so both can tell an
 # explicit value from an unset one when the trip is one-way and the value is moot.
 _DEFAULT_CALENDAR_DURATION = "5-7"
@@ -118,37 +120,56 @@ def _parse_date(s: str) -> date:
     try:
         return datetime.strptime(s, "%Y-%m-%d").date()
     except ValueError as e:
-        err.print(f"[red]bad date {s!r}; use YYYY-MM-DD[/]")
+        err.print(f"[red]bad date {escape(repr(s))}; use YYYY-MM-DD[/]")
         raise typer.Exit(2) from e
+
+
+# A nights bound: digits, optionally signed. Deliberately narrower than `int()`,
+# which also swallows every Unicode space — U+001C..1F among them — so `5-\x1c7`
+# would parse as a range while reading as one token.
+_RE_DURATION_BOUND = re.compile(r"^[+-]?\d+$")
+
+
+def _canonical_bound(part: str) -> str:
+    """One spelling per number, so `05`, `+5` and `5` compare equal. A part that
+    is not a number is returned as-is for `_parse_duration` to reject: this
+    function decides sameness, never validity."""
+    part = part.strip(" \t")
+    return str(int(part)) if _RE_DURATION_BOUND.match(part) else part
 
 
 def _normalize_duration(s: str) -> str:
-    """One form for the spellings of a nights range that mean the same thing:
-    `..` for `-`, and blanks around either bound. Shared with `_resolve_duration`,
-    which decides whether a value differs from the default without parsing it, so
-    the parser and that comparison agree on which spellings are one range.
+    """One form for the spellings of a nights range that mean the same thing: `..`
+    for `-`, blanks around either bound, and the zero-padded or signed writings of
+    a number. Shared with `_resolve_duration`, which decides whether a value
+    differs from the default without parsing it, so the parser and that comparison
+    agree on which spellings are one range.
 
-    Blanks go per bound rather than everywhere, because `5 7` is not a range and
-    has to stay the parse error it is."""
-    return "-".join(part.strip() for part in s.replace("..", "-").strip().split("-"))
+    Blanks go per bound and only spaces and tabs, so `5 7` stays the parse error it
+    is and a control character stays visible rather than being quietly stripped."""
+    return "-".join(_canonical_bound(part) for part in s.replace("..", "-").strip(" \t").split("-"))
 
 
 def _parse_duration(s: str) -> tuple[int, int]:
-    """Nights as '5' or '5-7' (also '5..7'). Every failure is a typed CLI error:
-    the pair feeds `CalendarWindow`, whose validator rejects a reversed range with
-    a pydantic ValidationError, and a stack trace is not an answer to a mistyped
-    flag."""
-    t = _normalize_duration(s)
-    lo_s, sep, hi_s = t.partition("-")
-    if not sep:
-        hi_s = lo_s  # a bare '5' is the degenerate range 5-5
-    try:
-        lo, hi = int(lo_s), int(hi_s)
-    except ValueError as e:
-        err.print(f"[red]bad duration {s!r}; use nights as '5' or '5-7'[/]")
-        raise typer.Exit(2) from e
+    """Nights as '5', '5-7' or '5..7'. Every failure is a typed CLI error: the
+    pair feeds `CalendarWindow`, whose validator rejects a reversed range with a
+    pydantic ValidationError, and a stack trace is not an answer to a mistyped
+    flag.
+
+    Split on the separator rather than parsed bound-first, so an empty bound is
+    caught while it is still visible: `5-- 7` is a malformed range, and reading it
+    as a max of -7 would answer a typo with a number the user never wrote."""
+    # `escape(repr(...))`, in that order, at both exits below: `repr` doubles the
+    # backslash `escape` prepends, so escaping first hands the tag right back.
+    parts = _normalize_duration(s).split("-")
+    if len(parts) == 1:
+        parts *= 2  # a bare '5' is the degenerate range 5-5
+    if len(parts) != _DURATION_BOUNDS or not all(_RE_DURATION_BOUND.match(p) for p in parts):
+        err.print(f"[red]bad duration {escape(repr(s))}; use nights as '5' or '5-7'[/]")
+        raise typer.Exit(2)
+    lo, hi = int(parts[0]), int(parts[1])
     if hi < lo:
-        err.print(f"[red]bad duration {s!r}: max ({hi}) is below min ({lo})[/]")
+        err.print(f"[red]bad duration {escape(repr(s))}: max ({hi}) is below min ({lo})[/]")
         raise typer.Exit(2)
     return lo, hi
 
@@ -686,7 +707,7 @@ def _report_calendar_matrix_failure(state: dict[str, Any]) -> None:
         if e.request_id:
             err.print(f"[dim]request_id: {e.request_id}[/]")
     elif state.get("matrix_unexpected") is not None:
-        err.print(f"[red]Matrix calendar failed:[/] {state['matrix_unexpected']}")
+        err.print(f"[red]Matrix calendar failed:[/] {escape(str(state['matrix_unexpected']))}")
     else:
         err.print("[yellow]Matrix calendar did not complete.[/]")
 
@@ -778,7 +799,9 @@ def _run_calendar_enriched(
             elif state.get("gf_unavailable"):
                 console.print(f"[dim]{_GF_GRID_UNAVAILABLE_WEAVE_NOTE}[/]")
             elif "gf_err" in state:
-                err.print(f"[yellow]Google Flights date-grid failed:[/] {state['gf_err']}")
+                err.print(
+                    f"[yellow]Google Flights date-grid failed:[/] {escape(str(state['gf_err']))}"
+                )
                 console.print("[dim]…awaiting Matrix calendar…[/]")
             else:
                 console.print("[dim]…awaiting Matrix calendar…[/]")
@@ -1111,9 +1134,11 @@ def _grid_branch_blocker(
     """Why the GF date-grid can't serve this calendar, or None if it can.
 
     The string is user-facing: it completes "this is …" in the `--fast` refusal, so
-    every branch returns a noun phrase naming the shape, not the flag. Ordered
-    cheapest-first so the fli-heavy `_gf_dategrid` import is still skipped for the
-    Matrix-only shapes.
+    every branch returns a noun phrase. The first three name the SHAPE, which is
+    the whole story for them; the routing branch names the flag and the tier
+    instead, because a constraint the grid can't honor is not visible in the shape
+    of the command line. Ordered cheapest-first so the fli-heavy `_gf_dategrid`
+    import is still skipped for the shapes that never need it.
     """
     if json_out:
         return "JSON output"
@@ -2830,8 +2855,8 @@ def calendar(
         typer.Option(
             "--duration",
             "-d",
-            help="Nights between the outbound and the return, '5' or '5-7'. "
-            "Round-trip only — a one-way calendar has no trip length.",
+            help="Nights between the outbound and the return, '5', '5-7' or "
+            "'5..7'. Round-trip only — a one-way calendar has no trip length.",
             rich_help_panel=_GROUP_ITINERARY,
         ),
     ] = _DEFAULT_CALENDAR_DURATION,
@@ -2972,7 +2997,7 @@ def calendar(
         # condition failed.
         err.print(
             "[yellow]--fast applies only to one-way, single-airport, non-JSON "
-            f"calendars; this is {blocker}. Run without --fast for Matrix.[/]"
+            f"calendars; this is {escape(blocker)}. Run without --fast for Matrix.[/]"
         )
         raise typer.Exit(1)
     if blocker is None:
@@ -3014,7 +3039,7 @@ def calendar(
             # Ahead of the broad except, as in the weave.
             console.print(f"[dim]{_GF_GRID_UNAVAILABLE_NOTE}[/]")
         except Exception as e:  # noqa: BLE001 — GF is the optional fast layer; Matrix still runs
-            err.print(f"[yellow]Google Flights date-grid failed:[/] {e}")
+            err.print(f"[yellow]Google Flights date-grid failed:[/] {escape(str(e))}")
         if grid:
             _render_date_grid(grid, origin=origins, destination=dests, sd=sd, ed=ed)
             _emit_urls(search, matrix_url=matrix_url, google_url=google_url)

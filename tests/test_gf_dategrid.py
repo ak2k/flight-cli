@@ -234,10 +234,15 @@ def test_grid_routing_blocker_separates_tier2_from_matrix_only() -> None:
         (None, "-CODESHARE", "a Tier-2 extension code"),
         (None, "MINCONNECT 1:00", "a Tier-2 extension code"),
         (None, "-REDEYES", "a Tier-2 extension code"),
-        ("O:LH+", "-CODESHARE", "Tier-2 routing and extension codes"),
+        ("O:LH+", "-CODESHARE", "both Tier-2 routing and a Tier-2 extension code"),
+        # `--extension` takes a `;`-separated list, so its half is counted.
+        (None, "-CODESHARE;MINCONNECT 1:00", "Tier-2 extension codes"),
+        ("O:LH+", "-CODESHARE;-REDEYES", "both Tier-2 routing and Tier-2 extension codes"),
         ("BA AA", None, "Matrix-only routing"),
         (None, "F bc=y", "a Matrix-only extension code"),
-        ("BA AA", "F bc=y", "Matrix-only routing and extension codes"),
+        (None, "F bc=y;Q zz=1", "Matrix-only extension codes"),
+        ("BA AA", "F bc=y", "both Matrix-only routing and a Matrix-only extension code"),
+        ("BA AA", "F bc=y;Q zz=1", "both Matrix-only routing and Matrix-only extension codes"),
     ],
 )
 def test_grid_routing_blocker_names_the_flag_that_declined(
@@ -245,7 +250,9 @@ def test_grid_routing_blocker_names_the_flag_that_declined(
 ) -> None:
     """`classify` flattens `--routing` and `--extension` into one predicate set
     that no longer remembers which carried what, so the two are classified
-    separately and the phrase names every side that declined."""
+    separately and the phrase names every side that declined — in the number the
+    declining directives actually have, and reading as a sentence after
+    "this is …"."""
     blocker = grid_routing_blocker(_cal(routing=routing, ext=ext))
     assert blocker is not None
     assert blocker.startswith(expected)

@@ -127,16 +127,38 @@ code unconditionally: `--fast` means "the GF grid alone, ~1s", and answering it
 with the ~45s Matrix calendar — silently or otherwise — would change what the
 flag means.
 
-That refusal names both the tier and the flag that declined, because the phrase
-is what tells the reader where to go. `grid_can_serve` is False for Tier-2 and
-Tier-3 alike, so `grid_routing_blocker` re-reads the predicates for the tier;
-and `classify` flattens `--routing` and `--extension` into one predicate set that
-no longer remembers which carried what, so it classifies the two SEPARATELY for
-the source. Eight phrases result, "Tier-2 routing" and "a Matrix-only extension
-code" among them, plus a "… routing and extension codes" form at each tier when
-both flags declined. Calling a booking class "Tier-2" points the reader at a
-post-filter that was never the problem; calling it "routing" points them at a
-flag they did not set.
+That refusal names the tier, the flag and the number, because the phrase is what
+tells the reader where to go. `grid_can_serve` is False for Tier-2 and Tier-3
+alike, so `grid_routing_blocker` re-reads the predicates for the tier; and
+`classify` flattens `--routing` and `--extension` into one predicate set that no
+longer remembers which carried what, so it classifies the two SEPARATELY for the
+source. `--extension` takes a `;`-separated list, so its half is counted. Five
+spellings per tier, ten in all, covering the ten cases (routing declines or not,
+crossed with none / one / several declining extension directives, less the case
+where nothing declined):
+
+| declining | phrase (`<T>` is `Tier-2` or `Matrix-only`) |
+|---|---|
+| routing only | `<T> routing` |
+| one extension directive | `a <T> extension code` |
+| several extension directives | `<T> extension codes` |
+| routing + one directive | `both <T> routing and a <T> extension code` |
+| routing + several | `both <T> routing and <T> extension codes` |
+
+Calling a booking class "Tier-2" points the reader at a post-filter that was
+never the problem; calling it "routing" points them at a flag they did not set;
+and "a … extension code" for three of them makes them look for one directive.
+The Matrix-only phrases carry every reason in parentheses, so the count there
+matches the count in the phrase.
+
+Those reason strings quote the user's `--routing` / `--extension` text verbatim,
+and `err` is a markup-enabled console: `--routing 'BA[/weird]AA'` raised
+`MarkupError` where it should have refused, and a `[bold]` form ate the token the
+reader needed to see. `routing_predicates` has no console to escape for, so the
+escape belongs at the render sites — `rich.markup.escape` on the blocker, on the
+date-grid failure text, and on the argument parsers' own messages. Where the
+message also quotes, `repr` runs BEFORE `escape`: reversed, `repr` doubles the
+backslash `escape` prepends and hands the tag straight back to the parser.
 
 The grid paint in the weave and
 `_render_date_grid` are runtime-dead until the gate flips;

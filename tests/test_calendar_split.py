@@ -755,9 +755,18 @@ def test_fast_refuses_tier2_routing(monkeypatch: Any, capsys: pytest.CaptureFixt
     assert calls["calendar"] == 0  # refused before any Matrix work
 
 
-@pytest.mark.parametrize("ext", ["-CODESHARE", "MINCONNECT 1:00"])
+@pytest.mark.parametrize(
+    ("ext", "phrase"),
+    [
+        ("-CODESHARE", "this is a Tier-2 extension code"),
+        ("MINCONNECT 1:00", "this is a Tier-2 extension code"),
+        # `--extension` takes a `;`-separated list, so the phrase counts it.
+        ("-CODESHARE;MINCONNECT 1:00", "this is Tier-2 extension codes"),
+        ("-CODESHARE;-REDEYES;MINCONNECT 1:00", "this is Tier-2 extension codes"),
+    ],
+)
 def test_fast_refuses_a_tier2_extension_without_calling_it_routing(
-    ext: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+    ext: str, phrase: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # Same tier, other flag. The phrase completes "this is …" so the reader knows
     # which option to go edit, and `--routing` is not set on this command line.
@@ -768,10 +777,33 @@ def test_fast_refuses_a_tier2_extension_without_calling_it_routing(
     cap = capsys.readouterr()
     assert excinfo.value.exit_code == 1
     msg = _flat(cap.err)
-    assert "this is a Tier-2 extension code" in msg
+    assert phrase in msg
     assert "routing" not in msg
     assert cap.out == ""
     assert calls["calendar"] == 0  # refused before any Matrix work
+
+
+@pytest.mark.parametrize(
+    ("ext", "phrase"),
+    [
+        ("F bc=y", "this is a Matrix-only extension code"),
+        ("F bc=y;Q zz=1", "this is Matrix-only extension codes"),
+    ],
+)
+def test_fast_refusal_agrees_in_number_with_the_declining_directives(
+    ext: str, phrase: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # One directive takes an article, several do not. The reasons list every one,
+    # so the count in the phrase and the count in the parentheses match.
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    _spy_renderers(monkeypatch)
+    with pytest.raises(typer.Exit) as excinfo:
+        _calendar_fast(extension=ext)
+    msg = _flat(capsys.readouterr().err)
+    assert excinfo.value.exit_code == 1
+    assert phrase in msg
+    for directive in ext.split(";"):
+        assert directive in msg
 
 
 @pytest.mark.parametrize(
@@ -879,6 +911,14 @@ def test_calendar_one_way_note_survives_json_output(
         ("abc", "use nights as"),  # not a number at all
         ("5-", "use nights as"),  # half a range
         ("5 7", "use nights as"),  # two numbers, no separator: not a range
+        # An empty bound is a malformed range, not a max of -7: reading the second
+        # dash as a sign would answer a typo with a number nobody wrote.
+        ("5-- 7", "use nights as"),
+        ("5-7-9", "use nights as"),  # three bounds
+        # `int()` swallows every Unicode space, U+001C..1F among them, so a bound
+        # is matched against digits rather than handed to `int()` to be lenient.
+        ("5-\x1c7", "use nights as"),
+        ("5\x1d-7", "use nights as"),
     ],
 )
 def test_calendar_round_trip_bad_duration_is_a_typed_error(
@@ -909,6 +949,8 @@ def test_calendar_round_trip_bad_duration_is_a_typed_error(
         ("5..7", (5, 7)),  # the SPA's range spelling
         (" 5 - 7 ", (5, 7)),  # blanks around either end
         ("3-3", (3, 3)),  # an explicit degenerate range
+        ("05-07", (5, 7)),  # zero-padded bounds
+        ("+5-+7", (5, 7)),  # signed bounds
     ],
 )
 def test_parse_duration_accepts_every_spelling_of_a_valid_range(
@@ -918,21 +960,67 @@ def test_parse_duration_accepts_every_spelling_of_a_valid_range(
     is the documented short form and the CLI has no other way to ask for one
     night count, so the bare-number branch is a contract, not an implementation
     detail."""
-    assert cli._parse_duration(raw) == expected  # pyright: ignore[reportPrivateUsage]
+    got = cli._parse_duration(raw)  # pyright: ignore[reportPrivateUsage] — the parser IS the unit
+    assert got == expected
 
 
-@pytest.mark.parametrize("spelling", ["5-7", "5..7", " 5-7 ", "5 - 7", "5-  7"])
+@pytest.mark.parametrize(
+    "spelling", ["5-7", "5..7", " 5-7 ", "5 - 7", "5-  7", "05-07", "+5-+7", "05..7"]
+)
 def test_calendar_one_way_is_silent_for_every_spelling_of_the_default(
     spelling: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A value that means the default changes nothing, so it is not worth a line —
     the note exists to explain a value the user will otherwise look for in the
-    output. The comparison normalizes exactly what `_parse_duration` normalizes,
-    so the two agree on which spellings are the same range."""
+    output. The comparison runs on the same normalizer the parser does, down to
+    the zero-padded and signed writings of a number, so the two agree on which
+    spellings are the same range."""
     monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
     _spy_renderers(monkeypatch)
     _calendar_fast(fast=False, duration=spelling)
     assert "--duration is ignored" not in _flat(capsys.readouterr().err)
+
+
+@pytest.mark.parametrize("routing", ["BA[/weird]AA", "BA[bold]AA", "BA[/]AA"])
+def test_fast_refusal_survives_markup_in_a_flag(
+    routing: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`err` is a markup console and the refusal quotes the flag verbatim, so an
+    unbalanced tag raised MarkupError instead of refusing, and a well-formed one
+    ate the token the reader needs to see. Escaped at the render site: the
+    reason strings come from the routing parser, which builds them from user
+    text and has no console to escape for."""
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    calls = _spy_renderers(monkeypatch)
+    with pytest.raises(typer.Exit) as excinfo:
+        _calendar_fast(routing=routing)
+    cap = capsys.readouterr()
+    assert excinfo.value.exit_code == 1  # a refusal, not a crash
+    assert routing in _flat(cap.err)  # brackets and all, so the reader can see it
+    assert cap.out == ""
+    assert calls["calendar"] == 0
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "shown"),
+    [
+        ({"duration": "[/x]"}, "'[/x]'"),  # unparseable, and unbalanced markup
+        ({"duration": "9[bold]-3"}, "'9[bold]-3'"),  # a tag rich would otherwise eat
+        ({"start": "[/x]"}, "'[/x]'"),  # the same crash one flag over
+    ],
+)
+def test_parse_errors_survive_markup_in_a_flag(
+    kwargs: dict[str, Any], shown: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The parsers quote what the user typed, so they escape it too. `repr` runs
+    BEFORE `escape`: reversed, `repr` doubles the backslash `escape` prepends and
+    hands the tag straight back to the markup parser."""
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    _spy_renderers(monkeypatch)
+    with pytest.raises(typer.Exit) as excinfo:
+        _calendar_fast(fast=False, one_way=False, **kwargs)
+    assert excinfo.value.exit_code == 2  # a usage error, not a crash
+    assert shown in _flat(capsys.readouterr().err)
 
 
 def _detail(**overrides: Any) -> None:
