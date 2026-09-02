@@ -10,7 +10,17 @@ as "no flights on this route".
 
 FIXTURE POLICY: **scrub secrets, not structure.** Fixtures are real captures
 (2026-09-02) trimmed to three rows with the top-level session id at `[0][4]`
-replaced; nothing else is nulled or reshaped. Most of these were additionally
+replaced; nothing else is nulled or reshaped.
+
+What is deliberately KEPT: `[0][3]` and the base64 booking token on each row,
+both of which carry the same per-search context id Google stamps on the page.
+It is not a credential — it authenticates nothing, belongs to no account, and
+the searches were anonymous — and the row token is the field this whole module
+exists to read, so scrubbing it would leave the fixtures unable to pin the
+behaviour under test. The session id at `[0][4]` is replaced because it is the
+one value that identifies the capture rather than the flights.
+
+Most of these fixtures were additionally
 slimmed by dropping the metadata blocks no code reads, which is safe for what
 they pin but makes them useless for the misplaced-block scan — with indices
 1-31 all `None`, `misplaced == ()` holds no matter what the scan does.
@@ -308,9 +318,11 @@ def test_synthetic_empty_block_shapes_are_authoritative_empties(client: Any, fix
 
 
 def test_metadata_blocks_are_not_mistaken_for_relocated_rows() -> None:
-    """`ds:1` carries other list-of-list-of-list structures on every page (1, 7,
-    14, 17 among them). A nesting-depth test would call those relocated rows
-    and refuse every ordinary page, so the probe parses instead."""
+    """`ds:1` carries other list-of-list-of-list structures on every page —
+    indices 1, 6, 7, 11, 14, 17, 25, 26 and 30, the union across the three
+    captures, of which any one page carries 4 to 9. A nesting-depth test would
+    call those relocated rows and refuse every ordinary page, so the probe
+    parses instead."""
     payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
     board = gfid._rows_from_ds1(payload)
     assert board.misplaced == ()
@@ -469,7 +481,8 @@ def test_a_relocation_with_no_block_left_behind_still_raises(client: Any) -> Non
 def test_a_served_board_with_row_shaped_blocks_elsewhere_is_served_with_a_warning(
     client: Any, caplog: Any
 ) -> None:
-    """Live pages carry 7-11 blocks that are row-shaped by structure, so
+    """Live pages carry 4-9 blocks that are row-shaped by structure (4, 9 and 7
+    across the three captures), so
     refusing whenever one of them happens to parse would throw away a board we
     answered completely. The warning is what keeps it findable."""
     payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))

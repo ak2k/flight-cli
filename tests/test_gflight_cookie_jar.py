@@ -20,12 +20,12 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any, cast, override
 
+import pytest
+
 import flight_cli._gflight_ids as gfid
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
 
 class _JarCookie:
@@ -248,6 +248,27 @@ def test_a_failed_rename_leaves_no_temp_holding_the_cookie(
 
     assert list(tmp_path.glob("*.tmp")) == []
     assert not (tmp_path / "gflight-cookies.json").exists()
+
+
+def test_an_interrupt_mid_write_leaves_no_temp_holding_the_cookie(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Ctrl-C during a search is ordinary, and it does not come through the
+    OSError arm. Cleanup has to sit in a `finally` or the interrupt strands the
+    temp with the NID already written into it."""
+    _reset(monkeypatch, tmp_path)
+    real_dump = json.dump
+
+    def _interrupted(obj: object, fh: Any, **kw: Any) -> None:
+        real_dump(obj, fh, **kw)  # the NID really is on disk when this lands
+        fh.flush()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(gfid.json, "dump", _interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        gfid._persist_cookies(_FakeClient([_JarCookie("NID", "532=abc", ".google.com")]))
+
+    assert list(tmp_path.glob("*.tmp")) == []
 
 
 def test_seed_ignores_corrupt_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

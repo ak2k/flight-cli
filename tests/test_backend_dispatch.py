@@ -300,10 +300,10 @@ def test_gflight_alias_takes_matrix_for_a_child_passenger(
 def test_gflight_alias_splits_a_multi_airport_argument_like_search(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`JFK,LAX` is a two-airport origin, which the picker routes to Matrix.
-
-    The alias handed the comma string to `Leg.of` whole, so the user got a
-    pydantic traceback panel for a query `flight search` answers."""
+    """A comma-separated argument is a list of airports here exactly as it is
+    in `flight search`, and a multi-airport query belongs to Matrix. Parsing it
+    as one opaque airport code turns a query the CLI answers into a model
+    validation panel."""
     called, output = _gflight_alias(monkeypatch, "JFK,LAX", "MIA", "--dep", _future_dep())
     assert called == ["matrix"]
     assert "a multi-airport origin/destination" in output

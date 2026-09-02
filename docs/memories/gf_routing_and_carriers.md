@@ -153,11 +153,17 @@ index for a block whose leading rows actually parse as flight rows:
 
 - rows only at `[2]`/`[3]` → those rows (however many blocks carried them)
 - nothing row-shaped anywhere → `[]`, an authoritative empty
-- rows found outside `[2]`/`[3]` and **none served** → `GfPageShapeError`
-- rows found outside `[2]`/`[3]` **plus a served board** → the served rows, and
-  a `log.warning` naming the indices
+- rows found outside `[2]`/`[3]` and **no block at either index** →
+  `GfPageShapeError`
+- rows found outside `[2]`/`[3]` **with a block at either index** → whatever
+  that block held, even zero rows, and a `log.warning` naming the indices
 - a payload too short to reach `[3]`, or a value at `[2]`/`[3]` that is neither
   absent nor row-shaped → `GfPageShapeError`
+
+`None` and a bare `[]` both count as ABSENT at `[2]`/`[3]`: neither carries rows
+and neither claims anything, and `None` is the shape Google actually sends.
+`[[]]` is a different fact — a block that exists and holds no rows — and it
+counts as a block, which is what the refusal predicate above turns on.
 
 That last case is not pedantry. Enumerating a list never visits an index that
 isn't there, so a truncated or junk `ds:1` (`[]`, `[null]`) would otherwise fall
@@ -168,8 +174,10 @@ The two probes differ on purpose. Away from `[2]`/`[3]` the test must PARSE a
 row, because `ds:1` carries other list-of-list-of-list structures on every page
 (indices 1, 6, 7, 11, 14, 17, 25, 26 and 30 across the three captures) and a
 nesting-depth test would report a relocation on every ordinary page. It reads
-down to three rows rather than only the first, because one malformed row at the
-head of a genuinely relocated block is exactly what a shape change looks like.
+EVERY row, not a leading window: unparseable rows at the head of a moved block
+are exactly what a layout change looks like, so any fixed depth is a number some
+payload sits just past. The decoys hold 2-7 rows and the scan is sub-millisecond,
+so full depth costs nothing worth a cutoff.
 At `[2]`/`[3]` the test must NOT require a parse, or a block whose rows have all
 changed shape would drop to an empty board instead of reaching the 0-of-N parse
 guard below, which is what catches a moved ROW layout. Both share one tuple of
@@ -186,13 +194,18 @@ every round-trip instead. Under-returning is the accepted cost; the alternative
 measured worse.
 
 Refusing on the misplaced-block probe alone was the other tempting fix, and it
-is worse for the same reason. Live pages carry 7 to 11 blocks that are
-row-shaped by structure, so a Google row-schema change that makes any ONE of
-them parse would refuse a board we can already serve completely. So a partial
-relocation now under-returns **with a `log.warning` naming the indices** rather
-than refusing: the user keeps their results, and the next maintainer has the
-indices to re-derive from. Only a relocation that leaves nothing at `[2]`/`[3]`
-raises.
+is worse for the same reason. Live pages carry 4 to 9 blocks that are
+row-shaped by structure (4, 9 and 7 across the three captures), so a Google
+row-schema change that makes any ONE of them parse would refuse a board we can
+already serve completely. So a partial relocation now under-returns **with a
+`log.warning` naming the indices** rather than refusing: the user keeps their
+results, and the next maintainer has the indices to re-derive from.
+
+The refusal predicate is `misplaced and not rows and not blocks_seen` — rows
+somewhere else AND no block at all where we read. A block that was there and
+held nothing is how Google answers a flight-less search, so refusing on the row
+count alone would turn that into a shape change whenever one metadata block
+happened to parse.
 
 ## Tier model: who honors each constraint
 

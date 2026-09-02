@@ -1,3 +1,7 @@
+# pyright: reportMissingTypeStubs=false
+#   fli ships no stubs and this module imports eleven names from five of its
+#   packages; a per-import suppression on each is five places to forget when a
+#   twelfth arrives. Same file-level form as tests/test_gf_native_filters.py.
 """The search-page `tfs=` encoder: one writer, an allowlist, no silent drops.
 
 `build_search_tfs` shares `_encode_gflight_pinned_tfs` with the pinned booking
@@ -13,10 +17,10 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 import pytest
-from fli.models import FlightLeg, FlightResult  # pyright: ignore[reportMissingTypeStubs]
-from fli.models.airline import Airline  # pyright: ignore[reportMissingTypeStubs]
-from fli.models.airport import Airport  # pyright: ignore[reportMissingTypeStubs]
-from fli.models.google_flights.base import (  # pyright: ignore[reportMissingTypeStubs]
+from fli.models import FlightLeg, FlightResult
+from fli.models.airline import Airline
+from fli.models.airport import Airport
+from fli.models.google_flights.base import (
     Alliance,
     BagsFilter,
     EmissionsFilter,
@@ -30,7 +34,7 @@ from fli.models.google_flights.base import (  # pyright: ignore[reportMissingTyp
     TimeRestrictions,
     TripType,
 )
-from fli.models.google_flights.flights import (  # pyright: ignore[reportMissingTypeStubs]
+from fli.models.google_flights.flights import (
     FlightSearchFilters,
 )
 
