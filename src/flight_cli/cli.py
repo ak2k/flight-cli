@@ -18,7 +18,7 @@ import re
 import sys
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
-from typing import TYPE_CHECKING, Annotated, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any, NamedTuple, cast
 
 import anyio
 import anyio.to_thread
@@ -28,6 +28,13 @@ from rich.table import Table
 
 from . import _config
 from ._calendar_split import is_empty_calendar, merge_calendar_results, split_calendar_search
+from ._gf_errors import (
+    GfBackendError,
+    GfConsentError,
+    GfPageShapeError,
+    GfTfsUnsupportedError,
+    GfThrottledError,
+)
 from ._multi_cabin import MultiCabinRow, parse_price
 from ._multi_cabin import merge as _merge_cabins
 from .client import MatrixApiError, MatrixClient
@@ -241,13 +248,13 @@ def _pick_backend(
     slice_specs: list[str] | None,
     depart_times: str | None,
     return_times: str | None,
-    children: int = 0,
+    children: int,
     seniors: int,
     youth: int,
     inf_seat: int,
     inf_lap: int,
-    origin: str | None = None,
-    destination: str | None = None,
+    origin: str | None,
+    destination: str | None,
 ) -> str:
     """Resolve --backend to a concrete backend.
 
@@ -1197,76 +1204,65 @@ def _gflight_results(legs: tuple[Leg, ...], opts: SearchOptions, top_n: int) -> 
 def _gflight_json_row(g: Any) -> dict[str, Any]:
     """One `--format json` itinerary: fli's FlightResult plus the two things
     only this backend knows — Google's opaque `flight_id` and the per-leg
-    legroom/amenity extract, which the human table already shows but JSON
-    consumers previously had no way to reach."""
+    legroom/amenity extract, which the human table shows and `model_dump()`
+    alone doesn't carry."""
     row: dict[str, Any] = {**g.flight.model_dump(mode="json"), "flight_id": g.flight_id}
     legs: list[Any] = row.get("legs") or []
     amenities: list[Any] = list(g.amenities)
-    for i, leg in enumerate(legs):
-        if i >= len(amenities):
-            break  # misaligned extract: leave the leg as fli dumped it
-        a = amenities[i]
+    # A misaligned extract leaves the surplus legs as fli dumped them.
+    for leg, a in zip(legs, amenities, strict=False):
         leg["legroom_class"] = a.legroom_class
         leg["amenities"] = asdict(a)
     return row
 
 
-def _gf_refusal_message(e: Exception) -> str:
-    """One user-facing line per typed Google Flights refusal.
+class _GfRefusal(NamedTuple):
+    """How one Google Flights refusal reads: `note` where Matrix still answers
+    and the refusal is a footnote, `message` where it is the whole outcome."""
 
-    Each names a different wall and a different next move — collapsing them
-    into one message ("Google Flights failed") is how a page-shape regression
-    gets mistaken for a route with no service."""
-    from ._gf_errors import (  # noqa: PLC0415
-        GfConsentError,
-        GfPageShapeError,
-        GfTfsUnsupportedError,
-        GfThrottledError,
-    )
+    note: str
+    message: str
 
+
+_GF_DECLINED = "Google Flights declined the request"
+
+
+def _gf_refusal(e: Exception) -> _GfRefusal:
+    """User-facing text for a typed Google Flights refusal.
+
+    Each wall gets its own wording and its own next move — collapsing them into
+    one message ("Google Flights failed") is how a page-shape regression gets
+    mistaken for a route with no service. One dispatch for both renderings so a
+    new refusal type can't be given a line in only one of them."""
     match e:
         case GfThrottledError():
-            return (
+            return _GfRefusal(
+                "Google Flights rate-limited",
                 "[yellow]Google Flights is rate-limiting this IP.[/] Wait a moment and "
-                "retry, or use [bold]--backend matrix[/]."
+                "retry, or use [bold]--backend matrix[/].",
             )
         case GfConsentError():
-            return (
+            return _GfRefusal(
+                "Google Flights served its consent page",
                 "[yellow]Google served its consent page instead of flight results.[/] "
-                "Use [bold]--backend matrix[/]."
+                "Use [bold]--backend matrix[/].",
             )
         case GfPageShapeError():
-            return (
+            return _GfRefusal(
+                "Google Flights' page shape changed",
                 "[red]Google Flights' page shape changed[/] — no rows could be read. "
-                f"Use [bold]--backend matrix[/]. ({e})"
+                f"Use [bold]--backend matrix[/]. ({e})",
             )
         case GfTfsUnsupportedError():
-            return (
+            # Generic note: `page_can_encode` keeps these queries off Google
+            # Flights, so the enrich path never has one to render.
+            return _GfRefusal(
+                _GF_DECLINED,
                 f"[red]Google Flights can't express this search:[/] {e.reason}. "
-                "Use [bold]--backend matrix[/]."
+                "Use [bold]--backend matrix[/].",
             )
         case _:
-            return f"[red]Google Flights declined the request:[/] {e}"
-
-
-def _gf_refusal_note(e: Exception) -> str:
-    """Short form of `_gf_refusal_message` for the enrich path, where Matrix
-    still answers and the refusal is a footnote rather than the outcome."""
-    from ._gf_errors import (  # noqa: PLC0415
-        GfConsentError,
-        GfPageShapeError,
-        GfThrottledError,
-    )
-
-    match e:
-        case GfThrottledError():
-            return "Google Flights rate-limited"
-        case GfConsentError():
-            return "Google Flights served its consent page"
-        case GfPageShapeError():
-            return "Google Flights' page shape changed"
-        case _:
-            return "Google Flights declined the request"
+            return _GfRefusal(_GF_DECLINED, f"[red]{_GF_DECLINED}:[/] {e}")
 
 
 _MERGE_SOURCE_TAG = {"both": "GF+MX", "matrix": "MX", "gf": "GF"}
@@ -1324,13 +1320,12 @@ def _run_gflight_path(
     the existing PP matcher + renderer reuse cleanly. PP runs on the same
     (origin, dest, date) per leg as the matrix path.
     """
-    from ._gf_errors import GfBackendError  # noqa: PLC0415
     from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
 
     try:
         results = _gflight_results(legs, opts, top_n)
     except GfBackendError as e:
-        err.print(_gf_refusal_message(e))
+        err.print(_gf_refusal(e).message)
         raise typer.Exit(1) from e
     except Exception as e:
         err.print(f"[red]Google Flights query failed:[/] {e}")
@@ -1444,14 +1439,12 @@ def _run_enriched_path(
 
     gf: list[Any] = state.get("gf") or []
     if "gf_err" in state:
-        from ._gf_errors import GfBackendError  # noqa: PLC0415
-
         e = state["gf_err"]
         if isinstance(e, GfBackendError):
             # Matrix is still running and authoritative, so a GF refusal is a
             # note, not a failure — but it stays named: the merged table below
             # would otherwise look like Google simply had nothing cheaper.
-            console.print(f"[dim]{_gf_refusal_note(e)} — showing Matrix only.[/]")
+            console.print(f"[dim]{_gf_refusal(e).note} — showing Matrix only.[/]")
         else:
             err.print(f"[yellow]Google Flights query failed:[/] {e}")
     matrix_res = state.get("matrix")

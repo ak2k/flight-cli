@@ -440,12 +440,9 @@ def _encode_gflight_pinned_tfs(
 
 # ───────────── Google Flights search-page tfs= (transport) ─────────────────
 #
-# Since 2026-08 Google's `GetShoppingResults` RPC requires an
-# `x-goog-batchexecute-bgr` header signed by the page's own JavaScript over the
-# exact request bytes, so a plain HTTP client gets HTTP 200 and a payload-less
-# `wrb.fr` row. The public search page is not gated that way and inlines the
-# same leg rows, addressed by this tfs= parameter instead of the f.req JSON —
-# so `_gflight_ids` fetches the page and reads `ds:1` (see that module).
+# The gflight backend addresses its search through this parameter rather than
+# the `GetShoppingResults` RPC's f.req JSON; `_gflight_ids` fetches the page and
+# reads `ds:1`, and its module docstring holds the why.
 #
 # The encoder below is deliberately an ALLOWLIST. fli's FlightSearchFilters
 # carries a dozen filters this transport has no field for, and honouring some
@@ -473,8 +470,8 @@ _TFS_REFUSED_FIELDS: tuple[tuple[str, str], ...] = (
 # `show_all_results` is deliberately absent: it defaults to True and there is
 # no tfs= field for it. The page serves Google's default board (~30 rows per
 # leg, measured 2026-09-02) with no back-fill, so a top-N above that returns
-# fewer rows than the RPC used to. That's a documented ceiling, not a dropped
-# constraint — nothing the user asked for goes unhonoured.
+# fewer rows than asked for. That's a board ceiling, not a dropped constraint —
+# nothing the user asked for goes unhonoured.
 
 # Non-adult passengers ride tfs field 8 under distinct kind codes (2 child,
 # 3 infant-in-seat, 4 infant-on-lap) that we have never verified against a
@@ -496,8 +493,7 @@ def _tfs_iata(value: Any) -> str:
     fli maps codes to display NAMES (`Airline._0B.value == "Blue Air"`) and
     underscore-prefixes the digit-leading ones, so the enum *name* minus that
     prefix is the code — the same rule fli's own request serializer uses."""
-    name = getattr(value, "name", None)
-    return str(name if name is not None else value).removeprefix("_")
+    return str(getattr(value, "name", value)).removeprefix("_")
 
 
 def _tfs_field_is_default(filters: Any, field: str) -> bool:

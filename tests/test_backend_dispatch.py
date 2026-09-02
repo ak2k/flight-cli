@@ -7,11 +7,11 @@ bearing knowledge — get it wrong and either Matrix is invoked when it
 needn't be (slow) or gflight is invoked for inexpressible queries (errors
 deep in fli).
 
-Since the search path moved onto Google's public page, the second load-bearing
-fact is that the page's `tfs=` parameter carries far fewer filters than the old
-RPC did: only a stop ceiling, today. Anything else goes to Matrix WITH ITS
-REASON, because the alternative — post-filtering Google's fixed ~30-row board —
-answers a constrained search with a plausible-looking "no results"."""
+The second load-bearing fact is the search transport: Google's public page,
+whose `tfs=` parameter carries only a stop ceiling today. Anything else goes to
+Matrix WITH ITS REASON, because the alternative — post-filtering Google's fixed
+~30-row board — answers a constrained search with a plausible-looking "no
+results"."""
 
 from __future__ import annotations
 

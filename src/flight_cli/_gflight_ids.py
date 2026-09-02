@@ -8,20 +8,19 @@ chunk-5KW5VSHS.js: `flightId: a` where `a = n[17]`). Without it, PP returns
 an empty result for hint-based queries; with it, `matchedGoogleFlightId`
 echoes back populated.
 
-Transport is the PUBLIC SEARCH PAGE, not the `GetShoppingResults` RPC. Since
+Transport is the PUBLIC SEARCH PAGE, not the `GetShoppingResults` RPC: since
 2026-08 that RPC requires an `x-goog-batchexecute-bgr` header signed by the
-page's own JavaScript over the exact request bytes, so a plain HTTP client
-gets HTTP 200 with a payload-less `wrb.fr` row and error 13 — which the old
-code read as "no flights on this route". `https://www.google.com/travel/
+page's own JavaScript over the exact request bytes, so a plain HTTP client gets
+HTTP 200 with a payload-less `wrb.fr` row and error 13 — a refusal shaped
+exactly like "no flights on this route". `https://www.google.com/travel/
 flights?tfs=…` inlines the identical rows in its `AF_initDataCallback` `ds:1`
-blob (`[2]` = Google's top-flights board, `[3]` = the rest), so the row parser
-below is untouched and only the fetch + the refusal classification changed.
-Verified live 2026-09-02: flight_id at data[0][17], 33-element leg tuples,
-leg[13] legroom class present, round-trip pins return correctly-directed
+blob (`[2]` = Google's top-flights board, `[3]` = the rest), so one row parser
+serves both. Verified live 2026-09-02: flight_id at data[0][17], 33-element leg
+tuples, leg[13] legroom class present, round-trip pins return correctly-directed
 returns with distinct flight_ids.
 
 The board the page serves is Google's default (~30 rows per leg) with no
-back-fill, so a top-N above that returns fewer rows than the RPC did.
+back-fill, so a top-N above that returns fewer rows than asked for.
 """
 
 from __future__ import annotations
@@ -137,8 +136,8 @@ def _extract_ds1(html: str) -> list[Any] | None:
     """The decoded `ds:1` payload from a rendered search page, or None when the
     page doesn't carry one in the shape we read.
 
-    Returns the same structure the RPC used to hand back, so callers keep
-    indexing `payload[2]` / `payload[3]` for flight rows."""
+    Shaped like the RPC's own payload, so callers index `payload[2]` /
+    `payload[3]` for flight rows."""
     for match in _DS_BLOB_RE.finditer(html):
         blob = match.group(1)
         key = _DS_KEY_RE.search(blob)
@@ -577,9 +576,8 @@ def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
     _seed_cookies_once(client)
     url = google_flights_search_page_url(build_search_tfs(filters))
     resp = client.get(url, impersonate="chrome", allow_redirects=True)
-    status_code = int(resp.status_code)
-    final_url = str(getattr(resp, "url", "") or "")
-    if _is_page_throttled(status_code=status_code, final_url=final_url):
+    final_url = str(resp.url)
+    if _is_page_throttled(status_code=resp.status_code, final_url=final_url):
         raise GfThrottledError("Google Flights rate-limited the request")
     resp.raise_for_status()
     html = resp.text

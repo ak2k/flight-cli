@@ -32,13 +32,13 @@ def _ds1(name: str) -> str:
     return (FIXTURE_DIR / name).read_text()
 
 
-def _page(ds1_json: str, *, key: str = "ds:1") -> str:
+def _page(ds1_json: str) -> str:
     """The smallest page shaped like Google's: an AF_initDataCallback blob for
     an unrelated key, then the one we read."""
     return (
         "<!doctype html><html><body><script>"
         "AF_initDataCallback({key: 'ds:0', hash: '1', data:[[]], sideChannel: {}});"
-        f"AF_initDataCallback({{key: '{key}', hash: '2', "
+        f"AF_initDataCallback({{key: 'ds:1', hash: '2', "
         f"data:{ds1_json}, sideChannel: {{}}}});"
         "</script></body></html>"
     )

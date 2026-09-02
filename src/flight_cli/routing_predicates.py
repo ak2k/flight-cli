@@ -362,10 +362,10 @@ def parse_extension(extension: str) -> list[Predicate]:
 
 # ───────────────── search-page transport encodability ──────────────────
 #
-# `Tier` above answers "could Google Flights honor this at all", and the date
-# grid still asks that question of its RPC. The SEARCH path now goes through
-# the public page's tfs= parameter, which carries a much narrower filter set —
-# so it needs its own question: can `links.build_search_tfs` encode this?
+# `Tier` above answers "could Google Flights honor this at all" — the date
+# grid's question of its RPC. The search path's transport, the public page's
+# tfs= parameter, carries a much narrower filter set, so it gets its own
+# question: can `links.build_search_tfs` encode this?
 #
 # Today the answer is yes only for stops. Carrier/alliance/layover-airport
 # filters DO have tfs fields (3.6 / 3.7 / 3.15 / 3.17 / 3.18) and are the
