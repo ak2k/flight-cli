@@ -1,13 +1,22 @@
 """Google Flights native date-grid (SearchDates / GetCalendarGraph) for fast,
 Tier-1 calendars.
 
-Returns cheapest-price-per-date for a whole window in ONE call — far faster than
-Matrix's calendar, and it sidesteps Matrix's compute-budget under-reporting
-(MEMORY quirk #7). `DateSearchFilters` carries the full Tier-1 filter set, so
-airlines/stops/layover/max_duration/cabin/times/price are honored server-side
-(reusing `apply_gf_native_filters`). It returns `{date: price}` only — **no
-itineraries** — so Tier-2 constraints (`O:`/`-CODESHARE`/`~UA`/flight#) can't be
-honored on a grid; those calendars go to Matrix.
+**Gated off since 2026-08.** GetCalendarGraph answers HTTP 200 with an empty
+payload to any client that can't sign `x-goog-batchexecute-bgr` (BotGuard), and
+an empty payload is not a throttle, so the shared retry read it as a cold session
+and spent 4 POSTs + ~6s of backoff per chunk to learn nothing. `_one_grid_call`
+now raises `GfGridUnavailableError` before it opens a client, so callers degrade
+to Matrix at once and say why (work-h70kv.5). Deleting that one raise re-enables
+the transport below it, which is otherwise unchanged.
+
+When the RPC answers, it returns cheapest-price-per-date for a whole window in
+ONE call — far faster than Matrix's calendar, and it sidesteps Matrix's
+compute-budget under-reporting (MEMORY quirk #7). `DateSearchFilters` carries the
+full Tier-1 filter set, so airlines/stops/layover/max_duration/cabin/times/price
+are honored server-side (reusing `apply_gf_native_filters`). It returns
+`{date: price}` only — **no itineraries** — so Tier-2 constraints
+(`O:`/`-CODESHARE`/`~UA`/flight#) can't be honored on a grid; those calendars go
+to Matrix.
 
 We chunk windows to <=61 days OURSELVES with the full filter set, dodging the fli
 `SearchDates` >61-day bug that drops filters on later chunks (bd work-bcdex).
@@ -63,6 +72,15 @@ _CABIN_TO_SEAT = {
     Cabin.BUSINESS: SeatType.BUSINESS,
     Cabin.FIRST: SeatType.FIRST,
 }
+
+
+class GfGridUnavailableError(Exception):
+    """Google Flights' date-grid RPC won't answer a plain HTTP client.
+
+    A standing gate, not a transient: unlike `GfThrottledError` (rate-limited —
+    backoff helps) and the cold-session empty (a retry on the same client helps),
+    nothing this process can do makes the next call succeed. Callers degrade to
+    Matrix immediately and tell the user which backend priced the grid."""
 
 
 def grid_can_serve(search: CalendarSearch) -> bool:
@@ -126,8 +144,18 @@ def _parse_grid(parsed: str) -> dict[str, float]:
 
 
 def _one_grid_call(filters: Any) -> dict[str, float]:
-    """One GetCalendarGraph round-trip -> {date: price}. Raises GfThrottledError
-    on a genuine code-13 block; returns {} on a cold-session empty."""
+    """One GetCalendarGraph round-trip -> {date: price}. Currently always raises
+    GfGridUnavailableError before touching the network (see the module docstring).
+    Everything after the raise is the transport unchanged, kept for the flip-back:
+    it raises GfThrottledError on a genuine code-13 block and returns {} on a
+    cold-session empty."""
+    # Remove this raise when GetCalendarGraph returns rows to a plain client again,
+    # or when an attested transport lands (work-h70kv.5 / work-udpp1 notes). It sits
+    # ahead of `get_client()` so `retry_throttled` — which catches only
+    # GfThrottledError — propagates it with zero POSTs and zero backoff sleeps.
+    raise GfGridUnavailableError(
+        "Google Flights' calendar RPC (GetCalendarGraph) returns no data to this client"
+    )
     client = get_client()
     _seed_cookies_once(client)
     resp = client.post(

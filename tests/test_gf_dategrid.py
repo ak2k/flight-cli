@@ -1,18 +1,17 @@
 # pyright: reportPrivateUsage=false
-"""Tests for the GF native date-grid foundation (gate, parse, chunking)."""
+"""Tests for the GF native date-grid foundation (gate, parse, chunking, RPC gate)."""
 
 from __future__ import annotations
 
 import json
-from datetime import date
-from typing import TYPE_CHECKING, Any
+from datetime import date, timedelta
+from typing import Any
+
+import pytest
 
 from flight_cli import _gf_dategrid
-from flight_cli._gf_dategrid import _parse_grid, date_grid, grid_can_serve
+from flight_cli._gf_dategrid import GfGridUnavailableError, _parse_grid, date_grid, grid_can_serve
 from flight_cli.domain import CalendarSearch, CalendarWindow, Leg
-
-if TYPE_CHECKING:
-    import pytest
 
 
 def _cal(
@@ -109,3 +108,33 @@ def test_date_grid_single_chunk_under_61_days(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(_gf_dategrid, "_one_grid_call", fake_call)
     date_grid(_cal())  # 16-day window -> single chunk
     assert calls["n"] == 1
+
+
+# ─────────────── RPC gate: no network, no retry sleeps (work-h70kv.5) ──
+
+
+def test_date_grid_raises_without_touching_the_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The gate is checked before `get_client()`, so a servable window costs zero
+    POSTs and zero cold-session backoff — `retry_throttled` catches only
+    GfThrottledError, so GfGridUnavailableError propagates on the first call."""
+    clients = {"n": 0}
+
+    class _ExplodingClient:
+        def post(self, *_a: object, **_k: object) -> None:
+            raise AssertionError("the gated date-grid must not reach the network")
+
+    def _fake_get_client() -> _ExplodingClient:
+        clients["n"] += 1
+        return _ExplodingClient()
+
+    monkeypatch.setattr(_gf_dategrid, "get_client", _fake_get_client)
+
+    # A window `_grid_filters` will actually build: fli's FlightSegment rejects a
+    # travel_date in the past, and this test has to get past filter-building to
+    # reach the gate at all.
+    start = date.today() + timedelta(days=30)
+    cal = _cal(start=start, end=start + timedelta(days=15))
+    assert grid_can_serve(cal)  # the gate only matters on a window GF would serve
+    with pytest.raises(GfGridUnavailableError):
+        date_grid(cal)
+    assert clients["n"] == 0  # no client was even constructed

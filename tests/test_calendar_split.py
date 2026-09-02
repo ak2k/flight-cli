@@ -20,6 +20,7 @@ from flight_cli._calendar_split import (
     merge_calendar_results,
     split_calendar_search,
 )
+from flight_cli._gf_dategrid import GfGridUnavailableError
 from flight_cli._gflight_ids import GfThrottledError
 from flight_cli.client import MatrixApiError
 from flight_cli.domain import Cabin, CalendarSearch, CalendarWindow, Leg, SearchOptions
@@ -438,3 +439,82 @@ def test_calendar_enriched_paints_grid_before_matrix(monkeypatch: Any) -> None:
     monkeypatch.setattr(cli, "_emit_urls", _noop)
     _run_enriched()
     assert order == ["grid", "calendar"]
+
+
+# ──────────── GF date-grid RPC gate: honest degrade (work-h70kv.5) ──────────
+# GetCalendarGraph returns no rows to a plain HTTP client, so `date_grid` raises
+# GfGridUnavailableError. The weave must say so once and still paint Matrix;
+# `--fast` has no Matrix to fall back to, so it says so and exits non-zero.
+
+
+def _unavailable(_search: object) -> dict[str, float]:
+    raise GfGridUnavailableError("calendar RPC returns no data to this client")
+
+
+def test_calendar_enriched_grid_unavailable_notes_once_and_paints_matrix(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _unavailable)
+    calls = _spy_renderers(monkeypatch)
+    _run_enriched()
+    out = capsys.readouterr().out
+    assert calls["grid"] == 0  # gated → never show a GF half that isn't there
+    assert calls["calendar"] == 1  # Matrix priced the window and painted
+    assert out.count("price grid unavailable") == 1  # said once, not per chunk
+    assert "date-grid failed" not in out  # not routed through the broad except
+
+
+def _calendar_fast(**overrides: Any) -> None:
+    """Drive the `calendar` command function directly (no CliRunner in this repo).
+    Every typer.Option default has to be passed explicitly — an unpassed one is an
+    OptionInfo object, not a value."""
+    kwargs: dict[str, Any] = {
+        "origin": "JFK",
+        "destination": "LHR",
+        "start": "2026-09-07",
+        "end": "2026-10-07",
+        "duration": "5-7",
+        "one_way": True,
+        "cabin": "economy",
+        "adults": 1,
+        "children": 0,
+        "seniors": 0,
+        "youth": 0,
+        "routing": None,
+        "extension": None,
+        "routing_return": None,
+        "extension_return": None,
+        "depart_times": None,
+        "return_times": None,
+        "stops": None,
+        "allow_airport_changes": True,
+        "only_available": True,
+        "rps": 10.0,
+        "impersonate": "chrome",
+        "fmt": "table",
+        "json_out": False,
+        "matrix_url": False,
+        "google_url": False,
+        "no_cache": True,
+        "fast": True,
+        "max_per_query": 1,
+        "max_concurrency": 12,
+    }
+    kwargs.update(overrides)
+    cli.calendar(**kwargs)
+
+
+def test_calendar_fast_grid_unavailable_notes_and_exits_one(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _unavailable)
+    calls = _spy_renderers(monkeypatch)
+    with pytest.raises(typer.Exit) as excinfo:
+        _calendar_fast()
+    out = capsys.readouterr().out
+    assert excinfo.value.exit_code == 1  # --fast had nothing to serve
+    assert calls["grid"] == 0
+    assert calls["calendar"] == 0  # --fast never silently runs the ~45s Matrix calendar
+    assert out.count("price grid unavailable") == 1
+    assert "drop --fast for Matrix" in out

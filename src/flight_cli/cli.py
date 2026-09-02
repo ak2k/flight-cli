@@ -644,6 +644,18 @@ def _report_calendar_matrix_failure(state: dict[str, Any]) -> None:
         err.print("[yellow]Matrix calendar did not complete.[/]")
 
 
+# Printed whenever the GF date-grid declines to run because its RPC is gated
+# (`_gf_dategrid.GfGridUnavailableError`). It states the observation and where it
+# is tracked — not a cause — so a reader can tell "we didn't get a grid" from "there
+# are no cheap fares". The weave adds the second sentence because it goes on to show
+# Matrix; `--fast` has no Matrix to show, so it prints the first sentence alone.
+_GF_GRID_UNAVAILABLE_NOTE = (
+    "Google Flights price grid unavailable: the calendar RPC currently returns "
+    "no data to this client (tracked in work-h70kv.5)."
+)
+_GF_GRID_UNAVAILABLE_WEAVE_NOTE = f"{_GF_GRID_UNAVAILABLE_NOTE} Showing the Matrix calendar."
+
+
 def _run_calendar_enriched(
     search: CalendarSearch,
     *,
@@ -665,8 +677,13 @@ def _run_calendar_enriched(
     the authoritative Matrix calendar (~45s) — total ≈ max(GF, Matrix), not the sum.
     Mirrors `_run_enriched_path` (the search-path weave). `--fast` never reaches here
     (the command serves the grid alone for that). The `grid_can_serve` gate guarantees
-    a single-airport query, so the Matrix side is one `execute` (no fan-out)."""
-    from ._gf_dategrid import date_grid  # noqa: PLC0415
+    a single-airport query, so the Matrix side is one `execute` (no fan-out).
+
+    While the GF grid RPC is gated (`GfGridUnavailableError`), the grid arm raises
+    before it opens a client, so in practice this prints the unavailable note and
+    the Matrix calendar alone — the grid paint below is runtime-dead until the gate
+    flips. Everything else about the weave is unchanged."""
+    from ._gf_dategrid import GfGridUnavailableError, date_grid  # noqa: PLC0415
     from ._gflight_ids import GfThrottledError  # noqa: PLC0415
 
     # Single-airport calendar runs as one Matrix query; mirror `_run_calendar`'s
@@ -700,6 +717,11 @@ def _run_calendar_enriched(
                 grid = await anyio.to_thread.run_sync(date_grid, search)
             except GfThrottledError:
                 state["gf_throttled"] = True
+            except GfGridUnavailableError:
+                # A standing gate, not a failure and not retryable — note it once and
+                # let Matrix price the window. Must sit ahead of the broad except,
+                # which would report it as "date-grid failed: …".
+                state["gf_unavailable"] = True
             except Exception as e:  # noqa: BLE001 — GF is the optional fast layer; Matrix still runs
                 state["gf_err"] = e
             state["grid"] = grid
@@ -709,6 +731,8 @@ def _run_calendar_enriched(
                 console.print("[dim]…refining with Matrix (full grid + durations)…[/]")
             elif state.get("gf_throttled"):
                 console.print("[dim]Google Flights rate-limited — awaiting Matrix calendar…[/]")
+            elif state.get("gf_unavailable"):
+                console.print(f"[dim]{_GF_GRID_UNAVAILABLE_WEAVE_NOTE}[/]")
             elif "gf_err" in state:
                 err.print(f"[yellow]Google Flights date-grid failed:[/] {state['gf_err']}")
                 console.print("[dim]…awaiting Matrix calendar…[/]")
@@ -2768,7 +2792,9 @@ def calendar(
         "--no-enrich/--no-fast",
         help="Skip the Matrix enrichment: show only the fast Google Flights "
         "date-grid (one-way, single-airport, Tier-1 filters) instead of also "
-        "running the authoritative Matrix calendar.",
+        "running the authoritative Matrix calendar. Unavailable right now — "
+        "Google Flights' calendar RPC returns no data to this client, so --fast "
+        "reports that and exits non-zero (work-h70kv.5).",
         rich_help_panel=_GROUP_BACKEND,
     ),
     max_per_query: int = typer.Option(
@@ -2833,6 +2859,8 @@ def calendar(
     # windows. Paint it first, then enrich with the authoritative Matrix calendar
     # (full per-duration grid). `--fast` stops after the grid. The cheap pre-check
     # avoids importing the fli-heavy module for the Matrix-only cases.
+    # The grid RPC is gated today (work-h70kv.5), so what this actually does is note
+    # that and paint Matrix alone; `--fast` has nothing to serve and exits 1.
     if not json_out and one_way and len(origins) == 1 and len(dests) == 1:
         from ._gf_dategrid import grid_can_serve  # noqa: PLC0415
 
@@ -2857,7 +2885,7 @@ def calendar(
                 )
                 return
             # --fast: Google Flights date-grid only (no Matrix).
-            from ._gf_dategrid import date_grid  # noqa: PLC0415
+            from ._gf_dategrid import GfGridUnavailableError, date_grid  # noqa: PLC0415
             from ._gflight_ids import GfThrottledError  # noqa: PLC0415
 
             grid: dict[str, float] = {}
@@ -2865,6 +2893,15 @@ def calendar(
                 grid = date_grid(search)
             except GfThrottledError:
                 console.print("[dim]Google Flights rate-limited — Matrix only.[/]")
+            except GfGridUnavailableError:
+                # `--fast` promises the GF grid alone in ~1s. With its RPC gated there is
+                # nothing fast to serve, and quietly running the ~45s Matrix calendar
+                # instead would change what the flag means — so say why, point at the
+                # flag to drop, and exit non-zero. Ahead of the broad except, which
+                # would report a standing gate as a transport failure.
+                console.print(f"[dim]{_GF_GRID_UNAVAILABLE_NOTE}[/]")
+                console.print("[yellow]No Google Flights grid; drop --fast for Matrix.[/]")
+                raise typer.Exit(1) from None
             except Exception as e:  # noqa: BLE001 — GF is the optional fast layer; Matrix still runs
                 err.print(f"[yellow]Google Flights date-grid failed:[/] {e}")
             if grid:

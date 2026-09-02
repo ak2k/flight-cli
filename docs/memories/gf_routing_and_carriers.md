@@ -90,15 +90,37 @@ honest, `_leg_display` relabels a codeshare match to the matched identity —
 
 ## GF date-grid (calendar) — `fli.search.dates.SearchDates`
 
-Google's `GetCalendarGraph` RPC returns a whole date window's cheapest-per-date
-prices in ONE call, and `DateSearchFilters` carries the full Tier-1 filter set
-(airlines, stops, layover, max_duration, cabin, times, price). Verified
-2026-06-14: `airlines=LH` / `stops=NON_STOP` change the grid prices, so Tier-1
-filters ARE honored. It returns `{date, price}` only — **no itineraries** — so
-Tier-2 (`O:`/`-CODESHARE`/`~UA`/flight#) can't be post-filtered on a grid; those
-calendars go to Matrix. This is the throttle-friendly calendar primitive (1 call
-vs a per-date fan-out), so we prefer it; **no GF fan-out is needed** (Matrix's
-`_calendar_split` already fans out for Tier-2 / multi-airport).
+**Status 2026-09: gated off, degrades to Matrix (work-h70kv.5).**
+`GetCalendarGraph` answers HTTP 200 with an empty payload unless the request
+carries a signed `x-goog-batchexecute-bgr` (BotGuard) header — the same gate that
+took out `GetShoppingResults`. An empty payload is not a throttle
+(`_is_throttle_block` needs an RPC error marker), so `retry_throttled` read it as
+a cold session and spent 4 POSTs + ~6s of backoff per ≤61-day chunk to return
+`{}`. `_gf_dategrid._one_grid_call` therefore raises `GfGridUnavailableError` as
+its first statement, ahead of `get_client()`: zero POSTs, zero sleeps, and
+`retry_throttled` (which catches only `GfThrottledError`) propagates it. The
+weave `cli._run_calendar_enriched` prints one note — the observation plus the bd
+id, not a cause — and paints the Matrix calendar; `--fast` prints the note plus
+"drop --fast for Matrix" and exits 1, because `--fast` means "the GF grid alone,
+~1s" and quietly running the ~45s Matrix calendar under it would change what the
+flag means. The grid paint in the weave and `_render_date_grid` are runtime-dead
+until the gate flips; `_run_calendar_enriched` itself still runs (it is what
+paints Matrix). **Flipping back is deleting that one raise** — when the RPC
+answers a plain client again, or when an attested transport lands (work-udpp1).
+A per-date page fan-out (the transport upstream fli#230 uses for search) is the
+other candidate; it is tracked, not built — 61 page GETs of ~3.6 MB per chunk is
+a different throttle budget entirely.
+
+The rest of this section describes the primitive as it behaves when the RPC
+answers. Google's `GetCalendarGraph` returns a whole date window's
+cheapest-per-date prices in ONE call, and `DateSearchFilters` carries the full
+Tier-1 filter set (airlines, stops, layover, max_duration, cabin, times, price).
+Verified 2026-06-14: `airlines=LH` / `stops=NON_STOP` change the grid prices, so
+Tier-1 filters ARE honored. It returns `{date, price}` only — **no itineraries**
+— so Tier-2 (`O:`/`-CODESHARE`/`~UA`/flight#) can't be post-filtered on a grid;
+those calendars go to Matrix. It is the throttle-friendly calendar primitive
+(1 call vs a per-date fan-out), which is why we prefer it when it works, and
+Matrix's `_calendar_split` already fans out for Tier-2 / multi-airport.
 
 **fli `SearchDates` >61-day chunk filter-drop (fixed upstream in 0.9.0):** in fli
 ≤0.8.5, `SearchDates.search()` split windows >61 days into chunks but rebuilt
@@ -110,7 +132,8 @@ on chunks 2+.** fli 0.9.0 fixed this upstream (the per-chunk rebuild now copies 
 work-bcdex and work-aua4v (the upstream-it follow-up) are both closed. `_gf_dategrid`
 still caps each call to ≤61 days and chunks ourselves with the full filter set —
 now redundant but harmless; bd work-orp1i tracks simplifying it to lean on fli's
-chunking.
+chunking. That simplification is blocked while the RPC is gated: verifying fli's
+chunker keeps the filters needs a live >61-day grid to compare against.
 
 ## GF throttle (per client-context, dynamic) — handle reactively, not with a fixed cap
 
