@@ -18,9 +18,14 @@ Three things are deliberate and easy to undo by accident:
 - **`response.text()`, never `page.content()`.** `content()` serializes the
   live DOM, which Google's own JavaScript has already rewritten; `text()` is
   the HTTP response body, the same bytes curl_cffi sees, `ds:1` blob intact.
-- **`wait_until="commit"`.** `response.text()` waits for the body regardless,
-  so a later readiness state buys nothing. Measured the same day:
-  `commit` and `domcontentloaded` returned the same 30 rows and the same id.
+- **`wait_until="domcontentloaded"`, not `commit`.** Both return the same 30
+  rows and the same first id (measured 2026-09-02), so this is not about what
+  arrives — it is about what bounds it. `response.text()` takes NO timeout, at
+  any layer: patchright sends the body request with no deadline, and the driver
+  arms its timer only when one is supplied, so a stalled body read hangs
+  forever. `commit` returns before the body exists and leaves that read outside
+  `goto`'s ceiling; `domcontentloaded` puts it inside, which is the only
+  timeout rung 2 has. A default round trip makes 11 of these reads.
 - **The session is thread-local.** The CLI runs the query inside
   `anyio.to_thread.run_sync`; a playwright object touched from a thread other
   than the one that made it raises `greenlet.error` and strands a live Chrome.
@@ -36,7 +41,7 @@ from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 
-from ._gf_errors import GfBrowserUnavailableError
+from ._gf_errors import BROWSER_DEFAULT_REMEDY, GfBrowserUnavailableError
 from ._gflight_ids import PageFetch, cache_dir
 
 if TYPE_CHECKING:
@@ -51,9 +56,9 @@ log = logging.getLogger(__name__)
 _err = Console(stderr=True)
 
 _NAV_TIMEOUT_MS = 30_000
-# `commit` returns as soon as the navigation commits; the body arrives with
-# `response.text()` either way (see the module docstring).
-_WAIT_UNTIL = "commit"
+# The one bound on the body read: `response.text()` has no timeout of its own,
+# so the wait state has to hold the body inside `goto`'s ceiling (module docstring).
+_WAIT_UNTIL = "domcontentloaded"
 # Escape hatch for a Chrome that isn't where `channel="chrome"` looks; pointing
 # it at a missing binary is also how a caller forces the typed refusal.
 _BROWSER_BIN_ENV = "FLIGHT_CLI_GF_BROWSER_BIN"
@@ -66,6 +71,15 @@ _SINGLETON_GLOB = "Singleton*"
 _INSTALL_HINT = (
     "Install it with `uv pip install 'flight-cli[browser]'` "
     "(plus a one-time `uvx --from patchright patchright install chrome`)."
+)
+
+# A launch failure is usually a missing Chrome, and the bare default remedy
+# ("Retry…") never says so — it reads as a transient blip for a condition that
+# will fail identically forever. patchright finds Chrome by channel, so the two
+# fixes are installing it or pointing the override at it.
+_LAUNCH_REMEDY = (
+    "Install Chrome (`uvx --from patchright patchright install chrome`), or point "
+    f"`{_BROWSER_BIN_ENV}` at an existing binary. {BROWSER_DEFAULT_REMEDY}"
 )
 
 
@@ -97,17 +111,27 @@ def _launch_failure(profile: pathlib.Path, detail: str) -> GfBrowserUnavailableE
 
     A locked profile is the one failure the user can clear themselves, and the
     two ways in — a second `flight` running now, or a run killed mid-navigation
-    — need different actions, so both are spelled out."""
-    if _profile_is_locked(profile):
+    — need different actions, so both are spelled out.
+
+    Both the profile state AND the driver text have to agree before we call it a
+    lock. A `SIGKILL`ed run leaves `Singleton*` behind indefinitely, so the
+    profile test alone would blame the lock for every later failure — including
+    a missing Chrome, whose real cause would then go unnamed while the user
+    deletes lock files that were never the problem. The default remedy is
+    appended either way, so `--gf-transport http` is offered even when the
+    lock diagnosis is right and the user cannot clear it."""
+    if _profile_is_locked(profile) and "singleton" in detail.lower():
         return GfBrowserUnavailableError(
             f"Chrome could not open Google Flights' browser profile at {profile}: {detail}",
             remedy=(
                 "Another `flight` process is holding it, or an interrupted run left it "
                 f"locked; wait for the other run to finish, or remove {profile}/Singleton* "
-                "and retry."
+                f"and retry. {BROWSER_DEFAULT_REMEDY}"
             ),
         )
-    return GfBrowserUnavailableError(f"Chrome failed to launch for Google Flights: {detail}")
+    return GfBrowserUnavailableError(
+        f"Chrome failed to launch for Google Flights: {detail}", remedy=_LAUNCH_REMEDY
+    )
 
 
 def _playwright_factory() -> Callable[[], Any]:
@@ -238,10 +262,25 @@ class GfBrowserSession:
 
 def _swallow(what: str, shutdown: Callable[[], object]) -> None:
     """Run one teardown step, logging rather than raising. Teardown runs from a
-    `finally`, where a raise would replace the real error with this one."""
+    `finally`, where a raise would replace the real error with this one.
+
+    `BaseException`, not `Exception`, and NOT re-raised. `close` runs two of
+    these in sequence, so anything escaping the first skips the driver shutdown
+    and strands a live Chrome — the exact outcome this module exists to
+    prevent. A `KeyboardInterrupt` arriving mid-teardown is the realistic way in.
+
+    Deliberately the opposite choice from `_ensure_page`, which catches
+    `Exception` narrowly so the suite's `pytest.fail` guard — a `BaseException`
+    on purpose — cannot be swallowed by the code under test. The guard raises
+    from `_playwright_factory`, outside any `_swallow`, so the breadth here
+    cannot reach it.
+
+    The cost, stated: a Ctrl-C landing inside a teardown that is not already
+    unwinding is dropped. Teardown is microseconds and the process is leaving
+    anyway; a stranded Chrome outlives it."""
     try:
         shutdown()
-    except Exception as e:  # noqa: BLE001 — teardown is best-effort, never fatal
+    except BaseException as e:  # noqa: BLE001 — see the docstring: never fatal, never re-raised
         log.debug("could not close the gflight browser %s: %s", what, e)
 
 

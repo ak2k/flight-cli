@@ -42,7 +42,7 @@ import time
 from copy import deepcopy
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from fli.models import (  # pyright: ignore[reportMissingTypeStubs]
     FlightLeg,
@@ -70,6 +70,7 @@ from ._gf_errors import (
     GfConsentError,
     GfPageShapeError,
     GfThrottledError,
+    GfUpstreamStatusError,
 )
 from .links import build_search_tfs, google_flights_search_page_url
 
@@ -735,15 +736,16 @@ def _rows_from_page_html(page: PageFetch) -> list[GFlightWithId]:
     html, final_url, status_code = page
     # Both status tests serve the browser rung alone — Chrome reports a status
     # where fli raises on it, so a curl_cffi page arrives here already 2xx with
-    # its 429 turned into this same refusal. Without the 429 test, a
-    # rate-limited navigation carrying no `/sorry/` redirect and no body marker
-    # would fall through to the shape branch and read as a moved payload.
+    # its 429 turned into this same refusal. The 429 test must come FIRST: the
+    # next branch would otherwise claim it as a generic upstream status and lose
+    # the one fact a caller can act on, that backing off is the fix.
     if status_code == HTTPStatus.TOO_MANY_REQUESTS or _is_page_throttled(
         final_url=final_url, html=html
     ):
         raise GfThrottledError("Google Flights rate-limited the request")
     if status_code >= HTTPStatus.BAD_REQUEST:
-        raise GfPageShapeError(f"Google Flights' search page returned HTTP {status_code}")
+        # Not a shape error: nothing was served to re-derive an extract from.
+        raise GfUpstreamStatusError(status_code)
     payload = _extract_ds1(html)
     if payload is None:
         if _is_consent_page(final_url=final_url, html=html):
@@ -790,10 +792,16 @@ def _rows_from_page_html(page: PageFetch) -> list[GFlightWithId]:
 def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
     """Rung 1: fetch the search page over curl_cffi and read its rows."""
     rows = _rows_from_page_html(_fetch_page(filters))
-    # A page we could read means Google answered a warm session — save its
+    # A page we could READ means Google answered a warm session — save its
     # cookies (NID) so the next one-shot CLI process starts warm instead of
     # cold. Rung-1 only: rung 2 keeps its own Chrome profile, and its cookies
     # are not this session's to persist.
+    #
+    # Narrower than persisting right after the ds:1 decode: a page that decodes
+    # and then fails a shape guard no longer re-warms the NID. Accepted, and
+    # deliberately not worked around. A shape error means the extract is broken
+    # and the next run wants a human, not a warmer cookie; keeping the persist
+    # here is what lets the rule stay "we understood the page".
     _persist_cookies(get_client())
     return rows
 
@@ -851,6 +859,8 @@ TRANSPORT_AUTO = "auto"
 TRANSPORT_HTTP = "http"
 TRANSPORT_BROWSER = "browser"
 
+type GfTransportMode = Literal["auto", "http", "browser"]
+
 
 @dataclass(frozen=True)
 class GfTransport:
@@ -863,9 +873,13 @@ class GfTransport:
       call site are already the shape it needs.
 
     Frozen, and defaulting to `http`, so an unpassed `transport` is rung 1.
+
+    `mode` is a `Literal` so that adding a rung without teaching
+    `_one_call_laddered` about it is a type error rather than a silent
+    downgrade to rung 1.
     """
 
-    mode: str = TRANSPORT_HTTP
+    mode: GfTransportMode = TRANSPORT_HTTP
     headed: bool = False
 
 
@@ -893,10 +907,17 @@ def _one_call_laddered(filters: FlightSearchFilters, transport: GfTransport) -> 
     """One leg on the rung `transport` asks for.
 
     The single place that knows which rungs exist, so `search_with_ids` — and
-    the recursion that drives a round trip's return legs — never has to."""
+    the recursion that drives a round trip's return legs — never has to.
+
+    Exhaustive on purpose. `auto` is spelled out beside `http` rather than
+    swept up by a trailing `else`, so a fourth mode reaching here raises
+    instead of quietly running the rung the user did not ask for — the failure
+    that would otherwise look like the browser rung simply not working."""
     if transport.mode == TRANSPORT_BROWSER:
         return _one_call_browser(filters, headed=transport.headed)
-    return _one_call_with_retry(filters)
+    if transport.mode in (TRANSPORT_HTTP, TRANSPORT_AUTO):
+        return _one_call_with_retry(filters)
+    raise ValueError(f"unknown Google Flights transport mode {transport.mode!r}")
 
 
 def search_with_ids(

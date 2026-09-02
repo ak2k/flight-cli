@@ -24,6 +24,7 @@ import anyio
 import anyio.to_thread
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from . import _config
@@ -35,6 +36,7 @@ from ._gf_errors import (
     GfPageShapeError,
     GfTfsUnsupportedError,
     GfThrottledError,
+    GfUpstreamStatusError,
 )
 from ._multi_cabin import MultiCabinRow, parse_price
 from ._multi_cabin import merge as _merge_cabins
@@ -64,6 +66,9 @@ from .pp.cli import auth_app, run_pp_for_search
 from .providers.base import LegQuery
 
 if TYPE_CHECKING:
+    # Type-only, so the Matrix path still never pays for `_gflight_ids` (fli's
+    # import, measured at 64 ms) just to type-check a transport string.
+    from ._gflight_ids import GfTransportMode
     from .models import CalendarResult, LegInfo, Location, SearchResult, Slice
 
 # Tuple-length sentinels for `--slice` parser (`ORIGIN-DEST:DATE[:r=...:e=...]`).
@@ -1217,7 +1222,14 @@ def _gflight_results(
 
     # Built here rather than at the CLI seam: this is the first point that has
     # already paid for `_gflight_ids`.
-    transport = None if gf_mode is None else GfTransport(mode=gf_mode, headed=gf_headed)
+    # `mode` is a Literal, and `gf_mode` reaches here as a plain `str` from
+    # typer. `_resolve_gf_transport` is the validator — it rejected anything
+    # outside the Literal before dispatch — so this narrows rather than assumes.
+    transport = (
+        None
+        if gf_mode is None
+        else GfTransport(mode=cast("GfTransportMode", gf_mode), headed=gf_headed)
+    )
     fli_filter = to_fli_filter(SpecificDateSearch(legs=legs, options=opts))
     out_constraints = classify(legs[0].route_language, legs[0].extension) if legs else None
     if out_constraints and out_constraints.predicates:
@@ -1261,6 +1273,16 @@ def _gflight_json_row(g: Any) -> dict[str, Any]:
     return row
 
 
+# The Google Flights search page has two transports. `http` is the curl_cffi
+# GET the backend has always used. `browser` drives a real Chrome to the same
+# URL, which earns a far larger rate budget when Google throttles the thin
+# client. `auto` is the shape the escalate-on-throttle rung will take and is
+# `http` until then, so a script written against it keeps working when it lands.
+_GF_TRANSPORT_HTTP = "http"
+_GF_TRANSPORT_BROWSER = "browser"
+_VALID_GF_TRANSPORTS = ("auto", _GF_TRANSPORT_HTTP, _GF_TRANSPORT_BROWSER)
+
+
 class _GfRefusal(NamedTuple):
     """How one Google Flights refusal reads: `note` where Matrix still answers
     and the refusal is a footnote, `message` where it is the whole outcome."""
@@ -1272,19 +1294,43 @@ class _GfRefusal(NamedTuple):
 _GF_DECLINED = "Google Flights declined the request"
 
 
-def _gf_refusal(e: Exception) -> _GfRefusal:
+def _gf_refusal(  # noqa: PLR0911 — one return per refusal type is the point;
+    # collapsing arms to satisfy the count is exactly the failure this function prevents.
+    e: Exception,
+    *,
+    transport: str = _GF_TRANSPORT_HTTP,
+) -> _GfRefusal:
     """User-facing text for a typed Google Flights refusal.
 
     Each wall gets its own wording and its own next move — collapsing them into
     one message ("Google Flights failed") is how a page-shape regression gets
     mistaken for a route with no service. One dispatch for both renderings so a
-    new refusal type can't be given a line in only one of them."""
+    new refusal type can't be given a line in only one of them.
+
+    **Every interpolated string is `escape`d.** The app runs rich in markup
+    mode, so an unescaped `[browser]` in a remedy, or a `[0m` in patchright's
+    driver text, is either deleted from the output or raises `MarkupError` from
+    `print` — the second one turning a typed refusal into a crash. Literal
+    markup in these templates is ours and stays unescaped; anything arriving
+    from an exception is data.
+
+    `transport` only changes the throttle wording. The browser rung runs no
+    retry ladder, so "wait a moment and retry" would describe a recovery the
+    caller does not have."""
     match e:
+        case GfThrottledError() if transport == _GF_TRANSPORT_BROWSER:
+            return _GfRefusal(
+                "Google Flights rate-limited the browser rung",
+                "[yellow]Google Flights rate-limited the browser rung.[/] It does not "
+                "retry, so use [bold]--backend matrix[/].",
+            )
         case GfThrottledError():
+            # Not "this IP": the budget is per client context, which is why the
+            # browser rung keeps working from an IP that is throttling this one.
             return _GfRefusal(
                 "Google Flights rate-limited",
-                "[yellow]Google Flights is rate-limiting this IP.[/] Wait a moment and "
-                "retry, or use [bold]--backend matrix[/].",
+                "[yellow]Google Flights rate-limited the request.[/] Wait a moment and "
+                "retry, use [bold]--gf-transport browser[/], or use [bold]--backend matrix[/].",
             )
         case GfConsentError():
             return _GfRefusal(
@@ -1293,30 +1339,38 @@ def _gf_refusal(e: Exception) -> _GfRefusal:
                 "Use [bold]--backend matrix[/].",
             )
         case GfBrowserUnavailableError():
-            # The note carries the remedy too. It is not the short form of the
-            # message here: the enrich path is the DEFAULT search, and it prints
-            # only the note — so without this a user whose browser rung cannot
-            # start would never be told what to install.
+            # The note carries the reason AND the remedy. It is not the short
+            # form of the message here: the enrich path is the DEFAULT search
+            # and prints only the note, so a note built from the remedy alone
+            # collapses "no Chrome", "nav timed out", "no response" and "body
+            # unreadable" into one line that says "Retry".
             return _GfRefusal(
-                f"Google Flights' browser rung is unavailable — {e.remedy}",
-                f"[yellow]{e}[/]",
+                f"Google Flights' browser rung is unavailable — "
+                f"{escape(e.reason)} {escape(e.remedy)}",
+                f"[yellow]{escape(str(e))}[/]",
+            )
+        case GfUpstreamStatusError():
+            return _GfRefusal(
+                f"Google Flights returned HTTP {e.status_code}",
+                f"[yellow]Google Flights returned HTTP {e.status_code}.[/] Try again, "
+                "or use [bold]--backend matrix[/].",
             )
         case GfPageShapeError():
             return _GfRefusal(
                 "Google Flights' page shape changed",
                 "[red]Google Flights' page shape changed[/] — no rows could be read. "
-                f"Use [bold]--backend matrix[/]. ({e})",
+                f"Use [bold]--backend matrix[/]. ({escape(str(e))})",
             )
         case GfTfsUnsupportedError():
             # Generic note: `page_can_encode` keeps these queries off Google
             # Flights, so the enrich path never has one to render.
             return _GfRefusal(
                 _GF_DECLINED,
-                f"[red]Google Flights can't express this search:[/] {e.reason}. "
+                f"[red]Google Flights can't express this search:[/] {escape(e.reason)}. "
                 "Use [bold]--backend matrix[/].",
             )
         case _:
-            return _GfRefusal(_GF_DECLINED, f"[red]{_GF_DECLINED}:[/] {e}")
+            return _GfRefusal(_GF_DECLINED, f"[red]{_GF_DECLINED}:[/] {escape(str(e))}")
 
 
 _MERGE_SOURCE_TAG = {"both": "GF+MX", "matrix": "MX", "gf": "GF"}
@@ -1384,10 +1438,10 @@ def _run_gflight_path(
     try:
         results = _gflight_results(legs, opts, top_n, gf_mode, gf_headed)
     except GfBackendError as e:
-        err.print(_gf_refusal(e).message)
+        err.print(_gf_refusal(e, transport=gf_mode or _GF_TRANSPORT_HTTP).message)
         raise typer.Exit(1) from e
     except Exception as e:
-        err.print(f"[red]Google Flights query failed:[/] {e}")
+        err.print(f"[red]Google Flights query failed:[/] {escape(str(e))}")
         raise typer.Exit(1) from e
 
     if not results:
@@ -1507,9 +1561,12 @@ def _run_enriched_path(
             # Matrix is still running and authoritative, so a GF refusal is a
             # note, not a failure — but it stays named: the merged table below
             # would otherwise look like Google simply had nothing cheaper.
-            console.print(f"[dim]{_gf_refusal(e).note} — showing Matrix only.[/]")
+            console.print(
+                f"[dim]{_gf_refusal(e, transport=gf_mode or _GF_TRANSPORT_HTTP).note}"
+                " — showing Matrix only.[/]"
+            )
         else:
-            err.print(f"[yellow]Google Flights query failed:[/] {e}")
+            err.print(f"[yellow]Google Flights query failed:[/] {escape(str(e))}")
     matrix_res = state.get("matrix")
     if matrix_res is None:
         # Matrix failed; the GF table (if any) was already painted.
@@ -1705,7 +1762,7 @@ def _run_gflight_multi(
             # bare handler below would print it as an unexplained failure.
             err.print(f"[yellow]Google Flights {cab.value}: {_gf_refusal(e).note}.[/]")
         except Exception as e:  # noqa: BLE001 — fli has no documented exception surface
-            err.print(f"[yellow]Google Flights {cab.value} query failed: {e}[/]")
+            err.print(f"[yellow]Google Flights {cab.value} query failed: {escape(str(e))}[/]")
 
     async def go() -> None:
         async with anyio.create_task_group() as tg:
@@ -2181,16 +2238,6 @@ def _resolve_no_cache(flag: bool) -> bool:
     return _config.cache_disabled()
 
 
-# The Google Flights search page has two transports. `http` is the curl_cffi
-# GET the backend has always used. `browser` drives a real Chrome to the same
-# URL, which earns a far larger rate budget when Google throttles the thin
-# client. `auto` is the shape the escalate-on-throttle rung will take and is
-# `http` until then, so a script written against it keeps working when it lands.
-_GF_TRANSPORT_HTTP = "http"
-_GF_TRANSPORT_BROWSER = "browser"
-_VALID_GF_TRANSPORTS = ("auto", _GF_TRANSPORT_HTTP, _GF_TRANSPORT_BROWSER)
-
-
 def _resolve_gf_transport(mode: str) -> str:
     """Validate `--gf-transport`, returning the mode unchanged.
 
@@ -2440,7 +2487,9 @@ def search(
             "seconds per search, and survives the rate limit that blocks http; "
             "[bold]auto[/] is identical to http today (escalate-on-throttle lands "
             "separately). Single-cabin searches only. Needs "
-            "[bold]pip install 'flight-cli[browser]'[/] for browser."
+            # Escaped: rich reads `[browser]` as a style tag and deletes it, which
+            # printed an install command that silently omits the extra.
+            "[bold]uv pip install 'flight-cli\\[browser]'[/] for browser."
         ),
         rich_help_panel=_GROUP_BACKEND,
     ),
@@ -2594,11 +2643,19 @@ def search(
     # particular query happens to reach Google Flights.
     gf_transport = _resolve_gf_transport(gf_transport)
 
-    if len(cabins_tuple) > 1 and gf_transport == _GF_TRANSPORT_BROWSER:
+    if (
+        len(cabins_tuple) > 1
+        and gf_transport == _GF_TRANSPORT_BROWSER
+        and resolved == BACKEND_GFLIGHT
+    ):
         # Not threaded into the fan-out on purpose: each cabin is a separate
         # thread, and Chromium single-instances the profile directory, so the
         # second cabin would fail on the first one's lock. Saying so beats a
         # silent downgrade.
+        #
+        # Gated on the picker's verdict as well: with `--backend matrix` no rung
+        # runs at all, and announcing a downgrade from a transport that was
+        # never going to be used describes a decision nobody made.
         err.print(
             "[dim]--gf-transport browser applies to single-cabin searches; "
             "multi-cabin uses http.[/]"

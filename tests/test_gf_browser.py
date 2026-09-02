@@ -25,9 +25,11 @@ import pytest
 from flight_cli import _gf_browser as gfb
 from flight_cli import _gflight_ids as gfid
 from flight_cli._gf_errors import (
+    GfBackendError,
     GfBrowserUnavailableError,
     GfPageShapeError,
     GfThrottledError,
+    GfUpstreamStatusError,
 )
 from flight_cli.cli import _resolve_gf_transport
 from flight_cli.domain import Leg, SearchOptions, SpecificDateSearch
@@ -195,12 +197,32 @@ def test_fetch_page_reports_a_2xx_by_construction(monkeypatch: pytest.MonkeyPatc
     assert page.status_code == 200
 
 
-def test_a_server_error_is_a_typed_shape_refusal() -> None:
-    """A non-2xx is a shape refusal, so it degrades to Matrix through the seam
-    every other refusal uses. Only a navigation gets here with one — fli raises
-    on a non-2xx before the curl_cffi rung can report it."""
-    with pytest.raises(GfPageShapeError, match="HTTP 503"):
+def test_a_server_error_is_its_own_refusal_not_a_shape_error() -> None:
+    """A non-2xx degrades to Matrix through the seam every other refusal uses,
+    but it is NOT a shape error: nothing was served to re-derive an extract
+    from. Reading Google declining to serve as "the parser is broken" sends the
+    next reader hunting an extract bug during an outage.
+
+    Only a navigation gets here with a status — fli raises on a non-2xx before
+    the curl_cffi rung can report one."""
+    with pytest.raises(GfUpstreamStatusError, match="HTTP 503") as e:
         gfid._rows_from_page_html(gfid.PageFetch("", _PAGE_URL, 503))
+    assert e.value.status_code == 503
+    assert not isinstance(e.value, GfPageShapeError)
+    # Still a GfBackendError, so the Matrix-fallback seams keep catching it.
+    assert isinstance(e.value, GfBackendError)
+
+
+def test_the_navigation_waits_for_the_dom_so_the_body_read_is_bounded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """`response.text()` takes no timeout at any layer, so `goto`'s ceiling is
+    the only bound rung 2 has — and `commit` returns before the body exists,
+    leaving the read outside it. A default round trip makes 11 such reads."""
+    pw = _install(monkeypatch, tmp_path)
+    with gfb.GfBrowserSession(headed=False) as session:
+        session.get_html(_PAGE_URL)
+    assert _page_of(pw).gotos == [(_PAGE_URL, "domcontentloaded", 30_000)]
 
 
 def test_a_throttle_outranks_the_status_check() -> None:
@@ -338,7 +360,9 @@ def test_the_http_rungs_never_consult_the_browser(
     monkeypatch.setattr(gfb, "session", _forbidden)
     monkeypatch.setattr(gfid, "_one_call", _rung_one)
     out = gfid.search_with_ids(
-        _filters(round_trip=False), top_n=5, transport=gfid.GfTransport(mode=mode)
+        _filters(round_trip=False),
+        top_n=5,
+        transport=gfid.GfTransport(mode=cast("Any", mode)),  # parametrized as a plain str
     )
     assert out is not None
     assert len(out) == 3
@@ -380,7 +404,7 @@ def test_a_navigation_becomes_rows_and_the_launch_is_announced(
     assert fetch.status_code == 200
     rows = gfid._rows_from_page_html(fetch)
     assert len(rows) == 3  # the navigation's bytes go straight into the one parser
-    assert _page_of(pw).gotos == [(_PAGE_URL, "commit", 30_000)] * 2  # one launch, two navs
+    assert _page_of(pw).gotos == [(_PAGE_URL, "domcontentloaded", 30_000)] * 2
     assert capsys.readouterr().err.count("opening Chrome") == 1
     assert pw.chromium._context.closed and pw.stopped
 
@@ -631,6 +655,136 @@ def test_the_refusal_note_carries_the_remedy_too() -> None:
     assert "Install the thing." in refusal.message
 
 
+def _render(markup: str) -> str:
+    """What a user actually sees: the markup pass rich applies before printing.
+
+    Asserting on the template instead would pass while the terminal shows
+    something else — which is exactly how `[browser]` went missing."""
+    import io
+
+    from rich.console import Console
+
+    buf = io.StringIO()
+    Console(file=buf, width=200, force_terminal=False, no_color=True).print(markup)
+    return buf.getvalue()
+
+
+def test_the_install_extra_survives_the_markup_pass() -> None:
+    """`rich_markup_mode="rich"` reads `[browser]` as a style tag and deletes
+    it, so an unescaped remedy prints `uv pip install 'flight-cli'` — a command
+    that installs the package WITHOUT the browser extra and leaves the user
+    exactly where they started. Both renderings have to survive it."""
+    from flight_cli.cli import _gf_refusal
+
+    e = GfBrowserUnavailableError(
+        "Google Flights' browser rung needs patchright, which isn't installed.",
+        remedy=gfb._INSTALL_HINT,
+    )
+    refusal = _gf_refusal(e)
+    assert "flight-cli[browser]" in _render(f"[dim]{refusal.note}[/]")
+    assert "flight-cli[browser]" in _render(refusal.message)
+
+
+def test_driver_text_carrying_markup_renders_verbatim() -> None:
+    """patchright's text is arbitrary and reaches a markup-mode console. A
+    closing tag it never opened raises `MarkupError` from `print`, turning a
+    typed refusal — the thing that should degrade cleanly to Matrix — into a
+    crash."""
+    from flight_cli.cli import _gf_refusal
+
+    e = GfBrowserUnavailableError("Chrome said [/x] no.", remedy="Then do [/y].")
+    refusal = _gf_refusal(e)
+    for text in (_render(f"[dim]{refusal.note}[/]"), _render(refusal.message)):
+        assert "[/x]" in text
+        assert "[/y]" in text
+
+
+def test_the_help_text_keeps_the_extra_and_installs_with_uv() -> None:
+    """The same markup trap, on the one line that tells a user how to get the
+    rung at all. `uv` because that is this project's package manager."""
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    result = CliRunner().invoke(cli.app, ["search", "--help"], env={"COLUMNS": "200"})
+    assert result.exit_code == 0
+    flat = " ".join(result.output.split())
+    assert "uv pip install 'flight-cli[browser]'" in flat
+
+
+def test_four_browser_failures_read_as_four_different_notes(tmp_path: pathlib.Path) -> None:
+    """The enrich path is the DEFAULT search and prints only the note. Built
+    from the remedy alone it said "Retry" for a missing Chrome, a nav timeout, a
+    null response and an unreadable body alike — four causes, one useless line,
+    and the only one a user can act on never named."""
+    from flight_cli.cli import _gf_refusal
+
+    profile = tmp_path / "gf-browser-profile"  # never created: no lock to find
+    failures = [
+        gfb._launch_failure(profile, "Chromium distribution 'chrome' is not found."),
+        GfBrowserUnavailableError("Chrome could not load the page: Timeout 30000ms exceeded."),
+        GfBrowserUnavailableError("Chrome navigated but returned no response."),
+        GfBrowserUnavailableError("Chrome loaded the page but its body could not be read: EOF."),
+    ]
+    notes = [_gf_refusal(e).note for e in failures]
+    assert len(set(notes)) == len(notes)
+    assert all("unavailable" in n for n in notes)
+    # The launch failure is the one with a local fix, so it names Chrome.
+    assert "install chrome" in notes[0]
+    assert gfb._BROWSER_BIN_ENV in notes[0]
+
+
+def test_a_stale_lock_does_not_claim_an_unrelated_launch_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """A `SIGKILL`ed run leaves `Singleton*` behind indefinitely. On the profile
+    test alone every later failure then reads as a lock — so a user with no
+    Chrome deletes lock files, retries, and hits the same wall with the real
+    cause still unnamed. The driver text has to agree before we blame the lock."""
+    profile = tmp_path / "gf-browser-profile"
+    profile.mkdir(parents=True)
+    (profile / "SingletonLock").symlink_to("some-host-4242")
+    monkeypatch.setenv("MATRIX_CACHE_DIR", str(tmp_path))
+    assert gfb._profile_is_locked(profile)  # the stale file is really there
+
+    e = gfb._launch_failure(profile, "Chromium distribution 'chrome' is not found.")
+    assert "failed to launch" in str(e)
+    assert "is not found" in str(e)
+    assert "Singleton*" not in str(e)  # not blamed on the lock it did not cause
+
+
+def test_a_real_lock_is_still_diagnosed_and_offers_the_http_fallback(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The other side of the corroboration: when the driver names the singleton
+    the diagnosis stands — and it now also offers `--gf-transport http`, which
+    works while the other run holds the profile and the user can do nothing."""
+    profile = tmp_path / "gf-browser-profile"
+    profile.mkdir(parents=True)
+    (profile / "SingletonLock").symlink_to("some-host-4242")
+
+    e = gfb._launch_failure(profile, "Failed to create a ProcessSingleton for your profile.")
+    assert "interrupted run" in str(e)
+    assert f"{profile}/Singleton*" in str(e)
+    assert "--gf-transport http" in str(e)
+
+
+def test_a_browser_throttle_does_not_promise_a_retry_it_will_not_make() -> None:
+    """Rung 2 runs no retry ladder, so "wait a moment and retry" describes a
+    recovery the caller does not have. And neither wording blames the IP: the
+    budget is per client context, which is the premise of the whole rung."""
+    from flight_cli.cli import _GF_TRANSPORT_BROWSER, _gf_refusal
+
+    http = _gf_refusal(GfThrottledError("x"))
+    browser = _gf_refusal(GfThrottledError("x"), transport=_GF_TRANSPORT_BROWSER)
+    assert "does not" in _render(browser.message)
+    assert "--backend matrix" in _render(browser.message)
+    assert "retry" in _render(http.message).lower()
+    assert browser.note != http.note
+    for r in (http, browser):
+        assert "this IP" not in _render(r.message)
+
+
 def test_a_multi_cabin_browser_search_says_it_is_using_http(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -671,6 +825,48 @@ def test_a_multi_cabin_browser_search_says_it_is_using_http(
     assert result.exit_code == 0, result.output
     assert dispatched == ["multi"]
     assert result.output.count("multi-cabin uses http") == 1  # said once, not per cabin
+
+
+def test_no_downgrade_note_when_google_flights_is_never_used(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--backend matrix` runs no rung at all, so there is nothing to downgrade.
+    Announcing one describes a decision nobody made, and points the user at a
+    transport flag that had no bearing on the search they ran."""
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    dispatched: list[str] = []
+
+    def _stub(**_kw: Any) -> None:
+        dispatched.append("multi")
+
+    monkeypatch.setattr(cli, "_run_matrix_path_multi", _stub)
+    monkeypatch.setattr(cli, "_run_gflight_path_multi", _stub)
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "search",
+            "JFK",
+            "LAX",
+            "--dep",
+            "2026-10-14",
+            "--cabin",
+            "coach,business",
+            "--backend",
+            "matrix",
+            "--gf-transport",
+            "browser",
+            "--cash-only",
+            "-n",
+            "1",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert dispatched == ["multi"]  # it still ran, it just says nothing about rungs
+    assert "multi-cabin uses http" not in result.output
 
 
 def test_a_single_cabin_browser_search_prints_no_downgrade(
