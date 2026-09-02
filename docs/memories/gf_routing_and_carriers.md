@@ -127,11 +127,16 @@ code unconditionally: `--fast` means "the GF grid alone, ~1s", and answering it
 with the ~45s Matrix calendar — silently or otherwise — would change what the
 flag means.
 
-The routing branch of that refusal names the tier that actually declined.
-`grid_can_serve` is False for Tier-2 and Tier-3 alike, so `grid_routing_blocker`
-re-reads the predicates: "Tier-2 routing" only when Tier-2 is what stopped it,
-otherwise "Matrix-only routing (<reason>)". Calling a booking class or an ordered
-routing "Tier-2" points the reader at a post-filter that was never the problem.
+That refusal names both the tier and the flag that declined, because the phrase
+is what tells the reader where to go. `grid_can_serve` is False for Tier-2 and
+Tier-3 alike, so `grid_routing_blocker` re-reads the predicates for the tier;
+and `classify` flattens `--routing` and `--extension` into one predicate set that
+no longer remembers which carried what, so it classifies the two SEPARATELY for
+the source. Eight phrases result, "Tier-2 routing" and "a Matrix-only extension
+code" among them, plus a "… routing and extension codes" form at each tier when
+both flags declined. Calling a booking class "Tier-2" points the reader at a
+post-filter that was never the problem; calling it "routing" points them at a
+flag they did not set.
 
 The grid paint in the weave and
 `_render_date_grid` are runtime-dead until the gate flips;

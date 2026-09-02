@@ -216,36 +216,60 @@ def test_grid_routing_blocker_separates_tier2_from_matrix_only() -> None:
     booking_class = grid_routing_blocker(_cal(ext="F bc=y"))
     assert booking_class is not None
     assert "Tier-2" not in booking_class  # fare construction is Tier-3, not a post-filter
-    assert booking_class.startswith("Matrix-only routing")
+    assert booking_class.startswith("a Matrix-only extension code")
+    assert "routing" not in booking_class  # a booking class is not routing, at either tier
     assert "F bc=y" in booking_class  # and it says which constraint
 
     ordered = grid_routing_blocker(_cal(routing="BA AA"))
     assert ordered is not None and "Tier-2" not in ordered
+    assert ordered.startswith("Matrix-only routing")
 
 
-@pytest.mark.parametrize("ext", ["-CODESHARE", "MINCONNECT 1:00", "-REDEYES"])
-def test_grid_routing_blocker_names_the_source_flag_for_tier2_extensions(ext: str) -> None:
-    """The phrase tells the reader which flag to go edit, so a Tier-2 EXTENSION
-    code must not be reported as routing. `classify` flattens both sources into
-    one predicate set that no longer remembers which carried what, so the two are
-    classified separately."""
-    blocker = grid_routing_blocker(_cal(ext=ext))
-    assert blocker == "a Tier-2 extension code"
-    assert "routing" not in blocker
+@pytest.mark.parametrize(
+    ("routing", "ext", "expected"),
+    [
+        # Tier-2 and Tier-3 name their source the same way, so the reader learns
+        # which flag to edit from the phrase alone, at either tier.
+        ("O:LH+", None, "Tier-2 routing"),
+        (None, "-CODESHARE", "a Tier-2 extension code"),
+        (None, "MINCONNECT 1:00", "a Tier-2 extension code"),
+        (None, "-REDEYES", "a Tier-2 extension code"),
+        ("O:LH+", "-CODESHARE", "Tier-2 routing and extension codes"),
+        ("BA AA", None, "Matrix-only routing"),
+        (None, "F bc=y", "a Matrix-only extension code"),
+        ("BA AA", "F bc=y", "Matrix-only routing and extension codes"),
+    ],
+)
+def test_grid_routing_blocker_names_the_flag_that_declined(
+    routing: str | None, ext: str | None, expected: str
+) -> None:
+    """`classify` flattens `--routing` and `--extension` into one predicate set
+    that no longer remembers which carried what, so the two are classified
+    separately and the phrase names every side that declined."""
+    blocker = grid_routing_blocker(_cal(routing=routing, ext=ext))
+    assert blocker is not None
+    assert blocker.startswith(expected)
+    if ext is not None and routing is None:
+        assert "routing" not in blocker  # nothing on this command line is routing
 
 
-def test_grid_routing_blocker_prefers_routing_when_both_sources_are_tier2() -> None:
-    """One phrase completes one sentence, so a query carrying both names the
-    routing side; the extension is still there to find once that one is gone."""
-    assert grid_routing_blocker(_cal(routing="O:LH+", ext="-CODESHARE")) == "Tier-2 routing"
-
-
-def test_grid_routing_blocker_reports_matrix_only_from_either_source() -> None:
-    """Tier-3 outranks Tier-2 whichever flag carries it: the grid cannot serve the
-    query at all, so the post-filterable half is not the news."""
+def test_grid_routing_blocker_reports_every_matrix_only_reason() -> None:
+    """A query can be Matrix-only twice over. Fixing one flag would leave the
+    refusal unchanged, so it lists both rather than the first it found."""
     both = grid_routing_blocker(_cal(routing="BA AA", ext="F bc=y"))
     assert both is not None
-    assert both.startswith("Matrix-only routing")
-    assert "BA AA" in both and "F bc=y" in both  # every reason, not just the first
+    assert "BA AA" in both and "F bc=y" in both
+
+
+def test_grid_routing_blocker_matrix_only_outranks_tier2_on_the_other_flag() -> None:
+    """Tier-3 outranks Tier-2 whichever flag carries it: the grid cannot serve the
+    query at all, so the post-filterable half is not the news — and the phrase
+    names the Tier-3 side, which is the one that has to change."""
     mixed = grid_routing_blocker(_cal(routing="O:LH+", ext="F bc=y"))
-    assert mixed is not None and mixed.startswith("Matrix-only routing")
+    assert mixed is not None
+    assert mixed.startswith("a Matrix-only extension code")
+    assert "Tier-2" not in mixed
+    flipped = grid_routing_blocker(_cal(routing="BA AA", ext="-CODESHARE"))
+    assert flipped is not None
+    assert flipped.startswith("Matrix-only routing")
+    assert "Tier-2" not in flipped

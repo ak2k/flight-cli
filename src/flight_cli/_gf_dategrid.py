@@ -122,6 +122,21 @@ def grid_can_serve(search: CalendarSearch) -> bool:
     return all(p.tier is Tier.GF_NATIVE for p in constraints.predicates)
 
 
+def _decliner_phrase(
+    routing_only: str, extension_only: str, both: str, *, routing: bool, extension: bool
+) -> str:
+    """Pick the phrase naming whichever of `--routing` / `--extension` declined.
+
+    Callers pass all three spellings because English will not compose them: the
+    routing phrase is a mass noun and the extension phrase takes an article.
+    At least one flag must have declined, so the `extension_only` fallback is the
+    remaining case, not a default.
+    """
+    if routing and extension:
+        return both
+    return routing_only if routing else extension_only
+
+
 def grid_routing_blocker(search: CalendarSearch) -> str | None:
     """Name the constraint keeping the date-grid off this calendar, or None when
     every predicate is Tier-1 (so no constraint is the reason).
@@ -137,7 +152,10 @@ def grid_routing_blocker(search: CalendarSearch) -> str | None:
     `--routing` and `--extension` are classified separately because the phrase
     names the flag to go edit, and `classify` flattens both into one predicate
     set that no longer remembers which one carried what. `-CODESHARE` and
-    `MINCONNECT` are Tier-2 extension codes, not routing.
+    `MINCONNECT` are Tier-2 extension codes, not routing; a booking class is a
+    Matrix-only extension code, not Matrix-only routing. Both tiers name the
+    source by the same rule, so the reader learns which flag to edit whichever
+    tier stopped the query.
     """
     leg = search.legs[0]
     routing_c = classify(leg.route_language, None)
@@ -147,12 +165,25 @@ def grid_routing_blocker(search: CalendarSearch) -> str | None:
     # through to a Tier-2 phrase. `matrix_reasons` supplies the text where it can
     # (only `UnsupportedPred` carries one), never the branch.
     if routing_c.requires_matrix or ext_c.requires_matrix:
+        head = _decliner_phrase(
+            "Matrix-only routing",
+            "a Matrix-only extension code",
+            "Matrix-only routing and extension codes",
+            routing=routing_c.requires_matrix,
+            extension=ext_c.requires_matrix,
+        )
+        # Every reason, not just the first: a query can be Matrix-only twice over,
+        # and fixing one flag would leave the refusal unchanged and unexplained.
         reasons = routing_c.matrix_reasons + ext_c.matrix_reasons
-        return f"Matrix-only routing ({'; '.join(reasons)})" if reasons else "Matrix-only routing"
-    if routing_c.tier2:
-        return "Tier-2 routing"
-    if ext_c.tier2:
-        return "a Tier-2 extension code"
+        return f"{head} ({'; '.join(reasons)})" if reasons else head
+    if routing_c.tier2 or ext_c.tier2:
+        return _decliner_phrase(
+            "Tier-2 routing",
+            "a Tier-2 extension code",
+            "Tier-2 routing and extension codes",
+            routing=bool(routing_c.tier2),
+            extension=bool(ext_c.tier2),
+        )
     return None
 
 

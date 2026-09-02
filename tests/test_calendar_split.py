@@ -775,14 +775,20 @@ def test_fast_refuses_a_tier2_extension_without_calling_it_routing(
 
 
 @pytest.mark.parametrize(
-    ("kwargs", "quoted"),
+    ("kwargs", "quoted", "phrase"),
     [
-        ({"extension": "F bc=y"}, "F bc=y"),  # booking class: fare construction
-        ({"routing": "BA AA"}, "BA AA"),  # ordered routing: not GF-expressible
+        # booking class: fare construction, carried by --extension
+        ({"extension": "F bc=y"}, "F bc=y", "this is a Matrix-only extension code"),
+        # ordered routing: not GF-expressible, carried by --routing
+        ({"routing": "BA AA"}, "BA AA", "this is Matrix-only routing"),
     ],
 )
 def test_fast_refuses_tier3_without_calling_it_tier2(
-    kwargs: dict[str, Any], quoted: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+    kwargs: dict[str, Any],
+    quoted: str,
+    phrase: str,
+    monkeypatch: Any,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     # `grid_can_serve` is False for Tier-2 and Tier-3 alike, so the refusal has to
     # ask which. Tier-2 is post-filterable and only wants the itineraries a grid
@@ -797,8 +803,10 @@ def test_fast_refuses_tier3_without_calling_it_tier2(
     assert excinfo.value.exit_code == 1
     msg = _flat(cap.err)
     assert "Tier-2" not in msg
-    assert "this is Matrix-only routing" in msg
+    assert phrase in msg  # naming the flag that carried it, not just the tier
     assert quoted in msg  # and it names the constraint that did it
+    if "routing" not in kwargs:
+        assert "routing" not in msg  # nothing on this command line is routing
     assert cap.out == ""
     assert calls["calendar"] == 0  # refused before any Matrix work
 
