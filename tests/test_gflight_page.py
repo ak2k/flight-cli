@@ -20,10 +20,10 @@ exists to read, so scrubbing it would leave the fixtures unable to pin the
 behaviour under test. The session id at `[0][4]` is replaced because it is the
 one value that identifies the capture rather than the flights.
 
-Most of these fixtures were additionally
-slimmed by dropping the metadata blocks no code reads, which is safe for what
-they pin but makes them useless for the misplaced-block scan — with indices
-1-31 all `None`, `misplaced == ()` holds no matter what the scan does.
+Most of these fixtures were additionally slimmed by dropping the metadata
+blocks no code reads, which is safe for what they pin but makes them useless for
+the misplaced-block scan — with indices 1-31 all `None`, `misplaced == ()` holds
+no matter what the scan does.
 `ds1_metadata_blocks_kept.json` is the counterweight: a whole capture, all 31
 indices intact including the nine blocks that are row-shaped by structure, at
 39 KB. Slim a new fixture only if you know which invariant it is for.
@@ -482,9 +482,9 @@ def test_a_served_board_with_row_shaped_blocks_elsewhere_is_served_with_a_warnin
     client: Any, caplog: Any
 ) -> None:
     """Live pages carry 4-9 blocks that are row-shaped by structure (4, 9 and 7
-    across the three captures), so
-    refusing whenever one of them happens to parse would throw away a board we
-    answered completely. The warning is what keeps it findable."""
+    across the three captures), so refusing whenever one of them happens to
+    parse would throw away a board we answered completely. The warning is what
+    keeps it findable."""
     payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
     payload[5] = copy.deepcopy(payload[2])
     client(_FakeResponse(text=_page(json.dumps(payload))))

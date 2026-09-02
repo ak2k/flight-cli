@@ -792,9 +792,9 @@ def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
     if board.misplaced:
         # A served board plus something row-shaped elsewhere. Live pages carry
         # 4-9 candidate blocks each (4, 9 and 7 across the three captures), so
-        # refusing here would fail a query we can
-        # already answer; the log is what makes a real partial relocation
-        # findable without costing the user their results.
+        # refusing here would fail a query we can already answer; the log is
+        # what makes a real partial relocation findable without costing the
+        # user their results.
         log.warning(
             "ds:1 carried row-shaped blocks outside %s at %s; served %d rows",
             list(_DS_ROW_BLOCKS),
