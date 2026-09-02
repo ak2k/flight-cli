@@ -8,9 +8,11 @@ so a multi-airport calendar is queried one destination at a time (groupable via
 
 from __future__ import annotations
 
+import ast
 import json
 from datetime import date
-from typing import Any, ClassVar, override
+from pathlib import Path
+from typing import Any, ClassVar, cast, override
 
 import pytest
 import typer
@@ -369,6 +371,40 @@ def test_calendar_enriched_matrix_error_with_grid_does_not_raise(monkeypatch: An
     _run_enriched()  # grid was shown → must NOT raise typer.Exit
     assert calls["grid"] == 1
     assert calls["calendar"] == 0  # Matrix errored → no calendar paint
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        # Matrix quotes the routing string back at you, so its error message is
+        # user text arriving from the far side of the network.
+        "QPX Warning.  Illegal COMMAND-LINE prefix: BA[/weird]AA",
+        "QPX Warning.  Illegal COMMAND-LINE prefix: O:LH[bold]+",
+    ],
+)
+def test_calendar_matrix_error_survives_markup_in_the_message(
+    message: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The non-fast path has no refusal to catch a bad routing string first, so
+    Matrix is where the user learns it was bad — and the message comes back with
+    their brackets in it. Unescaped, an unbalanced tag raises MarkupError over the
+    error it was reporting."""
+
+    class _ErrClient(_PricedClient):
+        @override
+        async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
+            _ = (search, cache)
+            raise MatrixApiError(message, kind="input", request_id="req[/x]42")
+
+    monkeypatch.setattr(cli, "MatrixClient", _ErrClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _fake_grid)
+    _spy_renderers(monkeypatch)
+    _run_enriched()  # a grid was painted, so no Exit — only the report
+    cap = _flat(capsys.readouterr().err)
+    # `_flat` collapses the wrap, so flatten the expectation the same way; the
+    # brackets are what matters and they survive both.
+    assert _flat(message) in cap
+    assert "req[/x]42" in cap
 
 
 def test_calendar_enriched_unexpected_matrix_error_still_shows_grid(monkeypatch: Any) -> None:
@@ -919,6 +955,16 @@ def test_calendar_one_way_note_survives_json_output(
         # is matched against digits rather than handed to `int()` to be lenient.
         ("5-\x1c7", "use nights as"),
         ("5\x1d-7", "use nights as"),
+        # `\Z`, not `$`: `$` matches before one trailing newline, so `5-7\n` read
+        # as the default range — and a pipeline hands over exactly that.
+        ("5-7\n", "use nights as"),
+        ("5-7\r", "use nights as"),
+        ("5\n-7", "use nights as"),
+        # `int()` REFUSES 4300+ digits (CPython's int/str cap), so an unbounded
+        # match reaches it and tracebacks where this should be a usage error.
+        ("9" * 4301, "use nights as"),
+        ("5-" + "9" * 4301, "use nights as"),
+        ("1000000000", "use nights as"),  # ten digits: past the bound, still typed
     ],
 )
 def test_calendar_round_trip_bad_duration_is_a_typed_error(
@@ -1007,6 +1053,10 @@ def test_fast_refusal_survives_markup_in_a_flag(
         ({"duration": "[/x]"}, "'[/x]'"),  # unparseable, and unbalanced markup
         ({"duration": "9[bold]-3"}, "'9[bold]-3'"),  # a tag rich would otherwise eat
         ({"start": "[/x]"}, "'[/x]'"),  # the same crash one flag over
+        ({"fmt": "[/x]"}, "'[/x]'"),  # --format, which runs first in the body
+        ({"cabin": "[/x]"}, "'[/x]'"),
+        ({"depart_times": "[/x]"}, "'[/x]'"),
+        ({"cabin": "[bold]"}, "'[bold]'"),  # a tag rich would otherwise eat
     ],
 )
 def test_parse_errors_survive_markup_in_a_flag(
@@ -1100,3 +1150,96 @@ def test_detail_round_trip_bad_duration_is_a_typed_error(
     assert "max (3) is below min (9)" in err_out
     assert "ValidationError" not in err_out
     assert seen == []  # refused before any Matrix work
+
+
+# ──────────── every value these paths print is escaped (work-h70kv.9) ───────
+# `err` and `console` are markup-enabled, so any user string or exception message
+# reaching them is markup until escaped: an unbalanced `[/x]` raises MarkupError
+# instead of the message, and a well-formed `[bold]` eats the token the reader
+# needs. Individual cases above cover the paths that carry user text today; this
+# reads the source so a NEW interpolation cannot be added without one.
+
+# The functions whose output a calendar or detail invocation can reach.
+_ESCAPE_SCOPE = frozenset(
+    {
+        "_parse_date",
+        "_parse_duration",
+        "_parse_times",
+        "_resolve_cabin",
+        "_resolve_format",
+        "_resolve_duration",
+        "_grid_branch_blocker",
+        "_run",
+        "_run_calendar",
+        "_report_calendar_matrix_failure",
+        "_run_calendar_enriched",
+        "calendar",
+        "detail",
+    }
+)
+
+# Values that are this module's own, never a user string or an exception message:
+# counters it computed and constants it wrote. Anything else must be escaped.
+_UNESCAPED_OK = frozenset(
+    {
+        "lo",
+        "hi",
+        "n",
+        "rounds",
+        "conc",
+        "n_split",
+        "_GF_GRID_UNAVAILABLE_NOTE",
+        "_GF_GRID_UNAVAILABLE_WEAVE_NOTE",
+        "'/'.join(_VALID_FORMATS)",
+    }
+)
+
+
+def _printed_interpolations(src: str, tree: ast.Module) -> list[tuple[str, int, str]]:
+    """Every f-string field printed to a console from a function in scope."""
+    found: list[tuple[str, int, str]] = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if fn.name not in _ESCAPE_SCOPE:
+            continue
+        for node in ast.walk(fn):
+            is_print = (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "print"
+            )
+            if not is_print:
+                continue
+            for arg in cast("ast.Call", node).args:
+                for piece in ast.walk(arg):
+                    if isinstance(piece, ast.FormattedValue):
+                        segment = ast.get_source_segment(src, piece.value) or ""
+                        found.append((fn.name, piece.value.lineno, segment))
+    return found
+
+
+def test_calendar_paths_escape_every_printed_value() -> None:
+    src = Path(cli.__file__).read_text(encoding="utf-8")
+    fields = _printed_interpolations(src, ast.parse(src))
+    assert fields, "the scan found no printed interpolations — the walk is broken"
+    unescaped = [
+        f"{name}:{line} {segment}"
+        for name, line, segment in fields
+        if not segment.startswith("escape(") and segment not in _UNESCAPED_OK
+    ]
+    assert not unescaped, (
+        "wrap these in rich.markup.escape, or add them to _UNESCAPED_OK if the "
+        f"value is this module's own: {unescaped}"
+    )
+
+
+def test_escape_scope_names_real_functions() -> None:
+    """A renamed or deleted function would silently drop out of the scan above."""
+    src = Path(cli.__file__).read_text(encoding="utf-8")
+    defined = {
+        fn.name
+        for fn in ast.walk(ast.parse(src))
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert defined >= _ESCAPE_SCOPE, _ESCAPE_SCOPE - defined

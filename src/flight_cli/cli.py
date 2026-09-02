@@ -124,10 +124,15 @@ def _parse_date(s: str) -> date:
         raise typer.Exit(2) from e
 
 
-# A nights bound: digits, optionally signed. Deliberately narrower than `int()`,
-# which also swallows every Unicode space — U+001C..1F among them — so `5-\x1c7`
-# would parse as a range while reading as one token.
-_RE_DURATION_BOUND = re.compile(r"^[+-]?\d+$")
+# A nights bound: 1-9 digits, optionally signed. Narrower than `int()` on both
+# axes. Class: `int()` swallows every Unicode space, U+001C..1F among them, so
+# `5-\x1c7` would parse as a range while reading as one token. Length: `int()`
+# REFUSES a string of 4300+ digits (CPython's int/str conversion cap), so an
+# unbounded match hands `_canonical_bound` a traceback instead of a usage error.
+# Nine digits is past any trip anyone will take and inside every limit involved.
+# `\Z` not `$`, which admits one trailing newline — `--duration '5-7\n'` then
+# reads as the default range.
+_RE_DURATION_BOUND = re.compile(r"[+-]?\d{1,9}\Z")
 
 
 def _canonical_bound(part: str) -> str:
@@ -218,7 +223,7 @@ def _parse_times(s: str | None) -> tuple[TimeOfDay, ...]:
         key = raw.strip().lower().replace("-", "_")
         if key not in aliases:
             err.print(
-                f"[red]bad time-of-day {raw!r}; choose: "
+                f"[red]bad time-of-day {escape(repr(raw))}; choose: "
                 f"early,morning,midday,afternoon,evening,night[/]"
             )
             raise typer.Exit(2)
@@ -243,7 +248,9 @@ def _resolve_cabin(name: str) -> Cabin:
     }
     if norm in aliases:
         return aliases[norm]
-    err.print(f"[red]Unknown cabin {name!r}; choose: economy, premium, business, first[/]")
+    err.print(
+        f"[red]Unknown cabin {escape(repr(name))}; choose: economy, premium, business, first[/]"
+    )
     raise typer.Exit(2)
 
 
@@ -597,9 +604,14 @@ def _run(
     try:
         return anyio.run(go)
     except MatrixApiError as e:
-        err.print(f"[red]Matrix returned an error ({e.kind}):[/] {e.message}")
+        # Matrix echoes the routing string back inside `message` ("Illegal
+        # COMMAND-LINE prefix: BA[/weird]AA"), so this carries user text onto a
+        # markup console like every other reporter on these paths.
+        err.print(
+            f"[red]Matrix returned an error ({escape(str(e.kind))}):[/] {escape(str(e.message))}"
+        )
         if e.request_id:
-            err.print(f"[dim]request_id: {e.request_id}[/]")
+            err.print(f"[dim]request_id: {escape(str(e.request_id))}[/]")
         raise typer.Exit(1) from e
 
 
@@ -691,9 +703,14 @@ def _run_calendar(
     try:
         return anyio.run(go)
     except MatrixApiError as e:
-        err.print(f"[red]Matrix returned an error ({e.kind}):[/] {e.message}")
+        # Matrix echoes the routing string back inside `message` ("Illegal
+        # COMMAND-LINE prefix: BA[/weird]AA"), so this carries user text onto a
+        # markup console like every other reporter on these paths.
+        err.print(
+            f"[red]Matrix returned an error ({escape(str(e.kind))}):[/] {escape(str(e.message))}"
+        )
         if e.request_id:
-            err.print(f"[dim]request_id: {e.request_id}[/]")
+            err.print(f"[dim]request_id: {escape(str(e.request_id))}[/]")
         raise typer.Exit(1) from e
 
 
@@ -703,9 +720,11 @@ def _report_calendar_matrix_failure(state: dict[str, Any]) -> None:
     `_matrix` task, or a cancel/never-completed fall-through."""
     e = state.get("matrix_err")
     if e is not None:
-        err.print(f"[red]Matrix returned an error ({e.kind}):[/] {e.message}")
+        err.print(
+            f"[red]Matrix returned an error ({escape(str(e.kind))}):[/] {escape(str(e.message))}"
+        )
         if e.request_id:
-            err.print(f"[dim]request_id: {e.request_id}[/]")
+            err.print(f"[dim]request_id: {escape(str(e.request_id))}[/]")
     elif state.get("matrix_unexpected") is not None:
         err.print(f"[red]Matrix calendar failed:[/] {escape(str(state['matrix_unexpected']))}")
     else:
@@ -2221,11 +2240,13 @@ def _resolve_format(*, fmt: str, json_flag: bool) -> str:
     if json_flag:
         err.print("[yellow]--json is deprecated; use --format json.[/]")
         if fmt not in ("table", "json"):
-            err.print(f"[red]--json conflicts with --format {fmt!r}; pick one.[/]")
+            err.print(f"[red]--json conflicts with --format {escape(repr(fmt))}; pick one.[/]")
             raise typer.Exit(2)
         return "json"
     if fmt not in _VALID_FORMATS:
-        err.print(f"[red]--format must be one of {'/'.join(_VALID_FORMATS)}; got {fmt!r}[/]")
+        err.print(
+            f"[red]--format must be one of {'/'.join(_VALID_FORMATS)}; got {escape(repr(fmt))}[/]"
+        )
         raise typer.Exit(2)
     return fmt
 

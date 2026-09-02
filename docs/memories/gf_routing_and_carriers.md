@@ -148,17 +148,26 @@ where nothing declined):
 Calling a booking class "Tier-2" points the reader at a post-filter that was
 never the problem; calling it "routing" points them at a flag they did not set;
 and "a … extension code" for three of them makes them look for one directive.
-The Matrix-only phrases carry every reason in parentheses, so the count there
-matches the count in the phrase.
+The Matrix-only phrases carry every reason in parentheses, from both flags. The
+phrase counts only the EXTENSION directives, so the two counts agree when the
+extension is the whole story and differ by one when routing declined as well:
+"both Matrix-only routing and a Matrix-only extension code" carries two reasons,
+one per flag.
 
 Those reason strings quote the user's `--routing` / `--extension` text verbatim,
 and `err` is a markup-enabled console: `--routing 'BA[/weird]AA'` raised
 `MarkupError` where it should have refused, and a `[bold]` form ate the token the
 reader needed to see. `routing_predicates` has no console to escape for, so the
-escape belongs at the render sites — `rich.markup.escape` on the blocker, on the
-date-grid failure text, and on the argument parsers' own messages. Where the
-message also quotes, `repr` runs BEFORE `escape`: reversed, `repr` doubles the
-backslash `escape` prepends and hands the tag straight back to the parser.
+escape belongs at the render sites. The rule for the calendar and detail paths:
+**anything that reaches `err.print` or `console.print` from user input or an
+exception message is wrapped in `rich.markup.escape`** — the blocker, the
+date-grid failure text, every argument parser's own message, and Matrix's
+`kind` / `message` / `request_id`, which echo the routing string back verbatim
+("Illegal COMMAND-LINE prefix: BA[/weird]AA") on the path with no refusal to
+catch it first. Where the message also quotes, `repr` runs BEFORE `escape`:
+reversed, `repr` doubles the backslash `escape` prepends and hands the tag
+straight back to the parser. `tests/test_calendar_split.py` greps for the rule,
+so a new unescaped interpolation in these functions fails the suite.
 
 The grid paint in the weave and
 `_render_date_grid` are runtime-dead until the gate flips;
