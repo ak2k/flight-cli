@@ -645,13 +645,14 @@ def _report_calendar_matrix_failure(state: dict[str, Any]) -> None:
 
 
 # Says "no grid" rather than staying silent, which a reader would take for "no
-# cheap fares". Two constants because `--fast` has no Matrix to show, so the
-# weave's closing sentence would be a lie there.
+# cheap fares". Two constants because the weave prints while Matrix is still in
+# flight — it can promise to wait, not to deliver — and `--fast` has no Matrix
+# coming at all.
 _GF_GRID_UNAVAILABLE_NOTE = (
     "Google Flights price grid unavailable: the calendar RPC currently returns "
     "no data to this client (tracked in work-h70kv.5)."
 )
-_GF_GRID_UNAVAILABLE_WEAVE_NOTE = f"{_GF_GRID_UNAVAILABLE_NOTE} Showing the Matrix calendar."
+_GF_GRID_UNAVAILABLE_WEAVE_NOTE = f"{_GF_GRID_UNAVAILABLE_NOTE} …awaiting Matrix calendar…"
 
 
 def _run_calendar_enriched(
@@ -2788,9 +2789,7 @@ def calendar(
         "--no-enrich/--no-fast",
         help="Skip the Matrix enrichment: show only the fast Google Flights "
         "date-grid (one-way, single-airport, Tier-1 filters) instead of also "
-        "running the authoritative Matrix calendar. Unavailable right now — "
-        "Google Flights' calendar RPC returns no data to this client, so --fast "
-        "reports that and exits non-zero (work-h70kv.5).",
+        "running the authoritative Matrix calendar.",
         rich_help_panel=_GROUP_BACKEND,
     ),
     max_per_query: int = typer.Option(
@@ -2885,22 +2884,26 @@ def calendar(
             grid: dict[str, float] = {}
             try:
                 grid = date_grid(search)
+            # Each handler only says WHY there is no grid; the single exit below says
+            # THAT there is none. Under `--fast` there is no Matrix to fall back to, so
+            # every no-grid outcome — gate, throttle, or a bad airport/date landing in
+            # the broad except — has to leave the same way, or a wrapper doing
+            # `--fast || fallback` reads success where it should read failure.
             except GfThrottledError:
-                console.print("[dim]Google Flights rate-limited — Matrix only.[/]")
+                console.print("[dim]Google Flights rate-limited; no grid to show.[/]")
             except GfGridUnavailableError:
-                # Exit non-zero rather than fall back: `--fast` means the GF grid alone
-                # in ~1s, so quietly running the ~45s Matrix calendar would change what
-                # the flag means. Ahead of the broad except, as in the weave.
+                # Ahead of the broad except, as in the weave.
                 console.print(f"[dim]{_GF_GRID_UNAVAILABLE_NOTE}[/]")
-                console.print("[yellow]No Google Flights grid; drop --fast for Matrix.[/]")
-                raise typer.Exit(1) from None
             except Exception as e:  # noqa: BLE001 — GF is the optional fast layer; Matrix still runs
                 err.print(f"[yellow]Google Flights date-grid failed:[/] {e}")
             if grid:
                 _render_date_grid(grid, origin=origins, destination=dests, sd=sd, ed=ed)
                 _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
             else:
+                # `--fast` means the GF grid alone in ~1s; quietly running the ~45s
+                # Matrix calendar instead would change what the flag means.
                 console.print("[yellow]No Google Flights grid; drop --fast for Matrix.[/]")
+                raise typer.Exit(1)
             return
 
     # Matrix (authoritative; also the only path for round-trip, multi-airport,

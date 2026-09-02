@@ -1,13 +1,13 @@
 """Google Flights native date-grid (SearchDates / GetCalendarGraph) for fast,
 Tier-1 calendars.
 
-**Gated off since 2026-08 (work-h70kv.5).** GetCalendarGraph answers HTTP 200
-with an empty payload to any client that can't sign `x-goog-batchexecute-bgr`
-(BotGuard). An empty payload is not a throttle, so the shared retry reads it as a
-cold session and burns 4 POSTs + ~6s of backoff per chunk to learn nothing —
-hence the `GfGridUnavailableError` at the top of `_one_grid_call`. Deleting that
-one raise re-enables the transport below it, as does an attested transport
-landing (work-udpp1).
+**Gated off since 2026-08 (upstream report fli#223), verified here 2026-09-02
+(work-h70kv.5).** GetCalendarGraph answers HTTP 200 with an empty payload to any
+client that can't sign `x-goog-batchexecute-bgr` (BotGuard). An empty payload is
+not a throttle, so the shared retry reads it as a cold session and burns 4 POSTs
++ ~6s of backoff per chunk to learn nothing — hence the `GfGridUnavailableError`
+at the top of `_one_grid_call`. Flipping that flag back to False re-enables the
+transport below it, as does an attested transport landing (work-udpp1).
 
 When the RPC answers, it returns cheapest-price-per-date for a whole window in
 ONE call — far faster than Matrix's calendar, and it sidesteps Matrix's
@@ -65,6 +65,16 @@ if TYPE_CHECKING:
     from .routing_predicates import Predicate
 
 _MAX_GRID_DAYS = 61  # GetCalendarGraph's per-request span limit
+
+# Flip to False when GetCalendarGraph answers a plain client again, or when an
+# attested transport lands (work-udpp1) — that is the whole re-enable. A flag
+# rather than an unconditional raise so basedpyright still checks the transport
+# below: `SearchDates.BASE_URL` and `DateSearchFilters.encode()` have no other
+# caller here, and `flights` is pinned with an open floor, so an fli bump could
+# otherwise break the flip-back with green CI. NOT `Final`: basedpyright narrows a
+# Final to its literal value and treats everything past the raise as unreachable
+# again — measured, `Final[bool]` included.
+_GRID_RPC_GATED: bool = True
 
 _CABIN_TO_SEAT = {
     Cabin.COACH: SeatType.ECONOMY,
@@ -148,9 +158,10 @@ def _one_grid_call(filters: Any) -> dict[str, float]:
     on a genuine code-13 block; returns {} on a cold-session empty."""
     # First statement, ahead of `get_client()`: `retry_throttled` catches only
     # GfThrottledError, so this propagates with zero POSTs and zero backoff sleeps.
-    raise GfGridUnavailableError(
-        "Google Flights' calendar RPC (GetCalendarGraph) returns no data to this client"
-    )
+    if _GRID_RPC_GATED:
+        raise GfGridUnavailableError(
+            "Google Flights' calendar RPC (GetCalendarGraph) returns no data to this client"
+        )
     client = get_client()
     _seed_cookies_once(client)
     resp = client.post(
@@ -173,7 +184,9 @@ def _one_grid_call(filters: Any) -> dict[str, float]:
 def date_grid(search: CalendarSearch) -> dict[str, float]:
     """Cheapest price per departure date across the window (caller ensures
     `grid_can_serve`). Chunks to <=61 days with the FULL filter set, throttle-
-    retries each, and merges. Raises GfThrottledError if the throttle persists."""
+    retries each, and merges. Raises GfThrottledError if the throttle persists —
+    and, while `_GRID_RPC_GATED`, GfGridUnavailableError on the first chunk, which
+    is the only exception it can currently raise."""
     leg = search.legs[0]
     predicates = list(classify(leg.route_language, leg.extension).predicates)
     out: dict[str, float] = {}

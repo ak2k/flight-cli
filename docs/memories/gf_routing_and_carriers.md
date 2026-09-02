@@ -90,7 +90,8 @@ honest, `_leg_display` relabels a codeshare match to the matched identity —
 
 ## GF date-grid (calendar) — `fli.search.dates.SearchDates`
 
-**Status 2026-09: gated off, degrades to Matrix (work-h70kv.5).**
+**Gated off since 2026-08 (upstream report fli#223), verified here 2026-09-02:
+degrades to Matrix (work-h70kv.5).**
 `GetCalendarGraph` answers HTTP 200 with an empty payload unless the request
 carries a signed `x-goog-batchexecute-bgr` (BotGuard) header — the same gate that
 took out `GetShoppingResults`. An empty payload is not a throttle
@@ -100,13 +101,21 @@ a cold session and spent 4 POSTs + ~6s of backoff per ≤61-day chunk to return
 its first statement, ahead of `get_client()`: zero POSTs, zero sleeps, and
 `retry_throttled` (which catches only `GfThrottledError`) propagates it. The
 weave `cli._run_calendar_enriched` prints one note — the observation plus the bd
-id, not a cause — and paints the Matrix calendar; `--fast` prints the note plus
-"drop --fast for Matrix" and exits 1, because `--fast` means "the GF grid alone,
-~1s" and quietly running the ~45s Matrix calendar under it would change what the
-flag means. The grid paint in the weave and `_render_date_grid` are runtime-dead
+id, not a cause — and then waits for Matrix. The note can only promise to wait,
+not to deliver: it is printed while the Matrix request is still in flight, and
+Matrix can still fail after it. Under `--fast` every no-grid outcome — gate,
+throttle, or a bad airport/date in the broad except — prints "No Google Flights
+grid; drop --fast for Matrix." once and exits 1, so a wrapper doing `--fast ||
+fallback` can trust the exit code; `--fast` means "the GF grid alone, ~1s" and
+quietly running the ~45s Matrix calendar under it would change what the flag
+means. The grid paint in the weave and `_render_date_grid` are runtime-dead
 until the gate flips; `_run_calendar_enriched` itself still runs (it is what
-paints Matrix). **Flipping back is deleting that one raise** — when the RPC
-answers a plain client again, or when an attested transport lands (work-udpp1).
+paints Matrix). **Flipping back is `_GRID_RPC_GATED = False`** — one module
+constant, a flag rather than an unconditional raise so basedpyright still checks
+the transport body (`SearchDates.BASE_URL` and `DateSearchFilters.encode()` have
+no other caller here, and `flights` is pinned with an open floor). Flip it when
+the RPC answers a plain client again, or when an attested transport lands
+(work-udpp1).
 A per-date page fan-out (the transport upstream fli#230 uses for search) is the
 other candidate; it is tracked, not built — 61 page GETs of ~3.6 MB per chunk is
 a different throttle budget entirely.

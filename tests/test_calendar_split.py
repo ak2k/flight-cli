@@ -447,6 +447,12 @@ def test_calendar_enriched_paints_grid_before_matrix(monkeypatch: Any) -> None:
 # `--fast` has no Matrix to fall back to, so it says so and exits non-zero.
 
 
+def _flat(s: str) -> str:
+    """rich wraps console output at ~80 columns, so a phrase can straddle two
+    lines. Collapse whitespace before matching on it."""
+    return " ".join(s.split())
+
+
 def _unavailable(_search: object) -> dict[str, float]:
     raise GfGridUnavailableError("calendar RPC returns no data to this client")
 
@@ -458,11 +464,17 @@ def test_calendar_enriched_grid_unavailable_notes_once_and_paints_matrix(
     monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _unavailable)
     calls = _spy_renderers(monkeypatch)
     _run_enriched()
-    out = capsys.readouterr().out
+    cap = capsys.readouterr()
     assert calls["grid"] == 0  # gated → never show a GF half that isn't there
     assert calls["calendar"] == 1  # Matrix priced the window and painted
+    out = _flat(cap.out)
     assert out.count("price grid unavailable") == 1  # said once, not per chunk
-    assert "date-grid failed" not in out  # not routed through the broad except
+    # The note is printed while Matrix is still in flight, so it may only promise
+    # to wait — Matrix can still fail after it (and today, on one-way, it does).
+    assert "awaiting Matrix calendar" in out
+    assert "Showing the Matrix calendar" not in out
+    # `err` is a stderr Console, so the broad except's message lands on cap.err.
+    assert "date-grid failed" not in cap.err
 
 
 def _calendar_fast(**overrides: Any) -> None:
@@ -508,13 +520,52 @@ def _calendar_fast(**overrides: Any) -> None:
 def test_calendar_fast_grid_unavailable_notes_and_exits_one(
     monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)  # never dial Matrix from a test
     monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _unavailable)
     calls = _spy_renderers(monkeypatch)
     with pytest.raises(typer.Exit) as excinfo:
         _calendar_fast()
-    out = capsys.readouterr().out
+    out = _flat(capsys.readouterr().out)
     assert excinfo.value.exit_code == 1  # --fast had nothing to serve
     assert calls["grid"] == 0
     assert calls["calendar"] == 0  # --fast never silently runs the ~45s Matrix calendar
     assert out.count("price grid unavailable") == 1
     assert "drop --fast for Matrix" in out
+
+
+def test_calendar_fast_throttled_exits_one(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A throttle is a different reason for the same outcome: no grid, and no Matrix
+    # under --fast to fall back to. Same line, same exit code as the gate.
+    def _throttled(_search: object) -> dict[str, float]:
+        raise GfThrottledError("rate-limited")
+
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _throttled)
+    calls = _spy_renderers(monkeypatch)
+    with pytest.raises(typer.Exit) as excinfo:
+        _calendar_fast()
+    out = _flat(capsys.readouterr().out)
+    assert excinfo.value.exit_code == 1
+    assert calls["grid"] == 0
+    assert "rate-limited; no grid to show." in out
+    assert out.count("drop --fast for Matrix") == 1  # said once, by the single exit
+
+
+def test_calendar_fast_bad_airport_exits_one(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # An unknown IATA blows up in `_grid_filters`, BEFORE the gate, so it lands in the
+    # broad except. That used to print the same 'drop --fast' line and exit 0 — the
+    # opposite of the contract for a wrapper doing `--fast || fallback`. Real
+    # `date_grid` here (offline: it never reaches a client), so the path is genuine.
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    calls = _spy_renderers(monkeypatch)
+    with pytest.raises(typer.Exit) as excinfo:
+        _calendar_fast(origin="ZZZ")
+    cap = capsys.readouterr()
+    assert excinfo.value.exit_code == 1
+    assert calls["grid"] == 0
+    assert "date-grid failed" in _flat(cap.err)  # the reason, on stderr
+    assert "drop --fast for Matrix" in _flat(cap.out)  # the outcome, on stdout
