@@ -1212,6 +1212,9 @@ def _gflight_json_row(g: Any) -> dict[str, Any]:
     # A misaligned extract leaves the surplus legs as fli dumped them.
     for leg, a in zip(legs, amenities, strict=False):
         leg["legroom_class"] = a.legroom_class
+        # Same key as fli's own `FlightLeg.amenities`, a different schema. Safe
+        # only because `_flight_leg` never populates fli's — if it ever does,
+        # this write silently replaces it and needs its own key.
         leg["amenities"] = asdict(a)
     return row
 
@@ -1625,16 +1628,27 @@ def _run_gflight_multi(
     top_n: int,
 ) -> dict[Cabin, list[Any]]:
     """Fan out N parallel gflight queries (one per cabin). fli is sync, so
-    each query runs in a worker thread via `anyio.to_thread.run_sync`."""
+    each query runs in a worker thread via `anyio.to_thread.run_sync`.
+
+    Routing/extension predicates are applied natively, exactly as the
+    single-cabin path does: `_pick_backend` only routes here when
+    `page_can_encode` accepted every one, so dropping them would silently
+    widen a constrained multi-cabin search."""
     from ._gflight_ids import search_with_ids  # noqa: PLC0415
-    from .fli_bridge import to_fli_filter  # noqa: PLC0415
+    from .fli_bridge import apply_gf_native_filters, to_fli_filter  # noqa: PLC0415
+    from .routing_predicates import classify  # noqa: PLC0415
 
     results: dict[Cabin, list[Any]] = {}
+    constraints = classify(legs[0].route_language, legs[0].extension) if legs else None
+    predicates = list(constraints.predicates) if constraints else []
 
     def query_sync(cab: Cabin) -> list[Any]:
         cabin_opts = opts.model_copy(update={"cabin": cab})
         search = SpecificDateSearch(legs=legs, options=cabin_opts)
-        return search_with_ids(to_fli_filter(search), top_n=top_n) or []
+        fli_filter = to_fli_filter(search)
+        if predicates:
+            apply_gf_native_filters(fli_filter, predicates)
+        return search_with_ids(fli_filter, top_n=top_n) or []
 
     async def query_cabin(cab: Cabin) -> None:
         try:
@@ -1817,9 +1831,7 @@ def _run_gflight_path_multi(
             cab_dumped: list[Any] = []
             for r in fli_results:
                 items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
-                dumped = [
-                    {**g.flight.model_dump(mode="json"), "flight_id": g.flight_id} for g in items
-                ]
+                dumped = [_gflight_json_row(g) for g in items]
                 cab_dumped.append(dumped if isinstance(r, tuple) else dumped[0])
             out[cab.value] = cab_dumped
         sys.stdout.write(json.dumps(out, indent=2, default=str))
@@ -2482,10 +2494,11 @@ def search(
     run_awards = _should_run_awards(sel)
 
     if len(cabins_tuple) > 1:
-        # The multi-cabin gflight path doesn't apply the routing/extension
-        # filters yet, so a constrained multi-cabin search goes to Matrix to
-        # honor the routing correctly (the single-cabin gflight path filters).
-        if resolved == BACKEND_GFLIGHT and not (routing or extension):
+        # `_pick_backend` already refused anything the page can't encode, so a
+        # constraint that survived to here is one the multi-cabin fan-out
+        # honours natively. Re-testing `routing or extension` (as this once did)
+        # would drop an encodable constraint to Matrix with no reason printed.
+        if resolved == BACKEND_GFLIGHT:
             _run_gflight_path_multi(
                 legs=legs,
                 opts=opts,
@@ -3138,6 +3151,26 @@ def gflight(
         "[yellow]`flight gflight` is deprecated; use `flight search` "
         "(or `flight search --backend gflight` to force).[/]",
     )
+    # This alias has no --backend flag, so it resolves like `search` on auto
+    # rather than forcing Google Flights: `--children N` can't be priced on the
+    # page transport, and erroring where this used to (wrongly) answer would be
+    # a worse regression than quietly taking the backend that can price it.
+    # `_pick_backend` prints the reason either way.
+    resolved = _pick_backend(
+        backend=BACKEND_AUTO,
+        routing=None,
+        extension=None,
+        slice_specs=None,
+        depart_times=None,
+        return_times=None,
+        children=children,
+        seniors=0,
+        youth=0,
+        inf_seat=0,
+        inf_lap=0,
+        origin=origin,
+        destination=destination,
+    )
     legs = (Leg.of(origin, destination, _parse_date(dep)),)
     if ret:
         legs += (Leg.of(destination, origin, _parse_date(ret)),)
@@ -3153,6 +3186,24 @@ def gflight(
         allow_airport_changes=True,
         show_only_available=True,
     )
+    if resolved == BACKEND_MATRIX:
+        _run_matrix_path(
+            legs=legs,
+            opts=opts,
+            rps=_resolve_rps(None),
+            impersonate=_resolve_impersonate(None),
+            no_cache=_resolve_no_cache(False),
+            json_out=json_out,
+            matrix_url=False,
+            google_url=False,
+            run_pp=False,
+            # This alias predates the provider flags: cash only, no awards.
+            sel=_resolve_providers(
+                providers=None, cash_only=True, awards_only=False, provider_opt=()
+            ),
+            pick=None,
+        )
+        return
     _run_gflight_path(legs=legs, opts=opts, top_n=top_n, json_out=json_out)
 
 
