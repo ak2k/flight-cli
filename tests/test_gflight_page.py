@@ -578,3 +578,78 @@ def test_a_real_results_page_is_not_read_as_consent(client: Any) -> None:
     )
     client(_FakeResponse(text=page))
     assert len(gfid._one_call(_FILTERS)) == 3
+
+
+def test_a_shape_change_on_a_page_that_links_to_consent_is_a_shape_change(
+    client: Any,
+) -> None:
+    """The combination the substring test got wrong. A page whose `ds:1` really
+    is gone, which also carries a link to the consent domain, is a LAYOUT
+    change. Calling it a consent wall hands the user a remedy for a problem
+    they don't have and hides the one they do."""
+    page = _SHAPE_CHANGE_PAGE.replace(
+        "</body>", '<a href="https://consent.google.com/">Privacy</a></body>'
+    )
+    client(_FakeResponse(text=page))
+    with pytest.raises(GfPageShapeError, match="page shape changed"):
+        gfid._one_call(_FILTERS)
+
+
+def test_a_consent_redirect_is_a_consent_wall(client: Any) -> None:
+    """Where the response came FROM is the strongest signal: Google redirects to
+    its consent host, and the body that arrives has no `ds:1` at all."""
+    client(
+        _FakeResponse(
+            text="<!doctype html><html><body>Before you continue</body></html>",
+            url="https://consent.google.com/m?continue=https://www.google.com/travel/flights",
+        )
+    )
+    with pytest.raises(GfConsentError):
+        gfid._one_call(_FILTERS)
+
+
+def test_a_consent_form_is_a_consent_wall_without_a_redirect(client: Any) -> None:
+    """Served in place, with the original URL. A results page LINKS to the
+    consent host; only the interstitial POSTS to it, so the form is what tells
+    them apart."""
+    client(_FakeResponse(text=_CONSENT_PAGE))
+    with pytest.raises(GfConsentError):
+        gfid._one_call(_FILTERS)
+
+
+@pytest.mark.parametrize(
+    ("final_url", "expected"),
+    [
+        pytest.param("https://consent.google.com/m?continue=x", True, id="consent-host"),
+        pytest.param("https://consent.google.co.uk/m", True, id="consent-host-cctld"),
+        pytest.param("https://www.google.com/consent?continue=x", True, id="google-consent-path"),
+        pytest.param("https://www.google.de/consent?continue=x", True, id="cctld-consent-path"),
+        pytest.param("https://www.google.com/travel/flights?tfs=abc", False, id="the-real-page"),
+        pytest.param(
+            "https://consent.google.com.evil.example/", False, id="consent-host-as-a-prefix"
+        ),
+        pytest.param(
+            "https://www.google.com/travel/flights?tfs=Y29uc2VudC5nb29nbGUuY29t",
+            False,
+            id="consent-host-inside-our-own-tfs-parameter",
+        ),
+        pytest.param(
+            "https://evil.example.com/?x=consent.google.com", False, id="another-host-saying-it"
+        ),
+    ],
+)
+def test_consent_is_decided_by_the_url_not_by_a_substring(final_url: str, expected: bool) -> None:
+    """The host is parsed, never matched as text. Our own request URL carries a
+    base64 `tfs=` blob, so any string can turn up inside it."""
+    assert gfid._is_consent_page(final_url=final_url, html="") is expected
+
+
+def test_a_throttle_is_decided_by_the_url_path_not_the_query() -> None:
+    """Same shape of bug one function over: `/sorry/` inside the `tfs=`
+    parameter is our own request, not Google's captcha."""
+    assert gfid._is_page_throttled(
+        final_url="https://www.google.com/sorry/index?continue=x", html=""
+    )
+    assert not gfid._is_page_throttled(
+        final_url="https://www.google.com/travel/flights?tfs=L3NvcnJ5Lw&q=/sorry/", html=""
+    )

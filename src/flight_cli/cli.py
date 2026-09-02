@@ -1475,7 +1475,7 @@ def _run_enriched_path(
         # Matrix failed; the GF table (if any) was already painted.
         e = state.get("matrix_err")
         if e is not None:
-            err.print(f"[red]Matrix returned an error ({e.kind}):[/] {escape(e.message)}")
+            err.print(f"[red]Matrix returned an error ({escape(e.kind)}):[/] {escape(e.message)}")
         if not gf:
             raise typer.Exit(1)
         return
@@ -1670,7 +1670,9 @@ def _run_gflight_multi(
                 f"[yellow]Google Flights {escape(cab.value)}: {escape(_gf_refusal(e).note)}.[/]"
             )
         except Exception as e:  # noqa: BLE001 — fli has no documented exception surface
-            err.print(f"[yellow]Google Flights {cab.value} query failed: {escape(str(e))}[/]")
+            err.print(
+                f"[yellow]Google Flights {escape(cab.value)} query failed: {escape(str(e))}[/]"
+            )
 
     async def go() -> None:
         async with anyio.create_task_group() as tg:

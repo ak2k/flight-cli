@@ -231,6 +231,75 @@ def test_a_matrix_error_carrying_markup_is_printable(monkeypatch: pytest.MonkeyP
         assert fragment in printed, f"{fragment!r} was mangled: {printed!r}"
 
 
+def test_the_enriched_path_escapes_every_field_of_a_matrix_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The enriched path prints the same Matrix error as `_run`, from its own
+    line, and it escaped the message while leaving `kind` bare.
+
+    That is the failure mode a line-level `grep -v escape` cannot see: the line
+    already said `escape`, so it looked done. Every field is asserted here, not
+    just the one that was wrong."""
+    from datetime import date, timedelta
+
+    from flight_cli import cli
+    from flight_cli.client import MatrixApiError
+
+    class _FailingMatrix:
+        """Matrix's client, refusing. Nothing here reaches the network — the
+        real dispatch still runs, on a stubbed client and a stubbed GF call."""
+
+        def __init__(self, **_kw: object) -> None: ...
+
+        async def __aenter__(self) -> _FailingMatrix:
+            return self
+
+        async def __aexit__(self, *_a: object) -> bool:
+            return False
+
+        async def execute(self, _search: object, **_kw: object) -> object:
+            raise MatrixApiError(
+                "QPX Warning. Bad route [/spec]", kind="in[put]", request_id="Or[FG]x"
+            )
+
+    buf = io.StringIO()
+    monkeypatch.setattr(cli, "err", Console(file=buf, width=400, no_color=True, highlight=False))
+    monkeypatch.setattr(cli, "MatrixClient", _FailingMatrix)
+    monkeypatch.setattr(cli, "_gflight_results", lambda *_a, **_kw: [])
+
+    legs = (cli.Leg.of(("JFK",), ("LAX",), date.today() + timedelta(days=45)),)
+    opts = cli._build_options(
+        cabin="economy",
+        adults=1,
+        children=0,
+        seniors=0,
+        youth=0,
+        infants_in_seat=0,
+        infants_in_lap=0,
+        stops=None,
+        allow_airport_changes=True,
+        show_only_available=True,
+    )
+    with pytest.raises(typer.Exit):
+        cli._run_enriched_path(
+            legs=legs,
+            opts=opts,
+            top_n=3,
+            run_pp=False,
+            sel=None,
+            matrix_url=False,
+            google_url=False,
+            pick=None,
+            rps=1.0,
+            impersonate="chrome",
+            no_cache=True,
+        )
+
+    printed = buf.getvalue()
+    for fragment in ("QPX Warning. Bad route [/spec]", "in[put]"):
+        assert fragment in printed, f"{fragment!r} was mangled: {printed!r}"
+
+
 @pytest.mark.parametrize("routing", _HOSTILE_ROUTING)
 def test_hostile_routing_reaches_the_explicit_path_without_backslashes(
     monkeypatch: pytest.MonkeyPatch, routing: str

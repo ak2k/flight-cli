@@ -34,6 +34,7 @@ import random
 import re
 import threading
 import time
+import urllib.parse
 from copy import deepcopy
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -129,9 +130,31 @@ _SORRY_PATH = "/sorry/"
 # `hl=en`; a localised block would still be caught by the `/sorry/` URL check
 # whenever Google redirects, which is the common shape.
 _SORRY_MARKERS = ("Our systems have detected unusual traffic",)
-# Consent interstitial markers. EU/EEA egress lands here; the page has no
-# `ds:1`, so without this it would be indistinguishable from a shape change.
-_CONSENT_MARKERS = ("consent.google.com", "/consent?continue=", "CONSENT_PAGE")
+# Consent interstitial. EU/EEA egress lands here; the page has no `ds:1`, so
+# without a check for it a consent wall is indistinguishable from a shape change.
+#
+# Classified from WHERE the response came from, or from a structural feature of
+# the consent page — never from a bare substring in the body. `consent.google.com`
+# is a domain Google's own pages link to, and the body is two megabytes of
+# untrusted markup, so a substring test says "consent wall" for any shape-changed
+# page that happens to mention it. That sends the user to fix a consent problem
+# they do not have, instead of reporting the layout change we actually saw.
+# One or two trailing labels, each a plausible TLD — `.com`, `.de`, `.co.uk`.
+# NOT an open `[a-z.]+`: that is greedy to the end of the string, so
+# `consent.google.com.evil.example` would read as Google's consent host.
+_TLD = r"[a-z]{2,4}(?:\.[a-z]{2,4})?"
+# Anchored at both ends, so it names a host rather than finding one inside a
+# longer string. The ccTLD arm is not hypothetical: EU egress is redirected to
+# the consent host for the local Google domain, `consent.google.co.uk` among
+# them, and only the `.com` spelling would otherwise be recognised.
+_CONSENT_HOST_RE = re.compile(rf"^consent\.google\.{_TLD}$", re.IGNORECASE)
+_CONSENT_PATH = "/consent"
+_GOOGLE_HOST_RE = re.compile(rf"^(?:[a-z0-9-]+\.)*google\.{_TLD}$", re.IGNORECASE)
+# The interstitial SUBMITS the user's choice to the consent host. A results page
+# can link to that host; only the consent page itself posts a form to it.
+_CONSENT_FORM_RE = re.compile(
+    rf"<form\b[^>]*\baction=[\"']https://consent\.google\.{_TLD}/", re.IGNORECASE
+)
 
 # `AF_initDataCallback({key: 'ds:1', hash: '..', data:[...], sideChannel: {}});`
 # — the search page inlines the flight rows here. Literal regexes because the
@@ -211,17 +234,35 @@ def _is_page_throttled(*, final_url: str, html: str) -> bool:
     Both signals are needed. The interstitial usually arrives as a redirect to
     `/sorry/`, but Google also serves it with HTTP 200 at the requested URL, and
     that variant is only visible in the body. An HTTP 429 never reaches here at
-    all — fli's client raises it (see `_one_call`)."""
-    return _SORRY_PATH in final_url or any(marker in html for marker in _SORRY_MARKERS)
+    all — fli's client raises it (see `_one_call`).
+
+    The URL half reads the PATH, not the whole string: our own request URL
+    carries a base64 `tfs=` parameter, and a substring test over the query
+    string would call a served page a block on the right three bytes. The body
+    half stays a substring because its marker is a whole English sentence, not a
+    token that turns up in ordinary markup."""
+    path = urllib.parse.urlsplit(final_url).path
+    return _SORRY_PATH in path or any(marker in html for marker in _SORRY_MARKERS)
 
 
 def _is_consent_page(*, final_url: str, html: str) -> bool:
     """True when the consent interstitial was served instead of the page.
 
-    Only meaningful once `ds:1` has already come back missing: a real results
-    page links to Google's consent domain in its footer, so these markers on
-    their own don't mean the board is absent."""
-    return any(marker in final_url or marker in html for marker in _CONSENT_MARKERS)
+    Two positive signals, both structural. The response came back FROM the
+    consent host (or a `/consent` path on a Google host), or the body carries a
+    form that submits TO the consent host. A results page links to that domain;
+    it never posts to it.
+
+    Still only meaningful once `ds:1` has come back missing — `_one_call` checks
+    in that order — but it no longer answers "consent wall" for any page that
+    merely mentions the domain."""
+    parsed = urllib.parse.urlsplit(final_url)
+    host = (parsed.hostname or "").lower()
+    if _CONSENT_HOST_RE.match(host):
+        return True
+    if _GOOGLE_HOST_RE.match(host) and parsed.path.startswith(_CONSENT_PATH):
+        return True
+    return _CONSENT_FORM_RE.search(html) is not None
 
 
 # Persisted gflight session cookies. The cold-session empties above are almost
