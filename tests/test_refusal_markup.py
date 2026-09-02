@@ -344,3 +344,37 @@ def test_the_awards_only_refusal_escapes_the_providers_the_user_typed(
     with pytest.raises(typer.Exit):
         cli._should_run_awards(sel)
     assert "[/x]" in buf.getvalue()
+
+
+@pytest.mark.parametrize("fetch", [False, True], ids=["url-only", "resolved"])
+def test_seatmap_prints_a_url_the_user_can_actually_paste(
+    monkeypatch: pytest.MonkeyPatch, fetch: bool
+) -> None:
+    """These two prints pass the URL as a BARE argument, which rich still reads
+    as markup — and a bare string is the dangerous case: rich DROPS a bracketed
+    segment rather than raising, so the user copies a silently wrong URL.
+
+    A URL can carry brackets legitimately (RFC 3986 reserves them for IPv6
+    literals, and query strings in the wild use them unencoded)."""
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    # `[bold]` is the dangerous shape, not `[/x]`: rich RAISES on an unmatched
+    # closing tag but silently DROPS a valid opening one, so this URL comes out
+    # short and wrong rather than loudly broken. `[1A]` would prove nothing —
+    # rich leaves non-tag-shaped brackets alone.
+    bracketed = "https://seatmaps.example/x?f=AA100&opts=[bold]seats"
+
+    def _url(**_kw: object) -> str:
+        return bracketed
+
+    monkeypatch.setattr(cli, "console", Console(width=400, no_color=True, highlight=False))
+    monkeypatch.setattr("flight_cli.seatmap.seatmap_api_url", _url)
+    monkeypatch.setattr("flight_cli.seatmap.fetch_seatmap_url", _url)
+
+    args = ["seatmap", "JFK", "LAX", "AA100", "--date", "2026-10-14"]
+    result = CliRunner().invoke(cli.app, args if fetch else [*args, "--no-fetch"])
+
+    assert result.exit_code == 0, result.output
+    assert "[bold]" in result.output, f"the bracketed segment was eaten: {result.output!r}"
