@@ -8,9 +8,12 @@ captcha interstitial, a consent wall, a re-shaped page — renders as zero rows,
 so the load-bearing behavior under test is that none of them can reach the user
 as "no flights on this route".
 
-Fixtures are a real JFK-LAX capture (2026-09-02) trimmed to three rows with the
-session id scrubbed: the top-level arity and the two row blocks are kept, and
-the ~3.5 MB of UI copy and airport metadata no code reads is dropped.
+Fixtures are real captures (2026-09-02) trimmed to three rows with the session
+id scrubbed — the top-level arity and the row blocks are kept, and the ~3.5 MB
+of UI copy and airport metadata no code reads is dropped. Two page shapes are
+pinned because Google serves both: an initial JFK-LAX search (a row block at
+`[2]` AND `[3]`) and a pinned return leg (`[2] = None`, the whole board at
+`[3]`).
 """
 
 from __future__ import annotations
@@ -250,12 +253,29 @@ def test_sorry_body_at_the_original_url_raises_throttled(client: Any) -> None:
         gfid._one_call(_FILTERS)
 
 
-def test_partially_relocated_row_blocks_raise_page_shape(client: Any) -> None:
-    """Rows leave [2] while [3] still holds a list: zero rows, exactly like an
-    empty board. Requiring BOTH blocks is what tells the two apart."""
-    client(_FakeResponse(text=_page(_ds1("ds1_blocks_partial.json"))))
-    with pytest.raises(GfPageShapeError, match=r"carried 1 of 2 row blocks"):
-        gfid._one_call(_FILTERS)
+def test_a_pinned_return_leg_page_serves_one_block(client: Any) -> None:
+    """A leg pinned through tfs 3.4 legitimately carries `[2] = None` with the
+    whole board at `[3]` — there is no top-flights ranking to show for a board
+    answering an already-chosen outbound. Captured live 2026-09-02 from the
+    HNL-MIA round-trip expansion; requiring both blocks refused it as a shape
+    change and cost the user a real result."""
+    payload = json.loads(_ds1("ds1_return_leg_pinned.json"))
+    assert payload[2] is None, "fixture must keep the served shape"
+    fake = client(_FakeResponse(text=_page(_ds1("ds1_return_leg_pinned.json"))))
+    out = gfid._one_call(_FILTERS)
+    assert len(out) == 3
+    assert all(g.flight_id for g in out)
+    assert len(fake.gets) == 1
+
+
+def test_a_single_empty_block_is_an_authoritative_empty(client: Any) -> None:
+    """The pinned shape with nothing in it: one block, zero rows. An empty
+    block and a missing block are indistinguishable from the rows alone, so
+    this has to be Google's answer rather than a refusal."""
+    payload = json.loads(_ds1("ds1_single_block_empty.json"))
+    assert payload[2] is None and payload[3] == [[]]
+    client(_FakeResponse(text=_page(_ds1("ds1_single_block_empty.json"))))
+    assert gfid._one_call(_FILTERS) == []
 
 
 def test_a_block_that_is_not_a_row_list_does_not_count(client: Any) -> None:
@@ -265,7 +285,7 @@ def test_a_block_that_is_not_a_row_list_does_not_count(client: Any) -> None:
     payload[2] = ["not-a-row-block"]
     payload[3] = ["nor-this"]
     client(_FakeResponse(text=_page(json.dumps(payload))))
-    with pytest.raises(GfPageShapeError, match=r"carried 0 of 2 row blocks"):
+    with pytest.raises(GfPageShapeError, match=r"no row block at \[2\] or \[3\]"):
         gfid._one_call(_FILTERS)
 
 
@@ -273,7 +293,7 @@ def test_relocated_row_blocks_raise_page_shape(client: Any) -> None:
     """A payload that decodes but whose row blocks moved off [2]/[3] yields no
     rows — indistinguishable from an empty board without the block count."""
     client(_FakeResponse(text=_page(_ds1("ds1_blocks_relocated.json"))))
-    with pytest.raises(GfPageShapeError, match=r"carried 0 of 2 row blocks"):
+    with pytest.raises(GfPageShapeError, match=r"no row block at \[2\] or \[3\]"):
         gfid._one_call(_FILTERS)
 
 

@@ -600,14 +600,24 @@ def _persist_cookies(client: Any) -> None:
 
 def _rows_from_ds1(payload: list[Any]) -> tuple[list[Any], int]:
     """The flight rows inlined in a `ds:1` payload (top-flights board first),
-    and how many of the two row blocks were actually shaped like row blocks.
+    and how many of the two indices actually held a row-shaped block.
 
-    The count is the discriminator between "Google says this leg has no
-    flights" and "the payload moved". A genuinely empty board still carries a
-    row block at BOTH indices (`[[]]` at 2 and 3, checked against a live
-    capture), so anything less than both is a layout change — a partial
-    relocation leaves rows empty exactly like an empty board does, and without
-    this count the two are indistinguishable."""
+    How many blocks a SERVED page carries varies by request, measured live
+    2026-09-02:
+
+      - initial one-way / outbound search — `[2]` Google's top-flights board
+        AND `[3]` the rest (JFK-LAX: 3 + 27 rows; HNL-MIA business: 3 + 5)
+      - a leg pinned through tfs field 3.4, i.e. the return-leg fetch of a
+        round-trip expansion — `[2]` is **None** and the whole board is at
+        `[3]` (3 rows). There is no top-flights ranking to show for a board
+        that answers an already-chosen outbound.
+      - a flight-less board — a row block that is present but empty (`[[]]`).
+
+    So the count is NOT a "both indices or the layout moved" test; one block is
+    a perfectly ordinary served page. It only separates "Google gave us a board,
+    possibly empty" from "neither index holds anything row-shaped", which is the
+    single honest shape signal here — an empty block and a missing block are
+    indistinguishable from the rows alone."""
     rows: list[Any] = []
     blocks_seen = 0
     for index in _DS_ROW_BLOCKS:
@@ -616,8 +626,8 @@ def _rows_from_ds1(payload: list[Any]) -> tuple[list[Any], int]:
             continue
         # Counted only here: a list that isn't shaped `[[…rows…], …]` is not a
         # row block, and counting it would let a moved payload pass the guard.
-        # An empty `[[]]` still counts — that is what a genuinely flight-less
-        # board looks like, and it must stay an authoritative empty.
+        # An empty `[[]]` still counts — that is a flight-less board, and it
+        # must stay an authoritative empty rather than a refusal.
         blocks_seen += 1
         rows.extend(cast("list[Any]", block[0]))
     return rows, blocks_seen
@@ -658,11 +668,11 @@ def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
     # (NID) so the next one-shot CLI process starts warm instead of cold.
     _persist_cookies(client)
     rows, blocks_seen = _rows_from_ds1(payload)
-    if blocks_seen < len(_DS_ROW_BLOCKS):
-        raise GfPageShapeError(
-            f"ds:1 carried {blocks_seen} of {len(_DS_ROW_BLOCKS)} row blocks at "
-            "[2]/[3]; the payload layout changed"
-        )
+    if not blocks_seen:
+        # Neither index holds anything row-shaped. Requiring BOTH would be
+        # wrong: a pinned return-leg page legitimately serves `[2] = None` with
+        # the entire board at `[3]` (see `_rows_from_ds1`).
+        raise GfPageShapeError("ds:1 held no row block at [2] or [3]; the payload layout changed")
     if not rows:
         return []  # Google's own answer: this leg has no flights.
     out: list[GFlightWithId] = []

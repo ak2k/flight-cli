@@ -116,18 +116,33 @@ shared so the two sites can't drift): the routing-language `MAXSTOPS 3` through
   catches that and re-raises 429 as a throttle. Anything else re-raises.
 - `GfConsentError` — no `ds:1` *and* consent markers, checked in that order,
   because a real results page links to the consent domain in its footer.
-- `GfPageShapeError` — no readable `ds:1`; or `ds:1` decoded but carried fewer
-  than BOTH row blocks at `[2]`/`[3]`; or rows present and none parsed (with
-  sampled reasons).
+- `GfPageShapeError` — no readable `ds:1`; or `ds:1` decoded but held no
+  row-shaped block at EITHER `[2]` or `[3]`; or rows present and none parsed
+  (with sampled reasons).
 
 A page that decodes with zero rows returns `[]` and is Google's authoritative
 answer, so the search path passes `retry_empty=False` and spends exactly one GET
-on it. The discriminator against a moved payload is that a genuinely empty board
-still carries a row block — a list shaped `[[…]]` — at BOTH indices (`[[]]` at 2
-and 3, checked against a live capture). Anything less than both means the layout
-changed, not that the route has no service. Requiring both is what catches a
-PARTIAL relocation, where rows leave `[2]` and `[3]` still holds a list: that
-yields zero rows, exactly like an empty board.
+on it.
+
+**How many row blocks a served page carries varies, so "both indices" is NOT a
+validity test.** Measured live 2026-09-02:
+
+| page | `ds:1[2]` | `ds:1[3]` |
+|---|---|---|
+| initial one-way / outbound search | top-flights board (JFK-LAX: 3 rows) | the rest (27 rows) |
+| leg pinned via tfs 3.4 (a round-trip's return fetch) | **`None`** | the whole board (3 rows) |
+| flight-less board | `[[]]` | `[[]]` |
+
+A pinned page has no top-flights ranking to show for a board that answers an
+already-chosen outbound, so it simply omits `[2]`. Requiring both blocks refused
+every round-trip return leg as a "page shape change" — a real result turned into
+a refusal, which is the same class of bug as the one this guard exists to catch,
+pointing the other way.
+
+The only honest shape signal is therefore **neither index holding anything
+row-shaped**: an empty block and a missing block are indistinguishable from the
+rows alone, so a single empty block stays an authoritative empty. The 0-of-N
+parse guard below still catches a row layout that moved.
 
 ## Tier model: who honors each constraint
 
