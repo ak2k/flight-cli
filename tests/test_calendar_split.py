@@ -1083,6 +1083,45 @@ def test_parse_errors_survive_markup_in_a_flag(
     assert shown in _flat(capsys.readouterr().err)
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "flag"),
+    [
+        ({"duration": "9" * 4301}, "duration"),
+        ({"start": "2026-10-01" + "x" * 4301}, "date"),
+        ({"cabin": "e" * 4301}, "cabin"),
+        ({"depart_times": "z" * 4301}, "time-of-day"),
+        ({"fmt": "j" * 4301}, "format"),
+    ],
+)
+def test_parse_errors_truncate_an_oversized_value(
+    kwargs: dict[str, Any], flag: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The message names which value was rejected, so it has to stay readable:
+    the parsers take any string a shell can pass, and echoing 4301 characters
+    back buries the point under its own evidence."""
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    _spy_renderers(monkeypatch)
+    with pytest.raises(typer.Exit) as excinfo:
+        _calendar_fast(fast=False, one_way=False, **kwargs)
+    message = _flat(capsys.readouterr().err)
+    assert excinfo.value.exit_code == 2  # still a typed usage error
+    assert flag in message  # and still says which flag
+    assert "…" in message  # cut, and visibly so
+    # Comfortably under the input's 4301 characters, with room for the sentence
+    # around the value.
+    assert len(message) < 200
+
+
+def test_quote_keeps_a_normal_value_whole() -> None:
+    """Truncation is for the pathological case; an ordinary mistyped value is
+    short, and cutting it would hide the typo the message exists to show."""
+    assert cli._quote("5-7") == "'5-7'"  # pyright: ignore[reportPrivateUsage] — the helper IS the unit
+    edge = "9" * 60  # exactly the cap
+    assert cli._quote(edge) == f"'{edge}'"  # pyright: ignore[reportPrivateUsage] — as above
+    over = "9" * 61
+    assert cli._quote(over).endswith("…'")  # pyright: ignore[reportPrivateUsage] — as above
+
+
 def _detail(**overrides: Any) -> None:
     """Drive the `detail` command function directly. Same rule as `_calendar_fast`:
     every typer.Option default has to be passed explicitly."""
@@ -1188,8 +1227,12 @@ _ESCAPE_SCOPE = frozenset(
     }
 )
 
+# The two ways a value is made safe to print: `escape` directly, or `_quote`,
+# which truncates for display and then quotes and escapes. Nothing else counts.
+_SAFE_WRAPPERS = ("escape(", "_quote(")
+
 # Values that are this module's own, never a user string or an exception message:
-# counters it computed and constants it wrote. Anything else must be escaped.
+# counters it computed and constants it wrote. Anything else must be wrapped.
 _UNESCAPED_OK = frozenset(
     {
         "lo",
@@ -1236,11 +1279,12 @@ def test_calendar_paths_escape_every_printed_value() -> None:
     unescaped = [
         f"{name}:{line} {segment}"
         for name, line, segment in fields
-        if not segment.startswith("escape(") and segment not in _UNESCAPED_OK
+        if not segment.startswith(_SAFE_WRAPPERS) and segment not in _UNESCAPED_OK
     ]
     assert not unescaped, (
-        "wrap these in rich.markup.escape, or add them to _UNESCAPED_OK if the "
-        f"value is this module's own: {unescaped}"
+        "wrap these in _quote (a user value) or rich.markup.escape (anything "
+        "else), or add them to _UNESCAPED_OK if the value is this module's "
+        f"own: {unescaped}"
     )
 
 

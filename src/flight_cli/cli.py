@@ -116,11 +116,29 @@ def main(
 # ─────────────────────────── argument parsers ──────────────────────────────
 
 
+_MAX_ECHOED_VALUE = 60  # characters of a rejected value worth showing back
+
+
+def _quote(value: str) -> str:
+    """A rejected user value, ready to interpolate into a markup console message.
+
+    The message exists to show WHICH value was rejected, so an oversized one is
+    cut: a 4301-digit `--duration` echoed whole buries its own point, and the
+    parsers accept any string a shell can pass.
+
+    Two orderings matter. Truncate before `repr`, so the cap counts characters the
+    user typed rather than the quotes and escapes `repr` adds. `repr` before
+    `escape`, because `repr` doubles the backslash `escape` prepends and hands the
+    tag straight back to the markup parser."""
+    shown = value if len(value) <= _MAX_ECHOED_VALUE else value[:_MAX_ECHOED_VALUE] + "…"
+    return escape(repr(shown))
+
+
 def _parse_date(s: str) -> date:
     try:
         return datetime.strptime(s, "%Y-%m-%d").date()
     except ValueError as e:
-        err.print(f"[red]bad date {escape(repr(s))}; use YYYY-MM-DD[/]")
+        err.print(f"[red]bad date {_quote(s)}; use YYYY-MM-DD[/]")
         raise typer.Exit(2) from e
 
 
@@ -164,17 +182,15 @@ def _parse_duration(s: str) -> tuple[int, int]:
     Split on the separator rather than parsed bound-first, so an empty bound is
     caught while it is still visible: `5-- 7` is a malformed range, and reading it
     as a max of -7 would answer a typo with a number the user never wrote."""
-    # `escape(repr(...))`, in that order, at both exits below: `repr` doubles the
-    # backslash `escape` prepends, so escaping first hands the tag right back.
     parts = _normalize_duration(s).split("-")
     if len(parts) == 1:
         parts *= 2  # a bare '5' is the degenerate range 5-5
     if len(parts) != _DURATION_BOUNDS or not all(_RE_DURATION_BOUND.match(p) for p in parts):
-        err.print(f"[red]bad duration {escape(repr(s))}; use nights as '5' or '5-7'[/]")
+        err.print(f"[red]bad duration {_quote(s)}; use nights as '5' or '5-7'[/]")
         raise typer.Exit(2)
     lo, hi = int(parts[0]), int(parts[1])
     if hi < lo:
-        err.print(f"[red]bad duration {escape(repr(s))}: max ({hi}) is below min ({lo})[/]")
+        err.print(f"[red]bad duration {_quote(s)}: max ({hi}) is below min ({lo})[/]")
         raise typer.Exit(2)
     return lo, hi
 
@@ -223,7 +239,7 @@ def _parse_times(s: str | None) -> tuple[TimeOfDay, ...]:
         key = raw.strip().lower().replace("-", "_")
         if key not in aliases:
             err.print(
-                f"[red]bad time-of-day {escape(repr(raw))}; choose: "
+                f"[red]bad time-of-day {_quote(raw)}; choose: "
                 f"early,morning,midday,afternoon,evening,night[/]"
             )
             raise typer.Exit(2)
@@ -248,9 +264,7 @@ def _resolve_cabin(name: str) -> Cabin:
     }
     if norm in aliases:
         return aliases[norm]
-    err.print(
-        f"[red]Unknown cabin {escape(repr(name))}; choose: economy, premium, business, first[/]"
-    )
+    err.print(f"[red]Unknown cabin {_quote(name)}; choose: economy, premium, business, first[/]")
     raise typer.Exit(2)
 
 
@@ -2240,13 +2254,11 @@ def _resolve_format(*, fmt: str, json_flag: bool) -> str:
     if json_flag:
         err.print("[yellow]--json is deprecated; use --format json.[/]")
         if fmt not in ("table", "json"):
-            err.print(f"[red]--json conflicts with --format {escape(repr(fmt))}; pick one.[/]")
+            err.print(f"[red]--json conflicts with --format {_quote(fmt)}; pick one.[/]")
             raise typer.Exit(2)
         return "json"
     if fmt not in _VALID_FORMATS:
-        err.print(
-            f"[red]--format must be one of {'/'.join(_VALID_FORMATS)}; got {escape(repr(fmt))}[/]"
-        )
+        err.print(f"[red]--format must be one of {'/'.join(_VALID_FORMATS)}; got {_quote(fmt)}[/]")
         raise typer.Exit(2)
     return fmt
 

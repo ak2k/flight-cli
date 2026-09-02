@@ -168,9 +168,13 @@ exception message is wrapped in `rich.markup.escape`** — the blocker, the
 date-grid failure text, every argument parser's own message, and Matrix's
 `kind` / `message` / `request_id`, which echo the routing string back verbatim
 ("Illegal COMMAND-LINE prefix: BA[/weird]AA") on the path with no refusal to
-catch it first. Where the message also quotes, `repr` runs BEFORE `escape`:
-reversed, `repr` doubles the backslash `escape` prepends and hands the tag
-straight back to the parser. `tests/test_calendar_split.py` greps for the rule,
+catch it first. The argument parsers go through one `_quote` helper,
+which truncates a value past 60 characters before quoting it — the message exists
+to show WHICH value was rejected, and a 4301-digit `--duration` echoed whole
+buries that under its own evidence. Two orderings inside it: truncate before
+`repr`, so the cap counts what the user typed rather than the quotes `repr` adds;
+and `repr` BEFORE `escape`, because `repr` doubles the backslash `escape`
+prepends and hands the tag straight back to the parser. `tests/test_calendar_split.py` greps for the rule,
 so a new unescaped interpolation in these functions fails the suite.
 
 The grid paint in the weave and
