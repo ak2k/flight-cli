@@ -1096,6 +1096,10 @@ def test_parse_errors_survive_markup_in_a_flag(
         ({"cabin": "e" * 4301}, "cabin"),
         ({"depart_times": "z" * 4301}, "time-of-day"),
         ({"fmt": "j" * 4301}, "format"),
+        # `repr` doubles every backslash, so this value's MESSAGE is twice the
+        # length of the others' while the value shown is the same size. A bound on
+        # the message would pass or fail on the fill rather than on the cap.
+        ({"cabin": "\\" * 4301}, "cabin"),
     ],
 )
 def test_parse_errors_truncate_an_oversized_value(
@@ -1112,19 +1116,28 @@ def test_parse_errors_truncate_an_oversized_value(
     assert excinfo.value.exit_code == 2  # still a typed usage error
     assert flag in message  # and still says which flag
     assert "…" in message  # cut, and visibly so
-    # Comfortably under the input's 4301 characters, with room for the sentence
-    # around the value.
-    assert len(message) < 200
+    # What the cap actually governs: the value the user typed, measured where the
+    # cap applies — before `repr`, which is where one code point stops being one
+    # character. Plus one for the ellipsis.
+    value = next(iter(kwargs.values()))
+    shown = cli._elide(value)  # pyright: ignore[reportPrivateUsage] — the cap IS the unit
+    assert len(shown) <= cli._MAX_ECHOED_VALUE + 1  # pyright: ignore[reportPrivateUsage] — as above
 
 
 def test_quote_keeps_a_normal_value_whole() -> None:
     """Truncation is for the pathological case; an ordinary mistyped value is
     short, and cutting it would hide the typo the message exists to show."""
-    assert cli._quote("5-7") == "'5-7'"  # pyright: ignore[reportPrivateUsage] — the helper IS the unit
-    edge = "9" * 60  # exactly the cap
-    assert cli._quote(edge) == f"'{edge}'"  # pyright: ignore[reportPrivateUsage] — as above
-    over = "9" * 61
-    assert cli._quote(over).endswith("…'")  # pyright: ignore[reportPrivateUsage] — as above
+    quote = cli._quote  # pyright: ignore[reportPrivateUsage] — the helper IS the unit
+    elide = cli._elide  # pyright: ignore[reportPrivateUsage] — as above
+    cap = cli._MAX_ECHOED_VALUE  # pyright: ignore[reportPrivateUsage] — as above
+    assert quote("5-7") == "'5-7'"
+    assert elide("9" * cap) == "9" * cap  # exactly the cap is not cut
+    assert elide("9" * (cap + 1)) == "9" * cap + "…"  # one over is
+    assert quote("9" * (cap + 1)).endswith("…'")
+    # A backslash costs one code point going in and two coming out of `repr`, so
+    # the cap has to be applied to the value, not to what is printed.
+    assert len(elide("\\" * (cap + 1))) == cap + 1
+    assert len(quote("\\" * (cap + 1))) > 2 * cap
 
 
 def _detail(**overrides: Any) -> None:
@@ -1221,8 +1234,19 @@ def test_detail_round_trip_bad_duration_is_a_typed_error(
 # Paths another unit owns. Each entry is a promise that the value is not ours to
 # escape, not that it is safe.
 _ESCAPE_OUT_OF_SCOPE = {
-    "_emit_urls": "URL emitter shared with the search path",
-    "_pinned_solution_index": "search-path pick helper",
+    # These four ARE escaped — on the u1a branch, which is editing them now. A
+    # second escape here would conflict at merge, so they are excluded until the
+    # consolidation unit enrols them.
+    "_emit_urls": "escaped on the u1a branch; enrolled by the docs/consolidation unit after merge",
+    "_pinned_solution_index": (
+        "escaped on the u1a branch; enrolled by the docs/consolidation unit after merge"
+    ),
+    "_try_pinned_matrix_url": (
+        "escaped on the u1a branch; enrolled by the docs/consolidation unit after merge"
+    ),
+    "_try_pinned_gflight_url": (
+        "escaped on the u1a branch; enrolled by the docs/consolidation unit after merge"
+    ),
     "_render_search": "search renderable (Rich Table)",
     "_render_calendar": "calendar renderable (Rich Table)",
     "_render_date_grid": "date-grid renderable (Rich Table)",
@@ -1247,18 +1271,21 @@ _SAFE_WRAPPERS = frozenset({"escape", "_quote"})
 
 # Names that are this module's own — counters it computed, constants it wrote —
 # and so are never user text. Matched by IDENTIFIER, never by source text: an
-# expression that happens to read the same way is not the same value.
+# expression that happens to read the same way is not the same value. Keyed per
+# FUNCTION for the same reason one step further: `n` is a fan-out counter in
+# `_run_calendar` and could be anything anywhere else, and a bare name is exactly
+# what a user value looks like once it is in a local.
 _PRINTABLE_IDENTIFIERS = frozenset(
     {
-        "lo",  # _parse_duration: the ints it just parsed
-        "hi",
-        "n",  # _run_calendar: fan-out counters
-        "rounds",
-        "conc",
-        "n_split",  # calendar: how many sub-searches were merged
-        "_GF_GRID_UNAVAILABLE_NOTE",
-        "_GF_GRID_UNAVAILABLE_WEAVE_NOTE",
-        "_FORMAT_CHOICES",
+        ("_parse_duration", "lo"),  # the ints it just parsed
+        ("_parse_duration", "hi"),
+        ("_run_calendar", "n"),  # fan-out counters
+        ("_run_calendar", "rounds"),
+        ("_run_calendar", "conc"),
+        ("calendar", "n_split"),  # how many sub-searches were merged
+        ("calendar", "_GF_GRID_UNAVAILABLE_NOTE"),
+        ("_run_calendar_enriched", "_GF_GRID_UNAVAILABLE_WEAVE_NOTE"),
+        ("_resolve_format", "_FORMAT_CHOICES"),
     }
 )
 
@@ -1299,14 +1326,31 @@ def _enclosing_functions(tree: ast.Module) -> dict[ast.AST, list[str]]:
     return chains
 
 
-def _is_safe_field(value: ast.expr) -> bool:
-    """A printed f-string field is safe when it is wrapped, or is one of ours."""
-    if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
-        return value.func.id in _SAFE_WRAPPERS
-    return isinstance(value, ast.Name) and value.id in _PRINTABLE_IDENTIFIERS
+def _is_ours(name: ast.expr, chain: list[str]) -> bool:
+    """Whether this bare name is one of the module's own values, here.
+
+    The chain, not just the innermost function, because a print can sit in a
+    closure — and two closures in this module are both called `_go`.
+    """
+    if not isinstance(name, ast.Name):
+        return False
+    return any((fn, name.id) in _PRINTABLE_IDENTIFIERS for fn in chain)
 
 
-def _argument_faults(src: str, arg: ast.expr) -> list[str]:
+def _is_safe_field(value: ast.expr, chain: list[str]) -> bool:
+    """A printed f-string field is safe when it is wrapped, or is one of ours.
+
+    Judged on the AST shape — an `ast.Call` whose `func` is an `ast.Name` in
+    `_SAFE_WRAPPERS` — never on the source text. `escape` and `not_escape` share
+    a prefix, and `obj.escape(x)` is an attribute call on something else
+    entirely; both read as safe to a string comparison.
+    """
+    if isinstance(value, ast.Call):
+        return isinstance(value.func, ast.Name) and value.func.id in _SAFE_WRAPPERS
+    return _is_ours(value, chain)
+
+
+def _argument_faults(src: str, arg: ast.expr, chain: list[str]) -> list[str]:
     """Why this print argument could reach rich unescaped, or nothing."""
     if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
         return []  # a literal the author wrote
@@ -1315,12 +1359,12 @@ def _argument_faults(src: str, arg: ast.expr) -> list[str]:
         for part in arg.values:
             if isinstance(part, ast.Constant):
                 continue
-            if isinstance(part, ast.FormattedValue) and _is_safe_field(part.value):
+            if isinstance(part, ast.FormattedValue) and _is_safe_field(part.value, chain):
                 continue
             shown = ast.get_source_segment(src, part) or ast.dump(part)
             faults.append(f"unwrapped f-string field {shown}")
         return faults
-    if isinstance(arg, ast.Name) and arg.id in _PRINTABLE_IDENTIFIERS:
+    if _is_ours(arg, chain):
         return []
     shown = ast.get_source_segment(src, arg) or ast.dump(arg)
     return [f"{type(arg).__name__} argument {shown}"]
@@ -1353,7 +1397,9 @@ def escape_scan(src: str) -> list[str]:
         args = list(node.args)
         args += [k.value for k in node.keywords if k.arg not in _NON_CONTENT_KEYWORDS]
         for arg in args:
-            faults += [f"{where}:{node.lineno} {fault}" for fault in _argument_faults(src, arg)]
+            faults += [
+                f"{where}:{node.lineno} {fault}" for fault in _argument_faults(src, arg, chain)
+            ]
     return faults
 
 
@@ -1377,6 +1423,8 @@ def test_out_of_scope_names_real_functions() -> None:
         if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     assert defined >= set(_ESCAPE_OUT_OF_SCOPE), set(_ESCAPE_OUT_OF_SCOPE) - defined
+    allowed = {fn for fn, _ in _PRINTABLE_IDENTIFIERS}
+    assert defined >= allowed, allowed - defined
 
 
 def test_escape_scan_finds_every_known_bypass() -> None:
@@ -1393,6 +1441,13 @@ def test_escape_scan_finds_every_known_bypass() -> None:
         "builtin print": 'def calendar():\n    print(f"{e}")\n',
         "partly wrapped": 'def calendar():\n    err.print(f"{escape(a)} {b}")\n',
         "lookalike wrapper": 'def calendar():\n    err.print(f"{not_escape(e)}")\n',
+        "attribute call that ends in escape": (
+            'def calendar():\n    err.print(f"{shell.escape(e)}")\n'
+        ),
+        # An allowlisted name earns its pass in ONE function. `n` is a fan-out
+        # counter in `_run_calendar`; anywhere else it is just a local, and a
+        # local is what a user value looks like once it has been assigned.
+        "allowlisted name in the wrong function": 'def detail():\n    err.print(f"{n}")\n',
     }
     missed = [name for name, source in bypasses.items() if not escape_scan(source)]
     assert not missed, f"the scan does not catch: {missed}"
@@ -1403,10 +1458,15 @@ def test_escape_scan_passes_clean_source() -> None:
     clean = (
         "def calendar():\n"
         '    err.print("[red]a plain literal[/]")\n'
-        '    err.print(f"[red]bad duration {_quote(s)}[/]")\n'
         '    err.print(f"[red]error ({escape(str(e.kind))})[/]")\n'
-        '    err.print(f"[dim]{_GF_GRID_UNAVAILABLE_NOTE}[/]")\n'
-        '    err.print(f"max ({hi}) is below min ({lo})", style="red")\n'
+        '    err.print(f"[dim]{_GF_GRID_UNAVAILABLE_NOTE}[/]")\n'  # allowed HERE
+        "def _parse_duration():\n"
+        '    err.print(f"[red]bad duration {_quote(s)}[/]")\n'
+        '    err.print(f"max ({hi}) is below min ({lo})", style="red")\n'  # allowed HERE
+        "def _run_calendar_enriched():\n"
+        "    async def _go():\n"
+        # Allowed through the enclosing function, not the closure it sits in.
+        '        console.print(f"[dim]{_GF_GRID_UNAVAILABLE_WEAVE_NOTE}[/]")\n'
         "def _render_search():\n"
         "    console.print(t)\n"  # out of scope: a Rich renderable
     )

@@ -119,6 +119,18 @@ def main(
 _MAX_ECHOED_VALUE = 60  # characters of a rejected value worth showing back
 
 
+def _elide(value: str) -> str:
+    """A value cut to `_MAX_ECHOED_VALUE` code points, with an ellipsis if cut.
+
+    Separate from `_quote` because the cap governs the value the user typed, not
+    the message around it: `repr` can double the length of a backslash-heavy
+    string, so a bound on the finished message would say nothing about the input
+    it is supposed to limit."""
+    if len(value) <= _MAX_ECHOED_VALUE:
+        return value
+    return value[:_MAX_ECHOED_VALUE] + "…"
+
+
 def _quote(value: str) -> str:
     """A rejected user value, ready to interpolate into a markup console message.
 
@@ -126,12 +138,11 @@ def _quote(value: str) -> str:
     cut: a 4301-digit `--duration` echoed whole buries its own point, and the
     parsers accept any string a shell can pass.
 
-    Two orderings matter. Truncate before `repr`, so the cap counts characters the
+    Two orderings matter. `_elide` before `repr`, so the cap counts characters the
     user typed rather than the quotes and escapes `repr` adds. `repr` before
     `escape`, because `repr` doubles the backslash `escape` prepends and hands the
     tag straight back to the markup parser."""
-    shown = value if len(value) <= _MAX_ECHOED_VALUE else value[:_MAX_ECHOED_VALUE] + "…"
-    return escape(repr(shown))
+    return escape(repr(_elide(value)))
 
 
 def _parse_date(s: str) -> date:
@@ -150,7 +161,7 @@ def _parse_date(s: str) -> date:
 # Nine digits is past any trip anyone will take and inside every limit involved.
 # `\Z` not `$`, which admits one trailing newline — `--duration '5-7\n'` then
 # reads as the default range.
-_RE_DURATION_BOUND = re.compile(r"[+-]?\d{1,9}\Z")
+_RE_DURATION_BOUND = re.compile(r"\A[+-]?\d{1,9}\Z")
 
 
 def _canonical_bound(part: str) -> str:

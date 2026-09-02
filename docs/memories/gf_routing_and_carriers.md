@@ -162,20 +162,36 @@ Those reason strings quote the user's `--routing` / `--extension` text verbatim,
 and `err` is a markup-enabled console: `--routing 'BA[/weird]AA'` raised
 `MarkupError` where it should have refused, and a `[bold]` form ate the token the
 reader needed to see. `routing_predicates` has no console to escape for, so the
-escape belongs at the render sites. The rule for the calendar and detail paths:
-**anything that reaches `err.print` or `console.print` from user input or an
-exception message is wrapped in `rich.markup.escape`** — the blocker, the
-date-grid failure text, every argument parser's own message, and Matrix's
-`kind` / `message` / `request_id`, which echo the routing string back verbatim
-("Illegal COMMAND-LINE prefix: BA[/weird]AA") on the path with no refusal to
-catch it first. The argument parsers go through one `_quote` helper,
-which truncates a value past 60 characters before quoting it — the message exists
-to show WHICH value was rejected, and a 4301-digit `--duration` echoed whole
-buries that under its own evidence. Two orderings inside it: truncate before
-`repr`, so the cap counts what the user typed rather than the quotes `repr` adds;
-and `repr` BEFORE `escape`, because `repr` doubles the backslash `escape`
-prepends and hands the tag straight back to the parser. `tests/test_calendar_split.py` greps for the rule,
-so a new unescaped interpolation in these functions fails the suite.
+escape belongs at the render sites. The rule, **for the functions
+`tests/test_calendar_split.py::escape_scan` covers**: anything reaching
+`err.print` or `console.print` from user input or an exception message is wrapped
+in `rich.markup.escape` — the blocker, the date-grid failure text, every argument
+parser's own message, and Matrix's `kind` / `message` / `request_id`, which echo
+the routing string back verbatim ("Illegal COMMAND-LINE prefix: BA[/weird]AA") on
+the path with no refusal to catch it first.
+
+Not yet everywhere. `_emit_urls`, the pinned-URL helpers, and the search,
+multi-cabin and seatmap paths are escaped on the **search branch**, not this one,
+so this branch excludes them from the scan by name rather than escaping them
+twice and conflicting at merge. The consolidation unit enrols them afterwards,
+and `_ESCAPE_OUT_OF_SCOPE` is the list of what is left.
+
+The scan reads the source, so a new print in a covered function fails the suite.
+Its polarity is inverted — everything is scanned unless excluded by name — because
+an opt-in list goes stale the moment a print moves into a new helper. It judges
+each argument by AST shape, never by source text: a string comparison reads
+`not_escape(x)` and `shell.escape(x)` as safe. Its allowlist of the module's own
+values is keyed per FUNCTION, since `n` is a fan-out counter in one place and
+could be anything in another.
+
+The argument parsers go through one `_quote` helper: `_elide` cuts a value past 60
+characters, then `repr`, then `escape`. The message exists to show WHICH value was
+rejected, and a 4301-digit `--duration` echoed whole buries that under its own
+evidence. Both orderings are load-bearing. `_elide` before `repr`, so the cap
+counts what the user typed — a backslash costs one code point going in and two
+coming out of `repr`, so a bound on the finished message would measure the fill
+rather than the cap. And `repr` before `escape`, because `repr` doubles the
+backslash `escape` prepends and hands the tag straight back to the parser.
 
 The grid paint in the weave and
 `_render_date_grid` are runtime-dead until the gate flips;

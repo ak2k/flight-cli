@@ -84,6 +84,14 @@ takes the default range, which nothing downstream reads. Round-trip does read it
 so a reversed or unparseable range there is a typed usage error: exit 2 and one
 line, never a traceback.
 
+Whether a one-way value counts as "the default" is a textual comparison, over the
+spellings `_normalize_duration` folds together: `..` for `-`, blanks around either
+bound, and the zero-padded or signed writings of a number. A bound is only
+canonicalized if it is one to nine digits — the width `int()` will take without
+refusing — so `0000000005-0000000007` is ten digits a side, stays as typed, and
+draws the "ignored" line. True, and only cosmetic: a one-way ignores the value
+either way, and the same spelling on a round trip is a typed exit 2.
+
 ## Why bother with followup vs. just calling `name: "specificDatesSlice"`?
 
 Both work; both return the same shape. The SPA uses `calendarFollowup`
