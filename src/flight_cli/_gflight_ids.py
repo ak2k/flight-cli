@@ -586,11 +586,18 @@ def search_page_url(filters: FlightSearchFilters) -> str:
 def _fetch_page(filters: FlightSearchFilters) -> tuple[str, str, int]:
     """One GET of the public search page: `(html, final_url, status_code)`.
 
-    Deliberately says nothing about what came back — no `raise_for_status`, no
-    classification. A block arrives as an ordinary HTTP response (a 429, or a
-    302 to `/sorry/`), and deciding what that means is `_rows_from_page_html`'s
-    job so that rung 2, which fetches the same page through Chrome, reaches the
-    same verdicts from the same evidence."""
+    Deliberately classifies nothing. Deciding what came back is
+    `_rows_from_page_html`'s job, so that rung 2 — which fetches the same page
+    through Chrome — reaches the same verdicts from the same evidence.
+
+    Do not read the returned `status_code` as "whatever Google answered". fli's
+    own `Client.get` calls `raise_for_status()` inside a three-attempt tenacity
+    retry, so on this rung a 4xx/5xx never arrives as a response: it arrives as
+    `fli.search.exceptions.SearchHTTPError`, and a throttling 429 costs three
+    GETs and two exponential waits before it does. Verified against fli 0.9.0
+    with a stubbed session. So `status_code` here is ~always 200, and the
+    non-2xx branch downstream is reachable from the browser rung, whose
+    navigation reports a status without raising."""
     client = get_client()
     _seed_cookies_once(client)
     resp = client.get(search_page_url(filters), impersonate="chrome", allow_redirects=True)
@@ -613,6 +620,9 @@ def _rows_from_page_html(html: str, *, final_url: str, status_code: int) -> list
     if _is_page_throttled(status_code=status_code, final_url=final_url):
         raise GfThrottledError("Google Flights rate-limited the request")
     if status_code >= HTTPStatus.BAD_REQUEST:
+        # Reachable from the browser rung, which reports a status instead of
+        # raising on one. On the curl_cffi rung fli's client has already turned
+        # any non-2xx into a `SearchHTTPError` — see `_fetch_page`.
         raise GfPageShapeError(f"Google Flights' search page returned HTTP {status_code}")
     payload = _extract_ds1(html)
     if payload is None:

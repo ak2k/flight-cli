@@ -170,9 +170,14 @@ class _FakeHttpResponse:
 def test_fetch_page_returns_the_response_without_judging_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`_fetch_page` is the GET and nothing else. A 500 is data it hands back,
-    not an exception it raises — otherwise curl_cffi's own error type would be
-    the user-visible outcome on one rung and a typed refusal on the other."""
+    """`_fetch_page` is the GET and nothing else: a 500 is data it hands back,
+    not an exception it raises.
+
+    This pins the contract, NOT the live rung-1 path — the fake client stands
+    in for fli's, whose own `Client.get` calls `raise_for_status()` inside a
+    three-attempt retry and so turns a non-2xx into `SearchHTTPError` before
+    `_fetch_page` ever sees it. What the contract buys is rung 2, where a
+    navigation really does report a status without raising."""
 
     class _Client:
         def get(self, url: str, **_kw: object) -> _FakeHttpResponse:
