@@ -125,6 +125,43 @@ A page that decodes with zero rows returns `[]` and is Google's authoritative
 answer, so the search path passes `retry_empty=False` and spends exactly one GET
 on it.
 
+**A page may carry more than one `ds:1` blob**, and this one hydrates in stages,
+so `_extract_ds1` decodes them ALL and picks the first that structurally holds a
+row block at `[2]`/`[3]` — falling back to the first decodable blob when none
+does, so a genuinely flight-less page stays flight-less. Taking the first
+decodable blob was a bet on position: a placeholder emitted above the populated
+one read as an authoritative empty (or tripped the arity guard) while the real
+board sat further down the document, unexamined.
+
+### Request budget
+
+Every one of these is a multi-megabyte page GET, so the count is the cost:
+
+| query | GETs |
+|---|---|
+| one-way | 1 |
+| round trip | 1 + min(top_n, rows on the board, `_PINNED_FANOUT_CAP` = 10) |
+| multi-cabin | the above, times the cabin count |
+| a persistently throttled leg | `_THROTTLE_RETRY_ATTEMPTS` + 1 = 5, then it aborts |
+
+Two things make those numbers hold. `_fetch_page` goes through fli's SESSION,
+not `Client.get` — which is wrapped in `@retry(stop_after_attempt(3))`, so a
+throttled leg used to cost up to 15 GETs as fli's ladder ran inside each of
+ours. `retry_throttled` is the only ladder now. And the round-trip pin is capped
+at 10 regardless of `top_n`: the multi-cabin path bumps `top_n` 5x (to 100) to
+widen the pool it filters, which was free on the old RPC and would otherwise
+mean ~2 x 31 page fetches for a two-cabin round trip. The default `-n 10` is
+unchanged by the cap.
+
+A throttle aborts the whole search after ONE ladder: `search_with_ids` does not
+catch `GfThrottledError` in its pinning loop, so the remaining pins are never
+fetched. That is deliberate — the throttle is per-IP, so the next leg would hit
+the same wall.
+
+The cost of owning the ladder: fli's `Client.get` also retried transport errors
+three times, and nothing does now. A connection reset fails the leg instead of
+being retried. The enriched path still answers from Matrix.
+
 **Where a served page puts its rows varies, so no count of blocks is a validity
 test.** Six live pages, measured 2026-09-02:
 
@@ -201,11 +238,16 @@ already serve completely. So a partial relocation now under-returns **with a
 `log.warning` naming the indices** rather than refusing: the user keeps their
 results, and the next maintainer has the indices to re-derive from.
 
-The refusal predicate is `misplaced and not rows and not blocks_seen` — rows
-somewhere else AND no block at all where we read. A block that was there and
-held nothing is how Google answers a flight-less search, so refusing on the row
-count alone would turn that into a shape change whenever one metadata block
-happened to parse.
+The refusal predicate is `misplaced and not rows` — rows found somewhere else
+and none served from where we read. An earlier revision also required
+`not blocks_seen`, on the theory that an empty block at `[2]`/`[3]` is how
+Google answers a flight-less search. It is not: the MEASURED flight-less shape
+is `None` at both indices, and an empty husk `[[]]` has never been seen on a
+live page. A husk plus flight rows sitting elsewhere is far likelier a
+relocation than a coincidence, and the two outcomes are not symmetric —
+refusing degrades to Matrix, while reading it as an empty tells the user the
+route has no flights. A zero-row board with nothing misplaced is still an
+authoritative empty.
 
 ## Tier model: who honors each constraint
 

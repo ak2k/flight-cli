@@ -36,6 +36,7 @@ whole board at `[3]`).
 from __future__ import annotations
 
 import copy
+import datetime
 import json
 import logging
 import pathlib
@@ -43,10 +44,14 @@ import threading
 from typing import Any, ClassVar, cast
 
 import pytest
-from fli.search.exceptions import SearchHTTPError
 
 from flight_cli import _gflight_ids as gfid
-from flight_cli._gf_errors import GfConsentError, GfPageShapeError, GfThrottledError
+from flight_cli._gf_errors import (
+    GfBackendError,
+    GfConsentError,
+    GfPageShapeError,
+    GfThrottledError,
+)
 
 FIXTURE_DIR = pathlib.Path(__file__).parent / "fixtures" / "gflight_page"
 _FILTERS = cast("Any", None)  # a patched client never encodes the filter
@@ -91,26 +96,62 @@ class _NullCookies:
 
 
 class _FakeResponse:
-    """The shape fli's client hands back — it has already called
-    `raise_for_status()`, so a response reaching us is always 2xx."""
+    """What curl_cffi's session hands back: a status we classify ourselves.
 
-    def __init__(self, *, text: str, url: str = "") -> None:
+    `_one_call` no longer goes through fli's `Client.get`, so nothing has
+    called `raise_for_status()` and a 429 arrives as a RESPONSE."""
+
+    def __init__(self, *, text: str, url: str = "", status_code: int = 200) -> None:
         self.text = text
         self.url = url or "https://www.google.com/travel/flights?tfs=abc"
+        self.status_code = status_code
 
 
-class _FakeClient:
-    """Counts GETs so a test can assert the request budget, not just the value."""
+class _FakeRateLimiter:
+    """fli's shared token bucket. Counted so a test can prove we still take a
+    token per request after leaving `Client.get` behind."""
 
-    def __init__(self, response: _FakeResponse | Exception) -> None:
-        self.response = response
-        self.gets: list[str] = []
+    def __init__(self) -> None:
+        self.acquisitions = 0
+
+    def acquire(self, *_a: object, **_kw: object) -> bool:
+        self.acquisitions += 1
+        return True
+
+
+class _FakeSession:
+    """The curl_cffi session, which is where the GET now goes.
+
+    Faking `Client.get` instead would skip the code under test: the whole point
+    of the change is that `Client.get`'s own retry ladder is no longer in the
+    path, so a fake sitting there could not observe the request budget."""
+
+    def __init__(self, responses: list[_FakeResponse | Exception], gets: list[str]) -> None:
+        self._responses = responses
+        self.gets = gets
+        self.cookies = _NullCookies()
 
     def get(self, url: str, **_kw: object) -> _FakeResponse:
         self.gets.append(url)
-        if isinstance(self.response, Exception):
-            raise self.response
-        return self.response
+        # The last entry repeats, so "429 forever" is one element.
+        response = self._responses[min(len(self.gets) - 1, len(self._responses) - 1)]
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+class _FakeClient:
+    """fli's `Client` at the surface `_one_call` actually touches: the shared
+    rate limiter and the per-thread session. Counts GETs so a test can assert
+    the request budget, not just the value."""
+
+    def __init__(self, responses: list[_FakeResponse | Exception]) -> None:
+        self.gets: list[str] = []
+        self._rate_limiter = _FakeRateLimiter()
+        self._sessions = _FakeSession(responses, self.gets)
+
+    def _session(self) -> _FakeSession:
+        return self._sessions
 
 
 def _reset_cookie_latches(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
@@ -138,8 +179,10 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> Any:
 
     monkeypatch.setattr(gfid.time, "sleep", _no_sleep)
 
-    def install(response: _FakeResponse | Exception) -> _FakeClient:
-        fake = _FakeClient(response)
+    def install(*responses: _FakeResponse | Exception) -> _FakeClient:
+        """One response, or a sequence; the last one repeats for every GET
+        after it, so a persistent condition is a single argument."""
+        fake = _FakeClient(list(responses))
         monkeypatch.setattr(gfid, "get_client", lambda: fake)
         return fake
 
@@ -165,6 +208,42 @@ def test_extract_ds1_returns_none_when_the_key_is_absent() -> None:
 
 def test_extract_ds1_returns_none_on_undecodable_data() -> None:
     assert gfid._extract_ds1(_page("[[,]]")) is None
+
+
+def test_a_placeholder_blob_before_the_real_one_does_not_win(client: Any) -> None:
+    """Google hydrates this page in stages, so a `ds:1` can be emitted empty and
+    filled later in the document. Taking the FIRST decodable blob was a bet on
+    position: the placeholder decodes fine, so the real board below it was never
+    looked at and the leg read as an authoritative empty."""
+    placeholder = json.dumps([0, 0, None, None] + [None] * 28)
+    html = _page(placeholder) + _page(_ds1("ds1_jfk_lax_3rows.json"))
+    payload = gfid._extract_ds1(html)
+    assert payload is not None
+    assert len(gfid._rows_from_ds1(payload).rows) == 3
+    fake = client(_FakeResponse(text=html))
+    assert len(gfid._one_call(_FILTERS)) == 3
+    assert len(fake.gets) == 1
+
+
+def test_a_truncated_placeholder_before_the_real_one_does_not_win(client: Any) -> None:
+    """Same shape, but the placeholder is short enough to trip the arity guard —
+    which would have refused the whole page as a truncated payload while the
+    real board sat further down."""
+    html = _page("[]") + _page(_ds1("ds1_jfk_lax_3rows.json"))
+    client(_FakeResponse(text=html))
+    assert len(gfid._one_call(_FILTERS)) == 3
+
+
+def test_two_empty_blobs_still_read_as_empty(client: Any) -> None:
+    """Choosing by content must not invent a board. With no blob holding one,
+    the first decodable payload is returned unchanged, so a genuinely
+    flight-less page stays flight-less rather than becoming a missing ds:1."""
+    html = _page(_ds1("ds1_flightless_board.json")) + _page(_ds1("ds1_flightless_board.json"))
+    payload = gfid._extract_ds1(html)
+    assert payload is not None
+    assert payload[2] is None and payload[3] is None
+    client(_FakeResponse(text=html))
+    assert gfid._one_call(_FILTERS) == []
 
 
 def test_rows_keep_the_top_flights_block_first() -> None:
@@ -212,65 +291,48 @@ def test_sorry_redirect_raises_throttled(client: Any) -> None:
 
 
 def test_http_429_raises_throttled(client: Any) -> None:
-    """fli's own client calls `raise_for_status()` and wraps the failure, so a
-    429 reaches us as `SearchHTTPError` — never as a response to inspect."""
-    client(SearchHTTPError("rate limited", status_code=429))
+    """A 429 now arrives as a RESPONSE, not an exception — nothing calls
+    `raise_for_status()` on our behalf any more, which is what lets the ladder
+    see the throttle rather than a wrapped transport error."""
+    client(_FakeResponse(text="", status_code=429))
     with pytest.raises(GfThrottledError):
         gfid._one_call(_FILTERS)
 
 
 def test_other_http_errors_are_not_mistaken_for_throttling(client: Any) -> None:
-    client(SearchHTTPError("server error", status_code=500))
-    with pytest.raises(SearchHTTPError):
+    """A 503 is not a throttle and not a shape change. It refuses as the base
+    `GfBackendError`, which is the seam that degrades to Matrix — backing off
+    and retrying would spend the ladder on something backing off cannot fix."""
+    client(_FakeResponse(text="", status_code=503))
+    with pytest.raises(GfBackendError) as excinfo:
         gfid._one_call(_FILTERS)
+    assert not isinstance(excinfo.value, GfThrottledError)
+    assert "503" in str(excinfo.value)
 
 
-def test_real_fli_client_turns_a_429_into_a_typed_throttle(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
-) -> None:
-    """The wiring the fake can't prove: fli's REAL `Client.get` in front of a
-    stubbed session, so the `raise_for_status()` -> `SearchHTTPError` ->
-    `GfThrottledError` chain is exercised end to end."""
-    from curl_cffi.requests import exceptions as curl_exc
-    from fli.search.client import Client
-
-    _reset_cookie_latches(monkeypatch, tmp_path)
-
-    def _stub(_filters: Any) -> bytes:
-        return b"\x08\x1c"
-
-    monkeypatch.setattr(gfid, "build_search_tfs", _stub)
-
-    class _Resp:
-        status_code = 429
-
-        def raise_for_status(self) -> None:
-            raise curl_exc.HTTPError("429 Too Many Requests", response=self)
-
-    class _Session:
-        cookies = _NullCookies()
-
-        def get(self, _url: str, **_kw: object) -> _Resp:
-            return _Resp()
-
-    session = _Session()
-    real = Client()
-    monkeypatch.setattr(real, "_session", lambda: session)
-    monkeypatch.setattr(gfid, "get_client", lambda: real)
-
-    # fli wraps `get` in `@retry(stop_after_attempt(3), wait_exponential())`, so
-    # the real backoff runs here. Tenacity's documented hook skips the waits;
-    # the three attempts (and the request budget they cost) still happen.
-    def _no_backoff(_seconds: float) -> None:
-        return None
-
-    # `Client.get` is decorated, so `.retry` is tenacity's controller — present
-    # at runtime, invisible to a type checker looking at a plain function.
-    retry_controller: Any = Client.get.retry  # pyright: ignore[reportFunctionMemberAccess]
-    monkeypatch.setattr(retry_controller, "sleep", _no_backoff)
-
+def test_a_persistent_throttle_costs_exactly_one_ladder(client: Any) -> None:
+    """THE request budget. fli's `Client.get` retried three times inside each of
+    our throttle retries, so one throttled leg cost up to fifteen multi-megabyte
+    GETs and a multi-cabin round trip multiplied that again. Ours is now the
+    only ladder: one initial GET plus `_THROTTLE_RETRY_ATTEMPTS` retries."""
+    fake = client(_FakeResponse(text="", status_code=429))
     with pytest.raises(GfThrottledError):
-        gfid._one_call(_FILTERS)
+        gfid._one_call_with_retry(_FILTERS)
+    assert len(fake.gets) == gfid._THROTTLE_RETRY_ATTEMPTS + 1
+    # Every GET still takes a token from fli's process-wide bucket; bypassing
+    # `Client.get` must not bypass the rate limit the fan-out threads share.
+    assert fake._rate_limiter.acquisitions == len(fake.gets)
+
+
+def test_the_page_get_does_not_go_through_flis_retrying_wrapper(client: Any) -> None:
+    """`Client.get` is wrapped in `@retry(stop_after_attempt(3))`. Calling it
+    would put a second ladder under ours, which is the amplification this
+    replaced — so the fake client has no `get` at all and a regression here is
+    an AttributeError, not a quietly larger request count."""
+    fake = client(_FakeResponse(text=_page(_ds1("ds1_jfk_lax_3rows.json"))))
+    assert not hasattr(fake, "get")
+    assert len(gfid._one_call(_FILTERS)) == 3
+    assert len(fake.gets) == 1
 
 
 def test_sorry_body_at_the_original_url_raises_throttled(client: Any) -> None:
@@ -449,12 +511,12 @@ def test_an_empty_list_at_one_index_is_absent_not_junk(client: Any) -> None:
     assert all(g.flight_id for g in out)
 
 
-def test_a_zero_row_board_that_had_a_block_is_an_empty_not_a_refusal(
-    client: Any, caplog: Any
-) -> None:
-    """A block that was where we read and held nothing is Google's answer for a
-    flight-less search. Refusing on the row count alone turns that into a shape
-    change the moment any metadata block happens to parse."""
+def test_an_empty_husk_plus_rows_elsewhere_is_a_relocation(client: Any) -> None:
+    """An empty block `[[]]` at a board index has never been observed live —
+    the measured flight-less shape is `None` at both. A husk plus flight rows
+    sitting somewhere else is far likelier a relocation than a coincidence, and
+    refusing degrades to Matrix while reading it as an empty tells the user
+    this route has no flights."""
     payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
     payload[5] = copy.deepcopy(payload[2])  # a block elsewhere that really parses
     payload[2] = [[]]  # a block, holding no rows
@@ -463,9 +525,22 @@ def test_a_zero_row_board_that_had_a_block_is_an_empty_not_a_refusal(
     assert board.blocks_seen == 2
     assert board.misplaced == (5,)
     client(_FakeResponse(text=_page(json.dumps(payload))))
-    with caplog.at_level(logging.WARNING, logger="flight_cli._gflight_ids"):
-        assert gfid._one_call(_FILTERS) == []
-    assert "carried row-shaped blocks outside [2, 3] at [5]; served 0 rows" in caplog.text
+    with pytest.raises(GfPageShapeError, match=r"holds flight rows at \[5\]"):
+        gfid._one_call(_FILTERS)
+
+
+def test_an_empty_husk_with_nothing_misplaced_is_still_an_empty(client: Any) -> None:
+    """The other half of that rule. Nothing row-shaped anywhere else means
+    there is no relocation to suspect, so an empty board is Google's answer —
+    this is the shape the two synthetic empty-block fixtures pin."""
+    payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
+    payload[2] = [[]]
+    payload[3] = [[]]
+    board = gfid._rows_from_ds1(payload)
+    assert board.blocks_seen == 2
+    assert board.misplaced == ()
+    client(_FakeResponse(text=_page(json.dumps(payload))))
+    assert gfid._one_call(_FILTERS) == []
 
 
 def test_a_relocation_with_no_block_left_behind_still_raises(client: Any) -> None:
@@ -653,3 +728,76 @@ def test_a_throttle_is_decided_by_the_url_path_not_the_query() -> None:
     assert not gfid._is_page_throttled(
         final_url="https://www.google.com/travel/flights?tfs=L3NvcnJ5Lw&q=/sorry/", html=""
     )
+
+
+# ─────────────────── request budget: the round-trip fan-out ────────────────
+
+
+def _board_of(n: int) -> str:
+    """A ds:1 page carrying `n` parseable rows, cloned from the real capture."""
+    payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
+    row = payload[2][0][0]
+    payload[2] = [[copy.deepcopy(row) for _ in range(n)]]
+    payload[3] = None
+    return _page(json.dumps(payload))
+
+
+def _round_trip_filters() -> Any:
+    """Two unselected segments, which is what drives the pinning recursion."""
+    from fli.models import Airport, FlightSegment, MaxStops, PassengerInfo, SeatType
+    from fli.models.google_flights.base import TripType as _TripType
+    from fli.models.google_flights.flights import FlightSearchFilters
+
+    dep = (datetime.date.today() + datetime.timedelta(days=45)).isoformat()
+    ret = (datetime.date.today() + datetime.timedelta(days=52)).isoformat()
+    return FlightSearchFilters(
+        passenger_info=PassengerInfo(adults=1),
+        flight_segments=[
+            FlightSegment(
+                departure_airport=[[Airport["JFK"], 0]],
+                arrival_airport=[[Airport["LAX"], 0]],
+                travel_date=dep,
+            ),
+            FlightSegment(
+                departure_airport=[[Airport["LAX"], 0]],
+                arrival_airport=[[Airport["JFK"], 0]],
+                travel_date=ret,
+            ),
+        ],
+        stops=MaxStops.ANY,
+        seat_type=SeatType.ECONOMY,
+        trip_type=_TripType.ROUND_TRIP,
+    )
+
+
+def test_the_pinned_fanout_is_capped_regardless_of_top_n(client: Any) -> None:
+    """Each pinned outbound is another multi-megabyte page GET, and the
+    multi-cabin path bumps top_n by 5x (capped at 100) to widen the pool it
+    filters — free on an RPC, not free here. At top_n=50 over a 30-row board
+    the round trip costs 1 outbound + 10 pins, not 1 + 30."""
+    fake = client(_FakeResponse(text=_board_of(30)))
+    out = gfid.search_with_ids(_round_trip_filters(), top_n=50)
+    assert out is not None
+    assert len(fake.gets) == 1 + gfid._PINNED_FANOUT_CAP == 11
+
+
+def test_the_default_top_n_is_unchanged_by_the_cap(client: Any) -> None:
+    """The cap must not narrow an ordinary search: `-n 10` is the default and
+    sits exactly on it."""
+    fake = client(_FakeResponse(text=_board_of(30)))
+    gfid.search_with_ids(_round_trip_filters(), top_n=10)
+    assert len(fake.gets) == 11
+    assert gfid._pinned_fanout(3) == 3  # below the cap, top_n still decides
+
+
+def test_a_throttled_pinned_leg_stops_the_fan_out(client: Any) -> None:
+    """A throttle is per-IP, so the next pinned leg would hit the same wall.
+    `search_with_ids` must not swallow it and keep fetching — one outbound, one
+    exhausted ladder on the first pin, and nothing after it."""
+    fake = client(
+        _FakeResponse(text=_board_of(30)),  # the outbound board
+        _FakeResponse(text="", status_code=429),  # every pinned leg, forever
+    )
+    with pytest.raises(GfThrottledError):
+        gfid.search_with_ids(_round_trip_filters(), top_n=50)
+    assert len(fake.gets) == 1 + (gfid._THROTTLE_RETRY_ATTEMPTS + 1) == 6

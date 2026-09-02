@@ -14,6 +14,7 @@ No network here: a tiny fake client mirrors fli's `Client`, whose jar hangs off
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import stat
 import threading
@@ -359,3 +360,58 @@ def test_seeding_still_runs_once_within_one_thread(
     gfid._seed_cookies_once(second)
     assert first._session().cookies.set_calls
     assert second._session().cookies.set_calls == []
+
+
+def test_a_temp_we_did_not_create_is_left_alone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`O_EXCL` failing means the scratch file was already there and belongs to
+    another writer, mid-write. Deleting it because our own `finally` runs would
+    destroy their data — cleanup owns only what this call created."""
+    _reset(monkeypatch, tmp_path)
+    squatter = tmp_path / f"gflight-cookies.json.{os.getpid()}.{threading.get_ident()}.tmp"
+    squatter.write_text("another writer's half-written file")
+
+    gfid._persist_cookies(_FakeClient([_JarCookie("NID", "532=abc", ".google.com")]))
+
+    assert squatter.exists(), "cleanup deleted a temp file it did not create"
+    assert squatter.read_text() == "another writer's half-written file"
+    assert not (tmp_path / "gflight-cookies.json").exists()
+
+
+def test_the_cache_directory_is_owner_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """`mkdir` takes the umask unless told otherwise, and this directory holds a
+    live Google session cookie."""
+    cache_dir = tmp_path / "fresh"
+    _reset(monkeypatch, cache_dir)
+    gfid._persist_cookies(_FakeClient([_JarCookie("NID", "532=abc", ".google.com")]))
+    assert stat.S_IMODE(cache_dir.stat().st_mode) == 0o700
+
+
+@pytest.mark.parametrize(
+    ("name", "domain"),
+    [
+        pytest.param("SID", ".google.com", id="a-google-cookie-not-on-the-allowlist"),
+        pytest.param("NID", ".evil.example", id="the-right-name-for-another-domain"),
+        pytest.param("__Secure-1PSID", ".google.com", id="an-auth-cookie-name"),
+    ],
+)
+def test_a_tampered_cache_cannot_inject_arbitrary_cookies(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str, domain: str
+) -> None:
+    """The cache is a plain file in a shared directory. Whatever can edit it
+    could otherwise name any cookie for any domain and have the seeder install
+    it on a live session, so the read side re-checks the write side's
+    allowlist."""
+    _reset(monkeypatch, tmp_path)
+    _write_cache(
+        tmp_path,
+        [
+            {"name": name, "value": "injected", "domain": domain, "path": "/"},
+            {"name": "NID", "value": "legitimate", "domain": ".google.com", "path": "/"},
+        ],
+        saved_at=time.time(),
+    )
+    fresh = _FakeClient([])
+    gfid._seed_cookies_once(fresh)
+    assert fresh._session().cookies.set_calls == [("NID", "legitimate", ".google.com", "/")]

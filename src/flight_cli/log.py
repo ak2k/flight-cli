@@ -43,9 +43,16 @@ class _StderrHandler(logging.Handler):
 
     @override
     def emit(self, record: logging.LogRecord) -> None:
+        # stdlib's own contract, and the reason it is this wide: `self.format`
+        # runs the caller's `%` interpolation, so a mismatched placeholder in a
+        # `log.debug` raises TypeError from HERE. Logging must never be able to
+        # end the command it was describing. RecursionError re-raises because
+        # swallowing it would loop.
         try:
             sys.stderr.write(self.format(record) + "\n")
-        except (OSError, ValueError):  # closed or detached stream — never fatal
+        except RecursionError:
+            raise
+        except Exception:  # noqa: BLE001 — a log line cannot be allowed to fail a search
             self.handleError(record)
 
 

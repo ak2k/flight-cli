@@ -57,12 +57,10 @@ from fli.search._decoders import (  # pyright: ignore[reportMissingTypeStubs]
     _parse_datetime,  # pyright: ignore[reportPrivateUsage]
 )
 from fli.search.client import get_client  # pyright: ignore[reportMissingTypeStubs]
-from fli.search.exceptions import (  # pyright: ignore[reportMissingTypeStubs]
-    SearchHTTPError,
-)
 from fli.search.flights import SearchFlights  # pyright: ignore[reportMissingTypeStubs]
 
 from ._gf_errors import (
+    GfBackendError,
     GfConsentError,
     GfPageShapeError,
     GfThrottledError,
@@ -108,6 +106,9 @@ _EMPTY_RETRY_BACKOFF_S = 1.0  # multiplied by attempt number: 1s, 2s, 3s between
 # retry in lockstep and re-trip it.
 _THROTTLE_RETRY_ATTEMPTS = 4
 _THROTTLE_BACKOFF_S = 1.0  # exponential base: ~1, 2, 4, 8s (plus 0-50% jitter)
+# Mirrors fli's own `REQUEST_TIMEOUT`, which `_fetch_page` no longer inherits
+# because it bypasses `Client.get`. A search page is multi-megabyte.
+_REQUEST_TIMEOUT_S = 60.0
 
 
 def _is_throttle_block(body: str) -> bool:  # pyright: ignore[reportUnusedFunction]  # read by _gf_dategrid, not here
@@ -203,10 +204,20 @@ def _extract_ds1(html: str) -> list[Any] | None:
     page doesn't carry one in the shape we read.
 
     Shaped like the RPC's own payload, so callers index `payload[2]` /
-    `payload[3]` for flight rows."""
-    # `continue`, never an early `return`: the page may carry more than one
-    # `ds:1` blob, and giving up on the first undecodable one would report a
-    # readable board as a shape change.
+    `payload[3]` for flight rows.
+
+    A page may carry more than one `ds:1` blob, so ALL of them are decoded and
+    the one holding a board wins. Taking the first decodable blob was a
+    positional bet: a placeholder emitted before the populated one — Google
+    hydrates parts of this page in stages — would be served as an authoritative
+    empty, or trip the arity guard, while the real board sat further down the
+    document and was never looked at. Choosing by content instead of position
+    costs one pass over blobs that are already in memory.
+
+    When no blob holds a board, the first decodable one is returned unchanged,
+    so a genuinely flight-less page stays a flight-less page rather than
+    becoming a missing `ds:1`."""
+    first_decodable: list[Any] | None = None
     for match in _DS_BLOB_RE.finditer(html):
         blob = match.group(1)
         key = _DS_KEY_RE.search(blob)
@@ -220,9 +231,25 @@ def _extract_ds1(html: str) -> list[Any] | None:
         except ValueError:
             log.debug("ds:1 blob is not valid JSON")
             continue
-        if isinstance(payload, list):
-            return cast("list[Any]", payload)
-    return None
+        if not isinstance(payload, list):
+            continue
+        decoded = cast("list[Any]", payload)
+        if _holds_a_board(decoded):
+            return decoded
+        if first_decodable is None:
+            first_decodable = decoded
+    return first_decodable
+
+
+def _holds_a_board(payload: list[Any]) -> bool:
+    """Does this payload carry a row block at `[2]` or `[3]`?
+
+    Structural, like the scan at those indices: a block whose rows have all
+    changed shape must still count as a board here, or a row-layout change
+    would send us to a placeholder blob instead of reaching the 0-of-N guard."""
+    return any(
+        index < len(payload) and _looks_like_a_row_block(payload[index]) for index in _DS_ROW_BLOCKS
+    )
 
 
 def _is_page_throttled(*, final_url: str, html: str) -> bool:
@@ -619,10 +646,19 @@ def _seed_cookies_once(client: Any) -> None:
         return
     try:
         for c in saved:
+            name = str(c["name"])
+            domain = str(c.get("domain", ".google.com"))
+            # The SAME allowlist the write side applies, checked again on the
+            # way in. The cache is a plain file in a shared directory: anything
+            # that can edit it could otherwise add a cookie of any name for any
+            # domain and have this seed it onto a live session.
+            if name not in _PERSIST_COOKIE_NAMES or _GOOGLE_DOMAIN_SUFFIX not in domain:
+                log.debug("ignoring non-allowlisted cookie %r for %r in the cache", name, domain)
+                continue
             client._session().cookies.set(
-                c["name"],
+                name,
                 c["value"],
-                domain=c.get("domain", ".google.com"),
+                domain=domain,
                 path=c.get("path", "/"),
             )
     except Exception as e:  # noqa: BLE001 — seeding is best-effort (corrupt/odd cache, never fatal)
@@ -659,14 +695,18 @@ def _persist_cookies(client: Any) -> None:
     # file, never the bytes in between. The temp name carries pid and thread id
     # so two writers cannot share a scratch file either.
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    created = False
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        # 0700 explicitly: `mkdir` takes the umask otherwise, and the directory
+        # holds a live Google session cookie.
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         # `os.open` with the mode, not a write-then-chmod: the rename below
         # carries this inode and its mode onto the cache, so a mode fixed after
         # the fact would leave a live Google session cookie world-readable for
         # the length of the write. O_EXCL because a temp we did not create is
         # not ours to overwrite.
         fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        created = True
         with os.fdopen(fd, "w") as fh:
             json.dump({"saved_at": time.time(), "cookies": cookies}, fh, indent=2)
         tmp.replace(path)  # os.replace under the hood: one atomic rename
@@ -674,11 +714,15 @@ def _persist_cookies(client: Any) -> None:
     except OSError as e:
         log.debug("could not persist gflight cookies: %s", e)
     finally:
-        # A successful rename already consumed the temp; this is what removes it
-        # on every other exit, including a KeyboardInterrupt mid-write. Nothing
-        # else sweeps the cache directory, and the temp holds the NID.
-        with contextlib.suppress(OSError):
-            tmp.unlink(missing_ok=True)
+        # Only a temp THIS call created. `O_EXCL` failing means the file was
+        # already there and belongs to someone else — unlinking it would delete
+        # another writer's scratch file mid-write. Otherwise: a successful
+        # rename already consumed ours, and this removes it on every other exit,
+        # including a KeyboardInterrupt mid-write. Nothing else sweeps the cache
+        # directory, and the temp holds the NID.
+        if created:
+            with contextlib.suppress(OSError):
+                tmp.unlink(missing_ok=True)
 
 
 class _Ds1Board(NamedTuple):
@@ -785,6 +829,36 @@ def _rows_from_ds1(payload: list[Any]) -> _Ds1Board:
     return _Ds1Board(rows, blocks_seen, tuple(misplaced))
 
 
+def _fetch_page(client: Any, url: str) -> Any:
+    """GET the search page through fli's session, bypassing fli's `Client.get`.
+
+    DIVERGE, and the reason is a request budget. `Client.get` is wrapped in
+    `@retry(stop_after_attempt(3))` and calls `raise_for_status()`, so a
+    persistently throttled leg cost three fli attempts inside each of our
+    throttle retries — up to fifteen multi-megabyte GETs for one leg, and a
+    multi-cabin round trip multiplies that by the cabin count. Two ladders
+    stacked on the same signal is not a policy anyone chose. `retry_throttled`
+    is now the only one, so throttle handling lives where the classification
+    does.
+
+    What comes back is the raw response: this function does not raise on a
+    non-2xx, because a 429 IS the signal and swallowing it into an exception is
+    what hid it from us before. The caller classifies the status.
+
+    Kept from `Client.get`: the shared 10 req/sec token bucket (a
+    process-global budget the fan-out threads share) and its request timeout.
+    NOT kept: fli's transport-error retry — a connection reset now fails the
+    leg instead of being retried three times. That is the deliberate cost of
+    owning the ladder; the enriched path still answers from Matrix."""
+    client._rate_limiter.acquire()  # pyright: ignore[reportAny]
+    return client._session().get(  # pyright: ignore[reportAny]
+        url,
+        impersonate="chrome",
+        allow_redirects=True,
+        timeout=_REQUEST_TIMEOUT_S,
+    )
+
+
 def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
     """One GET of the public search page; flat list of one leg's flights.
 
@@ -794,19 +868,18 @@ def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
     client = get_client()
     _seed_cookies_once(client)
     url = google_flights_search_page_url(build_search_tfs(filters))
-    # fli's `Client.get` calls `raise_for_status()` itself and wraps whatever it
-    # catches in `SearchHTTPError`, so a 429 never comes back as a response for
-    # us to inspect — it arrives here as an exception or not at all.
-    try:
-        resp = client.get(url, impersonate="chrome", allow_redirects=True)
-    except SearchHTTPError as e:
-        if e.status_code == HTTPStatus.TOO_MANY_REQUESTS:
-            raise GfThrottledError("Google Flights rate-limited the request") from e
-        raise
-    final_url = str(resp.url)
-    html = resp.text
-    if _is_page_throttled(final_url=final_url, html=html):
+    resp = _fetch_page(client, url)
+    status = int(resp.status_code)  # pyright: ignore[reportAny]  # fli/curl_cffi untyped
+    final_url = str(resp.url)  # pyright: ignore[reportAny]
+    html = cast("str", resp.text)  # pyright: ignore[reportAny]
+    if status == HTTPStatus.TOO_MANY_REQUESTS or _is_page_throttled(final_url=final_url, html=html):
         raise GfThrottledError("Google Flights rate-limited the request")
+    if status >= HTTPStatus.BAD_REQUEST:
+        # Not a throttle and not a page we can read. `GfBackendError` is the
+        # fallback seam, so this degrades to Matrix rather than ending the
+        # command — the same outcome a shape change gets, without claiming the
+        # layout changed when Google simply answered 503.
+        raise GfBackendError(f"Google Flights' search page returned HTTP {status}")
     payload = _extract_ds1(html)
     if payload is None:
         if _is_consent_page(final_url=final_url, html=html):
@@ -820,11 +893,14 @@ def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
     # (NID) so the next one-shot CLI process starts warm instead of cold.
     _persist_cookies(client)
     board = _rows_from_ds1(payload)
-    if board.misplaced and not board.rows and not board.blocks_seen:
-        # Rows found elsewhere, and NO block at all where we read. A block that
-        # was there and held nothing is Google's answer for a flight-less
-        # search, so refusing on the row count alone turns a genuine empty into
-        # a shape change whenever a metadata block happens to parse.
+    if board.misplaced and not board.rows:
+        # Rows found elsewhere and none served here. The measured flight-less
+        # shape is `None` at BOTH indices, not an empty husk `[[]]` — that husk
+        # has never been observed on a live page, and a husk plus flight rows
+        # sitting somewhere else is far likelier a relocation than a
+        # coincidence. Refusing degrades to Matrix; reading it as an empty
+        # tells the user this route has no flights. A zero-row board with
+        # nothing misplaced is still an authoritative empty.
         raise GfPageShapeError(
             f"ds:1 holds flight rows at {list(board.misplaced)}, not at "
             f"{list(_DS_ROW_BLOCKS)} (found {board.blocks_seen} there); "
@@ -860,8 +936,10 @@ def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
         try:
             out.append(_parse_flight_with_id(fd))
         except _ROW_PARSE_ERRORS as e:
-            log.debug("skipping flight with unparseable data: %s", e)
-            reasons.append(f"{type(e).__name__}: {e}")
+            # %r / !r, not %s: this text comes from the page, and a raw ESC
+            # or C1 byte written to a terminal is not a diagnostic.
+            log.debug("skipping flight with unparseable data: %r", e)
+            reasons.append(f"{type(e).__name__}: {e!r}")
             continue
     if not out:
         # Rows were there and none of them parsed — the row layout moved, which
@@ -924,6 +1002,23 @@ def _one_call_with_retry(filters: FlightSearchFilters) -> list[GFlightWithId]:
     return retry_throttled(lambda: _one_call(filters), retry_empty=False)
 
 
+# How many outbound flights a round trip pins and re-fetches. Each pin is one
+# more multi-megabyte page GET, so this is a REQUEST budget, not a result limit.
+#
+# The multi-cabin path bumps top_n (`_MULTI_CABIN_QUERY_BUMP_FACTOR`, 5x, capped
+# at 100) to widen the pool it filters, which was free when this was an RPC and
+# is not free on the page transport: at top_n=100 a two-cabin round trip would
+# fan out to ~2 x 31 page fetches. The default `-n 10` is unchanged by this cap;
+# above it, the round trip returns combinations for the ten best outbounds
+# rather than for all of them.
+_PINNED_FANOUT_CAP = 10
+
+
+def _pinned_fanout(top_n: int) -> int:
+    """How many outbounds to pin, given the caller's top_n."""
+    return min(top_n, _PINNED_FANOUT_CAP)
+
+
 def search_with_ids(
     filters: FlightSearchFilters,
     *,
@@ -949,7 +1044,7 @@ def search_with_ids(
         return list(first)
 
     combos: list[GFlightWithId | tuple[GFlightWithId, ...]] = []
-    for picked in first[:top_n]:
+    for picked in first[: _pinned_fanout(top_n)]:
         next_filters = deepcopy(filters)
         next_filters.flight_segments[selected_count].selected_flight = picked.flight
         nxt = search_with_ids(next_filters, top_n=top_n)

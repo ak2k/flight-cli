@@ -13,6 +13,7 @@ every third-party library that logs.
 from __future__ import annotations
 
 import logging
+import sys
 from typing import TYPE_CHECKING
 
 import pytest
@@ -79,3 +80,45 @@ def test_a_module_record_reaches_the_handler(capsys: pytest.CaptureFixture[str])
     log_mod.configure("debug")
     logging.getLogger(_MODULE_LOGGER).debug("ds:1 carried no row block at %s", [2, 3])
     assert "ds:1 carried no row block at [2, 3]" in capsys.readouterr().err
+
+
+def _record(msg: str, *args: object) -> logging.LogRecord:
+    return logging.LogRecord(_MODULE_LOGGER, logging.DEBUG, __file__, 1, msg, args, None)
+
+
+def test_a_bad_format_string_does_not_kill_the_command() -> None:
+    """`Handler.format` runs the caller's own `%` interpolation, so a mismatched
+    placeholder raises from inside emit. Logging describes the work; it must
+    never be able to end it.
+
+    Driven at the handler rather than through the logger tree on purpose:
+    pytest installs its own capture handler that deliberately RE-RAISES
+    formatting errors, so a logger-level call would fail on pytest's handler
+    and prove nothing about ours."""
+    handler = log_mod._StderrHandler()
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    handler.handle(_record("served %d rows", "not-an-int"))  # must not raise
+
+
+def test_a_missing_stderr_does_not_kill_the_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`sys.stderr` is None under pythonw and can be replaced by anything at
+    all mid-run. A log line is not worth a crash."""
+    handler = log_mod._StderrHandler()
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    monkeypatch.setattr(sys, "stderr", None)
+    handler.handle(_record("a warning nobody can read"))  # must not raise
+
+
+def test_a_recursion_error_is_not_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one exception stdlib re-raises: swallowing it would loop, because
+    `handleError` writes to the same stream that just overflowed."""
+
+    class _Recursing:
+        def write(self, _s: str) -> int:
+            raise RecursionError
+
+    handler = log_mod._StderrHandler()
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    monkeypatch.setattr(sys, "stderr", _Recursing())
+    with pytest.raises(RecursionError):
+        handler.handle(_record("boom"))
