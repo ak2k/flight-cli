@@ -12,6 +12,8 @@ cabin auto-derivation."""
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 import typer
 
@@ -375,3 +377,151 @@ def test_bumped_query_top_n_cabin_count_doesnt_compound():
     5x per cabin is enough regardless of cabin count."""
     assert _bumped_query_top_n(5, cabin_count=3) == _bumped_query_top_n(5, cabin_count=2)
     assert _bumped_query_top_n(5, cabin_count=4) == _bumped_query_top_n(5, cabin_count=2)
+
+
+# ── multi-cabin gflight: JSON shape + the constraint guard (work-h70kv.5) ──
+
+
+def _one_gflight_row() -> Any:
+    """A real GFlightWithId, parsed from the committed ds:1 capture."""
+    import json as _json
+    import pathlib as _pathlib
+
+    from flight_cli import _gflight_ids as gfid
+
+    fixture = (
+        _pathlib.Path(__file__).parent / "fixtures" / "gflight_page" / "ds1_jfk_lax_3rows.json"
+    )
+    rows, _blocks = gfid._rows_from_ds1(_json.loads(fixture.read_text()))
+    return gfid._parse_flight_with_id(rows[0])
+
+
+def test_multi_cabin_json_carries_legroom_like_the_single_cabin_path(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Both JSON paths must emit the same row shape — the multi-cabin branch
+    used to dump `model_dump()` directly and lose legroom/amenities."""
+    import json as _json
+    from datetime import date as _date
+
+    from flight_cli import cli
+    from flight_cli.domain import Cabin as _Cabin
+    from flight_cli.domain import Leg as _Leg
+    from flight_cli.domain import SearchOptions as _SearchOptions
+
+    row = _one_gflight_row()
+
+    def _fan_out(**_kw: Any) -> dict[Any, list[Any]]:
+        return {_Cabin.COACH: [row]}
+
+    monkeypatch.setattr(cli, "_run_gflight_multi", _fan_out)
+    cli._run_gflight_path_multi(
+        legs=(_Leg.of("JFK", "LAX", _date(2026, 10, 14)),),
+        opts=_SearchOptions(cabin=_Cabin.COACH),
+        cabins=(_Cabin.COACH, _Cabin.BUSINESS),
+        sort_by=_Cabin.COACH,
+        top_n=5,
+        json_out=True,
+        run_pp=False,
+        sel=cli._resolve_providers(
+            providers=None, cash_only=True, awards_only=False, provider_opt=()
+        ),
+    )
+    dumped: Any = _json.loads(capsys.readouterr().out)["COACH"][0]
+    assert dumped["flight_id"] == row.flight_id
+    # Compare through JSON: the helper keeps tuples that a dump turns into lists.
+    expected: Any = _json.loads(_json.dumps(cli._gflight_json_row(row), default=str))
+    assert dumped == expected
+    assert dumped["legs"][0]["legroom_class"]
+
+
+def test_multi_cabin_fan_out_honours_an_encodable_constraint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_pick_backend` keeps an encodable constraint on gflight for multi-cabin
+    too, which is only correct if the fan-out actually applies it."""
+    from datetime import date as _date
+
+    from flight_cli import _gflight_ids as gfid
+    from flight_cli import cli
+    from flight_cli.domain import Cabin as _Cabin
+    from flight_cli.domain import Leg as _Leg
+    from flight_cli.domain import SearchOptions as _SearchOptions
+
+    seen: list[Any] = []
+
+    def _capture(filters: Any, top_n: int) -> list[Any]:
+        seen.append(filters)
+        return []
+
+    monkeypatch.setattr(gfid, "search_with_ids", _capture)
+    cli._run_gflight_multi(
+        legs=(_Leg.of("JFK", "LAX", _date(2026, 10, 14), extension="MAXSTOPS 1"),),
+        opts=_SearchOptions(cabin=_Cabin.COACH),
+        cabins=(_Cabin.COACH,),
+        top_n=5,
+    )
+    assert seen, "the fan-out never queried"
+    assert seen[0].stops.name == "ONE_STOP_OR_FEWER"
+
+
+def _dispatch(monkeypatch: pytest.MonkeyPatch, *args: str) -> tuple[list[str], str]:
+    """Run the real `flight search` with both multi-cabin backends stubbed, and
+    report which one it chose. Driven through CliRunner because calling the
+    typer command directly hands every option its OptionInfo sentinel."""
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    called: list[str] = []
+
+    def _gf(**_kw: Any) -> None:
+        called.append("gflight")
+
+    def _mx(**_kw: Any) -> None:
+        called.append("matrix")
+
+    monkeypatch.setattr(cli, "_run_gflight_path_multi", _gf)
+    monkeypatch.setattr(cli, "_run_matrix_path_multi", _mx)
+    result = CliRunner().invoke(cli.app, ["search", *args])
+    assert result.exit_code == 0, result.output
+    return called, result.output
+
+
+def test_multi_cabin_encodable_constraint_stays_on_gflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard used to re-test `routing or extension` and override
+    `_pick_backend`, dropping an encodable constraint to Matrix silently."""
+    called, _ = _dispatch(
+        monkeypatch,
+        "JFK",
+        "LAX",
+        "--dep",
+        "2026-10-14",
+        "--cabin",
+        "coach,business",
+        "--extension",
+        "MAXSTOPS 1",
+        "--cash-only",
+    )
+    assert called == ["gflight"]
+
+
+def test_multi_cabin_unencodable_constraint_goes_to_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called, output = _dispatch(
+        monkeypatch,
+        "JFK",
+        "LAX",
+        "--dep",
+        "2026-10-14",
+        "--cabin",
+        "coach,business",
+        "--routing",
+        "DL+",
+        "--cash-only",
+    )
+    assert called == ["matrix"]
+    assert "a carrier filter (DL)" in output

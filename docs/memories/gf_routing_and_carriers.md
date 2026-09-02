@@ -91,6 +91,18 @@ search with a plausible-looking "no results" — the exact failure this whole
 design is built to avoid. Re-widening `3.6`/`3.7`/`3.15`/`3.17`/`3.18` is the
 obvious next step and is tracked in bd work-h70kv.
 
+The encoder is an enforced allowlist, not a deny-list: every field on fli's
+`FlightSearchFilters` must be named in one of three sets (encoded / refused /
+deliberately ignored), and `build_search_tfs` raises on any remainder. `flights`
+is pinned with an open floor (`>=0.9`), so a minor that adds a filter would
+otherwise encode as if the new field were unset — dropping a constraint the user
+asked for, silently.
+
+One more trap in `page_can_encode`: a stop ceiling only encodes up to **two**.
+fli's `MaxStops` tops out at `TWO_OR_FEWER_STOPS`, so `MAXSTOPS 3` maps to `ANY`
+and omits field 3.5 entirely — certifying it as page-servable would drop the
+constraint with neither a native filter nor a printed reason.
+
 **That page has two rungs.** Rung 1 is the curl_cffi GET above. Rung 2
 (`--gf-transport browser`) drives a real Chrome to the *same* URL and hands its
 `response.text()` to the *same* parser — Google's rate budget is keyed on client
@@ -101,16 +113,33 @@ only place a refusal is diagnosed. A rung supplies bytes, never interpretation.
 `auto` is accepted today and identical to `http`; escalate-on-throttle is a
 follow-up. Details, measurements and traps: [gf_browser_rung.md](gf_browser_rung.md).
 
-**Refusals are typed** (`_gf_errors`): `GfThrottledError` (final URL contains
-`/sorry/`, or HTTP 429), `GfConsentError` (no `ds:1` *and* consent markers —
-checked in that order, because a real results page links to the consent domain
-in its footer), `GfPageShapeError` (no readable `ds:1`, or rows present and none
-parsed, with sampled reasons), and `GfBrowserUnavailableError` (rung 2 could
-not produce bytes at all — no Chrome, a locked profile, a dead navigation). A
-page that decodes with zero rows returns `[]` and is Google's authoritative
+**Refusals are typed** (`_gf_errors`):
+
+- `GfThrottledError` — the captcha interstitial, which arrives three ways. A
+  redirect puts `/sorry/` in the final URL; Google also serves the same page
+  in place with HTTP 200, where the body marker ("Our systems have detected
+  unusual traffic") is the only tell; and an outright **HTTP 429 never reaches
+  our code as a response at all**. fli's `Client.get` calls `raise_for_status()`
+  itself and wraps whatever it catches in `SearchHTTPError`, so
+  `_fetch_page` catches that and re-raises 429 as a throttle. Anything else
+  re-raises. Measured: a persistent 429 costs three GETs inside fli first.
+- `GfConsentError` — no `ds:1` *and* consent markers, checked in that order,
+  because a real results page links to the consent domain in its footer.
+- `GfPageShapeError` — no readable `ds:1`; or `ds:1` decoded but carried no row
+  block at `[2]`/`[3]`; or rows present and none parsed (with sampled reasons);
+  or a non-2xx status, which only the browser rung can report (fli raises
+  first on the other one).
+- `GfBrowserUnavailableError` — rung 2 could not produce bytes at all: no
+  patchright, no Chrome, a profile another `flight` holds, a dead navigation.
+  Never a statement about the route. It carries its own remedy text, because
+  `cli` renders a refusal type it has no case for as `str(e)` and nothing else.
+
+A page that decodes with zero rows returns `[]` and is Google's authoritative
 answer, so the search path passes `retry_empty=False` and spends exactly one GET
-on it. Any non-2xx that is not a throttle is a `GfPageShapeError`, so a 5xx
-degrades to Matrix instead of surfacing curl_cffi's own exception.
+on it. The discriminator against a moved payload is that a genuinely empty board
+still carries a LIST at both row indices (`[[]]` at 2 and 3, checked against a
+live capture) — zero blocks present means the layout changed, not that the route
+has no service.
 
 ## Tier model: who honors each constraint
 
@@ -196,10 +225,18 @@ chunking.
 
 Everything measured below was measured against the **RPC** transport, which is
 what the date grid still uses. The search page is a different endpoint with a
-different budget and a different block signal (a `/sorry/` redirect or a 429,
-not a code-13 body), so treat the numbers as the grid's and re-measure before
-quoting them for the page. The reactive design carries over unchanged: both
-raise `GfThrottledError` into the same `retry_throttled` backoff.
+different budget and a different block signal (the captcha interstitial, by
+redirect or in place; or an HTTP 429 that fli's client raises), so treat the
+numbers as the grid's and re-measure before quoting them for the page. The
+reactive design carries over unchanged: both raise `GfThrottledError` into the
+same `retry_throttled` backoff.
+
+**Budget arithmetic on the page path.** fli's `Client.get` is wrapped in
+`@retry(stop_after_attempt(3))`, so a hard 429 costs THREE requests before our
+own backoff ever sees it — and `retry_throttled` then makes up to 5 attempts of
+its own. Worst case a single throttled leg fetch spends ~15 requests against an
+IP that is already blocking us. Budget accordingly before raising either count,
+and prefer widening fli's backoff to widening ours.
 
 The budget is keyed on **client context, not just IP.** Verified 2026-06-15
 (`research/experiment_gf_patchright.py` + `capture_gf_request.py`): a real Chrome

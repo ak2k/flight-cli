@@ -444,11 +444,19 @@ def _encode_gflight_pinned_tfs(
 # the `GetShoppingResults` RPC's f.req JSON; `_gflight_ids` fetches the page and
 # reads `ds:1`, and its module docstring holds the why.
 #
-# The encoder below is deliberately an ALLOWLIST. fli's FlightSearchFilters
-# carries a dozen filters this transport has no field for, and honouring some
-# of a user's constraints while dropping the rest is a silent wrong answer.
+# The encoder below is deliberately an ALLOWLIST, and enforced as one: every
+# field on fli's model must be named in exactly one of the three sets below, and
+# `build_search_tfs` raises on anything left over. A deny-list would be quietly
+# wrong the day `flights>=0.9` (an open floor) adds a filter — the new field
+# would encode as if unset, dropping a constraint the user asked for. Honouring
+# some of a user's constraints while dropping the rest is a silent wrong answer.
 # `routing_predicates.page_can_encode` keeps those queries on Matrix; anything
 # that reaches here anyway raises.
+
+# Fields this encoder reads and writes into the tfs= payload.
+_TFS_ENCODED_FIELDS = frozenset(
+    {"trip_type", "passenger_info", "flight_segments", "stops", "seat_type"}
+)
 
 # Filters with no tfs= field, checked against fli's own model default rather
 # than truthiness: fli populates sort_by, emissions, exclude_basic_economy and
@@ -467,11 +475,12 @@ _TFS_REFUSED_FIELDS: tuple[tuple[str, str], ...] = (
     ("exclude_basic_economy", "a basic-economy exclusion"),
     ("sort_by", "a server-side sort order"),
 )
-# `show_all_results` is deliberately absent: it defaults to True and there is
+# Read and deliberately not acted on. `show_all_results` defaults to True and there is
 # no tfs= field for it. The page serves Google's default board (~30 rows per
 # leg, measured 2026-09-02) with no back-fill, so a top-N above that returns
 # fewer rows than asked for. That's a board ceiling, not a dropped constraint —
 # nothing the user asked for goes unhonoured.
+_TFS_IGNORED_FIELDS = frozenset({"show_all_results"})
 
 # Non-adult passengers ride tfs field 8 under distinct kind codes (2 child,
 # 3 infant-in-seat, 4 infant-on-lap) that we have never verified against a
@@ -546,6 +555,19 @@ def build_search_tfs(filters: Any) -> bytes:
     Raises `GfTfsUnsupportedError` for any filter this transport has no field
     for — see `_TFS_REFUSED_FIELDS` for why that's an allowlist and not a
     truthiness scan."""
+    unclaimed = (
+        set(cast("dict[str, Any]", type(filters).model_fields))
+        - _TFS_ENCODED_FIELDS
+        - {field for field, _ in _TFS_REFUSED_FIELDS}
+        - _TFS_IGNORED_FIELDS
+    )
+    if unclaimed:
+        # fli grew a filter since this encoder was written. Refusing is the only
+        # safe default: we cannot know whether it is set, let alone encode it.
+        raise GfTfsUnsupportedError(
+            ", ".join(sorted(unclaimed)),
+            "a filter this encoder has never seen (fli's model gained a field)",
+        )
     if filters.trip_type.value == _TFS_MULTI_CITY:
         raise GfTfsUnsupportedError(
             "trip_type",

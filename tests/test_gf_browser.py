@@ -158,30 +158,26 @@ def _page_of(pw: _FakePlaywright) -> _FakePage:
 
 
 class _FakeHttpResponse:
-    def __init__(self, *, text: str, status_code: int, url: str) -> None:
+    """What fli's client hands back — it has already called `raise_for_status()`,
+    so a response reaching us is 2xx and carries no status worth reading."""
+
+    def __init__(self, *, text: str, url: str) -> None:
         self.text = text
-        self.status_code = status_code
         self.url = url
 
-    def raise_for_status(self) -> None:
-        raise AssertionError("_fetch_page must not classify the response")
 
+def test_fetch_page_reports_a_2xx_by_construction(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_fetch_page` hands on the body and the final URL, and reports OK.
 
-def test_fetch_page_returns_the_response_without_judging_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`_fetch_page` is the GET and nothing else: a 500 is data it hands back,
-    not an exception it raises.
-
-    This pins the contract, NOT the live rung-1 path — the fake client stands
-    in for fli's, whose own `Client.get` calls `raise_for_status()` inside a
-    three-attempt retry and so turns a non-2xx into `SearchHTTPError` before
-    `_fetch_page` ever sees it. What the contract buys is rung 2, where a
-    navigation really does report a status without raising."""
+    Not laziness — fli raised on anything else before returning, so there is no
+    other status this rung could truthfully report. The field exists in the
+    triple for the browser rung, whose navigation reports a real one. (The
+    429 -> GfThrottledError mapping around the GET is covered end-to-end in
+    tests/test_gflight_page.py, including against the real fli client.)"""
 
     class _Client:
         def get(self, url: str, **_kw: object) -> _FakeHttpResponse:
-            return _FakeHttpResponse(text="boom", status_code=500, url=url)
+            return _FakeHttpResponse(text="<html>board</html>", url=url)
 
     def _stub_tfs(_filters: Any) -> bytes:
         return b"\x08\x1c"
@@ -194,8 +190,9 @@ def test_fetch_page_returns_the_response_without_judging_it(
     monkeypatch.setattr(gfid, "_seed_cookies_once", _no_seed)
 
     html, final_url, status_code = gfid._fetch_page(cast("Any", None))
-    assert (html, status_code) == ("boom", 500)
+    assert html == "<html>board</html>"
     assert "tfs=" in final_url
+    assert status_code == 200
 
 
 def test_a_server_error_is_a_typed_shape_refusal() -> None:
@@ -207,7 +204,11 @@ def test_a_server_error_is_a_typed_shape_refusal() -> None:
 
 def test_a_throttle_outranks_the_status_check() -> None:
     """429 is both "blocked" and "not 2xx"; it has to read as the throttle,
-    because that is the one the caller can back off and retry."""
+    because that is the one the caller can back off and retry.
+
+    Only the browser rung can reach this with a 429 — Chrome reports the status
+    where fli would have raised — and the interstitial it usually arrives as is
+    caught by URL or body instead."""
     with pytest.raises(GfThrottledError):
         gfid._rows_from_page_html("", final_url=_PAGE_URL, status_code=429)
     with pytest.raises(GfThrottledError):
@@ -601,4 +602,6 @@ def test_the_fixture_is_the_shape_the_page_serves() -> None:
     """Guards the helper above: if the fixture stops being a three-row `ds:1`
     payload, every parity assertion here becomes vacuous."""
     payload = json.loads((FIXTURE_DIR / "ds1_jfk_lax_3rows.json").read_text())
-    assert len(gfid._rows_from_ds1(payload)) == 3
+    rows, blocks_seen = gfid._rows_from_ds1(payload)
+    assert len(rows) == 3
+    assert blocks_seen == 2  # both row blocks present, so an empty board would be authoritative

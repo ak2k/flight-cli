@@ -77,7 +77,18 @@ def test_auto_hard_matrix_flag_picks_matrix(flag: str, value: object) -> None:
 def test_auto_stop_ceiling_stays_on_gflight() -> None:
     """The one constraint the search page's tfs= parameter carries natively."""
     assert _call(extension="MAXSTOPS 1") == BACKEND_GFLIGHT
+    assert _call(extension="MAXSTOPS 2") == BACKEND_GFLIGHT
     assert _call(routing="N") == BACKEND_GFLIGHT
+
+
+def test_stop_ceiling_above_two_goes_to_matrix() -> None:
+    """fli's MaxStops tops out at "two or fewer", so a higher ceiling maps to
+    ANY and the tfs field is omitted — certifying it encodable would drop the
+    constraint with neither a native filter nor a reason."""
+    assert _call(extension="MAXSTOPS 3") == BACKEND_MATRIX
+    encodable, reasons = page_can_encode(classify(None, "MAXSTOPS 3").predicates)
+    assert not encodable
+    assert reasons == ["a stop ceiling above 2 (3)"]
 
 
 @pytest.mark.parametrize(
@@ -205,3 +216,47 @@ def test_explicit_gflight_error_names_the_airport_set() -> None:
 def test_unknown_backend_rejected() -> None:
     with pytest.raises(typer.BadParameter, match="--backend must be one of"):
         _call("nope")
+
+
+# ───────────── deprecated `flight gflight` alias (work-h70kv.5) ─────────────
+
+
+def _gflight_alias(monkeypatch: pytest.MonkeyPatch, *args: str) -> tuple[list[str], str]:
+    """Run the deprecated alias with both backends stubbed, reporting its pick."""
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    called: list[str] = []
+
+    def _gf(**_kw: object) -> None:
+        called.append("gflight")
+
+    def _mx(**_kw: object) -> None:
+        called.append("matrix")
+
+    monkeypatch.setattr(cli, "_run_gflight_path", _gf)
+    monkeypatch.setattr(cli, "_run_matrix_path", _mx)
+    result = CliRunner().invoke(cli.app, ["gflight", *args])
+    assert result.exit_code == 0, result.output
+    return called, result.output
+
+
+def test_gflight_alias_still_uses_google_flights_for_a_plain_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called, _ = _gflight_alias(monkeypatch, "JFK", "LAX", "--dep", "2026-10-14")
+    assert called == ["gflight"]
+
+
+def test_gflight_alias_takes_matrix_for_a_child_passenger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The page transport can't price a child. The alias has no --backend flag,
+    so it resolves like `search` on auto rather than erroring on a query it
+    used to answer (wrongly, at adult fares)."""
+    called, output = _gflight_alias(
+        monkeypatch, "JFK", "LAX", "--dep", "2026-10-14", "--children", "1"
+    )
+    assert called == ["matrix"]
+    assert "a passenger type beyond adults" in output
