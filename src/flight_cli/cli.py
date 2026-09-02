@@ -1190,13 +1190,12 @@ def _gflight_results(
     `search` applies the same routing/extension to every leg, so the first leg's
     constraints cover the trip for the native query; the post-filter is per slice.
 
-    This is also where a rung-2 browser session dies. It is created lazily in
+    This is also where a rung-2 browser session dies. It is created lazily on
     whichever thread runs this call — the enrich path runs it inside
     `anyio.to_thread.run_sync` — and a playwright object may only be closed by
-    the thread that made it, so the `finally` here is the guarantee. It covers
-    every path this function *returns* from; a SIGINT landing while a worker
-    thread sits in `page.goto` is outside any `finally`'s reach, which is why
-    the profile-lock refusal names the interrupted-run case.
+    the thread that made it, so the `finally` here is the guarantee. A SIGINT
+    landing while that thread sits in `page.goto` escapes it, which is why the
+    profile-lock refusal names the interrupted-run case.
     """
     from ._gf_postfilter import surviving_indices  # noqa: PLC0415
     from ._gflight_ids import HTTP_TRANSPORT, TRANSPORT_HTTP, search_with_ids  # noqa: PLC0415
@@ -1356,8 +1355,8 @@ def _run_gflight_path(
     the existing PP matcher + renderer reuse cleanly. PP runs on the same
     (origin, dest, date) per leg as the matrix path.
 
-    `transport` defaults to None (rung 1) so the deprecated `gflight` command,
-    which has no transport flag, keeps the behaviour it had.
+    `transport=None` is rung 1 — the deprecated `gflight` command has no
+    transport flag.
     """
     from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
 

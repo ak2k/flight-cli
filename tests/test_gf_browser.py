@@ -189,17 +189,17 @@ def test_fetch_page_reports_a_2xx_by_construction(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(gfid, "build_search_tfs", _stub_tfs)
     monkeypatch.setattr(gfid, "_seed_cookies_once", _no_seed)
 
-    html, final_url, status_code = gfid._fetch_page(cast("Any", None))
-    assert html == "<html>board</html>"
-    assert "tfs=" in final_url
-    assert status_code == 200
+    page = gfid._fetch_page(cast("Any", None))
+    assert page.html == "<html>board</html>"
+    assert "tfs=" in page.final_url
+    assert page.status_code == 200
 
 
 def test_a_server_error_is_a_typed_shape_refusal() -> None:
     """A 5xx used to surface as curl_cffi's own `HTTPError`, which the Matrix
     fallback seam does not catch. Typed, it degrades like every other refusal."""
     with pytest.raises(GfPageShapeError, match="HTTP 503"):
-        gfid._rows_from_page_html("", final_url=_PAGE_URL, status_code=503)
+        gfid._rows_from_page_html(gfid.PageFetch("", _PAGE_URL, 503))
 
 
 def test_a_throttle_outranks_the_status_check() -> None:
@@ -210,16 +210,15 @@ def test_a_throttle_outranks_the_status_check() -> None:
     where fli would have raised — and the interstitial it usually arrives as is
     caught by URL or body instead."""
     with pytest.raises(GfThrottledError):
-        gfid._rows_from_page_html("", final_url=_PAGE_URL, status_code=429)
+        gfid._rows_from_page_html(gfid.PageFetch("", _PAGE_URL, 429))
     with pytest.raises(GfThrottledError):
-        gfid._rows_from_page_html("", final_url=_SORRY_URL, status_code=200)
+        gfid._rows_from_page_html(gfid.PageFetch("", _SORRY_URL, 200))
 
 
 def test_browser_bytes_and_http_bytes_reach_the_same_rows() -> None:
     """The invariant the whole rung rests on: rung 2 supplies bytes, never
     interpretation, so identical bytes must yield identical rows."""
-    html = _page()
-    rows = gfid._rows_from_page_html(html, final_url=_PAGE_URL, status_code=200)
+    rows = gfid._rows_from_page_html(gfid.PageFetch(_page(), _PAGE_URL, 200))
     assert len(rows) == 3
     assert all(r.flight_id for r in rows)
     assert all(a.legroom_class for r in rows for a in r.amenities)
@@ -239,7 +238,7 @@ class _RecordingSession:
         self.urls.append(url)
         if isinstance(self._result, Exception):
             raise self._result
-        return gfb.PageFetch(html=_page(), final_url=_PAGE_URL, status_code=200)
+        return gfid.PageFetch(html=_page(), final_url=_PAGE_URL, status_code=200)
 
 
 def _filters(*, round_trip: bool) -> Any:
@@ -312,7 +311,7 @@ def test_the_http_rungs_never_consult_the_browser(
         raise AssertionError(f"mode={mode} reached the browser rung (headed={headed})")
 
     def _rung_one(_filters_arg: Any) -> list[GFlightWithId]:
-        return gfid._rows_from_page_html(_page(), final_url=_PAGE_URL, status_code=200)
+        return gfid._rows_from_page_html(gfid.PageFetch(_page(), _PAGE_URL, 200))
 
     monkeypatch.setattr(gfb, "session", _forbidden)
     monkeypatch.setattr(gfid, "_one_call", _rung_one)
@@ -358,9 +357,7 @@ def test_a_navigation_becomes_rows_and_the_launch_is_announced(
         session.get_html(_PAGE_URL)
 
     assert fetch.status_code == 200
-    rows = gfid._rows_from_page_html(
-        fetch.html, final_url=fetch.final_url, status_code=fetch.status_code
-    )
+    rows = gfid._rows_from_page_html(fetch)
     assert len(rows) == 3  # the navigation's bytes go straight into the one parser
     assert _page_of(pw).gotos == [(_PAGE_URL, "commit", 30_000)] * 2  # one launch, two navs
     assert capsys.readouterr().err.count("opening Chrome") == 1

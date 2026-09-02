@@ -41,7 +41,7 @@ import time
 from copy import deepcopy
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from fli.models import (  # pyright: ignore[reportMissingTypeStubs]
     FlightLeg,
@@ -621,8 +621,18 @@ def search_page_url(filters: FlightSearchFilters) -> str:
     return google_flights_search_page_url(build_search_tfs(filters))
 
 
-def _fetch_page(filters: FlightSearchFilters) -> tuple[str, str, int]:
-    """One GET of the public search page: `(html, final_url, status_code)`.
+class PageFetch(NamedTuple):
+    """One fetch of the search page, whichever rung made it — and the whole of
+    the evidence `_rows_from_page_html` rules on, so the parser cannot tell the
+    rungs apart."""
+
+    html: str
+    final_url: str
+    status_code: int
+
+
+def _fetch_page(filters: FlightSearchFilters) -> PageFetch:
+    """One GET of the public search page.
 
     Everything visible in the bytes themselves is left to
     `_rows_from_page_html`, so rung 2 — which fetches the same page through
@@ -649,10 +659,10 @@ def _fetch_page(filters: FlightSearchFilters) -> tuple[str, str, int]:
         if e.status_code == HTTPStatus.TOO_MANY_REQUESTS:
             raise GfThrottledError("Google Flights rate-limited the request") from e
         raise
-    return resp.text, str(resp.url), HTTPStatus.OK
+    return PageFetch(html=resp.text, final_url=str(resp.url), status_code=HTTPStatus.OK)
 
 
-def _rows_from_page_html(html: str, *, final_url: str, status_code: int) -> list[GFlightWithId]:
+def _rows_from_page_html(page: PageFetch) -> list[GFlightWithId]:
     """The flight rows a rendered search page carries — the single parser both
     rungs go through; a rung supplies bytes, never interpretation.
 
@@ -665,19 +675,17 @@ def _rows_from_page_html(html: str, *, final_url: str, status_code: int) -> list
     Refusals are typed and raised (`GfThrottledError` / `GfConsentError` /
     `GfPageShapeError`); a page that decodes with zero rows returns `[]`, which
     is Google's authoritative answer and not retried."""
-    # The status half of this test exists for the browser rung alone. Chrome
-    # reports a 429 instead of raising on it, so without it a rate-limited
-    # navigation with no `/sorry/` redirect and no body marker would fall
-    # through to the shape branch below and be reported as a moved payload.
-    # On the curl_cffi rung fli has already raised, and `_fetch_page` has
-    # already turned a 429 into this same refusal.
+    html, final_url, status_code = page
+    # Both status tests serve the browser rung alone — Chrome reports a status
+    # where fli raises on it, so a curl_cffi page arrives here already 2xx with
+    # its 429 turned into this same refusal. Without the 429 test, a
+    # rate-limited navigation carrying no `/sorry/` redirect and no body marker
+    # would fall through to the shape branch and read as a moved payload.
     if status_code == HTTPStatus.TOO_MANY_REQUESTS or _is_page_throttled(
         final_url=final_url, html=html
     ):
         raise GfThrottledError("Google Flights rate-limited the request")
     if status_code >= HTTPStatus.BAD_REQUEST:
-        # Same story: only a navigation can get here with a non-2xx, because
-        # fli raises on one before `_fetch_page` ever sees a response.
         raise GfPageShapeError(f"Google Flights' search page returned HTTP {status_code}")
     payload = _extract_ds1(html)
     if payload is None:
@@ -716,8 +724,7 @@ def _rows_from_page_html(html: str, *, final_url: str, status_code: int) -> list
 
 def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
     """Rung 1: fetch the search page over curl_cffi and read its rows."""
-    html, final_url, status_code = _fetch_page(filters)
-    rows = _rows_from_page_html(html, final_url=final_url, status_code=status_code)
+    rows = _rows_from_page_html(_fetch_page(filters))
     # A page we could read means Google answered a warm session — save its
     # cookies (NID) so the next one-shot CLI process starts warm instead of
     # cold. Rung-1 only: rung 2 keeps its own Chrome profile, and its cookies
@@ -790,8 +797,7 @@ class GfTransport:
       rung lands separately; the mode exists now so the CLI surface and every
       call site are already the shape it needs.
 
-    Frozen, and defaulting to `http`, so a call site nobody updated keeps the
-    behaviour it had before rung 2 existed.
+    Frozen, and defaulting to `http`, so an unpassed `transport` is rung 1.
     """
 
     mode: str = TRANSPORT_HTTP
@@ -813,9 +819,8 @@ def _one_call_browser(filters: FlightSearchFilters, *, headed: bool) -> list[GFl
     session without a browser anywhere in the process."""
     from . import _gf_browser  # noqa: PLC0415 — patchright is optional; keep it off the http path
 
-    fetch = _gf_browser.session(headed=headed).get_html(search_page_url(filters))
     return _rows_from_page_html(
-        fetch.html, final_url=fetch.final_url, status_code=fetch.status_code
+        _gf_browser.session(headed=headed).get_html(search_page_url(filters))
     )
 
 

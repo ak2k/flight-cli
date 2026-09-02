@@ -47,10 +47,9 @@ class GfPageShapeError(GfBackendError):
     re-deriving — never that the route has no flights."""
 
 
-# Every other remedy this module offers is a flag the user can already see in
-# `--help`; this one has to be spelled out because the browser rung is the only
-# transport that can fail for reasons outside Google (no Chrome, a locked
-# profile), and the fix is local rather than "try the other backend".
+# Spelled out because the browser rung is the only transport that fails for
+# reasons outside Google (no Chrome, a locked profile), where the fix is local
+# rather than the "try the other backend" every other refusal offers.
 _BROWSER_DEFAULT_REMEDY = "Retry, or use `--gf-transport http` (or `--backend matrix`)."
 
 

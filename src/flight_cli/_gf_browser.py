@@ -32,12 +32,12 @@ import atexit
 import logging
 import os
 import threading
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 
 from ._gf_errors import GfBrowserUnavailableError
-from ._gflight_ids import cache_dir
+from ._gflight_ids import PageFetch, cache_dir
 
 if TYPE_CHECKING:
     import pathlib
@@ -54,8 +54,8 @@ _NAV_TIMEOUT_MS = 30_000
 # `commit` returns as soon as the navigation commits; the body arrives with
 # `response.text()` either way (see the module docstring).
 _WAIT_UNTIL = "commit"
-# Escape hatch for a Chrome that isn't where `channel="chrome"` looks, and the
-# seam the oracle uses to prove an unavailable browser is a typed refusal.
+# Escape hatch for a Chrome that isn't where `channel="chrome"` looks; pointing
+# it at a missing binary is also how a caller forces the typed refusal.
 _BROWSER_BIN_ENV = "FLIGHT_CLI_GF_BROWSER_BIN"
 _PROFILE_DIR_NAME = "gf-browser-profile"
 # Chromium's single-instance guard writes these into the profile dir and
@@ -67,15 +67,6 @@ _INSTALL_HINT = (
     "Install it with `uv pip install 'flight-cli[browser]'` "
     "(plus a one-time `uvx --from patchright patchright install chrome`)."
 )
-
-
-class PageFetch(NamedTuple):
-    """What one navigation yields: the same three facts a curl_cffi GET does,
-    so `_rows_from_page_html` cannot tell the rungs apart."""
-
-    html: str
-    final_url: str
-    status_code: int
 
 
 def _profile_dir() -> pathlib.Path:
@@ -160,18 +151,15 @@ class GfBrowserSession:
     """
 
     def __init__(self, *, headed: bool) -> None:
-        """Record how to launch; open nothing until the first fetch."""
         self._headed = headed
         self._playwright: Any = None
         self._context: Any = None
         self._page: Any = None
 
     def __enter__(self) -> GfBrowserSession:
-        """Support `with`; the launch still waits for the first fetch."""
         return self
 
     def __exit__(self, *_exc: object) -> None:
-        """Close on the way out, success or failure alike."""
         self.close()
 
     def get_html(self, url: str) -> PageFetch:

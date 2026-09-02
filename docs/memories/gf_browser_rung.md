@@ -19,8 +19,8 @@ token-replay designs) is in bd `work-udpp1`.
 
 ## One parser, two rungs
 
-`_one_call_laddered(filters, transport)` picks the rung. Both end in
-`_rows_from_page_html(html, *, final_url, status_code)`:
+`_one_call_laddered(filters, transport)` picks the rung. Both hand a
+`PageFetch(html, final_url, status_code)` to `_rows_from_page_html`:
 
 ```
 rung 1  _fetch_page ─────────────┐
@@ -28,10 +28,12 @@ rung 1  _fetch_page ─────────────┐
 rung 2  GfBrowserSession.get_html┘        (the only parser)
 ```
 
-**A rung supplies bytes; it never interprets them.** `_fetch_page` deliberately
-does not call `raise_for_status` — a block arrives as an ordinary HTTP response
-(a 429, or a 302 to `/sorry/`), and deciding what that means belongs downstream
-so both rungs reach identical verdicts from identical evidence.
+**A rung supplies bytes; it never interprets them.** The lone exception is the
+429 fli hides: `Client.get` calls `raise_for_status()` itself, so on rung 1 a
+429 never arrives as a response at all and `_fetch_page` is the only place that
+can name it. Everything visible in the bytes — the `/sorry/` redirect, the body
+marker, a missing `ds:1`, the status Chrome does report — is decided
+downstream, so both rungs reach identical verdicts from identical evidence.
 
 Classification order inside `_rows_from_page_html` is load-bearing: throttle
 (`/sorry/` or 429) → any other non-2xx as `GfPageShapeError` → missing `ds:1`
