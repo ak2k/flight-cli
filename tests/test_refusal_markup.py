@@ -20,7 +20,7 @@ asserted below, on the same input, for exactly that reason.
 from __future__ import annotations
 
 import io
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 import typer
@@ -160,6 +160,30 @@ def test_hostile_extension_reaches_the_auto_path_verbatim(
     resolved, printed = _pick(monkeypatch, extension=extension)
     assert resolved == BACKEND_MATRIX
     assert _as_quoted(extension) in printed, f"the extension string was mangled: {printed!r}"
+
+
+def test_a_matrix_error_carrying_markup_is_printable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Matrix's rejections are quoted back verbatim too — the QPX layer answers
+    a bad route with its own prose, and nothing sanitises it on the way here.
+    `_run` is the shared search and detail entry point that prints it."""
+    from flight_cli import cli
+    from flight_cli.client import MatrixApiError
+
+    buf = io.StringIO()
+    monkeypatch.setattr(cli, "err", Console(file=buf, width=400, no_color=True, highlight=False))
+
+    def _boom(*_a: object, **_kw: object) -> object:
+        raise MatrixApiError(
+            "QPX Warning. Bad route [/spec]", kind="in[put]", request_id="Or[FG]wFzk"
+        )
+
+    monkeypatch.setattr(cli.anyio, "run", _boom)
+    with pytest.raises(typer.Exit):
+        cli._run(cast("Any", None), rps=1.0, impersonate="chrome", no_cache=True)
+
+    printed = buf.getvalue()
+    for fragment in ("QPX Warning. Bad route [/spec]", "in[put]", "Or[FG]wFzk"):
+        assert fragment in printed, f"{fragment!r} was mangled: {printed!r}"
 
 
 @pytest.mark.parametrize("routing", _HOSTILE_ROUTING)
