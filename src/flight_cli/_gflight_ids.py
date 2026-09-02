@@ -484,13 +484,18 @@ def _flight_leg(fl: list[Any]) -> FlightLeg:
     )
 
 
-def _cookie_path() -> pathlib.Path:
-    """Where the warmed gflight session cookies live — the shared CLI cache dir
-    (same `MATRIX_CACHE_DIR` override the response cache honors)."""
-    cache_dir = pathlib.Path(
+def cache_dir() -> pathlib.Path:
+    """The shared CLI cache dir, honoring the same `MATRIX_CACHE_DIR` override
+    the response cache does. Rung 2's browser profile resolves from here too, so
+    a test that redirects the cache redirects both."""
+    return pathlib.Path(
         os.environ.get("MATRIX_CACHE_DIR") or pathlib.Path.home() / ".cache" / "flight-cli"
     )
-    return cache_dir / "gflight-cookies.json"
+
+
+def _cookie_path() -> pathlib.Path:
+    """Where the warmed gflight session cookies live."""
+    return cache_dir() / "gflight-cookies.json"
 
 
 def _seed_cookies_once(client: Any) -> None:
@@ -566,21 +571,43 @@ def _rows_from_ds1(payload: list[Any]) -> list[Any]:
     return rows
 
 
-def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
-    """One GET of the public search page; flat list of one leg's flights.
+def search_page_url(filters: FlightSearchFilters) -> str:
+    """The public search-page URL for `filters` — the one address both rungs
+    fetch, so neither can drift into asking Google a different question."""
+    return google_flights_search_page_url(build_search_tfs(filters))
+
+
+def _fetch_page(filters: FlightSearchFilters) -> tuple[str, str, int]:
+    """One GET of the public search page: `(html, final_url, status_code)`.
+
+    Deliberately says nothing about what came back — no `raise_for_status`, no
+    classification. A block arrives as an ordinary HTTP response (a 429, or a
+    302 to `/sorry/`), and deciding what that means is `_rows_from_page_html`'s
+    job so that rung 2, which fetches the same page through Chrome, reaches the
+    same verdicts from the same evidence."""
+    client = get_client()
+    _seed_cookies_once(client)
+    resp = client.get(search_page_url(filters), impersonate="chrome", allow_redirects=True)
+    return resp.text, str(resp.url), resp.status_code
+
+
+def _rows_from_page_html(html: str, *, final_url: str, status_code: int) -> list[GFlightWithId]:
+    """The flight rows a rendered search page carries — the single parser both
+    rungs go through; a rung supplies bytes, never interpretation.
+
+    The order is load-bearing. A `/sorry/` interstitial or a 429 is a throttle
+    before it is anything else; only then does another non-200 become a shape
+    error; only then is a missing `ds:1` read as consent. Every one of those
+    would otherwise decode as zero rows and reach the user as "no flights on
+    this route".
 
     Refusals are typed and raised (`GfThrottledError` / `GfConsentError` /
     `GfPageShapeError`); a page that decodes with zero rows returns `[]`, which
     is Google's authoritative answer and not retried."""
-    client = get_client()
-    _seed_cookies_once(client)
-    url = google_flights_search_page_url(build_search_tfs(filters))
-    resp = client.get(url, impersonate="chrome", allow_redirects=True)
-    final_url = str(resp.url)
-    if _is_page_throttled(status_code=resp.status_code, final_url=final_url):
+    if _is_page_throttled(status_code=status_code, final_url=final_url):
         raise GfThrottledError("Google Flights rate-limited the request")
-    resp.raise_for_status()
-    html = resp.text
+    if status_code >= HTTPStatus.BAD_REQUEST:
+        raise GfPageShapeError(f"Google Flights' search page returned HTTP {status_code}")
     payload = _extract_ds1(html)
     if payload is None:
         if _is_consent_page(final_url=final_url, html=html):
@@ -590,9 +617,6 @@ def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
         raise GfPageShapeError(
             "Google Flights' search page carried no readable ds:1 payload; the page shape changed"
         )
-    # A decoded payload means Google answered a warm session — save its cookies
-    # (NID) so the next one-shot CLI process starts warm instead of cold.
-    _persist_cookies(client)
     rows = _rows_from_ds1(payload)
     if not rows:
         return []  # Google's own answer: this leg has no flights.
@@ -615,6 +639,18 @@ def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
             f"the row shape changed (sample reasons: {sample})"
         )
     return out
+
+
+def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
+    """Rung 1: fetch the search page over curl_cffi and read its rows."""
+    html, final_url, status_code = _fetch_page(filters)
+    rows = _rows_from_page_html(html, final_url=final_url, status_code=status_code)
+    # A page we could read means Google answered a warm session — save its
+    # cookies (NID) so the next one-shot CLI process starts warm instead of
+    # cold. Rung-1 only: rung 2 keeps its own Chrome profile, and its cookies
+    # are not this session's to persist.
+    _persist_cookies(get_client())
+    return rows
 
 
 def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
