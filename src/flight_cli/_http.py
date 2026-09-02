@@ -135,6 +135,13 @@ class HttpTransport:
             return None
 
     def _cache_put(self, key: str, value: dict[str, Any]) -> None:
+        # Matrix reports failures as HTTP 200 with a top-level `error` object, so
+        # without this a brownout gets cached and replayed for the whole TTL —
+        # the giveaway is an identical request_id returning instantly on a retry
+        # (work-h70kv.8). A failure is never worth keeping; let the next run ask.
+        if value.get("error") is not None:
+            log.debug("cache_write_skipped", key=key, reason="error body")
+            return
         try:
             self._cache_path(key).write_text(json.dumps(value, indent=2))
         except OSError as e:
