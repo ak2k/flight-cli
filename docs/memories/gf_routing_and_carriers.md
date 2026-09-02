@@ -98,10 +98,12 @@ is pinned with an open floor (`>=0.9`), so a minor that adds a filter would
 otherwise encode as if the new field were unset — dropping a constraint the user
 asked for, silently.
 
-One more trap in `page_can_encode`: a stop ceiling only encodes up to **two**.
-fli's `MaxStops` tops out at `TWO_OR_FEWER_STOPS`, so `MAXSTOPS 3` maps to `ANY`
-and omits field 3.5 entirely — certifying it as page-servable would drop the
-constraint with neither a native filter nor a printed reason.
+One more trap: a stop ceiling only encodes up to **two**. fli's `MaxStops` tops
+out at `TWO_OR_FEWER_STOPS`, so a ceiling of 3+ maps to `ANY` and omits field
+3.5 entirely — `--stops 3` then encodes byte-identically to no `--stops` at all.
+Both spellings hit the same ceiling (`routing_predicates.MAX_ENCODABLE_STOPS`,
+shared so the two sites can't drift): the routing-language `MAXSTOPS 3` through
+`page_can_encode`, and the `--stops` flag through `_pick_backend` directly.
 
 **That page has two rungs.** Rung 1 is the curl_cffi GET above. Rung 2
 (`--gf-transport browser`) drives a real Chrome to the *same* URL and hands its
@@ -125,10 +127,10 @@ follow-up. Details, measurements and traps: [gf_browser_rung.md](gf_browser_rung
   re-raises. Measured: a persistent 429 costs three GETs inside fli first.
 - `GfConsentError` — no `ds:1` *and* consent markers, checked in that order,
   because a real results page links to the consent domain in its footer.
-- `GfPageShapeError` — no readable `ds:1`; or `ds:1` decoded but carried no row
-  block at `[2]`/`[3]`; or rows present and none parsed (with sampled reasons);
-  or a non-2xx status, which only the browser rung can report (fli raises
-  first on the other one).
+- `GfPageShapeError` — no readable `ds:1`; or `ds:1` decoded but held no
+  row-shaped block at EITHER `[2]` or `[3]`; or rows present and none parsed
+  (with sampled reasons); or a non-2xx status, which only the browser rung can
+  report (fli raises first on the other one).
 - `GfBrowserUnavailableError` — rung 2 could not produce bytes at all: no
   patchright, no Chrome, a profile another `flight` holds, a dead navigation.
   Never a statement about the route. It carries its own remedy text, because
@@ -136,10 +138,27 @@ follow-up. Details, measurements and traps: [gf_browser_rung.md](gf_browser_rung
 
 A page that decodes with zero rows returns `[]` and is Google's authoritative
 answer, so the search path passes `retry_empty=False` and spends exactly one GET
-on it. The discriminator against a moved payload is that a genuinely empty board
-still carries a LIST at both row indices (`[[]]` at 2 and 3, checked against a
-live capture) — zero blocks present means the layout changed, not that the route
-has no service.
+on it.
+
+**How many row blocks a served page carries varies, so "both indices" is NOT a
+validity test.** Measured live 2026-09-02:
+
+| page | `ds:1[2]` | `ds:1[3]` |
+|---|---|---|
+| initial one-way / outbound search | top-flights board (JFK-LAX: 3 rows) | the rest (27 rows) |
+| leg pinned via tfs 3.4 (a round-trip's return fetch) | **`None`** | the whole board (3 rows) |
+| flight-less board | `[[]]` | `[[]]` |
+
+A pinned page has no top-flights ranking to show for a board that answers an
+already-chosen outbound, so it simply omits `[2]`. Requiring both blocks refused
+every round-trip return leg as a "page shape change" — a real result turned into
+a refusal, which is the same class of bug as the one this guard exists to catch,
+pointing the other way.
+
+The only honest shape signal is therefore **neither index holding anything
+row-shaped**: an empty block and a missing block are indistinguishable from the
+rows alone, so a single empty block stays an authoritative empty. The 0-of-N
+parse guard below still catches a row layout that moved.
 
 ## Tier model: who honors each constraint
 

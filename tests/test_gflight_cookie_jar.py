@@ -1,6 +1,4 @@
-# pyright: reportPrivateUsage=false, reportUnknownVariableType=false
-# pyright: reportUnknownLambdaType=false, reportUnknownMemberType=false
-# Profile-B edge: curl_cffi's Session is generic and ships no stubs.
+# pyright: reportPrivateUsage=false
 """Persisted gflight session cookies (work-4bje3).
 
 The cold-session empties are almost entirely a missing Google `NID` cookie.
@@ -9,15 +7,16 @@ process is the root-cause fix (the retry-on-empty is the fallback). We persist
 ONLY the allowlisted NID cookie, with a TTL so we re-warm a fresh identity
 periodically rather than ride one forever.
 
-No network here: a tiny fake client mirrors the curl_cffi session's cookie API
-(`_client.cookies.jar` to read, `_client.cookies.set(...)` to seed).
+No network here: a tiny fake client mirrors fli's `Client`, whose jar hangs off
+`_session()` (`.cookies.jar` to read, `.cookies.set(...)` to seed).
 """
 
 from __future__ import annotations
 
 import json
+import threading
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import flight_cli._gflight_ids as gfid
 
@@ -52,8 +51,8 @@ class _FakeSession:
 
 class _FakeClient:
     """Mirrors fli's `Client`: the jar hangs off `_session()`, which is backed by
-    a `threading.local` — there is no `_client` attribute (reaching for one made
-    both helpers silent no-ops until work-h70kv.5 round 1)."""
+    a `threading.local`. There is no `_client` attribute — reaching for one makes
+    both helpers silent no-ops, swallowed by their broad excepts."""
 
     def __init__(self, cookies: list[_JarCookie] | None = None) -> None:
         self._sessions = _FakeSession(cookies or [])
@@ -64,7 +63,8 @@ class _FakeClient:
 
 def _reset(monkeypatch: pytest.MonkeyPatch, cache_dir: Path) -> None:
     monkeypatch.setenv("MATRIX_CACHE_DIR", str(cache_dir))
-    monkeypatch.setattr(gfid, "_cookie_state", {"seeded": False, "persisted": False})
+    monkeypatch.setattr(gfid, "_cookie_state", {"persisted": False})
+    monkeypatch.setattr(gfid, "_seed_latch", threading.local())
 
 
 def _write_cache(cache_dir: Path, cookies: list[dict[str, str]], *, saved_at: float) -> None:
@@ -180,7 +180,8 @@ def test_persist_then_seed_round_trips_through_fli_s_real_client(
     from fli.search.client import Client
 
     _reset(monkeypatch, tmp_path)
-    session = curl_requests.Session()
+    # curl_cffi's Session is generic and unstubbed — Profile-B edge.
+    session = cast("Any", curl_requests.Session())
     session.cookies.set("NID", "round-trip-value", domain=".google.com")
 
     writer = Client()
@@ -188,9 +189,56 @@ def test_persist_then_seed_round_trips_through_fli_s_real_client(
     gfid._persist_cookies(writer)
     assert (tmp_path / "gflight-cookies.json").exists()
 
-    monkeypatch.setattr(gfid, "_cookie_state", {"seeded": False, "persisted": False})
-    reader_session = curl_requests.Session()
+    monkeypatch.setattr(gfid, "_seed_latch", threading.local())
+    reader_session = cast("Any", curl_requests.Session())
     reader = Client()
     monkeypatch.setattr(reader, "_session", lambda: reader_session)
     gfid._seed_cookies_once(reader)
     assert reader_session.cookies.get("NID") == "round-trip-value"
+
+
+def test_each_thread_gets_seeded(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """fli's session is a `threading.local`, so a process-wide seed latch left
+    every worker thread but the first cold — which is precisely the fan-out."""
+    _reset(monkeypatch, tmp_path)
+    (tmp_path / "gflight-cookies.json").write_text(
+        json.dumps(
+            {
+                "saved_at": time.time(),
+                "cookies": [{"name": "NID", "value": "v", "domain": ".google.com", "path": "/"}],
+            }
+        )
+    )
+    clients = [_FakeClient([]) for _ in range(3)]
+
+    def seed(c: _FakeClient) -> None:
+        gfid._seed_cookies_once(c)
+
+    threads = [threading.Thread(target=seed, args=(c,)) for c in clients]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+
+    assert all(c._session().cookies.set_calls for c in clients), (
+        "a thread ran with a cold, NID-less session"
+    )
+
+
+def test_seeding_still_runs_once_within_one_thread(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _reset(monkeypatch, tmp_path)
+    (tmp_path / "gflight-cookies.json").write_text(
+        json.dumps(
+            {
+                "saved_at": time.time(),
+                "cookies": [{"name": "NID", "value": "v", "domain": ".google.com", "path": "/"}],
+            }
+        )
+    )
+    first, second = _FakeClient([]), _FakeClient([])
+    gfid._seed_cookies_once(first)
+    gfid._seed_cookies_once(second)
+    assert first._session().cookies.set_calls
+    assert second._session().cookies.set_calls == []

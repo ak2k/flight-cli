@@ -321,12 +321,21 @@ def test_every_filter_field_is_claimed_by_exactly_one_set() -> None:
         _TFS_ENCODED_FIELDS,
         _TFS_IGNORED_FIELDS,
         _TFS_REFUSED_FIELDS,
+        _TFS_REFUSED_PAX,
     )
 
     refused = {field for field, _ in _TFS_REFUSED_FIELDS}
     claimed = _TFS_ENCODED_FIELDS | refused | _TFS_IGNORED_FIELDS
     assert claimed == set(FlightSearchFilters.model_fields)
     assert not (_TFS_ENCODED_FIELDS & refused)
+
+    # The nested models the encoder reaches into carry their own fields, and a
+    # new one there is just as silent — `PassengerInfo` gaining a passenger kind
+    # would price it as nothing at all.
+    pax_refused = {field for field, _ in _TFS_REFUSED_PAX}
+    assert pax_refused | {"adults"} == set(PassengerInfo.model_fields)
+    segment_read = {"departure_airport", "arrival_airport", "travel_date", "selected_flight"}
+    assert segment_read | {"time_restrictions"} == set(FlightSegment.model_fields)
 
 
 def test_a_filter_field_fli_grows_later_is_refused() -> None:

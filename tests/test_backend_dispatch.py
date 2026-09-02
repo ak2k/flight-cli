@@ -35,6 +35,7 @@ def _call(backend: str = BACKEND_AUTO, **overrides: object) -> str:
         "slice_specs": None,
         "depart_times": None,
         "return_times": None,
+        "stops": None,
         "children": 0,
         "seniors": 0,
         "youth": 0,
@@ -79,6 +80,32 @@ def test_auto_stop_ceiling_stays_on_gflight() -> None:
     assert _call(extension="MAXSTOPS 1") == BACKEND_GFLIGHT
     assert _call(extension="MAXSTOPS 2") == BACKEND_GFLIGHT
     assert _call(routing="N") == BACKEND_GFLIGHT
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"stops": 3},  # the --stops flag
+        {"extension": "MAXSTOPS 3"},  # the routing-language spelling
+    ],
+)
+def test_a_stop_ceiling_above_two_goes_to_matrix_either_spelling(
+    overrides: dict[str, object], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Both spellings hit the same ceiling. Without this the flag bypasses
+    `page_can_encode` and encodes byte-identically to no --stops."""
+    assert _call(**overrides) == BACKEND_MATRIX  # pyright: ignore[reportArgumentType]
+    assert "a stop ceiling above 2 (3)" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("stops", [0, 1, 2])
+def test_an_encodable_stop_ceiling_stays_on_gflight(stops: int) -> None:
+    assert _call(stops=stops) == BACKEND_GFLIGHT
+
+
+def test_explicit_gflight_rejects_a_stop_ceiling_above_two() -> None:
+    with pytest.raises(typer.BadParameter, match=r"a stop ceiling above 2 \(3\)"):
+        _call(BACKEND_GFLIGHT, stops=3)
 
 
 def test_stop_ceiling_above_two_goes_to_matrix() -> None:
@@ -252,9 +279,9 @@ def test_gflight_alias_still_uses_google_flights_for_a_plain_search(
 def test_gflight_alias_takes_matrix_for_a_child_passenger(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The page transport can't price a child. The alias has no --backend flag,
-    so it resolves like `search` on auto rather than erroring on a query it
-    used to answer (wrongly, at adult fares)."""
+    """The page transport can't price a child — the tfs writer emits one adult
+    varint per occupant. The alias has no --backend flag, so it resolves like
+    `search` on auto rather than erroring on a query it accepts."""
     called, output = _gflight_alias(
         monkeypatch, "JFK", "LAX", "--dep", "2026-10-14", "--children", "1"
     )

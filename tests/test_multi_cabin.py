@@ -399,8 +399,8 @@ def _one_gflight_row() -> Any:
 def test_multi_cabin_json_carries_legroom_like_the_single_cabin_path(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Both JSON paths must emit the same row shape — the multi-cabin branch
-    used to dump `model_dump()` directly and lose legroom/amenities."""
+    """Both JSON paths must emit the same row shape: a bare `model_dump()` in
+    either one loses the legroom/amenities the other carries."""
     import json as _json
     from datetime import date as _date
 
@@ -491,8 +491,9 @@ def _dispatch(monkeypatch: pytest.MonkeyPatch, *args: str) -> tuple[list[str], s
 def test_multi_cabin_encodable_constraint_stays_on_gflight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The guard used to re-test `routing or extension` and override
-    `_pick_backend`, dropping an encodable constraint to Matrix silently."""
+    """The multi-cabin guard defers to `_pick_backend`. Re-testing
+    `routing or extension` there drops an encodable constraint to Matrix
+    silently."""
     called, _ = _dispatch(
         monkeypatch,
         "JFK",

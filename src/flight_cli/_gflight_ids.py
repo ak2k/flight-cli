@@ -37,6 +37,7 @@ import os
 import pathlib
 import random
 import re
+import threading
 import time
 from copy import deepcopy
 from dataclasses import dataclass
@@ -123,7 +124,9 @@ def _is_throttle_block(body: str) -> bool:  # pyright: ignore[reportUnusedFuncti
 # so both would otherwise read as an empty board.
 _SORRY_PATH = "/sorry/"
 # The same interstitial served at the requested URL with HTTP 200 — no redirect
-# to key off, so the body is the only tell.
+# to key off, so the body is the only tell. English-only, and we always request
+# `hl=en`; a localised block would still be caught by the `/sorry/` URL check
+# whenever Google redirects, which is the common shape.
 _SORRY_MARKERS = ("Our systems have detected unusual traffic",)
 # Consent interstitial markers. EU/EEA egress lands here; the page has no
 # `ds:1`, so without this it would be indistinguishable from a shape change.
@@ -134,10 +137,18 @@ _CONSENT_MARKERS = ("consent.google.com", "/consent?continue=", "CONSENT_PAGE")
 # blob is JavaScript, not JSON: only `data:` holds a JSON value. Anything about
 # the shape drifting is a `GfPageShapeError`, never an empty result.
 #
-# The blob terminates on the `sideChannel` KEY, not on `});`: row payloads carry
-# arbitrary Google copy, and one airline name or airport string containing `});`
-# would otherwise cut the capture short and fail the whole search.
-_DS_BLOB_RE = re.compile(r"AF_initDataCallback\((\{.*?),\s*sideChannel\s*:", re.S)
+# The blob terminates on the `sideChannel` KEY, never on `});`: row payloads
+# carry arbitrary Google copy, and one airline name or airport string containing
+# `});` would otherwise cut the capture short and fail the whole search. (An
+# alternation that accepts either terminator does NOT work — the lazy quantifier
+# stops at whichever comes first, so an embedded `});` still wins.)
+#
+# The body is tempered so it cannot run past the next `AF_initDataCallback(`.
+# A blob carrying no `sideChannel` therefore matches nothing instead of
+# swallowing its successor, and the scan resumes at that successor.
+_DS_BLOB_RE = re.compile(
+    r"AF_initDataCallback\(((?:(?!AF_initDataCallback\()[\s\S])*?),\s*sideChannel\s*:"
+)
 _DS_KEY_RE = re.compile(r"key:\s*'([^']+)'")
 # Greedy to the end of the captured head — `data:` is the last key before
 # `sideChannel`, so everything after the first one is the payload.
@@ -207,11 +218,11 @@ def _is_consent_page(*, final_url: str, html: str) -> bool:
 # as the fallback for the first-ever run and NID rotation.
 #
 # The jar lives on fli's `Client._session()`, which is a `threading.local` —
-# each worker thread gets its OWN curl_cffi session. The multi-cabin fan-out and
-# the enrich path both query from threads, so seeding warms only the thread that
-# calls it; the once-per-process latches below mean the first thread to arrive
-# wins. That is enough for the one-shot CLI (the seed happens on whichever
-# thread makes the first request) and is why these helpers are best-effort.
+# each worker thread gets its OWN curl_cffi session, so seeding warms only the
+# thread that calls it. The multi-cabin fan-out and the enrich path both query
+# from threads, which is why the seed latch below is thread-local too: a
+# process-wide one left every thread but the first with a cold, NID-less
+# session, exactly where warmth matters most.
 #
 # We persist ONLY the named cookies below (and only on the google.com domain),
 # not the whole jar: NID is the one we've validated, and replaying an unknown
@@ -223,8 +234,12 @@ _PERSIST_COOKIE_NAMES = frozenset({"NID"})
 # a hedge in case Google ever keys rate-limiting on the cookie. The retry above
 # absorbs the single cold start when this lapses.
 _COOKIE_TTL_S = 14 * 24 * 3600  # 14 days
-# Once-per-process latches (a dict so we mutate rather than rebind a global).
+# Persistence guards a shared FILE, so once per process is right (a dict so we
+# mutate rather than rebind a global).
 _cookie_state: dict[str, bool] = {"seeded": False, "persisted": False}
+# Seeding guards a per-thread session, so its latch is per-thread. Tests reset it
+# by rebinding this to a fresh `threading.local()`.
+_seed_latch = threading.local()
 
 # Position of the opaque per-flight ID in Google Flights' API row array.
 # Mirrors the PP browser extension's parser (chunk-5KW5VSHS.js: `a = n[17]`).
@@ -536,9 +551,9 @@ def _seed_cookies_once(client: Any) -> None:
     before the first request — so a fresh CLI invocation starts warm instead of
     cold. Best-effort: missing/corrupt cache or a cookie-set failure leaves the
     session as-is (the retry then warms it)."""
-    if _cookie_state["seeded"]:
+    if getattr(_seed_latch, "done", False):
         return
-    _cookie_state["seeded"] = True
+    _seed_latch.done = True
     try:
         payload: dict[str, Any] = json.loads(_cookie_path().read_text())
         saved_at = float(payload["saved_at"])
@@ -596,22 +611,36 @@ def _persist_cookies(client: Any) -> None:
 
 def _rows_from_ds1(payload: list[Any]) -> tuple[list[Any], int]:
     """The flight rows inlined in a `ds:1` payload (top-flights board first),
-    and how many of the two row blocks were present at all.
+    and how many of the two indices actually held a row-shaped block.
 
-    The count is the discriminator between "Google says this leg has no
-    flights" and "the payload moved". A genuinely empty board still carries a
-    list at BOTH indices (`[[]]` at 2 and 3, checked against a live capture);
-    a payload whose blocks have moved carries a list at neither, and without
-    the count both look identical — zero rows."""
+    How many blocks a SERVED page carries varies by request, measured live
+    2026-09-02:
+
+      - initial one-way / outbound search — `[2]` Google's top-flights board
+        AND `[3]` the rest (JFK-LAX: 3 + 27 rows; HNL-MIA business: 3 + 5)
+      - a leg pinned through tfs field 3.4, i.e. the return-leg fetch of a
+        round-trip expansion — `[2]` is **None** and the whole board is at
+        `[3]` (3 rows). There is no top-flights ranking to show for a board
+        that answers an already-chosen outbound.
+      - a flight-less board — a row block that is present but empty (`[[]]`).
+
+    So the count is NOT a "both indices or the layout moved" test; one block is
+    a perfectly ordinary served page. It only separates "Google gave us a board,
+    possibly empty" from "neither index holds anything row-shaped", which is the
+    single honest shape signal here — an empty block and a missing block are
+    indistinguishable from the rows alone."""
     rows: list[Any] = []
     blocks_seen = 0
     for index in _DS_ROW_BLOCKS:
         block = payload[index] if len(payload) > index else None
-        if not isinstance(block, list):
+        if not isinstance(block, list) or not block or not isinstance(block[0], list):
             continue
+        # Counted only here: a list that isn't shaped `[[…rows…], …]` is not a
+        # row block, and counting it would let a moved payload pass the guard.
+        # An empty `[[]]` still counts — that is a flight-less board, and it
+        # must stay an authoritative empty rather than a refusal.
         blocks_seen += 1
-        if block and isinstance(block[0], list):
-            rows.extend(cast("list[Any]", block[0]))
+        rows.extend(cast("list[Any]", block[0]))
     return rows, blocks_seen
 
 
@@ -698,7 +727,10 @@ def _rows_from_page_html(page: PageFetch) -> list[GFlightWithId]:
         )
     rows, blocks_seen = _rows_from_ds1(payload)
     if not blocks_seen:
-        raise GfPageShapeError("ds:1 has no row blocks at [2]/[3]; the payload layout changed")
+        # Neither index holds anything row-shaped. Requiring BOTH would be
+        # wrong: a pinned return-leg page legitimately serves `[2] = None` with
+        # the entire board at `[3]` (see `_rows_from_ds1`).
+        raise GfPageShapeError("ds:1 held no row block at [2] or [3]; the payload layout changed")
     if not rows:
         return []  # Google's own answer: this leg has no flights.
     out: list[GFlightWithId] = []
