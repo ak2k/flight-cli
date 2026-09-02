@@ -629,6 +629,19 @@ def _run(
         raise typer.Exit(1) from e
 
 
+def _print_matrix_error(e: MatrixApiError) -> None:
+    """Report a Matrix error to stderr, escaped.
+
+    Matrix echoes the routing string back inside `message` ("Illegal COMMAND-LINE
+    prefix: BA[/weird]AA"), so all three fields carry user text onto a markup
+    console. Used by the two calendar sites only: `_run`, the multi-cabin fan-out
+    and the search path have the same block, and consolidating those means
+    editing code another unit is changing right now."""
+    err.print(f"[red]Matrix returned an error ({escape(str(e.kind))}):[/] {escape(str(e.message))}")
+    if e.request_id:
+        err.print(f"[dim]request_id: {escape(str(e.request_id))}[/]")
+
+
 # Matrix silently UNDER-REPORTS multi-airport calendar grids under compute-budget
 # pressure — even when the result is non-empty (a 3-destination query returned 12
 # solutions where one destination alone returns 155). The only query guaranteed
@@ -717,14 +730,7 @@ def _run_calendar(
     try:
         return anyio.run(go)
     except MatrixApiError as e:
-        # Matrix echoes the routing string back inside `message` ("Illegal
-        # COMMAND-LINE prefix: BA[/weird]AA"), so this carries user text onto a
-        # markup console like every other reporter on these paths.
-        err.print(
-            f"[red]Matrix returned an error ({escape(str(e.kind))}):[/] {escape(str(e.message))}"
-        )
-        if e.request_id:
-            err.print(f"[dim]request_id: {escape(str(e.request_id))}[/]")
+        _print_matrix_error(e)
         raise typer.Exit(1) from e
 
 
@@ -734,11 +740,7 @@ def _report_calendar_matrix_failure(state: dict[str, Any]) -> None:
     `_matrix` task, or a cancel/never-completed fall-through."""
     e = state.get("matrix_err")
     if e is not None:
-        err.print(
-            f"[red]Matrix returned an error ({escape(str(e.kind))}):[/] {escape(str(e.message))}"
-        )
-        if e.request_id:
-            err.print(f"[dim]request_id: {escape(str(e.request_id))}[/]")
+        _print_matrix_error(cast("MatrixApiError", e))
     elif state.get("matrix_unexpected") is not None:
         err.print(f"[red]Matrix calendar failed:[/] {escape(str(state['matrix_unexpected']))}")
     else:
@@ -2213,11 +2215,14 @@ def _resolve_no_cache(flag: bool) -> bool:
 # shape isn't naturally tabular without a flattening pass that deserves its
 # own design. Today's surface is the front door; emitters layer on later.
 _VALID_FORMATS = ("table", "json")
+# Rendered once, so the message and the help string cannot drift, and so the two
+# print sites interpolate a name rather than an expression.
+_FORMAT_CHOICES = "/".join(_VALID_FORMATS)
 
 _FORMAT_OPT = typer.Option(
     "table",
     "--format",
-    help=f"Output format: one of {'/'.join(_VALID_FORMATS)}.",
+    help=f"Output format: one of {_FORMAT_CHOICES}.",
     rich_help_panel=_GROUP_OUTPUT,
 )
 _JSON_OPT = typer.Option(
@@ -2258,7 +2263,7 @@ def _resolve_format(*, fmt: str, json_flag: bool) -> str:
             raise typer.Exit(2)
         return "json"
     if fmt not in _VALID_FORMATS:
-        err.print(f"[red]--format must be one of {'/'.join(_VALID_FORMATS)}; got {_quote(fmt)}[/]")
+        err.print(f"[red]--format must be one of {_FORMAT_CHOICES}; got {_quote(fmt)}[/]")
         raise typer.Exit(2)
     return fmt
 

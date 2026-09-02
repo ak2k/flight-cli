@@ -12,7 +12,7 @@ import ast
 import json
 from datetime import date
 from pathlib import Path
-from typing import Any, ClassVar, cast, override
+from typing import Any, ClassVar, override
 
 import pytest
 import typer
@@ -1007,6 +1007,11 @@ def test_calendar_round_trip_bad_duration_is_a_typed_error(
         ("3-3", (3, 3)),  # an explicit degenerate range
         ("05-07", (5, 7)),  # zero-padded bounds
         ("+5-+7", (5, 7)),  # signed bounds
+        # The accept side of the length bound: nine digits is the last width the
+        # parser takes, and the reject list holds the ten-digit neighbour. Past
+        # any trip anyone will book, and short of the digits `int()` refuses.
+        ("999999999", (999999999, 999999999)),
+        ("9-999999999", (9, 999999999)),
     ],
 )
 def test_parse_duration_accepts_every_spelling_of_a_valid_range(
@@ -1205,95 +1210,204 @@ def test_detail_round_trip_bad_duration_is_a_typed_error(
 # `err` and `console` are markup-enabled, so any user string or exception message
 # reaching them is markup until escaped: an unbalanced `[/x]` raises MarkupError
 # instead of the message, and a well-formed `[bold]` eats the token the reader
-# needs. Individual cases above cover the paths that carry user text today; this
-# reads the source so a NEW interpolation cannot be added without one.
+# needs. The cases above cover the values that carry user text today; this reads
+# the source, so a NEW print cannot be added without one.
+#
+# Polarity is inverted on purpose. An opt-IN list of functions to scan goes stale
+# the moment a print moves into a new helper — the helper is simply not listed,
+# and the scan stays green. Everything is scanned unless its enclosing function
+# is named below, so the default for new code is "checked".
 
-# The functions whose output a calendar or detail invocation can reach.
-_ESCAPE_SCOPE = frozenset(
+# Paths another unit owns. Each entry is a promise that the value is not ours to
+# escape, not that it is safe.
+_ESCAPE_OUT_OF_SCOPE = {
+    "_emit_urls": "URL emitter shared with the search path",
+    "_pinned_solution_index": "search-path pick helper",
+    "_render_search": "search renderable (Rich Table)",
+    "_render_calendar": "calendar renderable (Rich Table)",
+    "_render_date_grid": "date-grid renderable (Rich Table)",
+    "_render_merged": "merged-result renderable (Rich Table)",
+    "_render_gflight_table": "Google Flights renderable (Rich Table)",
+    "_render_multi_cabin_search": "multi-cabin renderable (Rich Table)",
+    "_run_enriched_path": "search-path weave",
+    "_run_gflight_path": "Google Flights search path",
+    "_run_matrix_multi": "multi-cabin fan-out",
+    "query_cabin": "multi-cabin per-cabin query",
+    "_validate_sort_cabin": "--sort validation",
+    "_should_run_awards": "provider selection",
+    "_resolve_providers": "provider/config loading",
+    "_resolve_rps": "rps config loading",
+    "airport": "airport lookup command",
+    "seatmap": "seatmap command",
+}
+
+# The two ways a value is made safe to print: `escape`, or `_quote`, which
+# truncates for display and then quotes and escapes.
+_SAFE_WRAPPERS = frozenset({"escape", "_quote"})
+
+# Names that are this module's own — counters it computed, constants it wrote —
+# and so are never user text. Matched by IDENTIFIER, never by source text: an
+# expression that happens to read the same way is not the same value.
+_PRINTABLE_IDENTIFIERS = frozenset(
     {
-        "_parse_date",
-        "_parse_duration",
-        "_parse_times",
-        "_resolve_cabin",
-        "_resolve_format",
-        "_resolve_duration",
-        "_grid_branch_blocker",
-        "_run",
-        "_run_calendar",
-        "_report_calendar_matrix_failure",
-        "_run_calendar_enriched",
-        "calendar",
-        "detail",
-    }
-)
-
-# The two ways a value is made safe to print: `escape` directly, or `_quote`,
-# which truncates for display and then quotes and escapes. Nothing else counts.
-_SAFE_WRAPPERS = ("escape(", "_quote(")
-
-# Values that are this module's own, never a user string or an exception message:
-# counters it computed and constants it wrote. Anything else must be wrapped.
-_UNESCAPED_OK = frozenset(
-    {
-        "lo",
+        "lo",  # _parse_duration: the ints it just parsed
         "hi",
-        "n",
+        "n",  # _run_calendar: fan-out counters
         "rounds",
         "conc",
-        "n_split",
+        "n_split",  # calendar: how many sub-searches were merged
         "_GF_GRID_UNAVAILABLE_NOTE",
         "_GF_GRID_UNAVAILABLE_WEAVE_NOTE",
-        "'/'.join(_VALID_FORMATS)",
+        "_FORMAT_CHOICES",
+    }
+)
+
+# Rich's own rendering knobs, which never carry content.
+_NON_CONTENT_KEYWORDS = frozenset(
+    {
+        "sep",
+        "end",
+        "style",
+        "justify",
+        "overflow",
+        "no_wrap",
+        "emoji",
+        "markup",
+        "highlight",
+        "width",
+        "height",
+        "crop",
+        "soft_wrap",
+        "new_line_start",
     }
 )
 
 
-def _printed_interpolations(src: str, tree: ast.Module) -> list[tuple[str, int, str]]:
-    """Every f-string field printed to a console from a function in scope."""
-    found: list[tuple[str, int, str]] = []
-    for fn in ast.walk(tree):
-        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        if fn.name not in _ESCAPE_SCOPE:
-            continue
-        for node in ast.walk(fn):
-            is_print = (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "print"
-            )
-            if not is_print:
+def _enclosing_functions(tree: ast.Module) -> dict[ast.AST, list[str]]:
+    """Every node mapped to the function names enclosing it, innermost first."""
+    chains: dict[ast.AST, list[str]] = {}
+
+    def walk(node: ast.AST, chain: list[str]) -> None:
+        for child in ast.iter_child_nodes(node):
+            inner = chain
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                inner = [child.name, *chain]
+            chains[child] = inner
+            walk(child, inner)
+
+    walk(tree, [])
+    return chains
+
+
+def _is_safe_field(value: ast.expr) -> bool:
+    """A printed f-string field is safe when it is wrapped, or is one of ours."""
+    if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+        return value.func.id in _SAFE_WRAPPERS
+    return isinstance(value, ast.Name) and value.id in _PRINTABLE_IDENTIFIERS
+
+
+def _argument_faults(src: str, arg: ast.expr) -> list[str]:
+    """Why this print argument could reach rich unescaped, or nothing."""
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        return []  # a literal the author wrote
+    if isinstance(arg, ast.JoinedStr):
+        faults: list[str] = []
+        for part in arg.values:
+            if isinstance(part, ast.Constant):
                 continue
-            for arg in cast("ast.Call", node).args:
-                for piece in ast.walk(arg):
-                    if isinstance(piece, ast.FormattedValue):
-                        segment = ast.get_source_segment(src, piece.value) or ""
-                        found.append((fn.name, piece.value.lineno, segment))
-    return found
+            if isinstance(part, ast.FormattedValue) and _is_safe_field(part.value):
+                continue
+            shown = ast.get_source_segment(src, part) or ast.dump(part)
+            faults.append(f"unwrapped f-string field {shown}")
+        return faults
+    if isinstance(arg, ast.Name) and arg.id in _PRINTABLE_IDENTIFIERS:
+        return []
+    shown = ast.get_source_segment(src, arg) or ast.dump(arg)
+    return [f"{type(arg).__name__} argument {shown}"]
+
+
+def escape_scan(src: str) -> list[str]:
+    """Console prints in `src` that could hand rich unescaped text.
+
+    Checks positional AND keyword arguments, and demands a literal, a fully
+    wrapped f-string, or an allowlisted name. A local holding a message, a
+    `.format()`, a `%`, or a concatenation is none of those, and each was a way
+    past the earlier field-only scan.
+    """
+    tree = ast.parse(src)
+    chains = _enclosing_functions(tree)
+    faults: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        prints = (isinstance(func, ast.Attribute) and func.attr in ("print", "log")) or (
+            isinstance(func, ast.Name) and func.id == "print"
+        )
+        if not prints:
+            continue
+        chain = chains.get(node, [])
+        if any(name in _ESCAPE_OUT_OF_SCOPE for name in chain):
+            continue
+        where = chain[0] if chain else "<module>"
+        args = list(node.args)
+        args += [k.value for k in node.keywords if k.arg not in _NON_CONTENT_KEYWORDS]
+        for arg in args:
+            faults += [f"{where}:{node.lineno} {fault}" for fault in _argument_faults(src, arg)]
+    return faults
 
 
 def test_calendar_paths_escape_every_printed_value() -> None:
-    src = Path(cli.__file__).read_text(encoding="utf-8")
-    fields = _printed_interpolations(src, ast.parse(src))
-    assert fields, "the scan found no printed interpolations — the walk is broken"
-    unescaped = [
-        f"{name}:{line} {segment}"
-        for name, line, segment in fields
-        if not segment.startswith(_SAFE_WRAPPERS) and segment not in _UNESCAPED_OK
-    ]
-    assert not unescaped, (
+    faults = escape_scan(Path(cli.__file__).read_text(encoding="utf-8"))
+    assert not faults, (
         "wrap these in _quote (a user value) or rich.markup.escape (anything "
-        "else), or add them to _UNESCAPED_OK if the value is this module's "
-        f"own: {unescaped}"
+        "else); add the name to _PRINTABLE_IDENTIFIERS if the value is this "
+        "module's own, or the function to _ESCAPE_OUT_OF_SCOPE with a reason if "
+        f"another unit owns it: {faults}"
     )
 
 
-def test_escape_scope_names_real_functions() -> None:
-    """A renamed or deleted function would silently drop out of the scan above."""
+def test_out_of_scope_names_real_functions() -> None:
+    """A renamed or deleted function would sit in the exclusion list forever,
+    silently exempting whatever later takes its name."""
     src = Path(cli.__file__).read_text(encoding="utf-8")
     defined = {
         fn.name
         for fn in ast.walk(ast.parse(src))
         if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
-    assert defined >= _ESCAPE_SCOPE, _ESCAPE_SCOPE - defined
+    assert defined >= set(_ESCAPE_OUT_OF_SCOPE), set(_ESCAPE_OUT_OF_SCOPE) - defined
+
+
+def test_escape_scan_finds_every_known_bypass() -> None:
+    """The scan's own regression net. Each source below slipped past the earlier
+    field-only version, which looked at f-string fields and nothing else."""
+    bypasses = {
+        "local variable": 'def calendar():\n    msg = f"{e}"\n    err.print(msg)\n',
+        "keyword argument": 'def calendar():\n    err.print(text=f"{e}")\n',
+        "str.format": 'def calendar():\n    err.print("{}".format(e))\n',
+        "percent formatting": 'def calendar():\n    err.print("%s" % e)\n',
+        "concatenation": 'def calendar():\n    err.print("bad " + str(e))\n',
+        "a newly extracted helper": 'def _brand_new_helper():\n    err.print(f"{e}")\n',
+        "console.log": 'def calendar():\n    console.log(f"{e}")\n',
+        "builtin print": 'def calendar():\n    print(f"{e}")\n',
+        "partly wrapped": 'def calendar():\n    err.print(f"{escape(a)} {b}")\n',
+        "lookalike wrapper": 'def calendar():\n    err.print(f"{not_escape(e)}")\n',
+    }
+    missed = [name for name, source in bypasses.items() if not escape_scan(source)]
+    assert not missed, f"the scan does not catch: {missed}"
+
+
+def test_escape_scan_passes_clean_source() -> None:
+    """And it must not cry wolf, or the next author will route around it."""
+    clean = (
+        "def calendar():\n"
+        '    err.print("[red]a plain literal[/]")\n'
+        '    err.print(f"[red]bad duration {_quote(s)}[/]")\n'
+        '    err.print(f"[red]error ({escape(str(e.kind))})[/]")\n'
+        '    err.print(f"[dim]{_GF_GRID_UNAVAILABLE_NOTE}[/]")\n'
+        '    err.print(f"max ({hi}) is below min ({lo})", style="red")\n'
+        "def _render_search():\n"
+        "    console.print(t)\n"  # out of scope: a Rich renderable
+    )
+    assert not escape_scan(clean)
