@@ -1,9 +1,9 @@
 # Console sanitizing: what reaches a markup console, and how it is wrapped
 
 Read before adding any print to `src/flight_cli/cli.py`. `console` and `err` are
-markup-enabled Rich consoles, and `rich.table.Table` parses markup in its title,
-in every column header and in every cell, so any string that is not this module's
-own is markup until it is wrapped. An unbalanced `[/x]` raises `MarkupError` and
+markup-enabled Rich consoles, and `rich.table.Table` parses markup in its title
+and caption, in every column header and footer, and in every cell, so any string
+that is not this module's own is markup until it is wrapped. An unbalanced `[/x]` raises `MarkupError` and
 loses the render of a query that SUCCEEDED; a well-formed `[bold]` silently eats
 the token the reader needed; and an ESC or an 8-bit CSI repaints the terminal.
 
@@ -22,7 +22,7 @@ for whatever an undocumented third-party library raised.
 
 **A source that quotes a value into a sentence keeps its `repr`.**
 `routing_predicates.py:284,331,343` build their reasons with `{...!r}`, and
-`_config.py:136,146` build the rps `ValueError` the same way. `repr` is there for
+`_config.py:139,149` build the rps `ValueError` the same way. `repr` is there for
 the reader — it shows the exact string that was rejected, quotes and all — and it
 happens to neutralise ESC, C1 and DEL on the way. It is not the guard, because it
 does not cover the value that reaches a console any other way.
@@ -107,8 +107,8 @@ survives them too, so for such a value this is not a proof; none reaches a
 numeric spec in `cli.py` today.
 
 There is no per-function exemption. One would pre-approve every FUTURE print in a
-function rather than one value, and each of the three rounds that had one shipped
-a MarkupError behind it. What a function may print without a wrapper is said one
+function rather than one value, and every MarkupError this guard has caught
+arrived behind one. What a function may print without a wrapper is said one
 identifier at a time in `_PRINTABLE_IDENTIFIERS`, keyed per FUNCTION since `n` is
 a fan-out counter in one place and could be anything in another. A decorator and
 a default argument belong to the scope around the `def`, because that is where

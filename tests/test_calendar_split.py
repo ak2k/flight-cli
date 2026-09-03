@@ -22,7 +22,7 @@ import pytest
 import typer
 from rich.console import Console
 
-from flight_cli import cli
+from flight_cli import _config, cli
 from flight_cli._calendar_split import (
     is_empty_calendar,
     merge_calendar_results,
@@ -967,8 +967,11 @@ def test_calendar_one_way_note_survives_json_output(
         # dash as a sign would answer a typo with a number nobody wrote.
         ("5-- 7", "use nights as"),
         ("5-7-9", "use nights as"),  # three bounds
-        # `int()` swallows every Unicode space, U+001C..1F among them, so a bound
-        # is matched against digits rather than handed to `int()` to be lenient.
+        # `int()` swallows every Unicode space, so `5-\xa07` would reach it as a
+        # range while reading as one token. U+001C..1F are `isspace()`-true and
+        # `int()` rejects them, so a bound is matched against digits rather than
+        # handed to `int()` to be lenient about which of the two it got.
+        ("5-\xa07", "use nights as"),
         ("5-\x1c7", "use nights as"),
         ("5\x1d-7", "use nights as"),
         # A bound is digits and nothing else, line endings included: `\Z` anchors
@@ -1792,6 +1795,13 @@ def test_a_hostile_config_path_and_error_are_reported_as_text(
     assert "bad toml at line 1: [/x]" in message  # and what went wrong with it
 
 
+def test_the_provider_opt_help_names_the_file_this_process_reads() -> None:
+    """The help says WHERE to put the option it is showing a flag for, and
+    `FLIGHT_CLI_CONFIG_DIR` moves that file — a hardcoded default names a path the
+    user may not have. Same defect, same fix, as the diagnostic one function over."""
+    assert str(_config.config_path()) in (cli._PROVIDER_OPT.help or "")  # pyright: ignore[reportPrivateUsage] — the option IS the unit
+
+
 class _FakeAirline:
     def __init__(self, name: str) -> None:
         self.name = name
@@ -2271,8 +2281,8 @@ def test_detail_round_trip_bad_duration_is_a_typed_error(
 # scanned here (work-h70kv.19).
 #
 # Every function is scanned. There is no per-function escape hatch: one exempts
-# every FUTURE print in a function rather than one value, and each of the three
-# rounds that had one shipped a reproduced MarkupError behind it. What a function
+# every FUTURE print in a function rather than one value, and every MarkupError
+# this guard has caught arrived behind one. What a function
 # may print without a wrapper is said one identifier at a time, below, where the
 # claim is small enough to be checked and a test exists that checks it.
 

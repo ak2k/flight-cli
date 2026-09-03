@@ -56,8 +56,9 @@ go into detail and are loaded on demand.
   print to `cli.py`.** Which values are markup on a Rich console (user flags,
   Matrix fields, third-party exceptions), the `_quote` / `_safe_text` /
   sanitize-inside-the-formatter rule and the orderings that make each work, and
-  the `escape_scan` AST guard: what it reads (including table cells, headers
-  and titles), what its two allowlists claim, and what it does not model.
+  the `escape_scan` AST guard: what it reads (table titles and captions, column
+  headers and footers, and every cell), what its allowlist claims and what holds
+  the values behind it, and what it does not model.
 - [legroom_recipe.md](legroom_recipe.md) — Per-leg legroom + amenities +
   aircraft come back in-band in Google Flights' own response (no
   travelarrow.io API call needed for the data itself). Index map for

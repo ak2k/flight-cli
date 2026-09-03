@@ -78,10 +78,11 @@ choice that fits the rest of the stack — don't substitute.
 - **Run pytest after any change to `cli.py` too**, and read
   [`docs/memories/console_sanitizing.md`](./docs/memories/console_sanitizing.md)
   before adding a print or a table cell there. `cli.py` is the one file with a
-  whole-file AST gate over it (`tests/test_calendar_split.py::escape_scan`):
-  every value reaching a Rich console or table that this module did not compute
-  goes through `_quote`, `_safe_text` or a formatter that calls one, and the gate
-  is what says so.
+  whole-file AST gate over it (`tests/test_calendar_split.py::escape_scan`). A
+  value reaches a Rich console or table one of four ways: through `_quote`,
+  `_safe_text` or a formatter that calls one; as a named entry in the identifier
+  allowlist; through a format spec only a number survives; or as a renderable this
+  scope built. Anything else fails the gate.
 - **New SPA captures go in `research/`** (gitignored). Use
   `research/record_user_session.py` to drive a real browser, capture a wire
   body, drop it into `tests/fixtures/`, and write a reconstruction test.

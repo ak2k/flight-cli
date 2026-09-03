@@ -1241,7 +1241,9 @@ def _fmt_legroom_one(flight_no: str, leg: LegInfo) -> str:
     # is the backend's, and escaping LENGTHENS it — one backslash per markup-shaped
     # bracket — so padding the escaped value would count a character the reader
     # never sees and drift the column. Strip, pad, then escape: the width is
-    # measured on what renders.
+    # measured on what renders. The exception is the tab `_CTRL` deliberately
+    # keeps for sentence-shaped text — inside a fixed pad it counts as one
+    # character and renders as eight.
     shown = str(flight_no).translate(_CTRL)
     return f"  {escape(f'{shown:<6}')} " + " ".join(parts)
 
@@ -2283,7 +2285,8 @@ def _fmt_gflight_legroom(fli_legs: list[Any], amenities: list[Any]) -> str:
         if not parts:
             continue
         # Google Flights chose both leaves and this cell parses markup, exactly as
-        # `_fmt_legroom_one`'s does; padded before escaping for the same reason.
+        # `_fmt_legroom_one`'s does; padded before escaping for the same reason,
+        # and carrying the same tab exception.
         leg_label = (
             f"{getattr(leg.airline, 'name', leg.airline)}{getattr(leg, 'flight_number', '?')}"
         )
@@ -2331,7 +2334,9 @@ _PROVIDER_OPT = typer.Option(
     "--provider-opt",
     help=(
         "Per-provider override, repeatable: 'pp.airlines=United,Delta'. "
-        "Overrides ~/.config/flight-cli/config.toml [providers.<name>]."
+        # The file this process reads, not the default: `FLIGHT_CLI_CONFIG_DIR`
+        # moves it, and this string tells the reader where to put the option.
+        f"Overrides {_config.config_path()} [providers.<name>]."
     ),
     rich_help_panel="Backend & providers",
 )
