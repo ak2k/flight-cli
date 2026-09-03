@@ -146,13 +146,14 @@ def test_a_record_survives_a_real_stream_whatever_the_page_put_in_it(
         log_mod.configure("debug")
         logging.getLogger(_MODULE_LOGGER).debug(
             "ds:1 refused: %s",
-            "head\u2028forged\u2029split\ud800\u202ereversed\u2069tail",
+            "head\u2028forged\u2029split\ud800\u202ereversed\u2069tail\u200fmarked\u061cend",
         )
     written = path.read_text(encoding="utf-8")
 
     assert "--- Logging error ---" not in written, written
-    assert "head" in written and "forged" in written and "tail" in written, written
-    for hostile in ("\u2028", "\u2029", "\ud800", "\u202e", "\u2069"):
+    for readable in ("head", "forged", "split", "reversed", "tail", "marked", "end"):
+        assert readable in written, written
+    for hostile in ("\u2028", "\u2029", "\ud800", "\u202e", "\u2069", "\u200f", "\u061c"):
         assert hostile not in written, f"{hostile!r} reached the stream: {written!r}"
     assert written.count("\n") == 1, f"one record must be one line: {written!r}"
 

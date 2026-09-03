@@ -58,7 +58,13 @@ _DRIVERS = {
     0x2028: None,  # LINE SEPARATOR
     0x2029: None,  # PARAGRAPH SEPARATOR
     # Bidi. These reorder the run they sit in, so a record can be made to read
-    # back as something it does not say.
+    # back as something it does not say. The marks reorder only the neutral
+    # characters beside them, which is a smaller effect and the same kind — a
+    # comment that says "these reorder" and then lists two of the three families
+    # invites the third to be read as deliberate.
+    0x061C: None,  # ARABIC LETTER MARK
+    0x200E: None,  # LEFT-TO-RIGHT MARK
+    0x200F: None,  # RIGHT-TO-LEFT MARK
     **{c: None for c in range(0x202A, 0x202F)},  # embeddings and overrides
     **{c: None for c in range(0x2066, 0x206A)},  # isolates
     # A lone surrogate has no utf-8 encoding, so one reaching a real stderr does
