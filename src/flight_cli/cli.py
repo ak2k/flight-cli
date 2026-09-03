@@ -844,7 +844,18 @@ def _print_calendar_failure(cause: object, lost: str = "") -> None:
     deliberate stop, or as one of several destinations — and a caller has one
     prefix to match on. `lost` is the count sentence the caller built from its own
     numbers; it is wrapped rather than allowlisted because a parameter's value
-    belongs to callers this module's markup guard never reads."""
+    belongs to callers this module's markup guard never reads.
+
+    A `MatrixApiError` finishes through `_print_matrix_error`, under the count
+    line rather than inside it, so one backend error reads the same whether one
+    query asked or twelve did — `str()` of that exception is the message alone,
+    and the kind and request id a reader needs to report it would be dropped by
+    the sub-query path and kept by the single-query one."""
+    if isinstance(cause, MatrixApiError):
+        if lost:
+            err.print(f"[red]Matrix calendar failed:[/] {_safe_text(lost)}")
+        _print_matrix_error(cause)
+        return
     err.print(f"[red]Matrix calendar failed:[/] {_safe_text(lost)}{_failure_text(cause)}")
 
 
@@ -1001,10 +1012,7 @@ def _run_calendar(
         # `KeyboardInterrupt` and leaves through here untouched, which is the one
         # interruption that must not be dressed up as a backend failure.
         cause = _calendar_failure(e)
-        if isinstance(cause, MatrixApiError):
-            _print_matrix_error(cause)
-        else:
-            _print_calendar_failure(cause)
+        _print_calendar_failure(cause)  # which sends a MatrixApiError to its own reporter
         raise typer.Exit(1) from cause
 
 
@@ -1015,7 +1023,8 @@ def _run_calendar_weave(go: Callable[[], Coroutine[Any, Any, None]], state: dict
     key, a refused connection or a DNS failure raises BEFORE the task group opens —
     outside the `_matrix` task whose handlers would have caught it, and outside the
     typed line every other Matrix path prints. Stashing rather than reporting keeps
-    one reporter below: it already reads both keys, and a grid painted before the
+    one reporter below: it reads every key this sets, on the branch where Matrix
+    answered as well as the one where it did not, and a grid painted before the
     failure still decides the exit code."""
     try:
         anyio.run(go)
@@ -1028,15 +1037,20 @@ def _run_calendar_weave(go: Callable[[], Coroutine[Any, Any, None]], state: dict
 
 
 def _report_calendar_matrix_failure(state: dict[str, Any]) -> None:
-    """Print the right stderr message for a Matrix calendar that returned no result:
-    a known `MatrixApiError`, an unexpected non-MatrixApiError stashed by the weave's
-    `_matrix` task, or a cancel/never-completed fall-through."""
+    """Print the stderr line for every failure the weave stashed: a known
+    `MatrixApiError`, an unexpected cause from anywhere in the weave, or a
+    cancel/never-completed fall-through when it stashed nothing at all.
+
+    Both keys are reported, not the first of them. A Matrix outage and a renderer
+    that then blew up are two things that happened, and the one printed second is
+    the one a reader would otherwise go looking for."""
     e = state.get("matrix_err")
+    unexpected = state.get("matrix_unexpected")
     if e is not None:
         _print_matrix_error(cast("MatrixApiError", e))
-    elif state.get("matrix_unexpected") is not None:
-        _print_calendar_failure(state["matrix_unexpected"])
-    else:
+    if unexpected is not None:
+        _print_calendar_failure(unexpected)
+    if e is None and unexpected is None:
         err.print("[yellow]Matrix calendar did not complete.[/]")
 
 
@@ -1197,8 +1211,11 @@ def _run_calendar_enriched(
                 raise  # an orderly exit is not a grid failure; see `_matrix` above
             except Exception as e:  # noqa: BLE001 — GF is the optional fast layer; Matrix still runs
                 state["gf_err"] = e
-            state["grid"] = grid
             _paint_calendar_first(grid, state, origins=origins, dests=dests, sd=sd, ed=ed)
+            # After the paint, and a boolean rather than the grid itself: the exit
+            # gate below asks whether the reader was given something, and a grid
+            # that was fetched and then died in the renderer is not that.
+            state["painted"] = bool(grid)
 
     _run_calendar_weave(_go, state)
 
@@ -1206,9 +1223,16 @@ def _run_calendar_enriched(
     if matrix_res is None:
         # Matrix failed; the GF grid (if any) was already painted.
         _report_calendar_matrix_failure(state)
-        if not state.get("grid"):
+        if not state.get("painted"):
             raise typer.Exit(1)
         return
+    if state.get("matrix_unexpected") is not None:
+        # Matrix answered and the run failed after it — a client teardown, a
+        # renderer, a closed pipe. The reporter above is behind the "Matrix said
+        # nothing" branch, so this is the only place such a failure is ever said;
+        # said BEFORE the render, because whatever broke may break that too. The
+        # answer below still stands, so this is a line and not an exit code.
+        _print_calendar_failure(state["matrix_unexpected"])
     res = cast("CalendarResult", matrix_res)
     _render_calendar(
         res,
