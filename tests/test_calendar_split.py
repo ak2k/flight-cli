@@ -29,9 +29,10 @@ from flight_cli._calendar_split import (
 )
 from flight_cli._gf_dategrid import GfGridUnavailableError
 from flight_cli._gflight_ids import GfThrottledError
+from flight_cli._multi_cabin import MultiCabinRow
 from flight_cli.client import MatrixApiError
 from flight_cli.domain import Cabin, CalendarSearch, CalendarWindow, Leg, SearchOptions
-from flight_cli.models import CalendarResult, SearchResult
+from flight_cli.models import CalendarResult, Location, SearchResult
 
 W = CalendarWindow(start=date(2026, 9, 7), end=date(2026, 10, 7), duration_min=5, duration_max=7)
 
@@ -983,6 +984,14 @@ def test_calendar_one_way_note_survives_json_output(
         ("9" * 4301, "each bound is at most 9 digits"),
         ("5-" + "9" * 4301, "each bound is at most 9 digits"),
         ("1000000000", "each bound is at most 9 digits"),  # the first refused width
+        # A bound in the parser's width but past the domain's size. `_render_calendar`
+        # opens a column per night and fills one per priced day, so the number typed
+        # here multiplies the render — and it is spent AFTER Matrix has answered,
+        # which is what makes a late refusal the wrong answer.
+        ("1-366", "366 nights is past the 365-night maximum"),  # one over
+        ("1-10000", "10000 nights is past the 365-night maximum"),
+        ("1-999999999", "999999999 nights is past the 365-night maximum"),
+        ("400", "400 nights is past the 365-night maximum"),  # a bare bound too
     ],
 )
 def test_calendar_round_trip_bad_duration_is_a_typed_error(
@@ -1015,11 +1024,12 @@ def test_calendar_round_trip_bad_duration_is_a_typed_error(
         ("3-3", (3, 3)),  # an explicit degenerate range
         ("05-07", (5, 7)),  # zero-padded bounds
         ("+5-+7", (5, 7)),  # signed bounds
-        # The accept side of the length bound: nine digits is the last width the
-        # parser takes, and the reject list holds the ten-digit neighbour. Past
-        # any trip anyone will book, and short of the digits `int()` refuses.
-        ("999999999", (999999999, 999999999)),
-        ("9-999999999", (9, 999999999)),
+        # The accept side of the size bound, whose reject list holds the neighbour
+        # one night over. A year is where a nights range stops being one; a trip
+        # of most of one is a trip somebody takes.
+        ("365", (365, 365)),
+        ("1-365", (1, 365)),
+        ("90-180", (90, 180)),
     ],
 )
 def test_parse_duration_accepts_every_spelling_of_a_valid_range(
@@ -1499,6 +1509,282 @@ def test_search_summary_and_table_survive_a_hostile_matrix_field(
     _ = capsys.readouterr()
 
 
+# Everything Matrix (and, on the enriched path, Google Flights) chooses INSIDE an
+# itinerary cell. The cell is composed from several of these at once, so each is
+# driven one at a time: a matrix that varied them together would pass on whichever
+# field happened to be wrapped.
+_SLICE_FIELDS = ("origin", "destination", "stop", "flight_number", "timestamps", "legroom_class")
+
+
+def _slice_solution(field: str, payload: str) -> dict[str, Any]:
+    """One solution whose itinerary slice carries `payload` in `field`.
+
+    The timestamps are driven as a PAIR and deliberately unreadable as dates:
+    `_fmt_slice_times` formats two datetimes when it can parse them and falls back
+    to Matrix's own two strings when it cannot, and only the fallback is remote.
+    """
+    return {
+        "ext": {"price": "USD421.00"},
+        "itinerary": {
+            "carriers": [{"code": "BA"}],
+            "slices": [
+                {
+                    "origin": {"code": payload if field == "origin" else "JFK"},
+                    "destination": {"code": payload if field == "destination" else "LHR"},
+                    "stops": [{"code": payload if field == "stop" else "BOS"}],
+                    "flights": [payload if field == "flight_number" else "BA117"],
+                    "departure": f"{payload}dep" if field == "timestamps" else "2026-10-01T08:00",
+                    "arrival": f"{payload}arr" if field == "timestamps" else "2026-10-01T20:00",
+                    "duration": 420,
+                    "legs": [
+                        {
+                            "pitch_inches": 31,
+                            "legroom_class": payload if field == "legroom_class" else "Lie Flat",
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+
+
+def _slice_result(field: str, payload: str) -> SearchResult:
+    """A search response holding one such solution and nothing else hostile."""
+    return SearchResult.from_api(
+        {
+            "solutionCount": 1,
+            "currencyNotice": {"ext": {"price": "USD421.00"}},
+            "solutionList": {"solutions": [_slice_solution(field, payload)]},
+        }
+    )
+
+
+@pytest.mark.parametrize("payload", _HOSTILE_FIELD_VALUES)
+@pytest.mark.parametrize("field", _SLICE_FIELDS)
+def test_search_itinerary_cells_survive_a_hostile_matrix_field(
+    field: str, payload: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The itinerary cells are the half of the table the summary cases never
+    reached: airport codes, connection codes, flight numbers, the raw-ISO timestamp
+    fallback and the seat-type name all land in a Rich cell, which parses markup
+    exactly as the title above it does."""
+    buffer = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, width=400))
+    cli._render_search(_slice_result(field, payload))  # pyright: ignore[reportPrivateUsage] — the render site IS the unit
+    probe = _flat(_SGR.sub("", buffer.getvalue()))
+    for driver in _DRIVERS:
+        assert driver not in probe, f"{driver!r} reached the console"
+    if payload != "\x1b[2J":  # the ESC is dropped, so only its letters remain
+        assert payload in probe, f"{field} was eaten"
+    _ = capsys.readouterr()
+
+
+@pytest.mark.parametrize("payload", _HOSTILE_FIELD_VALUES)
+@pytest.mark.parametrize("field", _SLICE_FIELDS)
+def test_multi_cabin_itinerary_cells_survive_a_hostile_matrix_field(
+    field: str, payload: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The multi-cabin table builds its cells from the same formatter, and the two
+    renderers have drifted apart on a shared field before, so it is pinned on its
+    own rather than through the one above."""
+    row = MultiCabinRow(
+        itinerary=_slice_result(field, payload).solutions[0],
+        prices={Cabin.COACH: "USD421.00"},
+    )
+    buffer = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, width=400))
+    cli._render_multi_cabin_search(  # pyright: ignore[reportPrivateUsage] — the render site IS the unit
+        [row], cabins=(Cabin.COACH,), sort_by=Cabin.COACH
+    )
+    probe = _flat(_SGR.sub("", buffer.getvalue()))
+    for driver in _DRIVERS:
+        assert driver not in probe, f"{driver!r} reached the console"
+    if payload != "\x1b[2J":
+        assert payload in probe, f"{field} was eaten"
+    _ = capsys.readouterr()
+
+
+def test_a_hostile_slice_does_not_cost_the_legroom_colour(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Why the fix wraps LEAVES and not the composed cell. `_fmt_legroom_one` writes
+    a real `[red]` around a below-average pitch, and one wrap around the finished
+    cell would print that tag instead of colouring the number — a table that is safe
+    and says less than it did."""
+    solution = _slice_solution("origin", "[/x]")
+    solution["itinerary"]["slices"][0]["legs"][0]["legroom_class"] = "BELOW"
+    res = SearchResult.from_api(
+        {
+            "solutionCount": 1,
+            "currencyNotice": {"ext": {"price": "USD421.00"}},
+            "solutionList": {"solutions": [solution]},
+        }
+    )
+    buffer = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, force_terminal=True, width=400))
+    cli._render_search(res)  # pyright: ignore[reportPrivateUsage] — the render site IS the unit
+    written = buffer.getvalue()
+    probe = _flat(_SGR.sub("", written))
+    assert "[/x]" in probe  # the hostile code, shown and not parsed
+    assert '31"' in probe  # and the pitch the colour is on
+    # Rich turns `[red]` into an SGR sequence, so the styled bytes are the only
+    # evidence the tag was still a tag by the time the cell reached the console.
+    assert re.search(r"\x1b\[[0-9;]*31[;m]", written), "the legroom colour was escaped away"
+    _ = capsys.readouterr()
+
+
+def test_airport_lookup_survives_a_hostile_query_and_a_hostile_location(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`flight airport '[/x]'` needs no hostile backend to crash: the argument goes
+    into the table title verbatim. The four Location fields beside it are Matrix's,
+    on every success."""
+
+    class _Locations:
+        def __init__(self, **_kwargs: object) -> None: ...
+
+        async def __aenter__(self) -> _Locations:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+        async def airports(self, query: str) -> list[Location]:
+            _ = query
+            return [
+                Location.model_validate(
+                    {
+                        "code": f"[/x]{_DRIVES_THE_TERMINAL}",
+                        "displayName": "[bold]Name",
+                        "cityName": "[/y]City",
+                        "timezone": "[/z]TZ",
+                    }
+                )
+            ]
+
+    buffer = io.StringIO()
+    monkeypatch.setattr(cli, "MatrixClient", _Locations)
+    monkeypatch.setattr(cli, "console", Console(file=buffer, width=400))
+    cli.airport(query="[/x]", impersonate="chrome")
+    probe = _flat(_SGR.sub("", buffer.getvalue()))
+    for driver in _DRIVERS:
+        assert driver not in probe, f"{driver!r} reached the console"
+    assert "'[/x]'" in probe  # the query, quoted, in the title
+    assert "[bold]Name" in probe
+    assert "[/y]City" in probe
+    assert "[/z]TZ" in probe
+    _ = capsys.readouterr()
+
+
+def test_one_failing_cabin_does_not_take_the_other_cabins_down(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A per-cabin Google Flights failure is soft by design: that cabin is omitted
+    and the rest still render. Reporting it through a markup console made it hard —
+    the MarkupError raised inside the task group leaves as an ExceptionGroup,
+    cancels the sibling cabin and loses a result that had already arrived."""
+    good: list[Any] = [object()]
+    asked: list[Cabin] = []
+
+    def _search_with_ids(search: Any, top_n: int = 5) -> list[Any]:
+        _ = top_n
+        asked.append(search.options.cabin)
+        if search.options.cabin is Cabin.BUSINESS:
+            raise RuntimeError(f"fli said [/x]no{_DRIVES_THE_TERMINAL}")
+        return good
+
+    def _identity(search: Any) -> Any:
+        # `to_fli_filter` hands the stub the search itself, so the cabin under test
+        # is readable without building an fli filter.
+        return search
+
+    monkeypatch.setattr("flight_cli.fli_bridge.to_fli_filter", _identity)
+    monkeypatch.setattr("flight_cli._gflight_ids.search_with_ids", _search_with_ids)
+    out = cli._run_gflight_multi(  # pyright: ignore[reportPrivateUsage] — the fan-out IS the unit
+        legs=(Leg.of(["JFK"], ["LHR"], date(2026, 10, 1)),),
+        opts=SearchOptions(cabin=Cabin.COACH),
+        cabins=(Cabin.COACH, Cabin.BUSINESS),
+        top_n=5,
+    )
+    assert set(asked) == {Cabin.COACH, Cabin.BUSINESS}  # both cabins ran
+    assert set(out) == {Cabin.COACH}  # the failing one is omitted, not fatal
+    assert out[Cabin.COACH] is good  # and the one that answered still answers
+    probe = _flat(_SGR.sub("", capsys.readouterr().err))
+    assert probe.count("query failed") == 1  # one soft line, not a traceback
+    assert "fli said [/x]no" in probe  # the message shown, not parsed
+    assert "BUSINESS" in probe  # and it names which cabin went missing
+    for driver in _DRIVERS:
+        assert driver not in probe, f"{driver!r} reached the console"
+
+
+def test_a_nights_range_the_renderer_cannot_render_is_refused_before_matrix(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The cost of this flag is paid in the renderer, one column per night and one
+    cell per priced day — and it is paid AFTER the round trip, so an accepted range
+    the table cannot hold loses an answer Matrix already computed. The refusal is
+    therefore the parser's, before any Matrix work."""
+    _RecordingClient.seen = []
+    monkeypatch.setattr(cli, "MatrixClient", _RecordingClient)
+    _spy_renderers(monkeypatch)
+    with pytest.raises(typer.Exit) as excinfo:
+        _calendar_fast(fast=False, one_way=False, duration="1-10000")
+    assert excinfo.value.exit_code == 2
+    assert _RecordingClient.seen == []  # refused before any Matrix work
+    assert "past the 365-night maximum" in _flat(capsys.readouterr().err)
+
+
+def test_the_widest_accepted_nights_range_still_renders(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The other half of the bound: a cap is only a cap if what it admits renders.
+    One column per night at the maximum, with a priced day to fill them. No timing
+    assertion — the bound is the guarantee, not the clock."""
+    dmin, dmax = cli._parse_duration(f"1-{cli._MAX_NIGHTS}")  # pyright: ignore[reportPrivateUsage] — the cap IS the unit
+    buffer = io.StringIO()
+    # Wide enough that the columns the cap admits are all readable; a narrow
+    # console renders the same table and shows one character of each.
+    monkeypatch.setattr(cli, "console", Console(file=buffer, width=8000))
+    cli._render_calendar(  # pyright: ignore[reportPrivateUsage] — the render site IS the unit
+        _result({9: {7: ("USD500.00", 1, {5: "USD501.00"})}}),
+        dmin=dmin,
+        dmax=dmax,
+        origin=("JFK",),
+        destination=("LHR",),
+        sd=W.start,
+        ed=W.end,
+        round_trip=True,
+    )
+    written = _flat(buffer.getvalue())
+    assert "500.00" in written  # the day's own cell, its currency stripped by `_amount`
+    assert "365n" in written  # and the last of the columns the cap allows
+    _ = capsys.readouterr()
+
+
+def test_an_unknown_provider_name_is_a_typed_error_that_shows_the_value(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--providers` takes any string — `canonical_provider` lowercases an unknown
+    name and passes it through — so what the user typed reaches the message saying
+    it matched nothing. An unbalanced tag there answered a typo with a MarkupError
+    instead of the sentence that names the typo."""
+    monkeypatch.setattr("flight_cli.providers.registry.has_any_configured", lambda: True)
+    monkeypatch.setattr("flight_cli.providers.pointspath.provider.is_configured", lambda: True)
+    monkeypatch.setattr("flight_cli.providers.seats_aero.auth.is_configured", lambda: False)
+    sel = cli.ProviderSelection(
+        provider_filter=("[/]",),
+        cash_only=False,
+        awards_only=True,
+        provider_opts={},
+    )
+    with pytest.raises(typer.Exit) as excinfo:
+        cli._should_run_awards(sel)  # pyright: ignore[reportPrivateUsage] — the branch IS the unit
+    assert excinfo.value.exit_code == 2
+    message = _flat(capsys.readouterr().err)
+    assert "'[/]'" in message  # the value the user typed, quoted and shown
+    assert "matches no configured provider" in message
+
+
 def test_multi_cabin_soft_failure_survives_a_hostile_matrix_message(
     monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1724,13 +2010,9 @@ def test_detail_round_trip_bad_duration_is_a_typed_error(
 # Keyed on the TOP-LEVEL function, so a nested helper inherits the exemption of
 # the command it belongs to and cannot pick one up by reusing a name.
 _ESCAPE_OUT_OF_SCOPE = {
-    "_emit_urls": "prints matrix_deep_link and google_flights_url output, and pinned",
     "_pinned_solution_index": "prints pick and len(result.solutions), integers it computed",
-    "_run_gflight_multi": "prints cab.value and whatever {e} fli raised",
     "_validate_sort_cabin": "prints sort_by.value and the cabin names in a list it built",
-    "_should_run_awards": "prints sel.provider_filter, owned by the provider path",
     "_resolve_providers": "prints the {e} a provider config raised, owned by the provider path",
-    "seatmap": "prints api_url, url and the {e} a seatmap fetch raised, owned by that command",
 }
 
 # There are two ways a value becomes printable: `_quote`, which elides, quotes
@@ -1753,6 +2035,7 @@ _PRINTABLE_IDENTIFIERS = frozenset(
     {
         ("_parse_duration", "lo"),  # the ints it just parsed
         ("_parse_duration", "hi"),
+        ("_parse_duration", "_MAX_NIGHTS"),  # and the cap it is comparing them to
         ("_run_calendar", "n"),  # fan-out counters
         ("_run_calendar", "rounds"),
         ("_run_calendar", "conc"),
@@ -1761,6 +2044,8 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_run_calendar_enriched", "_GF_GRID_UNAVAILABLE_WEAVE_NOTE"),
         ("_resolve_format", "_FORMAT_CHOICES"),
         ("_run_matrix_multi", "cab.value"),  # a member of this module's own enum
+        ("_run_gflight_multi", "cab.value"),
+        ("_emit_urls", "pinned_label"),  # "#N" or "cheapest", built from an int
         ("_render_search", "res.solution_count"),  # counts and dates off the response
         ("_render_calendar", "res.solution_count"),
         ("_render_calendar", "window"),

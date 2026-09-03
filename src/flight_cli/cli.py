@@ -225,7 +225,9 @@ def _parse_date(s: str) -> date:
 # `5-\x1c7` would parse as a range while reading as one token. Length: `int()`
 # REFUSES a string of 4300+ digits (CPython's int/str conversion cap), so an
 # unbounded match hands `_canonical_bound` a traceback instead of a usage error.
-# Nine digits is past any trip anyone will take and inside every limit involved.
+# Nine digits is what the PARSE needs bounded and all it bounds: it keeps `int()`
+# inside its own conversion cap. How large a nights range may be is a separate
+# question, and this regex answers none of it — `_MAX_NIGHTS` does, after the parse.
 # `\Z` not `$`, which admits one trailing newline — `--duration '5-7\n'` then
 # reads as the default range.
 _RE_DURATION_BOUND = re.compile(r"\A[+-]?\d{1,9}\Z")
@@ -233,6 +235,12 @@ _RE_DURATION_BOUND = re.compile(r"\A[+-]?\d{1,9}\Z")
 # "use nights as '5' or '5-7'" describes the SHAPE, and `1000000000` is already in
 # that shape, so answering it with the shape hands back what the user just typed.
 _RE_NUMERIC_BOUND = re.compile(r"\A[+-]?\d+\Z")
+# The widest range that is still a nights range. `_render_calendar` gives every
+# night between the bounds its own column and every priced day a cell in it, so
+# the number typed here multiplies the render: a nine-digit bound is hours of
+# work and terabytes of table, spent AFTER Matrix has already answered. A year is
+# where the domain runs out — past it the value is a typo, not a trip.
+_MAX_NIGHTS = 365
 
 
 def _canonical_bound(part: str) -> str:
@@ -276,6 +284,13 @@ def _parse_duration(s: str) -> tuple[int, int]:
     lo, hi = int(parts[0]), int(parts[1])
     if hi < lo:
         err.print(f"[red]bad duration {_quote(s)}: max ({hi}) is below min ({lo})[/]")
+        raise typer.Exit(2)
+    if hi > _MAX_NIGHTS:
+        # After the ordering check, so `hi` is the larger bound and the message
+        # names the one that is out of range.
+        err.print(
+            f"[red]bad duration {_quote(s)}: {hi} nights is past the {_MAX_NIGHTS}-night maximum[/]"
+        )
         raise typer.Exit(2)
     return lo, hi
 
@@ -679,7 +694,8 @@ def _should_run_awards(sel: ProviderSelection) -> bool:
     ):
         if sel.awards_only:
             err.print(
-                f"[red]--awards-only set but --providers={sel.provider_filter} "
+                f"[red]--awards-only set but "
+                f"--providers={_quote(','.join(sel.provider_filter))} "
                 "matches no configured provider.[/]",
             )
             raise typer.Exit(2)
@@ -712,10 +728,13 @@ def _print_matrix_error(e: MatrixApiError) -> None:
 
     Matrix echoes the routing string back inside `message` ("Illegal COMMAND-LINE
     prefix: BA[/weird]AA"), so all three fields carry remote text onto a markup
-    console. Every Matrix reporter — the calendar sites, `_run` (which serves
-    `detail` and the search path), the search weave and the multi-cabin fan-out —
-    reports through here, so one Matrix error reads the same whichever command
-    asked for it."""
+    console. Every Matrix reporter that FAILS a command reports through here — the
+    calendar sites, `_run` (which serves `detail` and the search path), the search
+    weave and the group-level multi-cabin arm — so one Matrix error reads the same
+    whichever command asked for it. The per-cabin fan-out is the one exception and
+    is deliberate: its failure is soft, one cabin of several, so it prints a yellow
+    line naming that cabin and wraps the two fields itself rather than reporting a
+    red failure for a command that is still going to answer."""
     err.print(f"[red]Matrix returned an error ({_safe_text(e.kind)}):[/] {_safe_text(e.message)}")
     if e.request_id:
         err.print(f"[dim]request_id: {_safe_text(e.request_id)}[/]")
@@ -1037,10 +1056,10 @@ def _emit_urls(
         pinned_m = _try_pinned_matrix_url(search, result, idx) if idx is not None else None
         if pinned_m is not None:
             console.print(f"[dim]Matrix ({pinned_label} pinned):[/]")
-            console.print(f"  [link]{pinned_m}[/]")
+            console.print(f"  [link]{_safe_text(pinned_m)}[/]")
         else:
             console.print("[dim]Matrix deep-link:[/]")
-            console.print(f"  [link]{matrix_deep_link(search)}[/]")
+            console.print(f"  [link]{_safe_text(matrix_deep_link(search))}[/]")
     if google_url:
         # `google_flights_url` builds protobuf-encoded tfs= URLs via fast_flights.
         # That library has no documented exception surface — catch broadly so a
@@ -1049,12 +1068,12 @@ def _emit_urls(
             pinned = _try_pinned_gflight_url(search, result, idx) if idx is not None else None
             if pinned is not None:
                 console.print(f"[dim]Google Flights ({pinned_label} pinned):[/]")
-                console.print(f"  [link]{pinned}[/]")
+                console.print(f"  [link]{_safe_text(pinned)}[/]")
             else:
                 console.print("[dim]Google Flights (tfs= structured):[/]")
-                console.print(f"  [link]{google_flights_url(search)}[/]")
+                console.print(f"  [link]{_safe_text(google_flights_url(search))}[/]")
         except Exception as e:  # noqa: BLE001 - third-party undocumented errors; non-fatal fallback
-            console.print(f"[dim]Google Flights link: {e}[/]")
+            console.print(f"[dim]Google Flights link: {_safe_text(e)}[/]")
 
 
 # ─────────────────────────── result renderers ──────────────────────────────
@@ -1085,7 +1104,10 @@ def _fmt_slice_times(dep: str, arr: str) -> str:
     d = _parse_iso(dep)
     a = _parse_iso(arr)
     if d is None or a is None:
-        return f"{dep[:16]}→{arr[:16]}"
+        # The fallback is the branch where this function could NOT read Matrix's
+        # two strings, so what it puts in the cell is whatever Matrix sent. The
+        # parsed branch below formats two datetimes and carries none of it.
+        return f"{_safe_text(dep[:16])}→{_safe_text(arr[:16])}"
     day_off = (a.date() - d.date()).days
     suffix = f" +{day_off}d" if day_off > 0 else (f" {day_off}d" if day_off < 0 else "")
     return f"{d:%b%d %H:%M}→{a:%H:%M}{suffix}"
@@ -1093,20 +1115,29 @@ def _fmt_slice_times(dep: str, arr: str) -> str:
 
 def _fmt_slice_route(s: Slice) -> str:
     """Origin→destination threading any intermediate connection airports, so a
-    1-stop itinerary shows its connection city instead of hiding it."""
-    o = (s.origin.code if s.origin else None) or "?"
-    d = (s.destination.code if s.destination else None) or "?"
-    vias = [e.code for e in s.stops if e and e.code]
+    1-stop itinerary shows its connection city instead of hiding it.
+
+    Matrix chooses all three codes and the result is a table cell, which parses
+    markup: wrapped per code rather than around the join, so the cell composed
+    from this can still carry the tags `_fmt_legroom_one` writes on purpose."""
+    o = _safe_text((s.origin.code if s.origin else None) or "?")
+    d = _safe_text((s.destination.code if s.destination else None) or "?")
+    vias = [_safe_text(e.code) for e in s.stops if e and e.code]
     return "→".join([o, *vias, d])
 
 
 def _fmt_slice_cell(s: Slice) -> str:
     """One itinerary slice as a table cell: route (with connection cities),
     flight numbers, compact unambiguous times, duration, then per-leg legroom
-    lines. Shared by the single-cabin and multi-cabin itinerary tables."""
+    lines. Shared by the single-cabin and multi-cabin itinerary tables.
+
+    Every remote leaf is wrapped where it is read — here, in `_fmt_slice_route`,
+    `_fmt_slice_times` and `_fmt_legroom_one` — and the composed cell is not
+    wrapped again: `_fmt_legroom_one` emits `[red]` on purpose, and one wrap
+    around the whole cell would show that tag instead of colouring the pitch."""
     dur_min = s.duration or 0
     dur = f"{dur_min // 60}h{dur_min % 60:02d}m" if dur_min else ""
-    flights = "/".join(s.flights) or "?"
+    flights = _safe_text("/".join(s.flights)) or "?"
     times = _fmt_slice_times(s.departure or "", s.arrival or "")
     head = " ".join(p for p in (_fmt_slice_route(s), flights, times, dur) if p)
     tail = _fmt_legroom_lines(s)
@@ -1118,9 +1149,11 @@ def _render_search(res: SearchResult) -> None:
         console.print("[yellow]No solutions returned.[/]")
         return
     # Matrix chooses the price, the currency, the carrier codes and short names,
-    # and the stop labels; the summary line, the two table titles and every header
-    # and cell parse markup. Sanitized where each value is read, so a hostile field
-    # cannot lose the render of a query that succeeded.
+    # the stop labels, and — through `_fmt_slice_cell` — the airport codes, flight
+    # numbers and timestamps in the itinerary cells. The summary line, the two
+    # table titles and every header and cell parse markup, so each of those values
+    # is wrapped where it is read and a hostile field cannot lose the render of a
+    # query that succeeded.
     ccy, cheapest = _split_price(res.cheapest_price)
     ccy_tag = f" ({_safe_text(ccy)})" if ccy else ""
     console.print(
@@ -1162,7 +1195,7 @@ def _render_search(res: SearchResult) -> None:
 
         out = _fmt_slice_cell(slcs[0]) if slcs else "—"
         ret = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
-        st.add_row(str(i), _amount(it.price), it_carriers or "?", out, ret)
+        st.add_row(f"{i:d}", _amount(it.price), it_carriers or "?", out, ret)
     console.print(st)
 
 
@@ -1184,7 +1217,9 @@ def _fmt_legroom_one(flight_no: str, leg: LegInfo) -> str:
             token = f"[{color}]{token}[/]"
         parts.append(token)
     if leg.legroom_class and leg.legroom_class not in {"AVERAGE", "BELOW", "ABOVE"}:
-        parts.append(leg.legroom_class)
+        # Not one of the three judgments above, so it is a seat-type name the
+        # backend chose ("Lie Flat", "Suite") and reaches the cell as it came.
+        parts.append(_safe_text(leg.legroom_class))
     amenities: list[str] = []
     w = _WIFI_GLYPH.get(leg.wifi or "")
     if w:
@@ -1199,7 +1234,9 @@ def _fmt_legroom_one(flight_no: str, leg: LegInfo) -> str:
         parts.append("".join(amenities))
     if not parts:
         return ""
-    return f"  {flight_no:<6} " + " ".join(parts)
+    # The colour tag on the pitch token is ours and stays live; the flight number
+    # is the backend's and is escaped, so the pad counts what the reader sees.
+    return f"  {_safe_text(flight_no):<6} " + " ".join(parts)
 
 
 def _fmt_legroom_lines(s: Slice) -> str:
@@ -1225,14 +1262,13 @@ def _render_date_grid(
         return
     priced_days = len(grid)
     cheapest = min(grid.values())
-    window = f"{sd.isoformat()} → {ed.isoformat()}"
     console.print(
         f"[bold]{priced_days} priced days[/]  · cheapest: "
         f"[bold cyan]{cheapest:.0f} (USD)[/]  · "
-        f"window {window}"
+        f"window {_safe_text(sd.isoformat())} → {_safe_text(ed.isoformat())}"
     )
     t = Table(
-        title=f"{','.join(origin)} → {','.join(destination)}: "
+        title=f"{_safe_text(','.join(origin))} → {_safe_text(','.join(destination))}: "
         "lowest fare per departure day (Google Flights)",
         show_header=True,
         header_style="bold green",
@@ -1240,7 +1276,8 @@ def _render_date_grid(
     t.add_column("departure", justify="right")
     t.add_column("min (USD)", justify="right")
     for day, price in sorted(grid.items(), key=lambda kv: kv[1]):
-        t.add_row(day, f"{price:.0f}")
+        # The day is a key off the Google Flights grid, not a date this module built.
+        t.add_row(_safe_text(day), f"{price:.0f}")
     console.print(t)
 
 
@@ -1307,28 +1344,31 @@ def _render_calendar(
     ccy, cheapest = _split_price(res.cheapest_price)
     ccy_tag = f" ({_safe_text(ccy)})" if ccy else ""
     duration_note = f"  · duration {dmin}-{dmax} nights" if round_trip else ""
-    window = f"{sd.isoformat()} → {ed.isoformat()}"
     console.print(
         f"[bold]{res.solution_count} solutions[/]  · "
         f"overall cheapest: [bold cyan]{_safe_text(cheapest or '—')}{ccy_tag}[/]  · "
-        f"window {window}"
+        f"window {_safe_text(sd.isoformat())} → {_safe_text(ed.isoformat())}"
         f"{duration_note}"
     )
-    title = f"{','.join(origin)} → {','.join(destination)}: lowest fare per departure day{ccy_tag}"
-    t = Table(title=title, show_header=True, header_style="bold green")
+    t = Table(
+        title=f"{_safe_text(','.join(origin))} → {_safe_text(','.join(destination))}: "
+        f"lowest fare per departure day{ccy_tag}",
+        show_header=True,
+        header_style="bold green",
+    )
     t.add_column("departure", justify="right")
     t.add_column("min", justify="right")
     if round_trip:
         for dur in range(dmin, dmax + 1):
-            t.add_column(f"{dur}n", justify="right")
+            t.add_column(f"{dur:d}n", justify="right")
     t.add_column("sols", justify="right")
     for d in sorted(res.priced_days, key=lambda x: x.price_value or 9e9):
-        row = [str(d.date), _amount(d.min_price)]
+        row = [f"{d.date:d}", _amount(d.min_price)]
         if round_trip:
             opts = {o.trip_length: o.min_price for o in d.options}
             for dur in range(dmin, dmax + 1):
                 row.append(_amount(opts.get(dur)))
-        row.append(str(d.solution_count))
+        row.append(f"{d.solution_count:d}")
         t.add_row(*row)
     console.print(t)
 
@@ -1451,7 +1491,7 @@ def _render_merged(rows: list[Any], *, legs: tuple[Leg, ...], top_n: int) -> Non
     destination = legs[0].destinations[0] if legs[0].destinations else "?"
     has_return = len(legs) >= _ROUND_TRIP_LEGS
     t = Table(
-        title=f"Google Flights + Matrix · {origin}→{destination}"
+        title=f"Google Flights + Matrix · {_safe_text(origin)}→{_safe_text(destination)}"
         + (" + return" if has_return else ""),
         show_header=True,
         header_style="bold green",
@@ -1468,8 +1508,10 @@ def _render_merged(rows: list[Any], *, legs: tuple[Leg, ...], top_n: int) -> Non
         out = _fmt_slice_cell(slcs[0]) if slcs else "—"
         ret = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
         t.add_row(
-            str(i),
-            _MERGE_SOURCE_TAG.get(row.source, row.source),
+            f"{i:d}",
+            # `rows` is duck-typed, and the lookup falls back to the tag it was
+            # handed when it is not one of the three this module writes.
+            _safe_text(_MERGE_SOURCE_TAG.get(row.source, row.source)),
             _amount(row.matrix_price),
             _amount(row.gf_price),
             out,
@@ -1820,7 +1862,7 @@ def _run_gflight_multi(
         try:
             results[cab] = await anyio.to_thread.run_sync(query_sync, cab)
         except Exception as e:  # noqa: BLE001 — fli has no documented exception surface
-            err.print(f"[yellow]Google Flights {cab.value} query failed: {e}[/]")
+            err.print(f"[yellow]Google Flights {cab.value} query failed: {_safe_text(e)}[/]")
 
     async def go() -> None:
         async with anyio.create_task_group() as tg:
@@ -1863,11 +1905,12 @@ def _render_multi_cabin_search(
                 break
         if ccy:
             break
-    ccy_tag = f" ({ccy})" if ccy else ""
+    ccy_tag = f" ({_safe_text(ccy)})" if ccy else ""
     cabin_labels = "+".join(_CABIN_TO_LETTER[c] for c in cabins)
+    sort_label = _CABIN_TO_LETTER[sort_by]
 
     t = Table(
-        title=f"{title_prefix} · {cabin_labels} (sorted by {_CABIN_TO_LETTER[sort_by]}){ccy_tag}",
+        title=f"{title_prefix} · {cabin_labels} (sorted by {sort_label}){ccy_tag}",
         show_header=True,
         header_style="bold green",
     )
@@ -1875,18 +1918,19 @@ def _render_multi_cabin_search(
     t.add_column("carriers")
     t.add_column("outbound")
     t.add_column("return")
-    for cab in cabins:
-        t.add_column(f"{_CABIN_TO_LETTER[cab]} $", justify="right")
+    for letter in (_CABIN_TO_LETTER[c] for c in cabins):
+        t.add_column(f"{letter} $", justify="right")
 
     for i, row in enumerate(rows, 1):
         itn = row.itinerary.itinerary
         slcs: list[Slice] = itn.slices if itn else []
-        carriers = ",".join((c.code or "?") for c in (itn.carriers if itn else []))
+        # Wrapped per code, as `_render_search` does with the same field.
+        carriers = ",".join(_safe_text(c.code or "?") for c in (itn.carriers if itn else []))
 
         out_cell = _fmt_slice_cell(slcs[0]) if slcs else "—"
         ret_cell = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
         price_cells = [_amount(row.prices.get(cab)) for cab in cabins]
-        t.add_row(str(i), carriers or "?", out_cell, ret_cell, *price_cells)
+        t.add_row(f"{i:d}", carriers or "?", out_cell, ret_cell, *price_cells)
     console.print(t)
 
 
@@ -2072,8 +2116,8 @@ def _leg_display(leg: Any, amenity: Any, match_carriers: frozenset[str]) -> str:
     """Per-leg label '<carrier> <num>'. If the booking carrier isn't in the user's
     carrier filter but the leg is sold under a codeshare that IS (e.g. UA58 sold as
     LH9407 under `--routing LH+`), show the matched identity: 'LH9407 (op UA58)'."""
-    code = getattr(leg.airline, "name", "") or ""
-    number = getattr(leg, "flight_number", "?")
+    code = _safe_text(getattr(leg.airline, "name", "") or "")
+    number = _safe_text(getattr(leg, "flight_number", "?"))
     booking = f"{code} {number}"
     if not match_carriers or code in match_carriers:
         return booking
@@ -2081,7 +2125,7 @@ def _leg_display(leg: Any, amenity: Any, match_carriers: frozenset[str]) -> str:
     mflights: tuple[str, ...] = tuple(raw_mf or ())
     for mf in mflights:
         if mf[:2].upper() in match_carriers:
-            return f"{mf} (op {code}{number})"
+            return f"{_safe_text(mf)} (op {code}{number})"
     return booking
 
 
@@ -2101,7 +2145,8 @@ def _render_gflight_table(
     destination = legs[0].destinations[0] if legs[0].destinations else "?"
     has_return = len(legs) >= _ROUND_TRIP_LEGS
     t = Table(
-        title=f"Google Flights · {origin}→{destination}" + (" + return" if has_return else ""),
+        title=f"Google Flights · {_safe_text(origin)}→{_safe_text(destination)}"
+        + (" + return" if has_return else ""),
         show_header=True,
         header_style="bold green",
     )
@@ -2129,8 +2174,8 @@ def _render_gflight_table(
                 any_legroom = True
             t.add_row(
                 label,
-                f"{fr.currency or 'USD'}{fr.price:.2f}",
-                str(fr.stops),
+                f"{_safe_text(fr.currency or 'USD')}{fr.price:.2f}",
+                _safe_text(fr.stops),
                 dur,
                 legs_str,
                 legroom_str,
@@ -2200,13 +2245,16 @@ def _fmt_gflight_legroom(fli_legs: list[Any], amenities: list[Any]) -> str:
         pitch = getattr(a, "pitch_inches", None)
         cls = getattr(a, "legroom_class", None)
         if pitch is not None:
-            tok = f'{pitch}"'
+            # Both fields are `getattr` off a duck-typed Google Flights object,
+            # so neither has a type this module checked. The colour around the
+            # token is ours and goes on after the value is escaped.
+            tok = f'{_safe_text(pitch)}"'
             color = _LEGROOM_AS_COLOR.get(cls or "")
             if color:
                 tok = f"[{color}]{tok}[/]"
             parts.append(tok)
         if cls and cls not in {"AVERAGE", "BELOW", "ABOVE"}:
-            parts.append(cls)
+            parts.append(_safe_text(cls))
         glyphs: list[str] = []
         wifi_g = _WIFI_GLYPH.get(getattr(a, "wifi", None) or "")
         if wifi_g:
@@ -3398,13 +3446,18 @@ def airport(
     if not locs:
         console.print("[yellow]No matches.[/]")
         return
-    t = Table(title=f"Airport lookup: {query!r}", show_header=True, header_style="bold blue")
+    t = Table(title=f"Airport lookup: {_quote(query)}", show_header=True, header_style="bold blue")
     t.add_column("code")
     t.add_column("name")
     t.add_column("city")
     t.add_column("tz")
     for loc in locs:
-        t.add_row(loc.code, loc.display_name or "", loc.city_name or "", loc.timezone or "")
+        t.add_row(
+            _safe_text(loc.code),
+            _safe_text(loc.display_name or ""),
+            _safe_text(loc.city_name or ""),
+            _safe_text(loc.timezone or ""),
+        )
     console.print(t)
 
 
@@ -3463,7 +3516,7 @@ def seatmap(
         aircraft=aircraft,
     )
     if not fetch:
-        console.print(api_url)
+        console.print(_safe_text(api_url))
         return
     try:
         url = fetch_seatmap_url(
@@ -3475,14 +3528,14 @@ def seatmap(
             aircraft=aircraft,
         )
     except Exception as e:
-        err.print(f"[red]Seatmap lookup failed:[/] {e}")
-        console.print(f"[dim]API URL:[/] {api_url}")
+        err.print(f"[red]Seatmap lookup failed:[/] {_safe_text(e)}")
+        console.print(f"[dim]API URL:[/] {_safe_text(api_url)}")
         raise typer.Exit(1) from e
     if url is None:
         err.print("[yellow]No seatmap on file for this flight/aircraft.[/]")
-        console.print(f"[dim]API URL:[/] {api_url}")
+        console.print(f"[dim]API URL:[/] {_safe_text(api_url)}")
         raise typer.Exit(1)
-    console.print(url)
+    console.print(_safe_text(url))
 
 
 if __name__ == "__main__":
