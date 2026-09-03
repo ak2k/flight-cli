@@ -2261,10 +2261,11 @@ _PRINTABLE_IDENTIFIERS = frozenset(
 # assignment instead, which is a claim about the BINDING rather than the name.
 
 # What "reaches rich" means, one call shape at a time. A Rich Table parses markup
-# in its title, in every column header and in every cell, so the calls that FILL
-# one are sinks exactly as `console.print` is: the text is chosen there, and the
-# `console.print(t)` a hundred lines later adds none of its own. Reading the fill
-# rather than exempting the print is what lets a renderer be scanned at all.
+# in its title, in its caption, in every column header and footer and in every
+# cell — all of which are read here — so the calls that FILL one are sinks exactly
+# as `console.print` is: the text is chosen there, and the `console.print(t)` a
+# hundred lines later adds none of its own. Exempting that print instead, and
+# never reading a cell, is the shape that hides a MarkupError from a green scan.
 _TEXT_SINK_METHODS = frozenset(
     {"print", "log", "rule", "status", "add_row", "add_column", "from_markup", "render_str"}
 )

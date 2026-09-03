@@ -221,15 +221,16 @@ def _parse_date(s: str) -> date:
 
 
 # A nights bound: 1-9 digits, optionally signed. Narrower than `int()` on both
-# axes. Class: `int()` swallows every Unicode space, U+001C..1F among them, so
-# `5-\x1c7` would parse as a range while reading as one token. Length: `int()`
+# axes. Class: `int()` swallows every Unicode space, so `5-\xa07` would parse as a
+# range while reading as one token (U+001C..1F are `isspace()`-true but `int()`
+# rejects those, so the class is real and that pair is not it). Length: `int()`
 # REFUSES a string of 4300+ digits (CPython's int/str conversion cap), so an
 # unbounded match hands `_canonical_bound` a traceback instead of a usage error.
 # Nine digits is what the PARSE needs bounded and all it bounds: it keeps `int()`
 # inside its own conversion cap. How large a nights range may be is a separate
 # question, and this regex answers none of it — `_MAX_NIGHTS` does, after the parse.
-# `\Z` not `$`, which admits one trailing newline — `--duration '5-7\n'` then
-# reads as the default range.
+# `\Z` not `$`, which admits one trailing newline — `--duration '5-7\n'` out of a
+# pipeline would then parse as a range instead of being told its shape is wrong.
 _RE_DURATION_BOUND = re.compile(r"\A[+-]?\d{1,9}\Z")
 # The same bound without the width, to tell "not a number" from "too many digits":
 # "use nights as '5' or '5-7'" describes the SHAPE, and `1000000000` is already in

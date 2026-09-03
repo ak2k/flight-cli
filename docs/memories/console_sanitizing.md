@@ -85,33 +85,55 @@ Its polarity is inverted — everything is scanned unless excluded by name —
 because an opt-in list goes stale the moment a print moves into a new helper. A
 sink is `console.print` / `.log` / `.rule` / `.status` / bare `print`, AND the
 calls that fill a renderable: `Table(...)` / `Panel(...)` / `Text(...)`
-arguments, `add_column` and `add_row`. Reading the fill is what makes a renderer
-scannable at all — the cells are where the text is chosen, and the
-`console.print(t)` a hundred lines later adds none of its own. (An earlier shape
-exempted that print instead and never read a cell; six reproduced `MarkupError`s
-came through it while the guard stayed green.)
+arguments (`Text` only through `from_markup` — the bare constructor takes its
+argument literally), `Text.from_markup`, `Console.render_str`, `add_column` and
+`add_row`. Reading the fill is what makes a renderer scannable at all — the cells
+are where the text is chosen, and the `console.print(t)` a hundred lines later
+adds none of its own. Exempting that print instead, and never reading a cell, is
+the shape that hides a MarkupError from the scan: six reproduced ones fit through
+that gap with the guard green.
 
 It judges each argument by AST shape, never by source text: a string comparison
 reads `not_escape(x)` and `shell.escape(x)` as safe. A concatenation, a
 conditional and an `or` are judged piece by piece, since each piece is printed on
 its own. A format spec that is a single literal ending in a numeric presentation
-type (`{price:.2f}`, `{i:d}`) proves the field is a number, because a string
-reaching it raises — which is a proof about the value, unlike allowlisting a name
-off a duck-typed object.
+type of `d` or `f` and holding no `%` (`{price:.2f}`, `{i:d}`) proves the field is
+a number, because a string reaching it raises — a proof about the value, unlike
+allowlisting a name off a duck-typed object. The `%` clause is what keeps
+`{when:%Y-%m-%d}` out: `date.__format__` is `strftime`, so a date survives every
+presentation type and comes back a string. An object with its own `__format__`
+survives them too, so for such a value this is not a proof; none reaches a
+numeric spec in `cli.py` today.
 
-Two allowlists, and each has a delete-one test proving no entry is inert.
-`_PRINTABLE_IDENTIFIERS` (this module's own values) is keyed per FUNCTION, since
-`n` is a fan-out counter in one place and could be anything in another;
-`_ESCAPE_OUT_OF_SCOPE` is keyed on the TOP-LEVEL function, so a nested helper
-cannot pick one up by reusing a name — while a decorator and a default argument
-belong to the scope around the `def`, because that is where they run. Each
-exclusion's reason must name every identifier its function prints, matched on
-word boundaries; a corpus of deliberately vacuous reasons proves that test can
-fail. A regression corpus of one synthetic source per known bypass keeps the scan
-itself honest.
+There is no per-function exemption. One would pre-approve every FUTURE print in a
+function rather than one value, and each of the three rounds that had one shipped
+a MarkupError behind it. What a function may print without a wrapper is said one
+identifier at a time in `_PRINTABLE_IDENTIFIERS`, keyed per FUNCTION since `n` is
+a fan-out counter in one place and could be anything in another. A decorator and
+a default argument belong to the scope around the `def`, because that is where
+they run.
 
-What it does not model is scope: an allowlisted identifier is a claim about a
-NAME in a function, so a closure inside inherits the pass and a second binding of
-the name is invisible. `_run_calendar` is the only live shape with both. The
-hostile-field tests — one payload per response field, driven one field at a time
-through each renderer — are what pin the values themselves.
+Every list the scan consults is checked by a test that breaks it.
+`_PRINTABLE_IDENTIFIERS` has two: no entry is inert, and every entry is
+FALSIFIABLE — rebind its local to interpolated text and the scan must withdraw the
+pass, which is what stops an entry from being a sentence that was true when it was
+written. An entry that cannot be broken that way does not belong in the list; wrap
+the value at the sink instead, as `title_prefix` is, because a parameter's value
+belongs to callers the scan never reads. `_SAFE_WRAPPERS` and
+`_NUMERIC_PRESENTATION` each have a delete-one test, and every text sink has a
+probe that goes silent without it. A regression corpus of one synthetic source per
+known bypass keeps the scan itself honest. A printed table needs no entry at all:
+the scan reads the assignment and asks whether this scope built a renderable,
+which is a claim about the binding rather than about the name.
+
+The scan reads CALLS, so a markup slot filled by assignment (`t.title = x`,
+`t.caption = x`, `t.columns[0].header = x`) or by an API it does not name is not
+read; none is live in `cli.py` today, and `Panel` and `Text` sit in
+`_RENDERABLE_SINKS` unimported, so an aliased import of one would have coverage
+that looks present and is not. It does not model scope either: an allowlisted
+identifier is a claim about a NAME in a function, so a closure inside inherits the
+pass and a binding of the name in that closure is invisible. `cab` in
+`_run_matrix_multi` and `_run_gflight_multi` is the live shape with both — the
+print sits inside `query_cabin` and the entry is written against the outer name.
+The hostile-field tests — one payload per response field, driven one field at a
+time through each renderer — are what pin the values themselves.

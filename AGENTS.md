@@ -79,8 +79,9 @@ choice that fits the rest of the stack — don't substitute.
   [`docs/memories/console_sanitizing.md`](./docs/memories/console_sanitizing.md)
   before adding a print or a table cell there. `cli.py` is the one file with a
   whole-file AST gate over it (`tests/test_calendar_split.py::escape_scan`):
-  every value reaching a Rich console or table has to go through `_quote` or
-  `_safe_text`, and the gate is what says so.
+  every value reaching a Rich console or table that this module did not compute
+  goes through `_quote`, `_safe_text` or a formatter that calls one, and the gate
+  is what says so.
 - **New SPA captures go in `research/`** (gitignored). Use
   `research/record_user_session.py` to drive a real browser, capture a wire
   body, drop it into `tests/fixtures/`, and write a reconstruction test.
