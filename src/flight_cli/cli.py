@@ -621,7 +621,7 @@ def _resolve_providers(  # noqa: PLR0912 — single-purpose validator + merge; s
     try:
         config = _config.load()
     except (OSError, ValueError) as e:
-        err.print(f"[red]Failed to load ~/.config/flight-cli/config.toml: {e}[/]")
+        err.print(f"[red]Failed to load {_quote(str(_config.config_path()))}: {_safe_text(e)}[/]")
         raise typer.Exit(2) from e
     base_opts: dict[str, dict[str, Any]] = {}
     providers_section: Any = config.get("providers", {})
@@ -633,7 +633,9 @@ def _resolve_providers(  # noqa: PLR0912 — single-purpose validator + merge; s
     try:
         cli_opts = _config.parse_provider_opt_overrides(list(provider_opt))
     except ValueError as e:
-        err.print(f"[red]{e}[/]")
+        # `parse_provider_opt_overrides` builds this message around the user's raw
+        # `--provider-opt` token, so the sentence carries whatever was typed.
+        err.print(f"[red]{_safe_text(e)}[/]")
         raise typer.Exit(2) from e
     merged_opts = _config.merge_provider_options(base_opts, cli_opts)
 
@@ -974,7 +976,7 @@ def _pinned_solution_index(result: SearchResult | None, pick: int | None) -> int
         return 0
     if pick < 1 or pick > len(result.solutions):
         console.print(
-            f"[yellow]--pick {pick} is out of range (1-{len(result.solutions)}); "
+            f"[yellow]--pick {pick:d} is out of range (1-{len(result.solutions):d}); "
             f"pinning the cheapest itinerary instead.[/]"
         )
         return 0
@@ -1234,9 +1236,13 @@ def _fmt_legroom_one(flight_no: str, leg: LegInfo) -> str:
         parts.append("".join(amenities))
     if not parts:
         return ""
-    # The colour tag on the pitch token is ours and stays live; the flight number
-    # is the backend's and is escaped, so the pad counts what the reader sees.
-    return f"  {_safe_text(flight_no):<6} " + " ".join(parts)
+    # The colour tag on the pitch token is ours and stays live. The flight number
+    # is the backend's, and escaping LENGTHENS it — one backslash per markup-shaped
+    # bracket — so padding the escaped value would count a character the reader
+    # never sees and drift the column. Strip, pad, then escape: the width is
+    # measured on what renders.
+    shown = str(flight_no).translate(_CTRL)
+    return f"  {escape(f'{shown:<6}')} " + " ".join(parts)
 
 
 def _fmt_legroom_lines(s: Slice) -> str:
@@ -1910,7 +1916,10 @@ def _render_multi_cabin_search(
     sort_label = _CABIN_TO_LETTER[sort_by]
 
     t = Table(
-        title=f"{title_prefix} · {cabin_labels} (sorted by {sort_label}){ccy_tag}",
+        # `title_prefix` is a parameter: its value is chosen by whoever calls, and
+        # a claim about every present and future caller is not one this function
+        # can keep. The two callers pass a literal, so the wrap costs nothing.
+        title=f"{_safe_text(title_prefix)} · {cabin_labels} (sorted by {sort_label}){ccy_tag}",
         show_header=True,
         header_style="bold green",
     )
@@ -2116,10 +2125,13 @@ def _leg_display(leg: Any, amenity: Any, match_carriers: frozenset[str]) -> str:
     """Per-leg label '<carrier> <num>'. If the booking carrier isn't in the user's
     carrier filter but the leg is sold under a codeshare that IS (e.g. UA58 sold as
     LH9407 under `--routing LH+`), show the matched identity: 'LH9407 (op UA58)'."""
-    code = _safe_text(getattr(leg.airline, "name", "") or "")
+    # The filter is compared against the code Google Flights sent; escaping first
+    # would test a string the user's `--routing` could never have named.
+    raw_code = getattr(leg.airline, "name", "") or ""
+    code = _safe_text(raw_code)
     number = _safe_text(getattr(leg, "flight_number", "?"))
     booking = f"{code} {number}"
-    if not match_carriers or code in match_carriers:
+    if not match_carriers or raw_code in match_carriers:
         return booking
     raw_mf = getattr(amenity, "marketing_flights", ()) if amenity else ()
     mflights: tuple[str, ...] = tuple(raw_mf or ())
@@ -2269,10 +2281,13 @@ def _fmt_gflight_legroom(fli_legs: list[Any], amenities: list[Any]) -> str:
             parts.append("".join(glyphs))
         if not parts:
             continue
+        # Google Flights chose both leaves and this cell parses markup, exactly as
+        # `_fmt_legroom_one`'s does; padded before escaping for the same reason.
         leg_label = (
             f"{getattr(leg.airline, 'name', leg.airline)}{getattr(leg, 'flight_number', '?')}"
         )
-        lines.append(f"{leg_label:<6} " + " ".join(parts))
+        shown = leg_label.translate(_CTRL)
+        lines.append(f"{escape(f'{shown:<6}')} " + " ".join(parts))
     return "\n".join(lines)
 
 

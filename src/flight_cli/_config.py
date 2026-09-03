@@ -22,7 +22,10 @@ CONFIG_DIR_ENV = "FLIGHT_CLI_CONFIG_DIR"
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "flight-cli" / "config.toml"
 
 
-def _config_path() -> Path:
+def config_path() -> Path:
+    """The config file THIS process reads. `FLIGHT_CLI_CONFIG_DIR` moves it, so a
+    diagnostic that names the default path can name a file the user does not
+    have."""
     override = os.environ.get(CONFIG_DIR_ENV)
     if override:
         return Path(override) / "config.toml"
@@ -34,7 +37,7 @@ def load() -> dict[str, Any]:
 
     Parse errors raise — silent fallback would hide typos that defeat the
     user's intent."""
-    path = _config_path()
+    path = config_path()
     if not path.exists():
         return {}
     with path.open("rb") as f:
