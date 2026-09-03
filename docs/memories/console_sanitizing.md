@@ -84,10 +84,11 @@ in a covered function fails the suite. It says nothing about any other module:
 Its polarity is inverted — everything is scanned unless excluded by name —
 because an opt-in list goes stale the moment a print moves into a new helper. A
 sink is `console.print` / `.log` / `.rule` / `.status` / bare `print`, AND the
-calls that fill a renderable: `Table(...)` / `Panel(...)` / `Text(...)`
-arguments (`Text` only through `from_markup` — the bare constructor takes its
-argument literally), `Text.from_markup`, `Console.render_str`, `add_column` and
-`add_row`. Reading the fill is what makes a renderer scannable at all — the cells
+calls that fill a renderable: `Table(...)` and `Panel(...)` arguments,
+`Text.from_markup`, `Console.render_str`, `add_column` and `add_row`. A bare
+`Text(...)` is absent on purpose — it takes its argument literally, and naming a
+constructor also exempts the name it is assigned to from the print check, so
+leaving it out is what makes `console.print(Text(f"{e}"))` a fault. Reading the fill is what makes a renderer scannable at all — the cells
 are where the text is chosen, and the `console.print(t)` a hundred lines later
 adds none of its own. Exempting that print instead, and never reading a cell, is
 the shape that hides a MarkupError from the scan: six reproduced ones fit through
@@ -114,26 +115,31 @@ a default argument belong to the scope around the `def`, because that is where
 they run.
 
 Every list the scan consults is checked by a test that breaks it.
-`_PRINTABLE_IDENTIFIERS` has two: no entry is inert, and every entry is
-FALSIFIABLE — rebind its local to interpolated text and the scan must withdraw the
-pass, which is what stops an entry from being a sentence that was true when it was
-written. An entry that cannot be broken that way does not belong in the list; wrap
-the value at the sink instead, as `title_prefix` is, because a parameter's value
-belongs to callers the scan never reads. `_SAFE_WRAPPERS` and
-`_NUMERIC_PRESENTATION` each have a delete-one test, and every text sink has a
-probe that goes silent without it. A regression corpus of one synthetic source per
+`_PRINTABLE_IDENTIFIERS` has one: no entry is inert — delete any entry and the
+scan speaks, so an entry that allows nothing cannot sit there pre-approving
+whatever later takes its name. What an entry does NOT get is a check on the value
+behind it. The scan reads a name's binding only when it is a top-level f-string
+over a bare name, which no binding in `cli.py` is, so an entry is a claim held by
+the hostile-field tests: give a new one an arm that fails when the value stops
+being this module's own, or wrap at the sink instead, as `title_prefix` is,
+because a parameter's value belongs to callers the scan never reads.
+`_SAFE_WRAPPERS`, `_NUMERIC_PRESENTATION` and `_RENDERABLE_SINKS` each have a
+delete-one test — measured over the bypass corpus as well as `cli.py`, since
+dropping a member makes one speak and the other go quiet — and every text sink has
+a probe that goes silent without it. A regression corpus of one synthetic source per
 known bypass keeps the scan itself honest. A printed table needs no entry at all:
 the scan reads the assignment and asks whether this scope built a renderable,
 which is a claim about the binding rather than about the name.
 
 The scan reads CALLS, so a markup slot filled by assignment (`t.title = x`,
 `t.caption = x`, `t.columns[0].header = x`) or by an API it does not name is not
-read; none is live in `cli.py` today, and `Panel` and `Text` sit in
-`_RENDERABLE_SINKS` unimported, so an aliased import of one would have coverage
-that looks present and is not. It does not model scope either: an allowlisted
-identifier is a claim about a NAME in a function, so a closure inside inherits the
-pass and a binding of the name in that closure is invisible. `cab` in
-`_run_matrix_multi` and `_run_gflight_multi` is the live shape with both — the
-print sits inside `query_cabin` and the entry is written against the outer name.
+read; none is live in `cli.py` today, and `Panel` sits in `_RENDERABLE_SINKS`
+unimported, so an aliased import of it would have coverage that looks present and
+is not. It models scope only as far as the INNERMOST function: an allowlisted
+identifier is a claim about a NAME in one body, so a closure that shadows the name
+with a parameter or binds it to something else is scanned like any other function.
+What it cannot tell apart is two bodies of the same name, which share their
+entries — the two `query_cabin` closures printing `cab.value` are that shape on
+purpose, and the entry is keyed on the closure that prints it.
 The hostile-field tests — one payload per response field, driven one field at a
 time through each renderer — are what pin the values themselves.

@@ -1816,17 +1816,30 @@ class _FakeAmenities:
 
 
 class _FakeFlightResult:
-    def __init__(self, flight_number: str) -> None:
+    """Every field `_render_gflight_table` reads off an fli result, each one
+    overridable. A renderer gets a hostile arm per field it interpolates: with only
+    the flight number driven, the four columns beside it are unpinned, and a
+    refactor that moved a remote value into one of them would pass."""
+
+    def __init__(
+        self,
+        flight_number: str,
+        *,
+        price: object = 421.0,
+        currency: object = "USD",
+        stops: object = 0,
+        duration: object = 185,
+    ) -> None:
         self.legs = [_FakeLeg("UA", flight_number)]
-        self.price = 421.0
-        self.currency = "USD"
-        self.stops = 0
-        self.duration = 185
+        self.price = price
+        self.currency = currency
+        self.stops = stops
+        self.duration = duration
 
 
 class _FakeGf:
-    def __init__(self, flight_number: str) -> None:
-        self.flight = _FakeFlightResult(flight_number)
+    def __init__(self, flight_number: str, **fields: object) -> None:
+        self.flight = _FakeFlightResult(flight_number, **fields)
         self.amenities = [_FakeAmenities()]
 
 
@@ -1861,6 +1874,82 @@ def test_gflight_table_survives_a_hostile_flight_number(
     # `_fmt_gflight_legroom` writes a real `[red]` on a below-average pitch, so the
     # wrap has to be on the leaf: one around the finished cell shows the tag.
     assert re.search(r"\x1b\[[0-9;]*31[;m]", written), "the legroom colour was escaped away"
+
+
+# The rest of what the Google Flights table interpolates. Two reach a cell as text
+# and must arrive escaped; two reach one under a numeric spec or through integer
+# arithmetic, where the guard reads the spec as a PROOF that no string can be here
+# rather than a promise about the name — so for those the pin is that a string
+# raises before anything is printed.
+_GF_TEXT_FIELDS = ("currency", "stops")
+_GF_NUMERIC_FIELDS = ("price", "duration")
+
+
+@pytest.mark.parametrize("payload", _HOSTILE_FIELD_VALUES)
+@pytest.mark.parametrize("field", _GF_TEXT_FIELDS)
+def test_gflight_table_survives_a_hostile_result_field(
+    field: str, payload: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The currency prefixes the price cell and the stop count is a cell of its own.
+    Both are Google Flights' strings, both land in a Rich table, and neither had an
+    arm of its own — which is what lets an allowlisted local beside them be rebound
+    to one without any test noticing."""
+    buffer = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, width=400))
+    cli._render_gflight_table(  # pyright: ignore[reportPrivateUsage] — the render site IS the unit
+        [_FakeGf("UA117", **{field: payload})],
+        legs=(Leg.of(["JFK"], ["LHR"], date(2026, 10, 1)),),
+        top_n=5,
+    )
+    probe = _flat(_SGR.sub("", buffer.getvalue()))
+    for driver in _DRIVERS:
+        assert driver not in probe, f"{driver!r} reached the console"
+    if payload != "\x1b[2J":  # the ESC is dropped, so only its letters remain
+        assert payload in probe, f"{field} was eaten"
+    _ = capsys.readouterr()
+
+
+@pytest.mark.parametrize("field", _GF_NUMERIC_FIELDS)
+def test_a_gflight_number_column_refuses_a_string(field: str, monkeypatch: Any) -> None:
+    """`f"{fr.price:.2f}"` and `fr.duration // 60` are why these two columns need no
+    wrapper: a string cannot survive either, so a markup payload in one raises here
+    instead of reaching the console. That is the claim the guard makes about a
+    numeric presentation type, driven through the renderer that relies on it."""
+    buffer = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, width=400))
+    with pytest.raises((TypeError, ValueError)):
+        cli._render_gflight_table(  # pyright: ignore[reportPrivateUsage] — the render site IS the unit
+            [_FakeGf("UA117", **{field: "[/x]"})],
+            legs=(Leg.of(["JFK"], ["LHR"], date(2026, 10, 1)),),
+            top_n=5,
+        )
+
+
+@pytest.mark.parametrize("payload", _HOSTILE_FIELD_VALUES)
+def test_the_multi_cabin_title_survives_a_hostile_currency(
+    payload: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The multi-cabin title interpolates a currency tag beside two labels this
+    module composed, and the currency is the only remote one of the three. It is
+    driven through `_split_price` because `_PRICE_RE` bounds a currency to three
+    letters, so the render site is pinned without depending on that regex."""
+
+    def _hostile_currency(_s: str | None) -> tuple[str, str]:
+        return payload, "421.00"
+
+    monkeypatch.setattr(cli, "_split_price", _hostile_currency)
+    row = MultiCabinRow(itinerary=_search_result().solutions[0], prices={Cabin.COACH: "USD421.00"})
+    buffer = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, width=400))
+    cli._render_multi_cabin_search(  # pyright: ignore[reportPrivateUsage] — the render site IS the unit
+        [row], cabins=(Cabin.COACH,), sort_by=Cabin.COACH
+    )
+    probe = _flat(_SGR.sub("", buffer.getvalue()))
+    for driver in _DRIVERS:
+        assert driver not in probe, f"{driver!r} reached the console"
+    if payload != "\x1b[2J":
+        assert payload in probe, "the currency tag was eaten"
+    _ = capsys.readouterr()
 
 
 def test_the_carrier_filter_is_tested_against_the_code_that_was_sent() -> None:
@@ -2215,10 +2304,9 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_run_calendar", "conc"),
         ("calendar", "n_split"),  # how many sub-searches were merged
         ("calendar", "_GF_GRID_UNAVAILABLE_NOTE"),
-        ("_run_calendar_enriched", "_GF_GRID_UNAVAILABLE_WEAVE_NOTE"),
+        ("_go", "_GF_GRID_UNAVAILABLE_WEAVE_NOTE"),  # printed from the weave closure
         ("_resolve_format", "_FORMAT_CHOICES"),
-        ("_run_matrix_multi", "cab.value"),  # a member of this module's own enum
-        ("_run_gflight_multi", "cab.value"),
+        ("query_cabin", "cab.value"),  # a member of this module's own enum
         ("_validate_sort_cabin", "sort_by.value"),  # the same enum, one command over
         ("_validate_sort_cabin", "names"),  # its members joined into a list
         ("_emit_urls", "pinned_label"),  # "#N" or "cheapest", built from an int
@@ -2270,11 +2358,13 @@ _TEXT_SINK_METHODS = frozenset(
     {"print", "log", "rule", "status", "add_row", "add_column", "from_markup", "render_str"}
 )
 # Constructors whose arguments reach the markup parser when the object renders,
-# read at the constructor for the same reason. `Text` is here for the
-# `Text.from_markup` shape rather than the bare constructor, which takes its
-# argument literally: reading it costs nothing and stops the distinction from
-# being one a future print has to get right.
-_RENDERABLE_SINKS = frozenset({"Table", "Panel", "Text"})
+# read at the constructor for the same reason. Membership does two jobs — it reads
+# the arguments AND exempts `x = Ctor(...)` from the print check — so a member that
+# reads nothing still hands out that exemption. `Text` is therefore absent: the
+# bare constructor takes its argument literally, and leaving it out reads MORE,
+# since `console.print(Text(f"{e}"))` then faults as an unwrapped call and
+# `x = Text(f"{e}")` faults at the print. `Text.from_markup` is a sink above.
+_RENDERABLE_SINKS = frozenset({"Table", "Panel"})
 
 # Presentation types only a number survives: `format("x", "d")` raises, so a field
 # carrying one cannot be a string and cannot carry markup. The alternative is
@@ -2448,13 +2538,13 @@ def _read_names(tree: ast.Module) -> _Names:
 def _rebound_to_interpolated_text(values: list[ast.expr]) -> bool:
     """Whether any assignment to this name interpolates another name into it.
 
-    An allowlist entry claims a local was sanitized where its value was READ.
-    Reading the f-string assignments is what makes that claim falsifiable: rebind
-    the local to interpolated text and the pass is withdrawn, which is what
-    `test_allowlisted_locals_are_falsifiable` asserts for every entry. An
-    assignment from a CALL is not read — the scan has no view inside a function —
-    so an entry whose value comes from one is still a promise, and the tests
-    around the formatters are what hold it."""
+    Narrower than it reads: only a top-level f-string whose field is a bare name or
+    an attribute chain. A call, a conditional, a list, a comprehension, a subscript
+    and a name with no assignment at all are each unread, and between them they are
+    every binding behind an entry in `cli.py` today — so this is NOT what makes an
+    entry checkable. The hostile-field tests around the renderers are, one payload
+    per field. What this catches and nothing else here does is the bypass case `an
+    allowlisted local rebound to interpolated text`."""
     for value in values:
         if not isinstance(value, ast.JoinedStr):
             continue
@@ -2469,18 +2559,18 @@ def _rebound_to_interpolated_text(values: list[ast.expr]) -> bool:
 def _is_ours(name: ast.expr, chain: list[str], names: _Names) -> bool:
     """Whether this identifier is one that needs no wrapper here.
 
-    The chain, not just the innermost function, because a print can sit in a
-    closure: `cab.value` in `_run_matrix_multi` and `_run_gflight_multi` is printed
-    from inside `query_cabin`, and the entry is written against the outer name.
-    """
+    The INNERMOST function, and no scope around it. An entry is a claim about a
+    name in one body, so a closure that shadows the name with a parameter or binds
+    it to something else holds no such claim: `cab.value` is keyed on
+    `query_cabin`, which prints it, not on the two functions that define it. The
+    price is that two bodies of one name share their entries, which is what those
+    two `query_cabin` closures do on purpose."""
     dotted = _dotted_name(name)
-    if dotted is None:
+    if dotted is None or not chain:
         return False
-    for fn in chain:
-        if (fn, dotted) not in _PRINTABLE_IDENTIFIERS:
-            continue
-        return not _rebound_to_interpolated_text(names.assigned.get(fn, {}).get(dotted, []))
-    return False
+    if (chain[0], dotted) not in _PRINTABLE_IDENTIFIERS:
+        return False
+    return not _rebound_to_interpolated_text(names.assigned.get(chain[0], {}).get(dotted, []))
 
 
 def _is_safe_field(value: ast.expr, chain: list[str], names: _Names) -> bool:
@@ -2623,16 +2713,16 @@ def escape_scan(src: str) -> list[str]:
 
     It reads CALLS. A markup slot filled by assignment (`t.title = x`,
     `t.caption = x`, `t.columns[0].header = x`), or by an API this file does not
-    name, is not read — none is live in `cli.py` today, and `Panel` / `Text` sit in
-    `_RENDERABLE_SINKS` unimported, so an aliased import of one would have coverage
+    name, is not read — none is live in `cli.py` today, and `Panel` sits in
+    `_RENDERABLE_SINKS` unimported, so an aliased import of it would have coverage
     that looks present and is not.
 
-    What it does not model is scope. An allowlisted identifier is a claim about a
-    NAME in a function, so a closure inside that function inherits the pass, and a
-    binding of the name in the closure is invisible here. `cab` in
-    `_run_matrix_multi` and `_run_gflight_multi` is the live shape with both: the
-    print sits inside `query_cabin` and the entry is written against the outer
-    name. The hostile-field tests above are what pin the values themselves.
+    It models scope only as far as the INNERMOST function: an entry is a claim
+    about a name in one body, so a closure that shadows or rebinds the name is
+    scanned like any other function and inherits nothing. What it cannot tell apart
+    is two bodies of the same name, which share their entries — the two
+    `query_cabin` closures printing `cab.value` are that shape on purpose. The
+    hostile-field tests above are what pin the values themselves.
     """
     tree = ast.parse(src)
     chains = _enclosing_functions(tree)
@@ -2662,8 +2752,8 @@ def test_calendar_paths_escape_every_printed_value() -> None:
     assert not faults, (
         "wrap these in _quote (a value the user typed), _safe_text (anything "
         "remote) or a formatter that calls one; add the name to "
-        "_PRINTABLE_IDENTIFIERS only if the value is this module's own, and only "
-        f"if the falsifiability test can break the entry: {faults}"
+        "_PRINTABLE_IDENTIFIERS only if the value is this module's own, and give "
+        f"it a hostile-field arm that fails when it stops being: {faults}"
     )
 
 
@@ -2681,9 +2771,10 @@ def test_allowlisted_functions_are_real_functions() -> None:
 
 
 def test_printable_identifiers_are_all_load_bearing() -> None:
-    """The same rule for the other allowlist, which is the longer of the two. An
-    entry that allows nothing still pre-approves whatever later takes its name in
-    that function, and nothing else in the file would speak when it did."""
+    """The same rule one column over: the test above holds the function halves of
+    the allowlist, this one holds the whole entries. An entry that allows nothing
+    still pre-approves whatever later takes its name in that function, and nothing
+    else in the file would speak when it did."""
     src = Path(cli.__file__).read_text(encoding="utf-8")
     inert: list[tuple[str, str]] = []
     for entry in sorted(_PRINTABLE_IDENTIFIERS):
@@ -2698,61 +2789,21 @@ def test_printable_identifiers_are_all_load_bearing() -> None:
     assert not inert, f"these entries allow nothing; delete them: {inert}"
 
 
-_TAINT = 'f"{__remote__}"'
-# Every allowlisted BARE local, and the assignment the entry's claim rests on. The
-# mutation test rebinds each to interpolated text; a dotted chain has no assignment
-# in the file to rebind, and is held by the hostile-field tests instead.
-_ALLOWLISTED_LOCALS = frozenset(
-    {(fn, name) for fn, name in _PRINTABLE_IDENTIFIERS if "." not in name}
-)
-
-
-def _rebind(src: str, function: str, name: str) -> str:
-    """`src` with `name` assigned interpolated text at the end of `function`.
-
-    An assignment rather than an edit to the existing one, so a name bound as a
-    parameter, a loop variable or a tuple target is rebound the same way as a
-    plainly assigned one — the scan reads no flow, so where the rebinding sits does
-    not matter and every entry is reachable."""
-    tree = ast.parse(src)
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function:
-            node.body.extend(ast.parse(f"{name} = {_TAINT}").body)
-            return ast.unparse(tree)
-    raise AssertionError(f"no function named {function}")
-
-
-def test_allowlisted_locals_are_falsifiable() -> None:
-    """Every entry claims a local holds a value this module computed. Rebind that
-    local to interpolated text and the scan has to withdraw the pass.
-
-    This is the test the allowlist was missing: an entry is otherwise a sentence in
-    a comment, true when it was written and unchecked ever after. An entry this
-    cannot falsify does not belong in the list — wrap the value at the sink
-    instead."""
-    src = Path(cli.__file__).read_text(encoding="utf-8")
-    assert not escape_scan(src)  # the premise: the file is clean before each rebinding
-    silent = [
-        (fn, name)
-        for fn, name in sorted(_ALLOWLISTED_LOCALS)
-        if not escape_scan(_rebind(src, fn, name))
-    ]
-    assert not silent, f"these entries cannot be falsified; wrap the value instead: {silent}"
-
-
-@pytest.mark.parametrize("label", ["_SAFE_WRAPPERS", "_NUMERIC_PRESENTATION"])
+@pytest.mark.parametrize("label", ["_SAFE_WRAPPERS", "_NUMERIC_PRESENTATION", "_RENDERABLE_SINKS"])
 def test_every_set_that_allows_something_is_load_bearing(label: str) -> None:
     """A member that allows nothing reads like a decision and is not one, and it
-    pre-approves whatever later carries it. The two allowlists have had this test
-    since they were written; the sets beside them had none, and one of those grew
-    eleven dead members before anybody counted them."""
-    src = Path(cli.__file__).read_text(encoding="utf-8")
+    pre-approves whatever later carries it. Measured over every source the scan
+    reads, because the directions look opposite: dropping a member makes `cli.py`
+    speak where it was silent and a corpus case go silent where it spoke. No change
+    at all is what inert means. One of these sets grew eleven dead members."""
+    sources = [Path(cli.__file__).read_text(encoding="utf-8"), *_KNOWN_BYPASSES.values()]
+    before = [escape_scan(source) for source in sources]
     members: frozenset[str] = getattr(sys.modules[__name__], label)
     inert: list[str] = []
     for member in sorted(members):
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(sys.modules[__name__], label, members - {member})
-            if not escape_scan(src):
+            if all(escape_scan(s) == was for s, was in zip(sources, before, strict=True)):
                 inert.append(member)
     assert not inert, f"{label}: these members allow nothing; delete them: {inert}"
 
@@ -2774,10 +2825,9 @@ _SINK_PROBES = {
 
 
 def test_every_text_sink_is_read() -> None:
-    """Each named sink parses markup and each is reached by a probe. `Text` is the
-    one member of `_RENDERABLE_SINKS` with no probe of its own: the bare
-    constructor takes its argument literally, and it is in the set for the
-    `Text.from_markup` shape above rather than for itself."""
+    """Each named sink is reached by a probe of its own, and each probe goes silent
+    without the member that reads it. That the sinks parse markup is a fact about
+    rich, checked where the renderers are and not here."""
     assert set(_SINK_PROBES) == set(_TEXT_SINK_METHODS)
     unread = [name for name, probe in _SINK_PROBES.items() if not escape_scan(probe)]
     assert not unread, f"these sinks are named but never reached by the scan: {unread}"
@@ -2790,130 +2840,130 @@ def test_every_text_sink_is_read() -> None:
     assert not still_caught, f"these members are not what catches their own probe: {still_caught}"
 
 
+# The scan's own regression net: one source per shape that reaches rich holding
+# text it did not escape, or escaped too weakly. The delete-one test above reads it
+# too — a member changing nothing here and nothing in `cli.py` allows nothing.
+_KNOWN_BYPASSES = {
+    "local variable": 'def calendar():\n    msg = f"{e}"\n    err.print(msg)\n',
+    "keyword argument": 'def calendar():\n    err.print(text=f"{e}")\n',
+    "str.format": 'def calendar():\n    err.print("{}".format(e))\n',
+    "percent formatting": 'def calendar():\n    err.print("%s" % e)\n',
+    "concatenation": 'def calendar():\n    err.print("bad " + str(e))\n',
+    "a newly extracted helper": 'def _brand_new_helper():\n    err.print(f"{e}")\n',
+    "console.log": 'def calendar():\n    console.log(f"{e}")\n',
+    "console.rule": 'def calendar():\n    console.rule(f"{e}")\n',
+    "console.status": 'def calendar():\n    console.status(f"{e}")\n',
+    "builtin print": 'def calendar():\n    print(f"{e}")\n',
+    "partly wrapped": 'def calendar():\n    err.print(f"{escape(a)} {b}")\n',
+    "lookalike wrapper": 'def calendar():\n    err.print(f"{not_escape(e)}")\n',
+    "attribute call that ends in escape": (
+        'def calendar():\n    err.print(f"{shell.escape(e)}")\n'
+    ),
+    # An allowlisted name earns its pass in ONE function. `n` is a fan-out
+    # counter in `_run_calendar`; anywhere else it is just a local, and a
+    # local is what a user value looks like once it has been assigned.
+    "allowlisted name in the wrong function": 'def detail():\n    err.print(f"{n}")\n',
+    # `escape` neutralises markup and nothing else, so it is a fault wherever
+    # it stands in for a wrapper — and the value it is handed is exactly what
+    # a taint check cannot follow: a bare name, a `str()` call, a local
+    # assigned three lines up, an attribute of a response model.
+    "escape on an exception": 'def calendar():\n    err.print(f"{escape(e)}")\n',
+    "escape on str() of an exception": ('def calendar():\n    err.print(f"{escape(str(e))}")\n'),
+    "escape on a local holding remote text": (
+        'def calendar():\n    msg = matrix_message()\n    err.print(f"{escape(msg)}")\n'
+    ),
+    "escape on a value the user typed": ('def calendar():\n    err.print(f"{escape(routing)}")\n'),
+    "escape on a response field": (
+        'def calendar():\n    err.print(f"{escape(res.cheapest_price)}")\n'
+    ),
+    # A Rich table is a console one object later. Its title, its headers and
+    # its cells all parse markup, and a value that reaches one never passes
+    # through the `console.print(t)` this scan would otherwise be reading.
+    "a raw name in a table cell": ("def _render_search():\n    st.add_row(res.cheapest_price)\n"),
+    "a raw field in a table cell": ('def _render_search():\n    st.add_row(f"{it.price}")\n'),
+    "a raw field in a column header": (
+        'def _render_search():\n    st.add_column(f"{col.label.code}")\n'
+    ),
+    "a raw field in a table title": ('def _render_search():\n    t = Table(title=f"{query}")\n'),
+    "a raw field in a panel": ('def _render_search():\n    p = Panel(f"{e}")\n'),
+    # A starred list is the argument list, so the cells come out of it.
+    "a raw name starred into a row": (
+        "def _render_calendar():\n    t.add_row(*[res.cheapest_price])\n"
+    ),
+    # A printed name is exempt because THIS scope assigned it a renderable, not
+    # because of how it is spelled: `t` and `st` are the names the renderers
+    # use, and neither buys a pass on its own.
+    "a name printed whole that was never a renderable": (
+        "def _render_search():\n    st = remote_renderable(res.raw)\n    console.print(st)\n"
+    ),
+    "a renderable name assigned twice, once from text": (
+        "def _render_search():\n"
+        "    t = Table(title='x')\n"
+        '    t = f"{res.cheapest_price}"\n'
+        "    console.print(t)\n"
+    ),
+    # An allowlisted local rebound to interpolated text loses the pass: the
+    # entry claims the value was sanitized where it was read.
+    "an allowlisted local rebound to interpolated text": (
+        'def _render_search():\n    out = f"{it.raw_note}"\n    st.add_row(out)\n'
+    ),
+    # `date.__format__` is `strftime`, so a spec ending in `d` or `f` proves
+    # nothing when it holds a `%`.
+    "a strftime spec whose last character is a numeric type": (
+        'def calendar():\n    err.print(f"{when:%Y-%m-%d}")\n'
+    ),
+    "a strftime spec ending in microseconds": (
+        'def calendar():\n    err.print(f"{when:%H:%M:%S%f}")\n'
+    ),
+    # Either half of a concatenation, and either branch of a conditional,
+    # is printed on its own.
+    "a raw name concatenated to a literal": (
+        'def _render_search():\n    st.add_row("#" + res.cheapest_price)\n'
+    ),
+    "a raw name in one branch of a conditional": (
+        'def _render_search():\n    st.add_row(res.cheapest_price if x else "—")\n'
+    ),
+    "a raw name behind an or": ('def _render_search():\n    st.add_row(carriers or "?")\n'),
+    # A format spec proves a number only when it is a literal one: a numeric
+    # type on a field whose fill is interpolated proves nothing about the fill.
+    "an interpolated fill beside a numeric type": (
+        'def calendar():\n    err.print(f"{price:{fill}.2f}")\n'
+    ),
+    "a padding spec, which any string survives": ('def calendar():\n    err.print(f"{code:<6}")\n'),
+    # A decorator and a default argument run at import, in the scope around
+    # the `def`, so neither inherits the exemption the name would carry.
+    "a print in a decorator on an excluded function": (
+        '@err.print(f"{e}")\ndef _validate_sort_cabin():\n    pass\n'
+    ),
+    "a print in a default argument of an excluded function": (
+        'def _validate_sort_cabin(x=err.print(f"{e}")):\n    pass\n'
+    ),
+    # `!r` runs after the wrapper: `repr` doubles the backslash `escape`
+    # prepended and hands the tag straight back to the markup parser.
+    "conversion applied after the wrapper": (
+        'def calendar():\n    err.print(f"{_safe_text(e)!r}")\n'
+    ),
+    # A format spec is interpolated too, and its field becomes the fill.
+    "unwrapped field inside a format spec": (
+        'def calendar():\n    err.print(f"{escape(a):{e}}")\n'
+    ),
+    # An entry is a claim about a name in ONE body: a nested helper reusing the name
+    # gets no pass from the function around it, as a parameter or bound inside.
+    "nested helper reusing an excluded name": (
+        'def calendar():\n    def _render_search():\n        err.print(f"{e}")\n'
+    ),
+    "an allowlisted name shadowed by a nested parameter": (
+        "def _render_search():\n    def helper(out):\n        st.add_row(out)\n"
+    ),
+    "an allowlisted name rebound inside a nested scope": (
+        'def _render_search():\n    def helper():\n        out = f"{it.raw}"\n'
+        "        st.add_row(out)\n"
+    ),
+}
+
+
 def test_escape_scan_finds_every_known_bypass() -> None:
-    """The scan's own regression net: one source per shape that reaches rich
-    holding text it did not escape, or escaped too weakly."""
-    bypasses = {
-        "local variable": 'def calendar():\n    msg = f"{e}"\n    err.print(msg)\n',
-        "keyword argument": 'def calendar():\n    err.print(text=f"{e}")\n',
-        "str.format": 'def calendar():\n    err.print("{}".format(e))\n',
-        "percent formatting": 'def calendar():\n    err.print("%s" % e)\n',
-        "concatenation": 'def calendar():\n    err.print("bad " + str(e))\n',
-        "a newly extracted helper": 'def _brand_new_helper():\n    err.print(f"{e}")\n',
-        "console.log": 'def calendar():\n    console.log(f"{e}")\n',
-        "console.rule": 'def calendar():\n    console.rule(f"{e}")\n',
-        "console.status": 'def calendar():\n    console.status(f"{e}")\n',
-        "builtin print": 'def calendar():\n    print(f"{e}")\n',
-        "partly wrapped": 'def calendar():\n    err.print(f"{escape(a)} {b}")\n',
-        "lookalike wrapper": 'def calendar():\n    err.print(f"{not_escape(e)}")\n',
-        "attribute call that ends in escape": (
-            'def calendar():\n    err.print(f"{shell.escape(e)}")\n'
-        ),
-        # An allowlisted name earns its pass in ONE function. `n` is a fan-out
-        # counter in `_run_calendar`; anywhere else it is just a local, and a
-        # local is what a user value looks like once it has been assigned.
-        "allowlisted name in the wrong function": 'def detail():\n    err.print(f"{n}")\n',
-        # `escape` neutralises markup and nothing else, so it is a fault wherever
-        # it stands in for a wrapper — and the value it is handed is exactly what
-        # a taint check cannot follow: a bare name, a `str()` call, a local
-        # assigned three lines up, an attribute of a response model.
-        "escape on an exception": 'def calendar():\n    err.print(f"{escape(e)}")\n',
-        "escape on str() of an exception": (
-            'def calendar():\n    err.print(f"{escape(str(e))}")\n'
-        ),
-        "escape on a local holding remote text": (
-            'def calendar():\n    msg = matrix_message()\n    err.print(f"{escape(msg)}")\n'
-        ),
-        "escape on a value the user typed": (
-            'def calendar():\n    err.print(f"{escape(routing)}")\n'
-        ),
-        "escape on a response field": (
-            'def calendar():\n    err.print(f"{escape(res.cheapest_price)}")\n'
-        ),
-        # A Rich table is a console one object later. Its title, its headers and
-        # its cells all parse markup, and a value that reaches one never passes
-        # through the `console.print(t)` this scan would otherwise be reading.
-        "a raw name in a table cell": (
-            "def _render_search():\n    st.add_row(res.cheapest_price)\n"
-        ),
-        "a raw field in a table cell": ('def _render_search():\n    st.add_row(f"{it.price}")\n'),
-        "a raw field in a column header": (
-            'def _render_search():\n    st.add_column(f"{col.label.code}")\n'
-        ),
-        "a raw field in a table title": (
-            'def _render_search():\n    t = Table(title=f"{query}")\n'
-        ),
-        "a raw field in a panel": ('def _render_search():\n    p = Panel(f"{e}")\n'),
-        # A starred list is the argument list, so the cells come out of it.
-        "a raw name starred into a row": (
-            "def _render_calendar():\n    t.add_row(*[res.cheapest_price])\n"
-        ),
-        # A printed name is exempt because THIS scope assigned it a renderable, not
-        # because of how it is spelled: `t` and `st` are the names the renderers
-        # use, and neither buys a pass on its own.
-        "a name printed whole that was never a renderable": (
-            "def _render_search():\n    st = remote_renderable(res.raw)\n    console.print(st)\n"
-        ),
-        "a renderable name assigned twice, once from text": (
-            "def _render_search():\n"
-            "    t = Table(title='x')\n"
-            '    t = f"{res.cheapest_price}"\n'
-            "    console.print(t)\n"
-        ),
-        # An allowlisted local rebound to interpolated text loses the pass: the
-        # entry claims the value was sanitized where it was read.
-        "an allowlisted local rebound to interpolated text": (
-            'def _render_search():\n    out = f"{it.raw_note}"\n    st.add_row(out)\n'
-        ),
-        # `date.__format__` is `strftime`, so a spec ending in `d` or `f` proves
-        # nothing when it holds a `%`.
-        "a strftime spec whose last character is a numeric type": (
-            'def calendar():\n    err.print(f"{when:%Y-%m-%d}")\n'
-        ),
-        "a strftime spec ending in microseconds": (
-            'def calendar():\n    err.print(f"{when:%H:%M:%S%f}")\n'
-        ),
-        # Either half of a concatenation, and either branch of a conditional,
-        # is printed on its own.
-        "a raw name concatenated to a literal": (
-            'def _render_search():\n    st.add_row("#" + res.cheapest_price)\n'
-        ),
-        "a raw name in one branch of a conditional": (
-            'def _render_search():\n    st.add_row(res.cheapest_price if x else "—")\n'
-        ),
-        "a raw name behind an or": ('def _render_search():\n    st.add_row(carriers or "?")\n'),
-        # A format spec proves a number only when it is a literal one: a numeric
-        # type on a field whose fill is interpolated proves nothing about the fill.
-        "an interpolated fill beside a numeric type": (
-            'def calendar():\n    err.print(f"{price:{fill}.2f}")\n'
-        ),
-        "a padding spec, which any string survives": (
-            'def calendar():\n    err.print(f"{code:<6}")\n'
-        ),
-        # A decorator and a default argument run at import, in the scope around
-        # the `def`, so neither inherits the exemption the name would carry.
-        "a print in a decorator on an excluded function": (
-            '@err.print(f"{e}")\ndef _validate_sort_cabin():\n    pass\n'
-        ),
-        "a print in a default argument of an excluded function": (
-            'def _validate_sort_cabin(x=err.print(f"{e}")):\n    pass\n'
-        ),
-        # `!r` runs after the wrapper: `repr` doubles the backslash `escape`
-        # prepended and hands the tag straight back to the markup parser.
-        "conversion applied after the wrapper": (
-            'def calendar():\n    err.print(f"{_safe_text(e)!r}")\n'
-        ),
-        # A format spec is interpolated too, and its field becomes the fill.
-        "unwrapped field inside a format spec": (
-            'def calendar():\n    err.print(f"{escape(a):{e}}")\n'
-        ),
-        # The exemption belongs to the top-level function, so a nested helper
-        # that happens to reuse an excluded name is still scanned.
-        "nested helper reusing an excluded name": (
-            'def calendar():\n    def _render_search():\n        err.print(f"{e}")\n'
-        ),
-    }
-    missed = [name for name, source in bypasses.items() if not escape_scan(source)]
+    missed = [name for name, source in _KNOWN_BYPASSES.items() if not escape_scan(source)]
     assert not missed, f"the scan does not catch: {missed}"
 
 
@@ -2934,7 +2984,7 @@ def test_escape_scan_passes_clean_source() -> None:
         '    err.print(f"max ({hi}) is below min ({lo})", style="red")\n'  # allowed HERE
         "def _run_calendar_enriched():\n"
         "    async def _go():\n"
-        # Allowed through the enclosing function, not the closure it sits in.
+        # Allowed in the closure that prints it, which is where the entry is keyed.
         '        console.print(f"[dim]{_GF_GRID_UNAVAILABLE_WEAVE_NOTE}[/]")\n'
         # A table filled through the wrappers, then printed whole: the title, the
         # header and the cell are each read where the value was chosen, and the
