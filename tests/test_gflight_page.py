@@ -295,6 +295,38 @@ def test_extract_ds1_reads_the_flights_blob_past_other_keys() -> None:
     assert len(rows) == 3
 
 
+def test_the_captured_callback_envelope_is_the_one_the_extraction_reads() -> None:
+    """The one thing `_page()` above cannot pin: the wrapper itself.
+
+    Every other fixture here is a captured `ds:1` payload dropped into a
+    callback this file writes to suit the regex that reads it, so the two agree
+    by construction and a production envelope that drifted — different quoting,
+    reordered properties, a renamed terminator — would refuse every search
+    while the suite stayed green. `gf_page_envelope.json` is the verbatim
+    wrapper cut from a live page: the prefix through `data:`, and the suffix
+    from the end of the array through the call's own `);`. The payload it
+    carried is not committed with it; any captured board splices in."""
+    envelope: dict[str, str] = json.loads(
+        (FIXTURE_DIR.parent / "gf_page_envelope.json").read_text()
+    )
+    page = (
+        "<!doctype html><html><body><script>"
+        f"{envelope['prefix']}{_ds1('ds1_jfk_lax_3rows.json')}{envelope['suffix']}"
+        "</script></body></html>"
+    )
+    payload = gfid._extract_ds1(page)
+    assert payload is not None
+    assert len(gfid._rows_from_ds1(payload).rows) == 3
+
+    # And that the envelope is READ rather than merely carried: the blob is
+    # JavaScript, so the single-quoted key is a literal in the regex. The same
+    # page with the same rows under a double-quoted key is a page we cannot
+    # read, which is the shape of the drift this fixture exists to catch.
+    requoted = page.replace("key: 'ds:1'", 'key: "ds:1"')
+    assert requoted != page, envelope["prefix"]
+    assert gfid._extract_ds1(requoted) is None
+
+
 def test_extract_ds1_returns_none_when_the_key_is_absent() -> None:
     assert gfid._extract_ds1(_SHAPE_CHANGE_PAGE) is None
 

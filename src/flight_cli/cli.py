@@ -1493,6 +1493,17 @@ def _run_gflight_path(
         console.print("[yellow]Google Flights: no results (or none matched the routing).[/]")
         return
 
+    # `-n` is one number for everything the user can act on. Google's page
+    # serves its whole board (~30 rows) whatever was asked of it, and the table
+    # was the only thing trimmed: `--format json` ran to thirty rows, `--pick`
+    # accepted a row the table never printed and pinned it without a word, and
+    # the award matcher was fanned out over itineraries nobody had seen. The
+    # trim is HERE rather than in the query because the wide board is what the
+    # Tier-2 post-filter above and the multi-cabin join elsewhere are drawn
+    # from — narrowing the query would answer a filtered search with fewer rows
+    # than exist, which is the failure this backend is most prone to.
+    results = results[:top_n]
+
     # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType,
     #                 reportUnknownArgumentType, reportUnknownParameterType]
     # fli/fast_flights have no type stubs; results are duck-typed pydantic
@@ -2127,7 +2138,11 @@ def _run_gflight_path_multi(
         out: dict[str, Any] = {}
         for cab, fli_results in fli_by_cabin.items():
             cab_dumped: list[Any] = []
-            for r in fli_results:
+            # The user's count per cabin, not the bumped one the cabins were
+            # queried at: the bump exists to give the join overlap to work
+            # with, and quoting it back would answer `-n 3` with ten rows a
+            # cabin. The table path gets the same number through `_merge_cabins`.
+            for r in fli_results[:top_n]:
                 items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
                 dumped = [_gflight_json_row(g) for g in items]
                 cab_dumped.append(dumped if isinstance(r, tuple) else dumped[0])

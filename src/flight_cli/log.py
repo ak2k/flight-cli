@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from contextlib import suppress
 from typing import TYPE_CHECKING, override
 
 import structlog
@@ -130,8 +131,49 @@ def _configure_stdlib(lvl: int) -> None:
     logger.addHandler(handler)
 
 
+class _LiveStderr:
+    """The stream `PrintLogger` writes through: whatever `sys.stderr` is NOW.
+
+    `PrintLogger` takes a file at construction, and `configure` caches the
+    bound logger on first use, so passing `sys.stderr` itself pins the stream
+    that happened to be installed when the first record was emitted. A host
+    that then replaces and closes it gets `ValueError: I/O operation on closed
+    file` out of its next log line, and a host with no stderr at all gets
+    worse: `PrintLogger` falls back to STDOUT, so the diagnostic lands in the
+    document `--format json` is writing. Resolving per write is what
+    `_StderrHandler` does for the stdlib half of this module, for the same
+    reason — and there is no version of this where a log line is worth either
+    outcome, so a stream that cannot be written to is written nowhere.
+
+    Truthy and left that way deliberately: `PrintLogger.__init__` reads
+    `file or stdout`, so a proxy that ever tested false would route the whole
+    package's diagnostics into stdout."""
+
+    def write(self, s: str) -> int:
+        stream = sys.stderr
+        if stream is None:
+            return 0
+        # A closed stream raises ValueError, a broken one OSError, and
+        # `sys.stderr` can be rebound to something that is not a stream at all
+        # — `_stderr_wants_colour` below already assumes as much. A log line is
+        # not worth ending the command it was describing, which is the same
+        # trade `_StderrHandler.emit` makes one stream over.
+        with suppress(ValueError, OSError, AttributeError):
+            stream.write(s)
+        # What `print` would have written. It discards the count, and asking
+        # the stream for its own would re-raise everything just suppressed.
+        return len(s)
+
+    def flush(self) -> None:
+        stream = sys.stderr
+        if stream is None:
+            return
+        with suppress(ValueError, OSError, AttributeError):
+            stream.flush()
+
+
 def _stderr_logger_factory(*_args: object) -> structlog.PrintLogger:
-    """A structlog logger writing to whatever `sys.stderr` is when it is built.
+    """A structlog logger writing to whatever `sys.stderr` is per record.
 
     structlog's default factory writes to STDOUT, which is the stream
     `--format json` writes its document to — a retry warning or a rate-limit
@@ -139,9 +181,13 @@ def _stderr_logger_factory(*_args: object) -> structlog.PrintLogger:
     module's docstring, `configure`'s, and the CLI's `-v` help all say stderr,
     so this is what makes them true.
 
-    Resolved per logger rather than captured at import, for the same reason the
+    Resolved per write rather than captured here, for the same reason the
     stdlib handler resolves it per record: this process replaces `sys.stderr`."""
-    return structlog.PrintLogger(file=sys.stderr)
+    # reportArgumentType: `PrintLogger` annotates `file` as `TextIO` but uses
+    # only `write`/`flush`, through `print`. Being one fixed stream is the
+    # property this proxy exists not to have, so the annotation is the thing
+    # ignored rather than a shape we could satisfy.
+    return structlog.PrintLogger(file=_LiveStderr())  # pyright: ignore[reportArgumentType]
 
 
 def configure(level: str = "warning") -> None:

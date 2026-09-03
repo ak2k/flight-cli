@@ -120,10 +120,17 @@ def fli_results_to_search_result(results: Sequence[Any]) -> SearchResult:
 
     fli returns ``list[FlightResult]`` for one-way and ``list[tuple[FlightResult, ...]]``
     for round-trip/multi-city. Each top-level entry maps to one Itinerary; for
-    tuples, each FlightResult becomes one Slice in slice-index order. The
-    cheapest-cash price for the itinerary uses the outbound leg's price
-    (round-trip prices in fli are attached per-result; the outbound carries
-    the combined fare on round-trip queries).
+    tuples, each FlightResult becomes one Slice in slice-index order.
+
+    Every member of a round-trip tuple carries a price, and they are not the
+    same number. An outbound row is priced at the cheapest round-trip TOTAL
+    reachable from that outbound; the return board fetched with it pinned
+    prices each of its rows at THAT combination's total. So the itinerary fare
+    is the terminal member's — the pinned leg is what makes this combination
+    this combination, and the outbound's price belongs to whichever return is
+    cheapest, which is only one of them. The number matters downstream: an
+    award is compared against it, so an outbound-priced combination undercuts
+    every cash comparison but the cheapest one.
     """
     solutions: list[Itinerary] = []
     cheapest_price: float | None = None
@@ -134,18 +141,22 @@ def fli_results_to_search_result(results: Sequence[Any]) -> SearchResult:
             continue
         unwrapped = [_unwrap(it) for it in items_raw]
         slices = [_slice_from_flight_result(fr, fid, am) for fr, fid, am in unwrapped]
-        first_fr = unwrapped[0][0]
-        price_str = _price_string(first_fr)
+        # The pinned leg on a round trip, and the only leg on a one-way — one
+        # rule, because `unwrapped[-1]` is `unwrapped[0]` when there is one.
+        fare_fr = unwrapped[-1][0]
+        price_str = _price_string(fare_fr)
         solutions.append(
             Itinerary(
                 ext=ItineraryExt(price=price_str),
                 itinerary=ItineraryDetails(slices=slices, carriers=[]),
             ),
         )
-        p: float = first_fr.price
+        # The same member the itineraries are priced from: a cheapest quoted
+        # from the outbound boards would name a fare no row in the table shows.
+        p: float = fare_fr.price
         if cheapest_price is None or p < cheapest_price:
             cheapest_price = p
-            cheapest_currency = first_fr.currency or "USD"
+            cheapest_currency = fare_fr.currency or "USD"
 
     sr = SearchResult(
         solutionCount=len(solutions),

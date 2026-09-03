@@ -11,7 +11,7 @@ the price string — so this test pins those exact fields end-to-end."""
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -82,6 +82,9 @@ def test_one_way_single_leg_maps_to_one_slice() -> None:
 
 
 def test_round_trip_tuple_maps_to_two_slices() -> None:
+    """Prices deliberately UNEQUAL: the members of a round-trip tuple carry
+    different fares, and equal ones would make the itinerary's price agree with
+    both members and pin neither."""
     out = _result(
         1078.0,
         _leg(
@@ -94,7 +97,7 @@ def test_round_trip_tuple_maps_to_two_slices() -> None:
         ),
     )
     ret = _result(
-        1078.0,
+        1421.0,
         _leg(
             "101",
             "LHR",
@@ -114,6 +117,11 @@ def test_round_trip_tuple_maps_to_two_slices() -> None:
     assert slices[1].flights == ["AA101"]
     assert slices[1].origin is not None and slices[1].origin.code == "LHR"
     assert slices[1].destination is not None and slices[1].destination.code == "JFK"
+    # The pinned leg's fare is this combination's total; the outbound's is the
+    # cheapest total reachable from that outbound, which is a different trip
+    # unless this return happens to be the cheapest one.
+    assert it.price == "USD1421.00"
+    assert sr.cheapest_price == "USD1421.00"
 
 
 def test_connection_slice_flattens_all_flight_numbers_first_origin_last_dest() -> None:
@@ -278,3 +286,51 @@ def test_cash_hints_skip_slices_without_flight_id() -> None:
     )
     hints = cash_hints_from_search_result(sr)
     assert hints == []
+
+
+def test_a_captured_round_trip_is_priced_at_the_combination_not_the_outbound(
+    gf_session: Any, gf_capture: Any
+) -> None:
+    """Driven through the transport with the matched pair of live captures,
+    because this is a fact about Google's two boards and not about the adapter's
+    taste.
+
+    The outbound board prices AA144/AA1110 at 6616, and the return board Google
+    served with an outbound pinned prices AA1115/AA297 at 7196 — the same 6616
+    is that return board's own MINIMUM, which is what the outbound row was
+    quoting all along. Pricing the pair from the outbound therefore reports a
+    7196 trip as a 6616 one, and the award comparison downstream reads that
+    number as the cash fare to beat."""
+    from flight_cli._gflight_ids import search_with_ids
+    from flight_cli.domain import Cabin, Leg, SearchOptions, SpecificDateSearch
+    from flight_cli.fli_bridge import to_fli_filter
+
+    dep = date.today() + timedelta(days=45)
+    ret = date.today() + timedelta(days=52)
+    gf_session(
+        gf_capture("ds1_metadata_blocks_kept.json"), gf_capture("ds1_return_leg_pinned.json")
+    )
+    results = search_with_ids(
+        to_fli_filter(
+            SpecificDateSearch(
+                legs=(Leg.of("HNL", "MIA", dep), Leg.of("MIA", "HNL", ret)),
+                options=SearchOptions(cabin=Cabin.COACH),
+            )
+        ),
+        top_n=3,
+    )
+    assert results is not None
+    sr = fli_results_to_search_result(results)
+
+    priced: dict[tuple[str, str], set[str]] = {}
+    for it in sr.solutions:
+        itn = it.itinerary
+        assert itn is not None
+        key = ("/".join(itn.slices[0].flights), "/".join(itn.slices[1].flights))
+        priced.setdefault(key, set()).add(it.price or "")
+
+    assert priced[("AA144/AA1110", "AA1115/AA297")] == {"USD7196.00"}
+    # Per combination, not per outbound: the same outbound against a cheaper
+    # return is a cheaper trip, and an outbound-priced board reports one number
+    # for all three.
+    assert priced[("AA144/AA1110", "AA713/AA297")] == {"USD6616.00"}

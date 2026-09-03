@@ -12,6 +12,8 @@ every third-party library that logs.
 
 from __future__ import annotations
 
+import functools
+import json
 import logging
 import sys
 from typing import TYPE_CHECKING
@@ -115,8 +117,6 @@ def test_structlog_records_go_to_stderr_so_json_stdout_stays_parseable(
     machine consumer's input — not corrupting a table a human reads, but
     breaking `json.load` for the one output format that promises to be
     parseable. Every docstring in this package says these go to stderr."""
-    import json
-
     import structlog
 
     log_mod.configure("warning")
@@ -126,6 +126,58 @@ def test_structlog_records_go_to_stderr_so_json_stdout_stays_parseable(
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {"solutions": []}, captured.out
     assert "gflight throttled" in captured.err, captured.err
+
+
+def test_a_cached_structlog_logger_writes_to_the_stderr_of_the_moment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`configure()` caches each logger on first use, so a factory that hands
+    over `sys.stderr` itself pins whichever stream was installed when the first
+    record was emitted.
+
+    Every module here logs through a proxy built at import — `_http.log` is
+    one — and those outlive any one call. A host that replaces and closes the
+    stream it started with then gets `ValueError: I/O operation on closed file`
+    out of its next log line, which is the one thing this module's stdlib half
+    already refuses to do."""
+    import io
+
+    from flight_cli import _http
+
+    # Un-cache the module-level proxy so THIS test decides which stream it
+    # binds first; monkeypatch restores whatever the session had after it.
+    monkeypatch.setattr(_http.log, "bind", functools.partial(type(_http.log).bind, _http.log))
+
+    first = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", first)
+    log_mod.configure("warning")
+    _http.log.warning("the record that caches the logger")
+    assert "the record that caches the logger" in first.getvalue()
+
+    second = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", second)
+    first.close()
+    _http.log.warning("the record after the stream was replaced")
+    assert "the record after the stream was replaced" in second.getvalue()
+
+
+def test_a_record_with_no_stderr_to_reach_never_falls_back_to_stdout(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`sys.stderr` is None under pythonw and under any host that took it away.
+    structlog's `PrintLogger` reads `file or stdout`, so a None stream there
+    does not silence the record — it moves it to STDOUT, which is where
+    `--format json` writes its document. A diagnostic is worth less than a
+    parseable answer, so a record with no stream goes nowhere."""
+    import structlog
+
+    monkeypatch.setattr(sys, "stderr", None)
+    log_mod.configure("warning")
+    structlog.get_logger("flight_cli.nowhere").warning("a diagnostic with nowhere to go")
+    print(json.dumps({"solutions": []}))  # the JSON document the CLI writes to stdout
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"solutions": []}, captured.out
 
 
 def test_a_record_survives_a_real_stream_whatever_the_page_put_in_it(
