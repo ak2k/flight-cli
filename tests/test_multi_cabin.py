@@ -485,7 +485,60 @@ def test_a_multi_cabin_round_trip_says_what_its_join_is_drawn_from(
             providers=None, cash_only=True, awards_only=False, provider_opt=()
         ),
     )
-    assert ("10 cheapest outbounds" in buf.getvalue()) is shown, buf.getvalue()
+    from flight_cli._gflight_ids import pinned_fanout
+
+    pins = pinned_fanout(cli._bumped_query_top_n(5, len(cabins)))
+    assert (f"{pins} cheapest outbounds" in buf.getvalue()) is shown, buf.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("top_n", "expected"),
+    [
+        pytest.param(10, 10, id="the-default-sits-on-the-cap"),
+        pytest.param(1, 5, id="a-small-n-pins-fewer-than-the-cap"),
+    ],
+)
+def test_the_join_note_counts_the_outbounds_that_were_actually_pinned(
+    monkeypatch: pytest.MonkeyPatch, top_n: int, expected: int
+) -> None:
+    """The number is the point of the sentence, so it comes from the pin budget
+    rather than a literal. Below the cap `-n` decides, and a note still saying
+    "10" would explain an empty cell with a number that never happened."""
+    import io as _io
+    from datetime import date as _date
+
+    from rich.console import Console as _Console
+
+    from flight_cli import cli
+    from flight_cli.domain import Cabin as _Cabin
+    from flight_cli.domain import Leg as _Leg
+    from flight_cli.domain import SearchOptions as _SearchOptions
+
+    buf = _io.StringIO()
+    monkeypatch.setattr(cli, "err", _Console(file=buf, width=400, no_color=True, highlight=False))
+    row = _one_gflight_row()
+    cabins = (_Cabin.COACH, _Cabin.BUSINESS)
+
+    def _fan_out(**_kw: Any) -> dict[Any, list[Any]]:
+        return {c: [row] for c in cabins}
+
+    monkeypatch.setattr(cli, "_run_gflight_multi", _fan_out)
+    cli._run_gflight_path_multi(
+        legs=(
+            _Leg.of("JFK", "LAX", _date(2026, 10, 14)),
+            _Leg.of("LAX", "JFK", _date(2026, 10, 21)),
+        ),
+        opts=_SearchOptions(cabin=_Cabin.COACH),
+        cabins=cabins,
+        sort_by=_Cabin.COACH,
+        top_n=top_n,
+        json_out=True,
+        run_pp=False,
+        sel=cli._resolve_providers(
+            providers=None, cash_only=True, awards_only=False, provider_opt=()
+        ),
+    )
+    assert f"{expected} cheapest outbounds" in buf.getvalue(), buf.getvalue()
 
 
 def test_multi_cabin_fan_out_honours_an_encodable_constraint(

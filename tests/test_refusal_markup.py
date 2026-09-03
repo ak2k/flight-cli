@@ -507,6 +507,92 @@ def test_the_enriched_path_reports_a_google_flights_refusal_as_a_footnote(
     _assert_drives_no_terminal(printed)
 
 
+def test_the_gflight_only_path_quotes_an_untyped_failure_it_cannot_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--backend gflight` has no Matrix to fall back to, so an untyped failure
+    IS the whole output. Quoting it is the only account the user gets of why
+    the command ended."""
+    from flight_cli import cli
+
+    buf = io.StringIO()
+    monkeypatch.setattr(cli, "err", Console(file=buf, width=400, no_color=True, highlight=False))
+
+    def _boom(*_a: object, **_kw: object) -> object:
+        raise RuntimeError(f"boom {_DROPPED}{_ESCAPES}")
+
+    monkeypatch.setattr(cli, "_gflight_results", _boom)
+    legs, opts = _gf_legs_and_opts()
+    with pytest.raises(typer.Exit):
+        cli._run_gflight_path(legs=legs, opts=opts, top_n=3, json_out=False)
+
+    printed = buf.getvalue()
+    assert f"boom {_DROPPED}" in printed, f"the failure was mangled: {printed!r}"
+    _assert_drives_no_terminal(printed)
+
+
+def test_a_link_builder_that_fails_does_not_take_the_results_with_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The URL footer is a convenience printed after a table the user already
+    has. Its third-party builder has no documented exception surface, so the
+    failure is caught and quoted — and that quote is remote text on a markup
+    console like any other."""
+    from flight_cli import cli
+
+    buf = io.StringIO()
+    monkeypatch.setattr(
+        cli, "console", Console(file=buf, width=400, no_color=True, highlight=False)
+    )
+
+    def _boom(*_a: object, **_kw: object) -> str:
+        raise RuntimeError(f"no url {_DROPPED}{_ESCAPES}")
+
+    monkeypatch.setattr(cli, "google_flights_url", _boom)
+    legs, opts = _gf_legs_and_opts()
+    cli._emit_urls(
+        cli.SpecificDateSearch(legs=legs, options=opts),
+        matrix_url=False,
+        google_url=True,
+        result=cast("Any", None),
+        pick=None,
+    )
+
+    printed = buf.getvalue()
+    assert f"no url {_DROPPED}" in printed, f"the failure was mangled: {printed!r}"
+    _assert_drives_no_terminal(printed)
+
+
+def test_the_seatmap_lookup_failure_quotes_the_remote_url_and_the_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both halves of the failure branch carry text from elsewhere: the error
+    from a third-party client, and the API URL built from a remote path."""
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    bracketed = f"https://seatmaps.example/x?opts={_DROPPED}seats{_ESCAPES}"
+
+    def _url(**_kw: object) -> str:
+        return bracketed
+
+    def _boom(**_kw: object) -> str:
+        raise RuntimeError(f"upstream said no {_DROPPED}{_ESCAPES}")
+
+    monkeypatch.setattr(cli, "console", Console(width=400, no_color=True, highlight=False))
+    monkeypatch.setattr(cli, "err", Console(width=400, no_color=True, highlight=False))
+    monkeypatch.setattr("flight_cli.seatmap.seatmap_api_url", _url)
+    monkeypatch.setattr("flight_cli.seatmap.fetch_seatmap_url", _boom)
+
+    result = CliRunner().invoke(cli.app, ["seatmap", "JFK", "LAX", "AA100", "--date", "2026-10-14"])
+
+    assert result.exit_code == 1, result.output
+    for fragment in (f"upstream said no {_DROPPED}", f"opts={_DROPPED}seats"):
+        assert fragment in result.output, f"{fragment!r} was mangled: {result.output!r}"
+    _assert_drives_no_terminal(result.output)
+
+
 @pytest.mark.parametrize("routing", _HOSTILE_ROUTING)
 def test_hostile_routing_reaches_the_explicit_path_without_backslashes(
     monkeypatch: pytest.MonkeyPatch, routing: str

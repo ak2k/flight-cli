@@ -26,6 +26,7 @@ back-fill, so a top-N above that returns fewer rows than asked for.
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -67,6 +68,7 @@ from ._gf_errors import (
     GfConsentError,
     GfPageShapeError,
     GfThrottledError,
+    GfTransportError,
 )
 from .links import build_search_tfs, google_flights_search_page_url
 
@@ -121,26 +123,119 @@ _THROTTLE_BACKOFF_S = 1.0  # exponential base: ~1, 2, 4, 8s (plus 0-50% jitter)
 _TRANSPORT_RETRY_ATTEMPTS = 2
 
 
-class _SharedThrottleLadder:
-    """One throttle ladder, drawn on by every worker of a fan-out.
+def _backoff_for(attempt: int) -> float:
+    """The jittered exponential backoff for the given rung.
 
-    Google's throttle is per-IP, so cabins querying at once share one wall and
-    laddering against it separately spends the cabin count times the requests to
-    learn the same thing. Workers take their retry numbers from here instead, so
-    the fan-out backs off once and then gives up together."""
+    Jitter so concurrent one-shot `flight` processes — which share the per-IP
+    signal but cannot share a budget — do not retry in lockstep and re-trip it."""
+    return _THROTTLE_BACKOFF_S * (2 ** (attempt - 1)) * (1 + random.random() * 0.5)  # noqa: S311 — jitter, not crypto
+
+
+# How long a waiting worker will trust an owner to report back. Not part of the
+# budget: the owner releases the round from a `finally`, so this only fires if
+# that guarantee is ever broken, and a fan-out that hangs is worse than one that
+# spends an extra request.
+_LADDER_WAIT_CEILING_S = 120.0
+
+
+# DIVERGE: a hand-written ladder where the rest of the package would reach for a
+# retry decorator (stamina, already a dependency for `_http`'s Matrix calls). A
+# decorator retries ONE call against a counter of its own. This budget belongs
+# to the per-IP wall, not to a call: several worker threads share it, one of
+# them owns the backoff while the others wait on its outcome, and any success
+# refills it. There is no decorator that can express state shared sideways
+# across threads, so the loop in `retry_throttled` is written out.
+class _SharedThrottleLadder:
+    """One ladder against the wall, for every worker of a fan-out at once.
+
+    Google's throttle is per-IP, so cabins querying together meet ONE wall.
+    Laddering against it separately spends the cabin count times the requests to
+    learn a single fact, and gives up at N different moments.
+
+    So exactly one worker OWNS the backoff. It sleeps a rung and retries, and
+    that retry is the probe: a worker that gets throttled while an owner exists
+    waits for the probe's outcome rather than running a schedule of its own.
+    When the probe gets through, every waiter retries at once — a wall that
+    lifts inside the ladder serves the whole fan-out, not just whoever happened
+    to be probing. When the rungs run out, the waiters raise without spending a
+    request on a wall that has just been measured.
+
+    Any successful call RESETS the ladder. The rungs measure one wall; a wall
+    that returns half an hour later is a different one and gets a full budget.
+
+    The transport budget rides the same object because it is shared for the same
+    reason — the network is one network — but it is a plain counter: there is
+    nothing to probe, and a reset socket does not lift for a caller who waits."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._spent = 0
+        self._transport_spent = 0
+        self._exhausted = False
+        self._owner: int | None = None
+        # Set when the owner's round resolves. Replaced per round so a waiter
+        # cannot be woken by the previous round's result.
+        self._settled = threading.Event()
 
-    def next_attempt(self) -> int | None:
-        """The attempt number the next retry backs off on, or None once the
-        shared budget is gone and the throttle has to be re-raised."""
+    def throttled(self) -> float | None:
+        """This worker's call came back throttled. How long to wait before
+        trying again, or None when the shared budget is gone.
+
+        A non-owner blocks here for the owner's outcome and then retries
+        immediately, so its wait is the owner's backoff rather than one of its
+        own."""
+        me = threading.get_ident()
         with self._lock:
-            if self._spent >= _THROTTLE_RETRY_ATTEMPTS:
+            if self._exhausted:
                 return None
-            self._spent += 1
-            return self._spent
+            if self._owner is None:
+                self._owner = me
+            if self._owner == me:
+                self._spent += 1
+                if self._spent > _THROTTLE_RETRY_ATTEMPTS:
+                    self._exhausted = True
+                    self._release_locked()
+                    return None
+                return _backoff_for(self._spent)
+            settled = self._settled
+        settled.wait(_LADDER_WAIT_CEILING_S)
+        with self._lock:
+            return None if self._exhausted else 0.0
+
+    def transport_failed(self) -> float | None:
+        """A curl-level failure. How long to wait before trying again, or None
+        when the shared transport budget is gone."""
+        with self._lock:
+            self._transport_spent += 1
+            if self._transport_spent > _TRANSPORT_RETRY_ATTEMPTS:
+                return None
+            return _backoff_for(self._transport_spent)
+
+    def succeeded(self) -> None:
+        """A call got through. The wall this ladder was measuring is gone, so
+        the rungs are returned and anyone waiting is released to retry."""
+        with self._lock:
+            self._spent = 0
+            self._transport_spent = 0
+            self._exhausted = False
+            self._release_locked()
+
+    def stand_down(self) -> None:
+        """Give up ownership without a verdict — for a worker leaving the ladder
+        by some other door (a shape error, a consent wall).
+
+        Waiters are released to retry rather than left holding a probe that will
+        never report: whatever ended the owner's call says nothing about the
+        wall, and one request each is cheaper than a fan-out that hangs."""
+        with self._lock:
+            if self._owner == threading.get_ident():
+                self._release_locked()
+
+    def _release_locked(self) -> None:
+        """End the current round. Caller holds the lock."""
+        self._owner = None
+        self._settled.set()
+        self._settled = threading.Event()
 
 
 # The ladder the current fan-out shares, or None when nothing is fanning out.
@@ -152,26 +247,19 @@ _fanout_ladder: dict[str, _SharedThrottleLadder | None] = {"current": None}
 
 @contextlib.contextmanager
 def shared_throttle_ladder() -> Generator[None]:
-    """Make every GF call inside this block draw its throttle retries from ONE
-    ladder — for a caller that issues several searches at once.
+    """Make every GF call inside this block draw on ONE ladder — for a caller
+    that issues several searches at once.
 
     Outside it each call ladders on its own, which is what a lone search wants:
-    there is nobody else to share the wall with."""
+    there is nobody else to share the wall with. The previous ladder is restored
+    on the way out, so nesting one scope inside another cannot strand a fan-out
+    on an inner budget."""
     previous = _fanout_ladder["current"]
     _fanout_ladder["current"] = _SharedThrottleLadder()
     try:
         yield
     finally:
         _fanout_ladder["current"] = previous
-
-
-def _throttle_attempt(own_attempt: int) -> int | None:
-    """The attempt number this retry backs off on, or None when the budget is
-    spent and the throttle has to be re-raised."""
-    ladder = _fanout_ladder["current"]
-    if ladder is not None:
-        return ladder.next_attempt()
-    return own_attempt if own_attempt <= _THROTTLE_RETRY_ATTEMPTS else None
 
 
 def _is_throttle_block(body: str) -> bool:  # pyright: ignore[reportUnusedFunction]  # read by _gf_dategrid, not here
@@ -188,7 +276,7 @@ def _is_throttle_block(body: str) -> bool:  # pyright: ignore[reportUnusedFuncti
 # The search page's block is Google's captcha interstitial — reached by redirect
 # to `/sorry/`, or served in place with HTTP 200. Neither carries a `ds:1` blob,
 # so both would otherwise read as an empty board.
-_SORRY_PATH = "/sorry/"
+_SORRY_PATH = "/sorry"
 # The same interstitial served at the requested URL with HTTP 200 — no redirect
 # to key off, so the body is the only tell. English-only, and we always request
 # `hl=en`; a localised block would still be caught by the `/sorry/` URL check
@@ -293,6 +381,11 @@ def _extract_ds1(html: str) -> list[Any] | None:
     the settled board carries thirty. Counting costs one pass over blobs that
     are already in memory.
 
+    Only a blob `_rows_from_ds1` could actually SERVE competes on rows
+    (`_is_a_readable_board`). A staged blob can be truncated above `[3]`, or
+    carry rows at `[2]` beside a placeholder at `[3]`; counting its rows would
+    let it beat the finished board and turn a served page into a refusal.
+
     The count is STRUCTURAL, exactly like the scan that follows it: rows are
     counted, never parsed, so a board whose rows have all changed shape still
     wins and reaches the 0-of-N guard as a layout change instead of losing to a
@@ -327,7 +420,7 @@ def _extract_ds1(html: str) -> list[Any] | None:
         if not isinstance(payload, list):
             continue
         decoded = cast("list[Any]", payload)
-        rows = _board_row_count(decoded)
+        rows = _board_row_count(decoded) if _is_a_readable_board(decoded) else 0
         if rows > best_rows:  # strictly greater, so a tie keeps the earlier blob
             best, best_rows = decoded, rows
         if long_enough is None and len(decoded) > max(_DS_ROW_BLOCKS):
@@ -337,6 +430,23 @@ def _extract_ds1(html: str) -> list[Any] | None:
     if best is not None:
         return best
     return long_enough if long_enough is not None else first_decodable
+
+
+def _is_a_readable_board(payload: list[Any]) -> bool:
+    """Could `_rows_from_ds1` serve this payload at all?
+
+    Its two refusals, asked in advance: an arity that cannot reach `[3]`, and a
+    value at `[2]`/`[3]` that is neither absent nor row-shaped. A blob that
+    fails either cannot be served however many rows it appears to hold, so
+    letting it win on row count trades a board we can read for a typed refusal
+    — a staged blob with rows at `[2]` and a placeholder at `[3]` is exactly
+    that shape."""
+    if len(payload) <= max(_DS_ROW_BLOCKS):
+        return False
+    return all(
+        _is_an_absent_board(payload[index]) or _looks_like_a_row_block(payload[index])
+        for index in _DS_ROW_BLOCKS
+    )
 
 
 def _board_row_count(payload: list[Any]) -> int:
@@ -383,11 +493,14 @@ def _is_page_throttled(*, final_url: str, html: str) -> bool:
 
     The URL half reads the PATH, not the whole string: our own request URL
     carries a base64 `tfs=` parameter, and a substring test over the query
-    string would call a served page a block on the right three bytes. The body
-    half stays a substring because its marker is a whole English sentence, not a
-    token that turns up in ordinary markup."""
+    string would call a served page a block on the right three bytes. Both
+    spellings of the path count — Google redirects to `/sorry/index`, but a
+    bare `/sorry` is the same interstitial and a trailing slash is not a
+    promise. The body half stays a substring because its marker is a whole
+    English sentence, not a token that turns up in ordinary markup."""
     path = _split_url(final_url).path
-    return _SORRY_PATH in path or any(marker in html for marker in _SORRY_MARKERS)
+    blocked = path == _SORRY_PATH or f"{_SORRY_PATH}/" in path
+    return blocked or any(marker in html for marker in _SORRY_MARKERS)
 
 
 def _is_consent_page(*, final_url: str, html: str) -> bool:
@@ -978,24 +1091,53 @@ class _RetryableTransportError(GfBackendError):
     user as an untyped traceback."""
 
 
+@functools.cache
+def _retryable_curl_codes() -> frozenset[Any]:
+    """Curl result codes worth another attempt that no exception CLASS selects.
+
+    curl_cffi maps several codes onto classes that also carry permanent faults,
+    so the class alone cannot decide: `PARTIAL_FILE` arrives as `IncompleteRead`
+    — a multi-megabyte body cut short, which is the page we asked for and a
+    retry usually completes — and the three HTTP/2 and HTTP/3 stream errors all
+    arrive as `HTTPError`, which is otherwise a status we must not retry.
+
+    Cached because the import is deferred: `curl_cffi` costs ~100ms cold and
+    this is reached only once an exception has come back from the session."""
+    from curl_cffi.const import CurlECode  # noqa: PLC0415
+
+    return frozenset(
+        {
+            CurlECode.PARTIAL_FILE,
+            CurlECode.HTTP2,
+            CurlECode.HTTP2_STREAM,
+            CurlECode.HTTP3,
+        }
+    )
+
+
 def _is_transport_failure(e: BaseException) -> bool:
     """Is this curl failing to REACH Google, rather than a page we read?
 
-    Exactly two families, because only these clear on a second attempt:
+    Two families by class, because only these clear on a second attempt:
     `ConnectionError` (DNS, TLS, a reset socket) and `Timeout` (connect and
-    read). curl's broader `CurlError` base also covers `InvalidURL`,
-    `InvalidSchema`, `SessionClosed`, `CookieConflict`, `ImpersonateError` and
-    `TooManyRedirects` — faults in the request WE built, which is the shape a
-    `build_search_tfs` regression takes. Retrying those three times and
-    relabelling them "Google could not be reached" is how such a defect becomes
-    unfindable.
+    read). Then the handful of codes above, which those classes do not cover.
 
-    The import is deferred and on the error path only: `curl_cffi` costs ~100ms
-    cold, and by the time an exception comes back from the session it is
-    certainly loaded."""
+    Everything else propagates on its first try, including the rest of curl's
+    `CurlError` tree — `InvalidURL`, `InvalidSchema`, `SessionClosed`,
+    `CookieConflict`, `ImpersonateError`, `TooManyRedirects`. Each names a
+    request WE built wrongly, which is the shape a `build_search_tfs`
+    regression takes, and retrying it three times under the words "Google could
+    not be reached" is how such a defect becomes unfindable.
+
+    The import is deferred and on the error path only, for the reason above."""
     from curl_cffi.requests import exceptions as curl_exc  # noqa: PLC0415
 
-    return isinstance(e, curl_exc.ConnectionError | curl_exc.Timeout)
+    if isinstance(e, curl_exc.ConnectionError | curl_exc.Timeout):
+        return True
+    return (
+        isinstance(e, curl_exc.RequestException)
+        and getattr(e, "code", None) in _retryable_curl_codes()
+    )
 
 
 def _fetch_page(client: Any, url: str) -> Any:
@@ -1138,63 +1280,65 @@ def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
       same (warming) client; a fresh session would stay cold. Returns the falsy
       result if it never warms.
     - genuine **throttle** (GfThrottledError) -> exponential, jittered backoff;
-      re-raised when exhausted so the caller can degrade to Matrix. Inside a
-      `shared_throttle_ladder` scope that budget belongs to the whole fan-out
-      rather than to this call.
+      re-raised when exhausted so the caller can degrade to Matrix.
 
     `retry_empty=False` turns the first policy off, for callers whose empty is
     authoritative rather than cold: the search page either decodes or raises, so
     re-fetching a multi-megabyte page can only return the same zero rows.
 
     - **transport failure** (a reset connection, a read timeout) -> the same
-      backoff, on a smaller budget. Nothing below this ladder retries one:
-      `_fetch_page` goes to fli's session rather than `Client.get`, so without
-      this arm a single blip fails the leg. When the budget is spent it becomes
-      a plain `GfBackendError`, so the enriched path degrades to Matrix and
-      `--backend gflight` prints a typed line instead of a curl traceback."""
+      backoff, on a smaller budget, and `GfTransportError` when it is spent.
+      Nothing below this ladder retries one: `_fetch_page` goes to fli's session
+      rather than `Client.get`, so without this arm a single blip fails the leg.
+      The type matters to the caller — the network is not a property of the
+      query, so a caller looping over related queries stops rather than meeting
+      the same outage once per query.
+
+    Both budgets come from ONE ladder object, bound here for the whole call:
+    the fan-out's when there is one, otherwise this call's own. Inside a
+    fan-out that ladder is shared, so the group backs off once against a wall
+    that is per-IP (see `_SharedThrottleLadder`)."""
+    ladder = _fanout_ladder["current"] or _SharedThrottleLadder()
     empty_attempts = 0
-    throttle_attempts = 0
-    transport_attempts = 0
-    while True:
-        try:
-            result = call()
-        except _RetryableTransportError as e:
-            transport_attempts += 1
-            if transport_attempts > _TRANSPORT_RETRY_ATTEMPTS:
-                raise GfBackendError(f"Google Flights could not be reached: {e}") from e
-            base = _THROTTLE_BACKOFF_S * (2 ** (transport_attempts - 1))
-            backoff = base * (1 + random.random() * 0.5)  # noqa: S311 — jitter, not crypto
-            log.debug(
-                "gflight transport failure (%s); backoff %.1fs (retry %d/%d)",
-                e,
-                backoff,
-                transport_attempts,
-                _TRANSPORT_RETRY_ATTEMPTS,
-            )
-            time.sleep(backoff)
-            continue
-        except GfThrottledError:
-            throttle_attempts += 1
-            attempt = _throttle_attempt(throttle_attempts)
-            if attempt is None:
-                raise
-            base = _THROTTLE_BACKOFF_S * (2 ** (attempt - 1))
-            backoff = base * (1 + random.random() * 0.5)  # noqa: S311 — jitter, not crypto
-            log.debug(
-                "gflight throttled; backoff %.1fs (retry %d/%d)",
-                backoff,
-                attempt,
-                _THROTTLE_RETRY_ATTEMPTS,
-            )
-            time.sleep(backoff)
-            continue
-        if result or not retry_empty:
-            return result
-        empty_attempts += 1
-        if empty_attempts >= _EMPTY_RETRY_ATTEMPTS:
-            return result  # never warmed, or genuinely empty
-        log.debug("empty gflight response; retry %d/%d", empty_attempts, _EMPTY_RETRY_ATTEMPTS)
-        time.sleep(_EMPTY_RETRY_BACKOFF_S * empty_attempts)
+    try:
+        while True:
+            try:
+                result = call()
+            except _RetryableTransportError as e:
+                backoff = ladder.transport_failed()
+                if backoff is None:
+                    raise GfTransportError(f"Google Flights could not be reached: {e}") from e
+                log.debug(
+                    "gflight transport failure (%s); backoff %.1fs (budget %d)",
+                    e,
+                    backoff,
+                    _TRANSPORT_RETRY_ATTEMPTS,
+                )
+                time.sleep(backoff)
+                continue
+            except GfThrottledError:
+                backoff = ladder.throttled()
+                if backoff is None:
+                    raise
+                log.debug(
+                    "gflight throttled; backoff %.1fs (budget %d)",
+                    backoff,
+                    _THROTTLE_RETRY_ATTEMPTS,
+                )
+                time.sleep(backoff)
+                continue
+            ladder.succeeded()
+            if result or not retry_empty:
+                return result
+            empty_attempts += 1
+            if empty_attempts >= _EMPTY_RETRY_ATTEMPTS:
+                return result  # never warmed, or genuinely empty
+            log.debug("empty gflight response; retry %d/%d", empty_attempts, _EMPTY_RETRY_ATTEMPTS)
+            time.sleep(_EMPTY_RETRY_BACKOFF_S * empty_attempts)
+    finally:
+        # Whatever door this call left by, it is no longer probing the wall.
+        # A waiter holding a probe that will never report is a hung fan-out.
+        ladder.stand_down()
 
 
 def _one_call_with_retry(filters: FlightSearchFilters) -> list[GFlightWithId]:
@@ -1218,7 +1362,7 @@ def _one_call_with_retry(filters: FlightSearchFilters) -> list[GFlightWithId]:
 _PINNED_FANOUT_CAP = 10
 
 
-def _pinned_fanout(top_n: int) -> int:
+def pinned_fanout(top_n: int) -> int:
     """How many outbounds to pin, given the caller's top_n."""
     return min(top_n, _PINNED_FANOUT_CAP)
 
@@ -1235,9 +1379,12 @@ def search_with_ids(
     as fli: query first leg, pick top_n, drive each through the rest. Each
     `GFlightWithId` in a returned tuple has its own per-leg flight_id.
 
-    A pin whose return board refuses is dropped with a warning and the rest are
-    still fetched; the refusal is only raised when EVERY pin failed. A throttle
-    is the exception — it is per-IP, so it aborts the fan-out."""
+    A pin whose return board refuses for its own reasons is dropped with a
+    warning and the rest are still fetched. A throttle or an exhausted transport
+    ladder stops the pinning instead, because neither says anything about the
+    pin: the wall is per-IP and the network is one network. Either way the
+    combinations already fetched are returned, and the error is raised only when
+    nothing at all was served."""
     first = _one_call_with_retry(filters)
     if not first:
         return None
@@ -1252,22 +1399,27 @@ def search_with_ids(
         return list(first)
 
     combos: list[GFlightWithId | tuple[GFlightWithId, ...]] = []
-    pins = first[: _pinned_fanout(top_n)]
+    pins = first[: pinned_fanout(top_n)]
     refused: list[GfBackendError] = []
-    for picked in pins:
+    stopped: GfBackendError | None = None
+    skipped = 0
+    for index, picked in enumerate(pins):
         next_filters = deepcopy(filters)
         next_filters.flight_segments[selected_count].selected_flight = picked.flight
         try:
             nxt = search_with_ids(next_filters, top_n=top_n)
-        except GfThrottledError:
-            # Per-IP: every remaining pin would walk into the same wall, and
-            # the caller has a Matrix fallback that this only delays.
-            raise
+        except (GfThrottledError, GfTransportError) as e:
+            # Neither is a fact about THIS pin. The wall is per-IP and the
+            # network is one network, so every remaining pin walks into the
+            # same one, having just spent a whole ladder measuring it.
+            stopped = e
+            skipped = len(pins) - index
+            break
         except GfBackendError as e:
-            # One outbound's return board is one query of many, and the pins
-            # are independent. Unwinding here would throw away every
-            # combination already fetched and answer a partly-served trip with
-            # nothing at all.
+            # A refusal of this URL: a re-shaped return board, a consent wall,
+            # a 503. The pins are independent queries, so the next one may well
+            # be served, and unwinding would throw away every combination
+            # already fetched.
             refused.append(e)
             continue
         if nxt is None:
@@ -1277,8 +1429,37 @@ def search_with_ids(
                 combos.append((picked, *nx))
             else:
                 combos.append((picked, nx))
-    if refused:
-        if len(refused) == len(pins):
-            raise refused[-1]  # nothing was served; the refusal IS the outcome
-        log.warning("%d of %d return boards unavailable: %s", len(refused), len(pins), refused[-1])
+    _report_pin_outcome(
+        served=bool(combos), pins=len(pins), refused=refused, stopped=stopped, skipped=skipped
+    )
     return combos or None
+
+
+def _report_pin_outcome(
+    *,
+    served: bool,
+    pins: int,
+    refused: list[GfBackendError],
+    stopped: GfBackendError | None,
+    skipped: int,
+) -> None:
+    """Account for what the pin loop met: a counted warning, or a raise.
+
+    Raising is for the case where nothing at all was served — then the refusal
+    IS the outcome, and swallowing it reports a round trip with no return legs
+    as a route with no return flights. Anything served makes every refusal a
+    footnote to a real answer, and the counts are what tell the user their
+    table is short."""
+    if stopped is not None:
+        if not served:
+            raise stopped
+        log.warning(
+            "stopped pinning: Google Flights %s; %d of %d return boards skipped",
+            "rate-limited this IP" if isinstance(stopped, GfThrottledError) else "was unreachable",
+            skipped,
+            pins,
+        )
+    elif refused and len(refused) == pins:
+        raise refused[-1]
+    if refused:
+        log.warning("%d of %d return boards unavailable: %s", len(refused), pins, refused[-1])

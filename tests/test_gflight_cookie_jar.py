@@ -113,6 +113,46 @@ def test_persist_then_seed_round_trips_only_nid(
     assert fresh._session().cookies.set_calls == [("NID", "532=abc", ".google.com", "/")]
 
 
+@pytest.mark.parametrize(
+    "domain",
+    [
+        pytest.param("google.com.evil.example", id="google-com-as-a-prefix"),
+        pytest.param("notgoogle.com", id="a-suffix-that-is-not-a-label"),
+        pytest.param(".evil.example", id="a-plainly-foreign-domain"),
+    ],
+)
+def test_a_foreign_domains_cookie_is_never_written_to_the_cache(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, domain: str
+) -> None:
+    """The WRITE side of the same allowlist the read side applies.
+
+    A live session picks up cookies from wherever it has been, including any
+    redirect it followed. Writing an NID for a host we do not talk to puts it in
+    a file the next process seeds from, so the read-side check would be the only
+    thing standing between a redirect and a cookie on a live session."""
+    _reset(monkeypatch, tmp_path)
+    warm = _FakeClient(
+        [
+            _JarCookie("NID", "impostor", domain),
+            _JarCookie("NID", "532=abc", ".google.com"),
+        ]
+    )
+    gfid._persist_cookies(warm)
+
+    payload = json.loads((tmp_path / "gflight-cookies.json").read_text())
+    assert [(c["name"], c["domain"]) for c in payload["cookies"]] == [("NID", ".google.com")]
+
+
+def test_a_cache_with_nothing_but_a_foreign_cookie_is_not_written_at_all(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Nothing allowlisted is nothing to save; an empty cache file would only
+    give the next process something to fail to parse."""
+    _reset(monkeypatch, tmp_path)
+    gfid._persist_cookies(_FakeClient([_JarCookie("NID", "impostor", "google.com.evil.example")]))
+    assert not (tmp_path / "gflight-cookies.json").exists()
+
+
 def test_seed_with_no_saved_file_is_a_noop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _reset(monkeypatch, tmp_path)
     fresh = _FakeClient([])

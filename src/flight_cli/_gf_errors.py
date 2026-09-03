@@ -32,6 +32,15 @@ class GfThrottledError(GfBackendError):
     usually fast; callers may retry shortly or fall back to Matrix."""
 
 
+class GfTransportError(GfBackendError):
+    """Google Flights could not be REACHED — the retries for it are spent.
+
+    A condition of the route rather than of the request: DNS, TLS, a reset
+    socket, a stalled body. Typed apart from the other refusals because it says
+    nothing about the query, so a caller iterating over related queries learns
+    from one of these that the rest will fail the same way."""
+
+
 class GfConsentError(GfBackendError):
     """Google served its consent interstitial instead of the search page.
 

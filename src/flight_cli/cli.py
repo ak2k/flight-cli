@@ -1567,21 +1567,27 @@ def _run_enriched_path(
 # another multi-megabyte page GET, so `_gflight_ids._PINNED_FANOUT_CAP` clamps
 # that to ten outbounds per cabin whatever this returns. A multi-cabin round
 # trip is therefore joined on each cabin's ten cheapest outbounds, which is
-# what `_MULTI_CABIN_JOIN_NOTE` tells the user.
+# what `_multi_cabin_join_note` tells the user. A two-cabin round trip costs
+# 2 x 11 = 22 page fetches with the cap; ~2 x 31 is what it would cost without
+# one.
 #
 # Capped to bound response size (each itinerary costs bytes + parse time);
 # Matrix and gflight both tolerate page sizes in this range comfortably.
 _MULTI_CABIN_QUERY_BUMP_FACTOR = 5
 _MULTI_CABIN_QUERY_BUMP_CAP = 100
 
-# Printed once for a multi-cabin round trip on the page transport, where the pin
-# cap decides what the join can even see. Without it an empty cabin cell reads
-# as "that fare does not exist" when it means "these ten outbounds had no fare
-# in both cabins". Plain text with nothing interpolated, so nothing to escape.
-_MULTI_CABIN_JOIN_NOTE = (
-    "Google Flights joins cabins on each cabin's 10 cheapest outbounds; "
-    "'—' means no shared itinerary, not no fare."
-)
+
+def _multi_cabin_join_note(pins: int) -> str:
+    """Why a cabin cell can be empty on a multi-cabin round trip.
+
+    The count comes from the pin budget rather than a literal, because the
+    sentence is only true while they agree: the cap is what decides how many
+    outbounds the join can see, and `-n` below it lowers the number further.
+    Every part is ours, so there is nothing here to escape."""
+    return (
+        f"Google Flights joins cabins on each cabin's {pins} cheapest outbounds; "
+        "'—' means no shared itinerary, not no fare."
+    )
 
 
 def _bumped_query_top_n(top_n: int, cabin_count: int) -> int:
@@ -1911,10 +1917,12 @@ def _run_gflight_path_multi(
     sel: ProviderSelection,
 ) -> None:
     """Google Flights multi-cabin: N parallel cabin queries (threadpool) → join → render."""
-    if len(legs) >= _ROUND_TRIP_LEGS and len(cabins) > 1:
-        err.print(f"[dim]{_MULTI_CABIN_JOIN_NOTE}[/]")
     # Widen per-cabin queries so the join has overlap; see _bumped_query_top_n.
     query_top_n = _bumped_query_top_n(top_n, len(cabins))
+    if len(legs) >= _ROUND_TRIP_LEGS and len(cabins) > 1:
+        from ._gflight_ids import pinned_fanout  # noqa: PLC0415
+
+        err.print(f"[dim]{_multi_cabin_join_note(pinned_fanout(query_top_n))}[/]")
     fli_by_cabin = _run_gflight_multi(legs=legs, opts=opts, cabins=cabins, top_n=query_top_n)
     if not fli_by_cabin:
         err.print("[red]All Google Flights cabin queries failed.[/]")
@@ -2412,6 +2420,7 @@ def search(
         10,
         "--n",
         "-n",
+        min=1,
         help="Result count (matrix: page size; gflight: top_n).",
         rich_help_panel=_GROUP_OUTPUT,
     ),
@@ -2727,7 +2736,7 @@ def fare(
         True, "--allow-airport-changes/--no-airport-changes"
     ),
     only_available: bool = typer.Option(True, "--only-available/--include-unavailable"),
-    page_size: int = typer.Option(10, "--n", "-n"),
+    page_size: int = typer.Option(10, "--n", "-n", min=1),
     rps: float | None = _RPS_OPT,
     impersonate: str | None = _IMPERSONATE_OPT,
     fmt: str = _FORMAT_OPT,
@@ -3239,7 +3248,7 @@ def gflight(
     cabin: str = "economy",
     adults: int = 1,
     children: int = 0,
-    top_n: Annotated[int, typer.Option("--n", "-n")] = 5,
+    top_n: Annotated[int, typer.Option("--n", "-n", min=1)] = 5,
     fmt: str = _FORMAT_OPT,
     json_out: bool = _JSON_OPT,
 ) -> None:
