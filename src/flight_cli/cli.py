@@ -659,10 +659,10 @@ def _run(
         raise typer.Exit(1) from e
     except Exception as e:
         # `execute()` wraps what Matrix answered; it does not wrap a DNS failure
-        # or a refused connection. Those left here as a rich traceback with the
-        # cause hundreds of lines down, on the most ordinary command there is —
-        # and this package's rule is that a third-party transport error never
-        # reaches a caller untyped.
+        # or a refused connection. Untyped, those leave here as a rich traceback
+        # with the cause hundreds of lines down, on the most ordinary command
+        # there is — and this package's rule is that a third-party transport
+        # error never reaches a caller untyped.
         err.print(f"[red]Matrix search failed:[/] {_safe_text(e)}")
         raise typer.Exit(1) from e
 
@@ -1596,13 +1596,20 @@ def _report_enriched_gf_failure(e: Exception) -> None:
 
 def _report_search_matrix_failure(state: dict[str, Any]) -> None:
     """Print the right stderr message for a Matrix search that returned no
-    result: a known `MatrixApiError` through the shared reporter, or an
-    unexpected non-MatrixApiError stashed by the weave's `_matrix` task."""
+    result: a known `MatrixApiError` through the shared reporter, an unexpected
+    non-MatrixApiError stashed by the weave, or a task that never finished.
+
+    The third arm is not decoration. A cancellation is a `BaseException`, so
+    nothing stashes it, and without a fall-through the command exits non-zero
+    with both streams empty — which is the one outcome every reporter here
+    exists to prevent."""
     e = state.get("matrix_err")
     if e is not None:
         _print_matrix_error(e)
     elif state.get("matrix_unexpected") is not None:
         err.print(f"[red]Matrix search failed:[/] {_safe_text(state['matrix_unexpected'])}")
+    else:
+        err.print("[yellow]Matrix search did not complete.[/]")
 
 
 def _run_enriched_path(
@@ -1735,9 +1742,9 @@ def _pin_cap_note(*, legs: tuple[Leg, ...], top_n: int) -> None:
 
     A round trip prices returns against the cheapest outbounds only, and the
     number of those is capped however large `-n` is. Without a word the user
-    reads a short table as the market rather than as the budget, and the cap was
-    said out loud on exactly one path — the multi-cabin one — while the ordinary
-    single-cabin round trip said nothing at all.
+    reads a short table as the market rather than as the budget, so every
+    round-trip path says it: the enriched one, `--fast`, `--format json` and
+    multi-cabin alike.
 
     "Up to", because the cap bounds the count and the board may hold fewer. The
     exact number is knowable only inside the pin loop, and carrying it back out

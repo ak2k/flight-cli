@@ -127,11 +127,11 @@ def _configure_stdlib(lvl: int) -> None:
 def _stderr_logger_factory(*_args: object) -> structlog.PrintLogger:
     """A structlog logger writing to whatever `sys.stderr` is when it is built.
 
-    structlog's default factory writes to STDOUT. Every structlog record —
-    a retry warning, a rate-limit pause — therefore landed on the same stream
-    `--format json` writes its document to, splicing a diagnostic into a
-    machine consumer's input. This module's docstring, `configure`'s, and the
-    CLI's `-v` help all say stderr; only the code said otherwise.
+    structlog's default factory writes to STDOUT, which is the stream
+    `--format json` writes its document to — a retry warning or a rate-limit
+    pause there splices a diagnostic into a machine consumer's input. This
+    module's docstring, `configure`'s, and the CLI's `-v` help all say stderr,
+    so this is what makes them true.
 
     Resolved per logger rather than captured at import, for the same reason the
     stdlib handler resolves it per record: this process replaces `sys.stderr`."""

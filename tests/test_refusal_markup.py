@@ -1339,3 +1339,21 @@ def test_the_group_level_matrix_arm_types_a_client_that_cannot_be_built(
     assert "Matrix search failed" in printed, printed
     assert "could not resolve the Matrix API key" in printed, printed
     _assert_drives_no_terminal(printed)
+
+
+def test_a_matrix_task_that_never_finishes_still_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancellation is a `BaseException`, so nothing stashes it and neither of
+    the two reporting arms fires.
+
+    Without a fall-through the command exits non-zero having said nothing at
+    all — the outcome every reporter on this path exists to prevent, and the one
+    the calendar's own reporter has had a third arm for all along."""
+    from flight_cli import cli
+
+    buf = _capture(monkeypatch)
+    cli._report_search_matrix_failure({})
+    printed = buf.getvalue()
+    assert printed.strip(), "an empty state reported nothing at all"
+    assert "did not complete" in printed, printed

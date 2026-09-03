@@ -198,7 +198,7 @@ class _FakeRateLimiter:
 
 
 class _FakeSession:
-    """The curl_cffi session, which is where the GET now goes.
+    """The curl_cffi session, which is where the GET goes.
 
     Faking `Client.get` instead would skip the code under test: that method's
     own retry ladder is not in the path, so a fake sitting there could not

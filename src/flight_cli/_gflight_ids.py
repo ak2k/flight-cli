@@ -149,10 +149,10 @@ class _Round:
     throttle's verdict, so the caller names the wrong wall to the user; and one
     worker can own both at once, so each needs its own owner to give up.
 
-    Not because a probe of one says nothing about the other — a success DOES
-    release both rounds' waiters, deliberately, since the call that got through
-    both met the wall and rode a socket. What it does not do is hand the rungs
-    back on both arms; see `succeeded`.
+    A success releases the WALL's waiters always, since the wall is per-IP and
+    any call getting through has measured it. It releases the NETWORK's only for
+    the worker that met a transport failure on that call — a sibling's socket is
+    not this one's. See `succeeded`, which is where that asymmetry lives.
 
     The lock lives on the ladder, which holds every round, so a worker that owns
     both takes it once."""
@@ -201,14 +201,17 @@ class _SharedThrottleLadder:
     to be probing. When the rungs run out, the waiters raise without spending a
     request on a wall that has just been measured.
 
-    Any successful call RESETS the ladder. The rungs measure one wall; a wall
-    that returns half an hour later is a different one and gets a full budget.
+    Any successful call RESETS THE WALL, so the ceiling is a statement about a
+    wall nothing is getting through — and each CALL carries its own attempt
+    count too, because a refillable shared budget cannot bound one. The
+    arithmetic and the measured costs live once, in the budget section of
+    docs/memories/gf_routing_and_carriers.md.
 
-    The transport budget rides the same object for the same reason — the network
-    is one network — and works the same way, because a retry is a probe there
-    too: `_is_transport_failure` admits only the families that DO clear, so a
-    waiter has an outcome worth waiting for. The two arms stay separate rounds;
-    only the lock is shared."""
+    The transport budget rides the same object because the network is one
+    network, and it probes the same way: `_is_transport_failure` admits only the
+    families that DO clear, so a waiter has an outcome worth waiting for. It
+    does NOT reset the same way — see `succeeded`. The two arms stay separate
+    rounds; only the lock is shared."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -255,6 +258,11 @@ class _SharedThrottleLadder:
             # nobody is probing must not be one somebody else is waiting for:
             # two workers that each hold what the other waits for never move,
             # and no budget is spent to end it.
+            #
+            # This is the PARK path only. A worker that crosses and finds the
+            # other round free takes it and never reaches here, so it holds both
+            # until `retry_throttled`'s `finally` stands it down — that is the
+            # other half of the same guarantee, not a spare.
             for other in (self._wall, self._net):
                 if other is not round_ and other.owner == me:
                     other.release()
@@ -289,10 +297,10 @@ class _SharedThrottleLadder:
         The NETWORK only for a worker that met a transport failure on this
         call. fli's session is a `threading.local`, so the socket that carried
         this call is this worker's own and is no evidence about a sibling's.
-        Refilling it for everyone let each healthy sibling hand a failing
-        worker another rung, and a per-request fault — a read timeout on one
-        cabin's multi-megabyte board is the ordinary shape — then retries
-        without bound for as long as the siblings keep succeeding."""
+        Refilling it for everyone lets each healthy sibling hand a failing
+        worker another rung, so a per-request fault — a read timeout on one
+        cabin's multi-megabyte board is the ordinary shape — retries for as long
+        as the siblings keep succeeding, which is no bound at all."""
         with self._lock:
             self._wall.refill()
             if network:
@@ -1281,7 +1289,10 @@ def _permanent_curl_codes() -> frozenset[Any]:
     certificate. It is excluded because it is unreachable — nothing here sends
     one — not because it would clear. The reachable local-config code is
     `SSL_CIPHER`: `_fetch_page` passes `impersonate="chrome"`, which is what
-    sets a cipher list, so that is the one this codebase can provoke.
+    sets a cipher list, so that is the one this codebase can provoke. It is
+    knowingly left retried: curl_cffi vendors its own BoringSSL, so the list it
+    is asked for is one it ships, and a fault there is a packaging problem three
+    attempts will not worsen. Move it up here if that stops being true.
 
     Checked BEFORE the class arm, because the class is what sweeps them in."""
     from curl_cffi.const import CurlECode  # noqa: PLC0415
