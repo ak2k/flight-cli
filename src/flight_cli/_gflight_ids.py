@@ -112,14 +112,14 @@ _EMPTY_RETRY_BACKOFF_S = 1.0  # multiplied by attempt number: 1s, 2s, 3s between
 _THROTTLE_RETRY_ATTEMPTS = 4
 _THROTTLE_BACKOFF_S = 1.0  # exponential base: ~1, 2, 4, 8s (plus 0-50% jitter)
 
-# A reset connection or a read timeout is worth a couple of quick retries and
-# nothing more. Nothing below this budget retries one: `_fetch_page` goes to
-# fli's session rather than `Client.get` and its three attempts, so a single
-# blip would otherwise fail the leg. Deliberately smaller than the throttle
-# budget: a throttle is a wall that lifts on its own, while a transport failure
-# that survives three attempts is usually the network being down, and spending a
-# long backoff on it just delays the Matrix fallback the user is going to get
-# anyway.
+# THE transport budget, and the one place it is explained. A reset connection or
+# a read timeout is worth a couple of quick retries and nothing more. Nothing
+# below it retries one: `_fetch_page` goes to fli's session rather than
+# `Client.get` and its three attempts, so a single blip would otherwise fail the
+# leg. Deliberately smaller than the throttle budget, because the two failures
+# are not alike: a throttle is a wall that lifts on its own, while a transport
+# failure surviving three attempts is usually the network being down, and a long
+# backoff there only delays the Matrix fallback the user is going to get anyway.
 _TRANSPORT_RETRY_ATTEMPTS = 2
 
 
@@ -1158,9 +1158,16 @@ def _fetch_page(client: Any, url: str) -> Any:
     Kept from `Client.get`: the shared 10 req/sec token bucket, a process-global
     budget the fan-out threads share, and fli's own `REQUEST_TIMEOUT`. Its
     transport retry is not kept but is re-homed: a curl-level failure comes back
-    as `_RetryableTransportError`, which `retry_throttled` retries on a budget of
-    its own — `_TRANSPORT_RETRY_ATTEMPTS`, so three GETs per leg — and then
-    turns into a plain `GfBackendError`."""
+    as `_RetryableTransportError`, which `retry_throttled` retries on the budget
+    at `_TRANSPORT_RETRY_ATTEMPTS` — three GETs per leg — and then raises
+    `GfTransportError`.
+
+    Those are per-leg numbers, and the aggregates are what actually reach
+    Google. A fan-out shares one budget rather than one each
+    (`shared_throttle_ladder`), so four cabins under an outage cost three GETs
+    plus the three already in flight, not four ladders; and a round trip stops
+    pinning at the pin that met the outage rather than spending a ladder on
+    each of the ten."""
     client._rate_limiter.acquire()  # pyright: ignore[reportAny]  # fli/curl_cffi untyped
     try:
         return client._session().get(  # pyright: ignore[reportAny]  # fli/curl_cffi untyped
@@ -1287,12 +1294,11 @@ def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
     re-fetching a multi-megabyte page can only return the same zero rows.
 
     - **transport failure** (a reset connection, a read timeout) -> the same
-      backoff, on a smaller budget, and `GfTransportError` when it is spent.
-      Nothing below this ladder retries one: `_fetch_page` goes to fli's session
-      rather than `Client.get`, so without this arm a single blip fails the leg.
-      The type matters to the caller — the network is not a property of the
+      backoff on the smaller budget at `_TRANSPORT_RETRY_ATTEMPTS`, which is
+      where that budget is explained, and `GfTransportError` when it is spent.
+      The type matters to the caller: the network is not a property of the
       query, so a caller looping over related queries stops rather than meeting
-      the same outage once per query.
+      one outage once per query.
 
     Both budgets come from ONE ladder object, bound here for the whole call:
     the fan-out's when there is one, otherwise this call's own. Inside a
@@ -1347,15 +1353,17 @@ def _one_call_with_retry(filters: FlightSearchFilters) -> list[GFlightWithId]:
     return retry_throttled(lambda: _one_call(filters), retry_empty=False)
 
 
-# How many outbound flights a round trip pins and re-fetches. Each pin is one
-# more multi-megabyte page GET, so this is a REQUEST budget, not a result limit.
+# THE pin budget, and the one place it is explained. How many outbound flights a
+# round trip pins and re-fetches: each pin is one more multi-megabyte page GET,
+# so this is a REQUEST budget rather than a result limit.
 #
-# The multi-cabin path bumps top_n (`_MULTI_CABIN_QUERY_BUMP_FACTOR`, 5x, capped
-# at 100) to widen the pool it filters. That is free on an RPC and expensive
-# here: at top_n=100 a two-cabin round trip fans out to ~2 x 31 page fetches.
-# The default `-n 10` sits exactly on this cap and is unchanged by it; above it,
-# the round trip returns combinations for the ten best outbounds rather than for
-# all of them, and `cli._MULTI_CABIN_JOIN_NOTE` says so where it shows.
+# The multi-cabin path bumps top_n to widen the pool it filters, which is free
+# on an RPC and is not free here. With the cap, a two-cabin round trip costs
+# 2 x 11 = 22 page fetches; without one, at the bumped top_n=100, it would cost
+# ~2 x 31. The default `-n 10` sits exactly on the cap and is unchanged by it;
+# above it, the round trip returns combinations for the ten best outbounds
+# rather than for all of them, and `cli._multi_cabin_join_note` says so where
+# a user can see the consequence.
 #
 # Multi-city never reaches this: `cli._pick_backend` routes a multi-city query
 # to Matrix, so the recursion below only ever runs the two legs of a round trip.

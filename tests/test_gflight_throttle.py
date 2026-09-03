@@ -3,9 +3,10 @@
 
 Two transports, two block signals: the date grid still POSTs an RPC and reads a
 code-13 error envelope out of the body (`_is_throttle_block`); the search path
-GETs a page and reads the final URL and the body (`_is_page_throttled`), because
-an outright 429 is raised by fli's client and never reaches that predicate.
-`retry_throttled` backs off the same way for both.
+GETs a page and reads the final URL and the body (`_is_page_throttled`); an
+outright 429 is a third shape, read straight off the response by `_one_call`.
+`retry_throttled` backs off the same way for all of them, against a ladder that
+one fan-out shares.
 """
 
 from __future__ import annotations
@@ -71,8 +72,8 @@ def test_is_page_throttled_on_sorry_redirect() -> None:
 
 def test_is_page_throttled_on_the_interstitial_served_in_place() -> None:
     """Google also serves the block at the requested URL with HTTP 200, leaving
-    the body as the only tell. An HTTP 429 never reaches this predicate — fli's
-    client raises it (see `_one_call`)."""
+    the body as the only tell. An HTTP 429 never reaches this predicate: it is a
+    status, and `_one_call` reads it off the response itself."""
     assert _is_page_throttled(
         final_url="https://www.google.com/travel/flights?tfs=abc",
         html="<html>Our systems have detected unusual traffic</html>",

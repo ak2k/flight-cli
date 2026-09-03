@@ -128,8 +128,18 @@ _CTRL = {
     **{c: None for c in range(0x20) if c not in (0x09, 0x0A)},  # C0, keeping tab and newline
     0x7F: None,  # DEL
     **{c: None for c in range(0x80, 0xA0)},  # C1, including the 8-bit CSI
-    **{c: None for c in range(0x202A, 0x202F)},  # bidi embeddings and overrides
-    **{c: None for c in range(0x2066, 0x206A)},  # bidi isolates
+    # `str.splitlines` breaks on these two as it does on `\n`, so one message
+    # carrying one arrives at a log reader or a `readlines` caller as two records.
+    0x2028: None,  # LINE SEPARATOR
+    0x2029: None,  # PARAGRAPH SEPARATOR
+    # Bidi. The marks reorder the run they sit in and the embeddings, overrides
+    # and isolates reorder everything up to their terminator, so any of them can
+    # make a sentence read back as something it does not say.
+    0x061C: None,  # ARABIC LETTER MARK
+    0x200E: None,  # LEFT-TO-RIGHT MARK
+    0x200F: None,  # RIGHT-TO-LEFT MARK
+    **{c: None for c in range(0x202A, 0x202F)},  # embeddings and overrides
+    **{c: None for c in range(0x2066, 0x206A)},  # isolates
 }
 
 
@@ -140,8 +150,20 @@ def _safe_text(value: object) -> str:
     For text we did not write and the user did not type — a Matrix error message,
     an exception's `str()`. Neither quoted nor truncated, unlike `_quote`: this is
     a sentence someone needs to read whole, and the part that explains the failure
-    is as often at the end as the start."""
-    return escape(str(value).translate(_CTRL))
+    is as often at the end as the start.
+
+    Strip before escape, never after. `escape` only sees a tag where `[` is
+    followed by `[a-z#/@]`, so a control character between the brackets hides the
+    tag from it, and stripping afterwards uncovers a live one: `"[\x00red]x"`
+    comes out of the other order as `"[red]x"`, styled."""
+    text = escape(str(value).translate(_CTRL))
+    if not text.strip() and isinstance(value, BaseException):
+        # `httpx.ConnectTimeout("")` stringifies to nothing, which would leave a
+        # reporter saying "Matrix calendar failed:" and stopping. The class name is
+        # the only thing such an exception carries. A blank from anywhere else is a
+        # value someone chose, and stays blank.
+        return escape(type(value).__name__)
+    return text
 
 
 def _parse_date(s: str) -> date:
@@ -615,12 +637,22 @@ def _run(
     try:
         return anyio.run(go)
     except MatrixApiError as e:
-        err.print(
-            f"[red]Matrix returned an error ({_safe_text(e.kind)}):[/] {_safe_text(e.message)}"
-        )
-        if e.request_id:
-            err.print(f"[dim]request_id: {_safe_text(e.request_id)}[/]")
+        _print_matrix_error(e)
         raise typer.Exit(1) from e
+
+
+def _print_matrix_error(e: MatrixApiError) -> None:
+    """Report a Matrix error to stderr: control characters dropped, markup escaped.
+
+    Matrix echoes the routing string back inside `message` ("Illegal COMMAND-LINE
+    prefix: BA[/weird]AA"), so all three fields carry remote text onto a markup
+    console. Every Matrix reporter — the calendar sites, `_run` (which serves
+    `detail` and the search path), the search weave and the multi-cabin fan-out —
+    reports through here, so one Matrix error reads the same whichever command
+    asked for it."""
+    err.print(f"[red]Matrix returned an error ({_safe_text(e.kind)}):[/] {_safe_text(e.message)}")
+    if e.request_id:
+        err.print(f"[dim]request_id: {_safe_text(e.request_id)}[/]")
 
 
 # Matrix silently UNDER-REPORTS multi-airport calendar grids under compute-budget
@@ -1521,9 +1553,7 @@ def _run_enriched_path(
         # Matrix failed; the GF table (if any) was already painted.
         e = state.get("matrix_err")
         if e is not None:
-            err.print(
-                f"[red]Matrix returned an error ({_safe_text(e.kind)}):[/] {_safe_text(e.message)}"
-            )
+            _print_matrix_error(e)
         if not gf:
             raise typer.Exit(1)
         return
@@ -1563,13 +1593,8 @@ def _run_enriched_path(
 # almost never overlaps, leaving the J column rendered as all "—".
 #
 # What the bump widens is how many LEG-1 rows each cabin keeps. It does NOT
-# widen a round trip's pinned fan-out on the page transport: every pin is
-# another multi-megabyte page GET, so `_gflight_ids._PINNED_FANOUT_CAP` clamps
-# that to ten outbounds per cabin whatever this returns. A multi-cabin round
-# trip is therefore joined on each cabin's ten cheapest outbounds, which is
-# what `_multi_cabin_join_note` tells the user. A two-cabin round trip costs
-# 2 x 11 = 22 page fetches with the cap; ~2 x 31 is what it would cost without
-# one.
+# widen a round trip's pinned fan-out, which `_gflight_ids._PINNED_FANOUT_CAP`
+# clamps whatever this returns — see that constant for the budget and its cost.
 #
 # Capped to bound response size (each itinerary costs bytes + parse time);
 # Matrix and gflight both tolerate page sizes in this range comfortably.
@@ -1690,7 +1715,7 @@ def _run_matrix_multi(
             res = await client.execute(search, cache=not no_cache)
         except MatrixApiError as e:
             err.print(
-                f"[yellow]Matrix {escape(cab.value)} query failed "
+                f"[yellow]Matrix {cab.value} query failed "
                 f"({_safe_text(e.kind)}): {_safe_text(e.message)}[/]"
             )
             return
@@ -1707,11 +1732,7 @@ def _run_matrix_multi(
     try:
         anyio.run(go)
     except MatrixApiError as e:
-        err.print(
-            f"[red]Matrix returned an error ({_safe_text(e.kind)}):[/] {_safe_text(e.message)}"
-        )
-        if e.request_id:
-            err.print(f"[dim]request_id: {_safe_text(e.request_id)}[/]")
+        _print_matrix_error(e)
         raise typer.Exit(1) from e
     return results
 
@@ -2782,6 +2803,9 @@ def fare(
     )
     if pp:
         err.print("[dim]Note: `--pp` is now a no-op (PP is implicit on Matrix backend).[/]")
+    # This block is `search`'s, near-duplicated. Deliberately not shared: `fare`
+    # is deprecated and prints so on every run, and a helper spanning a command
+    # on its way out ties the survivor's leg building to the leaving one.
     if slice_specs:
         legs = tuple(_parse_slice_spec(s) for s in slice_specs)
     elif origin and destination and dep:

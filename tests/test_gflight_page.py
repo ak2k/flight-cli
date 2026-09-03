@@ -1053,11 +1053,12 @@ def test_consent_is_decided_by_the_url_not_by_a_substring(final_url: str, expect
 
 
 def test_the_consent_form_scan_does_not_blow_up_on_unterminated_tags(client: Any) -> None:
-    """The body is two megabytes of untrusted markup and a `<form` in it need
-    not be closed. Letting the attribute run cross a tag boundary makes every
-    one of them rescan the rest of the document, which is quadratic — measured
-    in seconds on a few thousand, and the classifier runs on every page that
-    comes back without a `ds:1`."""
+    """A real search page is megabytes of untrusted markup and a `<form` in it
+    need not be closed. Letting the attribute run cross a tag boundary makes
+    every one of them rescan the rest of the document, which is quadratic: the
+    72 KB built below took over 100 seconds before the bound and takes under a
+    millisecond after it. The classifier runs on every page that comes back
+    without a `ds:1`."""
     hostile = "<form " * 12_000
     start = time.perf_counter()
     assert not gfid._is_consent_page(final_url="https://www.google.com/travel", html=hostile)
@@ -1424,9 +1425,10 @@ def _by_code(name: str) -> Exception:
 @pytest.mark.parametrize("name", _RETRY_BY_CODE)
 def test_a_transient_curl_code_is_retried_even_where_its_class_is_not(name: str) -> None:
     """A half-received multi-megabyte page and a broken HTTP/2 stream are the
-    ordinary way this transport fails on a flaky link, and both used to escape
-    as a raw curl exception — no retry, no typed refusal, and a message that is
-    a bare byte count."""
+    ordinary way this transport fails on a flaky link. Both arrive in a class
+    that also carries permanent faults, so a rule written in classes alone
+    lets them out raw: no retry, no typed refusal, and a message that is a
+    bare byte count."""
     assert gfid._is_transport_failure(_by_code(name))
 
 

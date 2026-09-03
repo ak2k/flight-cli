@@ -101,13 +101,17 @@ def _hostile_matrix_error() -> Any:
 
 
 def _unstringly_matrix_error() -> Any:
-    """`kind` and `request_id` are lifted out of the remote JSON with no
-    coercion, so a `type` of `{"code": 5}` reaches the renderer as a dict —
-    where `escape()` alone raises TypeError and the refusal becomes a
-    traceback."""
+    """Hostile in every field at once, and typed as the remote JSON actually
+    arrives: `kind` and `request_id` are lifted out of it with no coercion, so
+    a `type` of `{"code": 5}` reaches the renderer as a dict — where `escape()`
+    alone raises TypeError and the refusal becomes a traceback."""
     from flight_cli.client import MatrixApiError
 
-    return MatrixApiError("m", kind=cast("Any", {"code": 5}), request_id=cast("Any", 7))
+    return MatrixApiError(
+        f"Illegal COMMAND-LINE prefix: BA[/weird]AA{_ESCAPES}",
+        kind=cast("Any", {"code": 5}),
+        request_id=cast("Any", 7),
+    )
 
 
 def _assert_drives_no_terminal(printed: str) -> None:
@@ -253,7 +257,9 @@ def test_hostile_extension_reaches_the_auto_path_verbatim(
             id="markup-and-control-bytes",
         ),
         pytest.param(
-            _unstringly_matrix_error, ("code", "5", "7"), id="fields-that-are-not-strings"
+            _unstringly_matrix_error,
+            ("code", "5", "request_id: 7", "BA[/weird]AA"),
+            id="fields-that-are-not-strings",
         ),
     ],
 )
@@ -290,7 +296,11 @@ def test_a_matrix_error_carrying_markup_is_printable(
             ("QPX Warning. Bad route [/spec]", "in[put]"),
             id="markup-and-control-bytes",
         ),
-        pytest.param(_unstringly_matrix_error, ("code", "5"), id="fields-that-are-not-strings"),
+        pytest.param(
+            _unstringly_matrix_error,
+            ("code", "5", "request_id: 7", "BA[/weird]AA"),
+            id="fields-that-are-not-strings",
+        ),
     ],
 )
 def test_the_enriched_path_escapes_every_field_of_a_matrix_error(
@@ -303,8 +313,9 @@ def test_the_enriched_path_escapes_every_field_of_a_matrix_error(
     already said `escape`, so it looked done. Every field is asserted here, not
     just the one that was wrong.
 
-    This path prints `kind` and `message` only, so `request_id` is asserted at
-    `_run` instead — the same helper builds the error for both."""
+    It reports through the same helper as every other Matrix site, so the
+    request id it used to drop is shown here too: without it a user cannot
+    quote the failure back to anyone who could look it up."""
     from datetime import date, timedelta
 
     from flight_cli import cli
@@ -504,6 +515,51 @@ def test_the_enriched_path_reports_a_google_flights_refusal_as_a_footnote(
 
     printed = buf.getvalue()
     assert expected in printed, f"{expected!r} was mangled: {printed!r}"
+    _assert_drives_no_terminal(printed)
+
+
+def test_the_per_cabin_matrix_failure_is_readable_and_inert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cabin whose Matrix query fails is a soft failure: the column goes
+    missing and this line is the only account of why. It carries every remote
+    field of the error onto a markup console, on a path that never reaches the
+    shared reporter because it names the cabin as well."""
+    from flight_cli import cli
+    from flight_cli.domain import Cabin
+
+    buf = io.StringIO()
+    monkeypatch.setattr(cli, "err", Console(file=buf, width=400, no_color=True, highlight=False))
+
+    class _FailingCabin:
+        def __init__(self, **_kw: object) -> None: ...
+
+        async def __aenter__(self) -> _FailingCabin:
+            return self
+
+        async def __aexit__(self, *_a: object) -> bool:
+            return False
+
+        async def execute(self, _search: object, **_kw: object) -> object:
+            raise cast("Exception", _unstringly_matrix_error())
+
+    monkeypatch.setattr(cli, "MatrixClient", _FailingCabin)
+    legs, opts = _gf_legs_and_opts()
+    assert (
+        cli._run_matrix_multi(
+            legs=legs,
+            opts=opts,
+            cabins=(Cabin.COACH,),
+            rps=1.0,
+            impersonate="chrome",
+            no_cache=True,
+        )
+        == {}
+    )
+
+    printed = buf.getvalue()
+    for fragment in ("COACH", "code", "5", "BA[/weird]AA"):
+        assert fragment in printed, f"{fragment!r} was mangled: {printed!r}"
     _assert_drives_no_terminal(printed)
 
 

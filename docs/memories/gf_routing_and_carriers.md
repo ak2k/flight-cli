@@ -135,6 +135,13 @@ unexamined. Choosing on "carries a row block" is the same bet one level down,
 because a staged blob can carry an empty husk `[[]]`, or one row where the
 settled board carries thirty.
 
+Only a blob the row scan could actually SERVE competes on rows
+(`_is_a_readable_board`, which mirrors `_rows_from_ds1`'s two refusals: the
+arity floor, and a value at `[2]`/`[3]` that is neither absent nor row-shaped).
+A staged blob can be truncated above `[3]` or carry rows beside a placeholder at
+`[3]`, and either holds MORE rows than the finished board — counting them turned
+a served page into a typed refusal.
+
 The count is **structural**, exactly like the scan at those indices: rows are
 counted, never parsed, so a board whose rows have all changed shape still wins
 and reaches the 0-of-N guard as a layout change rather than losing to a husk.
@@ -142,6 +149,13 @@ With no blob carrying rows the fallback takes the first one long enough to reach
 `[3]`, then the first decodable one at all — so a genuinely flight-less page
 stays flight-less and a truncated placeholder above it does not become a shape
 error.
+
+The accepted cost, measured: a readable blob whose `[2]` holds many row-shaped
+NON-flight entries outranks the real board in either order, and the search then
+refuses with "none of N Google Flights rows parsed". That fails loud and
+degrades to Matrix, which is the right side of the trade — the alternative is a
+selector that parses rows to choose between blobs, and it would drop a real
+board whose row layout has just changed.
 
 ### Request budget
 
@@ -156,6 +170,8 @@ Every one of these is a multi-megabyte page GET, so the count is the cost:
 | a transport blip | up to 3 GETs per leg (`_TRANSPORT_RETRY_ATTEMPTS` + 1) |
 | a leg that both throttles and blips | 1 + `_THROTTLE_RETRY_ATTEMPTS` + `_TRANSPORT_RETRY_ATTEMPTS` = 7 |
 | a persistently throttled multi-cabin fan-out | one ladder for the group: 5 + (cabins - 1) |
+| a multi-cabin fan-out under a transport outage | one ladder for the group: 3 + (cabins - 1) |
+| a round trip whose pins meet a throttle or an outage | it stops at that pin: no further pin is fetched |
 
 Two things make those numbers hold. `_fetch_page` goes through fli's SESSION,
 not `Client.get` — which is wrapped in `@retry(stop_after_attempt(3))`, so a
@@ -179,18 +195,38 @@ two transport blips and a final 429 costs 7 GETs. That is the ceiling, and it is
 deliberate — a wall that lifts and a network that drops are different failures,
 and sharing one counter would let a blip eat the throttle budget.
 
-A throttle aborts the whole search after ONE ladder per cabin: `search_with_ids`
-does not catch `GfThrottledError` in its pinning loop, so the remaining pins are
-never fetched. That is deliberate — the throttle is per-IP, so the next leg
-would hit the same wall.
+**The pin loop has ONE rule for stopping.** A throttle, or a transport ladder
+that ran out, says nothing about the pin it happened on: the wall is per-IP and
+the network is one network, so every remaining pin walks into the same one
+having just spent a whole ladder measuring it. `search_with_ids` therefore stops
+pinning on either, returns the combinations already fetched, and logs one
+counted warning naming the cause and how many return boards it skipped. It
+raises only when NOTHING was served — then the refusal is the whole outcome, and
+swallowing it would report a round trip with no return legs as a route with no
+return flights. A refusal of one URL (a re-shaped board, a consent wall, a 503)
+is a different fact and still continues to the next pin, counted the same way.
+`GfTransportError` exists so the loop can tell an exhausted transport ladder
+apart from those.
 
-Per **cabin** is not per **search**, and the multi-cabin fan-out runs a cabin
-per thread. Four cabins laddering separately spend 4 x 5 = 20 multi-megabyte
-GETs against an IP that is already refusing us, to learn what the first ladder
-learned. `_gflight_ids.shared_throttle_ladder` — armed by `cli._run_gflight_multi`
-around the fan-out — gives the whole group one ladder to draw retry numbers
-from: the first worker to exhaust it trips it, and every other worker's next
-throttle re-raises without another GET.
+**One ladder per fan-out, not per cabin.** The multi-cabin path runs a cabin per
+thread; laddering separately, four cabins spend 4 x 5 = 20 multi-megabyte GETs
+against an IP already refusing us to learn what the first ladder learned.
+`_gflight_ids.shared_throttle_ladder` — armed by `cli._run_gflight_multi` around
+the fan-out — hands the group one ladder, and it is a **single prober**: the
+first worker throttled owns the backoff and its retry is the probe, while any
+other worker throttled meanwhile waits on that outcome instead of sleeping a
+schedule of its own. A probe that gets through releases every waiter to retry,
+so a wall that lifts inside the ladder serves the whole fan-out rather than
+whichever cabin happened to be probing. When the rungs run out the waiters raise
+without spending a request on a wall just measured. Any successful call REFILLS
+the ladder: the rungs measure one wall, and a wall that returns later is a
+different one. The transport budget rides the same object for the same reason,
+as a plain shared counter — there is nothing to probe, and a reset socket does
+not lift for a caller who waits.
+
+A decorator cannot express this, which is why the loop is written out: retry
+decorators bound ONE call against a counter of its own, while this budget
+belongs to the per-IP wall and is shared sideways across worker threads.
 
 Owning the ladder meant re-homing one thing fli's `Client.get` did for us: it
 also retried transport errors three times. `retry_throttled` now has a third
@@ -203,7 +239,15 @@ plain `GfBackendError`, so the enriched path degrades to Matrix and
 `--backend gflight` prints a typed line rather than a curl traceback.
 
 Only a failure to REACH Google is retried — `curl_cffi`'s `ConnectionError` and
-`Timeout`, which is DNS, TLS, a reset socket, connect and read timeouts.
+`Timeout` (DNS, TLS, a reset socket, connect and read timeouts), **plus four
+result codes those classes do not cover**: `PARTIAL_FILE`, `HTTP2`,
+`HTTP2_STREAM` and `HTTP3`. curl_cffi maps several codes onto classes that also
+carry permanent faults, so the class alone cannot decide — a multi-megabyte body
+cut short arrives as `IncompleteRead` and the HTTP/2 and HTTP/3 stream errors
+all arrive as `HTTPError`, which is otherwise a status never to retry. Classify
+by class OR code, and enumerate `CODE2ERROR` in the test: a rule written in
+classes quietly decides for codes nobody looked at.
+
 Everything else propagates on the first try, including the rest of curl's own
 `CurlError` tree (`InvalidURL`, `InvalidSchema`, `SessionClosed`,
 `CookieConflict`, `ImpersonateError`, `TooManyRedirects`). Those name a request
@@ -283,28 +327,26 @@ land in one and miss the other.
 leaving `[2]` while `[3]` still parses — yields a short board. There is no
 signal that proves it: one block is an ordinary served shape (the business
 pinned return), so a missing block cannot be told from a board that never had
-one. An earlier revision refused single-block pages to catch this and broke
-every round-trip instead. Under-returning is the accepted cost; the alternative
-measured worse.
+one. Refusing a single-block page to catch it breaks every round trip, which is
+the worse trade; under-returning is the accepted cost.
 
-Refusing on the misplaced-block probe alone was the other tempting fix, and it
-is worse for the same reason. Live pages carry 4 to 9 blocks that are
-row-shaped by structure (4, 9 and 7 across the three captures), so a Google
-row-schema change that makes any ONE of them parse would refuse a board we can
-already serve completely. So a partial relocation now under-returns **with a
-`log.warning` naming the indices** rather than refusing: the user keeps their
-results, and the next maintainer has the indices to re-derive from.
+Refusing on the misplaced-block probe alone is worse for the same reason. Live
+pages carry 4 to 9 blocks that are row-shaped by structure (4, 9 and 7 across
+the three captures), so a Google row-schema change that makes any ONE of them
+parse would refuse a board we can already serve completely. A partial relocation
+therefore under-returns **with a `log.warning` naming the indices**: the user
+keeps their results, and the next maintainer has the indices to re-derive
+from.
 
 The refusal predicate is `misplaced and not rows` — rows found somewhere else
-and none served from where we read. An earlier revision also required
-`not blocks_seen`, on the theory that an empty block at `[2]`/`[3]` is how
-Google answers a flight-less search. It is not: the MEASURED flight-less shape
-is `None` at both indices, and an empty husk `[[]]` has never been seen on a
-live page. A husk plus flight rows sitting elsewhere is far likelier a
-relocation than a coincidence, and the two outcomes are not symmetric —
-refusing degrades to Matrix, while reading it as an empty tells the user the
-route has no flights. A zero-row board with nothing misplaced is still an
-authoritative empty.
+and none served from where we read. It deliberately does NOT also require
+`not blocks_seen`: an empty block at `[2]`/`[3]` is not how Google answers a
+flight-less search. The MEASURED flight-less shape is `None` at both indices,
+and an empty husk `[[]]` has never been seen on a live page, so a husk plus
+flight rows sitting elsewhere is far likelier a relocation than a coincidence —
+and the two outcomes are not symmetric, since refusing degrades to Matrix while
+reading it as an empty tells the user the route has no flights. A zero-row board
+with nothing misplaced is still an authoritative empty.
 
 ## Tier model: who honors each constraint
 
