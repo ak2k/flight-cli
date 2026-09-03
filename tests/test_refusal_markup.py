@@ -730,3 +730,214 @@ def test_seatmap_prints_a_url_the_user_can_actually_paste(
 
     assert result.exit_code == 0, result.output
     assert "[bold]" in result.output, f"the bracketed segment was eaten: {result.output!r}"
+
+
+# Code points a terminal does not ACT on, which is why the strip above misses
+# them and `escape` never sees them. The first two are invisible rather than
+# active: they survive `strip()` and sit unseen inside a carrier code or a price,
+# so two values that read as identical compare unequal and nothing on screen says
+# why. The third cannot be encoded at all — a lone surrogate reaches a real
+# stdout as UnicodeEncodeError, so the render of a query that already SUCCEEDED
+# dies on the way out. A StringIO takes all three silently, so the encode below
+# is what stands in for the real console.
+_UNWRITABLE = "\u200b\U000e0041\ud800"
+
+# The other half of `_safe_text`: an exception that stringifies to nothing is
+# reported by its class NAME, and a class built from a remote payload can be
+# named anything. Built by `type()` rather than a `class` statement because that
+# statement takes an identifier, and an identifier cannot contain an ESC.
+_BlankFailure: type[RuntimeError] = type("Blank\x1b[2JTimeout", (RuntimeError,), {})
+_BLANK_NAME = _BlankFailure.__name__.replace("\x1b", "")
+
+
+def _unwritable_matrix_error() -> Any:
+    """Matrix's own prose, carrying the invisible and the unencodable in every
+    field that is quoted back."""
+    from flight_cli.client import MatrixApiError
+
+    return MatrixApiError(
+        f"QPX Warning. Bad route{_UNWRITABLE}",
+        kind=f"input{_UNWRITABLE}",
+        request_id=f"Or{_UNWRITABLE}wFzk",
+    )
+
+
+def _blank_failure() -> Any:
+    """`httpx.ConnectTimeout("")`'s shape: nothing to print but the class name."""
+    return _BlankFailure("")
+
+
+def _refusing_matrix(error: Exception) -> Any:
+    """Matrix's client, refusing with `error`. Nothing here reaches the network —
+    the real dispatch still runs, on a stubbed client."""
+
+    class _Refusing:
+        def __init__(self, **_kw: object) -> None: ...
+
+        async def __aenter__(self) -> _Refusing:
+            return self
+
+        async def __aexit__(self, *_a: object) -> bool:
+            return False
+
+        async def execute(self, _search: object, **_kw: object) -> object:
+            raise error
+
+    return _Refusing
+
+
+def _capture(monkeypatch: pytest.MonkeyPatch) -> io.StringIO:
+    """Both streams into one buffer: these reporters are split across `err` and
+    `console`, and which one a given line took is not what is under test."""
+    from flight_cli import cli
+
+    buf = io.StringIO()
+    captured = Console(file=buf, width=400, no_color=True, highlight=False)
+    monkeypatch.setattr(cli, "err", captured)
+    monkeypatch.setattr(cli, "console", captured)
+    return buf
+
+
+def _run_enriched() -> None:
+    from flight_cli import cli
+
+    legs, opts = _gf_legs_and_opts()
+    with pytest.raises(typer.Exit):
+        cli._run_enriched_path(
+            legs=legs,
+            opts=opts,
+            top_n=3,
+            run_pp=False,
+            sel=None,
+            matrix_url=False,
+            google_url=False,
+            pick=None,
+            rps=1.0,
+            impersonate="chrome",
+            no_cache=True,
+        )
+
+
+def _via_enriched_matrix(monkeypatch: pytest.MonkeyPatch, error: Exception) -> str:
+    """The shared Matrix reporter, reached from the enriched path."""
+    from flight_cli import cli
+
+    buf = _capture(monkeypatch)
+    monkeypatch.setattr(cli, "MatrixClient", _refusing_matrix(error))
+
+    def _no_gf_rows(*_a: object, **_kw: object) -> list[Any]:
+        return []
+
+    monkeypatch.setattr(cli, "_gflight_results", _no_gf_rows)
+    _run_enriched()
+    return buf.getvalue()
+
+
+def _via_cabin_matrix(monkeypatch: pytest.MonkeyPatch, error: Exception) -> str:
+    """The per-cabin line, which names the cabin and so never reaches the shared
+    reporter."""
+    from flight_cli import cli
+    from flight_cli.domain import Cabin
+
+    buf = _capture(monkeypatch)
+    monkeypatch.setattr(cli, "MatrixClient", _refusing_matrix(error))
+    legs, opts = _gf_legs_and_opts()
+    assert (
+        cli._run_matrix_multi(
+            legs=legs,
+            opts=opts,
+            cabins=(Cabin.COACH,),
+            rps=1.0,
+            impersonate="chrome",
+            no_cache=True,
+        )
+        == {}
+    )
+    return buf.getvalue()
+
+
+def _via_enriched_gf(monkeypatch: pytest.MonkeyPatch, error: Exception) -> str:
+    """The enriched path's footnote for an untyped Google failure, which passes
+    the exception itself rather than a message lifted off it."""
+    from flight_cli import cli
+    from flight_cli.client import MatrixApiError
+
+    buf = _capture(monkeypatch)
+    # Matrix has to end too, or the path renders a table instead of exiting.
+    monkeypatch.setattr(
+        cli, "MatrixClient", _refusing_matrix(MatrixApiError("no fares", kind="input"))
+    )
+
+    def _boom(*_a: object, **_kw: object) -> object:
+        raise error
+
+    monkeypatch.setattr(cli, "_gflight_results", _boom)
+    _run_enriched()
+    return buf.getvalue()
+
+
+def _via_cabin_gf(monkeypatch: pytest.MonkeyPatch, error: Exception) -> str:
+    from flight_cli import _gflight_ids as gfid
+    from flight_cli import cli
+    from flight_cli.domain import Cabin
+
+    buf = _capture(monkeypatch)
+
+    def _boom(*_a: object, **_kw: object) -> object:
+        raise error
+
+    monkeypatch.setattr(gfid, "search_with_ids", _boom)
+    legs, opts = _gf_legs_and_opts()
+    assert cli._run_gflight_multi(legs=legs, opts=opts, cabins=(Cabin.COACH,), top_n=5) == {}
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("report", "build", "expected"),
+    [
+        pytest.param(
+            _via_enriched_matrix,
+            _unwritable_matrix_error,
+            "QPX Warning. Bad route",
+            id="matrix-prose-through-the-shared-reporter",
+        ),
+        pytest.param(
+            _via_cabin_matrix,
+            _unwritable_matrix_error,
+            "QPX Warning. Bad route",
+            id="matrix-prose-through-the-per-cabin-line",
+        ),
+        pytest.param(
+            _via_enriched_gf,
+            _blank_failure,
+            _BLANK_NAME,
+            id="a-blank-exception-through-the-enriched-footnote",
+        ),
+        pytest.param(
+            _via_cabin_gf,
+            _blank_failure,
+            _BLANK_NAME,
+            id="a-blank-exception-through-the-per-cabin-line",
+        ),
+    ],
+)
+def test_remote_text_arrives_visible_and_writable(
+    monkeypatch: pytest.MonkeyPatch, report: Any, build: Any, expected: str
+) -> None:
+    """Whatever the reporter, what lands on the stream can be SEEN and can be
+    WRITTEN.
+
+    Two failures that `_assert_drives_no_terminal` cannot catch, because neither
+    code point drives anything. An invisible one is read back as a value it is
+    not; an unencodable one kills the write. And an exception with nothing to
+    say is reported by its class name, which comes from the same remote payload
+    as the message and takes the same two steps."""
+    printed = report(monkeypatch, cast("Exception", build()))
+
+    assert expected in printed, f"{expected!r} was mangled: {printed!r}"
+    for ch in _UNWRITABLE:
+        assert ch not in printed, f"{ch!r} reached the terminal: {printed!r}"
+    _assert_drives_no_terminal(printed)
+    # The assertion is that this does not raise: a StringIO accepted the lone
+    # surrogate that a real stdout would have died on.
+    printed.encode("utf-8")

@@ -120,10 +120,11 @@ def main(
 # ─────────────────────────── argument parsers ──────────────────────────────
 
 
-# Characters that drive a terminal rather than appear in it. `escape` neutralises
-# `[` and nothing else, so an ESC or CSI inside remote text still clears the
-# screen, repositions the cursor, or repaints what came before it — and a
-# redirected stderr keeps every byte for whatever reads the file next.
+# Characters that drive a terminal rather than appear in it, hide inside what does
+# appear, or cannot be written out at all. `escape` neutralises `[` and nothing
+# else, so an ESC or CSI inside remote text still clears the screen, repositions
+# the cursor, or repaints what came before it — and a redirected stderr keeps
+# every byte for whatever reads the file next.
 _CTRL = {
     **{c: None for c in range(0x20) if c not in (0x09, 0x0A)},  # C0, keeping tab and newline
     0x7F: None,  # DEL
@@ -140,6 +141,18 @@ _CTRL = {
     0x200F: None,  # RIGHT-TO-LEFT MARK
     **{c: None for c in range(0x202A, 0x202F)},  # embeddings and overrides
     **{c: None for c in range(0x2066, 0x206A)},  # isolates
+    # Invisible and not whitespace, so they survive `strip()` and `split()` and
+    # sit unseen inside a carrier code or a price: two values that read as equal
+    # compare unequal, and nothing on the screen says why.
+    0x00AD: None,  # SOFT HYPHEN
+    **{c: None for c in range(0x200B, 0x200E)},  # zero-width space, non-joiner, joiner
+    0x2060: None,  # WORD JOINER
+    0xFEFF: None,  # ZERO WIDTH NO-BREAK SPACE
+    **{c: None for c in range(0xE0000, 0xE0080)},  # tag block
+    # A lone surrogate has no utf-8 encoding at all, so one in a Matrix price
+    # reaches a real stdout as UnicodeEncodeError: the render of a query that
+    # succeeded dies on the way out, where a console file object hides it.
+    **{c: None for c in range(0xD800, 0xE000)},
 }
 
 
@@ -160,9 +173,11 @@ def _safe_text(value: object) -> str:
     if not text.strip() and isinstance(value, BaseException):
         # `httpx.ConnectTimeout("")` stringifies to nothing, which would leave a
         # reporter saying "Matrix calendar failed:" and stopping. The class name is
-        # the only thing such an exception carries. A blank from anywhere else is a
-        # value someone chose, and stays blank.
-        return escape(type(value).__name__)
+        # the only thing such an exception carries, and it takes the same two steps
+        # as the message would: a class built from a remote payload can be named
+        # anything. A blank from anywhere else is a value someone chose, and stays
+        # blank.
+        return escape(type(value).__name__.translate(_CTRL))
     return text
 
 
