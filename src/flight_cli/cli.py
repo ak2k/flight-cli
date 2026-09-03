@@ -887,7 +887,10 @@ def _calendar_cause(e: Exception) -> Exception:
 
     A lone member IS the cause and the group is plumbing. A group of several comes
     back whole, because picking one of them would hide the rest — `_failure_text`
-    is what then names each of them, since the group's own `str` is a count."""
+    is what then names each of them, since the group's own `str` is a count. A
+    lone member that is not an `Exception` comes back whole too: the callers' arms
+    are typed to `Exception`, so unwrapping a cancellation out of its group would
+    hand them something they are written not to catch."""
     while isinstance(e, BaseExceptionGroup):
         members = cast("BaseExceptionGroup[BaseException]", e).exceptions
         if len(members) != 1 or not isinstance(members[0], Exception):

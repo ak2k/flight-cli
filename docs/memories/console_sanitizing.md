@@ -28,6 +28,14 @@ the reader — it shows the exact string that was rejected, quotes and all — a
 happens to neutralise ESC, C1 and DEL on the way. It is not the guard, because it
 does not cover the value that reaches a console any other way.
 
+The two wrappers therefore disagree about control characters inside one sentence,
+and on purpose. `Failed to load <path>: <error>` quotes the path through `_quote`,
+whose `repr` writes an ESC back as the four characters `\x1b`, and passes the
+library's message through `_safe_text`, which drops it and keeps the letters. The
+path is evidence of what was typed and the message is prose to read, so the same
+payload shows two ways in one line — expect that, rather than reading it as one
+of them being wrong.
+
 **A formatter that owns a whole field sanitizes inside itself.** `_amount` is the
 model: Matrix chooses the entire price string, every caller drops the result into
 a table cell or a summary line, and wrapping at each of those call sites is a
@@ -45,9 +53,12 @@ through `_quote` (a value the user typed: elide, `repr`, escape) or `_safe_text`
 (anything remote: strip the control characters, then escape). Bare
 `rich.markup.escape` is neither and is never sufficient — it neutralises `[` and
 leaves every ESC, 8-bit CSI, bidi control and lone surrogate in place. Every
-Matrix error goes through `_print_matrix_error`, so one backend error reads the
-same whichever command asked for it; the per-cabin fan-out is the one deliberate
-exception, because its failure is soft and its line names the cabin.
+Matrix error that FAILS a command goes through `_print_matrix_error`, so one
+backend error reads the same whichever command asked for it — the calendar
+reaches it through its own single failure printer, which hands a `MatrixApiError`
+on rather than formatting it, so a fan-out keeps the kind and the request id that
+a single query keeps. The per-cabin fan-out is the one deliberate exception,
+because its failure is soft and its line names the cabin.
 
 ## `_safe_text` and `_quote`
 
@@ -85,11 +96,14 @@ in a covered function fails the suite. It says nothing about any other module:
 Its polarity is inverted — everything is scanned unless excluded by name —
 because an opt-in list goes stale the moment a print moves into a new helper. A
 sink is `console.print` / `.log` / `.rule` / `.status` / bare `print`, AND the
-calls that fill a renderable: `Table(...)` and `Panel(...)` arguments,
-`Text.from_markup`, `Console.render_str`, `add_column` and `add_row`. A bare
-`Text(...)` is absent on purpose — it takes its argument literally, and naming a
-constructor also exempts the name it is assigned to from the print check, so
-leaving it out is what makes `console.print(Text(f"{e}"))` a fault. Reading the
+calls that fill a renderable: `Table(...)`, `Panel(...)` and `Text(...)`
+arguments, `Text.from_markup`, `Console.render_str`, `add_column` and `add_row`.
+A bare `Text(...)` parses no markup — it takes its argument literally — and is
+named anyway for the other half of what naming a constructor does: it exempts the
+name the object is assigned to from the print check, so without it an allowlisted
+local assigned `Text(<remote>)` and handed to a cell reads as this module's own
+text and is never looked at again. The price is a false positive on
+`Text(<literal>)`, which the wrapper already there settles. Reading the
 fill is what makes a renderer scannable at all — the cells are where the text is
 chosen, and the `console.print(t)` a hundred lines later adds none of its own.
 Exempting that print instead, and never reading a cell, is the shape that hides
@@ -122,14 +136,19 @@ scan speaks, so an entry that allows nothing cannot sit there pre-approving
 whatever later takes its name. What an entry does NOT get is a check on the
 value behind it. The scan reads a name's binding only when it is a top-level
 f-string over a bare name, which no binding in `cli.py` is, so an entry is a
-claim held by the hostile-field tests: give a new one an arm that fails when the
-value stops being this module's own, or wrap at the sink instead, as
-`title_prefix` is, because a parameter's value belongs to callers the scan never
-reads. `_SAFE_WRAPPERS`, `_NUMERIC_PRESENTATION` and `_RENDERABLE_SINKS` each
-have a delete-one test — measured over the bypass corpus as well as `cli.py`,
-since dropping a member makes one speak and the other go quiet — and every text
-sink has a probe that goes silent without it. A regression corpus of one
-synthetic source per known bypass keeps the scan itself honest. A printed table
+claim its author has to back, and there are three ways to: a hostile-field arm
+that fails when the value stops being this module's own; a type at the response
+or enum boundary, which is what stands behind `res.solution_count` and the
+`Cabin` members; or a wrap at the sink instead, as `title_prefix` is, because a
+parameter's value belongs to callers the scan never reads. Backed by none of
+those, an entry is a claim nothing checks — allowed, but as a decision made out
+loud rather than a default. `_SAFE_WRAPPERS`, `_NUMERIC_PRESENTATION`,
+`_RENDERABLE_SINKS`, `_TEXT_SINK_METHODS` and `_HELP_SINKS` share one delete-one
+test — measured over the bypass corpus as well as `cli.py`, since dropping a
+member that ALLOWS makes `cli.py` speak where it was silent while dropping one
+that READS makes a corpus case go quiet, and no change either way is what inert
+means. A regression corpus of one synthetic source per known bypass keeps the
+scan itself honest, and is where every sink member has its witness. A printed table
 needs no entry at all: the scan reads the assignment and asks whether this scope
 built a renderable, which is a claim about the binding rather than about the
 name.
@@ -146,6 +165,11 @@ entries — the two `query_cabin` closures printing `cab.value` are that shape o
 purpose, and the entry is keyed on the closure that prints it.
 The hostile-field tests — one payload per response field, driven one field at a
 time through each renderer — are what pin the values themselves.
+The boundary in one line: a value can reach a Rich console from `cli.py` outside
+any call this scan reads — through one of those assignment slots, an API it does
+not name, a help string whose only f-string field is a bare name, or `pp/cli.py`'s
+second console — so a green scan is a claim about the calls it reads and nothing
+wider.
 
 A Typer `help=` / `epilog=` string is a markup sink as surely as a table cell:
 the app sets `rich_markup_mode="rich"`, so Typer renders every help string

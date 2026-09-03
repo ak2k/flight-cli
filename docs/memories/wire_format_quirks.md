@@ -146,3 +146,13 @@ state, and it is a stderr NOTE beside a complete-looking stdout document: exit 0
 a grid, and a line saying how many origin/destination groups are missing from it.
 The JSON carries no field for that, so a caller that must know whether the grid
 is whole reads stderr, or asks for one destination at a time.
+
+Three readings cover every calendar that ran. Exit 1 with stdout empty is no
+answer at all: the window was never priced, and the single line on stderr says
+why. Exit 0 with "Calendar empty." on stdout IS an answer — Matrix searched the
+window and priced nothing in it — which is why a fan-out that lost a destination
+refuses rather than printing that sentence. Exit 0 with a grid is the answer,
+possibly a partial one, and stderr is where everything that qualifies it goes:
+the coverage note above, and a failure that happened AFTER the grid reached the
+reader, which stays a line rather than an exit code because what they were given
+still stands.

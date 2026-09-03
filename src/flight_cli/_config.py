@@ -1,4 +1,5 @@
-"""User-level config loader for ~/.config/flight-cli/config.toml.
+"""User-level config loader for `config.toml` (in ~/.config/flight-cli by
+default; FLIGHT_CLI_CONFIG_DIR moves it).
 
 Consumers today:
   - [providers.<name>] tables: per-provider airline lists, cabin lists, etc.

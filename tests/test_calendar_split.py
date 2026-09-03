@@ -2948,12 +2948,14 @@ def test_detail_round_trip_bad_duration_is_a_typed_error(
 _SAFE_WRAPPERS = frozenset({"_quote", "_safe_text", "_amount", "_failure_text"})
 
 # Identifiers that need no wrapper at the print site: counters and dates this
-# module computed, constants it wrote, and locals already sanitized where the
-# value was read. Matched by IDENTIFIER — a bare name or an attribute chain —
-# never by source text: an expression that happens to read the same way is not
-# the same value. Keyed per FUNCTION for the same reason one step further: `n` is
-# a fan-out counter in `_run_calendar` and could be anything anywhere else, and a
-# bare name is exactly what a user value looks like once it is in a local.
+# module computed, constants it wrote, locals already sanitized where the value
+# was read, and a response field pydantic types to a number — remote, but a
+# number is not a string and cannot carry markup. Matched by IDENTIFIER — a bare
+# name or an attribute chain — never by source text: an expression that happens to
+# read the same way is not the same value. Keyed per FUNCTION for the same reason
+# one step further: `n` is a fan-out counter in `_run_calendar` and could be
+# anything anywhere else, and a bare name is exactly what a user value looks like
+# once it is in a local.
 _PRINTABLE_IDENTIFIERS = frozenset(
     {
         ("_parse_duration", "lo"),  # the ints it just parsed
