@@ -1036,21 +1036,27 @@ def _run_calendar_weave(go: Callable[[], Coroutine[Any, Any, None]], state: dict
             state["matrix_unexpected"] = cause
 
 
-def _report_calendar_matrix_failure(state: dict[str, Any]) -> None:
+def _report_calendar_matrix_failure(state: dict[str, Any], *, answered: bool = False) -> None:
     """Print the stderr line for every failure the weave stashed: a known
     `MatrixApiError`, an unexpected cause from anywhere in the weave, or a
     cancel/never-completed fall-through when it stashed nothing at all.
 
     Both keys are reported, not the first of them. A Matrix outage and a renderer
     that then blew up are two things that happened, and the one printed second is
-    the one a reader would otherwise go looking for."""
+    the one a reader would otherwise go looking for.
+
+    `answered` says a calendar arrived, which is the only thing that makes an
+    empty stash unremarkable. It is what lets the caller on that branch hand the
+    whole stash here rather than testing a key itself: the weave stashes after the
+    answer as readily as instead of it, and a branch that reads one key is how a
+    failure goes silent."""
     e = state.get("matrix_err")
     unexpected = state.get("matrix_unexpected")
     if e is not None:
         _print_matrix_error(cast("MatrixApiError", e))
     if unexpected is not None:
         _print_calendar_failure(unexpected)
-    if e is None and unexpected is None:
+    if e is None and unexpected is None and not answered:
         err.print("[yellow]Matrix calendar did not complete.[/]")
 
 
@@ -1226,13 +1232,13 @@ def _run_calendar_enriched(
         if not state.get("painted"):
             raise typer.Exit(1)
         return
-    if state.get("matrix_unexpected") is not None:
-        # Matrix answered and the run failed after it — a client teardown, a
-        # renderer, a closed pipe. The reporter above is behind the "Matrix said
-        # nothing" branch, so this is the only place such a failure is ever said;
-        # said BEFORE the render, because whatever broke may break that too. The
-        # answer below still stands, so this is a line and not an exit code.
-        _print_calendar_failure(state["matrix_unexpected"])
+    # Matrix answered, and the run may still have failed after it — a client
+    # teardown, a renderer, a closed pipe. The same reporter, because the stash is
+    # the same stash: reading one of its keys here is how a failure that happened
+    # after the answer stayed silent. Said BEFORE the render, since whatever broke
+    # may break that too, and said as a line rather than an exit code, because the
+    # answer below still stands.
+    _report_calendar_matrix_failure(state, answered=True)
     res = cast("CalendarResult", matrix_res)
     _render_calendar(
         res,

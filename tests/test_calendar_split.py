@@ -359,13 +359,18 @@ def _fake_grid(_search: object) -> dict[str, float]:
     return {"2026-09-09": 600.0}
 
 
-def test_calendar_enriched_paints_grid_then_matrix(monkeypatch: Any) -> None:
+def test_calendar_enriched_paints_grid_then_matrix(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
     monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
     monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _fake_grid)
     calls = _spy_renderers(monkeypatch)
     _run_enriched()
     assert calls["grid"] == 1  # GF grid painted (fast, first)
     assert calls["calendar"] == 1  # authoritative Matrix calendar painted
+    # And nothing on stderr: the weave reports whatever it stashed on both
+    # branches, so the branch where it stashed nothing has to stay quiet.
+    assert capsys.readouterr().err == ""
 
 
 def test_calendar_enriched_gf_throttle_still_paints_matrix(monkeypatch: Any) -> None:
@@ -524,6 +529,34 @@ def test_a_first_paint_that_fails_after_the_answer_is_still_reported(
     _run_enriched()
     assert calls["calendar"] == 1  # Matrix answered, so the answer is still painted
     assert "the date-grid renderer blew up" in _flat(capsys.readouterr().err)
+
+
+class _TeardownRefusesClient(_PricedClient):
+    """Answers, then fails on the way out with a typed backend error."""
+
+    @override
+    async def __aexit__(self, *_exc: object) -> None:
+        raise MatrixApiError(
+            "the session could not be closed", kind="unavailable", request_id="req-9"
+        )
+
+
+def test_a_backend_error_after_the_answer_is_still_reported(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The stash has two keys and a `MatrixApiError` leaving the weave lands in
+    the other one, so a branch that reads only the unexpected key is the same
+    silence one key over. Reported through the Matrix reporter, so the kind and
+    the request id a reader quotes when they report an outage survive here too."""
+    monkeypatch.setattr(cli, "MatrixClient", _TeardownRefusesClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _fake_grid)
+    calls = _spy_renderers(monkeypatch)
+    _run_enriched()  # the calendar was delivered, so the failure is not an exit code
+    assert calls["calendar"] == 1
+    line = _flat(capsys.readouterr().err)
+    assert "the session could not be closed" in line
+    assert "unavailable" in line  # the kind
+    assert "req-9" in line  # and the id
 
 
 def test_a_paint_that_never_happened_is_not_a_success(
@@ -1311,6 +1344,9 @@ def test_an_orderly_exit_inside_a_calendar_guard_keeps_its_own_code(
     else:
         assert beside in line  # the failure the exit would otherwise bury
         assert "1 failure beside a deliberate stop" in line  # and how many there were
+        # Named by the shared Matrix reporter, so the kind survives a failure that
+        # was only ever mentioned because something else ended the command.
+        assert "unavailable" in line
 
 
 class _TwoFailureClient(_PricedClient):
