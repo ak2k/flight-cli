@@ -12,6 +12,7 @@ import ast
 import io
 import json
 import re
+import sys
 from datetime import date
 from pathlib import Path
 from typing import Any, ClassVar, override
@@ -1154,15 +1155,18 @@ def test_parse_errors_truncate_an_oversized_value(
 # ESC to clear the screen or repaint the line above, and a bidi override to reorder
 # what is left. A redirected stderr keeps every byte for whatever reads it next.
 _DRIVES_THE_TERMINAL = (
-    "\x1b[2J\x9b31m\x7f\u202e\u2067\u2028\u2029\u200e\u200f\u061c\u200b\ufeff\ud800"
+    "\x1b[2J\x9b31m\x7f\u202e\u2067\u2028\u2029\u200e\u200f\u061c\u200b\ufeff"
+    "\u00ad\u200c\u200d\u2060\U000e0041\ud800"
 )
 _READS_AS_TEXT = "café ¥1200 → [/x]"
 # The code points that do the driving, as opposed to the letters they steer:
 # a clear-screen, its 7-bit and 8-bit introducers, DEL, an override, an isolate,
-# the two separators `str.splitlines` breaks on, the three bidi marks, two
-# invisibles that survive `strip()`, and a lone surrogate that no utf-8 stream can
-# write at all. Asserted individually, because `[`, `2` and `J` are ordinary text
-# once the ESC is gone.
+# the two separators `str.splitlines` breaks on, the three bidi marks, the
+# invisibles that survive `strip()` and sit unseen inside a carrier code, a tag
+# character, and a lone surrogate that no utf-8 stream can write at all. Asserted
+# individually, because `[`, `2` and `J` are ordinary text once the ESC is gone —
+# and because a set member with no case here is a claim in a comment, not a
+# property: removing the last five from `_CTRL` left the whole file green.
 _DRIVERS = (
     "\x1b[2J",
     "\x1b",
@@ -1177,6 +1181,11 @@ _DRIVERS = (
     "\u061c",
     "\u200b",
     "\ufeff",
+    "\u00ad",
+    "\u200c",
+    "\u200d",
+    "\u2060",
+    "\U000e0041",
     "\ud800",
 )
 # Rich's own colour codes, which it interleaves with the text when styling for a
@@ -1835,8 +1844,7 @@ def test_multi_cabin_group_failure_reports_through_the_shared_reporter(
     monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A failure that escapes the whole fan-out rather than one cabin is fatal, and
-    reports the same three fields the calendar does — request_id included, which
-    the copy it replaces never printed."""
+    reports the same three fields the calendar does, request_id included."""
 
     class _ClientFailsOnOpen(_MatrixErrorClient):
         @override
@@ -1923,7 +1931,7 @@ def test_search_weave_reports_a_hostile_matrix_error_through_the_shared_reporter
     for driver in _DRIVERS:
         assert driver not in probe, f"{driver!r} reached the console"
     assert "Illegal COMMAND-LINE prefix" in probe
-    assert "request_id" in probe  # the third field, which the old copy dropped
+    assert "request_id" in probe  # the third field, which a partial reporter drops first
     if gflight_fails:
         assert "upstream said [/x]no" in probe
 
@@ -1996,6 +2004,10 @@ def test_detail_round_trip_bad_duration_is_a_typed_error(
 # needs. The cases above cover the values that carry user text today; this reads
 # the source, so a NEW print cannot be added without one.
 #
+# It reads ONE file, `src/flight_cli/cli.py`, and says nothing about any other.
+# `src/flight_cli/pp/cli.py` builds a second markup console of its own and is not
+# scanned here (work-h70kv.19).
+#
 # Polarity is inverted on purpose. An opt-IN list of functions to scan goes stale
 # the moment a print moves into a new helper — the helper is simply not listed,
 # and the scan stays green. Everything is scanned unless the top-level function it
@@ -2004,13 +2016,12 @@ def test_detail_round_trip_bad_duration_is_a_typed_error(
 # Functions this scan does not cover. A reason names WHAT the function prints and
 # why that value is not this path's to wrap — never that a sink is safe, because
 # there is no safe sink: a Rich Table parses markup in every cell and in its
-# title. A print of a renderable is exempted by shape instead, at the print
-# itself, so the summary line beside it is still read.
+# title, and the calls that fill one are read here for that reason.
 #
 # Keyed on the TOP-LEVEL function, so a nested helper inherits the exemption of
 # the command it belongs to and cannot pick one up by reusing a name.
 _ESCAPE_OUT_OF_SCOPE = {
-    "_pinned_solution_index": "prints pick and len(result.solutions), integers it computed",
+    "_pinned_solution_index": "prints pick, an int typer parsed, and len(result.solutions)",
     "_validate_sort_cabin": "prints sort_by.value and the cabin names in a list it built",
     "_resolve_providers": "prints the {e} a provider config raised, owned by the provider path",
 }
@@ -2020,9 +2031,11 @@ _ESCAPE_OUT_OF_SCOPE = {
 # characters and escapes anything remote. Bare `rich.markup.escape` is neither.
 # It neutralises `[` and leaves every ESC, 8-bit CSI, bidi control and lone
 # surrogate in place, and telling which values can carry one means tracking taint
-# through locals, `str()` calls and attribute chains — which the scan cannot do
-# and kept getting wrong. Both wrappers end in `escape`, so nothing is lost.
-_SAFE_WRAPPERS = frozenset({"_quote", "_safe_text"})
+# through locals, `str()` calls and attribute chains — which the scan cannot do.
+# Both wrappers end in `escape`, so nothing is lost. `_amount` is the third
+# because it calls `_safe_text` on the way out: it is the formatter for a price,
+# and sanitizing inside a formatter is what keeps the wrap off every call site.
+_SAFE_WRAPPERS = frozenset({"_quote", "_safe_text", "_amount"})
 
 # Identifiers that need no wrapper at the print site: counters and dates this
 # module computed, constants it wrote, and locals already sanitized where the
@@ -2048,25 +2061,67 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_emit_urls", "pinned_label"),  # "#N" or "cheapest", built from an int
         ("_render_search", "res.solution_count"),  # counts and dates off the response
         ("_render_calendar", "res.solution_count"),
-        ("_render_calendar", "window"),
         ("_render_calendar", "duration_note"),
         ("_render_date_grid", "priced_days"),
-        ("_render_date_grid", "cheapest"),
-        ("_render_date_grid", "window"),
         ("_render_gflight_table", "_LEGROOM_KEY"),  # the legend it wrote
         # Sanitized where the currency was read, so the summary line and the table
         # title interpolate one value that was wrapped once.
         ("_render_search", "ccy_tag"),
         ("_render_calendar", "ccy_tag"),
+        ("_render_multi_cabin_search", "ccy_tag"),
+        # Cells and rows composed in the renderer from leaves each wrapped where
+        # it was read — `_fmt_slice_cell`, `_leg_display`, `_fmt_gflight_legroom`
+        # and `_amount` — and NOT wrapped again around the composition, because
+        # `_fmt_legroom_one` writes a `[red]` on the pitch token on purpose.
+        ("_render_search", "cells"),
+        ("_render_search", "it_carriers"),
+        ("_render_search", "out"),
+        ("_render_search", "ret"),
+        ("_render_merged", "out"),
+        ("_render_merged", "ret"),
+        ("_render_multi_cabin_search", "carriers"),
+        ("_render_multi_cabin_search", "out_cell"),
+        ("_render_multi_cabin_search", "ret_cell"),
+        ("_render_multi_cabin_search", "price_cells"),
+        ("_render_calendar", "row"),
+        ("_render_gflight_table", "label"),  # the row number, and its a/b suffix
+        ("_render_gflight_table", "dur"),  # "3h05m", from an integer count of minutes
+        ("_render_gflight_table", "legs_str"),
+        ("_render_gflight_table", "legroom_str"),
+        # The cabin letters are this module's own map, keyed by its own enum.
+        ("_render_multi_cabin_search", "title_prefix"),
+        ("_render_multi_cabin_search", "cabin_labels"),
+        ("_render_multi_cabin_search", "sort_label"),
+        ("_render_multi_cabin_search", "letter"),
+        # The table each renderer built and then prints whole. Every value that
+        # went into it was read at the `Table(...)`, `add_column` and `add_row`
+        # below, which is what makes the print itself add nothing.
+        ("_render_search", "t"),
+        ("_render_search", "st"),
+        ("_render_calendar", "t"),
+        ("_render_date_grid", "t"),
+        ("_render_merged", "t"),
+        ("_render_multi_cabin_search", "t"),
+        ("_render_gflight_table", "t"),
+        ("airport", "t"),
     }
 )
 
+# What "reaches rich" means, one call shape at a time. A Rich Table parses markup
+# in its title, in every column header and in every cell, so the calls that FILL
+# one are sinks exactly as `console.print` is: the text is chosen there, and the
+# `console.print(t)` a hundred lines later adds none of its own. Reading the fill
+# rather than exempting the print is what lets a renderer be scanned at all.
+_TEXT_SINK_METHODS = frozenset({"print", "log", "rule", "status", "add_row", "add_column"})
+# Constructors whose arguments become markup the moment the object is printed,
+# read at the constructor for the same reason.
+_RENDERABLE_SINKS = frozenset({"Table", "Panel", "Text"})
 
-# Rich renderables the module builds and then prints whole. Not a claim that the
-# sink is safe — a Table parses markup in every cell and in its title — but that
-# the cells were filled where this scan can read them, so the print itself adds
-# no text of its own.
-_RENDERABLE_CONSTRUCTORS = frozenset({"Table", "Panel", "Text"})
+# Presentation types only a number survives: `format("x", "d")` raises, so a field
+# carrying one of these cannot be a string and cannot carry markup. The
+# alternative is allowlisting the name, and for `fr.price` — a `getattr` off a
+# duck-typed Google Flights result — that would be a promise nobody here can keep.
+_NUMERIC_PRESENTATION = frozenset("bdoxXneEfFgG%")
 
 
 def _def_time_expressions(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.expr]:
@@ -2103,53 +2158,6 @@ def _enclosing_functions(tree: ast.Module) -> dict[ast.AST, list[str]]:
 
     walk(tree, [])
     return chains
-
-
-def _renderables_built_in(fn: ast.AST) -> frozenset[str]:
-    """Names this function assigns a freshly constructed Rich renderable."""
-    names: set[str] = set()
-    for node in ast.walk(fn):
-        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
-            continue
-        target, value = node.targets[0], node.value
-        if (
-            isinstance(target, ast.Name)
-            and isinstance(value, ast.Call)
-            and isinstance(value.func, ast.Name)
-            and value.func.id in _RENDERABLE_CONSTRUCTORS
-        ):
-            names.add(target.id)
-    return frozenset(names)
-
-
-def _enclosing_renderables(tree: ast.Module) -> dict[ast.AST, frozenset[str]]:
-    """Every node mapped to the renderables its enclosing functions build."""
-    bound: dict[ast.AST, frozenset[str]] = {}
-
-    def walk(node: ast.AST, names: frozenset[str]) -> None:
-        for child in ast.iter_child_nodes(node):
-            inner = names
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                inner = names | _renderables_built_in(child)
-            bound[child] = inner
-            walk(child, inner)
-
-    walk(tree, frozenset())
-    return bound
-
-
-def _prints_a_renderable(node: ast.Call, renderables: frozenset[str]) -> bool:
-    """A print of one renderable this function built, and nothing beside it.
-
-    Sink-level rather than function-level: `console.print(t)` is exempt, and the
-    summary line two lines above it in the same function is not.
-    """
-    return (
-        not node.keywords
-        and len(node.args) == 1
-        and isinstance(node.args[0], ast.Name)
-        and node.args[0].id in renderables
-    )
 
 
 def _dotted_name(node: ast.expr) -> str | None:
@@ -2194,30 +2202,25 @@ def _is_safe_field(value: ast.expr, chain: list[str]) -> bool:
 
 
 def _is_a_print(node: ast.Call) -> bool:
-    """Whether this call is a console sink: `console.print`, `err.log`, `print`."""
+    """Whether this call hands text to a markup console — `console.print`,
+    `err.log`, a rule or a status, bare `print`, or a renderable's title, columns
+    and rows, which are the same console one object later."""
     func = node.func
-    return (isinstance(func, ast.Attribute) and func.attr in ("print", "log")) or (
-        isinstance(func, ast.Name) and func.id == "print"
-    )
+    if isinstance(func, ast.Attribute):
+        return func.attr in _TEXT_SINK_METHODS
+    return isinstance(func, ast.Name) and (func.id == "print" or func.id in _RENDERABLE_SINKS)
 
 
 def _printed_identifiers(src: str, function: str) -> set[str]:
-    """Every identifier `function` hands to a console, dotted chains included.
-
-    Renderable prints are skipped: the exemption for those is the shape of the
-    print, so a reason has nothing to say about them.
-    """
+    """Every identifier `function` hands to a console, dotted chains included."""
     tree = ast.parse(src)
     chains = _enclosing_functions(tree)
-    renderables = _enclosing_renderables(tree)
     found: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or not _is_a_print(node):
             continue
         chain = chains.get(node, [])
         if not chain or chain[-1] != function:
-            continue
-        if _prints_a_renderable(node, renderables.get(node, frozenset())):
             continue
         for arg in [*node.args, *[k.value for k in node.keywords]]:
             for inner in ast.walk(arg):
@@ -2234,18 +2237,61 @@ def _spec_has_field(spec: ast.expr | None) -> bool:
     return spec is not None and any(isinstance(n, ast.FormattedValue) for n in ast.walk(spec))
 
 
+def _spec_proves_a_number(spec: ast.expr | None) -> bool:
+    """Whether this format spec would raise on a string, which makes the field a
+    number whatever the name says. A spec with a field of its own proves nothing —
+    the fill is interpolated too — so only a single literal counts."""
+    if not isinstance(spec, ast.JoinedStr) or len(spec.values) != 1:
+        return False
+    only = spec.values[0]
+    return (
+        isinstance(only, ast.Constant)
+        and isinstance(only.value, str)
+        and only.value[-1:] in _NUMERIC_PRESENTATION
+    )
+
+
+def _printed_parts(arg: ast.expr) -> list[ast.expr] | None:
+    """The sub-expressions of an argument that are each printed in their own right,
+    or None when the argument is not composed of others.
+
+    A concatenation is its two pieces, a conditional is whichever branch wins, an
+    `or` is each of its operands, and a starred list stands in for the argument
+    list itself — so each piece is judged on its own. `%` is deliberately absent:
+    its left side is a template, not text beside the value.
+    """
+    if isinstance(arg, ast.Starred):
+        return [arg.value]
+    if isinstance(arg, ast.BinOp) and isinstance(arg.op, ast.Add):
+        return [arg.left, arg.right]
+    if isinstance(arg, ast.IfExp):
+        return [arg.body, arg.orelse]
+    if isinstance(arg, ast.BoolOp):
+        return list(arg.values)
+    return None
+
+
 def _argument_faults(src: str, arg: ast.expr, chain: list[str]) -> list[str]:
     """Why this print argument could reach rich unescaped, or nothing."""
     if isinstance(arg, ast.Constant):
         # A literal the author wrote, of any type: rich's own knobs arrive as
         # `no_wrap=True` and `width=200` as often as `style="red"`.
         return []
+    parts = _printed_parts(arg)
+    if parts is not None:
+        return [fault for part in parts for fault in _argument_faults(src, part, chain)]
     if isinstance(arg, ast.JoinedStr):
         faults: list[str] = []
         for part in arg.values:
             if isinstance(part, ast.Constant):
                 continue
             shown = ast.get_source_segment(src, part) or ast.dump(part)
+            if (
+                isinstance(part, ast.FormattedValue)
+                and part.conversion == -1
+                and _spec_proves_a_number(part.format_spec)
+            ):
+                continue  # a string would raise here, so this field is a number
             if not isinstance(part, ast.FormattedValue) or not _is_safe_field(part.value, chain):
                 faults.append(f"unwrapped f-string field {shown}")
             elif part.conversion != -1 and isinstance(part.value, ast.Call):
@@ -2269,12 +2315,17 @@ def escape_scan(src: str) -> list[str]:
 
     Checks positional AND keyword arguments, and demands a literal, a fully
     wrapped f-string, or an allowlisted name. A local holding a message, a
-    `.format()`, a `%`, or a concatenation is none of those, and neither is a
-    field whose conversion or format spec runs after the wrapper.
+    `.format()`, a `%`, or a concatenation of one is none of those, and neither is
+    a field whose conversion or format spec runs after the wrapper.
+
+    What it does not model is scope. An allowlisted identifier is a claim about a
+    NAME in a function, so a closure inside that function inherits the pass, and a
+    second binding of the name in either place is invisible here — `_run_calendar`
+    is the only live shape with both, and `n` / `rounds` / `conc` are the names to
+    watch. The hostile-field tests above are what pin the values themselves.
     """
     tree = ast.parse(src)
     chains = _enclosing_functions(tree)
-    renderables = _enclosing_renderables(tree)
     faults: list[str] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -2283,8 +2334,6 @@ def escape_scan(src: str) -> list[str]:
             continue
         chain = chains.get(node, [])
         if chain and chain[-1] in _ESCAPE_OUT_OF_SCOPE:
-            continue
-        if _prints_a_renderable(node, renderables.get(node, frozenset())):
             continue
         where = chain[0] if chain else "<module>"
         args = list(node.args)
@@ -2334,11 +2383,44 @@ def test_out_of_scope_entries_are_all_load_bearing() -> None:
     assert not inert, f"these entries exempt nothing; delete them: {inert}"
 
 
+def test_printable_identifiers_are_all_load_bearing() -> None:
+    """The same rule for the other allowlist, which is the longer of the two. An
+    entry that allows nothing still pre-approves whatever later takes its name in
+    that function, and nothing else in the file would speak when it did."""
+    src = Path(cli.__file__).read_text(encoding="utf-8")
+    inert: list[tuple[str, str]] = []
+    for entry in sorted(_PRINTABLE_IDENTIFIERS):
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                sys.modules[__name__],
+                "_PRINTABLE_IDENTIFIERS",
+                _PRINTABLE_IDENTIFIERS - {entry},
+            )
+            if not escape_scan(src):
+                inert.append(entry)
+    assert not inert, f"these entries allow nothing; delete them: {inert}"
+
+
+def _identifiers_not_named(reason: str, printed: set[str]) -> list[str]:
+    """The identifiers in `printed` that `reason` does not name.
+
+    Word boundaries, because the highest-value name to have to justify is `e`, the
+    exception variable, and a substring test finds it in any reason containing the
+    letter. EVERY identifier, because naming one value does not excuse the rest,
+    and the one left unnamed is the one nobody looked at.
+    """
+    return [
+        identifier
+        for identifier in sorted(printed)
+        if not re.search(rf"(?<![\w.]){re.escape(identifier)}(?![\w])", reason)
+    ]
+
+
 def test_out_of_scope_reasons_name_what_the_function_prints() -> None:
     """A reason is the only thing telling the next reader whether an exemption can
     be lifted. "search-path weave" says where the code lives; it does not say what
-    reaches a console, so nobody can check it. Naming a value that does makes the
-    claim falsifiable, and this test is what falsifies it."""
+    reaches a console, so nobody can check it. Naming every value that does makes
+    the claim falsifiable, and this test is what falsifies it."""
     src = Path(cli.__file__).read_text(encoding="utf-8")
     vague: list[str] = []
     for name, reason in _ESCAPE_OUT_OF_SCOPE.items():
@@ -2347,9 +2429,34 @@ def test_out_of_scope_reasons_name_what_the_function_prints() -> None:
             if "nothing" not in reason:
                 vague.append(f"{name}: prints nothing this scan reads; say so or drop the entry")
             continue
-        if not any(identifier in reason for identifier in printed):
-            vague.append(f"{name}: {reason!r} names none of {sorted(printed)}")
+        unnamed = _identifiers_not_named(reason, printed)
+        if unnamed:
+            vague.append(f"{name}: {reason!r} does not name {unnamed}")
     assert not vague, vague
+
+
+def test_a_reason_that_names_nothing_is_rejected() -> None:
+    """The test above is worth its lines only if it can fail, and the shape it
+    replaces could not: `any(i in reason for i in printed)` passed on one value out
+    of five, and `in` alone found the one-character `e` inside any word holding an
+    "e". Each case below passed that check and names nothing."""
+    printed = {"e", "cab.value", "pinned_label"}
+    assert _identifiers_not_named("cheese", printed) == ["cab.value", "e", "pinned_label"]
+    assert _identifiers_not_named("the values it was handed", printed) == [
+        "cab.value",
+        "e",
+        "pinned_label",
+    ]
+    # A reason that names a LOCATION rather than a value — the one thing the
+    # header above forbids — and one that names a single value out of three.
+    assert _identifiers_not_named("search-path weave", printed) == [
+        "cab.value",
+        "e",
+        "pinned_label",
+    ]
+    assert _identifiers_not_named("prints cab.value", printed) == ["e", "pinned_label"]
+    # And it passes only when every one is named, in the spelling the scan reads.
+    assert _identifiers_not_named("prints {e}, cab.value and pinned_label", printed) == []
 
 
 def test_escape_scan_finds_every_known_bypass() -> None:
@@ -2363,6 +2470,8 @@ def test_escape_scan_finds_every_known_bypass() -> None:
         "concatenation": 'def calendar():\n    err.print("bad " + str(e))\n',
         "a newly extracted helper": 'def _brand_new_helper():\n    err.print(f"{e}")\n',
         "console.log": 'def calendar():\n    console.log(f"{e}")\n',
+        "console.rule": 'def calendar():\n    console.rule(f"{e}")\n',
+        "console.status": 'def calendar():\n    console.status(f"{e}")\n',
         "builtin print": 'def calendar():\n    print(f"{e}")\n',
         "partly wrapped": 'def calendar():\n    err.print(f"{escape(a)} {b}")\n',
         "lookalike wrapper": 'def calendar():\n    err.print(f"{not_escape(e)}")\n',
@@ -2390,32 +2499,48 @@ def test_escape_scan_finds_every_known_bypass() -> None:
         "escape on a response field": (
             'def calendar():\n    err.print(f"{escape(res.cheapest_price)}")\n'
         ),
-        # A renderable print is exempt by shape, and the shape is the renderable
-        # ALONE: the f-string beside it, in the same call or the next one, is
-        # text this scan has to read.
-        "a new print beside a renderable": (
-            "def _render_calendar():\n"
-            "    t = Table(title='lowest fare')\n"
-            "    console.print(t)\n"
-            '    err.print(f"{remote_price}")\n'
+        # A Rich table is a console one object later. Its title, its headers and
+        # its cells all parse markup, and a value that reaches one never passes
+        # through the `console.print(t)` this scan would otherwise be reading.
+        "a raw name in a table cell": (
+            "def _render_search():\n    st.add_row(res.cheapest_price)\n"
         ),
-        "an f-string in the same call as a renderable": (
-            "def _render_calendar():\n"
-            "    t = Table(title='lowest fare')\n"
-            '    console.print(t, f"{remote_price}")\n'
+        "a raw field in a table cell": ('def _render_search():\n    st.add_row(f"{it.price}")\n'),
+        "a raw field in a column header": (
+            'def _render_search():\n    st.add_column(f"{col.label.code}")\n'
         ),
-        "a computed keyword in the same call as a renderable": (
-            "def _render_calendar():\n"
-            "    t = Table(title='lowest fare')\n"
-            "    console.print(t, style=chosen_style)\n"
+        "a raw field in a table title": (
+            'def _render_search():\n    t = Table(title=f"{query}")\n'
+        ),
+        "a raw field in a panel": ('def _render_search():\n    p = Panel(f"{e}")\n'),
+        # A starred list is the argument list, so the cells come out of it.
+        "a raw name starred into a row": (
+            "def _render_calendar():\n    t.add_row(*[res.cheapest_price])\n"
+        ),
+        # Either half of a concatenation, and either branch of a conditional,
+        # is printed on its own.
+        "a raw name concatenated to a literal": (
+            'def _render_search():\n    st.add_row("#" + res.cheapest_price)\n'
+        ),
+        "a raw name in one branch of a conditional": (
+            'def _render_search():\n    st.add_row(res.cheapest_price if x else "—")\n'
+        ),
+        "a raw name behind an or": ('def _render_search():\n    st.add_row(carriers or "?")\n'),
+        # A format spec proves a number only when it is a literal one: a numeric
+        # type on a field whose fill is interpolated proves nothing about the fill.
+        "an interpolated fill beside a numeric type": (
+            'def calendar():\n    err.print(f"{price:{fill}.2f}")\n'
+        ),
+        "a padding spec, which any string survives": (
+            'def calendar():\n    err.print(f"{code:<6}")\n'
         ),
         # A decorator and a default argument run at import, in the scope around
         # the `def`, so neither inherits the exemption the name would carry.
         "a print in a decorator on an excluded function": (
-            '@err.print(f"{e}")\ndef seatmap():\n    pass\n'
+            '@err.print(f"{e}")\ndef _validate_sort_cabin():\n    pass\n'
         ),
         "a print in a default argument of an excluded function": (
-            'def seatmap(x=err.print(f"{e}")):\n    pass\n'
+            'def _validate_sort_cabin(x=err.print(f"{e}")):\n    pass\n'
         ),
         # `!r` runs after the wrapper: `repr` doubles the backslash `escape`
         # prepended and hands the tag straight back to the markup parser.
@@ -2455,13 +2580,17 @@ def test_escape_scan_passes_clean_source() -> None:
         "    async def _go():\n"
         # Allowed through the enclosing function, not the closure it sits in.
         '        console.print(f"[dim]{_GF_GRID_UNAVAILABLE_WEAVE_NOTE}[/]")\n'
-        # A renderable this function built, printed whole, in each of its shapes.
+        # A table filled through the wrappers, then printed whole: the title, the
+        # header and the cell are each read where the value was chosen, and the
+        # name of the table is allowlisted in the function that built it.
         "def _render_merged():\n"
-        "    t = Table(title='merged')\n"
+        '    t = Table(title=f"merged {_safe_text(origin)}", show_header=True)\n'
+        '    t.add_column("price", justify="right")\n'
+        "    t.add_row(_amount(row.gf_price), out, ret)\n"
         "    console.print(t)\n"
-        "    p = Panel('note')\n"
-        "    console.print(p)\n"
-        "    body = Text('note')\n"
-        "    console.print(body)\n"
+        # A numeric presentation type is a proof about the value, not a promise
+        # about the name: a string reaching either of these raises instead.
+        "def _render_gflight_table():\n"
+        '    t.add_row(f"{fr.price:.2f}", f"{i:d}")\n'
     )
     assert not escape_scan(clean)

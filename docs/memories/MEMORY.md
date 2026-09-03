@@ -52,6 +52,12 @@ go into detail and are loaded on demand.
   (`_gf_postfilter`), the concurrent GF-fast-paint + Matrix-enrich flow
   (`_run_enriched_path`), and codeshare-aware display. Read before touching
   `routing_predicates.py`, `_gf_postfilter.py`, or `_gflight_ids` carrier parsing.
+- [console_sanitizing.md](console_sanitizing.md) — **Read before adding any
+  print to `cli.py`.** Which values are markup on a Rich console (user flags,
+  Matrix fields, third-party exceptions), the `_quote` / `_safe_text` /
+  sanitize-inside-the-formatter rule and the orderings that make each work, and
+  the `escape_scan` AST guard: what it reads (including table cells, headers
+  and titles), what its two allowlists claim, and what it does not model.
 - [legroom_recipe.md](legroom_recipe.md) — Per-leg legroom + amenities +
   aircraft come back in-band in Google Flights' own response (no
   travelarrow.io API call needed for the data itself). Index map for

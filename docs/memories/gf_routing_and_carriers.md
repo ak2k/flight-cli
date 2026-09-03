@@ -158,80 +158,10 @@ extension is the whole story and differ by one when routing declined as well:
 "both Matrix-only routing and a Matrix-only extension code" carries two reasons,
 one per flag.
 
-Those reason strings quote the user's `--routing` / `--extension` text verbatim,
-and `err` is a markup-enabled console: `--routing 'BA[/weird]AA'` raised
-`MarkupError` where it should have refused, and a `[bold]` form ate the token the
-reader needed to see. `routing_predicates` has no console to escape for, so the
-sanitizing belongs at the render sites.
-
-Two steps, in two places. A source that quotes a value into a sentence keeps its
-`repr`: `routing_predicates.py:284,331,343` build their reasons with `{...!r}`,
-and `_config.py:136,146` build the rps `ValueError` the same way. `repr` is
-there for the reader — it shows the exact string that was rejected, quotes and
-all — and it happens to neutralise ESC, C1 and DEL on the way. It is not the
-guard, because it does not cover the value that reaches a console any other way.
-
-The render site is the guard, and it wraps exactly once. The rule, **for the
-functions `tests/test_calendar_split.py::escape_scan` covers**: anything reaching
-`err.print` or `console.print` from user input, a response field or an exception
-message goes through `_quote` (a value the user typed: elide, `repr`, escape) or
-`_safe_text` (anything remote: strip the control characters, then escape). Bare
-`rich.markup.escape` is neither and is never sufficient — it neutralises `[` and
-leaves every ESC, 8-bit CSI, bidi control and lone surrogate in place. That covers
-the blocker, the date-grid failure text, every argument parser's own message, the
-calendar and search prices, the carrier codes and stop labels, and Matrix's
-`kind` / `message` / `request_id`, which echo the routing string back verbatim
-("Illegal COMMAND-LINE prefix: BA[/weird]AA") on the path with no refusal to
-catch it first. Every Matrix reporter goes through `_print_matrix_error`, so one
-backend error reads the same whichever command asked for it.
-
-Not everywhere. `_ESCAPE_OUT_OF_SCOPE` names what is left, and each entry names
-the value its function prints rather than the surface it lives on: `_emit_urls`
-prints deep links and a link-failure line; `_pinned_solution_index` prints two
-integers it computed; `_run_gflight_multi` prints a cabin name and whatever fli
-raised; `_validate_sort_cabin`, `_should_run_awards` and `_resolve_providers`
-print a flag value and a config error; `seatmap` prints two URLs and a fetch
-error. A renderer is not on that list: a print whose only argument is a Rich
-renderable the function built is exempted by its shape, so the summary line
-beside it is still read.
-
-`tests/test_calendar_split.py::escape_scan` parses cli.py and walks its AST, so a
-new print in a covered function fails the suite. Its polarity is inverted —
-everything is scanned unless excluded by name — because an opt-in list goes stale
-the moment a print moves into a new helper. It judges each argument by AST shape,
-never by source text: a string comparison reads `not_escape(x)` and
-`shell.escape(x)` as safe. Its allowlist of the module's own values is keyed per
-FUNCTION, since `n` is a fan-out counter in one place and could be anything in
-another, and its exclusions are keyed on the TOP-LEVEL function, so a nested
-helper cannot pick one up by reusing a name — while a decorator and a default
-argument belong to the scope around the `def`, because that is where they run. A
-regression corpus of one synthetic source per known bypass keeps it honest; a
-second test removes each exclusion in turn to prove none of them exempts nothing,
-and a third checks that each reason names a value the function really prints.
-
-`escape` is not the whole job for text from somewhere else. It neutralises `[`
-and nothing more, so an ESC or an 8-bit CSI inside a Matrix error message still
-clears the screen or repaints the line above it, a DEL rubs out what precedes it,
-and a bidi override reorders the rest — and a redirected stderr keeps every byte
-for whatever reads the file next. `_safe_text` drops those code points (C0 bar
-tab and newline, DEL, C1, the two separators `str.splitlines` breaks on, the bidi
-marks, overrides and isolates, the invisibles that survive `strip()`, and the
-lone surrogates, which have no utf-8 encoding at all and reach a real stdout as
-`UnicodeEncodeError`) and then escapes — in that order, because `escape` only
-sees a tag where `[` is followed by `[a-z#/@]`, so a control character between
-the brackets would hide a live `[red]` from it. It
-neither quotes nor truncates, unlike `_quote`: a remote error is a sentence
-someone has to read whole, and the half that explains the failure is as often at
-the end as at the start.
-
-The argument parsers go through one `_quote` helper: `_elide` cuts a value past 60
-characters, then `repr`, then `escape`. The message exists to show WHICH value was
-rejected, and a 4301-digit `--duration` echoed whole buries that under its own
-evidence. Both orderings are load-bearing. `_elide` before `repr`, so the cap
-counts what the user typed — a backslash costs one code point going in and two
-coming out of `repr`, so a bound on the finished message would measure the fill
-rather than the cap. And `repr` before `escape`, because `repr` doubles the
-backslash `escape` prepends and hands the tag straight back to the parser.
+Those reason strings quote the user's `--routing` / `--extension` text verbatim
+onto a markup console, and so does every response field a renderer shows. The
+wrapping rule, the two helpers and the AST guard over `cli.py` are in
+[console_sanitizing.md](console_sanitizing.md).
 
 The grid paint in the weave and
 `_render_date_grid` are runtime-dead until the gate flips;
