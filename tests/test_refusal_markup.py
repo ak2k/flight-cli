@@ -937,6 +937,106 @@ def test_a_link_builder_that_fails_does_not_take_the_results_with_it(
     _assert_drives_no_terminal(printed)
 
 
+# A URL is remote text too: the pinned builders encode airline and airport
+# strings taken off a payload, and the deep link carries the user's own routing.
+_HOSTILE_URL = f"https://example.test/x?q={_DROPPED}{_ESCAPES}"
+
+
+def _emit(
+    monkeypatch: pytest.MonkeyPatch, *, pinned: bool, pick: int | None, solutions: int = 3
+) -> str:
+    """Drive `_emit_urls` with both link kinds and return what it printed."""
+    from flight_cli import cli
+    from flight_cli.models import SearchResult
+
+    buf = io.StringIO()
+    monkeypatch.setattr(
+        cli, "console", Console(file=buf, width=400, no_color=True, highlight=False)
+    )
+
+    def _hostile(*_a: object, **_kw: object) -> str:
+        return _HOSTILE_URL
+
+    def _cannot_pin(*_a: object, **_kw: object) -> str | None:
+        return None
+
+    monkeypatch.setattr(cli, "_try_pinned_matrix_url", _hostile if pinned else _cannot_pin)
+    monkeypatch.setattr(cli, "_try_pinned_gflight_url", _hostile if pinned else _cannot_pin)
+    if not pinned:
+        monkeypatch.setattr(cli, "matrix_deep_link", _hostile)
+        monkeypatch.setattr(cli, "google_flights_url", _hostile)
+
+    legs, opts = _gf_legs_and_opts()
+    result = SearchResult.model_validate({"solutions": [{} for _ in range(solutions)]})
+    cli._emit_urls(
+        cli.SpecificDateSearch(legs=legs, options=opts),
+        matrix_url=True,
+        google_url=True,
+        result=result,
+        pick=pick,
+    )
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize("pinned", [True, False], ids=["pinned-links", "plain-links"])
+def test_both_url_lines_sanitise_what_they_print(
+    monkeypatch: pytest.MonkeyPatch, pinned: bool
+) -> None:
+    """Both links are built from text nobody here wrote: the pinned encoders
+    take airline and airport strings off a payload, and the deep link carries
+    the user's own routing string.
+
+    The escape is per line, and the two lines have separate calls — losing it on
+    either is a `MarkupError` traceback in place of a footer, or a control
+    sequence handed to the terminal. Driven through a real Console, which is
+    where both of those come from."""
+    printed = _emit(monkeypatch, pinned=pinned, pick=1)
+
+    assert printed.count(_DROPPED) == 2, f"a URL line lost its escape: {printed!r}"
+    _assert_drives_no_terminal(printed)
+    for line in printed.splitlines():
+        if "example.test" in line:
+            assert line.startswith("  "), f"a URL line lost its indent: {line!r}"
+
+
+def test_a_pinned_link_is_labelled_with_the_row_the_user_picked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The label is the only thing that says WHICH itinerary the link opens.
+    Off by one it is worse than missing: the link goes to the cheapest row and
+    the label says it is the row the user asked for."""
+    printed = _emit(monkeypatch, pinned=True, pick=2)
+
+    assert printed.count("itinerary #2 pinned") == 2, printed
+    assert "cheapest itinerary" not in printed, printed
+
+
+def test_an_out_of_range_pick_labels_the_link_it_actually_built(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An out-of-range pick falls back to the cheapest row rather than emitting
+    a broken link, so the label has to fall back with it — a "#9" over the
+    cheapest itinerary is a wrong answer dressed as the requested one."""
+    printed = _emit(monkeypatch, pinned=True, pick=9, solutions=3)
+
+    assert "out of range (1-3)" in printed, printed
+    assert printed.count("cheapest itinerary pinned") == 2, printed
+    assert "#9" not in printed, printed
+
+
+def test_an_unpinnable_result_says_so_in_both_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Neither builder could pin, so both lines are the plain search links —
+    labelled as what they are, because a user who asked for row 2 and got the
+    search page needs to be able to tell."""
+    printed = _emit(monkeypatch, pinned=False, pick=2)
+
+    assert "Matrix deep-link:" in printed, printed
+    assert "Google Flights (tfs= structured):" in printed, printed
+    assert "pinned" not in printed, printed
+
+
 def test_the_seatmap_lookup_failure_quotes_the_remote_url_and_the_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1264,14 +1364,13 @@ def test_remote_text_arrives_visible_and_writable(
 def test_key_resolution_failing_is_a_typed_line_not_an_empty_traceback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The Matrix client resolves its API key when it is CONSTRUCTED, and the
-    weave constructs it before the task group opens — so the guard inside the
-    Matrix task never sees this one.
+    """The Matrix client resolves its API key when it is CONSTRUCTED — the disk
+    cache, then the network — so a stale cache with an unreachable bootstrap
+    fails on the most ordinary command there is.
 
-    A stale key cache with an unreachable bootstrap is the ordinary way it
-    happens, on the most ordinary command there is, and it ended as a traceback
-    with both streams empty: no table, no reason, and Google's rows never even
-    requested."""
+    Untyped it is a traceback with both streams empty: no table, no reason. Here
+    Google has nothing either, so the typed line is the whole answer and the
+    exit says so."""
     from flight_cli import cli
     from flight_cli._api_key import ApiKeyResolutionError
 
@@ -1281,7 +1380,11 @@ def test_key_resolution_failing_is_a_typed_line_not_an_empty_traceback(
         def __init__(self, **_kw: object) -> None:
             raise ApiKeyResolutionError(f"could not resolve the Matrix API key{_ESCAPES}")
 
+    def _no_gf_rows(*_a: object, **_kw: object) -> list[Any]:
+        return []
+
     monkeypatch.setattr(cli, "MatrixClient", _NoKey)
+    monkeypatch.setattr(cli, "_gflight_results", _no_gf_rows)
     legs, opts = _gf_legs_and_opts()
     with pytest.raises(typer.Exit) as excinfo:
         cli._run_enriched_path(
@@ -1302,6 +1405,183 @@ def test_key_resolution_failing_is_a_typed_line_not_an_empty_traceback(
     printed = buf.getvalue()
     assert "Matrix search failed" in printed, printed
     assert "could not resolve the Matrix API key" in printed, printed
+    _assert_drives_no_terminal(printed)
+
+
+def test_a_key_that_will_not_resolve_still_leaves_the_google_rows_on_screen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of the same contract, and the one a user notices.
+
+    Resolving the key is the first thing the Matrix client does, so a client
+    built beside the task group takes the Google half down with it: the same
+    query answers with a table under `--fast` and with nothing at all by
+    default. Built inside the task, a key that will not resolve is one half of
+    a weave failing — the rows Google returned are painted, the reason is on
+    stderr, and the exit reports what reached the user."""
+    from flight_cli import cli
+    from flight_cli._api_key import ApiKeyResolutionError
+
+    buf = _capture(monkeypatch)
+    rows = [cast("Any", object())]
+    painted: list[Any] = []
+
+    class _NoKey:
+        def __init__(self, **_kw: object) -> None:
+            raise ApiKeyResolutionError("could not resolve the Matrix API key")
+
+    def _gf_rows(*_a: object, **_kw: object) -> list[Any]:
+        return rows
+
+    def _paint(gf: list[Any], **_kw: object) -> None:
+        painted.extend(gf)
+
+    monkeypatch.setattr(cli, "MatrixClient", _NoKey)
+    monkeypatch.setattr(cli, "_gflight_results", _gf_rows)
+    monkeypatch.setattr(cli, "_render_gflight_table", _paint)
+
+    legs, opts = _gf_legs_and_opts()
+    # No `pytest.raises`: something reached the user, so the command has an
+    # answer to stand behind.
+    cli._run_enriched_path(
+        legs=legs,
+        opts=opts,
+        top_n=3,
+        run_pp=False,
+        sel=None,
+        matrix_url=False,
+        google_url=False,
+        pick=None,
+        rps=1.0,
+        impersonate="chrome",
+        no_cache=True,
+    )
+
+    assert painted == rows, "the Google rows went down with the Matrix key"
+    printed = buf.getvalue()
+    assert "Matrix search failed" in printed, printed
+    assert "could not resolve the Matrix API key" in printed, printed
+
+
+def test_a_failure_after_matrix_answered_is_still_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A weave stashes what it catches, and every stash has to be read.
+
+    The transport not closing is the ordinary shape: `execute()` has already
+    returned, so the answer is real and the command is right to print it — but
+    the stash sat under a reader that only runs when Matrix produced NOTHING,
+    which made the failure exit 0 with stderr byte-empty. It is a note beside a
+    real answer, not the outcome, and not silence."""
+    from flight_cli import cli
+    from flight_cli.models import SearchResult
+
+    buf = _capture(monkeypatch)
+
+    class _AnswersThenBreaks:
+        def __init__(self, **_kw: object) -> None:
+            pass
+
+        async def __aenter__(self) -> _AnswersThenBreaks:
+            return self
+
+        async def __aexit__(self, *_a: object) -> None:
+            raise RuntimeError(f"the transport would not close{_ESCAPES}")
+
+        async def execute(self, _search: object, **_kw: object) -> object:
+            return SearchResult.model_validate({"solutions": []})
+
+    def _no_gf_rows(*_a: object, **_kw: object) -> list[Any]:
+        return []
+
+    monkeypatch.setattr(cli, "MatrixClient", _AnswersThenBreaks)
+    monkeypatch.setattr(cli, "_gflight_results", _no_gf_rows)
+
+    def _no_repaint(*_a: object, **_kw: object) -> None:
+        return None
+
+    monkeypatch.setattr(cli, "_render_merged", _no_repaint)
+    legs, opts = _gf_legs_and_opts()
+    # Matrix answered, so this is not an exit — but it is not silence either.
+    cli._run_enriched_path(
+        legs=legs,
+        opts=opts,
+        top_n=3,
+        run_pp=False,
+        sel=None,
+        matrix_url=False,
+        google_url=False,
+        pick=None,
+        rps=1.0,
+        impersonate="chrome",
+        no_cache=True,
+    )
+
+    printed = buf.getvalue()
+    assert "the transport would not close" in printed, printed
+    _assert_drives_no_terminal(printed)
+
+
+def test_an_orderly_exit_from_inside_a_guard_is_not_reported_as_a_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`typer.Exit` subclasses `RuntimeError` on the installed click, so every
+    bare `except Exception` in this file is wide enough to catch one.
+
+    Caught, an orderly exit becomes a message quoting its exit CODE — "could not
+    be rendered: 0" — and the command carries on as though a third-party library
+    had failed. Nothing raises one inside these bodies today; this is what makes
+    the day one does a loud failure rather than a wrong sentence."""
+    import click
+
+    from flight_cli import cli
+
+    assert issubclass(typer.Exit, Exception), "the guard below is only needed while this holds"
+
+    buf = _capture(monkeypatch)
+    state: dict[str, Any] = {}
+
+    def _exits(*_a: object, **_kw: object) -> None:
+        raise typer.Exit(0)
+
+    monkeypatch.setattr(cli, "_render_gflight_table", _exits)
+    with pytest.raises(click.exceptions.Exit) as excinfo:
+        cli._paint_first_gf_table(
+            state, [cast("Any", object())], legs=(), top_n=3, awards_only=False
+        )
+
+    assert excinfo.value.exit_code == 0
+    assert "paint_err" not in state, state
+    assert buf.getvalue() == "", buf.getvalue()
+
+
+def test_a_table_the_google_only_path_cannot_draw_is_typed_and_non_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--fast` has no second backend, so the renderer meeting a drifted row
+    shape IS the outcome. Untyped it is a traceback with nothing on either
+    stream that a user could act on; the weave beside it has said this in a
+    sentence since the day it was written."""
+    from flight_cli import cli
+
+    buf = _capture(monkeypatch)
+
+    def _rows(*_a: object, **_kw: object) -> list[Any]:
+        return [cast("Any", object())]
+
+    def _cannot_draw(*_a: object, **_kw: object) -> None:
+        raise AttributeError(f"row shape drifted{_ESCAPES}")
+
+    monkeypatch.setattr(cli, "_gflight_results", _rows)
+    monkeypatch.setattr(cli, "_render_gflight_table", _cannot_draw)
+    legs, opts = _gf_legs_and_opts()
+    with pytest.raises(typer.Exit) as excinfo:
+        cli._run_gflight_path(legs=legs, opts=opts, top_n=3, json_out=False)
+
+    assert excinfo.value.exit_code == 1
+    printed = buf.getvalue()
+    assert "could not be rendered" in printed, printed
+    assert "row shape drifted" in printed, printed
     _assert_drives_no_terminal(printed)
 
 

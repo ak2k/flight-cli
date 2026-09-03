@@ -12,6 +12,7 @@ one fan-out shares.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import threading
 import time
 from typing import Any, ClassVar, cast, override
@@ -34,12 +35,17 @@ _JOIN_TIMEOUT_S = 5.0
 # Deliberately short: with mutual exclusion this timeout IS the pass, so the
 # suite pays it once.
 _BARRIER_TIMEOUT_S = 0.3
-# Short enough that a worker parked on a round it should never have parked on
-# is a test that fails in seconds rather than one that waits out the real
-# ceiling. Passing must not depend on a park timing out.
-_CROSSED_CEILING_S = 0.05
+# A park ends only when the round is released, so a probe that is still alive is
+# a probe that parked. Short, because it is paid on every pass of the loop that
+# uses it, and the signal it reads is the verdict list rather than the clock.
+_PARKED_S = 0.02
+# Enough short-lived threads that this platform hands the same id out again —
+# 60 sequential threads produced 3 distinct ids when this was measured.
+_RECYCLE_ROUNDS = 40
 # How long a crossed pair is given to spend its budgets down. Reached only when
-# neither budget moves, which is the failure.
+# the budgets move without ever running out, which is one of the two failures
+# this shape has; the other — a pair that parks on each other and never moves at
+# all — is a worker that does not come back, and the join timeout reports that.
 _CROSSED_DEADLINE_S = 2.0
 
 
@@ -297,10 +303,10 @@ def _meet_until_refused(meet: Any, deadline: float, rungs: list[float]) -> Any:
     """Keep meeting one wall until its budget says stop, or time runs out.
 
     Returning None is the wall answering. Anything else means the worker was
-    still asking when the clock ran out, which is what a pair holding each
-    other's rounds looks like from outside. Every positive backoff handed out on
-    the way is recorded: that count is the budget actually spent, which the
-    final `spent` cannot show once a round has been re-elected."""
+    still being handed rungs when the clock ran out, which is what a budget
+    that keeps being refunded looks like from outside. Every positive backoff
+    handed out on the way is recorded: that count is the budget actually spent,
+    which the final `spent` cannot show once a round has been re-elected."""
     while time.monotonic() < deadline:
         verdict = meet()
         if verdict is None:
@@ -310,27 +316,21 @@ def _meet_until_refused(meet: Any, deadline: float, rungs: list[float]) -> Any:
     return "still asking"
 
 
-def test_two_workers_that_cross_walls_do_not_hold_what_the_other_waits_for(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_two_workers_that_cross_walls_do_not_hold_what_the_other_waits_for() -> None:
     """One worker can meet BOTH walls — a cabin throttled on one attempt and
     reset on the next — and two of them can cross.
 
     A owns the throttle round and then meets the network; B owns the network
     round and then meets the wall. If a worker parks while still owning the
-    round its sibling needs, neither budget ever moves: the park times out, the
-    round it is waiting on is no more exhausted than before, so it is told to
-    retry, meets the other wall again and parks again. No rungs are spent, so
-    nothing ever exhausts to end it — and it costs a multi-megabyte GET per
-    worker per timeout, forever.
+    round its sibling needs, neither budget ever moves: each waits on a round
+    whose owner has stopped probing it, no rung is spent, and nothing exhausts
+    to end it. A park ends when the round is released and at no other time, so
+    that pair waits for as long as the process lives.
 
     Every other ladder test drives one arm, which is why this shape had no
     cover. What makes it terminate is giving up a round before waiting on
     another: a worker that has stopped meeting its own wall is not probing it,
     and a round nobody probes must not be one somebody waits for."""
-    # A park must never be how this passes, and a failing run must not leave
-    # two threads asleep for two minutes after the assertion.
-    monkeypatch.setattr(_gflight_ids, "_LADDER_WAIT_CEILING_S", _CROSSED_CEILING_S)
     ladder = _ladder()
     crossed = threading.Barrier(2)
     outcomes: dict[str, Any] = {}
@@ -356,12 +356,19 @@ def test_two_workers_that_cross_walls_do_not_hold_what_the_other_waits_for(
             # measuring the harness rather than the ladder.
             ladder.stand_down()
 
+    # Daemons, because the failure this test exists for is a pair that never
+    # comes back: the assertion below reports it, and a non-daemon pair parked
+    # on each other would hold the interpreter open after the report.
     threads = [
         threading.Thread(
-            target=worker, args=("owns-the-wall", ladder.throttled, ladder.transport_failed)
+            target=worker,
+            args=("owns-the-wall", ladder.throttled, ladder.transport_failed),
+            daemon=True,
         ),
         threading.Thread(
-            target=worker, args=("owns-the-network", ladder.transport_failed, ladder.throttled)
+            target=worker,
+            args=("owns-the-network", ladder.transport_failed, ladder.throttled),
+            daemon=True,
         ),
     ]
     for t in threads:
@@ -371,10 +378,6 @@ def test_two_workers_that_cross_walls_do_not_hold_what_the_other_waits_for(
 
     assert not any(t.is_alive() for t in threads), "a worker never came back"
     assert outcomes == {"owns-the-wall": None, "owns-the-network": None}, outcomes
-    # Giving a round UP is not giving its budget back. `refill()` here instead
-    # of `release()` is the plausible misreading — "I have stopped probing, so
-    # take the rungs back" — and it silently converts a budget spent on evidence
-    # into one a crossing refunds, at one extra multi-megabyte GET per arm.
     # One ladder per arm and no more. Giving a round UP is not giving its budget
     # back: `refill()` here instead of `release()` is the plausible misreading —
     # "I have stopped probing, so take the rungs back" — and it silently turns a
@@ -560,6 +563,166 @@ def test_one_rung_is_not_handed_to_two_workers_at_once(arm: str, meet_the_wall: 
     for t in threads:
         t.join(timeout=_JOIN_TIMEOUT_S)
     assert round_.spent == 2, "two workers were authorised on one rung"
+
+
+def test_a_call_with_no_attempts_left_does_not_park_for_the_prober() -> None:
+    """A call whose own attempts are spent cannot use a backoff, so waiting for
+    one is pure latency: the owner's remaining ladder is several full request
+    timeouts, and the answer arrives after this call has already given up. The
+    park is also unbounded from here — nothing but the owner's report ends it."""
+    ladder = _ladder()
+    holding = threading.Event()
+    took_it = threading.Event()
+
+    def prober() -> None:
+        ladder.transport_failed()  # owns the round
+        took_it.set()
+        holding.wait(timeout=_JOIN_TIMEOUT_S)  # still out, the way a GET is
+
+    owner = threading.Thread(target=prober, daemon=True)
+    owner.start()
+    assert took_it.wait(timeout=_JOIN_TIMEOUT_S), "the prober never took the round"
+
+    verdict: list[Any] = []
+    asked = threading.Event()
+
+    def spent_caller() -> None:
+        asked.set()
+        verdict.append(ladder.transport_failed(final=True))
+
+    caller = threading.Thread(target=spent_caller, daemon=True)
+    caller.start()
+    assert asked.wait(timeout=_JOIN_TIMEOUT_S)
+    caller.join(timeout=_JOIN_TIMEOUT_S)
+
+    assert not caller.is_alive(), "a call with nothing left to spend parked anyway"
+    assert verdict == [None], verdict
+    holding.set()
+    owner.join(timeout=_JOIN_TIMEOUT_S)
+
+
+def test_the_caller_tells_the_ladder_when_an_attempt_is_its_last(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`retry_throttled` is where "last attempt" is known, so it is where the
+    ladder has to be told.
+
+    Told nothing, a call whose own budget is spent asks for a backoff like any
+    other and parks on whichever prober is out — several full request timeouts
+    of waiting for a number it will throw away. Driven through the real caller,
+    because the ladder alone cannot know."""
+    with _gflight_ids.shared_throttle_ladder():
+        ladder = _gflight_ids._fanout_ladder.get()
+        assert ladder is not None
+        holding = threading.Event()
+        took_it = threading.Event()
+
+        def prober() -> None:
+            ladder.transport_failed()  # owns the round
+            took_it.set()
+            holding.wait(timeout=_JOIN_TIMEOUT_S)  # still out, the way a GET is
+
+        owner = threading.Thread(target=prober, daemon=True)
+        owner.start()
+        assert took_it.wait(timeout=_JOIN_TIMEOUT_S), "the prober never took the round"
+
+        # Patched AFTER the ladder was built, so the shared round keeps the
+        # rungs the prober is climbing and only THIS call is out of attempts.
+        monkeypatch.setattr(_gflight_ids, "_TRANSPORT_RETRY_ATTEMPTS", 0)
+        outcome: list[str] = []
+
+        def spent_caller() -> None:
+            def always_resets() -> object:
+                raise _gflight_ids._RetryableTransportError("connection reset by peer")
+
+            try:
+                _gflight_ids.retry_throttled(always_resets)
+            except GfTransportError:
+                outcome.append("unreachable")
+
+        # The fan-out's ladder rides a ContextVar, and a bare thread starts
+        # with an empty context — it would build a ladder of its own, own it,
+        # and never park at all. `anyio.to_thread.run_sync` copies the caller's
+        # context in production; this is that copy, made explicit.
+        in_the_fanout = contextvars.copy_context()
+        caller = threading.Thread(target=lambda: in_the_fanout.run(spent_caller), daemon=True)
+        caller.start()
+        caller.join(timeout=_JOIN_TIMEOUT_S)
+
+        parked = caller.is_alive()
+        holding.set()
+        owner.join(timeout=_JOIN_TIMEOUT_S)
+        caller.join(timeout=_JOIN_TIMEOUT_S)
+        assert not parked, "a call with no attempts left parked for the prober"
+        assert outcome == ["unreachable"], outcome
+
+
+def test_a_last_attempt_still_books_the_rung_that_ends_the_round() -> None:
+    """The other half: a caller with nothing left is still the owner of a round,
+    and the rung it is about to walk away from is the one that says the wall has
+    been measured to the end.
+
+    Left unbooked, the round is merely released — so every waiter wakes to a
+    budget that looks unspent and pays a GET each to learn what this call
+    already knows. Measured on a four-cabin outage: 9 GETs against the 6 the
+    memo's budget table states."""
+    ladder = _ladder()
+    for _ in range(_gflight_ids._TRANSPORT_RETRY_ATTEMPTS):
+        assert ladder.transport_failed() is not None  # this thread owns the round
+    assert ladder.transport_failed(final=True) is None
+
+    sibling: list[Any] = []
+    asked = threading.Event()
+
+    def meet_the_same_wall() -> None:
+        asked.set()
+        sibling.append(ladder.transport_failed())
+
+    t = threading.Thread(target=meet_the_same_wall, daemon=True)
+    t.start()
+    assert asked.wait(timeout=_JOIN_TIMEOUT_S)
+    t.join(timeout=_JOIN_TIMEOUT_S)
+    assert not t.is_alive(), "the round was released rather than ended, so a sibling parked on it"
+    assert sibling == [None], sibling
+
+
+def test_a_round_left_by_a_dead_thread_is_not_handed_to_a_later_one() -> None:
+    """Ownership is a thread, not its id, and this is the difference.
+
+    Thread ids are unique only among LIVE threads: this platform hands the same
+    one to a later worker within a few dozen short-lived threads. A worker given
+    a dead owner's id would take that round as its own and inherit the rungs the
+    dead thread had already spent — a silently shortened budget on a wall it has
+    not met. Holding the thread object cannot be confused that way, since the
+    dead thread is kept alive by the round that names it.
+
+    The trigger is out of reach today (`retry_throttled` stands its owner down
+    from a `finally`, on every door out), so this pins the property rather than
+    a live defect. On a platform that never recycles an id it passes for free."""
+    for _ in range(_RECYCLE_ROUNDS):
+        ladder = _ladder()
+        # A thread that takes the round and dies still owning it — the one shape
+        # the `finally` cannot cover.
+        dead = threading.Thread(target=ladder.throttled)
+        dead.start()
+        dead.join(timeout=_JOIN_TIMEOUT_S)
+
+        verdict: list[Any] = []
+        asked = threading.Event()
+
+        def probe(verdict: list[Any] = verdict, asked: threading.Event = asked) -> None:
+            asked.set()
+            verdict.append(ladder.throttled())  # noqa: B023 — one ladder per pass, by construction
+
+        later = threading.Thread(target=probe, daemon=True)
+        later.start()
+        assert asked.wait(timeout=_JOIN_TIMEOUT_S)
+        later.join(timeout=_PARKED_S)
+        parked = verdict == []
+        with ladder._lock:  # whatever it did, let it go
+            ladder._wall.release()
+        later.join(timeout=_JOIN_TIMEOUT_S)
+        assert parked, f"a later thread was handed the round a dead one left: {verdict}"
 
 
 def test_a_nested_scope_restores_the_ladder_it_replaced() -> None:

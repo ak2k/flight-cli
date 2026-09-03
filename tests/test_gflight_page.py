@@ -119,13 +119,13 @@ def _one_prober_per_wall(
     verdicts: list[float | None] = []
     seen = threading.Lock()
 
-    def wrapped(self: Any) -> Any:
+    def wrapped(self: Any, **kwargs: Any) -> Any:
         first = not getattr(reported, "done", False)
         if first:
             reported.done = True
             with contextlib.suppress(threading.BrokenBarrierError):
                 gate.wait(timeout=_WAVE_TIMEOUT_S)
-        verdict = real(self)
+        verdict = real(self, **kwargs)
         if first:
             with seen:
                 verdicts.append(verdict)
@@ -2050,29 +2050,25 @@ def test_the_documented_round_trip_costs_compose_from_their_factors(client: Any)
     assert len(fake.gets) == 1 + pins == 11, fake.gets
 
 
-# One GET stands in for fli's request timeout; the ceiling for the ladder wait.
-# The RATIO is what the test is about: an owner's transport ladder is three
-# GETs plus backoffs, so it outlasts the ceiling here exactly as it does at the
-# shipped defaults (~184 s of ladder against a 120 s wait).
+# One GET, standing in for fli's request timeout: long enough that a waiter
+# released early would start its own while the owner's is still in flight, which
+# is the thing being counted below.
 _SLOW_GET_S = 0.20
-_SHORT_CEILING_S = 0.30
 
 
 def test_a_waiter_does_not_probe_while_the_prober_is_still_out(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A park that TIMES OUT and one that is RELEASED must not read the same.
+    """A waiter's park ends when the owner reports and at no other time.
 
-    Every attempt of an owner's ladder can burn the full request timeout, so the
-    owner reports later than the wait allows — deterministically, at the shipped
-    defaults. Treated as a release, the timeout tells three waiters to retry
-    while the owner's probe is still in flight: four ladders serialised by a
-    clock, which is the amplification the shared budget exists to remove, at the
-    one moment it matters.
+    Every attempt of an owner's ladder can burn the full request timeout, so an
+    owner is slow by construction. Any rule that lets a waiter go before the
+    report arrives — a clock, a poll, a wait that reads running out as an
+    answer — sends three waiters to GET while the owner's probe is still in
+    flight: four ladders against one wall, which is the amplification the shared
+    budget exists to remove, at the one moment it matters.
 
-    The ceiling is for an owner that never reports, not for one that is slow.
     What bounds a waiter is its own attempt count."""
-    monkeypatch.setattr(gfid, "_LADDER_WAIT_CEILING_S", _SHORT_CEILING_S)
     monkeypatch.setattr(gfid, "_THROTTLE_BACKOFF_S", 0.01)  # backoffs out of the way
 
     cabins = 4

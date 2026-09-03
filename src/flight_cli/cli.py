@@ -657,6 +657,8 @@ def _run(
     except MatrixApiError as e:
         _print_matrix_error(e)
         raise typer.Exit(1) from e
+    except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
+        raise
     except Exception as e:
         # `execute()` wraps what Matrix answered; it does not wrap a DNS failure
         # or a refused connection. Untyped, those leave here as a rich traceback
@@ -1490,6 +1492,8 @@ def _run_gflight_path(
     except GfBackendError as e:
         err.print(_gf_refusal(e).message)
         raise typer.Exit(1) from e
+    except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
+        raise
     except Exception as e:
         err.print(f"[red]Google Flights query failed:[/] {_safe_text(e)}")
         raise typer.Exit(1) from e
@@ -1525,7 +1529,19 @@ def _run_gflight_path(
 
     awards_only = sel.awards_only if sel is not None else False
     if not awards_only:
-        _render_gflight_table(results, legs=legs, top_n=top_n, match_carriers=_match_carriers(legs))
+        try:
+            _render_gflight_table(
+                results, legs=legs, top_n=top_n, match_carriers=_match_carriers(legs)
+            )
+        except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
+            raise
+        except Exception as e:
+            # The table IS the output on this path — there is no Matrix half to
+            # fall back on — so a renderer meeting a drifted row shape decides
+            # the command. Typed and non-zero, because the alternative is a
+            # traceback with nothing on either stream that a user could act on.
+            _report_paint_failure(e)
+            raise typer.Exit(1) from e
 
     # Always adapt to SearchResult shape so the URL emission has segment
     # info for the pinned link (cheap: just shuffles existing fields).
@@ -1573,6 +1589,8 @@ def _paint_first_gf_table(
     if gf and not awards_only:
         try:
             _render_gflight_table(gf, legs=legs, top_n=top_n, match_carriers=_match_carriers(legs))
+        except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
+            raise
         except Exception as e:  # noqa: BLE001 — see the docstring
             state["paint_err"] = e
         else:
@@ -1581,21 +1599,78 @@ def _paint_first_gf_table(
         console.print("[yellow]Google Flights: no results; awaiting Matrix…[/]")
 
 
+async def _matrix_into(
+    state: dict[str, Any], search: Search, rps: float, impersonate: str, cache: bool
+) -> None:
+    """The Matrix half of a weave: run the search, stash every way it can fail.
+
+    The client is BUILT in here, inside the task, because building it resolves
+    the API key — the disk cache first, then the network. Built beside the task
+    group instead, a key that will not resolve ends the command before the
+    Google Flights thread is ever started, and the user gets nothing on a query
+    `--fast` answers with a table. In here it is one half of a weave failing,
+    which is what the other half is for.
+
+    Nothing leaves this task. Anything `execute()` does not wrap — a connect
+    timeout, a TLS failure, a key that will not resolve, a transport that will
+    not close — would cancel the still-pending Google Flights paint and end the
+    command as a bare ExceptionGroup. Every stash here is read after the weave.
+    """
+    try:
+        async with MatrixClient(rps=rps, impersonate=impersonate) as c:
+            state["matrix"] = await c.execute(search, cache=cache)
+    except MatrixApiError as e:
+        state["matrix_err"] = e
+    except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
+        raise
+    except Exception as e:  # noqa: BLE001 — see the docstring: this task must not tear the group down
+        state["matrix_unexpected"] = e
+
+
 def _run_the_weave(go: Callable[[], Coroutine[Any, Any, None]], state: dict[str, Any]) -> None:
     """Run the weave and stash anything that escapes it, so the reporters below
     it decide the outcome.
 
-    The `_matrix` task guards its own body, but the client is CONSTRUCTED before
-    the task group opens — and constructing it resolves the API key, which
-    reaches the disk cache and then the network. A stale cache with an
-    unreachable bootstrap therefore failed before any task existed, on the most
-    ordinary command there is, and left a traceback with both streams empty."""
+    Each task guards its own body, so what reaches here is what the weave
+    itself does: opening the loop, starting the group, and the group's own
+    unwinding. Untyped, any of that is a traceback with both streams empty on
+    the most ordinary command there is — and the rows the other backend already
+    has go with it. A stash is not an outcome: every caller reads it, including
+    the callers whose other half succeeded."""
     try:
         anyio.run(go)
-    except MatrixApiError as e:
-        state["matrix_err"] = e
+    except (typer.Exit, typer.Abort):
+        # An orderly exit is a decision, not a failure. `typer.Exit` subclasses
+        # `RuntimeError` on the installed click, so the arm below would catch it
+        # and report the exit CODE as a Matrix error message.
+        raise
     except Exception as e:  # noqa: BLE001 — reported by _report_search_matrix_failure
         state["matrix_unexpected"] = e
+
+
+def _report_paint_failure(e: object) -> None:
+    """The one sentence for a Google Flights table that could not be drawn.
+
+    Both paths that draw one say it: the weave, where Matrix may still answer,
+    and the Google-only path, where it is the whole outcome. What differs is
+    what happens next, not what the user is told."""
+    err.print(f"[yellow]Google Flights results could not be rendered:[/] {_safe_text(e)}")
+
+
+def _report_weave_aftermath(state: dict[str, Any]) -> None:
+    """What the weave left behind on a run that ANSWERED.
+
+    A Google Flights table that could not be drawn, and a Matrix half that
+    failed after producing its result — a transport that would not close, a
+    console write that failed. Neither is the outcome, and neither may be
+    silence: a value stashed on one path and read only on another is a failure
+    the command hid."""
+    if state.get("paint_err") is not None:
+        _report_paint_failure(state["paint_err"])
+    if state.get("matrix_unexpected") is not None:
+        err.print(
+            f"[yellow]Matrix answered, then failed:[/] {_safe_text(state['matrix_unexpected'])}"
+        )
 
 
 def _report_enriched_gf_failure(e: Exception) -> None:
@@ -1657,29 +1732,15 @@ def _run_enriched_path(
     awards_only = sel.awards_only if sel is not None else False
     state: dict[str, Any] = {}
 
-    async def _matrix(c: MatrixClient) -> None:
-        try:
-            state["matrix"] = await c.execute(matrix_search, cache=not no_cache)
-        except MatrixApiError as e:
-            state["matrix_err"] = e
-        except Exception as e:  # noqa: BLE001 — see below: this task must not tear down the group
-            # Anything `execute()` does not wrap — a connect timeout, a TLS
-            # failure — must NOT leave this task, or the group cancels the
-            # still-pending Google Flights paint and the whole command ends as a
-            # bare ExceptionGroup. Stash it and report after the weave, so the
-            # rows Google already returned survive a Matrix failure.
-            state["matrix_unexpected"] = e
-
     async def _go() -> None:
-        async with (
-            MatrixClient(rps=rps, impersonate=impersonate) as c,
-            anyio.create_task_group() as tg,
-        ):
-            tg.start_soon(_matrix, c)
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(_matrix_into, state, matrix_search, rps, impersonate, not no_cache)
             # Google Flights is sync (curl_cffi) — run it in a worker thread so the
             # Matrix request progresses concurrently on the event loop.
             try:
                 gf = await anyio.to_thread.run_sync(_gflight_results, legs, opts, top_n)
+            except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
+                raise
             except Exception as e:  # noqa: BLE001 - reported below; Matrix may still succeed
                 state["gf_err"] = e
                 gf = []
@@ -1697,18 +1758,18 @@ def _run_enriched_path(
     painted = bool(gf) and not awards_only and state.get("paint_err") is None
     if "gf_err" in state:
         _report_enriched_gf_failure(state["gf_err"])
-    if state.get("paint_err") is not None:
-        err.print(
-            f"[yellow]Google Flights results could not be rendered:[/] "
-            f"{_safe_text(state['paint_err'])}"
-        )
     matrix_res = state.get("matrix")
     if matrix_res is None:
+        # Every stash is read here: the paint failure is part of why nothing
+        # reached the user, and the Matrix one IS the outcome.
+        if state.get("paint_err") is not None:
+            _report_paint_failure(state["paint_err"])
         _report_search_matrix_failure(state)
         if not painted:
             raise typer.Exit(1)
         return
     matrix_res = cast("SearchResult", matrix_res)
+    _report_weave_aftermath(state)
 
     # Repaint: reconciled GF + Matrix, prices attributed.
     if not awards_only:
@@ -1894,6 +1955,8 @@ def _run_matrix_multi(
                 f"({_safe_text(e.kind)}): {_safe_text(e.message)}[/]"
             )
             return
+        except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
+            raise
         except Exception as e:  # noqa: BLE001 — see below: one cabin is not the group
             # Soft here for the same reason the arm above it is soft, and for
             # one more: an exception leaving this task cancels its siblings and
@@ -1916,6 +1979,8 @@ def _run_matrix_multi(
     except MatrixApiError as e:
         _print_matrix_error(e)
         raise typer.Exit(1) from e
+    except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
+        raise
     except Exception as e:
         # Nothing from a cabin reaches here — those are caught per cabin — so
         # this is the shared client failing to open or close at all. Typed

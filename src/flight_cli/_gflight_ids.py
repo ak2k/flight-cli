@@ -132,13 +132,6 @@ def _backoff_for(attempt: int) -> float:
     return _THROTTLE_BACKOFF_S * (2 ** (attempt - 1)) * (1 + random.random() * 0.5)  # noqa: S311 — jitter, not crypto
 
 
-# How long a waiting worker will trust an owner to report back. Not part of the
-# budget: the owner releases the round from a `finally`, so this only fires if
-# that guarantee is ever broken, and a fan-out that hangs is worse than one that
-# spends an extra request.
-_LADDER_WAIT_CEILING_S = 120.0
-
-
 class _Round:
     """One arm's shared budget: the prober that owns it, the rungs it has spent,
     and the waiters parked on its outcome.
@@ -161,7 +154,14 @@ class _Round:
         self.budget = budget
         self.spent = 0
         self.exhausted = False
-        self.owner: int | None = None
+        # The thread itself, not `get_ident()`: an id is only unique among LIVE
+        # threads and this platform hands the same one out again within a few
+        # dozen short-lived threads. A round is meant to be released by the
+        # thread that took it — `retry_throttled`'s `finally` is what makes that
+        # happen on every door out — and holding the object means that even a
+        # thread that somehow died still owning one cannot have its identity
+        # handed to a later worker, which would inherit a budget it never spent.
+        self.owner: threading.Thread | None = None
         # Set when the owner's round resolves. Replaced per round so a waiter
         # cannot be woken by the previous round's result.
         self.settled = threading.Event()
@@ -218,16 +218,16 @@ class _SharedThrottleLadder:
         self._wall = _Round(_THROTTLE_RETRY_ATTEMPTS)
         self._net = _Round(_TRANSPORT_RETRY_ATTEMPTS)
 
-    def throttled(self) -> float | None:
+    def throttled(self, *, final: bool = False) -> float | None:
         """This worker's call came back throttled. How long to wait before
         trying again, or None when the shared budget is gone.
 
         A non-owner blocks here for the owner's outcome and then retries
         immediately, so its wait is the owner's backoff rather than one of its
-        own."""
-        return self._step(self._wall)
+        own — unless it is `final`; see `_step`."""
+        return self._step(self._wall, final=final)
 
-    def transport_failed(self) -> float | None:
+    def transport_failed(self, *, final: bool = False) -> float | None:
         """A curl-level failure. How long to wait before trying again, or None
         when the shared transport budget is gone.
 
@@ -235,16 +235,25 @@ class _SharedThrottleLadder:
         otherwise eat the whole budget before any retry lands, and the ones that
         arrive last are refused after a single try — their columns then go
         missing from a table that cannot say why."""
-        return self._step(self._net)
+        return self._step(self._net, final=final)
 
-    def _step(self, round_: _Round) -> float | None:
+    def _step(self, round_: _Round, *, final: bool = False) -> float | None:
         """One worker's turn on one arm: own the round and get a rung, or park
-        on the owner's outcome and retry the moment it reports."""
-        me = threading.get_ident()
+        on the owner's outcome and retry the moment it reports.
+
+        `final` is a caller whose OWN attempts are spent. It cannot use a
+        backoff, so it neither parks — the answer would arrive after it has
+        already given up, having cost it the owner's whole remaining ladder in
+        latency — nor takes a round it will not probe. What it still does is
+        spend the rung of a round it already owns: that spend is how a group
+        learns the wall has been measured to the end, and an owner that walked
+        away without booking it would leave every waiter to find an unexhausted
+        round and spend a GET each proving what this call already knows."""
+        me = threading.current_thread()
         with self._lock:
             if round_.exhausted:
                 return None
-            if round_.owner is None:
+            if round_.owner is None and not final:
                 round_.owner = me
             if round_.owner == me:
                 round_.spent += 1
@@ -252,7 +261,9 @@ class _SharedThrottleLadder:
                     round_.exhausted = True
                     round_.release()
                     return None
-                return _backoff_for(round_.spent)
+                return None if final else _backoff_for(round_.spent)
+            if final:
+                return None
             # About to wait on someone else's round. A worker that has stopped
             # meeting the wall it owns is not probing it any more, and a round
             # nobody is probing must not be one somebody else is waiting for:
@@ -267,23 +278,20 @@ class _SharedThrottleLadder:
                 if other is not round_ and other.owner == me:
                     other.release()
             settled = round_.settled
-        while True:
-            released = settled.wait(_LADDER_WAIT_CEILING_S)
-            with self._lock:
-                if round_.exhausted:
-                    return None
-                if released or round_.owner in (None, me):
-                    return 0.0
-                # The clock ran out while a prober is still out. Retrying now is
-                # the amplification this ladder exists to prevent, at the one
-                # moment it matters: a GET here doubles the group's requests
-                # against a wall nobody has finished measuring. The ceiling is
-                # for an owner that never reports, not for one that is slow —
-                # and an owner IS slow by construction, since every attempt of
-                # its ladder can burn the full request timeout, which outlasts
-                # this wait at the shipped defaults. What bounds the waiting is
-                # the caller's own attempt count, not this clock.
-                settled = round_.settled
+        # No clock on this wait, because there is nothing for one to decide.
+        # `release()` sets the very event held here, so waking IS the owner
+        # reporting rather than a poll noticing that it did; a wait that ran out
+        # while the prober was still out could only re-park, and a wait that
+        # treated running out as an answer would send every waiter to retry
+        # against a wall nobody has finished measuring — the amplification this
+        # ladder exists to remove. What bounds the waiting is the caller's own
+        # attempt count, and what guarantees a report arrives at all is
+        # `retry_throttled`'s `finally`. The one thing neither covers is a GET
+        # that never returns: the owner is then a worker thread the task group
+        # is waiting on, so the command is wedged whatever its waiters do.
+        settled.wait()
+        with self._lock:
+            return None if round_.exhausted else 0.0
 
     def succeeded(self, *, network: bool = False) -> None:
         """A call got through: return the rungs it earned back and release the
@@ -316,7 +324,7 @@ class _SharedThrottleLadder:
 
         Every round this worker owns, since a throttled owner whose probe meets
         a reset socket holds one while it climbs the other."""
-        me = threading.get_ident()
+        me = threading.current_thread()
         with self._lock:
             for round_ in (self._wall, self._net):
                 if round_.owner == me:
@@ -1522,8 +1530,15 @@ def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
             except _RetryableTransportError as e:
                 met_network = True
                 net_attempts += 1
-                backoff = ladder.transport_failed()
-                if backoff is None or net_attempts > _TRANSPORT_RETRY_ATTEMPTS:
+                # The ladder is told either way, and told WHICH: a call with no
+                # attempts left cannot use a backoff, so it must not park for
+                # one — that park costs the owner's whole remaining ladder in
+                # latency and the answer arrives after this call has given up.
+                # It is still the ladder's business, because an owner on its
+                # last attempt has a rung to book before it leaves.
+                final = net_attempts > _TRANSPORT_RETRY_ATTEMPTS
+                backoff = ladder.transport_failed(final=final)
+                if final or backoff is None:
                     raise GfTransportError(f"Google Flights could not be reached: {e}") from e
                 log.debug(
                     "gflight transport failure (%s); backoff %.1fs (budget %d)",
@@ -1535,8 +1550,10 @@ def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
                 continue
             except GfThrottledError:
                 wall_attempts += 1
-                backoff = ladder.throttled()
-                if backoff is None or wall_attempts > _THROTTLE_RETRY_ATTEMPTS:
+                # Same shape, and for the same reason, as the arm above.
+                final = wall_attempts > _THROTTLE_RETRY_ATTEMPTS
+                backoff = ladder.throttled(final=final)
+                if final or backoff is None:
                     raise
                 log.debug(
                     "gflight throttled; backoff %.1fs (budget %d)",
@@ -1693,10 +1710,9 @@ def _report_pin_outcome(
             pins,
         )
     elif refused and not served:
-        # "Nothing was served", which is what both docstrings above have always
-        # claimed, rather than "every pin refused". One pin returning a
-        # genuinely empty board used to be enough to suppress the raise, and the
-        # command then reported a round trip whose return boards had stopped
+        # "Nothing was served", rather than "every pin refused": one pin
+        # returning a genuinely empty board is not a served pin, and suppressing
+        # the raise on it reports a round trip whose return boards have stopped
         # parsing as a route with no return flights.
         #
         # The trade, stated: this also raises when one pin refused and the rest
@@ -1706,4 +1722,10 @@ def _report_pin_outcome(
         # one, while "no results" is unrecoverable and indistinguishable from an
         # answer. The loop cannot tell the two empties apart anyway: a pin whose
         # own sub-pins all refused also comes back as nothing.
+        #
+        # The LAST refusal, and any of them would do: the pins are independent
+        # queries, so no one refusal is more authoritative than another about
+        # the trip. The last is the one the counted warning above already names,
+        # so the line the user reads and the exception the caller degrades on
+        # describe the same event.
         raise refused[-1]
