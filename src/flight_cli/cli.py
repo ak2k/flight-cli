@@ -1784,9 +1784,7 @@ def _run_gflight_multi(
                 f"[yellow]Google Flights {escape(cab.value)}: {_safe_text(_gf_refusal(e).note)}.[/]"
             )
         except Exception as e:  # noqa: BLE001 — fli has no documented exception surface
-            err.print(
-                f"[yellow]Google Flights {escape(cab.value)} query failed: {_safe_text(e)}[/]"
-            )
+            err.print(f"[yellow]Google Flights {cab.value} query failed: {_safe_text(e)}[/]")
 
     async def go() -> None:
         async with anyio.create_task_group() as tg:
