@@ -49,6 +49,8 @@ import threading
 import time
 from typing import Any, ClassVar, cast
 
+import anyio
+import anyio.to_thread
 import pytest
 
 from flight_cli import _gflight_ids as gfid
@@ -1540,6 +1542,34 @@ def test_a_refusal_on_every_pin_is_still_the_outcome(client: Any) -> None:
         gfid.search_with_ids(_round_trip_filters(), top_n=3)
 
 
+def test_one_empty_board_among_refusals_does_not_suppress_the_refusal(
+    client: Any,
+) -> None:
+    """ "Nothing was served" is the rule, not "every pin refused".
+
+    The two differ by exactly one pin. A round trip whose return boards have
+    stopped parsing, with a single genuinely empty board among them, produced
+    `None` — which the caller renders as "no results (or none matched the
+    routing)" and exits 0. That is a wrong answer, not a partial one: the user
+    is told this route has no return flights when what happened is that we can
+    no longer read the page.
+
+    The trade the other way is deliberate. This also raises when one pin refused
+    and the rest were honestly empty, preferring a false refusal to a false "no
+    flights" — a refusal degrades to Matrix or exits with a reason, while "no
+    results" is unrecoverable."""
+    empty = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
+    empty[2] = None
+    empty[3] = None
+    client(
+        _FakeResponse(text=_board_of(3)),  # the outbound board
+        _FakeResponse(text=_page(json.dumps(empty))),  # pin 1: a real empty board
+        _FakeResponse(text=_SHAPE_CHANGE_PAGE),  # pins 2-3 and on: refusals
+    )
+    with pytest.raises(GfPageShapeError):
+        gfid.search_with_ids(_round_trip_filters(), top_n=3)
+
+
 def test_a_throttle_on_a_later_pin_keeps_what_was_already_served(
     client: Any, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1986,3 +2016,93 @@ def test_the_documented_round_trip_costs_compose_from_their_factors(client: Any)
     with pytest.raises(GfPageShapeError):
         gfid.search_with_ids(_round_trip_filters(), top_n=10)
     assert len(fake.gets) == 1 + pins == 11, fake.gets
+
+
+# One GET stands in for fli's request timeout; the ceiling for the ladder wait.
+# The RATIO is what the test is about: an owner's transport ladder is three
+# GETs plus backoffs, so it outlasts the ceiling here exactly as it does at the
+# shipped defaults (~184 s of ladder against a 120 s wait).
+_SLOW_GET_S = 0.20
+_SHORT_CEILING_S = 0.30
+
+
+def test_a_waiter_does_not_probe_while_the_prober_is_still_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A park that TIMES OUT and one that is RELEASED must not read the same.
+
+    Every attempt of an owner's ladder can burn the full request timeout, so the
+    owner reports later than the wait allows — deterministically, at the shipped
+    defaults. Treated as a release, the timeout tells three waiters to retry
+    while the owner's probe is still in flight: four ladders serialised by a
+    clock, which is the amplification the shared budget exists to remove, at the
+    one moment it matters.
+
+    The ceiling is for an owner that never reports, not for one that is slow.
+    What bounds a waiter is its own attempt count."""
+    monkeypatch.setattr(gfid, "_LADDER_WAIT_CEILING_S", _SHORT_CEILING_S)
+    monkeypatch.setattr(gfid, "_THROTTLE_BACKOFF_S", 0.01)  # backoffs out of the way
+
+    cabins = 4
+    starts: list[int] = []
+    inflight = {"n": 0}
+    guard = threading.Lock()
+
+    def slow_and_dead() -> object:
+        with guard:
+            starts.append(inflight["n"])  # how many GETs were already out
+            inflight["n"] += 1
+        _real_sleep(_SLOW_GET_S)  # the request timeout burning down
+        with guard:
+            inflight["n"] -= 1
+        raise gfid._RetryableTransportError("read timeout")
+
+    def worker() -> str:
+        try:
+            gfid.retry_throttled(slow_and_dead)
+        except GfTransportError:
+            return "unreachable"
+        return "served"
+
+    async def fan_out() -> list[str]:
+        out: list[str] = []
+
+        async def one() -> None:
+            out.append(await anyio.to_thread.run_sync(worker))
+
+        async with anyio.create_task_group() as tg:
+            for _ in range(cabins):
+                tg.start_soon(one)
+        return out
+
+    with gfid.shared_throttle_ladder():
+        outcomes = anyio.run(fan_out)
+
+    assert outcomes == ["unreachable"] * cabins
+    # The wave each worker had already committed to, then the owner probing
+    # ALONE. A GET starting beside another after the wave is a waiter that took
+    # a timeout for an answer.
+    assert starts[:cabins] == list(range(cabins)), starts
+    assert all(n == 0 for n in starts[cabins:]), starts
+    one_ladder = gfid._TRANSPORT_RETRY_ATTEMPTS + 1
+    assert len(starts) == one_ladder + (cabins - 1) == 6, starts
+
+
+def test_a_payload_too_short_to_hold_a_board_is_a_typed_refusal_not_a_traceback(
+    client: Any,
+) -> None:
+    """Both callers establish the arity before asking, so this guard is defence
+    in depth — and a defence nothing measures is one a later reader deletes as
+    dead code.
+
+    What it defends is the difference between a refusal that degrades to Matrix
+    and an `IndexError` reaching the user, which is the one outcome this module
+    exists to prevent."""
+    with pytest.raises(GfPageShapeError, match="too few to count a board"):
+        gfid._board_row_count([[], []])
+
+    # And through the real path: a decodable blob too short to reach [3] is an
+    # answer the caller can act on, not a crash.
+    client(_FakeResponse(text=_page(json.dumps([0, 1]))))
+    with pytest.raises(GfBackendError):
+        gfid._one_call(_FILTERS)

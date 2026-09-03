@@ -12,7 +12,7 @@ cabin auto-derivation."""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import typer
@@ -677,3 +677,75 @@ def test_a_round_trip_says_how_many_outbounds_it_will_actually_combine(
     if expected:
         assert f"up to {pinned_fanout(top_n)} cheapest" in printed, printed
         assert str(top_n) not in printed, "the note must not quote the number it is correcting"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param(["search", "JFK", "LHR"], id="the-default-enriched-path"),
+        pytest.param(["search", "JFK", "LHR", "--fast"], id="fast-skips-matrix"),
+        pytest.param(["search", "JFK", "LHR", "--format", "json"], id="json"),
+        pytest.param(["search", "JFK", "LHR", "--cabin", "y,j"], id="multi-cabin"),
+    ],
+)
+def test_every_round_trip_surface_says_how_many_outbounds_it_combines(
+    monkeypatch: pytest.MonkeyPatch, command: list[str]
+) -> None:
+    """The helper had a unit test and not one call site was pinned: deleting the
+    call from all three left the suite green and every surface silent.
+
+    Driven through the real commands, because "which surfaces say it" is the
+    whole requirement. `--format json` is here for the second half of it — the
+    note is stderr, so the document on stdout stays a document."""
+    import json as _json
+    from datetime import date as _date
+    from datetime import timedelta as _timedelta
+
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    row = _one_gflight_row()
+
+    def _rows(*_a: object, **_kw: object) -> list[Any]:
+        return [row]
+
+    def _by_cabin(**kw: Any) -> dict[Any, list[Any]]:
+        return {c: [row] for c in kw["cabins"]}
+
+    monkeypatch.setattr(cli, "_gflight_results", _rows)
+    monkeypatch.setattr(cli, "_run_gflight_multi", _by_cabin)
+
+    def _gflight_backend(**_kw: object) -> str:
+        return cast("str", cli.BACKEND_GFLIGHT)
+
+    monkeypatch.setattr(cli, "_pick_backend", _gflight_backend)
+
+    dep = _date.today() + _timedelta(days=45)
+    ret = dep + _timedelta(days=7)
+    result = CliRunner().invoke(
+        cli.app,
+        # `--cash-only` so the JSON branch is reached: award output owns stdout
+        # when it runs, and this is about where the NOTE goes.
+        [
+            *command,
+            "--dep",
+            dep.isoformat(),
+            "--return",
+            ret.isoformat(),
+            "-n",
+            "30",
+            "--cash-only",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    # This exact sentence, not merely the words: the multi-cabin path also
+    # prints the join note, which says something adjacent about the same cap and
+    # would answer for a call site that is no longer there.
+    assert "combines returns against up to" in result.stderr, result.stderr
+    # stderr on every surface, which is what lets the JSON case have it at all:
+    # a document on stdout stays a document.
+    if "json" in command:
+        _json.loads(result.stdout)  # the assertion is that this does not raise
+        assert "cheapest outbounds" not in result.stdout, result.stdout

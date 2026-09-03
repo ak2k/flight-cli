@@ -19,7 +19,7 @@ from typing import Any, ClassVar, cast, override
 import pytest
 
 from flight_cli import _gflight_ids
-from flight_cli._gf_errors import GfThrottledError, GfTransportError
+from flight_cli._gf_errors import GfPageShapeError, GfThrottledError, GfTransportError
 from flight_cli._gflight_ids import _is_consent_page, _is_page_throttled, _is_throttle_block
 
 # A genuine RPC throttle body: HTTP 200 wrapper with a code-13 ErrorResponse.
@@ -293,15 +293,20 @@ class _RacingInt(int):
         return int(self) + other
 
 
-def _meet_until_refused(meet: Any, deadline: float) -> Any:
+def _meet_until_refused(meet: Any, deadline: float, rungs: list[float]) -> Any:
     """Keep meeting one wall until its budget says stop, or time runs out.
 
     Returning None is the wall answering. Anything else means the worker was
     still asking when the clock ran out, which is what a pair holding each
-    other's rounds looks like from outside."""
+    other's rounds looks like from outside. Every positive backoff handed out on
+    the way is recorded: that count is the budget actually spent, which the
+    final `spent` cannot show once a round has been re-elected."""
     while time.monotonic() < deadline:
-        if meet() is None:
+        verdict = meet()
+        if verdict is None:
             return None
+        if verdict:
+            rungs.append(verdict)
     return "still asking"
 
 
@@ -329,15 +334,22 @@ def test_two_workers_that_cross_walls_do_not_hold_what_the_other_waits_for(
     ladder = _ladder()
     crossed = threading.Barrier(2)
     outcomes: dict[str, Any] = {}
+    rungs: list[float] = []
+    handed = threading.Lock()
     deadline = time.monotonic() + _CROSSED_DEADLINE_S
 
     def worker(tag: str, own: Any, then_meet: Any) -> None:
+        mine: list[float] = []
         try:
-            own()  # take one round
+            first = own()  # take one round
+            if first:
+                mine.append(first)
             with contextlib.suppress(threading.BrokenBarrierError):
                 crossed.wait(timeout=_JOIN_TIMEOUT_S)  # both own one before either crosses
-            outcomes[tag] = _meet_until_refused(then_meet, deadline)
+            outcomes[tag] = _meet_until_refused(then_meet, deadline, mine)
         finally:
+            with handed:
+                rungs.extend(mine)
             # What `retry_throttled` does in its own `finally`, and the reason
             # it does: a worker that leaves still owning a round strands
             # whoever is waiting on it. Without this the test would be
@@ -359,6 +371,18 @@ def test_two_workers_that_cross_walls_do_not_hold_what_the_other_waits_for(
 
     assert not any(t.is_alive() for t in threads), "a worker never came back"
     assert outcomes == {"owns-the-wall": None, "owns-the-network": None}, outcomes
+    # Giving a round UP is not giving its budget back. `refill()` here instead
+    # of `release()` is the plausible misreading — "I have stopped probing, so
+    # take the rungs back" — and it silently converts a budget spent on evidence
+    # into one a crossing refunds, at one extra multi-megabyte GET per arm.
+    # One ladder per arm and no more. Giving a round UP is not giving its budget
+    # back: `refill()` here instead of `release()` is the plausible misreading —
+    # "I have stopped probing, so take the rungs back" — and it silently turns a
+    # budget spent on evidence into one a crossing refunds. The final `spent`
+    # cannot see it, because the round is re-elected from zero either way; the
+    # rungs handed out can.
+    one_of_each = _gflight_ids._THROTTLE_RETRY_ATTEMPTS + _gflight_ids._TRANSPORT_RETRY_ATTEMPTS
+    assert len(rungs) == one_of_each, rungs
 
 
 def test_a_call_ends_even_while_a_sibling_keeps_refilling_the_budget() -> None:
@@ -388,6 +412,107 @@ def test_a_call_ends_even_while_a_sibling_keeps_refilling_the_budget() -> None:
         _gflight_ids.retry_throttled(always_reset)
 
     assert attempts["n"] == _gflight_ids._TRANSPORT_RETRY_ATTEMPTS + 1, attempts
+
+
+@pytest.mark.parametrize(
+    ("arm", "budget_name"),
+    [
+        pytest.param("net", "_TRANSPORT_RETRY_ATTEMPTS", id="network"),
+        pytest.param("wall", "_THROTTLE_RETRY_ATTEMPTS", id="throttle"),
+    ],
+)
+def test_a_call_ends_on_either_arm_while_a_sibling_keeps_refilling(
+    arm: str, budget_name: str
+) -> None:
+    """Both arms, because both are refillable from underneath.
+
+    The wall's refill is unconditional and deliberate — it is per-IP, so any
+    sibling getting through is evidence it lifted — which means on a flapping
+    wall the ladder hands this call a fresh budget between every rung and the
+    per-call count is the ONLY exit. The network's refill is narrower, so that
+    arm has two guards and this one has one; the arm with one guard is the one
+    that had no test."""
+    attempts = {"n": 0}
+
+    def always_fail() -> object:
+        attempts["n"] += 1
+        bound = _gflight_ids._fanout_ladder.get()
+        assert bound is not None, "the scope should have bound a ladder"
+        bound.succeeded(network=arm == "net")  # a sibling got through
+        if arm == "net":
+            raise _gflight_ids._RetryableTransportError("connection reset by peer")
+        raise GfThrottledError("rate-limited")
+
+    with (
+        _gflight_ids.shared_throttle_ladder(),
+        pytest.raises((GfTransportError, GfThrottledError)),
+    ):
+        _gflight_ids.retry_throttled(always_fail)
+
+    assert attempts["n"] == getattr(_gflight_ids, budget_name) + 1, attempts
+
+
+def test_an_owner_that_raises_releases_the_round_it_was_probing() -> None:
+    """A worker can leave a round by a door that is not the ladder's — a shape
+    error, a consent wall, an exception from the call itself.
+
+    It is still the owner when it goes, and a waiter parked on its outcome would
+    otherwise hold until the ceiling: two minutes per attempt at the shipped
+    values, for a probe that will never report. `retry_throttled` gives the
+    round back in a `finally` for that reason, and this drives the real function
+    rather than standing in for it — the crossing test hand-rolls the same
+    stand-down in its own harness, so it cannot see this.
+
+    What is pinned is that the round comes BACK, not which way the sibling then
+    takes it: released while parked and found free are the same guarantee."""
+    started = threading.Barrier(2)
+    outcome: list[Any] = []
+
+    def owner() -> None:
+        def boom() -> object:
+            # Neither a throttle nor a transport failure, so the loop does not
+            # catch it: the owner leaves by a door that spends no rung and
+            # reaches no release of its own. Exhausting the budget instead would
+            # release the round anyway and prove nothing about the `finally`.
+            raise GfPageShapeError("the page changed")
+
+        with contextlib.suppress(GfPageShapeError):
+            _gflight_ids.retry_throttled(boom)
+
+    def sibling(ladder: Any) -> None:
+        with contextlib.suppress(threading.BrokenBarrierError):
+            started.wait(timeout=_JOIN_TIMEOUT_S)
+        outcome.append(ladder.throttled())
+
+    with _gflight_ids.shared_throttle_ladder():
+        ladder = _gflight_ids._fanout_ladder.get()
+        assert ladder is not None
+        assert ladder.throttled() is not None  # this thread owns the wall
+        # Daemon: without the stand-down this waiter never returns, and a
+        # failing run must not wedge the interpreter on the way out.
+        waiter = threading.Thread(target=sibling, args=(ladder,), daemon=True)
+        waiter.start()
+        with contextlib.suppress(threading.BrokenBarrierError):
+            started.wait(timeout=_JOIN_TIMEOUT_S)
+        owner()  # runs the real loop, which stands down in its finally
+        waiter.join(timeout=_JOIN_TIMEOUT_S)
+
+    assert not waiter.is_alive(), "the waiter was left holding a probe that never reported"
+    # Either shape proves the round came back: released while parked (0.0), or
+    # found free and taken (a rung). Being stranded is the failure, and it shows
+    # as no verdict at all.
+    assert len(outcome) == 1 and outcome[0] is not None, outcome
+
+
+def test_the_internal_retry_marker_is_a_transport_error() -> None:
+    """Its base decides two things at once: how it renders if it ever escaped an
+    un-laddered path, and which arm of the pin loop it lands in.
+
+    Under the plain base it renders as "declined the request", which is the one
+    sentence the transport arm exists to stop, and it lands in the
+    refuse-and-continue arm rather than the stop rule — so one unreachable
+    network would be met once per pin."""
+    assert issubclass(_gflight_ids._RetryableTransportError, GfTransportError)
 
 
 class _EveryThread:

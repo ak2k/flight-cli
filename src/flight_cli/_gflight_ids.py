@@ -259,9 +259,23 @@ class _SharedThrottleLadder:
                 if other is not round_ and other.owner == me:
                     other.release()
             settled = round_.settled
-        settled.wait(_LADDER_WAIT_CEILING_S)
-        with self._lock:
-            return None if round_.exhausted else 0.0
+        while True:
+            released = settled.wait(_LADDER_WAIT_CEILING_S)
+            with self._lock:
+                if round_.exhausted:
+                    return None
+                if released or round_.owner in (None, me):
+                    return 0.0
+                # The clock ran out while a prober is still out. Retrying now is
+                # the amplification this ladder exists to prevent, at the one
+                # moment it matters: a GET here doubles the group's requests
+                # against a wall nobody has finished measuring. The ceiling is
+                # for an owner that never reports, not for one that is slow —
+                # and an owner IS slow by construction, since every attempt of
+                # its ladder can burn the full request timeout, which outlasts
+                # this wait at the shipped defaults. What bounds the waiting is
+                # the caller's own attempt count, not this clock.
+                settled = round_.settled
 
     def succeeded(self, *, network: bool = False) -> None:
         """A call got through: return the rungs it earned back and release the
@@ -1661,5 +1675,18 @@ def _report_pin_outcome(
             skipped,
             pins,
         )
-    elif refused and len(refused) == pins:
+    elif refused and not served:
+        # "Nothing was served", which is what both docstrings above have always
+        # claimed, rather than "every pin refused". One pin returning a
+        # genuinely empty board used to be enough to suppress the raise, and the
+        # command then reported a round trip whose return boards had stopped
+        # parsing as a route with no return flights.
+        #
+        # The trade, stated: this also raises when one pin refused and the rest
+        # came back honestly empty, so it prefers a false refusal to a false
+        # "no flights". That is the right way round — a refusal degrades to
+        # Matrix on the auto path and exits with a typed reason on the explicit
+        # one, while "no results" is unrecoverable and indistinguishable from an
+        # answer. The loop cannot tell the two empties apart anyway: a pin whose
+        # own sub-pins all refused also comes back as nothing.
         raise refused[-1]

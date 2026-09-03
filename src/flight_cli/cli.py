@@ -65,6 +65,8 @@ from .pp.cli import auth_app, run_pp_for_search
 from .providers.base import LegQuery
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+
     from .models import CalendarResult, LegInfo, Location, SearchResult, Slice
 
 # Tuple-length sentinels for `--slice` parser (`ORIGIN-DEST:DATE[:r=...:e=...]`).
@@ -969,11 +971,11 @@ def _emit_urls(
         console.print()
         pinned_m = _try_pinned_matrix_url(search, result, idx) if idx is not None else None
         if pinned_m is not None:
-            console.print(f"[dim]Matrix ({escape(pinned_label)} pinned):[/]")
-            console.print(f"  [link]{escape(pinned_m)}[/]")
+            console.print(f"[dim]Matrix ({pinned_label} pinned):[/]")
+            console.print(f"  [link]{_safe_text(pinned_m)}[/]")
         else:
             console.print("[dim]Matrix deep-link:[/]")
-            console.print(f"  [link]{escape(matrix_deep_link(search))}[/]")
+            console.print(f"  [link]{_safe_text(matrix_deep_link(search))}[/]")
     if google_url:
         # `google_flights_url` builds protobuf-encoded tfs= URLs via fast_flights.
         # That library has no documented exception surface — catch broadly so a
@@ -981,11 +983,11 @@ def _emit_urls(
         try:
             pinned = _try_pinned_gflight_url(search, result, idx) if idx is not None else None
             if pinned is not None:
-                console.print(f"[dim]Google Flights ({escape(pinned_label)} pinned):[/]")
-                console.print(f"  [link]{escape(pinned)}[/]")
+                console.print(f"[dim]Google Flights ({pinned_label} pinned):[/]")
+                console.print(f"  [link]{_safe_text(pinned)}[/]")
             else:
                 console.print("[dim]Google Flights (tfs= structured):[/]")
-                console.print(f"  [link]{escape(google_flights_url(search))}[/]")
+                console.print(f"  [link]{_safe_text(google_flights_url(search))}[/]")
         except Exception as e:  # noqa: BLE001 - third-party undocumented errors; non-fatal fallback
             console.print(f"[dim]Google Flights link: {_safe_text(e)}[/]")
 
@@ -1563,6 +1565,23 @@ def _paint_first_gf_table(
         console.print("[yellow]Google Flights: no results; awaiting Matrix…[/]")
 
 
+def _run_the_weave(go: Callable[[], Coroutine[Any, Any, None]], state: dict[str, Any]) -> None:
+    """Run the weave and stash anything that escapes it, so the reporters below
+    it decide the outcome.
+
+    The `_matrix` task guards its own body, but the client is CONSTRUCTED before
+    the task group opens — and constructing it resolves the API key, which
+    reaches the disk cache and then the network. A stale cache with an
+    unreachable bootstrap therefore failed before any task existed, on the most
+    ordinary command there is, and left a traceback with both streams empty."""
+    try:
+        anyio.run(go)
+    except MatrixApiError as e:
+        state["matrix_err"] = e
+    except Exception as e:  # noqa: BLE001 — reported by _report_search_matrix_failure
+        state["matrix_unexpected"] = e
+
+
 def _report_enriched_gf_failure(e: Exception) -> None:
     """Say why the Google Flights half of the weave produced nothing.
 
@@ -1644,7 +1663,7 @@ def _run_enriched_path(
             state["gf"] = gf
             _paint_first_gf_table(state, gf, legs=legs, top_n=top_n, awards_only=awards_only)
 
-    anyio.run(_go)
+    _run_the_weave(_go, state)
 
     gf: list[Any] = state.get("gf") or []
     # What reached the USER, which is not the same question as what was
@@ -2082,7 +2101,12 @@ def _run_gflight_path_multi(
     """Google Flights multi-cabin: N parallel cabin queries (threadpool) → join → render."""
     # Widen per-cabin queries so the join has overlap; see _bumped_query_top_n.
     query_top_n = _bumped_query_top_n(top_n, len(cabins))
-    _pin_cap_note(legs=legs, top_n=query_top_n)
+    # The user's count, not the bumped one. The bump widens the pool each cabin
+    # keeps so the join has overlap; it is not what anyone asked for, and
+    # quoting it tells someone who asked for three that returns are combined
+    # against ten — more than they wanted, from a note whose whole job is to say
+    # when they will get fewer.
+    _pin_cap_note(legs=legs, top_n=top_n)
     if len(legs) >= _ROUND_TRIP_LEGS and len(cabins) > 1:
         from ._gflight_ids import pinned_fanout  # noqa: PLC0415
 

@@ -36,7 +36,6 @@ from rich.console import Console
 
 from flight_cli._gf_errors import (
     GfBackendError,
-    GfConsentError,
     GfPageShapeError,
     GfTfsUnsupportedError,
     GfThrottledError,
@@ -204,16 +203,41 @@ def test_an_extension_reason_is_plain_text_at_its_source(extension: str) -> None
     _assert_plain_at_source(classify(None, extension).matrix_reasons, extension)
 
 
+_REFUSALS = GfBackendError.__module__  # where the published hierarchy lives
+
+
+def _every_subclass(root: type[GfBackendError]) -> list[type[GfBackendError]]:
+    """Every descendant of `root`, not just its children.
+
+    `__subclasses__()` is one level deep, so a refusal added under an existing
+    one instead of beside it would never be walked."""
+    found: list[type[GfBackendError]] = []
+    for child in root.__subclasses__():
+        found.append(child)
+        found.extend(_every_subclass(child))
+    return found
+
+
+def _hostile_of(cls: type[GfBackendError]) -> GfBackendError:
+    """An instance of `cls` carrying every shape a console reacts to."""
+    payload = f"{_HOSTILE}{_ESCAPES}"
+    if cls is GfTfsUnsupportedError:
+        return GfTfsUnsupportedError("stops", f"a ceiling {payload}")
+    return cls(f"refused {payload}")
+
+
 @pytest.mark.parametrize(
     "error",
+    # Driven off the hierarchy rather than listed, so an arm cannot be added
+    # without a hostile case — the transport arm was added, and rewritten, with
+    # this file's whole subject uncovering it.
     [
-        pytest.param(GfPageShapeError(f"none of 2 rows parsed (AttributeError: {_HOSTILE})")),
-        pytest.param(GfThrottledError(f"rate-limited {_HOSTILE}")),
-        pytest.param(GfConsentError(f"consent {_HOSTILE}")),
-        pytest.param(GfTfsUnsupportedError("stops", f"a ceiling {_HOSTILE}")),
-        pytest.param(GfBackendError(f"an untyped failure {_HOSTILE}")),
+        pytest.param(_hostile_of(cls), id=cls.__name__)
+        for cls in [
+            GfBackendError,
+            *(c for c in _every_subclass(GfBackendError) if c.__module__ == _REFUSALS),
+        ]
     ],
-    ids=lambda e: type(e).__name__,
 )
 def test_a_refusal_carrying_remote_markup_is_printable(error: GfBackendError) -> None:
     """Every arm of the dispatch, including the ones whose wording is fixed —
@@ -227,18 +251,6 @@ def test_a_refusal_carrying_remote_markup_is_printable(error: GfBackendError) ->
     refusal = _gf_refusal(error)
     for markup in (refusal.message, refusal.note):
         _render(markup)  # the assertion is that this does not raise
-
-
-def _every_subclass(root: type[GfBackendError]) -> list[type[GfBackendError]]:
-    """Every descendant of `root`, not just its children.
-
-    `__subclasses__()` is one level deep, so a refusal added under an existing
-    one instead of beside it would never be walked."""
-    found: list[type[GfBackendError]] = []
-    for child in root.__subclasses__():
-        found.append(child)
-        found.extend(_every_subclass(child))
-    return found
 
 
 def _one_of(cls: type[GfBackendError]) -> GfBackendError:
@@ -1247,3 +1259,83 @@ def test_remote_text_arrives_visible_and_writable(
     # The assertion is that this does not raise: a StringIO accepted the lone
     # surrogate that a real stdout would have died on.
     printed.encode("utf-8")
+
+
+def test_key_resolution_failing_is_a_typed_line_not_an_empty_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Matrix client resolves its API key when it is CONSTRUCTED, and the
+    weave constructs it before the task group opens — so the guard inside the
+    Matrix task never sees this one.
+
+    A stale key cache with an unreachable bootstrap is the ordinary way it
+    happens, on the most ordinary command there is, and it ended as a traceback
+    with both streams empty: no table, no reason, and Google's rows never even
+    requested."""
+    from flight_cli import cli
+    from flight_cli._api_key import ApiKeyResolutionError
+
+    buf = _capture(monkeypatch)
+
+    class _NoKey:
+        def __init__(self, **_kw: object) -> None:
+            raise ApiKeyResolutionError(f"could not resolve the Matrix API key{_ESCAPES}")
+
+    monkeypatch.setattr(cli, "MatrixClient", _NoKey)
+    legs, opts = _gf_legs_and_opts()
+    with pytest.raises(typer.Exit) as excinfo:
+        cli._run_enriched_path(
+            legs=legs,
+            opts=opts,
+            top_n=3,
+            run_pp=False,
+            sel=None,
+            matrix_url=False,
+            google_url=False,
+            pick=None,
+            rps=1.0,
+            impersonate="chrome",
+            no_cache=True,
+        )
+
+    assert excinfo.value.exit_code == 1
+    printed = buf.getvalue()
+    assert "Matrix search failed" in printed, printed
+    assert "could not resolve the Matrix API key" in printed, printed
+    _assert_drives_no_terminal(printed)
+
+
+def test_the_group_level_matrix_arm_types_a_client_that_cannot_be_built(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing from a cabin reaches the group-level arm — those are caught per
+    cabin — so what it catches is the shared client failing to open at all,
+    which is the same key resolution the other weaves meet. Without it that is a
+    raw traceback with byte-empty stderr."""
+    from flight_cli import cli
+    from flight_cli._api_key import ApiKeyResolutionError
+    from flight_cli.domain import Cabin
+
+    buf = _capture(monkeypatch)
+
+    class _NoKey:
+        def __init__(self, **_kw: object) -> None:
+            raise ApiKeyResolutionError(f"could not resolve the Matrix API key{_ESCAPES}")
+
+    monkeypatch.setattr(cli, "MatrixClient", _NoKey)
+    legs, opts = _gf_legs_and_opts()
+    with pytest.raises(typer.Exit) as excinfo:
+        cli._run_matrix_multi(
+            legs=legs,
+            opts=opts,
+            cabins=(Cabin.COACH, Cabin.BUSINESS),
+            rps=1.0,
+            impersonate="chrome",
+            no_cache=True,
+        )
+
+    assert excinfo.value.exit_code == 1
+    printed = buf.getvalue()
+    assert "Matrix search failed" in printed, printed
+    assert "could not resolve the Matrix API key" in printed, printed
+    _assert_drives_no_terminal(printed)

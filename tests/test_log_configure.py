@@ -145,7 +145,8 @@ def test_a_record_survives_a_real_stream_whatever_the_page_put_in_it(
         monkeypatch.setattr(sys, "stderr", stream)
         log_mod.configure("debug")
         logging.getLogger(_MODULE_LOGGER).debug(
-            "ds:1 refused: %s", "head\u2028forged\ud800\u202ereversed\u2069tail"
+            "ds:1 refused: %s",
+            "head\u2028forged\u2029split\ud800\u202ereversed\u2069tail",
         )
     written = path.read_text(encoding="utf-8")
 
