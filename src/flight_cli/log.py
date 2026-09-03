@@ -33,6 +33,26 @@ _STDLIB_ROOT = "flight_cli"
 _HANDLER_NAME = "flight-cli-stderr"
 
 
+# Bytes that drive a terminal rather than appear in it, dropped from every line
+# this handler writes. Page text reaches these records — a refusal quotes the
+# board it could not read — and stderr redirected to a file keeps every byte for
+# whatever reads the file next.
+#
+# Its OWN table, deliberately not the console one: that helper also escapes rich
+# markup, which is wrong here. This handler renders no markup, so a record
+# mentioning `[bold]` should say `[bold]`, and a backslash added on the way out
+# would be a byte the log did not contain. What the two share is only the
+# principle, so they share no code.
+#
+# The whole formatted line, not just the message: the logger NAME goes through
+# the format string too, and a record can be emitted on any name.
+_DRIVERS = {
+    **{c: None for c in range(0x20) if c not in (0x09, 0x0A)},  # C0, keeping tab and newline
+    0x7F: None,  # DEL
+    **{c: None for c in range(0x80, 0xA0)},  # C1, including the 8-bit CSI
+}
+
+
 class _StderrHandler(logging.Handler):
     """Writes to whatever `sys.stderr` is when the record is emitted.
 
@@ -49,7 +69,7 @@ class _StderrHandler(logging.Handler):
         # end the command it was describing. RecursionError re-raises because
         # swallowing it would loop.
         try:
-            sys.stderr.write(self.format(record) + "\n")
+            sys.stderr.write(self.format(record).translate(_DRIVERS) + "\n")
         except RecursionError:
             raise
         except Exception:  # noqa: BLE001 — a log line cannot be allowed to fail a search

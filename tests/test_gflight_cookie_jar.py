@@ -83,10 +83,24 @@ def _reset(monkeypatch: pytest.MonkeyPatch, cache_dir: Path) -> None:
     monkeypatch.setattr(gfid, "_seed_latch", threading.local())
 
 
+def _cookie_file(cache_dir: Path) -> Path:
+    """Where the jar lands: a directory of this component's own under the cache
+    root, so the root's mode stays whatever its owner chose."""
+    return cache_dir / "gflight" / "gflight-cookies.json"
+
+
+def _plant_cache(cache_dir: Path, text: str) -> Path:
+    """Put `text` where the reader will look for the jar, directory and all."""
+    path = _cookie_file(cache_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
 def _write_cache(cache_dir: Path, cookies: list[dict[str, str]], *, saved_at: float) -> None:
-    (cache_dir / "gflight-cookies.json").write_text(
-        json.dumps({"saved_at": saved_at, "cookies": cookies})
-    )
+    path = _cookie_file(cache_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"saved_at": saved_at, "cookies": cookies}))
 
 
 def test_persist_then_seed_round_trips_only_nid(
@@ -103,7 +117,7 @@ def test_persist_then_seed_round_trips_only_nid(
     )
     gfid._persist_cookies(warm)
 
-    payload = json.loads((tmp_path / "gflight-cookies.json").read_text())
+    payload = json.loads(_cookie_file(tmp_path).read_text())
     assert [c["name"] for c in payload["cookies"]] == ["NID"]  # only NID persisted
     assert payload["saved_at"] <= time.time()  # stamped now
 
@@ -139,7 +153,7 @@ def test_a_foreign_domains_cookie_is_never_written_to_the_cache(
     )
     gfid._persist_cookies(warm)
 
-    payload = json.loads((tmp_path / "gflight-cookies.json").read_text())
+    payload = json.loads(_cookie_file(tmp_path).read_text())
     assert [(c["name"], c["domain"]) for c in payload["cookies"]] == [("NID", ".google.com")]
 
 
@@ -150,7 +164,7 @@ def test_a_cache_with_nothing_but_a_foreign_cookie_is_not_written_at_all(
     give the next process something to fail to parse."""
     _reset(monkeypatch, tmp_path)
     gfid._persist_cookies(_FakeClient([_JarCookie("NID", "impostor", "google.com.evil.example")]))
-    assert not (tmp_path / "gflight-cookies.json").exists()
+    assert not _cookie_file(tmp_path).exists()
 
 
 def test_seed_with_no_saved_file_is_a_noop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -205,7 +219,7 @@ def test_persist_runs_only_once_per_process(
     gfid._persist_cookies(warm)
     warm._session().cookies.jar.append(_JarCookie("NID", "v2", ".google.com"))
     gfid._persist_cookies(warm)  # one write per process
-    payload = json.loads((tmp_path / "gflight-cookies.json").read_text())
+    payload = json.loads(_cookie_file(tmp_path).read_text())
     assert payload["cookies"][0]["value"] == "v1"
 
 
@@ -217,7 +231,7 @@ def test_concurrent_persists_never_leave_a_partial_file(
     for the rest of the process. Rename-into-place is what removes the window."""
     _reset(monkeypatch, tmp_path)
     monkeypatch.setattr(gfid, "_cookie_state", _NeverLatched())
-    path = tmp_path / "gflight-cookies.json"
+    path = _cookie_file(tmp_path)
     writers_done = threading.Event()
     torn: list[str] = []
 
@@ -264,8 +278,7 @@ def test_the_cache_is_owner_only_even_over_a_world_readable_predecessor(
     place, so the mode has to be right on the temp — an existing 0644 cache is
     replaced, not chmod'ed."""
     _reset(monkeypatch, tmp_path)
-    path = tmp_path / "gflight-cookies.json"
-    path.write_text("{}")
+    path = _plant_cache(tmp_path, "{}")
     path.chmod(0o644)
 
     gfid._persist_cookies(_FakeClient([_JarCookie("NID", "532=abc", ".google.com")]))
@@ -288,7 +301,7 @@ def test_a_failed_rename_leaves_no_temp_holding_the_cookie(
     gfid._persist_cookies(_FakeClient([_JarCookie("NID", "532=abc", ".google.com")]))
 
     assert list(tmp_path.glob("*.tmp")) == []
-    assert not (tmp_path / "gflight-cookies.json").exists()
+    assert not _cookie_file(tmp_path).exists()
 
 
 def test_an_interrupt_mid_write_leaves_no_temp_holding_the_cookie(
@@ -314,7 +327,7 @@ def test_an_interrupt_mid_write_leaves_no_temp_holding_the_cookie(
 
 def test_seed_ignores_corrupt_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _reset(monkeypatch, tmp_path)
-    (tmp_path / "gflight-cookies.json").write_text("{not valid json")
+    _plant_cache(tmp_path, "{not valid json")
     fresh = _FakeClient([])
     gfid._seed_cookies_once(fresh)  # must not raise
     assert fresh._session().cookies.set_calls == []
@@ -326,7 +339,7 @@ def test_persist_skips_when_no_allowlisted_cookie(
     _reset(monkeypatch, tmp_path)
     warm = _FakeClient([_JarCookie("AEC", "x", ".google.com")])  # Google but not NID
     gfid._persist_cookies(warm)
-    assert not (tmp_path / "gflight-cookies.json").exists()
+    assert not _cookie_file(tmp_path).exists()
 
 
 def test_persist_then_seed_round_trips_through_fli_s_real_client(
@@ -347,7 +360,7 @@ def test_persist_then_seed_round_trips_through_fli_s_real_client(
     writer = Client()
     monkeypatch.setattr(writer, "_session", lambda: session)
     gfid._persist_cookies(writer)
-    assert (tmp_path / "gflight-cookies.json").exists()
+    assert _cookie_file(tmp_path).exists()
 
     monkeypatch.setattr(gfid, "_seed_latch", threading.local())
     reader_session = cast("Any", curl_requests.Session())
@@ -361,13 +374,14 @@ def test_each_thread_gets_seeded(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     """fli's session is a `threading.local`, so a process-wide seed latch left
     every worker thread but the first cold — which is precisely the fan-out."""
     _reset(monkeypatch, tmp_path)
-    (tmp_path / "gflight-cookies.json").write_text(
+    _plant_cache(
+        tmp_path,
         json.dumps(
             {
                 "saved_at": time.time(),
                 "cookies": [{"name": "NID", "value": "v", "domain": ".google.com", "path": "/"}],
             }
-        )
+        ),
     )
     clients = [_FakeClient([]) for _ in range(3)]
 
@@ -389,13 +403,14 @@ def test_seeding_still_runs_once_within_one_thread(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _reset(monkeypatch, tmp_path)
-    (tmp_path / "gflight-cookies.json").write_text(
+    _plant_cache(
+        tmp_path,
         json.dumps(
             {
                 "saved_at": time.time(),
                 "cookies": [{"name": "NID", "value": "v", "domain": ".google.com", "path": "/"}],
             }
-        )
+        ),
     )
     first, second = _FakeClient([]), _FakeClient([])
     gfid._seed_cookies_once(first)
@@ -411,14 +426,16 @@ def test_a_temp_we_did_not_create_is_left_alone(
     another writer, mid-write. Deleting it because our own `finally` runs would
     destroy their data — cleanup owns only what this call created."""
     _reset(monkeypatch, tmp_path)
-    squatter = tmp_path / f"gflight-cookies.json.{os.getpid()}.{threading.get_ident()}.tmp"
+    jar = _cookie_file(tmp_path)
+    jar.parent.mkdir(parents=True, exist_ok=True)
+    squatter = jar.with_name(f"{jar.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     squatter.write_text("another writer's half-written file")
 
     gfid._persist_cookies(_FakeClient([_JarCookie("NID", "532=abc", ".google.com")]))
 
     assert squatter.exists(), "cleanup deleted a temp file it did not create"
     assert squatter.read_text() == "another writer's half-written file"
-    assert not (tmp_path / "gflight-cookies.json").exists()
+    assert not _cookie_file(tmp_path).exists()
 
 
 @pytest.mark.parametrize(
@@ -446,24 +463,34 @@ def test_an_allowlisted_google_domain_is_still_seeded(
 
 
 @pytest.mark.parametrize("premade", [False, True], ids=["fresh", "already-there-and-0755"])
-def test_the_cache_directory_is_owner_only(
+def test_the_cookie_directory_is_owner_only_and_the_cache_root_is_left_alone(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, premade: bool
 ) -> None:
     """`mkdir` takes the umask unless told otherwise, and this directory holds a
-    live Google session cookie.
+    live Google session cookie. So the cookie gets a directory of its own, which
+    this code creates and can therefore make private.
 
-    The pre-made case is the one that happens in practice: the Matrix response
-    cache shares this root and creates it with no mode, so on any machine that
-    has run a Matrix search the `mkdir` here is a no-op and its mode never
-    applies. A test that only ever sees a fresh directory cannot tell."""
+    The pre-made case is the one that happens in practice, and it is why the
+    cookie cannot simply live in the root: the Matrix response cache shares that
+    root and creates it with no mode, so on any machine that has run a search it
+    already sits at the umask default. Tightening it from here would change a
+    directory this component was handed rather than created — and would take the
+    response cache's permissions with it, on a box where the user may have
+    widened them deliberately. Both halves are asserted, because the private
+    leaf is only half the rule."""
     cache_dir = tmp_path / "fresh"
     _reset(monkeypatch, cache_dir)
     if premade:
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_dir.chmod(0o755)
+    before = stat.S_IMODE(cache_dir.stat().st_mode) if premade else None
     gfid._persist_cookies(_FakeClient([_JarCookie("NID", "532=abc", ".google.com")]))
-    assert stat.S_IMODE(cache_dir.stat().st_mode) == 0o700
-    assert stat.S_IMODE((cache_dir / "gflight-cookies.json").stat().st_mode) == 0o600
+    assert stat.S_IMODE(_cookie_file(cache_dir).parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(_cookie_file(cache_dir).stat().st_mode) == 0o600
+    if before is not None:
+        assert stat.S_IMODE(cache_dir.stat().st_mode) == before, (
+            "the caller's directory was changed"
+        )
 
 
 @pytest.mark.parametrize(
@@ -516,11 +543,11 @@ def test_the_temp_file_is_owner_only_while_it_is_being_written(
     def _inspect(obj: object, fh: Any, **kw: Any) -> None:
         real_dump(obj, fh, **kw)
         fh.flush()
-        for temp in tmp_path.glob("*.tmp"):
+        for temp in _cookie_file(tmp_path).parent.glob("*.tmp"):
             modes.append(stat.S_IMODE(temp.stat().st_mode))
 
     monkeypatch.setattr(gfid.json, "dump", _inspect)
     gfid._persist_cookies(_FakeClient([_JarCookie("NID", "532=abc", ".google.com")]))
 
     assert modes == [0o600], f"the temp was readable mid-write: {[oct(m) for m in modes]}"
-    assert stat.S_IMODE((tmp_path / "gflight-cookies.json").stat().st_mode) == 0o600
+    assert stat.S_IMODE(_cookie_file(tmp_path).stat().st_mode) == 0o600

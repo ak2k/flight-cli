@@ -35,12 +35,15 @@ import typer
 from rich.console import Console
 
 from flight_cli._gf_errors import (
+    GfBackendError,
     GfConsentError,
     GfPageShapeError,
     GfTfsUnsupportedError,
     GfThrottledError,
+    GfTransportError,
 )
 from flight_cli.cli import (
+    _GF_DECLINED,
     BACKEND_AUTO,
     BACKEND_GFLIGHT,
     BACKEND_MATRIX,
@@ -208,17 +211,71 @@ def test_an_extension_reason_is_plain_text_at_its_source(extension: str) -> None
         pytest.param(GfThrottledError(f"rate-limited {_HOSTILE}")),
         pytest.param(GfConsentError(f"consent {_HOSTILE}")),
         pytest.param(GfTfsUnsupportedError("stops", f"a ceiling {_HOSTILE}")),
-        pytest.param(ValueError(f"an untyped failure {_HOSTILE}")),
+        pytest.param(GfBackendError(f"an untyped failure {_HOSTILE}")),
     ],
     ids=lambda e: type(e).__name__,
 )
-def test_a_refusal_carrying_remote_markup_is_printable(error: Exception) -> None:
+def test_a_refusal_carrying_remote_markup_is_printable(error: GfBackendError) -> None:
     """Every arm of the dispatch, including the ones whose wording is fixed —
     a later edit that starts interpolating the exception there is the same bug
-    again, and this is what catches it."""
+    again, and this is what catches it.
+
+    The last case is the BASE type, which is what actually reaches the base
+    arm: a 5xx from the search page is raised as one. An unrelated exception
+    cannot arrive here at all — the dispatch takes a refusal, and every caller
+    has one in hand."""
     refusal = _gf_refusal(error)
     for markup in (refusal.message, refusal.note):
         _render(markup)  # the assertion is that this does not raise
+
+
+def _one_of(cls: type[GfBackendError]) -> GfBackendError:
+    """An instance of `cls`, whatever its constructor wants."""
+    if cls is GfTfsUnsupportedError:
+        return GfTfsUnsupportedError("stops", "a ceiling this page cannot carry")
+    return cls("refused")
+
+
+def test_every_refusal_type_is_named_rather_than_merely_declined() -> None:
+    """A refusal type added to the hierarchy alone must not render as the
+    generic wording.
+
+    The dispatch has a base case, so a type with no arm still prints — as
+    "declined the request", the same sentence an unreachable network and a
+    page-shape change would produce. Nothing raises, nothing is missing, and
+    the user is told the one thing that is not true. `assert_never` catches a
+    type the checker can SEE; this catches the one that lands in
+    `_gf_errors.py` with no arm written for it, which is the way it happened.
+
+    Asserted on `message`, the text a user actually reads when the refusal is
+    the whole outcome. `note` is the one-line label beside a Matrix table, and
+    one type keeps the generic label there on purpose — its queries never reach
+    this renderer — so a rule over `note` would fail on a type that IS handled.
+
+    Only the published hierarchy: a marker class defined elsewhere is converted
+    to a public type before any renderer sees it."""
+    published = [
+        cls
+        for cls in GfBackendError.__subclasses__()
+        if cls.__module__ == GfBackendError.__module__
+    ]
+    assert GfTransportError in published, "the walk must see the whole hierarchy"
+    for cls in published:
+        message = _gf_refusal(_one_of(cls)).message
+        assert _GF_DECLINED not in message, (
+            f"{cls.__name__} renders as the generic refusal: {message!r}"
+        )
+
+
+def test_the_transport_refusal_agrees_with_the_pin_loop_about_the_cause() -> None:
+    """Two sites report an unreachable network and they must not disagree about
+    which fact it is. The pin loop already says "was unreachable"; a render that
+    says Google declined the request describes a different failure, and the user
+    cannot tell which one happened."""
+    refusal = _gf_refusal(GfTransportError("connection reset by peer"))
+    assert "unreachable" in refusal.note
+    assert "could not be reached" in refusal.message
+    assert "connection reset by peer" in _render(refusal.message)
 
 
 def test_the_page_shape_message_keeps_the_payload_text_readable() -> None:
@@ -377,6 +434,64 @@ def test_the_enriched_path_escapes_every_field_of_a_matrix_error(
     printed = buf.getvalue()
     for fragment in fragments:
         assert fragment in printed, f"{fragment!r} was mangled: {printed!r}"
+    _assert_drives_no_terminal(printed)
+
+
+def test_an_unwrapped_matrix_failure_is_reported_without_taking_the_google_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Matrix task must not carry an exception out of the weave.
+
+    `execute()` wraps what it knows about; a connect timeout or a TLS failure is
+    not on that list, and one leaving this task cancels the still-pending Google
+    Flights paint and surfaces as a bare ExceptionGroup — a traceback in place
+    of the rows Google had already returned. The two backends are meant to fail
+    independently, which is exactly what the calendar weave beside this one
+    already does.
+
+    The message is remote text like any other, so it goes through the same
+    sanitiser: driven with control bytes here, which a bare `escape` would let
+    through."""
+    from flight_cli import cli
+
+    buf = _capture(monkeypatch)
+    monkeypatch.setattr(
+        cli, "MatrixClient", _refusing_matrix(RuntimeError(f"connect timeout{_ESCAPES}"))
+    )
+
+    rows = [cast("Any", object())]
+    painted: list[Any] = []
+
+    def _gf_rows(*_a: object, **_kw: object) -> list[Any]:
+        return rows
+
+    def _paint(gf: list[Any], **_kw: object) -> None:
+        painted.extend(gf)
+
+    monkeypatch.setattr(cli, "_gflight_results", _gf_rows)
+    monkeypatch.setattr(cli, "_render_gflight_table", _paint)
+
+    legs, opts = _gf_legs_and_opts()
+    # No `pytest.raises`: Google answered, so the command has an answer to give.
+    cli._run_enriched_path(
+        legs=legs,
+        opts=opts,
+        top_n=3,
+        run_pp=False,
+        sel=None,
+        matrix_url=False,
+        google_url=False,
+        pick=None,
+        rps=1.0,
+        impersonate="chrome",
+        no_cache=True,
+    )
+
+    printed = buf.getvalue()
+    assert painted == rows, "the Google rows were lost with the Matrix failure"
+    assert "Matrix search failed" in printed, printed
+    assert "connect timeout" in printed, printed
+    assert printed.count("Matrix search failed") == 1, printed
     _assert_drives_no_terminal(printed)
 
 

@@ -35,6 +35,7 @@ whole board at `[3]`).
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import datetime
 import json
@@ -63,6 +64,73 @@ FIXTURE_DIR = pathlib.Path(__file__).parent / "fixtures" / "gflight_page"
 _FILTERS = cast("Any", None)  # a patched client never encodes the filter
 _real_tfs = gfid.build_search_tfs
 _LIFTS_AFTER_BACKOFFS = 2  # how many rungs the owner climbs before the wall lifts
+# How long a worker holds its first GET waiting for its siblings to reach theirs.
+# Reached only if a wave never assembles, which is a failing test either way.
+_WAVE_TIMEOUT_S = 5.0
+# A backoff of ~1 s becomes ~20 ms: long enough that a sibling reaches the lock
+# while the prober is away, short enough that the suite does not notice.
+_BACKOFF_SCALE = 0.02
+# Captured before anything patches it. `gfid.time` IS the stdlib module, so a
+# replacement that calls `time.sleep` calls itself.
+_real_sleep = time.sleep
+
+
+def _first_get_of_each_worker(cabins: tuple[Any, ...]) -> tuple[Any, threading.Barrier]:
+    """A latch per worker thread and the barrier their first GETs meet on.
+
+    A fan-out's failures land within microseconds of each other — four threads
+    started in one loop, one network — while the retry that would rescue a
+    sibling costs a backoff and a multi-megabyte fetch. Left to the scheduler a
+    test gets the lucky ordering instead, so the wave is made to assemble."""
+    return threading.local(), threading.Barrier(len(cabins))
+
+
+def _await_the_wave(first_get: Any, wave: threading.Barrier) -> bool:
+    """True on this worker's FIRST GET, once every sibling has reached its own."""
+    if getattr(first_get, "done", False):
+        return False
+    first_get.done = True
+    with contextlib.suppress(threading.BrokenBarrierError):
+        wave.wait(timeout=_WAVE_TIMEOUT_S)
+    return True
+
+
+def _one_prober_per_wall(
+    monkeypatch: pytest.MonkeyPatch, arm: str, workers: int
+) -> list[float | None]:
+    """Make every worker meet the wall together, and report what each was told.
+
+    Synchronising the GETs is not enough on its own: a faked retry costs
+    microseconds here, so one worker's success can refill the budget before the
+    last worker has even reported, and the test then measures the lucky
+    ordering. Production goes the other way — the retry that would rescue a
+    sibling costs a backoff and a multi-megabyte fetch, while the failures land
+    within microseconds of each other.
+
+    The returned verdicts are the structural difference, and they do not depend
+    on ordering: one prober hands a rung to exactly ONE worker and releases the
+    rest with 0.0, while a bare shared counter hands out a rung apiece until the
+    budget is gone and refuses whoever arrives after that."""
+    real = getattr(gfid._SharedThrottleLadder, arm)
+    reported = threading.local()
+    gate = threading.Barrier(workers)
+    verdicts: list[float | None] = []
+    seen = threading.Lock()
+
+    def wrapped(self: Any) -> Any:
+        first = not getattr(reported, "done", False)
+        if first:
+            reported.done = True
+            with contextlib.suppress(threading.BrokenBarrierError):
+                gate.wait(timeout=_WAVE_TIMEOUT_S)
+        verdict = real(self)
+        if first:
+            with seen:
+                verdicts.append(verdict)
+        return verdict
+
+    monkeypatch.setattr(gfid._SharedThrottleLadder, arm, wrapped)
+    return verdicts
 
 
 def _ds1(name: str) -> str:
@@ -497,12 +565,21 @@ def _multi_cabin_legs() -> Any:
 
 
 def _fan_out(
-    monkeypatch: pytest.MonkeyPatch, *cabins: Any, slept: list[float] | None = None
+    monkeypatch: pytest.MonkeyPatch,
+    *cabins: Any,
+    slept: list[float] | None = None,
+    real_time: bool = False,
 ) -> tuple[dict[Any, Any], list[float]]:
     """Run the real cabin fan-out with its stderr swallowed, reporting what it
     returned and every backoff it slept.
 
-    `slept` may be supplied so a responder can decide by backoff count."""
+    `slept` may be supplied so a responder can decide by backoff count.
+
+    `real_time` sleeps a scaled fraction of each backoff instead of returning at
+    once. A test about what the OTHER workers do while the prober is away needs
+    the prober to be away for longer than a lock acquisition: with instant
+    sleeps a whole retry — backoff, fetch, reset — finishes before a sibling is
+    scheduled, and the fan-out runs as though it were sequential."""
     import io
 
     from rich.console import Console
@@ -511,7 +588,13 @@ def _fan_out(
     from flight_cli.domain import SearchOptions
 
     slept = [] if slept is None else slept
-    monkeypatch.setattr(gfid.time, "sleep", slept.append)
+    recorded = slept
+
+    def sleep_a_little(seconds: float) -> None:
+        recorded.append(seconds)
+        _real_sleep(seconds * _BACKOFF_SCALE)
+
+    monkeypatch.setattr(gfid.time, "sleep", sleep_a_little if real_time else slept.append)
     monkeypatch.setattr(cli, "err", Console(file=io.StringIO(), width=400))
     out = cli._run_gflight_multi(
         legs=_multi_cabin_legs(),
@@ -552,22 +635,32 @@ def test_a_wall_that_lifts_inside_the_ladder_serves_every_cabin(
     and refuses the other three for a wall that is no longer there."""
     from flight_cli.domain import Cabin
 
+    cabins = (Cabin.COACH, Cabin.PREMIUM_COACH, Cabin.BUSINESS, Cabin.FIRST)
     slept: list[float] = []
+    first_get, wave = _first_get_of_each_worker(cabins)
 
     def wall_that_lifts() -> _FakeResponse:
+        # Every worker's FIRST GET meets the wall, decided before the owner can
+        # climb: reading the rung count here instead would let a worker that is
+        # slow out of the barrier find the wall already lifted and never park,
+        # which is the test passing for the wrong reason.
+        if _await_the_wave(first_get, wave):
+            return _FakeResponse(text="", status_code=429)
         if len(slept) >= _LIFTS_AFTER_BACKOFFS:
             return _FakeResponse(text=_page(_ds1("ds1_jfk_lax_3rows.json")))
         return _FakeResponse(text="", status_code=429)
 
     fake = client(wall_that_lifts)
-    cabins = (Cabin.COACH, Cabin.PREMIUM_COACH, Cabin.BUSINESS, Cabin.FIRST)
     out, slept_out = _fan_out(monkeypatch, *cabins, slept=slept)
 
     assert set(out) == set(cabins), f"a cabin was refused a wall that lifted: {sorted(out)}"
     assert all(len(rows) == 3 for rows in out.values())  # the capture's row count
-    # One worker owned the backoff; the other three waited on its outcome
-    # rather than each sleeping a schedule of their own.
-    assert len(slept_out) == _LIFTS_AFTER_BACKOFFS, slept_out  # only the owner backed off
+    # One worker owned the backoff and climbed two rungs; the other three parked
+    # on its outcome and were handed 0.0 — a release, which `retry_throttled`
+    # sleeps like any other backoff. Counting only the owner's two would forbid
+    # the release this test exists to prove happened.
+    assert len(slept_out) == _LIFTS_AFTER_BACKOFFS + (len(cabins) - 1), slept_out
+    assert sum(slept_out) <= _one_ladders_worth_of_sleep()
     assert len(fake.gets) <= len(cabins) * 2 + 1
 
 
@@ -594,6 +687,10 @@ def test_a_success_gives_the_ladder_its_rungs_back(
     # Two separate rung-1 backoffs. Without the refill the second call would
     # have started from rung 2 and, on a longer wall, refused with no retries.
     assert len(slept) == 2
+    # Which rung, not just how many: jitter is unstubbed here, so rung 1 lands
+    # in [1.0, 1.5) and rung 2 in [2.0, 3.0). The counts alone hold either way,
+    # which is what let an unrefilled ladder pass.
+    assert all(s < 2.0 for s in slept), slept
 
 
 def test_a_transport_outage_costs_one_ladder_for_the_WHOLE_cabin_fan_out(
@@ -612,6 +709,47 @@ def test_a_transport_outage_costs_one_ladder_for_the_WHOLE_cabin_fan_out(
     one_ladder = gfid._TRANSPORT_RETRY_ATTEMPTS + 1
     assert len(fake.gets) <= one_ladder + (len(cabins) - 1) == 6
     assert len(slept) <= gfid._TRANSPORT_RETRY_ATTEMPTS
+
+
+def test_a_transport_blip_that_clears_serves_every_cabin(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The floor under the transport ceiling, and the reason the network arm
+    needs a prober rather than a bare counter.
+
+    A shared budget without one is spent by whoever arrives first: four cabins
+    whose sockets reset together consume it before any retry lands, and the last
+    two are refused after a single try. The blip then clears and their columns
+    are missing anyway — and a missing column reads as "no fare in this cabin",
+    not as "we never asked", so the holes are the answer the user keeps."""
+    from flight_cli.domain import Cabin
+
+    cabins = (Cabin.COACH, Cabin.PREMIUM_COACH, Cabin.BUSINESS, Cabin.FIRST)
+    served = _FakeResponse(text=_page(_ds1("ds1_jfk_lax_3rows.json")))
+    first_get, wave = _first_get_of_each_worker(cabins)
+
+    def blip_then_serve() -> Any:
+        if _await_the_wave(first_get, wave):
+            return _transport_error("connection reset by peer")
+        return served
+
+    fake = client(blip_then_serve)
+    verdicts = _one_prober_per_wall(monkeypatch, "transport_failed", len(cabins))
+    out, slept = _fan_out(monkeypatch, *cabins, real_time=True)
+
+    assert set(out) == set(cabins), f"a cabin was lost to a blip that cleared: {sorted(out)}"
+    assert all(len(rows) == 3 for rows in out.values())  # the capture's row count
+    # Exactly one worker paid a backoff and the rest were released by its probe.
+    # A bare counter gives every worker its own rung until the budget is gone,
+    # which is the same request total and a different fan-out — the cabins that
+    # report last are refused after a single try.
+    paid = [v for v in verdicts if v]
+    assert paid == [slept[0]], (paid, slept)  # the owner's rung, and nobody else's
+    assert verdicts.count(0.0) == len(cabins) - 1, verdicts
+    # One GET each to meet the blip, one each to be served: the owner's retry is
+    # the probe and the waiters are released by it, so nobody re-measures.
+    assert len(fake.gets) == len(cabins) * 2, fake.gets
+    assert sum(slept) <= _one_ladders_worth_of_sleep()
 
 
 def test_a_single_cabin_fan_out_still_gets_a_whole_ladder(
@@ -783,6 +921,59 @@ def test_relocated_row_blocks_raise_page_shape(client: Any) -> None:
     client(_FakeResponse(text=_page(_ds1("ds1_blocks_relocated.json"))))
     with pytest.raises(GfPageShapeError, match=r"holds flight rows at \[4, 5\]"):
         gfid._one_call(_FILTERS)
+
+
+@pytest.mark.parametrize("placeholder_first", [True, False], ids=["above", "below"])
+def test_a_placeholder_does_not_hide_a_board_whose_blocks_moved(
+    client: Any, placeholder_first: bool
+) -> None:
+    """Whichever order Google emits them in, the relocation is the news.
+
+    Both blobs are readable and both count zero rows at the indices we read, so
+    neither can win on rows and the choice would otherwise fall to whichever
+    came first. Pick the placeholder and the user is told this route has no
+    flights; pick the board whose blocks moved and the refusal degrades to
+    Matrix. Position deciding that is a coin toss on a fact the page states."""
+    placeholder = _page(_ds1("ds1_flightless_board.json"))
+    relocated = _page(_ds1("ds1_blocks_relocated.json"))
+    html = placeholder + relocated if placeholder_first else relocated + placeholder
+    client(_FakeResponse(text=html))
+    with pytest.raises(GfPageShapeError, match=r"holds flight rows at \[4, 5\]"):
+        gfid._one_call(_FILTERS)
+
+
+def test_a_placeholder_above_a_drifted_board_does_not_become_an_empty(client: Any) -> None:
+    """The other half of the same rule, for the board the readability floor
+    turns away.
+
+    A settled board carrying a value at `[3]` that is neither absent nor
+    row-shaped is exactly the drift the floor exists to survive, so it scores no
+    rows and cannot win. But it still CARRIES rows, at `[2]`, and a page with
+    rows on it somewhere is not a page with no flights — so it has to beat a
+    placeholder that carries none, and reach the refusal that names the drift."""
+    drifted = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
+    drifted[3] = {"moved": 1}
+    assert not gfid._is_a_readable_board(drifted), "the floor must still turn this away"
+    client(
+        _FakeResponse(text=_page(_ds1("ds1_flightless_board.json")) + _page(json.dumps(drifted)))
+    )
+    with pytest.raises(GfPageShapeError, match=r"ds:1\[3\] holds dict"):
+        gfid._one_call(_FILTERS)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["ds1_jfk_lax_3rows.json", "ds1_brace_in_string.json", "ds1_return_leg_pinned.json"],
+)
+def test_a_placeholder_above_a_served_board_still_serves_it(client: Any, name: str) -> None:
+    """The runner-up must not disturb the page that works. A board that carries
+    rows where we read them wins on rows, as it always did, and the placeholder
+    above it changes nothing about what the user is shown."""
+    client(_FakeResponse(text=_page(_ds1("ds1_flightless_board.json")) + _page(_ds1(name))))
+    with_placeholder = [f.flight_id for f in gfid._one_call(_FILTERS)]
+    client(_FakeResponse(text=_page(_ds1(name))))
+    assert with_placeholder == [f.flight_id for f in gfid._one_call(_FILTERS)]
+    assert with_placeholder, "this capture is one that carries rows"
 
 
 @pytest.mark.parametrize("bad_rows", [1, 3, 7])
@@ -1084,6 +1275,30 @@ def test_every_consent_form_shape_is_still_recognised(body: str) -> None:
     assert gfid._is_consent_page(final_url="https://www.google.com/travel/flights", html=body)
 
 
+@pytest.mark.parametrize(
+    ("path_or_url", "blocked"),
+    [
+        pytest.param("/sorry/index?continue=x", True, id="the-redirect-google-sends"),
+        pytest.param("/sorry/", True, id="a-trailing-slash"),
+        # A trailing slash is not a promise, and the equality arm is the only
+        # thing that catches the bare form: a `"/sorry/" in path` test misses it.
+        pytest.param("/sorry", True, id="the-bare-path"),
+        # Neither of these is the interstitial, and a substring test calls both
+        # of them one.
+        pytest.param("/sorryabout", False, id="a-longer-first-segment"),
+        pytest.param("/notsorry", False, id="a-longer-segment-ending-in-sorry"),
+        pytest.param("/notsorry/index", False, id="and-with-a-path-under-it"),
+    ],
+)
+def test_only_the_sorry_path_itself_reads_as_a_block(path_or_url: str, blocked: bool) -> None:
+    """The path is a sequence of segments, not a string that happens to contain
+    one. Both spellings Google uses count and neither near miss does."""
+    assert (
+        gfid._is_page_throttled(final_url=f"https://www.google.com{path_or_url}", html="")
+        is blocked
+    )
+
+
 def test_a_throttle_is_decided_by_the_url_path_not_the_query() -> None:
     """Same shape of bug one function over: `/sorry/` inside the `tfs=`
     parameter is our own request, not Google's captcha."""
@@ -1276,6 +1491,30 @@ def test_a_transport_outage_on_a_later_pin_keeps_what_was_already_served(
     assert "3 of 5 return boards skipped" in caplog.text
 
 
+def test_a_stop_with_nothing_served_still_reports_the_boards_that_would_not_parse(
+    client: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The throttle is what ended the pinning, but it is not the whole news.
+
+    Two of three return boards no longer parse, and the user is about to be told
+    to wait and retry — advice that will not work and hides the page-shape
+    change behind it. The raise is the outcome; the refusals seen on the way
+    there still have to be said, and every other exit from this accounting says
+    them."""
+    client(
+        _FakeResponse(text=_board_of(3)),  # the outbound board
+        _FakeResponse(text=_moved_row_page()),  # pin 1 refuses
+        _FakeResponse(text=_moved_row_page()),  # pin 2 refuses
+        _FakeResponse(text="", status_code=429),  # pin 3 throttles, nothing served
+    )
+    with (
+        caplog.at_level(logging.WARNING, logger="flight_cli._gflight_ids"),
+        pytest.raises(GfThrottledError),
+    ):
+        gfid.search_with_ids(_round_trip_filters(), top_n=3)
+    assert "2 of 3 return boards unavailable" in caplog.text, caplog.text
+
+
 def test_a_transport_outage_with_nothing_served_is_the_outcome(client: Any) -> None:
     """Stopping early must not turn a wholly unreachable round trip into a
     silent `None` the caller renders as "no results". Exactly one transport
@@ -1437,21 +1676,67 @@ def test_a_permanent_curl_code_is_not_retried(name: str) -> None:
     assert not gfid._is_transport_failure(_by_code(name))
 
 
+# Every TLS code curl_cffi maps, with the decision written out one by one
+# instead of derived from the rule under test. `SSLError` subclasses
+# `ConnectionError`, so the class arm answers "retry" for all twelve, and a test
+# that recomputes the rule agrees with it every time — including where it is
+# wrong. An independent list is the only kind that can disagree.
+_SSL_CODE_IS_RETRIED = {
+    # The handshake, or the peer's certificate. Either can differ on the next
+    # attempt, and a flaky link produces them.
+    "SSL_CONNECT_ERROR": True,
+    "SSL_CERTPROBLEM": True,
+    "SSL_CIPHER": True,
+    "SSL_ISSUER_ERROR": True,
+    "SSL_INVALIDCERTSTATUS": True,
+    # This machine's own TLS setup: an engine it does not have, a CA bundle or
+    # CRL it cannot read, a pin that does not match, a client certificate the
+    # server refused. Identical on the third attempt, and reported as "Google
+    # Flights could not be reached" — which sends the reader to the network for
+    # a fault that is here.
+    "SSL_ENGINE_NOTFOUND": False,
+    "SSL_ENGINE_SETFAILED": False,
+    "SSL_ENGINE_INITFAILED": False,
+    "SSL_CACERT_BADFILE": False,
+    "SSL_CRL_BADFILE": False,
+    "SSL_PINNEDPUBKEYNOTMATCH": False,
+    "SSL_CLIENTCERT": False,
+}
+
+
+@pytest.mark.parametrize(("name", "retried"), sorted(_SSL_CODE_IS_RETRIED.items()))
+def test_each_tls_code_is_decided_on_its_own_merits(name: str, retried: bool) -> None:
+    """One class covers all of these and two answers are needed, so the
+    deny-list is read before the class."""
+    assert gfid._is_transport_failure(_by_code(name)) is retried
+
+
 def test_every_curl_result_code_gets_a_decision_and_only_these_are_retried() -> None:
     """Enumerated, not sampled. curl_cffi maps 41 result codes onto a dozen
     classes, so a rule written in classes quietly decides for codes nobody
     looked at — which is how a stalled body came to be classified as a bug in
-    our own request."""
+    our own request.
+
+    The TLS codes carry their decision from the table above rather than from the
+    class, which is the half this shape of test could not see before."""
     from curl_cffi.const import CurlECode
     from curl_cffi.requests import exceptions as curl_exc
 
     by_code = {getattr(CurlECode, n) for n in _RETRY_BY_CODE}
+    named = {getattr(CurlECode, n): r for n, r in _SSL_CODE_IS_RETRIED.items()}
+    seen = 0
     for code, cls in curl_exc.CODE2ERROR.items():
         error = cls(f"curl said {code}", code=cast("Any", code))
-        reachability = isinstance(error, curl_exc.ConnectionError | curl_exc.Timeout)
-        assert gfid._is_transport_failure(error) is (reachability or code in by_code), (
+        if code in named:
+            expected = named[code]
+            seen += 1
+        else:
+            reachability = isinstance(error, curl_exc.ConnectionError | curl_exc.Timeout)
+            expected = reachability or code in by_code
+        assert gfid._is_transport_failure(error) is expected, (
             f"{getattr(code, 'name', code)} ({type(error).__name__}) is classified wrongly"
         )
+    assert seen == len(_SSL_CODE_IS_RETRIED), "a named TLS code is no longer mapped"
 
 
 @pytest.mark.parametrize(

@@ -391,3 +391,34 @@ def test_an_absent_origin_is_refused_by_whichever_arm_owns_it(
         else "origin destination --dep"
     )
     assert expected in output
+
+
+@pytest.mark.parametrize("n", ["0", "-5"], ids=["zero", "negative"])
+@pytest.mark.parametrize("command", ["gflight", "search", "fare"])
+def test_a_result_count_below_one_is_refused_before_any_backend_runs(
+    monkeypatch: pytest.MonkeyPatch, command: str, n: str
+) -> None:
+    """`--n` feeds a pin count and a page size, and neither has a meaning below
+    one. A negative reached the pin loop as a slice bound and asked for the
+    whole board rather than nothing, so the guard is a floor on the option
+    itself — which is a keyword argument no test reads unless one asks.
+
+    All three commands, because the floor is written three times and removing
+    it from any one of them is invisible from the other two."""
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    def _unreached(**_kw: object) -> None:
+        raise AssertionError("a backend ran on a query that asked for no results")
+
+    for path in (
+        "_run_gflight_path",
+        "_run_matrix_path",
+        "_run_gflight_path_multi",
+        "_run_matrix_path_multi",
+        "_run_enriched_path",
+    ):
+        monkeypatch.setattr(cli, path, _unreached)
+    result = CliRunner().invoke(cli.app, [command, "JFK", "MIA", "--dep", _future_dep(), "-n", n])
+    assert result.exit_code == 2, result.output

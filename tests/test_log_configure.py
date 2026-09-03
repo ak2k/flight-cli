@@ -82,6 +82,41 @@ def test_a_module_record_reaches_the_handler(capsys: pytest.CaptureFixture[str])
     assert "ds:1 carried no row block at [2, 3]" in capsys.readouterr().err
 
 
+def test_a_record_carrying_terminal_control_bytes_reaches_the_stream_without_them(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Page text reaches these records, so remote bytes reach this stream.
+
+    A refusal names the board it could not read, and the classifier quotes what
+    it found. Today every such call spells the payload with `%r`, which is why
+    nothing has escaped — but that is a habit held at each call site, and one
+    `%s` written later undoes it silently. Pinned at the handler instead, where
+    it holds for calls nobody has written yet.
+
+    The C1 byte matters as much as the ESC: a single 0x9b IS a control sequence
+    introducer on a terminal that reads eight-bit sequences, and it survives
+    every rule written about `\x1b[`."""
+    log_mod.configure("debug")
+    logging.getLogger(_MODULE_LOGGER).debug("ds:1 refused: %s", "\x1b[2Jcleared\x9b31mred\x07bell")
+    err = capsys.readouterr().err
+    assert "cleared" in err and "red" in err and "bell" in err, err
+    for driver in ("\x1b", "\x9b", "\x07"):
+        assert driver not in err, f"{driver!r} reached the terminal: {err!r}"
+
+
+def test_the_handler_keeps_the_whitespace_a_log_line_is_made_of(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Stripping is for bytes that drive a terminal, not for layout. A tab
+    inside a quoted payload is content, and the newline the handler itself adds
+    is what makes a line a line."""
+    log_mod.configure("debug")
+    logging.getLogger(_MODULE_LOGGER).debug("a\tb")
+    err = capsys.readouterr().err
+    assert "a\tb" in err, err
+    assert err.endswith("\n")
+
+
 def _record(msg: str, *args: object) -> logging.LogRecord:
     return logging.LogRecord(_MODULE_LOGGER, logging.DEBUG, __file__, 1, msg, args, None)
 

@@ -26,6 +26,7 @@ back-fill, so a top-N above that returns fewer rows than asked for.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import functools
 import json
 import logging
@@ -138,6 +139,42 @@ def _backoff_for(attempt: int) -> float:
 _LADDER_WAIT_CEILING_S = 120.0
 
 
+class _Round:
+    """One arm's shared budget: the prober that owns it, the rungs it has spent,
+    and the waiters parked on its outcome.
+
+    An arm is a wall of one kind. Two of them ride one ladder because a fan-out
+    can meet both at once, and they are kept apart because a probe of one says
+    nothing about the other: a waiter on the network released by a throttle
+    probe's success would retry into a network nobody has measured, and one
+    `exhausted` flag across both would answer a transport waiter with the
+    throttle's verdict — the caller then names the wrong wall to the user.
+
+    The lock lives on the ladder, which holds every round, so a worker that owns
+    both takes it once."""
+
+    def __init__(self, budget: int) -> None:
+        self.budget = budget
+        self.spent = 0
+        self.exhausted = False
+        self.owner: int | None = None
+        # Set when the owner's round resolves. Replaced per round so a waiter
+        # cannot be woken by the previous round's result.
+        self.settled = threading.Event()
+
+    def release(self) -> None:
+        """End the current round. The ladder's lock is held."""
+        self.owner = None
+        self.settled.set()
+        self.settled = threading.Event()
+
+    def refill(self) -> None:
+        """Hand the rungs back. The ladder's lock is held."""
+        self.spent = 0
+        self.exhausted = False
+        self.release()
+
+
 # DIVERGE: a hand-written ladder where the rest of the package would reach for a
 # retry decorator (stamina, already a dependency for `_http`'s Matrix calls). A
 # decorator retries ONE call against a counter of its own. This budget belongs
@@ -163,19 +200,16 @@ class _SharedThrottleLadder:
     Any successful call RESETS the ladder. The rungs measure one wall; a wall
     that returns half an hour later is a different one and gets a full budget.
 
-    The transport budget rides the same object because it is shared for the same
-    reason — the network is one network — but it is a plain counter: there is
-    nothing to probe, and a reset socket does not lift for a caller who waits."""
+    The transport budget rides the same object for the same reason — the network
+    is one network — and works the same way, because a retry is a probe there
+    too: `_is_transport_failure` admits only the families that DO clear, so a
+    waiter has an outcome worth waiting for. The two arms stay separate rounds;
+    only the lock is shared."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._spent = 0
-        self._transport_spent = 0
-        self._exhausted = False
-        self._owner: int | None = None
-        # Set when the owner's round resolves. Replaced per round so a waiter
-        # cannot be woken by the previous round's result.
-        self._settled = threading.Event()
+        self._wall = _Round(_THROTTLE_RETRY_ATTEMPTS)
+        self._net = _Round(_TRANSPORT_RETRY_ATTEMPTS)
 
     def throttled(self) -> float | None:
         """This worker's call came back throttled. How long to wait before
@@ -184,41 +218,48 @@ class _SharedThrottleLadder:
         A non-owner blocks here for the owner's outcome and then retries
         immediately, so its wait is the owner's backoff rather than one of its
         own."""
-        me = threading.get_ident()
-        with self._lock:
-            if self._exhausted:
-                return None
-            if self._owner is None:
-                self._owner = me
-            if self._owner == me:
-                self._spent += 1
-                if self._spent > _THROTTLE_RETRY_ATTEMPTS:
-                    self._exhausted = True
-                    self._release_locked()
-                    return None
-                return _backoff_for(self._spent)
-            settled = self._settled
-        settled.wait(_LADDER_WAIT_CEILING_S)
-        with self._lock:
-            return None if self._exhausted else 0.0
+        return self._step(self._wall)
 
     def transport_failed(self) -> float | None:
         """A curl-level failure. How long to wait before trying again, or None
-        when the shared transport budget is gone."""
+        when the shared transport budget is gone.
+
+        One prober here too: four cabins whose sockets reset together would
+        otherwise eat the whole budget before any retry lands, and the ones that
+        arrive last are refused after a single try — their columns then go
+        missing from a table that cannot say why."""
+        return self._step(self._net)
+
+    def _step(self, round_: _Round) -> float | None:
+        """One worker's turn on one arm: own the round and get a rung, or park
+        on the owner's outcome and retry the moment it reports."""
+        me = threading.get_ident()
         with self._lock:
-            self._transport_spent += 1
-            if self._transport_spent > _TRANSPORT_RETRY_ATTEMPTS:
+            if round_.exhausted:
                 return None
-            return _backoff_for(self._transport_spent)
+            if round_.owner is None:
+                round_.owner = me
+            if round_.owner == me:
+                round_.spent += 1
+                if round_.spent > round_.budget:
+                    round_.exhausted = True
+                    round_.release()
+                    return None
+                return _backoff_for(round_.spent)
+            settled = round_.settled
+        settled.wait(_LADDER_WAIT_CEILING_S)
+        with self._lock:
+            return None if round_.exhausted else 0.0
 
     def succeeded(self) -> None:
         """A call got through. The wall this ladder was measuring is gone, so
-        the rungs are returned and anyone waiting is released to retry."""
+        the rungs are returned and anyone waiting is released to retry.
+
+        Both arms, because one call getting through measures both: the wall let
+        it past and the socket carried it."""
         with self._lock:
-            self._spent = 0
-            self._transport_spent = 0
-            self._exhausted = False
-            self._release_locked()
+            for round_ in (self._wall, self._net):
+                round_.refill()
 
     def stand_down(self) -> None:
         """Give up ownership without a verdict — for a worker leaving the ladder
@@ -226,23 +267,30 @@ class _SharedThrottleLadder:
 
         Waiters are released to retry rather than left holding a probe that will
         never report: whatever ended the owner's call says nothing about the
-        wall, and one request each is cheaper than a fan-out that hangs."""
-        with self._lock:
-            if self._owner == threading.get_ident():
-                self._release_locked()
+        wall, and one request each is cheaper than a fan-out that hangs.
 
-    def _release_locked(self) -> None:
-        """End the current round. Caller holds the lock."""
-        self._owner = None
-        self._settled.set()
-        self._settled = threading.Event()
+        Every round this worker owns, since a throttled owner whose probe meets
+        a reset socket holds one while it climbs the other."""
+        me = threading.get_ident()
+        with self._lock:
+            for round_ in (self._wall, self._net):
+                if round_.owner == me:
+                    round_.release()
 
 
 # The ladder the current fan-out shares, or None when nothing is fanning out.
-# Module-level rather than thread-local because the workers ARE threads and the
-# signal they share is per-IP; a dict so the scope below mutates rather than
-# rebinds a global.
-_fanout_ladder: dict[str, _SharedThrottleLadder | None] = {"current": None}
+#
+# Not thread-local: the workers ARE threads and the wall they share is per-IP,
+# so they have to see ONE ladder. Not a plain global either — two fan-outs can
+# overlap, and a save/restore global is LIFO-correct only on one thread: each
+# scope would leave the other holding a foreign, possibly spent ladder, and the
+# last one out would leave a stale ladder bound for every later search in the
+# process. A ContextVar is both at once, because `anyio.to_thread.run_sync`
+# copies the caller's context into the worker: shared downward into a fan-out's
+# threads, isolated sideways between fan-outs.
+_fanout_ladder: contextvars.ContextVar[_SharedThrottleLadder | None] = contextvars.ContextVar(
+    "flight_cli_fanout_ladder", default=None
+)
 
 
 @contextlib.contextmanager
@@ -254,12 +302,11 @@ def shared_throttle_ladder() -> Generator[None]:
     there is nobody else to share the wall with. The previous ladder is restored
     on the way out, so nesting one scope inside another cannot strand a fan-out
     on an inner budget."""
-    previous = _fanout_ladder["current"]
-    _fanout_ladder["current"] = _SharedThrottleLadder()
+    token = _fanout_ladder.set(_SharedThrottleLadder())
     try:
         yield
     finally:
-        _fanout_ladder["current"] = previous
+        _fanout_ladder.reset(token)
 
 
 def _is_throttle_block(body: str) -> bool:  # pyright: ignore[reportUnusedFunction]  # read by _gf_dategrid, not here
@@ -391,13 +438,21 @@ def _extract_ds1(html: str) -> list[Any] | None:
     wins and reaches the 0-of-N guard as a layout change instead of losing to a
     husk.
 
-    With no blob carrying rows the first one long enough to reach `[3]` is
-    returned, and failing that the first decodable one at all: a genuinely
-    flight-less page stays a flight-less page rather than becoming a missing
-    `ds:1`, and a truncated placeholder above it does not become a shape
-    error."""
+    When no readable board carries rows, a blob that carries rows SOMEWHERE
+    still beats one that carries none. Rows we cannot read are a layout we no
+    longer understand and the refusal downstream says so; rows nowhere on the
+    page is a route with no flights. Without the distinction the answer turns
+    on which blob Google emitted first, and a placeholder ahead of a board we
+    cannot read is served as an authoritative "no flights on this route" — the
+    one outcome none of these failures may reach the user as.
+
+    Failing all of that the first blob long enough to reach `[3]` is returned,
+    and failing that the first decodable one at all: a genuinely flight-less
+    page stays a flight-less page rather than becoming a missing `ds:1`, and a
+    truncated placeholder above it does not become a shape error."""
     best: list[Any] | None = None
     best_rows = 0
+    carries_rows: list[Any] | None = None
     long_enough: list[Any] | None = None
     first_decodable: list[Any] | None = None
     for match in _DS_BLOB_RE.finditer(html):
@@ -423,12 +478,17 @@ def _extract_ds1(html: str) -> list[Any] | None:
         rows = _board_row_count(decoded) if _is_a_readable_board(decoded) else 0
         if rows > best_rows:  # strictly greater, so a tie keeps the earlier blob
             best, best_rows = decoded, rows
-        if long_enough is None and len(decoded) > max(_DS_ROW_BLOCKS):
-            long_enough = decoded
+        if len(decoded) > max(_DS_ROW_BLOCKS):
+            if long_enough is None:
+                long_enough = decoded
+            if carries_rows is None and _carries_rows_anywhere(decoded):
+                carries_rows = decoded
         if first_decodable is None:
             first_decodable = decoded
     if best is not None:
         return best
+    if carries_rows is not None:
+        return carries_rows
     return long_enough if long_enough is not None else first_decodable
 
 
@@ -449,6 +509,30 @@ def _is_a_readable_board(payload: list[Any]) -> bool:
     )
 
 
+def _carries_rows_anywhere(payload: list[Any]) -> bool:
+    """Does this payload hold flight rows at all — where we read them, or where
+    we do not?
+
+    The runner-up test, and the one that separates the two failures this module
+    must never confuse. Rows at an index we cannot read, or at one we do not
+    read, mean a board whose layout moved; no rows anywhere means a page with no
+    flights on it. Only the second is an answer.
+
+    Both halves are the tests the scan itself uses, so a blob answers the same
+    way here and there: structural at `_DS_ROW_BLOCKS`, where anything
+    row-shaped counts, and strict elsewhere, where `ds:1`'s several other
+    lists-of-lists-of-lists would otherwise read as relocated rows.
+
+    Caller guarantees the arity: only a payload long enough to reach `[3]` is
+    asked."""
+    if _board_row_count(payload) > 0:
+        return True
+    return any(
+        index not in _DS_ROW_BLOCKS and _holds_flight_rows(block)
+        for index, block in enumerate(payload)
+    )
+
+
 def _board_row_count(payload: list[Any]) -> int:
     """How many rows this payload carries at `[2]` and `[3]` together.
 
@@ -456,10 +540,14 @@ def _board_row_count(payload: list[Any]) -> int:
     a block whose rows have all changed shape still counts as the board it is
     and reaches the 0-of-N guard. An empty husk `[[]]` is a block that exists
     and holds nothing, so it counts as the zero rows it has — the whole point of
-    counting rather than asking whether a block is there."""
+    counting rather than asking whether a block is there.
+
+    Callers guarantee the arity — every one of them has already established
+    that the payload reaches `[3]` — so the indices are read without a second
+    bounds test that could never fail."""
     total = 0
     for index in _DS_ROW_BLOCKS:
-        if index < len(payload) and _looks_like_a_row_block(payload[index]):
+        if _looks_like_a_row_block(payload[index]):
             total += len(cast("list[Any]", cast("list[Any]", payload[index])[0]))
     return total
 
@@ -861,12 +949,21 @@ def _flight_leg(fl: list[Any]) -> FlightLeg:
 
 
 def _cookie_path() -> pathlib.Path:
-    """Where the warmed gflight session cookies live — the shared CLI cache dir
-    (same `MATRIX_CACHE_DIR` override the response cache honors)."""
+    """Where the warmed gflight session cookies live: a directory of this
+    component's own under the shared CLI cache root (same `MATRIX_CACHE_DIR`
+    override the response cache honors).
+
+    Its own directory rather than the root, because the file is a live Google
+    session cookie and wants a private one — and the root is not ours to make
+    private. The Matrix response cache shares that root and creates it with no
+    mode, so on any machine that has run a search it already exists at the umask
+    default; tightening it here would change a directory this component was
+    handed rather than created, and take the response cache's permissions with
+    it. A directory we create is ours to set a mode on, so we create one."""
     cache_dir = pathlib.Path(
         os.environ.get("MATRIX_CACHE_DIR") or pathlib.Path.home() / ".cache" / "flight-cli"
     )
-    return cache_dir / "gflight-cookies.json"
+    return cache_dir / "gflight" / "gflight-cookies.json"
 
 
 def _seed_cookies_once(client: Any) -> None:
@@ -941,14 +1038,16 @@ def _persist_cookies(client: Any) -> None:
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     created = False
     try:
-        # 0700 explicitly: `mkdir` takes the umask otherwise, and the directory
-        # holds a live Google session cookie. The mode on `mkdir` only applies
-        # when THIS call creates the directory, and whichever of this CLI's
-        # caches writes first is the one that creates it — the Matrix response
-        # cache shares the same root and asks for no mode at all. So the mode is
-        # enforced here rather than assumed. Suppressed because the directory
-        # may belong to another user on a shared box, where a private cache is
-        # not ours to fix and a search is still worth serving.
+        # 0700 explicitly: `mkdir` takes the umask otherwise, and this directory
+        # holds a live Google session cookie. `parents=True` creates the shared
+        # cache root with the default mode and only the leaf with this one,
+        # which is the split we want — the root belongs to whoever made it and
+        # holds the Matrix response cache too, while the leaf is ours alone. The
+        # chmod covers the leaf already existing at some other mode, since the
+        # mode on `mkdir` applies only when that call creates it. Suppressed
+        # because the cache may belong to another user on a shared box, where a
+        # private directory is not ours to fix and a search is still worth
+        # serving.
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with contextlib.suppress(OSError):
             path.parent.chmod(0o700)
@@ -1115,12 +1214,46 @@ def _retryable_curl_codes() -> frozenset[Any]:
     )
 
 
+@functools.cache
+def _permanent_curl_codes() -> frozenset[Any]:
+    """Curl result codes that name THIS machine's TLS configuration.
+
+    `SSLError` subclasses curl_cffi's `ConnectionError`, so the class arm below
+    admits the entire TLS family — and most of it belongs there, because a
+    handshake that failed once usually completes. These seven do not: a CA
+    bundle that cannot be read, a crypto engine that is not installed, a client
+    certificate the server would not take. Each is the same on the third
+    attempt as the first, and reporting it as "Google Flights could not be
+    reached" sends the reader to look at the network for a fault that is here.
+
+    Left retryable on purpose: `SSL_CONNECT_ERROR` and the certificate-status
+    codes, which describe the peer or the moment rather than our setup.
+
+    Checked BEFORE the class arm, because the class is what sweeps them in."""
+    from curl_cffi.const import CurlECode  # noqa: PLC0415
+
+    return frozenset(
+        {
+            CurlECode.SSL_ENGINE_NOTFOUND,
+            CurlECode.SSL_ENGINE_SETFAILED,
+            CurlECode.SSL_ENGINE_INITFAILED,
+            CurlECode.SSL_CACERT_BADFILE,
+            CurlECode.SSL_CRL_BADFILE,
+            CurlECode.SSL_PINNEDPUBKEYNOTMATCH,
+            CurlECode.SSL_CLIENTCERT,
+        }
+    )
+
+
 def _is_transport_failure(e: BaseException) -> bool:
     """Is this curl failing to REACH Google, rather than a page we read?
 
     Two families by class, because only these clear on a second attempt:
     `ConnectionError` (DNS, TLS, a reset socket) and `Timeout` (connect and
     read). Then the handful of codes above, which those classes do not cover.
+    Minus the codes those classes cover but should not — a deny-list read first,
+    since a class cannot see the difference between a network that is down and a
+    CA bundle that is missing.
 
     Everything else propagates on its first try, including the rest of curl's
     `CurlError` tree — `InvalidURL`, `InvalidSchema`, `SessionClosed`,
@@ -1132,12 +1265,12 @@ def _is_transport_failure(e: BaseException) -> bool:
     The import is deferred and on the error path only, for the reason above."""
     from curl_cffi.requests import exceptions as curl_exc  # noqa: PLC0415
 
+    code = getattr(e, "code", None)
+    if code is not None and code in _permanent_curl_codes():
+        return False
     if isinstance(e, curl_exc.ConnectionError | curl_exc.Timeout):
         return True
-    return (
-        isinstance(e, curl_exc.RequestException)
-        and getattr(e, "code", None) in _retryable_curl_codes()
-    )
+    return isinstance(e, curl_exc.RequestException) and code in _retryable_curl_codes()
 
 
 def _fetch_page(client: Any, url: str) -> Any:
@@ -1304,7 +1437,7 @@ def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
     the fan-out's when there is one, otherwise this call's own. Inside a
     fan-out that ladder is shared, so the group backs off once against a wall
     that is per-IP (see `_SharedThrottleLadder`)."""
-    ladder = _fanout_ladder["current"] or _SharedThrottleLadder()
+    ladder = _fanout_ladder.get() or _SharedThrottleLadder()
     empty_attempts = 0
     try:
         while True:
@@ -1458,6 +1591,13 @@ def _report_pin_outcome(
     as a route with no return flights. Anything served makes every refusal a
     footnote to a real answer, and the counts are what tell the user their
     table is short."""
+    # First, because two of the exits below leave by `raise` and nothing after
+    # them runs. A stop rule that fires with nothing served would otherwise take
+    # the per-URL refusals with it, and "rate-limited, wait and retry" is the
+    # wrong advice for a round trip whose return boards no longer parse — the
+    # page-shape change is the news, and this is the only place it is said.
+    if refused:
+        log.warning("%d of %d return boards unavailable: %s", len(refused), pins, refused[-1])
     if stopped is not None:
         if not served:
             raise stopped
@@ -1469,5 +1609,3 @@ def _report_pin_outcome(
         )
     elif refused and len(refused) == pins:
         raise refused[-1]
-    if refused:
-        log.warning("%d of %d return boards unavailable: %s", len(refused), pins, refused[-1])

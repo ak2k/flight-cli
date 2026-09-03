@@ -18,7 +18,7 @@ import re
 import sys
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
-from typing import TYPE_CHECKING, Annotated, Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Annotated, Any, NamedTuple, assert_never, cast
 
 import anyio
 import anyio.to_thread
@@ -35,6 +35,7 @@ from ._gf_errors import (
     GfPageShapeError,
     GfTfsUnsupportedError,
     GfThrottledError,
+    GfTransportError,
 )
 from ._multi_cabin import MultiCabinRow, parse_price
 from ._multi_cabin import merge as _merge_cabins
@@ -661,10 +662,13 @@ def _print_matrix_error(e: MatrixApiError) -> None:
 
     Matrix echoes the routing string back inside `message` ("Illegal COMMAND-LINE
     prefix: BA[/weird]AA"), so all three fields carry remote text onto a markup
-    console. Every Matrix reporter — the calendar sites, `_run` (which serves
-    `detail` and the search path), the search weave and the multi-cabin fan-out —
-    reports through here, so one Matrix error reads the same whichever command
-    asked for it."""
+    console. Every Matrix reporter that FAILS a command reports through here — the
+    calendar sites, `_run` (which serves `detail` and the search path), the search
+    weave and the group-level multi-cabin arm — so one Matrix error reads the same
+    whichever command asked for it. The per-cabin fan-out is the one exception and
+    is deliberate: its failure is soft, one cabin of several, so it prints a yellow
+    line naming that cabin and wraps the two fields itself rather than reporting a
+    red failure for a command that is still going to answer."""
     err.print(f"[red]Matrix returned an error ({_safe_text(e.kind)}):[/] {_safe_text(e.message)}")
     if e.request_id:
         err.print(f"[dim]request_id: {_safe_text(e.request_id)}[/]")
@@ -1343,13 +1347,18 @@ class _GfRefusal(NamedTuple):
 _GF_DECLINED = "Google Flights declined the request"
 
 
-def _gf_refusal(e: Exception) -> _GfRefusal:
+def _gf_refusal(e: GfBackendError) -> _GfRefusal:
     """User-facing text for a typed Google Flights refusal.
 
     Each wall gets its own wording and its own next move — collapsing them into
     one message ("Google Flights failed") is how a page-shape regression gets
-    mistaken for a route with no service. One dispatch for both renderings so a
-    new refusal type can't be given a line in only one of them."""
+    mistaken for a route with no service.
+
+    One dispatch, so the two renderings of a refusal AGREE. That is the whole
+    of the guarantee: a type with no arm of its own still renders, from the base
+    case, in both places — identically and without naming the wall. What keeps
+    a new type from quietly landing there is the `assert_never` below plus the
+    test that walks the subclasses, not this function's shape."""
     match e:
         case GfThrottledError():
             return _GfRefusal(
@@ -1377,8 +1386,23 @@ def _gf_refusal(e: Exception) -> _GfRefusal:
                 f"[red]Google Flights can't express this search:[/] {escape(e.reason)}. "
                 "Use [bold]--backend matrix[/].",
             )
-        case _:
+        case GfTransportError():
+            # "unreachable", the same word the pin loop uses for a spent
+            # transport ladder. Two sites naming one fact two ways leaves the
+            # user deciding which of them to believe, and only one is right:
+            # nothing here says the query was declined.
+            return _GfRefusal(
+                "Google Flights was unreachable",
+                "[yellow]Google Flights could not be reached[/] — the connection "
+                f"failed, not the query. Use [bold]--backend matrix[/]. ({_safe_text(e)})",
+            )
+        case GfBackendError():
+            # The base type is raised directly — a 5xx from the search page is
+            # the reachable one — so this is a case, not a fallback. It names no
+            # wall because it knows none.
             return _GfRefusal(_GF_DECLINED, f"[red]{_GF_DECLINED}:[/] {_safe_text(e)}")
+        case _:
+            assert_never(e)
 
 
 _MERGE_SOURCE_TAG = {"both": "GF+MX", "matrix": "MX", "gf": "GF"}
@@ -1515,9 +1539,6 @@ def _run_enriched_path(
     concurrently under one event loop, paint GF immediately (~1s), then repaint a
     reconciled GF+Matrix table once Matrix lands (~45s). PP/awards + URLs run on
     the Matrix (authoritative) result. `--fast` skips this for GF-only speed."""
-    from ._enrich import merge_results  # noqa: PLC0415
-    from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
-
     matrix_search = SpecificDateSearch(legs=legs, options=opts)
     awards_only = sel.awards_only if sel is not None else False
     state: dict[str, Any] = {}
@@ -1527,6 +1548,13 @@ def _run_enriched_path(
             state["matrix"] = await c.execute(matrix_search, cache=not no_cache)
         except MatrixApiError as e:
             state["matrix_err"] = e
+        except Exception as e:  # noqa: BLE001 — see below: this task must not tear down the group
+            # Anything `execute()` does not wrap — a connect timeout, a TLS
+            # failure — must NOT leave this task, or the group cancels the
+            # still-pending Google Flights paint and the whole command ends as a
+            # bare ExceptionGroup. Stash it and report after the weave, so the
+            # rows Google already returned survive a Matrix failure.
+            state["matrix_unexpected"] = e
 
     async def _go() -> None:
         async with (
@@ -1569,10 +1597,51 @@ def _run_enriched_path(
         e = state.get("matrix_err")
         if e is not None:
             _print_matrix_error(e)
+        elif state.get("matrix_unexpected") is not None:
+            err.print(f"[red]Matrix search failed:[/] {_safe_text(state['matrix_unexpected'])}")
         if not gf:
             raise typer.Exit(1)
         return
-    matrix_res = cast("SearchResult", matrix_res)
+    _render_enriched_answer(
+        matrix_res=cast("SearchResult", matrix_res),
+        gf=gf,
+        legs=legs,
+        opts=opts,
+        matrix_search=matrix_search,
+        top_n=top_n,
+        run_pp=run_pp,
+        sel=sel,
+        awards_only=awards_only,
+        matrix_url=matrix_url,
+        google_url=google_url,
+        pick=pick,
+    )
+
+
+def _render_enriched_answer(
+    *,
+    matrix_res: SearchResult,
+    gf: list[Any],
+    legs: tuple[Leg, ...],
+    opts: SearchOptions,
+    matrix_search: Search,
+    top_n: int,
+    run_pp: bool,
+    sel: ProviderSelection | None,
+    awards_only: bool,
+    matrix_url: bool,
+    google_url: bool,
+    pick: int | None,
+) -> None:
+    """Everything that happens once Matrix has landed: the reconciled repaint,
+    the award lookups, and the URL footer.
+
+    Separate from the weave above because the two read differently. The weave is
+    about failure — which backend answered, which refused, and what the user is
+    told when neither did — and this is about the answer. Neither should have to
+    be held in mind to follow the other."""
+    from ._enrich import merge_results  # noqa: PLC0415
+    from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
 
     # Repaint: reconciled GF + Matrix, prices attributed.
     if not awards_only:

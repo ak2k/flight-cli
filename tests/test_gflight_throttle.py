@@ -33,6 +33,9 @@ _JOIN_TIMEOUT_S = 5.0
 # Deliberately short: with mutual exclusion this timeout IS the pass, so the
 # suite pays it once.
 _BARRIER_TIMEOUT_S = 0.3
+# Slack on top of the barrier for the owner to return once the barrier gives up.
+# Only the parked waiter should still be running after this.
+_SETTLE_S = 0.4
 
 
 @pytest.fixture(autouse=True)
@@ -262,23 +265,51 @@ class _RacingInt(int):
         return int(self) + other
 
 
-def test_the_shared_counter_is_not_incremented_by_two_workers_at_once() -> None:
+class _EveryThread:
+    """An owner that compares equal to whichever worker asks.
+
+    A rung is handed out under `owner == me`, so this opens that gate for both
+    workers at once and leaves the increment as the only thing between them —
+    which is what the lock is there to protect. Electing a real owner instead
+    would park the loser as a waiter and the race would never happen."""
+
+    @override
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    @override
+    def __hash__(self) -> int:
+        return 0
+
+
+@pytest.mark.parametrize(
+    ("arm", "meet_the_wall"),
+    [
+        pytest.param("_wall", "throttled", id="throttle"),
+        pytest.param("_net", "transport_failed", id="transport"),
+    ],
+)
+def test_one_rung_is_not_handed_to_two_workers_at_once(arm: str, meet_the_wall: str) -> None:
     """Two cabins failing at the same instant must consume two rungs, not one.
 
     An unguarded read-modify-write hands both workers the same rung, so the
-    fan-out issues one more request than the budget authorises — per pair, per
-    round, which is exactly the multiplication a shared budget exists to stop.
-    Driven through the transport counter because it is the plain one; the same
-    lock guards the throttle arm's owner election."""
+    fan-out issues one more request than the budget authorises and runs two
+    backoff schedules against one wall — per pair, per round, which is the
+    multiplication a shared budget exists to stop.
+
+    Both arms, because each keeps its own rungs and the lock is the only thing
+    they share: a race pinned on one says nothing about the other."""
     ladder = _ladder()
-    ladder._transport_spent = _RacingInt(0)
+    round_ = getattr(ladder, arm)
+    round_.owner = cast("Any", _EveryThread())
+    round_.spent = _RacingInt(0)
     _RacingInt.barrier.reset()
-    threads = [threading.Thread(target=ladder.transport_failed) for _ in range(2)]
+    threads = [threading.Thread(target=getattr(ladder, meet_the_wall)) for _ in range(2)]
     for t in threads:
         t.start()
     for t in threads:
         t.join(timeout=_JOIN_TIMEOUT_S)
-    assert ladder._transport_spent == 2, "two workers were authorised on one rung"
+    assert round_.spent == 2, "two workers were authorised on one rung"
 
 
 def test_a_nested_scope_restores_the_ladder_it_replaced() -> None:
@@ -286,20 +317,53 @@ def test_a_nested_scope_restores_the_ladder_it_replaced() -> None:
     that leaked would leave the outer fan-out spending an inner budget, and one
     that never cleared would leave a later lone search sharing a spent ladder
     with nobody."""
-    assert _gflight_ids._fanout_ladder["current"] is None
+    assert _gflight_ids._fanout_ladder.get() is None
     with _gflight_ids.shared_throttle_ladder():
-        outer = _gflight_ids._fanout_ladder["current"]
+        outer = _gflight_ids._fanout_ladder.get()
         assert outer is not None
         with _gflight_ids.shared_throttle_ladder():
-            assert _gflight_ids._fanout_ladder["current"] is not outer
-        assert _gflight_ids._fanout_ladder["current"] is outer
-    assert _gflight_ids._fanout_ladder["current"] is None
+            assert _gflight_ids._fanout_ladder.get() is not outer
+        assert _gflight_ids._fanout_ladder.get() is outer
+    assert _gflight_ids._fanout_ladder.get() is None
 
 
 def test_a_scope_left_by_an_exception_still_restores() -> None:
     with contextlib.suppress(RuntimeError), _gflight_ids.shared_throttle_ladder():
         raise RuntimeError("the fan-out failed")
-    assert _gflight_ids._fanout_ladder["current"] is None
+    assert _gflight_ids._fanout_ladder.get() is None
+
+
+def test_two_overlapping_scopes_on_different_threads_do_not_clobber_each_other() -> None:
+    """Scopes on one thread nest; scopes on two threads OVERLAP, and a global
+    that saves and restores is only correct for the first shape.
+
+    Interleaved, each scope would restore what it saw on entry — the other
+    thread's ladder, or None — so both fan-outs end up laddering against a
+    budget that is not theirs, and whichever exits last leaves a spent ladder
+    bound for every later search in the process. Forced to interleave here,
+    because scheduling would usually hide it."""
+    entered = threading.Barrier(2)
+    seen: dict[str, Any] = {}
+    left: list[Any] = []
+
+    def scope(tag: str) -> None:
+        with _gflight_ids.shared_throttle_ladder():
+            seen[tag] = _gflight_ids._fanout_ladder.get()
+            entered.wait(timeout=_JOIN_TIMEOUT_S)  # both scopes open at once
+            # Still its own, after the sibling opened one.
+            seen[tag + "-after"] = _gflight_ids._fanout_ladder.get()
+        left.append(_gflight_ids._fanout_ladder.get())
+
+    threads = [threading.Thread(target=scope, args=(t,)) for t in ("a", "b")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=_JOIN_TIMEOUT_S)
+
+    assert seen["a"] is not seen["b"], "two fan-outs shared one ladder"
+    assert seen["a-after"] is seen["a"], "a sibling's scope replaced this one's ladder"
+    assert seen["b-after"] is seen["b"], "a sibling's scope replaced this one's ladder"
+    assert left == [None, None], f"a scope leaked a ladder on the way out: {left}"
 
 
 def test_two_sequential_scopes_do_not_share_a_spent_budget() -> None:
@@ -308,7 +372,7 @@ def test_two_sequential_scopes_do_not_share_a_spent_budget() -> None:
     ladders: list[Any] = []
     for _ in range(2):
         with _gflight_ids.shared_throttle_ladder():
-            ladder = _gflight_ids._fanout_ladder["current"]
+            ladder = _gflight_ids._fanout_ladder.get()
             assert ladder is not None
             ladders.append(ladder)
             for _ in range(_gflight_ids._THROTTLE_RETRY_ATTEMPTS):
