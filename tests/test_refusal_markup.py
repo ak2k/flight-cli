@@ -1584,6 +1584,46 @@ def test_a_table_the_google_only_path_cannot_draw_is_typed_and_non_zero(
     _assert_drives_no_terminal(printed)
 
 
+def test_a_key_failure_leaves_a_real_google_board_on_screen(
+    monkeypatch: pytest.MonkeyPatch,
+    gf_session: Any,
+    gf_capture: Any,
+) -> None:
+    """The same contract, driven through the page transport and the real
+    renderer rather than a stub of each: a captured board, parsed the way a
+    live one would be, reaching the table while Matrix has no key at all."""
+    from flight_cli import cli
+    from flight_cli._api_key import ApiKeyResolutionError
+
+    buf = _capture(monkeypatch)
+
+    class _NoKey:
+        def __init__(self, **_kw: object) -> None:
+            raise ApiKeyResolutionError("could not resolve the Matrix API key")
+
+    monkeypatch.setattr(cli, "MatrixClient", _NoKey)
+    gf_session(gf_capture("ds1_jfk_lax_3rows.json"))
+
+    legs, opts = _gf_legs_and_opts()
+    cli._run_enriched_path(
+        legs=legs,
+        opts=opts,
+        top_n=3,
+        run_pp=False,
+        sel=None,
+        matrix_url=False,
+        google_url=False,
+        pick=None,
+        rps=1.0,
+        impersonate="chrome",
+        no_cache=True,
+    )
+
+    printed = buf.getvalue()
+    assert "JFK" in printed and "LAX" in printed, printed
+    assert "could not resolve the Matrix API key" in printed, printed
+
+
 def test_the_group_level_matrix_arm_types_a_client_that_cannot_be_built(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
