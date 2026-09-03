@@ -16,6 +16,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, ClassVar, override
 
+import httpx
 import pytest
 import typer
 from rich.console import Console
@@ -30,7 +31,7 @@ from flight_cli._gf_dategrid import GfGridUnavailableError
 from flight_cli._gflight_ids import GfThrottledError
 from flight_cli.client import MatrixApiError
 from flight_cli.domain import Cabin, CalendarSearch, CalendarWindow, Leg, SearchOptions
-from flight_cli.models import CalendarResult
+from flight_cli.models import CalendarResult, SearchResult
 
 W = CalendarWindow(start=date(2026, 9, 7), end=date(2026, 10, 7), duration_min=5, duration_max=7)
 
@@ -1126,7 +1127,11 @@ def test_parse_errors_truncate_an_oversized_value(
     assert "…" in message  # cut, and visibly so
     # And bounded, which the ellipsis alone does not say: a message that echoed the
     # whole value and appended "…" satisfies the line above and nothing else here.
-    assert len(message) < len(cli._quote(value)) + 200  # pyright: ignore[reportPrivateUsage]
+    # Measured against the constant, not against `_quote`, whose own output would
+    # grow with the mutant and move the bound out of the mutant's way.
+    assert (
+        len(message) < cli._MAX_ECHOED_VALUE + 200  # pyright: ignore[reportPrivateUsage] — the cap IS the unit
+    )
     # What the cap actually governs: the value the user typed, measured where the
     # cap applies — before `repr`, which is where one code point stops being one
     # character. Plus one for the ellipsis.
@@ -1138,13 +1143,16 @@ def test_parse_errors_truncate_an_oversized_value(
 # ESC and CSI drive the terminal, and `escape` neutralises `[` alone: it leaves an
 # ESC to clear the screen or repaint the line above, and a bidi override to reorder
 # what is left. A redirected stderr keeps every byte for whatever reads it next.
-_DRIVES_THE_TERMINAL = "\x1b[2J\x9b31m\x7f\u202e\u2067\u2028\u2029\u200e\u200f\u061c"
+_DRIVES_THE_TERMINAL = (
+    "\x1b[2J\x9b31m\x7f\u202e\u2067\u2028\u2029\u200e\u200f\u061c\u200b\ufeff\ud800"
+)
 _READS_AS_TEXT = "café ¥1200 → [/x]"
 # The code points that do the driving, as opposed to the letters they steer:
 # a clear-screen, its 7-bit and 8-bit introducers, DEL, an override, an isolate,
-# the two separators `str.splitlines` breaks on, and the three bidi marks.
-# Asserted individually, because `[`, `2` and `J` are ordinary text once the ESC
-# is gone.
+# the two separators `str.splitlines` breaks on, the three bidi marks, two
+# invisibles that survive `strip()`, and a lone surrogate that no utf-8 stream can
+# write at all. Asserted individually, because `[`, `2` and `J` are ordinary text
+# once the ESC is gone.
 _DRIVERS = (
     "\x1b[2J",
     "\x1b",
@@ -1157,10 +1165,10 @@ _DRIVERS = (
     "\u200e",
     "\u200f",
     "\u061c",
+    "\u200b",
+    "\ufeff",
+    "\ud800",
 )
-# rich emits its own ESC sequences when it is styling for a terminal, so the bare
-# introducer is the one driver a styled stream cannot be asked about.
-_DRIVERS_ON_A_TTY = tuple(d for d in _DRIVERS if d != "\x1b")
 # Rich's own colour codes, which it interleaves with the text when styling for a
 # terminal — `café ¥1200` comes back in three styled pieces. Only SGR sequences,
 # so a payload's `ESC [ 2J` would survive this and fail the assertion above.
@@ -1191,14 +1199,15 @@ def test_matrix_error_strips_terminal_control_characters(
     _run_enriched()  # a grid was painted, so no Exit — only the report
     written = buffer.getvalue()
 
-    # Never, on either stream: a clear-screen, an 8-bit CSI, a DEL, a bidi control.
-    for driver in _DRIVERS_ON_A_TTY:
-        assert driver not in written, f"{driver!r} reached the console"
-    if not force_terminal:
-        # Redirected, nothing emits ESC — not rich's styling, and not the payload.
-        assert "\x1b" not in written
-    assert "café ¥1200" in _SGR.sub("", written)  # the readable half survives
-    assert "input" in written  # and the kind field is still readable
+    # Rich interleaves its own SGR codes when it styles for a terminal, and it
+    # styles the payload's `[` — which splits an ESC from the `[2J` that follows
+    # and hides the sequence from a search of the raw stream. Strip rich's own
+    # colour codes and the payload's bytes are all that is left to find.
+    probe = _SGR.sub("", written)
+    for driver in _DRIVERS:
+        assert driver not in probe, f"{driver!r} reached the console"
+    assert "café ¥1200" in probe  # the readable half survives
+    assert "input" in probe  # and the kind field is still readable
     _ = capsys.readouterr()
 
 
@@ -1221,8 +1230,12 @@ def test_safe_text_keeps_the_sentence_and_drops_the_drivers() -> None:
     assert safe_text(long_sentence) == long_sentence  # never truncated, unlike _quote
     # An exception is the one value that can say nothing and still have to be
     # reported; anything else that is blank is blank because someone chose it.
-    assert safe_text(TimeoutError("")) == "TimeoutError"
+    assert safe_text(httpx.ConnectTimeout("")) == "ConnectTimeout"
     assert safe_text(ValueError("\x00\x01")) == "ValueError"  # blank once sanitized
+    # The fallback is not a literal this module wrote: a class built from a remote
+    # payload is named by that payload, so it takes the same two steps.
+    named_by_a_backend = type("Bad\x1b[2JName", (Exception,), {})
+    assert safe_text(named_by_a_backend("")) == "Bad[2JName"  # the ESC gone, the rest kept
     assert safe_text("") == ""
     assert safe_text("   ") == "   "
 
@@ -1261,6 +1274,22 @@ def _detail(**overrides: Any) -> None:
     cli.detail(**kwargs)
 
 
+class _Utf8Console:
+    """A console file that encodes what it is given, as a real stdout does.
+
+    `StringIO` accepts a lone surrogate and hands it back; utf-8 has no encoding
+    for one, so a real stream raises UnicodeEncodeError and the render of a query
+    that succeeded dies on the way out."""
+
+    def __init__(self) -> None:
+        self.raw = io.BytesIO()
+        self.text = io.TextIOWrapper(self.raw, encoding="utf-8", newline="")
+
+    def written(self) -> str:
+        self.text.flush()
+        return self.raw.getvalue().decode("utf-8")
+
+
 class _MatrixErrorClient:
     """Every query fails the way Matrix fails: a typed error whose three fields
     carry whatever the backend chose to echo back."""
@@ -1289,17 +1318,17 @@ def test_detail_matrix_error_strips_terminal_control_characters(
     """`detail` runs its query through `_run`, which reports a Matrix error through
     the same helper the calendar uses: one backend message cannot repaint the
     terminal on one command and read as text on another."""
-    buffer = io.StringIO()
+    stream = _Utf8Console()
     monkeypatch.setattr(cli, "MatrixClient", _MatrixErrorClient)
-    monkeypatch.setattr(cli, "err", Console(file=buffer, force_terminal=force_terminal, width=200))
+    monkeypatch.setattr(
+        cli, "err", Console(file=stream.text, force_terminal=force_terminal, width=200)
+    )
     with pytest.raises(typer.Exit) as excinfo:
         _detail()
     assert excinfo.value.exit_code == 1
-    written = buffer.getvalue()
-    for driver in _DRIVERS_ON_A_TTY:
-        assert driver not in written, f"{driver!r} reached the console"
-    if not force_terminal:
-        assert "\x1b" not in written
+    written = stream.written()
+    for driver in _DRIVERS:
+        assert driver not in _SGR.sub("", written), f"{driver!r} reached the console"
     flat = _flat(_SGR.sub("", written))
     assert "Illegal COMMAND-LINE prefix" in flat  # message
     assert "input" in flat  # kind
@@ -1325,10 +1354,8 @@ def test_calendar_fast_refusal_strips_terminal_control_characters(
         _calendar_fast()
     assert excinfo.value.exit_code == 1
     written = buffer.getvalue()
-    for driver in _DRIVERS_ON_A_TTY:
-        assert driver not in written, f"{driver!r} reached the console"
-    if not force_terminal:
-        assert "\x1b" not in written
+    for driver in _DRIVERS:
+        assert driver not in _SGR.sub("", written), f"{driver!r} reached the console"
     assert "Matrix-only routing" in _flat(_SGR.sub("", written))
     assert capsys.readouterr().out == ""  # a refusal leaves stdout empty
 
@@ -1344,7 +1371,7 @@ def test_a_matrix_failure_that_says_nothing_still_names_itself(
         @override
         async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
             _ = (search, cache)
-            raise TimeoutError("")
+            raise httpx.ConnectTimeout("")
 
     monkeypatch.setattr(cli, "MatrixClient", _SilentClient)
     monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _fake_grid)
@@ -1352,7 +1379,7 @@ def test_a_matrix_failure_that_says_nothing_still_names_itself(
     _run_enriched()  # the grid painted, so the Matrix half only reports
     cap = capsys.readouterr()
     assert calls["grid"] == 1
-    assert "Matrix calendar failed: TimeoutError" in _flat(cap.err)
+    assert "Matrix calendar failed: ConnectTimeout" in _flat(cap.err)
 
 
 @pytest.mark.parametrize("value", ["[/x]", "[bold]x"])
@@ -1403,6 +1430,216 @@ def test_calendar_summary_and_cells_survive_a_markup_price(
     assert "[/x]USD500.00" in written  # the min cell
     assert "[bold]USD501.00" in written  # a per-duration cell
     _ = capsys.readouterr()
+
+
+# Everything Matrix chooses in a search response, one field at a time. `[/x]`
+# raises MarkupError and loses a render that had succeeded, `[bold]` eats the
+# value the cell exists to show, and the ESC drives the terminal it lands on.
+_HOSTILE_FIELD_VALUES = ("[/x]", "[bold]", "\x1b[2J")
+
+
+def _search_result(
+    *,
+    price: str = "USD421.00",
+    code: str = "BA",
+    short_name: str = "British Airways",
+    row_label: str = "0 stops",
+    carrier: str = "BA",
+) -> SearchResult:
+    """A one-solution search response with a carrier x stops grid, shaped the way
+    `SearchResult.from_api` reads Matrix's body."""
+    return SearchResult.from_api(
+        {
+            "solutionCount": 1,
+            "currencyNotice": {"ext": {"price": price}},
+            "carrierStopMatrix": {
+                "columns": [{"label": {"code": code, "shortName": short_name}}],
+                "rows": [{"label": row_label, "cells": [{"minPrice": "USD421.00"}]}],
+            },
+            "solutionList": {
+                "solutions": [
+                    {
+                        "ext": {"price": "USD421.00"},
+                        "itinerary": {"carriers": [{"code": carrier}], "slices": []},
+                    }
+                ]
+            },
+        }
+    )
+
+
+@pytest.mark.parametrize("payload", _HOSTILE_FIELD_VALUES)
+@pytest.mark.parametrize(
+    "field", ["price", "currency", "code", "short_name", "row_label", "carrier"]
+)
+def test_search_summary_and_table_survive_a_hostile_matrix_field(
+    field: str, payload: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Every one of these is Matrix's string verbatim, and all of them land on a
+    markup console — the summary line, both table titles, a column header, a row
+    label and a carrier cell. The currency half is driven through `_split_price`
+    because `_PRICE_RE` bounds it to three letters, so the render site is pinned
+    without depending on that regex staying as it is."""
+    kwargs = {field: payload} if field != "currency" else {}
+    res = _search_result(**kwargs)
+    if field == "currency":
+
+        def _hostile_currency(_s: str | None) -> tuple[str, str]:
+            return payload, "421.00"
+
+        monkeypatch.setattr(cli, "_split_price", _hostile_currency)
+    buffer = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, width=400))
+    cli._render_search(res)  # pyright: ignore[reportPrivateUsage] — the render site IS the unit
+    probe = _flat(_SGR.sub("", buffer.getvalue()))
+    for driver in _DRIVERS:
+        assert driver not in probe, f"{driver!r} reached the console"
+    if payload != "\x1b[2J":  # the ESC is dropped, so only its letters remain
+        assert payload in probe, f"{field} was eaten"
+    _ = capsys.readouterr()
+
+
+def test_multi_cabin_soft_failure_survives_a_hostile_matrix_message(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A per-cabin failure is soft — the column renders empty and the other cabins
+    still show. Reporting it through a markup console made it hard: an unbalanced
+    tag in the message raises MarkupError inside the task group, which leaves as an
+    ExceptionGroup and takes every other cabin's result with it."""
+    good = object()
+
+    class _OneCabinFails:
+        def __init__(self, **_kwargs: object) -> None: ...
+
+        async def __aenter__(self) -> _OneCabinFails:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+        async def execute(self, search: Any, *, cache: bool = True) -> object:
+            _ = cache
+            if search.options.cabin is Cabin.BUSINESS:
+                raise MatrixApiError(
+                    f"Illegal COMMAND-LINE prefix: BA[/weird]AA{_DRIVES_THE_TERMINAL}",
+                    kind=f"input{_DRIVES_THE_TERMINAL}",
+                )
+            return good
+
+    monkeypatch.setattr(cli, "MatrixClient", _OneCabinFails)
+    out = cli._run_matrix_multi(  # pyright: ignore[reportPrivateUsage] — the fan-out IS the unit
+        legs=(Leg.of(["JFK"], ["LHR"], date(2026, 10, 1)),),
+        opts=SearchOptions(cabin=Cabin.COACH),
+        cabins=(Cabin.COACH, Cabin.BUSINESS),
+        rps=10.0,
+        impersonate="chrome",
+        no_cache=True,
+    )
+    assert set(out) == {Cabin.COACH}  # the failing cabin is omitted, not fatal
+    assert out[Cabin.COACH] is good  # and the cabin that answered still answers
+    written = capsys.readouterr().err
+    probe = _flat(_SGR.sub("", written))
+    assert probe.count("query failed") == 1  # one soft line, not a traceback
+    assert "BA[/weird]AA" in probe  # the message shown, not parsed
+    for driver in _DRIVERS:
+        assert driver not in probe, f"{driver!r} reached the console"
+
+
+def test_multi_cabin_group_failure_reports_through_the_shared_reporter(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A failure that escapes the whole fan-out rather than one cabin is fatal, and
+    reports the same three fields the calendar does — request_id included, which
+    the copy it replaces never printed."""
+
+    class _ClientFailsOnOpen(_MatrixErrorClient):
+        @override
+        async def __aenter__(self) -> _ClientFailsOnOpen:
+            raise MatrixApiError(
+                f"Illegal COMMAND-LINE prefix: BA[/weird]AA{_DRIVES_THE_TERMINAL}",
+                kind=f"input{_DRIVES_THE_TERMINAL}",
+                request_id=f"r{_DRIVES_THE_TERMINAL}",
+            )
+
+    monkeypatch.setattr(cli, "MatrixClient", _ClientFailsOnOpen)
+    with pytest.raises(typer.Exit) as excinfo:
+        cli._run_matrix_multi(  # pyright: ignore[reportPrivateUsage] — the fan-out IS the unit
+            legs=(Leg.of(["JFK"], ["LHR"], date(2026, 10, 1)),),
+            opts=SearchOptions(cabin=Cabin.COACH),
+            cabins=(Cabin.COACH,),
+            rps=10.0,
+            impersonate="chrome",
+            no_cache=True,
+        )
+    assert excinfo.value.exit_code == 1
+    probe = _flat(_SGR.sub("", capsys.readouterr().err))
+    for driver in _DRIVERS:
+        assert driver not in probe, f"{driver!r} reached the console"
+    assert "BA[/weird]AA" in probe
+    assert "request_id" in probe
+
+
+def test_gflight_only_path_reports_a_hostile_query_failure(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """fli has no documented exception surface, so whatever it raises is reported
+    verbatim — and whatever it raises can carry a backend's text."""
+
+    def _boom(*_a: object, **_k: object) -> list[Any]:
+        raise RuntimeError(f"upstream said [/x]no{_DRIVES_THE_TERMINAL}")
+
+    monkeypatch.setattr(cli, "_gflight_results", _boom)
+    with pytest.raises(typer.Exit) as excinfo:
+        cli._run_gflight_path(  # pyright: ignore[reportPrivateUsage] — the path IS the unit
+            legs=(Leg.of(["JFK"], ["LHR"], date(2026, 10, 1)),),
+            opts=SearchOptions(cabin=Cabin.COACH),
+            top_n=5,
+            json_out=False,
+        )
+    assert excinfo.value.exit_code == 1
+    probe = _flat(_SGR.sub("", capsys.readouterr().err))
+    for driver in _DRIVERS:
+        assert driver not in probe, f"{driver!r} reached the console"
+    assert "upstream said [/x]no" in probe
+
+
+@pytest.mark.parametrize("gflight_fails", [False, True])
+def test_search_weave_reports_a_hostile_matrix_error_through_the_shared_reporter(
+    gflight_fails: bool, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The weave reports the same Matrix error the calendar does, so a message that
+    clears a terminal on one command cannot read as text on the other. Its Google
+    Flights half reports whatever fli raised, which is remote text too."""
+
+    def _no_gflight(*_a: object, **_k: object) -> list[Any]:
+        if gflight_fails:
+            raise RuntimeError(f"upstream said [/x]no{_DRIVES_THE_TERMINAL}")
+        return []
+
+    monkeypatch.setattr(cli, "MatrixClient", _MatrixErrorClient)
+    monkeypatch.setattr(cli, "_gflight_results", _no_gflight)
+    with pytest.raises(typer.Exit) as excinfo:
+        cli._run_enriched_path(  # pyright: ignore[reportPrivateUsage] — the weave IS the unit
+            legs=(Leg.of(["JFK"], ["LHR"], date(2026, 10, 1)),),
+            opts=SearchOptions(cabin=Cabin.COACH),
+            top_n=5,
+            run_pp=False,
+            sel=None,
+            matrix_url=False,
+            google_url=False,
+            pick=None,
+            rps=10.0,
+            impersonate="chrome",
+            no_cache=True,
+        )
+    assert excinfo.value.exit_code == 1  # no Google Flights half either
+    probe = _flat(_SGR.sub("", capsys.readouterr().err))
+    for driver in _DRIVERS:
+        assert driver not in probe, f"{driver!r} reached the console"
+    assert "Illegal COMMAND-LINE prefix" in probe
+    assert "request_id" in probe  # the third field, which the old copy dropped
+    if gflight_fails:
+        assert "upstream said [/x]no" in probe
 
 
 def test_quote_keeps_a_normal_value_whole() -> None:
@@ -1493,8 +1730,6 @@ _ESCAPE_OUT_OF_SCOPE = {
     "_render_merged": "merged-result renderable (Rich Table)",
     "_render_gflight_table": "Google Flights renderable (Rich Table)",
     "_render_multi_cabin_search": "multi-cabin renderable (Rich Table)",
-    "_run_enriched_path": "search-path weave",
-    "_run_gflight_path": "Google Flights search path",
     "_run_matrix_multi": "multi-cabin fan-out",
     "_run_gflight_multi": "Google Flights multi-cabin fan-out",
     "_validate_sort_cabin": "--sort validation",

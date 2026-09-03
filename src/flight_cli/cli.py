@@ -125,10 +125,11 @@ def main(
 _MAX_ECHOED_VALUE = 60  # characters of a rejected value worth showing back
 
 
-# Characters that drive a terminal rather than appear in it. `escape` neutralises
-# `[` and nothing else, so an ESC or CSI inside remote text still clears the
-# screen, repositions the cursor, or repaints what came before it — and a
-# redirected stderr keeps every byte for whatever reads the file next.
+# Characters that drive a terminal rather than appear in it, hide inside what does
+# appear, or cannot be written out at all. `escape` neutralises `[` and nothing
+# else, so an ESC or CSI inside remote text still clears the screen, repositions
+# the cursor, or repaints what came before it — and a redirected stderr keeps
+# every byte for whatever reads the file next.
 _CTRL = {
     **{c: None for c in range(0x20) if c not in (0x09, 0x0A)},  # C0, keeping tab and newline
     0x7F: None,  # DEL
@@ -145,6 +146,18 @@ _CTRL = {
     0x200F: None,  # RIGHT-TO-LEFT MARK
     **{c: None for c in range(0x202A, 0x202F)},  # embeddings and overrides
     **{c: None for c in range(0x2066, 0x206A)},  # isolates
+    # Invisible and not whitespace, so they survive `strip()` and `split()` and
+    # sit unseen inside a carrier code or a price: two values that read as equal
+    # compare unequal, and nothing on the screen says why.
+    0x00AD: None,  # SOFT HYPHEN
+    **{c: None for c in range(0x200B, 0x200E)},  # zero-width space, non-joiner, joiner
+    0x2060: None,  # WORD JOINER
+    0xFEFF: None,  # ZERO WIDTH NO-BREAK SPACE
+    **{c: None for c in range(0xE0000, 0xE0080)},  # tag block
+    # A lone surrogate has no utf-8 encoding at all, so one in a Matrix price
+    # reaches a real stdout as UnicodeEncodeError: the render of a query that
+    # succeeded dies on the way out, where a console file object hides it.
+    **{c: None for c in range(0xD800, 0xE000)},
 }
 
 
@@ -165,9 +178,11 @@ def _safe_text(value: object) -> str:
     if not text.strip() and isinstance(value, BaseException):
         # `httpx.ConnectTimeout("")` stringifies to nothing, which would leave a
         # reporter saying "Matrix calendar failed:" and stopping. The class name is
-        # the only thing such an exception carries. A blank from anywhere else is a
-        # value someone chose, and stays blank.
-        return escape(type(value).__name__)
+        # the only thing such an exception carries, and it takes the same two steps
+        # as the message would: a class built from a remote payload can be named
+        # anything. A blank from anywhere else is a value someone chose, and stays
+        # blank.
+        return escape(type(value).__name__.translate(_CTRL))
     return text
 
 
@@ -697,10 +712,10 @@ def _print_matrix_error(e: MatrixApiError) -> None:
 
     Matrix echoes the routing string back inside `message` ("Illegal COMMAND-LINE
     prefix: BA[/weird]AA"), so all three fields carry remote text onto a markup
-    console. The calendar sites and `_run` — which serves `detail` and the search
-    path — all report through here, so one Matrix error reads the same whichever
-    command asked for it. The multi-cabin fan-out and the search weave keep their
-    own copies, which do neither."""
+    console. Every Matrix reporter — the calendar sites, `_run` (which serves
+    `detail` and the search path), the search weave and the multi-cabin fan-out —
+    reports through here, so one Matrix error reads the same whichever command
+    asked for it."""
     err.print(f"[red]Matrix returned an error ({_safe_text(e.kind)}):[/] {_safe_text(e.message)}")
     if e.request_id:
         err.print(f"[dim]request_id: {_safe_text(e.request_id)}[/]")
@@ -1102,11 +1117,15 @@ def _render_search(res: SearchResult) -> None:
     if res.solution_count == 0:
         console.print("[yellow]No solutions returned.[/]")
         return
+    # Matrix chooses the price, the currency, the carrier codes and short names,
+    # and the stop labels; the summary line, the two table titles and every header
+    # and cell parse markup. Sanitized where each value is read, so a hostile field
+    # cannot lose the render of a query that succeeded.
     ccy, cheapest = _split_price(res.cheapest_price)
-    ccy_tag = f" ({ccy})" if ccy else ""
+    ccy_tag = f" ({_safe_text(ccy)})" if ccy else ""
     console.print(
         f"[bold]{res.solution_count} solutions[/]  · "
-        f"cheapest: [bold cyan]{cheapest or '—'}{ccy_tag}[/]"
+        f"cheapest: [bold cyan]{_safe_text(cheapest or '—')}{ccy_tag}[/]"
     )
 
     cm = res.carrier_stop_matrix
@@ -1120,9 +1139,9 @@ def _render_search(res: SearchResult) -> None:
         for col in cm.columns:
             code = col.label.code if col.label else "?"
             sn = (col.label.short_name or "") if col.label else ""
-            t.add_column(f"{code or '?'}\n{sn[:14]}")
+            t.add_column(f"{_safe_text(code or '?')}\n{_safe_text(sn[:14])}")
         for row in cm.rows:
-            cells = [str(row.label) if row.label is not None else "?"]
+            cells = [_safe_text(row.label) if row.label is not None else "?"]
             for c in row.cells:
                 p = _amount(c.min_price)
                 mark = "★" if c.min_price_in_grid else ("·" if c.min_price_in_row else "")
@@ -1139,7 +1158,7 @@ def _render_search(res: SearchResult) -> None:
     for i, it in enumerate(res.solutions[:10], 1):
         itn = it.itinerary
         slcs: list[Slice] = itn.slices if itn else []
-        it_carriers = ",".join((c.code or "?") for c in (itn.carriers if itn else []))
+        it_carriers = ",".join(_safe_text(c.code or "?") for c in (itn.carriers if itn else []))
 
         out = _fmt_slice_cell(slcs[0]) if slcs else "—"
         ret = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
@@ -1485,7 +1504,7 @@ def _run_gflight_path(
         )
         raise typer.Exit(1) from e
     except Exception as e:
-        err.print(f"[red]Google Flights query failed:[/] {e}")
+        err.print(f"[red]Google Flights query failed:[/] {_safe_text(e)}")
         raise typer.Exit(1) from e
 
     if not results:
@@ -1602,13 +1621,13 @@ def _run_enriched_path(
         if isinstance(e, GfThrottledError):
             console.print("[dim]Google Flights rate-limited — showing Matrix only.[/]")
         else:
-            err.print(f"[yellow]Google Flights query failed:[/] {e}")
+            err.print(f"[yellow]Google Flights query failed:[/] {_safe_text(e)}")
     matrix_res = state.get("matrix")
     if matrix_res is None:
         # Matrix failed; the GF table (if any) was already painted.
         e = state.get("matrix_err")
         if e is not None:
-            err.print(f"[red]Matrix returned an error ({e.kind}):[/] {e.message}")
+            _print_matrix_error(e)
         if not gf:
             raise typer.Exit(1)
         return
@@ -1751,7 +1770,10 @@ def _run_matrix_multi(
         try:
             res = await client.execute(search, cache=not no_cache)
         except MatrixApiError as e:
-            err.print(f"[yellow]Matrix {cab.value} query failed ({e.kind}): {e.message}[/]")
+            err.print(
+                f"[yellow]Matrix {cab.value} query failed "
+                f"({_safe_text(e.kind)}): {_safe_text(e.message)}[/]"
+            )
             return
         results[cab] = cast("SearchResult", res)
 
@@ -1766,9 +1788,7 @@ def _run_matrix_multi(
     try:
         anyio.run(go)
     except MatrixApiError as e:
-        err.print(f"[red]Matrix returned an error ({e.kind}):[/] {e.message}")
-        if e.request_id:
-            err.print(f"[dim]request_id: {e.request_id}[/]")
+        _print_matrix_error(e)
         raise typer.Exit(1) from e
     return results
 
