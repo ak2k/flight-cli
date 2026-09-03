@@ -488,7 +488,7 @@ def test_a_multi_cabin_round_trip_says_what_its_join_is_drawn_from(
     from flight_cli._gflight_ids import pinned_fanout
 
     pins = pinned_fanout(cli._bumped_query_top_n(5, len(cabins)))
-    assert (f"up to {pins} of each cabin's cheapest" in buf.getvalue()) is shown, buf.getvalue()
+    assert (f"up to {pins} of each cabin's first-ranked" in buf.getvalue()) is shown, buf.getvalue()
 
 
 @pytest.mark.parametrize(
@@ -540,7 +540,7 @@ def test_the_join_note_counts_the_outbounds_that_were_actually_pinned(
     )
     # "up to", because the cap bounds how many outbounds the join can see and
     # the board may hold fewer. The number is still the pin budget's.
-    assert f"up to {expected} of each cabin's cheapest" in buf.getvalue(), buf.getvalue()
+    assert f"up to {expected} of each cabin's first-ranked" in buf.getvalue(), buf.getvalue()
 
 
 def test_multi_cabin_fan_out_honours_an_encodable_constraint(
@@ -673,10 +673,13 @@ def test_a_round_trip_says_how_many_outbounds_it_will_actually_combine(
     cli._pin_cap_note(legs=legs, top_n=top_n)
 
     printed = buf.getvalue()
-    assert ("cheapest outbounds" in printed) is expected, printed
+    assert ("first-ranked outbounds" in printed) is expected, printed
     if expected:
-        assert f"up to {pinned_fanout(top_n)} cheapest" in printed, printed
+        assert f"up to {pinned_fanout(top_n)} first-ranked" in printed, printed
         assert str(top_n) not in printed, "the note must not quote the number it is correcting"
+        # Ranked, not cheapest: the pins are the board in page order, and the
+        # repository's own capture has its cheapest outbound outside them.
+        assert "cheapest" not in printed, printed
 
 
 @pytest.mark.parametrize(
@@ -749,4 +752,4 @@ def test_every_round_trip_surface_says_how_many_outbounds_it_combines(
     # a document on stdout stays a document.
     if "json" in command:
         _json.loads(result.stdout)  # the assertion is that this does not raise
-        assert "cheapest outbounds" not in result.stdout, result.stdout
+        assert "first-ranked outbounds" not in result.stdout, result.stdout

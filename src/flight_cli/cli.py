@@ -692,6 +692,10 @@ def _failure_text(e: BaseException) -> str:
     sees one cause fixes one thing and runs the same command again."""
     failures = _failures_inside(e)
     if not failures:
+        # No leaves at all. A group holding nothing but orderly exits reaches
+        # this too, and naming the group there would be the plumbing string this
+        # docstring refuses — but that group is the caller's to have raised
+        # already, which `_reraise_if_orderly` does before any of these print.
         return _safe_text(e)
     if len(failures) == 1:
         return _safe_text(failures[0])
@@ -733,7 +737,10 @@ def _run(
     except MatrixApiError as e:
         _print_matrix_error(e)
         raise typer.Exit(1) from e
-    except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
+    except (typer.Exit, typer.Abort):
+        # An orderly exit is not a failure. Redundant with the
+        # `_reraise_if_orderly` below on the installed click, and the only guard
+        # left if `typer.Exit` ever stops subclassing `Exception`.
         raise
     except Exception as e:
         # `execute()` wraps what Matrix answered; it does not wrap a DNS failure
@@ -1635,12 +1642,12 @@ def _run_gflight_path(
         return
 
     # `-n` is one number for everything the user can act on. Google's page
-    # serves its whole board (~30 rows) whatever was asked of it, and the table
-    # was the only thing trimmed: `--format json` ran to thirty rows, `--pick`
-    # accepted a row the table never printed and pinned it without a word, and
-    # the award matcher was fanned out over itineraries nobody had seen. The
-    # trim is HERE rather than in the query because the wide board is what the
-    # Tier-2 post-filter above and the multi-cabin join elsewhere are drawn
+    # serves its whole board (~30 rows) whatever count is asked of it, so the
+    # count is a trim rather than a query parameter, and everything below this
+    # line is drawn from the same rows: the table, the JSON document, the range
+    # `--pick` accepts, the itineraries the award matcher is fanned out over.
+    # The trim is HERE rather than in the query because the wide board is what
+    # the Tier-2 post-filter above and the multi-cabin join elsewhere are drawn
     # from — narrowing the query would answer a filtered search with fewer rows
     # than exist, which is the failure this backend is most prone to.
     results = _price_ordered(results)[:top_n]
@@ -1726,7 +1733,12 @@ def _paint_first_gf_table(
     the weave's task group, so a renderer raising on a drifted row shape would
     cancel Matrix and end the command as a bare ExceptionGroup — a traceback in
     place of the answer the other backend was about to give. The failure is
-    stashed and reported after the weave, like every other one here."""
+    stashed and reported after the weave, like every other one here.
+
+    The note on the empty branch is true when it prints: it is gated on there
+    being no Google refusal stashed, so Matrix really is the only half still
+    running. A Google half that FAILED is a different sentence, and
+    `_report_enriched_gf_failure` is where the difference is made."""
     if gf and not awards_only:
         try:
             _render_gflight_table(gf, legs=legs, top_n=top_n, match_carriers=_match_carriers(legs))
@@ -1776,8 +1788,8 @@ def _run_the_weave(go: Callable[[], Coroutine[Any, Any, None]], state: dict[str,
     itself does: opening the loop, starting the group, and the group's own
     unwinding. Untyped, any of that is a traceback with both streams empty on
     the most ordinary command there is — and the rows the other backend already
-    has go with it. A stash is not an outcome: every caller reads it, including
-    the callers whose other half succeeded."""
+    has go with it. A stash is not an outcome: every path out of its caller
+    reads it, including the one whose other half succeeded."""
     try:
         anyio.run(go)
     except (typer.Exit, typer.Abort):
@@ -1785,7 +1797,9 @@ def _run_the_weave(go: Callable[[], Coroutine[Any, Any, None]], state: dict[str,
         # `RuntimeError` on the installed click, so the arm below would catch it
         # and report the exit CODE as a Matrix error message. This arm is for
         # an exit raised by the weave itself; one raised inside the task group
-        # arrives wrapped, which is what the next line is for.
+        # arrives wrapped, which is what the next line is for — and on the
+        # installed click that next line covers this one too, leaving this the
+        # guard that still works if `typer.Exit` stops subclassing `Exception`.
         raise
     except Exception as e:  # noqa: BLE001 — reported by _report_search_matrix_failure
         # Backend-neutral, both times. This group spans BOTH halves, so what it
@@ -2010,11 +2024,17 @@ _MULTI_CABIN_QUERY_BUMP_CAP = 100
 def _pin_cap_note(*, legs: tuple[Leg, ...], top_n: int) -> None:
     """Say so when a round trip will search fewer outbounds than were asked for.
 
-    A round trip prices returns against the cheapest outbounds only, and the
-    number of those is capped however large `-n` is. Without a word the user
+    A round trip prices returns against the outbounds Google ranks first, and
+    the number of those is capped however large `-n` is. Without a word the user
     reads a short table as the market rather than as the budget, so every
     round-trip path says it: the enriched one, `--fast`, `--format json` and
     multi-cabin alike.
+
+    Ranked first, not cheapest: the pin loop slices the board in the order the
+    page served it, which is a composite of price, duration and stops that
+    nothing here reproduces. A note claiming otherwise is checkably false on the
+    repository's own capture, whose lowest fare sits in the second block and is
+    never pinned at all below `-n 3`.
 
     "Up to", because the cap bounds the count and the board may hold fewer. The
     exact number is knowable only inside the pin loop, and carrying it back out
@@ -2027,7 +2047,7 @@ def _pin_cap_note(*, legs: tuple[Leg, ...], top_n: int) -> None:
     pins = pinned_fanout(top_n)
     if len(legs) >= _ROUND_TRIP_LEGS and pins < top_n:
         err.print(
-            f"[dim]Google Flights combines returns against up to {pins} cheapest outbounds.[/]"
+            f"[dim]Google Flights combines returns against up to {pins} first-ranked outbounds.[/]"
         )
 
 
@@ -2039,8 +2059,8 @@ def _multi_cabin_join_note(pins: int) -> str:
     outbounds the join can see, and `-n` below it lowers the number further.
     Every part is ours, so there is nothing here to escape."""
     return (
-        f"Google Flights joins cabins on up to {pins} of each cabin's cheapest outbounds; "
-        "'—' means no shared itinerary, not no fare."
+        f"Google Flights joins cabins on up to {pins} of each cabin's first-ranked "
+        "outbounds; '—' means no shared itinerary, not no fare."
     )
 
 
@@ -2169,7 +2189,10 @@ def _run_matrix_multi(
 
     try:
         anyio.run(go)
-    except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
+    except (typer.Exit, typer.Abort):
+        # An orderly exit is not a failure. Redundant with the
+        # `_reraise_if_orderly` below on the installed click, and the only guard
+        # left if `typer.Exit` ever stops subclassing `Exception`.
         raise
     except Exception as e:
         # Nothing from a cabin reaches here — those are caught per cabin — so
@@ -2902,7 +2925,11 @@ def search(
         "--n",
         "-n",
         min=1,
-        help="Result count (matrix: page size; gflight: top_n).",
+        help=(
+            "Result count (matrix: page size; gflight: top_n). On Google Flights it "
+            "keeps the board in Google's ranking and round-trip combinations in "
+            "price order."
+        ),
         rich_help_panel=_GROUP_OUTPUT,
     ),
     rps: float | None = _RPS_OPT,

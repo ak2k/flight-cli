@@ -134,15 +134,13 @@ class _LiveStderr:
     """The stream `PrintLogger` writes through: whatever `sys.stderr` is NOW.
 
     `PrintLogger` takes a file at construction, and `configure` caches the
-    bound logger on first use, so passing `sys.stderr` itself pins the stream
-    that happened to be installed when the first record was emitted. A host
-    that then replaces and closes it gets `ValueError: I/O operation on closed
-    file` out of its next log line, and a host with no stderr at all gets
-    worse: `PrintLogger` falls back to STDOUT, so the diagnostic lands in the
-    document `--format json` is writing. Resolving per write is what
-    `_StderrHandler` does for the stdlib half of this module, for the same
-    reason — and there is no version of this where a log line is worth either
-    outcome, so a stream that cannot be written to is written nowhere.
+    bound logger on first use, so passing `sys.stderr` itself pins whichever
+    stream carried the first record — and an embedding host that then replaces
+    it gets the diagnostic in a closed stream or in stdout, where the
+    `--format json` document goes. Both failures are written up in the logging
+    section of docs/memories/gf_routing_and_carriers.md. Resolving per write is
+    what `_StderrHandler` does for the stdlib half of this module, for the same
+    reason, and a stream that cannot be written to is written nowhere.
 
     Truthy and left that way deliberately: `PrintLogger.__init__` reads
     `file or stdout`, so a proxy that ever tested false would route the whole

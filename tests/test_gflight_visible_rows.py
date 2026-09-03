@@ -2,14 +2,21 @@
 """`-n` is one number for everything the user can act on.
 
 Google's search page serves its whole board — around thirty rows — whatever
-count was asked of it, so the count has to be applied on the way out. Only the
-table was: `--format json` emitted every row, `--pick` accepted and silently
-pinned a row the table never printed, and the award matcher was fanned out over
-itineraries nobody had seen. What is under test is that the table, the JSON
-document, the pinned deep link and the award matcher are all handed the SAME
-set, and that the wide board still reaches the one thing that needs it — the
-Tier-2 post-filter, which runs before the trim because a routing constraint is
-answered out of the whole board or answered wrong.
+count is asked of it, so the count is applied on the way out. What is under
+test is that the table, the JSON document, the pinned deep link and the award
+matcher are all handed the SAME set, and that the wide board still reaches the
+one thing that needs it — the Tier-2 post-filter, which runs before the trim
+because a routing constraint is answered out of the whole board or answered
+wrong.
+
+WHICH rows survive is under test too, and the answer differs by set. A one-way
+board is trimmed in Google's ranking, which the page decides and nothing here
+reproduces; a round trip's combinations carry no ranking of their own — they
+are built pin-major by the fan-out — so they are trimmed by price.
+
+The multi-cabin arms are where only the COUNT agrees: the JSON document carries
+the first `-n` of each cabin's own board and the table carries the top `-n` of
+the join, which is the same number of rows drawn from different sets.
 """
 
 from __future__ import annotations

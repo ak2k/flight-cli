@@ -203,7 +203,7 @@ unchanged by the cap.
 
 The bump therefore widens the leg-1 rows each cabin keeps and NOT the round-trip
 pins, so **Google Flights joins cabins on up to `<pin budget>` of each cabin's
-cheapest outbounds; '—' means no shared itinerary, not no fare** — the budget
+first-ranked outbounds; '—' means no shared itinerary, not no fare** — the budget
 being `pinned_fanout` of the bumped page size, which the cap holds at 10 however
 large `-n` is. `cli._multi_cabin_join_note`
 builds that sentence from the pin budget rather than a literal, and
@@ -252,34 +252,55 @@ prints the pin budget that count resolves to, which is the number the join will
 actually see rather than the one being corrected.
 
 **`-n` is one number, applied on the way out.** The page serves Google's whole
-board — 30 rows on the live JFK-LAX capture — whatever count was asked of it, so
-the count is a trim rather than a query parameter. It bounds everything the user
-can act on, and all of it from one place in `cli._run_gflight_path`: the table,
-the `--format json` document, the range `--pick` accepts and the itinerary
-`--emit-urls` pins, and the itineraries the award providers are fanned out over.
-Two things still read the whole board, and this is why the trim cannot move into
-the query: the Tier-2 post-filter, because a routing constraint is answered out
-of every row Google served or answered wrong — the flight that satisfies it can
-sit at row 25 of 30 — and the multi-cabin join, whose per-cabin queries are
+board — around thirty rows; the dated measurement is at the top of this file —
+whatever count is asked of it, so the count is a trim rather than a query
+parameter. It bounds everything the user can act on, and all of it from one place
+in `cli._run_gflight_path`: the table, the `--format json` document, the range
+`--pick` accepts and the itinerary `--emit-urls` pins, and the itineraries the
+award providers are fanned out over. That claim is about the paths that keep it —
+`--fast`, `--format json` and multi-cabin. On the default enriched path `--pick`
+indexes the Matrix solutions rather than the merged rows, which are two different
+sets the moment a Google-only row is cheaper.
+
+**And it keeps two different orders, because the two sets are ordered by
+different things.** A one-way board arrives ranked by Google — a composite of
+price, duration and stops that nothing here reproduces — so the trim keeps the
+page's order and `-n` means the rows the page put first. A round trip's
+combinations are ours: the pin loop builds them outbound by outbound, so their
+order is the loop's artifact and carries no ranking at all. Left alone, `-n 3`
+there is three trips from one outbound with cheaper trips from the next outbound
+off the table entirely. `cli._price_ordered` sorts them on their terminal member,
+which is the fare every surface prints, immediately before each of the three
+trims. The `-n` help string says both halves.
+
+Three things still read the whole board, and this is why the trim cannot move
+into the query: the Tier-2 post-filter, because a routing constraint is answered
+out of every row Google served or answered wrong — the flight that satisfies it
+can sit at row 25 of 30 — the multi-cabin join, whose per-cabin queries are
 deliberately widened (`_bumped_query_top_n`) so the cabins have overlap to join
-on and are trimmed back to the user's count by `_merge_cabins`. The multi-cabin
-`--format json` arm trims per cabin for the same reason, to the user's count and
-not the bumped one.
+on and are trimmed back to the user's count by `_multi_cabin.merge`, and the
+enriched weave, which hands the untrimmed board to `merge_results` and bounds the
+merged table afterwards in `_render_merged`. The multi-cabin `--format json` arm
+trims per cabin for the same reason, to the user's count and not the bumped one —
+the same count as the table beside it, drawn from a different set.
 
 **What a round-trip row's price means.** The two boards price different things.
 An outbound row carries the cheapest round-trip TOTAL reachable from that
 outbound; the return board fetched with that outbound pinned prices each of its
-rows at THAT combination's own total. Measured on the committed capture pair:
-the pinned board's minimum is 6616, exactly the AA144/AA1110 outbound row's
-price, while the AA1115/AA297 combination is a 7196 trip. Live 2026-09-03
-(HNL-MIA business, 2 adults) says the same from the other end: outbound 854/305
-quoted 6806 and its two combinations totalled 6806 and 7650. So an itinerary is
-priced from its terminal member — the pinned leg is what makes the combination
-that combination — and pricing it from the outbound reports every combination
-but the cheapest under its real fare. The human table prints each member's own
-price on its `Na`/`Nb` rows and `--format json` emits both, so both carry the
-true number; the SearchResult the award comparison reads carries one, and it is
-the total.
+rows at THAT combination's own total. Measured on the committed capture pair —
+the numbers and the assertions are in `tests/pp/test_gflight_adapter.py` — the
+pinned board's minimum is exactly the outbound row's price, while the other
+combination is a dearer trip. Live 2026-09-03 (HNL-MIA business, 2 adults) says
+the same from the other end: outbound 854/305 quoted 6806 and its two
+combinations totalled 6806 and 7650. So an itinerary is priced from its terminal
+member — the pinned leg is what makes the combination that combination — and
+pricing it from the outbound reports every combination but the cheapest under its
+real fare. The human table prints each member's own price on its `Na`/`Nb` rows
+and `--format json` emits both, so both carry the true number; the SearchResult
+the award comparison reads carries one, and it is the total. The cash baseline
+that comparison is made against is therefore the cheapest of the rows SHOWN —
+one-way rows in Google's order, combinations in price order — and not the
+cheapest on the board, which is what `-n` bounding everything means.
 
 **Release before park.** A worker that is about to wait on another arm's round
 gives up any round it still owns first. Two workers can otherwise each hold what
@@ -334,19 +355,28 @@ lets a waiter go earlier — a timeout read as an answer, a poll — puts three 
 multi-megabyte GETs in flight beside the prober's, which is the amplification
 the shared budget exists to remove; and an owner IS slow by construction, since
 every attempt of its ladder can burn the full request timeout. What bounds a
-waiter is its own attempt count. What guarantees the report arrives at all is
-`retry_throttled`'s `finally`, which stands an owner down whatever door it
-leaves by. The case neither covers is a GET that never returns: the owner is
-then a worker thread the task group is waiting on, so the command is wedged
-whatever its waiters do — that is a request timeout's job, not a ladder's.
+waiter is its own attempt count: it meets the wall at most
+`_THROTTLE_RETRY_ATTEMPTS` = 4 times and the network at most
+`_TRANSPORT_RETRY_ATTEMPTS` = 2, because the next meeting is `final` and returns
+without parking. One park ends no later than the owner's remaining ladder —
+`4 x REQUEST_TIMEOUT (60 s) + b1..b4 (<= 22.5 s) = 262.5 s` on the wall and
+`124.5 s` on the network — so one wall waiter's whole call is bounded at
+`5 x 60 + 4 x 262.5 = 1350 s` and one network waiter's at 429 s. What guarantees
+the report arrives at all is `retry_throttled`'s `finally`, which stands an owner
+down whatever door it leaves by. A round whose owner thread DIED without doing
+so is released by the next worker to meet the same wall, which costs that worker
+one GET against a wall this round had already measured. The case none of them
+covers is a GET that never returns: the owner is then a worker thread the task
+group is waiting on, so the command is wedged whatever its waiters do — that is
+a request timeout's job, not a ladder's.
 
 A call whose own attempts are spent never parks at all. It cannot use a backoff,
 so waiting for one is latency it will throw away, and it takes no round it will
 not probe. It does still book the rung of a round it already owns: that booking
 is how the group learns the wall has been measured to the end, and an owner that
 walked away without it leaves every waiter to spend a GET proving what the call
-already knew — measured at 9 GETs for a four-cabin outage against the 6 in the
-table above.
+already knew — measured at 9 GETs for a four-cabin outage, against the
+`3 + (cabins - 1)` the table above bounds one at, which is 6 for four cabins.
 
 A successful call REFILLS the WALL's rungs: the wall is per-IP, so any call
 getting through is evidence it lifted whoever made it, and a wall that returns

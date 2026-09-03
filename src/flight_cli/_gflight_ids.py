@@ -296,8 +296,10 @@ class _SharedThrottleLadder:
             settled = round_.settled
         # No clock: `release()` sets the very event held here, so waking is the
         # owner reporting and nothing else can end this wait. What bounds it is
-        # the caller's own attempt count; the reasoning and the timings live in
-        # the budget section of docs/memories/gf_routing_and_carriers.md.
+        # the caller's own attempt count, and what guarantees the report arrives
+        # is `retry_throttled`'s `finally`, which stands an owner down whatever
+        # door it leaves by. The reasoning and the elapsed bounds live in the
+        # budget section of docs/memories/gf_routing_and_carriers.md.
         settled.wait()
         with self._lock:
             return None if round_.exhausted else 0.0
@@ -1732,9 +1734,13 @@ def _report_pin_outcome(
         # answer. The loop cannot tell the two empties apart anyway: a pin whose
         # own sub-pins all refused also comes back as nothing.
         #
-        # The LAST refusal, and any of them would do: the pins are independent
-        # queries, so no one refusal is more authoritative than another about
-        # the trip. The last is the one the counted warning above already names,
-        # so the line the user reads and the exception the caller degrades on
-        # describe the same event.
+        # The LAST refusal: the pins are independent queries, so no one of them
+        # is more authoritative than another about the trip, and the last is the
+        # one the counted warning above already names — the line the user reads
+        # and the exception the caller degrades on then describe one event.
+        #
+        # A MIXED set is therefore decided by pin ORDER and not by kind, which
+        # matters because `cli._gf_refusal` words each kind differently: a 503
+        # arriving last speaks for boards that stopped parsing. Ranking the
+        # kinds is the alternative, and it needs a rule this loop does not have.
         raise refused[-1]

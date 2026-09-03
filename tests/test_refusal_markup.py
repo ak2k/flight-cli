@@ -2061,8 +2061,8 @@ def test_a_table_the_google_only_path_cannot_draw_is_typed_and_non_zero(
 ) -> None:
     """`--fast` has no second backend, so the renderer meeting a drifted row
     shape IS the outcome. Untyped it is a traceback with nothing on either
-    stream that a user could act on; the weave beside it has said this in a
-    sentence since the day it was written."""
+    stream that a user could act on; the weave beside it says the same thing in
+    a sentence."""
     from flight_cli import cli
 
     buf = _capture(monkeypatch)
