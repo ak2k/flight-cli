@@ -157,6 +157,13 @@ degrades to Matrix, which is the right side of the trade — the alternative is 
 selector that parses rows to choose between blobs, and it would drop a real
 board whose row layout has just changed.
 
+Loud only while NONE of the decoy's rows parse. A decoy carrying four rows one
+of which is a genuine flight row beats a real three-row board and serves that
+one flight, with no warning at any level — the 0-of-N guard never fires because
+one of N parsed. Measured; unchanged by the readability floor. The trade is the
+same one and still worth taking, but the failure it degrades to is a short
+table rather than a refusal, which is the quieter half.
+
 ### Request budget
 
 Every one of these is a multi-megabyte page GET, so the count is the cost:
@@ -172,11 +179,13 @@ Every one of these is a multi-megabyte page GET, so the count is the cost:
 | a persistently throttled multi-cabin fan-out | one ladder for the group: 5 + (cabins - 1) |
 | a multi-cabin fan-out under a transport outage | one ladder for the group: 3 + (cabins - 1) |
 | a round trip whose pins meet a throttle or an outage | it stops at that pin: no further pin is fetched |
+| a round trip whose every pin blips and recovers | 1 + 3 x pins = 31 at the default `-n 10` |
+| a round trip whose return boards all refuse (5xx, consent, layout) | 1 + pins, the same as a successful search |
 
 Two things make those numbers hold. `_fetch_page` goes through fli's SESSION,
 not `Client.get` — which is wrapped in `@retry(stop_after_attempt(3))`, so a
-throttled leg used to cost up to 15 GETs as fli's ladder ran inside each of
-ours. `retry_throttled` is the only ladder now. And the round-trip pin is capped
+throttled leg would otherwise cost up to 15 GETs, fli's ladder running inside
+each rung of ours. `retry_throttled` is the only ladder. And the round-trip pin is capped
 at 10 regardless of `top_n`: the multi-cabin path bumps `top_n` 5x (to 100) to
 widen the pool it filters, which was free on the old RPC and would otherwise
 mean ~2 x 31 page fetches for a two-cabin round trip. The default `-n 10` is
@@ -218,25 +227,45 @@ other worker throttled meanwhile waits on that outcome instead of sleeping a
 schedule of its own. A probe that gets through releases every waiter to retry,
 so a wall that lifts inside the ladder serves the whole fan-out rather than
 whichever cabin happened to be probing. When the rungs run out the waiters raise
-without spending a request on a wall just measured. Any successful call REFILLS
-the ladder: the rungs measure one wall, and a wall that returns later is a
-different one. The transport budget rides the same object for the same reason,
-as a plain shared counter — there is nothing to probe, and a reset socket does
-not lift for a caller who waits.
+without spending a request on a wall just measured. The transport budget rides
+the same object for the same reason — the network is one network — and works
+the same way, because a retry is a probe there too: the classifier admits only
+the curl failures that DO clear, so a waiter has an outcome worth waiting for.
+Each arm keeps its own round; only the lock is shared. One worker can own both
+at once, so standing down releases both and a success resets both.
+
+Any successful call REFILLS the ladder: the rungs measure one wall, and a wall
+that returns later is a different one. **That is what the "one ladder" ceiling
+is bounded by — no success getting through, not elapsed time.** There is no
+time floor: a success five milliseconds old refills the budget exactly as one
+from half an hour ago does. A wall that lets the prober past and then closes
+again refills on each probe, so a flapping wall costs more than one ladder;
+measured, a wall admitting only the prober cost 10 GETs against the 5 + 3 the
+ceiling quotes. The bound holds while nothing is getting through, which is the
+case it was written for.
+
+The rejected alternative is worth recording, because it is the lever if a
+request bound is ever traded away. A shared DEADLINE — every worker retries on
+its own schedule until one clock expires — recovers every cabin just as well
+and does not bound requests at all, since each worker keeps spending until the
+deadline. Bounding AND recovering needs a shared budget plus a broadcast of the
+probe's outcome, which is a counter and a condition variable; that is what this
+is.
 
 A decorator cannot express this, which is why the loop is written out: retry
 decorators bound ONE call against a counter of its own, while this budget
 belongs to the per-IP wall and is shared sideways across worker threads.
 
-Owning the ladder meant re-homing one thing fli's `Client.get` did for us: it
-also retried transport errors three times. `retry_throttled` now has a third
-arm for a curl-level failure — a reset connection, a read timeout — on a
+Owning the ladder re-homes one thing fli's `Client.get` does for us: it also
+retries transport errors three times. `retry_throttled` carries a third arm
+for a curl-level failure — a reset connection, a read timeout — on a
 deliberately smaller budget than the throttle arm. A throttle is a wall that
 lifts on its own; a transport failure that survives three attempts is usually
 the network being down, and a long backoff there only delays the Matrix
-fallback the user is going to get anyway. When the budget is spent it becomes a
-plain `GfBackendError`, so the enriched path degrades to Matrix and
-`--backend gflight` prints a typed line rather than a curl traceback.
+fallback the user is going to get anyway. When the budget is spent it becomes
+`GfTransportError`, so the enriched path degrades to Matrix, `--backend gflight`
+prints a typed line rather than a curl traceback, and the pin loop can tell an
+unreachable network apart from a board that refused for its own reasons.
 
 Only a failure to REACH Google is retried — `curl_cffi`'s `ConnectionError` and
 `Timeout` (DNS, TLS, a reset socket, connect and read timeouts), **plus four
@@ -439,17 +468,10 @@ chunking.
 Everything measured below was measured against the **RPC** transport, which is
 what the date grid still uses. The search page is a different endpoint with a
 different budget and a different block signal (the captcha interstitial, by
-redirect or in place; or an HTTP 429 that fli's client raises), so treat the
+redirect or in place; or an HTTP 429, which arrives as a response status), so treat the
 numbers as the grid's and re-measure before quoting them for the page. The
 reactive design carries over unchanged: both raise `GfThrottledError` into the
 same `retry_throttled` backoff.
-
-**Budget arithmetic on the page path.** fli's `Client.get` is wrapped in
-`@retry(stop_after_attempt(3))`, so a hard 429 costs THREE requests before our
-own backoff ever sees it — and `retry_throttled` then makes up to 5 attempts of
-its own. Worst case a single throttled leg fetch spends ~15 requests against an
-IP that is already blocking us. Budget accordingly before raising either count,
-and prefer widening fli's backoff to widening ours.
 
 The budget is keyed on **client context, not just IP.** Verified 2026-06-15
 (`research/experiment_gf_patchright.py` + `capture_gf_request.py`): a real Chrome

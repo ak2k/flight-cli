@@ -363,16 +363,13 @@ def test_a_matrix_error_carrying_markup_is_printable(
 def test_the_enriched_path_escapes_every_field_of_a_matrix_error(
     monkeypatch: pytest.MonkeyPatch, build: Any, fragments: tuple[str, ...]
 ) -> None:
-    """The enriched path prints the same Matrix error as `_run`, from its own
-    line, and it escaped the message while leaving `kind` bare.
+    """The enriched path prints the same Matrix error as `_run`, through the same
+    helper.
 
-    That is the failure mode a line-level `grep -v escape` cannot see: the line
-    already said `escape`, so it looked done. Every field is asserted here, not
-    just the one that was wrong.
-
-    It reports through the same helper as every other Matrix site, so the
-    request id it used to drop is shown here too: without it a user cannot
-    quote the failure back to anyone who could look it up."""
+    A line-level `grep` for `escape` cannot tell a sanitised field from an
+    unsanitised one beside it, so every field is asserted here, the request id
+    included: without it a user cannot quote the failure back to anyone who
+    could look it up."""
     from datetime import date, timedelta
 
     from flight_cli import cli

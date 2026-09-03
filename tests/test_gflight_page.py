@@ -347,6 +347,29 @@ def test_the_chosen_blob_is_counted_structurally_not_parsed(client: Any) -> None
         gfid._one_call(_FILTERS)
 
 
+def test_a_decoy_whose_rows_partly_parse_is_served_short_and_silently(client: Any) -> None:
+    """The other half of the same trade, and the quieter one.
+
+    Counting structurally means a decoy wins on row count, and the 0-of-N guard
+    is what turns that into a loud refusal. But the guard needs ZERO of N to
+    parse: a decoy carrying one genuine row among its junk beats a real
+    three-row board and serves that single flight, with no warning at any level.
+    The user gets a one-row table for a route with three.
+
+    Pinned because it is the documented cost of not parsing rows to choose, and
+    a cost nobody has written down is one somebody later reads as a defect and
+    'fixes' by parsing — which loses the board whose layout just changed."""
+    real = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
+    genuine_row = copy.deepcopy(real[2][0][0])
+    decoy = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
+    decoy[2] = [[["junk"], ["more-junk"], ["still-junk"], genuine_row]]
+    decoy[3] = None
+    # Four row-shaped entries against the real board's three, so the decoy wins.
+    client(_FakeResponse(text=_page(json.dumps(decoy)) + _board_of(3)))
+    served = gfid._one_call(_FILTERS)
+    assert len(served) == 1, f"the decoy no longer outranks the real board: {len(served)}"
+
+
 def _truncated_with_rows() -> str:
     """A staged blob carrying rows at `[2]` and stopping short of `[3]`."""
     return json.dumps([0, 1, [[["a"], ["b"], ["c"], ["d"], ["e"]]]])
@@ -697,8 +720,10 @@ def test_a_transport_outage_costs_one_ladder_for_the_WHOLE_cabin_fan_out(
     client: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The network is one network, so its budget is shared for the same reason
-    the wall's is. Per-worker, a single outage cost a transport ladder per
-    cabin — and on a round trip, per cabin per pin."""
+    the wall's is. Per-worker, a single outage costs a transport ladder per
+    cabin — and on a round trip, per cabin per pin.
+
+    The ceiling; the floor beside it is what makes the sharing safe."""
     from flight_cli.domain import Cabin
 
     fake = client(_transport_error("connection reset by peer"))

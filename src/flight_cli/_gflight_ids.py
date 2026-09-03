@@ -1183,11 +1183,13 @@ def _rows_from_ds1(payload: list[Any]) -> _Ds1Board:
 class _RetryableTransportError(GfBackendError):
     """A curl-level failure `retry_throttled` may try again.
 
-    Internal to this module: `retry_throttled` converts it to a plain
-    `GfBackendError` once the budget is spent, so callers only ever see the
-    base type. It subclasses `GfBackendError` anyway, so that if it ever did
-    escape an un-laddered path it would degrade to Matrix rather than reach the
-    user as an untyped traceback."""
+    Internal to this module: `retry_throttled` converts it to `GfTransportError`
+    once the budget is spent, and a caller seeing that distinct type IS the stop
+    rule — the network is one network, so a loop over related queries learns
+    from one of these that the rest will fail the same way. It subclasses
+    `GfBackendError` anyway, so that if it ever did escape an un-laddered path
+    it would degrade to Matrix rather than reach the user as an untyped
+    traceback."""
 
 
 @functools.cache
