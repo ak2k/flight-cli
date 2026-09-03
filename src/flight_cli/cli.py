@@ -650,7 +650,9 @@ def _orderly_exit(e: BaseException) -> typer.Exit | typer.Abort | None:
     host body's own exception included. Between them, a broad arm outside a group
     catches a deliberate stop wearing the shape of a backend failure and answers it
     with a backend's name and the wrong exit code. An exit beside other failures
-    still wins: it is the one outcome somebody asked for."""
+    still wins: it is the one outcome somebody asked for. "First" is first in
+    member order, which is task-start order — not the first to raise, and not the
+    most severe."""
     if isinstance(e, (typer.Exit, typer.Abort)):
         return e
     if isinstance(e, BaseExceptionGroup):
@@ -1353,7 +1355,9 @@ def _run_matrix_path(
     if json_out and not run_pp:
         sys.stdout.write(json.dumps(res.raw, indent=2))
         return
-    if not sel.awards_only:
+    # `not json_out` for the reason given at the same gate in
+    # `_run_gflight_path`: with awards on, the document is written below this.
+    if not sel.awards_only and not json_out:
         _render_search(res)
     if run_pp:
         p = opts.pax
@@ -1370,7 +1374,8 @@ def _run_matrix_path(
             cash_per_cabin=_cash_per_cabin_single(res, opts.cabin),
         )
     # `res` was cast to SearchResult at the top of this function; safe to pass through.
-    _emit_urls(search, matrix_url=matrix_url, google_url=google_url, result=res, pick=pick)
+    if not json_out:
+        _emit_urls(search, matrix_url=matrix_url, google_url=google_url, result=res, pick=pick)
 
 
 def _gflight_results(legs: tuple[Leg, ...], opts: SearchOptions, top_n: int) -> list[Any]:
@@ -1415,6 +1420,51 @@ def _gflight_json_row(g: Any) -> dict[str, Any]:
         # this write silently replaces it and needs its own key.
         leg["amenities"] = asdict(a)
     return row
+
+
+def _price_ordered(results: list[Any]) -> list[Any]:
+    """Round-trip combinations in price order. A one-way board is returned as
+    it came.
+
+    Two different sets, ordered by two different things. Google's board arrives
+    ranked by Google — a composite of price, duration and stops that nothing
+    here can reproduce — and that ranking is the answer to a one-way query, so
+    a trim over it keeps the rows the page put first. A round trip is not that:
+    the combinations are built pin-major by the fan-out, outbound by outbound,
+    so their order is this package's loop and carries no ranking at all. Left
+    alone, `-n` there means "the first count from the first outbounds", which
+    reads as a ranking and is not one.
+
+    A combination's fare is its terminal member's — the pinned leg is what
+    makes it that combination — so sorting on that member is sorting on the
+    price the table, the JSON document and the award comparison all show. The
+    sort is stable, so combinations sharing a total stay in the order the pins
+    were fetched."""
+    if any(not isinstance(r, tuple) for r in results):
+        return results
+    return sorted(results, key=lambda r: cast("float", list(r)[-1].flight.price))
+
+
+def _pick_in_range(pick: int | None, rows: int) -> int | None:
+    """`pick` when it names one of the `rows` the user was shown, else None
+    with the reason on stderr.
+
+    The range a pick is measured against is the visible count, which is decided
+    at the trim and nowhere else, so the check belongs beside it. Answering
+    None rather than an index is what makes the fallback single-sourced: the
+    pin machinery already treats "no pick" as "the cheapest row", labels the
+    link that way, and a caller that clamped to an index instead would pin the
+    right row under a label claiming the user's number.
+
+    stderr, because a `--format json` document on stdout stays a document —
+    the same rule every other note on this path follows."""
+    if pick is None or 1 <= pick <= rows:
+        return pick
+    err.print(
+        f"[yellow]--pick {pick} is out of range (1-{rows}); "
+        f"pinning the cheapest itinerary instead.[/]"
+    )
+    return None
 
 
 class _GfRefusal(NamedTuple):
@@ -1574,6 +1624,13 @@ def _run_gflight_path(
         raise typer.Exit(1) from e
 
     if not results:
+        if json_out:
+            # No rows is a value, and a document is what was asked for. The
+            # sentence below is for a person; to a consumer it is a parse error
+            # where an empty answer belongs, and the two are indistinguishable
+            # from the exit code.
+            sys.stdout.write(json.dumps([], indent=2))
+            return
         console.print("[yellow]Google Flights: no results (or none matched the routing).[/]")
         return
 
@@ -1586,7 +1643,8 @@ def _run_gflight_path(
     # Tier-2 post-filter above and the multi-cabin join elsewhere are drawn
     # from — narrowing the query would answer a filtered search with fewer rows
     # than exist, which is the failure this backend is most prone to.
-    results = results[:top_n]
+    results = _price_ordered(results)[:top_n]
+    pick = _pick_in_range(pick, len(results))
 
     # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType,
     #                 reportUnknownArgumentType, reportUnknownParameterType]
@@ -1603,7 +1661,12 @@ def _run_gflight_path(
         return
 
     awards_only = sel.awards_only if sel is not None else False
-    if not awards_only:
+    # `not json_out` as well as `not awards_only`: the early return above fires
+    # only with awards OFF, so with them on the document is written further
+    # down by the award renderer and every human surface between here and it
+    # would land in the same stream. A caller asking for a document gets a
+    # document — one, and nothing else — whatever else was asked for beside it.
+    if not awards_only and not json_out:
         try:
             _render_gflight_table(
                 results, legs=legs, top_n=top_n, match_carriers=_match_carriers(legs)
@@ -1637,13 +1700,16 @@ def _run_gflight_path(
             cash_per_cabin=_cash_per_cabin_single(sr, opts.cabin),
         )
 
-    _emit_urls(
-        SpecificDateSearch(legs=legs, options=opts),
-        matrix_url=matrix_url,
-        google_url=google_url,
-        result=sr,
-        pick=pick,
-    )
+    # The URL lines are prose on stdout, and `_emit_urls` is shared text that
+    # cannot know which format asked for it, so the guard belongs here.
+    if not json_out:
+        _emit_urls(
+            SpecificDateSearch(legs=legs, options=opts),
+            matrix_url=matrix_url,
+            google_url=google_url,
+            result=sr,
+            pick=pick,
+        )
 
 
 def _paint_first_gf_table(
@@ -1722,8 +1788,17 @@ def _run_the_weave(go: Callable[[], Coroutine[Any, Any, None]], state: dict[str,
         # arrives wrapped, which is what the next line is for.
         raise
     except Exception as e:  # noqa: BLE001 — reported by _report_search_matrix_failure
-        _reraise_if_orderly(e, said="Matrix search failed")
-        state["matrix_unexpected"] = e
+        # Backend-neutral, both times. This group spans BOTH halves, so what it
+        # hands over names whatever any of its tasks left in it — a broken pipe
+        # out of the Google paint among them. "Matrix search failed" in front of
+        # that sends the user to the backend that did not fail. `_run` and
+        # `_run_matrix_multi` keep the Matrix banner: their groups hold nothing
+        # else.
+        _reraise_if_orderly(e, said="Search failed")
+        # Its own key. The Matrix task stashes what IT could not do; this is
+        # what the weave itself could not do, and one key for both means
+        # whichever lands second is the only one anybody reads.
+        state["weave_err"] = e
 
 
 def _report_paint_failure(e: object) -> None:
@@ -1738,46 +1813,83 @@ def _report_paint_failure(e: object) -> None:
 def _report_weave_aftermath(state: dict[str, Any]) -> None:
     """What the weave left behind on a run that ANSWERED.
 
-    A Google Flights table that could not be drawn, and a Matrix half that
-    failed after producing its result — a transport that would not close, a
-    console write that failed. Neither is the outcome, and neither may be
-    silence: a value stashed on one path and read only on another is a failure
-    the command hid."""
+    A Google Flights table that could not be drawn, a Matrix half that failed
+    after producing its result — a transport that would not close, a console
+    write that failed — and the weave's own unwinding. None of them is the
+    outcome, and none of them may be silence: a value stashed on one path and
+    read only on another is a failure the command hid.
+
+    Every stash, not the first: `state["matrix"]` is written by the last
+    statement inside its `async with`, so a Matrix half can leave a result AND
+    a failure behind, and a run that answered can still have lost the table
+    beside it."""
     if state.get("paint_err") is not None:
         _report_paint_failure(state["paint_err"])
+    if state.get("matrix_err") is not None:
+        err.print(
+            f"[yellow]Matrix answered, then failed:[/] {_safe_text(state['matrix_err'].message)}"
+        )
     if state.get("matrix_unexpected") is not None:
         err.print(
             f"[yellow]Matrix answered, then failed:[/] {_failure_text(state['matrix_unexpected'])}"
         )
+    if state.get("weave_err") is not None:
+        err.print(
+            f"[yellow]The search answered, then failed:[/] {_failure_text(state['weave_err'])}"
+        )
 
 
-def _report_enriched_gf_failure(e: Exception) -> None:
+def _report_enriched_gf_failure(e: Exception, *, matrix_answered: bool) -> None:
     """Say why the Google Flights half of the weave produced nothing.
 
-    Matrix is still authoritative here, so a typed refusal is a note beside its
-    table rather than the outcome — but it stays named, or the merged table just
-    looks like Google had nothing cheaper."""
-    if isinstance(e, GfBackendError):
+    Where Matrix answered it is still authoritative, so a typed refusal is a
+    note beside its table rather than the outcome — but it stays named, or the
+    merged table just looks like Google had nothing cheaper.
+
+    Where Matrix did not answer there is no table for the note to sit beside,
+    and "showing Matrix only" promises a half that never arrives — on the most
+    likely both-halves-fail shape there is, a stale key with no route to either
+    backend. The same refusal then reads as what it is: half of the outcome,
+    on the stream the other half is about to be named on, leaving stdout the
+    zero bytes a run that answered nothing owes a caller."""
+    if not isinstance(e, GfBackendError):
+        err.print(f"[yellow]Google Flights query failed:[/] {_safe_text(e)}")
+    elif matrix_answered:
         console.print(f"[dim]{_safe_text(_gf_refusal(e).note)} — showing Matrix only.[/]")
     else:
-        err.print(f"[yellow]Google Flights query failed:[/] {_safe_text(e)}")
+        err.print(_gf_refusal(e).message)
 
 
 def _report_search_matrix_failure(state: dict[str, Any]) -> None:
-    """Print the right stderr message for a Matrix search that returned no
-    result: a known `MatrixApiError` through the shared reporter, an unexpected
-    non-MatrixApiError stashed by the weave, or a task that never finished.
+    """Print the stderr message for a search that produced no Matrix result: a
+    known `MatrixApiError` through the shared reporter, an unexpected one out
+    of the Matrix task, the weave's own unwinding, or a task that never
+    finished.
 
-    The third arm is not decoration. A cancellation is a `BaseException`, so
+    EVERY stash held, not the first of them. The three can coexist — the task
+    stashes what Matrix could not do while the weave stashes what the group
+    could not do — and reporting one of two is the same defect as reporting
+    the group instead of its leaves: the user fixes one thing and runs the
+    same command again. It is the rule `_failure_text` already applies to
+    several failures inside one group, applied to several stashes beside it.
+
+    The last arm is not decoration. A cancellation is a `BaseException`, so
     nothing stashes it, and without a fall-through the command exits non-zero
     with both streams empty — which is the one outcome every reporter here
     exists to prevent."""
     e = state.get("matrix_err")
+    said = False
     if e is not None:
         _print_matrix_error(e)
-    elif state.get("matrix_unexpected") is not None:
+        said = True
+    if state.get("matrix_unexpected") is not None:
         err.print(f"[red]Matrix search failed:[/] {_failure_text(state['matrix_unexpected'])}")
-    else:
+        said = True
+    if state.get("weave_err") is not None:
+        # Neutral, because this group spans both backends; see `_run_the_weave`.
+        err.print(f"[red]Search failed:[/] {_failure_text(state['weave_err'])}")
+        said = True
+    if not said:
         err.print("[yellow]Matrix search did not complete.[/]")
 
 
@@ -1834,9 +1946,12 @@ def _run_enriched_path(
     # exit code that reports success on one is the command lying about it. One
     # expression for both, because two that must agree eventually will not.
     painted = bool(gf) and not awards_only and state.get("paint_err") is None
-    if "gf_err" in state:
-        _report_enriched_gf_failure(state["gf_err"])
+    # Read BEFORE the Google half is reported, because what that report should
+    # say depends on it: a refusal is a footnote to a Matrix table, and the
+    # whole outcome where there is no Matrix table.
     matrix_res = state.get("matrix")
+    if "gf_err" in state:
+        _report_enriched_gf_failure(state["gf_err"], matrix_answered=matrix_res is not None)
     if matrix_res is None:
         # Every stash is read here: the paint failure is part of why nothing
         # reached the user, and the Matrix one IS the outcome.
@@ -2054,15 +2169,16 @@ def _run_matrix_multi(
 
     try:
         anyio.run(go)
-    except MatrixApiError as e:
-        _print_matrix_error(e)
-        raise typer.Exit(1) from e
     except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
         raise
     except Exception as e:
         # Nothing from a cabin reaches here — those are caught per cabin — so
         # this is the shared client failing to open or close at all. Typed
         # rather than a traceback, and worded like every other Matrix failure.
+        # One arm and not two: a `MatrixApiError` cannot arrive here either.
+        # `execute()` is the only thing that raises one and every call to it is
+        # inside a task, from which anything escaping arrives wrapped in a
+        # group that `except MatrixApiError` cannot catch.
         _reraise_if_orderly(e, said="Matrix search failed")
         err.print(f"[red]Matrix search failed:[/] {_failure_text(e)}")
         raise typer.Exit(1) from e
@@ -2220,7 +2336,9 @@ def _run_matrix_path_multi(
         return
 
     rows = _merge_cabins(results_by_cabin, sort_by=sort_by, top_n=top_n)
-    if not sel.awards_only:
+    # `not json_out` for the reason given at the same gate in
+    # `_run_gflight_path`: with awards on, the document is written below this.
+    if not sel.awards_only and not json_out:
         _render_multi_cabin_search(rows, cabins=cabins, sort_by=sort_by)
 
     if run_pp:
@@ -2247,11 +2365,12 @@ def _run_matrix_path_multi(
     # link for the sort cabin — it's the "primary" surface in the rendered
     # table and the one a user is most likely to click through to.
     sort_opts = opts.model_copy(update={"cabin": sort_by})
-    _emit_urls(
-        SpecificDateSearch(legs=legs, options=sort_opts),
-        matrix_url=matrix_url,
-        google_url=google_url,
-    )
+    if not json_out:
+        _emit_urls(
+            SpecificDateSearch(legs=legs, options=sort_opts),
+            matrix_url=matrix_url,
+            google_url=google_url,
+        )
 
 
 def _run_gflight_path_multi(
@@ -2292,7 +2411,7 @@ def _run_gflight_path_multi(
             # with, and quoting it back answers a small `-n` with a whole
             # bumped page. The table path gets the same number through
             # `_merge_cabins`.
-            for r in fli_results[:top_n]:
+            for r in _price_ordered(fli_results)[:top_n]:
                 items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
                 dumped = [_gflight_json_row(g) for g in items]
                 cab_dumped.append(dumped if isinstance(r, tuple) else dumped[0])
@@ -2302,7 +2421,9 @@ def _run_gflight_path_multi(
 
     results_by_cabin = _gflight_to_search_result_per_cabin(fli_by_cabin)
     rows = _merge_cabins(results_by_cabin, sort_by=sort_by, top_n=top_n)
-    if not sel.awards_only:
+    # `not json_out` for the reason given at the same gate in
+    # `_run_gflight_path`: with awards on, the document is written below this.
+    if not sel.awards_only and not json_out:
         _render_multi_cabin_search(
             rows, cabins=cabins, sort_by=sort_by, title_prefix="Google Flights"
         )
@@ -2407,7 +2528,7 @@ def _render_gflight_table(
     t.add_column("legs")
     t.add_column("legroom")
     any_legroom = False
-    for i, r in enumerate(results[:top_n], 1):
+    for i, r in enumerate(_price_ordered(results)[:top_n], 1):
         items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
         for j, g in enumerate(items):
             fr = g.flight  # unwrap GFlightWithId → fli FlightResult

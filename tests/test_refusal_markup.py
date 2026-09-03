@@ -48,6 +48,7 @@ from flight_cli.cli import (
     BACKEND_MATRIX,
     _gf_refusal,
     _pick_backend,
+    _safe_text,
 )
 from flight_cli.routing_predicates import classify
 
@@ -87,10 +88,22 @@ def _as_quoted(value: str) -> str:
 
 # Bytes that a terminal ACTS on. `escape` neutralises `[` and nothing else, so
 # these survive it: the first clears the screen and homes the cursor, the second
-# is the 8-bit CSI doing the same thing in one byte, and the last two reverse the
-# reading order of everything printed after them. A redirected stderr keeps them
+# is the 8-bit CSI doing the same thing in one byte, and the rest reverse the
+# reading order of what is printed after them. A redirected stderr keeps them
 # for whatever reads the file next.
-_ESCAPES = "\x1b[2J\x1b[1;1H\x9b31m\u202e\u2066"
+#
+# The last three are bidi MARKS rather than overrides or isolates: they carry no
+# terminator and reorder only the neutral characters beside them, which is what
+# makes them the ones a reader is least likely to notice — a price or a route in
+# a refusal line, read back as something it does not say.
+_ESCAPES = "\x1b[2J\x1b[1;1H\x9b31m\u202e\u2066\u061c\u200e\u200f"
+
+# Rich markup with a control character wedged inside the tag. `escape` only sees
+# a tag where `[` is followed by `[a-z#/@]`, so this is invisible to it — and
+# stripping the control character AFTERWARDS uncovers live markup that a real
+# terminal then styles. That is the one outcome `_safe_text`'s ordering exists
+# to prevent, and the reason `_render` below runs in terminal mode.
+_LIVE_MARKUP = "[\x00red]DELAYED[\x00/red] and [\x00blink]PAY NOW[\x00/blink]"
 
 
 def _hostile_matrix_error() -> Any:
@@ -119,15 +132,22 @@ def _unstringly_matrix_error() -> Any:
 def _assert_drives_no_terminal(printed: str) -> None:
     """Nothing in `printed` can move a cursor, clear a screen, or flip the
     reading order."""
-    for ctrl in ("\x1b", "\x9b", "\u202e", "\u2066"):
+    for ctrl in ("\x1b", "\x9b", "\u202e", "\u2066", "\u061c", "\u200e", "\u200f"):
         assert ctrl not in printed, f"{ctrl!r} reached the terminal: {printed!r}"
 
 
 def _render(markup: str) -> str:
     """Render through a real Console, which is where MarkupError comes from —
-    a plain string comparison would pass on text that cannot be printed."""
+    a plain string comparison would pass on text that cannot be printed.
+
+    `force_terminal`, because a Console not writing to one emits no escape
+    sequence at all: live markup and escaped markup then render to different
+    text with the same absence of styling, and an assertion about what a
+    terminal is driven to do cannot see the difference between them. `no_color`
+    stays — the colours are noise in every other assertion here, and the
+    attributes that survive it are enough to make styling visible."""
     buf = io.StringIO()
-    Console(file=buf, width=400, no_color=True, highlight=False).print(markup)
+    Console(file=buf, width=400, no_color=True, highlight=False, force_terminal=True).print(markup)
     return buf.getvalue()
 
 
@@ -317,6 +337,27 @@ def test_the_transport_refusal_agrees_with_the_pin_loop_about_the_cause() -> Non
     assert rendered.count("could not be reached") == 1, rendered
     assert "connection reset by peer" in rendered, rendered
     assert "--backend matrix" in rendered, rendered
+
+
+def test_remote_text_cannot_style_the_terminal_it_is_reported_on() -> None:
+    """Strip the control characters, THEN escape — the order, and what it buys.
+
+    A tag with a control character inside it is invisible to `escape`, which
+    only sees one where `[` is followed by `[a-z#/@]`. Stripping afterwards
+    uncovers it, and the console is then handed live markup assembled out of
+    remote text: a Matrix message or an exception's `str()` chooses the colour,
+    the blink and the reverse video its own failure is reported in, and can
+    repaint what was printed above it.
+
+    Rendered in terminal mode on purpose. A Console with no terminal to write
+    to emits no escape sequence at all, so the two orders come out as different
+    text with the same absence of styling — which is a difference no assertion
+    about a terminal can see."""
+    printed = _render(_safe_text(f"Matrix said: {_LIVE_MARKUP}"))
+    _assert_drives_no_terminal(printed)
+    # Visible as itself: the brackets belong to the payload, so they are what a
+    # reader should see, and the text between them must not go missing either.
+    assert "[blink]PAY NOW[/blink]" in printed, printed
 
 
 def test_the_page_shape_message_keeps_the_payload_text_readable() -> None:
@@ -785,37 +826,93 @@ def test_the_cabin_fan_out_reports_why_a_column_is_missing(
 def test_the_enriched_path_reports_a_google_flights_refusal_as_a_footnote(
     monkeypatch: pytest.MonkeyPatch, error: Exception, expected: str
 ) -> None:
-    """Matrix is still authoritative here, so a Google Flights failure is a
-    note beside a table rather than the outcome — but it stays named, or the
-    merged table just looks like Google had nothing cheaper."""
+    """Matrix answered, so it is authoritative and a Google Flights failure is
+    a note beside its table rather than the outcome — but it stays named, or
+    the merged table just looks like Google had nothing cheaper."""
     from flight_cli import cli
+    from flight_cli.models import SearchResult
 
     buf = io.StringIO()
     captured = Console(file=buf, width=400, no_color=True, highlight=False)
     monkeypatch.setattr(cli, "err", captured)
     monkeypatch.setattr(cli, "console", captured)
 
-    class _EmptyMatrix:
+    class _AnsweringMatrix:
         def __init__(self, **_kw: object) -> None: ...
 
-        async def __aenter__(self) -> _EmptyMatrix:
+        async def __aenter__(self) -> _AnsweringMatrix:
             return self
 
         async def __aexit__(self, *_a: object) -> bool:
             return False
 
         async def execute(self, _search: object, **_kw: object) -> object:
-            from flight_cli.client import MatrixApiError
-
-            raise MatrixApiError("no fares", kind="input")
+            return SearchResult.model_validate({"solutions": []})
 
     def _boom(*_a: object, **_kw: object) -> object:
         raise error
 
-    monkeypatch.setattr(cli, "MatrixClient", _EmptyMatrix)
+    def _no_repaint(*_a: object, **_kw: object) -> None:
+        return None
+
+    monkeypatch.setattr(cli, "MatrixClient", _AnsweringMatrix)
     monkeypatch.setattr(cli, "_gflight_results", _boom)
+    monkeypatch.setattr(cli, "_render_merged", _no_repaint)
     legs, opts = _gf_legs_and_opts()
-    with pytest.raises(typer.Exit):
+    # No `pytest.raises`: the other half answered, so this run has an outcome.
+    cli._run_enriched_path(
+        legs=legs,
+        opts=opts,
+        top_n=3,
+        run_pp=False,
+        sel=None,
+        matrix_url=False,
+        google_url=False,
+        pick=None,
+        rps=1.0,
+        impersonate="chrome",
+        no_cache=True,
+    )
+
+    printed = buf.getvalue()
+    assert expected in printed, f"{expected!r} was mangled: {printed!r}"
+    _assert_drives_no_terminal(printed)
+
+
+def test_a_run_with_no_matrix_does_not_promise_a_table_it_never_got(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both halves failed, so there is no Matrix table for a Google Flights
+    refusal to be a footnote to — and "showing Matrix only" is a promise the
+    run cannot keep.
+
+    This is the likeliest shape of a total outage there is: a key that will not
+    resolve and no route to Google are the same lost network. What the user
+    gets is the two reasons on stderr, nothing on stdout, and an exit code that
+    agrees with both."""
+    from flight_cli import cli
+    from flight_cli._gf_errors import GfTransportError
+
+    out_buf, err_buf = io.StringIO(), io.StringIO()
+    monkeypatch.setattr(
+        cli, "console", Console(file=out_buf, width=400, no_color=True, highlight=False)
+    )
+    monkeypatch.setattr(
+        cli, "err", Console(file=err_buf, width=400, no_color=True, highlight=False)
+    )
+
+    def _unreachable(*_a: object, **_kw: object) -> object:
+        raise GfTransportError("Google Flights could not be reached: connection reset by peer")
+
+    async def _matrix_fails(state: dict[str, Any], *_a: object, **_kw: object) -> None:
+        from flight_cli.client import MatrixApiError
+
+        state["matrix_err"] = MatrixApiError("no fares", kind="input")
+
+    monkeypatch.setattr(cli, "_gflight_results", _unreachable)
+    monkeypatch.setattr(cli, "_matrix_into", _matrix_fails)
+    legs, opts = _gf_legs_and_opts()
+    with pytest.raises(typer.Exit) as excinfo:
         cli._run_enriched_path(
             legs=legs,
             opts=opts,
@@ -830,8 +927,12 @@ def test_the_enriched_path_reports_a_google_flights_refusal_as_a_footnote(
             no_cache=True,
         )
 
-    printed = buf.getvalue()
-    assert expected in printed, f"{expected!r} was mangled: {printed!r}"
+    assert excinfo.value.exit_code == 1
+    assert out_buf.getvalue() == "", out_buf.getvalue()
+    printed = err_buf.getvalue()
+    assert "showing Matrix only" not in printed, printed
+    assert "could not be reached" in printed, printed
+    assert "no fares" in printed, printed
     _assert_drives_no_terminal(printed)
 
 
@@ -1686,6 +1787,32 @@ def test_an_orderly_exit_never_hides_what_failed_beside_it(
     assert "the transport broke" in buf.getvalue(), buf.getvalue()
 
 
+@pytest.mark.parametrize("code", [0, 3], ids=["exit-0", "exit-3"])
+def test_the_banner_over_an_orderly_exits_neighbours_names_no_backend(
+    monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    """The line that names what broke beside a deliberate stop carries a banner,
+    and this group holds both backends.
+
+    Here the stop comes from the Matrix half and the failure from the Google
+    half, which is the pairing the banner gets wrong: filed under Matrix, the
+    user goes and checks the backend that did as it was told."""
+    from flight_cli import cli
+
+    buf = _capture(monkeypatch)
+    monkeypatch.setattr(cli, "_gflight_results", _no_gf())
+    monkeypatch.setattr(cli, "_paint_first_gf_table", _fails_with("the table broke"))
+    monkeypatch.setattr(cli, "_matrix_into", _matrix_task_raising(typer.Exit(code)))
+
+    with pytest.raises(typer.Exit) as excinfo:
+        _enriched(monkeypatch)
+
+    printed = buf.getvalue()
+    assert excinfo.value.exit_code == code
+    assert "the table broke" in printed, printed
+    assert "Matrix" not in printed, printed
+
+
 def test_two_failures_at_once_are_both_named(monkeypatch: pytest.MonkeyPatch) -> None:
     """A group can carry several, and naming the first reports half an outage as
     the whole of it: the user fixes one thing and runs the same command again.
@@ -1706,6 +1833,110 @@ def test_two_failures_at_once_are_both_named(monkeypatch: pytest.MonkeyPatch) ->
     assert "2 concurrent failures" in printed, printed
     assert "the table broke" in printed and "matrix broke" in printed, printed
     assert "TaskGroup" not in printed, printed
+    # The banner names the group, and this group spans both backends: one of
+    # these two leaves is the Google half, so filing them under Matrix sends
+    # the user to the backend that did not break.
+    assert "Matrix search failed" not in printed, printed
+
+
+def test_a_google_side_failure_is_not_filed_under_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The weave's group holds both backends, so its banner cannot name one.
+
+    The reachable shape is a broken pipe: `flight search … | head -3` closes
+    stdout under the first paint while Matrix is still in flight. Reported as
+    a Matrix failure, the user goes and checks a backend that was working."""
+    from flight_cli import cli
+
+    buf = _capture(monkeypatch)
+    monkeypatch.setattr(cli, "_gflight_results", _no_gf())
+    monkeypatch.setattr(cli, "_paint_first_gf_table", _fails_with("[Errno 32] Broken pipe"))
+    monkeypatch.setattr(cli, "_matrix_into", _no_matrix())
+
+    with pytest.raises(typer.Exit):
+        _enriched(monkeypatch)
+
+    printed = buf.getvalue()
+    assert "[Errno 32] Broken pipe" in printed, printed
+    assert "Matrix" not in printed, printed
+
+
+def test_a_matrix_error_after_matrix_answered_is_reported_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`state["matrix"]` is written by the LAST statement inside the client's
+    `async with`, so a `MatrixApiError` out of `__aexit__` leaves a result and
+    a failure behind at once.
+
+    Read on one path and not the other, that is exit 0 with an answer on stdout
+    and stderr byte-empty — which is the outcome `_report_weave_aftermath`'s own
+    docstring forbids. Sibling of the `matrix_unexpected` case beside it, and
+    the same rule: every stash held is a stash reported."""
+    from flight_cli import cli
+    from flight_cli.client import MatrixApiError
+    from flight_cli.models import SearchResult
+
+    buf = _capture(monkeypatch)
+
+    class _AnswersThenRefuses:
+        def __init__(self, **_kw: object) -> None:
+            pass
+
+        async def __aenter__(self) -> _AnswersThenRefuses:
+            return self
+
+        async def __aexit__(self, *_a: object) -> None:
+            raise MatrixApiError(f"the session had already expired{_ESCAPES}", kind="input")
+
+        async def execute(self, _search: object, **_kw: object) -> object:
+            return SearchResult.model_validate({"solutions": []})
+
+    def _no_repaint(*_a: object, **_kw: object) -> None:
+        return None
+
+    monkeypatch.setattr(cli, "MatrixClient", _AnswersThenRefuses)
+    monkeypatch.setattr(cli, "_gflight_results", _no_gf())
+    monkeypatch.setattr(cli, "_render_merged", _no_repaint)
+
+    # Matrix answered, so this is not an exit — but it is not silence either.
+    _enriched(monkeypatch)
+
+    printed = buf.getvalue()
+    assert "the session had already expired" in printed, printed
+    _assert_drives_no_terminal(printed)
+
+
+def test_a_weave_that_fails_after_a_stash_reports_both(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two stashes, two writers, one report each.
+
+    The Matrix task stashes what MATRIX could not do; the weave stashes what
+    the GROUP could not do. Sharing a key loses whichever lands second, and
+    reporting the first of the two loses one outright — the same defect as
+    naming one leaf of a group and calling it the outage. The user then fixes
+    one thing and runs the same command again."""
+    from flight_cli import cli
+    from flight_cli.client import MatrixApiError
+
+    buf = _capture(monkeypatch)
+
+    async def _stashes_a_matrix_error(state: dict[str, Any], *_a: object, **_kw: object) -> None:
+        state["matrix_err"] = MatrixApiError("Illegal COMMAND-LINE prefix", kind="input")
+
+    monkeypatch.setattr(cli, "_gflight_results", _no_gf())
+    monkeypatch.setattr(cli, "_matrix_into", _stashes_a_matrix_error)
+    monkeypatch.setattr(
+        cli, "_paint_first_gf_table", _fails_with("stdout was closed while painting")
+    )
+
+    with pytest.raises(typer.Exit):
+        _enriched(monkeypatch)
+
+    printed = buf.getvalue()
+    assert "Illegal COMMAND-LINE prefix" in printed, printed
+    assert "stdout was closed while painting" in printed, printed
 
 
 def test_a_lone_failure_inside_a_group_is_named_rather_than_the_group(

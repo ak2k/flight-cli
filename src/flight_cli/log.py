@@ -154,10 +154,12 @@ class _LiveStderr:
             return 0
         # A closed stream raises ValueError, a broken one OSError, and
         # `sys.stderr` can be rebound to something that is not a stream at all
-        # — `_stderr_wants_colour` below already assumes as much. A log line is
-        # not worth ending the command it was describing, which is the same
-        # trade `_StderrHandler.emit` makes one stream over.
-        with suppress(ValueError, OSError, AttributeError):
+        # — `_stderr_wants_colour` below already assumes as much. Broad because
+        # that list is open-ended: a re-entered write raises RuntimeError and a
+        # `write` of another shape raises TypeError, and either ends the command
+        # the log line was only describing. `Exception` is the trade
+        # `_StderrHandler.emit` makes one stream over, and it is the trade here.
+        with suppress(Exception):
             stream.write(s)
         # What `print` would have written. It discards the count, and asking
         # the stream for its own would re-raise everything just suppressed.
@@ -167,8 +169,18 @@ class _LiveStderr:
         stream = sys.stderr
         if stream is None:
             return
-        with suppress(ValueError, OSError, AttributeError):
+        with suppress(Exception):
             stream.flush()
+
+
+# One proxy for the whole package, not one per logger. structlog keys its write
+# lock on the file OBJECT it was handed (`structlog._output.WRITE_LOCKS`), so a
+# fresh proxy per factory call gives every module logger a lock of its own and
+# they stop excluding each other — two threads then interleave characters of
+# two records on the one stream both are writing to. That table is a plain dict
+# holding strong references and is never pruned, so a proxy per call is also a
+# proxy kept for the life of the process.
+_LIVE_STDERR = _LiveStderr()
 
 
 def _stderr_logger_factory(*_args: object) -> structlog.PrintLogger:
@@ -186,7 +198,7 @@ def _stderr_logger_factory(*_args: object) -> structlog.PrintLogger:
     # only `write`/`flush`, through `print`. Being one fixed stream is the
     # property this proxy exists not to have, so the annotation is the thing
     # ignored rather than a shape we could satisfy.
-    return structlog.PrintLogger(file=_LiveStderr())  # pyright: ignore[reportArgumentType]
+    return structlog.PrintLogger(file=_LIVE_STDERR)  # pyright: ignore[reportArgumentType]
 
 
 def configure(level: str = "warning") -> None:

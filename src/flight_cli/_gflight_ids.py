@@ -229,7 +229,8 @@ class _SharedThrottleLadder:
 
     def transport_failed(self, *, final: bool = False) -> float | None:
         """A curl-level failure. How long to wait before trying again, or None
-        when the shared transport budget is gone.
+        when the shared transport budget is gone — unless it is `final`; see
+        `_step`.
 
         One prober here too: four cabins whose sockets reset together would
         otherwise eat the whole budget before any retry lands, and the ones that
@@ -248,11 +249,26 @@ class _SharedThrottleLadder:
         spend the rung of a round it already owns: that spend is how a group
         learns the wall has been measured to the end, and an owner that walked
         away without booking it would leave every waiter to find an unexhausted
-        round and spend a GET each proving what this call already knows."""
+        round and spend a GET each proving what this call already knows.
+
+        A `final` owner whose spend does not exhaust the round leaves it owned
+        and unreleased on the way out: it raises on the line after this returns,
+        and `retry_throttled`'s `finally` is what stands it down and frees
+        whoever is parked on it. Nothing in this class does that for it."""
         me = threading.current_thread()
         with self._lock:
             if round_.exhausted:
                 return None
+            if round_.owner is not None and not round_.owner.is_alive():
+                # An owner that will never report. `retry_throttled`'s `finally`
+                # covers every door out of an ordinary call, so reaching here
+                # means the thread left by a door there is no `finally` for —
+                # and the wait below carries no clock, so a round nobody can
+                # end is a park nothing ends. The trade is one comparison and,
+                # for whoever takes the round next, one GET against a wall this
+                # round had already measured; the alternative is a worker
+                # parked for the life of the process.
+                round_.release()
             if round_.owner is None and not final:
                 round_.owner = me
             if round_.owner == me:

@@ -291,3 +291,54 @@ def test_a_recursion_error_is_not_swallowed(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(logging, "raiseExceptions", False)
     with pytest.raises(RecursionError):
         handler.handle(_record("boom"))
+
+
+def test_every_module_logger_writes_under_one_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """structlog keys its write lock on the FILE OBJECT it was handed, so which
+    proxy the factory returns decides whether the package's loggers exclude each
+    other at all.
+
+    One proxy per logger is one lock per logger, which is no mutual exclusion:
+    two threads writing at once then interleave characters of two records on the
+    stream both are writing to, and a record can be lost outright. The table is
+    a plain dict that is never pruned, so a proxy per call is also a proxy kept
+    for as long as the process runs."""
+    import io
+
+    import structlog
+    from structlog._output import WRITE_LOCKS
+
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+    log_mod.configure("warning")
+    WRITE_LOCKS.clear()
+    structlog.get_logger("flight_cli.one").warning("a record from one module")
+    structlog.get_logger("flight_cli.two").warning("a record from another")
+
+    assert len({id(lock) for lock in WRITE_LOCKS.values()}) == 1, WRITE_LOCKS
+
+
+def test_a_stderr_that_raises_anything_at_all_costs_only_the_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A log line is not worth ending the command it was describing, and the
+    ways a stream can refuse one are not a list anybody here can close.
+
+    A closed stream raises `ValueError` and a broken one `OSError`, but a
+    re-entered write raises `RuntimeError` — what CPython says when a buffered
+    writer is re-entered — and a `write` of another shape raises `TypeError`.
+    Enumerating three of those and letting the rest through means the command
+    ends on the diagnostic rather than on the failure it was reporting, which is
+    the opposite of the trade this proxy exists to make."""
+
+    class _Reentered:
+        def write(self, _s: str) -> int:
+            raise RuntimeError("reentrant call inside <_io.BufferedWriter name='<stderr>'>")
+
+        def flush(self) -> None:
+            raise TypeError("flush() takes no arguments")
+
+    monkeypatch.setattr(sys, "stderr", _Reentered())
+    proxy = log_mod._LiveStderr()
+    # Returned and not raised: what `print` would have written, which it discards.
+    assert proxy.write("a record nobody will read") == len("a record nobody will read")
+    assert proxy.flush() is None

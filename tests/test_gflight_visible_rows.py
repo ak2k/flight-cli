@@ -15,8 +15,9 @@ answered out of the whole board or answered wrong.
 from __future__ import annotations
 
 import json
+import sys
 from datetime import date, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
@@ -94,16 +95,23 @@ def test_a_round_trips_json_document_counts_combinations_not_boards(
     assert all(len(r) == 2 for r in rows), rows
 
 
-def test_a_pick_past_the_visible_table_is_refused_not_pinned(
+def test_a_pick_past_the_visible_table_warns_and_falls_back_to_the_cheapest(
     gf_session: Callable[..., Any],
     gf_board: Callable[..., str],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """`--pick 6` on an `-n 5` table names a row that was never printed. It has
-    to take the out-of-range path — the warning and the cheapest row — rather
+    to take the out-of-range path — the warning AND the cheapest row — rather
     than quietly pinning something out of the part of the board the user never
     saw, which is indistinguishable in the emitted link from the row they
-    asked for."""
+    asked for.
+
+    Both halves, because something IS pinned: a regression that printed the
+    warning and then honoured the index would emit a link to a row nobody was
+    shown under a label saying it is the one they asked for.
+
+    The warning is on stderr, where every other note on this path goes, so the
+    stdout of a `--format json` run stays a document."""
     gf_session(gf_board(_BOARD_ROWS))
     cli._run_gflight_path(
         legs=_one_way(),
@@ -113,7 +121,10 @@ def test_a_pick_past_the_visible_table_is_refused_not_pinned(
         google_url=True,
         pick=6,
     )
-    assert "--pick 6 is out of range (1-5)" in capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert "--pick 6 is out of range (1-5)" in captured.err, captured.err
+    assert "--pick 6 is out of range" not in captured.out, captured.out
+    assert "cheapest itinerary" in captured.out, captured.out
 
 
 def test_a_pick_inside_the_visible_table_still_pins(
@@ -186,6 +197,215 @@ def test_the_routing_post_filter_still_reads_the_whole_board(
     rows = _json_rows(capsys)
     assert len(rows) == 1
     assert [leg["flight_number"] for leg in rows[0]["legs"]] == ["627", "305"]
+
+
+def _prices(rows: list[Any]) -> list[float]:
+    """Every price the emitted document carries, in the order it carries it."""
+    out: list[float] = []
+    for row in rows:
+        members: list[Any] = cast("list[Any]", row) if isinstance(row, list) else [row]
+        out.extend(float(m["price"]) for m in members)
+    return out
+
+
+def test_a_one_way_board_is_trimmed_in_the_order_google_ranked_it(
+    gf_session: Callable[..., Any],
+    gf_capture: Callable[[str], str],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Which rows survive, not how many.
+
+    The captured board is deliberately not price-ordered — Google's ranking is
+    a composite of price, duration and stops, and the page hands over its "best
+    flights" block followed by the rest. Reproducing that ranking is not
+    possible from here, so the trim keeps it: `-n 2` is the two rows the page
+    put first, which is what the table showed the day the capture was taken.
+
+    A sort by price here would look like an improvement and would answer a
+    one-way query in an order Google did not choose."""
+    gf_session(gf_capture("ds1_metadata_blocks_kept.json"))
+    cli._run_gflight_path(
+        legs=_one_way(),
+        opts=SearchOptions(cabin=Cabin.COACH),
+        top_n=2,
+        json_out=True,
+    )
+    assert _prices(_json_rows(capsys)) == [6590.0, 6616.0]
+
+
+def test_a_round_trips_combinations_are_trimmed_by_price(
+    gf_session: Callable[..., Any],
+    gf_capture: Callable[[str], str],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A round trip is the other set, and it carries no ranking of its own.
+
+    The combinations are built pin-major — every return against outbound one,
+    then every return against outbound two — so the first `-n` of them are the
+    returns of the first outbound and nothing else. On this fixture pair `-n 3`
+    would be three trips from one outbound, with cheaper trips from the next
+    outbound left off the table entirely.
+
+    Each combination is priced at its terminal member, so ordering by that is
+    ordering by the number every surface prints."""
+    gf_session(
+        gf_capture("ds1_metadata_blocks_kept.json"),
+        gf_capture("ds1_return_leg_pinned.json"),
+    )
+    cli._run_gflight_path(
+        legs=_round_trip(),
+        opts=SearchOptions(cabin=Cabin.COACH),
+        top_n=3,
+        json_out=True,
+    )
+    rows = _json_rows(capsys)
+    totals = [float(row[-1]["price"]) for row in rows]
+    assert totals == sorted(totals), totals
+    outbounds = {row[0]["flight_id"] for row in rows}
+    assert len(outbounds) > 1, f"every visible trip is one outbound: {rows}"
+
+
+def test_a_round_trip_table_prints_its_rows_in_price_order(
+    gf_rows: Callable[[str], list[Any]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The table applies the count itself, so it orders for itself too.
+
+    The enriched first paint reaches a trim only here — it hands the renderer
+    the whole board — so a table drawn from a pin-major list would show the
+    same wrong three rows the JSON document used to."""
+    board = gf_rows("ds1_metadata_blocks_kept.json")
+    dearest, cheapest = board[1], board[2]
+    cli._render_gflight_table(
+        [(dearest, dearest), (cheapest, cheapest)],
+        legs=_round_trip(),
+        top_n=1,
+        match_carriers=frozenset(),
+    )
+    out = capsys.readouterr().out
+    assert f"{cheapest.flight.price:.2f}" in out, out
+    assert f"{dearest.flight.price:.2f}" not in out, out
+
+
+def test_a_multi_cabin_json_arm_trims_each_cabins_combinations_by_price(
+    gf_rows: Callable[[str], list[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The per-cabin arm has its own trim, and the same set reaches it."""
+    board = gf_rows("ds1_metadata_blocks_kept.json")
+    dearest, cheapest = board[1], board[2]
+    cabins = (Cabin.COACH,)
+
+    def _fan_out(**_kw: object) -> dict[Cabin, list[Any]]:
+        return {Cabin.COACH: [(dearest, dearest), (cheapest, cheapest)]}
+
+    monkeypatch.setattr(cli, "_run_gflight_multi", _fan_out)
+    cli._run_gflight_path_multi(
+        legs=_round_trip(),
+        opts=SearchOptions(cabin=Cabin.COACH),
+        cabins=cabins,
+        sort_by=Cabin.COACH,
+        top_n=1,
+        json_out=True,
+        run_pp=False,
+        sel=cli._resolve_providers(
+            providers=None, cash_only=True, awards_only=False, provider_opt=()
+        ),
+    )
+    dumped: Any = json.loads(capsys.readouterr().out)
+    assert [m["price"] for m in dumped["COACH"][0]] == [
+        cheapest.flight.price,
+        cheapest.flight.price,
+    ], dumped
+
+
+def test_an_empty_board_under_json_is_an_empty_document(
+    gf_session: Callable[..., Any],
+    gf_board: Callable[..., str],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """No rows is a value. A sentence in the document's place is a parse error
+    to the consumer that asked for one, and indistinguishable from a crash by
+    the exit code, which stays 0 either way."""
+    gf_session(gf_board(1, distinct_at=0))
+    cli._run_gflight_path(
+        # A routing constraint nothing on the board satisfies, so the post-filter
+        # empties it — the shape a user actually meets.
+        legs=_one_way(route_language="XX9999"),
+        opts=SearchOptions(cabin=Cabin.COACH),
+        top_n=5,
+        json_out=True,
+    )
+    out = capsys.readouterr().out
+    assert json.loads(out) == [], out
+
+
+def test_awards_and_json_together_emit_one_document(
+    gf_session: Callable[..., Any],
+    gf_board: Callable[..., str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--format json` with awards on writes its document from the award
+    renderer, further down than the early return above it — so every human
+    surface between the two has to stand aside as well.
+
+    A table and a set of URL lines around a document is not a document: the
+    consumer that asked for one cannot parse any of it, and the exit code says
+    the command succeeded."""
+
+    def _award_document(_sr: object, **_kw: object) -> None:
+        sys.stdout.write(json.dumps({"legs": [], "matches": []}))
+
+    monkeypatch.setattr(cli, "run_pp_for_search", _award_document)
+    gf_session(gf_board(_BOARD_ROWS))
+    cli._run_gflight_path(
+        legs=_one_way(),
+        opts=SearchOptions(cabin=Cabin.COACH),
+        top_n=3,
+        json_out=True,
+        run_pp=True,
+        google_url=True,
+        matrix_url=True,
+        sel=cli._resolve_providers(
+            providers=None, cash_only=False, awards_only=False, provider_opt=()
+        ),
+    )
+    out = capsys.readouterr().out
+    assert json.loads(out) == {"legs": [], "matches": []}, out
+
+
+def test_an_out_of_range_pick_leaves_an_awards_json_document_parseable(
+    gf_session: Callable[..., Any],
+    gf_board: Callable[..., str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The trim narrows the range a pick is measured against, so `--pick 12`
+    against a 30-row board is in range one day and out of it the next. The
+    notice that fires then must not land in the document."""
+
+    def _award_document(_sr: object, **_kw: object) -> None:
+        sys.stdout.write(json.dumps({"legs": [], "matches": []}))
+
+    monkeypatch.setattr(cli, "run_pp_for_search", _award_document)
+    gf_session(gf_board(_BOARD_ROWS))
+    cli._run_gflight_path(
+        legs=_one_way(),
+        opts=SearchOptions(cabin=Cabin.COACH),
+        top_n=5,
+        json_out=True,
+        run_pp=True,
+        google_url=True,
+        pick=6,
+        sel=cli._resolve_providers(
+            providers=None, cash_only=False, awards_only=True, provider_opt=()
+        ),
+    )
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"legs": [], "matches": []}, captured.out
+    assert "out of range (1-5)" in captured.err, captured.err
 
 
 def test_multi_cabin_json_gives_each_cabin_the_count_that_was_asked_for(

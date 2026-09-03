@@ -534,6 +534,11 @@ class _EveryThread:
     def __hash__(self) -> int:
         return 0
 
+    def is_alive(self) -> bool:
+        """Alive: this stands in for a worker that is still out probing, which
+        is the only state in which a rung is handed to anybody at all."""
+        return True
+
 
 @pytest.mark.parametrize(
     ("arm", "meet_the_wall"),
@@ -686,19 +691,22 @@ def test_a_last_attempt_still_books_the_rung_that_ends_the_round() -> None:
     assert sibling == [None], sibling
 
 
-def test_a_round_left_by_a_dead_thread_is_not_handed_to_a_later_one() -> None:
+def test_a_round_left_by_a_dead_thread_is_taken_over_and_not_inherited() -> None:
     """Ownership is a thread, not its id, and this is the difference.
 
     Thread ids are unique only among LIVE threads: this platform hands the same
     one to a later worker within a few dozen short-lived threads. A worker given
-    a dead owner's id would take that round as its own and inherit the rungs the
-    dead thread had already spent — a silently shortened budget on a wall it has
-    not met. Holding the thread object cannot be confused that way, since the
-    dead thread is kept alive by the round that names it.
+    a dead owner's ID would be MISTAKEN for it — it would answer `owner == me`,
+    keep booking rungs as the owner and never be able to park as a waiter, on a
+    wall it has not met. Holding the thread object cannot be confused that way,
+    since the dead thread is kept alive by the round that names it.
 
-    The trigger is out of reach today (`retry_throttled` stands its owner down
-    from a `finally`, on every door out), so this pins the property rather than
-    a live defect. On a platform that never recycles an id it passes for free."""
+    What a later worker gets instead is the round in its own name: the dead
+    owner is one that will never report, so the round is released and taken
+    over rather than left standing. Both halves are asserted, because a pass
+    that only showed a verdict coming back would be equally true of the
+    confusion this exists to rule out."""
+    collided = False
     for _ in range(_RECYCLE_ROUNDS):
         ladder = _ladder()
         # A thread that takes the round and dies still owning it — the one shape
@@ -708,21 +716,83 @@ def test_a_round_left_by_a_dead_thread_is_not_handed_to_a_later_one() -> None:
         dead.join(timeout=_JOIN_TIMEOUT_S)
 
         verdict: list[Any] = []
+        idents: list[int] = [cast("int", dead.ident)]
         asked = threading.Event()
 
-        def probe(verdict: list[Any] = verdict, asked: threading.Event = asked) -> None:
+        def probe(
+            verdict: list[Any] = verdict, idents: list[int] = idents, asked: threading.Event = asked
+        ) -> None:
             asked.set()
+            idents.append(threading.get_ident())
             verdict.append(ladder.throttled())  # noqa: B023 — one ladder per pass, by construction
 
         later = threading.Thread(target=probe, daemon=True)
         later.start()
         assert asked.wait(timeout=_JOIN_TIMEOUT_S)
-        later.join(timeout=_PARKED_S)
-        parked = verdict == []
-        with ladder._lock:  # whatever it did, let it go
-            ladder._wall.release()
         later.join(timeout=_JOIN_TIMEOUT_S)
-        assert parked, f"a later thread was handed the round a dead one left: {verdict}"
+        assert not later.is_alive(), "a round nobody can report on left a worker parked"
+        collided = collided or idents[0] == idents[1]
+        assert verdict != [], "the later worker never got an answer"
+        assert ladder._wall.owner is later, (
+            f"the round is not in the later worker's name: {ladder._wall.owner!r}"
+        )
+
+    if not collided:
+        # The id half of this is only under test where an id is actually reused.
+        # Said out loud, because a probabilistic precondition that goes unmet in
+        # silence is a test reporting a pass it did not measure.
+        pytest.skip("this platform does not recycle thread ids")
+
+
+def test_a_waiter_is_let_go_when_the_round_it_waits_on_loses_its_owner() -> None:
+    """The park carries no clock, so a round nobody can report on is a park
+    nothing ends.
+
+    `retry_throttled`'s `finally` stands an owner down through every ordinary
+    door, so reaching this needs a thread that left by one there is no `finally`
+    for. The cost of being wrong is a worker parked for the life of the process,
+    against one comparison to rule it out — and the worker already parked is the
+    one that cannot rescue itself, since it is inside the wait rather than
+    asking for a rung."""
+    ladder = _ladder()
+    holding = threading.Event()
+    took_it = threading.Event()
+
+    def prober() -> None:
+        ladder.throttled()  # owns the round
+        took_it.set()
+        holding.wait(timeout=_JOIN_TIMEOUT_S)  # still out, the way a GET is
+
+    owner = threading.Thread(target=prober, daemon=True)
+    owner.start()
+    assert took_it.wait(timeout=_JOIN_TIMEOUT_S), "the prober never took the round"
+
+    verdict: list[Any] = []
+    asked = threading.Event()
+
+    def waits() -> None:
+        asked.set()
+        verdict.append(ladder.throttled())
+
+    waiter = threading.Thread(target=waits, daemon=True)
+    waiter.start()
+    assert asked.wait(timeout=_JOIN_TIMEOUT_S)
+    waiter.join(timeout=_PARKED_S)
+    assert waiter.is_alive(), "the waiter never parked on the owner's outcome"
+
+    # The owner leaves without standing the round down.
+    holding.set()
+    owner.join(timeout=_JOIN_TIMEOUT_S)
+    assert not owner.is_alive(), "the prober never left"
+
+    # A later worker meets the same wall, finds an owner that will never report,
+    # and ends the round rather than joining the queue behind it.
+    later = threading.Thread(target=ladder.throttled, daemon=True)
+    later.start()
+    later.join(timeout=_JOIN_TIMEOUT_S)
+    waiter.join(timeout=_JOIN_TIMEOUT_S)
+    assert not waiter.is_alive(), "the waiter is still parked on a round nobody will report on"
+    assert verdict == [0.0], f"a released waiter retries at once: {verdict}"
 
 
 def test_a_nested_scope_restores_the_ladder_it_replaced() -> None:

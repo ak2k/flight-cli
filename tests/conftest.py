@@ -13,7 +13,8 @@ from __future__ import annotations
 import json
 import pathlib
 import threading
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+import time
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
@@ -50,10 +51,30 @@ def _page(ds1_json: str) -> str:
 class _NullCookies:
     """Enough of curl_cffi's cookie API for the seed/persist helpers."""
 
-    jar: ClassVar[list[Any]] = []
+    def __init__(self) -> None:
+        # Per instance. A list on the class is one list for every instance in
+        # the session, so the day a persist path appends to it, cookies cross
+        # from one test into the next with nothing on either to say so.
+        self.jar: list[Any] = []
 
     def set(self, *_a: object, **_kw: object) -> None:
         return None
+
+
+class _NoSleepTime:
+    """`time`, with `sleep` costing nothing.
+
+    Installed over the module's OWN binding rather than over `time.sleep`.
+    `_gflight_ids` does a plain `import time`, so its `time` IS the stdlib
+    module object: patching `sleep` there makes it a no-op for every module and
+    every thread in the process for as long as the test runs, and any code
+    sleeping to order itself spins instead."""
+
+    def sleep(self, _seconds: float) -> None:
+        return None
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
 
 
 class _FakeResponse:
@@ -110,10 +131,7 @@ def gf_session(
     monkeypatch.setattr(gfid, "_cookie_state", {"persisted": False})
     monkeypatch.setattr(gfid, "_seed_latch", threading.local())
 
-    def _no_sleep(_seconds: float) -> None:
-        return None
-
-    monkeypatch.setattr(gfid.time, "sleep", _no_sleep)
+    monkeypatch.setattr(gfid, "time", _NoSleepTime())
 
     def install(*bodies: str) -> _FakeClient:
         fake = _FakeClient(list(bodies))
