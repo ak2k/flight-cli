@@ -124,3 +124,10 @@ failure mode otherwise.
 These are indistinguishable from the response. Surface a helpful message
 ("Calendar empty. Matrix's calendar mode brownouts regularly; retry") and
 include the deep-link URL so users can verify in the UI.
+
+A fourth case is NOT one of these and must not wear that message: a fanned-out
+multi-airport calendar whose sub-queries never answered. There is no response to
+be ambiguous about — the merge is empty because nothing reached it — so
+`_run_calendar` counts the failures and refuses when they are all of them, one
+line on stderr and exit 1. Some of them failing leaves a grid worth reading and a
+note saying how many destinations are missing from it.
