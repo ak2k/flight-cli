@@ -1599,6 +1599,12 @@ def search_with_ids(
     as fli: query first leg, pick top_n, drive each through the rest. Each
     `GFlightWithId` in a returned tuple has its own per-leg flight_id.
 
+    `top_n` bounds the PINS, not the rows returned: the page serves its whole
+    board and every row of it is returned, because the callers filter what they
+    were served (the Tier-2 post-filter) and join across it (the multi-cabin
+    path, which asks for a deliberately wider pool). Trimming to what the user
+    asked for is `cli._run_gflight_path`'s, on the way out.
+
     A pin whose return board refuses for its own reasons is dropped with a
     warning and the rest are still fetched. A throttle or an exhausted transport
     ladder stops the pinning instead, because neither says anything about the

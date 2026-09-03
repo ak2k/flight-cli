@@ -231,7 +231,7 @@ is a different fact and still continues to the next pin, counted the same way.
 apart from those.
 
 **Failures this branch reports that the other does not (yet).** Three arms are
-u1a-only and merge as new hunks below the shared reporter lines, so they are
+new here and merge as new hunks below the shared reporter lines, so they are
 recorded here rather than in the shared text:
 
 | site | what it catches | why it is not a traceback |
@@ -246,6 +246,36 @@ and multi-cabin — whenever the pin cap is below the `-n` asked for, and always
 to stderr so a JSON document stays a document. It quotes the user's count, never
 the multi-cabin bump, which is a wider pool per cabin and not something anyone
 asked for.
+
+**`-n` is one number, applied on the way out.** The page serves Google's whole
+board — 30 rows on the live JFK-LAX capture — whatever count was asked of it, so
+the count is a trim rather than a query parameter. It bounds everything the user
+can act on, and all of it from one place in `cli._run_gflight_path`: the table,
+the `--format json` document, the range `--pick` accepts and the itinerary
+`--emit-urls` pins, and the itineraries the award providers are fanned out over.
+Two things still read the whole board, and this is why the trim cannot move into
+the query: the Tier-2 post-filter, because a routing constraint is answered out
+of every row Google served or answered wrong — the flight that satisfies it can
+sit at row 25 of 30 — and the multi-cabin join, whose per-cabin queries are
+deliberately widened (`_bumped_query_top_n`) so the cabins have overlap to join
+on and are trimmed back to the user's count by `_merge_cabins`. The multi-cabin
+`--format json` arm trims per cabin for the same reason, to the user's count and
+not the bumped one.
+
+**What a round-trip row's price means.** The two boards price different things.
+An outbound row carries the cheapest round-trip TOTAL reachable from that
+outbound; the return board fetched with that outbound pinned prices each of its
+rows at THAT combination's own total. Measured on the committed capture pair:
+the pinned board's minimum is 6616, exactly the AA144/AA1110 outbound row's
+price, while the AA1115/AA297 combination is a 7196 trip. Live 2026-09-03
+(HNL-MIA business, 2 adults) says the same from the other end: outbound 854/305
+quoted 6806 and its two combinations totalled 6806 and 7650. So an itinerary is
+priced from its terminal member — the pinned leg is what makes the combination
+that combination — and pricing it from the outbound reports every combination
+but the cheapest under its real fare. The human table prints each member's own
+price on its `Na`/`Nb` rows and `--format json` emits both, so both carry the
+true number; the SearchResult the award comparison reads carries one, and it is
+the total.
 
 **Release before park.** A worker that is about to wait on another arm's round
 gives up any round it still owns first. Two workers can otherwise each hold what
@@ -263,6 +293,18 @@ for every existing consumer to signal a condition that also arises from
 ordinary upstream thinness, and a non-zero exit would make a normal throttle
 look like a failure to a script. If a machine-readable signal is ever wanted it
 belongs behind a new format, never a silent shape change.
+
+**A diagnostic resolves its stream per write.** Both halves of `log.py` do it and
+for the same reason: `_StderrHandler` looks up `sys.stderr` per record, and
+structlog's logger writes through a proxy that looks it up per write, because
+`cache_logger_on_first_use` otherwise pins whichever stream carried the first
+record for the life of the process. Two failures follow from a pinned stream,
+and only an embedding host reaches either — the CLI is one shot with a real
+stderr. A host that replaced and closed it got `ValueError: I/O operation on
+closed file` out of the next log line; a host with no `sys.stderr` at all got
+worse, because `PrintLogger` reads `file or stdout` and put the diagnostic in
+the stream the JSON document is written to. A stream that cannot be written to
+now drops the line, and there is no fallback to stdout at all.
 
 **One ladder per fan-out, not per cabin.** The multi-cabin path runs a cabin per
 thread; laddering separately, four cabins spend 4 x 5 = 20 multi-megabyte GETs

@@ -1476,6 +1476,11 @@ def _run_gflight_path(
     When run_pp=True, fli's results are adapted into a SearchResult shape so
     the existing PP matcher + renderer reuse cleanly. PP runs on the same
     (origin, dest, date) per leg as the matrix path.
+
+    This is where `top_n` becomes the answer's size. The query cannot ask for a
+    count, so everything below the trim — the table, the JSON document, the
+    pinned link and the awards — is drawn from the same `top_n` rows, and
+    everything above it reads the whole board.
     """
     _pin_cap_note(legs=legs, top_n=top_n)
     from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
