@@ -2143,7 +2143,7 @@ def _cli_module_with_config_dir(monkeypatch: Any, config_dir: str) -> ModuleType
     name sits under `flight_cli.` so the module's relative imports resolve, and it
     is never registered in `sys.modules`, so the real `cli` is untouched."""
     monkeypatch.setenv(_config.CONFIG_DIR_ENV, config_dir)
-    monkeypatch.setenv("COLUMNS", "400")  # wide enough that rich splits no token
+    monkeypatch.setenv("COLUMNS", "500")  # wide enough that rich wraps no path
     spec = importlib.util.spec_from_file_location("flight_cli._cli_help_probe", cli.__file__)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -2167,7 +2167,11 @@ def test_search_help_survives_a_hostile_config_directory(
     assert result.exception is None  # a MarkupError arrives as one of these
     assert result.exit_code == 0
     shown = _flat(result.output)
-    assert "config.toml" in shown  # the path is shown, not swallowed
+    # The path shown is the configured one minus its control characters, which is
+    # what `_safe_text` promises and `escape` does not: an ESC left in place takes
+    # the from-ANSI branch, which eats the sequence around it and names a
+    # directory nobody configured.
+    assert str(_config.config_path()).replace("\x1b", "") in shown
     assert "[providers.<name>]" in shown
 
 
