@@ -296,10 +296,16 @@ def test_the_transport_refusal_agrees_with_the_pin_loop_about_the_cause() -> Non
     which fact it is. The pin loop already says "was unreachable"; a render that
     says Google declined the request describes a different failure, and the user
     cannot tell which one happened."""
-    refusal = _gf_refusal(GfTransportError("connection reset by peer"))
+    # Built the way `retry_throttled` builds it: the type carries the sentence,
+    # so a renderer that adds its own says it twice.
+    refusal = _gf_refusal(
+        GfTransportError("Google Flights could not be reached: connection reset by peer")
+    )
     assert "unreachable" in refusal.note
-    assert "could not be reached" in refusal.message
-    assert "connection reset by peer" in _render(refusal.message)
+    rendered = _render(refusal.message)
+    assert rendered.count("could not be reached") == 1, rendered
+    assert "connection reset by peer" in rendered, rendered
+    assert "--backend matrix" in rendered, rendered
 
 
 def test_the_page_shape_message_keeps_the_payload_text_readable() -> None:

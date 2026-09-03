@@ -176,16 +176,18 @@ Every one of these is a multi-megabyte page GET, so the count is the cost:
 | a persistently throttled leg | `_THROTTLE_RETRY_ATTEMPTS` + 1 = 5, then it aborts |
 | a transport blip | up to 3 GETs per leg (`_TRANSPORT_RETRY_ATTEMPTS` + 1) |
 | a leg that both throttles and blips | 1 + `_THROTTLE_RETRY_ATTEMPTS` + `_TRANSPORT_RETRY_ATTEMPTS` = 7 |
-| a persistently throttled multi-cabin fan-out | one ladder for the group: 5 + (cabins - 1) |
-| a multi-cabin fan-out under a transport outage | one ladder for the group: 3 + (cabins - 1) |
+| a persistently throttled multi-cabin fan-out | one ladder for the group: at most 5 + (cabins - 1) |
+| a multi-cabin fan-out under a transport outage | one ladder for the group: at most 3 + (cabins - 1) |
 | a round trip whose pins meet a throttle or an outage | it stops at that pin: no further pin is fetched |
 | a round trip whose every pin blips and recovers | 1 + 3 x pins = 31 at the default `-n 10` |
 | a round trip whose return boards all refuse (5xx, consent, layout) | 1 + pins, the same as a successful search |
 
-Two things make those numbers hold. `_fetch_page` goes through fli's SESSION,
-not `Client.get` — which is wrapped in `@retry(stop_after_attempt(3))`, so a
-throttled leg would otherwise cost up to 15 GETs, fli's ladder running inside
-each rung of ours. `retry_throttled` is the only ladder. And the round-trip pin is capped
+Two things make those numbers hold, and this paragraph is where that arithmetic
+lives — the docstrings that depend on it point here rather than restating it.
+`_fetch_page` goes through fli's SESSION, not `Client.get`, which is wrapped in
+`@retry(stop_after_attempt(3))`: a throttled leg would otherwise cost up to 15
+GETs, fli's ladder running inside each rung of ours. `retry_throttled` is the
+only ladder. And the round-trip pin is capped
 at 10 regardless of `top_n`: the multi-cabin path bumps `top_n` 5x (to 100) to
 widen the pool it filters, which was free on the old RPC and would otherwise
 mean ~2 x 31 page fetches for a two-cabin round trip. The default `-n 10` is
@@ -217,6 +219,17 @@ is a different fact and still continues to the next pin, counted the same way.
 `GfTransportError` exists so the loop can tell an exhausted transport ladder
 apart from those.
 
+**A partial round trip is a success, deliberately.** When the loop stops early
+with something served, the command exits 0 and `--format json` emits the
+combinations it has, in the ordinary shape — no envelope, no marker, no
+different exit code. The account of what is missing is the counted warning on
+stderr, which the default log level shows. A human sees it; a machine consumer
+does not, and that gap is known: an envelope would change the output contract
+for every existing consumer to signal a condition that also arises from
+ordinary upstream thinness, and a non-zero exit would make a normal throttle
+look like a failure to a script. If a machine-readable signal is ever wanted it
+belongs behind a new format, never a silent shape change.
+
 **One ladder per fan-out, not per cabin.** The multi-cabin path runs a cabin per
 thread; laddering separately, four cabins spend 4 x 5 = 20 multi-megabyte GETs
 against an IP already refusing us to learn what the first ladder learned.
@@ -234,15 +247,25 @@ the curl failures that DO clear, so a waiter has an outcome worth waiting for.
 Each arm keeps its own round; only the lock is shared. One worker can own both
 at once, so standing down releases both and a success resets both.
 
-Any successful call REFILLS the ladder: the rungs measure one wall, and a wall
-that returns later is a different one. **That is what the "one ladder" ceiling
-is bounded by — no success getting through, not elapsed time.** There is no
+A successful call REFILLS the WALL's rungs: the wall is per-IP, so any call
+getting through is evidence it lifted whoever made it, and a wall that returns
+later is a different one. It does NOT refill the network's rungs for everybody —
+fli's session is a `threading.local`, so the socket that carried a sibling's
+call is no evidence about this one's, and crediting it let every healthy cabin
+hand a failing one another rung. Only the worker that met a transport failure
+gets those back.
+
+**That is what the "one ladder" ceiling is bounded by — no success getting
+through, not elapsed time.** And because the wall's refill is shared and
+correct, the ladder alone cannot bound a single call: each `retry_throttled`
+call carries its own attempt count as well, so a flapping link costs a bounded
+number of requests per call whatever the siblings are doing. There is no
 time floor: a success five milliseconds old refills the budget exactly as one
-from half an hour ago does. A wall that lets the prober past and then closes
-again refills on each probe, so a flapping wall costs more than one ladder;
-measured, a wall admitting only the prober cost 10 GETs against the 5 + 3 the
-ceiling quotes. The bound holds while nothing is getting through, which is the
-case it was written for.
+from half an hour ago does. So a wall that lets the prober past and closes again
+refills on each probe and costs more than one ladder — three cabins against a
+wall that admits only the prober spend 10 GETs, against the 7 that row quotes at
+that width. The bound holds while nothing is getting through, which is the case
+it was written for.
 
 The rejected alternative is worth recording, because it is the lever if a
 request bound is ever traded away. A shared DEADLINE — every worker retries on
@@ -268,14 +291,22 @@ prints a typed line rather than a curl traceback, and the pin loop can tell an
 unreachable network apart from a board that refused for its own reasons.
 
 Only a failure to REACH Google is retried — `curl_cffi`'s `ConnectionError` and
-`Timeout` (DNS, TLS, a reset socket, connect and read timeouts), **plus four
+`Timeout` (DNS, a reset socket, connect and read timeouts), **plus four
 result codes those classes do not cover**: `PARTIAL_FILE`, `HTTP2`,
 `HTTP2_STREAM` and `HTTP3`. curl_cffi maps several codes onto classes that also
 carry permanent faults, so the class alone cannot decide — a multi-megabyte body
 cut short arrives as `IncompleteRead` and the HTTP/2 and HTTP/3 stream errors
-all arrive as `HTTPError`, which is otherwise a status never to retry. Classify
-by class OR code, and enumerate `CODE2ERROR` in the test: a rule written in
-classes quietly decides for codes nobody looked at.
+all arrive as `HTTPError`, which is otherwise a status never to retry.
+
+Classify by class OR code, **minus a deny-list read first**. `SSLError`
+subclasses `ConnectionError`, so the class arm sweeps in seven codes that name
+this machine's own TLS setup: a CA bundle or CRL it cannot read, a crypto engine
+it does not have, a pin that does not match, a client certificate the server
+would not take. Those are identical on the third attempt, and reporting them as
+"Google Flights could not be reached" sends the reader to the network for a
+fault that is local. So TLS is both retried and not, by code — which is why the
+decision is enumerated per code in the test rather than re-derived from the
+rule: a test that restates the rule agrees with it even where it is wrong.
 
 Everything else propagates on the first try, including the rest of curl's own
 `CurlError` tree (`InvalidURL`, `InvalidSchema`, `SessionClosed`,

@@ -174,8 +174,8 @@ class _NullCookies:
 class _FakeResponse:
     """What curl_cffi's session hands back: a status we classify ourselves.
 
-    `_one_call` no longer goes through fli's `Client.get`, so nothing has
-    called `raise_for_status()` and a 429 arrives as a RESPONSE."""
+    `_one_call` goes to the session rather than fli's `Client.get`, so nothing
+    calls `raise_for_status()` and a 429 arrives as a RESPONSE."""
 
     def __init__(self, *, text: str, url: str = "", status_code: int = 200) -> None:
         self.text = text
@@ -198,9 +198,9 @@ class _FakeRateLimiter:
 class _FakeSession:
     """The curl_cffi session, which is where the GET now goes.
 
-    Faking `Client.get` instead would skip the code under test: the whole point
-    of the change is that `Client.get`'s own retry ladder is no longer in the
-    path, so a fake sitting there could not observe the request budget."""
+    Faking `Client.get` instead would skip the code under test: that method's
+    own retry ladder is not in the path, so a fake sitting there could not
+    observe the request budget."""
 
     def __init__(self, responses: list[Any], gets: list[str]) -> None:
         self._responses = responses
@@ -542,10 +542,10 @@ def test_other_http_errors_are_not_mistaken_for_throttling(client: Any) -> None:
 
 
 def test_a_persistent_throttle_costs_exactly_one_ladder(client: Any) -> None:
-    """THE request budget. fli's `Client.get` retried three times inside each of
-    our throttle retries, so one throttled leg cost up to fifteen multi-megabyte
-    GETs and a multi-cabin round trip multiplied that again. Ours is now the
-    only ladder: one initial GET plus `_THROTTLE_RETRY_ATTEMPTS` retries."""
+    """THE request budget: one initial GET plus `_THROTTLE_RETRY_ATTEMPTS`
+    retries, and no second ladder underneath it. What a nested one would cost is
+    worked out once, in the budget section of
+    docs/memories/gf_routing_and_carriers.md."""
     fake = client(_FakeResponse(text="", status_code=429))
     with pytest.raises(GfThrottledError):
         gfid._one_call_with_retry(_FILTERS)
@@ -861,9 +861,9 @@ def test_a_single_cabin_fan_out_still_gets_a_whole_ladder(
 
 def test_the_page_get_does_not_go_through_flis_retrying_wrapper(client: Any) -> None:
     """`Client.get` is wrapped in `@retry(stop_after_attempt(3))`. Calling it
-    would put a second ladder under ours, which is the amplification this
-    replaced — so the fake client has no `get` at all and a regression here is
-    an AttributeError, not a quietly larger request count."""
+    would put a second ladder under ours, which is the amplification this path
+    exists to avoid — so the fake client has no `get` at all and a regression
+    here is an AttributeError, not a quietly larger request count."""
     fake = client(_FakeResponse(text=_page(_ds1("ds1_jfk_lax_3rows.json"))))
     assert not hasattr(fake, "get")
     assert len(gfid._one_call(_FILTERS)) == 3

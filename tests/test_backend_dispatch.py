@@ -139,8 +139,8 @@ def test_stop_ceiling_above_two_goes_to_matrix() -> None:
     ],
 )
 def test_auto_unencodable_constraint_picks_matrix(flag: str, value: object) -> None:
-    """Anything the page's tfs= parameter can't carry goes to Matrix — including
-    constraints the old RPC filtered server-side."""
+    """Anything the page's tfs= parameter cannot carry goes to Matrix, including
+    constraints only a server-side filter could apply."""
     assert _call(**{flag: value}) == BACKEND_MATRIX  # pyright: ignore[reportArgumentType]
 
 

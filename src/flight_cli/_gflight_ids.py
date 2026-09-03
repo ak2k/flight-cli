@@ -144,11 +144,15 @@ class _Round:
     and the waiters parked on its outcome.
 
     An arm is a wall of one kind. Two of them ride one ladder because a fan-out
-    can meet both at once, and they are kept apart because a probe of one says
-    nothing about the other: a waiter on the network released by a throttle
-    probe's success would retry into a network nobody has measured, and one
-    `exhausted` flag across both would answer a transport waiter with the
-    throttle's verdict — the caller then names the wrong wall to the user.
+    can meet both at once, and they are kept apart for two reasons that hold:
+    one `exhausted` flag across both would answer a transport waiter with the
+    throttle's verdict, so the caller names the wrong wall to the user; and one
+    worker can own both at once, so each needs its own owner to give up.
+
+    Not because a probe of one says nothing about the other — a success DOES
+    release both rounds' waiters, deliberately, since the call that got through
+    both met the wall and rode a socket. What it does not do is hand the rungs
+    back on both arms; see `succeeded`.
 
     The lock lives on the ladder, which holds every round, so a worker that owns
     both takes it once."""
@@ -1257,8 +1261,13 @@ def _permanent_curl_codes() -> frozenset[Any]:
     attempt as the first, and reporting it as "Google Flights could not be
     reached" sends the reader to look at the network for a fault that is here.
 
-    Left retryable on purpose: `SSL_CONNECT_ERROR` and the certificate-status
-    codes, which describe the peer or the moment rather than our setup.
+    Left retryable, and one of them arguably wrongly: `SSL_CONNECT_ERROR` and
+    the certificate-status codes describe the peer or the moment, but
+    `SSL_CERTPROBLEM` is curl's name for a fault in the LOCAL client
+    certificate. It is excluded because it is unreachable — nothing here sends
+    one — not because it would clear. The reachable local-config code is
+    `SSL_CIPHER`: `_fetch_page` passes `impersonate="chrome"`, which is what
+    sets a cipher list, so that is the one this codebase can provoke.
 
     Checked BEFORE the class arm, because the class is what sweeps them in."""
     from curl_cffi.const import CurlECode  # noqa: PLC0415
@@ -1310,8 +1319,8 @@ def _fetch_page(client: Any, url: str) -> Any:
     DIVERGE, and the reason is a request budget. `Client.get` is wrapped in
     `@retry(stop_after_attempt(3))` and calls `raise_for_status()`, so a
     persistently throttled leg would cost three fli attempts inside each of our
-    throttle retries — up to fifteen multi-megabyte GETs for one leg, and a
-    multi-cabin round trip multiplies that by the cabin count. `retry_throttled`
+    throttle retries. The arithmetic and the resulting number live once, in the
+    budget section of docs/memories/gf_routing_and_carriers.md. `retry_throttled`
     is the only ladder, so throttle handling lives where the classification
     does.
 

@@ -1364,9 +1364,12 @@ def _gf_refusal(e: GfBackendError) -> _GfRefusal:
 
     One dispatch, so the two renderings of a refusal AGREE. That is the whole
     of the guarantee: a type with no arm of its own still renders, from the base
-    case, in both places — identically and without naming the wall. What keeps
-    a new type from quietly landing there is the `assert_never` below plus the
-    test that walks the subclasses, not this function's shape."""
+    case, in both places — identically and without naming the wall.
+
+    The test that walks the subclasses is what keeps a new type from landing
+    there. `assert_never` only closes the door this function cannot be given: a
+    value that is not a `GfBackendError` at all. With the base case present,
+    deleting a subclass arm type-checks clean."""
     match e:
         case GfThrottledError():
             return _GfRefusal(
@@ -1399,10 +1402,14 @@ def _gf_refusal(e: GfBackendError) -> _GfRefusal:
             # transport ladder. Two sites naming one fact two ways leaves the
             # user deciding which of them to believe, and only one is right:
             # nothing here says the query was declined.
+            #
+            # The exception's own `str()` already opens with "could not be
+            # reached", so the sentence starts there rather than saying it
+            # twice — and the cause it carries is the part worth reading.
             return _GfRefusal(
                 "Google Flights was unreachable",
-                "[yellow]Google Flights could not be reached[/] — the connection "
-                f"failed, not the query. Use [bold]--backend matrix[/]. ({_safe_text(e)})",
+                f"[yellow]{_safe_text(e)}[/] — the connection failed, not the "
+                "query. Use [bold]--backend matrix[/].",
             )
         case GfBackendError():
             # The base type is raised directly — a 5xx from the search page is
