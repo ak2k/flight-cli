@@ -17,7 +17,7 @@ import json
 import re
 import sys
 from datetime import date, datetime, timedelta
-from typing import TYPE_CHECKING, Annotated, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any, NamedTuple, cast
 
 import anyio
 import anyio.to_thread
@@ -56,6 +56,8 @@ from .pp.cli import auth_app, run_pp_for_search
 from .providers.base import LegQuery
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+
     from .models import CalendarResult, LegInfo, Location, SearchResult, Slice
 
 # Tuple-length sentinels for `--slice` parser (`ORIGIN-DEST:DATE[:r=...:e=...]`).
@@ -759,24 +761,101 @@ def _print_matrix_error(e: MatrixApiError) -> None:
 _CALENDAR_FANOUT_CONCURRENCY = 12
 
 
+class _CalendarFanout(NamedTuple):
+    """What a fanned-out calendar came back with, and what it lost on the way.
+
+    The losses travel with the results because they change what the results MEAN:
+    a merged grid holding no priced day renders as "Calendar empty", which reads as
+    "Matrix priced this window and found nothing" — true when the sub-queries
+    answered, and the one thing the data cannot support when they did not."""
+
+    results: list[CalendarResult]
+    failed: int
+    first_error: Exception | None
+
+
 async def _gather_calendar(
     c: MatrixClient, subs: list[CalendarSearch], *, cache: bool
-) -> list[CalendarResult]:
+) -> _CalendarFanout:
     """Run the per-destination sub-searches concurrently on one client (its
     rate-limiter + semaphore bound the in-flight count). A sub-query that fails
-    just drops its destination from the merge rather than sinking the whole run."""
+    just drops its destination from the merge rather than sinking the whole run,
+    and is counted so the caller can say so."""
     results: list[CalendarResult | None] = [None] * len(subs)
+    errors: list[Exception | None] = [None] * len(subs)
 
     async def one(i: int, s: CalendarSearch) -> None:
         try:
             results[i] = cast("CalendarResult", await c.execute(s, cache=cache))
-        except Exception:  # noqa: BLE001 — a sub-query failure just drops that destination
-            results[i] = None
+        except (typer.Exit, typer.Abort):
+            # Both subclass `RuntimeError` on the installed click, so the broad arm
+            # below would read an orderly exit as one more dropped destination.
+            raise
+        except Exception as e:  # noqa: BLE001 — this destination drops; the caller counts it
+            errors[i] = e
 
     async with anyio.create_task_group() as tg:
         for i, s in enumerate(subs):
             tg.start_soon(one, i, s)
-    return [r for r in results if r is not None]
+    failures = [e for e in errors if e is not None]
+    return _CalendarFanout(
+        [r for r in results if r is not None], len(failures), failures[0] if failures else None
+    )
+
+
+def _orderly_exit(e: BaseException) -> typer.Exit | typer.Abort | None:
+    """The first orderly exit anywhere inside `e`, or None.
+
+    `typer.Exit` and `typer.Abort` subclass `RuntimeError` on the installed click,
+    and a task group wraps EVERYTHING that leaves it in an `ExceptionGroup` — the
+    host body's own exception included. Between them, a broad arm outside a group
+    catches a deliberate stop wearing the shape of a backend failure and answers it
+    with a backend's name and the wrong exit code. An exit beside other failures
+    still wins: it is the one outcome somebody asked for."""
+    if isinstance(e, (typer.Exit, typer.Abort)):
+        return e
+    if isinstance(e, BaseExceptionGroup):
+        # `isinstance` narrows to the unparameterised generic, which leaves every
+        # member unknown; anyio builds these and they hold whatever the tasks raised.
+        for member in cast("BaseExceptionGroup[BaseException]", e).exceptions:
+            found = _orderly_exit(member)
+            if found is not None:
+                return found
+    return None
+
+
+def _calendar_cause(e: Exception) -> Exception:
+    """The exception worth naming, unwrapped from the group anyio put round it.
+
+    A lone member IS the cause and the group is plumbing. A group of several is
+    named as itself, because picking one of them would hide the rest."""
+    while isinstance(e, BaseExceptionGroup):
+        members = cast("BaseExceptionGroup[BaseException]", e).exceptions
+        if len(members) != 1 or not isinstance(members[0], Exception):
+            return e
+        e = members[0]
+    return e
+
+
+def _report_calendar_fanout(fan: _CalendarFanout, total: int) -> None:
+    """Say what the fan-out lost, and refuse when it lost everything.
+
+    Some destinations missing still leaves a grid worth reading, so that is a note
+    beside it. None of them answering is a failed command wearing the face of an
+    empty one: the renderer would print the brownout advice on stdout and leave
+    stderr silent, so a caller reading exit codes sees a calendar that succeeded."""
+    if fan.failed == 0:
+        return
+    if fan.failed >= total:
+        err.print(
+            f"[red]Matrix calendar failed:[/] all {total:d} sub-queries failed; "
+            f"first cause: {_safe_text(fan.first_error)}"
+        )
+        raise typer.Exit(1)
+    err.print(
+        f"[yellow]{fan.failed:d} of {total:d} sub-queries failed; those origin/destination "
+        f"groups are missing from the grid below.[/]"
+    )
 
 
 def _run_calendar(
@@ -824,15 +903,49 @@ def _run_calendar(
         ) as c:
             if not multi:
                 return cast("CalendarResult", await c.execute(search, cache=not no_cache)), 0
-            recovered = await _gather_calendar(c, subs, cache=not no_cache)
-            merged = merge_calendar_results(recovered)
+            fan = await _gather_calendar(c, subs, cache=not no_cache)
+            _report_calendar_fanout(fan, n)
+            merged = merge_calendar_results(fan.results)
             return (merged, n) if not is_empty_calendar(merged) else (merged, 0)
 
+    # One arm for every way this can fail. The client is built inside `go`, so an
+    # unresolvable API key, a refused connection or a DNS failure raises there
+    # rather than in `execute` — a `MatrixApiError` arm alone leaves those as a
+    # traceback, which is the one outcome a caller reading exit codes cannot act on.
     try:
         return anyio.run(go)
-    except MatrixApiError as e:
-        _print_matrix_error(e)
-        raise typer.Exit(1) from e
+    except Exception as e:  # noqa: BLE001 — every cause leaves as one typed line and exit 1
+        orderly = _orderly_exit(e)
+        if orderly is not None:
+            raise orderly from None  # a deliberate stop keeps its own code
+        cause = _calendar_cause(e)
+        if isinstance(cause, MatrixApiError):
+            _print_matrix_error(cause)
+        else:
+            err.print(f"[red]Matrix calendar failed:[/] {_safe_text(cause)}")
+        raise typer.Exit(1) from cause
+
+
+def _run_calendar_weave(go: Callable[[], Coroutine[Any, Any, None]], state: dict[str, Any]) -> None:
+    """Run the calendar weave, stashing a Matrix failure where its own tasks do.
+
+    The client is built in the weave's `async with` header, so an unresolvable API
+    key, a refused connection or a DNS failure raises BEFORE the task group opens —
+    outside the `_matrix` task whose handlers would have caught it, and outside the
+    typed line every other Matrix path prints. Stashing rather than reporting keeps
+    one reporter below: it already reads both keys, and a grid painted before the
+    failure still decides the exit code."""
+    try:
+        anyio.run(go)
+    except Exception as e:  # noqa: BLE001 — the reporter below turns any cause into one line
+        orderly = _orderly_exit(e)
+        if orderly is not None:
+            raise orderly from None  # a deliberate stop keeps its own code
+        cause = _calendar_cause(e)
+        if isinstance(cause, MatrixApiError):
+            state["matrix_err"] = cause
+        else:
+            state["matrix_unexpected"] = cause
 
 
 def _report_calendar_matrix_failure(state: dict[str, Any]) -> None:
@@ -857,6 +970,80 @@ _GF_GRID_UNAVAILABLE_NOTE = (
     "no data to this client (tracked in work-h70kv.5)."
 )
 _GF_GRID_UNAVAILABLE_WEAVE_NOTE = f"{_GF_GRID_UNAVAILABLE_NOTE} …awaiting Matrix calendar…"
+
+
+def _paint_calendar_first(
+    grid: dict[str, float],
+    state: dict[str, Any],
+    *,
+    origins: tuple[str, ...],
+    dests: tuple[str, ...],
+    sd: date,
+    ed: date,
+) -> None:
+    """What the weave shows while the Matrix calendar is still in flight.
+
+    Every branch ends by naming what the reader is waiting for, because the grid is
+    the fast half and Matrix is ~45s behind it: an unexplained pause reads as "no
+    cheap fares", and by the time the real grid lands the impression is formed."""
+    if grid:
+        _render_date_grid(grid, origin=origins, destination=dests, sd=sd, ed=ed)
+        console.print("[dim]…refining with Matrix (full grid + durations)…[/]")
+    elif state.get("gf_throttled"):
+        console.print("[dim]Google Flights rate-limited — awaiting Matrix calendar…[/]")
+    elif state.get("gf_unavailable"):
+        console.print(f"[dim]{_GF_GRID_UNAVAILABLE_WEAVE_NOTE}[/]")
+    elif "gf_err" in state:
+        err.print(f"[yellow]Google Flights date-grid failed:[/] {_safe_text(state['gf_err'])}")
+        console.print("[dim]…awaiting Matrix calendar…[/]")
+    else:
+        console.print("[dim]…awaiting Matrix calendar…[/]")
+
+
+def _run_fast_calendar_grid(
+    search: CalendarSearch,
+    *,
+    origins: tuple[str, ...],
+    dests: tuple[str, ...],
+    sd: date,
+    ed: date,
+    matrix_url: bool,
+    google_url: bool,
+) -> None:
+    """`--fast`: the Google Flights date-grid alone, or a refusal. No Matrix."""
+    from ._gf_dategrid import GfGridUnavailableError, date_grid  # noqa: PLC0415
+    from ._gflight_ids import GfThrottledError  # noqa: PLC0415
+
+    grid: dict[str, float] = {}
+    try:
+        grid = date_grid(search)
+    # Each handler only says WHY there is no grid; the single exit below says THAT
+    # there is none. Under `--fast` there is no Matrix to fall back to, so every
+    # no-grid outcome — gate, throttle, an empty grid, or a bad airport or date
+    # landing in the broad except — has to leave the same way, or a wrapper doing
+    # `--fast || fallback` reads success where it should read failure.
+    #
+    # All of it on stderr, like the up-front refusals in `_grid_branch_blocker`: a
+    # `--fast` run leaves stdout carrying a grid or nothing at all, so a caller can
+    # read the stream without first parsing it to find out whether this was an
+    # answer or an explanation.
+    except GfThrottledError:
+        err.print("[dim]Google Flights rate-limited; no grid to show.[/]")
+    except GfGridUnavailableError:
+        # Ahead of the broad except, as in the weave.
+        err.print(f"[dim]{_GF_GRID_UNAVAILABLE_NOTE}[/]")
+    except (typer.Exit, typer.Abort):
+        raise  # an orderly exit is not a grid failure; see the weave's arm
+    except Exception as e:  # noqa: BLE001 — any other cause is still just "no grid"
+        err.print(f"[yellow]Google Flights date-grid failed:[/] {_safe_text(e)}")
+    if grid:
+        _render_date_grid(grid, origin=origins, destination=dests, sd=sd, ed=ed)
+        _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
+    else:
+        # `--fast` means the GF grid alone in ~1s; quietly running the ~45s Matrix
+        # calendar instead would change what the flag means.
+        err.print("[yellow]No Google Flights grid; drop --fast for Matrix.[/]")
+        raise typer.Exit(1)
 
 
 def _run_calendar_enriched(
@@ -896,6 +1083,10 @@ def _run_calendar_enriched(
     async def _matrix(c: MatrixClient) -> None:
         try:
             state["matrix"] = await c.execute(search, cache=not no_cache)
+        except (typer.Exit, typer.Abort):
+            # `RuntimeError` subclasses on the installed click: the broad arm below
+            # would stash an orderly exit and report it as a Matrix failure.
+            raise
         except MatrixApiError as e:
             state["matrix_err"] = e
         except Exception as e:  # noqa: BLE001
@@ -923,26 +1114,14 @@ def _run_calendar_enriched(
                 # Ahead of the broad except, which would report a standing gate as
                 # "date-grid failed: …". Matrix still prices the window.
                 state["gf_unavailable"] = True
+            except (typer.Exit, typer.Abort):
+                raise  # an orderly exit is not a grid failure; see `_matrix` above
             except Exception as e:  # noqa: BLE001 — GF is the optional fast layer; Matrix still runs
                 state["gf_err"] = e
             state["grid"] = grid
-            # First paint, while Matrix is still in flight.
-            if grid:
-                _render_date_grid(grid, origin=origins, destination=dests, sd=sd, ed=ed)
-                console.print("[dim]…refining with Matrix (full grid + durations)…[/]")
-            elif state.get("gf_throttled"):
-                console.print("[dim]Google Flights rate-limited — awaiting Matrix calendar…[/]")
-            elif state.get("gf_unavailable"):
-                console.print(f"[dim]{_GF_GRID_UNAVAILABLE_WEAVE_NOTE}[/]")
-            elif "gf_err" in state:
-                err.print(
-                    f"[yellow]Google Flights date-grid failed:[/] {_safe_text(state['gf_err'])}"
-                )
-                console.print("[dim]…awaiting Matrix calendar…[/]")
-            else:
-                console.print("[dim]…awaiting Matrix calendar…[/]")
+            _paint_calendar_first(grid, state, origins=origins, dests=dests, sd=sd, ed=ed)
 
-    anyio.run(_go)
+    _run_calendar_weave(_go, state)
 
     matrix_res = state.get("matrix")
     if matrix_res is None:
@@ -3217,39 +3396,15 @@ def calendar(
                 google_url=google_url,
             )
             return
-        # --fast: Google Flights date-grid only (no Matrix).
-        from ._gf_dategrid import GfGridUnavailableError, date_grid  # noqa: PLC0415
-        from ._gflight_ids import GfThrottledError  # noqa: PLC0415
-
-        grid: dict[str, float] = {}
-        try:
-            grid = date_grid(search)
-        # Each handler only says WHY there is no grid; the single exit below says
-        # THAT there is none. Under `--fast` there is no Matrix to fall back to, so
-        # every no-grid outcome — gate, throttle, an empty grid, or a bad airport
-        # or date landing in the broad except — has to leave the same way, or a
-        # wrapper doing `--fast || fallback` reads success where it should read
-        # failure.
-        #
-        # All of it on stderr, like the up-front refusals in `_grid_branch_blocker`:
-        # a `--fast` run leaves stdout carrying a grid or nothing at all, so a
-        # caller can read the stream without first parsing it to find out whether
-        # this was an answer or an explanation.
-        except GfThrottledError:
-            err.print("[dim]Google Flights rate-limited; no grid to show.[/]")
-        except GfGridUnavailableError:
-            # Ahead of the broad except, as in the weave.
-            err.print(f"[dim]{_GF_GRID_UNAVAILABLE_NOTE}[/]")
-        except Exception as e:  # noqa: BLE001 — GF is the optional fast layer; Matrix still runs
-            err.print(f"[yellow]Google Flights date-grid failed:[/] {_safe_text(e)}")
-        if grid:
-            _render_date_grid(grid, origin=origins, destination=dests, sd=sd, ed=ed)
-            _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
-        else:
-            # `--fast` means the GF grid alone in ~1s; quietly running the ~45s
-            # Matrix calendar instead would change what the flag means.
-            err.print("[yellow]No Google Flights grid; drop --fast for Matrix.[/]")
-            raise typer.Exit(1)
+        _run_fast_calendar_grid(
+            search,
+            origins=origins,
+            dests=dests,
+            sd=sd,
+            ed=ed,
+            matrix_url=matrix_url,
+            google_url=google_url,
+        )
         return
 
     # Matrix (authoritative; also the only path for round-trip, multi-airport,

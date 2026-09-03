@@ -23,6 +23,7 @@ import typer
 from rich.console import Console
 
 from flight_cli import _config, cli
+from flight_cli._api_key import ApiKeyResolutionError
 from flight_cli._calendar_split import (
     is_empty_calendar,
     merge_calendar_results,
@@ -893,6 +894,182 @@ def test_fast_refuses_tier3_without_calling_it_tier2(
         assert "routing" not in msg  # nothing on this command line is routing
     assert cap.out == ""
     assert calls["calendar"] == 0  # refused before any Matrix work
+
+
+# ──────────── a calendar that cannot reach Matrix says so and exits 1 ───────
+# `MatrixClient(...)` is built inside the coroutine both calendar paths run, so an
+# unresolvable API key, a refused connection or a DNS failure raises where neither
+# `execute`'s `MatrixApiError` arm nor the weave's `_matrix` task can see it.
+# Unguarded that ends the command as a rich traceback with stdout empty, which is
+# the one outcome a caller reading exit codes and streams cannot act on. Every
+# other Matrix path answers with one typed line and exit 1; so do these.
+
+_ORDERLY_EXIT_CODE = 3  # neither 0 nor 1, so "kept its own code" is checkable
+
+
+class _UnbuildableClient(_PricedClient):
+    """A client whose CONSTRUCTOR fails, which is what an unresolvable key does."""
+
+    def __init__(self, **_kwargs: object) -> None:
+        raise ApiKeyResolutionError("could not resolve the Matrix API key")
+
+
+def test_the_calendar_weave_types_a_client_that_cannot_be_built(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli, "MatrixClient", _UnbuildableClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _fake_grid)
+    calls = _spy_renderers(monkeypatch)
+    with pytest.raises(typer.Exit) as excinfo:
+        _run_enriched()
+    assert excinfo.value.exit_code == 1
+    cap = capsys.readouterr()
+    assert calls == {"grid": 0, "calendar": 0}  # it failed before either paint
+    assert cap.out == ""  # so nothing on stdout can read as an answer
+    line = _flat(cap.err)
+    assert line.count("Matrix calendar failed:") == 1  # one line, said once
+    assert "could not resolve the Matrix API key" in line  # naming the cause
+
+
+def test_the_matrix_calendar_types_a_client_that_cannot_be_built(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The same failure on the path that has no Google half to fall back to:
+    round trip, multi-airport, Tier-2/3 routing and `--format json` all land here.
+    """
+    monkeypatch.setattr(cli, "MatrixClient", _UnbuildableClient)
+    with pytest.raises(typer.Exit) as excinfo:
+        cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
+            _cal(["PAR"]), rps=10.0, impersonate="chrome", no_cache=True
+        )
+    assert excinfo.value.exit_code == 1
+    cap = capsys.readouterr()
+    assert cap.out == ""
+    line = _flat(cap.err)
+    assert line.count("Matrix calendar failed:") == 1
+    assert "could not resolve the Matrix API key" in line
+
+
+class _FanoutFailClient(_PricedClient):
+    """Prices every destination but the ones named, which Matrix refuses."""
+
+    fails: ClassVar[frozenset[str]] = frozenset()
+
+    @override
+    async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
+        dest = next(iter(search.legs[0].destinations), "?")
+        if dest in type(self).fails:
+            raise MatrixApiError(f"{dest} UNAVAILABLE", kind="internal")
+        return await super().execute(search, cache=cache)
+
+
+def test_a_calendar_fanout_that_loses_every_sub_query_refuses(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A merged grid with no priced day renders as "Calendar empty", which tells
+    the reader Matrix priced the window and found nothing. When every sub-query
+    failed it priced nothing at all, so exit 0 under that sentence is a wrong
+    answer with nothing on stderr and no exit code to tell it from a right one."""
+    _FanoutFailClient.fails = frozenset({"VIE", "PAR"})
+    monkeypatch.setattr(cli, "MatrixClient", _FanoutFailClient)
+    with pytest.raises(typer.Exit) as excinfo:
+        cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
+            _cal(["VIE", "PAR"]), rps=10.0, impersonate="chrome", no_cache=True
+        )
+    assert excinfo.value.exit_code == 1
+    cap = capsys.readouterr()
+    assert cap.out == ""  # the brownout advice never gets printed as the answer
+    line = _flat(cap.err)
+    assert "all 2 sub-queries failed" in line  # how many of how many
+    assert "UNAVAILABLE" in line  # and the first cause, not just the count
+
+
+def test_a_calendar_fanout_that_loses_some_sub_queries_says_how_many(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """What answered is still worth reading, so this is a note beside the grid
+    rather than a refusal — but a destination Matrix refused looks exactly like a
+    destination with no fares, and the count is what tells them apart."""
+    _FanoutFailClient.fails = frozenset({"VIE"})
+    monkeypatch.setattr(cli, "MatrixClient", _FanoutFailClient)
+    res, n = cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
+        _cal(["VIE", "PAR"]), rps=10.0, impersonate="chrome", no_cache=True
+    )
+    assert n == 2  # what answered was merged and is still rendered
+    assert not is_empty_calendar(res)
+    assert "1 of 2 sub-queries failed" in _flat(capsys.readouterr().err)
+
+
+class _ExitingClient(_PricedClient):
+    """Raises an orderly exit from inside a Matrix task."""
+
+    @override
+    async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
+        _ = (search, cache)
+        raise typer.Exit(_ORDERLY_EXIT_CODE)
+
+
+def _exiting_grid(_search: object) -> dict[str, float]:
+    raise typer.Exit(_ORDERLY_EXIT_CODE)
+
+
+def _exit_from_a_fanout_sub_query(monkeypatch: Any) -> None:
+    monkeypatch.setattr(cli, "MatrixClient", _ExitingClient)
+    cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
+        _cal(["VIE", "PAR"]), rps=10.0, impersonate="chrome", no_cache=True
+    )
+
+
+def _exit_from_the_weave_matrix_task(monkeypatch: Any) -> None:
+    monkeypatch.setattr(cli, "MatrixClient", _ExitingClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _fake_grid)
+    _spy_renderers(monkeypatch)
+    _run_enriched()
+
+
+def _exit_from_the_weave_date_grid(monkeypatch: Any) -> None:
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _exiting_grid)
+    _spy_renderers(monkeypatch)
+    _run_enriched()
+
+
+def _exit_from_the_fast_date_grid(monkeypatch: Any) -> None:
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _exiting_grid)
+    _spy_renderers(monkeypatch)
+    cli._run_fast_calendar_grid(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
+        _oneway_cal(),
+        origins=("JFK",),
+        dests=("LHR",),
+        sd=W.start,
+        ed=W.end,
+        matrix_url=False,
+        google_url=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "drive",
+    [
+        _exit_from_a_fanout_sub_query,
+        _exit_from_the_weave_matrix_task,
+        _exit_from_the_weave_date_grid,
+        _exit_from_the_fast_date_grid,
+    ],
+    ids=["fanout sub-query", "weave matrix task", "weave date-grid", "fast date-grid"],
+)
+def test_an_orderly_exit_inside_a_calendar_guard_keeps_its_own_code(
+    drive: Any, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`typer.Exit` and `typer.Abort` subclass `RuntimeError` on the installed
+    click, and a task group wraps everything that leaves it — the host body's own
+    exception included. Between them, every broad arm on these paths would catch an
+    orderly exit and answer it with a backend's name: the grid arms as a date-grid
+    failure, the two outer guards as a Matrix failure with exit 1."""
+    with pytest.raises(typer.Exit) as excinfo:
+        drive(monkeypatch)
+    assert excinfo.value.exit_code == _ORDERLY_EXIT_CODE  # its own code, not 1
+    assert "failed" not in _flat(capsys.readouterr().err)  # and no backend blamed
 
 
 # ──────────── --duration is resolved against the trip shape (one-way) ───────
@@ -2313,8 +2490,8 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_run_calendar", "rounds"),
         ("_run_calendar", "conc"),
         ("calendar", "n_split"),  # how many sub-searches were merged
-        ("calendar", "_GF_GRID_UNAVAILABLE_NOTE"),
-        ("_go", "_GF_GRID_UNAVAILABLE_WEAVE_NOTE"),  # printed from the weave closure
+        ("_run_fast_calendar_grid", "_GF_GRID_UNAVAILABLE_NOTE"),
+        ("_paint_calendar_first", "_GF_GRID_UNAVAILABLE_WEAVE_NOTE"),
         ("_resolve_format", "_FORMAT_CHOICES"),
         ("query_cabin", "cab.value"),  # a member of this module's own enum
         ("_validate_sort_cabin", "sort_by.value"),  # the same enum, one command over
@@ -2983,19 +3160,19 @@ def test_escape_scan_passes_clean_source() -> None:
         "def calendar():\n"
         '    err.print("[red]a plain literal[/]")\n'
         '    err.print(f"[red]window {_safe_text(sd.isoformat())}[/]")\n'
-        '    err.print(f"[dim]{_GF_GRID_UNAVAILABLE_NOTE}[/]")\n'  # allowed HERE
-        # Either kind of safe value may stand as the whole argument.
-        "    err.print(_GF_GRID_UNAVAILABLE_NOTE)\n"
         "    err.print(_safe_text(e))\n"
         # Rich's own knobs are literals of whatever type rich takes.
         '    err.print("hi", no_wrap=True, width=200)\n'
+        "def _run_fast_calendar_grid():\n"
+        '    err.print(f"[dim]{_GF_GRID_UNAVAILABLE_NOTE}[/]")\n'  # allowed HERE
+        # Either kind of safe value may stand as the whole argument.
+        "    err.print(_GF_GRID_UNAVAILABLE_NOTE)\n"
         "def _parse_duration():\n"
         '    err.print(f"[red]bad duration {_quote(s)}[/]")\n'
         '    err.print(f"max ({hi}) is below min ({lo})", style="red")\n'  # allowed HERE
-        "def _run_calendar_enriched():\n"
-        "    async def _go():\n"
-        # Allowed in the closure that prints it, which is where the entry is keyed.
-        '        console.print(f"[dim]{_GF_GRID_UNAVAILABLE_WEAVE_NOTE}[/]")\n'
+        # Allowed in the function that prints it, which is where the entry is keyed.
+        "def _paint_calendar_first():\n"
+        '    console.print(f"[dim]{_GF_GRID_UNAVAILABLE_WEAVE_NOTE}[/]")\n'
         # A table filled through the wrappers, then printed whole: the title, the
         # header and the cell are each read where the value was chosen, and the
         # name of the table is allowlisted in the function that built it.
