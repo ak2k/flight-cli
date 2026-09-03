@@ -771,6 +771,10 @@ class _CalendarFanout(NamedTuple):
 
     results: list[CalendarResult]
     failed: int
+    # The LOWEST-INDEX failure, so it names the same destination on every run:
+    # sub-queries are indexed in destination order and finish in whatever order
+    # the network gives them, and "first to raise" would be a different one each
+    # time the same outage was reported.
     first_error: Exception | None
 
 
@@ -803,6 +807,47 @@ async def _gather_calendar(
     )
 
 
+def _exception_leaves(e: BaseException) -> list[BaseException]:
+    """Every non-group exception inside `e`, flattened, in member order.
+
+    A group's members sit in task-start order rather than the order they raised,
+    so this is the fan-out's own order and names the same failure on every run."""
+    if not isinstance(e, BaseExceptionGroup):
+        return [e]
+    return [
+        leaf
+        for member in cast("BaseExceptionGroup[BaseException]", e).exceptions
+        for leaf in _exception_leaves(member)
+    ]
+
+
+def _failure_text(cause: object) -> str:
+    """A failure's message, ready for a markup console.
+
+    A group that could not be unwrapped names every failure under it, because the
+    group's own `str` is a count of sub-exceptions and discards each message it
+    holds — which is the only part a reader can act on."""
+    if not isinstance(cause, BaseExceptionGroup):
+        return _safe_text(cause)
+    # `isinstance` narrows to the unparameterised generic, which leaves every
+    # member unknown; anyio builds these and they hold whatever the tasks raised.
+    leaves = _exception_leaves(cast("BaseExceptionGroup[BaseException]", cause))
+    named = "; ".join(_safe_text(leaf) for leaf in leaves)
+    return f"{len(leaves):d} concurrent failures: {named}"
+
+
+def _print_calendar_failure(cause: object, lost: str = "") -> None:
+    """The one line a calendar failure prints, wherever in the calendar it failed.
+
+    Both outer guards, both fan-out refusals and the weave's stashed cause end
+    here, so one failure reads the same whether it arrived alone, beside a
+    deliberate stop, or as one of several destinations — and a caller has one
+    prefix to match on. `lost` is the count sentence the caller built from its own
+    numbers; it is wrapped rather than allowlisted because a parameter's value
+    belongs to callers this module's markup guard never reads."""
+    err.print(f"[red]Matrix calendar failed:[/] {_safe_text(lost)}{_failure_text(cause)}")
+
+
 def _orderly_exit(e: BaseException) -> typer.Exit | typer.Abort | None:
     """The first orderly exit anywhere inside `e`, or None.
 
@@ -811,7 +856,9 @@ def _orderly_exit(e: BaseException) -> typer.Exit | typer.Abort | None:
     host body's own exception included. Between them, a broad arm outside a group
     catches a deliberate stop wearing the shape of a backend failure and answers it
     with a backend's name and the wrong exit code. An exit beside other failures
-    still wins: it is the one outcome somebody asked for."""
+    still wins: it is the one outcome somebody asked for. "First" is first in
+    member order, which is task-start order — not the first to raise, and not the
+    most severe."""
     if isinstance(e, (typer.Exit, typer.Abort)):
         return e
     if isinstance(e, BaseExceptionGroup):
@@ -827,8 +874,9 @@ def _orderly_exit(e: BaseException) -> typer.Exit | typer.Abort | None:
 def _calendar_cause(e: Exception) -> Exception:
     """The exception worth naming, unwrapped from the group anyio put round it.
 
-    A lone member IS the cause and the group is plumbing. A group of several is
-    named as itself, because picking one of them would hide the rest."""
+    A lone member IS the cause and the group is plumbing. A group of several comes
+    back whole, because picking one of them would hide the rest — `_failure_text`
+    is what then names each of them, since the group's own `str` is a count."""
     while isinstance(e, BaseExceptionGroup):
         members = cast("BaseExceptionGroup[BaseException]", e).exceptions
         if len(members) != 1 or not isinstance(members[0], Exception):
@@ -837,19 +885,50 @@ def _calendar_cause(e: Exception) -> Exception:
     return e
 
 
-def _report_calendar_fanout(fan: _CalendarFanout, total: int) -> None:
-    """Say what the fan-out lost, and refuse when it lost everything.
+def _calendar_failure(e: Exception) -> Exception:
+    """Honour an orderly exit inside `e`, or hand back the failure worth naming.
 
-    Some destinations missing still leaves a grid worth reading, so that is a note
-    beside it. None of them answering is a failed command wearing the face of an
-    empty one: the renderer would print the brownout advice on stdout and leave
-    stderr silent, so a caller reading exit codes sees a calendar that succeeded."""
+    Both calendar guards catch whatever leaves `anyio.run`, and both have to tell
+    the same three things apart: a deliberate stop, which keeps its own exit code
+    and is raised from here; the failures standing beside that stop, which nothing
+    downstream would ever say, because the exit ends the command where it is; and
+    an ordinary failure, which the caller then prints or stashes. Telling them
+    apart once is what keeps the two paths from answering the same exception two
+    ways — and the exit leaves with `__context__` intact, so a debugger still
+    reaches the group it came out of."""
+    orderly = _orderly_exit(e)
+    if orderly is not None:
+        hidden = [x for x in _exception_leaves(e) if not isinstance(x, (typer.Exit, typer.Abort))]
+        if hidden:
+            plural = "" if len(hidden) == 1 else "s"
+            _print_calendar_failure(
+                hidden[0],
+                f"{len(hidden):d} failure{plural} beside a deliberate stop; first cause: ",
+            )
+        raise orderly
+    return _calendar_cause(e)
+
+
+def _report_calendar_fanout(fan: _CalendarFanout, total: int, *, merged_empty: bool) -> None:
+    """Say what the fan-out lost, and refuse when nothing is left to show.
+
+    Judged on the MERGED grid, not on the fraction that failed. Rows still in it
+    are worth reading even short a destination, so that is a note beside them. No
+    rows at all is a different claim whatever fraction failed: the table arm prints
+    "Calendar empty" and the brownout advice, `--format json` writes
+    `solutionCount: 0`, and both say Matrix priced this window and found nothing —
+    which is exactly what a sub-query that never answered cannot support. So the
+    note only ever prints beside a grid, and its "below" is always true."""
     if fan.failed == 0:
         return
     if fan.failed >= total:
-        err.print(
-            f"[red]Matrix calendar failed:[/] all {total:d} sub-queries failed; "
-            f"first cause: {_safe_text(fan.first_error)}"
+        _print_calendar_failure(fan.first_error, f"all {total:d} sub-queries failed; first cause: ")
+        raise typer.Exit(1)
+    if merged_empty:
+        _print_calendar_failure(
+            fan.first_error,
+            f"{fan.failed:d} of {total:d} sub-queries failed and nothing that answered "
+            "priced a day; first cause: ",
         )
         raise typer.Exit(1)
     err.print(
@@ -904,9 +983,12 @@ def _run_calendar(
             if not multi:
                 return cast("CalendarResult", await c.execute(search, cache=not no_cache)), 0
             fan = await _gather_calendar(c, subs, cache=not no_cache)
-            _report_calendar_fanout(fan, n)
+            # Merge BEFORE reporting: whether what survived says anything is what
+            # decides between a note and a refusal, and only the merge knows.
             merged = merge_calendar_results(fan.results)
-            return (merged, n) if not is_empty_calendar(merged) else (merged, 0)
+            empty = is_empty_calendar(merged)
+            _report_calendar_fanout(fan, n, merged_empty=empty)
+            return (merged, 0) if empty else (merged, n)
 
     # One arm for every way this can fail. The client is built inside `go`, so an
     # unresolvable API key, a refused connection or a DNS failure raises there
@@ -915,14 +997,14 @@ def _run_calendar(
     try:
         return anyio.run(go)
     except Exception as e:  # noqa: BLE001 — every cause leaves as one typed line and exit 1
-        orderly = _orderly_exit(e)
-        if orderly is not None:
-            raise orderly from None  # a deliberate stop keeps its own code
-        cause = _calendar_cause(e)
+        # `Exception`, not `BaseException`: a real Ctrl-C is a bare
+        # `KeyboardInterrupt` and leaves through here untouched, which is the one
+        # interruption that must not be dressed up as a backend failure.
+        cause = _calendar_failure(e)
         if isinstance(cause, MatrixApiError):
             _print_matrix_error(cause)
         else:
-            err.print(f"[red]Matrix calendar failed:[/] {_safe_text(cause)}")
+            _print_calendar_failure(cause)
         raise typer.Exit(1) from cause
 
 
@@ -938,10 +1020,7 @@ def _run_calendar_weave(go: Callable[[], Coroutine[Any, Any, None]], state: dict
     try:
         anyio.run(go)
     except Exception as e:  # noqa: BLE001 — the reporter below turns any cause into one line
-        orderly = _orderly_exit(e)
-        if orderly is not None:
-            raise orderly from None  # a deliberate stop keeps its own code
-        cause = _calendar_cause(e)
+        cause = _calendar_failure(e)
         if isinstance(cause, MatrixApiError):
             state["matrix_err"] = cause
         else:
@@ -956,7 +1035,7 @@ def _report_calendar_matrix_failure(state: dict[str, Any]) -> None:
     if e is not None:
         _print_matrix_error(cast("MatrixApiError", e))
     elif state.get("matrix_unexpected") is not None:
-        err.print(f"[red]Matrix calendar failed:[/] {_safe_text(state['matrix_unexpected'])}")
+        _print_calendar_failure(state["matrix_unexpected"])
     else:
         err.print("[yellow]Matrix calendar did not complete.[/]")
 
@@ -2515,7 +2594,14 @@ _PROVIDER_OPT = typer.Option(
         "Per-provider override, repeatable: 'pp.airlines=United,Delta'. "
         # The file this process reads, not the default: `FLIGHT_CLI_CONFIG_DIR`
         # moves it, and this string tells the reader where to put the option.
-        f"Overrides {_config.config_path()} [providers.<name>]."
+        # `rich_markup_mode="rich"` renders this through the same markup parser
+        # `console.print` uses, so the path takes the wrapper any remote value
+        # takes — `escape` alone would leave an ESC in a directory name to reach
+        # Typer's from-ANSI branch, which drops the path it was meant to show.
+        # The section name is escaped so it RENDERS: unescaped, the parser reads
+        # `[providers.<name>]` as a style tag and eats the one token the sentence
+        # exists to give the reader.
+        f"Overrides {_safe_text(_config.config_path())} \\[providers.<name>]."
     ),
     rich_help_panel="Backend & providers",
 )

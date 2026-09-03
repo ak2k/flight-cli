@@ -9,18 +9,21 @@ so a multi-airport calendar is queried one destination at a time (groupable via
 from __future__ import annotations
 
 import ast
+import importlib.util
 import io
 import json
 import re
 import sys
 from datetime import date
 from pathlib import Path
-from typing import Any, ClassVar, NamedTuple, override
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, override
 
+import anyio
 import httpx
 import pytest
 import typer
 from rich.console import Console
+from typer.testing import CliRunner
 
 from flight_cli import _config, cli
 from flight_cli._api_key import ApiKeyResolutionError
@@ -35,6 +38,9 @@ from flight_cli._multi_cabin import MultiCabinRow
 from flight_cli.client import MatrixApiError
 from flight_cli.domain import Cabin, CalendarSearch, CalendarWindow, Leg, SearchOptions
 from flight_cli.models import CalendarResult, LegInfo, Location, SearchResult
+
+if TYPE_CHECKING:
+    from types import ModuleType
 
 W = CalendarWindow(start=date(2026, 9, 7), end=date(2026, 10, 7), duration_min=5, duration_max=7)
 
@@ -1000,6 +1006,46 @@ def test_a_calendar_fanout_that_loses_some_sub_queries_says_how_many(
     assert "1 of 2 sub-queries failed" in _flat(capsys.readouterr().err)
 
 
+class _FanoutEmptyRestClient(_PricedClient):
+    """Refuses the destinations named, and prices no day at all for the rest."""
+
+    fails: ClassVar[frozenset[str]] = frozenset()
+
+    @override
+    async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
+        _ = cache
+        dest = next(iter(search.legs[0].destinations), "?")
+        if dest in type(self).fails:
+            raise MatrixApiError(f"{dest} UNAVAILABLE", kind="internal")
+        return CalendarResult.from_api(_EMPTY)
+
+
+@pytest.mark.parametrize("fmt", ["table", "json"])
+def test_a_partly_lost_fanout_that_priced_nothing_refuses_in_both_arms(
+    fmt: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A destination dropped and the rest priced no day. Rendered, that is
+    "Calendar empty" and the advice to retry a brownout; under `--format json` it
+    is `solutionCount: 0`. Both documents say Matrix priced this window and found
+    nothing, which is the one claim a destination that never answered cannot
+    support — and the exit code says it a second time, to the caller least able to
+    read the note on stderr. The count alone was already there, so what this pins
+    is the two channels automation reads: exit 1, and no document at all."""
+    _FanoutEmptyRestClient.fails = frozenset({"VIE"})
+    monkeypatch.setattr(cli, "MatrixClient", _FanoutEmptyRestClient)
+    calls = _spy_renderers(monkeypatch)
+    with pytest.raises(typer.Exit) as excinfo:
+        _calendar_fast(fast=False, fmt=fmt, destination="VIE,PAR")
+    assert excinfo.value.exit_code == 1
+    cap = capsys.readouterr()
+    assert cap.out == ""  # no grid, no brownout advice, and no JSON document
+    assert calls["calendar"] == 0
+    line = _flat(cap.err)
+    assert "1 of 2 sub-queries failed" in line  # how many of how many
+    assert "VIE UNAVAILABLE" in line  # and the first cause, not just the count
+    assert "grid below" not in line  # the note that says that never prints here
+
+
 class _ExitingClient(_PricedClient):
     """Raises an orderly exit from inside a Matrix task."""
 
@@ -1034,6 +1080,49 @@ def _exit_from_the_weave_date_grid(monkeypatch: Any) -> None:
     _run_enriched()
 
 
+class _ExitBesideFailureClient(_PricedClient):
+    """One Matrix call ending as an orderly exit AND a failure, in one task group.
+
+    Two children that raise without awaiting: anyio runs both before the first
+    cancels the group, so it collects the pair — the shape the guard outside the
+    group has to answer, and the one where honouring the exit decides what happens
+    to the failure next to it."""
+
+    exit_code: ClassVar[int] = _ORDERLY_EXIT_CODE
+
+    @override
+    async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
+        _ = (search, cache)
+
+        async def _stop() -> None:
+            raise typer.Exit(type(self).exit_code)
+
+        async def _fail() -> None:
+            raise MatrixApiError("Matrix is down", kind="unavailable")
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(_stop)
+            tg.start_soon(_fail)
+        raise AssertionError  # unreachable: the group above always raises
+
+
+def _exit_beside_a_failure(monkeypatch: Any, code: int) -> None:
+    _ExitBesideFailureClient.exit_code = code
+    monkeypatch.setattr(cli, "MatrixClient", _ExitBesideFailureClient)
+    cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
+        _cal(["PAR"]), rps=10.0, impersonate="chrome", no_cache=True
+    )
+
+
+def _exit_zero_beside_a_failure(monkeypatch: Any) -> None:
+    # Exit(0) is the one that reads as success on every channel a caller has.
+    _exit_beside_a_failure(monkeypatch, 0)
+
+
+def _exit_three_beside_a_failure(monkeypatch: Any) -> None:
+    _exit_beside_a_failure(monkeypatch, _ORDERLY_EXIT_CODE)
+
+
 def _exit_from_the_fast_date_grid(monkeypatch: Any) -> None:
     monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _exiting_grid)
     _spy_renderers(monkeypatch)
@@ -1049,27 +1138,92 @@ def _exit_from_the_fast_date_grid(monkeypatch: Any) -> None:
 
 
 @pytest.mark.parametrize(
-    "drive",
+    ("drive", "code", "beside"),
     [
-        _exit_from_a_fanout_sub_query,
-        _exit_from_the_weave_matrix_task,
-        _exit_from_the_weave_date_grid,
-        _exit_from_the_fast_date_grid,
+        (_exit_from_a_fanout_sub_query, _ORDERLY_EXIT_CODE, None),
+        (_exit_from_the_weave_matrix_task, _ORDERLY_EXIT_CODE, None),
+        (_exit_from_the_weave_date_grid, _ORDERLY_EXIT_CODE, None),
+        (_exit_from_the_fast_date_grid, _ORDERLY_EXIT_CODE, None),
+        (_exit_zero_beside_a_failure, 0, "Matrix is down"),
+        (_exit_three_beside_a_failure, _ORDERLY_EXIT_CODE, "Matrix is down"),
     ],
-    ids=["fanout sub-query", "weave matrix task", "weave date-grid", "fast date-grid"],
+    ids=[
+        "fanout sub-query",
+        "weave matrix task",
+        "weave date-grid",
+        "fast date-grid",
+        "exit 0 beside a failure",
+        "exit 3 beside a failure",
+    ],
 )
 def test_an_orderly_exit_inside_a_calendar_guard_keeps_its_own_code(
-    drive: Any, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+    drive: Any,
+    code: int,
+    beside: str | None,
+    monkeypatch: Any,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """`typer.Exit` and `typer.Abort` subclass `RuntimeError` on the installed
     click, and a task group wraps everything that leaves it — the host body's own
     exception included. Between them, every broad arm on these paths would catch an
     orderly exit and answer it with a backend's name: the grid arms as a date-grid
-    failure, the two outer guards as a Matrix failure with exit 1."""
+    failure, the two outer guards as a Matrix failure with exit 1.
+
+    An exit keeps its code even where something failed beside it, because a stop is
+    the outcome somebody asked for — but the exit ends the command, so nothing
+    below would ever mention the failure, and with `Exit(0)` the process reports
+    success for a fan-out that half went down. The code is the caller's; stderr is
+    where what it cost gets said."""
     with pytest.raises(typer.Exit) as excinfo:
         drive(monkeypatch)
-    assert excinfo.value.exit_code == _ORDERLY_EXIT_CODE  # its own code, not 1
-    assert "failed" not in _flat(capsys.readouterr().err)  # and no backend blamed
+    assert excinfo.value.exit_code == code  # its own code, not 1
+    line = _flat(capsys.readouterr().err)
+    if beside is None:
+        assert "failed" not in line  # and no backend blamed
+    else:
+        assert beside in line  # the failure the exit would otherwise bury
+        assert "1 failure beside a deliberate stop" in line  # and how many there were
+
+
+class _TwoFailureClient(_PricedClient):
+    """Two unrelated real failures in one task group, and no exit anywhere."""
+
+    @override
+    async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
+        _ = (search, cache)
+
+        async def _dns() -> None:
+            raise OSError("nodename nor servname provided")
+
+        async def _matrix() -> None:
+            raise MatrixApiError("Matrix is down", kind="unavailable")
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(_dns)
+            tg.start_soon(_matrix)
+        raise AssertionError  # unreachable: the group above always raises
+
+
+def test_two_concurrent_calendar_failures_are_each_named(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A group of one is plumbing and unwraps to its member. A group of several
+    cannot, and its own `str` is a count — "unhandled errors in a TaskGroup
+    (2 sub-exceptions)" names neither cause, so the reader is told only that there
+    were two and every message the failures carried is dropped on the floor."""
+    monkeypatch.setattr(cli, "MatrixClient", _TwoFailureClient)
+    with pytest.raises(typer.Exit) as excinfo:
+        cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
+            _cal(["PAR"]), rps=10.0, impersonate="chrome", no_cache=True
+        )
+    assert excinfo.value.exit_code == 1
+    cap = capsys.readouterr()
+    assert cap.out == ""
+    line = _flat(cap.err)
+    assert "2 concurrent failures" in line  # how many
+    assert "nodename nor servname" in line  # the transport half
+    assert "Matrix is down" in line  # and the Matrix half
+    assert "TaskGroup" not in line  # never the plumbing the reader cannot act on
 
 
 # ──────────── --duration is resolved against the trip shape (one-way) ───────
@@ -1979,6 +2133,58 @@ def test_the_provider_opt_help_names_the_file_this_process_reads() -> None:
     assert str(_config.config_path()) in (cli._PROVIDER_OPT.help or "")  # pyright: ignore[reportPrivateUsage] — the option IS the unit
 
 
+def _cli_module_with_config_dir(monkeypatch: Any, config_dir: str) -> ModuleType:
+    """A second `cli` module object, imported with the config directory set.
+
+    The help string interpolates the config path while the module is IMPORTED, so
+    an environment patched after that changes nothing — the string a real
+    `flight search --help` renders is the one built at import, and a fresh module
+    object is what puts a hostile directory name into it without a subprocess. The
+    name sits under `flight_cli.` so the module's relative imports resolve, and it
+    is never registered in `sys.modules`, so the real `cli` is untouched."""
+    monkeypatch.setenv(_config.CONFIG_DIR_ENV, config_dir)
+    monkeypatch.setenv("COLUMNS", "400")  # wide enough that rich splits no token
+    spec = importlib.util.spec_from_file_location("flight_cli._cli_help_probe", cli.__file__)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("hostile", ["[/x]", "\x1b[2J"], ids=["an unmatched closing tag", "an ESC"])
+def test_search_help_survives_a_hostile_config_directory(
+    hostile: str, monkeypatch: Any, tmp_path: Path
+) -> None:
+    """A help string is a markup sink like any other: the app sets
+    `rich_markup_mode="rich"`, so Typer renders `help=` through the same parser
+    `console.print` uses, and the config path in it is whatever the environment
+    says. An unmatched `[/x]` in the directory name aborted `search --help` with a
+    MarkupError; an ESC took Typer's from-ANSI branch, which drops the path the
+    sentence exists to give — which is why the wrapper here is `_safe_text` and not
+    `escape`, since `escape` neutralises the first and leaves the second."""
+    module = _cli_module_with_config_dir(monkeypatch, str(tmp_path / hostile))
+    result = CliRunner().invoke(module.app, ["search", "--help"])
+    assert result.exception is None  # a MarkupError arrives as one of these
+    assert result.exit_code == 0
+    shown = _flat(result.output)
+    assert "config.toml" in shown  # the path is shown, not swallowed
+    assert "[providers.<name>]" in shown
+
+
+def test_the_provider_opt_help_shows_the_config_section_it_names(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """The half that needs no hostile input at all: `[providers.<name>]` is a
+    well-formed style tag, so unescaped the parser ate it and the rendered help
+    ended "Overrides …/config.toml ." — pointing at a file and naming no section
+    in it, on every machine."""
+    module = _cli_module_with_config_dir(monkeypatch, str(tmp_path))
+    result = CliRunner().invoke(module.app, ["search", "--help"])
+    assert result.exit_code == 0
+    # `config_path` reads the same environment the fresh module was imported under.
+    assert f"{_config.config_path()} [providers.<name>]." in _flat(result.output)
+
+
 class _FakeAirline:
     def __init__(self, name: str) -> None:
         self.name = name
@@ -2469,10 +2675,11 @@ def test_detail_round_trip_bad_duration_is_a_typed_error(
 # It neutralises `[` and leaves every ESC, 8-bit CSI, bidi control and lone
 # surrogate in place, and telling which values can carry one means tracking taint
 # through locals, `str()` calls and attribute chains — which the scan cannot do.
-# Both wrappers end in `escape`, so nothing is lost. `_amount` is the third
-# because it calls `_safe_text` on the way out: it is the formatter for a price,
-# and sanitizing inside a formatter is what keeps the wrap off every call site.
-_SAFE_WRAPPERS = frozenset({"_quote", "_safe_text", "_amount"})
+# Both wrappers end in `escape`, so nothing is lost. `_amount` and `_failure_text`
+# are the other two because every return path of each ends in `_safe_text`: one
+# formats a price, the other an exception that may be a group of them, and
+# sanitizing inside a formatter is what keeps the wrap off every call site.
+_SAFE_WRAPPERS = frozenset({"_quote", "_safe_text", "_amount", "_failure_text"})
 
 # Identifiers that need no wrapper at the print site: counters and dates this
 # module computed, constants it wrote, and locals already sanitized where the
@@ -2798,6 +3005,39 @@ def _is_a_print(node: ast.Call) -> bool:
     return isinstance(func, ast.Name) and (func.id == "print" or func.id in _RENDERABLE_SINKS)
 
 
+# A typer `help=` / `epilog=` string is a markup sink the way a table cell is: the
+# app sets `rich_markup_mode="rich"`, so Typer renders it through rich's markup
+# parser, and the value in it is chosen here rather than at any console. What is
+# read there is NARROWER than at a print — an f-string field that is a call or an
+# attribute read, which is where a runtime value comes from. A bare name is not
+# read: these strings are built at module scope, where there is no function to key
+# an allowlist entry on, and every name in one today is a constant of literal text
+# this file wrote. `console_sanitizing.md` states that boundary.
+_HELP_SINKS = frozenset({"Option", "Argument", "Typer"})
+
+
+def _help_faults(src: str, node: ast.Call, names: _Names) -> list[str]:
+    """Runtime values interpolated into a typer help string, or nothing."""
+    func = node.func
+    called = func.attr if isinstance(func, ast.Attribute) else _dotted_name(func) or ""
+    if called not in _HELP_SINKS:
+        return []
+    fields = [
+        part
+        for kw in node.keywords
+        if kw.arg in {"help", "epilog"} and isinstance(kw.value, ast.JoinedStr)
+        for part in kw.value.values
+        if isinstance(part, ast.FormattedValue)
+        and isinstance(part.value, (ast.Call, ast.Attribute))
+    ]
+    return [
+        f"{called}:{node.lineno} unwrapped help field "
+        f"{ast.get_source_segment(src, field) or ast.dump(field)}"
+        for field in fields
+        if not _is_safe_field(field.value, [], names)
+    ]
+
+
 def _spec_has_field(spec: ast.expr | None) -> bool:
     """Whether a format spec interpolates anything. `f"{escape(a):{e}}"` makes `e`
     the padding character, which reaches rich without passing the wrapper."""
@@ -2902,7 +3142,9 @@ def escape_scan(src: str) -> list[str]:
     `t.caption = x`, `t.columns[0].header = x`), or by an API this file does not
     name, is not read — none is live in `cli.py` today, and `Panel` sits in
     `_RENDERABLE_SINKS` unimported, so an aliased import of it would have coverage
-    that looks present and is not.
+    that looks present and is not. A typer `help=` / `epilog=` f-string is read
+    too, for the runtime values in it — Typer renders those through the same markup
+    parser, a console away from any print.
 
     It models scope only as far as the INNERMOST function: an entry is a claim
     about a name in one body, so a closure that shadows or rebinds the name is
@@ -2918,6 +3160,7 @@ def escape_scan(src: str) -> list[str]:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
+        faults += _help_faults(src, node, names)
         if not _is_a_print(node):
             continue
         if _prints_a_renderable(node, names.renderables.get(node, frozenset())):
@@ -3146,7 +3389,47 @@ _KNOWN_BYPASSES = {
         'def _render_search():\n    def helper():\n        out = f"{it.raw}"\n'
         "        st.add_row(out)\n"
     ),
+    # Typer renders a help string through the markup parser, so a path read out of
+    # the environment reaches rich with no print anywhere near it.
+    "a runtime value in an option help string": (
+        '_OPT = typer.Option(None, "--provider-opt", help=f"Overrides {_config.config_path()}.")\n'
+    ),
 }
+
+
+# One probe per help sink, the same shape as `_SINK_PROBES` one section up: a
+# runtime value interpolated into the string Typer will hand rich.
+_HELP_PROBES = {
+    "Option": '_OPT = typer.Option(None, "--x", help=f"reads {_config.config_path()}")\n',
+    "Argument": '_ARG = typer.Argument(help=f"reads {_config.config_path()}")\n',
+    "Typer": 'app = typer.Typer(help=f"reads {_config.config_path()}")\n',
+}
+
+
+def test_every_help_sink_is_read() -> None:
+    """Each named help sink is reached by a probe of its own, and each probe goes
+    silent without the member that reads it."""
+    assert set(_HELP_PROBES) == set(_HELP_SINKS)
+    unread = [name for name, probe in _HELP_PROBES.items() if not escape_scan(probe)]
+    assert not unread, f"these help sinks are named but never reached: {unread}"
+    still_caught: list[str] = []
+    for name, probe in _HELP_PROBES.items():
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(sys.modules[__name__], "_HELP_SINKS", _HELP_SINKS - {name})
+            if escape_scan(probe):
+                still_caught.append(name)
+    assert not still_caught, f"these members are not what catches their own probe: {still_caught}"
+
+
+def test_a_help_string_is_read_only_for_the_values_it_looks_up() -> None:
+    """The boundary the memo states, in the direction that keeps the scan honest:
+    a bare name in a help string is not read, so a constant of literal text needs
+    no wrapper — and the wrapped call, which is the shape the live site now has,
+    is silent too."""
+    assert not escape_scan('_OPT = typer.Option(None, "--x", help=f"one of {_FORMAT_CHOICES}.")\n')
+    assert not escape_scan(
+        '_OPT = typer.Option(None, help=f"{_safe_text(_config.config_path())} section.")\n'
+    )
 
 
 def test_escape_scan_finds_every_known_bypass() -> None:
