@@ -186,9 +186,9 @@ Every one of these is a multi-megabyte page GET, so the count is the cost:
 The flapping row is the worst case and the one that needs its bound named. Any
 sibling's success refills the wall — correctly, it is per-IP — so the shared
 ladder never exhausts there and cannot bound anything. What does is the attempt
-count each `retry_throttled` call carries: eleven calls of a round trip, each
-capped at `_THROTTLE_RETRY_ATTEMPTS + 1` = 5, is 55, and four cabins is 220. A
-healthy round trip is 11 per cabin, 44 for four.
+count each `retry_throttled` call carries, applied to the eleven calls a default
+round trip makes — one board and ten pins — and then to the cabin count. That
+product is the row above.
 
 Two things make the rest of those numbers hold, and this paragraph is where that
 arithmetic lives — the docstrings that depend on it point here rather than restating it.
@@ -202,8 +202,10 @@ mean ~2 x 31 page fetches for a two-cabin round trip. The default `-n 10` is
 unchanged by the cap.
 
 The bump therefore widens the leg-1 rows each cabin keeps and NOT the round-trip
-pins, so **Google Flights joins cabins on up to N of each cabin's cheapest
-outbounds; '—' means no shared itinerary, not no fare.** `cli._multi_cabin_join_note`
+pins, so **Google Flights joins cabins on up to `<pin budget>` of each cabin's
+cheapest outbounds; '—' means no shared itinerary, not no fare** — the budget
+being `pinned_fanout` of the bumped page size, which the cap holds at 10 however
+large `-n` is. `cli._multi_cabin_join_note`
 builds that sentence from the pin budget rather than a literal, and
 `cli._run_gflight_path_multi` prints it on a multi-cabin round trip, because an
 empty cabin cell otherwise reads as "that fare does not exist". "Up to",
@@ -230,22 +232,24 @@ is a different fact and still continues to the next pin, counted the same way.
 `GfTransportError` exists so the loop can tell an exhausted transport ladder
 apart from those.
 
-**Failures this branch reports that the other does not (yet).** Three arms are
-new here and merge as new hunks below the shared reporter lines, so they are
-recorded here rather than in the shared text:
+**Three Matrix failures that reach the user typed rather than as a traceback.**
+`execute()` wraps what Matrix answered; it does not wrap a client that could not
+be built or a socket that was never opened. Each of these arms exists because
+the untyped shape of that failure is worse than the failure:
 
 | site | what it catches | why it is not a traceback |
 |---|---|---|
-| the shared search path and the multi-cabin group | anything `execute()` does not wrap — a refused connection, a failed DNS lookup, an API key that will not resolve | the key is resolved when the client is CONSTRUCTED, so it fails before any task exists; untyped it reached the user as a rich traceback with the cause hundreds of lines down |
+| the shared search path and the multi-cabin group | anything `execute()` does not wrap — a refused connection, a failed DNS lookup, an API key that will not resolve | the key is resolved when the client is CONSTRUCTED, so on those paths it fails before any task exists; untyped it is a rich traceback with the cause hundreds of lines down |
 | the multi-cabin per-cabin arm | the same, for one cabin | an exception leaving a cabin's task cancels its siblings and surfaces as an ExceptionGroup, so one unreachable cabin took the cabins that answered with it |
-| the enriched weave's own run | the same, before the task group opens | the guard inside the Matrix task cannot see a client that was never built |
+| the enriched weave's own run | the same, for the loop and the task group themselves | a failure there is not one half of the weave failing, so nothing else in the command is left to report it |
 
 **A round trip says how many outbounds it will combine.** `cli._pin_cap_note`
 prints it on every round-trip path — the enriched one, `--fast`, `--format json`
 and multi-cabin — whenever the pin cap is below the `-n` asked for, and always
-to stderr so a JSON document stays a document. It quotes the user's count, never
-the multi-cabin bump, which is a wider pool per cabin and not something anyone
-asked for.
+to stderr so a JSON document stays a document. It is passed the user's count,
+never the multi-cabin bump — a wider pool per cabin that nobody asked for — and
+prints the pin budget that count resolves to, which is the number the join will
+actually see rather than the one being corrected.
 
 **`-n` is one number, applied on the way out.** The page serves Google's whole
 board — 30 rows on the live JFK-LAX capture — whatever count was asked of it, so
@@ -300,11 +304,11 @@ structlog's logger writes through a proxy that looks it up per write, because
 `cache_logger_on_first_use` otherwise pins whichever stream carried the first
 record for the life of the process. Two failures follow from a pinned stream,
 and only an embedding host reaches either — the CLI is one shot with a real
-stderr. A host that replaced and closed it got `ValueError: I/O operation on
-closed file` out of the next log line; a host with no `sys.stderr` at all got
-worse, because `PrintLogger` reads `file or stdout` and put the diagnostic in
+stderr. A host that replaces and closes it takes `ValueError: I/O operation on
+closed file` out of the next log line; a host with no `sys.stderr` at all fares
+worse, because `PrintLogger` reads `file or stdout` and puts the diagnostic in
 the stream the JSON document is written to. A stream that cannot be written to
-now drops the line, and there is no fallback to stdout at all.
+drops the line instead, and there is no fallback to stdout at any point.
 
 **One ladder per fan-out, not per cabin.** The multi-cabin path runs a cabin per
 thread; laddering separately, four cabins spend 4 x 5 = 20 multi-megabyte GETs
@@ -323,13 +327,26 @@ outcome worth waiting for. Each arm keeps its own round; only the lock is
 shared. One worker can own both at once, so standing down releases both — a
 SUCCESS does not, and the next paragraph is where that asymmetry is stated.
 
-A waiter whose park times out is not released by it. Every attempt of an
-owner's ladder can burn the full request timeout, so the owner reports after the
-wait would have expired — deterministically, at the shipped defaults. Treating
-the timeout as an answer put three more multi-megabyte GETs in flight beside the
-prober's, which is the amplification the shared budget exists to remove. The
-ceiling is for an owner that never reports at all; what bounds a waiter is its
-own attempt count.
+**A waiter's park ends on the owner's report and on nothing else.** The wait
+carries no clock, because there is nothing for one to decide: `release()` sets
+the very event the waiter holds, so waking is the report arriving. Any rule that
+lets a waiter go earlier — a timeout read as an answer, a poll — puts three more
+multi-megabyte GETs in flight beside the prober's, which is the amplification
+the shared budget exists to remove; and an owner IS slow by construction, since
+every attempt of its ladder can burn the full request timeout. What bounds a
+waiter is its own attempt count. What guarantees the report arrives at all is
+`retry_throttled`'s `finally`, which stands an owner down whatever door it
+leaves by. The case neither covers is a GET that never returns: the owner is
+then a worker thread the task group is waiting on, so the command is wedged
+whatever its waiters do — that is a request timeout's job, not a ladder's.
+
+A call whose own attempts are spent never parks at all. It cannot use a backoff,
+so waiting for one is latency it will throw away, and it takes no round it will
+not probe. It does still book the rung of a round it already owns: that booking
+is how the group learns the wall has been measured to the end, and an owner that
+walked away without it leaves every waiter to spend a GET proving what the call
+already knew — measured at 9 GETs for a four-cabin outage against the 6 in the
+table above.
 
 A successful call REFILLS the WALL's rungs: the wall is per-IP, so any call
 getting through is evidence it lifted whoever made it, and a wall that returns
@@ -339,19 +356,19 @@ call is no evidence about this one's, and crediting it let every healthy cabin
 hand a failing one another rung. Only the worker that met a transport failure
 gets those back.
 
-**That is what the "one ladder" ceiling is bounded by — no success getting
+**That is what the "one ladder" budget is bounded by — no success getting
 through, not elapsed time.** And because the wall's refill is shared and
 correct, the ladder alone cannot bound a single call: each `retry_throttled`
 call carries its own attempt count as well, so a flapping link costs a bounded
 number of requests per call whatever the siblings are doing. There is no
 time floor: a success five milliseconds old refills the budget exactly as one
 from half an hour ago does. So a wall that lets the prober past and closes again
-refills on each probe and costs more than one ladder. No count is quoted for
-that here, because the number depends on which requests the wall admits and
-three independent measurements of "only the prober gets through" landed on
-three different figures — what is bounded, and measured, is the per-call cost in
-the table above. The ladder ceiling holds while nothing is getting through,
-which is the case it was written for.
+refills on each probe and costs more than one ladder. No single count is quoted
+for that here, because it turns on what "only the prober gets through" means: a
+wall that stays open for as long as a prober is through costs about one ladder,
+while one that admits only the owner's own probe costs roughly three times that
+at three cabins. Each reading is deterministic; they are different questions.
+What is bounded whatever the wall does is the per-call cost in the table above.
 
 The rejected alternative is worth recording, because it is the lever if a
 request bound is ever traded away. A shared DEADLINE — every worker retries on

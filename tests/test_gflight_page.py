@@ -1579,12 +1579,12 @@ def test_one_empty_board_among_refusals_does_not_suppress_the_refusal(
 ) -> None:
     """ "Nothing was served" is the rule, not "every pin refused".
 
-    The two differ by exactly one pin. A round trip whose return boards have
-    stopped parsing, with a single genuinely empty board among them, produced
-    `None` — which the caller renders as "no results (or none matched the
-    routing)" and exits 0. That is a wrong answer, not a partial one: the user
-    is told this route has no return flights when what happened is that we can
-    no longer read the page.
+    The two differ by exactly one pin. Under the narrower rule a round trip
+    whose return boards have stopped parsing, with a single genuinely empty
+    board among them, is `None` — which the caller renders as "no results (or
+    none matched the routing)" and exits 0. That is a wrong answer, not a
+    partial one: the user is told this route has no return flights when what
+    happened is that we can no longer read the page.
 
     The trade the other way is deliberate. This also raises when one pin refused
     and the rest were honestly empty, preferring a false refusal to a false "no
@@ -2059,16 +2059,12 @@ _SLOW_GET_S = 0.20
 def test_a_waiter_does_not_probe_while_the_prober_is_still_out(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A waiter's park ends when the owner reports and at no other time.
+    """Four cabins meet one outage: the wave they had already committed to, then
+    the owner's ladder run alone.
 
-    Every attempt of an owner's ladder can burn the full request timeout, so an
-    owner is slow by construction. Any rule that lets a waiter go before the
-    report arrives — a clock, a poll, a wait that reads running out as an
-    answer — sends three waiters to GET while the owner's probe is still in
-    flight: four ladders against one wall, which is the amplification the shared
-    budget exists to remove, at the one moment it matters.
-
-    What bounds a waiter is its own attempt count."""
+    Any rule that lets a waiter go before the owner reports — a clock, a poll, a
+    wait that reads running out as an answer — shows up here as a GET starting
+    beside one already in flight, which is what the count below reads."""
     monkeypatch.setattr(gfid, "_THROTTLE_BACKOFF_S", 0.01)  # backoffs out of the way
 
     cabins = 4

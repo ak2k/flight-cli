@@ -433,8 +433,8 @@ def test_a_call_ends_on_either_arm_while_a_sibling_keeps_refilling(
     sibling getting through is evidence it lifted — which means on a flapping
     wall the ladder hands this call a fresh budget between every rung and the
     per-call count is the ONLY exit. The network's refill is narrower, so that
-    arm has two guards and this one has one; the arm with one guard is the one
-    that had no test."""
+    arm has two guards and the wall has one — the wall is the arm where the
+    per-call count is the only thing standing."""
     attempts = {"n": 0}
 
     def always_fail() -> object:

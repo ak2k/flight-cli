@@ -691,8 +691,9 @@ def test_a_round_trip_says_how_many_outbounds_it_will_actually_combine(
 def test_every_round_trip_surface_says_how_many_outbounds_it_combines(
     monkeypatch: pytest.MonkeyPatch, command: list[str]
 ) -> None:
-    """The helper had a unit test and not one call site was pinned: deleting the
-    call from all three left the suite green and every surface silent.
+    """Every surface, because a unit test on the helper says nothing about which
+    commands call it: the requirement is where the sentence appears, so the test
+    drives the commands.
 
     Driven through the real commands, because "which surfaces say it" is the
     whole requirement. `--format json` is here for the second half of it — the

@@ -228,9 +228,8 @@ def _hostile_of(cls: type[GfBackendError]) -> GfBackendError:
 
 @pytest.mark.parametrize(
     "error",
-    # Driven off the hierarchy rather than listed, so an arm cannot be added
-    # without a hostile case — the transport arm was added, and rewritten, with
-    # this file's whole subject uncovering it.
+    # Driven off the hierarchy rather than listed, so a new arm cannot be added
+    # without a hostile case to go with it.
     [
         pytest.param(_hostile_of(cls), id=cls.__name__)
         for cls in [

@@ -278,17 +278,10 @@ class _SharedThrottleLadder:
                 if other is not round_ and other.owner == me:
                     other.release()
             settled = round_.settled
-        # No clock on this wait, because there is nothing for one to decide.
-        # `release()` sets the very event held here, so waking IS the owner
-        # reporting rather than a poll noticing that it did; a wait that ran out
-        # while the prober was still out could only re-park, and a wait that
-        # treated running out as an answer would send every waiter to retry
-        # against a wall nobody has finished measuring — the amplification this
-        # ladder exists to remove. What bounds the waiting is the caller's own
-        # attempt count, and what guarantees a report arrives at all is
-        # `retry_throttled`'s `finally`. The one thing neither covers is a GET
-        # that never returns: the owner is then a worker thread the task group
-        # is waiting on, so the command is wedged whatever its waiters do.
+        # No clock: `release()` sets the very event held here, so waking is the
+        # owner reporting and nothing else can end this wait. What bounds it is
+        # the caller's own attempt count; the reasoning and the timings live in
+        # the budget section of docs/memories/gf_routing_and_carriers.md.
         settled.wait()
         with self._lock:
             return None if round_.exhausted else 0.0

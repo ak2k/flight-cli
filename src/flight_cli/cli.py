@@ -2191,9 +2191,9 @@ def _run_gflight_path_multi(
     query_top_n = _bumped_query_top_n(top_n, len(cabins))
     # The user's count, not the bumped one. The bump widens the pool each cabin
     # keeps so the join has overlap; it is not what anyone asked for, and
-    # quoting it tells someone who asked for three that returns are combined
-    # against ten — more than they wanted, from a note whose whole job is to say
-    # when they will get fewer.
+    # quoting it tells someone who asked for a handful of rows that returns are
+    # combined against the whole pin cap — more than they wanted, from a note
+    # whose whole job is to say when they will get fewer.
     _pin_cap_note(legs=legs, top_n=top_n)
     if len(legs) >= _ROUND_TRIP_LEGS and len(cabins) > 1:
         from ._gflight_ids import pinned_fanout  # noqa: PLC0415
@@ -2210,8 +2210,9 @@ def _run_gflight_path_multi(
             cab_dumped: list[Any] = []
             # The user's count per cabin, not the bumped one the cabins were
             # queried at: the bump exists to give the join overlap to work
-            # with, and quoting it back would answer `-n 3` with ten rows a
-            # cabin. The table path gets the same number through `_merge_cabins`.
+            # with, and quoting it back answers a small `-n` with a whole
+            # bumped page. The table path gets the same number through
+            # `_merge_cabins`.
             for r in fli_results[:top_n]:
                 items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
                 dumped = [_gflight_json_row(g) for g in items]
