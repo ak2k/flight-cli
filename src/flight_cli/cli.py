@@ -642,6 +642,80 @@ def _should_run_awards(sel: ProviderSelection) -> bool:
 # ─────────────────────────── shared execution ──────────────────────────────
 
 
+def _orderly_exit(e: BaseException) -> typer.Exit | typer.Abort | None:
+    """The first orderly exit anywhere inside `e`, or None.
+
+    `typer.Exit` and `typer.Abort` subclass `RuntimeError` on the installed click,
+    and a task group wraps EVERYTHING that leaves it in an `ExceptionGroup` — the
+    host body's own exception included. Between them, a broad arm outside a group
+    catches a deliberate stop wearing the shape of a backend failure and answers it
+    with a backend's name and the wrong exit code. An exit beside other failures
+    still wins: it is the one outcome somebody asked for."""
+    if isinstance(e, (typer.Exit, typer.Abort)):
+        return e
+    if isinstance(e, BaseExceptionGroup):
+        # `isinstance` narrows to the unparameterised generic, which leaves every
+        # member unknown; anyio builds these and they hold whatever the tasks raised.
+        for member in cast("BaseExceptionGroup[BaseException]", e).exceptions:
+            found = _orderly_exit(member)
+            if found is not None:
+                return found
+    return None
+
+
+def _failures_inside(e: BaseException) -> list[BaseException]:
+    """Every failure `e` is carrying, with the orderly exits left out.
+
+    A task group hands its caller one object holding whatever its tasks raised,
+    so the thing caught outside a group is a container: what failed is inside
+    it, possibly several deep, possibly beside a deliberate stop that is not a
+    failure at all."""
+    if isinstance(e, BaseExceptionGroup):
+        # Same narrowing as `_orderly_exit`: the members are whatever the tasks
+        # raised, which the unparameterised generic cannot describe.
+        members = cast("BaseExceptionGroup[BaseException]", e).exceptions
+        return [leaf for member in members for leaf in _failures_inside(member)]
+    if isinstance(e, typer.Exit | typer.Abort):
+        return []
+    return [e]
+
+
+def _failure_text(e: BaseException) -> str:
+    """What to call `e` on a typed line.
+
+    Never the group: "unhandled errors in a TaskGroup" is plumbing, printed to
+    someone whose search failed for a reason that is sitting inside it. One
+    failure is named as itself. Several are all named and counted, because
+    picking one would report half an outage as the whole of it — and a user who
+    sees one cause fixes one thing and runs the same command again."""
+    failures = _failures_inside(e)
+    if not failures:
+        return _safe_text(e)
+    if len(failures) == 1:
+        return _safe_text(failures[0])
+    named = "; ".join(_safe_text(f) for f in failures)
+    return f"{len(failures):d} concurrent failures: {named}"
+
+
+def _reraise_if_orderly(e: Exception, *, said: str) -> None:
+    """Re-raise a deliberate stop that arrived inside `e`, and never let it
+    hide what failed beside it.
+
+    An exit anywhere in the group is the outcome somebody asked for, so it keeps
+    its own code. But a group can carry an exit AND a real failure — one task
+    stopping the command while another one broke — and re-raising the exit alone
+    reports success, or a chosen code, with both streams empty. The failures are
+    named first, on the stream every other failure here uses, and the exit code
+    is left exactly as it was asked for."""
+    orderly = _orderly_exit(e)
+    if orderly is None:
+        return
+    beside = _failures_inside(e)
+    if beside:
+        err.print(f"[red]{said}:[/] {_failure_text(e)}")
+    raise orderly
+
+
 def _run(
     search: Search,
     rps: float,
@@ -665,7 +739,8 @@ def _run(
         # with the cause hundreds of lines down, on the most ordinary command
         # there is — and this package's rule is that a third-party transport
         # error never reaches a caller untyped.
-        err.print(f"[red]Matrix search failed:[/] {_safe_text(e)}")
+        _reraise_if_orderly(e, said="Matrix search failed")
+        err.print(f"[red]Matrix search failed:[/] {_failure_text(e)}")
         raise typer.Exit(1) from e
 
 
@@ -1642,9 +1717,12 @@ def _run_the_weave(go: Callable[[], Coroutine[Any, Any, None]], state: dict[str,
     except (typer.Exit, typer.Abort):
         # An orderly exit is a decision, not a failure. `typer.Exit` subclasses
         # `RuntimeError` on the installed click, so the arm below would catch it
-        # and report the exit CODE as a Matrix error message.
+        # and report the exit CODE as a Matrix error message. This arm is for
+        # an exit raised by the weave itself; one raised inside the task group
+        # arrives wrapped, which is what the next line is for.
         raise
     except Exception as e:  # noqa: BLE001 — reported by _report_search_matrix_failure
+        _reraise_if_orderly(e, said="Matrix search failed")
         state["matrix_unexpected"] = e
 
 
@@ -1669,7 +1747,7 @@ def _report_weave_aftermath(state: dict[str, Any]) -> None:
         _report_paint_failure(state["paint_err"])
     if state.get("matrix_unexpected") is not None:
         err.print(
-            f"[yellow]Matrix answered, then failed:[/] {_safe_text(state['matrix_unexpected'])}"
+            f"[yellow]Matrix answered, then failed:[/] {_failure_text(state['matrix_unexpected'])}"
         )
 
 
@@ -1698,7 +1776,7 @@ def _report_search_matrix_failure(state: dict[str, Any]) -> None:
     if e is not None:
         _print_matrix_error(e)
     elif state.get("matrix_unexpected") is not None:
-        err.print(f"[red]Matrix search failed:[/] {_safe_text(state['matrix_unexpected'])}")
+        err.print(f"[red]Matrix search failed:[/] {_failure_text(state['matrix_unexpected'])}")
     else:
         err.print("[yellow]Matrix search did not complete.[/]")
 
@@ -1985,7 +2063,8 @@ def _run_matrix_multi(
         # Nothing from a cabin reaches here — those are caught per cabin — so
         # this is the shared client failing to open or close at all. Typed
         # rather than a traceback, and worded like every other Matrix failure.
-        err.print(f"[red]Matrix search failed:[/] {_safe_text(e)}")
+        _reraise_if_orderly(e, said="Matrix search failed")
+        err.print(f"[red]Matrix search failed:[/] {_failure_text(e)}")
         raise typer.Exit(1) from e
     return results
 

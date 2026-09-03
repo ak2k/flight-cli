@@ -1203,6 +1203,37 @@ def _refusing_matrix(error: Exception) -> Any:
     return _Refusing
 
 
+def _no_gf() -> Any:
+    def _none(*_a: object, **_kw: object) -> list[Any]:
+        return []
+
+    return _none
+
+
+def _one_gf_row() -> Any:
+    def _row(*_a: object, **_kw: object) -> list[Any]:
+        return [cast("Any", object())]
+
+    return _row
+
+
+def _no_matrix() -> Any:
+    async def _nothing(*_a: object, **_kw: object) -> None:
+        return None
+
+    return _nothing
+
+
+def _matrix_task_raising(e: BaseException) -> Any:
+    """A Matrix task that lets something escape, rather than stashing it —
+    which is what puts it in the group the weave's own arm receives."""
+
+    async def _raise(*_a: object, **_kw: object) -> None:
+        raise e
+
+    return _raise
+
+
 def _capture(monkeypatch: pytest.MonkeyPatch) -> io.StringIO:
     """Both streams into one buffer: these reporters are split across `err` and
     `console`, and which one a given line took is not what is under test."""
@@ -1552,6 +1583,246 @@ def test_an_orderly_exit_from_inside_a_guard_is_not_reported_as_a_failure(
     assert excinfo.value.exit_code == 0
     assert "paint_err" not in state, state
     assert buf.getvalue() == "", buf.getvalue()
+
+
+# Every guarded search block, and where an orderly exit can be raised inside it.
+# The three shapes matter separately: a task group wraps what its HOST body
+# raises as well as what its tasks do, and a worker thread's exception reaches
+# the awaiting task unwrapped before the group wraps it in turn.
+def _exits_with(code: int) -> Any:
+    def _raise(*_a: object, **_kw: object) -> None:
+        raise typer.Exit(code)
+
+    return _raise
+
+
+def _fails_with(message: str) -> Any:
+    def _raise(*_a: object, **_kw: object) -> None:
+        raise RuntimeError(message)
+
+    return _raise
+
+
+def _enriched(monkeypatch: pytest.MonkeyPatch) -> None:
+    from flight_cli import cli
+
+    legs, opts = _gf_legs_and_opts()
+    cli._run_enriched_path(
+        legs=legs,
+        opts=opts,
+        top_n=3,
+        run_pp=False,
+        sel=None,
+        matrix_url=False,
+        google_url=False,
+        pick=None,
+        rps=1.0,
+        impersonate="chrome",
+        no_cache=True,
+    )
+
+
+@pytest.mark.parametrize("code", [0, 3], ids=["exit-0", "exit-3"])
+@pytest.mark.parametrize(
+    "raised_in",
+    ["the-google-thread", "the-matrix-task", "the-weave-body"],
+)
+def test_an_orderly_exit_keeps_its_code_from_anywhere_inside_the_weave(
+    monkeypatch: pytest.MonkeyPatch, code: int, raised_in: str
+) -> None:
+    """A deliberate stop is the outcome somebody asked for, wherever it is
+    raised.
+
+    A task group hands its caller one object holding whatever left it — the host
+    body's own exception included — and that object is an `Exception`, so the
+    broad arm outside the group catches a stop and answers it with a backend's
+    name and the wrong exit code. Three places raise it here because the three
+    arrive by different routes."""
+    from flight_cli import cli
+
+    buf = _capture(monkeypatch)
+    if raised_in == "the-google-thread":
+        monkeypatch.setattr(cli, "_gflight_results", _exits_with(code))
+        monkeypatch.setattr(cli, "MatrixClient", _refusing_matrix(RuntimeError("unused")))
+        monkeypatch.setattr(cli, "_matrix_into", _no_matrix())
+    elif raised_in == "the-matrix-task":
+        monkeypatch.setattr(cli, "_gflight_results", _no_gf())
+        monkeypatch.setattr(cli, "MatrixClient", _exits_with(code))
+    else:
+        monkeypatch.setattr(cli, "_gflight_results", _no_gf())
+        monkeypatch.setattr(cli, "_matrix_into", _no_matrix())
+        monkeypatch.setattr(cli, "_paint_first_gf_table", _exits_with(code))
+
+    with pytest.raises(typer.Exit) as excinfo:
+        _enriched(monkeypatch)
+
+    assert excinfo.value.exit_code == code
+    # Progress notes are fine; a failure line is not. The stop was asked for.
+    assert "failed" not in buf.getvalue(), buf.getvalue()
+
+
+@pytest.mark.parametrize("code", [0, 3], ids=["exit-0", "exit-3"])
+def test_an_orderly_exit_never_hides_what_failed_beside_it(
+    monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    """One task stops the command while another one breaks.
+
+    Re-raising the exit alone reports the code somebody asked for with both
+    streams empty — a failed half of the work wearing the face of a clean stop,
+    and worst at exit 0, where a caller reading the code is told everything
+    worked. The exit still decides the code; the failure is still named."""
+    from flight_cli import cli
+
+    buf = _capture(monkeypatch)
+    monkeypatch.setattr(cli, "_gflight_results", _exits_with(code))
+    monkeypatch.setattr(
+        cli, "_matrix_into", _matrix_task_raising(RuntimeError("the transport broke"))
+    )
+
+    with pytest.raises(typer.Exit) as excinfo:
+        _enriched(monkeypatch)
+
+    assert excinfo.value.exit_code == code
+    assert "the transport broke" in buf.getvalue(), buf.getvalue()
+
+
+def test_two_failures_at_once_are_both_named(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A group can carry several, and naming the first reports half an outage as
+    the whole of it: the user fixes one thing and runs the same command again.
+    Naming the group instead says "unhandled errors in a TaskGroup", which is
+    plumbing rather than news."""
+    from flight_cli import cli
+
+    buf = _capture(monkeypatch)
+    monkeypatch.setattr(cli, "_gflight_results", _no_gf())
+    monkeypatch.setattr(cli, "_paint_first_gf_table", _fails_with("the table broke"))
+    monkeypatch.setattr(cli, "_matrix_into", _matrix_task_raising(RuntimeError("matrix broke")))
+
+    with pytest.raises(typer.Exit) as excinfo:
+        _enriched(monkeypatch)
+
+    printed = buf.getvalue()
+    assert excinfo.value.exit_code == 1
+    assert "2 concurrent failures" in printed, printed
+    assert "the table broke" in printed and "matrix broke" in printed, printed
+    assert "TaskGroup" not in printed, printed
+
+
+def test_a_lone_failure_inside_a_group_is_named_rather_than_the_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ordinary case, and the one the wrapper makes worst: one thing broke,
+    and what reaches the arm outside the group is the wrapper around it."""
+    from flight_cli import cli
+
+    buf = _capture(monkeypatch)
+    monkeypatch.setattr(cli, "_gflight_results", _no_gf())
+    monkeypatch.setattr(cli, "_paint_first_gf_table", _fails_with("the table broke"))
+    monkeypatch.setattr(cli, "_matrix_into", _no_matrix())
+
+    with pytest.raises(typer.Exit):
+        _enriched(monkeypatch)
+
+    printed = buf.getvalue()
+    assert "the table broke" in printed, printed
+    assert "TaskGroup" not in printed, printed
+
+
+@pytest.mark.parametrize("code", [0, 3], ids=["exit-0", "exit-3"])
+def test_an_orderly_exit_survives_the_multi_cabin_group(
+    monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    """The other weave with a task group in it: a cabin task that stops the
+    command must not be reported as the shared client failing."""
+    from flight_cli import cli
+    from flight_cli.domain import Cabin
+
+    buf = _capture(monkeypatch)
+    monkeypatch.setattr(cli, "MatrixClient", _refusing_matrix(RuntimeError("unused")))
+
+    class _ExitingClient:
+        def __init__(self, **_kw: object) -> None:
+            pass
+
+        async def __aenter__(self) -> _ExitingClient:
+            return self
+
+        async def __aexit__(self, *_a: object) -> None:
+            return None
+
+        async def execute(self, _search: object, **_kw: object) -> object:
+            raise typer.Exit(code)
+
+    monkeypatch.setattr(cli, "MatrixClient", _ExitingClient)
+    legs, opts = _gf_legs_and_opts()
+    with pytest.raises(typer.Exit) as excinfo:
+        cli._run_matrix_multi(
+            legs=legs,
+            opts=opts,
+            cabins=(Cabin.COACH, Cabin.BUSINESS),
+            rps=1.0,
+            impersonate="chrome",
+            no_cache=True,
+        )
+
+    assert excinfo.value.exit_code == code
+    assert "failed" not in buf.getvalue(), buf.getvalue()
+
+
+@pytest.mark.parametrize("code", [0, 3], ids=["exit-0", "exit-3"])
+def test_an_orderly_exit_survives_the_single_matrix_run(
+    monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    """`_run` is the plainest of them and takes the same insurance: the arm
+    below its exit arm is wide enough to catch one."""
+    from flight_cli import cli
+
+    buf = _capture(monkeypatch)
+
+    class _ExitingClient:
+        def __init__(self, **_kw: object) -> None:
+            pass
+
+        async def __aenter__(self) -> _ExitingClient:
+            return self
+
+        async def __aexit__(self, *_a: object) -> None:
+            return None
+
+        async def execute(self, _search: object, **_kw: object) -> object:
+            raise typer.Exit(code)
+
+    monkeypatch.setattr(cli, "MatrixClient", _ExitingClient)
+    legs, opts = _gf_legs_and_opts()
+    with pytest.raises(typer.Exit) as excinfo:
+        cli._run(cli.SpecificDateSearch(legs=legs, options=opts), 1.0, "chrome", True)
+
+    assert excinfo.value.exit_code == code
+    assert "failed" not in buf.getvalue(), buf.getvalue()
+
+
+@pytest.mark.parametrize("code", [0, 3], ids=["exit-0", "exit-3"])
+def test_an_orderly_exit_survives_the_google_only_path(
+    monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    """Both of its guards: the query and the renderer. Neither runs under a task
+    group, so what has to hold here is only that the arms do not swallow it."""
+    from flight_cli import cli
+
+    buf = _capture(monkeypatch)
+    legs, opts = _gf_legs_and_opts()
+
+    monkeypatch.setattr(cli, "_gflight_results", _exits_with(code))
+    with pytest.raises(typer.Exit) as excinfo:
+        cli._run_gflight_path(legs=legs, opts=opts, top_n=3, json_out=False)
+    assert excinfo.value.exit_code == code
+
+    monkeypatch.setattr(cli, "_gflight_results", _one_gf_row())
+    monkeypatch.setattr(cli, "_render_gflight_table", _exits_with(code))
+    with pytest.raises(typer.Exit) as excinfo:
+        cli._run_gflight_path(legs=legs, opts=opts, top_n=3, json_out=False)
+    assert excinfo.value.exit_code == code
+    assert "failed" not in buf.getvalue(), buf.getvalue()
 
 
 def test_a_table_the_google_only_path_cannot_draw_is_typed_and_non_zero(
