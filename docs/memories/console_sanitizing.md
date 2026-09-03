@@ -3,9 +3,10 @@
 Read before adding any print to `src/flight_cli/cli.py`. `console` and `err` are
 markup-enabled Rich consoles, and `rich.table.Table` parses markup in its title
 and caption, in every column header and footer, and in every cell, so any string
-that is not this module's own is markup until it is wrapped. An unbalanced `[/x]` raises `MarkupError` and
-loses the render of a query that SUCCEEDED; a well-formed `[bold]` silently eats
-the token the reader needed; and an ESC or an 8-bit CSI repaints the terminal.
+that is not this module's own is markup until it is wrapped. An unbalanced
+`[/x]` raises `MarkupError` and loses the render of a query that SUCCEEDED; a
+well-formed `[bold]` silently eats the token the reader needed; and an ESC or an
+8-bit CSI repaints the terminal.
 
 ## Where the values come from
 
@@ -88,11 +89,12 @@ calls that fill a renderable: `Table(...)` and `Panel(...)` arguments,
 `Text.from_markup`, `Console.render_str`, `add_column` and `add_row`. A bare
 `Text(...)` is absent on purpose — it takes its argument literally, and naming a
 constructor also exempts the name it is assigned to from the print check, so
-leaving it out is what makes `console.print(Text(f"{e}"))` a fault. Reading the fill is what makes a renderer scannable at all — the cells
-are where the text is chosen, and the `console.print(t)` a hundred lines later
-adds none of its own. Exempting that print instead, and never reading a cell, is
-the shape that hides a MarkupError from the scan: six reproduced ones fit through
-that gap with the guard green.
+leaving it out is what makes `console.print(Text(f"{e}"))` a fault. Reading the
+fill is what makes a renderer scannable at all — the cells are where the text is
+chosen, and the `console.print(t)` a hundred lines later adds none of its own.
+Exempting that print instead, and never reading a cell, is the shape that hides
+a MarkupError from the scan: six reproduced ones fit through that gap with the
+guard green.
 
 It judges each argument by AST shape, never by source text: a string comparison
 reads `not_escape(x)` and `shell.escape(x)` as safe. A concatenation, a
@@ -117,19 +119,20 @@ they run.
 Every list the scan consults is checked by a test that breaks it.
 `_PRINTABLE_IDENTIFIERS` has one: no entry is inert — delete any entry and the
 scan speaks, so an entry that allows nothing cannot sit there pre-approving
-whatever later takes its name. What an entry does NOT get is a check on the value
-behind it. The scan reads a name's binding only when it is a top-level f-string
-over a bare name, which no binding in `cli.py` is, so an entry is a claim held by
-the hostile-field tests: give a new one an arm that fails when the value stops
-being this module's own, or wrap at the sink instead, as `title_prefix` is,
-because a parameter's value belongs to callers the scan never reads.
-`_SAFE_WRAPPERS`, `_NUMERIC_PRESENTATION` and `_RENDERABLE_SINKS` each have a
-delete-one test — measured over the bypass corpus as well as `cli.py`, since
-dropping a member makes one speak and the other go quiet — and every text sink has
-a probe that goes silent without it. A regression corpus of one synthetic source per
-known bypass keeps the scan itself honest. A printed table needs no entry at all:
-the scan reads the assignment and asks whether this scope built a renderable,
-which is a claim about the binding rather than about the name.
+whatever later takes its name. What an entry does NOT get is a check on the
+value behind it. The scan reads a name's binding only when it is a top-level
+f-string over a bare name, which no binding in `cli.py` is, so an entry is a
+claim held by the hostile-field tests: give a new one an arm that fails when the
+value stops being this module's own, or wrap at the sink instead, as
+`title_prefix` is, because a parameter's value belongs to callers the scan never
+reads. `_SAFE_WRAPPERS`, `_NUMERIC_PRESENTATION` and `_RENDERABLE_SINKS` each
+have a delete-one test — measured over the bypass corpus as well as `cli.py`,
+since dropping a member makes one speak and the other go quiet — and every text
+sink has a probe that goes silent without it. A regression corpus of one
+synthetic source per known bypass keeps the scan itself honest. A printed table
+needs no entry at all: the scan reads the assignment and asks whether this scope
+built a renderable, which is a claim about the binding rather than about the
+name.
 
 The scan reads CALLS, so a markup slot filled by assignment (`t.title = x`,
 `t.caption = x`, `t.columns[0].header = x`) or by an API it does not name is not
