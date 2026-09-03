@@ -1452,7 +1452,7 @@ def _price_ordered(results: list[Any]) -> list[Any]:
     return sorted(results, key=lambda r: cast("float", list(r)[-1].flight.price))
 
 
-def _pick_in_range(pick: int | None, rows: int) -> int | None:
+def _pick_in_range(pick: int | None, rows: int, *, links_follow: bool) -> int | None:
     """`pick` when it names one of the `rows` the user was shown, else None
     with the reason on stderr.
 
@@ -1463,14 +1463,19 @@ def _pick_in_range(pick: int | None, rows: int) -> int | None:
     link that way, and a caller that clamped to an index instead would pin the
     right row under a label claiming the user's number.
 
+    Two clauses, and only the first is unconditional. A number the user typed
+    that names no row is always worth a line, whatever else the run does with
+    it. What happens NEXT is not always the same: a run that emits no link pins
+    nothing, so `links_follow` is what keeps the second clause from describing
+    something that did not happen — the defect this whole reporter exists to
+    avoid, one sentence in.
+
     stderr, because a `--format json` document on stdout stays a document —
     the same rule every other note on this path follows."""
     if pick is None or 1 <= pick <= rows:
         return pick
-    err.print(
-        f"[yellow]--pick {pick} is out of range (1-{rows}); "
-        f"pinning the cheapest itinerary instead.[/]"
-    )
+    fallback = "; pinning the cheapest itinerary instead." if links_follow else "."
+    err.print(f"[yellow]--pick {pick} is out of range (1-{rows}){fallback}[/]")
     return None
 
 
@@ -1651,7 +1656,12 @@ def _run_gflight_path(
     # from — narrowing the query would answer a filtered search with fewer rows
     # than exist, which is the failure this backend is most prone to.
     results = _price_ordered(results)[:top_n]
-    pick = _pick_in_range(pick, len(results))
+    # A link follows only where one is asked for and the format has room for it:
+    # `--format json` emits none at all, and neither does a run with both URL
+    # flags off. The range is still reported; the fallback is not claimed.
+    pick = _pick_in_range(
+        pick, len(results), links_follow=not json_out and (matrix_url or google_url)
+    )
 
     # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType,
     #                 reportUnknownArgumentType, reportUnknownParameterType]

@@ -131,6 +131,9 @@ def test_a_pick_past_the_visible_table_warns_and_falls_back_to_the_cheapest(
     captured = capsys.readouterr()
     assert "--pick 6 is out of range (1-5)" in captured.err, captured.err
     assert "--pick 6 is out of range" not in captured.out, captured.out
+    # Both halves, because a link IS emitted here: the sentence promises a
+    # fallback and the label on stdout is that fallback happening.
+    assert "pinning the cheapest itinerary instead" in captured.err, captured.err
     assert "cheapest itinerary" in captured.out, captured.out
 
 
@@ -413,6 +416,58 @@ def test_an_out_of_range_pick_leaves_an_awards_json_document_parseable(
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {"legs": [], "matches": []}, captured.out
     assert "out of range (1-5)" in captured.err, captured.err
+    assert "cheapest itinerary" not in captured.err, captured.err
+
+
+def test_an_out_of_range_pick_under_json_reports_the_range_and_promises_nothing(
+    gf_session: Callable[..., Any],
+    gf_board: Callable[..., str],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A number that names no row is worth saying whatever the format is: the
+    user typed it, and silence reads as acceptance.
+
+    What must NOT be said is the rest of the old sentence. `--format json`
+    emits no deep link, so nothing is pinned and nothing falls back — a run
+    that claims otherwise is the same defect the notice itself exists to
+    report, one clause further in."""
+    gf_session(gf_board(_BOARD_ROWS))
+    cli._run_gflight_path(
+        legs=_one_way(),
+        opts=SearchOptions(cabin=Cabin.COACH),
+        top_n=5,
+        json_out=True,
+        google_url=True,
+        matrix_url=True,
+        pick=6,
+    )
+    captured = capsys.readouterr()
+    assert len(json.loads(captured.out)) == 5, captured.out
+    assert "--pick 6 is out of range (1-5)" in captured.err, captured.err
+    assert "cheapest" not in captured.err, captured.err
+
+
+def test_an_out_of_range_pick_with_no_link_asked_for_promises_nothing_either(
+    gf_session: Callable[..., Any],
+    gf_board: Callable[..., str],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The format is not the only way to reach a run that pins nothing: both
+    URL flags off emits no link either, and the fallback clause is untrue there
+    for exactly the same reason."""
+    gf_session(gf_board(_BOARD_ROWS))
+    cli._run_gflight_path(
+        legs=_one_way(),
+        opts=SearchOptions(cabin=Cabin.COACH),
+        top_n=5,
+        json_out=False,
+        matrix_url=False,
+        google_url=False,
+        pick=6,
+    )
+    captured = capsys.readouterr()
+    assert "--pick 6 is out of range (1-5)" in captured.err, captured.err
+    assert "cheapest" not in captured.err, captured.err
 
 
 def test_multi_cabin_json_gives_each_cabin_the_count_that_was_asked_for(
