@@ -1223,10 +1223,13 @@ def _render_date_grid(
     sorted cheapest-first. One-way only (the grid's shape)."""
     if not grid:
         return
+    priced_days = len(grid)
+    cheapest = min(grid.values())
+    window = f"{sd.isoformat()} → {ed.isoformat()}"
     console.print(
-        f"[bold]{len(grid)} priced days[/]  · cheapest: "
-        f"[bold cyan]{min(grid.values()):.0f} (USD)[/]  · "
-        f"window {sd.isoformat()} → {ed.isoformat()}"
+        f"[bold]{priced_days} priced days[/]  · cheapest: "
+        f"[bold cyan]{cheapest:.0f} (USD)[/]  · "
+        f"window {window}"
     )
     t = Table(
         title=f"{','.join(origin)} → {','.join(destination)}: "
@@ -1304,10 +1307,11 @@ def _render_calendar(
     ccy, cheapest = _split_price(res.cheapest_price)
     ccy_tag = f" ({_safe_text(ccy)})" if ccy else ""
     duration_note = f"  · duration {dmin}-{dmax} nights" if round_trip else ""
+    window = f"{sd.isoformat()} → {ed.isoformat()}"
     console.print(
         f"[bold]{res.solution_count} solutions[/]  · "
         f"overall cheapest: [bold cyan]{_safe_text(cheapest or '—')}{ccy_tag}[/]  · "
-        f"window {sd.isoformat()} → {ed.isoformat()}"
+        f"window {window}"
         f"{duration_note}"
     )
     title = f"{','.join(origin)} → {','.join(destination)}: lowest fare per departure day{ccy_tag}"
