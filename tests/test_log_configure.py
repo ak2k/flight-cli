@@ -22,6 +22,7 @@ from flight_cli import log as log_mod
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from pathlib import Path
 
 _MODULE_LOGGER = "flight_cli._gflight_ids"
 
@@ -102,6 +103,57 @@ def test_a_record_carrying_terminal_control_bytes_reaches_the_stream_without_the
     assert "cleared" in err and "red" in err and "bell" in err, err
     for driver in ("\x1b", "\x9b", "\x07"):
         assert driver not in err, f"{driver!r} reached the terminal: {err!r}"
+
+
+def test_structlog_records_go_to_stderr_so_json_stdout_stays_parseable(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """structlog's default factory writes to STDOUT, which is where
+    `--format json` puts its document.
+
+    A retry warning or a rate-limit pause therefore landed in the middle of a
+    machine consumer's input — not corrupting a table a human reads, but
+    breaking `json.load` for the one output format that promises to be
+    parseable. Every docstring in this package says these go to stderr."""
+    import json
+
+    import structlog
+
+    log_mod.configure("warning")
+    structlog.get_logger().warning("gflight throttled", backoff=1.5)
+    print(json.dumps({"solutions": []}))  # the JSON document the CLI writes to stdout
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"solutions": []}, captured.out
+    assert "gflight throttled" in captured.err, captured.err
+
+
+def test_a_record_survives_a_real_stream_whatever_the_page_put_in_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """On a REAL utf-8 stream, not the StringIO a captured one hands back.
+
+    The difference decides the test. A StringIO accepts a lone surrogate
+    silently; an encoding stream raises, stdlib swallows it and prints
+    "--- Logging error ---" instead, and the whole record is gone — the
+    diagnostic lost precisely when a page has drifted far enough to produce
+    one. A line separator is the other half: this handler writes one record per
+    line, so a message carrying one arrives at a reader as two records, the
+    second written by whoever controlled the page."""
+    path = tmp_path / "err.log"
+    with path.open("w", encoding="utf-8") as stream:
+        monkeypatch.setattr(sys, "stderr", stream)
+        log_mod.configure("debug")
+        logging.getLogger(_MODULE_LOGGER).debug(
+            "ds:1 refused: %s", "head\u2028forged\ud800\u202ereversed\u2069tail"
+        )
+    written = path.read_text(encoding="utf-8")
+
+    assert "--- Logging error ---" not in written, written
+    assert "head" in written and "forged" in written and "tail" in written, written
+    for hostile in ("\u2028", "\u2029", "\ud800", "\u202e", "\u2069"):
+        assert hostile not in written, f"{hostile!r} reached the stream: {written!r}"
+    assert written.count("\n") == 1, f"one record must be one line: {written!r}"
 
 
 def test_the_handler_keeps_the_whitespace_a_log_line_is_made_of(

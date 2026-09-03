@@ -655,6 +655,14 @@ def _run(
     except MatrixApiError as e:
         _print_matrix_error(e)
         raise typer.Exit(1) from e
+    except Exception as e:
+        # `execute()` wraps what Matrix answered; it does not wrap a DNS failure
+        # or a refused connection. Those left here as a rich traceback with the
+        # cause hundreds of lines down, on the most ordinary command there is —
+        # and this package's rule is that a third-party transport error never
+        # reaches a caller untyped.
+        err.print(f"[red]Matrix search failed:[/] {_safe_text(e)}")
+        raise typer.Exit(1) from e
 
 
 def _print_matrix_error(e: MatrixApiError) -> None:
@@ -1460,6 +1468,7 @@ def _run_gflight_path(
     the existing PP matcher + renderer reuse cleanly. PP runs on the same
     (origin, dest, date) per leg as the matrix path.
     """
+    _pin_cap_note(legs=legs, top_n=top_n)
     from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
 
     try:
@@ -1521,6 +1530,55 @@ def _run_gflight_path(
     )
 
 
+def _paint_first_gf_table(
+    state: dict[str, Any],
+    gf: list[Any],
+    *,
+    legs: tuple[Leg, ...],
+    top_n: int,
+    awards_only: bool,
+) -> None:
+    """The Google Flights table, painted while Matrix is still in flight.
+
+    Guarded for the same reason the Matrix task beside it is: this runs INSIDE
+    the weave's task group, so a renderer raising on a drifted row shape would
+    cancel Matrix and end the command as a bare ExceptionGroup — a traceback in
+    place of the answer the other backend was about to give. The failure is
+    stashed and reported after the weave, like every other one here."""
+    if gf and not awards_only:
+        try:
+            _render_gflight_table(gf, legs=legs, top_n=top_n, match_carriers=_match_carriers(legs))
+        except Exception as e:  # noqa: BLE001 — see the docstring
+            state["paint_err"] = e
+        else:
+            console.print("[dim]…refining with Matrix (authoritative fares)…[/]")
+    elif not gf and "gf_err" not in state:
+        console.print("[yellow]Google Flights: no results; awaiting Matrix…[/]")
+
+
+def _report_enriched_gf_failure(e: Exception) -> None:
+    """Say why the Google Flights half of the weave produced nothing.
+
+    Matrix is still authoritative here, so a typed refusal is a note beside its
+    table rather than the outcome — but it stays named, or the merged table just
+    looks like Google had nothing cheaper."""
+    if isinstance(e, GfBackendError):
+        console.print(f"[dim]{_safe_text(_gf_refusal(e).note)} — showing Matrix only.[/]")
+    else:
+        err.print(f"[yellow]Google Flights query failed:[/] {_safe_text(e)}")
+
+
+def _report_search_matrix_failure(state: dict[str, Any]) -> None:
+    """Print the right stderr message for a Matrix search that returned no
+    result: a known `MatrixApiError` through the shared reporter, or an
+    unexpected non-MatrixApiError stashed by the weave's `_matrix` task."""
+    e = state.get("matrix_err")
+    if e is not None:
+        _print_matrix_error(e)
+    elif state.get("matrix_unexpected") is not None:
+        err.print(f"[red]Matrix search failed:[/] {_safe_text(state['matrix_unexpected'])}")
+
+
 def _run_enriched_path(
     *,
     legs: tuple[Leg, ...],
@@ -1539,6 +1597,13 @@ def _run_enriched_path(
     concurrently under one event loop, paint GF immediately (~1s), then repaint a
     reconciled GF+Matrix table once Matrix lands (~45s). PP/awards + URLs run on
     the Matrix (authoritative) result. `--fast` skips this for GF-only speed."""
+    # Imported here rather than deeper in: every enriched run executes these two
+    # lines, so a packaging fault in either module fails the same way on every
+    # run instead of only on the runs where Matrix happens to land.
+    from ._enrich import merge_results  # noqa: PLC0415
+    from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
+
+    _pin_cap_note(legs=legs, top_n=top_n)
     matrix_search = SpecificDateSearch(legs=legs, options=opts)
     awards_only = sel.awards_only if sel is not None else False
     state: dict[str, Any] = {}
@@ -1570,78 +1635,31 @@ def _run_enriched_path(
                 state["gf_err"] = e
                 gf = []
             state["gf"] = gf
-            # First paint, while Matrix is still in flight.
-            if gf and not awards_only:
-                _render_gflight_table(
-                    gf, legs=legs, top_n=top_n, match_carriers=_match_carriers(legs)
-                )
-                console.print("[dim]…refining with Matrix (authoritative fares)…[/]")
-            elif not gf and "gf_err" not in state:
-                console.print("[yellow]Google Flights: no results; awaiting Matrix…[/]")
+            _paint_first_gf_table(state, gf, legs=legs, top_n=top_n, awards_only=awards_only)
 
     anyio.run(_go)
 
     gf: list[Any] = state.get("gf") or []
+    # What reached the USER, which is not the same question as what was
+    # fetched. The paint is gated on `not awards_only` and on the renderer not
+    # failing, so a non-empty `gf` can still mean a byte-empty stdout — and an
+    # exit code that reports success on one is the command lying about it. One
+    # expression for both, because two that must agree eventually will not.
+    painted = bool(gf) and not awards_only and state.get("paint_err") is None
     if "gf_err" in state:
-        e = state["gf_err"]
-        if isinstance(e, GfBackendError):
-            # Matrix is still running and authoritative, so a GF refusal is a
-            # note, not a failure — but it stays named: the merged table below
-            # would otherwise look like Google simply had nothing cheaper.
-            console.print(f"[dim]{_safe_text(_gf_refusal(e).note)} — showing Matrix only.[/]")
-        else:
-            err.print(f"[yellow]Google Flights query failed:[/] {_safe_text(e)}")
+        _report_enriched_gf_failure(state["gf_err"])
+    if state.get("paint_err") is not None:
+        err.print(
+            f"[yellow]Google Flights results could not be rendered:[/] "
+            f"{_safe_text(state['paint_err'])}"
+        )
     matrix_res = state.get("matrix")
     if matrix_res is None:
-        # Matrix failed; the GF table (if any) was already painted.
-        e = state.get("matrix_err")
-        if e is not None:
-            _print_matrix_error(e)
-        elif state.get("matrix_unexpected") is not None:
-            err.print(f"[red]Matrix search failed:[/] {_safe_text(state['matrix_unexpected'])}")
-        if not gf:
+        _report_search_matrix_failure(state)
+        if not painted:
             raise typer.Exit(1)
         return
-    _render_enriched_answer(
-        matrix_res=cast("SearchResult", matrix_res),
-        gf=gf,
-        legs=legs,
-        opts=opts,
-        matrix_search=matrix_search,
-        top_n=top_n,
-        run_pp=run_pp,
-        sel=sel,
-        awards_only=awards_only,
-        matrix_url=matrix_url,
-        google_url=google_url,
-        pick=pick,
-    )
-
-
-def _render_enriched_answer(
-    *,
-    matrix_res: SearchResult,
-    gf: list[Any],
-    legs: tuple[Leg, ...],
-    opts: SearchOptions,
-    matrix_search: Search,
-    top_n: int,
-    run_pp: bool,
-    sel: ProviderSelection | None,
-    awards_only: bool,
-    matrix_url: bool,
-    google_url: bool,
-    pick: int | None,
-) -> None:
-    """Everything that happens once Matrix has landed: the reconciled repaint,
-    the award lookups, and the URL footer.
-
-    Separate from the weave above because the two read differently. The weave is
-    about failure — which backend answered, which refused, and what the user is
-    told when neither did — and this is about the answer. Neither should have to
-    be held in mind to follow the other."""
-    from ._enrich import merge_results  # noqa: PLC0415
-    from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
+    matrix_res = cast("SearchResult", matrix_res)
 
     # Repaint: reconciled GF + Matrix, prices attributed.
     if not awards_only:
@@ -1686,6 +1704,30 @@ _MULTI_CABIN_QUERY_BUMP_FACTOR = 5
 _MULTI_CABIN_QUERY_BUMP_CAP = 100
 
 
+def _pin_cap_note(*, legs: tuple[Leg, ...], top_n: int) -> None:
+    """Say so when a round trip will search fewer outbounds than were asked for.
+
+    A round trip prices returns against the cheapest outbounds only, and the
+    number of those is capped however large `-n` is. Without a word the user
+    reads a short table as the market rather than as the budget, and the cap was
+    said out loud on exactly one path — the multi-cabin one — while the ordinary
+    single-cabin round trip said nothing at all.
+
+    "Up to", because the cap bounds the count and the board may hold fewer. The
+    exact number is knowable only inside the pin loop, and carrying it back out
+    means a new return type on a recursive function to replace a true sentence
+    with a truer one.
+
+    stderr, so a `--format json` document on stdout stays a document."""
+    from ._gflight_ids import pinned_fanout  # noqa: PLC0415
+
+    pins = pinned_fanout(top_n)
+    if len(legs) >= _ROUND_TRIP_LEGS and pins < top_n:
+        err.print(
+            f"[dim]Google Flights combines returns against up to {pins} cheapest outbounds.[/]"
+        )
+
+
 def _multi_cabin_join_note(pins: int) -> str:
     """Why a cabin cell can be empty on a multi-cabin round trip.
 
@@ -1694,7 +1736,7 @@ def _multi_cabin_join_note(pins: int) -> str:
     outbounds the join can see, and `-n` below it lowers the number further.
     Every part is ours, so there is nothing here to escape."""
     return (
-        f"Google Flights joins cabins on each cabin's {pins} cheapest outbounds; "
+        f"Google Flights joins cabins on up to {pins} of each cabin's cheapest outbounds; "
         "'—' means no shared itinerary, not no fare."
     )
 
@@ -1803,6 +1845,13 @@ def _run_matrix_multi(
                 f"({_safe_text(e.kind)}): {_safe_text(e.message)}[/]"
             )
             return
+        except Exception as e:  # noqa: BLE001 — see below: one cabin is not the group
+            # Soft here for the same reason the arm above it is soft, and for
+            # one more: an exception leaving this task cancels its siblings and
+            # surfaces as an ExceptionGroup, so one cabin's unreachable network
+            # would take the cabins that answered with it.
+            err.print(f"[yellow]Matrix {cab.value} query failed: {_safe_text(e)}[/]")
+            return
         results[cab] = cast("SearchResult", res)
 
     async def go() -> None:
@@ -1817,6 +1866,12 @@ def _run_matrix_multi(
         anyio.run(go)
     except MatrixApiError as e:
         _print_matrix_error(e)
+        raise typer.Exit(1) from e
+    except Exception as e:
+        # Nothing from a cabin reaches here — those are caught per cabin — so
+        # this is the shared client failing to open or close at all. Typed
+        # rather than a traceback, and worded like every other Matrix failure.
+        err.print(f"[red]Matrix search failed:[/] {_safe_text(e)}")
         raise typer.Exit(1) from e
     return results
 
@@ -2020,6 +2075,7 @@ def _run_gflight_path_multi(
     """Google Flights multi-cabin: N parallel cabin queries (threadpool) → join → render."""
     # Widen per-cabin queries so the join has overlap; see _bumped_query_top_n.
     query_top_n = _bumped_query_top_n(top_n, len(cabins))
+    _pin_cap_note(legs=legs, top_n=query_top_n)
     if len(legs) >= _ROUND_TRIP_LEGS and len(cabins) > 1:
         from ._gflight_ids import pinned_fanout  # noqa: PLC0415
 

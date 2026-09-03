@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import contextlib
 import threading
+import time
 from typing import Any, ClassVar, cast, override
 
 import pytest
 
 from flight_cli import _gflight_ids
-from flight_cli._gf_errors import GfThrottledError
+from flight_cli._gf_errors import GfThrottledError, GfTransportError
 from flight_cli._gflight_ids import _is_consent_page, _is_page_throttled, _is_throttle_block
 
 # A genuine RPC throttle body: HTTP 200 wrapper with a code-13 ErrorResponse.
@@ -33,9 +34,13 @@ _JOIN_TIMEOUT_S = 5.0
 # Deliberately short: with mutual exclusion this timeout IS the pass, so the
 # suite pays it once.
 _BARRIER_TIMEOUT_S = 0.3
-# Slack on top of the barrier for the owner to return once the barrier gives up.
-# Only the parked waiter should still be running after this.
-_SETTLE_S = 0.4
+# Short enough that a worker parked on a round it should never have parked on
+# is a test that fails in seconds rather than one that waits out the real
+# ceiling. Passing must not depend on a park timing out.
+_CROSSED_CEILING_S = 0.05
+# How long a crossed pair is given to spend its budgets down. Reached only when
+# neither budget moves, which is the failure.
+_CROSSED_DEADLINE_S = 2.0
 
 
 @pytest.fixture(autouse=True)
@@ -235,17 +240,40 @@ def test_an_owner_leaving_by_another_door_does_not_strand_its_waiters() -> None:
     assert outcome == [0.0]
 
 
-def test_a_success_refills_both_budgets() -> None:
-    ladder = _ladder()
+def _spend_both(ladder: Any) -> None:
     for _ in range(_gflight_ids._THROTTLE_RETRY_ATTEMPTS):
         ladder.throttled()
     for _ in range(_gflight_ids._TRANSPORT_RETRY_ATTEMPTS):
         ladder.transport_failed()
     assert ladder.throttled() is None
     assert ladder.transport_failed() is None
+
+
+def test_any_success_refills_the_wall_because_the_wall_is_shared() -> None:
+    """The throttle is per-IP, so a call getting through is evidence it lifted
+    whoever made it. Releasing those waiters is what serves a whole fan-out on
+    a wall that lifts inside the ladder, rather than the one cabin probing."""
+    ladder = _ladder()
+    _spend_both(ladder)
     ladder.succeeded()
-    assert ladder.throttled() is not None
-    assert ladder.transport_failed() is not None
+    assert ladder.throttled() is not None, "the wall was measured open and stayed shut"
+
+
+def test_a_success_refills_the_network_only_for_the_worker_that_met_it() -> None:
+    """The socket is not shared the way the wall is: fli's session is a
+    `threading.local`, so the connection that carried a sibling's call says
+    nothing about this one's.
+
+    Refilling it for everyone means every healthy sibling hands a failing
+    worker another rung — a read timeout on one cabin's board is then retried
+    for as long as the other cabins keep succeeding, which is no bound at
+    all."""
+    ladder = _ladder()
+    _spend_both(ladder)
+    ladder.succeeded()
+    assert ladder.transport_failed() is None, "a sibling's success refilled someone else's socket"
+    ladder.succeeded(network=True)
+    assert ladder.transport_failed() is not None, "the worker that met it got no rungs back"
 
 
 class _RacingInt(int):
@@ -263,6 +291,103 @@ class _RacingInt(int):
         with contextlib.suppress(threading.BrokenBarrierError):
             self.barrier.wait(timeout=_BARRIER_TIMEOUT_S)
         return int(self) + other
+
+
+def _meet_until_refused(meet: Any, deadline: float) -> Any:
+    """Keep meeting one wall until its budget says stop, or time runs out.
+
+    Returning None is the wall answering. Anything else means the worker was
+    still asking when the clock ran out, which is what a pair holding each
+    other's rounds looks like from outside."""
+    while time.monotonic() < deadline:
+        if meet() is None:
+            return None
+    return "still asking"
+
+
+def test_two_workers_that_cross_walls_do_not_hold_what_the_other_waits_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One worker can meet BOTH walls — a cabin throttled on one attempt and
+    reset on the next — and two of them can cross.
+
+    A owns the throttle round and then meets the network; B owns the network
+    round and then meets the wall. If a worker parks while still owning the
+    round its sibling needs, neither budget ever moves: the park times out, the
+    round it is waiting on is no more exhausted than before, so it is told to
+    retry, meets the other wall again and parks again. No rungs are spent, so
+    nothing ever exhausts to end it — and it costs a multi-megabyte GET per
+    worker per timeout, forever.
+
+    Every other ladder test drives one arm, which is why this shape had no
+    cover. What makes it terminate is giving up a round before waiting on
+    another: a worker that has stopped meeting its own wall is not probing it,
+    and a round nobody probes must not be one somebody waits for."""
+    # A park must never be how this passes, and a failing run must not leave
+    # two threads asleep for two minutes after the assertion.
+    monkeypatch.setattr(_gflight_ids, "_LADDER_WAIT_CEILING_S", _CROSSED_CEILING_S)
+    ladder = _ladder()
+    crossed = threading.Barrier(2)
+    outcomes: dict[str, Any] = {}
+    deadline = time.monotonic() + _CROSSED_DEADLINE_S
+
+    def worker(tag: str, own: Any, then_meet: Any) -> None:
+        try:
+            own()  # take one round
+            with contextlib.suppress(threading.BrokenBarrierError):
+                crossed.wait(timeout=_JOIN_TIMEOUT_S)  # both own one before either crosses
+            outcomes[tag] = _meet_until_refused(then_meet, deadline)
+        finally:
+            # What `retry_throttled` does in its own `finally`, and the reason
+            # it does: a worker that leaves still owning a round strands
+            # whoever is waiting on it. Without this the test would be
+            # measuring the harness rather than the ladder.
+            ladder.stand_down()
+
+    threads = [
+        threading.Thread(
+            target=worker, args=("owns-the-wall", ladder.throttled, ladder.transport_failed)
+        ),
+        threading.Thread(
+            target=worker, args=("owns-the-network", ladder.transport_failed, ladder.throttled)
+        ),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=_JOIN_TIMEOUT_S)
+
+    assert not any(t.is_alive() for t in threads), "a worker never came back"
+    assert outcomes == {"owns-the-wall": None, "owns-the-network": None}, outcomes
+
+
+def test_a_call_ends_even_while_a_sibling_keeps_refilling_the_budget() -> None:
+    """The shared ladder is not a ceiling on its own, because it is refillable.
+
+    A sibling that met the network and then got through returns that round's
+    rungs — right for the sibling, and it hands this call a fresh budget every
+    time. Checked only against the ladder, the loop has no exit: the round is
+    never exhausted when it is asked. The per-call count is what ends it, and
+    it is the same shape the empty-result retry already uses.
+
+    Driven with the refill inside the failing call, which is the interleaving a
+    fan-out produces and the one nothing else in this file reaches."""
+    attempts = {"n": 0}
+
+    def always_reset() -> object:
+        attempts["n"] += 1
+        bound = _gflight_ids._fanout_ladder.get()
+        assert bound is not None, "the scope should have bound a ladder"
+        bound.succeeded(network=True)  # a sibling got through on its own socket
+        raise _gflight_ids._RetryableTransportError("connection reset by peer")
+
+    with (
+        _gflight_ids.shared_throttle_ladder(),
+        pytest.raises(GfTransportError),
+    ):
+        _gflight_ids.retry_throttled(always_reset)
+
+    assert attempts["n"] == _gflight_ids._TRANSPORT_RETRY_ATTEMPTS + 1, attempts
 
 
 class _EveryThread:

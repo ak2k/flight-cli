@@ -229,6 +229,18 @@ def test_a_refusal_carrying_remote_markup_is_printable(error: GfBackendError) ->
         _render(markup)  # the assertion is that this does not raise
 
 
+def _every_subclass(root: type[GfBackendError]) -> list[type[GfBackendError]]:
+    """Every descendant of `root`, not just its children.
+
+    `__subclasses__()` is one level deep, so a refusal added under an existing
+    one instead of beside it would never be walked."""
+    found: list[type[GfBackendError]] = []
+    for child in root.__subclasses__():
+        found.append(child)
+        found.extend(_every_subclass(child))
+    return found
+
+
 def _one_of(cls: type[GfBackendError]) -> GfBackendError:
     """An instance of `cls`, whatever its constructor wants."""
     if cls is GfTfsUnsupportedError:
@@ -252,19 +264,31 @@ def test_every_refusal_type_is_named_rather_than_merely_declined() -> None:
     one type keeps the generic label there on purpose — its queries never reach
     this renderer — so a rule over `note` would fail on a type that IS handled.
 
+    The walk is recursive. `__subclasses__()` gives direct children only, so a
+    type added under an existing refusal rather than beside it is invisible to
+    it — and renders as its PARENT's wall, which is worse than the generic
+    wording because it names a wall confidently and names the wrong one.
+
     Only the published hierarchy: a marker class defined elsewhere is converted
     to a public type before any renderer sees it."""
     published = [
         cls
-        for cls in GfBackendError.__subclasses__()
+        for cls in _every_subclass(GfBackendError)
         if cls.__module__ == GfBackendError.__module__
     ]
     assert GfTransportError in published, "the walk must see the whole hierarchy"
+    seen: dict[str, str] = {}
     for cls in published:
         message = _gf_refusal(_one_of(cls)).message
         assert _GF_DECLINED not in message, (
             f"{cls.__name__} renders as the generic refusal: {message!r}"
         )
+        # Two refusals reading the same is the failure mode a nested type has:
+        # it inherits its parent's arm and names that wall confidently, which
+        # is worse than the generic wording because it is specific and wrong.
+        note = _gf_refusal(_one_of(cls)).note
+        assert note not in seen, f"{cls.__name__} renders as {seen[note]} does: {note!r}"
+        seen[note] = cls.__name__
 
 
 def test_the_transport_refusal_agrees_with_the_pin_loop_about_the_cause() -> None:
@@ -489,6 +513,170 @@ def test_an_unwrapped_matrix_failure_is_reported_without_taking_the_google_rows(
     assert "Matrix search failed" in printed, printed
     assert "connect timeout" in printed, printed
     assert printed.count("Matrix search failed") == 1, printed
+    _assert_drives_no_terminal(printed)
+
+
+def test_awards_only_with_matrix_down_exits_nonzero_rather_than_silently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rows FETCHED is not rows SHOWN, and the exit code has to track the
+    second.
+
+    `--awards-only` suppresses the Google table on purpose, and the award
+    lookups run behind Matrix — so when Matrix fails, a non-empty Google result
+    means the user got a byte-empty stdout. Exiting 0 there tells a script the
+    search succeeded and returned nothing, which is the one answer a search must
+    never give."""
+    from flight_cli import cli
+    from flight_cli.client import MatrixApiError
+
+    buf = _capture(monkeypatch)
+    monkeypatch.setattr(
+        cli, "MatrixClient", _refusing_matrix(MatrixApiError("matrix is down", kind="X"))
+    )
+
+    def _gf_rows(*_a: object, **_kw: object) -> list[Any]:
+        return [cast("Any", object())]
+
+    monkeypatch.setattr(cli, "_gflight_results", _gf_rows)
+
+    legs, opts = _gf_legs_and_opts()
+    sel = cli.ProviderSelection(
+        awards_only=True, cash_only=False, provider_filter=None, provider_opts={}
+    )
+    with pytest.raises(typer.Exit) as excinfo:
+        cli._run_enriched_path(
+            legs=legs,
+            opts=opts,
+            top_n=3,
+            run_pp=False,
+            sel=sel,
+            matrix_url=False,
+            google_url=False,
+            pick=None,
+            rps=1.0,
+            impersonate="chrome",
+            no_cache=True,
+        )
+    assert excinfo.value.exit_code == 1, "nothing was rendered, so the exit must say so"
+    assert "Matrix returned an error" in buf.getvalue(), buf.getvalue()
+
+
+def test_a_renderer_that_raises_does_not_cancel_the_matrix_half(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first paint runs inside the weave's task group, so an exception in
+    it cancels the Matrix task and the command ends as a bare ExceptionGroup —
+    the very failure the task beside it is guarded against. A drifted row shape
+    reaches the renderer, so this is not hypothetical.
+
+    Google's rows are lost either way; Matrix's answer need not be."""
+    from flight_cli import cli
+    from flight_cli.client import MatrixApiError
+
+    buf = _capture(monkeypatch)
+    monkeypatch.setattr(
+        cli, "MatrixClient", _refusing_matrix(MatrixApiError("no fares", kind="input"))
+    )
+
+    def _gf_rows(*_a: object, **_kw: object) -> list[Any]:
+        return [cast("Any", object())]
+
+    def _drifted(*_a: object, **_kw: object) -> None:
+        raise AttributeError("drifted row shape")
+
+    monkeypatch.setattr(cli, "_gflight_results", _gf_rows)
+    monkeypatch.setattr(cli, "_render_gflight_table", _drifted)
+
+    legs, opts = _gf_legs_and_opts()
+    with pytest.raises(typer.Exit) as excinfo:
+        cli._run_enriched_path(
+            legs=legs,
+            opts=opts,
+            top_n=3,
+            run_pp=False,
+            sel=None,
+            matrix_url=False,
+            google_url=False,
+            pick=None,
+            rps=1.0,
+            impersonate="chrome",
+            no_cache=True,
+        )
+    assert excinfo.value.exit_code == 1
+    printed = buf.getvalue()
+    assert "drifted row shape" in printed, printed
+    assert "Matrix returned an error" in printed, "the Matrix half was cancelled with the paint"
+    _assert_drives_no_terminal(printed)
+
+
+def test_the_shared_search_path_types_an_unreachable_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`execute()` wraps what Matrix ANSWERED. A refused connection or a failed
+    DNS lookup is not an answer, so nothing wrapped it and it left this path as
+    a rich traceback with the cause hundreds of lines down — on the most
+    ordinary command the CLI has."""
+    from flight_cli import cli
+
+    buf = _capture(monkeypatch)
+
+    def _boom(*_a: object, **_kw: object) -> object:
+        raise OSError(f"Could not resolve host{_ESCAPES}")
+
+    monkeypatch.setattr(cli.anyio, "run", _boom)
+    with pytest.raises(typer.Exit) as excinfo:
+        cli._run(cast("Any", None), rps=1.0, impersonate="chrome", no_cache=True)
+
+    assert excinfo.value.exit_code == 1
+    printed = buf.getvalue()
+    assert "Matrix search failed" in printed, printed
+    assert "Could not resolve host" in printed, printed
+    _assert_drives_no_terminal(printed)
+
+
+def test_one_cabins_unreachable_matrix_does_not_cancel_the_cabins_that_answered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exception leaving a cabin's task cancels its siblings and comes out
+    as an ExceptionGroup, so one unreachable cabin took the whole fan-out and
+    printed two tracebacks for it.
+
+    Soft per cabin, like the Google arm beside it: the column goes missing, the
+    line says why, and the cabins that answered are still an answer."""
+    from flight_cli import cli
+    from flight_cli.domain import Cabin
+
+    buf = _capture(monkeypatch)
+
+    class _OneBadCabin:
+        def __init__(self, **_kw: object) -> None: ...
+
+        async def __aenter__(self) -> _OneBadCabin:
+            return self
+
+        async def __aexit__(self, *_a: object) -> bool:
+            return False
+
+        async def execute(self, search: Any, **_kw: object) -> object:
+            if search.options.cabin is Cabin.BUSINESS:
+                raise OSError(f"Could not resolve host{_ESCAPES}")
+            return cast("Any", object())
+
+    monkeypatch.setattr(cli, "MatrixClient", _OneBadCabin)
+    legs, opts = _gf_legs_and_opts()
+    out = cli._run_matrix_multi(
+        legs=legs,
+        opts=opts,
+        cabins=(Cabin.COACH, Cabin.BUSINESS),
+        rps=1.0,
+        impersonate="chrome",
+        no_cache=True,
+    )
+
+    assert set(out) == {Cabin.COACH}, f"a cabin that answered was cancelled: {sorted(out)}"
+    printed = buf.getvalue()
+    assert "BUSINESS" in printed and "Could not resolve host" in printed, printed
     _assert_drives_no_terminal(printed)
 
 

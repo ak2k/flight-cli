@@ -50,6 +50,22 @@ _DRIVERS = {
     **{c: None for c in range(0x20) if c not in (0x09, 0x0A)},  # C0, keeping tab and newline
     0x7F: None,  # DEL
     **{c: None for c in range(0x80, 0xA0)},  # C1, including the 8-bit CSI
+    # `str.splitlines` breaks on these two as it does on `\n`. This handler
+    # writes one record per line and a reader splits them back, so a page-derived
+    # message carrying one arrives as TWO records — the second of them written by
+    # whoever controlled the page. The console has the same pair for the same
+    # reason; here the reader IS the point.
+    0x2028: None,  # LINE SEPARATOR
+    0x2029: None,  # PARAGRAPH SEPARATOR
+    # Bidi. These reorder the run they sit in, so a record can be made to read
+    # back as something it does not say.
+    **{c: None for c in range(0x202A, 0x202F)},  # embeddings and overrides
+    **{c: None for c in range(0x2066, 0x206A)},  # isolates
+    # A lone surrogate has no utf-8 encoding, so one reaching a real stderr does
+    # not mangle the record — it DROPS it, and stdlib prints "--- Logging error
+    # ---" in its place. The diagnostic is lost exactly when it is needed, and a
+    # StringIO accepts them, so no test on a captured stream can see it.
+    **{c: None for c in range(0xD800, 0xE000)},
 }
 
 
@@ -108,6 +124,20 @@ def _configure_stdlib(lvl: int) -> None:
     logger.addHandler(handler)
 
 
+def _stderr_logger_factory(*_args: object) -> structlog.PrintLogger:
+    """A structlog logger writing to whatever `sys.stderr` is when it is built.
+
+    structlog's default factory writes to STDOUT. Every structlog record —
+    a retry warning, a rate-limit pause — therefore landed on the same stream
+    `--format json` writes its document to, splicing a diagnostic into a
+    machine consumer's input. This module's docstring, `configure`'s, and the
+    CLI's `-v` help all say stderr; only the code said otherwise.
+
+    Resolved per logger rather than captured at import, for the same reason the
+    stdlib handler resolves it per record: this process replaces `sys.stderr`."""
+    return structlog.PrintLogger(file=sys.stderr)
+
+
 def configure(level: str = "warning") -> None:
     """Configure structlog for human-readable stderr output, and give the one
     stdlib-logging module in the package somewhere for its records to go.
@@ -127,5 +157,6 @@ def configure(level: str = "warning") -> None:
     structlog.configure(
         processors=processors,
         wrapper_class=structlog.make_filtering_bound_logger(lvl),
+        logger_factory=_stderr_logger_factory,
         cache_logger_on_first_use=True,
     )

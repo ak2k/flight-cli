@@ -89,6 +89,13 @@ def _cookie_file(cache_dir: Path) -> Path:
     return cache_dir / "gflight" / "gflight-cookies.json"
 
 
+def _strays(cache_dir: Path) -> list[Path]:
+    """Scratch files left behind, looked for where the writer actually puts
+    them — beside the jar, not in the cache root above it. A glob one directory
+    up finds nothing whatever the cleanup does."""
+    return list(_cookie_file(cache_dir).parent.glob("*.tmp"))
+
+
 def _plant_cache(cache_dir: Path, text: str) -> Path:
     """Put `text` where the reader will look for the jar, directory and all."""
     path = _cookie_file(cache_dir)
@@ -267,7 +274,7 @@ def test_concurrent_persists_never_leave_a_partial_file(
 
     assert not torn, f"a reader saw {len(torn)} partial cookie caches, e.g. {torn[:2]}"
     assert json.loads(path.read_text())["cookies"][0]["name"] == "NID"
-    assert list(tmp_path.glob("*.tmp")) == [], "scratch files outlived the write"
+    assert _strays(tmp_path) == [], "scratch files outlived the write"
 
 
 def test_the_cache_is_owner_only_even_over_a_world_readable_predecessor(
@@ -300,7 +307,7 @@ def test_a_failed_rename_leaves_no_temp_holding_the_cookie(
     monkeypatch.setattr(pathlib.Path, "replace", _boom)
     gfid._persist_cookies(_FakeClient([_JarCookie("NID", "532=abc", ".google.com")]))
 
-    assert list(tmp_path.glob("*.tmp")) == []
+    assert _strays(tmp_path) == []
     assert not _cookie_file(tmp_path).exists()
 
 
@@ -322,7 +329,7 @@ def test_an_interrupt_mid_write_leaves_no_temp_holding_the_cookie(
     with pytest.raises(KeyboardInterrupt):
         gfid._persist_cookies(_FakeClient([_JarCookie("NID", "532=abc", ".google.com")]))
 
-    assert list(tmp_path.glob("*.tmp")) == []
+    assert _strays(tmp_path) == []
 
 
 def test_seed_ignores_corrupt_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

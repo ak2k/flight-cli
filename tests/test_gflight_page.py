@@ -777,6 +777,73 @@ def test_a_transport_blip_that_clears_serves_every_cabin(
     assert sum(slept) <= _one_ladders_worth_of_sleep()
 
 
+def test_one_cabins_socket_fault_is_not_refilled_by_its_healthy_siblings(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read timeout on one cabin's board is a fault of THAT request, and the
+    budget for it has to end.
+
+    fli's session is a `threading.local`, so a sibling's success rode a
+    different socket and is no evidence about this one. Crediting it here means
+    every healthy sibling hands the failing worker another rung: with three
+    cabins answering, one bad socket is retried for as long as they keep
+    answering, and the ladder that is supposed to bound it never exhausts.
+
+    The wall is the opposite case and stays shared — it is per-IP, so a
+    sibling getting through really does mean it lifted."""
+    from flight_cli.domain import Cabin
+
+    cabins = (Cabin.COACH, Cabin.PREMIUM_COACH, Cabin.BUSINESS, Cabin.FIRST)
+    served = _FakeResponse(text=_page(_ds1("ds1_jfk_lax_3rows.json")))
+    role = threading.local()
+    claimed: list[bool] = []
+    claim = threading.Lock()
+
+    def one_bad_socket() -> Any:
+        if not hasattr(role, "failing"):
+            with claim:
+                role.failing = not claimed  # the first worker in is the unlucky one
+                claimed.append(True)
+        return _transport_error("read timeout") if role.failing else served
+
+    fake = client(one_bad_socket)
+    out, _slept = _fan_out(monkeypatch, *cabins)
+
+    assert len(out) == len(cabins) - 1, f"a healthy cabin was lost: {sorted(out)}"
+    # One ladder for the failing worker, one GET for each cabin that answered.
+    one_ladder = gfid._TRANSPORT_RETRY_ATTEMPTS + 1
+    assert len(fake.gets) == one_ladder + (len(cabins) - 1) == 6, fake.gets
+
+
+def test_a_flapping_network_costs_each_cabin_one_ladder_and_no_more(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ceiling has to be an exit, not a period.
+
+    A sibling's success refills the wall, correctly — so on a network that
+    keeps dropping and recovering, a budget checked only against the shared
+    ladder is handed back between rungs and the loop has no end. Each call
+    carries its own count as well, so a fan-out on a flapping link costs a
+    bounded number of requests whatever the siblings are doing."""
+    from flight_cli.domain import Cabin
+
+    cabins = (Cabin.COACH, Cabin.PREMIUM_COACH, Cabin.BUSINESS, Cabin.FIRST)
+    served = _FakeResponse(text=_page(_ds1("ds1_jfk_lax_3rows.json")))
+    seen = threading.local()
+
+    def flapping() -> Any:
+        seen.n = getattr(seen, "n", 0) + 1
+        return served if seen.n % 2 == 0 else _transport_error("connection reset by peer")
+
+    fake = client(flapping)
+    out, _slept = _fan_out(monkeypatch, *cabins)
+
+    assert set(out) == set(cabins), f"a cabin was lost to a link that recovered: {sorted(out)}"
+    one_ladder = gfid._TRANSPORT_RETRY_ATTEMPTS + 1
+    assert len(fake.gets) <= len(cabins) * one_ladder, fake.gets
+    assert len(fake.gets) == len(cabins) * 2 == 8, fake.gets
+
+
 def test_a_single_cabin_fan_out_still_gets_a_whole_ladder(
     client: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1831,3 +1898,91 @@ def test_the_configured_request_timeout_reaches_the_session_get() -> None:
     )
     assert done.returncode == 0, done.stderr
     assert json.loads(done.stdout) == {"timeout": 5.0}
+
+
+def test_the_first_selling_carrier_is_the_one_a_passenger_books_under() -> None:
+    """A leg can be sold under several codes at once, and exactly one of them
+    is the identity the booking shows.
+
+    Google lists them in order and the first is the headline — the same one
+    Matrix surfaces, which is what lets the cross-backend join fire on a
+    codeshare. Taking any other entry pairs a real flight with a code the
+    passenger will never see on a ticket, and the join then silently misses.
+    Nothing pinned the choice, so reading the last entry passed every test."""
+    leg: list[Any] = [None] * 23
+    leg[15] = [["LH", "9498", None, "Lufthansa"], ["UA", "8871", None, "United"]]
+    leg[18] = None  # not self-marketed, so the selling carrier is the headline
+    leg[22] = ["EN", "8858", None, "Air Dolomiti"]
+
+    assert gfid._resolve_booking(leg) == ("LH", "9498")
+    # The whole set is still carried, so a marketing-carrier filter can match
+    # any of them; only the headline is singular.
+    assert gfid._marketing_codes(leg) == ("LH", "UA")
+
+
+def test_a_flightless_capture_with_its_metadata_intact_is_still_an_empty(
+    client: Any,
+) -> None:
+    """The runner-up rule reads every OTHER index for row-shaped content, so it
+    meets the blocks a real page carries — and a real page carries several
+    lists-of-lists-of-lists that a structural test would call relocated rows.
+
+    The only capture that still has those blocks has flights in it, and every
+    flight-less capture was slimmed, so no test until now put the strict half
+    of that rule in front of a real decoy. Emptied here rather than captured:
+    the shape under test is 'no board, real metadata', which no committed page
+    has."""
+    payload = json.loads(_ds1("ds1_metadata_blocks_kept.json"))
+    assert sum(1 for b in payload if _is_row_shaped(b)) >= 2, "this capture lost its decoys"
+    payload[2] = None
+    payload[3] = None
+    client(_FakeResponse(text=_page(json.dumps(payload))))
+    assert gfid._one_call(_FILTERS) == [], "a real page's metadata read as relocated rows"
+
+
+def _is_row_shaped(block: Any) -> bool:
+    """The structural test, asked of a block the scan would meet away from the
+    indices it reads."""
+    return gfid._looks_like_a_row_block(block)
+
+
+def test_the_documented_round_trip_costs_compose_from_their_factors(client: Any) -> None:
+    """The memo quotes two aggregate numbers and each factor is measured
+    somewhere, but nothing multiplies them — so a change to the pin cap or the
+    transport budget would leave the memo quoting an arithmetic that no longer
+    holds.
+
+    A round trip where every pin blips once and recovers, and one where every
+    return board refuses, both composed from the constants rather than from a
+    literal."""
+    pins = gfid.pinned_fanout(10)
+    board = _board_of(pins)
+    served = _FakeResponse(text=_board_of(1))
+
+    # Every pin spends its whole transport ladder and then recovers: the
+    # outbound once, then budget + 1 GETs per pin. No ladder exhausts, so the
+    # stop rule never fires and the cost is the flaky link, not the outage.
+    per_pin = gfid._TRANSPORT_RETRY_ATTEMPTS + 1
+    count = {"n": 0}
+
+    def blip_then_serve() -> Any:
+        count["n"] += 1
+        if count["n"] == 1:
+            return _FakeResponse(text=board)  # the outbound board
+        return (
+            served
+            if (count["n"] - 2) % per_pin == per_pin - 1
+            else _transport_error("connection reset by peer")
+        )
+
+    fake = client(blip_then_serve)
+    out = gfid.search_with_ids(_round_trip_filters(), top_n=10)
+    assert out is not None and len(out) == pins
+    assert len(fake.gets) == 1 + per_pin * pins == 31, fake.gets
+
+    # Every return board refuses: one GET each, no retry, and the refusal is
+    # the outcome — the same cost as a search that worked.
+    fake = client(_FakeResponse(text=board), _FakeResponse(text=_SHAPE_CHANGE_PAGE))
+    with pytest.raises(GfPageShapeError):
+        gfid.search_with_ids(_round_trip_filters(), top_n=10)
+    assert len(fake.gets) == 1 + pins == 11, fake.gets

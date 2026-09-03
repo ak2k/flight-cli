@@ -246,20 +246,39 @@ class _SharedThrottleLadder:
                     round_.release()
                     return None
                 return _backoff_for(round_.spent)
+            # About to wait on someone else's round. A worker that has stopped
+            # meeting the wall it owns is not probing it any more, and a round
+            # nobody is probing must not be one somebody else is waiting for:
+            # two workers that each hold what the other waits for never move,
+            # and no budget is spent to end it.
+            for other in (self._wall, self._net):
+                if other is not round_ and other.owner == me:
+                    other.release()
             settled = round_.settled
         settled.wait(_LADDER_WAIT_CEILING_S)
         with self._lock:
             return None if round_.exhausted else 0.0
 
-    def succeeded(self) -> None:
-        """A call got through. The wall this ladder was measuring is gone, so
-        the rungs are returned and anyone waiting is released to retry.
+    def succeeded(self, *, network: bool = False) -> None:
+        """A call got through: return the rungs it earned back and release the
+        waiters that were parked on them.
 
-        Both arms, because one call getting through measures both: the wall let
-        it past and the socket carried it."""
+        The WALL always. It is per-IP, so any call getting through is evidence
+        it lifted whoever made it, and releasing the waiters is what turns a
+        wall that lifts inside the ladder into a fan-out that is served rather
+        than one cabin that happened to be probing.
+
+        The NETWORK only for a worker that met a transport failure on this
+        call. fli's session is a `threading.local`, so the socket that carried
+        this call is this worker's own and is no evidence about a sibling's.
+        Refilling it for everyone let each healthy sibling hand a failing
+        worker another rung, and a per-request fault — a read timeout on one
+        cabin's multi-megabyte board is the ordinary shape — then retries
+        without bound for as long as the siblings keep succeeding."""
         with self._lock:
-            for round_ in (self._wall, self._net):
-                round_.refill()
+            self._wall.refill()
+            if network:
+                self._net.refill()
 
     def stand_down(self) -> None:
         """Give up ownership without a verdict — for a worker leaving the ladder
@@ -543,8 +562,15 @@ def _board_row_count(payload: list[Any]) -> int:
     counting rather than asking whether a block is there.
 
     Callers guarantee the arity — every one of them has already established
-    that the payload reaches `[3]` — so the indices are read without a second
-    bounds test that could never fail."""
+    that the payload reaches `[3]`. Checked rather than assumed, because the
+    cost of being wrong is the difference between a refusal that degrades to
+    Matrix and an `IndexError` traceback, and this module's whole contract is
+    that no page shape reaches the user as a crash."""
+    if len(payload) <= max(_DS_ROW_BLOCKS):
+        raise GfPageShapeError(
+            f"ds:1 decoded to {len(payload)} top-level entries, too few to count a "
+            f"board at {list(_DS_ROW_BLOCKS)}; the payload layout changed"
+        )
     total = 0
     for index in _DS_ROW_BLOCKS:
         if _looks_like_a_row_block(payload[index]):
@@ -1180,16 +1206,19 @@ def _rows_from_ds1(payload: list[Any]) -> _Ds1Board:
     return _Ds1Board(rows, blocks_seen, tuple(misplaced))
 
 
-class _RetryableTransportError(GfBackendError):
+class _RetryableTransportError(GfTransportError):
     """A curl-level failure `retry_throttled` may try again.
 
     Internal to this module: `retry_throttled` converts it to `GfTransportError`
     once the budget is spent, and a caller seeing that distinct type IS the stop
     rule — the network is one network, so a loop over related queries learns
-    from one of these that the rest will fail the same way. It subclasses
-    `GfBackendError` anyway, so that if it ever did escape an un-laddered path
-    it would degrade to Matrix rather than reach the user as an untyped
-    traceback."""
+    from one of these that the rest will fail the same way.
+
+    It subclasses `GfTransportError` rather than the base, so that if it ever
+    did escape an un-laddered path it degrades to Matrix AND renders as the
+    wall it actually is. Under the base it would reach the user as "Google
+    Flights declined the request: connection reset by peer" — the one sentence
+    the transport arm exists to stop."""
 
 
 @functools.cache
@@ -1441,13 +1470,26 @@ def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
     that is per-IP (see `_SharedThrottleLadder`)."""
     ladder = _fanout_ladder.get() or _SharedThrottleLadder()
     empty_attempts = 0
+    # Per-CALL ceilings beside the ladder's per-fan-out ones. The ladder bounds
+    # what the group spends against one wall; these bound what THIS call spends
+    # whatever the group is doing. Two things need them. A sibling's success
+    # refills the wall — correctly, it is per-IP — so a flapping wall would
+    # otherwise give this call a fresh budget between every rung and the loop
+    # would never exhaust. And a worker released by a probe retries at once, so
+    # an interleaving nobody predicted costs one attempt more rather than a
+    # loop with no exit.
+    wall_attempts = 0
+    net_attempts = 0
+    met_network = False
     try:
         while True:
             try:
                 result = call()
             except _RetryableTransportError as e:
+                met_network = True
+                net_attempts += 1
                 backoff = ladder.transport_failed()
-                if backoff is None:
+                if backoff is None or net_attempts > _TRANSPORT_RETRY_ATTEMPTS:
                     raise GfTransportError(f"Google Flights could not be reached: {e}") from e
                 log.debug(
                     "gflight transport failure (%s); backoff %.1fs (budget %d)",
@@ -1458,8 +1500,9 @@ def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
                 time.sleep(backoff)
                 continue
             except GfThrottledError:
+                wall_attempts += 1
                 backoff = ladder.throttled()
-                if backoff is None:
+                if backoff is None or wall_attempts > _THROTTLE_RETRY_ATTEMPTS:
                     raise
                 log.debug(
                     "gflight throttled; backoff %.1fs (budget %d)",
@@ -1468,7 +1511,7 @@ def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
                 )
                 time.sleep(backoff)
                 continue
-            ladder.succeeded()
+            ladder.succeeded(network=met_network)
             if result or not retry_empty:
                 return result
             empty_attempts += 1

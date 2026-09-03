@@ -488,7 +488,7 @@ def test_a_multi_cabin_round_trip_says_what_its_join_is_drawn_from(
     from flight_cli._gflight_ids import pinned_fanout
 
     pins = pinned_fanout(cli._bumped_query_top_n(5, len(cabins)))
-    assert (f"{pins} cheapest outbounds" in buf.getvalue()) is shown, buf.getvalue()
+    assert (f"up to {pins} of each cabin's cheapest" in buf.getvalue()) is shown, buf.getvalue()
 
 
 @pytest.mark.parametrize(
@@ -538,7 +538,9 @@ def test_the_join_note_counts_the_outbounds_that_were_actually_pinned(
             providers=None, cash_only=True, awards_only=False, provider_opt=()
         ),
     )
-    assert f"{expected} cheapest outbounds" in buf.getvalue(), buf.getvalue()
+    # "up to", because the cap bounds how many outbounds the join can see and
+    # the board may hold fewer. The number is still the pin budget's.
+    assert f"up to {expected} of each cabin's cheapest" in buf.getvalue(), buf.getvalue()
 
 
 def test_multi_cabin_fan_out_honours_an_encodable_constraint(
@@ -632,3 +634,46 @@ def test_multi_cabin_unencodable_constraint_goes_to_matrix(
     )
     assert called == ["matrix"]
     assert "a carrier filter (DL)" in output
+
+
+@pytest.mark.parametrize(
+    ("legs_out", "top_n", "expected"),
+    [
+        pytest.param(True, 30, True, id="a-round-trip-above-the-cap-says-so"),
+        pytest.param(True, 4, False, id="below-the-cap-there-is-nothing-to-say"),
+        pytest.param(False, 30, False, id="a-one-way-pins-nothing"),
+    ],
+)
+def test_a_round_trip_says_how_many_outbounds_it_will_actually_combine(
+    monkeypatch: pytest.MonkeyPatch, legs_out: bool, top_n: int, expected: bool
+) -> None:
+    """`-n 30` on a round trip searches ten outbounds, not thirty, and said so
+    on exactly one path — the multi-cabin one. Everywhere else a user reading a
+    short table saw the market rather than the budget.
+
+    The note is stderr, so it reaches a human on `--fast` and under
+    `--format json` alike without touching the document on stdout."""
+    import io as _io
+    from datetime import date as _date
+    from datetime import timedelta as _timedelta
+
+    from rich.console import Console as _Console
+
+    from flight_cli import cli
+    from flight_cli._gflight_ids import pinned_fanout
+    from flight_cli.domain import Leg as _Leg
+
+    buf = _io.StringIO()
+    monkeypatch.setattr(cli, "err", _Console(file=buf, width=400, no_color=True, highlight=False))
+    dep = _date.today() + _timedelta(days=45)
+    legs = (_Leg.of("JFK", "LHR", dep),)
+    if legs_out:
+        legs = (*legs, _Leg.of("LHR", "JFK", dep + _timedelta(days=7)))
+
+    cli._pin_cap_note(legs=legs, top_n=top_n)
+
+    printed = buf.getvalue()
+    assert ("cheapest outbounds" in printed) is expected, printed
+    if expected:
+        assert f"up to {pinned_fanout(top_n)} cheapest" in printed, printed
+        assert str(top_n) not in printed, "the note must not quote the number it is correcting"
