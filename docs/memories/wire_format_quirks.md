@@ -127,7 +127,22 @@ include the deep-link URL so users can verify in the UI.
 
 A fourth case is NOT one of these and must not wear that message: a fanned-out
 multi-airport calendar whose sub-queries never answered. There is no response to
-be ambiguous about — the merge is empty because nothing reached it — so
-`_run_calendar` counts the failures and refuses when they are all of them, one
-line on stderr and exit 1. Some of them failing leaves a grid worth reading and a
-note saying how many destinations are missing from it.
+be ambiguous about — the merge is empty because nothing reached it. So
+`_run_calendar` merges first and judges what SURVIVED, not what fraction failed:
+rows still in the merged grid are worth reading even short a destination, and get
+a note beside them saying how many are missing; no rows at all is a refusal, one
+line on stderr naming the count and the first cause, and exit 1. Judging the
+merge rather than the fraction is what keeps "Matrix priced this window and found
+nothing" a claim only the destinations that answered can support.
+
+## What a black-box caller can read off `flight calendar`
+
+Exit 0 means a document on stdout: the rendered grid, or the object `--format
+json` writes. Exit 1 means no document at all — stdout is empty and stderr
+carries one typed line, whether the cause was a Matrix error, a backend that
+could not be reached, or the fan-out refusal above. Exit 2 is an input refusal,
+raised before any Matrix call. Partial sub-query coverage is the one middle
+state, and it is a stderr NOTE beside a complete-looking stdout document: exit 0,
+a grid, and a line saying how many origin/destination groups are missing from it.
+The JSON carries no field for that, so a caller that must know whether the grid
+is whole reads stderr, or asks for one destination at a time.

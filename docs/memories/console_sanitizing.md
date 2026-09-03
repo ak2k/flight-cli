@@ -146,3 +146,20 @@ entries — the two `query_cabin` closures printing `cab.value` are that shape o
 purpose, and the entry is keyed on the closure that prints it.
 The hostile-field tests — one payload per response field, driven one field at a
 time through each renderer — are what pin the values themselves.
+
+A Typer `help=` / `epilog=` string is a markup sink as surely as a table cell:
+the app sets `rich_markup_mode="rich"`, so Typer renders every help string
+through `Text.from_markup` — or `Text.from_ansi`, when the string holds a
+control character — on the way to the terminal. The scan reads those strings, in
+`typer.Option` / `typer.Argument` / `typer.Typer` calls, but NARROWER than it
+reads a print: an f-string field that is a call or an attribute read, which is
+where a runtime value comes from. A bare name in one is not read — these strings
+are built at module scope, where there is no function to key an allowlist entry
+on, and every name in one today is a constant of literal text this file wrote —
+so a module constant that stops being literal is what this boundary leaves
+uncovered. The wrapper is `_safe_text` for the usual reason plus one of its own:
+an ESC survives `escape` and sends the whole string down the from-ANSI branch,
+which eats the sequence and renders a path nobody configured. And a literal tag
+that is meant to READ as text — `\[providers.<name>]` — takes the backslash,
+or the parser takes it for a style and the reader sees nothing where the name
+should be.
