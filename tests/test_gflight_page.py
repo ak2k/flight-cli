@@ -2065,14 +2065,23 @@ def test_a_waiter_does_not_probe_while_the_prober_is_still_out(
     Any rule that lets a waiter go before the owner reports — a clock, a poll, a
     wait that reads running out as an answer — shows up here as a GET starting
     beside one already in flight, which is what the count below reads."""
-    monkeypatch.setattr(gfid, "_THROTTLE_BACKOFF_S", 0.01)  # backoffs out of the way
+    # Long enough that the owner's next rung cannot overlap the tail of the
+    # opening wave on a loaded machine, short enough that the suite pays little
+    # for it: what is being counted is overlap, so the two must not be close.
+    monkeypatch.setattr(gfid, "_THROTTLE_BACKOFF_S", 0.05)
 
     cabins = 4
     starts: list[int] = []
     inflight = {"n": 0}
     guard = threading.Lock()
+    first_get, wave = _first_get_of_each_worker(tuple(range(cabins)))
 
     def slow_and_dead() -> object:
+        # The wave is made to assemble rather than left to the scheduler: a
+        # worker whose thread starts late would still be in its first GET when
+        # the owner begins its second, and the count below would read that as a
+        # waiter probing behind the prober.
+        _await_the_wave(first_get, wave)
         with guard:
             starts.append(inflight["n"])  # how many GETs were already out
             inflight["n"] += 1
