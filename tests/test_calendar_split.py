@@ -16,6 +16,7 @@ import re
 import sys
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, override
 
 import anyio
@@ -2274,57 +2275,54 @@ def test_one_failing_cabin_does_not_take_the_other_cabins_down(
         assert driver not in probe, f"{driver!r} reached the console"
 
 
+def _hostile_config(payload: str, monkeypatch: Any, *, in_path: bool) -> None:
+    """Point `_config` at a path or an error carrying the payload, not both."""
+    where = payload if in_path else "cfg"
+    text = "bad toml at line 1" if in_path else f"bad toml at line 1: {payload}"
+
+    def _boom() -> dict[str, Any]:
+        raise ValueError(text)
+
+    monkeypatch.setattr("flight_cli._config.load", _boom)
+    monkeypatch.setattr(
+        "flight_cli._config.config_path", lambda: Path(f"/nonexistent/{where}/config.toml")
+    )
+
+
 @pytest.mark.parametrize("payload", ["[/x]", "[bold]x", "a\x1b[2Jb"])
-def test_a_hostile_provider_opt_is_a_typed_error_that_shows_the_token(
-    payload: str, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("arm", ["the option token", "the config path", "the config error"])
+def test_the_provider_diagnostics_show_the_value_they_are_about(
+    arm: str, payload: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`--provider-opt` takes any string a shell can pass, and the ValueError
-    `_config` raises quotes that token back into a markup console. An unbalanced
-    tag there answered a mistyped flag with a MarkupError, and a well-formed one
-    ate the token the message exists to name."""
+    """Three remote-or-typed values reach this one console: the token
+    `--provider-opt` could not parse, the path the config was read from — which
+    `FLIGHT_CLI_CONFIG_DIR` moves, so a hardcoded default names a file the user
+    may not have — and whatever tomllib said about its contents. Each sentence
+    exists to name the thing that failed, so an unbalanced tag answers a mistyped
+    flag with a MarkupError and a well-formed one eats the token.
+
+    The expectation is per arm because the two halves of the config sentence
+    sanitize differently on purpose, as the convention says they should: a value
+    the user typed goes through `_quote`, which reprs a control character into an
+    escape sequence, and text from a library goes through `_safe_text`, which
+    drops it."""
+    if arm == "the option token":
+        provider_opt = (payload,)
+    else:
+        provider_opt = ()
+        _hostile_config(payload, monkeypatch, in_path=arm == "the config path")
     with pytest.raises(typer.Exit) as excinfo:
         cli._resolve_providers(  # pyright: ignore[reportPrivateUsage] — the resolver IS the unit
-            providers=None,
-            cash_only=False,
-            awards_only=False,
-            provider_opt=(payload,),
+            providers=None, cash_only=False, awards_only=False, provider_opt=provider_opt
         )
     assert excinfo.value.exit_code == 2  # a typed usage error, not a traceback
     message = _flat(_SGR.sub("", capsys.readouterr().err))
     for driver in _DRIVERS:
         assert driver not in message, f"{driver!r} reached the console"
-    assert "missing '='" in message
-    # The token, tags and all — the message exists to say WHICH one was rejected.
-    # `_config` builds the sentence with `!r`, so a control character arrives as
-    # its escape sequence rather than as itself; that is the shape to look for.
-    assert payload.replace("\x1b", "\\x1b") in message
-
-
-def test_a_hostile_config_path_and_error_are_reported_as_text(
-    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """The path comes from `FLIGHT_CLI_CONFIG_DIR`, so the diagnostic that exists
-    to say WHICH file failed carries a value the user typed; the error under it is
-    whatever tomllib raised about the file's contents."""
-
-    def _boom() -> dict[str, Any]:
-        raise ValueError(f"bad toml at line 1: [/x]{_DRIVES_THE_TERMINAL}")
-
-    def _hostile_path() -> Path:
-        return Path("/nonexistent/a[bold]b/config.toml")
-
-    monkeypatch.setattr("flight_cli._config.load", _boom)
-    monkeypatch.setattr("flight_cli._config.config_path", _hostile_path)
-    with pytest.raises(typer.Exit) as excinfo:
-        cli._resolve_providers(  # pyright: ignore[reportPrivateUsage] — the resolver IS the unit
-            providers=None, cash_only=False, awards_only=False, provider_opt=()
-        )
-    assert excinfo.value.exit_code == 2
-    message = _flat(_SGR.sub("", capsys.readouterr().err))
-    for driver in _DRIVERS:
-        assert driver not in message, f"{driver!r} reached the console"
-    assert "a[bold]b/config.toml" in message  # the path it actually read
-    assert "bad toml at line 1: [/x]" in message  # and what went wrong with it
+    if arm == "the option token":
+        assert "missing '='" in message  # and what was wrong with it
+    quoted = arm != "the config error"  # `_quote` reprs, `_safe_text` drops
+    assert payload.replace("\x1b", "\\x1b" if quoted else "") in message
 
 
 def test_the_provider_opt_help_names_the_file_this_process_reads() -> None:
@@ -2390,55 +2388,35 @@ def test_the_provider_opt_help_shows_the_config_section_it_names(
     assert f"{_config.config_path()} [providers.<name>]." in _flat(result.output)
 
 
-class _FakeAirline:
-    def __init__(self, name: str) -> None:
-        self.name = name
-
-
-class _FakeLeg:
-    def __init__(self, airline: str, flight_number: str) -> None:
-        self.airline = _FakeAirline(airline)
-        self.flight_number = flight_number
-
-
-class _FakeAmenities:
-    cabin = "ECONOMY"
-    pitch_inches = 31
-    legroom_class = "BELOW"
-    wifi = None
-    power = None
-    video = None
-
-    def __init__(self) -> None:
-        self.marketing_flights: tuple[str, ...] = ()
-
-
-class _FakeFlightResult:
-    """Every field `_render_gflight_table` reads off an fli result, each one
-    overridable. A renderer gets a hostile arm per field it interpolates: with only
-    the flight number driven, the four columns beside it are unpinned, and a
-    refactor that moved a remote value into one of them would pass."""
-
-    def __init__(
-        self,
-        flight_number: str,
-        *,
-        price: object = 421.0,
-        currency: object = "USD",
-        stops: object = 0,
-        duration: object = 185,
-    ) -> None:
-        self.legs = [_FakeLeg("UA", flight_number)]
-        self.price = price
-        self.currency = currency
-        self.stops = stops
-        self.duration = duration
-
-
-class _FakeGf:
-    def __init__(self, flight_number: str, **fields: object) -> None:
-        self.flight = _FakeFlightResult(flight_number, **fields)
-        self.amenities = [_FakeAmenities()]
+def _fake_gf(
+    flight_number: str,
+    *,
+    airline: str = "UA",
+    price: object = 421.0,
+    currency: object = "USD",
+    stops: object = 0,
+    duration: object = 185,
+    marketing_flights: object = (),  # `object`, so a `**{field: payload}` arm still checks
+) -> SimpleNamespace:
+    """An fli-shaped Google Flights result: every field the table and the legroom
+    line read, each one overridable and none of them silently — a keyword this
+    does not take is a TypeError, where a `**kwargs` would swallow the typo and
+    leave the arm testing the default. A renderer gets a hostile arm per field it
+    interpolates, which is why the columns beside the flight number are here."""
+    leg = SimpleNamespace(airline=SimpleNamespace(name=airline), flight_number=flight_number)
+    amenities = SimpleNamespace(
+        cabin="ECONOMY",
+        pitch_inches=31,
+        legroom_class="BELOW",
+        wifi=None,
+        power=None,
+        video=None,
+        marketing_flights=marketing_flights,
+    )
+    flight = SimpleNamespace(
+        legs=[leg], price=price, currency=currency, stops=stops, duration=duration
+    )
+    return SimpleNamespace(flight=flight, amenities=[amenities])
 
 
 @pytest.mark.parametrize("payload", _HOSTILE_FIELD_VALUES)
@@ -2459,7 +2437,7 @@ def test_gflight_table_survives_a_hostile_flight_number(
         ),
     )
     cli._render_gflight_table(  # pyright: ignore[reportPrivateUsage] — the render site IS the unit
-        [_FakeGf(f"{payload}117")],
+        [_fake_gf(f"{payload}117")],
         legs=(Leg.of(["JFK"], ["LHR"], date(2026, 10, 1)),),
         top_n=5,
     )
@@ -2495,7 +2473,7 @@ def test_gflight_table_survives_a_hostile_result_field(
     buffer = io.StringIO()
     monkeypatch.setattr(cli, "console", Console(file=buffer, width=400))
     cli._render_gflight_table(  # pyright: ignore[reportPrivateUsage] — the render site IS the unit
-        [_FakeGf("UA117", **{field: payload})],
+        [_fake_gf("UA117", **{field: payload})],
         legs=(Leg.of(["JFK"], ["LHR"], date(2026, 10, 1)),),
         top_n=5,
     )
@@ -2517,7 +2495,7 @@ def test_a_gflight_number_column_refuses_a_string(field: str, monkeypatch: Any) 
     monkeypatch.setattr(cli, "console", Console(file=buffer, width=400))
     with pytest.raises((TypeError, ValueError)):
         cli._render_gflight_table(  # pyright: ignore[reportPrivateUsage] — the render site IS the unit
-            [_FakeGf("UA117", **{field: "[/x]"})],
+            [_fake_gf("UA117", **{field: "[/x]"})],
             legs=(Leg.of(["JFK"], ["LHR"], date(2026, 10, 1)),),
             top_n=5,
         )
@@ -2640,10 +2618,8 @@ def test_the_carrier_filter_is_tested_against_the_code_that_was_sent() -> None:
     membership test has to run on the code that arrived. Escaping first compares a
     string the user could never have named: the leg stops matching its own filter
     entry and the label falls through to a codeshare identity instead."""
-    leg = _FakeLeg("[x]", "1")
-    amenity = _FakeAmenities()
-    amenity.marketing_flights = ("BA999",)
-    shown = cli._leg_display(leg, amenity, frozenset({"[x]", "BA"}))  # pyright: ignore[reportPrivateUsage] — the formatter IS the unit
+    gf = _fake_gf("1", airline="[x]", marketing_flights=("BA999",))
+    shown = cli._leg_display(gf.flight.legs[0], gf.amenities[0], frozenset({"[x]", "BA"}))  # pyright: ignore[reportPrivateUsage] — the formatter IS the unit
     # Its own code matched, so this is the booking identity, escaped for display.
     assert shown == "\\[x] 1"
     assert "BA999" not in shown  # and not the codeshare it would have fallen to
@@ -3480,24 +3456,12 @@ def test_calendar_paths_escape_every_printed_value() -> None:
     )
 
 
-def test_allowlisted_functions_are_real_functions() -> None:
-    """A renamed or deleted function would sit in the allowlist forever, silently
-    pre-approving whatever later takes its name."""
-    src = Path(cli.__file__).read_text(encoding="utf-8")
-    defined = {
-        fn.name
-        for fn in ast.walk(ast.parse(src))
-        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    allowed = {fn for fn, _ in _PRINTABLE_IDENTIFIERS}
-    assert defined >= allowed, allowed - defined
-
-
 def test_printable_identifiers_are_all_load_bearing() -> None:
-    """The same rule one column over: the test above holds the function halves of
-    the allowlist, this one holds the whole entries. An entry that allows nothing
-    still pre-approves whatever later takes its name in that function, and nothing
-    else in the file would speak when it did."""
+    """An entry that allows nothing still pre-approves whatever later takes its
+    name in that function, and nothing else in the file would speak when it did.
+    It is also what speaks when an allowlisted function is DELETED — its entries
+    go inert — where a rename is caught by the scan itself, with the faults at
+    the prints rather than a set difference."""
     src = Path(cli.__file__).read_text(encoding="utf-8")
     inert: list[tuple[str, str]] = []
     for entry in sorted(_PRINTABLE_IDENTIFIERS):
@@ -3512,13 +3476,23 @@ def test_printable_identifiers_are_all_load_bearing() -> None:
     assert not inert, f"these entries allow nothing; delete them: {inert}"
 
 
-@pytest.mark.parametrize("label", ["_SAFE_WRAPPERS", "_NUMERIC_PRESENTATION", "_RENDERABLE_SINKS"])
-def test_every_set_that_allows_something_is_load_bearing(label: str) -> None:
-    """A member that allows nothing reads like a decision and is not one, and it
-    pre-approves whatever later carries it. Measured over every source the scan
-    reads, because the directions look opposite: dropping a member makes `cli.py`
-    speak where it was silent and a corpus case go silent where it spoke. No change
-    at all is what inert means. One of these sets grew eleven dead members."""
+@pytest.mark.parametrize(
+    "label",
+    [
+        "_SAFE_WRAPPERS",
+        "_NUMERIC_PRESENTATION",
+        "_RENDERABLE_SINKS",
+        "_TEXT_SINK_METHODS",
+        "_HELP_SINKS",
+    ],
+)
+def test_every_set_the_scan_consults_is_load_bearing(label: str) -> None:
+    """A member that changes nothing reads like a decision and is not one, and it
+    pre-approves whatever later carries its name. Measured over every source the
+    scan reads, because the directions look opposite: dropping a member that
+    ALLOWS makes `cli.py` speak where it was silent, dropping one that READS makes
+    a corpus case go silent where it spoke, and no change at all is what inert
+    means either way. One of these sets grew eleven dead members."""
     sources = [Path(cli.__file__).read_text(encoding="utf-8"), *_KNOWN_BYPASSES.values()]
     before = [escape_scan(source) for source in sources]
     members: frozenset[str] = getattr(sys.modules[__name__], label)
@@ -3529,38 +3503,6 @@ def test_every_set_that_allows_something_is_load_bearing(label: str) -> None:
             if all(escape_scan(s) == was for s, was in zip(sources, before, strict=True)):
                 inert.append(member)
     assert not inert, f"{label}: these members allow nothing; delete them: {inert}"
-
-
-# One probe per text sink, holding nothing else that would fault. A sink member is
-# load-bearing when its own probe goes SILENT without it — the inverse direction
-# from the allowing sets, because dropping a sink removes reading rather than
-# permission.
-_SINK_PROBES = {
-    "print": 'def calendar():\n    console.print(f"{e}")\n',
-    "log": 'def calendar():\n    console.log(f"{e}")\n',
-    "rule": 'def calendar():\n    console.rule(f"{e}")\n',
-    "status": 'def calendar():\n    console.status(f"{e}")\n',
-    "add_row": 'def calendar():\n    t.add_row(f"{e}")\n',
-    "add_column": 'def calendar():\n    t.add_column(f"{e}")\n',
-    "from_markup": 'def calendar():\n    body = Text.from_markup(f"{e}")\n',
-    "render_str": 'def calendar():\n    body = console.render_str(f"{e}")\n',
-}
-
-
-def test_every_text_sink_is_read() -> None:
-    """Each named sink is reached by a probe of its own, and each probe goes silent
-    without the member that reads it. That the sinks parse markup is a fact about
-    rich, checked where the renderers are and not here."""
-    assert set(_SINK_PROBES) == set(_TEXT_SINK_METHODS)
-    unread = [name for name, probe in _SINK_PROBES.items() if not escape_scan(probe)]
-    assert not unread, f"these sinks are named but never reached by the scan: {unread}"
-    still_caught: list[str] = []
-    for name, probe in _SINK_PROBES.items():
-        with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(sys.modules[__name__], "_TEXT_SINK_METHODS", _TEXT_SINK_METHODS - {name})
-            if escape_scan(probe):
-                still_caught.append(name)
-    assert not still_caught, f"these members are not what catches their own probe: {still_caught}"
 
 
 # The scan's own regression net: one source per shape that reaches rich holding
@@ -3576,6 +3518,12 @@ _KNOWN_BYPASSES = {
     "console.log": 'def calendar():\n    console.log(f"{e}")\n',
     "console.rule": 'def calendar():\n    console.rule(f"{e}")\n',
     "console.status": 'def calendar():\n    console.status(f"{e}")\n',
+    # A renderable built from markup, and a console asked to parse a string into
+    # one: neither is a print, and both hand rich text it will read as markup.
+    "text built from markup": 'def calendar():\n    body = Text.from_markup(f"{e}")\n',
+    "a string rendered by the console": (
+        'def calendar():\n    body = console.render_str(f"{e}")\n'
+    ),
     "builtin print": 'def calendar():\n    print(f"{e}")\n',
     "partly wrapped": 'def calendar():\n    err.print(f"{escape(a)} {b}")\n',
     "lookalike wrapper": 'def calendar():\n    err.print(f"{not_escape(e)}")\n',
@@ -3694,31 +3642,13 @@ _KNOWN_BYPASSES = {
     "a runtime value in an option help string": (
         '_OPT = typer.Option(None, "--provider-opt", help=f"Overrides {_config.config_path()}.")\n'
     ),
+    "a runtime value in an argument help string": (
+        '_ARG = typer.Argument(help=f"reads {_config.config_path()}")\n'
+    ),
+    "a runtime value in a command-group help string": (
+        'app = typer.Typer(help=f"reads {_config.config_path()}")\n'
+    ),
 }
-
-
-# One probe per help sink, the same shape as `_SINK_PROBES` one section up: a
-# runtime value interpolated into the string Typer will hand rich.
-_HELP_PROBES = {
-    "Option": '_OPT = typer.Option(None, "--x", help=f"reads {_config.config_path()}")\n',
-    "Argument": '_ARG = typer.Argument(help=f"reads {_config.config_path()}")\n',
-    "Typer": 'app = typer.Typer(help=f"reads {_config.config_path()}")\n',
-}
-
-
-def test_every_help_sink_is_read() -> None:
-    """Each named help sink is reached by a probe of its own, and each probe goes
-    silent without the member that reads it."""
-    assert set(_HELP_PROBES) == set(_HELP_SINKS)
-    unread = [name for name, probe in _HELP_PROBES.items() if not escape_scan(probe)]
-    assert not unread, f"these help sinks are named but never reached: {unread}"
-    still_caught: list[str] = []
-    for name, probe in _HELP_PROBES.items():
-        with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(sys.modules[__name__], "_HELP_SINKS", _HELP_SINKS - {name})
-            if escape_scan(probe):
-                still_caught.append(name)
-    assert not still_caught, f"these members are not what catches their own probe: {still_caught}"
 
 
 def test_a_help_string_is_read_only_for_the_values_it_looks_up() -> None:
