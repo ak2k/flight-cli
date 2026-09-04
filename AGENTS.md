@@ -86,9 +86,9 @@ choice that fits the rest of the stack — don't substitute.
   gate knows by name (any other formatter that wraps inside itself is admitted
   at its call sites, one allowlist entry each); as a named entry in the
   identifier allowlist; through a format spec only a number survives; or as a
-  renderable this scope built. Anything else fails the gate. Those are four ways
-  a value REACHES a console; they are not the four things that can BACK an
-  allowlist entry, which `console_sanitizing.md` sets out.
+  renderable this scope built. Anything else in a call this gate reads fails it.
+  Those are four ways a value REACHES a console; they are not the four things
+  that can BACK an allowlist entry, which `console_sanitizing.md` sets out.
 - **New SPA captures go in `research/`** (gitignored). Use
   `research/record_user_session.py` to drive a real browser, capture a wire
   body, drop it into `tests/fixtures/`, and write a reconstruction test.

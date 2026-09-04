@@ -325,7 +325,8 @@ def _spy_renderers(monkeypatch: Any, into: dict[str, int] | None = None) -> dict
 
     `into` counts in a dict the caller already holds, which is the only way a
     drive that RAISES can hand its counters back: its return value never reaches
-    the test that called it."""
+    the test that called it. Both counters are reset here, so a caller that put a
+    count into that dict before calling loses it."""
     calls: dict[str, int] = {} if into is None else into
     calls.update({"grid": 0, "calendar": 0})
 
@@ -1442,7 +1443,6 @@ def _exiting_grid(_search: object) -> dict[str, float]:
 
 
 def _exit_from_a_fanout_sub_query(monkeypatch: Any, calls: dict[str, int]) -> None:
-    _ = calls  # no renderer runs on this path
     monkeypatch.setattr(cli, "MatrixClient", _ExitingClient)
     cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
         _cal(["VIE", "PAR"]), rps=10.0, impersonate="chrome", no_cache=True
@@ -1499,12 +1499,10 @@ def _exit_beside_a_failure(monkeypatch: Any, code: int) -> None:
 
 def _exit_zero_beside_a_failure(monkeypatch: Any, calls: dict[str, int]) -> None:
     # Exit(0) is the one that reads as success on every channel a caller has.
-    _ = calls  # no renderer runs on this path
     _exit_beside_a_failure(monkeypatch, 0)
 
 
 def _exit_three_beside_a_failure(monkeypatch: Any, calls: dict[str, int]) -> None:
-    _ = calls  # no renderer runs on this path
     _exit_beside_a_failure(monkeypatch, _ORDERLY_EXIT_CODE)
 
 
@@ -1997,9 +1995,10 @@ def test_calendar_one_way_note_survives_json_output(
 ) -> None:
     # `--format json` is exactly when a dropped flag is least visible, and stderr is
     # where the remark can go without putting prose in front of `jq`. Both trip
-    # shapes, because the fan-out writes lines a single query never does and an
-    # `err` that slipped to `console` on one of them would put prose in front of
-    # `jq` on the arm nothing was reading.
+    # shapes, because only the fan-out enters the multi branch of `_run_calendar`
+    # and writes its document out of a merged `res.raw`: a `console` write anywhere
+    # in that branch reaches `jq` on an arm the single-query drive never runs. The
+    # two arms write the same stderr, so the branch is what separates them.
     monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
     _spy_renderers(monkeypatch)
     _calendar_fast(fast=False, fmt="json", duration="9-3", destination=destination)
@@ -3704,11 +3703,16 @@ _RENDERABLE_SINKS = frozenset({"Table", "Panel", "Text"})
 # allowlisting the name, and for `fr.price` — a `getattr` off a duck-typed Google
 # Flights result — that would be a promise nobody here can keep.
 #
-# Two characters, not the thirteen that raise on a `str`: a set with no inertness
-# test grew eleven members that allowed nothing, and every one of them was also a
-# place the proof stops being one. What the proof does NOT cover is stated at
-# `_spec_proves_a_number`.
+# Two characters, not the thirteen numeric presentation types: a set with no
+# inertness test grew eleven members that allowed nothing, and every one of them
+# was also a place the proof stops being one. What the proof does NOT cover is
+# stated at `_spec_proves_a_number`.
 _NUMERIC_PRESENTATION = frozenset("df")
+
+# The corpus the date test walks, beside the set it has to cover rather than beside
+# the test, because adjacency is what keeps the two from drifting apart. `%` is not
+# one of the thirteen; `_spec_proves_a_number` refuses it.
+_NUMERIC_PRESENTATION_CORPUS = "bcdoxXneEfFgG"
 
 
 def _def_time_expressions(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.expr]:
@@ -4396,8 +4400,12 @@ def test_a_date_survives_every_numeric_presentation_type() -> None:
     `str` on all of these, which is the whole claim — but `date.__format__` is
     `strftime`, so a date passes each of them and comes back a string. The `%`
     clause is what keeps a strftime spec from reading as a proof about a number."""
+    # A loop over a corpus can only fail by GROWING, so this is what makes a
+    # shortened one speak: drop a character the scan accepts and the proof stops
+    # covering it.
+    assert frozenset(_NUMERIC_PRESENTATION_CORPUS) >= _NUMERIC_PRESENTATION
     when = date(2026, 10, 1)
-    for presentation in "bcdoxXneEfFgG":
+    for presentation in _NUMERIC_PRESENTATION_CORPUS:
         assert format(when, presentation) == presentation  # returned, not formatted
         with pytest.raises((ValueError, TypeError)):
             format("a string", presentation)

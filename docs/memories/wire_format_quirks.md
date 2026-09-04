@@ -129,12 +129,12 @@ A fourth case is NOT one of these and must not wear that message: a fanned-out
 multi-airport calendar whose sub-queries never answered. There is no response to
 be ambiguous about — the merge is empty because nothing reached it. So
 `_run_calendar` merges first and judges what SURVIVED, not what fraction failed:
-rows still in the merged grid are worth reading even short a destination, and get
+rows still in the merged grid are worth reading even short a group, and get
 a note beside them saying how many are missing; no rows at all is a refusal: exit
 1, and a stderr report that names the count and then every cause that stood
 behind it, a backend error keeping its kind and request id. Judging the
 merge rather than the fraction is what keeps "Matrix priced this window and found
-nothing" a claim only the destinations that answered can support.
+nothing" a claim only the sub-queries that answered can support.
 
 ## What a black-box caller can read off `flight calendar`
 
@@ -144,19 +144,21 @@ report, whether the cause was a Matrix error, a backend that could not be
 reached, or the fan-out refusal above. Stdout is empty for every cause that
 happened before the answer was written, with two exceptions. A raise inside the
 write itself, in the renderer or in the URL emitter, exits 1 over whatever had
-already reached stdout, because the two are guarded as one act; and a weave
-whose first paint drew the whole grid and then raised on the status line under
-it exits 1 over a document that is complete. That report is one line or several:
-a Matrix error adds the backend's kind and message, and its request id when
-there is one, on the lines below the first; a fan-out names every sub-query that
-dropped; and `--fast` says why there is no grid before it says there is none.
-Its first line names the backend that failed rather than the command, so a
-`--fast` run reports "Google Flights date grid failed" where every Matrix path
-reports "Matrix calendar failed" — there is no Matrix behind `--fast` to blame.
-Read the whole stream, not the first line. Everything a weave prints while it
-still has nothing to show — the gate note, a throttle, the wait for Matrix — is
-on stderr for the same reason: stdout carries the answer or nothing. Exit 2 is
-an input refusal, raised before any Matrix call.
+already reached stdout, because the two are guarded as one act. And a weave's
+exit code follows whether it painted, which a raise on the status line under a
+finished grid clears: the same raise exits 1 over a complete document when
+Matrix also failed, and exits 0 with the grid, the calendar and a "could not be
+shown" line when Matrix answered. That report is one line or several: a Matrix
+error adds the backend's kind and message, and its request id when there is one,
+on the lines below the first; a fan-out names every sub-query that dropped; and
+`--fast` says why there is no grid before it says there is none. Its first line
+names the backend that failed rather than the command, so a `--fast` run reports
+"Google Flights date grid failed" where every Matrix path reports "Matrix
+calendar failed" — there is no Matrix behind `--fast` to blame. Read the whole
+stream, not the first line. Everything a weave prints while it still has nothing
+to show — the gate note, a throttle, the wait for Matrix — is on stderr for the
+same reason: stdout carries the answer or nothing. Exit 2 is an input refusal,
+raised before any Matrix call.
 
 Partial sub-query coverage is the one middle state, and it is a stderr NOTE
 beside a complete-looking stdout document: exit 0, a grid, and a line saying how
@@ -167,7 +169,7 @@ is whole reads stderr, or asks for one destination at a time.
 Four readings cover every calendar that ran. Exit 1 with stdout empty is no
 answer at all: the window was never priced, and stderr says why. Exit 0 with
 "Calendar empty." on stdout IS an answer — Matrix searched the window and priced
-nothing in it — which is why a fan-out that lost a destination refuses rather
+nothing in it — which is why a fan-out that lost a sub-query refuses rather
 than printing that sentence. Exit 0 with a grid is the answer,
 possibly a partial one, and stderr is where everything that qualifies it goes:
 the coverage note above, and a failure the weave stashed AFTER the answer was
@@ -184,13 +186,22 @@ reading above by the exit code, not by the stream — a failure that follows a
 finished write is a line and exit 0; a failure inside the write is a line and
 exit 1.
 
-A reader that hangs up is that fourth shape with nobody left to read it: exit 1,
-stdout partial or empty, and no failure report at all on stderr — only whatever
-the run had already written there before the reader left. Rich answers a broken
-output pipe with `SystemExit`, which is not the `Exception` every guard on these
-paths catches, so no report is ever composed — there is nowhere to put the
-answer and nothing is said about why. What was already said still stands, and it
-is not the same on every arm: a plain or `--fast` calendar leaves stderr empty,
-while a fan-out has printed its provenance note and a weave its gate or status
-line before the delivery the reader killed. A caller that pipes into `head` sees
-this, and it is indistinguishable from the reading above on stdout alone.
+A reader that hangs up is that fourth shape with nobody left to read it: exit 1
+on every arm but one, stdout partial or empty, and no failure report at all on
+stderr — only whatever the run had already written there before the reader left.
+Rich answers a broken output pipe with `SystemExit`, which is not the
+`Exception` every guard on these paths catches, so no report is ever composed —
+there is nowhere to put the answer and nothing is said about why. What survives
+on stderr is decided by the first byte to stdout: everything written before it
+stands, everything the run would have said after it is never reached. So a
+fan-out keeps its provenance note and a weave its gate note, both of which
+precede any document, while the line a weave prints beside a grid it has just
+painted is lost — it comes after the write that ended the run. A run that never
+reaches stdout loses nothing, and with the grid RPC gated as it ships `--fast`
+is exactly that run: its whole refusal arrives. A caller that pipes into `head`
+sees this, and it is indistinguishable from the reading above on stdout alone.
+`--format json` is the one arm none of it describes: it writes with a bare
+`sys.stdout.write` outside the delivery guard, so there is no `SystemExit` for
+anything to catch, and under a reader that hangs up the process ends at exit 120
+with a `BrokenPipeError` on stderr that nothing here composed (tracked in
+work-h70kv.29).

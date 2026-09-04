@@ -752,12 +752,13 @@ def _print_matrix_error(e: MatrixApiError) -> None:
 # always run as one sub-search per (origin, destination) pair, in parallel, and
 # merged — the only way to get complete results.
 #
-# `split_calendar_search` returns the cartesian product of origins x destinations,
-# so the fan-out is |origins| x |destinations| (just |destinations| in the common
-# single-origin case). Matrix tolerates the concurrency (measured: ≥16 in flight,
-# flat latency, no throttling); we hold a touch under that and let larger lists
-# batch into multiple rounds. There is no hard cap — a large fan-out is the user's
-# call; we warn loudly (and the concurrency limit keeps it a Ctrl-C-able drip).
+# `split_calendar_search` returns the cartesian product of origins x destination
+# GROUPS, so the fan-out is |origins| x ceil(|destinations| / --max-per-query) —
+# which is |destinations| only at the default of one per query, with one origin.
+# Matrix tolerates the concurrency (measured: ≥16 in flight, flat latency, no
+# throttling); we hold a touch under that and let larger lists batch into multiple
+# rounds. There is no hard cap — a large fan-out is the user's call; we warn
+# loudly (and the concurrency limit keeps it a Ctrl-C-able drip).
 _CALENDAR_FANOUT_CONCURRENCY = 12
 
 
@@ -1197,8 +1198,9 @@ _GF_GRID_UNAVAILABLE_WEAVE_NOTE = f"{_GF_GRID_UNAVAILABLE_NOTE} …awaiting Matr
 # The grid's name as a reader sees it, in one place because it is the prefix a
 # caller matches a failure on: two spellings across the arms of one command means
 # a matcher has to know both, and which one it gets depends on where the run
-# broke. The "date-grid" in the docstrings nearby is English about the thing and
-# not this printed name, which is why they are not built from here.
+# broke. Every remaining "date-grid" in this file is in a docstring or a comment,
+# where it is English about the thing rather than the name a reader is shown,
+# which is why none of them is built from here.
 _GF_GRID_NAME = "Google Flights date grid"
 
 
@@ -3565,7 +3567,7 @@ def calendar(
         "--fast/--enrich",
         "--no-enrich/--no-fast",
         help="Skip the Matrix enrichment: show only the fast Google Flights "
-        "date-grid (one-way, single-airport, Tier-1 filters) instead of also "
+        "date grid (one-way, single-airport, Tier-1 filters) instead of also "
         "running the authoritative Matrix calendar. Exits 1 rather than falling "
         "back, so a no-grid result is never mistaken for a fast one.",
         rich_help_panel=_GROUP_BACKEND,
