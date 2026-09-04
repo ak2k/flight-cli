@@ -125,12 +125,13 @@ def fli_results_to_search_result(results: Sequence[Any]) -> SearchResult:
     Every member of a round-trip tuple carries a price, and they are not the
     same number. An outbound row is priced at the cheapest round-trip TOTAL
     reachable from that outbound; the return board fetched with it pinned
-    prices each of its rows at THAT combination's total. So the itinerary fare
-    is the terminal member's — the pinned leg is what makes this combination
-    this combination, and the outbound's price belongs to whichever return is
-    cheapest, which is only one of them. The number matters downstream: an
-    award is compared against it, so an outbound-priced combination undercuts
-    every cash comparison but the cheapest one.
+    prices each of its rows at THAT combination's total. The itinerary fare is
+    therefore the terminal member's; why that is the true one, with the
+    measurements, is in `docs/memories/gf_routing_and_carriers.md`.
+
+    The number matters downstream: an award is compared against it, so an
+    outbound-priced combination undercuts every cash comparison but the
+    cheapest one.
     """
     solutions: list[Itinerary] = []
     cheapest_price: float | None = None

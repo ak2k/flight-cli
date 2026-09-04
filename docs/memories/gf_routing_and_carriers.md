@@ -256,17 +256,25 @@ board — around thirty rows; the dated measurement is at the top of this file �
 whatever count is asked of it, so the count is a trim rather than a query
 parameter. It bounds everything the user can act on, and all of it from one place
 in `cli._run_gflight_path`: the table, the `--format json` document, the range
-`--pick` accepts and the itinerary `--emit-urls` pins, and the itineraries the
-award providers are fanned out over. All five hold on `--fast` and on
-`--format json`, which are the same function. Multi-cabin keeps three of them —
-the table, the document and the award fan-out — and has neither of the other
-two: `cli._run_gflight_path_multi` has no `_emit_urls` call site at all, and
-neither multi path is passed `pick`, which the `search` command accepts and
-drops there. On the default enriched path `--pick` indexes the Matrix solutions
-rather than the merged rows, and those two sets differ in SIZE whenever any
-Google-only row survives the merge — the merged table can be longer than the
-Matrix solution list, so a pick naming a printed row is refused as out of
-range.
+`--pick` accepts and the itinerary the `--matrix-url` / `--google-url` lines pin,
+and the itineraries the award providers are fanned out over. All five hold on
+`--fast` and on `--format json`, which are the same function — and under
+`--format json` the count still bounds the document, while no link line is
+printed at all. Multi-cabin keeps three of them — the table, the document and
+the award fan-out — and has neither of the other two:
+`cli._run_gflight_path_multi` has no `_emit_urls` call site at all, and neither
+multi path is passed `pick`, which the `search` command accepts and drops there.
+
+**A pick names a row on the table that was printed, and the enriched path is
+where that is easy to get wrong.** Its table is the MERGED one: price-sorted, and
+holding Google-only rows the Matrix half never had. So it differs from the Matrix
+solution list in ORDER as much as in size, and order is the half that bites — at
+`-n 3` nothing is out of range and every pick still names the wrong itinerary,
+under the number the user read off the screen. Both surfaces are therefore built
+from one list, `merged[:top_n]`: the table numbers it, `cli._pick_in_range`
+measures the pick against its length, and `_emit_urls` is handed a result whose
+solutions ARE it. The label is then true by construction rather than by
+agreement between two call sites.
 
 **And it keeps two different orders, because the two sets are ordered by
 different things.** A one-way board arrives ranked by Google — a composite of
@@ -275,8 +283,9 @@ page's order and `-n` means the rows the page put first. A round trip's
 combinations are ours: the pin loop builds them outbound by outbound, so their
 order is the loop's artifact and carries no ranking at all. Left alone, `-n 3`
 there is three trips from one outbound with cheaper trips from the next outbound
-off the table entirely. `cli._price_ordered` sorts them on their terminal member,
-which is the fare every surface prints, immediately before each of the three
+off the table entirely. `cli._price_ordered` sorts them on their terminal
+member — the pinned leg is what makes the combination that combination, so its
+fare is the one every surface prints — immediately before each of the three
 trims. The `-n` help string says both halves.
 
 Three things still read the whole board, and this is why the trim cannot move
@@ -298,10 +307,8 @@ the numbers and the assertions are in `tests/pp/test_gflight_adapter.py` — the
 pinned board's minimum is exactly the outbound row's price, while the other
 combination is a dearer trip. Live 2026-09-03 (HNL-MIA business, 2 adults) says
 the same from the other end: outbound 854/305 quoted 6806 and its two
-combinations totalled 6806 and 7650. So an itinerary is priced from its terminal
-member — the pinned leg is what makes the combination that combination — and
-pricing it from the outbound reports every combination but the cheapest under its
-real fare. The human table prints each member's own price on its `Na`/`Nb` rows
+combinations totalled 6806 and 7650. Pricing a combination from the outbound
+therefore reports every one of them but the cheapest under its real fare. The human table prints each member's own price on its `Na`/`Nb` rows
 and `--format json` emits both, so both carry the true number; the SearchResult
 the award comparison reads carries one, and it is the total. The cash baseline
 that comparison is made against is therefore the cheapest of the rows SHOWN —

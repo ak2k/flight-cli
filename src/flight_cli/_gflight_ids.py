@@ -236,8 +236,8 @@ class _SharedThrottleLadder:
 
     def transport_failed(self, *, final: bool = False) -> float | None:
         """A curl-level failure. How long to wait before trying again, or None
-        when the shared transport budget is gone — unless it is `final`; see
-        `_step`.
+        when the shared transport budget is gone — or whenever it is `final`;
+        see `_step`.
 
         One prober here too: four cabins whose sockets reset together would
         otherwise eat the whole budget before any retry lands, and the ones that
@@ -1640,15 +1640,27 @@ def _unpinned_board(
     thing no later stage can catch: `cli._price_ordered` and the renderers read
     a combination as a combination.
 
-    Origin and date, because between them they identify the leg the request
-    asked for, and they are what a served board can be checked against without
-    a second query. The whole board, because a page answering the wrong segment
-    answers it for every row, and one honest row beside wrong ones is still not
-    the board that was asked for."""
+    Origin, destination and date, because between them they identify the leg
+    the request asked for, and they are what a served board can be checked
+    against without a second query. Three and not two: a board with the right
+    origin on the right day can still land somewhere else, and that one is
+    invisible on screen — the table's `legs` column carries flight numbers, so
+    a trip that never comes home reads like any other. The endpoints are read
+    off opposite ends of the row, the origin from the first leg and the arrival
+    from the last, because a connection's own endpoints are the route rather
+    than the answer.
+
+    The whole board, because a page answering the wrong segment answers it for
+    every row, and one honest row beside wrong ones is still not the board that
+    was asked for."""
     # `departure_airport` is fli's `[[Airport, weight], …]` shape, and a segment
     # may carry several. Narrowed to the airports because that is what a served
-    # leg can be compared against; fli's own validator requires the first entry
-    # to be one, so an empty set here is a segment nothing could have answered.
+    # leg can be compared against. fli itself does not require the entries to be
+    # `Airport` members — its validator skips a first entry that is not one — so
+    # what keeps these sets non-empty is this package: every segment reaching
+    # here is built by a constructor that resolves each code to a member first.
+    # An empty set would refuse every board with the wanted side of the sentence
+    # blank, which is why the guarantee is worth naming rather than assuming.
     origins = {a[0] for a in wanted.departure_airport if isinstance(a[0], Airport)}
     dests = {a[0] for a in wanted.arrival_airport if isinstance(a[0], Airport)}
     for row in board:
@@ -1741,6 +1753,11 @@ def search_with_ids(
             # a 503. The pins are independent queries, so the next one may well
             # be served, and unwinding would throw away every combination
             # already fetched.
+            #
+            # A 503 arrives here having spent no ladder. `retry_throttled`
+            # retries throttles and transport failures and nothing else, and
+            # `_one_call` raises a plain `GfBackendError` for a 5xx — so ten
+            # pins meeting ten 503s cost ten GETs, not ten ladders.
             refused.append(e)
             continue
         if nxt is None:

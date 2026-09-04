@@ -125,10 +125,14 @@ def _one_document(stdout: str) -> Any:
     """The single JSON value on stdout, or an assertion naming what else is
     there.
 
-    Parsed with `raw_decode` rather than `loads`, because a trailing deep link
-    is what `loads` is blind to: it would parse a document with URL lines after
-    it only if they happened to follow a complete value, which is exactly the
-    case here."""
+    `raw_decode` AND the leftover assertion below, which are one check in two
+    halves. `raw_decode` is the blind one on its own: it stops at the end of the
+    first complete value and reports success, whatever follows it. `json.loads`
+    would refuse a trailing deep link by itself, with "Extra data" and a
+    character offset — a true failure that names none of the bytes. Taking the
+    rest of the stream back is what lets the assertion print the prose that was
+    printed beside the document, which is the thing a reader has to see. A table
+    printed ABOVE it is a parse failure either way."""
     assert stdout, "a run that asked for a document got zero bytes"
     value, end = json.JSONDecoder().raw_decode(stdout)
     leftover = stdout[end:].strip()

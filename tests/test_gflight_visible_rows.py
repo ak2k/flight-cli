@@ -440,8 +440,8 @@ def test_a_round_trips_combinations_are_trimmed_by_price(
     would be three trips from one outbound, with cheaper trips from the next
     outbound left off the table entirely.
 
-    Each combination is priced at its terminal member, so ordering by that is
-    ordering by the number every surface prints."""
+    They are ordered by their terminal member's price, which is the number
+    every surface prints."""
     gf_session(
         gf_capture("ds1_metadata_blocks_kept.json"),
         _served_return(gf_answering),

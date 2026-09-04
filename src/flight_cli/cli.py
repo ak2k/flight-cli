@@ -1482,14 +1482,11 @@ def _price_ordered(results: list[Any]) -> list[Any]:
     """Round-trip combinations in price order. A one-way board is returned as
     it came.
 
-    Two sets, ordered by two different things; the argument is in the memo's
-    `-n` section.
+    Two sets, ordered by two different things, and a combination priced from
+    its terminal member; the argument for both is in the memo's `-n` section.
 
-    A combination's fare is its terminal member's — the pinned leg is what
-    makes it that combination — so sorting on that member is sorting on the
-    price the table, the JSON document and the award comparison all show. The
-    sort is stable, so combinations sharing a total stay in the order the pins
-    were fetched."""
+    The sort is stable, so combinations sharing a total stay in the order the
+    pins were fetched."""
     if any(not isinstance(r, tuple) for r in results):
         return results
     return sorted(results, key=lambda r: cast("float", list(r)[-1].flight.price))
@@ -1853,12 +1850,12 @@ async def _matrix_into(
     not close — would cancel the still-pending Google Flights paint and end the
     command as a bare ExceptionGroup. Every stash here is read after the weave.
 
-    A result and a `MatrixApiError` cannot be stashed together: the only
-    `MatrixApiError` this package builds is built in `client._raise_if_api_error`
-    (`client.py:51`), which only `execute()` calls (`client.py:149`), and
-    `MatrixClient.__aexit__` (`client.py:103-104`) awaits `aclose()` and nothing
-    else — so the arm below reaches `state["matrix"]` only through the value
-    `execute()` returned, and reaching it at all means nothing raised.
+    A result and a `MatrixApiError` cannot be stashed together: this package
+    builds that error at exactly one site, under `execute()`, and closing the
+    client awaits the transport and nothing that raises one — so the arm below
+    reaches `state["matrix"]` only through the value `execute()` returned, and
+    reaching it at all means nothing raised. The single-origin half is asserted
+    rather than described, in `tests/test_refusal_markup.py`.
     """
     try:
         async with MatrixClient(rps=rps, impersonate=impersonate) as c:
@@ -2313,8 +2310,13 @@ def _run_matrix_multi(
         # left if `typer.Exit` ever stops subclassing `Exception`.
         raise
     except Exception as e:
-        # Nothing from a cabin reaches here — those are caught per cabin — so
-        # this is the shared client failing to open or close at all. Typed
+        # Nothing an `Exception` from a cabin can do reaches here — those are
+        # caught per cabin — so this is the shared client failing to open or
+        # close at all. A `BaseException` leaf is outside both: the group anyio
+        # wraps it in is a `BaseExceptionGroup`, which is not an `Exception`, so
+        # it passes this arm and the per-cabin one alike and leaves by the door
+        # a deliberate stop should leave by. Widening either arm to catch it
+        # would report that stop as a backend failure. Typed
         # rather than a traceback, and worded like every other Matrix failure.
         # One arm and not two: a `MatrixApiError` cannot arrive here either.
         # `execute()` is the only thing that raises one and every call to it is
@@ -2377,11 +2379,15 @@ def _run_gflight_multi(
             # guard left if `typer.Exit` ever stops subclassing `Exception`.
             raise
         except Exception as e:
-            # Nothing from a cabin reaches here — those are caught per cabin —
-            # so this is the fan-out itself: opening the loop, starting the
-            # group, or the group's own unwinding. Untyped it is a bare
-            # traceback with both streams empty, which is the one outcome every
-            # reporter on this path exists to prevent.
+            # Nothing an `Exception` from a cabin can do reaches here — those
+            # are caught per cabin — so this is the fan-out itself: opening the
+            # loop, starting the group, or the group's own unwinding. A
+            # `BaseException` leaf passes both arms instead, wrapped by anyio in
+            # a `BaseExceptionGroup` that is not an `Exception`; that is the
+            # door a deliberate stop leaves by, and widening this to catch it
+            # would answer one with a backend's name. Untyped, what this DOES
+            # receive is a bare traceback with both streams empty, which is the
+            # one outcome every reporter on this path exists to prevent.
             _reraise_if_orderly(e, said="Google Flights search failed")
             err.print(f"[red]Google Flights search failed:[/] {_failure_text(e)}")
             raise typer.Exit(1) from e
@@ -2898,19 +2904,20 @@ _JSON_OPT = typer.Option(
 
 # URL emission flags shared by `search` / `calendar` / `detail`.
 #
-# Both URLs encode the search criteria. The Google-Flights URL ALSO pins
-# the cheapest matched itinerary (deep link to that specific selection)
-# when an itinerary row is available; Matrix's URL only encodes the
-# search (Matrix's SPA doesn't surface a per-itinerary URL state).
+# Both URLs encode the search criteria. The Google-Flights URL ALSO pins one
+# matched itinerary — the row `--pick` names, defaulting to the first row the
+# table printed — when an itinerary row is available; Matrix's URL only encodes
+# the search (Matrix's SPA doesn't surface a per-itinerary URL state).
 _MATRIX_URL_HELP = (
     "Print the Matrix ITA search URL (pre-fills the search; Matrix's SPA "
     "doesn't expose per-itinerary URL state, so this is the deepest link "
     "available)."
 )
 _GOOGLE_URL_HELP = (
-    "Print the Google Flights URL. When a cheapest itinerary is resolved "
-    "from the results, the URL deep-links to that specific itinerary "
-    "(pins selected flights). Otherwise it pre-fills the search."
+    "Print the Google Flights URL. When an itinerary can be resolved from the "
+    "results the URL deep-links to the row --pick names, or to the first row "
+    "printed; the label says which. Otherwise it pre-fills the search. No link "
+    "line is printed under --format json."
 )
 
 
@@ -3098,7 +3105,8 @@ def search(
         None,
         "--pick",
         help="Pin itinerary #N (1-based, as shown in the table) in the "
-        "--matrix-url/--google-url deep links. Default: cheapest.",
+        "--matrix-url/--google-url deep links. Default: the first row printed. "
+        "Ignored under --format json, which emits no link lines at all.",
         rich_help_panel=_GROUP_OUTPUT,
     ),
     no_cache: bool = _NO_CACHE_OPT,
