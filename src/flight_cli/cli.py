@@ -727,7 +727,7 @@ def _reraise_if_orderly(e: Exception, *, said: str) -> None:
     beside one, and it is the same sentence a calendar failure prints for the
     same shape.
 
-    A `MatrixApiError` is then re-printed by the reporter that knows it. Rendered
+    A `MatrixApiError` then goes to the reporter that knows it. Rendered
     as text it is its message alone — `kind` and `request_id` are what tell a
     user whether to fix their query or wait out a brownout, and losing them here
     would make this the one Matrix line on the branch that drops them.
@@ -1462,14 +1462,8 @@ def _price_ordered(results: list[Any]) -> list[Any]:
     """Round-trip combinations in price order. A one-way board is returned as
     it came.
 
-    Two different sets, ordered by two different things. Google's board arrives
-    ranked by Google — a composite of price, duration and stops that nothing
-    here can reproduce — and that ranking is the answer to a one-way query, so
-    a trim over it keeps the rows the page put first. A round trip is not that:
-    the combinations are built pin-major by the fan-out, outbound by outbound,
-    so their order is this package's loop and carries no ranking at all. Left
-    alone, `-n` there means "the first count from the first outbounds", which
-    reads as a ranking and is not one.
+    Two sets, ordered by two different things; the argument is in the memo's
+    `-n` section.
 
     A combination's fare is its terminal member's — the pinned leg is what
     makes it that combination — so sorting on that member is sorting on the
@@ -1777,7 +1771,12 @@ def _paint_first_gf_table(
     The note on the empty branch is true when it prints: it is gated on there
     being no Google refusal stashed, so Matrix really is the only half still
     running. A Google half that FAILED is a different sentence, and
-    `_report_enriched_gf_failure` is where the difference is made."""
+    `_report_enriched_gf_failure` is where the difference is made.
+
+    It goes to stderr all the same, because it names the MATRIX half and is
+    painted from inside the weave, before that half has resolved. On the run
+    where Matrix then fails it would be the only thing on stdout, promising a
+    table that never arrives to a caller owed zero bytes there."""
     if gf and not awards_only:
         try:
             _render_gflight_table(gf, legs=legs, top_n=top_n, match_carriers=_match_carriers(legs))
@@ -2002,9 +2001,11 @@ def _run_enriched_path(
     # exit code that reports success on one is the command lying about it. One
     # expression for both, because two that must agree eventually will not.
     painted = bool(gf) and not awards_only and state.get("paint_err") is None
-    # Read BEFORE the Google half is reported, because what that report should
-    # say depends on it: a refusal is a footnote to a Matrix table, and the
-    # whole outcome where there is no Matrix table.
+    # The Google half's report needs to know whether Matrix answered: a refusal
+    # is a footnote beside a Matrix table and the whole outcome without one, and
+    # "showing Matrix only" promises a half that never arrives. Passing
+    # `matrix_answered=` is what carries that; where the read sits relative to
+    # the block below is not, since the reporter never touches `state`.
     matrix_res = state.get("matrix")
     if "gf_err" in state:
         _report_enriched_gf_failure(state["gf_err"], matrix_answered=matrix_res is not None)
@@ -2073,8 +2074,7 @@ def _pin_cap_note(*, legs: tuple[Leg, ...], top_n: int) -> None:
     multi-cabin alike.
 
     Ranked first, not cheapest: the pin loop slices the board in the order the
-    page served it, which is a composite of price, duration and stops that
-    nothing here reproduces. A note claiming otherwise is checkably false on the
+    page served it. A note claiming otherwise is checkably false on the
     repository's own capture, whose lowest fare sits in the second block and is
     never pinned at all below `-n 3`.
 

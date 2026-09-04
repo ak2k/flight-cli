@@ -17,6 +17,10 @@ are built pin-major by the fan-out — so they are trimmed by price.
 The multi-cabin arms are where only the COUNT agrees: the JSON document carries
 the first `-n` of each cabin's own board and the table carries the top `-n` of
 the join, which is the same number of rows drawn from different sets.
+
+No rows is a value and has its own shape: an empty board is `[]` under
+`--format json` and a sentence on stdout otherwise, while a query that failed is
+zero bytes and exit 1. That is how a consumer tells no rows from no answer.
 """
 
 from __future__ import annotations
@@ -309,7 +313,7 @@ def test_a_round_trip_table_prints_its_rows_in_price_order(
 
     The enriched first paint reaches a trim only here — it hands the renderer
     the whole board — so a table drawn from a pin-major list would show the
-    same wrong three rows the JSON document used to."""
+    same wrong three rows a pin-major order produces."""
     board = gf_rows("ds1_metadata_blocks_kept.json")
     dearest, cheapest = board[1], board[2]
     cli._render_gflight_table(

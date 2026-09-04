@@ -162,7 +162,10 @@ class _Round:
         # thread that took it — `retry_throttled`'s `finally` is what makes that
         # happen on every door out — and holding the object means that even a
         # thread that somehow died still owning one cannot have its identity
-        # handed to a later worker, which would inherit a budget it never spent.
+        # handed to a later worker, which would then be MISTAKEN for the owner:
+        # it would answer `owner == me`, keep booking rungs and never be able to
+        # park as a waiter, on a wall it has not met. The round's SPEND is
+        # inherited either way, and correctly — the budget is the group's.
         self.owner: threading.Thread | None = None
         # Set when the owner's round resolves. Replaced per round so a waiter
         # cannot be woken by the previous round's result.
@@ -222,11 +225,12 @@ class _SharedThrottleLadder:
 
     def throttled(self, *, final: bool = False) -> float | None:
         """This worker's call came back throttled. How long to wait before
-        trying again, or None when the shared budget is gone.
+        trying again, or None when the shared budget is gone — or whenever it is
+        `final`; see `_step`.
 
         A non-owner blocks here for the owner's outcome and then retries
         immediately, so its wait is the owner's backoff rather than one of its
-        own — unless it is `final`; see `_step`."""
+        own."""
         return self._step(self._wall, final=final)
 
     def transport_failed(self, *, final: bool = False) -> float | None:
@@ -269,7 +273,9 @@ class _SharedThrottleLadder:
                 # end is a park nothing ends. The trade is one comparison and,
                 # for whoever takes the round next, one GET against a wall this
                 # round had already measured; the alternative is a worker
-                # parked for the life of the process.
+                # parked for the life of the process. What this does NOT reach
+                # is a worker already inside the wait: it is freed by the next
+                # worker to ask for a rung, and a two-worker fan-out has none.
                 round_.release()
             if round_.owner is None and not final:
                 round_.owner = me

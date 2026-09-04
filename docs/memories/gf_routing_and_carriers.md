@@ -257,10 +257,16 @@ whatever count is asked of it, so the count is a trim rather than a query
 parameter. It bounds everything the user can act on, and all of it from one place
 in `cli._run_gflight_path`: the table, the `--format json` document, the range
 `--pick` accepts and the itinerary `--emit-urls` pins, and the itineraries the
-award providers are fanned out over. That claim is about the paths that keep it —
-`--fast`, `--format json` and multi-cabin. On the default enriched path `--pick`
-indexes the Matrix solutions rather than the merged rows, which are two different
-sets the moment a Google-only row is cheaper.
+award providers are fanned out over. All five hold on `--fast` and on
+`--format json`, which are the same function. Multi-cabin keeps three of them —
+the table, the document and the award fan-out — and has neither of the other
+two: `cli._run_gflight_path_multi` has no `_emit_urls` call site at all, and
+neither multi path is passed `pick`, which the `search` command accepts and
+drops there. On the default enriched path `--pick` indexes the Matrix solutions
+rather than the merged rows, and those two sets differ in SIZE whenever any
+Google-only row survives the merge — the merged table can be longer than the
+Matrix solution list, so a pick naming a printed row is refused as out of
+range.
 
 **And it keeps two different orders, because the two sets are ordered by
 different things.** A one-way board arrives ranked by Google — a composite of
