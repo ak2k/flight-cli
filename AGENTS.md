@@ -80,10 +80,11 @@ choice that fits the rest of the stack — don't substitute.
   before adding a print or a table cell there. `cli.py` is the one file with a
   whole-file AST gate over it (`tests/test_calendar_split.py::escape_scan`). A
   value reaches a Rich console or table one of four ways: through `_quote` or
-  `_safe_text`, or through `_amount`, the one formatter the gate knows by name
-  (any other formatter that wraps inside itself is admitted at its call sites, one
-  allowlist entry each); as a named entry in the identifier allowlist; through a
-  format spec only a number survives; or as a renderable this scope built.
+  `_safe_text`, or through `_amount` or `_failure_text`, the two formatters the
+  gate knows by name (any other formatter that wraps inside itself is admitted at
+  its call sites, one allowlist entry each); as a named entry in the identifier
+  allowlist; through a format spec only a number survives; or as a renderable this
+  scope built.
   Anything else fails the gate.
 - **New SPA captures go in `research/`** (gitignored). Use
   `research/record_user_session.py` to drive a real browser, capture a wire

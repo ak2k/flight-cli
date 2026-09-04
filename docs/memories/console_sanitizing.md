@@ -164,7 +164,8 @@ What it cannot tell apart is two bodies of the same name, which share their
 entries — the two `query_cabin` closures printing `cab.value` are that shape on
 purpose, and the entry is keyed on the closure that prints it.
 The hostile-field tests — one payload per response field, driven one field at a
-time through each renderer — are what pin the values themselves.
+time through each renderer — are what pin the values a type at the boundary
+cannot, and an entry backed by neither is the claim nothing checks named above.
 The boundary in one line: a value can reach a Rich console from `cli.py` outside
 any call this scan reads — through one of those assignment slots, an API it does
 not name, a help string whose only f-string field is a bare name, or `pp/cli.py`'s

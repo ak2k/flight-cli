@@ -17,7 +17,7 @@ import sys
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, override
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, cast, override
 
 import anyio
 import httpx
@@ -610,6 +610,113 @@ def test_a_grid_that_was_painted_keeps_exit_zero_with_the_note(
     assert "Matrix is down" in _flat(cap.err)  # and what they did not get
 
 
+class _QueryAndTeardownFailClient(_PricedClient):
+    """Refuses the query, then refuses to close the session on the way out."""
+
+    @override
+    async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
+        _ = (search, cache)
+        raise MatrixApiError("the query was refused", kind="internal", request_id="req-QUERY")
+
+    @override
+    async def __aexit__(self, *_exc: object) -> None:
+        raise MatrixApiError(
+            "the session could not be closed", kind="unavailable", request_id="req-TEARDOWN"
+        )
+
+
+def test_two_matrix_failures_in_one_run_are_both_named(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The weave's Matrix task and the guard outside the event loop both stash, and
+    the two failures are not interchangeable: a query Matrix refused is the reason
+    there is no calendar, where a session that would not close is what happened
+    afterwards. One slot keeps whichever was written second, so the reader is sent
+    after the teardown and never learns the query was refused at all."""
+    monkeypatch.setattr(cli, "MatrixClient", _QueryAndTeardownFailClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _unavailable)
+    _spy_renderers(monkeypatch)
+    with pytest.raises(typer.Exit) as excinfo:
+        _run_enriched()
+    assert excinfo.value.exit_code == 1
+    line = _flat(capsys.readouterr().err)
+    assert "the query was refused" in line  # why there is no calendar
+    assert "req-QUERY" in line  # and the id a reader quotes for it
+    assert "the session could not be closed" in line  # and what happened next
+    assert "req-TEARDOWN" in line
+
+
+def test_a_first_paint_that_raised_is_not_reported_as_a_matrix_outage(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The first paint is the Google Flights half's own output and the renderer
+    drawing it is this process. Named under Matrix it reads as a backend outage,
+    which is an operator going after a service that never went down."""
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _fake_grid)
+    calls = _spy_renderers(monkeypatch)
+    monkeypatch.setattr(cli, "_render_date_grid", _exploding_grid_renderer)
+    _run_enriched()
+    assert calls["calendar"] == 1  # Matrix answered, so the answer is still painted
+    line = _flat(capsys.readouterr().err)
+    assert "the date-grid renderer blew up" in line
+    assert "Google Flights" in line  # the half that actually failed
+    assert "Matrix calendar failed" not in line  # and not the one that did not
+
+
+def test_a_reader_that_hung_up_under_the_first_paint_is_not_a_group(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`rich.Console.on_broken_pipe` answers a reader that closed the pipe with
+    `SystemExit`, which is a `BaseException`, and a task group wraps whatever leaves
+    its host body. A `BaseExceptionGroup` holding one is not an `Exception`, so the
+    guard round the weave cannot see it and neither can click: whoever ran `| head`
+    gets the group's traceback where every other calendar arm gives them a quiet
+    exit. This is the only arm that writes to a console from inside a task group,
+    which is why it is the only one with the shape."""
+
+    def _reader_hung_up(*_a: object, **_k: object) -> None:
+        raise SystemExit(1)
+
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _fake_grid)
+    _spy_renderers(monkeypatch)
+    monkeypatch.setattr(cli, "_render_date_grid", _reader_hung_up)
+    with pytest.raises(SystemExit) as excinfo:
+        _run_enriched()
+    assert excinfo.value.code == 1  # the exit a closed pipe has of its own
+    line = _flat(capsys.readouterr().err)
+    assert "ExceptionGroup" not in line  # never the plumbing round the cause
+    assert "sub-exception" not in line
+
+
+def test_a_matrix_brownout_behind_the_standing_gate_leaves_stdout_empty(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Exit 1 is a promise about stdout: no document at all. The grid RPC is gated,
+    so every weave run today takes a branch with no grid to paint and says so while
+    Matrix is still in flight — and Matrix failing behind that is the everyday
+    brownout. Real renderers, because a spy is exactly what would hide a status line
+    landing in the stream the answer uses."""
+
+    class _ErrClient(_PricedClient):
+        @override
+        async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
+            _ = (search, cache)
+            raise MatrixApiError("Matrix is down", kind="unavailable")
+
+    monkeypatch.setattr(cli, "MatrixClient", _ErrClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _unavailable)
+    with pytest.raises(typer.Exit) as excinfo:
+        _run_enriched()
+    assert excinfo.value.exit_code == 1
+    cap = capsys.readouterr()
+    assert cap.out == ""  # the stream a caller reads for the answer carries none
+    line = _flat(cap.err)
+    assert "price grid unavailable" in line  # why there was no fast half
+    assert "Matrix is down" in line  # and why there is no calendar
+
+
 def test_calendar_enriched_paints_grid_before_matrix(monkeypatch: Any) -> None:
     # The progressive-reveal contract: the GF grid is painted BEFORE the Matrix calendar.
     order: list[str] = []
@@ -660,14 +767,17 @@ def test_calendar_enriched_grid_unavailable_notes_once_and_paints_matrix(
     cap = capsys.readouterr()
     assert calls["grid"] == 0  # gated → never show a GF half that isn't there
     assert calls["calendar"] == 1  # Matrix priced the window and painted
-    out = _flat(cap.out)
-    assert out.count("price grid unavailable") == 1  # said once, not per chunk
+    # On stderr: there is no grid to show, so this is status about an answer that
+    # has not arrived, and Matrix may still fail behind it — which is exit 1 with
+    # a stream a caller reads for the document.
+    note = _flat(cap.err)
+    assert note.count("price grid unavailable") == 1  # said once, not per chunk
     # The note is printed while Matrix is still in flight, so it may only promise
     # to wait — Matrix can still fail after it (and today, on one-way, it does).
-    assert "awaiting Matrix calendar" in out
-    assert "Showing the Matrix calendar" not in out
-    # `err` is a stderr Console, so the broad except's message lands on cap.err.
-    assert "date-grid failed" not in cap.err
+    assert "awaiting Matrix calendar" in note
+    assert "Showing the Matrix calendar" not in note
+    assert "date-grid failed" not in note  # a standing gate is not a failure
+    assert cap.out == ""  # and nothing that is not the answer went to the answer
 
 
 def test_calendar_enriched_city_code_gets_the_gate_note_not_an_attribute_error(
@@ -684,10 +794,11 @@ def test_calendar_enriched_city_code_gets_the_gate_note_not_an_attribute_error(
     cap = capsys.readouterr()
     assert calls["calendar"] == 1  # Matrix priced the window regardless
     assert calls["grid"] == 0
-    out = _flat(cap.out)
-    assert out.count("price grid unavailable") == 1
-    assert "date-grid failed" not in _flat(cap.err)
-    assert "no attribute" not in _flat(cap.err)
+    note = _flat(cap.err)  # status, not a document; see the gate note above
+    assert note.count("price grid unavailable") == 1
+    assert "date-grid failed" not in note
+    assert "no attribute" not in note
+    assert cap.out == ""
 
 
 def _calendar_fast(**overrides: Any) -> None:
@@ -1130,15 +1241,21 @@ def test_a_calendar_fanout_that_loses_every_sub_query_refuses(
     assert cap.out == ""  # the brownout advice never gets printed as the answer
     line = _flat(cap.err)
     assert "all 2 sub-queries failed" in line  # how many of how many
-    # The FIRST cause, which is the lowest-index destination and not whichever
-    # sub-query happened to lose first; naming the other would make the count the
-    # only true thing in the sentence.
+    # And every destination that dropped, because two sub-queries refused for two
+    # reasons is two things to fix: a report naming one leaves the count as the
+    # only true half of it.
     assert "VIE UNAVAILABLE" in line
-    assert "PAR UNAVAILABLE" not in line
-    # And it arrives through the shared Matrix reporter, so the kind and the
-    # request id survive the fan-out the way they do on a single query.
+    assert "PAR UNAVAILABLE" in line
+    # Lowest-index first, so the same outage reads the same way on every run:
+    # sub-queries are indexed in destination order and finish in whatever order the
+    # network gives them.
+    assert line.index("VIE UNAVAILABLE") < line.index("PAR UNAVAILABLE")
+    # Each arrives through the shared Matrix reporter, so the kind and the request
+    # id survive the fan-out the way they do on a single query — for every cause,
+    # not just whichever one led.
     assert "internal" in line
     assert "req-VIE" in line
+    assert "req-PAR" in line
 
 
 def test_a_calendar_fanout_that_loses_some_sub_queries_says_how_many(
@@ -1426,6 +1543,237 @@ def test_two_concurrent_calendar_failures_are_each_named(
     assert "nodename nor servname" in line  # the transport half
     assert "Matrix is down" in line  # and the Matrix half
     assert "TaskGroup" not in line  # never the plumbing the reader cannot act on
+    # In member order, which is task-start order rather than the order they raised.
+    # Two things read it: the join above, and the "first cause" a deliberate stop
+    # beside a failure names — so the same outage has to report the same way twice.
+    assert line.index("nodename nor servname") < line.index("Matrix is down")
+
+
+def test_a_lone_cancellation_comes_back_inside_the_group_around_it() -> None:
+    """A group of one usually unwraps, because the wrapper is plumbing. Not when
+    the member is not an `Exception`: both guards' arms are typed to `Exception`,
+    so handing them a cancellation out of its group gives them something they are
+    written not to catch, and the classifier is the last place that can tell."""
+
+    async def _cancelled_class() -> type[BaseException]:
+        # Named by the backend rather than hardcoded: which class a cancel wears
+        # is anyio's to choose, and the point is that it is not an `Exception`.
+        return anyio.get_cancelled_exc_class()
+
+    group = BaseExceptionGroup("task group", [anyio.run(_cancelled_class)()])
+    # The annotation says `Exception`, and a group holding a `BaseException` is not
+    # one: the guard above this never passes such a group down, which is exactly why
+    # the classifier has to keep saying so rather than assume it.
+    assert cli._calendar_cause(cast("Exception", group)) is group  # pyright: ignore[reportPrivateUsage] — the classifier IS the unit
+
+
+def test_a_group_of_one_names_its_failure_without_counting_it() -> None:
+    """The count exists because a group's own `str` gives a reader a number and no
+    message. One message needs no number, and "1 concurrent failures" reads as a
+    fault in the reporter to the reader least placed to tell it from one."""
+    group = BaseExceptionGroup("task group", [RuntimeError("just the one")])
+    assert cli._failure_text(group) == "just the one"  # pyright: ignore[reportPrivateUsage] — the formatter IS the unit
+
+
+def test_a_single_query_calendar_failure_names_the_command_once(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One query refused is the commonest calendar failure there is, and it was the
+    one shape printing no prefix — so a matcher on `Matrix calendar failed` caught
+    the fan-out and the beside-a-stop line and missed this. Once, because the
+    backend's message belongs under the prefix rather than in it: folding the two
+    prints together is what drops the kind and the request id."""
+
+    class _ErrClient(_PricedClient):
+        @override
+        async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
+            _ = (search, cache)
+            raise MatrixApiError("Matrix is down", kind="unavailable", request_id="req-7")
+
+    monkeypatch.setattr(cli, "MatrixClient", _ErrClient)
+    with pytest.raises(typer.Exit) as excinfo:
+        cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
+            _cal(["PAR"]), rps=10.0, impersonate="chrome", no_cache=True
+        )
+    assert excinfo.value.exit_code == 1
+    cap = capsys.readouterr()
+    assert cap.out == ""
+    line = _flat(cap.err)
+    assert "Matrix calendar failed" in line  # the prefix every other shape prints
+    assert line.count("Matrix is down") == 1  # and the message once, not twice
+    assert "unavailable" in line  # with the kind
+    assert "req-7" in line  # and the id
+
+
+class _ExitBesideTwoFailuresClient(_PricedClient):
+    """A deliberate stop and TWO unrelated failures, all in one task group."""
+
+    @override
+    async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
+        _ = (search, cache)
+
+        async def _stop() -> None:
+            raise typer.Exit(0)
+
+        async def _dns() -> None:
+            raise OSError("nodename nor servname provided")
+
+        async def _refused() -> None:
+            raise MatrixApiError("Matrix is down", kind="unavailable")
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(_stop)
+            tg.start_soon(_dns)
+            tg.start_soon(_refused)
+        raise AssertionError  # unreachable: the group above always raises
+
+
+def test_every_failure_beside_a_deliberate_stop_is_named(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The count sentence says how many failures stood beside the stop, and the
+    stop ends the command where it is, so nothing downstream will ever mention
+    them. Naming one leaves the count as the only true half of that sentence — and
+    under `Exit(0)` the process reports success on every channel a caller has, so
+    stderr is the only place the rest of it can be said."""
+    monkeypatch.setattr(cli, "MatrixClient", _ExitBesideTwoFailuresClient)
+    with pytest.raises(typer.Exit) as excinfo:
+        cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
+            _cal(["PAR"]), rps=10.0, impersonate="chrome", no_cache=True
+        )
+    assert excinfo.value.exit_code == 0  # the stop's own code, not 1
+    cap = capsys.readouterr()
+    assert cap.out == ""
+    line = _flat(cap.err)
+    assert "2 failures beside a deliberate stop" in line  # how many there were
+    assert "nodename nor servname" in line  # and each of them, not the first alone
+    assert "Matrix is down" in line
+    assert "unavailable" in line  # the backend error keeping its kind
+
+
+def test_a_teardown_after_a_calendar_keeps_the_answer_on_the_plain_path(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Matrix priced the window and the client then refused to close. The exit code
+    follows what the reader got, as it does on the weave: an answer that arrived
+    stands, and the teardown is a line beside it. Discarding it reports a query that
+    succeeded as one that never ran, on the two channels automation reads."""
+    monkeypatch.setattr(cli, "MatrixClient", _TeardownFailsClient)
+    res, n = cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
+        _cal(["PAR"]), rps=10.0, impersonate="chrome", no_cache=True
+    )
+    assert not is_empty_calendar(res)  # the calendar Matrix priced, not discarded
+    assert n == 0
+    assert "client teardown blew up" in _flat(capsys.readouterr().err)
+
+
+class _SubQueryStop(BaseException):
+    """A `BaseException` from a sub-query that is not the interpreter's own stop.
+
+    Not `SystemExit`, and the difference is measured rather than stylistic: the
+    event loop re-raises a `SystemExit` or a `KeyboardInterrupt` out of the task
+    that raised it before the group is ever built, so those two never reach a guard
+    round `anyio.run` as a group at all. Every other `BaseException` a child raises
+    does, which makes this the shape the arm below exists for."""
+
+
+class _StoppingSubQueryClient(_PricedClient):
+    """One sub-query ending on something the fan-out's own arm cannot catch."""
+
+    @override
+    async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
+        if next(iter(search.legs[0].destinations), "?") == "VIE":
+            raise _SubQueryStop("the sub-query stopped")
+        return await super().execute(search, cache=cache)
+
+
+def test_a_base_exception_inside_a_fanout_is_not_a_group(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The fan-out's own arm catches `Exception`, so a `BaseException` from a
+    sub-query leaves the task group wrapped in a `BaseExceptionGroup` — which the
+    guard below cannot see for the same reason the weave's cannot, and which click
+    cannot map to an exit code either. Unwrapped it ends the command as it would
+    have with no group round it, rather than as the group's own traceback."""
+    monkeypatch.setattr(cli, "MatrixClient", _StoppingSubQueryClient)
+    with pytest.raises(_SubQueryStop) as excinfo:
+        cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
+            _cal(["VIE", "PAR"]), rps=10.0, impersonate="chrome", no_cache=True
+        )
+    assert str(excinfo.value) == "the sub-query stopped"  # the cause, not the wrapper
+    assert "ExceptionGroup" not in _flat(capsys.readouterr().err)
+
+
+# ──────────── the call that writes the answer is inside the guard ───────────
+# `_render_calendar`, `_render_date_grid` and `_emit_urls` are what put the
+# document on stdout. A raise in one is a calendar that failed as surely as a
+# backend that never answered — a price the table cannot format, a reader that
+# closed the pipe — and on the weave the grid has already been delivered, so it is
+# a calendar the reader is holding reported as a crash.
+
+
+def _exploding_calendar_renderer(*_a: object, **_k: object) -> None:
+    raise RuntimeError("the calendar renderer blew up")
+
+
+def _exploding_url_emitter(*_a: object, **_k: object) -> None:
+    raise RuntimeError("the URL emitter blew up")
+
+
+def _weave_renderer_raises(monkeypatch: Any) -> None:
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _fake_grid)
+    _spy_renderers(monkeypatch)
+    monkeypatch.setattr(cli, "_render_calendar", _exploding_calendar_renderer)
+    _run_enriched()
+
+
+def _weave_emitter_raises(monkeypatch: Any) -> None:
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _fake_grid)
+    _spy_renderers(monkeypatch)
+    monkeypatch.setattr(cli, "_emit_urls", _exploding_url_emitter)
+    _run_enriched()
+
+
+def _plain_renderer_raises(monkeypatch: Any) -> None:
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    _spy_renderers(monkeypatch)
+    monkeypatch.setattr(cli, "_render_calendar", _exploding_calendar_renderer)
+    _calendar_fast(fast=False, one_way=False)
+
+
+def _fanout_emitter_raises(monkeypatch: Any) -> None:
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    _spy_renderers(monkeypatch)
+    monkeypatch.setattr(cli, "_emit_urls", _exploding_url_emitter)
+    _calendar_fast(fast=False, destination="VIE,PAR")
+
+
+@pytest.mark.parametrize(
+    ("drive", "message"),
+    [
+        (_weave_renderer_raises, "the calendar renderer blew up"),
+        (_weave_emitter_raises, "the URL emitter blew up"),
+        (_plain_renderer_raises, "the calendar renderer blew up"),
+        (_fanout_emitter_raises, "the URL emitter blew up"),
+    ],
+    ids=["weave render", "weave emit", "plain render", "fan-out emit"],
+)
+def test_a_raise_writing_the_answer_is_a_typed_line(
+    drive: Any, message: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One arm per live site. Each ends as the typed line and exit 1 that every
+    other cause on these paths ends as, and the prefix is the same one, because a
+    caller matching on it cannot be asked to know which half of the command broke.
+    `--fast`'s grid render is the fourth site and is runtime-dead while the RPC
+    gate stands, so it has no arm here."""
+    with pytest.raises(typer.Exit) as excinfo:
+        drive(monkeypatch)
+    assert excinfo.value.exit_code == 1
+    line = _flat(capsys.readouterr().err)
+    assert "Matrix calendar failed" in line
+    assert message in line
 
 
 # ──────────── --duration is resolved against the trip shape (one-way) ───────
@@ -2062,63 +2410,86 @@ def test_search_summary_and_table_survive_a_hostile_matrix_field(
 # driven one at a time: a matrix that varied them together would pass on whichever
 # field happened to be wrapped.
 _SLICE_FIELDS = ("origin", "destination", "stop", "flight_number", "timestamps", "legroom_class")
+# Which slice of the trip carries it. Outbound and return come out of one
+# formatter but are bound to separate names in each renderer, so they are two
+# claims — and a row hostile in both stays green when either wrap goes, because
+# the other cell still carries the payload into the same line.
+_SLICE_SLOTS = ("outbound", "return")
 
 
-def _slice_solution(field: str, payload: str) -> dict[str, Any]:
-    """One solution whose itinerary slice carries `payload` in `field`.
+def _hostile_slice(field: str, payload: str) -> dict[str, Any]:
+    """One itinerary slice carrying `payload` in `field` and benign in the rest.
 
     The timestamps are driven as a PAIR and deliberately unreadable as dates:
     `_fmt_slice_times` formats two datetimes when it can parse them and falls back
     to Matrix's own two strings when it cannot, and only the fallback is remote.
     """
     return {
+        "origin": {"code": payload if field == "origin" else "JFK"},
+        "destination": {"code": payload if field == "destination" else "LHR"},
+        "stops": [{"code": payload if field == "stop" else "BOS"}],
+        "flights": [payload if field == "flight_number" else "BA117"],
+        "departure": f"{payload}dep" if field == "timestamps" else "2026-10-01T08:00",
+        "arrival": f"{payload}arr" if field == "timestamps" else "2026-10-01T20:00",
+        "duration": 420,
+        "legs": [
+            {
+                "pitch_inches": 31,
+                "legroom_class": payload if field == "legroom_class" else "Lie Flat",
+            }
+        ],
+    }
+
+
+def _slice_solution(
+    field: str, payload: str, *, slot: str = "outbound", carrier: str = "BA"
+) -> dict[str, Any]:
+    """A round-trip solution whose `slot` slice carries `payload` in `field`.
+
+    TWO slices, because the return cell exists only when there is one: given a
+    single slice both itinerary renderers take the literal '—' down that branch, so
+    the wrap on the return cell is a claim no payload ever reaches."""
+    return {
         "ext": {"price": "USD421.00"},
         "itinerary": {
-            "carriers": [{"code": "BA"}],
+            "carriers": [{"code": carrier}],
             "slices": [
-                {
-                    "origin": {"code": payload if field == "origin" else "JFK"},
-                    "destination": {"code": payload if field == "destination" else "LHR"},
-                    "stops": [{"code": payload if field == "stop" else "BOS"}],
-                    "flights": [payload if field == "flight_number" else "BA117"],
-                    "departure": f"{payload}dep" if field == "timestamps" else "2026-10-01T08:00",
-                    "arrival": f"{payload}arr" if field == "timestamps" else "2026-10-01T20:00",
-                    "duration": 420,
-                    "legs": [
-                        {
-                            "pitch_inches": 31,
-                            "legroom_class": payload if field == "legroom_class" else "Lie Flat",
-                        }
-                    ],
-                }
+                _hostile_slice(field if slot == "outbound" else "", payload),
+                _hostile_slice(field if slot == "return" else "", payload),
             ],
         },
     }
 
 
-def _slice_result(field: str, payload: str) -> SearchResult:
+def _slice_result(
+    field: str, payload: str, *, slot: str = "outbound", carrier: str = "BA"
+) -> SearchResult:
     """A search response holding one such solution and nothing else hostile."""
     return SearchResult.from_api(
         {
             "solutionCount": 1,
             "currencyNotice": {"ext": {"price": "USD421.00"}},
-            "solutionList": {"solutions": [_slice_solution(field, payload)]},
+            "solutionList": {
+                "solutions": [_slice_solution(field, payload, slot=slot, carrier=carrier)]
+            },
         }
     )
 
 
 @pytest.mark.parametrize("payload", _HOSTILE_FIELD_VALUES)
+@pytest.mark.parametrize("slot", _SLICE_SLOTS)
 @pytest.mark.parametrize("field", _SLICE_FIELDS)
 def test_search_itinerary_cells_survive_a_hostile_matrix_field(
-    field: str, payload: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+    field: str, slot: str, payload: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The itinerary cells are the half of the table the summary cases never
     reached: airport codes, connection codes, flight numbers, the raw-ISO timestamp
     fallback and the seat-type name all land in a Rich cell, which parses markup
-    exactly as the title above it does."""
+    exactly as the title above it does. Both columns, because they are two cells
+    and two claims."""
     buffer = io.StringIO()
     monkeypatch.setattr(cli, "console", Console(file=buffer, width=400))
-    cli._render_search(_slice_result(field, payload))  # pyright: ignore[reportPrivateUsage] — the render site IS the unit
+    cli._render_search(_slice_result(field, payload, slot=slot))  # pyright: ignore[reportPrivateUsage] — the render site IS the unit
     probe = _flat(_SGR.sub("", buffer.getvalue()))
     for driver in _DRIVERS:
         assert driver not in probe, f"{driver!r} reached the console"
@@ -2128,16 +2499,46 @@ def test_search_itinerary_cells_survive_a_hostile_matrix_field(
 
 
 @pytest.mark.parametrize("payload", _HOSTILE_FIELD_VALUES)
+@pytest.mark.parametrize("slot", _SLICE_SLOTS)
 @pytest.mark.parametrize("field", _SLICE_FIELDS)
 def test_multi_cabin_itinerary_cells_survive_a_hostile_matrix_field(
-    field: str, payload: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+    field: str, slot: str, payload: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The multi-cabin table builds its cells from the same formatter, and the two
     renderers have drifted apart on a shared field before, so it is pinned on its
     own rather than through the one above."""
     row = MultiCabinRow(
-        itinerary=_slice_result(field, payload).solutions[0],
+        itinerary=_slice_result(field, payload, slot=slot).solutions[0],
         prices={Cabin.COACH: "USD421.00"},
+    )
+    buffer = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, width=400))
+    cli._render_multi_cabin_search(  # pyright: ignore[reportPrivateUsage] — the render site IS the unit
+        [row], cabins=(Cabin.COACH,), sort_by=Cabin.COACH
+    )
+    probe = _flat(_SGR.sub("", buffer.getvalue()))
+    for driver in _DRIVERS:
+        assert driver not in probe, f"{driver!r} reached the console"
+    if payload != "\x1b[2J":
+        assert payload in probe, f"{field} was eaten"
+    _ = capsys.readouterr()
+
+
+@pytest.mark.parametrize("payload", _HOSTILE_FIELD_VALUES)
+@pytest.mark.parametrize("field", ["carrier", "price"])
+def test_multi_cabin_rows_survive_a_hostile_carrier_and_price(
+    field: str, payload: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The carrier column and the per-cabin price columns are the two the itinerary
+    arm above cannot reach: its fixture writes one carrier code and hands the row
+    one price, and both are this file's own strings. Matrix chooses both on a real
+    response, and the single-cabin table's carrier cell is pinned through a path
+    the multi-cabin one does not use."""
+    row = MultiCabinRow(
+        itinerary=_slice_result("", "", carrier=payload if field == "carrier" else "BA").solutions[
+            0
+        ],
+        prices={Cabin.COACH: payload if field == "price" else "USD421.00"},
     )
     buffer = io.StringIO()
     monkeypatch.setattr(cli, "console", Console(file=buffer, width=400))
@@ -2519,6 +2920,41 @@ def test_the_multi_cabin_title_survives_a_hostile_currency(
     monkeypatch.setattr(cli, "console", Console(file=buffer, width=400))
     cli._render_multi_cabin_search(  # pyright: ignore[reportPrivateUsage] — the render site IS the unit
         [row], cabins=(Cabin.COACH,), sort_by=Cabin.COACH
+    )
+    probe = _flat(_SGR.sub("", buffer.getvalue()))
+    for driver in _DRIVERS:
+        assert driver not in probe, f"{driver!r} reached the console"
+    if payload != "\x1b[2J":
+        assert payload in probe, "the currency tag was eaten"
+    _ = capsys.readouterr()
+
+
+@pytest.mark.parametrize("payload", _HOSTILE_FIELD_VALUES)
+def test_the_calendar_title_survives_a_hostile_currency(
+    payload: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The calendar's summary line and table title each interpolate a currency tag,
+    and the currency is Matrix's. It is the third renderer with that tag and the one
+    whose branch no arm rendered: the nearest case passes a price `_PRICE_RE` does
+    not match, so the currency comes back empty and the tag is the empty string.
+    Driven through `_split_price` because that regex bounds a currency to three
+    letters, so the render site is pinned without depending on it staying as it is."""
+
+    def _hostile_currency(_s: str | None) -> tuple[str, str]:
+        return payload, "421.00"
+
+    monkeypatch.setattr(cli, "_split_price", _hostile_currency)
+    buffer = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, width=400))
+    cli._render_calendar(  # pyright: ignore[reportPrivateUsage] — the render site IS the unit
+        _result({9: {7: ("USD500.00", 1, {5: "USD501.00", 7: "USD502.00"})}}),
+        dmin=5,
+        dmax=7,
+        origin=("JFK",),
+        destination=("LHR",),
+        sd=W.start,
+        ed=W.end,
+        round_trip=True,
     )
     probe = _flat(_SGR.sub("", buffer.getvalue()))
     for driver in _DRIVERS:
@@ -3421,8 +3857,11 @@ def escape_scan(src: str) -> list[str]:
     about a name in one body, so a closure that shadows or rebinds the name is
     scanned like any other function and inherits nothing. What it cannot tell apart
     is two bodies of the same name, which share their entries — the two
-    `query_cabin` closures printing `cab.value` are that shape on purpose. The
-    hostile-field tests above are what pin the values themselves.
+    `query_cabin` closures printing `cab.value` are that shape on purpose. What an
+    entry does NOT get from this is a check on the value behind it: the hostile-field
+    tests above are what pin the values a type at the response or enum boundary
+    cannot, one payload per field through the renderer that reads it, and an entry
+    with neither is a claim nothing checks.
     """
     tree = ast.parse(src)
     chains = _enclosing_functions(tree)

@@ -139,19 +139,27 @@ nothing" a claim only the destinations that answered can support.
 
 Exit 0 means a document on stdout: the rendered grid, or the object `--format
 json` writes. Exit 1 means no document at all — stdout is empty and stderr
-carries one typed line, whether the cause was a Matrix error, a backend that
-could not be reached, or the fan-out refusal above. Exit 2 is an input refusal,
-raised before any Matrix call. Partial sub-query coverage is the one middle
-state, and it is a stderr NOTE beside a complete-looking stdout document: exit 0,
-a grid, and a line saying how many origin/destination groups are missing from it.
+carries one typed failure report, whether the cause was a Matrix error, a
+backend that could not be reached, or the fan-out refusal above. That report is
+one line or several: a Matrix error adds the backend's kind and message, and its
+request id when there is one, on the lines below the first; a fan-out names every
+sub-query that dropped; and `--fast` says why there is no grid before it says
+there is none. Read the whole stream, not the first line. Everything a weave
+prints while it still has nothing to show — the gate note, a throttle, the wait
+for Matrix — is on stderr for the same reason: stdout carries the answer or
+nothing. Exit 2 is an input refusal, raised before any Matrix call.
+
+Partial sub-query coverage is the one middle state, and it is a stderr NOTE
+beside a complete-looking stdout document: exit 0, a grid, and a line saying how
+many origin/destination groups are missing from it.
 The JSON carries no field for that, so a caller that must know whether the grid
 is whole reads stderr, or asks for one destination at a time.
 
 Three readings cover every calendar that ran. Exit 1 with stdout empty is no
-answer at all: the window was never priced, and the single line on stderr says
-why. Exit 0 with "Calendar empty." on stdout IS an answer — Matrix searched the
-window and priced nothing in it — which is why a fan-out that lost a destination
-refuses rather than printing that sentence. Exit 0 with a grid is the answer,
+answer at all: the window was never priced, and stderr says why. Exit 0 with
+"Calendar empty." on stdout IS an answer — Matrix searched the window and priced
+nothing in it — which is why a fan-out that lost a destination refuses rather
+than printing that sentence. Exit 0 with a grid is the answer,
 possibly a partial one, and stderr is where everything that qualifies it goes:
 the coverage note above, and a failure that happened AFTER the grid reached the
 reader, which stays a line rather than an exit code because what they were given

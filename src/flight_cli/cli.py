@@ -770,12 +770,18 @@ class _CalendarFanout(NamedTuple):
     answered, and the one thing the data cannot support when they did not."""
 
     results: list[CalendarResult]
-    failed: int
-    # The LOWEST-INDEX failure, so it names the same destination on every run:
-    # sub-queries are indexed in destination order and finish in whatever order
-    # the network gives them, and "first to raise" would be a different one each
-    # time the same outage was reported.
-    first_error: Exception | None
+    # Every failure, in DESTINATION order rather than the order they raised:
+    # sub-queries are indexed in destination order and finish in whatever order the
+    # network gives them, so the same outage names the same destinations in the same
+    # sequence on every run. All of them, because three sub-queries failing for
+    # three different reasons is three things to fix and a reader told only the
+    # lowest-index one never learns the others were different.
+    failures: list[Exception]
+
+    @property
+    def failed(self) -> int:
+        """How many destinations dropped out of the merge."""
+        return len(self.failures)
 
 
 async def _gather_calendar(
@@ -801,9 +807,8 @@ async def _gather_calendar(
     async with anyio.create_task_group() as tg:
         for i, s in enumerate(subs):
             tg.start_soon(one, i, s)
-    failures = [e for e in errors if e is not None]
     return _CalendarFanout(
-        [r for r in results if r is not None], len(failures), failures[0] if failures else None
+        [r for r in results if r is not None], [e for e in errors if e is not None]
     )
 
 
@@ -826,13 +831,17 @@ def _failure_text(cause: object) -> str:
 
     A group that could not be unwrapped names every failure under it, because the
     group's own `str` is a count of sub-exceptions and discards each message it
-    holds — which is the only part a reader can act on."""
+    holds — which is the only part a reader can act on. The count belongs to
+    several: one message needs no counting, and "1 concurrent failures" reads as a
+    bug in the reporter to the reader least able to tell it from one."""
     if not isinstance(cause, BaseExceptionGroup):
         return _safe_text(cause)
     # `isinstance` narrows to the unparameterised generic, which leaves every
     # member unknown; anyio builds these and they hold whatever the tasks raised.
     leaves = _exception_leaves(cast("BaseExceptionGroup[BaseException]", cause))
     named = "; ".join(_safe_text(leaf) for leaf in leaves)
+    if len(leaves) == 1:
+        return named
     return f"{len(leaves):d} concurrent failures: {named}"
 
 
@@ -850,13 +859,28 @@ def _print_calendar_failure(cause: object, lost: str = "") -> None:
     line rather than inside it, so one backend error reads the same whether one
     query asked or twelve did — `str()` of that exception is the message alone,
     and the kind and request id a reader needs to report it would be dropped by
-    the sub-query path and kept by the single-query one."""
+    the sub-query path and kept by the single-query one. A group gets the same
+    treatment leaf by leaf, below the line that names them all: a backend error
+    inside one is the commonest thing in a group, and `_failure_text` has only
+    `str()` of it."""
     if isinstance(cause, MatrixApiError):
         if lost:
             err.print(f"[red]Matrix calendar failed:[/] {_safe_text(lost)}")
+        else:
+            # A full stop rather than a colon, because `lost` is the count sentence
+            # and a single query has none: a colon there promises a clause that
+            # never comes. Printed all the same, so the prefix a caller matches on
+            # is on the commonest calendar failure of all and not only the rare ones.
+            err.print("[red]Matrix calendar failed.[/]")
         _print_matrix_error(cause)
         return
     err.print(f"[red]Matrix calendar failed:[/] {_safe_text(lost)}{_failure_text(cause)}")
+    if isinstance(cause, BaseExceptionGroup):
+        # `isinstance` narrows to the unparameterised generic, which leaves every
+        # member unknown; anyio builds these and they hold whatever the tasks raised.
+        for leaf in _exception_leaves(cast("BaseExceptionGroup[BaseException]", cause)):
+            if isinstance(leaf, MatrixApiError):
+                _print_matrix_error(leaf)
 
 
 def _orderly_exit(e: BaseException) -> typer.Exit | typer.Abort | None:
@@ -919,8 +943,40 @@ def _calendar_failure(e: Exception) -> Exception:
                 hidden[0],
                 f"{len(hidden):d} failure{plural} beside a deliberate stop; first cause: ",
             )
+            rest = hidden[1:]
+            if rest:
+                # The count above says how many there were, and this is where the
+                # rest of them get said. Through the same printer, so each keeps
+                # the dispatch a backend error needs: the exit ends the command
+                # here, so nothing downstream will ever mention these again.
+                _print_calendar_failure(
+                    rest[0] if len(rest) == 1 else BaseExceptionGroup("beside a stop", rest),
+                    "and beside it: ",
+                )
         raise orderly
     return _calendar_cause(e)
+
+
+def _deliver_calendar(write_answer: Callable[[], None]) -> None:
+    """Write the calendar's answer inside the guard that reports a failure.
+
+    The renderer and the URL emitter are the calls that put the document on stdout,
+    and a raise in either is as much a calendar failure as a backend that never
+    answered — a malformed price the table cannot format, a reader that closed the
+    pipe. Outside a guard it is a rich traceback on the one path whose whole
+    contract is that a failure is a typed line and exit 1, and on the weave it
+    reports a calendar that was already delivered as a crash.
+
+    An orderly exit passes through: a stop is not a delivery failure, and both
+    `typer.Exit` and `typer.Abort` subclass `RuntimeError` on the installed click,
+    so the broad arm below would answer one with a backend's name."""
+    try:
+        write_answer()
+    except (typer.Exit, typer.Abort):
+        raise
+    except Exception as e:
+        _print_calendar_failure(e)
+        raise typer.Exit(1) from e
 
 
 def _report_calendar_fanout(fan: _CalendarFanout, total: int, *, merged_empty: bool) -> None:
@@ -935,14 +991,19 @@ def _report_calendar_fanout(fan: _CalendarFanout, total: int, *, merged_empty: b
     note only ever prints beside a grid, and its "below" is always true."""
     if fan.failed == 0:
         return
+    # Every destination that dropped, not the lowest-index one alone: three
+    # sub-queries refused for three different reasons is three things to fix, and
+    # the count in the sentence is the only true half of a report that names one.
+    # A lone failure goes as itself, because a group of one is plumbing.
+    causes = fan.failures[0] if fan.failed == 1 else BaseExceptionGroup("sub-queries", fan.failures)
     if fan.failed >= total:
-        _print_calendar_failure(fan.first_error, f"all {total:d} sub-queries failed; first cause: ")
+        _print_calendar_failure(causes, f"all {total:d} sub-queries failed; ")
         raise typer.Exit(1)
     if merged_empty:
         _print_calendar_failure(
-            fan.first_error,
+            causes,
             f"{fan.failed:d} of {total:d} sub-queries failed and nothing that answered "
-            "priced a day; first cause: ",
+            "priced a day; ",
         )
         raise typer.Exit(1)
     err.print(
@@ -990,19 +1051,29 @@ def _run_calendar(
             f"--max-per-query to send fewer, larger requests.[/]"
         )
 
+    answer: tuple[CalendarResult, int] | None = None
+
     async def go() -> tuple[CalendarResult, int]:
+        nonlocal answer
         async with MatrixClient(
             rps=max(rps, float(conc)), impersonate=impersonate, concurrency=conc
         ) as c:
             if not multi:
-                return cast("CalendarResult", await c.execute(search, cache=not no_cache)), 0
-            fan = await _gather_calendar(c, subs, cache=not no_cache)
-            # Merge BEFORE reporting: whether what survived says anything is what
-            # decides between a note and a refusal, and only the merge knows.
-            merged = merge_calendar_results(fan.results)
-            empty = is_empty_calendar(merged)
-            _report_calendar_fanout(fan, n, merged_empty=empty)
-            return (merged, 0) if empty else (merged, n)
+                answer = (cast("CalendarResult", await c.execute(search, cache=not no_cache)), 0)
+            else:
+                fan = await _gather_calendar(c, subs, cache=not no_cache)
+                # Merge BEFORE reporting: whether what survived says anything is
+                # what decides between a note and a refusal, and only the merge
+                # knows.
+                merged = merge_calendar_results(fan.results)
+                empty = is_empty_calendar(merged)
+                _report_calendar_fanout(fan, n, merged_empty=empty)
+                answer = (merged, 0) if empty else (merged, n)
+            # Recorded inside the `async with`, because the client's own teardown is
+            # one of the things that can fail after Matrix has answered, and the
+            # guard below has no other way to tell a query that never ran from one
+            # that ran and was thrown away on the way out.
+            return answer
 
     # One arm for every way this can fail. The client is built inside `go`, so an
     # unresolvable API key, a refused connection or a DNS failure raises there
@@ -1016,7 +1087,24 @@ def _run_calendar(
         # interruption that must not be dressed up as a backend failure.
         cause = _calendar_failure(e)
         _print_calendar_failure(cause)  # which sends a MatrixApiError to its own reporter
+        if answer is not None:
+            # A calendar that arrived and a run that then failed on the way out are
+            # both true, and the exit code follows what the reader got: the answer
+            # still stands, so the failure is the line above and nothing more.
+            return answer
         raise typer.Exit(1) from cause
+    except BaseExceptionGroup as group:
+        # BELOW the arm above, and it has to stay there: a group whose members are
+        # all `Exception`s IS an `Exception` and belongs to the classifier. What
+        # reaches here holds something that is not — rich answers a reader that hung
+        # up with `SystemExit` — and a task group wraps whatever leaves it, so the
+        # arm above cannot see it and neither can click. Unwrapped, the process ends
+        # the way it would have with no group round it, which for a closed pipe is a
+        # quiet exit 1 rather than the group's traceback at somebody who ran `| head`.
+        leaves = _exception_leaves(group)
+        if len(leaves) == 1:
+            raise leaves[0] from None
+        raise
 
 
 def _run_calendar_weave(go: Callable[[], Coroutine[Any, Any, None]], state: dict[str, Any]) -> None:
@@ -1026,40 +1114,59 @@ def _run_calendar_weave(go: Callable[[], Coroutine[Any, Any, None]], state: dict
     key, a refused connection or a DNS failure raises BEFORE the task group opens —
     outside the `_matrix` task whose handlers would have caught it, and outside the
     typed line every other Matrix path prints. Stashing rather than reporting keeps
-    one reporter below: it reads every key this sets, on the branch where Matrix
+    one reporter below: it reads everything this appends, on the branch where Matrix
     answered as well as the one where it did not, and a grid painted before the
     failure still decides the exit code."""
     try:
         anyio.run(go)
     except Exception as e:  # noqa: BLE001 — the reporter below turns any cause into one line
-        cause = _calendar_failure(e)
-        if isinstance(cause, MatrixApiError):
-            state["matrix_err"] = cause
-        else:
-            state["matrix_unexpected"] = cause
+        # Appended, never assigned. The weave's own Matrix task writes to this same
+        # list, and a session that refuses to close after a query Matrix already
+        # refused is two failures: an assignment keeps whichever was written last,
+        # which is the teardown, and drops the reason there is no calendar.
+        state.setdefault("matrix_failures", []).append(_calendar_failure(e))
+    except BaseExceptionGroup as group:
+        # BELOW the arm above, and it has to stay there: a group whose members are
+        # all `Exception`s IS an `Exception` and belongs to the classifier. What
+        # reaches here holds something that is not — rich answers a reader that hung
+        # up with `SystemExit` — and a task group wraps whatever leaves it, so the
+        # arm above cannot see it and neither can click. This is the only calendar
+        # arm that writes to a console from inside a task group, so it is the only
+        # one where a closed pipe turns into a group at all. Unwrapped, the process
+        # ends the way it would have with no group round it.
+        leaves = _exception_leaves(group)
+        if len(leaves) == 1:
+            raise leaves[0] from None
+        raise
 
 
-def _report_calendar_matrix_failure(state: dict[str, Any], *, answered: bool = False) -> None:
-    """Print the stderr line for every failure the weave stashed: a known
-    `MatrixApiError`, an unexpected cause from anywhere in the weave, or a
-    cancel/never-completed fall-through when it stashed nothing at all.
+def _report_calendar_failures(state: dict[str, Any], *, answered: bool = False) -> None:
+    """Print the stderr line for every failure the weave stashed, on either half of
+    it, or a cancel/never-completed fall-through when Matrix stashed nothing at all.
 
-    Both keys are reported, not the first of them. A Matrix outage and a renderer
-    that then blew up are two things that happened, and the one printed second is
-    the one a reader would otherwise go looking for.
+    Every failure is reported, not the first of them and not one per class: the
+    weave and its own tasks APPEND, because a Matrix outage and a client that then
+    refused to close are two things that happened and one slot keeps only the
+    second. Each is named under the backend it came from — a `MatrixApiError`
+    through the shared Matrix reporter, which is what keeps the kind and the request
+    id a reader quotes when they report an outage, and a first paint that raised
+    under Google Flights, because a display failure reported as a Matrix one sends
+    an operator after an outage that never happened.
 
     `answered` says a calendar arrived, which is the only thing that makes an
     empty stash unremarkable. It is what lets the caller on that branch hand the
     whole stash here rather than testing a key itself: the weave stashes after the
     answer as readily as instead of it, and a branch that reads one key is how a
     failure goes silent."""
-    e = state.get("matrix_err")
-    unexpected = state.get("matrix_unexpected")
-    if e is not None:
-        _print_matrix_error(cast("MatrixApiError", e))
-    if unexpected is not None:
-        _print_calendar_failure(unexpected)
-    if e is None and unexpected is None and not answered:
+    matrix = cast("list[BaseException]", state.get("matrix_failures", []))
+    for cause in matrix:
+        if isinstance(cause, MatrixApiError):
+            _print_matrix_error(cause)
+        else:
+            _print_calendar_failure(cause)
+    for cause in cast("list[BaseException]", state.get("gf_failures", [])):
+        err.print(f"[yellow]Google Flights date grid could not be shown:[/] {_safe_text(cause)}")
+    if not matrix and not answered:
         err.print("[yellow]Matrix calendar did not complete.[/]")
 
 
@@ -1087,19 +1194,25 @@ def _paint_calendar_first(
 
     Every branch ends by naming what the reader is waiting for, because the grid is
     the fast half and Matrix is ~45s behind it: an unexplained pause reads as "no
-    cheap fares", and by the time the real grid lands the impression is formed."""
+    cheap fares", and by the time the real grid lands the impression is formed.
+
+    Only the branch that painted a grid writes to stdout. The other four have no
+    document to show and are saying so, and Matrix may yet fail behind them, which
+    is exit 1 — a status line on stdout there is prose in the stream a caller reads
+    for the answer, and `_run_fast_calendar_grid` puts every equivalent line on
+    stderr for the same reason."""
     if grid:
         _render_date_grid(grid, origin=origins, destination=dests, sd=sd, ed=ed)
         console.print("[dim]…refining with Matrix (full grid + durations)…[/]")
     elif state.get("gf_throttled"):
-        console.print("[dim]Google Flights rate-limited — awaiting Matrix calendar…[/]")
+        err.print("[dim]Google Flights rate-limited — awaiting Matrix calendar…[/]")
     elif state.get("gf_unavailable"):
-        console.print(f"[dim]{_GF_GRID_UNAVAILABLE_WEAVE_NOTE}[/]")
+        err.print(f"[dim]{_GF_GRID_UNAVAILABLE_WEAVE_NOTE}[/]")
     elif "gf_err" in state:
         err.print(f"[yellow]Google Flights date-grid failed:[/] {_safe_text(state['gf_err'])}")
-        console.print("[dim]…awaiting Matrix calendar…[/]")
+        err.print("[dim]…awaiting Matrix calendar…[/]")
     else:
-        console.print("[dim]…awaiting Matrix calendar…[/]")
+        err.print("[dim]…awaiting Matrix calendar…[/]")
 
 
 def _run_fast_calendar_grid(
@@ -1139,8 +1252,12 @@ def _run_fast_calendar_grid(
     except Exception as e:  # noqa: BLE001 — any other cause is still just "no grid"
         err.print(f"[yellow]Google Flights date-grid failed:[/] {_safe_text(e)}")
     if grid:
-        _render_date_grid(grid, origin=origins, destination=dests, sd=sd, ed=ed)
-        _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
+
+        def _write_answer() -> None:
+            _render_date_grid(grid, origin=origins, destination=dests, sd=sd, ed=ed)
+            _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
+
+        _deliver_calendar(_write_answer)
     else:
         # `--fast` means the GF grid alone in ~1s; quietly running the ~45s Matrix
         # calendar instead would change what the flag means.
@@ -1189,15 +1306,15 @@ def _run_calendar_enriched(
             # `RuntimeError` subclasses on the installed click: the broad arm below
             # would stash an orderly exit and report it as a Matrix failure.
             raise
-        except MatrixApiError as e:
-            state["matrix_err"] = e
         except Exception as e:  # noqa: BLE001
-            # An unexpected Matrix failure (e.g. a raw httpx transport/status error that
-            # execute() doesn't wrap) must NOT propagate out of this task and tear down
-            # the group — that would cancel the still-pending grid paint and surface a
-            # bare traceback. Stash it and report after the weave so the GF grid still
-            # shows (per-backend isolation, mirroring the MatrixApiError path).
-            state["matrix_unexpected"] = e
+            # Every Matrix failure lands here, typed or not. A raw httpx transport or
+            # status error that execute() doesn't wrap must NOT propagate out of this
+            # task and tear down the group — that would cancel the still-pending grid
+            # paint and surface a bare traceback. Stashed and reported after the weave
+            # so the GF grid still shows, and appended rather than assigned because
+            # the guard outside the loop writes to this same list. The reporter
+            # dispatches on the class, so a `MatrixApiError` keeps its kind and id.
+            state.setdefault("matrix_failures", []).append(e)
 
     async def _go() -> None:
         async with (
@@ -1220,18 +1337,28 @@ def _run_calendar_enriched(
                 raise  # an orderly exit is not a grid failure; see `_matrix` above
             except Exception as e:  # noqa: BLE001 — GF is the optional fast layer; Matrix still runs
                 state["gf_err"] = e
-            _paint_calendar_first(grid, state, origins=origins, dests=dests, sd=sd, ed=ed)
-            # After the paint, and a boolean rather than the grid itself: the exit
-            # gate below asks whether the reader was given something, and a grid
-            # that was fetched and then died in the renderer is not that.
-            state["painted"] = bool(grid)
+            try:
+                _paint_calendar_first(grid, state, origins=origins, dests=dests, sd=sd, ed=ed)
+            except (typer.Exit, typer.Abort):
+                raise  # an orderly exit is not a paint failure; see `_matrix` above
+            except Exception as e:  # noqa: BLE001 — the display half fails on its own terms
+                # The first paint is the Google Flights half's own output, so a raise
+                # here belongs to that backend: on the Matrix list it would print
+                # "Matrix calendar failed" for a renderer, and the still-pending
+                # Matrix calendar would be cancelled by a failure that is not its own.
+                state.setdefault("gf_failures", []).append(e)
+            else:
+                # After the paint, and a boolean rather than the grid itself: the exit
+                # gate below asks whether the reader was given something, and a grid
+                # that was fetched and then died in the renderer is not that.
+                state["painted"] = bool(grid)
 
     _run_calendar_weave(_go, state)
 
     matrix_res = state.get("matrix")
     if matrix_res is None:
         # Matrix failed; the GF grid (if any) was already painted.
-        _report_calendar_matrix_failure(state)
+        _report_calendar_failures(state)
         if not state.get("painted"):
             raise typer.Exit(1)
         return
@@ -1241,19 +1368,23 @@ def _run_calendar_enriched(
     # after the answer stayed silent. Said BEFORE the render, since whatever broke
     # may break that too, and said as a line rather than an exit code, because the
     # answer below still stands.
-    _report_calendar_matrix_failure(state, answered=True)
+    _report_calendar_failures(state, answered=True)
     res = cast("CalendarResult", matrix_res)
-    _render_calendar(
-        res,
-        dmin=dmin,
-        dmax=dmax,
-        origin=origins,
-        destination=dests,
-        sd=sd,
-        ed=ed,
-        round_trip=len(search.legs) == _ROUND_TRIP_LEGS,
-    )
-    _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
+
+    def _write_answer() -> None:
+        _render_calendar(
+            res,
+            dmin=dmin,
+            dmax=dmax,
+            origin=origins,
+            destination=dests,
+            sd=sd,
+            ed=ed,
+            round_trip=len(search.legs) == _ROUND_TRIP_LEGS,
+        )
+        _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
+
+    _deliver_calendar(_write_answer)
 
 
 def _pinned_solution_index(result: SearchResult | None, pick: int | None) -> int | None:
@@ -3546,17 +3677,21 @@ def calendar(
             f"[dim]Queried {n_split} destinations separately and merged — Matrix "
             f"under-reports the combined multi-airport calendar grid.[/]"
         )
-    _render_calendar(
-        res,
-        dmin=dmin,
-        dmax=dmax,
-        origin=origins,
-        destination=dests,
-        sd=sd,
-        ed=ed,
-        round_trip=len(search.legs) == _ROUND_TRIP_LEGS,
-    )
-    _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
+
+    def _write_answer() -> None:
+        _render_calendar(
+            res,
+            dmin=dmin,
+            dmax=dmax,
+            origin=origins,
+            destination=dests,
+            sd=sd,
+            ed=ed,
+            round_trip=len(search.legs) == _ROUND_TRIP_LEGS,
+        )
+        _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
+
+    _deliver_calendar(_write_answer)
 
 
 @app.command()
