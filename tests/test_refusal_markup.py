@@ -1824,6 +1824,37 @@ def test_a_matrix_error_beside_a_deliberate_stop_keeps_its_kind_and_id(
     assert "req-ABC-123" in printed, printed
 
 
+@pytest.mark.parametrize(
+    ("cause", "names"),
+    [
+        pytest.param(
+            f"a stash somebody put a string in{_ESCAPES}", "a stash somebody", id="a-string"
+        ),
+        pytest.param({"code": 5, "note": "[/x]"}, "'code': 5", id="a-decoded-json-object"),
+        pytest.param(None, "None", id="nothing-at-all"),
+    ],
+)
+def test_a_cause_that_is_not_an_exception_is_named_and_stays_printable(
+    cause: object, names: str
+) -> None:
+    """`_failure_text` takes any value, because a caller reporting what it holds
+    cannot always promise it holds an exception — a stash read back, a field
+    lifted out of remote JSON with no coercion.
+
+    What the widening must not cost is the property every printer here relies
+    on: each path out ends in `_safe_text`, so the result is ready for a markup
+    console whatever was handed in."""
+    from flight_cli import cli
+
+    text = cli._failure_text(cause)
+    # Rendering at all is half the proof: `[/x]` is a closing tag with no
+    # opener, which rich RAISES on rather than ignoring, so an unescaped one
+    # would end the report instead of appearing in it.
+    rendered = _render(text)
+    _assert_drives_no_terminal(rendered)
+    assert names in rendered, rendered
+
+
 def _render_reraise(monkeypatch: pytest.MonkeyPatch, *, said: str) -> str:
     """`_reraise_if_orderly` driven with one failure beside one stop.
 
