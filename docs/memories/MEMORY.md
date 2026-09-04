@@ -5,7 +5,11 @@ go into detail and are loaded on demand.
 
 - [wire_format_quirks.md](wire_format_quirks.md) — Per-mode field rules,
   `routeLanguage` vs `commandLine`, summarizer ordering, page semantics,
-  timeRanges flexibility. Read before touching `wire.py` or `links.py`.
+  timeRanges flexibility. Read before touching `wire.py` or `links.py`. It
+  also carries what a black-box caller can read off `flight calendar` — which
+  exit code means what, and which stream carries the answer — a CLI contract
+  rather than a wire one, and closer to `calendar_two_phase.md`'s subject than
+  to this file's: read it before touching a calendar exit path too.
 - [routing_language.md](routing_language.md) — Full grammar of the
   `routeLanguage` field (`LH+`, `BA AA`, `F* X:LHR F*`, alliance codes,
   per-segment carrier/airport filters). What goes into `--routing`.
@@ -57,8 +61,9 @@ go into detail and are loaded on demand.
   Matrix fields, third-party exceptions), the `_quote` / `_safe_text` /
   sanitize-inside-the-formatter rule and the orderings that make each work, and
   the `escape_scan` AST guard: what it reads (table titles and captions, column
-  headers and footers, and every cell), what its allowlist claims and what holds
-  the values behind it, and what it does not model.
+  headers and footers, every cell, and Typer `help=` / `epilog=` strings), what
+  its allowlist claims and what holds the values behind it, and what it does not
+  model.
 - [legroom_recipe.md](legroom_recipe.md) — Per-leg legroom + amenities +
   aircraft come back in-band in Google Flights' own response (no
   travelarrow.io API call needed for the data itself). Index map for

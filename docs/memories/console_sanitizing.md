@@ -23,7 +23,7 @@ for whatever an undocumented third-party library raised.
 
 **A source that quotes a value into a sentence keeps its `repr`.**
 `routing_predicates.py:284,331,343` build their reasons with `{...!r}`, and
-`_config.py:139,149` build the rps `ValueError` the same way. `repr` is there for
+`_config.py:140,150` build the rps `ValueError` the same way. `repr` is there for
 the reader — it shows the exact string that was rejected, quotes and all — and it
 happens to neutralise ESC, C1 and DEL on the way. It is not the guard, because it
 does not cover the value that reaches a console any other way.
@@ -139,38 +139,41 @@ f-string over a bare name, which no binding in `cli.py` is, so an entry is a
 claim its author has to back, and there are three ways to: a hostile-field arm
 that fails when the value stops being this module's own; a type at the response
 or enum boundary, which is what stands behind `res.solution_count` and the
-`Cabin` members; or a wrap at the sink instead, as `title_prefix` is, because a
-parameter's value belongs to callers the scan never reads. Backed by none of
-those, an entry is a claim nothing checks — allowed, but as a decision made out
-loud rather than a default. `_SAFE_WRAPPERS`, `_NUMERIC_PRESENTATION`,
-`_RENDERABLE_SINKS`, `_TEXT_SINK_METHODS` and `_HELP_SINKS` share one delete-one
-test — measured over the bypass corpus as well as `cli.py`, since dropping a
-member that ALLOWS makes `cli.py` speak where it was silent while dropping one
-that READS makes a corpus case go quiet, and no change either way is what inert
-means. A regression corpus of one synthetic source per known bypass keeps the
-scan itself honest, and is where every sink member has its witness. A printed table
-needs no entry at all: the scan reads the assignment and asks whether this scope
-built a renderable, which is a claim about the binding rather than about the
-name.
+`Cabin` members; or a wrap at the sink instead, which is how a value avoids
+needing an entry at all — `title_prefix` is wrapped where it is interpolated and
+has none, because a parameter's value belongs to callers the scan never reads.
+Backed by none of those, an entry is a claim nothing checks — allowed, but as a
+decision made out loud rather than a default. `_SAFE_WRAPPERS`,
+`_NUMERIC_PRESENTATION`, `_RENDERABLE_SINKS`, `_TEXT_SINK_METHODS` and
+`_HELP_SINKS` share one delete-one test — measured over the bypass corpus as
+well as `cli.py`, since dropping a member that ALLOWS makes `cli.py` speak where
+it was silent while dropping one that READS makes a corpus case go quiet, and no
+change either way is what inert means. A regression corpus of one synthetic
+source per known bypass keeps the scan itself honest, and is where every sink
+member has its witness. A printed table needs no entry at all: the scan reads
+the assignment and asks whether this scope built a renderable, which is a claim
+about the binding rather than about the name.
 
 The scan reads CALLS, so a markup slot filled by assignment (`t.title = x`,
 `t.caption = x`, `t.columns[0].header = x`) or by an API it does not name is not
-read; none is live in `cli.py` today, and `Panel` sits in `_RENDERABLE_SINKS`
-unimported, so an aliased import of it would have coverage that looks present and
-is not. It models scope only as far as the INNERMOST function: an allowlisted
-identifier is a claim about a NAME in one body, so a closure that shadows the name
-with a parameter or binds it to something else is scanned like any other function.
-What it cannot tell apart is two bodies of the same name, which share their
-entries — the two `query_cabin` closures printing `cab.value` are that shape on
-purpose, and the entry is keyed on the closure that prints it.
-The hostile-field tests — one payload per response field, driven one field at a
-time through each renderer — are what pin the values a type at the boundary
-cannot, and an entry backed by neither is the claim nothing checks named above.
-The boundary in one line: a value can reach a Rich console from `cli.py` outside
-any call this scan reads — through one of those assignment slots, an API it does
-not name, a help string whose only f-string field is a bare name, or `pp/cli.py`'s
-second console — so a green scan is a claim about the calls it reads and nothing
-wider.
+read; none is live in `cli.py` today, and `Panel` and `Text` both sit in
+`_RENDERABLE_SINKS` unimported, so an aliased import of either would have
+coverage that looks present and is not. `Text` is the one that bites: an
+allowlisted local assigned `Tx(<remote>)` and handed to a sink is silent, where
+the same line under the plain name speaks. It models scope only as far as the
+INNERMOST function: an allowlisted identifier is a claim about a NAME in one
+body, so a closure that shadows the name with a parameter or binds it to
+something else is scanned like any other function. What it cannot tell apart is
+two bodies of the same name, which share their entries — the two `query_cabin`
+closures printing `cab.value` are that shape on purpose, and the entry is keyed
+on the closure that prints it. The hostile-field tests — one payload per
+response field, driven one field at a time through each renderer — are what pin
+the values a type at the boundary cannot, and an entry backed by neither is the
+claim nothing checks named above. The boundary in one line: a value can reach a
+Rich console from `cli.py` outside any call this scan reads — through one of
+those assignment slots, an API it does not name, a help string whose only
+f-string field is a bare name, or `pp/cli.py`'s second console — so a green scan
+is a claim about the calls it reads and nothing wider.
 
 A Typer `help=` / `epilog=` string is a markup sink as surely as a table cell:
 the app sets `rich_markup_mode="rich"`, so Typer renders every help string

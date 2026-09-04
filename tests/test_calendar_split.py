@@ -521,8 +521,9 @@ def test_a_teardown_that_fails_after_the_answer_is_still_reported(
 def test_a_first_paint_that_fails_after_the_answer_is_still_reported(
     monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The same silence by the other route: `flight calendar … | head -3` closes
-    the pipe under the first paint, which raises where only the stash can see it."""
+    """The same silence by the other route: the grid renderer raises after Matrix
+    has answered, so the failure happens where only the stash can see it and the
+    calendar goes out with nothing said about the half that died."""
     monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
     monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _fake_grid)
     calls = _spy_renderers(monkeypatch)
@@ -563,10 +564,11 @@ def test_a_backend_error_after_the_answer_is_still_reported(
 def test_a_paint_that_never_happened_is_not_a_success(
     monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The exit gate asked whether a grid had been FETCHED, so a paint that raised
-    left it truthy and the command exited 0 having printed nothing at all. Two
-    failures happened here and both are named: the reader has to know the window
-    was never priced AND that the fast half died."""
+    """The exit gate asks what the paint put on the reader's screen, not what was
+    fetched: a grid that arrived and then died in the renderer is not an answer,
+    and exit 0 over an empty stdout says it was. Two failures happen here and both
+    are named — the reader has to know the window was never priced AND that the
+    fast half died."""
 
     class _ErrClient(_PricedClient):
         @override
@@ -3640,12 +3642,14 @@ def _rebound_to_interpolated_text(values: list[ast.expr]) -> bool:
     """Whether any assignment to this name interpolates another name into it.
 
     Narrower than it reads: only a top-level f-string whose field is a bare name or
-    an attribute chain. A call, a conditional, a list, a comprehension, a subscript
-    and a name with no assignment at all are each unread, and between them they are
-    every binding behind an entry in `cli.py` today — so this is NOT what makes an
-    entry checkable. The hostile-field tests around the renderers are, one payload
-    per field. What this catches and nothing else here does is the bypass case `an
-    allowlisted local rebound to interpolated text`."""
+    an attribute chain, which no binding in `cli.py` is. A call, a conditional, a
+    list, a comprehension, a subscript, a tuple-unpack, an arithmetic expression and
+    a name with no assignment at all are each unread; so is the one top-level
+    f-string among them, `_render_gflight_table.dur`, because its two fields are
+    arithmetic rather than names. So this is NOT what makes an entry checkable. The
+    hostile-field tests around the renderers are, one payload per field. What this
+    catches and nothing else here does is the bypass case `an allowlisted local
+    rebound to interpolated text`."""
     for value in values:
         if not isinstance(value, ast.JoinedStr):
             continue
