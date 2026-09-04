@@ -9,7 +9,7 @@ go into detail and are loaded on demand.
   also carries what a black-box caller can read off `flight calendar` — which
   exit code means what, and which stream carries the answer — a CLI contract
   rather than a wire one, and closer to `calendar_two_phase.md`'s subject than
-  to this file's: read it before touching a calendar exit path too.
+  to the rest of this entry's: read it before touching a calendar exit path too.
 - [routing_language.md](routing_language.md) — Full grammar of the
   `routeLanguage` field (`LH+`, `BA AA`, `F* X:LHR F*`, alliance codes,
   per-segment carrier/airport filters). What goes into `--routing`.
@@ -60,7 +60,8 @@ go into detail and are loaded on demand.
   print to `cli.py`.** Which values are markup on a Rich console (user flags,
   Matrix fields, third-party exceptions), the `_quote` / `_safe_text` /
   sanitize-inside-the-formatter rule and the orderings that make each work, and
-  the `escape_scan` AST guard: what it reads (table titles and captions, column
+  the `escape_scan` AST guard: what it reads (every `console.print` / `err.print`
+  and `.log` / `.rule` / `.status`, bare `print`, table titles and captions, column
   headers and footers, every cell, and Typer `help=` / `epilog=` strings), what
   its allowlist claims and what holds the values behind it, and what it does not
   model.

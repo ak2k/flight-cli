@@ -770,17 +770,18 @@ class _CalendarFanout(NamedTuple):
     answered, and the one thing the data cannot support when they did not."""
 
     results: list[CalendarResult]
-    # Every failure, in DESTINATION order rather than the order they raised:
-    # sub-queries are indexed in destination order and finish in whatever order the
-    # network gives them, so the same outage names the same destinations in the same
-    # sequence on every run. All of them, because three sub-queries failing for
-    # three different reasons is three things to fix and a reader told only the
-    # lowest-index one never learns the others were different.
+    # Every failure, in SUB-QUERY order rather than the order they raised:
+    # sub-queries are indexed origins-outermost over the (origin, destination-group)
+    # product and finish in whatever order the network gives them, so the same
+    # outage names the same groups in the same sequence on every run. All of them,
+    # because three sub-queries failing for three different reasons is three things
+    # to fix and a reader told only the lowest-index one never learns the others
+    # were different.
     failures: list[Exception]
 
     @property
     def failed(self) -> int:
-        """How many destinations dropped out of the merge."""
+        """How many origin/destination groups dropped out of the merge."""
         return len(self.failures)
 
 

@@ -47,7 +47,7 @@ below-average pitch, and one wrap around the finished cell would print that tag
 instead of colouring the number.
 
 **The render site is the guard, and it wraps exactly once.** The rule, for
-everything `tests/test_calendar_split.py::escape_scan` covers: anything reaching
+everything `escape_scan` in `tests/test_calendar_split.py` covers: anything reaching
 a markup sink from user input, a response field or an exception message goes
 through `_quote` (a value the user typed: elide, `repr`, escape) or `_safe_text`
 (anything remote: strip the control characters, then escape). Bare
@@ -86,7 +86,7 @@ coming out of `repr`, so a bound on the finished message would measure the fill
 rather than the cap. And `repr` before `escape`, because `repr` doubles the
 backslash `escape` prepends and hands the tag straight back to the parser.
 
-## The guard: `tests/test_calendar_split.py::escape_scan`
+## The guard: `escape_scan` in `tests/test_calendar_split.py`
 
 It parses ONE file — `src/flight_cli/cli.py` — and walks its AST, so a new print
 in a covered function fails the suite. It says nothing about any other module:
@@ -136,17 +136,21 @@ scan speaks, so an entry that allows nothing cannot sit there pre-approving
 whatever later takes its name. What an entry does NOT get is a check on the
 value behind it. The scan reads a name's binding only when it is a top-level
 f-string over a bare name, which no binding in `cli.py` is, so an entry is a
-claim its author has to back, and there are three ways to: a hostile-field arm
-that fails when the value stops being this module's own; a type at the response
-or enum boundary, which is what stands behind `res.solution_count` and the
-`Cabin` members; or a wrap at the sink instead, which is how a value avoids
-needing an entry at all — `title_prefix` is wrapped where it is interpolated and
-has none, because a parameter's value belongs to callers the scan never reads.
-Backed by none of those, an entry is a claim nothing checks — allowed, but as a
-decision made out loud rather than a default. `_SAFE_WRAPPERS`,
-`_NUMERIC_PRESENTATION`, `_RENDERABLE_SINKS`, `_TEXT_SINK_METHODS` and
-`_HELP_SINKS` share one delete-one test — measured over the bypass corpus as
-well as `cli.py`, since dropping a member that ALLOWS makes `cli.py` speak where
+claim its author has to back, and the file's forty entries are backed four ways:
+a hostile-field arm that fails when the value stops being this module's own; a
+type at the response or enum boundary, which is what stands behind
+`res.solution_count` and the `Cabin` members; a number this module computed, like
+the `n = len(subs)` a fan-out counts its sub-queries with; and a constant it
+wrote. Backed by none of those, an entry is a claim nothing checks — allowed, but
+as a decision made out loud rather than a default.
+
+Wrapping at the sink is NOT a fifth backing: it is the alternative to needing an
+entry at all. `title_prefix` is wrapped where it is interpolated and has no
+entry, because a parameter's value belongs to callers the scan never reads.
+
+`_SAFE_WRAPPERS`, `_NUMERIC_PRESENTATION`, `_RENDERABLE_SINKS`,
+`_TEXT_SINK_METHODS` and `_HELP_SINKS` share one delete-one test — measured
+over the bypass corpus as well as `cli.py`, since dropping a member that ALLOWS makes `cli.py` speak where
 it was silent while dropping one that READS makes a corpus case go quiet, and no
 change either way is what inert means. A regression corpus of one synthetic
 source per known bypass keeps the scan itself honest, and is where every sink
@@ -168,8 +172,8 @@ two bodies of the same name, which share their entries — the two `query_cabin`
 closures printing `cab.value` are that shape on purpose, and the entry is keyed
 on the closure that prints it. The hostile-field tests — one payload per
 response field, driven one field at a time through each renderer — are what pin
-the values a type at the boundary cannot, and an entry backed by neither is the
-claim nothing checks named above. The boundary in one line: a value can reach a
+the values a type at the boundary cannot, and an entry backed by none of the four
+is the claim nothing checks named above. The boundary in one line: a value can reach a
 Rich console from `cli.py` outside any call this scan reads — through one of
 those assignment slots, an API it does not name, a help string whose only
 f-string field is a bare name, or `pp/cli.py`'s second console — so a green scan

@@ -78,7 +78,9 @@ choice that fits the rest of the stack — don't substitute.
 - **Run pytest after any change to `cli.py` too**, and read
   [`docs/memories/console_sanitizing.md`](./docs/memories/console_sanitizing.md)
   before adding a print or a table cell there. `cli.py` is the one file with a
-  whole-file AST gate over it (`tests/test_calendar_split.py::escape_scan`). A
+  whole-file AST gate over it — the `escape_scan` helper in
+  `tests/test_calendar_split.py`, run as
+  `tests/test_calendar_split.py::test_calendar_paths_escape_every_printed_value`. A
   value reaches a Rich console or table one of four ways: through `_quote` or
   `_safe_text`, or through `_amount` or `_failure_text`, the two formatters the
   gate knows by name (any other formatter that wraps inside itself is admitted at

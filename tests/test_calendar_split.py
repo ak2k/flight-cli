@@ -696,7 +696,8 @@ def test_a_reader_that_hung_up_under_the_first_paint_is_not_a_group(
 def test_a_matrix_brownout_behind_the_standing_gate_leaves_stdout_empty(
     monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Exit 1 is a promise about stdout: no document at all. The grid RPC is gated,
+    """Exit 1 before the answer is written is a promise about stdout: no document at
+    all. The grid RPC is gated,
     so every weave run today takes a branch with no grid to paint and says so while
     Matrix is still in flight — and Matrix failing behind that is the everyday
     brownout. Real renderers, because a spy is exactly what would hide a status line
@@ -1669,11 +1670,11 @@ def test_a_group_of_one_names_its_failure_without_counting_it() -> None:
 def test_a_single_query_calendar_failure_names_the_command_once(
     monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """One query refused is the commonest calendar failure there is, and it was the
-    one shape printing no prefix — so a matcher on `Matrix calendar failed` caught
-    the fan-out and the beside-a-stop line and missed this. Once, because the
-    backend's message belongs under the prefix rather than in it: folding the two
-    prints together is what drops the kind and the request id."""
+    """One query refused is the commonest calendar failure there is, and it prints
+    the same prefix as the fan-out and the beside-a-stop line, so a matcher on
+    `Matrix calendar failed` catches all three. Once, because the backend's message
+    belongs under the prefix rather than in it: folding the two prints together is
+    what drops the kind and the request id."""
 
     class _ErrClient(_PricedClient):
         @override
@@ -4030,10 +4031,14 @@ def escape_scan(src: str) -> list[str]:
     scanned like any other function and inherits nothing. What it cannot tell apart
     is two bodies of the same name, which share their entries — the two
     `query_cabin` closures printing `cab.value` are that shape on purpose. What an
-    entry does NOT get from this is a check on the value behind it: the hostile-field
-    tests above are what pin the values a type at the response or enum boundary
-    cannot, one payload per field through the renderer that reads it, and an entry
-    with neither is a claim nothing checks.
+    entry does NOT get from this is a check on the value behind it. Four things back
+    one: a hostile-field arm that fails when the value stops being this module's
+    own; a type at the response or enum boundary; a number this module computed; a
+    constant it wrote. The hostile-field tests above are what pin the values a type
+    at the boundary cannot, one payload per field through the renderer that reads
+    it, and an entry backed by none of the four is a claim nothing checks. Wrapping
+    at the sink is not a fifth backing — it is how a value avoids needing an entry
+    at all.
     """
     tree = ast.parse(src)
     chains = _enclosing_functions(tree)
@@ -4064,8 +4069,10 @@ def test_calendar_paths_escape_every_printed_value() -> None:
     assert not faults, (
         "wrap these in _quote (a value the user typed), _safe_text (anything "
         "remote) or a formatter that calls one; add the name to "
-        "_PRINTABLE_IDENTIFIERS only if the value is this module's own, and give "
-        f"it a hostile-field arm that fails when it stops being: {faults}"
+        "_PRINTABLE_IDENTIFIERS only if the value is this module's own, and say "
+        "which of the four backs it — a hostile-field arm that fails when it stops "
+        "being, a type at the response or enum boundary, a number this module "
+        f"computed, or a constant it wrote: {faults}"
     )
 
 
