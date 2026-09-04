@@ -1898,9 +1898,12 @@ def test_a_raise_writing_the_answer_is_a_typed_line(
     drive: Any, message: str, prefix: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """`_deliver_calendar` guards three call sites, and each writes a document out
-    of a renderer and a URL emitter — so the arms are weave x render, weave x emit,
-    tail x render, tail x emit, and the `--fast` grid render. Each ends as the typed
-    line and exit 1 that every other cause on these paths ends as.
+    of a renderer and a URL emitter: six pairs, five of them arms here — weave x
+    render, weave x emit, tail x render, tail x emit, and the `--fast` grid render.
+    The sixth, `--fast` x emit, has no arm of its own: it shares its guard, its
+    `_write_answer` and its backend name with the `--fast` render arm, and while the
+    date-grid RPC gate stands neither is reachable outside a test. Each ends as the
+    typed line and exit 1 that every other cause on these paths ends as.
 
     The prefix names the backend that built the document, not the command: a
     `--fast` run has no Matrix behind it at all, and reporting its renderer as a
@@ -3612,15 +3615,15 @@ def test_detail_round_trip_bad_duration_is_a_typed_error(
 # sanitizing inside a formatter is what keeps the wrap off every call site.
 _SAFE_WRAPPERS = frozenset({"_quote", "_safe_text", "_amount", "_failure_text"})
 
-# Identifiers that need no wrapper at the print site: counters and dates this
-# module computed, constants it wrote, locals already sanitized where the value
-# was read, and a response field pydantic types to a number — remote, but a
-# number is not a string and cannot carry markup. Matched by IDENTIFIER — a bare
-# name or an attribute chain — never by source text: an expression that happens to
-# read the same way is not the same value. Keyed per FUNCTION for the same reason
-# one step further: `n` is a fan-out counter in `_run_calendar` and could be
-# anything anywhere else, and a bare name is exactly what a user value looks like
-# once it is in a local.
+# Identifiers that need no wrapper at the print site. Four things can back an
+# entry, and they are the four the memo and this scan's own docstring name: a
+# hostile-field arm that fails when the value stops being this module's own; a
+# type at the response or enum boundary; a number this module computed; a
+# constant it wrote. Matched by IDENTIFIER — a bare name or an attribute chain —
+# never by source text: an expression that happens to read the same way is not
+# the same value. Keyed per FUNCTION for the same reason one step further: `n`
+# is a fan-out counter in `_run_calendar` and could be anything anywhere else,
+# and a bare name is exactly what a user value looks like once it is in a local.
 _PRINTABLE_IDENTIFIERS = frozenset(
     {
         ("_parse_duration", "lo"),  # the ints it just parsed

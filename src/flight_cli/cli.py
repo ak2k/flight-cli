@@ -788,10 +788,10 @@ class _CalendarFanout(NamedTuple):
 async def _gather_calendar(
     c: MatrixClient, subs: list[CalendarSearch], *, cache: bool
 ) -> _CalendarFanout:
-    """Run the per-destination sub-searches concurrently on one client (its
-    rate-limiter + semaphore bound the in-flight count). A sub-query that fails
-    just drops its destination from the merge rather than sinking the whole run,
-    and is counted so the caller can say so."""
+    """Run the sub-searches concurrently on one client (its rate-limiter +
+    semaphore bound the in-flight count). Each covers one (origin, destination
+    group); a sub-query that fails just drops its own group from the merge rather
+    than sinking the whole run, and is counted so the caller can say so."""
     results: list[CalendarResult | None] = [None] * len(subs)
     errors: list[Exception | None] = [None] * len(subs)
 
@@ -800,9 +800,9 @@ async def _gather_calendar(
             results[i] = cast("CalendarResult", await c.execute(s, cache=cache))
         except (typer.Exit, typer.Abort):
             # Both subclass `RuntimeError` on the installed click, so the broad arm
-            # below would read an orderly exit as one more dropped destination.
+            # below would read an orderly exit as one more dropped group.
             raise
-        except Exception as e:  # noqa: BLE001 — this destination drops; the caller counts it
+        except Exception as e:  # noqa: BLE001 — this group drops; the caller counts it
             errors[i] = e
 
     async with anyio.create_task_group() as tg:
@@ -853,7 +853,7 @@ def _print_calendar_failure(
 
     Both outer guards, both fan-out refusals and the weave's stashed cause end
     here, so one failure reads the same whether it arrived alone, beside a
-    deliberate stop, or as one of several destinations — and a caller has one
+    deliberate stop, or as one of several sub-queries — and a caller has one
     prefix to match on. `lost` is the count sentence the caller built from its own
     numbers, and `backend` names the half of the command that failed, so a run
     serving the Google Flights grid alone does not report its own renderer under
@@ -996,7 +996,7 @@ def _report_calendar_fanout(fan: _CalendarFanout, total: int, *, merged_empty: b
     """Say what the fan-out lost, and refuse when nothing is left to show.
 
     Judged on the MERGED grid, not on the fraction that failed. Rows still in it
-    are worth reading even short a destination, so that is a note beside them. No
+    are worth reading even short a group, so that is a note beside them. No
     rows at all is a different claim whatever fraction failed: the table arm prints
     "Calendar empty" and the brownout advice, `--format json` writes
     `solutionCount: 0`, and both say Matrix priced this window and found nothing —
@@ -1004,7 +1004,7 @@ def _report_calendar_fanout(fan: _CalendarFanout, total: int, *, merged_empty: b
     note only ever prints beside a grid, and its "below" is always true."""
     if fan.failed == 0:
         return
-    # Every destination that dropped, not the lowest-index one alone: three
+    # Every group that dropped, not the lowest-index one alone: three
     # sub-queries refused for three different reasons is three things to fix, and
     # the count in the sentence is the only true half of a report that names one.
     # A lone failure goes as itself, because a group of one is plumbing.
@@ -1306,7 +1306,9 @@ def _run_calendar_enriched(
     Google Flights date-grid and the Matrix calendar CONCURRENTLY under one event
     loop, paint the GF grid immediately (~1s) while Matrix is in flight, then paint
     the authoritative Matrix calendar (~45s) — total ≈ max(GF, Matrix), not the sum.
-    Mirrors `_run_enriched_path` (the search-path weave). `--fast` never reaches here
+    Mirrors the SHAPE of `_run_enriched_path` (the search-path weave) and not its
+    stream discipline: every status line here goes to stderr, while that one still
+    writes some of its own to stdout. `--fast` never reaches here
     (the command serves the grid alone for that). The `grid_can_serve` gate guarantees
     a single-airport query, so the Matrix side is one `execute` (no fan-out).
 
@@ -3682,7 +3684,8 @@ def calendar(
     # Matrix (authoritative; also the only path for round-trip, multi-airport,
     # Tier-2/3 routing, or when the grid was empty/throttled).
     # CalendarSearch → CalendarResult by client._parse_response dispatch.
-    # On a multi-airport brownout, _run_calendar splits per-destination + merges.
+    # On a multi-airport brownout, _run_calendar splits into one sub-query per
+    # (origin, destination group) and merges.
     res, n_split = _run_calendar(
         search,
         rps=_resolve_rps(rps),

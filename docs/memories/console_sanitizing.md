@@ -149,14 +149,14 @@ entry at all. `title_prefix` is wrapped where it is interpolated and has no
 entry, because a parameter's value belongs to callers the scan never reads.
 
 `_SAFE_WRAPPERS`, `_NUMERIC_PRESENTATION`, `_RENDERABLE_SINKS`,
-`_TEXT_SINK_METHODS` and `_HELP_SINKS` share one delete-one test — measured
-over the bypass corpus as well as `cli.py`, since dropping a member that ALLOWS makes `cli.py` speak where
-it was silent while dropping one that READS makes a corpus case go quiet, and no
-change either way is what inert means. A regression corpus of one synthetic
-source per known bypass keeps the scan itself honest, and is where every sink
-member has its witness. A printed table needs no entry at all: the scan reads
-the assignment and asks whether this scope built a renderable, which is a claim
-about the binding rather than about the name.
+`_TEXT_SINK_METHODS` and `_HELP_SINKS` share one delete-one test — measured over
+the bypass corpus as well as `cli.py`, since dropping a member that ALLOWS makes
+`cli.py` speak where it was silent while dropping one that READS makes a corpus
+case go quiet, and no change either way is what inert means. A regression corpus
+of one synthetic source per known bypass keeps the scan itself honest, and is
+where every sink member has its witness. A printed table needs no entry at all:
+the scan reads the assignment and asks whether this scope built a renderable,
+which is a claim about the binding rather than about the name.
 
 The scan reads CALLS, so a markup slot filled by assignment (`t.title = x`,
 `t.caption = x`, `t.columns[0].header = x`) or by an API it does not name is not
@@ -172,12 +172,12 @@ two bodies of the same name, which share their entries — the two `query_cabin`
 closures printing `cab.value` are that shape on purpose, and the entry is keyed
 on the closure that prints it. The hostile-field tests — one payload per
 response field, driven one field at a time through each renderer — are what pin
-the values a type at the boundary cannot, and an entry backed by none of the four
-is the claim nothing checks named above. The boundary in one line: a value can reach a
-Rich console from `cli.py` outside any call this scan reads — through one of
-those assignment slots, an API it does not name, a help string whose only
-f-string field is a bare name, or `pp/cli.py`'s second console — so a green scan
-is a claim about the calls it reads and nothing wider.
+the values a type at the boundary cannot, and an entry backed by none of the
+four is the claim nothing checks named above. The boundary in one line: a value
+can reach a Rich console from `cli.py` outside any call this scan reads —
+through one of those assignment slots, an API it does not name, a help string
+whose only f-string field is a bare name, or `pp/cli.py`'s second console — so a
+green scan is a claim about the calls it reads and nothing wider.
 
 A Typer `help=` / `epilog=` string is a markup sink as surely as a table cell:
 the app sets `rich_markup_mode="rich"`, so Typer renders every help string
