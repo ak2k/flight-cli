@@ -369,9 +369,10 @@ def test_calendar_enriched_paints_grid_then_matrix(
     _run_enriched()
     assert calls["grid"] == 1  # GF grid painted (fast, first)
     assert calls["calendar"] == 1  # authoritative Matrix calendar painted
-    # And nothing on stderr: the weave reports whatever it stashed on both
-    # branches, so the branch where it stashed nothing has to stay quiet.
-    assert capsys.readouterr().err == ""
+    # Nothing on stderr but the paint's own status line: the weave reports whatever
+    # it stashed on both branches, so the branch where it stashed nothing names no
+    # failure, and the line saying Matrix is still coming is not one.
+    assert _flat(capsys.readouterr().err) == "…refining with Matrix (full grid + durations)…"
 
 
 def test_calendar_enriched_gf_throttle_still_paints_matrix(monkeypatch: Any) -> None:
@@ -705,7 +706,7 @@ def test_a_matrix_brownout_behind_the_standing_gate_leaves_stdout_empty(
         @override
         async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
             _ = (search, cache)
-            raise MatrixApiError("Matrix is down", kind="unavailable")
+            raise MatrixApiError("Matrix is down", kind="unavailable", request_id="req-7")
 
     monkeypatch.setattr(cli, "MatrixClient", _ErrClient)
     monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _unavailable)
@@ -717,6 +718,93 @@ def test_a_matrix_brownout_behind_the_standing_gate_leaves_stdout_empty(
     line = _flat(cap.err)
     assert "price grid unavailable" in line  # why there was no fast half
     assert "Matrix is down" in line  # and why there is no calendar
+    # Under the same prefix every other calendar failure carries: this is the shape
+    # production takes for a single-airport one-way, so a caller matching on the
+    # prefix cannot be asked to know which runner served the query.
+    assert "Matrix calendar failed" in line
+    assert "req-7" in line  # and the id an outage report quotes survives the prefix
+
+
+class _DownClient(_PricedClient):
+    """Matrix refusing, so the weave exits 1 with only the first paint on record."""
+
+    @override
+    async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
+        _ = (search, cache)
+        raise MatrixApiError("Matrix is down", kind="unavailable")
+
+
+def _empty_grid(_search: object) -> dict[str, float]:
+    return {}
+
+
+def _throttled_grid(_search: object) -> dict[str, float]:
+    raise GfThrottledError("rate-limited")
+
+
+def _broken_grid(_search: object) -> dict[str, float]:
+    raise RuntimeError("the date-grid blew up")
+
+
+@pytest.mark.parametrize(
+    ("grid", "note"),
+    [
+        (_throttled_grid, "Google Flights rate-limited"),
+        (_broken_grid, "Google Flights date-grid failed"),
+        (_empty_grid, "awaiting Matrix calendar"),
+    ],
+    ids=["throttled", "date-grid raised", "empty grid"],
+)
+def test_every_weave_branch_with_no_grid_to_show_keeps_stdout_empty(
+    grid: Any, note: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The first paint has five branches and four of them have no document. Each
+    says why on stderr, because Matrix can still fail behind any of them — which is
+    exit 1, and exit 1 is a promise that the stream a caller reads for the answer
+    holds nothing to mistake for one. Real renderers, since a spy is exactly what
+    would hide a status line landing in the answer's stream."""
+    monkeypatch.setattr(cli, "MatrixClient", _DownClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", grid)
+    with pytest.raises(typer.Exit) as excinfo:
+        _run_enriched()
+    assert excinfo.value.exit_code == 1
+    cap = capsys.readouterr()
+    assert cap.out == ""
+    line = _flat(cap.err)
+    assert note in line  # why there is no fast half
+    assert "Matrix is down" in line  # and why there is no calendar behind it
+
+
+def test_the_paint_says_matrix_is_coming_without_saying_it_on_stdout(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The fifth branch, the one that DOES have a document: the grid goes to stdout
+    and the line promising the Matrix refinement does not. It is status about an
+    answer still in flight, exactly like the four branches with no grid at all, and
+    a caller reading stdout for the document gets the document."""
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _fake_grid)
+    _spy_renderers(monkeypatch)
+    _run_enriched()
+    cap = capsys.readouterr()
+    assert "refining" in _flat(cap.err)
+    assert "refining" not in cap.out
+
+
+def test_the_fanout_provenance_note_is_beside_the_grid_not_in_it(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Why the grid was assembled from several queries qualifies the answer rather
+    than being part of it — the same claim as the coverage note it sits beside, and
+    on the same stream. It is also written before the answer is delivered, so on
+    stdout a delivery that then failed would leave it there alone under exit 1,
+    where a caller reading the stream finds a document that is only provenance."""
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    _spy_renderers(monkeypatch)
+    _calendar_fast(fast=False, destination="VIE,PAR")
+    cap = capsys.readouterr()
+    assert "separately and merged" in _flat(cap.err)
+    assert "separately and merged" not in _flat(cap.out)
 
 
 def test_calendar_enriched_paints_grid_before_matrix(monkeypatch: Any) -> None:
@@ -1450,14 +1538,15 @@ def test_an_orderly_exit_inside_a_calendar_guard_keeps_its_own_code(
     assert excinfo.value.exit_code == code  # its own code, not 1
     cap = capsys.readouterr()
     if delivered:
-        # The one arm where something reached the reader BEFORE the stop: the
-        # grid paint is synchronous and the thread hop ahead of it is the last
-        # place a cancel can land, so what was given stays given.
-        assert "refining with Matrix" in _flat(cap.out)
-    else:
-        # Everywhere else a stop is not an answer, and leaves nothing on stdout
-        # for a caller to read as one whatever the exit code says.
-        assert cap.out == ""
+        # The one arm where the grid reached the reader BEFORE the stop: the paint
+        # is synchronous and the thread hop ahead of it is the last place a cancel
+        # can land, so what was given stays given. The renderers here are spies, so
+        # the paint's own status line is what witnesses it — on stderr, like every
+        # other line the weave writes while the answer is still in flight.
+        assert "refining with Matrix" in _flat(cap.err)
+    # A stop is not an answer, and leaves nothing on stdout for a caller to read
+    # as one whatever the exit code says.
+    assert cap.out == ""
     line = _flat(cap.err)
     if beside is None:
         assert "failed" not in line  # and no backend blamed
@@ -1752,29 +1841,47 @@ def _fanout_emitter_raises(monkeypatch: Any) -> None:
     _calendar_fast(fast=False, destination="VIE,PAR")
 
 
+def _fast_renderer_raises(monkeypatch: Any) -> None:
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)  # never dial Matrix from a test
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _fake_grid)
+    _spy_renderers(monkeypatch)
+    monkeypatch.setattr(cli, "_render_date_grid", _exploding_grid_renderer)
+    _calendar_fast(fast=True, one_way=True)
+
+
 @pytest.mark.parametrize(
-    ("drive", "message"),
+    ("drive", "message", "prefix"),
     [
-        (_weave_renderer_raises, "the calendar renderer blew up"),
-        (_weave_emitter_raises, "the URL emitter blew up"),
-        (_plain_renderer_raises, "the calendar renderer blew up"),
-        (_fanout_emitter_raises, "the URL emitter blew up"),
+        (_weave_renderer_raises, "the calendar renderer blew up", "Matrix calendar failed"),
+        (_weave_emitter_raises, "the URL emitter blew up", "Matrix calendar failed"),
+        (_plain_renderer_raises, "the calendar renderer blew up", "Matrix calendar failed"),
+        (_fanout_emitter_raises, "the URL emitter blew up", "Matrix calendar failed"),
+        (
+            _fast_renderer_raises,
+            "the date-grid renderer blew up",
+            "Google Flights date grid failed",
+        ),
     ],
-    ids=["weave render", "weave emit", "plain render", "fan-out emit"],
+    ids=["weave render", "weave emit", "plain render", "fan-out emit", "fast render"],
 )
 def test_a_raise_writing_the_answer_is_a_typed_line(
-    drive: Any, message: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+    drive: Any, message: str, prefix: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """One arm per live site. Each ends as the typed line and exit 1 that every
-    other cause on these paths ends as, and the prefix is the same one, because a
-    caller matching on it cannot be asked to know which half of the command broke.
-    `--fast`'s grid render is the fourth site and is runtime-dead while the RPC
-    gate stands, so it has no arm here."""
+    """`_deliver_calendar` guards three call sites, and each writes a document out
+    of a renderer and a URL emitter — so the arms are weave x render, weave x emit,
+    tail x render, tail x emit, and the `--fast` grid render. Each ends as the typed
+    line and exit 1 that every other cause on these paths ends as.
+
+    The prefix names the backend that built the document, not the command: a
+    `--fast` run has no Matrix behind it at all, and reporting its renderer as a
+    Matrix failure sends a reader after an outage nobody asked about. The `--fast`
+    arm is the one that reaches a site production cannot while the date-grid RPC
+    gate stands, which is why it is driven with the grid stubbed."""
     with pytest.raises(typer.Exit) as excinfo:
         drive(monkeypatch)
     assert excinfo.value.exit_code == 1
     line = _flat(capsys.readouterr().err)
-    assert "Matrix calendar failed" in line
+    assert prefix in line
     assert message in line
 
 
@@ -2285,6 +2392,33 @@ def test_a_matrix_failure_that_says_nothing_still_names_itself(
     cap = capsys.readouterr()
     assert calls["grid"] == 1
     assert "Matrix calendar failed: ConnectTimeout" in _flat(cap.err)
+
+
+def test_a_backend_error_behind_a_painted_grid_reports_under_the_same_prefix(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The contrast with the transport failure above: same weave, same painted
+    grid, and a `MatrixApiError` instead — the class that carries a kind and a
+    request id. Those belong BELOW the prefix, not instead of it, so the line a
+    caller matches on is the same one every other calendar failure prints and the
+    fields an outage report quotes follow it."""
+
+    class _TypedErrClient(_PricedClient):
+        @override
+        async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
+            _ = (search, cache)
+            raise MatrixApiError("Matrix is down", kind="unavailable", request_id="req-11")
+
+    monkeypatch.setattr(cli, "MatrixClient", _TypedErrClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _fake_grid)
+    calls = _spy_renderers(monkeypatch)
+    _run_enriched()  # the grid painted, so the Matrix half only reports
+    line = _flat(capsys.readouterr().err)
+    assert calls["grid"] == 1
+    assert line.index("Matrix calendar failed") < line.index("unavailable")
+    assert line.index("Matrix calendar failed") < line.index("request_id")
+    assert "req-11" in line
+    assert "Matrix is down" in line
 
 
 @pytest.mark.parametrize("value", ["[/x]", "[bold]x"])
@@ -2799,6 +2933,8 @@ def _fake_gf(
     currency: object = "USD",
     stops: object = 0,
     duration: object = 185,
+    pitch_inches: object = 31,
+    legroom_class: object = "BELOW",
     marketing_flights: object = (),  # `object`, so a `**{field: payload}` arm still checks
 ) -> SimpleNamespace:
     """An fli-shaped Google Flights result: every field the table and the legroom
@@ -2809,8 +2945,8 @@ def _fake_gf(
     leg = SimpleNamespace(airline=SimpleNamespace(name=airline), flight_number=flight_number)
     amenities = SimpleNamespace(
         cabin="ECONOMY",
-        pitch_inches=31,
-        legroom_class="BELOW",
+        pitch_inches=pitch_inches,
+        legroom_class=legroom_class,
         wifi=None,
         power=None,
         video=None,
@@ -2862,6 +2998,11 @@ def test_gflight_table_survives_a_hostile_flight_number(
 # raises before anything is printed.
 _GF_TEXT_FIELDS = ("currency", "stops")
 _GF_NUMERIC_FIELDS = ("price", "duration")
+# The legroom cell's own two, read off a duck-typed Google Flights object one
+# level further down: `_fmt_gflight_legroom` composes them into the string the
+# table then prints, so they reach a cell as text with nothing between them and
+# the parser but the wrap inside that formatter.
+_GF_AMENITY_FIELDS = ("pitch_inches", "legroom_class")
 
 
 @pytest.mark.parametrize("payload", _HOSTILE_FIELD_VALUES)
@@ -2873,6 +3014,33 @@ def test_gflight_table_survives_a_hostile_result_field(
     Both are Google Flights' strings, both land in a Rich table, and neither had an
     arm of its own — which is what lets an allowlisted local beside them be rebound
     to one without any test noticing."""
+    buffer = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, width=400))
+    cli._render_gflight_table(  # pyright: ignore[reportPrivateUsage] — the render site IS the unit
+        [_fake_gf("UA117", **{field: payload})],
+        legs=(Leg.of(["JFK"], ["LHR"], date(2026, 10, 1)),),
+        top_n=5,
+    )
+    probe = _flat(_SGR.sub("", buffer.getvalue()))
+    for driver in _DRIVERS:
+        assert driver not in probe, f"{driver!r} reached the console"
+    if payload != "\x1b[2J":  # the ESC is dropped, so only its letters remain
+        assert payload in probe, f"{field} was eaten"
+    _ = capsys.readouterr()
+
+
+@pytest.mark.parametrize("payload", _HOSTILE_FIELD_VALUES)
+@pytest.mark.parametrize("field", _GF_AMENITY_FIELDS)
+def test_gflight_table_survives_a_hostile_amenity_field(
+    field: str, payload: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The pitch and the seat-type word are Google Flights' own values, and the
+    legroom cell is the one place they are interpolated. That cell also carries a
+    real `[red]` of ours, so the wrap has to be on each leaf inside the formatter
+    rather than around the finished string — which is exactly the arrangement that
+    goes silent when one leaf loses its wrapper. Every payload here falls outside
+    the three seat-type words the module knows, so the branch printing an unknown
+    one is entered rather than skipped."""
     buffer = io.StringIO()
     monkeypatch.setattr(cli, "console", Console(file=buffer, width=400))
     cli._render_gflight_table(  # pyright: ignore[reportPrivateUsage] — the render site IS the unit
