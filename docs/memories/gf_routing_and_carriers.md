@@ -308,8 +308,9 @@ pinned board's minimum is exactly the outbound row's price, while the other
 combination is a dearer trip. Live 2026-09-03 (HNL-MIA business, 2 adults) says
 the same from the other end: outbound 854/305 quoted 6806 and its two
 combinations totalled 6806 and 7650. Pricing a combination from the outbound
-therefore reports every one of them but the cheapest under its real fare. The human table prints each member's own price on its `Na`/`Nb` rows
-and `--format json` emits both, so both carry the true number; the SearchResult
+therefore reports every one of them but the cheapest under its real fare. The
+human table prints each member's own price on its `Na`/`Nb` rows and
+`--format json` emits both, so both carry the true number; the SearchResult
 the award comparison reads carries one, and it is the total. The cash baseline
 that comparison is made against is therefore the cheapest of the rows SHOWN —
 one-way rows in Google's order, combinations in price order — and not the

@@ -1534,12 +1534,18 @@ def _pick_in_range(pick: int | None, rows: int, *, links_follow: bool) -> int | 
     link that way, and a caller that clamped to an index instead would pin the
     right row under a label claiming the user's number.
 
-    Two clauses, and only the first is unconditional. A number the user typed
-    that names no row is always worth a line, whatever else the run does with
-    it. What happens NEXT is not always the same: a run that emits no link pins
-    nothing, so `links_follow` is what keeps the second clause from describing
-    something that did not happen — the defect this whole reporter exists to
-    avoid, one sentence in.
+    Two clauses, and neither is unconditional. A number the user typed that
+    names no row on screen is worth a line, and `rows` is what the line
+    measures it against. What happens NEXT is a separate question: a run that
+    emits no link pins nothing, so `links_follow` is what keeps the second
+    clause from describing something that did not happen — the defect this
+    whole reporter exists to avoid, one sentence in.
+
+    A board with NO rows is the case the callers keep away from here rather
+    than one this reports, and for the same reason the second clause exists:
+    `1-0` is an empty interval, so it cannot say what a valid pick would be,
+    and nothing is pinned for a fallback clause to name. Every caller skips
+    this on an empty list and prints nothing there.
 
     The fallback names ROW ONE rather than "the cheapest", because that is what
     every caller of this does with the None: they pin the first row of the list
@@ -2121,7 +2127,7 @@ def _run_enriched_path(
 
     # Repaint: reconciled GF + Matrix, prices attributed.
     #
-    # `shown` is the list the user was NUMBERED, which is what `--pick N` names
+    # `shown` is the list the user saw numbered, which is what `--pick N` names
     # and what the pin label claims. The merged rows are price-sorted and can
     # include Google-only itineraries, so their order and their length both
     # differ from `matrix_res.solutions`: indexing those instead pins a row the
@@ -2380,13 +2386,17 @@ def _run_matrix_multi(
         # left if `typer.Exit` ever stops subclassing `Exception`.
         raise
     except Exception as e:
-        # Nothing an `Exception` from a cabin can do reaches here — those are
-        # caught per cabin — so this is the shared client failing to open or
-        # close at all. A `BaseException` leaf is outside both: the group anyio
-        # wraps it in is a `BaseExceptionGroup`, which is not an `Exception`, so
-        # it passes this arm and the per-cabin one alike and leaves by the door
-        # a deliberate stop should leave by. Widening either arm to catch it
-        # would report that stop as a backend failure. Typed
+        # No cabin FAILURE reaches here — those are caught per cabin — so this
+        # is the shared client failing to open or close at all. A deliberate
+        # stop does reach it: `typer.Exit` subclasses `RuntimeError`, the
+        # per-cabin arm re-raises it on purpose, and `_reraise_if_orderly`
+        # below unwraps it from the group anyio put it in. A `BaseException`
+        # leaf is outside both arms whichever way it arrives — anyio hands a
+        # generic one back inside a `BaseExceptionGroup` and the runner
+        # re-raises a `KeyboardInterrupt` or a `SystemExit` bare — and neither
+        # form is an `Exception`, so it leaves by the door a deliberate stop
+        # should leave by. Widening either arm to catch it would report that
+        # stop as a backend failure. Typed
         # rather than a traceback, and worded like every other Matrix failure.
         # One arm and not two: a `MatrixApiError` cannot arrive here either.
         # `execute()` is the only thing that raises one and every call to it is
@@ -2449,13 +2459,16 @@ def _run_gflight_multi(
             # guard left if `typer.Exit` ever stops subclassing `Exception`.
             raise
         except Exception as e:
-            # Nothing an `Exception` from a cabin can do reaches here — those
-            # are caught per cabin — so this is the fan-out itself: opening the
-            # loop, starting the group, or the group's own unwinding. A
-            # `BaseException` leaf passes both arms instead, wrapped by anyio in
-            # a `BaseExceptionGroup` that is not an `Exception`; that is the
-            # door a deliberate stop leaves by, and widening this to catch it
-            # would answer one with a backend's name. Untyped, what this DOES
+            # No cabin FAILURE reaches here — those are caught per cabin — so
+            # this is the fan-out itself: opening the loop, starting the group,
+            # or the group's own unwinding. A deliberate stop does reach it:
+            # `typer.Exit` subclasses `RuntimeError`, the per-cabin arm
+            # re-raises it on purpose, and `_reraise_if_orderly` below unwraps
+            # it from its group. A `BaseException` leaf passes both arms
+            # instead — whether anyio hands it back wrapped or the runner
+            # re-raises it bare, it is not an `Exception`; that is the door a
+            # deliberate stop leaves by, and widening this to catch it would
+            # answer one with a backend's name. Untyped, what this DOES
             # receive is a bare traceback with both streams empty, which is the
             # one outcome every reporter on this path exists to prevent.
             _reraise_if_orderly(e, said="Google Flights search failed")
@@ -2749,7 +2762,19 @@ def _render_gflight_table(
 
     Accepts our `GFlightWithId` wrappers — `.flight` is fli's FlightResult,
     `.amenities` is per-leg legroom data parsed from Google's response.
-    `match_carriers` enables codeshare-aware leg labels (see `_leg_display`)."""
+    `match_carriers` enables codeshare-aware leg labels (see `_leg_display`).
+
+    A round-trip combination therefore prints TWO different prices, on its `Na`
+    and `Nb` rows, and that reads as a bug until you know what each is: the `a`
+    row carries the outbound board's own quote — the cheapest total reachable
+    from that outbound — while the `b` row carries THIS combination's total,
+    from the return board fetched with that outbound pinned. Printing each
+    member's own number is deliberate, because both are true of the row they
+    sit on and the pair is what says which combination costs what. The
+    itinerary fare downstream is the terminal member's; the argument and the
+    measurements are in the round-trip-pricing paragraph of
+    docs/memories/gf_routing_and_carriers.md and in
+    `tests/pp/test_gflight_adapter.py`."""
     origin = legs[0].origins[0] if legs[0].origins else "?"
     destination = legs[0].destinations[0] if legs[0].destinations else "?"
     has_return = len(legs) >= _ROUND_TRIP_LEGS
@@ -2981,18 +3006,26 @@ _JSON_OPT = typer.Option(
 #
 # Both URLs encode the search criteria. The Google-Flights URL ALSO pins one
 # matched itinerary — the row `--pick` names, defaulting to the first row the
-# table printed — when an itinerary row is available; Matrix's URL only encodes
-# the search (Matrix's SPA doesn't surface a per-itinerary URL state).
+# FINAL table printed — when an itinerary row is available; Matrix's URL only
+# encodes the search (Matrix's SPA doesn't surface a per-itinerary URL state).
+# The enriched path prints two numbered tables and the pin names a row of the
+# second, so "the first row printed" would name a different itinerary from the
+# one the link opens.
+#
+# Neither line is printed under `--format json`, and the suppression is at the
+# call sites rather than in `_emit_urls`, which cannot know which format asked
+# for it. Both help strings say so, because a flag whose text promises output
+# it does not produce is the same defect on either of them.
 _MATRIX_URL_HELP = (
     "Print the Matrix ITA search URL (pre-fills the search; Matrix's SPA "
     "doesn't expose per-itinerary URL state, so this is the deepest link "
-    "available)."
+    "available). No link line is printed under --format json."
 )
 _GOOGLE_URL_HELP = (
     "Print the Google Flights URL. When an itinerary can be resolved from the "
-    "results the URL deep-links to the row --pick names, or to the first row "
-    "printed; the label says which. Otherwise it pre-fills the search. No link "
-    "line is printed under --format json."
+    "results the URL deep-links to the row --pick names, or to the first row of "
+    "the final table; the label says which. Otherwise it pre-fills the search. "
+    "No link line is printed under --format json."
 )
 
 
@@ -3180,8 +3213,9 @@ def search(
         None,
         "--pick",
         help="Pin itinerary #N (1-based, as shown in the table) in the "
-        "--matrix-url/--google-url deep links. Default: the first row printed. "
-        "Ignored under --format json, which emits no link lines at all.",
+        "--matrix-url/--google-url deep links. Default: the first row of the "
+        "final table. Ignored under --format json, which emits no link lines "
+        "at all.",
         rich_help_panel=_GROUP_OUTPUT,
     ),
     no_cache: bool = _NO_CACHE_OPT,

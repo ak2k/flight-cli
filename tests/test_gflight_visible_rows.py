@@ -653,8 +653,8 @@ def test_a_one_way_row_google_did_not_price_is_shown_rather_than_dropped(
 
     `_price_ordered` returns a non-tuple list as it came, so an unpriced row
     travels straight into the table's own price cell — a second, independent
-    place the absence has to be answered, and the one that used to end the
-    command with the renderer's own failure line and exit 1."""
+    place the absence has to be answered, and the one whose failure is the
+    renderer's own line and exit 1 rather than a traceback."""
     gf_session(gf_unpriced("ds1_metadata_blocks_kept.json", index=1))
     cli._run_gflight_path(
         legs=_one_way(),

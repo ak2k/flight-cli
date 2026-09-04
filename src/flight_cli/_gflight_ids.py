@@ -328,7 +328,17 @@ class _SharedThrottleLadder:
         Refilling it for everyone lets each healthy sibling hand a failing
         worker another rung, so a per-request fault — a read timeout on one
         cabin's multi-megabyte board is the ordinary shape — retries for as long
-        as the siblings keep succeeding, which is no bound at all."""
+        as the siblings keep succeeding, which is no bound at all.
+
+        The cost on the other side is a ruled trade rather than a gap: one
+        ladder is one budget for the whole fan-out, so a cabin that keeps
+        failing spends rungs its siblings would have had, and a group under a
+        transport outage gets at most `_TRANSPORT_RETRY_ATTEMPTS + 1 +
+        (cabins - 1)` GETs between them rather than that many each. Sharing is
+        what makes the budget a statement about the network, which is one
+        network. The arithmetic and the measured costs live once, in the budget
+        section of docs/memories/gf_routing_and_carriers.md — the same place
+        the class docstring points at for the wall."""
         with self._lock:
             self._wall.refill()
             if network:
@@ -548,6 +558,17 @@ def _extract_ds1(html: str) -> list[Any] | None:
         if not isinstance(payload, list):
             continue
         decoded = cast("list[Any]", payload)
+        # Counting STRUCTURALLY is a ruled trade, not an oversight: a decoy
+        # carrying one row that happens to parse outranks a complete three-row
+        # board and is served short with no warning at any level, because the
+        # 0-of-N guard never fires when one of N parsed. Taken because the
+        # alternative — a selector that parses rows to choose — drops a real
+        # board whose row layout has just changed, which is the failure this
+        # backend actually meets. The ruling and the measurements are in the
+        # `ds:1` selection section of docs/memories/gf_routing_and_carriers.md,
+        # and pinned by `test_a_decoy_whose_rows_partly_parse_is_served_short_
+        # and_silently` and `test_the_chosen_blob_is_counted_structurally_not_
+        # parsed`.
         rows = _board_row_count(decoded) if _is_a_readable_board(decoded) else 0
         if rows > best_rows:  # strictly greater, so a tie keeps the earlier blob
             best, best_rows = decoded, rows
@@ -1808,6 +1829,19 @@ def _report_pin_outcome(
     if stopped is not None:
         if not served:
             raise stopped
+        # A partial round trip is a success BY CONTRACT: exit 0, `--format
+        # json` in the ordinary shape, and this counted warning as the whole
+        # account of what is missing. A machine consumer does not read stderr
+        # and so cannot tell a short board from a thin one; that gap is known
+        # and accepted, because an envelope would change the output contract
+        # for every existing consumer to signal a condition ordinary upstream
+        # thinness also produces, and a non-zero exit would make a normal
+        # throttle look like a failure to a script. The ruling with its
+        # reasoning is in the partial-round-trip paragraph of
+        # docs/memories/gf_routing_and_carriers.md; the comment below covers
+        # the all-refused arm and the pin-ORDER trade, which are different
+        # questions. Driven by `test_a_throttle_on_a_later_pin_keeps_what_was_
+        # already_served` and its transport-outage sibling.
         log.warning(
             "stopped pinning: Google Flights %s; %d of %d return boards skipped",
             "rate-limited this IP" if isinstance(stopped, GfThrottledError) else "was unreachable",

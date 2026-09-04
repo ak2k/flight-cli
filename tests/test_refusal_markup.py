@@ -2409,8 +2409,8 @@ def test_the_google_refusal_note_is_never_the_whole_of_stdout(
     printed however well its half went — and the award renderer below it has
     arms that return without writing a byte to stdout, an expired token being
     the ordinary one. The sentence is then the ENTIRE contents of stdout, at
-    exit 0, with its own retraction on stderr: the shape this reporter exists
-    to prevent, one arm over from the one it already fixed.
+    exit 0, with its own retraction on stderr — the shape this reporter exists
+    to prevent, on the arm that has no table for a note to sit beside.
 
     So the awards arm says the same news on `err`, where a run that ends up
     printing nothing owes nothing. The control is the other arm, which keeps
