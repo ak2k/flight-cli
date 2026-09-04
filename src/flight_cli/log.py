@@ -95,7 +95,15 @@ class _StderrHandler(logging.Handler):
         except RecursionError:
             raise
         except Exception:  # noqa: BLE001 — a log line cannot be allowed to fail a search
-            self.handleError(record)
+            # The recovery is as unfailable as the write it recovers. stdlib's
+            # `handleError` writes its own report to `sys.stderr` and guards
+            # only `OSError`, so the stream that just refused this record
+            # refuses that report too — a CLOSED stream raises `ValueError` and
+            # the failure this arm exists to absorb escapes it instead, ending a
+            # command over a line that was only describing one. `_LiveStderr`
+            # makes the same trade one stream over, for the same reason.
+            with suppress(Exception):
+                self.handleError(record)
 
 
 def _stderr_wants_colour() -> bool:

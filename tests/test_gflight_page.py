@@ -53,6 +53,7 @@ import anyio
 import anyio.to_thread
 import pytest
 
+from conftest import _answering  # one home for the re-pointing rule; see its docstring
 from flight_cli import _gflight_ids as gfid
 from flight_cli._gf_errors import (
     GfBackendError,
@@ -1439,13 +1440,38 @@ def test_a_throttle_is_decided_by_the_url_path_not_the_query() -> None:
 # ─────────────────── request budget: the round-trip fan-out ────────────────
 
 
-def _board_of(n: int) -> str:
-    """A ds:1 page carrying `n` parseable rows, cloned from the real capture."""
+def _return_date() -> str:
+    """The date the RETURN segment of `_round_trip_filters` names.
+
+    Derived rather than pinned, for the reason that function derives its own:
+    fli refuses a travel date in the past, so a literal rots the suite."""
+    return (datetime.date.today() + datetime.timedelta(days=52)).isoformat()
+
+
+def _cloned_ds1(n: int) -> str:
+    """A ds:1 payload carrying `n` parseable rows, cloned from the real
+    capture."""
     payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
     row = payload[2][0][0]
     payload[2] = [[copy.deepcopy(row) for _ in range(n)]]
     payload[3] = None
-    return _page(json.dumps(payload))
+    return json.dumps(payload)
+
+
+def _board_of(n: int) -> str:
+    """A ds:1 page carrying `n` parseable rows, cloned from the real capture."""
+    return _page(_cloned_ds1(n))
+
+
+def _return_board_of(n: int) -> str:
+    """The same board, answering the RETURN segment of `_round_trip_filters`.
+
+    The capture is an outbound JFK-LAX page, and the pin loop refuses a return
+    board whose first leg does not correspond to the segment it was asked to
+    fill — an outbound board served back is precisely the shape it refuses. A
+    test whose subject is the pin BUDGET therefore answers the leg it asked
+    for, or it measures a refusal instead of a fan-out."""
+    return _page(_answering(_cloned_ds1(n), origin="LAX", destination="JFK", date=_return_date()))
 
 
 def _round_trip_filters() -> Any:
@@ -1492,7 +1518,10 @@ def test_the_pinned_fanout_is_capped_regardless_of_top_n(client: Any) -> None:
     multi-cabin path bumps top_n by 5x (capped at 100) to widen the pool it
     filters — free on an RPC, not free here. At top_n=50 over a 30-row board
     the round trip costs 1 outbound + 10 pins, not 1 + 30."""
-    fake = client(_FakeResponse(text=_board_of(30)))
+    fake = client(
+        _FakeResponse(text=_board_of(30)),  # the outbound board
+        _FakeResponse(text=_return_board_of(1)),  # every pinned leg answers
+    )
     out = gfid.search_with_ids(_round_trip_filters(), top_n=50)
     assert out is not None
     assert len(fake.gets) == 1 + gfid._PINNED_FANOUT_CAP == 11
@@ -1503,7 +1532,10 @@ def test_every_pin_asks_for_a_different_return_board(client: Any) -> None:
     file would notice a fan-out that pinned the same leg ten times: the GET
     count, the combination count and the warning counts would all still add
     up, and the user would get ten copies of one itinerary."""
-    fake = client(_FakeResponse(text=_page(_ds1("ds1_jfk_lax_3rows.json"))))
+    fake = client(
+        _FakeResponse(text=_page(_ds1("ds1_jfk_lax_3rows.json"))),
+        _FakeResponse(text=_return_board_of(3)),
+    )
     out = gfid.search_with_ids(_round_trip_filters(), top_n=3)
     assert out is not None
     assert len(fake.gets) == 4  # the outbound board, then one GET per pin
@@ -1513,7 +1545,10 @@ def test_every_pin_asks_for_a_different_return_board(client: Any) -> None:
 def test_the_default_top_n_is_unchanged_by_the_cap(client: Any) -> None:
     """The cap must not narrow an ordinary search: `-n 10` is the default and
     sits exactly on it."""
-    fake = client(_FakeResponse(text=_board_of(30)))
+    fake = client(
+        _FakeResponse(text=_board_of(30)),
+        _FakeResponse(text=_return_board_of(1)),
+    )
     gfid.search_with_ids(_round_trip_filters(), top_n=10)
     assert len(fake.gets) == 11
     assert gfid.pinned_fanout(3) == 3  # below the cap, top_n still decides
@@ -1551,9 +1586,9 @@ def test_one_refused_return_board_does_not_discard_the_pins_already_fetched(
     refusal for a page that mostly worked."""
     fake = client(
         _FakeResponse(text=_board_of(3)),  # the outbound board
-        _FakeResponse(text=_board_of(1)),  # pin 1 returns
+        _FakeResponse(text=_return_board_of(1)),  # pin 1 returns
         _FakeResponse(text=_moved_row_page()),  # pin 2 refuses
-        _FakeResponse(text=_board_of(1)),  # pin 3 returns
+        _FakeResponse(text=_return_board_of(1)),  # pin 3 returns
     )
     with caplog.at_level(logging.WARNING, logger="flight_cli._gflight_ids"):
         out = gfid.search_with_ids(_round_trip_filters(), top_n=3)
@@ -1561,6 +1596,108 @@ def test_one_refused_return_board_does_not_discard_the_pins_already_fetched(
     assert len(out) == 2
     assert len(fake.gets) == 4
     assert "1 of 3 return boards unavailable" in caplog.text
+
+
+def test_a_return_board_that_ignored_the_pin_never_becomes_a_combination(
+    client: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A page that dropped `selected_flight` arrives shaped exactly like one
+    that honoured it — nothing in the response says which pin it belongs to.
+
+    Paired unchecked, its rows become combinations whose members are legs
+    nobody asked for: this filter asks JFK-LAX out and LAX-JFK back a week
+    later, and the outbound board served back would emit six trips that fly
+    JFK-LAX twice and never come home, priced and printed beside real ones.
+    That is a refusal wearing the shape of a result, which is the failure this
+    module refuses everywhere else and the one no later stage can catch."""
+    client(
+        _FakeResponse(text=_board_of(2)),  # the outbound board
+        _FakeResponse(text=_board_of(3)),  # every pinned leg: the OUTBOUND again
+    )
+    with (
+        caplog.at_level(logging.WARNING, logger="flight_cli._gflight_ids"),
+        pytest.raises(GfPageShapeError) as excinfo,
+    ):
+        gfid.search_with_ids(_round_trip_filters(), top_n=2)
+
+    # Nothing served, so the refusal IS the outcome rather than a footnote —
+    # swallowing it would report a round trip whose return boards stopped
+    # meaning what we asked as a route with no return flights.
+    assert "the pinned leg was ignored" in str(excinfo.value), excinfo.value
+    # Counted per BOARD, so the count stays a count of the pins asked for.
+    assert "2 of 2 return boards unavailable" in caplog.text, caplog.text
+
+
+def test_a_return_board_for_the_wrong_day_is_refused_too(
+    client: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The other half of the same correspondence. A board for the right route on
+    a day nobody asked for is still not an answer to the segment that was sent,
+    and it is the half a same-route trip would otherwise leave unchecked."""
+    client(
+        _FakeResponse(text=_board_of(2)),
+        _FakeResponse(
+            text=_page(
+                _answering(
+                    _cloned_ds1(3),
+                    origin="LAX",
+                    destination="JFK",
+                    date=(datetime.date.today() + datetime.timedelta(days=53)).isoformat(),
+                )
+            )
+        ),
+    )
+    with (
+        caplog.at_level(logging.WARNING, logger="flight_cli._gflight_ids"),
+        pytest.raises(GfPageShapeError) as excinfo,
+    ):
+        gfid.search_with_ids(_round_trip_filters(), top_n=2)
+
+    assert "the pinned leg was ignored" in str(excinfo.value), excinfo.value
+    assert _return_date() in str(excinfo.value), excinfo.value
+
+
+def test_a_return_board_that_answers_the_segment_is_paired(
+    client: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The control the check above needs: a board that DOES answer the leg it
+    was asked for is paired, in full, with no warning.
+
+    Without it the correspondence check reads as a test of the fixtures rather
+    than of the rule — a guard that refused everything would satisfy the
+    reproduction on its own."""
+    client(
+        _FakeResponse(text=_board_of(2)),
+        _FakeResponse(text=_return_board_of(3)),
+    )
+    with caplog.at_level(logging.WARNING, logger="flight_cli._gflight_ids"):
+        out = gfid.search_with_ids(_round_trip_filters(), top_n=2)
+
+    assert out is not None
+    assert len(out) == 2 * 3, out
+    assert all(isinstance(c, tuple) and len(c) == 2 for c in out), out
+    assert "return boards unavailable" not in caplog.text, caplog.text
+
+
+def test_one_pin_answered_with_the_wrong_leg_keeps_the_pins_that_were_honoured(
+    client: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Refused per board, and the rest of the fan-out still runs.
+
+    A page that stops meaning what we asked is the same class as a re-shaped
+    one, so it takes the same arm: this pin is dropped, the pins that answered
+    are kept, and the count tells the user their table is short."""
+    client(
+        _FakeResponse(text=_board_of(2)),  # the outbound board
+        _FakeResponse(text=_board_of(3)),  # pin 1 answers the wrong leg
+        _FakeResponse(text=_return_board_of(3)),  # pin 2 answers the one asked
+    )
+    with caplog.at_level(logging.WARNING, logger="flight_cli._gflight_ids"):
+        out = gfid.search_with_ids(_round_trip_filters(), top_n=2)
+
+    assert out is not None
+    assert len(out) == 3, out
+    assert "1 of 2 return boards unavailable" in caplog.text, caplog.text
 
 
 def test_a_refusal_on_every_pin_is_still_the_outcome(client: Any) -> None:
@@ -1610,7 +1747,7 @@ def test_a_throttle_on_a_later_pin_keeps_what_was_already_served(
     combination is a real answer, so it is returned rather than unwound."""
     fake = client(
         _FakeResponse(text=_board_of(3)),
-        _FakeResponse(text=_board_of(1)),  # pin 1 returns
+        _FakeResponse(text=_return_board_of(1)),  # pin 1 returns
         _FakeResponse(text="", status_code=429),  # pin 2 onwards
     )
     with caplog.at_level(logging.WARNING, logger="flight_cli._gflight_ids"):
@@ -1631,8 +1768,8 @@ def test_a_transport_outage_on_a_later_pin_keeps_what_was_already_served(
     count — a transport ladder each, for a board none of them could reach."""
     fake = client(
         _FakeResponse(text=_board_of(5)),
-        _FakeResponse(text=_board_of(1)),  # pin 1 returns
-        _FakeResponse(text=_board_of(1)),  # pin 2 returns
+        _FakeResponse(text=_return_board_of(1)),  # pin 1 returns
+        _FakeResponse(text=_return_board_of(1)),  # pin 2 returns
         _transport_error("connection reset by peer"),  # pin 3 onwards
     )
     with caplog.at_level(logging.WARNING, logger="flight_cli._gflight_ids"):
@@ -2019,7 +2156,7 @@ def test_the_documented_round_trip_costs_compose_from_their_factors(client: Any)
     literal."""
     pins = gfid.pinned_fanout(10)
     board = _board_of(pins)
-    served = _FakeResponse(text=_board_of(1))
+    served = _FakeResponse(text=_return_board_of(1))
 
     # Every pin spends its whole transport ladder and then recovers: the
     # outbound once, then budget + 1 GETs per pin. No ladder exhausts, so the

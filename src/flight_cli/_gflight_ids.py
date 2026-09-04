@@ -43,6 +43,7 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from fli.models import (  # pyright: ignore[reportMissingTypeStubs]
+    Airport,
     FlightLeg,
     FlightResult,
 )
@@ -78,6 +79,7 @@ if TYPE_CHECKING:
 
     from fli.models.google_flights.flights import (  # pyright: ignore[reportMissingTypeStubs]
         FlightSearchFilters,
+        FlightSegment,
     )
 
 # DIVERGE: stdlib logging, where the rest of the package uses structlog (see
@@ -1615,6 +1617,52 @@ def pinned_fanout(top_n: int) -> int:
     return min(top_n, _PINNED_FANOUT_CAP)
 
 
+def _unpinned_board(
+    board: list[GFlightWithId | tuple[GFlightWithId, ...]],
+    wanted: FlightSegment,
+) -> str | None:
+    """Why `board` is not an answer to `wanted`, or None when it is.
+
+    A pin goes out as `selected_flight` and comes back only as whatever page
+    Google chose to serve: the response says nothing about which pin it belongs
+    to, so a page that dropped the pin arrives shaped exactly like one that
+    honoured it. Paired unchecked, its rows become combinations whose members
+    are legs nobody asked for — a trip that flies the outbound twice and never
+    comes home, priced and printed beside real ones. That is this module's worst
+    failure class, a refusal wearing the shape of a result, and it is the one
+    thing no later stage can catch: `cli._price_ordered` and the renderers read
+    a combination as a combination.
+
+    Origin and date, because between them they identify the leg the request
+    asked for, and they are what a served board can be checked against without
+    a second query. The whole board, because a page answering the wrong segment
+    answers it for every row, and one honest row beside wrong ones is still not
+    the board that was asked for."""
+    # `departure_airport` is fli's `[[Airport, weight], …]` shape, and a segment
+    # may carry several. Narrowed to the airports because that is what a served
+    # leg can be compared against; fli's own validator requires the first entry
+    # to be one, so an empty set here is a segment nothing could have answered.
+    origins = {a[0] for a in wanted.departure_airport if isinstance(a[0], Airport)}
+    for row in board:
+        member = row[0] if isinstance(row, tuple) else row
+        legs = member.flight.legs
+        if not legs:
+            return "a Google Flights return board carried a flight with no legs"
+        leg = legs[0]
+        if leg.departure_airport not in origins:
+            return (
+                f"a Google Flights return board departs {leg.departure_airport.name}, "
+                f"not {'/'.join(sorted(a.name for a in origins))}; the pinned leg was ignored"
+            )
+        flown = leg.departure_datetime.date().isoformat()
+        if flown != wanted.travel_date:
+            return (
+                f"a Google Flights return board departs {flown}, not {wanted.travel_date}; "
+                "the pinned leg was ignored"
+            )
+    return None
+
+
 def search_with_ids(
     filters: FlightSearchFilters,
     *,
@@ -1657,6 +1705,12 @@ def search_with_ids(
     refused: list[GfBackendError] = []
     stopped: GfBackendError | None = None
     skipped = 0
+    # The segment the recursion below is asked to FILL, which is the one after
+    # the pin it is given — checking the pinned segment instead would compare a
+    # return board against the outbound and accept a page that ignored the pin,
+    # the shape this check exists for. In range because the base case above
+    # returned for `selected_count >= num_segments - 1`.
+    wanted = filters.flight_segments[selected_count + 1]
     for index, picked in enumerate(pins):
         next_filters = deepcopy(filters)
         next_filters.flight_segments[selected_count].selected_flight = picked.flight
@@ -1677,6 +1731,16 @@ def search_with_ids(
             refused.append(e)
             continue
         if nxt is None:
+            continue
+        ignored = _unpinned_board(nxt, wanted)
+        if ignored is not None:
+            # Refused per BOARD and not per row, so that the count the warning
+            # prints stays a count of boards out of the pins that were asked
+            # for. A page that answers the wrong segment is a page whose shape
+            # stopped meaning what we sent it, so it takes the arm a re-shaped
+            # board takes: this pin is dropped, the others are still fetched,
+            # and nothing served at all still raises.
+            refused.append(GfPageShapeError(ignored))
             continue
         for nx in nxt:
             if isinstance(nx, tuple):

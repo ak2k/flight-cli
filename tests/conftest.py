@@ -158,6 +158,49 @@ def _board(rows: int, *, distinct_at: int | None = None) -> str:
     return _page(json.dumps(payload))
 
 
+def _answering(ds1_json: str, *, origin: str | None, destination: str | None, date: str) -> str:
+    """One captured `ds:1` payload, re-pointed at the leg a query asked for.
+
+    A capture is a real page for a real query, so its rows carry the route and
+    the day that query named. Replayed against a search built from `today` they
+    answer a different leg, and the pinning recursion refuses a return board
+    that does not correspond to the segment it asked to fill — correctly, since
+    that is what a page which dropped the pin looks like. A test that wants a
+    board SERVED rather than refused therefore has to answer the question it
+    asked, and this is how it says so without pinning a literal date that rots.
+
+    The rows keep their prices, ids, carriers and connections; only the endpoint
+    codes of the outer legs and every leg's calendar day move."""
+    payload: list[Any] = json.loads(ds1_json)
+    for block in (2, 3):
+        rows = cast("list[Any] | None", payload[block][0] if payload[block] else None)
+        for row in rows or []:
+            legs = cast("list[list[Any]]", row[0][2])
+            if origin is not None:
+                legs[0][3] = origin
+            if destination is not None:
+                legs[-1][6] = destination
+            for leg in legs:
+                # `[y, m, d]` at both ends; the clock times beside them are
+                # untouched, so an overnight row stays an overnight row.
+                leg[20] = [int(p) for p in date.split("-")]
+                leg[21] = [int(p) for p in date.split("-")]
+    return json.dumps(payload)
+
+
+@pytest.fixture
+def gf_answering() -> Callable[..., str]:
+    """A page carrying a committed capture re-pointed at one leg; see
+    `_answering`."""
+
+    def build(
+        name: str, *, date: str, origin: str | None = None, destination: str | None = None
+    ) -> str:
+        return _page(_answering(_ds1(name), origin=origin, destination=destination, date=date))
+
+    return build
+
+
 @pytest.fixture
 def gf_capture() -> Callable[[str], str]:
     """A page carrying one committed `ds:1` capture, by file name."""

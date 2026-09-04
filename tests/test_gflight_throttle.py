@@ -744,7 +744,7 @@ def test_a_round_left_by_a_dead_thread_is_taken_over_and_not_inherited() -> None
         pytest.skip("this platform does not recycle thread ids")
 
 
-def test_a_waiter_is_let_go_when_the_round_it_waits_on_loses_its_owner() -> None:
+def test_a_waiter_is_let_go_by_the_next_worker_to_meet_the_wall() -> None:
     """The park carries no clock, so a round nobody can report on is a park
     nothing ends.
 

@@ -342,3 +342,33 @@ def test_a_stderr_that_raises_anything_at_all_costs_only_the_record(
     # Returned and not raised: what `print` would have written, which it discards.
     assert proxy.write("a record nobody will read") == len("a record nobody will read")
     assert proxy.flush() is None
+
+
+def test_a_closed_stderr_costs_only_the_record_and_not_the_command(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The recovery has to be as unfailable as the write it recovers.
+
+    stdlib's `handleError` writes its own report to `sys.stderr` and guards only
+    `OSError`, so the stream that just refused a record refuses that report too —
+    and a CLOSED stream raises `ValueError`, which is not an `OSError`. The
+    failure the handler's broad arm exists to absorb then escapes through the
+    recovery instead, and a round trip that WAS served is destroyed by the
+    partial-refusal warning describing it.
+
+    `raiseExceptions` stays True — pytest's default and CPython's — because it
+    is the switch that makes `handleError` write at all: turned off, the arm
+    under test is never reached and the record is dropped either way.
+
+    Driven through `logging.getLogger` rather than the handler alone, because
+    the caller this protects is `_gflight_ids`, which logs that way."""
+    closed = (tmp_path / "stderr.txt").open("w")
+    closed.close()
+    assert closed.closed
+
+    log_mod.configure("warning")
+    monkeypatch.setattr(logging, "raiseExceptions", True)
+    monkeypatch.setattr(sys, "stderr", closed)
+
+    # Returns rather than raising: the caller is a search that already has rows.
+    logging.getLogger(_MODULE_LOGGER).warning("%d of %d return boards unavailable", 1, 3)

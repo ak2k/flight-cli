@@ -51,6 +51,20 @@ def _round_trip() -> tuple[Leg, ...]:
     return (Leg.of("HNL", "MIA", _DEP), Leg.of("MIA", "HNL", _RET))
 
 
+def _served_return(gf_answering: Callable[..., str]) -> str:
+    """The return board Google served with an outbound pinned, answering the
+    leg these tests ask for.
+
+    The capture is a real page for a real day, and a search built from `today`
+    names another one — a board answering neither the route nor the date asked
+    for is what a page that dropped the pin looks like, and the pin loop refuses
+    it. Re-pointing keeps every price, id and carrier the pairing argument rests
+    on."""
+    return gf_answering(
+        "ds1_return_leg_pinned.json", origin="MIA", destination="HNL", date=_RET.isoformat()
+    )
+
+
 def _json_rows(capsys: pytest.CaptureFixture[str]) -> list[Any]:
     out = capsys.readouterr().out
     parsed: Any = json.loads(out)
@@ -80,6 +94,7 @@ def test_the_json_document_carries_the_rows_the_table_numbered(
 def test_a_round_trips_json_document_counts_combinations_not_boards(
     gf_session: Callable[..., Any],
     gf_capture: Callable[[str], str],
+    gf_answering: Callable[..., str],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A round trip multiplies: three outbounds pinned against three returns is
@@ -89,7 +104,7 @@ def test_a_round_trips_json_document_counts_combinations_not_boards(
     # board Google served with one of those outbounds pinned.
     gf_session(
         gf_capture("ds1_metadata_blocks_kept.json"),
-        gf_capture("ds1_return_leg_pinned.json"),
+        _served_return(gf_answering),
     )
     cli._run_gflight_path(
         legs=_round_trip(),
@@ -246,6 +261,7 @@ def test_a_one_way_board_is_trimmed_in_the_order_google_ranked_it(
 def test_a_round_trips_combinations_are_trimmed_by_price(
     gf_session: Callable[..., Any],
     gf_capture: Callable[[str], str],
+    gf_answering: Callable[..., str],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A round trip is the other set, and it carries no ranking of its own.
@@ -260,7 +276,7 @@ def test_a_round_trips_combinations_are_trimmed_by_price(
     ordering by the number every surface prints."""
     gf_session(
         gf_capture("ds1_metadata_blocks_kept.json"),
-        gf_capture("ds1_return_leg_pinned.json"),
+        _served_return(gf_answering),
     )
     cli._run_gflight_path(
         legs=_round_trip(),
@@ -273,6 +289,16 @@ def test_a_round_trips_combinations_are_trimmed_by_price(
     assert totals == sorted(totals), totals
     outbounds = {row[0]["flight_id"] for row in rows}
     assert len(outbounds) > 1, f"every visible trip is one outbound: {rows}"
+    # The visible three by name. Six of the nine combinations this pair builds
+    # tie at the same total, so a monotonic check passes on a pin-major list and
+    # the tie-break alone decides every row on screen — cardinality and ordering
+    # are both satisfied by the wrong three. Naming them is what makes the
+    # documented stability of the sort a thing a test can lose.
+    assert [(r[0]["flight_id"], r[-1]["flight_id"]) for r in rows] == [
+        ("Ulft7e", "iQwZab"),
+        ("Ulft7e", "zIxVxf"),
+        ("FWXCne", "iQwZab"),
+    ], rows
 
 
 def test_a_round_trip_table_prints_its_rows_in_price_order(

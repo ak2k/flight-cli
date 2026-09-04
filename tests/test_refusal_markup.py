@@ -1784,7 +1784,81 @@ def test_an_orderly_exit_never_hides_what_failed_beside_it(
         _enriched(monkeypatch)
 
     assert excinfo.value.exit_code == code
-    assert "the transport broke" in buf.getvalue(), buf.getvalue()
+    printed = buf.getvalue()
+    assert "the transport broke" in printed, printed
+    # The count is said, not inferred. One failure beside a stop reads as the
+    # outcome unless the sentence puts it beside one, and this is the wording
+    # the calendar prints for the same shape — two halves of one vocabulary.
+    assert "failure beside a deliberate stop" in printed, printed
+
+
+def test_a_matrix_error_beside_a_deliberate_stop_keeps_its_kind_and_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rendered as text a `MatrixApiError` is its message alone.
+
+    `kind` tells the user whether to fix the query or wait out a brownout, and
+    `request_id` is the only handle on one search — a line that drops both names
+    the failure without saying anything actionable about it. Every other Matrix
+    reporter here keeps them, so this one does too."""
+    from flight_cli import cli
+    from flight_cli.client import MatrixApiError
+
+    buf = _capture(monkeypatch)
+    monkeypatch.setattr(cli, "_gflight_results", _exits_with(3))
+    monkeypatch.setattr(
+        cli,
+        "_matrix_into",
+        _matrix_task_raising(
+            MatrixApiError("no fares for that market", kind="input", request_id="req-ABC-123")
+        ),
+    )
+
+    with pytest.raises(typer.Exit) as excinfo:
+        _enriched(monkeypatch)
+
+    assert excinfo.value.exit_code == 3
+    printed = buf.getvalue()
+    assert "no fares for that market" in printed, printed
+    assert "input" in printed, printed
+    assert "req-ABC-123" in printed, printed
+
+
+def _render_reraise(monkeypatch: pytest.MonkeyPatch, *, said: str) -> str:
+    """`_reraise_if_orderly` driven with one failure beside one stop.
+
+    Through a real terminal Console, because a Console not writing to one emits
+    no escape sequence at all — live markup and escaped markup then render to
+    the same unstyled text, and an assertion about what a terminal is driven to
+    do cannot tell them apart."""
+    from flight_cli import cli
+
+    buf = io.StringIO()
+    monkeypatch.setattr(
+        cli,
+        "err",
+        Console(file=buf, width=400, no_color=True, highlight=False, force_terminal=True),
+    )
+    group = BaseExceptionGroup("weave", [typer.Exit(3), RuntimeError("the transport broke")])
+    with pytest.raises(typer.Exit):
+        cli._reraise_if_orderly(cast("Exception", group), said=said)
+    return buf.getvalue()
+
+
+def test_the_banner_beside_a_deliberate_stop_cannot_style_the_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The banner is a parameter, and a parameter's value belongs to callers
+    this module's markup guard never reads.
+
+    Every caller passes a literal today, which is exactly why the guard belongs
+    at the interpolation rather than as a standing obligation on whoever writes
+    the next one."""
+    printed = _render_reraise(monkeypatch, said=f"[blink]HOSTILE[/][red]{_ESCAPES}")
+    assert "HOSTILE" in printed, printed
+    # The tag survives as text rather than being consumed as styling.
+    assert "blink" in printed, printed
+    _assert_drives_no_terminal(printed)
 
 
 @pytest.mark.parametrize("code", [0, 3], ids=["exit-0", "exit-3"])
@@ -1862,51 +1936,6 @@ def test_a_google_side_failure_is_not_filed_under_matrix(
     assert "Matrix" not in printed, printed
 
 
-def test_a_matrix_error_after_matrix_answered_is_reported_too(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`state["matrix"]` is written by the LAST statement inside the client's
-    `async with`, so a `MatrixApiError` out of `__aexit__` leaves a result and
-    a failure behind at once.
-
-    Read on one path and not the other, that is exit 0 with an answer on stdout
-    and stderr byte-empty — which is the outcome `_report_weave_aftermath`'s own
-    docstring forbids. Sibling of the `matrix_unexpected` case beside it, and
-    the same rule: every stash held is a stash reported."""
-    from flight_cli import cli
-    from flight_cli.client import MatrixApiError
-    from flight_cli.models import SearchResult
-
-    buf = _capture(monkeypatch)
-
-    class _AnswersThenRefuses:
-        def __init__(self, **_kw: object) -> None:
-            pass
-
-        async def __aenter__(self) -> _AnswersThenRefuses:
-            return self
-
-        async def __aexit__(self, *_a: object) -> None:
-            raise MatrixApiError(f"the session had already expired{_ESCAPES}", kind="input")
-
-        async def execute(self, _search: object, **_kw: object) -> object:
-            return SearchResult.model_validate({"solutions": []})
-
-    def _no_repaint(*_a: object, **_kw: object) -> None:
-        return None
-
-    monkeypatch.setattr(cli, "MatrixClient", _AnswersThenRefuses)
-    monkeypatch.setattr(cli, "_gflight_results", _no_gf())
-    monkeypatch.setattr(cli, "_render_merged", _no_repaint)
-
-    # Matrix answered, so this is not an exit — but it is not silence either.
-    _enriched(monkeypatch)
-
-    printed = buf.getvalue()
-    assert "the session had already expired" in printed, printed
-    _assert_drives_no_terminal(printed)
-
-
 def test_a_weave_that_fails_after_a_stash_reports_both(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1937,6 +1966,86 @@ def test_a_weave_that_fails_after_a_stash_reports_both(
     printed = buf.getvalue()
     assert "Illegal COMMAND-LINE prefix" in printed, printed
     assert "stdout was closed while painting" in printed, printed
+
+
+def _split_capture(monkeypatch: pytest.MonkeyPatch) -> tuple[io.StringIO, io.StringIO]:
+    """`console` and `err` into two buffers, for the assertions where WHICH
+    stream a line took is the whole subject."""
+    from flight_cli import cli
+
+    out, errs = io.StringIO(), io.StringIO()
+    monkeypatch.setattr(
+        cli, "console", Console(file=out, width=400, no_color=True, highlight=False)
+    )
+    monkeypatch.setattr(cli, "err", Console(file=errs, width=400, no_color=True, highlight=False))
+    return out, errs
+
+
+def test_a_weave_that_fails_after_matrix_answered_still_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run that ANSWERED can still have lost the weave around it.
+
+    The Matrix half stashes its result and the group then comes apart on its own
+    unwinding — a value stashed on one path and read only on another is a
+    failure the command hid. The answer stands, so the exit code stays 0 and the
+    note goes beside it rather than in place of it."""
+    from flight_cli import cli
+    from flight_cli.models import SearchResult
+
+    buf = _capture(monkeypatch)
+
+    async def _stashes_a_result(state: dict[str, Any], *_a: object, **_kw: object) -> None:
+        state["matrix"] = SearchResult.model_validate({"solutions": []})
+
+    def _no_repaint(*_a: object, **_kw: object) -> None:
+        return None
+
+    monkeypatch.setattr(cli, "_gflight_results", _no_gf())
+    monkeypatch.setattr(cli, "_matrix_into", _stashes_a_result)
+    monkeypatch.setattr(cli, "_render_merged", _no_repaint)
+    monkeypatch.setattr(
+        cli, "_paint_first_gf_table", _fails_with("the group came apart on the way out")
+    )
+
+    # No exit: Matrix answered, so this is a note on a run that succeeded.
+    _enriched(monkeypatch)
+
+    printed = buf.getvalue()
+    assert "The search answered, then failed:" in printed, printed
+    assert "the group came apart on the way out" in printed, printed
+
+
+def test_a_google_half_with_no_rows_promises_matrix_on_stderr_not_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ "awaiting Matrix" is true of the GOOGLE half when it prints and unknowable
+    about the MATRIX half it names — it is painted from inside the weave, before
+    that half has resolved.
+
+    On the run where Matrix then fails, stdout carries a sentence promising a
+    table that never arrives, on a command exiting 1 with nothing else in it. A
+    caller reading stdout owes zero bytes there; a person still gets the
+    sentence, on the stream the failure beside it is named on."""
+    from flight_cli import cli
+    from flight_cli.client import MatrixApiError
+
+    out, errs = _split_capture(monkeypatch)
+
+    async def _stashes_a_matrix_error(state: dict[str, Any], *_a: object, **_kw: object) -> None:
+        state["matrix_err"] = MatrixApiError("no fares for that market", kind="input")
+
+    monkeypatch.setattr(cli, "_gflight_results", _no_gf())
+    monkeypatch.setattr(cli, "_matrix_into", _stashes_a_matrix_error)
+
+    with pytest.raises(typer.Exit) as excinfo:
+        _enriched(monkeypatch)
+
+    assert excinfo.value.exit_code == 1
+    assert out.getvalue() == "", out.getvalue()
+    printed = errs.getvalue()
+    assert "awaiting Matrix" in printed, printed
+    assert "no fares for that market" in printed, printed
 
 
 def test_a_lone_failure_inside_a_group_is_named_rather_than_the_group(
@@ -1998,6 +2107,75 @@ def test_an_orderly_exit_survives_the_multi_cabin_group(
 
     assert excinfo.value.exit_code == code
     assert "failed" not in buf.getvalue(), buf.getvalue()
+
+
+@pytest.mark.parametrize("code", [0, 3], ids=["exit-0", "exit-3"])
+def test_an_orderly_exit_survives_the_google_cabin_fan_out(
+    monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    """The `--fast` multi-cabin fan-out is a task group too.
+
+    `typer.Exit` subclasses `RuntimeError` on the installed click, so a broad
+    per-cabin arm catches a deliberate stop, prints its CODE as this cabin's
+    error message and lets the command carry on — the exit somebody asked for
+    reported as a backend failure, once per cabin, and then discarded."""
+    from flight_cli import cli
+    from flight_cli.domain import Cabin
+
+    buf = _capture(monkeypatch)
+    monkeypatch.setattr(cli, "_gflight_results", _exits_with(code))
+    legs, opts = _gf_legs_and_opts()
+
+    with pytest.raises(typer.Exit) as excinfo:
+        cli._run_gflight_multi(
+            legs=legs,
+            opts=opts,
+            cabins=(Cabin.COACH, Cabin.BUSINESS),
+            top_n=3,
+        )
+
+    assert excinfo.value.exit_code == code
+    printed = buf.getvalue()
+    assert "query failed" not in printed, printed
+    assert str(code) not in printed, printed
+
+
+def test_a_google_cabin_fan_out_that_comes_apart_is_typed_not_a_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing from a cabin reaches the fan-out's own arm — those are caught per
+    cabin — so what does is the group itself coming apart.
+
+    Untyped that is a bare traceback with both streams empty, which is the one
+    outcome every reporter on this path exists to prevent, and the cabins that
+    answered go with it."""
+    from flight_cli import cli
+    from flight_cli.domain import Cabin
+
+    out, errs = _split_capture(monkeypatch)
+
+    def _boom(*_a: object, **_kw: object) -> None:
+        raise RuntimeError("the throttle ladder came apart")
+
+    # `anyio.run` is what the fan-out's own arm wraps; a cabin's failure never
+    # reaches it, so this is the group coming apart rather than a query failing.
+    monkeypatch.setattr(cli.anyio, "run", _boom)
+    legs, opts = _gf_legs_and_opts()
+
+    with pytest.raises(typer.Exit) as excinfo:
+        cli._run_gflight_multi(
+            legs=legs,
+            opts=opts,
+            cabins=(Cabin.COACH, Cabin.BUSINESS),
+            top_n=3,
+        )
+
+    assert excinfo.value.exit_code == 1
+    assert out.getvalue() == "", out.getvalue()
+    printed = errs.getvalue()
+    assert "Google Flights search failed:" in printed, printed
+    assert "the throttle ladder came apart" in printed, printed
+    assert "Traceback" not in printed, printed
 
 
 @pytest.mark.parametrize("code", [0, 3], ids=["exit-0", "exit-3"])

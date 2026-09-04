@@ -682,21 +682,29 @@ def _failures_inside(e: BaseException) -> list[BaseException]:
     return [e]
 
 
-def _failure_text(e: BaseException) -> str:
-    """What to call `e` on a typed line.
+def _failure_text(cause: object) -> str:
+    """What to call `cause` on a typed line.
 
     Never the group: "unhandled errors in a TaskGroup" is plumbing, printed to
     someone whose search failed for a reason that is sitting inside it. One
     failure is named as itself. Several are all named and counted, because
     picking one would report half an outage as the whole of it — and a user who
-    sees one cause fixes one thing and runs the same command again."""
-    failures = _failures_inside(e)
+    sees one cause fixes one thing and runs the same command again.
+
+    `object` rather than an exception, because a caller reporting what it holds
+    cannot always promise it holds an exception — a stash read back, a value off
+    a task's result. Anything that is not one is a value somebody chose and is
+    named as it stands. Every path out of here ends in `_safe_text`, which is
+    the property that lets a printer treat this function as already escaped."""
+    if not isinstance(cause, BaseException):
+        return _safe_text(cause)
+    failures = _failures_inside(cause)
     if not failures:
         # No leaves at all. A group holding nothing but orderly exits reaches
         # this too, and naming the group there would be the plumbing string this
         # docstring refuses — but that group is the caller's to have raised
         # already, which `_reraise_if_orderly` does before any of these print.
-        return _safe_text(e)
+        return _safe_text(cause)
     if len(failures) == 1:
         return _safe_text(failures[0])
     named = "; ".join(_safe_text(f) for f in failures)
@@ -712,13 +720,34 @@ def _reraise_if_orderly(e: Exception, *, said: str) -> None:
     stopping the command while another one broke — and re-raising the exit alone
     reports success, or a chosen code, with both streams empty. The failures are
     named first, on the stream every other failure here uses, and the exit code
-    is left exactly as it was asked for."""
+    is left exactly as it was asked for.
+
+    The count is said out loud rather than left to be inferred from a list: one
+    failure beside a stop reads as the outcome unless the sentence says it stood
+    beside one, and it is the same sentence a calendar failure prints for the
+    same shape.
+
+    A `MatrixApiError` is then re-printed by the reporter that knows it. Rendered
+    as text it is its message alone — `kind` and `request_id` are what tell a
+    user whether to fix their query or wait out a brownout, and losing them here
+    would make this the one Matrix line on the branch that drops them.
+
+    `said` is escaped like any other value this file prints. Every caller passes
+    a literal today, which is exactly why the guard belongs here: a banner is the
+    kind of parameter that later gets built from something remote."""
     orderly = _orderly_exit(e)
     if orderly is None:
         return
     beside = _failures_inside(e)
     if beside:
-        err.print(f"[red]{said}:[/] {_failure_text(e)}")
+        plural = "" if len(beside) == 1 else "s"
+        err.print(
+            f"[red]{_safe_text(said)}:[/] {len(beside):d} failure{plural} "
+            f"beside a deliberate stop: {_failure_text(e)}"
+        )
+        for f in beside:
+            if isinstance(f, MatrixApiError):
+                _print_matrix_error(f)
     raise orderly
 
 
@@ -1759,7 +1788,7 @@ def _paint_first_gf_table(
         else:
             console.print("[dim]…refining with Matrix (authoritative fares)…[/]")
     elif not gf and "gf_err" not in state:
-        console.print("[yellow]Google Flights: no results; awaiting Matrix…[/]")
+        err.print("[yellow]Google Flights: no results; awaiting Matrix…[/]")
 
 
 async def _matrix_into(
@@ -1778,6 +1807,13 @@ async def _matrix_into(
     timeout, a TLS failure, a key that will not resolve, a transport that will
     not close — would cancel the still-pending Google Flights paint and end the
     command as a bare ExceptionGroup. Every stash here is read after the weave.
+
+    A result and a `MatrixApiError` cannot be stashed together: the only
+    `MatrixApiError` this package builds is built in `client._raise_if_api_error`
+    (`client.py:51`), which only `execute()` calls (`client.py:149`), and
+    `MatrixClient.__aexit__` (`client.py:103-104`) awaits `aclose()` and nothing
+    else — so the arm below reaches `state["matrix"]` only through the value
+    `execute()` returned, and reaching it at all means nothing raised.
     """
     try:
         async with MatrixClient(rps=rps, impersonate=impersonate) as c:
@@ -1849,10 +1885,6 @@ def _report_weave_aftermath(state: dict[str, Any]) -> None:
     beside it."""
     if state.get("paint_err") is not None:
         _report_paint_failure(state["paint_err"])
-    if state.get("matrix_err") is not None:
-        err.print(
-            f"[yellow]Matrix answered, then failed:[/] {_safe_text(state['matrix_err'].message)}"
-        )
     if state.get("matrix_unexpected") is not None:
         err.print(
             f"[yellow]Matrix answered, then failed:[/] {_failure_text(state['matrix_unexpected'])}"
@@ -2247,6 +2279,11 @@ def _run_gflight_multi(
             # A typed refusal is why this cabin's column will be missing; the
             # bare handler below would print it as an unexplained failure.
             err.print(f"[yellow]Google Flights {cab.value}: {_safe_text(_gf_refusal(e).note)}.[/]")
+        except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
+            # `typer.Exit` subclasses `RuntimeError` on the installed click, so
+            # the arm below would swallow the stop and print the exit CODE as
+            # this cabin's error message.
+            raise
         except Exception as e:  # noqa: BLE001 — fli has no documented exception surface
             err.print(f"[yellow]Google Flights {cab.value} query failed: {_safe_text(e)}[/]")
 
@@ -2256,7 +2293,22 @@ def _run_gflight_multi(
                 tg.start_soon(query_cabin, cab)
 
     with shared_throttle_ladder():
-        anyio.run(go)
+        try:
+            anyio.run(go)
+        except (typer.Exit, typer.Abort):
+            # An orderly exit is a decision, not a failure. Redundant with the
+            # `_reraise_if_orderly` below on the installed click, and the only
+            # guard left if `typer.Exit` ever stops subclassing `Exception`.
+            raise
+        except Exception as e:
+            # Nothing from a cabin reaches here — those are caught per cabin —
+            # so this is the fan-out itself: opening the loop, starting the
+            # group, or the group's own unwinding. Untyped it is a bare
+            # traceback with both streams empty, which is the one outcome every
+            # reporter on this path exists to prevent.
+            _reraise_if_orderly(e, said="Google Flights search failed")
+            err.print(f"[red]Google Flights search failed:[/] {_failure_text(e)}")
+            raise typer.Exit(1) from e
     return results
 
 

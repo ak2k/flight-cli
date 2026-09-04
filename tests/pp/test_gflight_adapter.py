@@ -289,7 +289,7 @@ def test_cash_hints_skip_slices_without_flight_id() -> None:
 
 
 def test_a_captured_round_trip_is_priced_at_the_combination_not_the_outbound(
-    gf_session: Any, gf_capture: Any
+    gf_session: Any, gf_capture: Any, gf_answering: Any
 ) -> None:
     """Driven through the transport with the matched pair of live captures,
     because this is a fact about Google's two boards and not about the adapter's
@@ -307,8 +307,18 @@ def test_a_captured_round_trip_is_priced_at_the_combination_not_the_outbound(
 
     dep = date.today() + timedelta(days=45)
     ret = date.today() + timedelta(days=52)
+    # The return capture answers the leg this search asks for: a board for
+    # another route or another day is what a page that dropped the pin looks
+    # like, and the pin loop refuses one rather than pairing it. Prices, ids and
+    # carriers — everything the pricing argument rests on — are the capture's.
     gf_session(
-        gf_capture("ds1_metadata_blocks_kept.json"), gf_capture("ds1_return_leg_pinned.json")
+        gf_capture("ds1_metadata_blocks_kept.json"),
+        gf_answering(
+            "ds1_return_leg_pinned.json",
+            origin="MIA",
+            destination="HNL",
+            date=ret.isoformat(),
+        ),
     )
     results = search_with_ids(
         to_fli_filter(
