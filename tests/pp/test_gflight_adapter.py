@@ -344,3 +344,44 @@ def test_a_captured_round_trip_is_priced_at_the_combination_not_the_outbound(
     # return is a cheaper trip, and an outbound-priced board reports one number
     # for all three.
     assert priced[("AA144/AA1110", "AA713/AA297")] == {"USD6616.00"}
+
+
+def test_a_row_google_did_not_price_is_carried_with_no_price_and_sorted_last(
+    gf_rows: Any,
+) -> None:
+    """The adapter is the third place the absence has to be answered, and the
+    only one where it is compared as well as formatted.
+
+    Two things happen to a price here: it becomes the itinerary's own string,
+    and it competes for `cheapest_price`. Fabricating `USD0.00` for the first
+    would undercut every cash comparison an award is made against, and reading
+    the absence as a number in the second is a type error the moment a priced
+    row precedes an unpriced one — which is ordinary, since the board arrives
+    in Google's order and not in ours.
+
+    Carried rather than skipped, because the merged table is drawn from this
+    list: a solution dropped here is a row the Google table showed and the
+    merged one does not."""
+    from flight_cli._enrich import merge_results
+    from flight_cli.models import SearchResult
+
+    board = gf_rows("ds1_metadata_blocks_kept.json", unpriced=1)
+    # Priced FIRST: `cheapest_price` is already a float when the unpriced row
+    # arrives, which is the order that makes the comparison a failure.
+    sr = fli_results_to_search_result([board[0], board[1], board[2]])
+
+    assert len(sr.solutions) == len(board)
+    prices = [s.ext.price if s.ext else None for s in sr.solutions]
+    assert prices == [f"USD{board[0].flight.price:.2f}", None, f"USD{board[2].flight.price:.2f}"]
+    # The cheapest is the cheapest of the rows that HAVE one.
+    assert sr.cheapest_price == f"USD{board[2].flight.price:.2f}"
+
+    # And the merge orders it last: `_price_int` answers `_NO_PRICE` for an
+    # absent string, so the same row the table shows with a dash sits at the
+    # bottom of the merged view too.
+    merged = merge_results(sr, SearchResult.model_validate({"solutions": []}))
+    assert [r.gf_price for r in merged] == [
+        f"USD{board[2].flight.price:.2f}",
+        f"USD{board[0].flight.price:.2f}",
+        None,
+    ], merged

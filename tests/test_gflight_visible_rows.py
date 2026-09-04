@@ -244,6 +244,24 @@ def test_the_award_matcher_is_given_the_rows_the_user_saw(
 # ─────────── the enriched path: --pick names a row on the MERGED table ───────
 
 
+def _decoded_tfs(printed: str) -> bytes:
+    """The protobuf bytes behind the emitted Google Flights link.
+
+    Flight numbers travel through `tfs=` as plain ASCII, so decoding is enough
+    to say WHICH itinerary a link pins — the one question the rendered page
+    cannot answer, since both tables are drawn whatever the pin resolves to.
+
+    Whitespace is stripped first because rich hard-wraps a URL across lines at
+    the console width, splitting the blob."""
+    import base64
+    import re
+
+    m = re.search(r"tfs=([A-Za-z0-9_-]+)", "".join(printed.split()))
+    assert m is not None, printed
+    blob = m.group(1)
+    return base64.urlsafe_b64decode(blob + "=" * (-len(blob) % 4))
+
+
 def _dearer_matrix() -> Any:
     """A Matrix half whose every fare is dearer than the Google board's.
 
@@ -266,12 +284,15 @@ def _enriched(
     *,
     top_n: int,
     pick: int | None = None,
+    matrix: SearchResult | None = None,
+    sel: Any = None,
+    run_pp: bool = False,
 ) -> None:
     """The real enriched path with both halves answered in process."""
-    matrix = _dearer_matrix()
+    answer = _dearer_matrix() if matrix is None else matrix
 
     async def _stashes_matrix(state: dict[str, Any], *_a: object, **_kw: object) -> None:
-        state["matrix"] = matrix
+        state["matrix"] = answer
 
     def _gf(*_a: object, **_kw: object) -> list[Any]:
         return rows
@@ -282,8 +303,8 @@ def _enriched(
         legs=_one_way(),
         opts=SearchOptions(cabin=Cabin.COACH),
         top_n=top_n,
-        run_pp=False,
-        sel=None,
+        run_pp=run_pp,
+        sel=sel,
         matrix_url=True,
         google_url=True,
         pick=pick,
@@ -291,6 +312,14 @@ def _enriched(
         impersonate="chrome",
         no_cache=True,
     )
+
+
+def _empty_matrix() -> SearchResult:
+    """Matrix answering with no solutions — an ordinary no-service outcome, not
+    a failure: the half answered, and the answer is that there is nothing."""
+    from flight_cli.models import SearchResult as _SR
+
+    return _SR.model_validate({"solutions": [], "solutionCount": 0})
 
 
 def test_the_enriched_pin_names_a_row_on_the_table_that_was_printed(
@@ -313,9 +342,16 @@ def test_the_enriched_pin_names_a_row_on_the_table_that_was_printed(
     # Pinned from the merged row's own slices — a Matrix solution with no
     # itinerary structure could not have produced this line at all.
     assert "Google Flights (itinerary #1 pinned):" in captured.out, captured.out
-    # Row 1 of the printed table is the cheapest of the five merged rows, and
-    # it is a Google-only one: the pinned URL carries ITS flights.
-    assert "USD6072.00" in captured.out, captured.out
+    # WHICH row, read out of the link rather than off the screen. Row 1 of the
+    # merged table is a Google-only itinerary — the cheapest of the five merged
+    # rows, and the FIRST table's row 3 — so its flight numbers in the emitted
+    # `tfs=` are the pin naming the row the merged table numbered 1. A price
+    # asserted on the page says nothing here: the merged table is rendered from
+    # `merged` whatever `shown` holds, and `USD6072.00` matches the first
+    # table's row 3, which the merged table prints as a bare `6072.00`.
+    pinned = _decoded_tfs(captured.out)
+    assert b"627" in pinned, pinned
+    assert b"854" not in pinned and b"144" not in pinned, pinned
 
 
 def test_the_enriched_default_pin_labels_the_row_it_printed_first(
@@ -367,6 +403,72 @@ def test_a_pick_the_enriched_table_printed_is_honoured(
 
     assert "out of range" not in captured.out + captured.err, captured.out + captured.err
     assert "itinerary #3 pinned" in captured.out, captured.out
+
+
+def test_an_empty_merged_board_reports_no_range_and_claims_no_pin(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Both halves answer with nothing, which is an outcome and not a failure.
+
+    Nothing is numbered, so `--pick 1` names no row — and `(1-0)` is not a
+    narrower way of saying that. It is an empty interval, so it cannot tell the
+    user what a valid pick would be, and the clause that follows it would
+    promise a pin that does not happen: the links fall back to their unpinned
+    form because there is no row to build one from.
+
+    Unlike its Google-only sibling this arm does not return early on an empty
+    board — it renders a header-only merged table and carries on — so the
+    silence has to be decided here rather than inherited."""
+    _enriched(monkeypatch, [], top_n=3, pick=1, matrix=_empty_matrix())
+    captured = capsys.readouterr()
+    both = captured.out + captured.err
+
+    assert "out of range" not in both, both
+    assert "(1-0)" not in both, both
+    assert "pinned" not in both, both
+    # The links still print, in the form that claims nothing.
+    assert "Matrix deep-link:" in captured.out, captured.out
+    assert "Google Flights (tfs= structured):" in captured.out, captured.out
+
+
+def test_a_pick_is_refused_where_this_mode_numbers_nothing(
+    gf_rows: Callable[..., list[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--awards-only` prints no merged table, and the award renderer it prints
+    instead has no `#` column.
+
+    So a pick on this arm names no row anywhere — not one out of range, one
+    that does not exist — and clamping it against the Matrix solution list
+    labels a link `itinerary #3` for a numbering the user was never shown. The
+    refusal says that once, on stderr, and both links fall back to the form
+    that claims nothing: with no numbered list, `cheapest itinerary` is as
+    unfounded a label as `itinerary #3`."""
+    sel = cli.ProviderSelection(
+        provider_filter=None, cash_only=False, awards_only=True, provider_opts={}
+    )
+
+    def _no_awards(*_a: object, **_kw: object) -> None:
+        return None
+
+    monkeypatch.setattr(cli, "run_pp_for_search", _no_awards)
+    _enriched(
+        monkeypatch,
+        gf_rows("ds1_metadata_blocks_kept.json"),
+        top_n=3,
+        pick=3,
+        sel=sel,
+        run_pp=True,
+    )
+    captured = capsys.readouterr()
+
+    assert captured.err.count("--pick 3 names a row in the results table") == 1, captured.err
+    assert "itinerary #" not in captured.out, captured.out
+    assert "(1-3)" not in captured.out + captured.err, captured.out + captured.err
+    assert "Matrix deep-link:" in captured.out, captured.out
+    assert "Google Flights (tfs= structured):" in captured.out, captured.out
 
 
 def test_the_routing_post_filter_still_reads_the_whole_board(
@@ -489,6 +591,86 @@ def test_a_round_trip_table_prints_its_rows_in_price_order(
     out = capsys.readouterr().out
     assert f"{cheapest.flight.price:.2f}" in out, out
     assert f"{dearest.flight.price:.2f}" not in out, out
+
+
+_NO_PRICE_CELL = "—"
+
+
+def test_a_round_trip_row_google_did_not_price_is_shown_last_and_reads_as_a_dash(
+    gf_session: Callable[..., Any],
+    gf_capture: Callable[[str], str],
+    gf_unpriced: Callable[..., str],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Google prices a shopping-list row or it does not, and the board is
+    served either way.
+
+    An unpriced row is ordinary — fli's decoder reads an empty price head as
+    "no aggregate price", not as a malformed row — so the table shows it. It
+    cannot be ranked against a number it does not have, so it sorts last, and
+    its cell carries the placeholder every other absent amount here uses rather
+    than a currency prefix over nothing, which would read as a fare of zero.
+
+    Dropping it instead is the option this rules out: `-n` is the count of rows
+    the user asked to see, and a board silently short by the ones Google would
+    not quote makes that number a lie."""
+    gf_session(
+        gf_capture("ds1_metadata_blocks_kept.json"),
+        gf_unpriced(
+            "ds1_return_leg_pinned.json",
+            index=1,
+            origin="MIA",
+            destination="HNL",
+            date=_RET.isoformat(),
+        ),
+    )
+    cli._run_gflight_path(
+        legs=_round_trip(),
+        opts=SearchOptions(cabin=Cabin.COACH),
+        top_n=9,
+        json_out=False,
+    )
+    captured = capsys.readouterr()
+    # Three outbounds against three returns, one of which carries no price.
+    rows = [ln for ln in captured.out.splitlines() if "│" in ln]
+    assert rows, captured.out
+    # The `b` member is the one the combination is priced from, so the dash is
+    # on the terminal row of each unpriced trip.
+    dashed = [ln for ln in rows if _NO_PRICE_CELL in ln and "USD" not in ln]
+    assert len(dashed) == 3, captured.out
+    assert all(ln.lstrip("│ ").startswith(("7b", "8b", "9b")) for ln in dashed), dashed
+    # Ordered last, not dropped: the priced combinations still occupy 1..6.
+    assert "9b" in captured.out, captured.out
+    assert "USD0.00" not in captured.out, captured.out
+
+
+def test_a_one_way_row_google_did_not_price_is_shown_rather_than_dropped(
+    gf_session: Callable[..., Any],
+    gf_unpriced: Callable[..., str],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The one-way board is the arm that never reaches the sort.
+
+    `_price_ordered` returns a non-tuple list as it came, so an unpriced row
+    travels straight into the table's own price cell — a second, independent
+    place the absence has to be answered, and the one that used to end the
+    command with the renderer's own failure line and exit 1."""
+    gf_session(gf_unpriced("ds1_metadata_blocks_kept.json", index=1))
+    cli._run_gflight_path(
+        legs=_one_way(),
+        opts=SearchOptions(cabin=Cabin.COACH),
+        top_n=3,
+        json_out=False,
+    )
+    captured = capsys.readouterr()
+    assert "unsupported format string" not in captured.out + captured.err, captured
+    assert "could not be rendered" not in captured.out + captured.err, captured
+    # All three rows, Google's own ranking kept: the unpriced one is row 2 on
+    # the board and stays row 2 on the table.
+    assert "USD6590.00" in captured.out, captured.out
+    assert "USD6072.00" in captured.out, captured.out
+    assert _NO_PRICE_CELL in captured.out, captured.out
+    assert "USD0.00" not in captured.out, captured.out
 
 
 def test_a_multi_cabin_json_arm_trims_each_cabins_combinations_by_price(

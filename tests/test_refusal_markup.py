@@ -31,7 +31,9 @@ those reporters rest on: which errors can reach which arm.
 
 from __future__ import annotations
 
+import ast
 import io
+import pathlib
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -2108,17 +2110,218 @@ def _split_capture(monkeypatch: pytest.MonkeyPatch) -> tuple[io.StringIO, io.Str
     return out, errs
 
 
-# Every progress or promise sentence `_run_enriched_path` and the functions it
-# calls can print. Both name the MATRIX half, and neither can be true when it is
-# printed. Swept by hand at the two sites and re-derived here so a third one
-# added on `console` fails this file rather than a user's pipe.
+def _matrix_path(
+    monkeypatch: pytest.MonkeyPatch, *, solutions: list[dict[str, Any]], pick: int | None
+) -> None:
+    """The Matrix-only path with its search answered in process."""
+    from flight_cli import cli
+    from flight_cli.models import SearchResult
+
+    res = SearchResult.model_validate(
+        {
+            "solutions": solutions,
+            "solutionCount": len(solutions),
+            "raw": {},
+            # The three server-generated identifiers a pinned Matrix URL needs,
+            # so the fallback below is a real link and not a None.
+            "session": "s-1",
+            "solutionSet": "ss-1",
+        }
+    )
+
+    def _answered(*_a: object, **_kw: object) -> SearchResult:
+        return res
+
+    monkeypatch.setattr(cli, "_run", _answered)
+    legs, opts = _gf_legs_and_opts()
+    cli._run_matrix_path(
+        legs=legs,
+        opts=opts,
+        rps=1.0,
+        impersonate="chrome",
+        no_cache=True,
+        json_out=False,
+        matrix_url=True,
+        google_url=True,
+        run_pp=False,
+        sel=cli.ProviderSelection(
+            provider_filter=None, cash_only=True, awards_only=False, provider_opts={}
+        ),
+        pick=pick,
+    )
+
+
+def test_an_out_of_range_pick_on_the_matrix_path_takes_stderr_like_every_other(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One fact, one wording, one stream.
+
+    The range a pick is measured against is the visible count on every path,
+    and the reporter that says so is the one whose second clause knows whether
+    a link follows. Answered further down instead, the same fact reaches stdout
+    — beside a table on this path and beside a document on a sibling — and in a
+    second wording, leaving the user to decide which of the two to believe."""
+    _matrix_path(
+        monkeypatch,
+        solutions=[{"displayTotal": f"USD{n}00.00", "id": f"sol-{n}"} for n in (5, 6, 7)],
+        pick=5,
+    )
+    captured = capsys.readouterr()
+
+    assert "--pick 5 is out of range (1-3)" in captured.err, captured.err
+    assert "out of range" not in captured.out, captured.out
+    # The link still goes somewhere, and its label names what it pinned.
+    assert "cheapest itinerary pinned" in captured.out, captured.out
+
+
+def test_an_empty_matrix_result_reports_no_range_at_all(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Nothing was numbered, so there is no interval to state.
+
+    `(1-0)` cannot say what a valid pick would be, and the clause after it would
+    name a pin nothing performs — the links fall back to their unpinned form
+    because there is no solution to build one from."""
+    _matrix_path(monkeypatch, solutions=[], pick=5)
+    captured = capsys.readouterr()
+    both = captured.out + captured.err
+
+    assert "out of range" not in both, both
+    assert "(1-0)" not in both, both
+    assert "pinned" not in both, both
+    assert "Matrix deep-link:" in captured.out, captured.out
+
+
+# The WORDING of every progress or promise sentence `_run_enriched_path` and the
+# functions it call can print. Each names the MATRIX half; the first two cannot
+# be true when they are printed, and the third is true only under the two
+# conditions `_report_enriched_gf_failure` states. A literal list catches a
+# fourth only if someone adds it here, which is what
+# `test_every_console_sentence_naming_matrix_is_accounted_for` exists to stop
+# depending on — that one derives the set instead.
 _PROMISES = ("refining with Matrix", "awaiting Matrix", "showing Matrix only")
 
+# Every `console.print` in `_run_enriched_path`'s call graph whose literal names
+# Matrix, and why each may stand on stdout. Two are link labels printed with the
+# URL they label; the third is the only forward-looking sentence, and it is
+# printed only where a Matrix table is certain to follow it.
+_MATRIX_ON_STDOUT = {
+    "[dim]Matrix (": "a link label, printed above the URL it labels",
+    "[dim]Matrix deep-link:[/]": "a link label, printed above the URL it labels",
+    " — showing Matrix only.[/]": (
+        "gated on `matrix_answered` AND `not awards_only`, which together mean "
+        "a Matrix table is printed under it"
+    ),
+}
 
+
+def _package_defs() -> dict[str, list[tuple[pathlib.Path, ast.AST]]]:
+    """Every function defined anywhere in the package, by name.
+
+    By NAME and across modules, because the graph below has to cross into
+    `pp.cli`: a sweep that stops at the module boundary misses the arm that
+    sits one call the other side of it."""
+    from flight_cli import cli as cli_mod
+
+    defs: dict[str, list[tuple[pathlib.Path, ast.AST]]] = {}
+    for path in sorted(pathlib.Path(cli_mod.__file__).parent.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                defs.setdefault(node.name, []).append((path, node))
+    return defs
+
+
+def _callee_name(call: ast.Call) -> str | None:
+    """The called function's bare name, for a direct call or one through its
+    module — the two spellings a package function is reached by."""
+    fn = call.func
+    if isinstance(fn, ast.Name):
+        return fn.id
+    return fn.attr if isinstance(fn, ast.Attribute) else None
+
+
+def _reachable(defs: dict[str, list[tuple[pathlib.Path, ast.AST]]], root: str) -> set[str]:
+    """Function names reachable from `root` by call name.
+
+    Over-approximates on purpose: a name defined more than once contributes all
+    of its definitions, so the walk visits more than any run can reach. A site
+    checked that no run reaches costs a line in a table; one missed costs a
+    sentence on a consumer's stdout."""
+    reached: set[str] = set()
+    queue = [root]
+    while queue:
+        name = queue.pop()
+        if name in reached or name not in defs:
+            continue
+        reached.add(name)
+        for _path, node in defs[name]:
+            queue += [
+                callee
+                for call in ast.walk(node)
+                if isinstance(call, ast.Call) and (callee := _callee_name(call)) is not None
+            ]
+    return reached
+
+
+def _console_prints(node: ast.AST) -> list[ast.Call]:
+    """Every `console.print(...)` inside `node`, nested defs included."""
+    return [
+        c
+        for c in ast.walk(node)
+        if isinstance(c, ast.Call)
+        and isinstance(c.func, ast.Attribute)
+        and c.func.attr == "print"
+        and isinstance(c.func.value, ast.Name)
+        and c.func.value.id == "console"
+    ]
+
+
+def _console_literals_naming_matrix(
+    defs: dict[str, list[tuple[pathlib.Path, ast.AST]]], reached: set[str]
+) -> dict[str, str]:
+    """`{literal: where}` for every `console.print` in `reached` whose text
+    names Matrix — the constant parts of an f-string included, which is how
+    every sentence on this path is built."""
+    sites: dict[str, str] = {}
+    for name in sorted(reached):
+        for path, node in defs[name]:
+            for call in _console_prints(node):
+                for lit in ast.walk(call):
+                    text = lit.value if isinstance(lit, ast.Constant) else None
+                    if isinstance(text, str) and "Matrix" in text:
+                        sites[text] = f"{path.name}:{call.lineno} in {name}"
+    return sites
+
+
+def test_every_console_sentence_naming_matrix_is_accounted_for() -> None:
+    """No sentence reaches stdout naming the Matrix half without a reason
+    recorded beside it.
+
+    Asserted as the DERIVED set rather than as a swept list. A hand-swept tuple
+    of wordings catches a fourth sentence only when whoever adds it also adds it
+    to the tuple, so a differently-worded promise passes a suite that exists to
+    refuse it."""
+    defs = _package_defs()
+    reached = _reachable(defs, "_run_enriched_path")
+    assert "run_pp_for_search" in reached, "the walk stopped at the package boundary"
+    assert "_paint_first_gf_table" in reached, "the walk does not enter nested defs"
+
+    sites = _console_literals_naming_matrix(defs, reached)
+    unaccounted = {lit: where for lit, where in sites.items() if lit not in _MATRIX_ON_STDOUT}
+    assert not unaccounted, (
+        f"{len(unaccounted)} console sentence(s) name Matrix with no reason recorded: {unaccounted}"
+    )
+    # The other direction too, so a site that goes away takes its entry with it
+    # and the table cannot rot into reasons for sentences nothing prints.
+    assert set(_MATRIX_ON_STDOUT) == set(sites), (set(_MATRIX_ON_STDOUT) ^ set(sites), sites)
+
+
+@pytest.mark.parametrize("awards_only", [False, True])
 def test_no_stdout_sentence_promises_a_matrix_half_that_never_arrives(
     monkeypatch: pytest.MonkeyPatch,
-    gf_rows: Callable[[str], list[Any]],
+    gf_rows: Callable[..., list[Any]],
     capsys: pytest.CaptureFixture[str],
+    awards_only: bool,
 ) -> None:
     """Google answers, Matrix fails, and the command exits 0 with a real table
     on stdout.
@@ -2129,6 +2332,13 @@ def test_no_stdout_sentence_promises_a_matrix_half_that_never_arrives(
     is never told otherwise. The rule is not "stdout owes zero bytes" (a table
     was owed and printed); it is that no sentence on stdout promises a half that
     never arrived.
+
+    Both award modes, because `awards_only` is the other half of what makes a
+    Matrix sentence true: it suppresses every cash surface, so that arm owes
+    stdout nothing at all and a promise printed there is not a line above a
+    table but the whole of what the caller receives. Driven over the same
+    failure, the two arms differ in what stdout is allowed to hold and agree on
+    what it may not.
 
     Driven through the real path with the real renderers: the promise is printed
     from inside the weave, so a probe that stubbed the paint would pin nothing.
@@ -2142,18 +2352,102 @@ def test_no_stdout_sentence_promises_a_matrix_half_that_never_arrives(
         return rows
 
     monkeypatch.setattr(cli, "_gflight_results", _gf)
+
+    def _no_awards(*_a: object, **_kw: object) -> None:
+        return None
+
+    monkeypatch.setattr(cli, "run_pp_for_search", _no_awards)
     monkeypatch.setattr(
         cli, "MatrixClient", _refusing_matrix(MatrixApiError("stale key", kind="auth"))
     )
     legs, opts = _gf_legs_and_opts()
+    sel = cli.ProviderSelection(
+        provider_filter=None, cash_only=False, awards_only=awards_only, provider_opts={}
+    )
+    kwargs: dict[str, Any] = {
+        "legs": legs,
+        "opts": opts,
+        "top_n": 3,
+        "run_pp": awards_only,
+        "sel": sel,
+        "matrix_url": False,
+        "google_url": False,
+        "pick": None,
+        "rps": 1.0,
+        "impersonate": "chrome",
+        "no_cache": True,
+    }
+    if awards_only:
+        # Nothing was painted, so the run answered nothing and its exit says so.
+        with pytest.raises(typer.Exit) as excinfo:
+            cli._run_enriched_path(**kwargs)
+        assert excinfo.value.exit_code == 1
+    else:
+        # No exit: Google painted, so the run answered.
+        cli._run_enriched_path(**kwargs)
+    captured = capsys.readouterr()
 
-    # No exit: Google painted, so the run answered.
+    if awards_only:
+        assert captured.out == "", captured.out
+    else:
+        # The table itself is a result and belongs on stdout — without it the
+        # assertion below would hold on a run that printed nothing at all.
+        assert "USD6590.00" in captured.out, captured.out
+        assert "refining with Matrix" in captured.err, captured.err
+    for promise in _PROMISES:
+        assert promise not in captured.out, (promise, captured.out)
+    assert "stale key" in captured.err, captured.err
+
+
+@pytest.mark.parametrize("awards_only", [False, True])
+def test_the_google_refusal_note_is_never_the_whole_of_stdout(
+    monkeypatch: pytest.MonkeyPatch, awards_only: bool
+) -> None:
+    """Matrix answering is necessary for "showing Matrix only" and not enough.
+
+    `awards_only` skips the merged repaint, so on that arm nothing Matrix is
+    printed however well its half went — and the award renderer below it has
+    arms that return without writing a byte to stdout, an expired token being
+    the ordinary one. The sentence is then the ENTIRE contents of stdout, at
+    exit 0, with its own retraction on stderr: the shape this reporter exists
+    to prevent, one arm over from the one it already fixed.
+
+    So the awards arm says the same news on `err`, where a run that ends up
+    printing nothing owes nothing. The control is the other arm, which keeps
+    the sentence on stdout because a real table follows it."""
+    from flight_cli import cli
+    from flight_cli._gf_errors import GfTransportError
+    from flight_cli.models import SearchResult
+
+    out_buf, err_buf = _split_capture(monkeypatch)
+
+    def _unreachable(*_a: object, **_kw: object) -> object:
+        raise GfTransportError("Google Flights could not be reached: connection reset by peer")
+
+    answer = SearchResult.model_validate(
+        {"solutions": [{"displayTotal": "USD9000.00"}], "solutionCount": 1}
+    )
+
+    async def _matrix_answers(state: dict[str, Any], *_a: object, **_kw: object) -> None:
+        state["matrix"] = answer
+
+    # The award half writing nothing is the point of the awards arm: it is what
+    # leaves a promise as the only thing on the stream.
+    def _no_awards(*_a: object, **_kw: object) -> None:
+        return None
+
+    monkeypatch.setattr(cli, "run_pp_for_search", _no_awards)
+    monkeypatch.setattr(cli, "_gflight_results", _unreachable)
+    monkeypatch.setattr(cli, "_matrix_into", _matrix_answers)
+    legs, opts = _gf_legs_and_opts()
     cli._run_enriched_path(
         legs=legs,
         opts=opts,
         top_n=3,
-        run_pp=False,
-        sel=None,
+        run_pp=awards_only,
+        sel=cli.ProviderSelection(
+            provider_filter=None, cash_only=False, awards_only=awards_only, provider_opts={}
+        ),
         matrix_url=False,
         google_url=False,
         pick=None,
@@ -2161,15 +2455,19 @@ def test_no_stdout_sentence_promises_a_matrix_half_that_never_arrives(
         impersonate="chrome",
         no_cache=True,
     )
-    captured = capsys.readouterr()
 
-    # The table itself is a result and belongs on stdout — without it the
-    # assertion below would hold on a run that printed nothing at all.
-    assert "USD6590.00" in captured.out, captured.out
-    for promise in _PROMISES:
-        assert promise not in captured.out, (promise, captured.out)
-    assert "refining with Matrix" in captured.err, captured.err
-    assert "stale key" in captured.err, captured.err
+    out, errs = out_buf.getvalue(), err_buf.getvalue()
+    # Named either way — a refusal nobody mentions leaves the run looking like
+    # Google simply had nothing cheaper.
+    assert "Google Flights" in out + errs, (out, errs)
+    if awards_only:
+        assert out == "", out
+        assert "showing Matrix only" not in out + errs, out + errs
+        assert "no fare table is printed on this arm" in errs, errs
+    else:
+        # The promise stands only where the table it names is under it.
+        assert "showing Matrix only" in out, out
+        assert "9000.00" in out, out
 
 
 def test_a_weave_that_fails_after_matrix_answered_still_says_so(

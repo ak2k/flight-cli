@@ -40,13 +40,14 @@ from flight_cli import cli
 from flight_cli.models import SearchResult
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from flight_cli.domain import Cabin
 
 # fli's validator rejects a past travel date, so this is derived: a literal
 # rots the suite on the day it passes.
 _DEP = date.today() + timedelta(days=45)
+_RET = _DEP + timedelta(days=7)
 _AWARD_DOCUMENT: dict[str, list[Any]] = {"legs": [], "matches": []}
 # Captured before the fixture below replaces it, so the one test that wants
 # the real transport underneath can put it back.
@@ -254,6 +255,96 @@ def test_the_detail_command_puts_one_json_document_on_stdout() -> None:
 
     assert result.exit_code == 0, result.output
     _one_document(result.stdout)
+
+
+def test_a_row_google_did_not_price_still_leaves_one_document(
+    monkeypatch: pytest.MonkeyPatch,
+    gf_rows: Callable[..., list[Any]],
+) -> None:
+    """The document is what a run that asked for one owes, priced rows or not.
+
+    An unpriced row reaches the document through the same trim and sort every
+    other row does, and the sort is the part with no answer for it: a key that
+    read the absence as a number ended the command with a bare traceback and an
+    empty stdout, which is the one outcome the whole of this file is about.
+
+    `price: null` is written by fli's own `model_dump`, so nothing here adds a
+    branch for it — what is under test is that the run REACHES the dump."""
+    board = gf_rows("ds1_metadata_blocks_kept.json", unpriced=1)
+    combinations = [(board[0], board[0]), (board[0], board[1])]
+
+    def _gf(*_a: object, **_kw: object) -> list[Any]:
+        return combinations
+
+    monkeypatch.setattr(cli, "_gflight_results", _gf)
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "search",
+            "JFK",
+            "LAX",
+            "--dep",
+            _DEP.isoformat(),
+            "--return",
+            _RET.isoformat(),
+            "-n",
+            "3",
+            "--format",
+            "json",
+            "--backend",
+            "gflight",
+            "--cash-only",
+            "--matrix-url",
+            "--google-url",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    rows = cast("list[list[dict[str, Any]]]", _one_document(result.stdout))
+    # Both combinations, and the unpriced one last: shown, not dropped.
+    assert [r[-1]["price"] for r in rows] == [board[0].flight.price, None], rows
+
+
+def test_the_awards_only_json_serializer_is_driven_by_something(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--awards-only --format json` writes its document from a serializer no
+    other arm in this file reaches.
+
+    Every arm above stubs `run_pp_for_search` wholesale, so the real function's
+    own two `sys.stdout.write` calls — the ones a stray `console.print` above
+    would splice prose into — are covered by nothing. This drives the real one
+    with only the network below it replaced."""
+    from flight_cli.pp import cli as pp_cli
+    from flight_cli.providers.base import AwardFlight, LegQuery
+
+    award = AwardFlight(
+        origin="JFK",
+        destination="LAX",
+        departure=f"{_DEP.isoformat()}T08:00:00",
+        arrival=f"{_DEP.isoformat()}T11:20:00",
+        flight_number="AA100",
+        provider="PointsPath",
+        program="American Airlines",
+    )
+
+    async def _gather(*_a: object, **_kw: object) -> tuple[list[list[Any]], list[Any]]:
+        return ([[award]], [])
+
+    monkeypatch.setattr(pp_cli, "gather_awards", _gather)
+    monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
+
+    pp_cli.run_pp_for_search(
+        _matrix_result(),
+        legs=[LegQuery("JFK", "LAX", _DEP.isoformat(), 0, "outbound JFK→LAX")],
+        pp_only=True,
+        json_out=True,
+    )
+
+    document = cast("list[dict[str, Any]]", _one_document(capsys.readouterr().out))
+    assert [leg["leg"] for leg in document] == ["outbound JFK→LAX"], document
+    assert document[0]["awards"][0]["flight_number"] == "AA100", document
 
 
 def test_a_retry_warning_lands_on_stderr_and_not_in_the_document(

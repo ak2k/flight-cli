@@ -159,7 +159,14 @@ def _board(rows: int, *, distinct_at: int | None = None) -> str:
     return _page(json.dumps(payload))
 
 
-def _answering(ds1_json: str, *, origin: str | None, destination: str | None, date: str) -> str:
+def _answering(
+    ds1_json: str,
+    *,
+    origin: str | None,
+    destination: str | None,
+    date: str,
+    name: str = "ds:1 payload",
+) -> str:
     """One captured `ds:1` payload, re-pointed at the leg a query asked for.
 
     A capture is a real page for a real query, so its rows carry the route and
@@ -171,29 +178,50 @@ def _answering(ds1_json: str, *, origin: str | None, destination: str | None, da
     asked, and this is how it says so without pinning a literal date that rots.
 
     The rows keep their prices, ids, carriers and connections; only the endpoint
-    codes of the outer legs and every leg's calendar day move."""
+    codes of the outer legs and every leg's calendar day move.
+
+    The rows are located by the transport's OWN scan rather than by indices
+    written out here. Which payload indices hold a board is a fact with one
+    home, and a second copy of it re-points nothing on a capture whose blocks
+    sit elsewhere — silently, since a helper that rewrites no row still returns
+    a page. Re-pointing nothing is therefore an error and not a quiet pass: the
+    caller asked for a board answering a leg, and it got the capture back."""
+    from flight_cli import _gflight_ids as gfid
+
     payload: list[Any] = json.loads(ds1_json)
-    for block in (2, 3):
-        rows = cast("list[Any] | None", payload[block][0] if payload[block] else None)
-        for row in rows or []:
-            legs = cast("list[list[Any]]", row[0][2])
-            if origin is not None:
-                legs[0][3] = origin
-            if destination is not None:
-                legs[-1][6] = destination
-            # ONE delta for the whole row, applied to both `[y, m, d]` ends of
-            # every leg. The clock times are what make the delta necessary: a
-            # row's dates are not interchangeable, so writing the asked-for day
-            # into both ends of a leg that lands after midnight makes it arrive
-            # before it departed, and pulls the next leg back in front of the
-            # flight feeding it. Sliding the whole row keeps every elapsed time,
-            # every overnight and the connection order, and still lands the
-            # first departure on the day the guard reads.
-            shift = datetime.date.fromisoformat(date) - datetime.date(*legs[0][20])
-            for leg in legs:
-                for idx in (20, 21):
-                    moved = datetime.date(*leg[idx]) + shift
-                    leg[idx] = [moved.year, moved.month, moved.day]
+    # The transport's own scan, not a second copy of the indices it reads.
+    board = gfid._rows_from_ds1(payload)
+    assert board.rows, f"{name}: no rows to re-point at {origin}->{destination} on {date}" + (
+        f"; rows are at payload{list(board.misplaced)}" if board.misplaced else ""
+    )
+    for i, row in enumerate(board.rows):
+        legs = cast("list[list[Any]]", row[0][2])
+        if origin is not None:
+            legs[0][3] = origin
+        if destination is not None:
+            legs[-1][6] = destination
+        for j, leg in enumerate(legs):
+            for idx in (20, 21):
+                # `datetime.date(*v)` on anything else raises a bare stdlib
+                # TypeError naming no capture, row or leg — and this helper is
+                # the one place that knows all three.
+                ymd: list[Any] | None = leg[idx] if isinstance(leg[idx], list) else None
+                assert ymd is not None and len(ymd) == 3, (
+                    f"{name} row {i} leg {j} field {idx} is not [y, m, d]: {leg[idx]!r}"
+                )
+        # ONE delta for the whole row, applied to both `[y, m, d]` ends of
+        # every leg. The clock times are what make the delta necessary: a
+        # row's dates are not interchangeable, so writing the asked-for day
+        # into both ends of a leg that lands after midnight makes it arrive
+        # before it departed, and pulls the next leg back in front of the
+        # flight feeding it. Sliding the whole row keeps every elapsed time,
+        # every overnight and the connection order, and still lands the
+        # first departure on the day the guard reads.
+        shift = datetime.date.fromisoformat(date) - datetime.date(*legs[0][20])
+        for leg in legs:
+            for idx in (20, 21):
+                moved = datetime.date(*leg[idx]) + shift
+                leg[idx] = [moved.year, moved.month, moved.day]
     return json.dumps(payload)
 
 
@@ -205,7 +233,55 @@ def gf_answering() -> Callable[..., str]:
     def build(
         name: str, *, date: str, origin: str | None = None, destination: str | None = None
     ) -> str:
-        return _page(_answering(_ds1(name), origin=origin, destination=destination, date=date))
+        return _page(
+            _answering(_ds1(name), origin=origin, destination=destination, date=date, name=name)
+        )
+
+    return build
+
+
+def _unpriced(ds1_json: str, *, index: int, name: str = "ds:1 payload") -> str:
+    """The same payload with the row at `index` carrying Google's "no
+    shopping-list price" marker.
+
+    An empty price head is what a served board holds for a row Google did not
+    price — premium-cabin round trips with several passengers are the routine
+    case — and fli reads it as `price=None` rather than as a malformed row, so
+    the row is parsed and served like any other.
+
+    Built from a committed capture rather than committed as a ninth one: the
+    marker is a two-character edit to a real board, and a capture whose only
+    difference from `ds1_metadata_blocks_kept` is that edit would have to be
+    kept in step with it by hand for as long as both exist."""
+    from flight_cli import _gflight_ids as gfid
+
+    payload: list[Any] = json.loads(ds1_json)
+    rows = gfid._rows_from_ds1(payload).rows
+    assert index < len(rows), f"{name} holds {len(rows)} rows; asked for {index}"
+    # `row[1]` is the price block and `row[1][0]` its head, the two indices
+    # fli's own decoder reads. Emptying the head is the marker; clearing the
+    # block would be a malformed row, which is skipped rather than served.
+    rows[index][1][0] = []
+    return json.dumps(payload)
+
+
+@pytest.fixture
+def gf_unpriced() -> Callable[..., str]:
+    """A page whose row `index` carries no price, optionally re-pointed at a
+    leg first; see `_unpriced` and `_answering`."""
+
+    def build(
+        capture: str,
+        *,
+        index: int,
+        date: str | None = None,
+        origin: str | None = None,
+        destination: str | None = None,
+    ) -> str:
+        ds1 = _ds1(capture)
+        if date is not None:
+            ds1 = _answering(ds1, origin=origin, destination=destination, date=date, name=capture)
+        return _page(_unpriced(ds1, index=index, name=capture))
 
     return build
 
@@ -227,14 +303,20 @@ def gf_board() -> Callable[..., str]:
 
 
 @pytest.fixture
-def gf_rows() -> Callable[[str], list[Any]]:
+def gf_rows() -> Callable[..., list[Any]]:
     """The parsed flights of one committed capture, as `search_with_ids` would
-    have returned them — for the paths a test reaches below the transport."""
+    have returned them — for the paths a test reaches below the transport.
 
-    def build(name: str) -> list[Any]:
+    `unpriced=i` empties row `i`'s price head first, so the row parses to
+    `price=None`; see `_unpriced`."""
+
+    def build(name: str, *, unpriced: int | None = None) -> list[Any]:
         from flight_cli import _gflight_ids as gfid
 
-        board = gfid._rows_from_ds1(json.loads(_ds1(name)))
+        ds1 = _ds1(name)
+        if unpriced is not None:
+            ds1 = _unpriced(ds1, index=unpriced, name=name)
+        board = gfid._rows_from_ds1(json.loads(ds1))
         return [gfid._parse_flight_with_id(r) for r in board.rows]
 
     return build

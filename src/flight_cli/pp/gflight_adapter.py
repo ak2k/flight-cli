@@ -96,8 +96,15 @@ def _slice_from_flight_result(
     )
 
 
-def _price_string(fr: Any) -> str:
-    """Match Matrix's price format ('USD877.00') so match._parse_cash works."""
+def _price_string(fr: Any) -> str | None:
+    """Match Matrix's price format ('USD877.00') so match._parse_cash works.
+
+    None where Google surfaced no price for the row. `ItineraryExt.price` is
+    optional, so the absence travels as itself: a fabricated `USD0.00` parses
+    as a real fare and would undercut every cash comparison an award is made
+    against, which is the one number this string exists to carry."""
+    if fr.price is None:
+        return None
     currency = fr.currency or "USD"
     return f"{currency}{fr.price:.2f}"
 
@@ -122,12 +129,16 @@ def fli_results_to_search_result(results: Sequence[Any]) -> SearchResult:
     for round-trip/multi-city. Each top-level entry maps to one Itinerary; for
     tuples, each FlightResult becomes one Slice in slice-index order.
 
-    Every member of a round-trip tuple carries a price, and they are not the
-    same number. An outbound row is priced at the cheapest round-trip TOTAL
+    Where a round-trip tuple's members carry prices they are not the same
+    number. An outbound row is priced at the cheapest round-trip TOTAL
     reachable from that outbound; the return board fetched with it pinned
     prices each of its rows at THAT combination's total. The itinerary fare is
     therefore the terminal member's; why that is the true one, with the
     measurements, is in `docs/memories/gf_routing_and_carriers.md`.
+
+    A member may carry no price at all — Google does not always surface one —
+    and such a row is carried with `price=None` rather than dropped, so the
+    solution list stays the board the user was shown.
 
     The number matters downstream: an award is compared against it, so an
     outbound-priced combination undercuts every cash comparison but the
@@ -154,8 +165,13 @@ def fli_results_to_search_result(results: Sequence[Any]) -> SearchResult:
         )
         # The same member the itineraries are priced from: a cheapest quoted
         # from the outbound boards would name a fare no row in the table shows.
-        p: float = fare_fr.price
-        if cheapest_price is None or p < cheapest_price:
+        #
+        # A row Google did not price competes for nothing here — it is not a
+        # cheaper fare, it is no fare — so it is passed over while its itinerary
+        # is still carried above. Reading it as a number instead is what makes
+        # the comparison a type error on the first priced row that precedes it.
+        p: float | None = fare_fr.price
+        if p is not None and (cheapest_price is None or p < cheapest_price):
             cheapest_price = p
             cheapest_currency = fare_fr.currency or "USD"
 

@@ -48,7 +48,7 @@ import sys
 import textwrap
 import threading
 import time
-from typing import Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import anyio
 import anyio.to_thread
@@ -64,6 +64,9 @@ from flight_cli._gf_errors import (
     GfThrottledError,
     GfTransportError,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 FIXTURE_DIR = pathlib.Path(__file__).parent / "fixtures" / "gflight_page"
 _FILTERS = cast("Any", None)  # a patched client never encodes the filter
@@ -1069,6 +1072,27 @@ def test_a_placeholder_does_not_hide_a_board_whose_blocks_moved(
     client(_FakeResponse(text=html))
     with pytest.raises(GfPageShapeError, match=r"holds flight rows at \[4, 5\]"):
         gfid._one_call(_FILTERS)
+
+
+def test_re_pointing_a_capture_whose_blocks_moved_is_an_error_not_a_no_op(
+    gf_answering: Callable[..., str],
+) -> None:
+    """A fixture helper that rewrites nothing still returns a page.
+
+    `_answering` exists so a test can say "this board answers the leg I asked
+    for"; a capture whose row blocks sit somewhere the helper does not look
+    comes back with its own route and its own dates, and the pin loop then
+    refuses it — a refusal the test reads as the behaviour under test rather
+    than as its own fixture. So the helper locates rows through the transport's
+    own scan and says so when that finds none, naming where the rows actually
+    are.
+
+    `ds1_blocks_relocated` is the capture that shows it: both indices the board
+    normally occupies are `None` and the rows are two blocks further on."""
+    with pytest.raises(AssertionError, match=r"no rows to re-point.*payload\[4, 5\]"):
+        gf_answering(
+            "ds1_blocks_relocated.json", origin="LAX", destination="JFK", date=_return_date()
+        )
 
 
 def test_a_placeholder_above_a_drifted_board_does_not_become_an_empty(client: Any) -> None:

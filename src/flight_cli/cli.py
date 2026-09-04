@@ -1431,6 +1431,20 @@ def _run_matrix_path(
         )
     # `res` was cast to SearchResult at the top of this function; safe to pass through.
     if not json_out:
+        # Same contract as every other path: the range a pick is measured
+        # against is the VISIBLE count, and the reporter that says so is the one
+        # whose second clause knows whether a link follows. Clamping here is
+        # also what keeps one out-of-range fact from being stated two ways —
+        # `_pinned_solution_index` would otherwise answer it on stdout, in a
+        # `--format json` sibling's stream and with a different fallback.
+        #
+        # An empty result is numbered nowhere, so it gets no sentence at all
+        # rather than an empty `(1-0)` interval and a pin claim nothing honours.
+        pick = (
+            _pick_in_range(pick, len(res.solutions), links_follow=matrix_url or google_url)
+            if res.solutions
+            else None
+        )
         _emit_urls(search, matrix_url=matrix_url, google_url=google_url, result=res, pick=pick)
 
 
@@ -1478,6 +1492,23 @@ def _gflight_json_row(g: Any) -> dict[str, Any]:
     return row
 
 
+def _terminal_fare_key(r: Any) -> tuple[int, float]:
+    """Sort key for one round-trip combination: its terminal member's fare,
+    with a row Google did not price ordered last.
+
+    Google surfaces no shopping-list price for some rows — premium-cabin round
+    trips with several passengers are the routine case — and a row it did not
+    price is still a row the board served. There is no number to rank it on, so
+    it goes last rather than being dropped or read as a zero fare; the leading
+    term is what carries that, and it leaves the priced rows compared on the
+    fare alone.
+
+    Reads `.flight.price` and no other attribute, so the key holds for anything
+    shaped like a result row rather than only for fli's own model."""
+    price: float | None = list(r)[-1].flight.price
+    return (1, 0.0) if price is None else (0, price)
+
+
 def _price_ordered(results: list[Any]) -> list[Any]:
     """Round-trip combinations in price order. A one-way board is returned as
     it came.
@@ -1489,7 +1520,7 @@ def _price_ordered(results: list[Any]) -> list[Any]:
     pins were fetched."""
     if any(not isinstance(r, tuple) for r in results):
         return results
-    return sorted(results, key=lambda r: cast("float", list(r)[-1].flight.price))
+    return sorted(results, key=_terminal_fare_key)
 
 
 def _pick_in_range(pick: int | None, rows: int, *, links_follow: bool) -> int | None:
@@ -1937,7 +1968,7 @@ def _report_weave_aftermath(state: dict[str, Any]) -> None:
         )
 
 
-def _report_enriched_gf_failure(e: Exception, *, matrix_answered: bool) -> None:
+def _report_enriched_gf_failure(e: Exception, *, matrix_answered: bool, awards_only: bool) -> None:
     """Say why the Google Flights half of the weave produced nothing.
 
     Where Matrix answered it is still authoritative, so a typed refusal is a
@@ -1951,15 +1982,29 @@ def _report_enriched_gf_failure(e: Exception, *, matrix_answered: bool) -> None:
     on the stream the other half is about to be named on, leaving stdout the
     zero bytes a run that answered nothing owes a caller.
 
-    That gate is why this sentence stays on stdout while its sibling in
-    `_paint_first_gf_table` does not: `matrix_answered` is read AFTER the weave,
-    so the arm below prints only where the Matrix half is already in hand and
-    something is certain to follow it. The other sentence is painted from inside
-    the weave and can only guess."""
+    `matrix_answered` is necessary for that sentence and not sufficient, and
+    `awards_only` is the rest of it. It is read AFTER the weave, so the Matrix
+    half is in hand — but under `awards_only` the merged table is never
+    rendered, so "showing Matrix only" names a surface this run does not print
+    even though the half behind it answered. Worse, the award renderer has two
+    arms that return without writing a byte to stdout, so on those the promise
+    is the ENTIRE document at exit 0 with its retraction on stderr. Only the
+    both-true arm keeps the sentence, and only there is stdout certain to carry
+    a Matrix table under it; the awards arm says the same news on `err`, where
+    a run that ends up printing nothing owes nothing.
+
+    That is also why this sentence can sit on stdout at all while its sibling in
+    `_paint_first_gf_table` cannot: the sibling is painted from inside the weave
+    and can only guess."""
     if not isinstance(e, GfBackendError):
         err.print(f"[yellow]Google Flights query failed:[/] {_safe_text(e)}")
-    elif matrix_answered:
+    elif matrix_answered and not awards_only:
         console.print(f"[dim]{_safe_text(_gf_refusal(e).note)} — showing Matrix only.[/]")
+    elif matrix_answered:
+        err.print(
+            f"[yellow]{_safe_text(_gf_refusal(e).note)}[/] — awards only; "
+            f"no fare table is printed on this arm."
+        )
     else:
         err.print(_gf_refusal(e).message)
 
@@ -2050,14 +2095,18 @@ def _run_enriched_path(
     # exit code that reports success on one is the command lying about it. One
     # expression for both, because two that must agree eventually will not.
     painted = bool(gf) and not awards_only and state.get("paint_err") is None
-    # The Google half's report needs to know whether Matrix answered: a refusal
-    # is a footnote beside a Matrix table and the whole outcome without one, and
-    # "showing Matrix only" promises a half that never arrives. Passing
-    # `matrix_answered=` is what carries that; where the read sits relative to
-    # the block below is not, since the reporter never touches `state`.
+    # The Google half's report needs both of the things that decide whether a
+    # refusal is a footnote or the outcome: whether Matrix answered, and whether
+    # a Matrix table is printed at all. "Showing Matrix only" promises a half
+    # that never arrives without the first, and a surface this run never renders
+    # without the second. Passing the two flags is what carries that; where the
+    # read sits relative to the block below is not, since the reporter never
+    # touches `state`.
     matrix_res = state.get("matrix")
     if "gf_err" in state:
-        _report_enriched_gf_failure(state["gf_err"], matrix_answered=matrix_res is not None)
+        _report_enriched_gf_failure(
+            state["gf_err"], matrix_answered=matrix_res is not None, awards_only=awards_only
+        )
     if matrix_res is None:
         # Every stash is read here: the paint failure is part of why nothing
         # reached the user, and the Matrix one IS the outcome.
@@ -2077,19 +2126,39 @@ def _run_enriched_path(
     # include Google-only itineraries, so their order and their length both
     # differ from `matrix_res.solutions`: indexing those instead pins a row the
     # table numbered differently, under the number read off the screen.
+    pinnable: SearchResult | None = None
     if not awards_only:
         merged = merge_results(fli_results_to_search_result(gf), matrix_res)
         _render_merged(merged, legs=legs, top_n=top_n)
         shown = [r.itinerary for r in merged[:top_n]]
+        # The same contract `_run_gflight_path` has: the range a pick is
+        # measured against is the VISIBLE count. Clamping here also means the
+        # duplicate warning inside `_emit_urls` is never reached from this path.
+        #
+        # An empty board is numbered nowhere, so it gets no clamp sentence at
+        # all: `(1-0)` is an empty interval that cannot say what a valid pick
+        # would be, and the fallback clause beside it would name a pin that does
+        # not happen — this arm renders a header-only table and carries on where
+        # the sibling has already returned.
+        pick = (
+            _pick_in_range(pick, len(shown), links_follow=matrix_url or google_url)
+            if shown
+            else None
+        )
+        pinnable = matrix_res.model_copy(update={"solutions": shown})
     else:
-        # No merged table is printed on this arm. The award renderer below is
-        # the only numbered surface it has, and it is fanned out over the Matrix
-        # result, so that is the list a pick names here.
-        shown = matrix_res.solutions[:top_n]
-    # The same contract `_run_gflight_path` has: the range a pick is measured
-    # against is the VISIBLE count. Clamping here also means the duplicate
-    # warning inside `_emit_urls` is never reached from this path.
-    pick = _pick_in_range(pick, len(shown), links_follow=matrix_url or google_url)
+        # Nothing this arm prints carries a row number: the award renderer is
+        # the only surface it has and its columns hold no `#`. So a pick names
+        # no row here — not one out of range, one that does not exist — and it
+        # is refused rather than clamped. The links stay unpinned for the same
+        # reason: with no numbered list, neither `itinerary #N` nor `cheapest
+        # itinerary` is a label the user could check against anything.
+        if pick is not None:
+            err.print(
+                f"[yellow]--pick {pick} names a row in the results table, and this mode "
+                f"prints none; the links below are unpinned.[/]"
+            )
+        pick = None
 
     if run_pp:
         p = opts.pax
@@ -2109,12 +2178,13 @@ def _run_enriched_path(
     # A result built from the rows the table numbered, so `_emit_urls`' label
     # expression is true by construction. A Google-only row carries no
     # `Itinerary.id`, so the Matrix line falls back to the plain deep link while
-    # the Google line still pins from that row's slices.
+    # the Google line still pins from that row's slices. None where no table was
+    # numbered, which is what makes both lines fall back to the unpinned form.
     _emit_urls(
         matrix_search,
         matrix_url=matrix_url,
         google_url=google_url,
-        result=matrix_res.model_copy(update={"solutions": shown}),
+        result=pinnable,
         pick=pick or 1,
     )
 
@@ -2710,9 +2780,14 @@ def _render_gflight_table(
             legroom_str = _fmt_gflight_legroom(fr.legs, amenities)
             if legroom_str:
                 any_legroom = True
+            # A row Google did not price is SHOWN, with the placeholder every
+            # other absent amount in this CLI uses. Dropping it would shorten a
+            # board the user asked `-n` rows of and make the count a lie, and a
+            # currency prefix over nothing would read as a fare of zero.
+            price_cell = "—" if fr.price is None else f"{fr.currency or 'USD'}{fr.price:.2f}"
             t.add_row(
                 label,
-                f"{fr.currency or 'USD'}{fr.price:.2f}",
+                price_cell,
                 str(fr.stops),
                 dur,
                 legs_str,
