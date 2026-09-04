@@ -105,7 +105,7 @@ of `date_grid`, not just in `_one_grid_call`: the loop builds `_grid_filters`
 first, and that resolves airports through fli's `Airport` enum and dates through
 `FlightSegment`. A city code (NYC/LON/PAR/CHI) is not an `Airport` member and a
 window opening in the past fails travel-date validation, so either one raises
-into the callers' broad `except` and prints `date-grid failed: type object
+into the callers' broad `except` and prints `date grid failed: type object
 'Airport' has no attribute 'NYC'` — a transport fault named for a request no
 transport was going to carry.
 

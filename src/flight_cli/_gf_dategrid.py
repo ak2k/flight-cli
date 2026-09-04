@@ -267,7 +267,7 @@ def date_grid(search: CalendarSearch) -> dict[str, float]:
     # dates through `FlightSegment`, both of which reject inputs this command
     # accepts: a city code (NYC/LON/PAR) is not in that enum, and a window opening
     # in the past fails travel-date validation. Either one raises, and the callers'
-    # broad `except` reports the standing gate as "date-grid failed: type object
+    # broad `except` reports the standing gate as "date grid failed: type object
     # 'Airport' has no attribute 'NYC'" — a transport-shaped error for a request no
     # transport was going to carry.
     if _GRID_RPC_GATED:

@@ -320,9 +320,14 @@ def _oneway_cal(origin: str = "JFK") -> CalendarSearch:
     )
 
 
-def _spy_renderers(monkeypatch: Any) -> dict[str, int]:
-    """Replace the calendar renderers + URL emitter with call-counting spies."""
-    calls: dict[str, int] = {"grid": 0, "calendar": 0}
+def _spy_renderers(monkeypatch: Any, into: dict[str, int] | None = None) -> dict[str, int]:
+    """Replace the calendar renderers + URL emitter with call-counting spies.
+
+    `into` counts in a dict the caller already holds, which is the only way a
+    drive that RAISES can hand its counters back: its return value never reaches
+    the test that called it."""
+    calls: dict[str, int] = {} if into is None else into
+    calls.update({"grid": 0, "calendar": 0})
 
     def _grid(*_a: object, **_k: object) -> None:
         calls["grid"] += 1
@@ -665,6 +670,9 @@ def test_a_first_paint_that_raised_is_not_reported_as_a_matrix_outage(
     assert "the date-grid renderer blew up" in line
     assert "Google Flights" in line  # the half that actually failed
     assert "Matrix calendar failed" not in line  # and not the one that did not
+    # Matrix still priced the window, so this is a degradation standing beside an
+    # answer rather than an outage, and the softer verb is the whole difference.
+    assert "could not be shown" in line
 
 
 def test_a_reader_that_hung_up_under_the_first_paint_is_not_a_group(
@@ -751,7 +759,7 @@ def _broken_grid(_search: object) -> dict[str, float]:
     ("grid", "note"),
     [
         (_throttled_grid, "Google Flights rate-limited"),
-        (_broken_grid, "Google Flights date-grid failed"),
+        (_broken_grid, "Google Flights date grid failed"),
         (_empty_grid, "awaiting Matrix calendar"),
     ],
     ids=["throttled", "date-grid raised", "empty grid"],
@@ -806,6 +814,21 @@ def test_the_fanout_provenance_note_is_beside_the_grid_not_in_it(
     cap = capsys.readouterr()
     assert "separately and merged" in _flat(cap.err)
     assert "separately and merged" not in _flat(cap.out)
+
+
+def test_the_fanout_provenance_note_counts_the_sub_queries_it_actually_ran(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The split is one sub-query per (origin, destination group), origins
+    outermost, so two origins asking for one destination is two queries and still
+    one destination. Counting them as destinations tells a reader the fan-out
+    covered ground it never went near, and this is the only count they see."""
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    _spy_renderers(monkeypatch)
+    _calendar_fast(fast=False, origin="JFK,BOS", destination="LHR")
+    note = _flat(capsys.readouterr().err)
+    assert "Queried 2 origin/destination groups separately" in note
+    assert "2 destinations" not in note  # one destination was asked for, not two
 
 
 def test_calendar_enriched_paints_grid_before_matrix(monkeypatch: Any) -> None:
@@ -867,7 +890,7 @@ def test_calendar_enriched_grid_unavailable_notes_once_and_paints_matrix(
     # to wait — Matrix can still fail after it (and today, on one-way, it does).
     assert "awaiting Matrix calendar" in note
     assert "Showing the Matrix calendar" not in note
-    assert "date-grid failed" not in note  # a standing gate is not a failure
+    assert "date grid failed" not in note  # a standing gate is not a failure
     assert cap.out == ""  # and nothing that is not the answer went to the answer
 
 
@@ -876,7 +899,7 @@ def test_calendar_enriched_city_code_gets_the_gate_note_not_an_attribute_error(
 ) -> None:
     """NYC is a place a user can ask for and fli's `Airport` enum has no member
     for. Real `date_grid` here: the gate has to answer before `_grid_filters` does,
-    or the weave's broad except turns a standing gate into `date-grid failed: type
+    or the weave's broad except turns a standing gate into `date grid failed: type
     object 'Airport' has no attribute 'NYC'` — and Matrix still prices it either
     way, so the note is the whole difference the user sees."""
     monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
@@ -887,7 +910,7 @@ def test_calendar_enriched_city_code_gets_the_gate_note_not_an_attribute_error(
     assert calls["grid"] == 0
     note = _flat(cap.err)  # status, not a document; see the gate note above
     assert note.count("price grid unavailable") == 1
-    assert "date-grid failed" not in note
+    assert "date grid failed" not in note
     assert "no attribute" not in note
     assert cap.out == ""
 
@@ -991,7 +1014,7 @@ def test_calendar_fast_unresolvable_origin_gets_the_gate_note(
     assert calls["grid"] == 0
     err_out = _flat(cap.err)
     assert "no attribute" not in err_out  # not an AttributeError in prose
-    assert "date-grid failed" not in err_out
+    assert "date grid failed" not in err_out
     assert err_out.count("price grid unavailable") == 1
     assert "drop --fast for Matrix" in err_out
     assert cap.out == ""
@@ -1014,7 +1037,7 @@ def test_calendar_fast_unexpected_grid_error_exits_one(
     assert excinfo.value.exit_code == 1
     assert calls["grid"] == 0
     err_out = _flat(cap.err)
-    assert "date-grid failed" in err_out  # the reason
+    assert "date grid failed" in err_out  # the reason
     assert "connection reset by peer" in err_out
     assert "drop --fast for Matrix" in err_out  # and the outcome, on the same stream
     assert cap.out == ""
@@ -1418,24 +1441,25 @@ def _exiting_grid(_search: object) -> dict[str, float]:
     raise typer.Exit(_ORDERLY_EXIT_CODE)
 
 
-def _exit_from_a_fanout_sub_query(monkeypatch: Any) -> None:
+def _exit_from_a_fanout_sub_query(monkeypatch: Any, calls: dict[str, int]) -> None:
+    _ = calls  # no renderer runs on this path
     monkeypatch.setattr(cli, "MatrixClient", _ExitingClient)
     cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
         _cal(["VIE", "PAR"]), rps=10.0, impersonate="chrome", no_cache=True
     )
 
 
-def _exit_from_the_weave_matrix_task(monkeypatch: Any) -> None:
+def _exit_from_the_weave_matrix_task(monkeypatch: Any, calls: dict[str, int]) -> None:
     monkeypatch.setattr(cli, "MatrixClient", _ExitingClient)
     monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _fake_grid)
-    _spy_renderers(monkeypatch)
+    _spy_renderers(monkeypatch, calls)
     _run_enriched()
 
 
-def _exit_from_the_weave_date_grid(monkeypatch: Any) -> None:
+def _exit_from_the_weave_date_grid(monkeypatch: Any, calls: dict[str, int]) -> None:
     monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
     monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _exiting_grid)
-    _spy_renderers(monkeypatch)
+    _spy_renderers(monkeypatch, calls)
     _run_enriched()
 
 
@@ -1473,18 +1497,20 @@ def _exit_beside_a_failure(monkeypatch: Any, code: int) -> None:
     )
 
 
-def _exit_zero_beside_a_failure(monkeypatch: Any) -> None:
+def _exit_zero_beside_a_failure(monkeypatch: Any, calls: dict[str, int]) -> None:
     # Exit(0) is the one that reads as success on every channel a caller has.
+    _ = calls  # no renderer runs on this path
     _exit_beside_a_failure(monkeypatch, 0)
 
 
-def _exit_three_beside_a_failure(monkeypatch: Any) -> None:
+def _exit_three_beside_a_failure(monkeypatch: Any, calls: dict[str, int]) -> None:
+    _ = calls  # no renderer runs on this path
     _exit_beside_a_failure(monkeypatch, _ORDERLY_EXIT_CODE)
 
 
-def _exit_from_the_fast_date_grid(monkeypatch: Any) -> None:
+def _exit_from_the_fast_date_grid(monkeypatch: Any, calls: dict[str, int]) -> None:
     monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _exiting_grid)
-    _spy_renderers(monkeypatch)
+    _spy_renderers(monkeypatch, calls)
     cli._run_fast_calendar_grid(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
         _oneway_cal(),
         origins=("JFK",),
@@ -1534,16 +1560,19 @@ def test_an_orderly_exit_inside_a_calendar_guard_keeps_its_own_code(
     below would ever mention the failure, and with `Exit(0)` the process reports
     success for a fan-out that half went down. The code is the caller's; stderr is
     where what it cost gets said."""
+    calls: dict[str, int] = {"grid": 0, "calendar": 0}
     with pytest.raises(typer.Exit) as excinfo:
-        drive(monkeypatch)
+        drive(monkeypatch, calls)
     assert excinfo.value.exit_code == code  # its own code, not 1
     cap = capsys.readouterr()
     if delivered:
         # The one arm where the grid reached the reader BEFORE the stop: the paint
         # is synchronous and the thread hop ahead of it is the last place a cancel
-        # can land, so what was given stays given. The renderers here are spies, so
-        # the paint's own status line is what witnesses it — on stderr, like every
-        # other line the weave writes while the answer is still in flight.
+        # can land, so what was given stays given. The renderer having RUN is the
+        # claim — a status line saying the grid is there is not the grid.
+        assert calls["grid"] == 1
+        # And on stderr, like every other line the weave writes while the answer is
+        # still in flight.
         assert "refining with Matrix" in _flat(cap.err)
     # A stop is not an answer, and leaves nothing on stdout for a caller to read
     # as one whatever the exit code says.
@@ -1886,6 +1915,31 @@ def test_a_raise_writing_the_answer_is_a_typed_line(
     assert message in line
 
 
+def _matrix_error_grid_renderer(*_a: object, **_k: object) -> None:
+    raise MatrixApiError("the date-grid renderer blew up", kind="internal")
+
+
+def test_a_backend_error_writing_the_answer_names_the_backend_it_was_handed(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The no-`lost` branch of the same reporter — the one a single query reaches,
+    where the backend name stands alone under a full stop. `MatrixApiError` is the
+    class every backend error on these paths wears, so the name has to come from
+    the guard the delivery ran under: under `--fast` there is no Matrix behind the
+    document at all, and naming one sends a reader after an outage nobody had."""
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)  # never dial Matrix
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _fake_grid)
+    _spy_renderers(monkeypatch)
+    monkeypatch.setattr(cli, "_render_date_grid", _matrix_error_grid_renderer)
+    with pytest.raises(typer.Exit) as excinfo:
+        _calendar_fast(fast=True, one_way=True)
+    assert excinfo.value.exit_code == 1
+    line = _flat(capsys.readouterr().err)
+    assert "Google Flights date grid failed." in line  # the backend that wrote it
+    assert "Matrix calendar" not in line  # and not the one the class is named for
+    assert "the date-grid renderer blew up" in line  # with the cause under it
+
+
 # ──────────── --duration is resolved against the trip shape (one-way) ───────
 # The trip LENGTH exists only between an outbound and a return: `_set_trip_length`
 # and `_spa_calendar_leg` both attach it round-trip only. A one-way therefore
@@ -1934,14 +1988,18 @@ def test_calendar_one_way_default_duration_is_silent(
     assert "--duration is ignored" not in _flat(capsys.readouterr().err)
 
 
+@pytest.mark.parametrize("destination", ["LHR", "VIE,PAR,FCO,MAD"], ids=["single", "fan-out"])
 def test_calendar_one_way_note_survives_json_output(
-    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+    destination: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # `--format json` is exactly when a dropped flag is least visible, and stderr is
-    # where the remark can go without putting prose in front of `jq`.
+    # where the remark can go without putting prose in front of `jq`. Both trip
+    # shapes, because the fan-out writes lines a single query never does and an
+    # `err` that slipped to `console` on one of them would put prose in front of
+    # `jq` on the arm nothing was reading.
     monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
     _spy_renderers(monkeypatch)
-    _calendar_fast(fast=False, fmt="json", duration="9-3")
+    _calendar_fast(fast=False, fmt="json", duration="9-3", destination=destination)
     cap = capsys.readouterr()
     assert "--duration is ignored" in _flat(cap.err)
     assert json.loads(cap.out)  # stdout is still a document, not prose
@@ -4336,7 +4394,7 @@ def test_a_date_survives_every_numeric_presentation_type() -> None:
     `strftime`, so a date passes each of them and comes back a string. The `%`
     clause is what keeps a strftime spec from reading as a proof about a number."""
     when = date(2026, 10, 1)
-    for presentation in "bdoxXneEfFgG":
+    for presentation in "bcdoxXneEfFgG":
         assert format(when, presentation) == presentation  # returned, not formatted
         with pytest.raises((ValueError, TypeError)):
             format("a string", presentation)

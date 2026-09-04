@@ -1179,7 +1179,7 @@ def _report_calendar_failures(state: dict[str, Any], *, answered: bool = False) 
     for cause in matrix:
         _print_calendar_failure(cause)
     for cause in cast("list[BaseException]", state.get("gf_failures", [])):
-        err.print(f"[yellow]Google Flights date grid could not be shown:[/] {_safe_text(cause)}")
+        err.print(f"[yellow]{_safe_text(_GF_GRID_NAME)} could not be shown:[/] {_safe_text(cause)}")
     if not matrix and not answered:
         err.print("[yellow]Matrix calendar did not complete.[/]")
 
@@ -1193,6 +1193,13 @@ _GF_GRID_UNAVAILABLE_NOTE = (
     "no data to this client (tracked in work-h70kv.5)."
 )
 _GF_GRID_UNAVAILABLE_WEAVE_NOTE = f"{_GF_GRID_UNAVAILABLE_NOTE} …awaiting Matrix calendar…"
+
+# The grid's name as a reader sees it, in one place because it is the prefix a
+# caller matches a failure on: two spellings across the arms of one command means
+# a matcher has to know both, and which one it gets depends on where the run
+# broke. The "date-grid" in the docstrings nearby is English about the thing and
+# not this printed name, which is why they are not built from here.
+_GF_GRID_NAME = "Google Flights date grid"
 
 
 def _paint_calendar_first(
@@ -1224,7 +1231,7 @@ def _paint_calendar_first(
     elif state.get("gf_unavailable"):
         err.print(f"[dim]{_GF_GRID_UNAVAILABLE_WEAVE_NOTE}[/]")
     elif "gf_err" in state:
-        err.print(f"[yellow]Google Flights date-grid failed:[/] {_safe_text(state['gf_err'])}")
+        err.print(f"[yellow]{_safe_text(_GF_GRID_NAME)} failed:[/] {_safe_text(state['gf_err'])}")
         err.print("[dim]…awaiting Matrix calendar…[/]")
     else:
         err.print("[dim]…awaiting Matrix calendar…[/]")
@@ -1265,14 +1272,14 @@ def _run_fast_calendar_grid(
     except (typer.Exit, typer.Abort):
         raise  # an orderly exit is not a grid failure; see the weave's arm
     except Exception as e:  # noqa: BLE001 — any other cause is still just "no grid"
-        err.print(f"[yellow]Google Flights date-grid failed:[/] {_safe_text(e)}")
+        err.print(f"[yellow]{_safe_text(_GF_GRID_NAME)} failed:[/] {_safe_text(e)}")
     if grid:
 
         def _write_answer() -> None:
             _render_date_grid(grid, origin=origins, destination=dests, sd=sd, ed=ed)
             _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
 
-        _deliver_calendar(_write_answer, backend="Google Flights date grid")
+        _deliver_calendar(_write_answer, backend=_GF_GRID_NAME)
     else:
         # `--fast` means the GF grid alone in ~1s; quietly running the ~45s Matrix
         # calendar instead would change what the flag means.
@@ -1346,7 +1353,7 @@ def _run_calendar_enriched(
                 state["gf_throttled"] = True
             except GfGridUnavailableError:
                 # Ahead of the broad except, which would report a standing gate as
-                # "date-grid failed: …". Matrix still prices the window.
+                # "date grid failed: …". Matrix still prices the window.
                 state["gf_unavailable"] = True
             except (typer.Exit, typer.Abort):
                 raise  # an orderly exit is not a grid failure; see `_matrix` above
@@ -3693,8 +3700,8 @@ def calendar(
         # delivery below, so on stdout a failure there would leave it standing alone
         # under exit 1 — a document, to a caller that reads the stream.
         err.print(
-            f"[dim]Queried {n_split} destinations separately and merged — Matrix "
-            f"under-reports the combined multi-airport calendar grid.[/]"
+            f"[dim]Queried {n_split} origin/destination groups separately and merged "
+            f"— Matrix under-reports the combined multi-airport calendar grid.[/]"
         )
 
     def _write_answer() -> None:

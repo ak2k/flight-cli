@@ -169,7 +169,7 @@ def test_date_grid_refuses_city_codes_before_building_fli_filters(
 
     fli's `Airport` enum holds airports only — NYC/LON/PAR/CHI are not members —
     so building filters for one raises AttributeError, and the callers' broad
-    `except` renders that as "date-grid failed: type object 'Airport' has no
+    `except` renders that as "date grid failed: type object 'Airport' has no
     attribute 'NYC'": a transport fault named for a request the gate never sends.
     Every other case in this file uses SFO/FRA, which the enum does hold."""
     clients = _no_client(monkeypatch)
