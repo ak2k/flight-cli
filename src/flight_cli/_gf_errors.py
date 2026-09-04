@@ -57,6 +57,21 @@ class GfPageShapeError(GfBackendError):
     extract needs re-deriving — never that the route has no flights."""
 
 
+class GfPinIgnoredError(GfBackendError):
+    """A well-formed page, read completely, answering a leg nobody asked for.
+
+    A pin goes out as `selected_flight` and the response says nothing about
+    which pin it belongs to, so a page that dropped it arrives shaped exactly
+    like one that honoured it — and only the served legs tell them apart. The
+    rows parsed; what they describe is a different segment.
+
+    A direct child of `GfBackendError` rather than of `GfPageShapeError`,
+    because a nested type inherits its parent's `match` arm: this would then
+    render as a layout change and send the next reader to re-derive an extract
+    that is working.
+    """
+
+
 class GfTfsUnsupportedError(GfBackendError):
     """A filter the `tfs` search-page encoder cannot express.
 

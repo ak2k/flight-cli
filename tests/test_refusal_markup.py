@@ -23,6 +23,10 @@ guaranteed to be a string.
 Three groups of tests below, one per half of the rule: `matrix_reasons` is plain
 at the source; both `_pick_backend` arms are correct on the same hostile input;
 and remote exception text survives the render sites that print it.
+
+The weave's failure reporters grew in beside them, because what they print is
+the same text through the same escapes — and with them one structural invariant
+those reporters rest on: which errors can reach which arm.
 """
 
 from __future__ import annotations
@@ -37,6 +41,7 @@ from rich.console import Console
 from flight_cli._gf_errors import (
     GfBackendError,
     GfPageShapeError,
+    GfPinIgnoredError,
     GfTfsUnsupportedError,
     GfThrottledError,
     GfTransportError,
@@ -53,6 +58,8 @@ from flight_cli.cli import (
 from flight_cli.routing_predicates import classify
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from flight_cli import cli as cli_mod
 
 # A closing tag with no opener: rich's parser raises on it rather than ignoring
@@ -157,6 +164,8 @@ def _pick(
     backend: str = BACKEND_AUTO,
     routing: str | None = None,
     extension: str | None = None,
+    allow_airport_changes: bool = True,
+    show_only_available: bool = True,
 ) -> tuple[str, str]:
     """Run the real picker with its stderr Console captured. No network: the
     picker only classifies, it never dispatches a backend."""
@@ -180,8 +189,33 @@ def _pick(
         origin="JFK",
         destination="LAX",
         stops=None,
+        allow_airport_changes=allow_airport_changes,
+        show_only_available=show_only_available,
     )
     return resolved, buf.getvalue()
+
+
+@pytest.mark.parametrize(
+    "flag,expected",
+    [
+        ("allow_airport_changes", "a ban on changing airports"),
+        ("show_only_available", "unavailable itineraries included"),
+    ],
+)
+def test_a_matrix_only_filter_names_itself_through_the_real_console(
+    monkeypatch: pytest.MonkeyPatch, flag: str, expected: str
+) -> None:
+    """These two reasons take the same markup path every other one does.
+
+    The picker's line is rich markup, so a reason carrying a square bracket
+    decides between a `MarkupError` traceback and a sentence — and a reason
+    added without going through a real Console is the way that lands."""
+    resolved, printed = _pick(monkeypatch, **{flag: False})  # pyright: ignore[reportArgumentType]
+
+    assert resolved == BACKEND_MATRIX
+    assert expected in printed, printed
+    assert "Using Matrix:" in printed, printed
+    assert "\x1b" not in printed, printed
 
 
 def test_the_reported_routing_string_has_no_backslash_in_its_reason() -> None:
@@ -320,6 +354,34 @@ def test_every_refusal_type_is_named_rather_than_merely_declined() -> None:
         note = _gf_refusal(_one_of(cls)).note
         assert note not in seen, f"{cls.__name__} renders as {seen[note]} does: {note!r}"
         seen[note] = cls.__name__
+
+
+def test_a_board_answering_the_wrong_leg_does_not_report_a_shape_change() -> None:
+    """A page read completely, describing a segment nobody asked for.
+
+    Rendered as a shape change it denies its own evidence — the endpoints in
+    the parenthetical are known only because the rows WERE read — and it aims
+    the next maintainer at re-deriving an extract that is working. What the
+    user can act on is which leg was served against which was wanted, so the
+    message carries both and keeps the steer to the backend that can answer."""
+    served = GfPinIgnoredError(
+        "a Google Flights return board departs JFK, not LAX; the pinned leg was ignored"
+    )
+    message = _gf_refusal(served).message
+
+    assert "no rows could be read" not in message, message
+    assert "JFK" in message, message
+    assert "LAX" in message, message
+    assert "--backend matrix" in message, message
+    _render(message)  # and it is well-formed markup
+
+
+def test_a_board_answering_the_wrong_leg_is_not_a_page_shape_error() -> None:
+    """Nested under `GfPageShapeError` it would inherit that arm and name a wall
+    confidently — the wrong one. A direct child of the base type is what makes
+    the dispatch reach the arm written for it."""
+    assert issubclass(GfPinIgnoredError, GfBackendError)
+    assert not issubclass(GfPinIgnoredError, GfPageShapeError)
 
 
 def test_the_transport_refusal_agrees_with_the_pin_loop_about_the_cause() -> None:
@@ -1285,6 +1347,40 @@ def _blank_failure() -> Any:
     return _BlankFailure("")
 
 
+def test_the_matrix_error_is_built_at_exactly_one_place() -> None:
+    """`_matrix_into` stashes a result and a `MatrixApiError` into keys that its
+    caller reads as alternatives, and that is sound only because the error has a
+    single origin: the one raiser sits under `execute`, so reaching the stash
+    line at all means nothing raised.
+
+    Asserted as the invariant rather than as a list of sites. An enumeration of
+    file and line rots on the next edit and says nothing when it does; the count
+    is the property, and a second construction site is the event that breaks the
+    argument — whichever file it lands in."""
+    import ast
+    import pathlib
+
+    from flight_cli import cli as cli_mod
+
+    sites: list[str] = []
+    for path in sorted(pathlib.Path(cli_mod.__file__).parent.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(node, ast.Call):
+                continue
+            # Both spellings: the raiser imports the name, and a caller reaching
+            # it through the module would be the same second origin.
+            func = node.func
+            named = ""
+            if isinstance(func, ast.Name):
+                named = func.id
+            elif isinstance(func, ast.Attribute):
+                named = func.attr
+            if named == "MatrixApiError":
+                sites.append(f"{path.name}:{node.lineno}")
+
+    assert len(sites) == 1, f"MatrixApiError is constructed at {len(sites)} sites: {sites}"
+
+
 def _refusing_matrix(error: Exception) -> Any:
     """Matrix's client, refusing with `error`. Nothing here reaches the network —
     the real dispatch still runs, on a stubbed client."""
@@ -2012,6 +2108,70 @@ def _split_capture(monkeypatch: pytest.MonkeyPatch) -> tuple[io.StringIO, io.Str
     return out, errs
 
 
+# Every progress or promise sentence `_run_enriched_path` and the functions it
+# calls can print. Both name the MATRIX half, and neither can be true when it is
+# printed. Swept by hand at the two sites and re-derived here so a third one
+# added on `console` fails this file rather than a user's pipe.
+_PROMISES = ("refining with Matrix", "awaiting Matrix", "showing Matrix only")
+
+
+def test_no_stdout_sentence_promises_a_matrix_half_that_never_arrives(
+    monkeypatch: pytest.MonkeyPatch,
+    gf_rows: Callable[[str], list[Any]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Google answers, Matrix fails, and the command exits 0 with a real table
+    on stdout.
+
+    That is the run the promise is worst on: the refinement it announces never
+    comes, the retraction goes to stderr, and the exit code says the search
+    succeeded — so a reader of stdout alone is told a better table follows and
+    is never told otherwise. The rule is not "stdout owes zero bytes" (a table
+    was owed and printed); it is that no sentence on stdout promises a half that
+    never arrived.
+
+    Driven through the real path with the real renderers: the promise is printed
+    from inside the weave, so a probe that stubbed the paint would pin nothing.
+    """
+    from flight_cli import cli
+    from flight_cli.client import MatrixApiError
+
+    rows = gf_rows("ds1_metadata_blocks_kept.json")
+
+    def _gf(*_a: object, **_kw: object) -> list[Any]:
+        return rows
+
+    monkeypatch.setattr(cli, "_gflight_results", _gf)
+    monkeypatch.setattr(
+        cli, "MatrixClient", _refusing_matrix(MatrixApiError("stale key", kind="auth"))
+    )
+    legs, opts = _gf_legs_and_opts()
+
+    # No exit: Google painted, so the run answered.
+    cli._run_enriched_path(
+        legs=legs,
+        opts=opts,
+        top_n=3,
+        run_pp=False,
+        sel=None,
+        matrix_url=False,
+        google_url=False,
+        pick=None,
+        rps=1.0,
+        impersonate="chrome",
+        no_cache=True,
+    )
+    captured = capsys.readouterr()
+
+    # The table itself is a result and belongs on stdout — without it the
+    # assertion below would hold on a run that printed nothing at all.
+    assert "USD6590.00" in captured.out, captured.out
+    for promise in _PROMISES:
+        assert promise not in captured.out, (promise, captured.out)
+    assert "refining with Matrix" in captured.err, captured.err
+    assert "stale key" in captured.err, captured.err
+
+
 def test_a_weave_that_fails_after_matrix_answered_still_says_so(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2024,7 +2184,7 @@ def test_a_weave_that_fails_after_matrix_answered_still_says_so(
     from flight_cli import cli
     from flight_cli.models import SearchResult
 
-    buf = _capture(monkeypatch)
+    out, errs = _split_capture(monkeypatch)
 
     async def _stashes_a_result(state: dict[str, Any], *_a: object, **_kw: object) -> None:
         state["matrix"] = SearchResult.model_validate({"solutions": []})
@@ -2042,9 +2202,13 @@ def test_a_weave_that_fails_after_matrix_answered_still_says_so(
     # No exit: Matrix answered, so this is a note on a run that succeeded.
     _enriched(monkeypatch)
 
-    printed = buf.getvalue()
+    # stderr, like its siblings in this reporter. The answer is on stdout and a
+    # note about the machinery around it is not part of that answer — a
+    # `--format json` consumer gets the document and nothing else.
+    printed = errs.getvalue()
     assert "The search answered, then failed:" in printed, printed
     assert "the group came apart on the way out" in printed, printed
+    assert "answered, then failed" not in out.getvalue(), out.getvalue()
 
 
 def test_a_google_half_with_no_rows_promises_matrix_on_stderr_not_stdout(

@@ -38,6 +38,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import datetime
+import itertools
 import json
 import logging
 import os
@@ -59,6 +60,7 @@ from flight_cli._gf_errors import (
     GfBackendError,
     GfConsentError,
     GfPageShapeError,
+    GfPinIgnoredError,
     GfThrottledError,
     GfTransportError,
 )
@@ -1474,6 +1476,56 @@ def _return_board_of(n: int) -> str:
     return _page(_answering(_cloned_ds1(n), origin="LAX", destination="JFK", date=_return_date()))
 
 
+def test_a_re_pointed_board_still_reports_the_row_that_was_captured() -> None:
+    """Moving a row's dates must not reshape the row.
+
+    Two captures carry a leg that lands after midnight. A helper that writes the
+    asked-for day into BOTH ends of every leg makes that leg arrive before it
+    departed, drops the `+Nd` marker the cell formatter exists to print, and
+    pulls the next leg back in front of the flight feeding it — on rows other
+    tests then assert prices and identities against.
+
+    So the row moves as a row: ONE delta, every leg, both ends. Pinned on a
+    SERVED board rather than on the helper's arithmetic, because it is the
+    served rows that every other test in the round-trip section reads."""
+    from flight_cli import cli
+    from flight_cli.pp.gflight_adapter import fli_results_to_search_result
+
+    asked = (datetime.date.today() + datetime.timedelta(days=52)).isoformat()
+    payload = json.loads(
+        _answering(_ds1("ds1_return_leg_pinned.json"), origin="MIA", destination="HNL", date=asked)
+    )
+    flights = [gfid._parse_flight_with_id(r) for r in gfid._rows_from_ds1(payload).rows]
+    assert flights, "no rows parsed from the re-pointed board"
+
+    overnight_legs = 0
+    for flight in flights:
+        legs = flight.flight.legs
+        assert legs[0].departure_datetime.date().isoformat() == asked, legs[0].departure_datetime
+        for leg in legs:
+            assert leg.arrival_datetime > leg.departure_datetime, (
+                f"{leg.departure_airport.name}-{leg.arrival_airport.name} arrives "
+                f"{leg.arrival_datetime} having departed {leg.departure_datetime}"
+            )
+            overnight_legs += leg.arrival_datetime.date() > leg.departure_datetime.date()
+        for before, after in itertools.pairwise(legs):
+            assert after.departure_datetime >= before.arrival_datetime, (
+                f"the connection departs {after.departure_datetime} and the flight "
+                f"feeding it lands {before.arrival_datetime}"
+            )
+    # Without one the assertions above hold on any board at all — this capture
+    # is in the suite precisely because it carries a leg over midnight.
+    assert overnight_legs == 1, overnight_legs
+
+    cells = [
+        cli._fmt_slice_times(s.departure or "", s.arrival or "")
+        for it in fli_results_to_search_result(flights).solutions
+        if it.itinerary
+        for s in it.itinerary.slices
+    ]
+    assert any("+1d" in c for c in cells), cells
+
+
 def _round_trip_filters() -> Any:
     """Two unselected segments, which is what drives the pinning recursion."""
     from fli.models import (  # pyright: ignore[reportMissingTypeStubs]
@@ -1616,7 +1668,7 @@ def test_a_return_board_that_ignored_the_pin_never_becomes_a_combination(
     )
     with (
         caplog.at_level(logging.WARNING, logger="flight_cli._gflight_ids"),
-        pytest.raises(GfPageShapeError) as excinfo,
+        pytest.raises(GfPinIgnoredError) as excinfo,
     ):
         gfid.search_with_ids(_round_trip_filters(), top_n=2)
 
@@ -1649,12 +1701,155 @@ def test_a_return_board_for_the_wrong_day_is_refused_too(
     )
     with (
         caplog.at_level(logging.WARNING, logger="flight_cli._gflight_ids"),
-        pytest.raises(GfPageShapeError) as excinfo,
+        pytest.raises(GfPinIgnoredError) as excinfo,
     ):
         gfid.search_with_ids(_round_trip_filters(), top_n=2)
 
     assert "the pinned leg was ignored" in str(excinfo.value), excinfo.value
     assert _return_date() in str(excinfo.value), excinfo.value
+    assert "2 of 2 return boards unavailable" in caplog.text, caplog.text
+
+
+def _same_day_filters() -> Any:
+    """A round trip out and back on ONE day, which is what blinds the date arm.
+
+    Nothing forbids one: `Leg` wants a date per leg and never compares them,
+    the CLI never compares them, and fli refuses only a date in the PAST. So
+    the query reaches this recursion with both segments naming the same day,
+    and a served board can then be wrong about the route while being right
+    about the only date there is."""
+    from fli.models import (  # pyright: ignore[reportMissingTypeStubs]
+        # fli ships no stubs; these are fixture builders, not typed API use.
+        Airport,
+        FlightSegment,
+        MaxStops,
+        PassengerInfo,
+        SeatType,
+    )
+    from fli.models.google_flights.base import (  # pyright: ignore[reportMissingTypeStubs]
+        TripType as _TripType,  # fli ships no stubs
+    )
+    from fli.models.google_flights.flights import (  # pyright: ignore[reportMissingTypeStubs]
+        FlightSearchFilters,  # fli ships no stubs
+    )
+
+    day = _same_day()
+    return FlightSearchFilters(
+        passenger_info=PassengerInfo(adults=1),
+        flight_segments=[
+            FlightSegment(
+                departure_airport=[[Airport["JFK"], 0]],
+                arrival_airport=[[Airport["LAX"], 0]],
+                travel_date=day,
+            ),
+            FlightSegment(
+                departure_airport=[[Airport["LAX"], 0]],
+                arrival_airport=[[Airport["JFK"], 0]],
+                travel_date=day,
+            ),
+        ],
+        stops=MaxStops.ANY,
+        seat_type=SeatType.ECONOMY,
+        trip_type=_TripType.ROUND_TRIP,
+    )
+
+
+def _same_day() -> str:
+    """The one date a same-day round trip names. Derived: fli refuses a past
+    travel date, so a literal rots the suite."""
+    return (datetime.date.today() + datetime.timedelta(days=45)).isoformat()
+
+
+def test_a_return_board_that_lands_somewhere_else_is_refused(
+    client: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The third field of the correspondence, and the one nothing on screen
+    would show.
+
+    A board re-pointed to arrive LAX for a LAX-JFK segment is right about its
+    origin and right about its day, so both other arms pass it. Its rows then
+    become combinations for a trip that never comes home — and the table's
+    `legs` column carries flight numbers, not endpoints, so the user sees four
+    ordinary-looking itineraries priced beside real ones."""
+    client(
+        _FakeResponse(text=_board_of(2)),  # the outbound board
+        _FakeResponse(
+            text=_page(
+                _answering(
+                    _cloned_ds1(3),
+                    origin="LAX",  # the segment's own origin: this arm passes
+                    destination="MIA",  # ...but the board lands nowhere near JFK
+                    date=_return_date(),  # ...on the day that was asked for
+                )
+            )
+        ),
+    )
+    with (
+        caplog.at_level(logging.WARNING, logger="flight_cli._gflight_ids"),
+        pytest.raises(GfPinIgnoredError) as excinfo,
+    ):
+        gfid.search_with_ids(_round_trip_filters(), top_n=2)
+
+    assert "arrives MIA, not JFK" in str(excinfo.value), excinfo.value
+    assert "the pinned leg was ignored" in str(excinfo.value), excinfo.value
+    assert "2 of 2 return boards unavailable" in caplog.text, caplog.text
+
+
+def test_a_same_day_return_board_from_the_wrong_airport_is_refused(
+    client: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The origin arm carrying the check on its own.
+
+    Every other board this file refuses is wrong in at least two fields, so the
+    origin arm can be deleted with the suite still green. A SAME-DAY round trip
+    is where it stands alone: the date arm cannot tell the two legs apart, and a
+    board that lands where it should but departs from the next airport over —
+    Google answering with a metro neighbour — is right about everything the
+    other two arms read. Unrefused, its rows are combinations that start from an
+    airport the traveller is not at."""
+    client(
+        _FakeResponse(text=_board_of(2)),  # the outbound board
+        _FakeResponse(
+            text=_page(
+                _answering(
+                    _cloned_ds1(3),
+                    origin="BUR",  # ...but not the LAX the segment named
+                    destination="JFK",  # the segment's own destination
+                    date=_same_day(),  # the only date either segment has
+                )
+            )
+        ),
+    )
+    with (
+        caplog.at_level(logging.WARNING, logger="flight_cli._gflight_ids"),
+        pytest.raises(GfPinIgnoredError) as excinfo,
+    ):
+        gfid.search_with_ids(_same_day_filters(), top_n=2)
+
+    assert "departs BUR, not LAX" in str(excinfo.value), excinfo.value
+    assert "2 of 2 return boards unavailable" in caplog.text, caplog.text
+
+
+def test_a_same_day_return_board_that_answers_its_segment_is_still_paired(
+    client: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The control for the arm above: a same-day trip is not refused for being
+    same-day. Without it, an origin arm that refused everything would satisfy
+    the reproduction on its own."""
+    client(
+        _FakeResponse(text=_board_of(2)),
+        _FakeResponse(
+            text=_page(
+                _answering(_cloned_ds1(3), origin="LAX", destination="JFK", date=_same_day())
+            )
+        ),
+    )
+    with caplog.at_level(logging.WARNING, logger="flight_cli._gflight_ids"):
+        out = gfid.search_with_ids(_same_day_filters(), top_n=2)
+
+    assert out is not None
+    assert len(out) == 2 * 3, out
+    assert "return boards unavailable" not in caplog.text, caplog.text
 
 
 def test_a_return_board_that_answers_the_segment_is_paired(

@@ -10,6 +10,7 @@ stub above all of it would pin none of it.
 
 from __future__ import annotations
 
+import datetime
 import json
 import pathlib
 import threading
@@ -180,11 +181,19 @@ def _answering(ds1_json: str, *, origin: str | None, destination: str | None, da
                 legs[0][3] = origin
             if destination is not None:
                 legs[-1][6] = destination
+            # ONE delta for the whole row, applied to both `[y, m, d]` ends of
+            # every leg. The clock times are what make the delta necessary: a
+            # row's dates are not interchangeable, so writing the asked-for day
+            # into both ends of a leg that lands after midnight makes it arrive
+            # before it departed, and pulls the next leg back in front of the
+            # flight feeding it. Sliding the whole row keeps every elapsed time,
+            # every overnight and the connection order, and still lands the
+            # first departure on the day the guard reads.
+            shift = datetime.date.fromisoformat(date) - datetime.date(*legs[0][20])
             for leg in legs:
-                # `[y, m, d]` at both ends; the clock times beside them are
-                # untouched, so an overnight row stays an overnight row.
-                leg[20] = [int(p) for p in date.split("-")]
-                leg[21] = [int(p) for p in date.split("-")]
+                for idx in (20, 21):
+                    moved = datetime.date(*leg[idx]) + shift
+                    leg[idx] = [moved.year, moved.month, moved.day]
     return json.dumps(payload)
 
 

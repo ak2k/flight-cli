@@ -134,6 +134,12 @@ reportAny = "none"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers --strict-config"
+# `tests/` on sys.path, so `from conftest import _answering` resolves by
+# declaration rather than by accident. Without it the import works only under
+# pytest's default `prepend` import mode, which inserts each test module's own
+# basedir because `tests/` has no `__init__.py` — and `tests/pp/` and
+# `tests/seats_aero/` already have one, so the arrangement is not even uniform.
+pythonpath = ["tests"]
 xfail_strict = true
 filterwarnings = [
     "error",  # deprecations become test failures — catch early

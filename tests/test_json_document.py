@@ -224,6 +224,34 @@ def test_the_table_gate_is_the_one_awards_leave_standing(
     assert _one_document(result.stdout) == _AWARD_DOCUMENT, result.stdout
 
 
+def test_the_detail_command_puts_one_json_document_on_stdout() -> None:
+    """`detail` is the other command with a `--format json` arm and its own
+    `_emit_urls` call site below it.
+
+    Nothing else in this file drives it, and nothing else drives its stdout in
+    any format: the guard above its URL lines is an early `return`, which is
+    exactly the kind of call site the module docstring calls easy to leave off.
+    Both URL flags are asked for, so a missing guard prints two link lines after
+    the document rather than nothing at all."""
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "detail",
+            "JFK",
+            "LAX",
+            "--dep",
+            _DEP.isoformat(),
+            "--format",
+            "json",
+            "--matrix-url",
+            "--google-url",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    _one_document(result.stdout)
+
+
 def test_a_retry_warning_lands_on_stderr_and_not_in_the_document(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:

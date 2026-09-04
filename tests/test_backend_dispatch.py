@@ -46,6 +46,8 @@ def _call(backend: str = BACKEND_AUTO, **overrides: object) -> str:
         "inf_lap": 0,
         "origin": "JFK",
         "destination": "LHR",
+        "allow_airport_changes": True,
+        "show_only_available": True,
     }
     defaults.update(overrides)
     return _pick_backend(backend=backend, **defaults)  # type: ignore[arg-type]
@@ -71,6 +73,11 @@ def test_auto_plain_search_picks_gflight() -> None:
         ("inf_lap", 1),
         ("origin", "JFK,EWR"),  # airport set — the GF bridge keeps only the first
         ("destination", "LHR,LGW"),
+        # Neither reaches the search page at all: `fli_bridge`, which the `tfs=`
+        # parameter is encoded from, has no field for either, so a query served
+        # on Google is served with the constraint simply gone.
+        ("allow_airport_changes", False),
+        ("show_only_available", False),
     ],
 )
 def test_auto_hard_matrix_flag_picks_matrix(flag: str, value: object) -> None:
@@ -181,6 +188,8 @@ def test_page_can_encode_names_every_constraint_it_refuses() -> None:
         ({"origin": "JFK,EWR"}, "a multi-airport origin/destination"),
         ({"slice_specs": ["JFK-LHR:2026-08-15"]}, "a multi-city itinerary"),
         ({"depart_times": "morning"}, "a departure/arrival time window"),
+        ({"allow_airport_changes": False}, "a ban on changing airports"),
+        ({"show_only_available": False}, "unavailable itineraries included"),
     ],
 )
 def test_auto_names_whatever_forced_matrix(
@@ -241,6 +250,23 @@ def test_explicit_gflight_error_lists_every_reason() -> None:
 def test_explicit_gflight_error_names_the_airport_set() -> None:
     with pytest.raises(typer.BadParameter, match="multi-airport"):
         _call(BACKEND_GFLIGHT, origin="JFK,EWR")
+
+
+@pytest.mark.parametrize(
+    "overrides,expected",
+    [
+        ({"allow_airport_changes": False}, "a ban on changing airports"),
+        ({"show_only_available": False}, "unavailable itineraries included"),
+    ],
+)
+def test_explicit_gflight_refuses_a_matrix_only_filter(
+    overrides: dict[str, object], expected: str
+) -> None:
+    """Accepting it silently is the worse half of the same defect: the query is
+    served without the constraint, and the Matrix deep link printed underneath
+    still carries it — so the two surfaces describe different searches."""
+    with pytest.raises(typer.BadParameter, match=expected):
+        _call(BACKEND_GFLIGHT, **overrides)  # pyright: ignore[reportArgumentType]
 
 
 def test_unknown_backend_rejected() -> None:

@@ -33,6 +33,7 @@ from ._gf_errors import (
     GfBackendError,
     GfConsentError,
     GfPageShapeError,
+    GfPinIgnoredError,
     GfTfsUnsupportedError,
     GfThrottledError,
     GfTransportError,
@@ -335,6 +336,8 @@ def _pick_backend(
     inf_lap: int,
     origin: str | None,
     destination: str | None,
+    allow_airport_changes: bool,
+    show_only_available: bool,
 ) -> str:
     """Resolve --backend to a concrete backend.
 
@@ -351,9 +354,17 @@ def _pick_backend(
     it to "any", so the tfs field would be omitted and the constraint lost),
     any pax type beyond adults (the page's
     passenger field has kind codes for children and infants that we have never
-    verified against a live priced search), and a multi-airport
+    verified against a live priced search), a multi-airport
     `--origin`/`--destination` set (the GF bridge flattens those to the first
-    code, so serving them on GF would silently drop the rest).
+    code, so serving them on GF would silently drop the rest), and
+    `--no-airport-changes` / `--include-unavailable`, which the search page's
+    `tfs=` parameter has no field for at all.
+
+    A constraint the page cannot carry has to be a reason here and nowhere
+    else. Left out, `auto` serves it on Google with the constraint silently
+    dropped and `--backend gflight` accepts it without a word, while the deep
+    link printed underneath still carries it — three surfaces disagreeing about
+    what was asked.
 
     Whatever the cause, `auto` names it on stderr. Silently taking the 45x
     slower backend leaves the user with no way to tell a constraint they could
@@ -374,6 +385,15 @@ def _pick_backend(
         reasons.append("a departure/arrival time window")
     if children or seniors or youth or inf_seat or inf_lap:
         reasons.append("a passenger type beyond adults")
+    if not allow_airport_changes:
+        # Both of these reach the Matrix REQUEST and the Matrix deep link and
+        # nothing else: `fli_bridge`, which the search page's `tfs=` is encoded
+        # from, has no field for either. Served on Google the constraint is
+        # simply absent, and the board that comes back is the unconstrained one
+        # — the shape this picker exists to keep off the fast backend.
+        reasons.append("a ban on changing airports")
+    if not show_only_available:
+        reasons.append("unavailable itineraries included")
     if len(_parse_iata_list(origin or "")) > 1 or len(_parse_iata_list(destination or "")) > 1:
         reasons.append("a multi-airport origin/destination")
     if stops is not None and stops > MAX_ENCODABLE_STOPS:
@@ -1493,11 +1513,17 @@ def _pick_in_range(pick: int | None, rows: int, *, links_follow: bool) -> int | 
     something that did not happen — the defect this whole reporter exists to
     avoid, one sentence in.
 
+    The fallback names ROW ONE rather than "the cheapest", because that is what
+    every caller of this does with the None: they pin the first row of the list
+    the table numbered. Only a round trip's rows are in price order, so on a
+    one-way board — which keeps Google's ranking — "the cheapest" describes a
+    different row from the one the link opens.
+
     stderr, because a `--format json` document on stdout stays a document —
     the same rule every other note on this path follows."""
     if pick is None or 1 <= pick <= rows:
         return pick
-    fallback = "; pinning the cheapest itinerary instead." if links_follow else "."
+    fallback = "; pinning itinerary #1 instead." if links_follow else "."
     err.print(f"[yellow]--pick {pick} is out of range (1-{rows}){fallback}[/]")
     return None
 
@@ -1519,7 +1545,7 @@ class _GfRefusal(NamedTuple):
 _GF_DECLINED = "Google Flights declined the request"
 
 
-def _gf_refusal(e: GfBackendError) -> _GfRefusal:
+def _gf_refusal(e: GfBackendError) -> _GfRefusal:  # noqa: PLR0911 - one arm per wall is the point
     """User-facing text for a typed Google Flights refusal.
 
     Each wall gets its own wording and its own next move — collapsing them into
@@ -1574,6 +1600,17 @@ def _gf_refusal(e: GfBackendError) -> _GfRefusal:
                 "Google Flights was unreachable",
                 f"[yellow]{_safe_text(e)}[/] — the connection failed, not the "
                 "query. Use [bold]--backend matrix[/].",
+            )
+        case GfPinIgnoredError():
+            # The page loaded, the rows parsed, and they describe a segment
+            # nobody asked for — so the sentence names the leg that was served
+            # against the one that was wanted, which `_safe_text(e)` carries.
+            # Reporting a shape change here would deny its own evidence: the
+            # served endpoints are known only because the rows WERE read.
+            return _GfRefusal(
+                "Google Flights answered the wrong leg",
+                f"[red]Google Flights served a board for a leg nobody asked for[/] — "
+                f"{_safe_text(e)}. Use [bold]--backend matrix[/].",
             )
         case GfBackendError():
             # The base type is raised directly — a 5xx from the search page is
@@ -1748,7 +1785,12 @@ def _run_gflight_path(
             matrix_url=matrix_url,
             google_url=google_url,
             result=sr,
-            pick=pick,
+            # The pin LABEL names the row it pins. `sr` is built from the rows
+            # the table numbered, so row 1 is the default pin — but a one-way
+            # board keeps Google's own ranking, where row 1 need not be the
+            # cheapest, and the label "cheapest itinerary" over it is simply
+            # false. `1` makes the label say what the link does on every board.
+            pick=pick or 1,
         )
 
 
@@ -1773,10 +1815,14 @@ def _paint_first_gf_table(
     running. A Google half that FAILED is a different sentence, and
     `_report_enriched_gf_failure` is where the difference is made.
 
-    It goes to stderr all the same, because it names the MATRIX half and is
-    painted from inside the weave, before that half has resolved. On the run
-    where Matrix then fails it would be the only thing on stdout, promising a
-    table that never arrives to a caller owed zero bytes there."""
+    BOTH sentences go to stderr, and for one reason: each names the MATRIX half
+    from inside the weave, before that half has resolved. Neither can be true
+    when it prints, because whether Matrix answers is not yet known. On the run
+    where it does not, a promise on stdout is a sentence saying a table follows
+    on a stream where nothing else ever arrives — and the command exits 0. The
+    rule is that no stdout sentence promises a half that never came, which is
+    narrower than "owed zero bytes": the run below paints a real table first and
+    still may not keep this promise."""
     if gf and not awards_only:
         try:
             _render_gflight_table(gf, legs=legs, top_n=top_n, match_carriers=_match_carriers(legs))
@@ -1785,7 +1831,7 @@ def _paint_first_gf_table(
         except Exception as e:  # noqa: BLE001 — see the docstring
             state["paint_err"] = e
         else:
-            console.print("[dim]…refining with Matrix (authoritative fares)…[/]")
+            err.print("[dim]…refining with Matrix (authoritative fares)…[/]")
     elif not gf and "gf_err" not in state:
         err.print("[yellow]Google Flights: no results; awaiting Matrix…[/]")
 
@@ -1906,7 +1952,13 @@ def _report_enriched_gf_failure(e: Exception, *, matrix_answered: bool) -> None:
     likely both-halves-fail shape there is, a stale key with no route to either
     backend. The same refusal then reads as what it is: half of the outcome,
     on the stream the other half is about to be named on, leaving stdout the
-    zero bytes a run that answered nothing owes a caller."""
+    zero bytes a run that answered nothing owes a caller.
+
+    That gate is why this sentence stays on stdout while its sibling in
+    `_paint_first_gf_table` does not: `matrix_answered` is read AFTER the weave,
+    so the arm below prints only where the Matrix half is already in hand and
+    something is certain to follow it. The other sentence is painted from inside
+    the weave and can only guess."""
     if not isinstance(e, GfBackendError):
         err.print(f"[yellow]Google Flights query failed:[/] {_safe_text(e)}")
     elif matrix_answered:
@@ -2022,9 +2074,25 @@ def _run_enriched_path(
     _report_weave_aftermath(state)
 
     # Repaint: reconciled GF + Matrix, prices attributed.
+    #
+    # `shown` is the list the user was NUMBERED, which is what `--pick N` names
+    # and what the pin label claims. The merged rows are price-sorted and can
+    # include Google-only itineraries, so their order and their length both
+    # differ from `matrix_res.solutions`: indexing those instead pins a row the
+    # table numbered differently, under the number read off the screen.
     if not awards_only:
         merged = merge_results(fli_results_to_search_result(gf), matrix_res)
         _render_merged(merged, legs=legs, top_n=top_n)
+        shown = [r.itinerary for r in merged[:top_n]]
+    else:
+        # No merged table is printed on this arm. The award renderer below is
+        # the only numbered surface it has, and it is fanned out over the Matrix
+        # result, so that is the list a pick names here.
+        shown = matrix_res.solutions[:top_n]
+    # The same contract `_run_gflight_path` has: the range a pick is measured
+    # against is the VISIBLE count. Clamping here also means the duplicate
+    # warning inside `_emit_urls` is never reached from this path.
+    pick = _pick_in_range(pick, len(shown), links_follow=matrix_url or google_url)
 
     if run_pp:
         p = opts.pax
@@ -2041,8 +2109,16 @@ def _run_enriched_path(
             cash_per_cabin=_cash_per_cabin_single(matrix_res, opts.cabin),
         )
 
+    # A result built from the rows the table numbered, so `_emit_urls`' label
+    # expression is true by construction. A Google-only row carries no
+    # `Itinerary.id`, so the Matrix line falls back to the plain deep link while
+    # the Google line still pins from that row's slices.
     _emit_urls(
-        matrix_search, matrix_url=matrix_url, google_url=google_url, result=matrix_res, pick=pick
+        matrix_search,
+        matrix_url=matrix_url,
+        google_url=google_url,
+        result=matrix_res.model_copy(update={"solutions": shown}),
+        pick=pick or 1,
     )
 
 
@@ -2975,11 +3051,19 @@ def search(
     allow_airport_changes: bool = typer.Option(
         True,
         "--allow-airport-changes/--no-airport-changes",
+        help=(
+            "Allow an itinerary to change airports within a city. "
+            "Matrix only: --no-airport-changes routes the search to Matrix."
+        ),
         rich_help_panel=_GROUP_FILTERING,
     ),
     only_available: bool = typer.Option(
         True,
         "--only-available/--include-unavailable",
+        help=(
+            "Show only itineraries with seats available for sale. "
+            "Matrix only: --include-unavailable routes the search to Matrix."
+        ),
         rich_help_panel=_GROUP_FILTERING,
     ),
     page_size: int = typer.Option(
@@ -3110,6 +3194,8 @@ def search(
         inf_lap=inf_lap,
         origin=origin,
         destination=destination,
+        allow_airport_changes=allow_airport_changes,
+        show_only_available=only_available,
     )
     if slice_specs:
         legs = tuple(_parse_slice_spec(s) for s in slice_specs)
@@ -3861,6 +3947,10 @@ def gflight(
         origin=origin,
         destination=destination,
         stops=None,
+        # The neutral values `_build_options` below hardcodes for this alias:
+        # it has no flag for either, so neither can be a reason here.
+        allow_airport_changes=True,
+        show_only_available=True,
     )
     opts = _build_options(
         cabin=cabin,

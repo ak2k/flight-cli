@@ -69,6 +69,7 @@ from ._gf_errors import (
     GfBackendError,
     GfConsentError,
     GfPageShapeError,
+    GfPinIgnoredError,
     GfThrottledError,
     GfTransportError,
 )
@@ -1649,6 +1650,7 @@ def _unpinned_board(
     # leg can be compared against; fli's own validator requires the first entry
     # to be one, so an empty set here is a segment nothing could have answered.
     origins = {a[0] for a in wanted.departure_airport if isinstance(a[0], Airport)}
+    dests = {a[0] for a in wanted.arrival_airport if isinstance(a[0], Airport)}
     for row in board:
         member = row[0] if isinstance(row, tuple) else row
         legs = member.flight.legs
@@ -1659,6 +1661,11 @@ def _unpinned_board(
             return (
                 f"a Google Flights return board departs {leg.departure_airport.name}, "
                 f"not {'/'.join(sorted(a.name for a in origins))}; the pinned leg was ignored"
+            )
+        if legs[-1].arrival_airport not in dests:
+            return (
+                f"a Google Flights return board arrives {legs[-1].arrival_airport.name}, "
+                f"not {'/'.join(sorted(a.name for a in dests))}; the pinned leg was ignored"
             )
         flown = leg.departure_datetime.date().isoformat()
         if flown != wanted.travel_date:
@@ -1746,7 +1753,7 @@ def search_with_ids(
             # stopped meaning what we sent it, so it takes the arm a re-shaped
             # board takes: this pin is dropped, the others are still fetched,
             # and nothing served at all still raises.
-            refused.append(GfPageShapeError(ignored))
+            refused.append(GfPinIgnoredError(ignored))
             continue
         for nx in nxt:
             if isinstance(nx, tuple):

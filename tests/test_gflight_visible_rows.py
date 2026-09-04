@@ -151,9 +151,12 @@ def test_a_pick_past_the_visible_table_warns_and_falls_back_to_the_cheapest(
     assert "--pick 6 is out of range (1-5)" in captured.err, captured.err
     assert "--pick 6 is out of range" not in captured.out, captured.out
     # Both halves, because a link IS emitted here: the sentence promises a
-    # fallback and the label on stdout is that fallback happening.
-    assert "pinning the cheapest itinerary instead" in captured.err, captured.err
-    assert "cheapest itinerary" in captured.out, captured.out
+    # fallback and the label on stdout is that fallback happening. Both name
+    # ROW ONE — a one-way board keeps Google's ranking, so "the cheapest" would
+    # describe a different row from the one the link opens.
+    assert "pinning itinerary #1 instead" in captured.err, captured.err
+    assert "itinerary #1 pinned" in captured.out, captured.out
+    assert "cheapest itinerary" not in captured.out, captured.out
 
 
 def test_a_pick_inside_the_visible_table_still_pins(
@@ -174,6 +177,39 @@ def test_a_pick_inside_the_visible_table_still_pins(
         pick=5,
     )
     assert "out of range" not in capsys.readouterr().out
+
+
+def test_the_pin_label_names_the_row_it_pinned_on_a_one_way_board(
+    gf_session: Callable[..., Any],
+    gf_capture: Callable[[str], str],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A pin is right and its SENTENCE can still be false.
+
+    A one-way board keeps Google's own ranking, so row 1 need not be the
+    cheapest — on this capture `-n 3` prints 6590, 6616 and then 6072. The link
+    goes to row 1, correctly; a label reading "cheapest itinerary" over it names
+    a row the table shows two places further down, and nothing on screen says
+    which of the two the link honoured.
+
+    So the rule is that the label names the row it pins. "Cheapest" is then a
+    word this path cannot print, because it has no way to be true."""
+    gf_session(gf_capture("ds1_metadata_blocks_kept.json"))
+    cli._run_gflight_path(
+        legs=_one_way(),
+        opts=SearchOptions(cabin=Cabin.COACH),
+        top_n=3,
+        json_out=False,
+        google_url=True,
+    )
+    captured = capsys.readouterr()
+
+    assert "itinerary #1 pinned" in captured.out, captured.out
+    assert "cheapest itinerary" not in captured.out, captured.out
+    # The row it names is the row the table put first, and it is not the
+    # cheapest of the three — without that the assertion above holds vacuously.
+    where = [captured.out.index(p) for p in ("USD6590.00", "USD6616.00", "USD6072.00")]
+    assert where == sorted(where), captured.out
 
 
 def test_the_award_matcher_is_given_the_rows_the_user_saw(
@@ -203,6 +239,134 @@ def test_the_award_matcher_is_given_the_rows_the_user_saw(
     )
     assert len(seen) == 1
     assert len(seen[0].solutions) == 4
+
+
+# ─────────── the enriched path: --pick names a row on the MERGED table ───────
+
+
+def _dearer_matrix() -> Any:
+    """A Matrix half whose every fare is dearer than the Google board's.
+
+    Its solutions carry no itinerary structure, so the merge cannot match them
+    to a Google row and keeps both sets — which is the ordinary shape here, and
+    the one where the merged table is longer than either list that built it."""
+    from flight_cli.models import SearchResult
+
+    return SearchResult.model_validate(
+        {
+            "solutions": [{"displayTotal": "USD9000.00"}, {"displayTotal": "USD9500.00"}],
+            "solutionCount": 2,
+        }
+    )
+
+
+def _enriched(
+    monkeypatch: pytest.MonkeyPatch,
+    rows: list[Any],
+    *,
+    top_n: int,
+    pick: int | None = None,
+) -> None:
+    """The real enriched path with both halves answered in process."""
+    matrix = _dearer_matrix()
+
+    async def _stashes_matrix(state: dict[str, Any], *_a: object, **_kw: object) -> None:
+        state["matrix"] = matrix
+
+    def _gf(*_a: object, **_kw: object) -> list[Any]:
+        return rows
+
+    monkeypatch.setattr(cli, "_gflight_results", _gf)
+    monkeypatch.setattr(cli, "_matrix_into", _stashes_matrix)
+    cli._run_enriched_path(
+        legs=_one_way(),
+        opts=SearchOptions(cabin=Cabin.COACH),
+        top_n=top_n,
+        run_pp=False,
+        sel=None,
+        matrix_url=True,
+        google_url=True,
+        pick=pick,
+        rps=1.0,
+        impersonate="chrome",
+        no_cache=True,
+    )
+
+
+def test_the_enriched_pin_names_a_row_on_the_table_that_was_printed(
+    gf_rows: Callable[[str], list[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--pick N` means the row numbered N in the table on screen.
+
+    The merged table is price-sorted and holds Google-only rows the Matrix half
+    never had, so its order and its length both differ from the Matrix solution
+    list. Indexed against that list instead, `--pick 1` emits links for whatever
+    row the merge happened to move — a wrong itinerary under the number the user
+    read off the screen, and nothing on either stream to say so."""
+    _enriched(monkeypatch, gf_rows("ds1_metadata_blocks_kept.json"), top_n=3, pick=1)
+    captured = capsys.readouterr()
+
+    assert "itinerary #1 pinned" in captured.out, captured.out
+    assert "out of range" not in captured.out + captured.err, captured.out
+    # Pinned from the merged row's own slices — a Matrix solution with no
+    # itinerary structure could not have produced this line at all.
+    assert "Google Flights (itinerary #1 pinned):" in captured.out, captured.out
+    # Row 1 of the printed table is the cheapest of the five merged rows, and
+    # it is a Google-only one: the pinned URL carries ITS flights.
+    assert "USD6072.00" in captured.out, captured.out
+
+
+def test_the_enriched_default_pin_labels_the_row_it_printed_first(
+    gf_rows: Callable[[str], list[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """With no `--pick` the link goes to the first row of the merged table, so
+    that is what the label says. "Cheapest itinerary" over a link built from a
+    different list is the same false sentence one row further along."""
+    _enriched(monkeypatch, gf_rows("ds1_metadata_blocks_kept.json"), top_n=3)
+    captured = capsys.readouterr()
+
+    assert "itinerary #1 pinned" in captured.out, captured.out
+    assert "cheapest itinerary" not in captured.out, captured.out
+
+
+def test_the_enriched_pick_range_is_the_count_the_table_printed(
+    gf_rows: Callable[[str], list[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Five rows merge and three are printed, so four is out of range and two of
+    the three numbers between them are not.
+
+    The range a pick is measured against is the VISIBLE count, decided at the
+    trim. Measured against the merged list it would accept a row nobody saw;
+    measured against the Matrix solutions it would refuse row 3, which the table
+    printed. The warning takes stderr, so a `--format json` run stays a
+    document."""
+    _enriched(monkeypatch, gf_rows("ds1_metadata_blocks_kept.json"), top_n=3, pick=4)
+    captured = capsys.readouterr()
+
+    assert "--pick 4 is out of range (1-3)" in captured.err, captured.err
+    assert "out of range" not in captured.out, captured.out
+    assert "itinerary #1 pinned" in captured.out, captured.out
+
+
+def test_a_pick_the_enriched_table_printed_is_honoured(
+    gf_rows: Callable[[str], list[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The other half: row 3 of a three-row table is a valid pick, even though
+    the Matrix half contributed only two solutions. A range taken from the wrong
+    list refuses a row the user is looking at."""
+    _enriched(monkeypatch, gf_rows("ds1_metadata_blocks_kept.json"), top_n=3, pick=3)
+    captured = capsys.readouterr()
+
+    assert "out of range" not in captured.out + captured.err, captured.out + captured.err
+    assert "itinerary #3 pinned" in captured.out, captured.out
 
 
 def test_the_routing_post_filter_still_reads_the_whole_board(
