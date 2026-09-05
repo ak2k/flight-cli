@@ -1359,9 +1359,6 @@ def test_the_matrix_error_is_built_at_exactly_one_place() -> None:
     file and line rots on the next edit and says nothing when it does; the count
     is the property, and a second construction site is the event that breaks the
     argument — whichever file it lands in."""
-    import ast
-    import pathlib
-
     from flight_cli import cli as cli_mod
 
     sites: list[str] = []
@@ -2231,13 +2228,53 @@ def _package_defs() -> dict[str, list[tuple[pathlib.Path, ast.AST]]]:
     return defs
 
 
-def _callee_name(call: ast.Call) -> str | None:
+def _package_module_names() -> set[str]:
+    """Every local name a package module is bound to, anywhere in the package.
+
+    The name in front of the dot is whatever the importing file called the
+    module, so this reads the imports rather than the file stems: `auth` is
+    also reachable as `_seats_auth`. A union across files rather than a map
+    per file, which matches the walk's own over-approximation.
+
+    This set is what makes `mod.fn()` resolvable without making EVERY attribute
+    call resolvable. An unrestricted `.attr` reads a stdlib method name as a
+    package function whenever the two spell the same — `_PRICE_DIGITS.search`
+    against the `search` command is the collision here — and one such name
+    walks the graph up into a caller and back down its every sibling."""
+    from flight_cli import cli as cli_mod
+
+    root = pathlib.Path(cli_mod.__file__).parent
+    stems = {path.stem for path in root.rglob("*.py")}
+    names: set[str] = set()
+    for path in sorted(root.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    tail = alias.name.rsplit(".", 1)[-1]
+                    if tail in stems:
+                        names.add(alias.asname or tail)
+            elif isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    if alias.name in stems:
+                        names.add(alias.asname or alias.name)
+    return names
+
+
+def _callee_name(call: ast.Call, modules: set[str]) -> str | None:
     """The called function's bare name, for a direct call or one through its
-    module — the two spellings a package function is reached by."""
+    module — the two spellings a package function is reached by.
+
+    `modules` is what separates the second spelling from an ordinary method
+    call. Taking `.attr` from any receiver resolves `_PRICE_DIGITS.search` to
+    the `search` command, and the walk that follows reaches three quarters of
+    the package from anywhere in it — wide enough that correct code fails the
+    net it feeds."""
     fn = call.func
     if isinstance(fn, ast.Name):
         return fn.id
-    return fn.attr if isinstance(fn, ast.Attribute) else None
+    if isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name):
+        return fn.attr if fn.value.id in modules else None
+    return None
 
 
 def _reachable(defs: dict[str, list[tuple[pathlib.Path, ast.AST]]], root: str) -> set[str]:
@@ -2246,7 +2283,20 @@ def _reachable(defs: dict[str, list[tuple[pathlib.Path, ast.AST]]], root: str) -
     Over-approximates on purpose: a name defined more than once contributes all
     of its definitions, so the walk visits more than any run can reach. A site
     checked that no run reaches costs a line in a table; one missed costs a
-    sentence on a consumer's stdout."""
+    sentence on a consumer's stdout.
+
+    It under-approximates in two directions as well, and both are worth knowing
+    before this is trusted as a whole answer. A callee this cannot resolve is
+    skipped in silence — `name not in defs` ends that arm with no record — so a
+    real sentence behind an unresolved spelling goes uncounted. And a function
+    handed somewhere as a VALUE is never called by name here, so it is never
+    reached: `tg.start_soon(_matrix_into, ...)` keeps `_matrix_into`, the Matrix
+    half itself, outside the walk. The runtime test below is what covers that
+    one, on both of its award arms.
+
+    So this is a net over the sentences a call graph reaches, not a proof that
+    no other sentence exists."""
+    modules = _package_module_names()
     reached: set[str] = set()
     queue = [root]
     while queue:
@@ -2258,7 +2308,8 @@ def _reachable(defs: dict[str, list[tuple[pathlib.Path, ast.AST]]], root: str) -
             queue += [
                 callee
                 for call in ast.walk(node)
-                if isinstance(call, ast.Call) and (callee := _callee_name(call)) is not None
+                if isinstance(call, ast.Call)
+                and (callee := _callee_name(call, modules)) is not None
             ]
     return reached
 

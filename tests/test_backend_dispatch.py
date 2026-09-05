@@ -186,6 +186,16 @@ def test_page_can_encode_names_every_constraint_it_refuses() -> None:
         ({"routing": "DL+"}, "a carrier filter (DL)"),
         ({"children": 1}, "a passenger type beyond adults"),
         ({"origin": "JFK,EWR"}, "a multi-airport origin/destination"),
+        # A metro code is ONE token, so the comma-list check above does not see
+        # it. Google Flights resolves an origin against fli's airport table,
+        # which has no member for most of the metro codes the docs steer users
+        # onto — reaching the bridge with one is an AttributeError before any
+        # request, and on `--format json` that is exit 1 and an empty document.
+        ({"origin": "NYC"}, "a city code rather than an airport (NYC)"),
+        # The quieter half: QSF is in fli's table, as Ain Arnat in Algeria. A
+        # membership test alone reads it as serveable and the query is built
+        # and sent for the wrong airport, so the collisions are named too.
+        ({"origin": "QSF"}, "a city code rather than an airport (QSF)"),
         ({"slice_specs": ["JFK-LHR:2026-08-15"]}, "a multi-city itinerary"),
         ({"depart_times": "morning"}, "a departure/arrival time window"),
         ({"allow_airport_changes": False}, "a ban on changing airports"),
@@ -198,7 +208,22 @@ def test_auto_names_whatever_forced_matrix(
     """Silently taking the 45x slower backend leaves the user unable to tell a
     constraint they could drop from one they can't."""
     assert _call(**overrides) == BACKEND_MATRIX  # pyright: ignore[reportArgumentType]
-    assert expected in capsys.readouterr().err
+    # Whitespace-collapsed: the reason is printed through a console that wraps
+    # at its own width, and where a reason long enough to wrap gets broken is
+    # not what this asserts. What it asserts is the sentence.
+    printed = " ".join(capsys.readouterr().err.split())
+    assert expected in printed, printed
+
+
+def test_auto_leaves_a_code_that_is_its_own_airport_on_gflight(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`LAX` is a metro code in the same table and also the airport code, and
+    fli resolves it to Los Angeles International. Gating on the table rather
+    than on the lookup would move a working query to the 45x slower backend for
+    a problem it does not have."""
+    assert _call(origin="LAX") == BACKEND_GFLIGHT
+    assert capsys.readouterr().err == ""
 
 
 def test_auto_says_nothing_when_gflight_serves_the_query(
@@ -250,6 +275,16 @@ def test_explicit_gflight_error_lists_every_reason() -> None:
 def test_explicit_gflight_error_names_the_airport_set() -> None:
     with pytest.raises(typer.BadParameter, match="multi-airport"):
         _call(BACKEND_GFLIGHT, origin="JFK,EWR")
+
+
+def test_explicit_gflight_refuses_a_metro_code_rather_than_crashing() -> None:
+    """Asked for outright, the metro code is a parameter error: exit 2 with the
+    reason, in place of the `AttributeError` the bridge raises when it looks the
+    code up. The failure it replaces is silent on stdout — `--format json` and
+    `--fast` both skip the enrich path, so the crash was the whole outcome and
+    the document was zero bytes."""
+    with pytest.raises(typer.BadParameter, match=r"a city code rather than an airport \(NYC\)"):
+        _call(BACKEND_GFLIGHT, origin="NYC")
 
 
 @pytest.mark.parametrize(

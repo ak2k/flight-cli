@@ -287,8 +287,15 @@ def _enriched(
     matrix: SearchResult | None = None,
     sel: Any = None,
     run_pp: bool = False,
+    matrix_url: bool = True,
+    google_url: bool = True,
 ) -> None:
-    """The real enriched path with both halves answered in process."""
+    """The real enriched path with both halves answered in process.
+
+    The two link flags default to the pair every caller here wants — links on,
+    so a pin has something to label. They are parameters because what the path
+    says about its links is under test, and `--no-matrix-url --no-google-url`
+    is the arm where no link follows the sentence."""
     answer = _dearer_matrix() if matrix is None else matrix
 
     async def _stashes_matrix(state: dict[str, Any], *_a: object, **_kw: object) -> None:
@@ -305,8 +312,8 @@ def _enriched(
         top_n=top_n,
         run_pp=run_pp,
         sel=sel,
-        matrix_url=True,
-        google_url=True,
+        matrix_url=matrix_url,
+        google_url=google_url,
         pick=pick,
         rps=1.0,
         impersonate="chrome",
@@ -469,6 +476,56 @@ def test_a_pick_is_refused_where_this_mode_numbers_nothing(
     assert "(1-3)" not in captured.out + captured.err, captured.out + captured.err
     assert "Matrix deep-link:" in captured.out, captured.out
     assert "Google Flights (tfs= structured):" in captured.out, captured.out
+
+
+def test_the_refusal_says_nothing_about_links_where_none_follow(
+    gf_rows: Callable[..., list[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The same refusal with both links suppressed drops its second clause.
+
+    `--no-matrix-url --no-google-url` is the arm where this mode prints no link
+    at all, so a clause telling the user how the links below are labelled
+    describes a surface the run does not produce — the one thing the pick
+    reporter exists to avoid. The refusal itself is still owed: the number was
+    typed and it still names no row.
+
+    The sibling above drives the same call with links on, so between them the
+    only thing that varies is whether a link follows."""
+    sel = cli.ProviderSelection(
+        provider_filter=None, cash_only=False, awards_only=True, provider_opts={}
+    )
+
+    def _no_awards(*_a: object, **_kw: object) -> None:
+        return None
+
+    monkeypatch.setattr(cli, "run_pp_for_search", _no_awards)
+    _enriched(
+        monkeypatch,
+        gf_rows("ds1_metadata_blocks_kept.json"),
+        top_n=3,
+        pick=3,
+        sel=sel,
+        run_pp=True,
+        matrix_url=False,
+        google_url=False,
+    )
+    captured = capsys.readouterr()
+
+    # Whitespace-collapsed: the sentence is printed through a console that
+    # wraps at its own width, and a clause split over a line break is still the
+    # clause. Asserted on the raw stream, "the links below" is absent from a
+    # stderr that says it — which is a pass for the wrong reason.
+    printed = " ".join(captured.err.split())
+
+    assert (
+        printed.count("--pick 3 names a row in the results table, and this mode prints none.") == 1
+    ), printed
+    assert "the links below" not in printed, printed
+    # The premise of the assertion above: nothing on this arm prints a link.
+    assert "Matrix deep-link:" not in captured.out, captured.out
+    assert "Google Flights (tfs= structured):" not in captured.out, captured.out
 
 
 def test_the_routing_post_filter_still_reads_the_whole_board(

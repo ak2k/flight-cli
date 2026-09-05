@@ -319,6 +319,40 @@ BACKEND_MATRIX = "matrix"
 BACKEND_GFLIGHT = "gflight"
 _VALID_BACKENDS = (BACKEND_AUTO, BACKEND_MATRIX, BACKEND_GFLIGHT)
 
+# Metro codes fli's airport table DOES have a member for, pointing somewhere
+# else: QSF is Ain Arnat in Algeria rather than the Bay Area, SAO is Campo de
+# Marte rather than São Paulo's airline airports. A membership test alone reads
+# these as serveable, so they are named.
+_GF_METRO_COLLISIONS = frozenset({"QSF", "SAO"})
+
+
+def _gf_unserveable_reasons(backend: str, origin: str | None, destination: str | None) -> list[str]:
+    """Reasons a city code keeps this request off Google Flights.
+
+    `docs/memories/airport_groups.md` tells the user to prefer a metro code over
+    a comma-list where one exists, and Matrix takes them, but the Google Flights
+    bridge resolves an origin by name against fli's airport table: 16 of the 24
+    metro codes that memo documents have no member there and two resolve to a
+    different city's airport. So the code fails one of two ways — an
+    `AttributeError` out of the bridge before any request, or a query silently
+    run against the wrong airport — and neither is an answer to what was asked.
+
+    Checked with the same attribute lookup the bridge performs, so this cannot
+    drift from what the bridge will accept, and only where Google Flights is
+    still in the running: a Matrix run pays neither the import nor the check."""
+    if backend == BACKEND_MATRIX:
+        return []
+    # PLC0415: paid only when Google Flights would otherwise serve the request;
+    # fli's package import is slow enough that a Matrix run should not carry it.
+    # reportMissingTypeStubs: fli ships none, as at every other seam onto it.
+    from fli.models.airport import (  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
+        Airport as FliAirport,
+    )
+
+    toks = (*_parse_iata_list(origin or ""), *_parse_iata_list(destination or ""))
+    bad = [t for t in toks if not hasattr(FliAirport, t) or t in _GF_METRO_COLLISIONS]
+    return [f"a city code rather than an airport ({', '.join(bad)})"] if bad else []
+
 
 def _pick_backend(
     *,
@@ -396,6 +430,7 @@ def _pick_backend(
         reasons.append("unavailable itineraries included")
     if len(_parse_iata_list(origin or "")) > 1 or len(_parse_iata_list(destination or "")) > 1:
         reasons.append("a multi-airport origin/destination")
+    reasons.extend(_gf_unserveable_reasons(backend, origin, destination))
     if stops is not None and stops > MAX_ENCODABLE_STOPS:
         # Same ceiling as the routing-language spelling below, and the same
         # wording: fli's MaxStops maps anything higher to ANY, which omits the
@@ -2159,10 +2194,16 @@ def _run_enriched_path(
         # is refused rather than clamped. The links stay unpinned for the same
         # reason: with no numbered list, neither `itinerary #N` nor `cheapest
         # itinerary` is a label the user could check against anything.
+        #
+        # That second clause is conditional for the reason `_pick_in_range`'s
+        # own is: `--no-matrix-url --no-google-url` leaves this arm printing no
+        # link at all, and a sentence describing how links below are labelled
+        # is then describing something that does not happen.
         if pick is not None:
+            unpinned = "; the links below are unpinned." if (matrix_url or google_url) else "."
             err.print(
                 f"[yellow]--pick {pick} names a row in the results table, and this mode "
-                f"prints none; the links below are unpinned.[/]"
+                f"prints none{unpinned}[/]"
             )
         pick = None
 

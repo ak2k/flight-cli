@@ -346,6 +346,42 @@ def test_a_captured_round_trip_is_priced_at_the_combination_not_the_outbound(
     assert priced[("AA144/AA1110", "AA713/AA297")] == {"USD6616.00"}
 
 
+def test_a_row_google_did_not_price_sends_no_cash_hint(gf_rows: Any) -> None:
+    """No hint carries a fare the board did not have.
+
+    `CashFlightHint.cash_price_usd` is an `int` and `to_payload` always emits
+    the key, so an unpriced row can only reach PointsPath as `cashPrice: 0` —
+    and matching is switched on by the presence of hints, which makes that zero
+    the cash baseline an award is judged against. Nothing rendered shows it:
+    the cash map skips a `None` price and no renderer here has a cash column,
+    so the fabricated number is visible only on the wire.
+
+    Asserted as "no hint priced at zero" and not as a count alone, because the
+    count is right for the wrong reason as soon as a second row goes unpriced.
+    Driven over a real board with one row's price head emptied, which is what a
+    served page holds for a row Google did not price."""
+    from flight_cli.pp.gflight_adapter import cash_hints_from_search_result
+
+    board = gf_rows("ds1_metadata_blocks_kept.json", unpriced=1)
+    priced, unpriced = board[0], board[1]
+    assert priced.flight.price is not None
+    assert unpriced.flight.price is None
+    assert priced.flight_id != unpriced.flight_id  # not deduplicated away
+
+    hints = cash_hints_from_search_result(fli_results_to_search_result([priced, unpriced]))
+
+    assert [h.flight_id for h in hints] == [priced.flight_id]
+    assert [h.cash_price_usd for h in hints] == [int(priced.flight.price)]
+    assert not [h for h in hints if h.cash_price_usd == 0], hints
+
+    # The edge this costs, asserted where it is paid: a leg on which Google
+    # priced nothing sends no hints at all, and `enable_matching` is derived
+    # from `bool(cash_hints)`, so the matcher is off for that leg. A leg with
+    # no priced row has no cash baseline to match an award against, which is
+    # why an absent hint beats a fabricated one here.
+    assert cash_hints_from_search_result(fli_results_to_search_result([unpriced])) == []
+
+
 def test_a_row_google_did_not_price_is_carried_with_no_price_and_sorted_last(
     gf_rows: Any,
 ) -> None:

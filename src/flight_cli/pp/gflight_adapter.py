@@ -207,7 +207,8 @@ def cash_hints_from_search_result(
     doesn't carry a `flight_id` — that means the matched-id path isn't
     available for them (Matrix cash, or the gflight result was constructed
     from a non-enriched fli call). The matcher's flight#+date / route+time
-    keys still apply to those.
+    keys still apply to those. Skips an unpriced itinerary for the reason
+    spelled out at that guard: the hint has no way to carry a missing fare.
 
     `max_hints` caps the payload — PP's airline-search rejects very large
     `googleFlightDetails` arrays; the extension typically sends 10-30.
@@ -222,6 +223,18 @@ def cash_hints_from_search_result(
         if not s.flight_id or s.flight_id in seen_flight_ids:
             continue
         if not s.origin or not s.destination or not s.flights or not s.departure:
+            continue
+        if it.price is None:
+            # `cash_price_usd` is an int and `to_payload` always emits the key,
+            # so a row Google did not price can only travel as `cashPrice: 0` —
+            # a fabricated fare in the one field the award is compared against,
+            # and the number `_price_string` refuses to invent one seam earlier.
+            # Skipping costs the matched-id key for this row; flight#+date and
+            # route+time still join it, so the loss is a missing award row
+            # rather than a wrong price. On a board where NO row is priced this
+            # sends no hints at all and `enable_matching` is then False for the
+            # leg, which is the right answer: a leg with no priced row has no
+            # cash baseline for the matcher to compare an award against.
             continue
         first_flight = s.flights[0]  # IATA-prefixed, e.g. "DL1"
         iata_prefix = first_flight[:2]
