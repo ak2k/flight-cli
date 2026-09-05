@@ -89,8 +89,9 @@ launch (and one "opening Chrome" line).
 
 **A round trip costs one navigation for the outbound board, then one per pinned
 return leg**, not four. How many pins that is — and every other page-fetch count
-this backend can run up — is stated once, in the GETs table and the paragraph
-under it in `docs/memories/gf_routing_and_carriers.md`. The pin cap named there
+this backend can run up — is derived in the GETs table and the paragraph under
+it in `docs/memories/gf_routing_and_carriers.md`, which is the authority for the
+arithmetic; what follows is this rung's own measurement. The pin cap named there
 is why the count stops growing with `-n`. Measured here with a recorder in place
 of the session and a 30-row board on each leg: `-n 1` → 2, `-n 3` → 4, `-n 10`
 → 11, `-n 25` → 11, `-n 100` → 11. Eleven is therefore the ceiling for any

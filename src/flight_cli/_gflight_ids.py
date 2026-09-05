@@ -74,8 +74,10 @@ from fli.search.flights import SearchFlights  # pyright: ignore[reportMissingTyp
 # `rich.Console` built at module scope, and one process-wide `atexit` hook that
 # does nothing unless a browser was launched. No optional dependency —
 # patchright is imported inside `_playwright_factory`, at launch — and the
-# transport vocabulary lives in `_gf_common`, so neither module imports the
-# other. Imported as a module, not `from ._gf_browser import session`, so
+# transport vocabulary lives in `_gf_common`, so the import below runs one way
+# only: `_gf_browser` never reaches back for this module, which is what keeps
+# it a leaf rather than half of a cycle. Imported as a module, not
+# `from ._gf_browser import session`, so
 # `_one_call_browser` looks the attribute up per call and a test can substitute
 # the session without a browser anywhere in the process.
 from . import _gf_browser
@@ -1861,11 +1863,12 @@ def search_with_ids(
     asked for is `cli._run_gflight_path`'s, on the way out.
 
     A pin whose return board refuses for its own reasons is dropped with a
-    warning and the rest are still fetched. A throttle or an exhausted transport
-    ladder stops the pinning instead, because neither says anything about the
-    pin: the wall is per-IP and the network is one network. Either way the
-    combinations already fetched are returned, and the error is raised only when
-    nothing at all was served.
+    warning and the rest are still fetched. A throttle, an exhausted transport
+    ladder or a dead browser session stops the pinning instead, because none of
+    the three says anything about the pin: the wall is per-IP and the network is
+    one network, and every remaining pin would navigate on that same dead
+    session. Either way the combinations already fetched are returned, and the
+    error is raised only when nothing at all was served.
 
     `transport` rides the recursion so every leg of one trip runs on the same
     rung — a round trip that opened Chrome for its outbound must not silently
@@ -1978,8 +1981,10 @@ def _report_pin_outcome(
         # docs/memories/gf_routing_and_carriers.md. The comment below covers
         # the all-refused arm and the pin-ORDER trade, which are different
         # questions. Driven by
-        # `test_a_throttle_on_a_later_pin_keeps_what_was_already_served`
-        # and its transport-outage sibling.
+        # `test_a_throttle_on_a_later_pin_keeps_what_was_already_served`, its
+        # transport-outage sibling, and — for the arm whose sentence is read
+        # off the exception —
+        # `test_a_browser_that_dies_after_a_served_pin_still_says_what_to_do`.
         log.warning(
             "stopped pinning: %d of %d return boards skipped; %s",
             skipped,

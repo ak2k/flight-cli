@@ -636,7 +636,7 @@ def test_a_failed_navigation_is_a_typed_refusal(
     # Two statements because they are two things: the session's lifetime, and
     # the claim about what happens inside it. One `with` reads as though the
     # session itself were what raises.
-    with gfb.GfBrowserSession(headed=False) as session:  # noqa: SIM117 — subject, then claim
+    with gfb.GfBrowserSession(headed=False) as session:  # noqa: SIM117 — nesting keeps the session's lifetime separate from what raises inside it
         with pytest.raises(GfBrowserUnavailableError, match=expected) as e:
             session.get_html(_PAGE_URL)
     # The remedy travels in the message, because both refusal renderers in
@@ -659,7 +659,7 @@ def test_an_unreadable_body_is_a_typed_refusal(
     # Two statements because they are two things: the session's lifetime, and
     # the claim about what happens inside it. One `with` reads as though the
     # session itself were what raises.
-    with gfb.GfBrowserSession(headed=False) as session:  # noqa: SIM117 — subject, then claim
+    with gfb.GfBrowserSession(headed=False) as session:  # noqa: SIM117 — nesting keeps the session's lifetime separate from what raises inside it
         with pytest.raises(GfBrowserUnavailableError, match="body could not be read"):
             session.get_html(_PAGE_URL)
 
