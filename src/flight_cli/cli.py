@@ -2225,8 +2225,9 @@ def _run_enriched_path(
     # A result built from the rows the table numbered, so `_emit_urls`' label
     # expression is true by construction. A Google-only row carries no
     # `Itinerary.id`, so the Matrix line falls back to the plain deep link while
-    # the Google line still pins from that row's slices. None where no table was
-    # numbered, which is what makes both lines fall back to the unpinned form.
+    # the Google line still pins from that row's slices. Unpinned where no
+    # table was numbered, which is what makes both lines fall back to the label
+    # that claims nothing.
     _emit_urls(
         matrix_search,
         matrix_url=matrix_url,
@@ -2805,15 +2806,18 @@ def _render_gflight_table(
     `.amenities` is per-leg legroom data parsed from Google's response.
     `match_carriers` enables codeshare-aware leg labels (see `_leg_display`).
 
-    A round-trip combination therefore prints TWO different prices, on its `Na`
-    and `Nb` rows, and that reads as a bug until you know what each is: the `a`
-    row carries the outbound board's own quote — the cheapest total reachable
-    from that outbound — while the `b` row carries THIS combination's total,
-    from the return board fetched with that outbound pinned. Printing each
-    member's own number is deliberate, because both are true of the row they
-    sit on and the pair is what says which combination costs what. The
-    itinerary fare downstream is the terminal member's; the argument and the
-    measurements are in the round-trip-pricing paragraph of
+    A round-trip combination can print two DIFFERENT prices, on its `Na` and
+    `Nb` rows, and that reads as a bug until you know what each is: the `a` row
+    carries the outbound board's own quote — the cheapest total reachable from
+    that outbound — while the `b` row carries THIS combination's total, from
+    the return board fetched with that outbound pinned. They agree only where
+    this combination IS the cheapest one reachable from that outbound, which is
+    the total the `a` row was quoting; on the committed capture two of the nine
+    combinations read that way. Printing each member's own number is
+    deliberate, because both are true of the row they sit on and the pair is
+    what says which combination costs what. The itinerary fare downstream is
+    the terminal member's; the argument and the measurements are under
+    "What a round-trip row's price means." in
     docs/memories/gf_routing_and_carriers.md and in
     `tests/pp/test_gflight_adapter.py`."""
     origin = legs[0].origins[0] if legs[0].origins else "?"

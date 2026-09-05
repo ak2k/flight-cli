@@ -97,7 +97,7 @@ def _slice_from_flight_result(
 
 
 def _price_string(fr: Any) -> str | None:
-    """Match Matrix's price format ('USD877.00') so match._parse_cash works.
+    """Match Matrix's price format ('USD877.00') so `pp.cli._parse_cash` reads it.
 
     None where Google surfaced no price for the row. `ItineraryExt.price` is
     optional, so the absence travels as itself: a fabricated `USD0.00` parses
@@ -129,8 +129,8 @@ def fli_results_to_search_result(results: Sequence[Any]) -> SearchResult:
     for round-trip/multi-city. Each top-level entry maps to one Itinerary; for
     tuples, each FlightResult becomes one Slice in slice-index order.
 
-    Where a round-trip tuple's members carry prices they are not the same
-    number. An outbound row is priced at the cheapest round-trip TOTAL
+    A round-trip tuple's members need not carry the same number, and where
+    they differ this is why. An outbound row is priced at the cheapest round-trip TOTAL
     reachable from that outbound; the return board fetched with it pinned
     prices each of its rows at THAT combination's total. The itinerary fare is
     therefore the terminal member's; why that is the true one, with the
