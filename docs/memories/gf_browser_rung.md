@@ -28,12 +28,12 @@ rung 1  _fetch_page ─────────────┐
 rung 2  GfBrowserSession.get_html┘        (the only parser)
 ```
 
-**A rung supplies bytes; it never interprets them.** The lone exception is the
-429 fli hides: `Client.get` calls `raise_for_status()` itself, so on rung 1 a
-429 never arrives as a response at all and `_fetch_page` is the only place that
-can name it. Everything visible in the bytes — the `/sorry/` redirect, the body
-marker, a missing `ds:1`, the status Chrome does report — is decided
-downstream, so both rungs reach identical verdicts from identical evidence.
+**A rung supplies bytes; it never interprets them.** Not even the status:
+rung 1 goes around fli's `Client.get` and the `raise_for_status()` inside it, so
+a 429 arrives as a response there exactly as it does on rung 2. Everything
+visible in the bytes — the `/sorry/` redirect, the body marker, a missing
+`ds:1`, the status itself — is decided downstream, so both rungs reach
+identical verdicts from identical evidence.
 
 Classification order inside `_rows_from_page_html` is load-bearing: throttle
 (`/sorry/` or 429) → any other non-2xx as `GfUpstreamStatusError` → missing

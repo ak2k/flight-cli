@@ -1,3 +1,7 @@
+# pyright: reportMissingTypeStubs=false
+#   fli ships no stubs and this module imports eleven names from five of its
+#   packages; a per-import suppression on each is five places to forget when a
+#   twelfth arrives. Same file-level form as tests/test_gf_native_filters.py.
 """The search-page `tfs=` encoder: one writer, an allowlist, no silent drops.
 
 `build_search_tfs` shares `_encode_gflight_pinned_tfs` with the pinned booking
@@ -30,7 +34,9 @@ from fli.models.google_flights.base import (
     TimeRestrictions,
     TripType,
 )
-from fli.models.google_flights.flights import FlightSearchFilters
+from fli.models.google_flights.flights import (
+    FlightSearchFilters,
+)
 
 from flight_cli._gf_errors import GfTfsUnsupportedError
 from flight_cli.links import build_search_tfs, google_flights_search_page_url

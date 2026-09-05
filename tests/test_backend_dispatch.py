@@ -15,8 +15,11 @@ results"."""
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 import pytest
 import typer
+from pydantic import ValidationError
 
 from flight_cli.cli import (
     BACKEND_AUTO,
@@ -43,6 +46,8 @@ def _call(backend: str = BACKEND_AUTO, **overrides: object) -> str:
         "inf_lap": 0,
         "origin": "JFK",
         "destination": "LHR",
+        "allow_airport_changes": True,
+        "show_only_available": True,
     }
     defaults.update(overrides)
     return _pick_backend(backend=backend, **defaults)  # type: ignore[arg-type]
@@ -68,6 +73,11 @@ def test_auto_plain_search_picks_gflight() -> None:
         ("inf_lap", 1),
         ("origin", "JFK,EWR"),  # airport set — the GF bridge keeps only the first
         ("destination", "LHR,LGW"),
+        # Neither reaches the search page at all: `fli_bridge`, which the `tfs=`
+        # parameter is encoded from, has no field for either, so a query served
+        # on Google is served with the constraint simply gone.
+        ("allow_airport_changes", False),
+        ("show_only_available", False),
     ],
 )
 def test_auto_hard_matrix_flag_picks_matrix(flag: str, value: object) -> None:
@@ -136,8 +146,8 @@ def test_stop_ceiling_above_two_goes_to_matrix() -> None:
     ],
 )
 def test_auto_unencodable_constraint_picks_matrix(flag: str, value: object) -> None:
-    """Anything the page's tfs= parameter can't carry goes to Matrix — including
-    constraints the old RPC filtered server-side."""
+    """Anything the page's tfs= parameter cannot carry goes to Matrix, including
+    constraints only a server-side filter could apply."""
     assert _call(**{flag: value}) == BACKEND_MATRIX  # pyright: ignore[reportArgumentType]
 
 
@@ -176,8 +186,20 @@ def test_page_can_encode_names_every_constraint_it_refuses() -> None:
         ({"routing": "DL+"}, "a carrier filter (DL)"),
         ({"children": 1}, "a passenger type beyond adults"),
         ({"origin": "JFK,EWR"}, "a multi-airport origin/destination"),
+        # A metro code is ONE token, so the comma-list check above does not see
+        # it. Google Flights resolves an origin against fli's airport table,
+        # which has no member for most of the metro codes the docs steer users
+        # onto — reaching the bridge with one is an AttributeError before any
+        # request, and on `--format json` that is exit 1 and an empty document.
+        ({"origin": "NYC"}, "a city code rather than an airport (NYC)"),
+        # The quieter half: QSF is in fli's table, as Ain Arnat in Algeria. A
+        # membership test alone reads it as serveable and the query is built
+        # and sent for the wrong airport, so the collisions are named too.
+        ({"origin": "QSF"}, "a city code rather than an airport (QSF)"),
         ({"slice_specs": ["JFK-LHR:2026-08-15"]}, "a multi-city itinerary"),
         ({"depart_times": "morning"}, "a departure/arrival time window"),
+        ({"allow_airport_changes": False}, "a ban on changing airports"),
+        ({"show_only_available": False}, "unavailable itineraries included"),
     ],
 )
 def test_auto_names_whatever_forced_matrix(
@@ -186,7 +208,22 @@ def test_auto_names_whatever_forced_matrix(
     """Silently taking the 45x slower backend leaves the user unable to tell a
     constraint they could drop from one they can't."""
     assert _call(**overrides) == BACKEND_MATRIX  # pyright: ignore[reportArgumentType]
-    assert expected in capsys.readouterr().err
+    # Whitespace-collapsed: the reason is printed through a console that wraps
+    # at its own width, and where a reason long enough to wrap gets broken is
+    # not what this asserts. What it asserts is the sentence.
+    printed = " ".join(capsys.readouterr().err.split())
+    assert expected in printed, printed
+
+
+def test_auto_leaves_a_code_that_is_its_own_airport_on_gflight(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`LAX` is a metro code in the same table and also the airport code, and
+    fli resolves it to Los Angeles International. Gating on the table rather
+    than on the lookup would move a working query to the 45x slower backend for
+    a problem it does not have."""
+    assert _call(origin="LAX") == BACKEND_GFLIGHT
+    assert capsys.readouterr().err == ""
 
 
 def test_auto_says_nothing_when_gflight_serves_the_query(
@@ -240,12 +277,44 @@ def test_explicit_gflight_error_names_the_airport_set() -> None:
         _call(BACKEND_GFLIGHT, origin="JFK,EWR")
 
 
+def test_explicit_gflight_refuses_a_metro_code_rather_than_crashing() -> None:
+    """Asked for outright, the metro code is a parameter error: exit 2 with the
+    reason, in place of the `AttributeError` the bridge raises when it looks the
+    code up. The failure it replaces is silent on stdout — `--format json` and
+    `--fast` both skip the enrich path, so the crash was the whole outcome and
+    the document was zero bytes."""
+    with pytest.raises(typer.BadParameter, match=r"a city code rather than an airport \(NYC\)"):
+        _call(BACKEND_GFLIGHT, origin="NYC")
+
+
+@pytest.mark.parametrize(
+    "overrides,expected",
+    [
+        ({"allow_airport_changes": False}, "a ban on changing airports"),
+        ({"show_only_available": False}, "unavailable itineraries included"),
+    ],
+)
+def test_explicit_gflight_refuses_a_matrix_only_filter(
+    overrides: dict[str, object], expected: str
+) -> None:
+    """Accepting it silently is the worse half of the same defect: the query is
+    served without the constraint, and the Matrix deep link printed underneath
+    still carries it — so the two surfaces describe different searches."""
+    with pytest.raises(typer.BadParameter, match=expected):
+        _call(BACKEND_GFLIGHT, **overrides)  # pyright: ignore[reportArgumentType]
+
+
 def test_unknown_backend_rejected() -> None:
     with pytest.raises(typer.BadParameter, match="--backend must be one of"):
         _call("nope")
 
 
 # ───────────── deprecated `flight gflight` alias (work-h70kv.5) ─────────────
+
+
+def _future_dep() -> str:
+    """A departure date the model will accept whatever day the suite runs."""
+    return (date.today() + timedelta(days=45)).isoformat()
 
 
 def _gflight_alias(monkeypatch: pytest.MonkeyPatch, *args: str) -> tuple[list[str], str]:
@@ -287,3 +356,130 @@ def test_gflight_alias_takes_matrix_for_a_child_passenger(
     )
     assert called == ["matrix"]
     assert "a passenger type beyond adults" in output
+
+
+def test_gflight_alias_splits_a_multi_airport_argument_like_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A comma-separated argument is a list of airports here exactly as it is
+    in `flight search`, and a multi-airport query belongs to Matrix. Parsing it
+    as one opaque airport code turns a query the CLI answers into a model
+    validation panel."""
+    called, output = _gflight_alias(monkeypatch, "JFK,LAX", "MIA", "--dep", _future_dep())
+    assert called == ["matrix"]
+    assert "a multi-airport origin/destination" in output
+    assert "validation error" not in output.lower()
+
+
+def test_gflight_alias_validates_airports_before_it_names_a_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A backend line is a claim that the query is on its way. An airport the
+    model rejects must surface before that line, not after it."""
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    def _unreached(**_kw: object) -> None:
+        raise AssertionError("a backend ran on a query that never validated")
+
+    monkeypatch.setattr(cli, "_run_gflight_path", _unreached)
+    monkeypatch.setattr(cli, "_run_matrix_path", _unreached)
+    # Multi-airport (so the picker WOULD announce Matrix) with one code the
+    # model rejects — the ordering is only observable when both are true.
+    result = CliRunner().invoke(cli.app, ["gflight", "JFK,XXXX", "MIA", "--dep", _future_dep()])
+
+    assert result.exit_code != 0
+    assert "Using Matrix" not in result.output
+    assert isinstance(result.exception, ValidationError)
+    assert "Not a 3-letter IATA code: 'XXXX'" in str(result.exception)
+
+
+def _no_backend_runs(monkeypatch: pytest.MonkeyPatch, command: str, origin: str) -> str:
+    """Invoke `command` with a blank origin and every backend booby-trapped."""
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    def _unreached(**_kw: object) -> None:
+        raise AssertionError("a backend ran on a query with no airports")
+
+    for path in (
+        "_run_gflight_path",
+        "_run_matrix_path",
+        "_run_gflight_path_multi",
+        "_run_matrix_path_multi",
+        "_run_enriched_path",
+    ):
+        monkeypatch.setattr(cli, path, _unreached)
+    result = CliRunner().invoke(cli.app, [command, origin, "MIA", "--dep", _future_dep()])
+    assert result.exit_code == 2, result.output
+    return result.output
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        pytest.param(",", id="comma-only"),
+        pytest.param(" , ", id="blanks"),
+    ],
+)
+@pytest.mark.parametrize("command", ["gflight", "search", "fare"])
+def test_a_command_that_builds_a_leg_rejects_a_blank_airport_list(
+    monkeypatch: pytest.MonkeyPatch, command: str, origin: str
+) -> None:
+    """`_parse_iata_list` drops blank entries, so these arrive as an empty tuple
+    while the argument itself stays truthy and satisfies a plain `if origin`.
+    Every command that builds a leg has to reject that the same way, or a leg
+    with no airports reaches a backend and fails deep inside it with an index
+    error instead."""
+    assert "origin and destination are required" in _no_backend_runs(monkeypatch, command, origin)
+
+
+@pytest.mark.parametrize("command", ["gflight", "search", "fare"])
+def test_an_absent_origin_is_refused_by_whichever_arm_owns_it(
+    monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    """An empty string is falsy, so on `search` and `fare` it never reaches the
+    airport check — it is a query with no origin at all, and the arm that asks
+    for one answers first. `gflight` takes origin positionally and has no such
+    arm. Both exits are 2 and both name what is missing; pinned so the
+    difference stays a choice."""
+    output = _no_backend_runs(monkeypatch, command, "")
+    expected = (
+        "origin and destination are required"
+        if command == "gflight"
+        else "origin destination --dep"
+    )
+    assert expected in output
+
+
+@pytest.mark.parametrize("n", ["0", "-5"], ids=["zero", "negative"])
+@pytest.mark.parametrize("command", ["gflight", "search", "fare"])
+def test_a_result_count_below_one_is_refused_before_any_backend_runs(
+    monkeypatch: pytest.MonkeyPatch, command: str, n: str
+) -> None:
+    """`--n` feeds a pin count and a page size, and neither has a meaning below
+    one. A negative reached the pin loop as a slice bound and asked for the
+    whole board rather than nothing, so the guard is a floor on the option
+    itself — which is a keyword argument no test reads unless one asks.
+
+    All three commands, because the floor is written three times and removing
+    it from any one of them is invisible from the other two."""
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    def _unreached(**_kw: object) -> None:
+        raise AssertionError("a backend ran on a query that asked for no results")
+
+    for path in (
+        "_run_gflight_path",
+        "_run_matrix_path",
+        "_run_gflight_path_multi",
+        "_run_matrix_path_multi",
+        "_run_enriched_path",
+    ):
+        monkeypatch.setattr(cli, path, _unreached)
+    result = CliRunner().invoke(cli.app, [command, "JFK", "MIA", "--dep", _future_dep(), "-n", n])
+    assert result.exit_code == 2, result.output

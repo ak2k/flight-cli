@@ -36,6 +36,12 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import TYPE_CHECKING, assert_never
 
+# A `reason` quotes the user's own --routing/--extension string back to them, so
+# it can carry any character. It is kept as PLAIN TEXT here and escaped by
+# whichever renderer needs it escaped — the CLI prints reasons two ways, through
+# a rich Console (markup, needs escaping) and through typer's BadParameter
+# (plain, must not be escaped or the user reads the backslashes).
+
 if TYPE_CHECKING:
     from collections.abc import Iterable
 

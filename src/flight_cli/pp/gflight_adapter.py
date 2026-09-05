@@ -96,8 +96,15 @@ def _slice_from_flight_result(
     )
 
 
-def _price_string(fr: Any) -> str:
-    """Match Matrix's price format ('USD877.00') so match._parse_cash works."""
+def _price_string(fr: Any) -> str | None:
+    """Match Matrix's price format ('USD877.00') so `pp.cli._parse_cash` reads it.
+
+    None where Google surfaced no price for the row. `ItineraryExt.price` is
+    optional, so the absence travels as itself: a fabricated `USD0.00` parses
+    as a real fare and would undercut every cash comparison an award is made
+    against, which is the one number this string exists to carry."""
+    if fr.price is None:
+        return None
     currency = fr.currency or "USD"
     return f"{currency}{fr.price:.2f}"
 
@@ -120,10 +127,22 @@ def fli_results_to_search_result(results: Sequence[Any]) -> SearchResult:
 
     fli returns ``list[FlightResult]`` for one-way and ``list[tuple[FlightResult, ...]]``
     for round-trip/multi-city. Each top-level entry maps to one Itinerary; for
-    tuples, each FlightResult becomes one Slice in slice-index order. The
-    cheapest-cash price for the itinerary uses the outbound leg's price
-    (round-trip prices in fli are attached per-result; the outbound carries
-    the combined fare on round-trip queries).
+    tuples, each FlightResult becomes one Slice in slice-index order.
+
+    A round-trip tuple's members need not carry the same number, and where
+    they differ this is why. An outbound row is priced at the cheapest round-trip TOTAL
+    reachable from that outbound; the return board fetched with it pinned
+    prices each of its rows at THAT combination's total. The itinerary fare is
+    therefore the terminal member's; why that is the true one, with the
+    measurements, is in `docs/memories/gf_routing_and_carriers.md`.
+
+    A member may carry no price at all — Google does not always surface one —
+    and such a row is carried with `price=None` rather than dropped, so the
+    solution list stays the board the user was shown.
+
+    The number matters downstream: an award is compared against it, so an
+    outbound-priced combination undercuts every cash comparison but the
+    cheapest one.
     """
     solutions: list[Itinerary] = []
     cheapest_price: float | None = None
@@ -134,18 +153,27 @@ def fli_results_to_search_result(results: Sequence[Any]) -> SearchResult:
             continue
         unwrapped = [_unwrap(it) for it in items_raw]
         slices = [_slice_from_flight_result(fr, fid, am) for fr, fid, am in unwrapped]
-        first_fr = unwrapped[0][0]
-        price_str = _price_string(first_fr)
+        # The pinned leg on a round trip, and the only leg on a one-way — one
+        # rule, because `unwrapped[-1]` is `unwrapped[0]` when there is one.
+        fare_fr = unwrapped[-1][0]
+        price_str = _price_string(fare_fr)
         solutions.append(
             Itinerary(
                 ext=ItineraryExt(price=price_str),
                 itinerary=ItineraryDetails(slices=slices, carriers=[]),
             ),
         )
-        p: float = first_fr.price
-        if cheapest_price is None or p < cheapest_price:
+        # The same member the itineraries are priced from: a cheapest quoted
+        # from the outbound boards would name a fare no row in the table shows.
+        #
+        # A row Google did not price competes for nothing here — it is not a
+        # cheaper fare, it is no fare — so it is passed over while its itinerary
+        # is still carried above. Reading it as a number instead is what makes
+        # the comparison a type error on the first priced row that precedes it.
+        p: float | None = fare_fr.price
+        if p is not None and (cheapest_price is None or p < cheapest_price):
             cheapest_price = p
-            cheapest_currency = first_fr.currency or "USD"
+            cheapest_currency = fare_fr.currency or "USD"
 
     sr = SearchResult(
         solutionCount=len(solutions),
@@ -179,7 +207,8 @@ def cash_hints_from_search_result(
     doesn't carry a `flight_id` — that means the matched-id path isn't
     available for them (Matrix cash, or the gflight result was constructed
     from a non-enriched fli call). The matcher's flight#+date / route+time
-    keys still apply to those.
+    keys still apply to those. Skips an unpriced itinerary for the reason
+    spelled out at that guard: the hint has no way to carry a missing fare.
 
     `max_hints` caps the payload — PP's airline-search rejects very large
     `googleFlightDetails` arrays; the extension typically sends 10-30.
@@ -194,6 +223,18 @@ def cash_hints_from_search_result(
         if not s.flight_id or s.flight_id in seen_flight_ids:
             continue
         if not s.origin or not s.destination or not s.flights or not s.departure:
+            continue
+        if it.price is None:
+            # `cash_price_usd` is an int and `to_payload` always emits the key,
+            # so a row Google did not price can only travel as `cashPrice: 0` —
+            # a fabricated fare in the one field the award is compared against,
+            # and the number `_price_string` refuses to invent one seam earlier.
+            # Skipping costs the matched-id key for this row; flight#+date and
+            # route+time still join it, so the loss is a missing award row
+            # rather than a wrong price. On a board where NO row is priced this
+            # sends no hints at all and `enable_matching` is then False for the
+            # leg, which is the right answer: a leg with no priced row has no
+            # cash baseline for the matcher to compare an award against.
             continue
         first_flight = s.flights[0]  # IATA-prefixed, e.g. "DL1"
         iata_prefix = first_flight[:2]

@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
+from conftest import _answering  # one home for the re-pointing rule; see its docstring
 from flight_cli import _gf_browser as gfb
 from flight_cli import _gf_common as gfc
 from flight_cli import _gflight_ids as gfid
@@ -52,13 +53,36 @@ _PAGE_URL = "https://www.google.com/travel/flights?tfs=abc"
 _SORRY_URL = "https://www.google.com/sorry/index?continue=x"
 
 
-def _page(name: str = "ds1_jfk_lax_3rows.json") -> str:
-    """A minimal page carrying the fixture's `ds:1` blob, as Google inlines it."""
+def _page_carrying(ds1_json: str) -> str:
+    """A minimal page carrying `ds1_json`, as Google inlines its `ds:1` blob."""
     return (
         "<!doctype html><html><body><script>"
         f"AF_initDataCallback({{key: 'ds:1', hash: '2', "
-        f"data:{(FIXTURE_DIR / name).read_text()}, sideChannel: {{}}}});"
+        f"data:{ds1_json}, sideChannel: {{}}}});"
         "</script></body></html>"
+    )
+
+
+def _page(name: str = "ds1_jfk_lax_3rows.json") -> str:
+    """A minimal page carrying the fixture's `ds:1` blob, as Google inlines it."""
+    return _page_carrying((FIXTURE_DIR / name).read_text())
+
+
+def _return_page() -> str:
+    """The outbound capture, re-pointed at the return leg `_filters` asks for.
+
+    A pinned return board is checked against the segment it was asked to FILL,
+    so the capture replayed unchanged answers the outbound a second time and is
+    refused — which is what a page that dropped the pin looks like. Rung 2 has
+    to answer the question it asked, exactly as rung 1 does."""
+    return _page_carrying(
+        _answering(
+            (FIXTURE_DIR / "ds1_jfk_lax_3rows.json").read_text(),
+            origin="LAX",
+            destination="JFK",
+            date="2026-10-24",
+            name="ds1_jfk_lax_3rows.json",
+        )
     )
 
 
@@ -173,41 +197,40 @@ def _page_of(pw: _FakePlaywright) -> _FakePage:
 
 
 class _FakeHttpResponse:
-    """What fli's client hands back — it has already called `raise_for_status()`,
-    so a response reaching us is 2xx and carries no status worth reading."""
+    """What fli's session hands back: a body, the URL it settled on, and the
+    status Google answered with — unread and untranslated."""
 
-    def __init__(self, *, text: str, url: str) -> None:
+    def __init__(self, *, text: str, url: str, status_code: int = 200) -> None:
         self.text = text
         self.url = url
+        self.status_code = status_code
 
 
-def test_fetch_page_reports_a_2xx_by_construction(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`_fetch_page` hands on the body and the final URL, and reports OK.
+def test_the_rung_reports_the_status_it_was_served(
+    monkeypatch: pytest.MonkeyPatch, gf_session: Callable[..., Any]
+) -> None:
+    """`_fetch_page` hands on the body, the final URL and the status, and rules
+    on none of them.
 
-    Not laziness — fli raised on anything else before returning, so there is no
-    other status this rung could truthfully report. The field exists in the
-    triple for the browser rung, whose navigation reports a real one. (The
-    429 -> GfThrottledError mapping around the GET is covered end-to-end in
-    tests/test_gflight_page.py, including against the real fli client.)"""
-
-    class _Client:
-        def get(self, url: str, **_kw: object) -> _FakeHttpResponse:
-            return _FakeHttpResponse(text="<html>board</html>", url=url)
-
-    def _stub_tfs(_filters: Any) -> bytes:
-        return b"\x08\x1c"
-
-    def _no_seed(_client: Any) -> None:
-        return None
-
-    monkeypatch.setattr(gfid, "get_client", _Client)
-    monkeypatch.setattr(gfid, "build_search_tfs", _stub_tfs)
-    monkeypatch.setattr(gfid, "_seed_cookies_once", _no_seed)
-
-    page = gfid._fetch_page(cast("Any", None))
-    assert page.html == "<html>board</html>"
+    The status is the one that used to be a constant. Rung 1 goes around fli's
+    `Client.get` and the `raise_for_status()` inside it, so a 429 comes back as
+    a RESPONSE and travels to `_rows_from_page_html` — the one place that ranks
+    it against the interstitial, for both rungs at once. Translating it here
+    again would take it back out of there, silently."""
+    fake = gf_session(_page())
+    page = gfid._fetch_page(_filters(round_trip=False))
+    assert page.html == _page()
     assert "tfs=" in page.final_url
     assert page.status_code == 200
+
+    def _blocked(url: str, **_kw: object) -> _FakeHttpResponse:
+        return _FakeHttpResponse(text="<html>blocked</html>", url=url, status_code=429)
+
+    monkeypatch.setattr(fake._session_obj, "get", _blocked)
+    throttled = gfid._fetch_page(_filters(round_trip=False))
+    assert throttled.status_code == 429
+    with pytest.raises(GfThrottledError):
+        gfid._rows_from_page_html(throttled)
 
 
 def test_a_server_error_is_its_own_refusal_not_a_shape_error() -> None:
@@ -216,8 +239,8 @@ def test_a_server_error_is_its_own_refusal_not_a_shape_error() -> None:
     from. Reading Google declining to serve as "the parser is broken" sends the
     next reader hunting an extract bug during an outage.
 
-    Only a navigation gets here with a status — fli raises on a non-2xx before
-    the curl_cffi rung can report one."""
+    Either rung gets here with a status: rung 1 reads it off the response and
+    rung 2 off the navigation."""
     with pytest.raises(GfUpstreamStatusError, match="HTTP 503") as e:
         gfid._rows_from_page_html(gfid.PageFetch("", _PAGE_URL, 503))
     assert e.value.status_code == 503
@@ -256,9 +279,9 @@ def test_a_throttle_outranks_the_status_check() -> None:
     """429 is both "blocked" and "not 2xx"; it has to read as the throttle,
     because that is the one the caller can back off and retry.
 
-    Only the browser rung can reach this with a 429 — Chrome reports the status
-    where fli would have raised — and the interstitial it usually arrives as is
-    caught by URL or body instead."""
+    Either rung can reach this with a 429, since nothing calls
+    `raise_for_status()` on the way — and the interstitial it usually arrives as
+    is caught by URL or body instead."""
     with pytest.raises(GfThrottledError):
         gfid._rows_from_page_html(gfid.PageFetch("", _PAGE_URL, 429))
     with pytest.raises(GfThrottledError):
@@ -303,10 +326,13 @@ class _RecordingSession:
     fixtures. Never launches anything, so a test using it proves what the ladder
     does without a browser in the process."""
 
-    def __init__(self, result: Any = None) -> None:
+    def __init__(self, result: Any = None, *, pages: list[str] | None = None) -> None:
         self.urls: list[str] = []
         self.closes = 0
         self._result = result
+        # One body per navigation, the last repeating — a round trip's return
+        # leg needs a different board from its outbound.
+        self._pages = pages or [_page()]
 
     def close(self) -> None:
         self.closes += 1
@@ -315,7 +341,8 @@ class _RecordingSession:
         self.urls.append(url)
         if isinstance(self._result, Exception):
             raise self._result
-        return gfid.PageFetch(html=_page(), final_url=_PAGE_URL, status_code=200)
+        body = self._pages[min(len(self.urls) - 1, len(self._pages) - 1)]
+        return gfid.PageFetch(html=body, final_url=_PAGE_URL, status_code=200)
 
 
 def _filters(*, round_trip: bool) -> Any:
@@ -359,7 +386,7 @@ def test_a_round_trip_navigates_once_per_leg_on_one_session(
 ) -> None:
     """The transport rides the recursion, so the return legs stay on rung 2 —
     and they share the session, which is what keeps the launch amortized."""
-    session = _RecordingSession()
+    session = _RecordingSession(pages=[_page(), _return_page()])
     handed_out: list[bool] = []
 
     def _session(*, headed: bool) -> _RecordingSession:
@@ -717,7 +744,14 @@ def test_a_round_trip_pays_for_one_launch_and_navigates_per_leg(
     a round trip pays it once, however many legs it pins. Driven through the
     real `GfBrowserSession` on a fake playwright, so the launch count is a
     measurement rather than a restatement of the ladder's monkeypatching."""
-    pw = _install(monkeypatch, tmp_path)
+    pw = _install(
+        monkeypatch,
+        tmp_path,
+        outcomes=[
+            _FakeResponse(body=_page(), url=_PAGE_URL, status=200, body_error=None),
+            _FakeResponse(body=_return_page(), url=_PAGE_URL, status=200, body_error=None),
+        ],
+    )
     monkeypatch.setattr(gfb, "_sessions", threading.local())
 
     def _rung_one(_f: Any) -> list[GFlightWithId]:
@@ -1056,6 +1090,38 @@ def test_driver_text_carrying_markup_renders_verbatim() -> None:
     for text in (_render(f"[dim]{refusal.note}[/]"), _render(refusal.message)):
         assert "[/x]" in text
         assert "[/y]" in text
+
+
+def test_the_default_search_path_escapes_the_note_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The note leaves `_gf_refusal` console-ready, so the reporter prints it as
+    it stands.
+
+    Escaping it a second time does not raise — it puts a visible backslash in
+    front of every bracket the driver's text carried, on the DEFAULT search
+    path, which is the one place this sentence is guaranteed to be read. That
+    is invisible to a test that only asserts the bracket survived, so this one
+    asserts the backslash did not."""
+    from rich.console import Console
+
+    from flight_cli import cli
+
+    buf = io.StringIO()
+    monkeypatch.setattr(
+        cli, "console", Console(file=buf, width=200, force_terminal=False, no_color=True)
+    )
+    cli._report_enriched_gf_failure(
+        GfBrowserUnavailableError("Chrome said [/x] no.", remedy="Then do [/y]."),
+        matrix_answered=True,
+        awards_only=False,
+    )
+
+    out = buf.getvalue()
+    assert "[/x]" in out, out
+    assert "[/y]" in out, out
+    assert "\\[/x]" not in out, out
+    assert "\\[/y]" not in out, out
 
 
 def _capture_err(monkeypatch: pytest.MonkeyPatch) -> io.StringIO:

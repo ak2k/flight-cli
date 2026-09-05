@@ -37,6 +37,15 @@ class GfThrottledError(GfBackendError):
     usually fast; callers may retry shortly or fall back to Matrix."""
 
 
+class GfTransportError(GfBackendError):
+    """Google Flights could not be REACHED — the retries for it are spent.
+
+    A condition of the route rather than of the request: DNS, TLS, a reset
+    socket, a stalled body. Typed apart from the other refusals because it says
+    nothing about the query, so a caller iterating over related queries learns
+    from one of these that the rest will fail the same way."""
+
+
 class GfConsentError(GfBackendError):
     """Google served its consent interstitial instead of the search page.
 
@@ -60,8 +69,8 @@ class GfPageShapeError(GfBackendError):
 class GfUpstreamStatusError(GfBackendError):
     """Google answered the search page with a non-2xx that is not a throttle.
 
-    Only the browser rung can raise this. A navigation reports a status where
-    fli's client raises on it first, so rung 1 never gets one this far.
+    Either rung raises it. Rung 1 goes around the `raise_for_status()` in fli's
+    client, so it reads the status off the response; rung 2 off the navigation.
 
     Its own type because a 403 or a 503 is Google declining to serve, which is
     usually transient and needs no investigation, while `GfPageShapeError` says
@@ -95,6 +104,21 @@ class GfBrowserUnavailableError(GfBackendError):
         self.reason = reason
         self.remedy = remedy
         super().__init__(f"{reason} {remedy}")
+
+
+class GfPinIgnoredError(GfBackendError):
+    """A well-formed page, read completely, answering a leg nobody asked for.
+
+    A pin goes out as `selected_flight` and the response says nothing about
+    which pin it belongs to, so a page that dropped it arrives shaped exactly
+    like one that honoured it — and only the served legs tell them apart. The
+    rows parsed; what they describe is a different segment.
+
+    A direct child of `GfBackendError` rather than of `GfPageShapeError`,
+    because a nested type inherits its parent's `match` arm: this would then
+    render as a layout change and send the next reader to re-derive an extract
+    that is working.
+    """
 
 
 class GfTfsUnsupportedError(GfBackendError):
