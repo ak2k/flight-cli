@@ -82,6 +82,7 @@ from . import _gf_browser
 from ._gf_common import TRANSPORT_HTTP, GfTransportMode, PageFetch, cache_dir
 from ._gf_errors import (
     GfBackendError,
+    GfBrowserUnavailableError,
     GfConsentError,
     GfPageShapeError,
     GfPinIgnoredError,
@@ -1898,10 +1899,14 @@ def search_with_ids(
         next_filters.flight_segments[selected_count].selected_flight = picked.flight
         try:
             nxt = search_with_ids(next_filters, top_n=top_n, transport=transport)
-        except (GfThrottledError, GfTransportError) as e:
-            # Neither is a fact about THIS pin. The wall is per-IP and the
-            # network is one network, so every remaining pin walks into the
-            # same one, having just spent a whole ladder measuring it.
+        except (GfThrottledError, GfTransportError, GfBrowserUnavailableError) as e:
+            # None of the three is a fact about THIS pin. The wall is per-IP and
+            # the network is one network, so every remaining pin walks into the
+            # same one, having just spent a whole ladder measuring it. A dead
+            # browser is a fact about the SESSION for the same reason: every
+            # remaining pin navigates on it, so re-driving it pays the 30 s
+            # navigation ceiling per pin and reports one process failure as N
+            # independent board refusals.
             stopped = e
             skipped = len(pins) - index
             break

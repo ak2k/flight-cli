@@ -1538,10 +1538,12 @@ def _gflight_results(
     try:
         results: list[Any] = search_with_ids(fli_filter, top_n=top_n, transport=transport) or []
     finally:
-        # Rung 1 opens nothing to close. Calling the closer anyway would be a
-        # no-op, but it would also read as though an http search might hold a
-        # Chrome, which is the one thing this transport promises it never does.
-        if transport.mode != TRANSPORT_HTTP:
+        # Named positively, because only rung 2 opens anything to close. The
+        # call would be a no-op on the others, but reaching for it would read
+        # as though an http search might hold a Chrome — the one thing that
+        # transport promises it never does, and `auto` is that transport under
+        # another name until the escalation rung lands.
+        if transport.mode == TRANSPORT_BROWSER:
             from ._gf_browser import close_thread_session  # noqa: PLC0415 — GF-only; see above
 
             close_thread_session()
@@ -1733,8 +1735,9 @@ def _gf_refusal(  # noqa: PLR0911 — one return per refusal type; see the docst
             status = _safe_text(e.status_code)
             return _GfRefusal(
                 f"Google Flights returned HTTP {status}",
-                f"[yellow]Google Flights returned HTTP {status}.[/] Try again, "
-                "or use [bold]--backend matrix[/].",
+                f"[yellow]Google Flights returned HTTP {status}.[/] Use [bold]--backend matrix[/], "
+                "or fetch the page the other way with [bold]--gf-transport http[/] or "
+                "[bold]browser[/].",
             )
         case GfPageShapeError():
             return _GfRefusal(
@@ -3426,7 +3429,8 @@ def search(
             "Chrome (headless unless [bold]--gf-headed[/]) against the same URL, a few "
             "seconds per search, and survives the rate limit that blocks http; "
             "[bold]auto[/] is identical to http today (escalate-on-throttle lands "
-            "separately). Single-cabin searches only. Needs "
+            "separately). [bold]browser[/] applies to single-cabin searches; multi-cabin "
+            "uses http. Needs "
             # Escaped: rich reads `[browser]` as a style tag and deletes it, which
             # printed an install command that silently omits the extra.
             "[bold]uv pip install 'flight-cli\\[browser]'[/] for browser."
