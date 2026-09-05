@@ -243,11 +243,11 @@ def test_the_rung_reports_the_status_it_was_served(
     """`_fetch_page` hands on the body, the final URL and the status, and rules
     on none of them.
 
-    The status is the one that used to be a constant. Rung 1 goes around fli's
-    `Client.get` and the `raise_for_status()` inside it, so a 429 comes back as
-    a RESPONSE and travels to `_rows_from_page_html` — the one place that ranks
-    it against the interstitial, for both rungs at once. Translating it here
-    again would take it back out of there, silently."""
+    Rung 1 goes around fli's `Client.get` and the `raise_for_status()` inside
+    it, so a 429 comes back as a RESPONSE and travels to `_rows_from_page_html`
+    — the one place that ranks it against the interstitial, for both rungs at
+    once. Translating it here again would take it back out of there,
+    silently."""
     fake = gf_session(_page())
     page = gfid._fetch_page(_filters(round_trip=False))
     assert page.html == _page()
@@ -1141,10 +1141,10 @@ def test_the_cli_and_the_ladder_name_the_same_transports() -> None:
     """One definition, said out loud: the CLI, the ladder and the leaf hold the
     same objects rather than three copies that happen to agree today.
 
-    The CLI used to spell the three modes a fourth time, with nothing pinning
-    them to `GfTransportMode` — so a rename on either side surfaced at
-    `_one_call_laddered`'s runtime raise, on the first user who happened to pick
-    the renamed mode, rather than in this suite."""
+    A fourth spelling of the three modes, pinned to `GfTransportMode` by
+    nothing, would put a rename on either side at `_one_call_laddered`'s runtime
+    raise — reaching the first user who happened to pick the renamed mode
+    rather than this suite."""
     from flight_cli import cli
 
     assert gfid.GfTransportMode is gfc.GfTransportMode
@@ -1160,8 +1160,8 @@ def test_every_documented_transport_has_a_rung(
 ) -> None:
     """`assert_never` makes a forgotten rung a basedpyright error; this is the
     runtime half of the same claim. A mode the CLI accepts and the ladder has no
-    branch for used to reach the user as a bare `ValueError` out of the middle
-    of a query."""
+    branch for reaches the user as a bare `ValueError` out of the middle of a
+    query."""
     rungs: list[str] = []
 
     def _http(_filters: Any) -> list[Any]:

@@ -31,7 +31,7 @@ from . import _config
 from ._calendar_split import is_empty_calendar, merge_calendar_results, split_calendar_search
 
 # The `--gf-transport` vocabulary, from the leaf that costs nothing to import.
-# `_gflight_ids` owns the ladder but costs fli (75 ms), and EVERY search
+# `_gflight_ids` owns the ladder but costs fli (~95 ms), and EVERY search
 # validates this flag — including the Matrix-only ones that never reach a rung.
 # One definition, so the CLI's accepted set cannot drift from the ladder's type.
 from ._gf_common import TRANSPORT_BROWSER, TRANSPORT_HTTP, VALID_TRANSPORT_MODES, GfTransportMode
@@ -1516,7 +1516,7 @@ def _gflight_results(
     # backend must not load on a Matrix-only search, and this function is the
     # first point that has committed to Google Flights.
     from ._gf_postfilter import surviving_indices  # noqa: PLC0415 — GF-only; see above
-    from ._gflight_ids import GfTransport, search_with_ids  # noqa: PLC0415 — fli, 75 ms
+    from ._gflight_ids import GfTransport, search_with_ids  # noqa: PLC0415 — fli, ~95 ms
     from .fli_bridge import apply_gf_native_filters, to_fli_filter  # noqa: PLC0415 — fli
     from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415 — GF-only
     from .routing_predicates import classify  # noqa: PLC0415 — pulled in by the two above
@@ -1686,12 +1686,14 @@ def _gf_refusal(  # noqa: PLR0911 — one return per refusal type; see the docst
     console-ready.** The app runs rich in markup mode, so an unescaped
     `[browser]` in a remedy, or a `[0m` in patchright's driver text, is either
     deleted from the output or raises `MarkupError` from `print` — the second
-    one turning a typed refusal into a crash. Anything read off the exception
-    goes through `_safe_text`, which drops the control characters before it
-    escapes; literal markup in these templates is ours and stays unescaped. A
-    caller prints `note` as it stands, and escaping it a second time is not
-    free: it puts a visible backslash in front of every bracket the remote text
-    carried, on the default search path.
+    one turning a typed refusal into a crash. Anything read off an exception
+    that carries REMOTE text goes through `_safe_text`, which drops the control
+    characters before it escapes. The one arm that only escapes reads a reason
+    this package wrote itself, so it has no control character to drop; literal
+    markup in these templates is ours and stays unescaped. A caller prints
+    `note` as it stands, and escaping it a second time is not free: it puts a
+    visible backslash in front of every bracket the remote text carried, on the
+    default search path.
 
     `transport` only changes the throttle wording. The browser rung runs no
     retry ladder, so "wait a moment and retry" would describe a recovery the
@@ -3161,7 +3163,7 @@ def _resolve_gf_transport(mode: str) -> GfTransportMode:
 
     A mode string, not a `GfTransport`, because every search validates this while
     only a Google Flights search should pay for `_gflight_ids` — building the
-    value here would put fli's import on the Matrix path too, measured at 75 ms
+    value here would put fli's import on the Matrix path too, measured at ~95 ms
     on top of an already-loaded `cli`. `_gflight_results` builds it instead; that
     is the first point which has already paid."""
     for known in VALID_TRANSPORT_MODES:

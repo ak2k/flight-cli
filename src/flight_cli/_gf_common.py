@@ -10,7 +10,7 @@ file like any other module.
 
 The transport vocabulary lives here for a second reason. `cli` validates
 `--gf-transport` on EVERY search, Matrix-only ones included, while `_gflight_ids`
-costs fli's import — measured at 75 ms on top of an already-loaded `cli`. A leaf
+costs fli's import — measured at ~95 ms on top of an already-loaded `cli`. A leaf
 that imports only the standard library is free, so the CLI can name the modes it
 accepts, and derive them from the `Literal` itself, without dragging rung 1 onto
 the Matrix path.

@@ -87,15 +87,16 @@ the owning thread, on every path that function returns from. Every leg of one
 search runs in that thread, so all of a round trip's navigations share one
 launch (and one "opening Chrome" line).
 
-**A round trip costs 1 + min(top_n, board rows) navigations**, not four: the
-outbound board, then one pinned return leg per outbound carried forward. `-n`
-defaults to 10, so the DEFAULT round trip is **11 navigations**, and `-n 25` is
-26. Measured with a recorder in place of the session: `-n 1` → 2, `-n 3` → 4,
-`-n 10` → 11. At the 30 s nav ceiling the default worst case is 330 s. The
-earlier "four navigations" figure came from a `top_n=1` fixture and described
-the test, not the CLI. `atexit` gets only a best-effort close, and is
-structurally same-thread: thread-local storage means interpreter shutdown on the
-main thread cannot see a worker's session.
+**A round trip costs one navigation for the outbound board, then one per pinned
+return leg**, not four. How many pins that is — and every other page-fetch count
+this backend can run up — is stated once, in the GETs table and the paragraph
+under it in `docs/memories/gf_routing_and_carriers.md`. The pin cap named there
+is why the count stops growing with `-n`. Measured here with a recorder in place
+of the session and a 30-row board on each leg: `-n 1` → 2, `-n 3` → 4, `-n 10`
+→ 11, `-n 25` → 11, `-n 100` → 11. Eleven is therefore the ceiling for any
+`-n`, so at the 30 s nav ceiling the worst case is 330 s. `atexit` gets only a
+best-effort close, and is structurally same-thread: thread-local storage means
+interpreter shutdown on the main thread cannot see a worker's session.
 
 Ctrl-C is outside any `finally`'s reach while a thread sits in `page.goto`.
 Probed 2026-09-02 (`kill -INT` mid-navigation on the `--fast` path): exit 130,
@@ -183,14 +184,13 @@ dependency and sends the reader somewhere else entirely.
 With the cycle gone the deferred import went too. `_gflight_ids` imports
 `_gf_browser` at the top of the file like any other module: it costs 0.2 ms and
 pulls no optional dependency, because the guarded `patchright` import lives
-inside `_playwright_factory` and runs at launch, not at import. An earlier
-version of this memo and three comments claimed the deferral kept patchright off
-the http path; it never did — `import flight_cli._gf_browser` leaves `sys.modules`
-patchright-free with the extra installed.
+inside `_playwright_factory` and runs at launch, not at import. Deferring the
+import would not add to that: `import flight_cli._gf_browser` leaves
+`sys.modules` patchright-free with the extra installed.
 
 The vocabulary is here for a second reason: `cli` validates `--gf-transport` on
 EVERY search, Matrix-only ones included, and `_gflight_ids` costs fli's import
-(75 ms). A standard-library-only leaf is free, so `cli._resolve_gf_transport`
+(~95 ms). A standard-library-only leaf is free, so `cli._resolve_gf_transport`
 derives the modes it accepts from `get_args(GfTransportMode.__value__)` and
 returns the narrowed type — one definition, no `cast` at any call site.
 
@@ -201,7 +201,7 @@ named for what they are.
 `import flight_cli.cli` still loads neither `_gflight_ids` nor `_gf_browser` —
 `_gf_errors` and `_gf_common` alone, for the exception catches and the transport
 vocabulary, neither of which imports anything outside the standard library. That
-is what keeps fli's 75 ms off a Matrix-only search, and
+is what keeps fli's ~95 ms off a Matrix-only search, and
 `test_resolving_a_transport_does_not_load_the_google_flights_stack` holds the
 line in a subprocess.
 
