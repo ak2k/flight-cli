@@ -477,6 +477,44 @@ def test_a_dead_browser_stops_the_pin_loop_rather_than_being_re_driven(
     assert "return boards unavailable" not in caplog.text, caplog.text
 
 
+@pytest.mark.usefixtures("no_rung_one")
+def test_a_browser_that_dies_after_a_served_pin_still_says_what_to_do(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One served pin turns the same death into a warning, and that one line is
+    then the ONLY place the user learns Chrome died.
+
+    A partial round trip is a success by contract — exit 0, a table, no raise —
+    so nothing downstream will say it again. "was unreachable" describes a
+    network and sends the reader to check one; the fix here is local, and it is
+    written down on the exception, so the line carries the exception's own
+    reason and remedy rather than a fixed phrase.
+
+    The sibling above is the other arm of the same `if`: the two differ by
+    exactly one served pin."""
+    session = _RecordingSession(
+        pages=[_page(), _return_page(), GfBrowserUnavailableError("Chrome died.")]
+    )
+
+    def _session(*, headed: bool) -> _RecordingSession:
+        return session
+
+    monkeypatch.setattr(gfb, "session", _session)
+
+    with caplog.at_level("WARNING", logger="flight_cli._gflight_ids"):
+        out = gfid.search_with_ids(
+            _filters(round_trip=True), top_n=3, transport=gfid.GfTransport(mode="browser")
+        )
+    assert out is not None
+    assert len(out) == 3  # pin 1's combinations, kept
+    assert len(session.urls) == 3, session.urls  # outbound, pin 1 served, pin 2 dead
+    assert "Chrome died." in caplog.text, caplog.text  # the reason
+    assert "--gf-transport http" in caplog.text, caplog.text  # the remedy, both halves
+    assert "--backend matrix" in caplog.text, caplog.text
+    assert "was unreachable" not in caplog.text, caplog.text  # not the wrong diagnosis
+    assert "2 of 3 return boards skipped" in caplog.text, caplog.text  # the served count
+
+
 @pytest.mark.parametrize("mode", ["http", "auto"])
 def test_the_http_rungs_never_consult_the_browser(
     monkeypatch: pytest.MonkeyPatch, mode: str
@@ -854,12 +892,19 @@ def test_a_ctrl_c_during_the_launch_is_not_turned_into_a_refusal(
 ) -> None:
     """And once more on the way in. The launch block is the broadest catch of
     the three — every distinction patchright draws collapses into one refusal
-    there — so it is the one where an interrupt is most easily lost."""
-    _install(monkeypatch, tmp_path, launch_error=KeyboardInterrupt())
+    there — so it is the one where an interrupt is most easily lost.
+
+    The driver is left RUNNING, and that is asserted rather than smoothed over:
+    an interrupt skips the `except Exception` that would have called
+    `self.close()`, and `cli`'s `finally` is the owner that recovers it. This
+    pins today's shape, so a change that cleans up on a `BaseException` here
+    updates the line rather than being caught by it."""
+    pw = _install(monkeypatch, tmp_path, launch_error=KeyboardInterrupt())
     session = gfb.GfBrowserSession(headed=False)
     with pytest.raises(KeyboardInterrupt) as e:
         session.get_html(_PAGE_URL)
     assert not isinstance(e.value, GfBrowserUnavailableError)
+    assert pw.stopped is False
     session.close()
 
 
@@ -1876,8 +1921,9 @@ def test_the_fast_path_is_handed_the_transport_the_user_named(
         ([], ("http", False)),
         (["--gf-transport", "browser"], ("browser", False)),
         (["--gf-transport", "browser", "--gf-headed"], ("browser", True)),
+        (["--gf-transport", "auto", "--gf-headed"], ("auto", True)),
     ],
-    ids=["default", "browser", "browser-headed"],
+    ids=["default", "browser", "browser-headed", "auto-headed"],
 )
 def test_the_enriched_path_is_handed_the_transport_the_user_named(
     monkeypatch: pytest.MonkeyPatch, extra: list[str], expected: tuple[str, bool]

@@ -1981,10 +1981,10 @@ def _report_pin_outcome(
         # `test_a_throttle_on_a_later_pin_keeps_what_was_already_served`
         # and its transport-outage sibling.
         log.warning(
-            "stopped pinning: Google Flights %s; %d of %d return boards skipped",
-            "rate-limited this IP" if isinstance(stopped, GfThrottledError) else "was unreachable",
+            "stopped pinning: %d of %d return boards skipped; %s",
             skipped,
             pins,
+            _why_pinning_stopped(stopped),
         )
     elif refused and not served:
         # "Nothing was served", rather than "every pin refused": one pin
@@ -2010,3 +2010,19 @@ def _report_pin_outcome(
         # arriving last speaks for boards that stopped parsing. Ranking the
         # kinds is the alternative, and it needs a rule this loop does not have.
         raise refused[-1]
+
+
+def _why_pinning_stopped(stopped: GfBackendError) -> str:
+    """The clause naming what ended the fan-out, in the failure's own words.
+
+    Not one fixed phrase, because the three stops send the reader to three
+    different places: "was unreachable" describes a network and asks them to
+    check one, while a Chrome that will not run is fixed locally and the
+    exception is where that fix is written down. The caller prints this LAST
+    in its line because a browser refusal ends in its own remedy, and a
+    sentence that ends on the move the user makes reads as one."""
+    if isinstance(stopped, GfThrottledError):
+        return "Google Flights rate-limited this IP"
+    if isinstance(stopped, GfBrowserUnavailableError):
+        return f"the browser rung stopped — {stopped}"
+    return "Google Flights was unreachable"
