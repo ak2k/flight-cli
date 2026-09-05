@@ -1647,8 +1647,11 @@ class _GfRefusal(NamedTuple):
     The two fields are not interchangeable, and the difference is markup.
     `message` is PRE-RENDERED rich markup — it carries its own tags and any
     exception text in it is already escaped, so print it as-is and never escape
-    it again. `note` is PLAIN text with no tags, so a caller embedding it in
-    markup of its own must escape it there."""
+    it again. `note` carries no tags of its own, but the exception text in it
+    has been through `_safe_text` as well, so it is equally console-ready: a
+    caller drops it straight into markup of its own. Escaping it there a second
+    time puts a visible backslash in front of every bracket the remote text
+    carried, on the default search path."""
 
     note: str
     message: str
@@ -1657,8 +1660,7 @@ class _GfRefusal(NamedTuple):
 _GF_DECLINED = "Google Flights declined the request"
 
 
-def _gf_refusal(  # noqa: PLR0911 — one return per refusal type is the point;
-    # collapsing arms to satisfy the count is exactly the failure this function prevents.
+def _gf_refusal(  # noqa: PLR0911 — one return per refusal type; see the docstring
     e: GfBackendError,
     *,
     transport: GfTransportMode = TRANSPORT_HTTP,

@@ -718,9 +718,9 @@ def _is_consent_page(*, final_url: str, html: str) -> bool:
     it never posts to it.
 
     Only meaningful once `ds:1` has come back missing, and `_rows_from_page_html`
-    checks in that order. Neither signal is a bare substring: a results page that merely
-    mentions the domain is not a consent wall, and answering that it is sends
-    the user to fix a problem they do not have."""
+    checks in that order. Neither signal is a bare substring: a results page
+    that merely mentions the domain is not a consent wall, and answering that it
+    is sends the user to fix a problem they do not have."""
     parsed = _split_url(final_url)
     host = (parsed.hostname or "").lower()
     if _CONSENT_HOST_RE.match(host):

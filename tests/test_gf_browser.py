@@ -27,7 +27,10 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
-from conftest import _answering  # one home for the re-pointing rule; see its docstring
+# One home for the callback envelope, the re-pointing rule and the stderr
+# capture; each helper's own docstring says why it is shaped as it is.
+from conftest import _answering, _ds1, capture_err
+from conftest import _page as _page_carrying
 from flight_cli import _gf_browser as gfb
 from flight_cli import _gf_common as gfc
 from flight_cli import _gflight_ids as gfid
@@ -48,24 +51,13 @@ if TYPE_CHECKING:
     from flight_cli._gf_common import GfTransportMode
     from flight_cli._gflight_ids import GFlightWithId
 
-FIXTURE_DIR = pathlib.Path(__file__).parent / "fixtures" / "gflight_page"
 _PAGE_URL = "https://www.google.com/travel/flights?tfs=abc"
 _SORRY_URL = "https://www.google.com/sorry/index?continue=x"
 
 
-def _page_carrying(ds1_json: str) -> str:
-    """A minimal page carrying `ds1_json`, as Google inlines its `ds:1` blob."""
-    return (
-        "<!doctype html><html><body><script>"
-        f"AF_initDataCallback({{key: 'ds:1', hash: '2', "
-        f"data:{ds1_json}, sideChannel: {{}}}});"
-        "</script></body></html>"
-    )
-
-
 def _page(name: str = "ds1_jfk_lax_3rows.json") -> str:
-    """A minimal page carrying the fixture's `ds:1` blob, as Google inlines it."""
-    return _page_carrying((FIXTURE_DIR / name).read_text())
+    """A page carrying the fixture's `ds:1` blob in the captured callback envelope."""
+    return _page_carrying(_ds1(name))
 
 
 def _return_page() -> str:
@@ -77,7 +69,7 @@ def _return_page() -> str:
     to answer the question it asked, exactly as rung 1 does."""
     return _page_carrying(
         _answering(
-            (FIXTURE_DIR / "ds1_jfk_lax_3rows.json").read_text(),
+            _ds1("ds1_jfk_lax_3rows.json"),
             origin="LAX",
             destination="JFK",
             date="2026-10-24",
@@ -1124,22 +1116,6 @@ def test_the_default_search_path_escapes_the_note_exactly_once(
     assert "\\[/y]" not in out, out
 
 
-def _capture_err(monkeypatch: pytest.MonkeyPatch) -> io.StringIO:
-    """Replace `cli.err` with a wide, colourless console over a buffer.
-
-    Wide on purpose: an assertion on a substring that rich wrapped mid-token
-    fails for a reason that has nothing to do with what is under test."""
-    from rich.console import Console
-
-    from flight_cli import cli
-
-    buf = io.StringIO()
-    monkeypatch.setattr(
-        cli, "err", Console(file=buf, width=1000, force_terminal=False, no_color=True)
-    )
-    return buf
-
-
 def _one_leg() -> tuple[Leg, ...]:
     return (Leg(origins=("JFK",), destinations=("LAX",), date=date(2026, 10, 14)),)
 
@@ -1155,7 +1131,7 @@ def test_an_untyped_crash_carrying_markup_survives_the_fast_path(
 
     from flight_cli import cli
 
-    buf = _capture_err(monkeypatch)
+    buf = capture_err(monkeypatch)
 
     def _boom(*_a: Any, **_kw: Any) -> list[Any]:
         raise RuntimeError("fli said [/x] no")
@@ -1180,7 +1156,7 @@ def test_an_untyped_crash_carrying_markup_survives_the_enriched_path(
     from flight_cli import cli
     from flight_cli.client import MatrixApiError
 
-    buf = _capture_err(monkeypatch)
+    buf = capture_err(monkeypatch)
 
     class _DeadMatrix:
         def __init__(self, **_kw: Any) -> None: ...
@@ -1432,7 +1408,7 @@ def test_the_default_transport_is_rung_one() -> None:
 def test_the_fixture_is_the_shape_the_page_serves() -> None:
     """Guards the helper above: if the fixture stops being a three-row `ds:1`
     payload, every parity assertion here becomes vacuous."""
-    payload = json.loads((FIXTURE_DIR / "ds1_jfk_lax_3rows.json").read_text())
+    payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
     board = gfid._rows_from_ds1(payload)
     assert len(board.rows) == 3
     assert board.blocks_seen == 2  # both row blocks present, so an empty board is authoritative

@@ -25,6 +25,7 @@ stub above all of it would pin none of it.
 from __future__ import annotations
 
 import datetime
+import io
 import json
 import pathlib
 import threading
@@ -68,6 +69,25 @@ def _no_browser_launch(  # pyright: ignore[reportUnusedFunction] - autouse pytes
         pytest.fail("this test reached rung 2's real browser launcher")
 
     monkeypatch.setattr(_gf_browser, "_playwright_factory", _forbidden)
+
+
+def capture_err(monkeypatch: pytest.MonkeyPatch) -> io.StringIO:
+    """Replace `cli.err` with a wide, colourless console over a buffer.
+
+    Public, unlike the fixture helpers around it: every caller is another test
+    module, and a leading underscore would say the opposite.
+
+    Wide on purpose: an assertion on a substring that rich wrapped mid-token
+    fails for a reason that has nothing to do with what is under test."""
+    from rich.console import Console
+
+    from flight_cli import cli
+
+    buf = io.StringIO()
+    monkeypatch.setattr(
+        cli, "err", Console(file=buf, width=1000, force_terminal=False, no_color=True)
+    )
+    return buf
 
 
 FIXTURE_DIR = pathlib.Path(__file__).parent / "fixtures"
@@ -152,7 +172,7 @@ class _FakeRateLimiter:
 
 
 class _FakeClient:
-    """fli's `Client` at the surface `_one_call` touches: the shared rate
+    """fli's `Client` at the surface `_get_search_page` touches: the shared rate
     limiter and the per-thread session. Counts GETs so a test can assert the
     request budget as well as the value."""
 

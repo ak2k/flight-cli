@@ -583,23 +583,17 @@ def _fan_out_over(monkeypatch: pytest.MonkeyPatch, failure: BaseException) -> st
     """Run the real fan-out with every cabin's query raising `failure`, and
     return what the user was told on stderr.
 
-    A wide, colourless console so an assertion cannot fail on rich's wrapping,
-    and markup left ON because surviving the markup pass is the point."""
-    import io
+    Markup is left ON, because surviving the markup pass is the point."""
     from datetime import date as _date
 
-    from rich.console import Console
-
+    from conftest import capture_err
     from flight_cli import _gflight_ids as gfid
     from flight_cli import cli
     from flight_cli.domain import Cabin as _Cabin
     from flight_cli.domain import Leg as _Leg
     from flight_cli.domain import SearchOptions as _SearchOptions
 
-    buf = io.StringIO()
-    monkeypatch.setattr(
-        cli, "err", Console(file=buf, width=1000, force_terminal=False, no_color=True)
-    )
+    buf = capture_err(monkeypatch)
 
     def _raise(*_a: Any, **_kw: Any) -> list[Any]:
         raise failure

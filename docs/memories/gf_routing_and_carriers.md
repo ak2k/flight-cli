@@ -121,7 +121,7 @@ follow-up. Details, measurements and traps: [gf_browser_rung.md](gf_browser_rung
   redirect puts `/sorry/` in the final URL; Google also serves the same page
   in place with HTTP 200, where the body marker ("Our systems have detected
   unusual traffic") is the only tell; and an outright **HTTP 429, which arrives
-  as a RESPONSE**. `_fetch_page` goes through fli's session rather than
+  as a RESPONSE**. `_get_search_page` goes through fli's session rather than
   `Client.get`, so nothing calls `raise_for_status()` on our behalf and
   `_rows_from_page_html` reads the status itself — which is what lets the ladder
   see a throttle instead of a wrapped transport error.
@@ -211,8 +211,8 @@ product is the row above.
 
 Two things make the rest of those numbers hold, and this paragraph is where that
 arithmetic lives — the docstrings that depend on it point here rather than restating it.
-`_fetch_page` goes through fli's SESSION, not `Client.get`, which is wrapped in
-`@retry(stop_after_attempt(3))`: a throttled leg would otherwise cost up to 15
+`_get_search_page` goes through fli's SESSION, not `Client.get`, which is wrapped
+in `@retry(stop_after_attempt(3))`: a throttled leg would otherwise cost up to 15
 GETs, fli's ladder running inside each rung of ours. `retry_throttled` is the
 only ladder. And the round-trip pin is capped
 at 10 regardless of `top_n`: the multi-cabin path bumps `top_n` 5x (to 100) to
