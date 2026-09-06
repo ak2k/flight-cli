@@ -338,7 +338,6 @@ class GfBrowserSession:
         task to a loop nobody drives and spins on a dead greenlet — measured at
         30 s and still going, ended only by `SIGKILL`. Stopping the driver IS the
         close in that state."""
-        context, playwright = self._context, self._playwright
         if self._dead:
             # Stop FIRST, then drop the handles. Three things set the dead flag
             # and only one of them killed anything — the stop itself did, the two
@@ -350,6 +349,7 @@ class GfBrowserSession:
             self._page = self._context = self._playwright = None
             _forget(self)
             return
+        context, playwright = self._context, self._playwright
         self._page = self._context = self._playwright = None
         from_context: KeyboardInterrupt | None = None
         from_driver: KeyboardInterrupt | None = None

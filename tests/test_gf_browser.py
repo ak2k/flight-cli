@@ -48,7 +48,7 @@ from flight_cli.domain import Leg, SearchOptions, SpecificDateSearch
 from flight_cli.fli_bridge import to_fli_filter
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from flight_cli._gf_common import GfTransportMode
     from flight_cli._gflight_ids import GFlightWithId
@@ -2147,7 +2147,7 @@ class _Recorder:
 
 
 @pytest.fixture
-def keep_sigint() -> Any:
+def keep_sigint() -> Iterator[None]:
     """Save and restore this process's SIGINT disposition around a test.
 
     The guard deliberately leaves `SIG_IGN` installed once an interrupt has been
@@ -2488,13 +2488,11 @@ def test_the_guard_is_a_no_op_off_the_main_thread_and_still_runs_its_body() -> N
     assert ran == ["body"]
 
 
-def _quiet() -> Any:
-    async def _sleep_briefly() -> None:
-        import anyio
+async def _sleep_briefly() -> None:
+    """A child the group is still running when the host frame raises."""
+    import anyio
 
-        await anyio.sleep(0.01)
-
-    return _sleep_briefly
+    await anyio.sleep(0.01)
 
 
 def _weave_raising(where: str, exc: BaseException) -> Any:
@@ -2513,7 +2511,7 @@ def _weave_raising(where: str, exc: BaseException) -> Any:
 
                 tg.start_soon(_raise)
             else:
-                tg.start_soon(_quiet())
+                tg.start_soon(_sleep_briefly)
                 raise exc
 
     return _go
