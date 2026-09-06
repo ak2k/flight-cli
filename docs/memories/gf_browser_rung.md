@@ -99,12 +99,37 @@ of the session and a 30-row board on each leg: `-n 1` → 2, `-n 3` → 4, `-n 1
 best-effort close, and is structurally same-thread: thread-local storage means
 interpreter shutdown on the main thread cannot see a worker's session.
 
-Ctrl-C is outside any `finally`'s reach while a thread sits in `page.goto`.
-Probed 2026-09-02 (`kill -INT` mid-navigation on the `--fast` path): exit 130,
-**no orphan Chrome, no `Singleton*` left behind** — the interrupt unwinds
-through the `finally` — plus one line of patchright teardown noise on stderr
-(`Future exception was never retrieved … TargetClosedError`). A `SIGKILL` would
-strand both, which is why the lock message names that case too.
+## Ctrl-C
+
+**A SIGINT at any point of a browser search exits 130 within 0.06 s, on both
+arms.** The session closes exactly once, no Chrome survives, no `Singleton*` is
+left where it would block the next search, and a second Ctrl-C during the
+shutdown changes none of that. stdout carries nothing partial — a table already
+painted before the interrupt is a whole answer and stays — and stderr carries no
+line about the interruption at all, only the launch notice the run had already
+printed. Measured across fourteen cases: both arms at 0.3/0.8/1.2/2.5 s and
+mid-pin-loop, a second SIGINT 50 ms into each arm's shutdown, `--format json`,
+and one `--gf-headed` window.
+
+The mechanism, because a hang here is otherwise re-derived from scratch: an
+interrupt that unwinds a patchright call kills the greenlet running that call's
+event loop, so every later call through the sync API posts to a loop nobody
+drives and spins on a dead greenlet — which is why teardown after an interrupt
+kills the driver process rather than closing anything. Chrome exits with it,
+being the peer of the pipe the driver holds.
+
+**A process-group signal cannot test any of this.** patchright's node driver
+installs its own SIGINT handler and closes Chrome itself, so `killpg` — and a
+bare Ctrl-C in a job-controlled shell — repairs the defect it is meant to
+detect. Signal the CLI process alone. Two more measurement traps sit next to it:
+`subprocess.communicate()` returns when the last holder of the inherited stderr
+fd goes away, and the driver and Chrome hold it, so it timed a 0.05 s exit at
+4.08 s — poll for the exit instead; and a `Singleton*` count taken with
+`pgrep -f gf-browser-profile` counts the counting command.
+
+A Ctrl-C therefore leaves no `Singleton*` behind, which narrows what the lock
+message below means: the "interrupted run" it names is now one killed from
+outside, where the residue is real and the user does have to clear it.
 
 ## The profile, and its lock
 

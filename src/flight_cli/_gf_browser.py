@@ -423,9 +423,11 @@ def _swallow(what: str, shutdown: Callable[[], object]) -> KeyboardInterrupt | N
     The catch is `BaseException`, not `Exception`, because `close` runs two of
     these in sequence: anything escaping the first would skip the driver
     shutdown and strand a live Chrome, the exact outcome this module exists to
-    prevent. Signals are delivered to the main thread, so the realistic way one
-    arrives is a Ctrl-C on `--fast` or at `atexit`; the enriched path tears down
-    from an anyio worker.
+    prevent. That sequence is the healthy path only — a session whose patchright
+    calls were unwound by an interrupt runs neither step, and reaches the same
+    outcome by killing the driver instead (`close`). Signals are delivered to the
+    main thread, so the realistic way one arrives is a Ctrl-C on `--fast` or at
+    `atexit`; the enriched path tears down from an anyio worker.
 
     Only the interrupt is handed back, because it is the only one of these that
     is the user's instruction rather than someone else's control flow.
@@ -632,7 +634,10 @@ def _close_at_exit() -> None:
     one: `_sessions` is thread-local, so an interpreter shutdown running on the
     main thread sees only a main-thread session. A worker thread's session is
     closed by that worker or not at all — reaching across would raise
-    `greenlet.error` and strand the Chrome it was trying to kill.
+    `greenlet.error` and strand the Chrome it was trying to kill. The one thing
+    that DOES cross a thread is a signal to the driver process, and it is the
+    interrupt path that sends it: by the time this runs there is no search left
+    to stop, only a process on its way out.
 
     `BaseException`, unlike the caller's `finally`: `close` re-raises a Ctrl-C
     so a run still in progress stops, and at interpreter shutdown there is no
