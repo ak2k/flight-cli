@@ -1855,10 +1855,17 @@ def _run_gflight_path(
     transport flag, so it never asks for another.
     """
     _pin_cap_note(legs=legs, top_n=top_n)
+    # Deferred like the adapter below: this arm reaches rung 2 only when the
+    # transport says so, and the module pulls in nothing patchright at import.
+    from ._gf_browser import interrupt_guard  # noqa: PLC0415 — GF-only; see above
     from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
 
     try:
-        results = _gflight_results(legs, opts, top_n, gf_mode, gf_headed)
+        # Armed around the whole search, not around the browser: a Ctrl-C is only
+        # answerable while the process still holds the driver, and on this arm
+        # the navigation runs on the thread the signal is delivered to.
+        with interrupt_guard():
+            results = _gflight_results(legs, opts, top_n, gf_mode, gf_headed)
     except GfBackendError as e:
         err.print(_gf_refusal(e, transport=gf_mode).message)
         raise typer.Exit(1) from e
@@ -2054,8 +2061,33 @@ def _run_the_weave(go: Callable[[], Coroutine[Any, Any, None]], state: dict[str,
     the most ordinary command there is — and the rows the other backend already
     has go with it. A stash is not an outcome: every path out of its caller
     reads it, including the one whose other half succeeded."""
+    from ._gf_browser import interrupt_guard  # noqa: PLC0415 — GF-only; see below
+
     try:
-        anyio.run(go)
+        try:
+            # OUTSIDE `anyio.run`, and it may not move inward. `asyncio.Runner`
+            # installs a SIGINT handler of its own only when the disposition is
+            # still the default (`asyncio/runners.py:102-104`) and restores that
+            # default on the way out (`:125-129`), so a guard armed from inside a
+            # coroutine or a worker would be replaced or reset. Armed here, the
+            # Runner installs nothing. `_run_enriched_path` is the only caller,
+            # so this is the enriched search path and nothing else.
+            with interrupt_guard():
+                anyio.run(go)
+        except* KeyboardInterrupt:
+            # With no Runner handler installed, the interrupt lands wherever the
+            # main thread stands — which includes the task group's own host
+            # frame, and the group appends it and re-raises it wrapped. Every
+            # handler from here to the exit matches the BARE class: typer turns a
+            # `KeyboardInterrupt` into exit 130 and a group of them into a
+            # traceback and exit 1, so unwrapped the user's stop reads as a crash.
+            # `except*` because a nested group unwraps the same way for free.
+            #
+            # A group carrying an interrupt AND a non-`Exception` leaf still
+            # propagates as a group, unchanged. Widening this arm to catch that
+            # would swallow the other leaf; it needs two of them in the same
+            # instant, and the shape below is the one that has a caller.
+            raise KeyboardInterrupt from None
     except (typer.Exit, typer.Abort):
         # An orderly exit is a decision, not a failure. `typer.Exit` subclasses
         # `RuntimeError` on the installed click, so the arm below would catch it

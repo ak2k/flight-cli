@@ -34,8 +34,10 @@ Three things are deliberate and easy to undo by accident:
 from __future__ import annotations
 
 import atexit
+import contextlib
 import logging
 import os
+import signal
 import threading
 from typing import TYPE_CHECKING, Any
 
@@ -46,9 +48,16 @@ from ._gf_errors import BROWSER_DEFAULT_REMEDY, GfBrowserUnavailableError
 
 if TYPE_CHECKING:
     import pathlib
-    from collections.abc import Callable
+    import types
+    from collections.abc import Callable, Generator
 
 log = logging.getLogger(__name__)
+# Resolved at import because `stop_driver` touches it from inside a signal
+# handler. `getLogger` takes the logging module lock, and a handler runs between
+# two bytecodes of whatever the main thread was doing — including a frame that
+# already holds it. `setLevel` alone is safe there (that lock is re-entrant, and
+# nothing under it does I/O); a lookup would be one more acquisition for nothing.
+_asyncio_log = logging.getLogger("asyncio")
 
 # DIVERGE: a transport module writing to the console. The launch notice lives at
 # the launch site, not in `cli`, because launching Chrome costs seconds a caller
@@ -179,9 +188,17 @@ class GfBrowserSession:
 
     def __init__(self, *, headed: bool) -> None:
         self._headed = headed
+        # The manager `sync_playwright()` returns, kept for the whole life of the
+        # session because it is the only handle on the driver PROCESS.
+        # `_playwright` is what that manager started, and it names no subprocess.
+        self._manager: Any = None
         self._playwright: Any = None
         self._context: Any = None
         self._page: Any = None
+        # "This browser is finished, and its sync API must not be driven again."
+        # See `close`: after an interrupt unwinds a patchright call, every
+        # further call through that API spins forever.
+        self._dead = False
 
     def __enter__(self) -> GfBrowserSession:
         return self
@@ -201,9 +218,17 @@ class GfBrowserSession:
             response = page.goto(url, wait_until=_WAIT_UNTIL, timeout=_NAV_TIMEOUT_MS)
         # patchright's error tree is broad, and all of it means the same thing: no bytes.
         except Exception as e:
+            self._interrupted_or_raise()
             raise GfBrowserUnavailableError(
                 f"Chrome could not load Google Flights' search page: {_detail(e)}"
             ) from e
+        # Nothing is caught here: the arm records that a patchright call was
+        # unwound by something that is not an error — the user's interrupt — and
+        # re-raises it untouched. What it records is that the greenlet running
+        # this session's event loop died with it, which is what `close` reads.
+        except BaseException:
+            self._dead = True
+            raise
         if response is None:
             raise GfBrowserUnavailableError(
                 "Chrome navigated to Google Flights' search page but returned no response."
@@ -214,11 +239,86 @@ class GfBrowserSession:
             status_code = int(response.status)
         # A body that cannot be read is the same refusal as one that never arrived.
         except Exception as e:
+            self._interrupted_or_raise()
             raise GfBrowserUnavailableError(
                 f"Chrome loaded Google Flights' search page but its body could not be read: "
                 f"{_detail(e)}"
             ) from e
+        # The same record one step later, and for the same reason.
+        except BaseException:
+            self._dead = True
+            raise
         return PageFetch(html=html, final_url=final_url, status_code=status_code)
+
+    def _interrupted_or_raise(self) -> None:
+        """Report a navigation that failed BECAUSE we stopped it as the interrupt
+        it is, rather than letting the caller wrap it as a refusal.
+
+        Killing the driver is how a stop reaches a navigation running on a thread
+        no exception can reach, and what that navigation then raises is an
+        ordinary transport error. Wrapped as one it becomes "Chrome was
+        unreachable" — which the pin loop absorbs, ending a run the user asked to
+        end with a warning about a network they never had trouble with."""
+        if self._dead:
+            raise KeyboardInterrupt
+
+    def stop_driver(self) -> None:
+        """Stop this session's browser from ANY thread, including a signal handler.
+
+        The one teardown that is neither loop-bound nor greenlet-bound: killing
+        the driver process. Every other way out — `context.close()`,
+        `playwright.stop()` — goes through patchright's sync API, which may only
+        be driven by the thread that built the object and only while that
+        thread's event loop is alive. A worker sitting in `page.goto` satisfies
+        neither, and cannot be woken by an exception or by cancellation; only the
+        transport dying wakes it.
+
+        Chrome needs no signal of its own. The driver holds its remote-debugging
+        pipe and Chrome exits when that peer disappears — measured, every Chrome
+        process gone within 0.6 s and no `Singleton*` left in the profile.
+
+        `SIGKILL` rather than the `SIGINT` the driver handles gracefully: the
+        graceful path writes its last frames into a Python that is already
+        unwinding, and the `EPIPE` that follows is an unhandled `error` event —
+        25 lines of Node stack on the user's terminal, on the run they asked to
+        end. A dead driver writes nothing. POSIX-only, as is every other caller
+        of `os.kill` here; this rung runs a real Chrome and has no Windows path.
+
+        The pid is resolved HERE and not recorded at launch, because the session
+        is registered before `start()` is called: an interrupt anywhere inside
+        `start()` still finds the process that call spawned.
+
+        The recorded manager can in principle name a driver that already exited
+        and whose pid the OS reused — `close` clears it only after
+        `playwright.stop()` returns, so that window spans a normal teardown. It
+        is accepted rather than closed: the alternative is a liveness check that
+        is itself racy, and every caller here is an interrupt path where the
+        driver was alive moments earlier.
+
+        The session is dead afterwards whether or not a pid was found, because
+        the caller has already decided this browser is finished."""
+        manager, self._manager = self._manager, None
+        self._dead = True
+        # Killing the driver mid-handshake leaves patchright's own `init` task
+        # holding the transport error, and asyncio reports every future nobody
+        # retrieved — measured at 14 stderr lines and a traceback, about a
+        # connection this process cut on purpose. Raised on every stop, before
+        # the pid is even looked up, because the report is written when the task
+        # is collected rather than when it fails: a stop that found no pid still
+        # severs the pipe by dropping the manager. The narrower fix — an
+        # exception handler on the driver's own loop, or retrieving that one
+        # future — needs a fourth private patchright attribute and cannot be
+        # reached from a signal handler, so this takes the blunt one. It costs
+        # asyncio's diagnostics for the rest of the process's life, bought by the
+        # fact that a stop is already under way.
+        _asyncio_log.setLevel(logging.CRITICAL)
+        pid = _driver_process_id(manager)
+        if pid is None:
+            return
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError as e:  # already gone, or never ours
+            log.debug("could not stop the gflight browser driver %d: %s", pid, e)
 
     def close(self) -> None:
         """Shut the context and the driver down.
@@ -230,8 +330,26 @@ class GfBrowserSession:
         A `KeyboardInterrupt` is the one exception to that. The driver shutdown
         still runs, and the interrupt surfaces after it. Dropping it would let
         `--fast` finish rendering a table after the user asked the process to
-        stop."""
+        stop.
+
+        None of that holds once the session is dead, and the sync API must not be
+        touched then. An interrupt that unwinds a patchright call kills the
+        greenlet its event loop runs in; a `context.close()` after that posts a
+        task to a loop nobody drives and spins on a dead greenlet — measured at
+        30 s and still going, ended only by `SIGKILL`. Stopping the driver IS the
+        close in that state."""
         context, playwright = self._context, self._playwright
+        if self._dead:
+            # Stop FIRST, then drop the handles. Three things set the dead flag
+            # and only one of them killed anything — the stop itself did, the two
+            # arms recording an unwound patchright call did not — and dropping
+            # the handles makes the driver unreachable for good. Stopping here is
+            # what makes "dead" mean "the driver is down" whichever one set it.
+            # On the path that already killed, this is a no-op.
+            self.stop_driver()
+            self._page = self._context = self._playwright = None
+            _forget(self)
+            return
         self._page = self._context = self._playwright = None
         from_context: KeyboardInterrupt | None = None
         from_driver: KeyboardInterrupt | None = None
@@ -245,6 +363,8 @@ class GfBrowserSession:
             # a Chrome running that nothing will come back for.
             if playwright is not None:
                 from_driver = _swallow("driver", playwright.stop)
+        self._manager = None
+        _forget(self)
         interrupt = from_context or from_driver
         if interrupt is not None:
             raise interrupt
@@ -263,7 +383,12 @@ class GfBrowserSession:
                 f"Google Flights' browser profile directory {profile} could not be created: {e}"
             ) from e
         try:
-            self._playwright = factory().start()
+            # Registered BEFORE the driver starts. `stop_driver` resolves the pid
+            # when it needs it, so an interrupt anywhere inside `start()` still
+            # reaches the process that call spawned.
+            self._manager = factory()
+            _remember(self)
+            self._playwright = self._manager.start()
             self._context = self._playwright.chromium.launch_persistent_context(
                 user_data_dir=str(profile),
                 headless=not self._headed,
@@ -276,6 +401,14 @@ class GfBrowserSession:
         except Exception as e:
             self.close()
             raise _launch_failure(profile, _detail(e)) from e
+        # The launch block's broad `except Exception` above calls `close()`; an
+        # interrupt skips it, so this is where the launch records that patchright
+        # was unwound. Re-raised untouched — the caller's `finally` closes, and
+        # the flag is what tells that close to stop the driver rather than drive
+        # a sync API whose greenlet is gone.
+        except BaseException:
+            self._dead = True
+            raise
         return self._page
 
 
@@ -334,6 +467,136 @@ def _detail(e: BaseException) -> str:
     lines = [line.strip() for line in str(e).strip().splitlines() if line.strip()]
     text = lines[0] if lines else e.__class__.__name__
     return text if text.endswith((".", "!", "?")) else f"{text}."
+
+
+def _driver_process_id(manager: Any) -> int | None:
+    """The pid of patchright's node driver, or None if this build hides it.
+
+    Private attributes, deliberately: patchright hands out no public handle on
+    the process it spawned, and a stop that has to cross a thread has nothing
+    else to aim at. Read against patchright 1.59.1 —
+    `PlaywrightContextManager.__enter__` builds the `Connection`
+    (`sync_api/_context_manager.py:39`) over a `PipeTransport` whose `connect()`
+    assigns `_proc` (`_impl/_connection.py:234`, `_impl/_transport.py:93`).
+
+    A lookup rather than an assertion, because `pyproject.toml` pins
+    `patchright>=1.59` with no upper bound: a build that moves any of the three
+    is one `uv sync` away, and it returns None here rather than raising inside a
+    signal handler. `_proc` is assigned only after `create_subprocess_exec`
+    returns, so for one await a child exists that this cannot name — self-healing,
+    because that driver exits on stdin EOF.
+
+    A None from a build that MOVED the chain is not the same as a None from a
+    session that never launched, and only the first is a problem: it is a driver
+    nobody can stop. `tests/test_gf_browser.py` pins the chain against the
+    installed patchright so that a bump fails there rather than as an orphan
+    Chrome nobody reported."""
+    try:
+        return int(manager._connection._transport._proc.pid)
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+# Re-entrant, and that is the whole reason it exists: the SIGINT handler runs on
+# the main thread between two bytecodes of whatever that thread was doing —
+# including a `_remember` or `_forget` that already holds this lock. A plain
+# `Lock` deadlocks there, in a handler, with the browser still open.
+_live_lock = threading.RLock()
+# Every session that has started a driver, on every thread. The thread-local
+# below answers "which session is MINE"; this answers "what is open in this
+# PROCESS", which is the only question a signal handler can ask. Strong
+# references, which is harmless for a set that lives as long as the process and
+# whose entries are removed by `close`.
+_live: set[GfBrowserSession] = set()
+
+
+def _remember(session: GfBrowserSession) -> None:
+    with _live_lock:
+        _live.add(session)
+
+
+def _forget(session: GfBrowserSession) -> None:
+    with _live_lock:
+        _live.discard(session)
+
+
+def stop_all_drivers() -> None:
+    """Stop every browser open in this process, from wherever the caller stands.
+
+    A session that never launched was never registered, and one whose manager is
+    already gone degrades to a no-op, so this is safe to call at any moment."""
+    with _live_lock:
+        open_now = list(_live)
+    for s in open_now:
+        s.stop_driver()
+
+
+@contextlib.contextmanager
+def interrupt_guard() -> Generator[None]:
+    """Make a Ctrl-C during a browser search reach the browser. Every path that
+    can open a browser session arms this.
+
+    The default handler raises `KeyboardInterrupt` on the main thread and stops
+    there, which leaves the two arms broken in different ways. On `--fast` the
+    interrupt unwinds patchright's own call and kills the greenlet its event loop
+    runs in, so the teardown that follows has nothing left to drive. On the
+    enriched path the navigation is on a worker thread that no exception and no
+    cancellation can reach, and `anyio.to_thread.run_sync` will not abandon it,
+    so the process waits out every remaining navigation. Stopping the drivers
+    FIRST fixes both: the worker's navigation fails at once and unwinds through
+    its own `finally`, and the main thread's teardown knows not to use the sync
+    API.
+
+    A handler, and not a `try/except` around the call, because the exception
+    arrives too late — by then the enriched path is inside anyio's unwind,
+    waiting for the very worker this exists to wake.
+
+    Arm it OUTSIDE `anyio.run`, never inside a coroutine or a worker.
+    `asyncio.Runner` installs its own SIGINT handler only when the current
+    disposition is `signal.default_int_handler` (`asyncio/runners.py:102-104`)
+    and restores that default on the way out if its own is still installed
+    (`:125-129`) — so a guard armed from inside would be replaced or reset. Armed
+    from outside, the Runner installs nothing and the interrupt lands as a plain
+    `KeyboardInterrupt` wherever the main thread stands. On 3.12 those are
+    CPython's own lines: anyio imports `asyncio.Runner` rather than using its
+    vendored copy (`anyio/_backends/_asyncio.py:111-112`).
+
+    After the first one, SIGINT is IGNORED for the rest of the process's life —
+    including by the restore below, which is skipped. There is nothing left for a
+    second Ctrl-C to stop: the drivers are dead and the exit is already running.
+    What it would do instead is land in the middle of that exit, as a second
+    `KeyboardInterrupt` through interpreter shutdown or, once the handler was
+    restored, as death by signal — which turns a clean 130 into rc -2 and reports
+    a stop the user asked for as a crash. The cost is real: a shutdown that ever
+    did hang could no longer be interrupted from the same terminal.
+
+    Only the main thread may install a handler; on any other this is a no-op that
+    still runs its body, which is correct — that thread's Ctrl-C arrives on the
+    main one anyway."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.getsignal(signal.SIGINT)
+    seen = False
+
+    def _on_sigint(_signum: int, _frame: types.FrameType | None) -> None:
+        nonlocal seen
+        # FIRST, before anything that can be re-entered. `Logger.setLevel` under
+        # the stop below clears the logging manager's cache, and that release is
+        # not guarded by a `try`/`finally` — a second SIGINT arriving inside it
+        # would raise out and leave the logging module lock held for the life of
+        # the process.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        seen = True
+        stop_all_drivers()
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, _on_sigint)
+    try:
+        yield
+    finally:
+        if not seen:
+            signal.signal(signal.SIGINT, previous)
 
 
 _sessions = threading.local()

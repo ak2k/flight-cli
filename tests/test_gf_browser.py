@@ -21,6 +21,7 @@ import inspect
 import io
 import json
 import pathlib
+import signal
 import sys
 import threading
 from datetime import date
@@ -894,18 +895,27 @@ def test_a_ctrl_c_during_the_launch_is_not_turned_into_a_refusal(
     the three — every distinction patchright draws collapses into one refusal
     there — so it is the one where an interrupt is most easily lost.
 
-    The driver is left RUNNING, and that is asserted rather than smoothed over:
-    an interrupt skips the `except Exception` that would have called
-    `self.close()`, and `cli`'s `finally` is the owner that recovers it. This
-    pins today's shape, so a change that cleans up on a `BaseException` here
-    updates the line rather than being caught by it."""
+    What the interrupt leaves behind is the other half of the contract. The
+    driver process is STOPPED and the sync API is never driven again: an
+    interrupt that unwinds a patchright call kills the greenlet running that
+    call's event loop, so a `context.close()` afterwards spins on a dead greenlet
+    forever. Both halves are asserted, because only one of them can fail on its
+    own — the fake manager exposes no driver pid, so `pw.stopped is False` holds
+    whether or not anything was stopped, and the kill is what says which."""
     pw = _install(monkeypatch, tmp_path, launch_error=KeyboardInterrupt())
+    killed: list[tuple[int, int]] = []
+    fake_pid = 424242
+    monkeypatch.setattr(gfb, "_driver_process_id", _fixed_pid(fake_pid))
+    monkeypatch.setattr(gfb.os, "kill", _record_kill(killed))
     session = gfb.GfBrowserSession(headed=False)
     with pytest.raises(KeyboardInterrupt) as e:
         session.get_html(_PAGE_URL)
     assert not isinstance(e.value, GfBrowserUnavailableError)
-    assert pw.stopped is False
     session.close()
+    # the sync API is never driven after the interrupt unwound it …
+    assert pw.stopped is False
+    # … but the driver is stopped rather than dropped
+    assert killed == [(fake_pid, signal.SIGKILL)]
 
 
 @pytest.mark.parametrize(
@@ -2070,3 +2080,624 @@ def test_the_fixture_is_the_shape_the_page_serves() -> None:
     assert len(board.rows) == 3
     assert board.blocks_seen == 2  # both row blocks present, so an empty board is authoritative
     assert board.misplaced == ()  # no relocated rows, so the parser reaches the rows at all
+
+
+# ───────────────────────── stopping a browser from another thread ──────────────
+# The rung's teardown is the thread that built the session, and only while that
+# thread's event loop is alive. A Ctrl-C satisfies neither: on the enriched arm
+# the navigation is on a worker no exception reaches, and on `--fast` the
+# interrupt has already killed the greenlet the loop runs in. These pin what is
+# left — a kill of the driver process — and what the session does afterwards.
+#
+# The fake is honest about STRUCTURE and dishonest about BLOCKING: its `goto`
+# blocks in pure Python, which a signal breaks, while real patchright blocks in a
+# greenlet driving an asyncio transport. So nothing here claims a timing, an
+# orphan count, `Singleton*` residue or the absence of stderr noise. Those are
+# measured against a real Chrome, and a fake that cannot spin cannot state them.
+
+
+def _record_kill(into: list[tuple[int, int]]) -> Callable[[int, int], None]:
+    """A stand-in for `os.kill` that records instead of signalling.
+
+    Typed rather than a lambda so the checker sees the pid and the signal, and
+    named once here because every stop test needs it. No test sends a real
+    signal: the pids are invented, and a `SIGKILL` aimed at an invented number
+    is aimed at whatever process happens to hold it."""
+
+    def _kill(pid: int, sig: int) -> None:
+        into.append((pid, sig))
+
+    return _kill
+
+
+def _fixed_pid(pid: int) -> Callable[[Any], int | None]:
+    """A stand-in for the driver pid lookup that answers the way the real one
+    does for a session with no manager: nothing to stop."""
+
+    def _lookup(manager: Any) -> int | None:
+        return pid if manager is not None else None
+
+    return _lookup
+
+
+def _source(owner: object, name: str) -> str:
+    """The source of `owner.name`, read from a module the checker knows nothing
+    about.
+
+    patchright ships no type information, so both the attribute lookup and the
+    function it yields arrive partially unknown. Taking the name rather than the
+    function keeps that narrowing in one place instead of at each call."""
+    return inspect.getsource(getattr(cast("Any", owner), name))
+
+
+class _Recorder:
+    """A context/driver pair that records the sync-API calls made on it.
+
+    Zero calls is the claim, and a claim about something NOT happening needs a
+    double that would have recorded it happening."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def close(self) -> None:
+        self.calls.append("context.close")
+
+    def stop(self) -> None:
+        self.calls.append("playwright.stop")
+
+
+@pytest.fixture
+def keep_sigint() -> Any:
+    """Save and restore this process's SIGINT disposition around a test.
+
+    The guard deliberately leaves `SIG_IGN` installed once an interrupt has been
+    handled — for the life of the process, which in a test run is the life of the
+    whole suite. Without this, the first test to trigger the handler makes Ctrl-C
+    do nothing for every test after it."""
+    previous = signal.getsignal(signal.SIGINT)
+    yield
+    signal.signal(signal.SIGINT, previous)
+
+
+def test_a_dead_session_closes_without_driving_the_sync_api() -> None:
+    """A stopped session's `close()` touches neither the context nor the driver.
+
+    Driving them is what hangs: the interrupt that killed this session also
+    killed the greenlet its event loop runs in, and `context.close()` then posts
+    a task to a loop nobody drives and spins on that dead greenlet. The recorder
+    is what makes "nothing was called" a measurement — the healthy case beside it
+    proves the recorder would have seen the calls."""
+    rec = _Recorder()
+    session = gfb.GfBrowserSession(headed=False)
+    session._context = session._playwright = rec
+    session._dead = True
+    session.close()
+    assert rec.calls == []
+
+    live = _Recorder()
+    healthy = gfb.GfBrowserSession(headed=False)
+    healthy._context = healthy._playwright = live
+    healthy.close()
+    assert live.calls == ["context.close", "playwright.stop"]
+
+
+def test_a_dead_close_stops_the_driver_before_it_drops_the_handles() -> None:
+    """*Dead* has to mean *the driver is down*, whichever thing set it.
+
+    Three things set it and only one of them killed anything: the stop itself,
+    and the two arms that record an interrupt unwinding a patchright call. Once
+    the handles are dropped the driver is unreachable for good, so the stop
+    cannot be left to whichever cause happened to fire."""
+    killed: list[tuple[int, int]] = []
+    session = gfb.GfBrowserSession(headed=False)
+    session._manager = object()
+    session._dead = True
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(gfb, "_driver_process_id", _fixed_pid(4242))
+        m.setattr(gfb.os, "kill", _record_kill(killed))
+        session.close()
+    assert killed == [(4242, signal.SIGKILL)]
+    assert session._manager is None
+
+
+def test_a_stop_kills_the_driver_with_sigkill_and_never_asks_it_to_close() -> None:
+    """`SIGKILL`, and the constant is asserted because the alternatives all work.
+
+    `SIGTERM` stops Chrome but leaves the node driver running. `SIGINT` stops
+    both — the driver has a handler for it — but that graceful path writes its
+    last frames into a Python that is already unwinding, and the unhandled
+    `EPIPE` puts 25 lines of Node stack on the terminal of the run the user asked
+    to end. A dead driver writes nothing. Nothing else here distinguishes the
+    three, so a test that did not name the signal would pass on all of them."""
+    killed: list[tuple[int, int]] = []
+    session = gfb.GfBrowserSession(headed=False)
+    session._manager = object()
+
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(gfb, "_driver_process_id", _fixed_pid(99))
+        m.setattr(gfb.os, "kill", _record_kill(killed))
+        session.stop_driver()
+        assert killed == [(99, signal.SIGKILL)]
+        assert session._dead is True
+        # Idempotent: the manager is taken on the way in, so a second stop —
+        # which a second Ctrl-C or a later `close()` makes — signals nothing.
+        session.stop_driver()
+    assert killed == [(99, signal.SIGKILL)]
+
+
+def test_stop_all_drivers_reaches_every_registered_session() -> None:
+    """The registry answers the only question a signal handler can ask: what is
+    open in this PROCESS. The thread-local beside it answers "which session is
+    mine", which the handler's thread cannot use — the session it has to stop
+    belongs to a worker."""
+    killed: list[tuple[int, int]] = []
+    first = gfb.GfBrowserSession(headed=False)
+    second = gfb.GfBrowserSession(headed=False)
+    first._manager, second._manager = object(), object()
+    gfb._remember(first)
+    gfb._remember(second)
+    pids = {id(first._manager): 11, id(second._manager): 22}
+
+    def _lookup(manager: Any) -> int | None:
+        return pids.get(id(manager))
+
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(gfb, "_driver_process_id", _lookup)
+        m.setattr(gfb.os, "kill", _record_kill(killed))
+        gfb.stop_all_drivers()
+    assert sorted(pid for pid, _ in killed) == [11, 22]
+    assert first._dead and second._dead
+    # The stop marks them; the close is what takes them off the register, and it
+    # runs on the thread that owns each session.
+    assert gfb._live == {first, second}
+    first.close()
+    second.close()
+    assert gfb._live == set()
+
+
+def test_a_session_that_never_launched_is_never_registered() -> None:
+    """Constructing a session is free and opens nothing, so a stop must not have
+    to know which of them got as far as a driver."""
+    gfb.GfBrowserSession(headed=False)
+    assert gfb._live == set()
+    gfb.stop_all_drivers()  # over an empty register: a no-op, not an error
+
+
+def test_a_session_this_test_registers_is_visible_to_this_test() -> None:
+    """Half of a pair, and it does NOT clean up after itself.
+
+    A test whose session reaches the launcher and then fails leaves an entry
+    behind — which is exactly the shape of the run this rung is about — so the
+    register has to be reset BETWEEN tests rather than by them."""
+    session = gfb.GfBrowserSession(headed=False)
+    gfb._remember(session)
+    assert gfb._live == {session}
+
+
+def test_the_registry_the_previous_test_filled_is_empty_again() -> None:
+    """The other half. The register is process-wide state, like the launch notice
+    and the thread-local session beside it, and the autouse fixture resets all
+    three. A leaked entry would let one test's session be stopped by another
+    test's interrupt — and the test that leaked it is never the one that fails."""
+    assert gfb._live == set()
+
+
+def test_the_driver_pid_lookup_answers_none_for_a_shape_it_does_not_know() -> None:
+    """A guarded lookup, never an assertion: it runs inside a signal handler,
+    where raising would replace the user's stop with a crash. Every level of the
+    chain is checked, because a patchright bump can move any one of them."""
+    assert gfb._driver_process_id(None) is None
+    assert gfb._driver_process_id(object()) is None
+
+    # The classes below are named for the private ATTRIBUTES they stand in for,
+    # so each stand-in reads as the level of the chain it truncates.
+    class _NoTransport:
+        _connection = object()
+
+    class _NoProc:
+        class _connection:
+            _transport = object()
+
+    class _NotAPid:
+        class _connection:
+            class _transport:
+                class _proc:
+                    pid = "not a number"
+
+    assert gfb._driver_process_id(_NoTransport()) is None
+    assert gfb._driver_process_id(_NoProc()) is None
+    assert gfb._driver_process_id(_NotAPid()) is None
+
+
+def test_the_driver_pid_chain_is_the_one_the_installed_patchright_builds() -> None:
+    """The three private assignments the pid lookup walks, pinned against the
+    installed patchright.
+
+    Load-bearing rather than decorative. A bump that renames any of them makes
+    the lookup answer `None` for a session that DOES hold a driver — a browser
+    marked finished whose Chrome nothing will ever stop, reported as nothing at
+    all. `pyproject.toml` pins `patchright>=1.59` with no upper bound, so that
+    bump is one sync away. This fails first, and loudly, instead."""
+    from patchright._impl._connection import Connection
+    from patchright._impl._transport import PipeTransport
+    from patchright.sync_api._context_manager import PlaywrightContextManager
+
+    assert "self._connection = Connection(" in _source(PlaywrightContextManager, "__enter__")
+    assert "self._transport = transport" in _source(Connection, "__init__")
+    assert "self._proc = await asyncio.create_subprocess_exec(" in _source(PipeTransport, "connect")
+
+
+def test_a_navigation_on_a_stopped_session_is_the_interrupt_it_really_is(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """Killing the driver is how a stop reaches a navigation on another thread,
+    and what that navigation then raises is an ordinary transport error.
+
+    Left as one it becomes "Chrome could not load Google Flights' search page",
+    which the pin loop absorbs into a warning about a network the user never had
+    trouble with — on the run they asked to end, with the exit code of a refusal
+    rather than of a stop."""
+    _install(
+        monkeypatch,
+        tmp_path,
+        outcomes=[RuntimeError("Target page, context or browser has been closed")],
+    )
+    session = gfb.GfBrowserSession(headed=False)
+    session._dead = True
+    with pytest.raises(KeyboardInterrupt) as e:
+        session.get_html(_PAGE_URL)
+    assert not isinstance(e.value, GfBrowserUnavailableError)
+
+
+def test_a_body_read_on_a_stopped_session_is_the_interrupt_too(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The same one step later. The page answered and the stop landed while its
+    body was being read, which is the longer of the two windows: `response.text()`
+    carries no timeout at any layer."""
+    _install(
+        monkeypatch,
+        tmp_path,
+        outcomes=[
+            _FakeResponse(
+                body="",
+                url=_PAGE_URL,
+                status=200,
+                body_error=RuntimeError("Target closed"),
+            )
+        ],
+    )
+    session = gfb.GfBrowserSession(headed=False)
+    session._dead = True
+    with pytest.raises(KeyboardInterrupt) as e:
+        session.get_html(_PAGE_URL)
+    assert not isinstance(e.value, GfBrowserUnavailableError)
+
+
+def test_a_stop_mid_round_trip_is_not_absorbed_by_the_pin_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    no_rung_one: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The whole reason the interrupt is re-raised rather than wrapped, driven
+    through the loop that would otherwise swallow it.
+
+    The pin loop treats a dead browser as a fact about the SESSION and stops
+    pinning — correctly, for a browser that died on its own. A browser this
+    process stopped on purpose is the user's instruction instead, and it has to
+    travel out past every arm here."""
+    pw = _install(
+        monkeypatch,
+        tmp_path,
+        outcomes=[_FakeResponse(body=_page(), url=_PAGE_URL, status=200, body_error=None)],
+    )
+    session = gfb.session(headed=False)
+    page = _page_of(pw)
+    real_goto = page.goto
+    calls: list[int] = []
+
+    def _goto(url: str, *, wait_until: str, timeout: int) -> Any:
+        calls.append(1)
+        if len(calls) == 1:
+            return real_goto(url, wait_until=wait_until, timeout=timeout)
+        # What a stop from another thread does, in the order it does it: the
+        # session is marked finished, and the navigation already in flight then
+        # fails the way a severed transport fails.
+        session._dead = True
+        raise RuntimeError("Target page, context or browser has been closed")
+
+    monkeypatch.setattr(page, "goto", _goto)
+    with caplog.at_level("WARNING"), pytest.raises(KeyboardInterrupt):
+        gfid.search_with_ids(
+            _filters(round_trip=True), top_n=1, transport=gfid.GfTransport(mode="browser")
+        )
+    assert "stopped pinning" not in caplog.text, caplog.text
+    gfb.close_thread_session()
+
+
+# ─────────────────── arming the interrupt, and what it costs the exit ──────────
+
+
+def test_the_guard_installs_a_handler_and_gives_it_back_on_a_clean_search(
+    keep_sigint: None,
+) -> None:
+    """Armed for the duration of a search and no longer. A search that ends
+    normally leaves the process's Ctrl-C exactly as it found it — this rung is a
+    guest in a CLI that is mostly not a browser."""
+    before = signal.getsignal(signal.SIGINT)
+    with gfb.interrupt_guard():
+        armed = signal.getsignal(signal.SIGINT)
+        assert armed is not before
+        assert callable(armed)
+    assert signal.getsignal(signal.SIGINT) is before
+
+
+def test_the_guard_stops_every_driver_and_then_ignores_the_next_ctrl_c(
+    keep_sigint: None,
+) -> None:
+    """What the handler does, in the order that matters.
+
+    `SIG_IGN` goes in FIRST, before anything a second signal could re-enter: the
+    stop below raises the `asyncio` logger's level, and clearing the logging
+    manager's cache releases that module's lock without a `try`/`finally`, so a
+    second SIGINT arriving inside it would leave the lock held for the life of
+    the process.
+
+    And the ignore OUTLIVES the guard, deliberately. Once the drivers are dead
+    and the exit is running there is nothing left for a second Ctrl-C to stop;
+    what it would do instead is land in the middle of that shutdown, and once the
+    old handler is back that is death by signal — rc -2 rather than the 130 the
+    user's first Ctrl-C had already earned."""
+    stopped: list[str] = []
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(gfb, "stop_all_drivers", lambda: stopped.append("stopped"))
+        with pytest.raises(KeyboardInterrupt), gfb.interrupt_guard():
+            handler = signal.getsignal(signal.SIGINT)
+            assert callable(handler)
+            # Raised by calling the handler rather than by sending a signal: a
+            # test that raced `os.kill` against the interpreter would pass or
+            # fail on timing, and this is about what the handler DOES.
+            handler(signal.SIGINT, None)
+    assert stopped == ["stopped"]
+    assert signal.getsignal(signal.SIGINT) is signal.SIG_IGN
+
+
+def test_the_guard_is_a_no_op_off_the_main_thread_and_still_runs_its_body() -> None:
+    """`signal.signal` raises on any other thread, and the enriched arm's search
+    runs on one. Nothing needs installing there — a Ctrl-C is delivered to the
+    main thread whichever thread was working — but the body still has to run, or
+    the guard would decide whether the search happens."""
+    ran: list[str] = []
+    failed: list[BaseException] = []
+
+    def _work() -> None:
+        try:
+            with gfb.interrupt_guard():
+                ran.append("body")
+        # Broad on purpose: what this asserts is that NOTHING escaped, and the
+        # failure it guards against — `signal.signal` off the main thread — is a
+        # `ValueError` that would otherwise die in a thread nobody is watching.
+        except BaseException as e:
+            failed.append(e)
+
+    t = threading.Thread(target=_work)
+    t.start()
+    t.join()
+    assert failed == []
+    assert ran == ["body"]
+
+
+def _quiet() -> Any:
+    async def _sleep_briefly() -> None:
+        import anyio
+
+        await anyio.sleep(0.01)
+
+    return _sleep_briefly
+
+
+def _weave_raising(where: str, exc: BaseException) -> Any:
+    """A `go` shaped exactly like `cli._run_enriched_path._go`: one task started
+    into a task group, and a host frame that runs after it — which is where the
+    first Google table is painted, and so where a Ctrl-C most often lands."""
+
+    async def _go() -> None:
+        import anyio
+
+        async with anyio.create_task_group() as tg:
+            if where == "a-task":
+
+                async def _raise() -> None:
+                    raise exc
+
+                tg.start_soon(_raise)
+            else:
+                tg.start_soon(_quiet())
+                raise exc
+
+    return _go
+
+
+@pytest.mark.parametrize("where", ["a-task", "the-host-frame"])
+def test_an_interrupt_inside_the_weave_leaves_it_as_a_bare_interrupt(
+    where: str, keep_sigint: None
+) -> None:
+    """A task group hands its caller a GROUP, and every handler between here and
+    the exit matches the bare class only.
+
+    With the guard armed, `asyncio.Runner` installs no handler of its own
+    (`asyncio/runners.py:102-104`), so the interrupt is raised wherever the main
+    thread stands — inside the group. Wrapped, it matches nothing: typer turns a
+    `KeyboardInterrupt` into exit 130 and a group of them into a traceback and
+    exit 1. `type(...) is`, not `isinstance`, because a group of one interrupt
+    passes `pytest.raises(KeyboardInterrupt)` for the wrong reason."""
+    from flight_cli import cli
+
+    state: dict[str, Any] = {}
+    # Deliberately the broadest catch, because the TYPE is what is asserted
+    # below: naming `KeyboardInterrupt` here would also accept a group of one.
+    with pytest.raises(BaseException) as e:
+        cli._run_the_weave(_weave_raising(where, KeyboardInterrupt()), state)
+    assert type(e.value) is KeyboardInterrupt, e.value
+    assert not isinstance(e.value, BaseExceptionGroup)
+    assert state == {}
+
+
+def _leaf_types(e: BaseException) -> list[str]:
+    """Every non-group exception inside `e`, however deeply it is nested.
+
+    A shallow read of `.exceptions` is not enough: splitting a group leaves the
+    unhandled half wrapped in a group of its own, so the question "which
+    exceptions came out of here" is only answerable recursively."""
+    if isinstance(e, BaseExceptionGroup):
+        inner = cast("tuple[BaseException, ...]", e.exceptions)
+        return sorted(t for sub in inner for t in _leaf_types(sub))
+    return [type(e).__name__]
+
+
+def test_a_failing_task_is_still_stashed_rather_than_raised(keep_sigint: None) -> None:
+    """The control for the arm above: a group carrying only ordinary errors keeps
+    reaching the handler that stashes it, so the reporters below still decide the
+    outcome and the other backend's rows are not thrown away."""
+    from flight_cli import cli
+
+    state: dict[str, Any] = {}
+    cli._run_the_weave(_weave_raising("a-task", RuntimeError("fli fell over")), state)
+    assert "weave_err" in state
+    assert _leaf_types(state["weave_err"]) == ["RuntimeError"]
+    assert "fli fell over" in str(state["weave_err"].exceptions[0])
+
+
+def test_a_group_carrying_an_interrupt_and_an_error_still_leaves_as_a_group(
+    keep_sigint: None,
+) -> None:
+    """The residual, pinned rather than fixed.
+
+    A group holding an interrupt AND a leaf that is not an `Exception` matches
+    nothing on the path out, so it reaches the exit as a traceback. Widening the
+    arm to catch it would swallow the other leaf — and it needs two of them
+    raised in the same instant, which nothing here has been seen to do. The pin
+    says the behaviour did not change; it is not an endorsement.
+
+    What is pinned is the OUTCOME — a group still leaves, carrying both leaves,
+    and nothing is stashed. Its nesting is not: splitting a group re-wraps the
+    half that was not handled, so the shape differs from the one that arrived
+    while the two exceptions in it do not."""
+    from flight_cli import cli
+
+    async def _go() -> None:
+        raise BaseExceptionGroup("two at once", [KeyboardInterrupt(), ValueError("x")])
+
+    state: dict[str, Any] = {}
+    with pytest.raises(BaseExceptionGroup) as e:
+        cli._run_the_weave(_go, state)
+    assert _leaf_types(e.value) == ["KeyboardInterrupt", "ValueError"]
+    assert state == {}
+
+
+# ──────────────────── what the exit code and the streams say ───────────────────
+# Through the real console entry, with only the browser substituted. The exit
+# code is typer's and only typer's — `typer/core.py:202-203` turns a
+# `KeyboardInterrupt` into `Exit(130)`, and `:223-225` makes that the process's
+# status — so nothing on the path from `get_html` up to it may catch one. These
+# are what say the whole path still obeys that.
+
+
+def _search_argv(*extra: str) -> list[str]:
+    return [
+        "search",
+        "JFK",
+        "LAX",
+        "--dep",
+        "2026-10-14",
+        "--gf-transport",
+        "browser",
+        "--cash-only",
+        "--no-cache",
+        "-n",
+        "3",
+        *extra,
+    ]
+
+
+def test_a_ctrl_c_on_the_fast_arm_exits_130_with_nothing_on_stdout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, keep_sigint: None
+) -> None:
+    """The `--fast` arm, end to end: the interrupt lands in the navigation and
+    the command exits 130 having written nothing.
+
+    Zero bytes is the load-bearing half. A stopped search that had already
+    printed part of its answer would be read as the answer — by a person and, in
+    a pipeline, by a parser — and the exit code is not consulted before the bytes
+    are. This is honest with a fake browser because it is about what was WRITTEN,
+    not about what blocked."""
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    _install(monkeypatch, tmp_path, outcomes=[KeyboardInterrupt()])
+    result = CliRunner().invoke(cli.app, _search_argv("--backend", "gflight", "--fast"))
+    assert result.exit_code == 130, (result.exit_code, result.output)
+    assert result.stdout == ""
+    assert "Traceback" not in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+def test_a_ctrl_c_on_the_enriched_arm_exits_130_and_not_as_a_crash(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, keep_sigint: None
+) -> None:
+    """The same claim on the arm where the search runs in a worker thread.
+
+    This is the case the unwrap in the weave exists for: the interrupt comes back
+    out of the worker into the task group's host frame, and the group re-raises
+    it wrapped. Unwrapped it matches no handler at all and the command ends as a
+    traceback and exit 1 — a crash where the user asked for a stop."""
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    _install(monkeypatch, tmp_path, outcomes=[KeyboardInterrupt()])
+    monkeypatch.setattr(cli, "MatrixClient", _DeadMatrix)
+    result = CliRunner().invoke(cli.app, _search_argv())
+    assert result.exit_code == 130, (result.exit_code, result.output)
+    assert result.stdout == ""
+    assert "Traceback" not in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+def test_a_ctrl_c_after_the_first_table_is_painted_still_exits_130(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, keep_sigint: None
+) -> None:
+    """The likeliest real Ctrl-C on this arm, and the one the "nothing on stdout"
+    rule has to make room for.
+
+    The Google table is painted about a second in and Matrix lands around forty
+    seconds later, so most of the enriched run is spent with a COMPLETE table
+    already on stdout. A table printed before the interrupt is not a partial
+    answer, and the invariant is about partial ones: what it forbids is bytes
+    that stop mid-answer. The exit code is still the user's stop, and the stop is
+    still not a traceback."""
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    _install(
+        monkeypatch,
+        tmp_path,
+        outcomes=[_FakeResponse(body=_page(), url=_PAGE_URL, status=200, body_error=None)],
+    )
+    monkeypatch.setattr(cli, "MatrixClient", _DeadMatrix)
+    real_paint = cli._paint_first_gf_table
+
+    def _paint_then_interrupt(*a: Any, **kw: Any) -> None:
+        real_paint(*a, **kw)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_paint_first_gf_table", _paint_then_interrupt)
+    result = CliRunner().invoke(cli.app, _search_argv())
+    assert result.exit_code == 130, (result.exit_code, result.output)
+    # The painted table is on stdout, whole, and is not what the rule forbids.
+    assert "JFK" in result.stdout
+    assert "Traceback" not in result.stdout
+    assert "Traceback" not in result.stderr

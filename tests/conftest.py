@@ -47,11 +47,15 @@ def _no_browser_launch(  # pyright: ignore[reportUnusedFunction] - autouse pytes
     """Fail any unmarked test that reaches the real patchright launcher, and
     give every test a clean set of the module's once-per-process latches.
 
-    The resets are unconditional: the launch notice and the thread-local
-    session are process-wide state, so without them the first browser test to
-    run would decide what every later one sees."""
+    The resets are unconditional: the launch notice, the thread-local session
+    and the registry of sessions holding a driver are process-wide state, so
+    without them the first browser test to run would decide what every later one
+    sees — and a leaked registry entry would let one test's session be stopped by
+    another's interrupt."""
     monkeypatch.setattr(_gf_browser, "_notice_state", {"printed": False})
     monkeypatch.setattr(_gf_browser, "_sessions", threading.local())
+    # Parameterised so the empty set is not partially unknown to the checker.
+    monkeypatch.setattr(_gf_browser, "_live", set[_gf_browser.GfBrowserSession]())
     # The MARKER, not `request.keywords`. `keywords` also carries the node's
     # name, its parametrize ids and its containing directory — so a test
     # parametrized with the string "gf_browser", or any test under a directory
