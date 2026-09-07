@@ -250,6 +250,20 @@ class GfBrowserSession:
             raise
         return PageFetch(html=html, final_url=final_url, status_code=status_code)
 
+    def _stop_a_late_driver_or_raise(self, manager: Any) -> None:
+        """Stop a driver that finished starting after the interrupt went past.
+
+        The stop reaches only drivers that already exist, so one still starting
+        when the handler ran is invisible to it — and the handler took
+        `_manager` on its way past, so the local handle is the only one left
+        naming the process this call spawned. Stopping it here is what keeps the
+        browser from being launched after the shutdown."""
+        if not _interrupt_state["seen"]:
+            return
+        self._manager = manager
+        self.stop_driver()
+        raise KeyboardInterrupt
+
     def _interrupted_or_raise(self) -> None:
         """Report a navigation that failed BECAUSE we stopped it as the interrupt
         it is, rather than letting the caller wrap it as a refusal.
@@ -386,6 +400,11 @@ class GfBrowserSession:
         """This session's page, launching Chrome on first use."""
         if self._page is not None:
             return self._page
+        if _interrupt_state["seen"]:
+            # The stop already ran and had nothing of this session's to find.
+            # Refusing here is what keeps a launch from opening a Chrome that
+            # the shutdown has already gone past.
+            raise KeyboardInterrupt
         factory = _playwright_factory()  # its own typed refusal; never re-wrapped below
         profile = _profile_dir()
         _announce()
@@ -399,9 +418,11 @@ class GfBrowserSession:
             # Registered BEFORE the driver starts. `stop_driver` resolves the pid
             # when it needs it, so an interrupt after the driver is spawned inside
             # `start()` still reaches the process that call spawned.
-            self._manager = factory()
+            manager = factory()
+            self._manager = manager
             _remember(self)
-            self._playwright = self._manager.start()
+            self._playwright = manager.start()
+            self._stop_a_late_driver_or_raise(manager)
             self._context = self._playwright.chromium.launch_persistent_context(
                 user_data_dir=str(profile),
                 headless=not self._headed,
@@ -523,6 +544,12 @@ _live_lock = threading.RLock()
 # references, which is harmless for a set that lives as long as the process and
 # whose entries are removed by `close`.
 _live: set[GfBrowserSession] = set()
+# Set by the handler BEFORE it snapshots the registry, and cleared by the guard
+# on its way in. A stop reaches only a driver that already exists, so a launch
+# still on its way up is invisible to it — this is what such a launch reads
+# instead, on the way in and again once its own driver does exist. Process-wide
+# because the launch runs on a worker and the handler runs on the main thread.
+_interrupt_state: dict[str, bool] = {"seen": False}
 
 
 def _remember(session: GfBrowserSession) -> None:
@@ -601,6 +628,11 @@ def interrupt_guard(*, armed: bool = True) -> Generator[None]:
         return
     previous = signal.getsignal(signal.SIGINT)
     seen = False
+    # Cleared on the way IN and nowhere else. The only thing that sets it is
+    # the handler, which sets `seen` in the same breath — so on a normal
+    # completion below it is already false, and after an interrupt it stays
+    # set for the rest of that shutdown, exactly as the ignore does.
+    _interrupt_state["seen"] = False
 
     def _on_sigint(_signum: int, _frame: types.FrameType | None) -> None:
         nonlocal seen
@@ -611,6 +643,9 @@ def interrupt_guard(*, armed: bool = True) -> Generator[None]:
         # the process.
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         seen = True
+        # BEFORE the snapshot: a launch that has not registered a driver yet
+        # cannot be reached by the stop, and this is what it reads instead.
+        _interrupt_state["seen"] = True
         stop_all_drivers()
         raise KeyboardInterrupt
 

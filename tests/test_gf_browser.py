@@ -2365,6 +2365,87 @@ def test_a_session_is_registered_before_its_driver_starts(
     session.close()
 
 
+def test_a_launch_asked_for_after_the_stop_refuses_before_it_opens_anything(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """A stop reaches only drivers that exist, so a launch that has not started
+    one is invisible to it — and on this arm the launch runs on a worker the
+    interrupt never reaches, so nothing else stops it either.
+
+    Read on the way IN, before the factory: the cheapest of the two reads, and
+    the one that covers the whole interval from the guard's first Ctrl-C to the
+    driver handshake — which on a cold worker is most of a second."""
+    pw = _install(monkeypatch, tmp_path)
+    session = gfb.GfBrowserSession(headed=False)
+    gfb._interrupt_state["seen"] = True
+
+    with pytest.raises(KeyboardInterrupt):
+        session._ensure_page()
+
+    assert pw.starts == 0
+    assert pw.chromium.launches == 0
+    assert session not in gfb._live
+
+
+def test_a_driver_that_starts_after_the_stop_is_killed_before_the_browser_opens(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The other read, and the one with something to clean up.
+
+    The handler fires DURING `start()`: it takes `_manager` and finds no pid,
+    because the driver it would have killed does not exist yet — so the stop
+    stops nothing and the process this call is spawning survives it. The read
+    after `start()` returns is the only place that can still name it, through
+    the local handle the session no longer holds. What it must NOT do is open a
+    browser."""
+    pw = _install(monkeypatch, tmp_path)
+    killed: list[tuple[int, int]] = []
+    started: list[bool] = []
+    session = gfb.GfBrowserSession(headed=False)
+    real_start = pw.start
+
+    def _the_handler_fires_while_the_driver_starts() -> _FakePlaywright:
+        gfb._interrupt_state["seen"] = True  # what the handler sets first
+        gfb.stop_all_drivers()  # …and what it does next: nothing to find
+        started.append(True)
+        return real_start()
+
+    # `_fixed_pid` answers for any non-`None` manager, which would let the stop
+    # above kill a driver that does not exist yet and take the premise with it.
+    def _pid_once_the_driver_exists(manager: Any) -> int | None:
+        return 4242 if manager is not None and started else None
+
+    monkeypatch.setattr(pw, "start", _the_handler_fires_while_the_driver_starts)
+    monkeypatch.setattr(gfb, "_driver_process_id", _pid_once_the_driver_exists)
+    monkeypatch.setattr(gfb.os, "kill", _record_kill(killed))
+
+    with pytest.raises(KeyboardInterrupt):
+        session._ensure_page()
+
+    assert pw.starts == 1
+    assert pw.chromium.launches == 0  # the discriminating one: no browser
+    assert killed == [(4242, signal.SIGKILL)]  # the late driver, killed once
+    assert session._dead is True
+
+
+def test_the_guard_clears_the_interrupt_latch_on_the_way_in(keep_sigint: None) -> None:
+    """The latch is per guarded search, not per process.
+
+    Set and never cleared, it would refuse every later launch in the same
+    process — the serialised second search a multi-cabin run makes, say. It is
+    cleared here and nowhere else: the only thing that sets it is the handler,
+    which sets the guard's own `seen` in the same breath, so a clean way out
+    finds it already false and an interrupted one leaves it set for the rest of
+    that shutdown — exactly as it leaves the ignore. A clear on the way out
+    would be a statement no state can reach."""
+    gfb._interrupt_state["seen"] = True
+
+    with gfb.interrupt_guard():
+        assert gfb._interrupt_state["seen"] is False
+
+    assert gfb._interrupt_state["seen"] is False
+
+
 def test_the_register_lock_is_re_entrant_for_the_thread_already_holding_it() -> None:
     """The handler runs on the main thread between two bytecodes of whatever
     that thread was doing — including a `_remember` or a `_forget` holding this
@@ -2567,6 +2648,10 @@ def test_the_guard_stops_every_driver_and_then_ignores_the_next_ctrl_c(
         # differ: after the guard both leave `SIG_IGN` behind, so an assertion
         # taken there holds either way and pins nothing.
         assert signal.getsignal(signal.SIGINT) is signal.SIG_IGN
+        # Read here for the same reason: the refusal a launch still on its way
+        # up will make has to be in place before the registry is snapshotted,
+        # because that snapshot is what misses such a launch.
+        assert gfb._interrupt_state["seen"] is True
         stopped.append("stopped")
 
     with pytest.MonkeyPatch.context() as m:
@@ -2694,6 +2779,60 @@ def test_the_enriched_arm_arms_the_guard_only_for_the_browser_transport(
         assert seen == [before]
 
 
+def test_the_enriched_path_hands_its_transport_to_the_arming_decision(
+    monkeypatch: pytest.MonkeyPatch, keep_sigint: None
+) -> None:
+    """The decision above only reaches a user through one call, and that call is
+    the whole of the wiring.
+
+    The test above drives `_run_the_weave` directly, so it says what the weave
+    does with a transport it is given and nothing about whether anything gives
+    it one. This one starts a leg further out, at the frame the CLI actually
+    calls, with both halves stubbed into their shortest failing shape — so what
+    it pins is that `--gf-transport browser` still arrives at the guard.
+
+    The reading is taken inside the guard's `__enter__` and nowhere else: by the
+    time the guarded work runs, `anyio.run` has opened a loop and
+    `asyncio.Runner` may have installed a handler of its own. The refusal both
+    stubbed halves force is asserted rather than suppressed, so a new failure
+    mode arrives as a failure instead of as a pass. Browser only, deliberately —
+    the per-transport decision is already pinned three ways by the test above,
+    and a second parametrize here would buy a node and no discrimination."""
+    import typer
+
+    from flight_cli import cli
+
+    before = signal.getsignal(signal.SIGINT)
+    seen: list[object] = []
+    monkeypatch.setattr(gfb, "interrupt_guard", _recording_guard(seen))
+    monkeypatch.setattr(cli, "MatrixClient", _DeadMatrix)
+
+    def _no_rows(*_a: Any, **_kw: Any) -> list[Any]:
+        return []
+
+    monkeypatch.setattr(cli, "_gflight_results", _no_rows)
+
+    with pytest.raises(typer.Exit):
+        cli._run_enriched_path(
+            legs=_one_leg(),
+            opts=SearchOptions(),
+            top_n=5,
+            run_pp=False,
+            sel=None,
+            matrix_url=False,
+            google_url=False,
+            pick=None,
+            rps=1.0,
+            impersonate="chrome",
+            no_cache=True,
+            gf_mode=cli.TRANSPORT_BROWSER,
+        )
+
+    assert len(seen) == 1
+    assert seen[0] is not before
+    assert callable(seen[0])
+
+
 async def _sleep_briefly() -> None:
     """A child the group is still running when the host frame raises."""
     import anyio
@@ -2742,7 +2881,7 @@ def test_an_interrupt_inside_the_weave_leaves_it_as_a_bare_interrupt(
     # Deliberately the broadest catch, because the TYPE is what is asserted
     # below: naming `KeyboardInterrupt` here would also accept a group of one.
     with pytest.raises(BaseException) as e:
-        cli._run_the_weave(_weave_raising(where, KeyboardInterrupt()), state)
+        cli._run_the_weave(_weave_raising(where, KeyboardInterrupt()), state, cli.TRANSPORT_HTTP)
     assert type(e.value) is KeyboardInterrupt, e.value
     assert not isinstance(e.value, BaseExceptionGroup)
     assert state == {}
@@ -2767,7 +2906,9 @@ def test_a_failing_task_is_still_stashed_rather_than_raised(keep_sigint: None) -
     from flight_cli import cli
 
     state: dict[str, Any] = {}
-    cli._run_the_weave(_weave_raising("a-task", RuntimeError("fli fell over")), state)
+    cli._run_the_weave(
+        _weave_raising("a-task", RuntimeError("fli fell over")), state, cli.TRANSPORT_HTTP
+    )
     assert "weave_err" in state
     assert _leaf_types(state["weave_err"]) == ["RuntimeError"]
     assert "fli fell over" in str(state["weave_err"].exceptions[0])
@@ -2795,7 +2936,7 @@ def test_a_group_carrying_an_interrupt_and_an_error_still_leaves_as_a_group(
 
     state: dict[str, Any] = {}
     with pytest.raises(BaseExceptionGroup) as e:
-        cli._run_the_weave(_go, state)
+        cli._run_the_weave(_go, state, cli.TRANSPORT_HTTP)
     assert _leaf_types(e.value) == ["KeyboardInterrupt", "ValueError"]
     assert state == {}
 

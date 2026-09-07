@@ -2054,7 +2054,7 @@ async def _matrix_into(
 def _run_the_weave(
     go: Callable[[], Coroutine[Any, Any, None]],
     state: dict[str, Any],
-    gf_mode: GfTransportMode = TRANSPORT_HTTP,
+    gf_mode: GfTransportMode,
 ) -> None:
     """Run the weave and stash anything that escapes it, so the reporters below
     it decide the outcome.
