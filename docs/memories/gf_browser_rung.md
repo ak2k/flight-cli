@@ -109,11 +109,13 @@ with a bound and not a property of the instant. stdout carries nothing partial �
 a table already painted before the interrupt is a whole answer and stays — and
 stderr carries no line about the interruption at all, only the notices the run
 had already printed. Measured across fourteen cases: both arms at
-0.3/0.8/1.2/2.5 s and mid-pin-loop, `--format json`, and one `--gf-headed`
-window. A second Ctrl-C during the shutdown changes none of it, and that is held
-by the disposition rather than by a live case: the handler installs `SIG_IGN`
-before it does anything else, and the shutdown is over inside 60 ms — faster
-than a second signal can be aimed into it.
+0.3/0.8/1.2/2.5 s and mid-pin-loop, `--format json`, one `--gf-headed` window,
+and one case per arm whose second Ctrl-C, aimed 50 ms into the shutdown,
+arrived after it was already over — so those two graded as ordinary interrupts.
+A second Ctrl-C during the shutdown changes none of it, and that is held by the
+disposition rather than by a live case: the handler installs `SIG_IGN` before
+it does anything else, and the shutdown is over inside 60 ms — faster than a
+second signal can be aimed into it.
 
 The mechanism, because a hang here is otherwise re-derived from scratch: an
 interrupt that unwinds a patchright call kills the greenlet running that call's

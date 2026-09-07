@@ -2347,9 +2347,10 @@ def test_a_session_is_registered_before_its_driver_starts(
     Driven through `_ensure_page`, which is the only path that registers: every
     other register test here calls `_remember` by hand and so cannot see the
     ordering at all. `start()` is the window — a stop arriving inside it either
-    finds this session or leaves the driver that call spawned behind. What leaks
-    there is a node driver and not a Chrome, since `launch_persistent_context`
-    has not run yet; that bounds the severity, not the order."""
+    finds this session or leaves the driver that call spawned behind. A driver
+    left behind there is stopped by the read after `start()` returns, before any
+    browser opens; the order is what lets a stop that does arrive in time find
+    anything at all."""
     pw = _install(monkeypatch, tmp_path)
     session = gfb.GfBrowserSession(headed=False)
     registered_at_start: list[bool] = []
