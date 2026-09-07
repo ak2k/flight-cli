@@ -17,6 +17,7 @@ Nothing in this file touches the network.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import io
 import json
@@ -48,7 +49,7 @@ from flight_cli.domain import Leg, SearchOptions, SpecificDateSearch
 from flight_cli.fli_bridge import to_fli_filter
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Generator, Iterator
 
     from flight_cli._gf_common import GfTransportMode
     from flight_cli._gflight_ids import GFlightWithId
@@ -2200,6 +2201,60 @@ def test_a_dead_close_stops_the_driver_before_it_drops_the_handles() -> None:
     assert session._manager is None
 
 
+def test_a_stop_inside_the_context_step_stops_the_rest_of_the_teardown() -> None:
+    """The window the check on the way in cannot see: the session dies INSIDE
+    the first teardown step.
+
+    `_swallow` hands the interrupt back as a return value rather than letting it
+    out, so the handler's stop runs and execution carries on into the `finally`
+    with the entry check already behind it. `rec.calls` is what discriminates —
+    the sync API must not be driven once the greenlet its event loop runs in is
+    gone, and only a double that would have recorded the call can say it was
+    never made. The rest is contract.
+
+    One entry in `killed` is a real "exactly once": the handler's
+    `stop_all_drivers()` takes `_manager` on the way in, so the stop this window
+    adds finds nothing left to name. The added stop is inert on the path that
+    already killed, which is what lets it sit on both.
+
+    And the interrupt still escapes. `_swallow` returned it, so the re-raise
+    below the teardown is what carries it — a close that took the dead path by
+    returning early would lose the user's stop instead.
+
+    No signal is sent: `os.kill` records, like every other stop test here."""
+    rec = _Recorder()
+    killed: list[tuple[int, int]] = []
+    session = gfb.GfBrowserSession(headed=False)
+    session._context = session._playwright = rec
+    session._manager = object()
+    gfb._remember(session)
+    real = gfb._swallow
+
+    def _the_handler_fires_inside_the_context_step(
+        what: str, shutdown: Callable[[], object]
+    ) -> KeyboardInterrupt | None:
+        if what != "context":
+            return real(what, shutdown)
+        shutdown()
+        gfb.stop_all_drivers()  # what the installed SIGINT handler does …
+        return KeyboardInterrupt()  # … and what `_swallow` hands back
+
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(gfb, "_swallow", _the_handler_fires_inside_the_context_step)
+        m.setattr(gfb, "_driver_process_id", _fixed_pid(4242))
+        m.setattr(gfb.os, "kill", _record_kill(killed))
+        with pytest.raises(KeyboardInterrupt):
+            session.close()
+
+    assert rec.calls == ["context.close"]
+    assert killed == [(4242, signal.SIGKILL)]
+    assert session._page is None
+    assert session._context is None
+    assert session._playwright is None
+    assert session._manager is None
+    assert session not in gfb._live
+
+
 def test_a_stop_kills_the_driver_with_sigkill_and_never_asks_it_to_close() -> None:
     """`SIGKILL`, and the constant is asserted because the alternatives all work.
 
@@ -2282,10 +2337,58 @@ def test_the_registry_the_previous_test_filled_is_empty_again() -> None:
     assert gfb._live == set()
 
 
+def test_a_session_is_registered_before_its_driver_starts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The register is filled before the driver exists, and that order is the
+    whole reason a stop from a signal handler reaches anything.
+
+    Driven through `_ensure_page`, which is the only path that registers: every
+    other register test here calls `_remember` by hand and so cannot see the
+    ordering at all. `start()` is the window — a stop arriving inside it either
+    finds this session or leaves the driver that call spawned behind. What leaks
+    there is a node driver and not a Chrome, since `launch_persistent_context`
+    has not run yet; that bounds the severity, not the order."""
+    pw = _install(monkeypatch, tmp_path)
+    session = gfb.GfBrowserSession(headed=False)
+    registered_at_start: list[bool] = []
+    real_start = pw.start
+
+    def _start() -> _FakePlaywright:
+        registered_at_start.append(session in gfb._live)
+        return real_start()
+
+    monkeypatch.setattr(pw, "start", _start)
+    session._ensure_page()
+    assert registered_at_start == [True]
+    session.close()
+
+
+def test_the_register_lock_is_re_entrant_for_the_thread_already_holding_it() -> None:
+    """The handler runs on the main thread between two bytecodes of whatever
+    that thread was doing — including a `_remember` or a `_forget` holding this
+    lock — and then stops every driver through the same lock.
+
+    Asserted by a non-blocking re-acquire rather than by a second blocking one.
+    The failure being pinned is a deadlock, and a test that reproduced it would
+    hang rather than fail; a plain `Lock` answers `False` here instead, which is
+    a failure that arrives."""
+    with gfb._live_lock:
+        got = gfb._live_lock.acquire(blocking=False)
+        if got:
+            gfb._live_lock.release()
+    assert got is True
+
+
 def test_the_driver_pid_lookup_answers_none_for_a_shape_it_does_not_know() -> None:
     """A guarded lookup, never an assertion: it runs inside a signal handler,
     where raising would replace the user's stop with a crash. Every level of the
-    chain is checked, because a patchright bump can move any one of them."""
+    chain is checked, because a patchright bump can move any one of them.
+
+    The walk that SUCCEEDS is checked last and belongs here: a lookup that
+    answered `None` for every shape would satisfy all four refusals above while
+    leaving every live driver unnameable — a browser marked finished whose Chrome
+    nothing ever stops, reported as nothing at all."""
     assert gfb._driver_process_id(None) is None
     assert gfb._driver_process_id(object()) is None
 
@@ -2304,9 +2407,16 @@ def test_the_driver_pid_lookup_answers_none_for_a_shape_it_does_not_know() -> No
                 class _proc:
                     pid = "not a number"
 
+    class _RealShape:
+        class _connection:
+            class _transport:
+                class _proc:
+                    pid = 4242
+
     assert gfb._driver_process_id(_NoTransport()) is None
     assert gfb._driver_process_id(_NoProc()) is None
     assert gfb._driver_process_id(_NotAPid()) is None
+    assert gfb._driver_process_id(_RealShape()) == 4242
 
 
 def test_the_driver_pid_chain_is_the_one_the_installed_patchright_builds() -> None:
@@ -2442,7 +2552,8 @@ def test_the_guard_stops_every_driver_and_then_ignores_the_next_ctrl_c(
     stop below raises the `asyncio` logger's level, and clearing the logging
     manager's cache releases that module's lock without a `try`/`finally`, so a
     second SIGINT arriving inside it would leave the lock held for the life of
-    the process.
+    the process. The stop itself is where that order is read, because it is the
+    only moment the two orderings differ.
 
     And the ignore OUTLIVES the guard, deliberately. Once the drivers are dead
     and the exit is running there is nothing left for a second Ctrl-C to stop;
@@ -2450,8 +2561,16 @@ def test_the_guard_stops_every_driver_and_then_ignores_the_next_ctrl_c(
     old handler is back that is death by signal — rc -2 rather than the 130 the
     user's first Ctrl-C had already earned."""
     stopped: list[str] = []
+
+    def _stop() -> None:
+        # Read DURING the stop, which is the only place the two orderings
+        # differ: after the guard both leave `SIG_IGN` behind, so an assertion
+        # taken there holds either way and pins nothing.
+        assert signal.getsignal(signal.SIGINT) is signal.SIG_IGN
+        stopped.append("stopped")
+
     with pytest.MonkeyPatch.context() as m:
-        m.setattr(gfb, "stop_all_drivers", lambda: stopped.append("stopped"))
+        m.setattr(gfb, "stop_all_drivers", _stop)
         with pytest.raises(KeyboardInterrupt), gfb.interrupt_guard():
             handler = signal.getsignal(signal.SIGINT)
             assert callable(handler)
@@ -2486,6 +2605,93 @@ def test_the_guard_is_a_no_op_off_the_main_thread_and_still_runs_its_body() -> N
     t.join()
     assert failed == []
     assert ran == ["body"]
+
+
+def _recording_guard(seen: list[object]) -> Callable[..., contextlib.AbstractContextManager[None]]:
+    """A stand-in for `interrupt_guard` that runs the real one and records what
+    its `__enter__` left installed on SIGINT.
+
+    One recorder for both arming questions: `len(seen)` is how many times the
+    guard was entered, and each entry is the disposition it installed — or the
+    one it decided to leave alone. The read happens INSIDE the guard and nowhere
+    else. By the time the guarded work runs, `anyio.run` has opened a loop and
+    `asyncio.Runner` may have installed a handler of its own
+    (`asyncio/runners.py:102-104`), so a read taken there measures asyncio
+    instead of this. And the disposition rather than the argument, because a
+    keyword that stopped being read would still be handed over."""
+    real = gfb.interrupt_guard
+
+    @contextlib.contextmanager
+    def _guard(*, armed: bool = True) -> Generator[None]:
+        with real(armed=armed):
+            seen.append(signal.getsignal(signal.SIGINT))
+            yield
+
+    return _guard
+
+
+def test_the_fast_arm_arms_the_guard_around_its_whole_search(
+    monkeypatch: pytest.MonkeyPatch, keep_sigint: None
+) -> None:
+    """The `--fast` arm arms it once, around the search rather than around the
+    browser: the transport is not known here, and a Ctrl-C is answerable only
+    while the process still holds the driver.
+
+    A structural claim — how many times the guard was entered and what it
+    installed — which is what a substitute can say honestly. The end-to-end
+    exit-code test further down passes with no guard at all, so it pins the 130
+    and not the arming."""
+    from flight_cli import cli
+
+    before = signal.getsignal(signal.SIGINT)
+    seen: list[object] = []
+    monkeypatch.setattr(gfb, "interrupt_guard", _recording_guard(seen))
+
+    def _no_rows(*_a: Any, **_kw: Any) -> list[Any]:
+        return []
+
+    monkeypatch.setattr(cli, "_gflight_results", _no_rows)
+    legs = (Leg(origins=("JFK",), destinations=("LAX",), date=date(2026, 10, 14)),)
+    cli._run_gflight_path(legs=legs, opts=SearchOptions(), top_n=3, json_out=True)
+
+    assert len(seen) == 1
+    assert seen[0] is not before
+    assert callable(seen[0])
+
+
+@pytest.mark.parametrize("mode", ["http", "auto", "browser"])
+def test_the_enriched_arm_arms_the_guard_only_for_the_browser_transport(
+    monkeypatch: pytest.MonkeyPatch, keep_sigint: None, mode: GfTransportMode
+) -> None:
+    """The other arm decides per transport, and the reason is the worker.
+
+    This half runs inside `anyio.to_thread.run_sync`, which will not abandon its
+    worker, and no signal reaches that thread. On the browser transport the
+    handler's stop is what frees it, which is the whole point of arming. On a
+    transport that holds no driver the stop frees nothing, and an ignore that
+    outlives the first Ctrl-C throws away the only key left: the second one,
+    which is what breaks the join interpreter shutdown is blocked on.
+
+    `auto` sits with `http` because the ladder maps it to rung 1, the same
+    reading the closer test above takes."""
+    from flight_cli import cli
+
+    before = signal.getsignal(signal.SIGINT)
+    seen: list[object] = []
+    state: dict[str, Any] = {}
+    monkeypatch.setattr(gfb, "interrupt_guard", _recording_guard(seen))
+
+    async def _nothing() -> None:
+        """A weave with no work in it: the arming happens before it runs."""
+
+    cli._run_the_weave(_nothing, state, mode)
+
+    if mode == "browser":
+        assert len(seen) == 1
+        assert seen[0] is not before
+        assert callable(seen[0])
+    else:
+        assert seen == [before]
 
 
 async def _sleep_briefly() -> None:

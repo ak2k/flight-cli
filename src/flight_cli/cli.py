@@ -2051,7 +2051,11 @@ async def _matrix_into(
         state["matrix_unexpected"] = e
 
 
-def _run_the_weave(go: Callable[[], Coroutine[Any, Any, None]], state: dict[str, Any]) -> None:
+def _run_the_weave(
+    go: Callable[[], Coroutine[Any, Any, None]],
+    state: dict[str, Any],
+    gf_mode: GfTransportMode = TRANSPORT_HTTP,
+) -> None:
     """Run the weave and stash anything that escapes it, so the reporters below
     it decide the outcome.
 
@@ -2072,7 +2076,12 @@ def _run_the_weave(go: Callable[[], Coroutine[Any, Any, None]], state: dict[str,
             # coroutine or a worker would be replaced or reset. Armed here, the
             # Runner installs nothing. `_run_enriched_path` is the only caller,
             # so this is the enriched search path and nothing else.
-            with interrupt_guard():
+            #
+            # Armed only for the transport that can open a browser. This half
+            # runs on a worker no interrupt reaches, so on the transports that
+            # hold no driver the first Ctrl-C has nothing to free and an ignored
+            # second one takes away the only thing that could end the process.
+            with interrupt_guard(armed=gf_mode == TRANSPORT_BROWSER):
                 anyio.run(go)
         except* KeyboardInterrupt:
             # With no Runner handler installed, the interrupt lands wherever the
@@ -2278,7 +2287,7 @@ def _run_enriched_path(
             state["gf"] = gf
             _paint_first_gf_table(state, gf, legs=legs, top_n=top_n, awards_only=awards_only)
 
-    _run_the_weave(_go, state)
+    _run_the_weave(_go, state, gf_mode)
 
     gf: list[Any] = state.get("gf") or []
     # What reached the USER, which is not the same question as what was

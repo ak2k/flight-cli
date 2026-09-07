@@ -314,6 +314,10 @@ class GfBrowserSession:
         _asyncio_log.setLevel(logging.CRITICAL)
         pid = _driver_process_id(manager)
         if pid is None:
+            # The arm below reports the kill it could not make; without this one
+            # a driver whose pid this build cannot name is indistinguishable
+            # from a session that had no driver to stop.
+            log.debug("no driver pid for this gflight session; nothing to stop")
             return
         try:
             os.kill(pid, signal.SIGKILL)
@@ -357,11 +361,17 @@ class GfBrowserSession:
             if context is not None:
                 from_context = _swallow("context", context.close)
         finally:
-            # What the `finally` buys, and the only thing it does: the driver
-            # shutdown runs even when a signal lands in the gap between the two
-            # steps. It is what kills the node subprocess, so skipping it leaves
-            # a Chrome running that nothing will come back for.
-            if playwright is not None:
+            # The driver shutdown runs even when a signal lands in the gap
+            # between the two steps: skipping it would leave a Chrome running
+            # that nothing will come back for. But the session can DIE inside the
+            # first step — `_swallow` hands that interrupt back rather than
+            # letting it out, so the check on the way in is already behind us —
+            # and the sync API must not be driven once it has. Stopping IS the
+            # close in that state, and it is a no-op when the stop already
+            # happened.
+            if self._dead:
+                self.stop_driver()
+            elif playwright is not None:
                 from_driver = _swallow("driver", playwright.stop)
         self._manager = None
         _forget(self)
@@ -534,9 +544,18 @@ def stop_all_drivers() -> None:
 
 
 @contextlib.contextmanager
-def interrupt_guard() -> Generator[None]:
-    """Make a Ctrl-C during a browser search reach the browser. Every path that
-    can open a browser session arms this.
+def interrupt_guard(*, armed: bool = True) -> Generator[None]:
+    """Make a Ctrl-C during a browser search reach the browser.
+
+    Armed by the caller, and the two arms decide differently. The fast arm arms
+    it for every Google Flights search, before the transport is known: that
+    search runs on the thread the signal is delivered to, so nothing after the
+    handler can block and the ignore lasts microseconds. The enriched arm arms it
+    only for the browser transport, because there the search runs on a worker no
+    interrupt reaches — on any other transport the first Ctrl-C cannot free that
+    worker, and an ignored second one leaves nothing that can. `auto` is `http`
+    today, so the escalate-on-throttle rung opens a browser on an enriched path
+    this gate leaves unarmed the day it lands.
 
     The default handler raises `KeyboardInterrupt` on the main thread and stops
     there, which leaves the two arms broken in different ways. On `--fast` the
@@ -575,7 +594,7 @@ def interrupt_guard() -> Generator[None]:
     Only the main thread may install a handler; on any other this is a no-op that
     still runs its body, which is correct — that thread's Ctrl-C arrives on the
     main one anyway."""
-    if threading.current_thread() is not threading.main_thread():
+    if not armed or threading.current_thread() is not threading.main_thread():
         yield
         return
     previous = signal.getsignal(signal.SIGINT)
