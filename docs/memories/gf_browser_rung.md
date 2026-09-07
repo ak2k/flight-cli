@@ -152,8 +152,10 @@ and the recovery: remove `<profile>/Singleton*`. Note `Path.exists()` is the
 wrong test there: `SingletonLock` is a symlink to `<host>-<pid>` and reads as
 missing once that pid is gone, which is precisely the interrupted-run case.
 
-That same lock is why multi-cabin stays rung-1-only: its fan-out would want
-concurrent sessions.
+That same lock is why a multi-cabin search cannot FAN OUT at rung 2: a thread
+per cabin is a session per cabin, and the second one fails on the first one's
+lock. It runs the cabins in series instead, through one session — see "What it
+costs" for what that trade buys and what it charges.
 
 ## Refusals and the two renderers
 
@@ -163,9 +165,17 @@ response, unreadable body. `remedy` is a separate attribute, and **both**
 renderings in `_gf_refusal` have to carry it. The full `message` gets it free
 inside `str(e)`. The one-line `note` must append both `e.reason` AND `e.remedy`
 itself, and that is the one that matters most: the enrich path is the default
-search and prints only the note. Built from the remedy alone it read "Retry" for
-all four launch-time failures at once — one useless line, with the only
+search and prints only the note. Built from the remedy alone it read "Retry"
+for all four launch-time failures at once — one useless line, with the only
 actionable one (install Chrome) never named.
+
+The multi-cabin downgrade line is the one place the remedy is deliberately left
+off, and the only one that leads with its verdict. It is not a refusal — the
+search succeeds over http — and half of that remedy is `--gf-transport http`,
+which is the move the line has just announced. Leading with the fact is also
+what makes it survive a narrow terminal: a phrase at the head of a line cannot
+be broken by any width, and a phrase appended after a driver's own sentence can
+be, at widths that have nothing to do with its length.
 
 **Every interpolated string in a refusal is `escape`d.** The app runs typer with
 `rich_markup_mode="rich"`, so `[browser]` in a remedy is read as a style tag and
@@ -195,10 +205,24 @@ still far cheaper than Matrix (~45 s). The 30 s nav timeout is a ceiling, not a
 typical cost — but see the navigation count above before assuming a default
 round trip is as cheap as the one that was timed.
 
-**Single-cabin only.** `--gf-transport browser` with a multi-cabin `--cabin`
-list prints a dim line and uses http. The fan-out runs a thread per cabin, and
-Chromium single-instances the profile directory, so the second cabin would fail
-on the first one's lock — one profile is the constraint, not a missing wire.
+**Multi-cabin is serial, and that is the cost.** `--gf-transport browser` with
+a multi-cabin `--cabin` list runs the cabins one at a time, through one session,
+on the thread that called the search. Measured 2026-09-07: a two-cabin round
+trip at `-n 6` is **10.5 s** and a three-cabin one **14.1 s**, against **1.3 s**
+for the same shape on rung 1. One profile is what makes it serial, and `--help`
+quotes the price so nobody buys the rung expecting the fan-out's latency.
+
+A Ctrl-C anywhere in that sequence is answered where it lands: the loop runs on
+the thread the signal is delivered to, with no worker to wait out, and the guard
+is entered ONCE for the whole list. A second entry would clear the interrupt
+latch and re-arm a SIGINT the first cabin had set to be ignored.
+
+When the browser cannot open at all and no cabin has been served, the whole
+fan-out runs rung 1, says so once on stderr and answers; the fall-through
+coerces the transport, or every cabin attempts the rung that just failed and the
+run ends with an empty stdout. Once a cabin HAS rows, a later failure stays that
+cabin's note — re-running the fan-out would discard them, and a table whose
+columns came from two different rungs is not one answer.
 
 ## The shared leaf
 
@@ -270,4 +294,4 @@ lets the throttle tests substitute it.
 `auto` is accepted and documented as identical to `http`; escalate-on-persistent-
 throttle plus the once-per-process latch is the follow-up. Also out, each a bd
 follow-up under `work-udpp1`: the calendar date grid through the browser,
-booking options, multi-cabin at rung 2, and parallel tabs.
+booking options, and parallel tabs.
