@@ -2002,6 +2002,37 @@ def test_every_cabin_of_a_multi_cabin_browser_search_reaches_the_rung_as_browser
     ]
 
 
+def test_every_cabin_of_a_multi_cabin_auto_search_reaches_the_rung_as_auto(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The coercion's OTHER arm: only a browser mode becomes http at the fan-out.
+
+    `auto` is http today, so replacing the conditional with the constant is
+    invisible to every other check — and the escalation the conditional exists
+    for would then arrive already flattened. Sorted, because this arm fans its
+    cabins out in parallel."""
+    assert sorted(_multi_cabin_transports(monkeypatch, "--gf-transport", "auto")) == [
+        ("BUSINESS", "auto", False),
+        ("COACH", "auto", False),
+    ]
+
+
+def test_a_headed_multi_cabin_browser_search_opens_a_headed_chrome_for_every_cabin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--gf-headed`'s VALUE, on the arm that serialises.
+
+    Dropping the argument from the rung call is an arity error and fails
+    loudly; passing the literal `False` is silent, and a run the user asked to
+    watch then opens a headless Chrome and exits 0 with a full table. Only an
+    assertion on the value can tell those two apart, and the single-cabin
+    headed assertions are on a frame this arm does not take."""
+    assert _multi_cabin_transports(monkeypatch, "--gf-transport", "browser", "--gf-headed") == [
+        ("COACH", "browser", True),
+        ("BUSINESS", "browser", True),
+    ]
+
+
 def _multi_at_rung_two(*cabins: Cabin) -> dict[Cabin, list[Any]]:
     """The multi-cabin fan-out at rung 2, on one leg — the call these nodes share.
 
@@ -2190,13 +2221,16 @@ def test_a_launch_failure_after_a_cabin_was_served_stays_a_per_cabin_note(
 
     buf = capture_err(monkeypatch)
     seen: list[tuple[str, Any]] = []
+    raised: list[GfBrowserUnavailableError] = []
 
     def _rung(
         _legs: Any, opts: Any, _top_n: Any, mode: Any = None, _headed: Any = False
     ) -> list[Any]:
         seen.append((str(opts.cabin.value), mode))
         if opts.cabin is Cabin.BUSINESS:
-            raise GfBrowserUnavailableError("Chrome failed to launch for Google Flights: gone.")
+            e = GfBrowserUnavailableError("Chrome failed to launch for Google Flights: gone.")
+            raised.append(e)
+            raise e
         return ["one-row"]
 
     monkeypatch.setattr(cli, "_gflight_results", _rung)
@@ -2204,7 +2238,10 @@ def test_a_launch_failure_after_a_cabin_was_served_stays_a_per_cabin_note(
     assert list(out) == [Cabin.COACH]  # the served cabin is kept
     assert seen == [("COACH", "browser"), ("BUSINESS", "browser")]  # the fan-out did not re-run
     assert "multi-cabin is using http" not in buf.getvalue()
-    assert "Google Flights BUSINESS" in buf.getvalue()
+    # The whole sentence, not its prefix: what makes the note worth printing is
+    # the refusal it renders, and a prefix holds while that body goes empty.
+    note = cli._gf_refusal(raised[0], transport=cli.TRANSPORT_BROWSER).note
+    assert f"Google Flights BUSINESS: {note}" in buf.getvalue()
 
 
 def test_the_downgrade_line_goes_to_stderr_and_the_table_to_stdout(
@@ -2278,14 +2315,20 @@ def test_a_matrix_multi_cabin_search_opens_no_browser_session(
 
     from flight_cli import cli
 
+    # One token per ARM, never one shared token: a stub that records the same
+    # word on both arms holds whichever one ran, so the routing this node is
+    # about is the thing it cannot see.
     dispatched: list[str] = []
 
-    def _stub(**_kw: Any) -> None:
-        dispatched.append("multi")
+    def _matrix(**_kw: Any) -> None:
+        dispatched.append("matrix")
+
+    def _gflight(**_kw: Any) -> None:
+        dispatched.append("gflight")
 
     asked = _forbid_browser_session(monkeypatch, "a Matrix search must not open a browser session")
-    monkeypatch.setattr(cli, "_run_matrix_path_multi", _stub)
-    monkeypatch.setattr(cli, "_run_gflight_path_multi", _stub)
+    monkeypatch.setattr(cli, "_run_matrix_path_multi", _matrix)
+    monkeypatch.setattr(cli, "_run_gflight_path_multi", _gflight)
 
     result = CliRunner().invoke(
         cli.app,
@@ -2307,7 +2350,7 @@ def test_a_matrix_multi_cabin_search_opens_no_browser_session(
         ],
     )
     assert result.exit_code == 0, result.output
-    assert dispatched == ["multi"]  # it still ran, it just never touched a rung
+    assert dispatched == ["matrix"]  # the Matrix arm ran, and only it
     assert asked == []
 
 

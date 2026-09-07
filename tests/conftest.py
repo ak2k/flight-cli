@@ -52,12 +52,15 @@ def _no_browser_launch(  # pyright: ignore[reportUnusedFunction] - autouse pytes
     reads before it starts one are process-wide state, so without them the first
     browser test to run would decide what every later one sees — and a leaked
     registry entry would let one test's session be stopped by another's
-    interrupt."""
+    interrupt. A leaked scope depth is the same hazard one level up: the close
+    at the end of a scope is skipped while the depth reads non-zero, so the
+    next test on that thread inherits a Chrome holding the profile."""
     monkeypatch.setattr(_gf_browser, "_notice_state", {"printed": False})
     monkeypatch.setattr(_gf_browser, "_sessions", threading.local())
     # Parameterised so the empty set is not partially unknown to the checker.
     monkeypatch.setattr(_gf_browser, "_live", set[_gf_browser.GfBrowserSession]())
     monkeypatch.setattr(_gf_browser, "_interrupt_state", {"seen": False})
+    monkeypatch.setattr(_gf_browser, "_scope_depth", threading.local())
     # The MARKER, not `request.keywords`. `keywords` also carries the node's
     # name, its parametrize ids and its containing directory — so a test
     # parametrized with the string "gf_browser", or any test under a directory
