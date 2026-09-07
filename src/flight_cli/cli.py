@@ -2646,6 +2646,14 @@ def _gflight_cabins_in_series(
     from ._gf_browser import interrupt_guard, session_scope  # noqa: PLC0415 — GF-only
     from ._gflight_ids import shared_throttle_ladder  # noqa: PLC0415 — fli, ~95 ms
 
+    def note_missing_column(cab: Cabin, e: GfBackendError) -> None:
+        """Why this cabin's column will be missing. Left to the bare arm below,
+        a typed refusal reads as an unexplained failure."""
+        err.print(
+            f"[yellow]Google Flights {cab.value}: "
+            f"{_gf_refusal(e, transport=TRANSPORT_BROWSER).note}.[/]"
+        )
+
     results: dict[Cabin, list[Any]] = {}
     with shared_throttle_ladder(), interrupt_guard(), session_scope():
         for cab in cabins:
@@ -2661,26 +2669,16 @@ def _gflight_cabins_in_series(
                 # Ahead of the `GfBackendError` arm below, which is its base
                 # class and would otherwise report a rung that never opened as
                 # one cabin's missing column.
-                if results:
-                    err.print(
-                        f"[yellow]Google Flights {cab.value}: "
-                        f"{_gf_refusal(e, transport=TRANSPORT_BROWSER).note}.[/]"
-                    )
-                    continue
-                # The phrase leads the line so that no console width can break
-                # it, and the reason follows without the refusal's remedy: half
-                # of that remedy is `--gf-transport http`, which is the move
-                # this line is announcing.
-                err.print(f"[dim]multi-cabin is using http: {_safe_text(e.reason)}[/]")
-                return None
+                if not results:
+                    # The phrase leads the line so that no console width can
+                    # break it, and the reason follows without the refusal's
+                    # remedy: half of that remedy is `--gf-transport http`,
+                    # which is the move this line is announcing.
+                    err.print(f"[dim]multi-cabin is using http: {_safe_text(e.reason)}[/]")
+                    return None
+                note_missing_column(cab, e)
             except GfBackendError as e:
-                # A typed refusal is why this cabin's column will be missing;
-                # the bare handler below would print it as an unexplained
-                # failure.
-                err.print(
-                    f"[yellow]Google Flights {cab.value}: "
-                    f"{_gf_refusal(e, transport=TRANSPORT_BROWSER).note}.[/]"
-                )
+                note_missing_column(cab, e)
             except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
                 raise
             except Exception as e:  # noqa: BLE001 — fli has no documented exception surface
