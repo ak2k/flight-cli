@@ -200,6 +200,15 @@ class GfBrowserSession:
         # further call through that API spins forever.
         self._dead = False
 
+    @property
+    def finished(self) -> bool:
+        """True once this browser is done and its sync API must not be driven again.
+
+        A property rather than a bare read of `_dead`: `close_thread_session`
+        needs this from module scope, where reading the attribute directly is a
+        `reportPrivateUsage` error."""
+        return self._dead
+
     def __enter__(self) -> GfBrowserSession:
         return self
 
@@ -674,10 +683,39 @@ def session(*, headed: bool) -> GfBrowserSession:
     return existing
 
 
+_scope_depth = threading.local()
+
+
+@contextlib.contextmanager
+def session_scope() -> Generator[None]:
+    """Hold this thread's session open across several searches, closing it once.
+
+    One search closes its own session as it returns. Several searches on one
+    thread — a multi-cabin run at rung 2 — would then pay the launch per cabin,
+    and a close whose Chrome has not finished exiting still holds the profile
+    lock the next launch needs. Inside this scope the close is deferred to the
+    scope's own exit, which runs on the same thread and on every path out."""
+    depth = getattr(_scope_depth, "n", 0)
+    _scope_depth.n = depth + 1
+    try:
+        yield
+    finally:
+        _scope_depth.n = depth
+        if depth == 0:
+            close_thread_session()
+
+
 def close_thread_session() -> None:
     """Close this thread's session if it made one. Idempotent, and safe to call
     on a thread that never touched rung 2."""
     existing: GfBrowserSession | None = getattr(_sessions, "current", None)
+    # A scope defers the close of a HEALTHY session only. One whose patchright
+    # calls were unwound must never be handed to the next search in the scope:
+    # `_ensure_page` returns the page it already has without consulting the
+    # flag, and a call through a sync API whose greenlet is gone spins on a loop
+    # nobody drives.
+    if getattr(_scope_depth, "n", 0) and existing is not None and not existing.finished:
+        return
     _sessions.current = None
     if existing is not None:
         existing.close()

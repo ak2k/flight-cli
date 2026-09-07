@@ -461,7 +461,7 @@ def test_a_multi_cabin_round_trip_says_what_its_join_is_drawn_from(
     from flight_cli.domain import SearchOptions as _SearchOptions
 
     buf = _io.StringIO()
-    monkeypatch.setattr(cli, "err", _Console(file=buf, width=400, no_color=True, highlight=False))
+    monkeypatch.setattr(cli, "err", _Console(file=buf, width=1000, no_color=True, highlight=False))
 
     row = _one_gflight_row()
     cabins = (_Cabin.COACH, _Cabin.BUSINESS)[:cabins_wanted]
@@ -515,7 +515,7 @@ def test_the_join_note_counts_the_outbounds_that_were_actually_pinned(
     from flight_cli.domain import SearchOptions as _SearchOptions
 
     buf = _io.StringIO()
-    monkeypatch.setattr(cli, "err", _Console(file=buf, width=400, no_color=True, highlight=False))
+    monkeypatch.setattr(cli, "err", _Console(file=buf, width=1000, no_color=True, highlight=False))
     row = _one_gflight_row()
     cabins = (_Cabin.COACH, _Cabin.BUSINESS)
 
@@ -705,6 +705,59 @@ def test_multi_cabin_unencodable_constraint_goes_to_matrix(
     assert "a carrier filter (DL)" in output
 
 
+def test_a_browser_refusal_fits_every_capture_console_in_this_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rung-2 refusal can reach this module's fan-out, and it is a long line.
+
+    The captures here were 400 columns wide while `tests/conftest.py` captures
+    at 1000, so the longest of those refusals wrapped in this module and not in
+    the other — and a substring assertion then failed on where rich broke the
+    line rather than on what the fan-out said. Every capture console in this
+    file is read out of the file's own source, so widening one and leaving
+    another behind fails here rather than in whichever test the refusal reaches
+    first."""
+    import io as _io
+    import pathlib as _pathlib
+    import re as _re
+
+    from rich.console import Console as _Console
+
+    from flight_cli._gf_common import TRANSPORT_BROWSER as _BROWSER
+    from flight_cli._gf_errors import GfBrowserUnavailableError as _Unavailable
+    from flight_cli.cli import _gf_refusal
+
+    _ = monkeypatch
+    source = _pathlib.Path(__file__).read_text(encoding="utf-8")
+    widths = {int(w) for w in _re.findall(r"Console\(file=buf, width=(\d+)", source)}
+    assert widths == {1000}, f"every capture console here must match conftest's: {widths}"
+
+    profile = "/home/somebody/.cache/flight-cli/gf-browser-profile"
+    lock = _Unavailable(
+        f"Chrome could not open Google Flights' browser profile at {profile}: "
+        "BrowserType.launch_persistent_context: Failed to create a ProcessSingleton for "
+        "your profile directory. This usually means that the profile is already in use "
+        "by another instance of Chromium.",
+        remedy=(
+            "Another `flight` process is holding it, or an interrupted run left it "
+            f"locked; wait for the other run to finish, or remove {profile}/Singleton* "
+            "and retry. Retry, or use `--gf-transport http` (or `--backend matrix`)."
+        ),
+    )
+    line = f"[yellow]Google Flights BUSINESS: {_gf_refusal(lock, transport=_BROWSER).note}.[/]"
+
+    def _rendered(width: int) -> list[str]:
+        out = _io.StringIO()
+        _Console(file=out, width=width, no_color=True, highlight=False).print(line)
+        return out.getvalue().rstrip("\n").split("\n")
+
+    # Long enough that the old width would have wrapped it: without this the
+    # assertion below would hold for a line no console could break.
+    assert len(_rendered(4000)[0]) > 400
+    for width in widths:
+        assert len(_rendered(width)) == 1, _rendered(width)
+
+
 @pytest.mark.parametrize(
     ("legs_out", "top_n", "expected"),
     [
@@ -733,7 +786,7 @@ def test_a_round_trip_says_how_many_outbounds_it_will_actually_combine(
     from flight_cli.domain import Leg as _Leg
 
     buf = _io.StringIO()
-    monkeypatch.setattr(cli, "err", _Console(file=buf, width=400, no_color=True, highlight=False))
+    monkeypatch.setattr(cli, "err", _Console(file=buf, width=1000, no_color=True, highlight=False))
     dep = _date.today() + _timedelta(days=45)
     legs = (_Leg.of("JFK", "LHR", dep),)
     if legs_out:

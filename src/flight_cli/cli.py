@@ -2613,12 +2613,89 @@ def _run_matrix_multi(
     return results
 
 
+def _gflight_cabins_in_series(
+    *,
+    legs: tuple[Leg, ...],
+    opts: SearchOptions,
+    cabins: tuple[Cabin, ...],
+    top_n: int,
+    gf_headed: bool,
+) -> dict[Cabin, list[Any]] | None:
+    """Rung 2's multi-cabin shape: one Chrome, one cabin at a time, on this thread.
+
+    The parallel fan-out below cannot run rung 2. A thread per cabin is a
+    session per cabin, and Chromium single-instances the profile directory, so
+    the second cabin fails on the first one's lock. Serialising here is what
+    lets ONE session serve every cabin: the launch is paid once, and every
+    navigation runs on the thread that made the session.
+
+    No task group and no worker thread on this arm, so the loop runs on the
+    thread the interrupt is delivered to and a Ctrl-C is honoured where it
+    lands rather than after the cabin in flight finishes.
+
+    ONE guard around the whole loop, never one per cabin. A guard clears the
+    interrupt latch on its way in, so a second cabin's guard would erase the
+    stop the first one recorded and re-arm a SIGINT the first one had set to be
+    ignored.
+
+    `None` says rung 2 never opened at all, and the caller then runs the whole
+    fan-out on rung 1. Only before the first cabin is served: once a cabin has
+    rows, re-running the fan-out would discard them, and a table whose columns
+    came from two different rungs is not one answer.
+    """
+    from ._gf_browser import interrupt_guard, session_scope  # noqa: PLC0415 — GF-only
+    from ._gflight_ids import shared_throttle_ladder  # noqa: PLC0415 — fli, ~95 ms
+
+    results: dict[Cabin, list[Any]] = {}
+    with shared_throttle_ladder(), interrupt_guard(), session_scope():
+        for cab in cabins:
+            try:
+                results[cab] = _gflight_results(
+                    legs,
+                    opts.model_copy(update={"cabin": cab}),
+                    top_n,
+                    TRANSPORT_BROWSER,
+                    gf_headed,
+                )
+            except GfBrowserUnavailableError as e:
+                # Ahead of the `GfBackendError` arm below, which is its base
+                # class and would otherwise report a rung that never opened as
+                # one cabin's missing column.
+                if results:
+                    err.print(
+                        f"[yellow]Google Flights {cab.value}: "
+                        f"{_gf_refusal(e, transport=TRANSPORT_BROWSER).note}.[/]"
+                    )
+                    continue
+                # The phrase leads the line so that no console width can break
+                # it, and the reason follows without the refusal's remedy: half
+                # of that remedy is `--gf-transport http`, which is the move
+                # this line is announcing.
+                err.print(f"[dim]multi-cabin is using http: {_safe_text(e.reason)}[/]")
+                return None
+            except GfBackendError as e:
+                # A typed refusal is why this cabin's column will be missing;
+                # the bare handler below would print it as an unexplained
+                # failure.
+                err.print(
+                    f"[yellow]Google Flights {cab.value}: "
+                    f"{_gf_refusal(e, transport=TRANSPORT_BROWSER).note}.[/]"
+                )
+            except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
+                raise
+            except Exception as e:  # noqa: BLE001 — fli has no documented exception surface
+                err.print(f"[yellow]Google Flights {cab.value} query failed: {_safe_text(e)}[/]")
+    return results
+
+
 def _run_gflight_multi(
     *,
     legs: tuple[Leg, ...],
     opts: SearchOptions,
     cabins: tuple[Cabin, ...],
     top_n: int,
+    gf_mode: GfTransportMode = TRANSPORT_HTTP,
+    gf_headed: bool = False,
 ) -> dict[Cabin, list[Any]]:
     """Fan out N parallel gflight queries (one per cabin). fli is sync, so
     each query runs in a worker thread via `anyio.to_thread.run_sync`.
@@ -2630,10 +2707,24 @@ def _run_gflight_multi(
     be told the same thing."""
     from ._gflight_ids import shared_throttle_ladder  # noqa: PLC0415
 
+    if gf_mode == TRANSPORT_BROWSER:
+        served = _gflight_cabins_in_series(
+            legs=legs, opts=opts, cabins=cabins, top_n=top_n, gf_headed=gf_headed
+        )
+        if served is not None:
+            return served
+
+    # Rung 1 for every cabin below: either the caller asked for it, or rung 2
+    # could not open at all and said so. A browser mode reaching the fan-out
+    # would open a session per worker thread, which is the profile-lock
+    # collision the series runner exists to avoid.
+    fanout_mode = TRANSPORT_HTTP if gf_mode == TRANSPORT_BROWSER else gf_mode
     results: dict[Cabin, list[Any]] = {}
 
     def query_sync(cab: Cabin) -> list[Any]:
-        return _gflight_results(legs, opts.model_copy(update={"cabin": cab}), top_n)
+        return _gflight_results(
+            legs, opts.model_copy(update={"cabin": cab}), top_n, fanout_mode, gf_headed
+        )
 
     async def query_cabin(cab: Cabin) -> None:
         try:
@@ -2838,8 +2929,12 @@ def _run_gflight_path_multi(
     json_out: bool,
     run_pp: bool,
     sel: ProviderSelection,
+    gf_mode: GfTransportMode = TRANSPORT_HTTP,
+    gf_headed: bool = False,
 ) -> None:
-    """Google Flights multi-cabin: N parallel cabin queries (threadpool) → join → render."""
+    """Google Flights multi-cabin: N cabin queries → join → render.
+
+    Parallel on rung 1 and serial on rung 2; `_run_gflight_multi` chooses."""
     # Widen per-cabin queries so the join has overlap; see _bumped_query_top_n.
     query_top_n = _bumped_query_top_n(top_n, len(cabins))
     # The user's count, not the bumped one. The bump widens the pool each cabin
@@ -2852,7 +2947,14 @@ def _run_gflight_path_multi(
         from ._gflight_ids import pinned_fanout  # noqa: PLC0415
 
         err.print(f"[dim]{_multi_cabin_join_note(pinned_fanout(query_top_n))}[/]")
-    fli_by_cabin = _run_gflight_multi(legs=legs, opts=opts, cabins=cabins, top_n=query_top_n)
+    fli_by_cabin = _run_gflight_multi(
+        legs=legs,
+        opts=opts,
+        cabins=cabins,
+        top_n=query_top_n,
+        gf_mode=gf_mode,
+        gf_headed=gf_headed,
+    )
     if not fli_by_cabin:
         err.print("[red]All Google Flights cabin queries failed.[/]")
         raise typer.Exit(1)
@@ -3472,8 +3574,9 @@ def search(
             "Chrome (headless unless [bold]--gf-headed[/]) against the same URL, a few "
             "seconds per search, and survives the rate limit that blocks http; "
             "[bold]auto[/] is identical to http today (escalate-on-throttle lands "
-            "separately). [bold]browser[/] applies to single-cabin searches; multi-cabin "
-            "uses http. Needs "
+            "separately). A multi-cabin [bold]browser[/] search runs its cabins one at "
+            "a time through a single Chrome (~10s for two cabins, ~14s for three, against "
+            "~1.3s over http), and falls back to http if Chrome cannot open. Needs "
             # Escaped: rich reads `[browser]` as a style tag and deletes it, which
             # printed an install command that silently omits the extra.
             "[bold]uv pip install 'flight-cli\\[browser]'[/] for browser."
@@ -3635,20 +3738,6 @@ def search(
     # and reassigning it would throw away the narrowing this call just did.
     gf_mode = _resolve_gf_transport(gf_transport)
 
-    if len(cabins_tuple) > 1 and gf_mode == TRANSPORT_BROWSER and resolved == BACKEND_GFLIGHT:
-        # Not threaded into the fan-out on purpose: each cabin is a separate
-        # thread, and Chromium single-instances the profile directory, so the
-        # second cabin would fail on the first one's lock. Saying so beats a
-        # silent downgrade.
-        #
-        # Gated on the picker's verdict as well: with `--backend matrix` no rung
-        # runs at all, and announcing a downgrade from a transport that was
-        # never going to be used describes a decision nobody made.
-        err.print(
-            "[dim]--gf-transport browser applies to single-cabin searches; "
-            "multi-cabin uses http.[/]"
-        )
-
     if len(cabins_tuple) > 1:
         # `_pick_backend` already refused anything the page can't encode, so a
         # constraint that survived to here is one the fan-out honours natively.
@@ -3664,6 +3753,8 @@ def search(
                 json_out=json_out,
                 run_pp=run_awards,
                 sel=sel,
+                gf_mode=gf_mode,
+                gf_headed=gf_headed,
             )
             return
         _run_matrix_path_multi(

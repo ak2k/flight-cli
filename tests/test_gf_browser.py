@@ -1621,15 +1621,15 @@ def test_the_help_text_keeps_the_extra_and_installs_with_uv() -> None:
     assert "uv pip install 'flight-cli[browser]'" in flat
 
 
-def test_the_transport_help_describes_the_multi_cabin_downgrade() -> None:
-    """`--help` and the runtime line are one claim about one behaviour, so they
-    say it the same way.
+def test_the_transport_help_describes_the_serialised_multi_cabin_run() -> None:
+    """`--help` and the behaviour are one claim, so they say the same thing.
 
-    The flag restricts nothing to single-cabin: a multi-cabin search under
-    every transport is dispatched and exits 0. What `browser` does with one is
-    downgrade to http and say so — which is what the runtime line at the
-    downgrade guard already tells the user, and what this option now promises
-    before they run it."""
+    A multi-cabin `browser` search is served, one cabin at a time, by one
+    Chrome. That is slower than the parallel rung-1 fan-out by roughly an order
+    of magnitude, and a flag whose help promises only the capability sells a
+    ten-second wait as a free upgrade — so the price is part of the sentence.
+    The http fallback is named as what it is now: what happens when Chrome
+    cannot open, not what a multi-cabin search always does."""
     from typer.testing import CliRunner
 
     from flight_cli import cli
@@ -1637,8 +1637,12 @@ def test_the_transport_help_describes_the_multi_cabin_downgrade() -> None:
     result = CliRunner().invoke(cli.app, ["search", "--help"], env={"COLUMNS": "200"})
     assert result.exit_code == 0
     flat = _flat_help(result.output)
-    assert "multi-cabin uses http" in flat
-    assert "Single-cabin searches only" not in flat
+    assert "runs its cabins one at a time through a single Chrome" in flat
+    assert "~10s for two cabins" in flat
+    assert "falls back to http if Chrome cannot open" in flat
+    # The claim this replaces. Its absence is the point: the flag no longer
+    # restricts anything to single-cabin.
+    assert "applies to single-cabin searches" not in flat
 
 
 def test_four_browser_failures_read_as_four_different_notes(tmp_path: pathlib.Path) -> None:
@@ -1733,25 +1737,47 @@ def test_a_non_2xx_offers_a_move_the_user_can_make() -> None:
     assert "try again" not in rendered.lower()
 
 
+def _no_chrome_rung(seen: list[tuple[str, Any]] | None = None) -> Any:
+    """A rung that refuses at the browser transport and answers over http.
+
+    The refusal a machine with no Chrome raises, at the frame the multi-cabin
+    paths reach the rung through — so the series runner, the fallback and the
+    fan-out all run for real and only the network does not."""
+
+    def _rung(
+        _legs: Any, opts: Any, _top_n: Any, gf_mode: Any = None, _headed: Any = False
+    ) -> list[Any]:
+        if seen is not None:
+            seen.append((str(opts.cabin.value), gf_mode))
+        if gf_mode == gfc.TRANSPORT_BROWSER:
+            raise GfBrowserUnavailableError(
+                "Chrome failed to launch for Google Flights: no browser on this machine."
+            )
+        return []
+
+    return _rung
+
+
 def test_a_multi_cabin_browser_search_says_it_is_using_http(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Chromium single-instances the profile dir, so a thread-per-cabin fan-out
-    cannot each hold one. Downgrading is right; doing it silently is not.
+    """It says so where the fact is known — when rung 2 cannot open at all.
 
-    The dispatch is stubbed out: this is about the line the user sees, and the
-    real one would query two backends over the network."""
+    The cabins are served one at a time by one Chrome now, so a multi-cabin
+    browser search is no longer a downgrade by construction. What is still true
+    is that a machine with no browser answers over http, and says so ONCE for
+    the fan-out rather than once per cabin.
+
+    Captured through `capture_err`: this line carries a driver's own text, and
+    at the 80 columns rich falls back to under `CliRunner` it is several
+    rendered lines, so a substring assertion would fail on where the wrap
+    landed rather than on what was said."""
     from typer.testing import CliRunner
 
     from flight_cli import cli
 
-    dispatched: list[str] = []
-
-    def _stub(**_kw: Any) -> None:
-        dispatched.append("multi")
-
-    monkeypatch.setattr(cli, "_run_matrix_path_multi", _stub)
-    monkeypatch.setattr(cli, "_run_gflight_path_multi", _stub)
+    buf = capture_err(monkeypatch)
+    monkeypatch.setattr(cli, "_gflight_results", _no_chrome_rung())
 
     result = CliRunner().invoke(
         cli.app,
@@ -1771,55 +1797,33 @@ def test_a_multi_cabin_browser_search_says_it_is_using_http(
         ],
     )
     assert result.exit_code == 0, result.output
-    assert dispatched == ["multi"]
-    # `stderr`, not `output`: on the installed click `result.output` is the
-    # MIXED stream, so a count taken there is blind to which one the sentence
-    # went to — and stdout under `--format json` is one document, which a
-    # prose line in front of it destroys.
-    assert result.stderr.count("multi-cabin uses http") == 1  # said once, not per cabin
+    assert buf.getvalue().count("multi-cabin is using http") == 1  # said once, not per cabin
     assert "multi-cabin" not in result.stdout
 
 
-def test_an_http_multi_cabin_search_announces_no_downgrade(
+def test_an_http_multi_cabin_search_never_reaches_rung_two(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The note fires only where a transport the user asked for was set aside.
+    """`--gf-transport http` opens no browser, and every cabin says so.
 
-    On `--gf-transport http` nothing was: the fan-out runs the rung the user
-    named. Saying otherwise tells them their transport was downgraded when the
-    search did exactly what they asked."""
-    from typer.testing import CliRunner
+    This asserted the ABSENCE of a downgrade line, which nothing prints any
+    more — so it passed while pinning nothing. What it pins instead is the
+    positive fact the flag promises: on http no cabin reaches rung 2, and the
+    session seam is never even asked for one."""
+    from flight_cli import _gf_browser as _gfb
 
-    from flight_cli import cli
+    asked: list[bool] = []
 
-    dispatched: list[str] = []
+    def _session(*, headed: bool) -> Any:
+        asked.append(headed)
+        raise AssertionError("an http search must not open a browser session")
 
-    def _stub(**_kw: Any) -> None:
-        dispatched.append("multi")
-
-    monkeypatch.setattr(cli, "_run_matrix_path_multi", _stub)
-    monkeypatch.setattr(cli, "_run_gflight_path_multi", _stub)
-
-    result = CliRunner().invoke(
-        cli.app,
-        [
-            "search",
-            "JFK",
-            "LAX",
-            "--dep",
-            "2026-10-14",
-            "--cabin",
-            "coach,business",
-            "--gf-transport",
-            "http",
-            "--cash-only",
-            "-n",
-            "1",
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    assert dispatched == ["multi"]
-    assert "multi-cabin uses http" not in result.output
+    monkeypatch.setattr(_gfb, "session", _session)
+    seen = _multi_cabin_transports(monkeypatch, "--gf-transport", "http")
+    # Sorted: rung 1 runs the cabins in parallel, so their order is the
+    # threadpool's rather than the user's.
+    assert sorted(seen) == [("BUSINESS", "http", False), ("COACH", "http", False)]
+    assert asked == []
 
 
 def test_the_downgrade_note_is_not_part_of_the_json_document(
@@ -1828,18 +1832,19 @@ def test_the_downgrade_note_is_not_part_of_the_json_document(
     """stdout under `--format json` is one document, and the note is prose.
 
     Printed there it is the FIRST thing on stdout, so the document does not
-    parse at all — an exit 0 a consumer cannot read. The stub writes the
-    document the real fan-out would, which is what makes the parse the
-    assertion rather than the absence of a substring."""
+    parse at all — an exit 0 a consumer cannot read. Driven through the
+    no-Chrome path, which is the one that prints the line now: the whole
+    fan-out is served over http, the document is the real one the fan-out
+    wrote, and the parse is the assertion rather than the absence of a
+    substring.
+
+    Captured through `capture_err` for the reason the node above it is."""
     from typer.testing import CliRunner
 
     from flight_cli import cli
 
-    def _stub(**_kw: Any) -> None:
-        sys.stdout.write(json.dumps({"itineraries": []}, indent=2))
-
-    monkeypatch.setattr(cli, "_run_matrix_path_multi", _stub)
-    monkeypatch.setattr(cli, "_run_gflight_path_multi", _stub)
+    buf = capture_err(monkeypatch)
+    monkeypatch.setattr(cli, "_gflight_results", _no_chrome_rung())
 
     result = CliRunner().invoke(
         cli.app,
@@ -1861,8 +1866,8 @@ def test_the_downgrade_note_is_not_part_of_the_json_document(
         ],
     )
     assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout) == {"itineraries": []}
-    assert "multi-cabin uses http" in result.stderr  # it was said, just not there
+    assert json.loads(result.stdout) == {"COACH": [], "BUSINESS": []}
+    assert "multi-cabin is using http" in buf.getvalue()  # it was said, just not there
 
 
 # ─────────── the option a user typed, all the way to the launch call ───────────
@@ -1945,6 +1950,341 @@ def test_the_enriched_path_is_handed_the_transport_the_user_named(
     assert _transport_seen(monkeypatch, *extra, enriched=True) == [expected]
 
 
+def _multi_cabin_transports(
+    monkeypatch: pytest.MonkeyPatch, *extra: str, cabins: str = "coach,business"
+) -> list[tuple[str, Any, Any]]:
+    """The `(cabin, gf_mode, gf_headed)` triple EVERY cabin reached the rung with.
+
+    `_transport_seen` above is the single-cabin model and is not reusable here:
+    it asserts one recorded call and it appends `--fast`, which the multi-cabin
+    dispatch does not read. This records one entry per cabin and takes the
+    multi-cabin arm, where the pair crosses two more frames than it does there.
+
+    `--format json` so the run ends in a document rather than a rendered table:
+    the rung is stubbed, so there are no rows to render."""
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    calls: list[tuple[str, Any, Any]] = []
+
+    def _record(_legs: Any, opts: Any, _top_n: Any, *rest: Any) -> list[Any]:
+        calls.append((str(opts.cabin.value), *rest))
+        return []
+
+    monkeypatch.setattr(cli, "_gflight_results", _record)
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "search",
+            "JFK",
+            "LAX",
+            "--dep",
+            "2026-10-14",
+            "--cabin",
+            cabins,
+            "--cash-only",
+            "-n",
+            "1",
+            "--format",
+            "json",
+            *extra,
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    return calls
+
+
+def test_every_cabin_of_a_multi_cabin_browser_search_reaches_the_rung_as_browser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wire the multi-cabin dispatch adds: four frames from the option to
+    the rung.
+
+    Severed anywhere along it, `--gf-transport browser --cabin y,j` still
+    parses, still exits 0 and quietly runs rung 1 for every cabin — the thin
+    client the user asked to replace, with nothing on either stream saying so.
+
+    In order, unlike rung 1's: the cabins are served one at a time."""
+    assert _multi_cabin_transports(monkeypatch, "--gf-transport", "browser") == [
+        ("COACH", "browser", False),
+        ("BUSINESS", "browser", False),
+    ]
+
+
+def _one_way(cabin: Any) -> tuple[Any, Any]:
+    """One leg and the options every fan-out test below queries with."""
+    from flight_cli.domain import SearchOptions as _Opts
+
+    return (Leg.of("JFK", "LAX", date(2026, 10, 14)),), _Opts(cabin=cabin)
+
+
+def test_a_multi_cabin_browser_run_enters_the_interrupt_guard_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One guard around the whole cabin list, never one per cabin.
+
+    A guard clears the process-wide interrupt latch on its way in and restores
+    SIGINT's disposition on its way out, so a guard entered per cabin would
+    erase the stop the previous cabin recorded and re-arm a signal that cabin
+    had set to be ignored — the second Ctrl-C would then raise straight through
+    a shutdown already in progress. Three cabins, because the hazard needs a
+    second entry to appear at all."""
+    from flight_cli import cli
+    from flight_cli.domain import Cabin
+
+    entries: list[bool] = []
+    real = gfb.interrupt_guard
+
+    @contextlib.contextmanager
+    def _counting(*, armed: bool = True) -> Generator[None]:
+        entries.append(armed)
+        with real(armed=armed):
+            yield
+
+    def _rung(*_a: Any, **_kw: Any) -> list[Any]:
+        return []
+
+    monkeypatch.setattr(gfb, "interrupt_guard", _counting)
+    monkeypatch.setattr(cli, "_gflight_results", _rung)
+    legs, opts = _one_way(Cabin.COACH)
+    cli._run_gflight_multi(
+        legs=legs,
+        opts=opts,
+        cabins=(Cabin.COACH, Cabin.BUSINESS, Cabin.FIRST),
+        top_n=1,
+        gf_mode=gfc.TRANSPORT_BROWSER,
+    )
+    assert entries == [True]
+
+
+@pytest.mark.gf_browser
+def test_two_cabins_at_rung_two_share_one_browser_launch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """One Chrome for the whole cabin list — the point of serialising at all.
+
+    A launch is the expensive part of rung 2, and Chromium single-instances the
+    profile directory: a second launch that overlaps the first fails on its
+    lock, and one that merely follows it races Chrome's asynchronous release of
+    the `Singleton*` files. The stub closes the thread's session on its way out
+    exactly as `_gflight_results` does, so what makes this one launch instead of
+    two is the scope deferring that close."""
+    from flight_cli import cli
+    from flight_cli.domain import Cabin
+
+    pw = _install(monkeypatch, tmp_path)
+
+    def _rung(
+        _legs: Any, _opts: Any, _top_n: Any, _mode: Any = None, headed: Any = False
+    ) -> list[Any]:
+        try:
+            gfb.session(headed=bool(headed)).get_html(_PAGE_URL)
+            return []
+        finally:
+            gfb.close_thread_session()
+
+    monkeypatch.setattr(cli, "_gflight_results", _rung)
+    legs, opts = _one_way(Cabin.COACH)
+    cli._run_gflight_multi(
+        legs=legs,
+        opts=opts,
+        cabins=(Cabin.COACH, Cabin.BUSINESS),
+        top_n=1,
+        gf_mode=gfc.TRANSPORT_BROWSER,
+    )
+    assert pw.chromium.launches == 1
+    assert len(_page_of(pw).gotos) == 2  # one navigation per cabin, one browser
+
+
+@pytest.mark.gf_browser
+def test_a_session_scope_defers_the_close_and_makes_it_once_on_the_way_out(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """Inside the scope the close is deferred; on the way out it happens once.
+
+    Deferred and not cancelled: a session the scope forgot to close leaves a
+    Chrome holding the profile for the life of the process, which is the next
+    run's launch failure."""
+    _install(monkeypatch, tmp_path)
+    closes: list[str] = []
+
+    with gfb.session_scope():
+        s = gfb.session(headed=False)
+        s.get_html(_PAGE_URL)
+        monkeypatch.setattr(s, "close", lambda: closes.append("close"))
+        gfb.close_thread_session()
+        gfb.close_thread_session()
+        assert closes == []  # deferred, both times
+        assert gfb.session(headed=False) is s  # and the same browser is handed back
+    assert closes == ["close"]
+
+
+@pytest.mark.gf_browser
+def test_a_finished_session_is_never_handed_to_the_next_search_in_a_scope(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The scope defers the close of a HEALTHY session only.
+
+    `_ensure_page` returns the page it already has without consulting the flag,
+    so a finished session handed to the next cabin is a call through a sync API
+    whose greenlet is gone — measured elsewhere as a spin on a loop nobody
+    drives, ended only by a kill. Pinned here rather than end to end: everything
+    that sets the flag today also raises past the cabin loop, so no shipped
+    handler reaches the next cabin with one."""
+    _install(monkeypatch, tmp_path)
+
+    with gfb.session_scope():
+        s1 = gfb.session(headed=False)
+        gfb.close_thread_session()
+        assert gfb.session(headed=False) is s1  # healthy: kept for the next cabin
+        s1._dead = True
+        assert s1.finished
+        gfb.close_thread_session()
+        assert gfb.session(headed=False) is not s1  # finished: not handed on
+
+
+def test_a_launch_failure_before_any_cabin_runs_the_whole_fan_out_on_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No Chrome on the machine, and the answer still arrives.
+
+    Rung 2 that cannot open at all says nothing about the query, so refusing
+    the search would withhold a table http can serve. The alternative the
+    fan-out must not take is returning the cabins it has: before the first one
+    is served that is no cabins, and an exit 0 with an empty table reads as a
+    route with no fares.
+
+    Captured through `capture_err`, whose console is as wide as the longest
+    refusal this can carry."""
+    from flight_cli import cli
+    from flight_cli.domain import Cabin
+
+    buf = capture_err(monkeypatch)
+    monkeypatch.setattr(cli, "_gflight_results", _no_chrome_rung())
+    legs, opts = _one_way(Cabin.COACH)
+    out = cli._run_gflight_multi(
+        legs=legs,
+        opts=opts,
+        cabins=(Cabin.COACH, Cabin.BUSINESS),
+        top_n=1,
+        gf_mode=gfc.TRANSPORT_BROWSER,
+    )
+    # Sorted, so the parallel fan-out's completion order is not the assertion.
+    assert sorted(out) == [Cabin.BUSINESS, Cabin.COACH]  # every cabin answered, over http
+    assert buf.getvalue().count("multi-cabin is using http") == 1
+
+
+def test_the_fallback_fan_out_queries_with_the_http_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fall-through has to CHANGE the transport, not just leave the rung.
+
+    Without that, the fan-out closes over the mode the caller asked for and
+    every cabin attempts rung 2 again — measured, before this line existed: the
+    fallback was announced, all three launch attempts failed, and the run ended
+    at exit 1 with nothing on stdout at all.
+
+    Captured through `capture_err` for the reason the node above it is."""
+    from flight_cli import cli
+    from flight_cli.domain import Cabin
+
+    capture_err(monkeypatch)
+    seen: list[tuple[str, Any]] = []
+    monkeypatch.setattr(cli, "_gflight_results", _no_chrome_rung(seen))
+    legs, opts = _one_way(Cabin.COACH)
+    cli._run_gflight_multi(
+        legs=legs,
+        opts=opts,
+        cabins=(Cabin.COACH, Cabin.BUSINESS),
+        top_n=1,
+        gf_mode=gfc.TRANSPORT_BROWSER,
+    )
+    assert seen[0] == ("COACH", "browser")  # the first cabin tried the rung
+    # Sorted: rung 1 runs its cabins in parallel.
+    assert sorted(seen[1:]) == [("BUSINESS", "http"), ("COACH", "http")]
+
+
+def test_a_launch_failure_after_a_cabin_was_served_stays_a_per_cabin_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once a cabin has rows, a later refusal is that cabin's note and no more.
+
+    Re-running the fan-out would discard the rows already in hand and refill the
+    table from the other rung — and a comparison whose columns came from two
+    different fetches of a moving market is not one answer. So the cabin that
+    failed is missing and says why, which is what every other per-cabin failure
+    on this path already does.
+
+    Captured through `capture_err`: the per-cabin refusal is the same long line
+    the downgrade carries."""
+    from flight_cli import cli
+    from flight_cli.domain import Cabin
+
+    buf = capture_err(monkeypatch)
+    seen: list[tuple[str, Any]] = []
+
+    def _rung(
+        _legs: Any, opts: Any, _top_n: Any, mode: Any = None, _headed: Any = False
+    ) -> list[Any]:
+        seen.append((str(opts.cabin.value), mode))
+        if opts.cabin is Cabin.BUSINESS:
+            raise GfBrowserUnavailableError("Chrome failed to launch for Google Flights: gone.")
+        return ["one-row"]
+
+    monkeypatch.setattr(cli, "_gflight_results", _rung)
+    legs, opts = _one_way(Cabin.COACH)
+    out = cli._run_gflight_multi(
+        legs=legs,
+        opts=opts,
+        cabins=(Cabin.COACH, Cabin.BUSINESS),
+        top_n=1,
+        gf_mode=gfc.TRANSPORT_BROWSER,
+    )
+    assert list(out) == [Cabin.COACH]  # the served cabin is kept
+    assert seen == [("COACH", "browser"), ("BUSINESS", "browser")]  # the fan-out did not re-run
+    assert "multi-cabin is using http" not in buf.getvalue()
+    assert "Google Flights BUSINESS" in buf.getvalue()
+
+
+def test_the_downgrade_line_goes_to_stderr_and_the_table_to_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two streams, two audiences: the notice is for a person, stdout is the answer.
+
+    The same rule the JSON document lives by, on the path that renders a table:
+    a prose line written to stdout is inside whatever the caller is reading,
+    and `--format json` is only the case where that is loudest."""
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    buf = capture_err(monkeypatch)
+    monkeypatch.setattr(cli, "_gflight_results", _no_chrome_rung())
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "search",
+            "JFK",
+            "LAX",
+            "--dep",
+            "2026-10-14",
+            "--cabin",
+            "coach,business",
+            "--gf-transport",
+            "browser",
+            "--cash-only",
+            "-n",
+            "1",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "multi-cabin is using http" in buf.getvalue()
+    assert "multi-cabin" not in result.stdout
+    assert result.stdout.strip()  # the answer still arrived
+
+
 @pytest.mark.usefixtures("no_rung_one")
 def test_the_headed_flag_reaches_the_launch_call_itself(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
@@ -1989,21 +2329,31 @@ def test_the_headed_flag_reaches_the_launch_call_itself(
     assert len(_page_of(pw).gotos) == 1
 
 
-def test_no_downgrade_note_when_google_flights_is_never_used(
+def test_a_matrix_multi_cabin_search_opens_no_browser_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`--backend matrix` runs no rung at all, so there is nothing to downgrade.
-    Announcing one describes a decision nobody made, and points the user at a
-    transport flag that had no bearing on the search they ran."""
+    """`--backend matrix` runs no rung at all, whatever `--gf-transport` says.
+
+    This asserted the absence of a downgrade line that nothing prints any more,
+    so it passed while pinning nothing. The claim underneath it is the one worth
+    holding: a transport flag that had no bearing on the search must not cost a
+    browser, a profile lock or a Chrome launch."""
     from typer.testing import CliRunner
 
+    from flight_cli import _gf_browser as _gfb
     from flight_cli import cli
 
     dispatched: list[str] = []
+    asked: list[bool] = []
 
     def _stub(**_kw: Any) -> None:
         dispatched.append("multi")
 
+    def _session(*, headed: bool) -> Any:
+        asked.append(headed)
+        raise AssertionError("a Matrix search must not open a browser session")
+
+    monkeypatch.setattr(_gfb, "session", _session)
     monkeypatch.setattr(cli, "_run_matrix_path_multi", _stub)
     monkeypatch.setattr(cli, "_run_gflight_path_multi", _stub)
 
@@ -2027,42 +2377,31 @@ def test_no_downgrade_note_when_google_flights_is_never_used(
         ],
     )
     assert result.exit_code == 0, result.output
-    assert dispatched == ["multi"]  # it still ran, it just says nothing about rungs
-    assert "multi-cabin uses http" not in result.output
+    assert dispatched == ["multi"]  # it still ran, it just never touched a rung
+    assert asked == []
 
 
-def test_a_single_cabin_browser_search_prints_no_downgrade(
+def test_a_single_cabin_browser_search_is_not_serialised(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The counterpart: the line must not fire where the browser rung is live."""
-    from typer.testing import CliRunner
+    """The series runner is the multi-cabin shape, and only that.
 
+    This asserted the absence of a downgrade line, which no path prints for a
+    single cabin any more — so it passed on a string nobody writes. What it
+    holds instead is the boundary: one cabin keeps the path U21 gated, and does
+    not acquire a second `interrupt_guard` entry by being routed through a
+    runner built for a list."""
     from flight_cli import cli
 
-    def _stub(**_kw: Any) -> None:
-        return None
+    entered: list[str] = []
 
-    monkeypatch.setattr(cli, "_run_gflight_path", _stub)
-    monkeypatch.setattr(cli, "_run_enriched_path", _stub)
+    def _series(**_kw: Any) -> None:
+        entered.append("series")
+        raise AssertionError("a single-cabin search must not take the series runner")
 
-    result = CliRunner().invoke(
-        cli.app,
-        [
-            "search",
-            "JFK",
-            "LAX",
-            "--dep",
-            "2026-10-14",
-            "--gf-transport",
-            "browser",
-            "--cash-only",
-            "-n",
-            "1",
-            "--fast",
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    assert "multi-cabin" not in result.output
+    monkeypatch.setattr(cli, "_gflight_cabins_in_series", _series)
+    assert _transport_seen(monkeypatch, "--gf-transport", "browser") == [("browser", False)]
+    assert entered == []
 
 
 def test_the_default_transport_is_rung_one() -> None:
