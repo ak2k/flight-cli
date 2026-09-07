@@ -169,13 +169,16 @@ search and prints only the note. Built from the remedy alone it read "Retry"
 for all four launch-time failures at once — one useless line, with the only
 actionable one (install Chrome) never named.
 
-The multi-cabin downgrade line is the one place the remedy is deliberately left
-off, and the only one that leads with its verdict. It is not a refusal — the
-search succeeds over http — and half of that remedy is `--gf-transport http`,
-which is the move the line has just announced. Leading with the fact is also
-what makes it survive a narrow terminal: a phrase at the head of a line cannot
-be broken by any width, and a phrase appended after a driver's own sentence can
-be, at widths that have nothing to do with its length.
+The multi-cabin downgrade line is the only one that leads with its verdict. It
+is not a refusal — the search succeeds over http — so the verdict comes first
+and the reason and the remedy follow it. Half that remedy is `--gf-transport
+http`, the move the line has just announced; the other half, install Chrome and
+point the binary at it, is what a user whose http rung is ALSO refused has left
+to try. Leading with the fact is what makes it survive a narrow terminal: a
+phrase at the head of a line cannot be broken by any width, and a phrase
+appended after a driver's own sentence can be, at widths that have nothing to do
+with its length. Measured on the three longest refusals this line carries, at
+1000, 400, 200 and 80 columns: the phrase renders whole in all twelve.
 
 **Every interpolated string in a refusal is `escape`d.** The app runs typer with
 `rich_markup_mode="rich"`, so `[browser]` in a remedy is read as a style tag and

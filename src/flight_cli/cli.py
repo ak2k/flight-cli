@@ -2649,10 +2649,10 @@ def _gflight_cabins_in_series(
     def note_missing_column(cab: Cabin, e: GfBackendError) -> None:
         """Why this cabin's column will be missing. Left to the bare arm below,
         a typed refusal reads as an unexplained failure."""
-        err.print(
-            f"[yellow]Google Flights {cab.value}: "
-            f"{_gf_refusal(e, transport=TRANSPORT_BROWSER).note}.[/]"
-        )
+        note = _gf_refusal(e, transport=TRANSPORT_BROWSER).note
+        # `removesuffix`, because a browser refusal's note already ends in the
+        # full stop its remedy carries and every other refusal's does not.
+        err.print(f"[yellow]Google Flights {cab.value}: {note.removesuffix('.')}.[/]")
 
     results: dict[Cabin, list[Any]] = {}
     with shared_throttle_ladder(), interrupt_guard(), session_scope():
@@ -2671,10 +2671,13 @@ def _gflight_cabins_in_series(
                 # one cabin's missing column.
                 if not results:
                     # The phrase leads the line so that no console width can
-                    # break it, and the reason follows without the refusal's
-                    # remedy: half of that remedy is `--gf-transport http`,
-                    # which is the move this line is announcing.
-                    err.print(f"[dim]multi-cabin is using http: {_safe_text(e.reason)}[/]")
+                    # break it. The remedy follows the reason because the other
+                    # half of it — install Chrome, point the binary — is what a
+                    # user whose http rung is also refused has left to try.
+                    err.print(
+                        f"[dim]multi-cabin is using http: "
+                        f"{_safe_text(e.reason)} {_safe_text(e.remedy)}[/]"
+                    )
                     return None
                 note_missing_column(cab, e)
             except GfBackendError as e:

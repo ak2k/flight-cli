@@ -2180,6 +2180,9 @@ def test_a_launch_failure_before_any_cabin_runs_the_whole_fan_out_on_http(
     # Sorted, so the parallel fan-out's completion order is not the assertion.
     assert sorted(out) == [Cabin.BUSINESS, Cabin.COACH]  # every cabin answered, over http
     assert buf.getvalue().count("multi-cabin is using http") == 1
+    # The remedy too: a run whose http rung is also refused has nothing else to
+    # go on, and this line is the only one printed before the first cabin.
+    assert gfb.BROWSER_DEFAULT_REMEDY in buf.getvalue()
 
 
 def test_the_fallback_fan_out_queries_with_the_http_transport(
@@ -2242,6 +2245,7 @@ def test_a_launch_failure_after_a_cabin_was_served_stays_a_per_cabin_note(
     # the refusal it renders, and a prefix holds while that body goes empty.
     note = cli._gf_refusal(raised[0], transport=cli.TRANSPORT_BROWSER).note
     assert f"Google Flights BUSINESS: {note}" in buf.getvalue()
+    assert ".." not in buf.getvalue()  # one full stop, not the writer's on top of the note's
 
 
 def test_the_downgrade_line_goes_to_stderr_and_the_table_to_stdout(
