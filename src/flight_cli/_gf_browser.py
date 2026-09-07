@@ -274,19 +274,21 @@ class GfBrowserSession:
         transport dying wakes it.
 
         Chrome needs no signal of its own. The driver holds its remote-debugging
-        pipe and Chrome exits when that peer disappears — measured, every Chrome
-        process gone within 0.6 s and no `Singleton*` left in the profile.
+        pipe and Chrome exits when that peer disappears. That exit is asynchronous
+        to this call and to the CLI's — nothing here waits for it — and it is what
+        clears `Singleton*`; measured at 0.08-0.11 s after the CLI's exit, and
+        load-dependent.
 
         `SIGKILL` rather than the `SIGINT` the driver handles gracefully: the
         graceful path writes its last frames into a Python that is already
         unwinding, and the `EPIPE` that follows is an unhandled `error` event —
         25 lines of Node stack on the user's terminal, on the run they asked to
-        end. A dead driver writes nothing. POSIX-only, as is every other caller
-        of `os.kill` here; this rung runs a real Chrome and has no Windows path.
+        end. A dead driver writes nothing. POSIX-only; this rung runs a real
+        Chrome and has no Windows path.
 
         The pid is resolved HERE and not recorded at launch, because the session
-        is registered before `start()` is called: an interrupt anywhere inside
-        `start()` still finds the process that call spawned.
+        is registered before `start()` is called: an interrupt after the driver is
+        spawned inside `start()` still finds the process that call spawned.
 
         The recorded manager can in principle name a driver that already exited
         and whose pid the OS reused — `close` clears it only after
@@ -343,12 +345,13 @@ class GfBrowserSession:
         30 s and still going, ended only by `SIGKILL`. Stopping the driver IS the
         close in that state."""
         if self._dead:
-            # Stop FIRST, then drop the handles. Three things set the dead flag
-            # and only one of them killed anything — the stop itself did, the two
-            # arms recording an unwound patchright call did not — and dropping
-            # the handles makes the driver unreachable for good. Stopping here is
-            # what makes "dead" mean "the driver is down" whichever one set it.
-            # On the path that already killed, this is a no-op.
+            # Stop FIRST, then drop the handles. Four things set the dead flag
+            # and only one of them killed anything — the stop itself did, the
+            # three arms recording an unwound patchright call did not — and
+            # dropping the handles makes the driver unreachable for good.
+            # Stopping here is what makes "dead" mean "the driver is down"
+            # whichever one set it. On the path that already killed, this is a
+            # no-op.
             self.stop_driver()
             self._page = self._context = self._playwright = None
             _forget(self)
@@ -394,8 +397,8 @@ class GfBrowserSession:
             ) from e
         try:
             # Registered BEFORE the driver starts. `stop_driver` resolves the pid
-            # when it needs it, so an interrupt anywhere inside `start()` still
-            # reaches the process that call spawned.
+            # when it needs it, so an interrupt after the driver is spawned inside
+            # `start()` still reaches the process that call spawned.
             self._manager = factory()
             _remember(self)
             self._playwright = self._manager.start()
@@ -500,9 +503,9 @@ def _driver_process_id(manager: Any) -> int | None:
 
     A None from a build that MOVED the chain is not the same as a None from a
     session that never launched, and only the first is a problem: it is a driver
-    nobody can stop. `tests/test_gf_browser.py` pins the chain against the
-    installed patchright so that a bump fails there rather than as an orphan
-    Chrome nobody reported."""
+    nobody can stop. `tests/test_gf_browser.py` pins those three assignments
+    against the installed patchright, so a bump that moves any of them fails
+    there rather than as an orphan Chrome nobody reported."""
     try:
         return int(manager._connection._transport._proc.pid)
     except (AttributeError, TypeError, ValueError):
@@ -586,10 +589,9 @@ def interrupt_guard(*, armed: bool = True) -> Generator[None]:
     including by the restore below, which is skipped. There is nothing left for a
     second Ctrl-C to stop: the drivers are dead and the exit is already running.
     What it would do instead is land in the middle of that exit, as a second
-    `KeyboardInterrupt` through interpreter shutdown or, once the handler was
-    restored, as death by signal — which turns a clean 130 into rc -2 and reports
-    a stop the user asked for as a crash. The cost is real: a shutdown that ever
-    did hang could no longer be interrupted from the same terminal.
+    `KeyboardInterrupt` through interpreter finalisation. The cost is real: a
+    shutdown that ever did hang could no longer be interrupted from the same
+    terminal.
 
     Only the main thread may install a handler; on any other this is a no-op that
     still runs its body, which is correct — that thread's Ctrl-C arrives on the

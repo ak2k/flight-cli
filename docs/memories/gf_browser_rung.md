@@ -102,14 +102,18 @@ interpreter shutdown on the main thread cannot see a worker's session.
 ## Ctrl-C
 
 **A SIGINT at any point of a browser search exits 130 within 0.06 s, on both
-arms.** The session closes exactly once, no Chrome survives, no `Singleton*` is
-left where it would block the next search, and a second Ctrl-C during the
-shutdown changes none of that. stdout carries nothing partial — a table already
-painted before the interrupt is a whole answer and stays — and stderr carries no
-line about the interruption at all, only the launch notice the run had already
-printed. Measured across fourteen cases: both arms at 0.3/0.8/1.2/2.5 s and
-mid-pin-loop, a second SIGINT 50 ms into each arm's shutdown, `--format json`,
-and one `--gf-headed` window.
+arms.** The session closes exactly once, and within 0.11 s of that exit no
+Chrome survives and no `Singleton*` is left where it would block the next
+search — Chrome's exit is asynchronous to the CLI's by design, so that is a tail
+with a bound and not a property of the instant. stdout carries nothing partial —
+a table already painted before the interrupt is a whole answer and stays — and
+stderr carries no line about the interruption at all, only the notices the run
+had already printed. Measured across fourteen cases: both arms at
+0.3/0.8/1.2/2.5 s and mid-pin-loop, `--format json`, and one `--gf-headed`
+window. A second Ctrl-C during the shutdown changes none of it, and that is held
+by the disposition rather than by a live case: the handler installs `SIG_IGN`
+before it does anything else, and the shutdown is over inside 60 ms — faster
+than a second signal can be aimed into it.
 
 The mechanism, because a hang here is otherwise re-derived from scratch: an
 interrupt that unwinds a patchright call kills the greenlet running that call's

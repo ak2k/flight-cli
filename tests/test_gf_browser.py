@@ -900,9 +900,10 @@ def test_a_ctrl_c_during_the_launch_is_not_turned_into_a_refusal(
     driver process is STOPPED and the sync API is never driven again: an
     interrupt that unwinds a patchright call kills the greenlet running that
     call's event loop, so a `context.close()` afterwards spins on a dead greenlet
-    forever. Both halves are asserted, because only one of them can fail on its
-    own — the fake manager exposes no driver pid, so `pw.stopped is False` holds
-    whether or not anything was stopped, and the kill is what says which."""
+    until something kills the process. Both halves are asserted, because only one
+    of them can fail on its own — `pw.stopped` is set only by the healthy
+    `close()`, which a dead session never runs, so it holds whether or not
+    anything was stopped, and the kill is what says which."""
     pw = _install(monkeypatch, tmp_path, launch_error=KeyboardInterrupt())
     killed: list[tuple[int, int]] = []
     fake_pid = 424242
@@ -2557,9 +2558,8 @@ def test_the_guard_stops_every_driver_and_then_ignores_the_next_ctrl_c(
 
     And the ignore OUTLIVES the guard, deliberately. Once the drivers are dead
     and the exit is running there is nothing left for a second Ctrl-C to stop;
-    what it would do instead is land in the middle of that shutdown, and once the
-    old handler is back that is death by signal — rc -2 rather than the 130 the
-    user's first Ctrl-C had already earned."""
+    what it would do instead is land in the middle of that shutdown, as a second
+    `KeyboardInterrupt` through interpreter finalisation."""
     stopped: list[str] = []
 
     def _stop() -> None:

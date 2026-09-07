@@ -2065,7 +2065,7 @@ def _run_the_weave(
     the most ordinary command there is — and the rows the other backend already
     has go with it. A stash is not an outcome: every path out of its caller
     reads it, including the one whose other half succeeded."""
-    from ._gf_browser import interrupt_guard  # noqa: PLC0415 — GF-only; see below
+    from ._gf_browser import interrupt_guard  # noqa: PLC0415 — patchright off the import path
 
     try:
         try:
