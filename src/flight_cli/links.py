@@ -183,19 +183,26 @@ def _spa_calendar_leg(
         else:
             d["routingRet"] = ret.route_language or ""
             d["extRet"] = ret.extension or ""
-    d["dates"] = {
+    dates: dict[str, Any] = {
         "searchDateType": "calendar",
         "departureDate": start.isoformat(),
         "departureDateType": "depart",
         "departureDateModifier": "0",
         "departureDatePreferredTimes": [t.value for t in out.time_ranges],
-        "duration": (
-            f"{duration_min}-{duration_max}" if duration_min != duration_max else str(duration_min)
-        ),
-        "returnDateType": "depart",
-        "returnDateModifier": "0",
-        "returnDatePreferredTimes": ([t.value for t in ret.time_ranges] if ret else []),
     }
+    if ret is not None:
+        # `duration` is the trip LENGTH — nights between the outbound and the return —
+        # so it belongs only on a round-trip URL. On a one-way it makes two otherwise
+        # identical searches produce different links, and opening one hands the SPA the
+        # trip-length state that makes Matrix answer 200 + "Internal server error"
+        # (work-h70kv.7). Inserted here so a round-trip URL keeps its captured key order.
+        dates["duration"] = (
+            f"{duration_min}-{duration_max}" if duration_min != duration_max else str(duration_min)
+        )
+    dates["returnDateType"] = "depart"
+    dates["returnDateModifier"] = "0"
+    dates["returnDatePreferredTimes"] = [t.value for t in ret.time_ranges] if ret else []
+    d["dates"] = dates
     return d
 
 

@@ -64,7 +64,35 @@ trip. Returns full itineraries (same shape as a specific-date search).
 | `slices[].dateModifier` | omitted | omitted (!) |
 | `inputs.filter` | `{}` (empty obj) | omitted entirely |
 | `inputs.page` | `{size}` | `{current:1, size}` |
-| `inputs.startDate` / `endDate` / `layover` | present | present (preserves context) |
+| `inputs.startDate` / `endDate` | present | present (preserves context) |
+| `inputs.layover` | round-trip only | round-trip only |
+
+`layover` is the trip LENGTH (nights between outbound and return), so it goes on
+a body only when there is a return leg. Send it one-way and Matrix answers HTTP
+200 `"Internal server error"` for both `calendar` and `calendarFollowup` —
+verified live 2026-09-02, the identical bodies without it return a grid and 10
+solutions respectively (work-h70kv.7).
+
+That makes `--duration` moot on a one-way, and the CLI resolves the trip shape
+BEFORE parsing it (`cli._resolve_duration`, used by `calendar` and `detail`
+alike). Order matters: parsing first meant `--duration 9-3` on a one-way hit
+`CalendarWindow`'s reversed-range validator and printed a pydantic traceback for
+a flag that was about to be ignored — two contradictory answers to one flag. A
+one-way now prints a single dim "ignored" line on **stderr** (every `--format`,
+so `--format json` still sees it and stdout still carries only the document) and
+takes the default range, which nothing downstream reads. Round-trip does read it,
+so a reversed or unparseable range there is a typed usage error: exit 2 and one
+line, never a traceback.
+
+Whether a one-way value counts as "the default" is a textual comparison, over the
+spellings `_normalize_duration` folds together: `..` for `-`, blanks around either
+bound, and the zero-padded or signed writings of a number. A bound is only
+canonicalized if it is one to nine digits, which is our bound, not `int()`'s —
+`int()` refuses only at 4300+ digits (CPython's int/str conversion cap), and nine
+is chosen as past any trip anyone will take and comfortably inside that. So
+`0000000005-0000000007` is ten digits a side, stays as typed, and draws the
+"ignored" line. True, and only cosmetic: a one-way ignores the value either way,
+and the same spelling on a round trip is a typed exit 2 naming the width.
 
 ## Why bother with followup vs. just calling `name: "specificDatesSlice"`?
 

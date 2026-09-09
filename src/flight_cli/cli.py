@@ -17,12 +17,13 @@ import json
 import re
 import sys
 from datetime import date, datetime, timedelta
-from typing import TYPE_CHECKING, Annotated, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any, NamedTuple, cast
 
 import anyio
 import anyio.to_thread
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from . import _config
@@ -56,12 +57,18 @@ from .pp.cli import auth_app, run_pp_for_search
 from .providers.base import LegQuery
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+
     from .models import CalendarResult, LegInfo, Location, Slice
 
 # Tuple-length sentinels for `--slice` parser (`ORIGIN-DEST:DATE[:r=...:e=...]`).
 _SLICE_MIN_PARTS = 2
 _SLICE_MAX_PARTS = 3
 _ROUND_TRIP_LEGS = 2  # 2 legs = round-trip; 1 = one-way; >2 = multi-city
+_DURATION_BOUNDS = 2  # a nights range is min and max, never a third bound
+# `--duration` default for `calendar` and `detail`. Shared so both can tell an
+# explicit value from an unset one when the trip is one-way and the value is moot.
+_DEFAULT_CALENDAR_DURATION = "5-7"
 
 # Matrix returns prices as 'USD877.00' (ISO-4217 prefix + decimal). We split
 # the prefix off for rendering so tables can show the currency once in the
@@ -78,8 +85,14 @@ def _split_price(s: str | None) -> tuple[str, str]:
 
 
 def _amount(s: str | None) -> str:
-    """Strip the currency prefix; pass-through for placeholders like '—'."""
-    return _split_price(s)[1] if s else "—"
+    """The amount with its currency prefix stripped, ready for a markup console;
+    '—' where there is no price.
+
+    Sanitized here rather than at each print site: Matrix chooses the whole string
+    and every caller drops it into a Rich table cell or a summary line, both of
+    which parse markup — an unbalanced `[/x]` there raises `MarkupError` and loses
+    a query that succeeded."""
+    return _safe_text(_split_price(s)[1]) if s else "—"
 
 
 app = typer.Typer(
@@ -112,21 +125,200 @@ def main(
 # ─────────────────────────── argument parsers ──────────────────────────────
 
 
+_MAX_ECHOED_VALUE = 60  # characters of a rejected value worth showing back
+
+
+# Characters that drive a terminal rather than appear in it, hide inside what does
+# appear, or cannot be written out at all. `escape` neutralises `[` and nothing
+# else, so an ESC or CSI inside remote text still clears the screen, repositions
+# the cursor, or repaints what came before it — and a redirected stderr keeps
+# every byte for whatever reads the file next.
+_CTRL = {
+    **{c: None for c in range(0x20) if c not in (0x09, 0x0A)},  # C0, keeping tab and newline
+    0x7F: None,  # DEL
+    **{c: None for c in range(0x80, 0xA0)},  # C1, including the 8-bit CSI
+    # `str.splitlines` breaks on these two as it does on `\n`, so one message
+    # carrying one arrives at a log reader or a `readlines` caller as two records.
+    0x2028: None,  # LINE SEPARATOR
+    0x2029: None,  # PARAGRAPH SEPARATOR
+    # Bidi. The marks reorder the run they sit in and the embeddings, overrides
+    # and isolates reorder everything up to their terminator, so any of them can
+    # make a sentence read back as something it does not say.
+    0x061C: None,  # ARABIC LETTER MARK
+    0x200E: None,  # LEFT-TO-RIGHT MARK
+    0x200F: None,  # RIGHT-TO-LEFT MARK
+    **{c: None for c in range(0x202A, 0x202F)},  # embeddings and overrides
+    **{c: None for c in range(0x2066, 0x206A)},  # isolates
+    # Invisible and not whitespace, so they survive `strip()` and `split()` and
+    # sit unseen inside a carrier code or a price: two values that read as equal
+    # compare unequal, and nothing on the screen says why.
+    0x00AD: None,  # SOFT HYPHEN
+    **{c: None for c in range(0x200B, 0x200E)},  # zero-width space, non-joiner, joiner
+    0x2060: None,  # WORD JOINER
+    0xFEFF: None,  # ZERO WIDTH NO-BREAK SPACE
+    **{c: None for c in range(0xE0000, 0xE0080)},  # tag block
+    # A lone surrogate has no utf-8 encoding at all, so one in a Matrix price
+    # reaches a real stdout as UnicodeEncodeError: the render of a query that
+    # succeeded dies on the way out, where a console file object hides it.
+    **{c: None for c in range(0xD800, 0xE000)},
+}
+
+
+def _safe_text(value: object) -> str:
+    """Remote sentence-shaped text, ready for a console: control characters
+    dropped, then markup escaped.
+
+    For text we did not write and the user did not type — a Matrix error message,
+    an exception's `str()`. Neither quoted nor truncated, unlike `_quote`: this is
+    a sentence someone needs to read whole, and the part that explains the failure
+    is as often at the end as the start.
+
+    Strip before escape, never after. `escape` only sees a tag where `[` is
+    followed by `[a-z#/@]`, so a control character between the brackets hides the
+    tag from it, and stripping afterwards uncovers a live one: `"[\x00red]x"`
+    comes out of the other order as `"[red]x"`, styled."""
+    text = escape(str(value).translate(_CTRL))
+    if not text.strip() and isinstance(value, BaseException):
+        # `httpx.ConnectTimeout("")` stringifies to nothing, which would leave a
+        # reporter saying "Matrix calendar failed:" and stopping. The class name is
+        # the only thing such an exception carries, and it takes the same two steps
+        # as the message would: a class built from a remote payload can be named
+        # anything. A blank from anywhere else is a value someone chose, and stays
+        # blank.
+        return escape(type(value).__name__.translate(_CTRL))
+    return text
+
+
+def _elide(value: str) -> str:
+    """A value cut to `_MAX_ECHOED_VALUE` code points, with an ellipsis if cut.
+
+    Separate from `_quote` because the cap governs the value the user typed, not
+    the message around it: `repr` can double the length of a backslash-heavy
+    string, so a bound on the finished message would say nothing about the input
+    it is supposed to limit."""
+    if len(value) <= _MAX_ECHOED_VALUE:
+        return value
+    return value[:_MAX_ECHOED_VALUE] + "…"
+
+
+def _quote(value: str) -> str:
+    """A rejected user value, ready to interpolate into a markup console message.
+
+    The message exists to show WHICH value was rejected, so an oversized one is
+    cut: a 4301-digit `--duration` echoed whole buries its own point, and the
+    parsers accept any string a shell can pass.
+
+    Two orderings matter. `_elide` before `repr`, so the cap counts characters the
+    user typed rather than the quotes and escapes `repr` adds. `repr` before
+    `escape`, because `repr` doubles the backslash `escape` prepends and hands the
+    tag straight back to the markup parser."""
+    return escape(repr(_elide(value)))
+
+
 def _parse_date(s: str) -> date:
     try:
         return datetime.strptime(s, "%Y-%m-%d").date()
     except ValueError as e:
-        err.print(f"[red]bad date {s!r}; use YYYY-MM-DD[/]")
+        err.print(f"[red]bad date {_quote(s)}; use YYYY-MM-DD[/]")
         raise typer.Exit(2) from e
 
 
+# A nights bound: 1-9 digits, optionally signed. Narrower than `int()` on both
+# axes. Class: `int()` swallows every Unicode space, so `5-\xa07` would parse as a
+# range while reading as one token (U+001C..1F are `isspace()`-true but `int()`
+# rejects those, so the class is real and that pair is not it). Length: `int()`
+# REFUSES a string of 4300+ digits (CPython's int/str conversion cap), so an
+# unbounded match hands `_canonical_bound` a traceback instead of a usage error.
+# Nine digits is what the PARSE needs bounded and all it bounds: it keeps `int()`
+# inside its own conversion cap. How large a nights range may be is a separate
+# question, and this regex answers none of it — `_MAX_NIGHTS` does, after the parse.
+# `\Z` not `$`, which admits one trailing newline — `--duration '5-7\n'` out of a
+# pipeline would then parse as a range instead of being told its shape is wrong.
+_RE_DURATION_BOUND = re.compile(r"\A[+-]?\d{1,9}\Z")
+# The same bound without the width, to tell "not a number" from "too many digits":
+# "use nights as '5' or '5-7'" describes the SHAPE, and `1000000000` is already in
+# that shape, so answering it with the shape hands back what the user just typed.
+_RE_NUMERIC_BOUND = re.compile(r"\A[+-]?\d+\Z")
+# The widest range that is still a nights range. `_render_calendar` gives every
+# night between the bounds its own column and every priced day a cell in it, so
+# the number typed here multiplies the render: a nine-digit bound is hours of
+# work and terabytes of table, spent AFTER Matrix has already answered. A year is
+# where the domain runs out — past it the value is a typo, not a trip.
+_MAX_NIGHTS = 365
+
+
+def _canonical_bound(part: str) -> str:
+    """One spelling per number, so `05`, `+5` and `5` compare equal. A part that
+    is not a number is returned as-is for `_parse_duration` to reject: this
+    function decides sameness, never validity."""
+    part = part.strip(" \t")
+    return str(int(part)) if _RE_DURATION_BOUND.match(part) else part
+
+
+def _normalize_duration(s: str) -> str:
+    """One form for the spellings of a nights range that mean the same thing: `..`
+    for `-`, blanks around either bound, and the zero-padded or signed writings of
+    a number. Shared with `_resolve_duration`, which decides whether a value
+    differs from the default without parsing it, so the parser and that comparison
+    agree on which spellings are one range.
+
+    Blanks go per bound and only spaces and tabs, so `5 7` stays the parse error it
+    is and a control character stays visible rather than being quietly stripped."""
+    return "-".join(_canonical_bound(part) for part in s.replace("..", "-").strip(" \t").split("-"))
+
+
 def _parse_duration(s: str) -> tuple[int, int]:
-    s = s.replace("..", "-").strip()
-    if "-" in s:
-        lo, hi = s.split("-", 1)
-        return int(lo), int(hi)
-    n = int(s)
-    return n, n
+    """Nights as '5', '5-7' or '5..7'. Every failure is a typed CLI error: the
+    pair feeds `CalendarWindow`, whose validator rejects a reversed range with a
+    pydantic ValidationError, and a stack trace is not an answer to a mistyped
+    flag.
+
+    Split on the separator rather than parsed bound-first, so an empty bound is
+    caught while it is still visible: `5-- 7` is a malformed range, and reading it
+    as a max of -7 would answer a typo with a number the user never wrote."""
+    parts = _normalize_duration(s).split("-")
+    if len(parts) == 1:
+        parts *= 2  # a bare '5' is the degenerate range 5-5
+    if len(parts) != _DURATION_BOUNDS or not all(_RE_DURATION_BOUND.match(p) for p in parts):
+        if len(parts) == _DURATION_BOUNDS and all(_RE_NUMERIC_BOUND.match(p) for p in parts):
+            err.print(f"[red]bad duration {_quote(s)}: each bound is at most 9 digits[/]")
+        else:
+            err.print(f"[red]bad duration {_quote(s)}; use nights as '5' or '5-7'[/]")
+        raise typer.Exit(2)
+    lo, hi = int(parts[0]), int(parts[1])
+    if hi < lo:
+        err.print(f"[red]bad duration {_quote(s)}: max ({hi}) is below min ({lo})[/]")
+        raise typer.Exit(2)
+    if hi > _MAX_NIGHTS:
+        # After the ordering check, so `hi` is the larger bound and the message
+        # names the one that is out of range.
+        err.print(
+            f"[red]bad duration {_quote(s)}: {hi} nights is past the {_MAX_NIGHTS}-night maximum[/]"
+        )
+        raise typer.Exit(2)
+    return lo, hi
+
+
+def _resolve_duration(duration: str, *, round_trip: bool) -> tuple[int, int]:
+    """Trip length for the calendar window, resolved against the trip shape.
+
+    A one-way has no length to bound, and nothing reads the number: the wire body
+    (`_set_trip_length`) and the SPA URL (`_spa_calendar_leg`) both attach it only
+    when there is a return leg. So the shape is resolved BEFORE the value is
+    parsed — telling someone their `--duration 9-3` is backwards, and then
+    ignoring it, is two contradictory answers to one flag.
+
+    The note goes to stderr under every `--format`: it is a remark about the
+    command line, and stdout under `--format json` carries a document or nothing.
+    A value spelling the default is indistinguishable from the default and passes
+    unremarked — also the one case where nothing looks different. That comparison
+    runs on `_normalize_duration`, not on parsed ints: parsing here would fail on
+    a bad range and hand a one-way the very error this function exists to avoid."""
+    if round_trip:
+        return _parse_duration(duration)
+    if _normalize_duration(duration) != _DEFAULT_CALENDAR_DURATION:
+        err.print("[dim]--duration is ignored for a one-way trip.[/]")
+    return _parse_duration(_DEFAULT_CALENDAR_DURATION)
 
 
 def _parse_iata_list(s: str) -> tuple[str, ...]:
@@ -151,7 +343,7 @@ def _parse_times(s: str | None) -> tuple[TimeOfDay, ...]:
         key = raw.strip().lower().replace("-", "_")
         if key not in aliases:
             err.print(
-                f"[red]bad time-of-day {raw!r}; choose: "
+                f"[red]bad time-of-day {_quote(raw)}; choose: "
                 f"early,morning,midday,afternoon,evening,night[/]"
             )
             raise typer.Exit(2)
@@ -176,7 +368,7 @@ def _resolve_cabin(name: str) -> Cabin:
     }
     if norm in aliases:
         return aliases[norm]
-    err.print(f"[red]Unknown cabin {name!r}; choose: economy, premium, business, first[/]")
+    err.print(f"[red]Unknown cabin {_quote(name)}; choose: economy, premium, business, first[/]")
     raise typer.Exit(2)
 
 
@@ -433,7 +625,7 @@ def _resolve_providers(  # noqa: PLR0912 — single-purpose validator + merge; s
     try:
         config = _config.load()
     except (OSError, ValueError) as e:
-        err.print(f"[red]Failed to load ~/.config/flight-cli/config.toml: {e}[/]")
+        err.print(f"[red]Failed to load {_quote(str(_config.config_path()))}: {_safe_text(e)}[/]")
         raise typer.Exit(2) from e
     base_opts: dict[str, dict[str, Any]] = {}
     providers_section: Any = config.get("providers", {})
@@ -445,7 +637,9 @@ def _resolve_providers(  # noqa: PLR0912 — single-purpose validator + merge; s
     try:
         cli_opts = _config.parse_provider_opt_overrides(list(provider_opt))
     except ValueError as e:
-        err.print(f"[red]{e}[/]")
+        # `parse_provider_opt_overrides` builds this message around the user's raw
+        # `--provider-opt` token, so the sentence carries whatever was typed.
+        err.print(f"[red]{_safe_text(e)}[/]")
         raise typer.Exit(2) from e
     merged_opts = _config.merge_provider_options(base_opts, cli_opts)
 
@@ -506,7 +700,8 @@ def _should_run_awards(sel: ProviderSelection) -> bool:
     ):
         if sel.awards_only:
             err.print(
-                f"[red]--awards-only set but --providers={sel.provider_filter} "
+                f"[red]--awards-only set but "
+                f"--providers={_quote(','.join(sel.provider_filter))} "
                 "matches no configured provider.[/]",
             )
             raise typer.Exit(2)
@@ -530,10 +725,25 @@ def _run(
     try:
         return anyio.run(go)
     except MatrixApiError as e:
-        err.print(f"[red]Matrix returned an error ({e.kind}):[/] {e.message}")
-        if e.request_id:
-            err.print(f"[dim]request_id: {e.request_id}[/]")
+        _print_matrix_error(e)
         raise typer.Exit(1) from e
+
+
+def _print_matrix_error(e: MatrixApiError) -> None:
+    """Report a Matrix error to stderr: control characters dropped, markup escaped.
+
+    Matrix echoes the routing string back inside `message` ("Illegal COMMAND-LINE
+    prefix: BA[/weird]AA"), so all three fields carry remote text onto a markup
+    console. Every Matrix reporter that FAILS a command reports through here — the
+    calendar sites, `_run` (which serves `detail` and the search path), the search
+    weave and the group-level multi-cabin arm — so one Matrix error reads the same
+    whichever command asked for it. The per-cabin fan-out is the one exception and
+    is deliberate: its failure is soft, one cabin of several, so it prints a yellow
+    line naming that cabin and wraps the two fields itself rather than reporting a
+    red failure for a command that is still going to answer."""
+    err.print(f"[red]Matrix returned an error ({_safe_text(e.kind)}):[/] {_safe_text(e.message)}")
+    if e.request_id:
+        err.print(f"[dim]request_id: {_safe_text(e.request_id)}[/]")
 
 
 # Matrix silently UNDER-REPORTS multi-airport calendar grids under compute-budget
@@ -543,44 +753,285 @@ def _run(
 # always run as one sub-search per (origin, destination) pair, in parallel, and
 # merged — the only way to get complete results.
 #
-# `split_calendar_search` returns the cartesian product of origins x destinations,
-# so the fan-out is |origins| x |destinations| (just |destinations| in the common
-# single-origin case). Matrix tolerates the concurrency (measured: ≥16 in flight,
-# flat latency, no throttling); we hold a touch under that and let larger lists
-# batch into multiple rounds. There is no hard cap — a large fan-out is the user's
-# call; we warn loudly (and the concurrency limit keeps it a Ctrl-C-able drip).
+# `split_calendar_search` returns the cartesian product of origins x destination
+# GROUPS, so the fan-out is |origins| x ceil(|destinations| / --max-per-query) —
+# which is |destinations| only at the default of one per query, with one origin.
+# Matrix tolerates the concurrency (measured: ≥16 in flight, flat latency, no
+# throttling); we hold a touch under that and let larger lists batch into multiple
+# rounds. There is no hard cap — a large fan-out is the user's call; we warn
+# loudly (and the concurrency limit keeps it a Ctrl-C-able drip).
 _CALENDAR_FANOUT_CONCURRENCY = 12
+
+
+class _CalendarFanout(NamedTuple):
+    """What a fanned-out calendar came back with, and what it lost on the way.
+
+    The losses travel with the results because they change what the results MEAN:
+    a merged grid holding no priced day renders as "Calendar empty", which reads as
+    "Matrix priced this window and found nothing" — true when the sub-queries
+    answered, and the one thing the data cannot support when they did not."""
+
+    results: list[CalendarResult]
+    # Every failure, in SUB-QUERY order rather than the order they raised:
+    # sub-queries are indexed origins-outermost over the (origin, destination-group)
+    # product and finish in whatever order the network gives them, so the same
+    # outage names the same groups in the same sequence on every run. All of them,
+    # because three sub-queries failing for three different reasons is three things
+    # to fix and a reader told only the lowest-index one never learns the others
+    # were different.
+    failures: list[Exception]
+    # The route each of those failures dropped, same order and same length. A
+    # Matrix error names the fare it could not price, never the group we asked
+    # for, so the cause alone leaves the reader to guess which destination is
+    # missing from a grid whose whole point is comparing them.
+    lost: list[str]
+
+    @property
+    def failed(self) -> int:
+        """How many origin/destination groups dropped out of the merge."""
+        return len(self.failures)
 
 
 async def _gather_calendar(
     c: MatrixClient, subs: list[CalendarSearch], *, cache: bool
-) -> list[CalendarResult]:
-    """Run the per-destination sub-searches concurrently on one client (its
-    rate-limiter + semaphore bound the in-flight count). A sub-query that fails
-    just drops its destination from the merge rather than sinking the whole run."""
+) -> _CalendarFanout:
+    """Run the sub-searches concurrently on one client (its rate-limiter +
+    semaphore bound the in-flight count). Each covers one (origin, destination
+    group); a sub-query that fails just drops its own group from the merge rather
+    than sinking the whole run, and is counted so the caller can say so."""
     results: list[CalendarResult | None] = [None] * len(subs)
-
-    failures: list[tuple[int, str]] = []
+    errors: list[Exception | None] = [None] * len(subs)
 
     async def one(i: int, s: CalendarSearch) -> None:
         try:
             results[i] = cast("CalendarResult", await c.execute(s, cache=cache))
-        except Exception as e:  # noqa: BLE001 — a sub-query failure just drops that destination
-            results[i] = None
-            failures.append((i, str(e) or type(e).__name__))
+        except (typer.Exit, typer.Abort):
+            # Both subclass `RuntimeError` on the installed click, so the broad arm
+            # below would read an orderly exit as one more dropped group.
+            raise
+        except Exception as e:  # noqa: BLE001 — this group drops; the caller counts it
+            errors[i] = e
 
     async with anyio.create_task_group() as tg:
         for i, s in enumerate(subs):
             tg.start_soon(one, i, s)
+    return _CalendarFanout(
+        [r for r in results if r is not None],
+        [e for e in errors if e is not None],
+        [_calendar_route_label(s) for s, e in zip(subs, errors, strict=True) if e is not None],
+    )
 
-    # A dropped sub-query silently removes its destination from the grid, so
-    # "cheapest destination" would be computed over an incomplete set and
-    # presented as the answer. Name what is missing.
-    for i, msg in sorted(failures):
-        route = _calendar_route_label(subs[i])
-        err.print(f"[yellow]{route}: sub-query failed, omitted from the grid — {msg}[/]")
 
-    return [r for r in results if r is not None]
+def _exception_leaves(e: BaseException) -> list[BaseException]:
+    """Every non-group exception inside `e`, flattened, in member order.
+
+    A group's members sit in task-start order rather than the order they raised,
+    so this is the fan-out's own order and names the same failure on every run."""
+    if not isinstance(e, BaseExceptionGroup):
+        return [e]
+    return [
+        leaf
+        for member in cast("BaseExceptionGroup[BaseException]", e).exceptions
+        for leaf in _exception_leaves(member)
+    ]
+
+
+def _failure_text(cause: object) -> str:
+    """A failure's message, ready for a markup console.
+
+    A group that could not be unwrapped names every failure under it, because the
+    group's own `str` is a count of sub-exceptions and discards each message it
+    holds — which is the only part a reader can act on. The count belongs to
+    several: one message needs no counting, and "1 concurrent failures" reads as a
+    bug in the reporter to the reader least able to tell it from one."""
+    if not isinstance(cause, BaseExceptionGroup):
+        return _safe_text(cause)
+    # `isinstance` narrows to the unparameterised generic, which leaves every
+    # member unknown; anyio builds these and they hold whatever the tasks raised.
+    leaves = _exception_leaves(cast("BaseExceptionGroup[BaseException]", cause))
+    named = "; ".join(_safe_text(leaf) for leaf in leaves)
+    if len(leaves) == 1:
+        return named
+    return f"{len(leaves):d} concurrent failures: {named}"
+
+
+def _print_calendar_failure(
+    cause: object, lost: str = "", *, backend: str = "Matrix calendar"
+) -> None:
+    """The one line a calendar failure prints, wherever in the calendar it failed.
+
+    Both outer guards, both fan-out refusals and the weave's stashed cause end
+    here, so one failure reads the same whether it arrived alone, beside a
+    deliberate stop, or as one of several sub-queries — and a caller has one
+    prefix to match on. `lost` is the count sentence the caller built from its own
+    numbers, and `backend` names the half of the command that failed, so a run
+    serving the Google Flights grid alone does not report its own renderer under
+    Matrix's name; both are wrapped rather than allowlisted because a parameter's
+    value belongs to callers this module's markup guard never reads.
+
+    A `MatrixApiError` finishes through `_print_matrix_error`, under the count
+    line rather than inside it, so one backend error reads the same whether one
+    query asked or twelve did — `str()` of that exception is the message alone,
+    and the kind and request id a reader needs to report it would be dropped by
+    the sub-query path and kept by the single-query one. A group gets the same
+    treatment leaf by leaf, below the line that names them all: a backend error
+    inside one is the commonest thing in a group, and `_failure_text` has only
+    `str()` of it."""
+    if isinstance(cause, MatrixApiError):
+        if lost:
+            err.print(f"[red]{_safe_text(backend)} failed:[/] {_safe_text(lost)}")
+        else:
+            # A full stop rather than a colon, because `lost` is the count sentence
+            # and a single query has none: a colon there promises a clause that
+            # never comes. Printed all the same, so the prefix a caller matches on
+            # is on the commonest calendar failure of all and not only the rare ones.
+            err.print(f"[red]{_safe_text(backend)} failed.[/]")
+        _print_matrix_error(cause)
+        return
+    err.print(f"[red]{_safe_text(backend)} failed:[/] {_safe_text(lost)}{_failure_text(cause)}")
+    if isinstance(cause, BaseExceptionGroup):
+        # `isinstance` narrows to the unparameterised generic, which leaves every
+        # member unknown; anyio builds these and they hold whatever the tasks raised.
+        for leaf in _exception_leaves(cast("BaseExceptionGroup[BaseException]", cause)):
+            if isinstance(leaf, MatrixApiError):
+                _print_matrix_error(leaf)
+
+
+def _orderly_exit(e: BaseException) -> typer.Exit | typer.Abort | None:
+    """The first orderly exit anywhere inside `e`, or None.
+
+    `typer.Exit` and `typer.Abort` subclass `RuntimeError` on the installed click,
+    and a task group wraps EVERYTHING that leaves it in an `ExceptionGroup` — the
+    host body's own exception included. Between them, a broad arm outside a group
+    catches a deliberate stop wearing the shape of a backend failure and answers it
+    with a backend's name and the wrong exit code. An exit beside other failures
+    still wins: it is the one outcome somebody asked for. "First" is first in
+    member order, which is task-start order — not the first to raise, and not the
+    most severe."""
+    if isinstance(e, (typer.Exit, typer.Abort)):
+        return e
+    if isinstance(e, BaseExceptionGroup):
+        # `isinstance` narrows to the unparameterised generic, which leaves every
+        # member unknown; anyio builds these and they hold whatever the tasks raised.
+        for member in cast("BaseExceptionGroup[BaseException]", e).exceptions:
+            found = _orderly_exit(member)
+            if found is not None:
+                return found
+    return None
+
+
+def _calendar_cause(e: Exception) -> Exception:
+    """The exception worth naming, unwrapped from the group anyio put round it.
+
+    A lone member IS the cause and the group is plumbing. A group of several comes
+    back whole, because picking one of them would hide the rest — `_failure_text`
+    is what then names each of them, since the group's own `str` is a count. A
+    lone member that is not an `Exception` comes back whole too: the callers' arms
+    are typed to `Exception`, so unwrapping a cancellation out of its group would
+    hand them something they are written not to catch."""
+    while isinstance(e, BaseExceptionGroup):
+        members = cast("BaseExceptionGroup[BaseException]", e).exceptions
+        if len(members) != 1 or not isinstance(members[0], Exception):
+            return e
+        e = members[0]
+    return e
+
+
+def _calendar_failure(e: Exception) -> Exception:
+    """Honour an orderly exit inside `e`, or hand back the failure worth naming.
+
+    Both calendar guards catch whatever leaves `anyio.run`, and both have to tell
+    the same three things apart: a deliberate stop, which keeps its own exit code
+    and is raised from here; the failures standing beside that stop, which nothing
+    downstream would ever say, because the exit ends the command where it is; and
+    an ordinary failure, which the caller then prints or stashes. Telling them
+    apart once is what keeps the two paths from answering the same exception two
+    ways — and the exit leaves with `__context__` intact, so a debugger still
+    reaches the group it came out of."""
+    orderly = _orderly_exit(e)
+    if orderly is not None:
+        hidden = [x for x in _exception_leaves(e) if not isinstance(x, (typer.Exit, typer.Abort))]
+        if hidden:
+            plural = "" if len(hidden) == 1 else "s"
+            _print_calendar_failure(
+                hidden[0],
+                f"{len(hidden):d} failure{plural} beside a deliberate stop; first cause: ",
+            )
+            rest = hidden[1:]
+            if rest:
+                # The count above says how many there were, and this is where the
+                # rest of them get said. Through the same printer, so each keeps
+                # the dispatch a backend error needs: the exit ends the command
+                # here, so nothing downstream will ever mention these again.
+                _print_calendar_failure(
+                    rest[0] if len(rest) == 1 else BaseExceptionGroup("beside a stop", rest),
+                    "and beside it: ",
+                )
+        raise orderly
+    return _calendar_cause(e)
+
+
+def _deliver_calendar(
+    write_answer: Callable[[], None], *, backend: str = "Matrix calendar"
+) -> None:
+    """Write the calendar's answer inside the guard that reports a failure.
+
+    The renderer and the URL emitter are the calls that put the document on stdout,
+    and a raise in either is as much a calendar failure as a backend that never
+    answered — a malformed price the table cannot format, a reader that closed the
+    pipe. Outside a guard it is a rich traceback on the one path whose whole
+    contract is that a failure is a typed line and exit 1, and on the weave it
+    reports a calendar that was already delivered as a crash.
+
+    An orderly exit passes through: a stop is not a delivery failure, and both
+    `typer.Exit` and `typer.Abort` subclass `RuntimeError` on the installed click,
+    so the broad arm below would answer one with a backend's name.
+
+    `backend` is the name the failure is reported under, because the caller is the
+    only one that knows which half of the command built the document: `--fast`
+    serves the Google Flights grid with no Matrix behind it, and its renderer
+    reported as a Matrix outage sends a reader after a backend that was never
+    asked."""
+    try:
+        write_answer()
+    except (typer.Exit, typer.Abort):
+        raise
+    except Exception as e:
+        _print_calendar_failure(e, backend=backend)
+        raise typer.Exit(1) from e
+
+
+def _report_calendar_fanout(fan: _CalendarFanout, total: int, *, merged_empty: bool) -> None:
+    """Say what the fan-out lost, and refuse when nothing is left to show.
+
+    Judged on the MERGED grid, not on the fraction that failed. Rows still in it
+    are worth reading even short a group, so that is a note beside them. No
+    rows at all is a different claim whatever fraction failed: the table arm prints
+    "Calendar empty" and the brownout advice, `--format json` writes
+    `solutionCount: 0`, and both say Matrix priced this window and found nothing —
+    which is exactly what a sub-query that never answered cannot support. So the
+    note only ever prints beside a grid, and its "below" is always true."""
+    if fan.failed == 0:
+        return
+    # Every group that dropped, not the lowest-index one alone: three
+    # sub-queries refused for three different reasons is three things to fix, and
+    # the count in the sentence is the only true half of a report that names one.
+    # A lone failure goes as itself, because a group of one is plumbing.
+    causes = fan.failures[0] if fan.failed == 1 else BaseExceptionGroup("sub-queries", fan.failures)
+    if fan.failed >= total:
+        _print_calendar_failure(causes, f"all {total:d} sub-queries failed; ")
+        raise typer.Exit(1)
+    if merged_empty:
+        _print_calendar_failure(
+            causes,
+            f"{fan.failed:d} of {total:d} sub-queries failed and nothing that answered "
+            "priced a day; ",
+        )
+        raise typer.Exit(1)
+    err.print(
+        f"[yellow]{fan.failed:d} of {total:d} sub-queries failed; those origin/destination "
+        f"groups are missing from the grid below: {_safe_text(', '.join(fan.lost))}.[/]"
+    )
 
 
 def _calendar_route_label(s: CalendarSearch) -> str:
@@ -630,40 +1081,228 @@ def _run_calendar(
             f"--max-per-query to send fewer, larger requests.[/]"
         )
 
+    answer: tuple[CalendarResult, int] | None = None
+
     async def go() -> tuple[CalendarResult, int]:
+        nonlocal answer
         async with MatrixClient(
             rps=max(rps, float(conc)), impersonate=impersonate, concurrency=conc
         ) as c:
             if not multi:
-                return cast("CalendarResult", await c.execute(search, cache=not no_cache)), 0
-            recovered = await _gather_calendar(c, subs, cache=not no_cache)
-            merged = merge_calendar_results(recovered)
-            # Count what SUCCEEDED. Returning `n` (the requested fan-out size)
-            # reported a complete merge even when sub-queries had been dropped.
-            return (merged, len(recovered)) if not is_empty_calendar(merged) else (merged, 0)
+                answer = (cast("CalendarResult", await c.execute(search, cache=not no_cache)), 0)
+            else:
+                fan = await _gather_calendar(c, subs, cache=not no_cache)
+                # Merge BEFORE reporting: whether what survived says anything is
+                # what decides between a note and a refusal, and only the merge
+                # knows.
+                merged = merge_calendar_results(fan.results)
+                empty = is_empty_calendar(merged)
+                _report_calendar_fanout(fan, n, merged_empty=empty)
+                answer = (merged, 0) if empty else (merged, n)
+            # Recorded inside the `async with`, because the client's own teardown is
+            # one of the things that can fail after Matrix has answered, and the
+            # guard below has no other way to tell a query that never ran from one
+            # that ran and was thrown away on the way out.
+            return answer
 
+    # One arm for every way this can fail. The client is built inside `go`, so an
+    # unresolvable API key, a refused connection or a DNS failure raises there
+    # rather than in `execute` — a `MatrixApiError` arm alone leaves those as a
+    # traceback, which is the one outcome a caller reading exit codes cannot act on.
     try:
         return anyio.run(go)
-    except MatrixApiError as e:
-        err.print(f"[red]Matrix returned an error ({e.kind}):[/] {e.message}")
-        if e.request_id:
-            err.print(f"[dim]request_id: {e.request_id}[/]")
-        raise typer.Exit(1) from e
+    except Exception as e:  # noqa: BLE001 — every cause leaves as one typed line and exit 1
+        # `Exception`, not `BaseException`: a real Ctrl-C is a bare
+        # `KeyboardInterrupt` and leaves through here untouched, which is the one
+        # interruption that must not be dressed up as a backend failure.
+        cause = _calendar_failure(e)
+        _print_calendar_failure(cause)  # which sends a MatrixApiError to its own reporter
+        if answer is not None:
+            # A calendar that arrived and a run that then failed on the way out are
+            # both true, and the exit code follows what the reader got: the answer
+            # still stands, so the failure is the line above and nothing more.
+            return answer
+        raise typer.Exit(1) from cause
+    except BaseExceptionGroup as group:
+        # BELOW the arm above, and it has to stay there: a group whose members are
+        # all `Exception`s IS an `Exception` and belongs to the classifier. What
+        # reaches here is a sub-query that ended on some other `BaseException`, and
+        # the fan-out's own arm catches `Exception`, so it leaves the task group
+        # wrapped — where the arm above cannot see it and neither can click.
+        # `SystemExit` and `KeyboardInterrupt` are the two that never arrive as a
+        # group: nothing here writes to a console from inside the task group, so a
+        # closed pipe raises in the caller rather than in a child, and a child's
+        # `SystemExit` is re-raised bare. Unwrapped, the process ends the way it
+        # would have with no group round it.
+        leaves = _exception_leaves(group)
+        if len(leaves) == 1:
+            raise leaves[0] from None
+        raise
 
 
-def _report_calendar_matrix_failure(state: dict[str, Any]) -> None:
-    """Print the right stderr message for a Matrix calendar that returned no result:
-    a known `MatrixApiError`, an unexpected non-MatrixApiError stashed by the weave's
-    `_matrix` task, or a cancel/never-completed fall-through."""
-    e = state.get("matrix_err")
-    if e is not None:
-        err.print(f"[red]Matrix returned an error ({e.kind}):[/] {e.message}")
-        if e.request_id:
-            err.print(f"[dim]request_id: {e.request_id}[/]")
-    elif state.get("matrix_unexpected") is not None:
-        err.print(f"[red]Matrix calendar failed:[/] {state['matrix_unexpected']}")
-    else:
+def _run_calendar_weave(go: Callable[[], Coroutine[Any, Any, None]], state: dict[str, Any]) -> None:
+    """Run the calendar weave, stashing a Matrix failure where its own tasks do.
+
+    The client is built in the weave's `async with` header, so an unresolvable API
+    key, a refused connection or a DNS failure raises BEFORE the task group opens —
+    outside the `_matrix` task whose handlers would have caught it, and outside the
+    typed line every other Matrix path prints. Stashing rather than reporting keeps
+    one reporter below: it reads everything this appends, on the branch where Matrix
+    answered as well as the one where it did not, and a grid painted before the
+    failure still decides the exit code."""
+    try:
+        anyio.run(go)
+    except Exception as e:  # noqa: BLE001 — the reporter below turns any cause into one line
+        # Appended, never assigned. The weave's own Matrix task writes to this same
+        # list, and a session that refuses to close after a query Matrix already
+        # refused is two failures: an assignment keeps whichever was written last,
+        # which is the teardown, and drops the reason there is no calendar.
+        state.setdefault("matrix_failures", []).append(_calendar_failure(e))
+    except BaseExceptionGroup as group:
+        # BELOW the arm above, and it has to stay there: a group whose members are
+        # all `Exception`s IS an `Exception` and belongs to the classifier. What
+        # reaches here holds something that is not — rich answers a reader that hung
+        # up with `SystemExit` — and a task group wraps whatever leaves it, so the
+        # arm above cannot see it and neither can click. This is the only calendar
+        # arm that writes to a console from inside a task group, so it is the only
+        # one where a closed pipe turns into a group at all. Unwrapped, the process
+        # ends the way it would have with no group round it.
+        leaves = _exception_leaves(group)
+        if len(leaves) == 1:
+            raise leaves[0] from None
+        raise
+
+
+def _report_calendar_failures(state: dict[str, Any], *, answered: bool = False) -> None:
+    """Print the stderr line for every failure the weave stashed, on either half of
+    it, or a cancel/never-completed fall-through when Matrix stashed nothing at all.
+
+    Every failure is reported, not the first of them and not one per class: the
+    weave and its own tasks APPEND, because a Matrix outage and a client that then
+    refused to close are two things that happened and one slot keeps only the
+    second. Each is named under the backend it came from — the Matrix stash through
+    the shared calendar printer, which prints the prefix and then dispatches a
+    `MatrixApiError` to the Matrix reporter under it, so the kind and the request id
+    a reader quotes arrive below a line a caller can match on; and a first paint
+    that raised under Google Flights, because a display failure reported as a Matrix
+    one sends an operator after an outage that never happened.
+
+    `answered` says a calendar arrived, which is the only thing that makes an
+    empty stash unremarkable. It is what lets the caller on that branch hand the
+    whole stash here rather than testing a key itself: the weave stashes after the
+    answer as readily as instead of it, and a branch that reads one key is how a
+    failure goes silent."""
+    matrix = cast("list[BaseException]", state.get("matrix_failures", []))
+    for cause in matrix:
+        _print_calendar_failure(cause)
+    for cause in cast("list[BaseException]", state.get("gf_failures", [])):
+        err.print(f"[yellow]{_safe_text(_GF_GRID_NAME)} could not be shown:[/] {_safe_text(cause)}")
+    if not matrix and not answered:
         err.print("[yellow]Matrix calendar did not complete.[/]")
+
+
+# Says "no grid" rather than staying silent, which a reader would take for "no
+# cheap fares". Two constants because the weave prints while Matrix is still in
+# flight — it can promise to wait, not to deliver — and `--fast` has no Matrix
+# coming at all.
+_GF_GRID_UNAVAILABLE_NOTE = (
+    "Google Flights price grid unavailable: the calendar RPC currently returns "
+    "no data to this client (tracked in work-h70kv.5)."
+)
+_GF_GRID_UNAVAILABLE_WEAVE_NOTE = f"{_GF_GRID_UNAVAILABLE_NOTE} …awaiting Matrix calendar…"
+
+# The grid's name as a reader sees it, in one place because it is the prefix a
+# caller matches a failure on: two spellings across the arms of one command means
+# a matcher has to know both, and which one it gets depends on where the run
+# broke. Every remaining "date-grid" in this file is in a docstring or a comment,
+# where it is English about the thing rather than the name a reader is shown,
+# which is why none of them is built from here.
+_GF_GRID_NAME = "Google Flights date grid"
+
+
+def _paint_calendar_first(
+    grid: dict[str, float],
+    state: dict[str, Any],
+    *,
+    origins: tuple[str, ...],
+    dests: tuple[str, ...],
+    sd: date,
+    ed: date,
+) -> None:
+    """What the weave shows while the Matrix calendar is still in flight.
+
+    Every branch ends by naming what the reader is waiting for, because the grid is
+    the fast half and Matrix is ~45s behind it: an unexplained pause reads as "no
+    cheap fares", and by the time the real grid lands the impression is formed.
+
+    Only the grid itself goes to stdout, and every branch's status line goes to
+    stderr — the one beside a painted grid included. Four of the five have no
+    document to show and are saying so, Matrix may yet fail behind any of them,
+    which is exit 1, and a status line on stdout is prose in the stream a caller
+    reads for the answer; `_run_fast_calendar_grid` puts every equivalent line on
+    stderr for the same reason."""
+    if grid:
+        _render_date_grid(grid, origin=origins, destination=dests, sd=sd, ed=ed)
+        err.print("[dim]…refining with Matrix (full grid + durations)…[/]")
+    elif state.get("gf_throttled"):
+        err.print("[dim]Google Flights rate-limited — awaiting Matrix calendar…[/]")
+    elif state.get("gf_unavailable"):
+        err.print(f"[dim]{_GF_GRID_UNAVAILABLE_WEAVE_NOTE}[/]")
+    elif "gf_err" in state:
+        err.print(f"[yellow]{_safe_text(_GF_GRID_NAME)} failed:[/] {_safe_text(state['gf_err'])}")
+        err.print("[dim]…awaiting Matrix calendar…[/]")
+    else:
+        err.print("[dim]…awaiting Matrix calendar…[/]")
+
+
+def _run_fast_calendar_grid(
+    search: CalendarSearch,
+    *,
+    origins: tuple[str, ...],
+    dests: tuple[str, ...],
+    sd: date,
+    ed: date,
+    matrix_url: bool,
+    google_url: bool,
+) -> None:
+    """`--fast`: the Google Flights date-grid alone, or a refusal. No Matrix."""
+    from ._gf_dategrid import GfGridUnavailableError, date_grid  # noqa: PLC0415
+    from ._gflight_ids import GfThrottledError  # noqa: PLC0415
+
+    grid: dict[str, float] = {}
+    try:
+        grid = date_grid(search)
+    # Each handler only says WHY there is no grid; the single exit below says THAT
+    # there is none. Under `--fast` there is no Matrix to fall back to, so every
+    # no-grid outcome — gate, throttle, an empty grid, or a bad airport or date
+    # landing in the broad except — has to leave the same way, or a wrapper doing
+    # `--fast || fallback` reads success where it should read failure.
+    #
+    # All of it on stderr, like the up-front refusals in `_grid_branch_blocker`: a
+    # `--fast` run leaves stdout carrying a grid or nothing at all, so a caller can
+    # read the stream without first parsing it to find out whether this was an
+    # answer or an explanation.
+    except GfThrottledError:
+        err.print("[dim]Google Flights rate-limited; no grid to show.[/]")
+    except GfGridUnavailableError:
+        # Ahead of the broad except, as in the weave.
+        err.print(f"[dim]{_GF_GRID_UNAVAILABLE_NOTE}[/]")
+    except (typer.Exit, typer.Abort):
+        raise  # an orderly exit is not a grid failure; see the weave's arm
+    except Exception as e:  # noqa: BLE001 — any other cause is still just "no grid"
+        err.print(f"[yellow]{_safe_text(_GF_GRID_NAME)} failed:[/] {_safe_text(e)}")
+    if grid:
+
+        def _write_answer() -> None:
+            _render_date_grid(grid, origin=origins, destination=dests, sd=sd, ed=ed)
+            _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
+
+        _deliver_calendar(_write_answer, backend=_GF_GRID_NAME)
+    else:
+        # `--fast` means the GF grid alone in ~1s; quietly running the ~45s Matrix
+        # calendar instead would change what the flag means.
+        err.print("[yellow]No Google Flights grid; drop --fast for Matrix.[/]")
+        raise typer.Exit(1)
 
 
 def _run_calendar_enriched(
@@ -685,10 +1324,16 @@ def _run_calendar_enriched(
     Google Flights date-grid and the Matrix calendar CONCURRENTLY under one event
     loop, paint the GF grid immediately (~1s) while Matrix is in flight, then paint
     the authoritative Matrix calendar (~45s) — total ≈ max(GF, Matrix), not the sum.
-    Mirrors `_run_enriched_path` (the search-path weave). `--fast` never reaches here
+    Mirrors the SHAPE of `_run_enriched_path` (the search-path weave) and not its
+    stream discipline: every status line here goes to stderr, while that one still
+    writes some of its own to stdout. `--fast` never reaches here
     (the command serves the grid alone for that). The `grid_can_serve` gate guarantees
-    a single-airport query, so the Matrix side is one `execute` (no fan-out)."""
-    from ._gf_dategrid import date_grid  # noqa: PLC0415
+    a single-airport query, so the Matrix side is one `execute` (no fan-out).
+
+    While the GF grid RPC is gated (`GfGridUnavailableError`), the grid arm raises
+    before it opens a client, so the first-paint branch below is runtime-dead and
+    what a user sees is the unavailable note plus the Matrix calendar."""
+    from ._gf_dategrid import GfGridUnavailableError, date_grid  # noqa: PLC0415
     from ._gflight_ids import GfThrottledError  # noqa: PLC0415
 
     # Single-airport calendar runs as one Matrix query; mirror `_run_calendar`'s
@@ -699,15 +1344,19 @@ def _run_calendar_enriched(
     async def _matrix(c: MatrixClient) -> None:
         try:
             state["matrix"] = await c.execute(search, cache=not no_cache)
-        except MatrixApiError as e:
-            state["matrix_err"] = e
+        except (typer.Exit, typer.Abort):
+            # `RuntimeError` subclasses on the installed click: the broad arm below
+            # would stash an orderly exit and report it as a Matrix failure.
+            raise
         except Exception as e:  # noqa: BLE001
-            # An unexpected Matrix failure (e.g. a raw httpx transport/status error that
-            # execute() doesn't wrap) must NOT propagate out of this task and tear down
-            # the group — that would cancel the still-pending grid paint and surface a
-            # bare traceback. Stash it and report after the weave so the GF grid still
-            # shows (per-backend isolation, mirroring the MatrixApiError path).
-            state["matrix_unexpected"] = e
+            # Every Matrix failure lands here, typed or not. A raw httpx transport or
+            # status error that execute() doesn't wrap must NOT propagate out of this
+            # task and tear down the group — that would cancel the still-pending grid
+            # paint and surface a bare traceback. Stashed and reported after the weave
+            # so the GF grid still shows, and appended rather than assigned because
+            # the guard outside the loop writes to this same list. The reporter
+            # dispatches on the class, so a `MatrixApiError` keeps its kind and id.
+            state.setdefault("matrix_failures", []).append(e)
 
     async def _go() -> None:
         async with (
@@ -722,33 +1371,62 @@ def _run_calendar_enriched(
                 grid = await anyio.to_thread.run_sync(date_grid, search)
             except GfThrottledError:
                 state["gf_throttled"] = True
+            except GfGridUnavailableError:
+                # Ahead of the broad except, which would report a standing gate as
+                # "date grid failed: …". Matrix still prices the window.
+                state["gf_unavailable"] = True
+            except (typer.Exit, typer.Abort):
+                raise  # an orderly exit is not a grid failure; see `_matrix` above
             except Exception as e:  # noqa: BLE001 — GF is the optional fast layer; Matrix still runs
                 state["gf_err"] = e
-            state["grid"] = grid
-            # First paint, while Matrix is still in flight.
-            if grid:
-                _render_date_grid(grid, origin=origins, destination=dests, sd=sd, ed=ed)
-                console.print("[dim]…refining with Matrix (full grid + durations)…[/]")
-            elif state.get("gf_throttled"):
-                console.print("[dim]Google Flights rate-limited — awaiting Matrix calendar…[/]")
-            elif "gf_err" in state:
-                err.print(f"[yellow]Google Flights date-grid failed:[/] {state['gf_err']}")
-                console.print("[dim]…awaiting Matrix calendar…[/]")
+            try:
+                _paint_calendar_first(grid, state, origins=origins, dests=dests, sd=sd, ed=ed)
+            except (typer.Exit, typer.Abort):
+                raise  # an orderly exit is not a paint failure; see `_matrix` above
+            except Exception as e:  # noqa: BLE001 — the display half fails on its own terms
+                # The first paint is the Google Flights half's own output, so a raise
+                # here belongs to that backend: on the Matrix list it would print
+                # "Matrix calendar failed" for a renderer, and the still-pending
+                # Matrix calendar would be cancelled by a failure that is not its own.
+                state.setdefault("gf_failures", []).append(e)
             else:
-                console.print("[dim]…awaiting Matrix calendar…[/]")
+                # After the paint, and a boolean rather than the grid itself: the exit
+                # gate below asks whether the reader was given something, and a grid
+                # that was fetched and then died in the renderer is not that.
+                state["painted"] = bool(grid)
 
-    anyio.run(_go)
+    _run_calendar_weave(_go, state)
 
     matrix_res = state.get("matrix")
     if matrix_res is None:
         # Matrix failed; the GF grid (if any) was already painted.
-        _report_calendar_matrix_failure(state)
-        if not state.get("grid"):
+        _report_calendar_failures(state)
+        if not state.get("painted"):
             raise typer.Exit(1)
         return
+    # Matrix answered, and the run may still have failed after it — a client
+    # teardown, a renderer, a closed pipe. The same reporter, because the stash is
+    # the same stash: reading one of its keys here is how a failure that happened
+    # after the answer stayed silent. Said BEFORE the render, since whatever broke
+    # may break that too, and said as a line rather than an exit code, because the
+    # answer below still stands.
+    _report_calendar_failures(state, answered=True)
     res = cast("CalendarResult", matrix_res)
-    _render_calendar(res, dmin=dmin, dmax=dmax, origin=origins, destination=dests, sd=sd, ed=ed)
-    _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
+
+    def _write_answer() -> None:
+        _render_calendar(
+            res,
+            dmin=dmin,
+            dmax=dmax,
+            origin=origins,
+            destination=dests,
+            sd=sd,
+            ed=ed,
+            round_trip=len(search.legs) == _ROUND_TRIP_LEGS,
+        )
+        _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
+
+    _deliver_calendar(_write_answer)
 
 
 def _pinned_solution_index(
@@ -771,7 +1449,7 @@ def _pinned_solution_index(
     upper = len(result.solutions) if rendered is None else min(rendered, len(result.solutions))
     if pick < 1 or pick > upper:
         console.print(
-            f"[yellow]--pick {pick} is out of range (1-{upper}); "
+            f"[yellow]--pick {pick:d} is out of range (1-{upper:d}); "
             f"pinning the cheapest itinerary instead.[/]"
         )
         return 0
@@ -899,10 +1577,10 @@ def _emit_urls(
         pinned_m = _try_pinned_matrix_url(search, result, idx) if idx is not None else None
         if pinned_m is not None:
             console.print(f"[dim]Matrix ({pinned_label} pinned):[/]")
-            console.print(f"  [link]{pinned_m}[/]")
+            console.print(f"  [link]{_safe_text(pinned_m)}[/]")
         else:
             console.print("[dim]Matrix deep-link:[/]")
-            console.print(f"  [link]{matrix_deep_link(search)}[/]")
+            console.print(f"  [link]{_safe_text(matrix_deep_link(search))}[/]")
     if google_url:
         # `google_flights_url` builds protobuf-encoded tfs= URLs via fast_flights.
         # That library has no documented exception surface — catch broadly so a
@@ -911,14 +1589,14 @@ def _emit_urls(
             pinned = _try_pinned_gflight_url(search, result, idx) if idx is not None else None
             if pinned is not None:
                 console.print(f"[dim]Google Flights ({pinned_label} pinned):[/]")
-                console.print(f"  [link]{pinned}[/]")
+                console.print(f"  [link]{_safe_text(pinned)}[/]")
             else:
                 console.print("[dim]Google Flights (tfs= structured):[/]")
-                console.print(f"  [link]{google_flights_url(search)}[/]")
+                console.print(f"  [link]{_safe_text(google_flights_url(search))}[/]")
                 for note in _gflight_url_caveats(search):
-                    console.print(f"  [yellow]note: {note}[/]")
+                    console.print(f"  [yellow]note: {_safe_text(note)}[/]")
         except Exception as e:  # noqa: BLE001 - third-party undocumented errors; non-fatal fallback
-            console.print(f"[dim]Google Flights link: {e}[/]")
+            console.print(f"[dim]Google Flights link: {_safe_text(e)}[/]")
 
 
 # ─────────────────────────── result renderers ──────────────────────────────
@@ -975,7 +1653,10 @@ def _fmt_slice_times(dep: str, arr: str) -> str:
     d = _parse_iso(dep)
     a = _parse_iso(arr)
     if d is None or a is None:
-        return f"{dep[:16]}→{arr[:16]}"
+        # The fallback is the branch where this function could NOT read Matrix's
+        # two strings, so what it puts in the cell is whatever Matrix sent. The
+        # parsed branch below formats two datetimes and carries none of it.
+        return f"{_safe_text(dep[:16])}→{_safe_text(arr[:16])}"
     day_off = (a.date() - d.date()).days
     suffix = f" +{day_off}d" if day_off > 0 else (f" {day_off}d" if day_off < 0 else "")
     return f"{d:%b%d %H:%M}→{a:%H:%M}{suffix}"
@@ -983,20 +1664,29 @@ def _fmt_slice_times(dep: str, arr: str) -> str:
 
 def _fmt_slice_route(s: Slice) -> str:
     """Origin→destination threading any intermediate connection airports, so a
-    1-stop itinerary shows its connection city instead of hiding it."""
-    o = (s.origin.code if s.origin else None) or "?"
-    d = (s.destination.code if s.destination else None) or "?"
-    vias = [e.code for e in s.stops if e and e.code]
+    1-stop itinerary shows its connection city instead of hiding it.
+
+    Matrix chooses all three codes and the result is a table cell, which parses
+    markup: wrapped per code rather than around the join, so the cell composed
+    from this can still carry the tags `_fmt_legroom_one` writes on purpose."""
+    o = _safe_text((s.origin.code if s.origin else None) or "?")
+    d = _safe_text((s.destination.code if s.destination else None) or "?")
+    vias = [_safe_text(e.code) for e in s.stops if e and e.code]
     return "→".join([o, *vias, d])
 
 
 def _fmt_slice_cell(s: Slice) -> str:
     """One itinerary slice as a table cell: route (with connection cities),
     flight numbers, compact unambiguous times, duration, then per-leg legroom
-    lines. Shared by the single-cabin and multi-cabin itinerary tables."""
+    lines. Shared by the single-cabin and multi-cabin itinerary tables.
+
+    Every remote leaf is wrapped where it is read — here, in `_fmt_slice_route`,
+    `_fmt_slice_times` and `_fmt_legroom_one` — and the composed cell is not
+    wrapped again: `_fmt_legroom_one` emits `[red]` on purpose, and one wrap
+    around the whole cell would show that tag instead of colouring the pitch."""
     dur_min = s.duration or 0
     dur = f"{dur_min // 60}h{dur_min % 60:02d}m" if dur_min else ""
-    flights = "/".join(s.flights) or "?"
+    flights = _safe_text("/".join(s.flights)) or "?"
     times = _fmt_slice_times(s.departure or "", s.arrival or "")
     head = " ".join(p for p in (_fmt_slice_route(s), flights, times, dur) if p)
     tail = _fmt_legroom_lines(s)
@@ -1029,11 +1719,17 @@ def _render_search(res: SearchResult, limit: int = _DEFAULT_RENDER_LIMIT) -> Non
     if res.solution_count == 0:
         console.print("[yellow]No solutions returned.[/]")
         return
+    # Matrix chooses the price, the currency, the carrier codes and short names,
+    # the stop labels, and — through `_fmt_slice_cell` — the airport codes, flight
+    # numbers and timestamps in the itinerary cells. The summary line, the two
+    # table titles and every header and cell parse markup, so each of those values
+    # is wrapped where it is read and a hostile field cannot lose the render of a
+    # query that succeeded.
     ccy, cheapest = _split_price(res.cheapest_price)
-    ccy_tag = f" ({ccy})" if ccy else ""
+    ccy_tag = f" ({_safe_text(ccy)})" if ccy else ""
     console.print(
         f"[bold]{res.solution_count} solutions[/]  · "
-        f"cheapest: [bold cyan]{cheapest or '—'}{ccy_tag}[/]"
+        f"cheapest: [bold cyan]{_safe_text(cheapest or '—')}{ccy_tag}[/]"
     )
 
     cm = res.carrier_stop_matrix
@@ -1047,9 +1743,9 @@ def _render_search(res: SearchResult, limit: int = _DEFAULT_RENDER_LIMIT) -> Non
         for col in cm.columns:
             code = col.label.code if col.label else "?"
             sn = (col.label.short_name or "") if col.label else ""
-            t.add_column(f"{code or '?'}\n{sn[:14]}")
+            t.add_column(f"{_safe_text(code or '?')}\n{_safe_text(sn[:14])}")
         for row in cm.rows:
-            cells = [str(row.label) if row.label is not None else "?"]
+            cells = [_safe_text(row.label) if row.label is not None else "?"]
             for c in row.cells:
                 p = _amount(c.min_price)
                 mark = "★" if c.min_price_in_grid else ("·" if c.min_price_in_row else "")
@@ -1066,11 +1762,11 @@ def _render_search(res: SearchResult, limit: int = _DEFAULT_RENDER_LIMIT) -> Non
     for i, it in enumerate(res.solutions[:limit], 1):
         itn = it.itinerary
         slcs: list[Slice] = itn.slices if itn else []
-        it_carriers = ",".join((c.code or "?") for c in (itn.carriers if itn else []))
+        it_carriers = ",".join(_safe_text(c.code or "?") for c in (itn.carriers if itn else []))
 
         out = _fmt_slice_cell(slcs[0]) if slcs else "—"
         ret = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
-        st.add_row(str(i), _amount(it.price), it_carriers or "?", out, ret)
+        st.add_row(f"{i:d}", _amount(it.price), it_carriers or "?", out, ret)
     console.print(st)
 
 
@@ -1092,7 +1788,9 @@ def _fmt_legroom_one(flight_no: str, leg: LegInfo) -> str:
             token = f"[{color}]{token}[/]"
         parts.append(token)
     if leg.legroom_class and leg.legroom_class not in {"AVERAGE", "BELOW", "ABOVE"}:
-        parts.append(leg.legroom_class)
+        # Not one of the three judgments above, so it is a seat-type name the
+        # backend chose ("Lie Flat", "Suite") and reaches the cell as it came.
+        parts.append(_safe_text(leg.legroom_class))
     amenities: list[str] = []
     w = _WIFI_GLYPH.get(leg.wifi or "")
     if w:
@@ -1107,7 +1805,15 @@ def _fmt_legroom_one(flight_no: str, leg: LegInfo) -> str:
         parts.append("".join(amenities))
     if not parts:
         return ""
-    return f"  {flight_no:<6} " + " ".join(parts)
+    # The colour tag on the pitch token is ours and stays live. The flight number
+    # is the backend's, and escaping LENGTHENS it — one backslash per markup-shaped
+    # bracket — so padding the escaped value would count a character the reader
+    # never sees and drift the column. Strip, pad, then escape: the width is
+    # measured on what renders. The exception is the tab `_CTRL` deliberately
+    # keeps for sentence-shaped text — inside a fixed pad it counts as one
+    # character and renders as eight.
+    shown = str(flight_no).translate(_CTRL)
+    return f"  {escape(f'{shown:<6}')} " + " ".join(parts)
 
 
 def _fmt_legroom_lines(s: Slice) -> str:
@@ -1131,13 +1837,15 @@ def _render_date_grid(
     sorted cheapest-first. One-way only (the grid's shape)."""
     if not grid:
         return
+    priced_days = len(grid)
+    cheapest = min(grid.values())
     console.print(
-        f"[bold]{len(grid)} priced days[/]  · cheapest: "
-        f"[bold cyan]{min(grid.values()):.0f} (USD)[/]  · "
-        f"window {sd.isoformat()} → {ed.isoformat()}"
+        f"[bold]{priced_days} priced days[/]  · cheapest: "
+        f"[bold cyan]{cheapest:.0f} (USD)[/]  · "
+        f"window {_safe_text(sd.isoformat())} → {_safe_text(ed.isoformat())}"
     )
     t = Table(
-        title=f"{','.join(origin)} → {','.join(destination)}: "
+        title=f"{_safe_text(','.join(origin))} → {_safe_text(','.join(destination))}: "
         "lowest fare per departure day (Google Flights)",
         show_header=True,
         header_style="bold green",
@@ -1145,8 +1853,44 @@ def _render_date_grid(
     t.add_column("departure", justify="right")
     t.add_column("min (USD)", justify="right")
     for day, price in sorted(grid.items(), key=lambda kv: kv[1]):
-        t.add_row(day, f"{price:.0f}")
+        # The day is a key off the Google Flights grid, not a date this module built.
+        t.add_row(_safe_text(day), f"{price:.0f}")
     console.print(t)
+
+
+def _grid_branch_blocker(
+    search: CalendarSearch,
+    *,
+    json_out: bool,
+    one_way: bool,
+    origins: tuple[str, ...],
+    dests: tuple[str, ...],
+) -> str | None:
+    """Why the GF date-grid can't serve this calendar, or None if it can.
+
+    The string is user-facing: it completes "this is …" in the `--fast` refusal, so
+    every branch returns a noun phrase. The first three name the SHAPE, which is
+    the whole story for them; the routing branch names the flag and the tier
+    instead, because a constraint the grid can't honor is not visible in the shape
+    of the command line. Ordered cheapest-first so the fli-heavy `_gf_dategrid`
+    import is still skipped for the shapes that never need it.
+    """
+    if json_out:
+        return "JSON output"
+    if not one_way:
+        return "a round-trip window"
+    if len(origins) > 1 or len(dests) > 1:
+        return "a multi-airport route"
+    from ._gf_dategrid import grid_can_serve, grid_routing_blocker  # noqa: PLC0415
+
+    if not grid_can_serve(search):
+        # `grid_can_serve` is False for Tier-2 AND Tier-3, so ask which: the grid
+        # returns no itineraries (Tier-2's problem) and cannot reach fare
+        # construction at all (Tier-3's), and only one of those is a routing tier
+        # the reader can do anything about. The fallback covers a future gate
+        # condition that routing does not explain.
+        return grid_routing_blocker(search) or "a constraint the price grid can't honor"
+    return None
 
 
 def _render_calendar(
@@ -1158,7 +1902,13 @@ def _render_calendar(
     destination: tuple[str, ...],
     sd: date,
     ed: date,
+    round_trip: bool,
 ) -> None:
+    """Render the lowest-fare grid. `round_trip` decides whether the trip-LENGTH
+    dimension exists at all: `wire._set_trip_length` attaches `layover` only when
+    there is a return leg, so a one-way request never asked for per-night prices
+    and Matrix never sent any. Showing the columns anyway prints a wall of '—'
+    under a duration range the backend never saw."""
     if res.solution_count == 0 or not res.priced_days:
         console.print(
             "[yellow]Calendar empty.[/] Matrix's calendar mode "
@@ -1166,27 +1916,36 @@ def _render_calendar(
             "for a single date."
         )
         return
+    # Matrix chose the whole price string. This line parses markup and so does
+    # the table title below, which carries the currency half a second time.
     ccy, cheapest = _split_price(res.cheapest_price)
-    ccy_tag = f" ({ccy})" if ccy else ""
+    ccy_tag = f" ({_safe_text(ccy)})" if ccy else ""
+    duration_note = f"  · duration {dmin}-{dmax} nights" if round_trip else ""
     console.print(
         f"[bold]{res.solution_count} solutions[/]  · "
-        f"overall cheapest: [bold cyan]{cheapest or '—'}{ccy_tag}[/]  · "
-        f"window {sd.isoformat()} → {ed.isoformat()}  · "
-        f"duration {dmin}-{dmax} nights"
+        f"overall cheapest: [bold cyan]{_safe_text(cheapest or '—')}{ccy_tag}[/]  · "
+        f"window {_safe_text(sd.isoformat())} → {_safe_text(ed.isoformat())}"
+        f"{duration_note}"
     )
-    title = f"{','.join(origin)} → {','.join(destination)}: lowest fare per departure day{ccy_tag}"
-    t = Table(title=title, show_header=True, header_style="bold green")
+    t = Table(
+        title=f"{_safe_text(','.join(origin))} → {_safe_text(','.join(destination))}: "
+        f"lowest fare per departure day{ccy_tag}",
+        show_header=True,
+        header_style="bold green",
+    )
     t.add_column("departure", justify="right")
     t.add_column("min", justify="right")
-    for dur in range(dmin, dmax + 1):
-        t.add_column(f"{dur}n", justify="right")
+    if round_trip:
+        for dur in range(dmin, dmax + 1):
+            t.add_column(f"{dur:d}n", justify="right")
     t.add_column("sols", justify="right")
     for d in sorted(res.priced_days, key=lambda x: x.price_value or 9e9):
-        row = [str(d.date), _amount(d.min_price)]
-        opts = {o.trip_length: o.min_price for o in d.options}
-        for dur in range(dmin, dmax + 1):
-            row.append(_amount(opts.get(dur)))
-        row.append(str(d.solution_count))
+        row = [f"{d.date:d}", _amount(d.min_price)]
+        if round_trip:
+            opts = {o.trip_length: o.min_price for o in d.options}
+            for dur in range(dmin, dmax + 1):
+                row.append(_amount(opts.get(dur)))
+        row.append(f"{d.solution_count:d}")
         t.add_row(*row)
     console.print(t)
 
@@ -1330,7 +2089,7 @@ def _render_merged(rows: list[Any], *, legs: tuple[Leg, ...], top_n: int) -> Non
     destination = legs[0].destinations[0] if legs[0].destinations else "?"
     has_return = len(legs) >= _ROUND_TRIP_LEGS
     t = Table(
-        title=f"Google Flights + Matrix · {origin}→{destination}"
+        title=f"Google Flights + Matrix · {_safe_text(origin)}→{_safe_text(destination)}"
         + (" + return" if has_return else ""),
         show_header=True,
         header_style="bold green",
@@ -1347,8 +2106,10 @@ def _render_merged(rows: list[Any], *, legs: tuple[Leg, ...], top_n: int) -> Non
         out = _fmt_slice_cell(slcs[0]) if slcs else "—"
         ret = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
         t.add_row(
-            str(i),
-            _MERGE_SOURCE_TAG.get(row.source, row.source),
+            f"{i:d}",
+            # `rows` is duck-typed, and the lookup falls back to the tag it was
+            # handed when it is not one of the three this module writes.
+            _safe_text(_MERGE_SOURCE_TAG.get(row.source, row.source)),
             _amount(row.matrix_price),
             _amount(row.gf_price),
             out,
@@ -1387,7 +2148,7 @@ def _run_gflight_path(
         )
         raise typer.Exit(1) from e
     except Exception as e:
-        err.print(f"[red]Google Flights query failed:[/] {e}")
+        err.print(f"[red]Google Flights query failed:[/] {_safe_text(e)}")
         raise typer.Exit(1) from e
 
     if not results:
@@ -1504,13 +2265,13 @@ def _run_enriched_path(
         if isinstance(e, GfThrottledError):
             console.print("[dim]Google Flights rate-limited — showing Matrix only.[/]")
         else:
-            err.print(f"[yellow]Google Flights query failed:[/] {e}")
+            err.print(f"[yellow]Google Flights query failed:[/] {_safe_text(e)}")
     matrix_res = state.get("matrix")
     if matrix_res is None:
         # Matrix failed; the GF table (if any) was already painted.
         e = state.get("matrix_err")
         if e is not None:
-            err.print(f"[red]Matrix returned an error ({e.kind}):[/] {e.message}")
+            _print_matrix_error(e)
         if not gf:
             raise typer.Exit(1)
         return
@@ -1650,7 +2411,10 @@ def _run_matrix_multi(
         try:
             res = await client.execute(search, cache=not no_cache)
         except MatrixApiError as e:
-            err.print(f"[yellow]Matrix {cab.value} query failed ({e.kind}): {e.message}[/]")
+            err.print(
+                f"[yellow]Matrix {cab.value} query failed "
+                f"({_safe_text(e.kind)}): {_safe_text(e.message)}[/]"
+            )
             return
         results[cab] = cast("SearchResult", res)
 
@@ -1665,9 +2429,7 @@ def _run_matrix_multi(
     try:
         anyio.run(go)
     except MatrixApiError as e:
-        err.print(f"[red]Matrix returned an error ({e.kind}):[/] {e.message}")
-        if e.request_id:
-            err.print(f"[dim]request_id: {e.request_id}[/]")
+        _print_matrix_error(e)
         raise typer.Exit(1) from e
     return results
 
@@ -1695,7 +2457,7 @@ def _run_gflight_multi(
         try:
             results[cab] = await anyio.to_thread.run_sync(query_sync, cab)
         except Exception as e:  # noqa: BLE001 — fli has no documented exception surface
-            err.print(f"[yellow]Google Flights {cab.value} query failed: {e}[/]")
+            err.print(f"[yellow]Google Flights {cab.value} query failed: {_safe_text(e)}[/]")
 
     async def go() -> None:
         async with anyio.create_task_group() as tg:
@@ -1738,11 +2500,15 @@ def _render_multi_cabin_search(
                 break
         if ccy:
             break
-    ccy_tag = f" ({ccy})" if ccy else ""
+    ccy_tag = f" ({_safe_text(ccy)})" if ccy else ""
     cabin_labels = "+".join(_CABIN_TO_LETTER[c] for c in cabins)
+    sort_label = _CABIN_TO_LETTER[sort_by]
 
     t = Table(
-        title=f"{title_prefix} · {cabin_labels} (sorted by {_CABIN_TO_LETTER[sort_by]}){ccy_tag}",
+        # `title_prefix` is a parameter: its value is chosen by whoever calls, and
+        # a claim about every present and future caller is not one this function
+        # can keep. The two callers pass a literal, so the wrap costs nothing.
+        title=f"{_safe_text(title_prefix)} · {cabin_labels} (sorted by {sort_label}){ccy_tag}",
         show_header=True,
         header_style="bold green",
     )
@@ -1750,18 +2516,19 @@ def _render_multi_cabin_search(
     t.add_column("carriers")
     t.add_column("outbound")
     t.add_column("return")
-    for cab in cabins:
-        t.add_column(f"{_CABIN_TO_LETTER[cab]} $", justify="right")
+    for letter in (_CABIN_TO_LETTER[c] for c in cabins):
+        t.add_column(f"{letter} $", justify="right")
 
     for i, row in enumerate(rows, 1):
         itn = row.itinerary.itinerary
         slcs: list[Slice] = itn.slices if itn else []
-        carriers = ",".join((c.code or "?") for c in (itn.carriers if itn else []))
+        # Wrapped per code, as `_render_search` does with the same field.
+        carriers = ",".join(_safe_text(c.code or "?") for c in (itn.carriers if itn else []))
 
         out_cell = _fmt_slice_cell(slcs[0]) if slcs else "—"
         ret_cell = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
         price_cells = [_amount(row.prices.get(cab)) for cab in cabins]
-        t.add_row(str(i), carriers or "?", out_cell, ret_cell, *price_cells)
+        t.add_row(f"{i:d}", carriers or "?", out_cell, ret_cell, *price_cells)
     console.print(t)
 
 
@@ -1947,16 +2714,19 @@ def _leg_display(leg: Any, amenity: Any, match_carriers: frozenset[str]) -> str:
     """Per-leg label '<carrier> <num>'. If the booking carrier isn't in the user's
     carrier filter but the leg is sold under a codeshare that IS (e.g. UA58 sold as
     LH9407 under `--routing LH+`), show the matched identity: 'LH9407 (op UA58)'."""
-    code = getattr(leg.airline, "name", "") or ""
-    number = getattr(leg, "flight_number", "?")
+    # The filter is compared against the code Google Flights sent; escaping first
+    # would test a string the user's `--routing` could never have named.
+    raw_code = getattr(leg.airline, "name", "") or ""
+    code = _safe_text(raw_code)
+    number = _safe_text(getattr(leg, "flight_number", "?"))
     booking = f"{code} {number}"
-    if not match_carriers or code in match_carriers:
+    if not match_carriers or raw_code in match_carriers:
         return booking
     raw_mf = getattr(amenity, "marketing_flights", ()) if amenity else ()
     mflights: tuple[str, ...] = tuple(raw_mf or ())
     for mf in mflights:
         if mf[:2].upper() in match_carriers:
-            return f"{mf} (op {code}{number})"
+            return f"{_safe_text(mf)} (op {code}{number})"
     return booking
 
 
@@ -1976,7 +2746,8 @@ def _render_gflight_table(
     destination = legs[0].destinations[0] if legs[0].destinations else "?"
     has_return = len(legs) >= _ROUND_TRIP_LEGS
     t = Table(
-        title=f"Google Flights · {origin}→{destination}" + (" + return" if has_return else ""),
+        title=f"Google Flights · {_safe_text(origin)}→{_safe_text(destination)}"
+        + (" + return" if has_return else ""),
         show_header=True,
         header_style="bold green",
     )
@@ -2004,12 +2775,12 @@ def _render_gflight_table(
                 any_legroom = True
             t.add_row(
                 label,
-                # fli types `price` as `NonNegativeFloat | None` ("None when
-                # not surfaced"). The gflight adapter already tolerates that;
-                # this renderer formatted it unguarded and raised TypeError,
-                # so one price-less row took down the whole cash table.
-                (f"{fr.currency or 'USD'}{fr.price:.2f}" if fr.price is not None else "—"),
-                str(fr.stops),
+                # fli types `price` as `NonNegativeFloat | None` ("None when not
+                # surfaced"). The gflight adapter already tolerates that; this
+                # renderer formatted it unguarded and raised TypeError, so one
+                # price-less row took down the whole cash table.
+                ("—" if fr.price is None else f"{_safe_text(fr.currency or 'USD')}{fr.price:.2f}"),
+                _safe_text(fr.stops),
                 dur,
                 legs_str,
                 legroom_str,
@@ -2079,13 +2850,16 @@ def _fmt_gflight_legroom(fli_legs: list[Any], amenities: list[Any]) -> str:
         pitch = getattr(a, "pitch_inches", None)
         cls = getattr(a, "legroom_class", None)
         if pitch is not None:
-            tok = f'{pitch}"'
+            # Both fields are `getattr` off a duck-typed Google Flights object,
+            # so neither has a type this module checked. The colour around the
+            # token is ours and goes on after the value is escaped.
+            tok = f'{_safe_text(pitch)}"'
             color = _LEGROOM_AS_COLOR.get(cls or "")
             if color:
                 tok = f"[{color}]{tok}[/]"
             parts.append(tok)
         if cls and cls not in {"AVERAGE", "BELOW", "ABOVE"}:
-            parts.append(cls)
+            parts.append(_safe_text(cls))
         glyphs: list[str] = []
         wifi_g = _WIFI_GLYPH.get(getattr(a, "wifi", None) or "")
         if wifi_g:
@@ -2100,10 +2874,14 @@ def _fmt_gflight_legroom(fli_legs: list[Any], amenities: list[Any]) -> str:
             parts.append("".join(glyphs))
         if not parts:
             continue
+        # Google Flights chose both leaves and this cell parses markup, exactly as
+        # `_fmt_legroom_one`'s does; padded before escaping for the same reason,
+        # and carrying the same tab exception.
         leg_label = (
             f"{getattr(leg.airline, 'name', leg.airline)}{getattr(leg, 'flight_number', '?')}"
         )
-        lines.append(f"{leg_label:<6} " + " ".join(parts))
+        shown = leg_label.translate(_CTRL)
+        lines.append(f"{escape(f'{shown:<6}')} " + " ".join(parts))
     return "\n".join(lines)
 
 
@@ -2146,7 +2924,16 @@ _PROVIDER_OPT = typer.Option(
     "--provider-opt",
     help=(
         "Per-provider override, repeatable: 'pp.airlines=United,Delta'. "
-        "Overrides ~/.config/flight-cli/config.toml [providers.<name>]."
+        # The file this process reads, not the default: `FLIGHT_CLI_CONFIG_DIR`
+        # moves it, and this string tells the reader where to put the option.
+        # `rich_markup_mode="rich"` renders this through the same markup parser
+        # `console.print` uses, so the path takes the wrapper any remote value
+        # takes — `escape` alone would leave an ESC in a directory name to reach
+        # Typer's from-ANSI branch, which drops the path it was meant to show.
+        # The section name is escaped so it RENDERS: unescaped, the parser reads
+        # `[providers.<name>]` as a style tag and eats the one token the sentence
+        # exists to give the reader.
+        f"Overrides {_safe_text(_config.config_path())} \\[providers.<name>]."
     ),
     rich_help_panel="Backend & providers",
 )
@@ -2159,7 +2946,7 @@ def _resolve_rps(flag: float | None) -> float:
     try:
         return _config.http_rps()
     except ValueError as e:
-        err.print(f"[red]Bad rps configuration: {e}[/]")
+        err.print(f"[red]Bad rps configuration: {_safe_text(e)}[/]")
         raise typer.Exit(2) from e
 
 
@@ -2184,11 +2971,14 @@ def _resolve_no_cache(flag: bool) -> bool:
 # shape isn't naturally tabular without a flattening pass that deserves its
 # own design. Today's surface is the front door; emitters layer on later.
 _VALID_FORMATS = ("table", "json")
+# Rendered once, so the message and the help string cannot drift, and so the two
+# print sites interpolate a name rather than an expression.
+_FORMAT_CHOICES = "/".join(_VALID_FORMATS)
 
 _FORMAT_OPT = typer.Option(
     "table",
     "--format",
-    help=f"Output format: one of {'/'.join(_VALID_FORMATS)}.",
+    help=f"Output format: one of {_FORMAT_CHOICES}.",
     rich_help_panel=_GROUP_OUTPUT,
 )
 _JSON_OPT = typer.Option(
@@ -2225,11 +3015,11 @@ def _resolve_format(*, fmt: str, json_flag: bool) -> str:
     if json_flag:
         err.print("[yellow]--json is deprecated; use --format json.[/]")
         if fmt not in ("table", "json"):
-            err.print(f"[red]--json conflicts with --format {fmt!r}; pick one.[/]")
+            err.print(f"[red]--json conflicts with --format {_quote(fmt)}; pick one.[/]")
             raise typer.Exit(2)
         return "json"
     if fmt not in _VALID_FORMATS:
-        err.print(f"[red]--format must be one of {'/'.join(_VALID_FORMATS)}; got {fmt!r}[/]")
+        err.print(f"[red]--format must be one of {_FORMAT_CHOICES}; got {_quote(fmt)}[/]")
         raise typer.Exit(2)
     return fmt
 
@@ -2857,9 +3647,13 @@ def calendar(
     duration: Annotated[
         str,
         typer.Option(
-            "--duration", "-d", help="Nights, '5' or '5-7'", rich_help_panel=_GROUP_ITINERARY
+            "--duration",
+            "-d",
+            help="Nights between the outbound and the return, '5', '5-7' or "
+            "'5..7'. Round-trip only — a one-way calendar has no trip length.",
+            rich_help_panel=_GROUP_ITINERARY,
         ),
-    ] = "5-7",
+    ] = _DEFAULT_CALENDAR_DURATION,
     one_way: bool = typer.Option(False, "--one-way", rich_help_panel=_GROUP_ITINERARY),
     cabin: str = typer.Option("economy", "--cabin", rich_help_panel=_GROUP_ITINERARY),
     adults: int = typer.Option(1, "--adults", rich_help_panel=_GROUP_ITINERARY),
@@ -2915,8 +3709,9 @@ def calendar(
         "--fast/--enrich",
         "--no-enrich/--no-fast",
         help="Skip the Matrix enrichment: show only the fast Google Flights "
-        "date-grid (one-way, single-airport, Tier-1 filters) instead of also "
-        "running the authoritative Matrix calendar.",
+        "date grid (one-way, single-airport, Tier-1 filters) instead of also "
+        "running the authoritative Matrix calendar. Exits 1 rather than falling "
+        "back, so a no-grid result is never mistaken for a fast one.",
         rich_help_panel=_GROUP_BACKEND,
     ),
     max_per_query: int = typer.Option(
@@ -2942,7 +3737,7 @@ def calendar(
     dests = _parse_iata_list(destination)
     sd = _parse_date(start)
     ed = _parse_date(end) if end else sd + timedelta(days=30)
-    dmin, dmax = _parse_duration(duration)
+    dmin, dmax = _resolve_duration(duration, round_trip=not one_way)
     out_times = _parse_times(depart_times)
     ret_times = _parse_times(return_times)
 
@@ -2979,53 +3774,62 @@ def calendar(
     # Fast layer: the GF native date-grid (~1s, throttle-friendly, dodges Matrix's
     # compute-budget under-reporting) for one-way / single-airport / Tier-1-only
     # windows. Paint it first, then enrich with the authoritative Matrix calendar
-    # (full per-duration grid). `--fast` stops after the grid. The cheap pre-check
-    # avoids importing the fli-heavy module for the Matrix-only cases.
-    if not json_out and one_way and len(origins) == 1 and len(dests) == 1:
-        from ._gf_dategrid import grid_can_serve  # noqa: PLC0415
-
-        if grid_can_serve(search):
-            if not fast:
-                # Progressive weave: dispatch the GF date-grid and the Matrix
-                # calendar concurrently, paint the grid first (~1s), then the
-                # authoritative Matrix calendar — total ≈ Matrix alone.
-                _run_calendar_enriched(
-                    search,
-                    origins=origins,
-                    dests=dests,
-                    sd=sd,
-                    ed=ed,
-                    dmin=dmin,
-                    dmax=dmax,
-                    rps=_resolve_rps(rps),
-                    impersonate=_resolve_impersonate(impersonate),
-                    no_cache=_resolve_no_cache(no_cache),
-                    matrix_url=matrix_url,
-                    google_url=google_url,
-                )
-                return
-            # --fast: Google Flights date-grid only (no Matrix).
-            from ._gf_dategrid import date_grid  # noqa: PLC0415
-            from ._gflight_ids import GfThrottledError  # noqa: PLC0415
-
-            grid: dict[str, float] = {}
-            try:
-                grid = date_grid(search)
-            except GfThrottledError:
-                console.print("[dim]Google Flights rate-limited — Matrix only.[/]")
-            except Exception as e:  # noqa: BLE001 — GF is the optional fast layer; Matrix still runs
-                err.print(f"[yellow]Google Flights date-grid failed:[/] {e}")
-            if grid:
-                _render_date_grid(grid, origin=origins, destination=dests, sd=sd, ed=ed)
-                _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
-            else:
-                console.print("[yellow]No Google Flights grid; drop --fast for Matrix.[/]")
+    # (full per-duration grid). `--fast` stops after the grid.
+    blocker = _grid_branch_blocker(
+        search, json_out=json_out, one_way=one_way, origins=origins, dests=dests
+    )
+    if fast and blocker is not None:
+        # `--fast` exists only inside the branch below. Everywhere else there is no
+        # grid to serve, so it fails closed instead of letting the ~45s Matrix calendar
+        # answer in its place at exit 0 — a wrapper doing `--fast || fallback` would
+        # read that as the grid it asked for (work-h70kv.9). Ahead of every Matrix call
+        # and of the JSON writer, so neither runs.
+        #
+        # On stderr, not stdout: one of the shapes this refuses IS `--format json`, and
+        # a caller piping to `jq` must get a JSON document or an empty stdout, never
+        # prose. The other shapes go the same way so the stream doesn't depend on which
+        # condition failed.
+        err.print(
+            "[yellow]--fast applies only to one-way, single-airport, non-JSON "
+            f"calendars; this is {_safe_text(blocker)}. Run without --fast for Matrix.[/]"
+        )
+        raise typer.Exit(1)
+    if blocker is None:
+        if not fast:
+            # Progressive weave: dispatch the GF date-grid and the Matrix
+            # calendar concurrently, paint the grid first (~1s), then the
+            # authoritative Matrix calendar — total ≈ Matrix alone.
+            _run_calendar_enriched(
+                search,
+                origins=origins,
+                dests=dests,
+                sd=sd,
+                ed=ed,
+                dmin=dmin,
+                dmax=dmax,
+                rps=_resolve_rps(rps),
+                impersonate=_resolve_impersonate(impersonate),
+                no_cache=_resolve_no_cache(no_cache),
+                matrix_url=matrix_url,
+                google_url=google_url,
+            )
             return
+        _run_fast_calendar_grid(
+            search,
+            origins=origins,
+            dests=dests,
+            sd=sd,
+            ed=ed,
+            matrix_url=matrix_url,
+            google_url=google_url,
+        )
+        return
 
     # Matrix (authoritative; also the only path for round-trip, multi-airport,
     # Tier-2/3 routing, or when the grid was empty/throttled).
     # CalendarSearch → CalendarResult by client._parse_response dispatch.
-    # On a multi-airport brownout, _run_calendar splits per-destination + merges.
+    # On a multi-airport brownout, _run_calendar splits into one sub-query per
+    # (origin, destination group) and merges.
     res, n_split = _run_calendar(
         search,
         rps=_resolve_rps(rps),
@@ -3038,12 +3842,29 @@ def calendar(
         sys.stdout.write(json.dumps(res.raw, indent=2))
         return
     if n_split:
-        console.print(
-            f"[dim]Queried {n_split} origin/destination groups separately and merged — Matrix "
-            f"under-reports the combined multi-airport calendar grid.[/]"
+        # On stderr, beside the coverage note the fan-out prints: it is provenance
+        # about the answer rather than part of it, and it is written BEFORE the
+        # delivery below, so on stdout a failure there would leave it standing alone
+        # under exit 1 — a document, to a caller that reads the stream.
+        err.print(
+            f"[dim]Queried {n_split} origin/destination groups separately and merged "
+            f"— Matrix under-reports the combined multi-airport calendar grid.[/]"
         )
-    _render_calendar(res, dmin=dmin, dmax=dmax, origin=origins, destination=dests, sd=sd, ed=ed)
-    _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
+
+    def _write_answer() -> None:
+        _render_calendar(
+            res,
+            dmin=dmin,
+            dmax=dmax,
+            origin=origins,
+            destination=dests,
+            sd=sd,
+            ed=ed,
+            round_trip=len(search.legs) == _ROUND_TRIP_LEGS,
+        )
+        _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
+
+    _deliver_calendar(_write_answer)
 
 
 @app.command()
@@ -3079,10 +3900,10 @@ def detail(
         typer.Option(
             "--duration",
             "-d",
-            help="Original duration range",
+            help="Original duration range (round-trip only — ignored without --return)",
             rich_help_panel=_GROUP_ITINERARY,
         ),
-    ] = "5-7",
+    ] = _DEFAULT_CALENDAR_DURATION,
     cabin: str = typer.Option("economy", "--cabin", rich_help_panel=_GROUP_ITINERARY),
     adults: int = typer.Option(1, "--adults", rich_help_panel=_GROUP_ITINERARY),
     children: int = typer.Option(0, "--children", rich_help_panel=_GROUP_ITINERARY),
@@ -3130,7 +3951,7 @@ def detail(
     ret_d = _parse_date(ret) if ret else None
     sd = _parse_date(start) if start else dep_d
     ed = _parse_date(end) if end else sd + timedelta(days=30)
-    dmin, dmax = _parse_duration(duration)
+    dmin, dmax = _resolve_duration(duration, round_trip=ret_d is not None)
 
     legs = (Leg.of(origins, dests, dep_d, route_language=routing, extension=extension),)
     if ret_d:
@@ -3228,13 +4049,18 @@ def airport(
     if not locs:
         console.print("[yellow]No matches.[/]")
         return
-    t = Table(title=f"Airport lookup: {query!r}", show_header=True, header_style="bold blue")
+    t = Table(title=f"Airport lookup: {_quote(query)}", show_header=True, header_style="bold blue")
     t.add_column("code")
     t.add_column("name")
     t.add_column("city")
     t.add_column("tz")
     for loc in locs:
-        t.add_row(loc.code, loc.display_name or "", loc.city_name or "", loc.timezone or "")
+        t.add_row(
+            _safe_text(loc.code),
+            _safe_text(loc.display_name or ""),
+            _safe_text(loc.city_name or ""),
+            _safe_text(loc.timezone or ""),
+        )
     console.print(t)
 
 
@@ -3293,7 +4119,7 @@ def seatmap(
         aircraft=aircraft,
     )
     if not fetch:
-        console.print(api_url)
+        console.print(_safe_text(api_url))
         return
     try:
         url = fetch_seatmap_url(
@@ -3305,14 +4131,14 @@ def seatmap(
             aircraft=aircraft,
         )
     except Exception as e:
-        err.print(f"[red]Seatmap lookup failed:[/] {e}")
-        console.print(f"[dim]API URL:[/] {api_url}")
+        err.print(f"[red]Seatmap lookup failed:[/] {_safe_text(e)}")
+        console.print(f"[dim]API URL:[/] {_safe_text(api_url)}")
         raise typer.Exit(1) from e
     if url is None:
         err.print("[yellow]No seatmap on file for this flight/aircraft.[/]")
-        console.print(f"[dim]API URL:[/] {api_url}")
+        console.print(f"[dim]API URL:[/] {_safe_text(api_url)}")
         raise typer.Exit(1)
-    console.print(url)
+    console.print(_safe_text(url))
 
 
 if __name__ == "__main__":
