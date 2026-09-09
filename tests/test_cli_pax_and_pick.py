@@ -7,7 +7,7 @@ that isn't true of the search the user asked for.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from flight_cli.cli import _pinned_solution_index, _seated_pax
@@ -20,6 +20,11 @@ from flight_cli.models import (
     SliceEndpoint,
 )
 
+# fli's FlightSegment validator rejects a past travel date, so the fixture date
+# is derived from today rather than pinned — a literal rots the suite the day
+# it passes.
+_TRAVEL_DATE = date.today() + timedelta(days=45)
+
 
 def _res(n: int) -> SearchResult:
     sols = [
@@ -30,7 +35,7 @@ def _res(n: int) -> SearchResult:
                 slices=[
                     Slice(
                         flights=[f"AA{i}"],
-                        departure="2026-09-01T06:00",
+                        departure=f"{_TRAVEL_DATE.isoformat()}T06:00",
                         origin=SliceEndpoint(code="JFK"),
                         destination=SliceEndpoint(code="LHR"),
                     ),
@@ -83,7 +88,7 @@ def _fli_pax(**kw: Any) -> Any:
     from flight_cli.fli_bridge import to_fli_filter
 
     s = SpecificDateSearch(
-        legs=(Leg(origins=("JFK",), destinations=("LHR",), date=date(2026, 9, 1)),),
+        legs=(Leg(origins=("JFK",), destinations=("LHR",), date=_TRAVEL_DATE),),
         options=SearchOptions(pax=Pax(**kw)),
     )
     return to_fli_filter(s).passenger_info
@@ -118,7 +123,7 @@ def test_multi_airport_and_routing_search_gets_caveats() -> None:
             Leg(
                 origins=("JFK", "EWR", "LGA"),
                 destinations=("LHR", "LGW"),
-                date=date(2026, 9, 1),
+                date=_TRAVEL_DATE,
                 route_language="AA+",
                 extension="f bc=J",
             ),
@@ -134,7 +139,7 @@ def test_plain_search_gets_no_caveats() -> None:
     from flight_cli.cli import _gflight_url_caveats
 
     s = SpecificDateSearch(
-        legs=(Leg(origins=("JFK",), destinations=("LHR",), date=date(2026, 9, 1)),),
+        legs=(Leg(origins=("JFK",), destinations=("LHR",), date=_TRAVEL_DATE),),
     )
     assert _gflight_url_caveats(s) == []
 
