@@ -1741,7 +1741,12 @@ def _no_chrome_rung(seen: list[tuple[str, Any]] | None = None) -> Any:
 
     The refusal a machine with no Chrome raises, at the frame the multi-cabin
     paths reach the rung through — so the series runner, the fallback and the
-    fan-out all run for real and only the network does not."""
+    fan-out all run for real and only the network does not.
+
+    It carries the install remedy rather than the default one because
+    `_INSTALL_HINT` is the shipped remedy a markup-mode console would damage:
+    its `[browser]` is a style tag. A writer that prints a constant instead of
+    `e.remedy`, or prints it unescaped, is then readable off the buffer."""
 
     def _rung(
         _legs: Any, opts: Any, _top_n: Any, gf_mode: Any = None, _headed: Any = False
@@ -1750,7 +1755,8 @@ def _no_chrome_rung(seen: list[tuple[str, Any]] | None = None) -> Any:
             seen.append((str(opts.cabin.value), gf_mode))
         if gf_mode == gfc.TRANSPORT_BROWSER:
             raise GfBrowserUnavailableError(
-                "Chrome failed to launch for Google Flights: no browser on this machine."
+                "Chrome failed to launch for Google Flights: no browser on this machine.",
+                remedy=gfb._INSTALL_HINT,
             )
         return []
 
@@ -2180,9 +2186,14 @@ def test_a_launch_failure_before_any_cabin_runs_the_whole_fan_out_on_http(
     # Sorted, so the parallel fan-out's completion order is not the assertion.
     assert sorted(out) == [Cabin.BUSINESS, Cabin.COACH]  # every cabin answered, over http
     assert buf.getvalue().count("multi-cabin is using http") == 1
-    # The remedy too: a run whose http rung is also refused has nothing else to
-    # go on, and this line is the only one printed before the first cabin.
-    assert gfb.BROWSER_DEFAULT_REMEDY in buf.getvalue()
+    # The remedy too, and the refusal's own rather than a constant the line
+    # could hold instead: a run whose http rung is also refused has nothing else
+    # to go on, and this line is the only one printed before the first cabin.
+    assert gfb._INSTALL_HINT in buf.getvalue()
+    # Rendered, not just written: `[browser]` is a style tag to the markup pass
+    # typer runs, and unescaped it is deleted — leaving a command that installs
+    # the package without the extra that carries the browser rung.
+    assert "flight-cli[browser]" in buf.getvalue()
 
 
 def test_the_fallback_fan_out_queries_with_the_http_transport(
