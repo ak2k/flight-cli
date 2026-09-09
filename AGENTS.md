@@ -158,6 +158,15 @@ choice that fits the rest of the stack — don't substitute.
      is the signal, not line coverage.
    - See "Appropriate divergence" table for the Profile-A→A/B-edge
      tunings (reportAny, Pydantic `extra` on boundary models).
+   - `_gf_browser.py` writes its "opening Chrome" notice to a
+     module-level `Console(stderr=True)` instead of leaving user-facing
+     output to `cli`. A browser launch costs a few seconds the user would
+     otherwise wait through unexplained; at the launch site no caller can
+     forget to announce it.
+   - Neither patchright extra runs `patchright install chrome`. Both
+     drive the *installed* real Chrome via `channel="chrome"` — a
+     bundled Chromium would have the same thin fingerprint the curl_cffi
+     rung already has, so downloading ~150 MB would buy nothing.
 
 5. **Ask when guessing.** Unknown Matrix wire shape, new SPA capture
    needed, irresolvable type error → ask. Don't invent the shape; capture
@@ -242,9 +251,13 @@ Full detail at [`docs/memories/MEMORY.md`](./docs/memories/MEMORY.md).
    therefore always runs a multi-airport query as one sub-search per
    (origin, destination), in parallel (Matrix tolerates ≥16 concurrent with flat
    latency), and merges the grids — the only way to get complete results
-   (`_calendar_split.py` + `cli._run_calendar`). The gflight backend has an
-   analogous empty-failure mode (cold curl_cffi session) handled separately by
-   retry + NID-cookie persistence in `_gflight_ids.py`.
+   (`_calendar_split.py` + `cli._run_calendar`). The gflight **date grid** — still
+   an RPC POST — has an analogous empty-failure mode (cold curl_cffi session)
+   handled separately by retry + NID-cookie persistence in `_gflight_ids.py`.
+   The gflight **search** path fetches Google's public page instead
+   (`GetShoppingResults` has been gated since 2026-08), where an empty board is
+   authoritative and every refusal is typed — see
+   [`gf_routing_and_carriers.md`](./docs/memories/gf_routing_and_carriers.md).
 8. **Two-phase calendar flow.** `name: "calendar"` returns the date grid;
    user picks a date in the UI; `name: "calendarFollowup"` returns full
    itineraries for that date. Both use the same `/v1/search` endpoint.

@@ -2,10 +2,13 @@
 can't express natively.
 
 Runs only on the gflight path (Matrix legs don't carry the per-leg carrier
-identity these predicates need). The gate (`gf_can_serve`) only routes a query
-to GF when every Tier-2 predicate here is *supported* — anything this module
-can't evaluate (min-layover, red-eyes, overnight stops) escalates the whole
-query to Matrix rather than being silently dropped.
+identity these predicates need), as the correctness backstop behind the gate
+that routed the query: `routing_predicates.page_can_encode` for the search page.
+The date grid does not reach here at all — `_gf_dategrid.grid_can_serve` admits
+Tier-1 only, because the grid returns prices per date and there are no
+itineraries to post-filter. Anything this module can't evaluate (min-layover,
+red-eyes, overnight stops) escalates the whole query to Matrix rather than being
+silently dropped.
 
 Supported Tier-2 predicates:
   - operating carrier include/exclude (`O:LH+`, `OPAIRLINES`, `-OPAIRLINES`)
@@ -36,7 +39,7 @@ if TYPE_CHECKING:
 
 # Tier-2 predicate types this module can evaluate. Other Tier-2 predicates
 # (ConnectTimePred min, red-eyes, overnights) need per-segment times we don't
-# yet thread through, so they escalate to Matrix via `gf_can_serve`.
+# yet thread through, so they escalate to Matrix at the gate.
 _SUPPORTED: tuple[type, ...] = (
     CarrierPred,
     ConnectionAirportPred,
@@ -57,7 +60,11 @@ def can_postfilter(pred: Predicate) -> bool:
 
 def gf_can_serve(constraints: ClassifiedConstraints) -> bool:
     """Whether Google Flights alone can honor every predicate: no Tier-3, and
-    every Tier-2 predicate is post-filterable here."""
+    every Tier-2 predicate is post-filterable here.
+
+    Looser than both live gates and currently reached only by its own tests —
+    the search page asks `routing_predicates.page_can_encode`, the date grid
+    asks `_gf_dategrid.grid_can_serve` (Tier-1 only)."""
     if constraints.requires_matrix:
         return False
     return all(can_postfilter(p) for p in constraints.predicates)

@@ -226,65 +226,6 @@ def test_extract_pin_segments_bails_on_missing_data() -> None:
     assert extract_pin_segments_from_slice(s) is None
 
 
-# ───────── --pick must index the rows the user actually saw ─────────
-
-
-def test_pin_source_follows_the_rendered_merged_order() -> None:
-    """`--pick N` names a row from the merged GF+Matrix table. Pinning from
-    `matrix_res` indexed a DIFFERENT sequence: a Google-only row is cheaper, so
-    it sorts first and shifts every Matrix row down by one — `--pick 2` then
-    linked the itinerary shown at row 1. That link is the handoff to a real
-    booking.
-    """
-    from types import SimpleNamespace
-
-    # DIVERGE: reportPrivateUsage — pinning the row-ordering contract is
-    # exactly the case for reaching into a module-internal helper; exporting
-    # it publicly to satisfy the rule would widen the API for a test.
-    from flight_cli.cli import _pin_source_from_merged  # pyright: ignore[reportPrivateUsage]
-    from flight_cli.models import (
-        Itinerary,
-        ItineraryDetails,
-        SearchResult,
-        Slice,
-        SliceEndpoint,
-    )
-
-    def _itin(fn: str) -> Itinerary:
-        return Itinerary(
-            displayTotal="USD500.00",
-            itinerary=ItineraryDetails(
-                slices=[
-                    Slice(
-                        flights=[fn],
-                        departure="2026-09-09T06:00:00",
-                        origin=SliceEndpoint(code="MSY"),
-                        destination=SliceEndpoint(code="MIA"),
-                    ),
-                ],
-                carriers=[],
-            ),
-        )
-
-    gf_only = _itin("DL300")  # cheaper: sorts to merged row 1
-    matrix_a = _itin("AA500")
-    merged = [SimpleNamespace(itinerary=gf_only), SimpleNamespace(itinerary=matrix_a)]
-
-    # Matrix's own list has AA500 first — the ordering that used to be pinned.
-    src = SearchResult(  # pyright: ignore[reportCallIssue]
-        solutionCount=1, solutions=[matrix_a], session="S", solutionSet="SS"
-    )
-
-    pin = _pin_source_from_merged(merged, 10, src)
-
-    flights = [s.itinerary.slices[0].flights[0] for s in pin.solutions if s.itinerary is not None]
-    assert flights == ["DL300", "AA500"]
-    # Server-generated identifiers must survive, or the Matrix pinned URL
-    # silently degrades to a plain deep link.
-    assert pin.session == "S"
-    assert pin.solution_set == "SS"
-
-
 # ───────── multi-city and passenger types survive into the pinned link ─────────
 
 

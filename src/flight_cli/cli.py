@@ -16,8 +16,9 @@ from __future__ import annotations
 import json
 import re
 import sys
+from dataclasses import asdict
 from datetime import date, datetime, timedelta
-from typing import TYPE_CHECKING, Annotated, Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Annotated, Any, NamedTuple, assert_never, cast
 
 import anyio
 import anyio.to_thread
@@ -28,6 +29,23 @@ from rich.table import Table
 
 from . import _config
 from ._calendar_split import is_empty_calendar, merge_calendar_results, split_calendar_search
+
+# The `--gf-transport` vocabulary, from the leaf that costs nothing to import.
+# `_gflight_ids` owns the ladder but costs fli (~95 ms), and EVERY search
+# validates this flag — including the Matrix-only ones that never reach a rung.
+# One definition, so the CLI's accepted set cannot drift from the ladder's type.
+from ._gf_common import TRANSPORT_BROWSER, TRANSPORT_HTTP, VALID_TRANSPORT_MODES, GfTransportMode
+from ._gf_errors import (
+    GfBackendError,
+    GfBrowserUnavailableError,
+    GfConsentError,
+    GfPageShapeError,
+    GfPinIgnoredError,
+    GfTfsUnsupportedError,
+    GfThrottledError,
+    GfTransportError,
+    GfUpstreamStatusError,
+)
 from ._multi_cabin import MultiCabinRow, parse_price
 from ._multi_cabin import merge as _merge_cabins
 from .client import MatrixApiError, MatrixClient
@@ -51,7 +69,6 @@ from .links import (
     matrix_itinerary_url,
 )
 from .log import configure as configure_logging
-from .models import SearchResult
 from .pp.auth import load_tokens
 from .pp.cli import auth_app, run_pp_for_search
 from .providers.base import LegQuery
@@ -59,7 +76,7 @@ from .providers.base import LegQuery
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
 
-    from .models import CalendarResult, LegInfo, Location, Slice
+    from .models import CalendarResult, LegInfo, Location, SearchResult, Slice
 
 # Tuple-length sentinels for `--slice` parser (`ORIGIN-DEST:DATE[:r=...:e=...]`).
 _SLICE_MIN_PARTS = 2
@@ -325,6 +342,20 @@ def _parse_iata_list(s: str) -> tuple[str, ...]:
     return tuple(a.strip().upper() for a in s.split(",") if a.strip())
 
 
+def _require_airports(origin: str, destination: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Both airport lists, parsed — or exit 2 rather than build an empty leg.
+
+    `_parse_iata_list` drops blank entries, so `""` and `","` arrive as an empty
+    tuple while the argument itself is still truthy and passes a plain `if
+    origin`. `Leg.of` accepts a leg with no airports at all out of that, and the
+    query only fails much later, inside a backend, as an index error."""
+    origins, destinations = _parse_iata_list(origin), _parse_iata_list(destination)
+    if not origins or not destinations:
+        err.print("[red]origin and destination are required.[/]")
+        raise typer.Exit(2)
+    return origins, destinations
+
+
 def _parse_times(s: str | None) -> tuple[TimeOfDay, ...]:
     if not s:
         return ()
@@ -424,6 +455,40 @@ BACKEND_MATRIX = "matrix"
 BACKEND_GFLIGHT = "gflight"
 _VALID_BACKENDS = (BACKEND_AUTO, BACKEND_MATRIX, BACKEND_GFLIGHT)
 
+# Metro codes fli's airport table DOES have a member for, pointing somewhere
+# else: QSF is Ain Arnat in Algeria rather than the Bay Area, SAO is Campo de
+# Marte rather than São Paulo's airline airports. A membership test alone reads
+# these as serveable, so they are named.
+_GF_METRO_COLLISIONS = frozenset({"QSF", "SAO"})
+
+
+def _gf_unserveable_reasons(backend: str, origin: str | None, destination: str | None) -> list[str]:
+    """Reasons a city code keeps this request off Google Flights.
+
+    `docs/memories/airport_groups.md` tells the user to prefer a metro code over
+    a comma-list where one exists, and Matrix takes them, but the Google Flights
+    bridge resolves an origin by name against fli's airport table: 16 of the 24
+    metro codes that memo documents have no member there and two resolve to a
+    different city's airport. So the code fails one of two ways — an
+    `AttributeError` out of the bridge before any request, or a query silently
+    run against the wrong airport — and neither is an answer to what was asked.
+
+    Checked with the same attribute lookup the bridge performs, so this cannot
+    drift from what the bridge will accept, and only where Google Flights is
+    still in the running: a Matrix run pays neither the import nor the check."""
+    if backend == BACKEND_MATRIX:
+        return []
+    # PLC0415: paid only when Google Flights would otherwise serve the request;
+    # fli's package import is slow enough that a Matrix run should not carry it.
+    # reportMissingTypeStubs: fli ships none, as at every other seam onto it.
+    from fli.models.airport import (  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
+        Airport as FliAirport,
+    )
+
+    toks = (*_parse_iata_list(origin or ""), *_parse_iata_list(destination or ""))
+    bad = [t for t in toks if not hasattr(FliAirport, t) or t in _GF_METRO_COLLISIONS]
+    return [f"a city code rather than an airport ({', '.join(bad)})"] if bad else []
+
 
 def _pick_backend(
     *,
@@ -433,51 +498,111 @@ def _pick_backend(
     slice_specs: list[str] | None,
     depart_times: str | None,
     return_times: str | None,
+    stops: int | None,
+    children: int,
     seniors: int,
     youth: int,
     inf_seat: int,
     inf_lap: int,
+    origin: str | None,
+    destination: str | None,
+    allow_airport_changes: bool,
+    show_only_available: bool,
 ) -> str:
     """Resolve --backend to a concrete backend.
 
     auto: matrix iff the request needs it, else gflight (~1s vs Matrix's ~45s).
-    `--routing`/`--extension` no longer force Matrix on their own — they're
-    parsed and classified, and Google Flights serves them when it can honor
-    every constraint (native filters + result post-filter; see routing_predicates
-    + _gf_postfilter). Only fare-construction (fare basis / booking class) or a
-    constraint GF can't reconstruct sends routing to Matrix. Hard-Matrix flags —
-    `--slice` (multi-city), `--depart-times`/`--return-times`, any pax type beyond
-    adults+children — always force Matrix (the GF bridge doesn't map them yet).
+    `--routing`/`--extension` don't force Matrix on their own — they're parsed
+    and classified, and Google Flights serves them when the search page's tfs=
+    parameter can encode every one (`page_can_encode`). A constraint it can't
+    carry goes to Matrix WITH ITS REASON PRINTED, rather than being post-
+    filtered out of Google's fixed ~30-row board, which would answer a
+    constrained search with a plausible-looking "no results".
+
+    Hard-Matrix flags always force Matrix: `--slice` (multi-city),
+    `--depart-times`/`--return-times`, a `--stops` ceiling above two (fli maps
+    it to "any", so the tfs field would be omitted and the constraint lost),
+    any pax type beyond adults (the page's
+    passenger field has kind codes for children and infants that we have never
+    verified against a live priced search), a multi-airport
+    `--origin`/`--destination` set (the GF bridge flattens those to the first
+    code, so serving them on GF would silently drop the rest), and
+    `--no-airport-changes` / `--include-unavailable`, which the search page's
+    `tfs=` parameter has no field for at all.
+
+    A constraint the page cannot carry has to be a reason here and nowhere
+    else. Left out, `auto` serves it on Google with the constraint silently
+    dropped and `--backend gflight` accepts it without a word, while the deep
+    link printed underneath still carries it — three surfaces disagreeing about
+    what was asked.
+
+    Whatever the cause, `auto` names it on stderr. Silently taking the 45x
+    slower backend leaves the user with no way to tell a constraint they could
+    drop from one they can't.
 
     Explicit --backend matrix: matrix. --backend gflight: gflight, unless the
     request is inexpressible on GF (error)."""
-    from ._gf_postfilter import gf_can_serve  # noqa: PLC0415
-    from .routing_predicates import classify  # noqa: PLC0415
-
-    hard_matrix = bool(slice_specs or depart_times or return_times) or (
-        seniors > 0 or youth > 0 or inf_seat > 0 or inf_lap > 0
+    from .routing_predicates import (  # noqa: PLC0415
+        MAX_ENCODABLE_STOPS,
+        classify,
+        page_can_encode,
     )
-    routing_needs_matrix = bool(routing or extension) and not gf_can_serve(
-        classify(routing, extension)
-    )
-    matrix_only = hard_matrix or routing_needs_matrix
 
+    reasons: list[str] = []
+    if slice_specs:
+        reasons.append("a multi-city itinerary")
+    if depart_times or return_times:
+        reasons.append("a departure/arrival time window")
+    if children or seniors or youth or inf_seat or inf_lap:
+        reasons.append("a passenger type beyond adults")
+    if not allow_airport_changes:
+        # Both of these reach the Matrix REQUEST and the Matrix deep link and
+        # nothing else: `fli_bridge`, which the search page's `tfs=` is encoded
+        # from, has no field for either. Served on Google the constraint is
+        # simply absent, and the board that comes back is the unconstrained one
+        # — the shape this picker exists to keep off the fast backend.
+        reasons.append("a ban on changing airports")
+    if not show_only_available:
+        reasons.append("unavailable itineraries included")
+    if len(_parse_iata_list(origin or "")) > 1 or len(_parse_iata_list(destination or "")) > 1:
+        reasons.append("a multi-airport origin/destination")
+    reasons.extend(_gf_unserveable_reasons(backend, origin, destination))
+    if stops is not None and stops > MAX_ENCODABLE_STOPS:
+        # Same ceiling as the routing-language spelling below, and the same
+        # wording: fli's MaxStops maps anything higher to ANY, which omits the
+        # tfs field, so `--stops 3` would encode byte-identically to no --stops.
+        reasons.append(f"a stop ceiling above {MAX_ENCODABLE_STOPS} ({stops})")
+    if routing or extension:
+        reasons.extend(page_can_encode(classify(routing, extension).predicates)[1])
+
+    # The same reasons go out two ways, and only one of them is markup. A
+    # reason quotes the user's --routing string verbatim, so one square bracket
+    # decides between a MarkupError traceback and a backslash the user can see.
     if backend == BACKEND_AUTO:
-        return BACKEND_MATRIX if matrix_only else BACKEND_GFLIGHT
-    if backend == BACKEND_GFLIGHT and matrix_only:
-        reason = (
-            "--slice/--depart-times/--return-times or an extra pax type"
-            if hard_matrix
-            else "a --routing/--extension constraint Google Flights can't honor "
-            "(fare basis, booking class, or similar)"
+        if not reasons:
+            return BACKEND_GFLIGHT
+        err.print(
+            f"[dim]Using Matrix: Google Flights can't serve "
+            f"{_safe_text(_join_reasons(reasons))}.[/]"
         )
+        return BACKEND_MATRIX
+    if backend == BACKEND_GFLIGHT and reasons:
+        # typer renders a BadParameter as plain Text, never markup — escaping
+        # here would print the backslashes instead of hiding them.
         raise typer.BadParameter(
-            f"--backend gflight can't serve this request: {reason}. "
+            f"--backend gflight can't serve this request: {_join_reasons(reasons)}. "
             "Drop it, or use --backend matrix.",
         )
     if backend not in _VALID_BACKENDS:
         raise typer.BadParameter(f"--backend must be one of {_VALID_BACKENDS}; got {backend!r}")
     return backend
+
+
+def _join_reasons(items: list[str]) -> str:
+    """Human list join: 'a', 'a and b', 'a, b and c'."""
+    if len(items) <= 1:
+        return "".join(items)
+    return f"{', '.join(items[:-1])} and {items[-1]}"
 
 
 def _should_run_pp(*, no_pp: bool, pp_only: bool) -> bool:  # pyright: ignore[reportUnusedFunction]
@@ -712,6 +837,115 @@ def _should_run_awards(sel: ProviderSelection) -> bool:
 # ─────────────────────────── shared execution ──────────────────────────────
 
 
+def _orderly_exit(e: BaseException) -> typer.Exit | typer.Abort | None:
+    """The first orderly exit anywhere inside `e`, or None.
+
+    `typer.Exit` and `typer.Abort` subclass `RuntimeError` on the installed click,
+    and a task group wraps EVERYTHING that leaves it in an `ExceptionGroup` — the
+    host body's own exception included. Between them, a broad arm outside a group
+    catches a deliberate stop wearing the shape of a backend failure and answers it
+    with a backend's name and the wrong exit code. An exit beside other failures
+    still wins: it is the one outcome somebody asked for. "First" is first in
+    member order, which is task-start order — not the first to raise, and not the
+    most severe."""
+    if isinstance(e, (typer.Exit, typer.Abort)):
+        return e
+    if isinstance(e, BaseExceptionGroup):
+        # `isinstance` narrows to the unparameterised generic, which leaves every
+        # member unknown; anyio builds these and they hold whatever the tasks raised.
+        for member in cast("BaseExceptionGroup[BaseException]", e).exceptions:
+            found = _orderly_exit(member)
+            if found is not None:
+                return found
+    return None
+
+
+def _failures_inside(e: BaseException) -> list[BaseException]:
+    """Every failure `e` is carrying, with the orderly exits left out.
+
+    A task group hands its caller one object holding whatever its tasks raised,
+    so the thing caught outside a group is a container: what failed is inside
+    it, possibly several deep, possibly beside a deliberate stop that is not a
+    failure at all."""
+    if isinstance(e, BaseExceptionGroup):
+        # Same narrowing as `_orderly_exit`: the members are whatever the tasks
+        # raised, which the unparameterised generic cannot describe.
+        members = cast("BaseExceptionGroup[BaseException]", e).exceptions
+        return [leaf for member in members for leaf in _failures_inside(member)]
+    if isinstance(e, typer.Exit | typer.Abort):
+        return []
+    return [e]
+
+
+def _failure_text(cause: object) -> str:
+    """What to call `cause` on a typed line.
+
+    Never the group: "unhandled errors in a TaskGroup" is plumbing, printed to
+    someone whose search failed for a reason that is sitting inside it. One
+    failure is named as itself. Several are all named and counted, because
+    picking one would report half an outage as the whole of it — and a user who
+    sees one cause fixes one thing and runs the same command again.
+
+    `object` rather than an exception, because a caller reporting what it holds
+    cannot always promise it holds an exception — a stash read back, a value off
+    a task's result. Anything that is not one is a value somebody chose and is
+    named as it stands. Every path out of here ends in `_safe_text`, which is
+    the property that lets a printer treat this function as already escaped."""
+    if not isinstance(cause, BaseException):
+        return _safe_text(cause)
+    failures = _failures_inside(cause)
+    if not failures:
+        # No leaves at all. A group holding nothing but orderly exits reaches
+        # this too, and naming the group there would be the plumbing string this
+        # docstring refuses — but that group is the caller's to have raised
+        # already, which `_reraise_if_orderly` does before any of these print.
+        return _safe_text(cause)
+    if len(failures) == 1:
+        return _safe_text(failures[0])
+    named = "; ".join(_safe_text(f) for f in failures)
+    return f"{len(failures):d} concurrent failures: {named}"
+
+
+def _reraise_if_orderly(e: Exception, *, said: str) -> None:
+    """Re-raise a deliberate stop that arrived inside `e`, and never let it
+    hide what failed beside it.
+
+    An exit anywhere in the group is the outcome somebody asked for, so it keeps
+    its own code. But a group can carry an exit AND a real failure — one task
+    stopping the command while another one broke — and re-raising the exit alone
+    reports success, or a chosen code, with both streams empty. The failures are
+    named first, on the stream every other failure here uses, and the exit code
+    is left exactly as it was asked for.
+
+    The count is said out loud rather than left to be inferred from a list: one
+    failure beside a stop reads as the outcome unless the sentence says it stood
+    beside one, and it is the same sentence a calendar failure prints for the
+    same shape.
+
+    A `MatrixApiError` then goes to the reporter that knows it. Rendered
+    as text it is its message alone — `kind` and `request_id` are what tell a
+    user whether to fix their query or wait out a brownout, and losing them here
+    would make this the one Matrix line on the branch that drops them.
+
+    `said` is escaped like any other value this file prints. Every caller passes
+    a literal today, which is exactly why the guard belongs here: a banner is the
+    kind of parameter that later gets built from something remote."""
+    orderly = _orderly_exit(e)
+    if orderly is None:
+        return
+    beside = _failures_inside(e)
+    if beside:
+        plural = "" if len(beside) == 1 else "s"
+        err.print(
+            f"[red]{_safe_text(said)}:[/] {len(beside):d} failure{plural} "
+            f"beside a deliberate stop: {_failure_text(e)}"
+        )
+        for f in beside:
+            if isinstance(f, MatrixApiError):
+                _print_matrix_error(f)
+    raise orderly
+
+
 def _run(
     search: Search,
     rps: float,
@@ -726,6 +960,28 @@ def _run(
         return anyio.run(go)
     except MatrixApiError as e:
         _print_matrix_error(e)
+        raise typer.Exit(1) from e
+    except (typer.Exit, typer.Abort):
+        # An orderly exit is not a failure. Redundant with the
+        # `_reraise_if_orderly` below on the installed click, and the only guard
+        # left if `typer.Exit` ever stops subclassing `Exception`.
+        raise
+    except Exception as e:
+        # `execute()` wraps what Matrix answered; it does not wrap a DNS failure
+        # or a refused connection. Untyped, those leave here as a rich traceback
+        # with the cause hundreds of lines down, on the most ordinary command
+        # there is — and this package's rule is that a third-party transport
+        # error never reaches a caller untyped.
+        _reraise_if_orderly(e, said="Matrix search failed")
+        err.print(f"[red]Matrix search failed:[/] {_failure_text(e)}")
+        # `str()` of a Matrix error is its message alone, so a group hands this
+        # line the one field of three that a reader cannot act on by itself.
+        # Each one inside `e` goes on to the reporter that keeps `kind` and
+        # `request_id` — the pair that says whether to fix the query or wait out
+        # a brownout.
+        for f in _failures_inside(e):
+            if isinstance(f, MatrixApiError):
+                _print_matrix_error(f)
         raise typer.Exit(1) from e
 
 
@@ -836,25 +1092,6 @@ def _exception_leaves(e: BaseException) -> list[BaseException]:
     ]
 
 
-def _failure_text(cause: object) -> str:
-    """A failure's message, ready for a markup console.
-
-    A group that could not be unwrapped names every failure under it, because the
-    group's own `str` is a count of sub-exceptions and discards each message it
-    holds — which is the only part a reader can act on. The count belongs to
-    several: one message needs no counting, and "1 concurrent failures" reads as a
-    bug in the reporter to the reader least able to tell it from one."""
-    if not isinstance(cause, BaseExceptionGroup):
-        return _safe_text(cause)
-    # `isinstance` narrows to the unparameterised generic, which leaves every
-    # member unknown; anyio builds these and they hold whatever the tasks raised.
-    leaves = _exception_leaves(cast("BaseExceptionGroup[BaseException]", cause))
-    named = "; ".join(_safe_text(leaf) for leaf in leaves)
-    if len(leaves) == 1:
-        return named
-    return f"{len(leaves):d} concurrent failures: {named}"
-
-
 def _print_calendar_failure(
     cause: object, lost: str = "", *, backend: str = "Matrix calendar"
 ) -> None:
@@ -895,29 +1132,6 @@ def _print_calendar_failure(
         for leaf in _exception_leaves(cast("BaseExceptionGroup[BaseException]", cause)):
             if isinstance(leaf, MatrixApiError):
                 _print_matrix_error(leaf)
-
-
-def _orderly_exit(e: BaseException) -> typer.Exit | typer.Abort | None:
-    """The first orderly exit anywhere inside `e`, or None.
-
-    `typer.Exit` and `typer.Abort` subclass `RuntimeError` on the installed click,
-    and a task group wraps EVERYTHING that leaves it in an `ExceptionGroup` — the
-    host body's own exception included. Between them, a broad arm outside a group
-    catches a deliberate stop wearing the shape of a backend failure and answers it
-    with a backend's name and the wrong exit code. An exit beside other failures
-    still wins: it is the one outcome somebody asked for. "First" is first in
-    member order, which is task-start order — not the first to raise, and not the
-    most severe."""
-    if isinstance(e, (typer.Exit, typer.Abort)):
-        return e
-    if isinstance(e, BaseExceptionGroup):
-        # `isinstance` narrows to the unparameterised generic, which leaves every
-        # member unknown; anyio builds these and they hold whatever the tasks raised.
-        for member in cast("BaseExceptionGroup[BaseException]", e).exceptions:
-            found = _orderly_exit(member)
-            if found is not None:
-                return found
-    return None
 
 
 def _calendar_cause(e: Exception) -> Exception:
@@ -1534,27 +1748,6 @@ def _overlay_awards(
     )
 
 
-def _pin_source_from_merged(rows: list[Any], top_n: int, src: SearchResult) -> SearchResult:
-    """The itineraries `--pick N` should index: exactly the rows rendered.
-
-    `--pick N` names a row number the user just read off the merged GF+Matrix
-    table. Pinning from `matrix_res` instead indexes a DIFFERENT sequence —
-    a Google-only row is cheaper, so it sorts early and shifts every row after
-    it, and the emitted link then pins an itinerary the user never selected.
-    Since that link is the handoff to an actual booking, the two orderings
-    must be the same list.
-    """
-    kept = rows[:top_n]
-    # `session` / `solution_set` are server-generated and required to build a
-    # Matrix pinned itinerary URL, so they must survive the re-key.
-    return SearchResult(  # pyright: ignore[reportCallIssue]  # DIVERGE: Field(alias=...) confuses basedpyright into requiring aliased names
-        solutionCount=len(kept),
-        solutions=[r.itinerary for r in kept],
-        session=src.session,
-        solutionSet=src.solution_set,
-    )
-
-
 def _emit_urls(
     search: Search,
     *,
@@ -2012,7 +2205,9 @@ def _run_matrix_path(
     if json_out and not run_pp:
         sys.stdout.write(json.dumps(res.raw, indent=2))
         return
-    if not sel.awards_only:
+    # `not json_out` for the reason given at the same gate in
+    # `_run_gflight_path`: with awards on, the document is written below this.
+    if not sel.awards_only and not json_out:
         _render_search(res, opts.page_size)
     if run_pp:
         p = opts.pax
@@ -2029,14 +2224,22 @@ def _run_matrix_path(
             cash_per_cabin=_cash_per_cabin_single(res, opts.cabin),
         )
     # `res` was cast to SearchResult at the top of this function; safe to pass through.
-    _emit_urls(
-        search,
-        matrix_url=matrix_url,
-        google_url=google_url,
-        result=res,
-        pick=pick,
-        rendered=opts.page_size,
-    )
+    if not json_out:
+        # Same contract as every other path: the range a pick is measured
+        # against is the VISIBLE count, and the reporter that says so is the one
+        # whose second clause knows whether a link follows. Clamping here is
+        # also what keeps one out-of-range fact from being stated two ways —
+        # `_pinned_solution_index` would otherwise answer it on stdout, in a
+        # `--format json` sibling's stream and with a different fallback.
+        #
+        # An empty result is numbered nowhere, so it gets no sentence at all
+        # rather than an empty `(1-0)` interval and a pin claim nothing honours.
+        pick = (
+            _pick_in_range(pick, len(res.solutions), links_follow=matrix_url or google_url)
+            if res.solutions
+            else None
+        )
+        _emit_urls(search, matrix_url=matrix_url, google_url=google_url, result=res, pick=pick)
 
 
 # How much deeper to fetch when a Tier-2 routing post-filter will discard rows.
@@ -2045,20 +2248,46 @@ def _run_matrix_path(
 _POSTFILTER_OVERFETCH = 5
 
 
-def _gflight_results(legs: tuple[Leg, ...], opts: SearchOptions, top_n: int) -> list[Any]:
+def _gflight_results(
+    legs: tuple[Leg, ...],
+    opts: SearchOptions,
+    top_n: int,
+    gf_mode: GfTransportMode = TRANSPORT_HTTP,
+    gf_headed: bool = False,
+) -> list[Any]:
     """Query Google Flights for `legs`, honoring routing/extension: Tier-1
     predicates narrow the fli query natively, the Tier-2 post-filter drops
     violating solutions. Returns the (filtered) raw fli result list.
 
     `search` applies the same routing/extension to every leg, so the first leg's
     constraints cover the trip for the native query; the post-filter is per slice.
-    """
-    from ._gf_postfilter import surviving_indices  # noqa: PLC0415
-    from ._gflight_ids import search_with_ids  # noqa: PLC0415
-    from .fli_bridge import apply_gf_native_filters, to_fli_filter  # noqa: PLC0415
-    from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
-    from .routing_predicates import classify  # noqa: PLC0415
 
+    This is also where a rung-2 browser session dies. It is created lazily on
+    whichever thread runs this call — the enrich path runs it inside
+    `anyio.to_thread.run_sync` — and a playwright object may only be closed by
+    the thread that made it, so the `finally` here is the guarantee. A SIGINT
+    landing while that thread sits in `page.goto` escapes it, which is why the
+    profile-lock refusal names the interrupted-run case.
+    """
+    # Every import in this block is deferred for one reason: the Google Flights
+    # backend must not load on a Matrix-only search, and this function is the
+    # first point that has committed to Google Flights.
+    from ._gf_postfilter import surviving_indices  # noqa: PLC0415 — GF-only; see above
+    from ._gflight_ids import GfTransport, search_with_ids  # noqa: PLC0415 — fli, ~95 ms
+    from .fli_bridge import apply_gf_native_filters, to_fli_filter  # noqa: PLC0415 — fli
+    from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415 — GF-only
+    from .routing_predicates import classify  # noqa: PLC0415 — pulled in by the two above
+
+    # Built here rather than at the CLI seam: this is the first point that has
+    # already paid for `_gflight_ids`.
+    # Always built, never a sentinel. `GfTransport(mode="http")` IS
+    # `search_with_ids`' own default, so the old `None` branch distinguished two
+    # equal values and made every reader check which one this was.
+    #
+    # No cast: `gf_mode` is already a `GfTransportMode`. `_resolve_gf_transport`
+    # narrowed typer's plain `str` once, at the CLI seam, and every path here
+    # runs through it.
+    transport = GfTransport(mode=gf_mode, headed=gf_headed)
     fli_filter = to_fli_filter(SpecificDateSearch(legs=legs, options=opts))
     out_constraints = classify(legs[0].route_language, legs[0].extension) if legs else None
     if out_constraints and out_constraints.predicates:
@@ -2072,11 +2301,260 @@ def _gflight_results(legs: tuple[Leg, ...], opts: SearchOptions, top_n: int) -> 
     # filter choose from a real candidate pool; the final slice below still
     # honours the user's `top_n`.
     fetch_n = top_n * _POSTFILTER_OVERFETCH if any(per_slice_preds) else top_n
-    results: list[Any] = search_with_ids(fli_filter, top_n=fetch_n) or []
+    try:
+        results: list[Any] = search_with_ids(fli_filter, top_n=fetch_n, transport=transport) or []
+    finally:
+        # Named positively, because only rung 2 opens anything to close. The
+        # call would be a no-op on the others, but reaching for it would read
+        # as though an http search might hold a Chrome — the one thing that
+        # transport promises it never does, and `auto` is that transport under
+        # another name until the escalation rung lands.
+        if transport.mode == TRANSPORT_BROWSER:
+            from ._gf_browser import close_thread_session  # noqa: PLC0415 — GF-only; see above
+
+            close_thread_session()
     if results and any(per_slice_preds):
         keep = set(surviving_indices(fli_results_to_search_result(results), per_slice_preds))
         results = [r for i, r in enumerate(results) if i in keep]
-    return results[:top_n]
+    # Untrimmed on purpose: a round trip's combinations are built pin-major, so
+    # the first `top_n` of them are one outbound's returns and nothing else.
+    # Every caller trims what it renders, in the order that surface ranks by.
+    return results
+
+
+def _gflight_json_row(g: Any) -> dict[str, Any]:
+    """One `--format json` itinerary: fli's FlightResult plus the two things
+    only this backend knows — Google's opaque `flight_id` and the per-leg
+    legroom/amenity extract, which the human table shows and `model_dump()`
+    alone doesn't carry."""
+    row: dict[str, Any] = {**g.flight.model_dump(mode="json"), "flight_id": g.flight_id}
+    legs: list[Any] = row.get("legs") or []
+    amenities: list[Any] = list(g.amenities)
+    # A misaligned extract leaves the surplus legs as fli dumped them.
+    for leg, a in zip(legs, amenities, strict=False):
+        leg["legroom_class"] = a.legroom_class
+        # Same key as fli's own `FlightLeg.amenities`, a different schema. Safe
+        # only because `_flight_leg` never populates fli's — if it ever does,
+        # this write silently replaces it and needs its own key.
+        leg["amenities"] = asdict(a)
+    return row
+
+
+def _terminal_fare_key(r: Any) -> tuple[int, float]:
+    """Sort key for one round-trip combination: its terminal member's fare,
+    with a row Google did not price ordered last.
+
+    Google surfaces no shopping-list price for some rows — premium-cabin round
+    trips with several passengers are the routine case — and a row it did not
+    price is still a row the board served. There is no number to rank it on, so
+    it goes last rather than being dropped or read as a zero fare; the leading
+    term is what carries that, and it leaves the priced rows compared on the
+    fare alone.
+
+    Reads `.flight.price` and no other attribute, so the key holds for anything
+    shaped like a result row rather than only for fli's own model."""
+    price: float | None = list(r)[-1].flight.price
+    return (1, 0.0) if price is None else (0, price)
+
+
+def _price_ordered(results: list[Any]) -> list[Any]:
+    """Round-trip combinations in price order. A one-way board is returned as
+    it came.
+
+    Two sets, ordered by two different things, and a combination priced from
+    its terminal member; the argument for both is in the memo's `-n` section.
+
+    The sort is stable, so combinations sharing a total stay in the order the
+    pins were fetched."""
+    if any(not isinstance(r, tuple) for r in results):
+        return results
+    return sorted(results, key=_terminal_fare_key)
+
+
+def _pick_in_range(pick: int | None, rows: int, *, links_follow: bool) -> int | None:
+    """`pick` when it names one of the `rows` the user was shown, else None
+    with the reason on stderr.
+
+    The range a pick is measured against is the visible count, which is decided
+    at the trim and nowhere else, so the check belongs beside it. Answering
+    None rather than an index is what makes the fallback single-sourced: the
+    pin machinery already treats "no pick" as "the cheapest row", labels the
+    link that way, and a caller that clamped to an index instead would pin the
+    right row under a label claiming the user's number.
+
+    Two clauses, and neither is unconditional. A number the user typed that
+    names no row on screen is worth a line, and `rows` is what the line
+    measures it against. What happens NEXT is a separate question: a run that
+    emits no link pins nothing, so `links_follow` is what keeps the second
+    clause from describing something that did not happen — the defect this
+    whole reporter exists to avoid, one sentence in.
+
+    A board with NO rows is the case the callers keep away from here rather
+    than one this reports, and for the same reason the second clause exists:
+    `1-0` is an empty interval, so it cannot say what a valid pick would be,
+    and nothing is pinned for a fallback clause to name. Every caller skips
+    this on an empty list and prints nothing there.
+
+    The fallback names ROW ONE rather than "the cheapest", because that is what
+    every caller of this does with the None: they pin the first row of the list
+    the table numbered. Only a round trip's rows are in price order, so on a
+    one-way board — which keeps Google's ranking — "the cheapest" describes a
+    different row from the one the link opens.
+
+    stderr, because a `--format json` document on stdout stays a document —
+    the same rule every other note on this path follows."""
+    if pick is None or 1 <= pick <= rows:
+        return pick
+    fallback = "; pinning itinerary #1 instead." if links_follow else "."
+    err.print(f"[yellow]--pick {pick:d} is out of range (1-{rows:d}){fallback}[/]")
+    return None
+
+
+class _GfRefusal(NamedTuple):
+    """How one Google Flights refusal reads: `note` where Matrix still answers
+    and the refusal is a footnote, `message` where it is the whole outcome.
+
+    The two fields are not interchangeable, and the difference is markup.
+    `message` is PRE-RENDERED rich markup — it carries its own tags and any
+    exception text in it is already escaped, so print it as-is and never escape
+    it again. `note` carries no tags of its own, but the exception text in it
+    has been through `_safe_text` as well, so it is equally console-ready: a
+    caller drops it straight into markup of its own. Escaping it there a second
+    time puts a visible backslash in front of every bracket the remote text
+    carried, on the default search path."""
+
+    note: str
+    message: str
+
+
+_GF_DECLINED = "Google Flights declined the request"
+
+
+def _gf_refusal(  # noqa: PLR0911 — one return per refusal type; see the docstring
+    e: GfBackendError,
+    *,
+    transport: GfTransportMode = TRANSPORT_HTTP,
+) -> _GfRefusal:
+    """User-facing text for a typed Google Flights refusal.
+
+    Each wall gets its own wording and its own next move — collapsing them into
+    one message ("Google Flights failed") is how a page-shape regression gets
+    mistaken for a route with no service.
+
+    One dispatch, so the two renderings of a refusal AGREE. That is the whole
+    of the guarantee: a type with no arm of its own still renders, from the base
+    case, in both places — identically and without naming the wall.
+
+    The test that walks the subclasses is what keeps a new type from landing
+    there. `assert_never` only closes the door this function cannot be given: a
+    value that is not a `GfBackendError` at all. With the base case present,
+    deleting a subclass arm type-checks clean.
+
+    **Every interpolated string arrives escaped, and both fields leave here
+    console-ready.** The app runs rich in markup mode, so an unescaped
+    `[browser]` in a remedy, or a `[0m` in patchright's driver text, is either
+    deleted from the output or raises `MarkupError` from `print` — the second
+    one turning a typed refusal into a crash. Anything read off an exception
+    that carries REMOTE text goes through `_safe_text`, which drops the control
+    characters before it escapes. The one arm that only escapes reads a reason
+    this package wrote itself, so it has no control character to drop; literal
+    markup in these templates is ours and stays unescaped. A caller prints
+    `note` as it stands, and escaping it a second time is not free: it puts a
+    visible backslash in front of every bracket the remote text carried, on the
+    default search path.
+
+    `transport` only changes the throttle wording. The browser rung runs no
+    retry ladder, so "wait a moment and retry" would describe a recovery the
+    caller does not have."""
+    match e:
+        case GfThrottledError() if transport == TRANSPORT_BROWSER:
+            return _GfRefusal(
+                "Google Flights rate-limited the browser rung",
+                "[yellow]Google Flights rate-limited the browser rung.[/] It does not "
+                "retry, so use [bold]--backend matrix[/].",
+            )
+        case GfThrottledError():
+            # Not "this IP": the budget is per client context, which is why the
+            # browser rung keeps working from an IP that is throttling this one.
+            return _GfRefusal(
+                "Google Flights rate-limited",
+                "[yellow]Google Flights rate-limited the request.[/] Wait a moment and "
+                "retry, use [bold]--gf-transport browser[/], or use [bold]--backend matrix[/].",
+            )
+        case GfConsentError():
+            return _GfRefusal(
+                "Google Flights served its consent page",
+                "[yellow]Google served its consent page instead of flight results.[/] "
+                "Use [bold]--backend matrix[/].",
+            )
+        case GfBrowserUnavailableError():
+            # The note carries the reason AND the remedy. It is not the short
+            # form of the message here: the enrich path is the DEFAULT search
+            # and prints only the note, so a note built from the remedy alone
+            # collapses "no Chrome", "nav timed out", "no response" and "body
+            # unreadable" into one line that says "Retry".
+            return _GfRefusal(
+                f"Google Flights' browser rung is unavailable — "
+                f"{_safe_text(e.reason)} {_safe_text(e.remedy)}",
+                f"[yellow]{_safe_text(e)}[/]",
+            )
+        case GfUpstreamStatusError():
+            # Through `_safe_text` like any other value read off an exception.
+            # The annotation says `int`, and the constructor is reached with
+            # whatever a caller passes it.
+            status = _safe_text(e.status_code)
+            return _GfRefusal(
+                f"Google Flights returned HTTP {status}",
+                f"[yellow]Google Flights returned HTTP {status}.[/] Use [bold]--backend matrix[/], "
+                "or fetch the page the other way with [bold]--gf-transport http[/] or "
+                "[bold]browser[/].",
+            )
+        case GfPageShapeError():
+            return _GfRefusal(
+                "Google Flights' page shape changed",
+                "[red]Google Flights' page shape changed[/] — no rows could be read. "
+                f"Use [bold]--backend matrix[/]. ({_safe_text(e)})",
+            )
+        case GfTfsUnsupportedError():
+            # Generic note: `page_can_encode` keeps these queries off Google
+            # Flights, so the enrich path never has one to render.
+            return _GfRefusal(
+                _GF_DECLINED,
+                f"[red]Google Flights can't express this search:[/] {escape(e.reason)}. "
+                "Use [bold]--backend matrix[/].",
+            )
+        case GfTransportError():
+            # "unreachable", the same word the pin loop uses for a spent
+            # transport ladder. Two sites naming one fact two ways leaves the
+            # user deciding which of them to believe, and only one is right:
+            # nothing here says the query was declined.
+            #
+            # The exception's own `str()` already opens with "could not be
+            # reached", so the sentence starts there rather than saying it
+            # twice — and the cause it carries is the part worth reading.
+            return _GfRefusal(
+                "Google Flights was unreachable",
+                f"[yellow]{_safe_text(e)}[/] — the connection failed, not the "
+                "query. Use [bold]--backend matrix[/].",
+            )
+        case GfPinIgnoredError():
+            # The page loaded, the rows parsed, and they describe a segment
+            # nobody asked for — so the sentence names the leg that was served
+            # against the one that was wanted, which `_safe_text(e)` carries.
+            # Reporting a shape change here would deny its own evidence: the
+            # served endpoints are known only because the rows WERE read.
+            return _GfRefusal(
+                "Google Flights answered the wrong leg",
+                f"[red]Google Flights served a board for a leg nobody asked for[/] — "
+                f"{_safe_text(e)}. Use [bold]--backend matrix[/].",
+            )
+        case GfBackendError():
+            # The base type is raised directly — a 5xx from the search page is
+            # the reachable one — so this is a case, not a fallback. It names no
+            # wall because it knows none.
+            return _GfRefusal(_GF_DECLINED, f"[red]{_GF_DECLINED}:[/] {_safe_text(e)}")
+        case _:
+            assert_never(e)
 
 
 _MERGE_SOURCE_TAG = {"both": "GF+MX", "matrix": "MX", "gf": "GF"}
@@ -2129,31 +2607,72 @@ def _run_gflight_path(
     matrix_url: bool = False,
     google_url: bool = False,
     pick: int | None = None,
+    gf_mode: GfTransportMode = TRANSPORT_HTTP,
+    gf_headed: bool = False,
 ) -> None:
     """Google Flights path: build fli filter → query → render. Single-leg or round-trip.
 
     When run_pp=True, fli's results are adapted into a SearchResult shape so
     the existing PP matcher + renderer reuse cleanly. PP runs on the same
     (origin, dest, date) per leg as the matrix path.
+
+    This is where `top_n` becomes the answer's size. The query cannot ask for a
+    count, so everything below the trim — the table, the JSON document, the
+    pinned link and the awards — is drawn from the same `top_n` rows, and
+    everything above it reads the whole board.
+
+    `gf_mode` defaults to rung 1 — the deprecated `gflight` command has no
+    transport flag, so it never asks for another.
     """
-    from ._gflight_ids import GfThrottledError  # noqa: PLC0415
+    _pin_cap_note(legs=legs, top_n=top_n)
+    # Deferred like the adapter below: this arm reaches rung 2 only when the
+    # transport says so, and the module pulls in nothing patchright at import.
+    from ._gf_browser import interrupt_guard  # noqa: PLC0415 — GF-only; see above
     from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
 
     try:
-        results = _gflight_results(legs, opts, top_n)
-    except GfThrottledError as e:
-        err.print(
-            "[yellow]Google Flights is rate-limiting this IP.[/] Wait a moment and "
-            "retry, or use [bold]--backend matrix[/]."
-        )
+        # Armed around the whole search, not around the browser: a Ctrl-C is only
+        # answerable while the process still holds the driver, and on this arm
+        # the navigation runs on the thread the signal is delivered to.
+        with interrupt_guard():
+            results = _gflight_results(legs, opts, top_n, gf_mode, gf_headed)
+    except GfBackendError as e:
+        refusal = _gf_refusal(e, transport=gf_mode)
+        err.print(refusal.message)
         raise typer.Exit(1) from e
+    except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
+        raise
     except Exception as e:
         err.print(f"[red]Google Flights query failed:[/] {_safe_text(e)}")
         raise typer.Exit(1) from e
 
     if not results:
+        if json_out:
+            # No rows is a value, and a document is what was asked for. The
+            # sentence below is for a person; to a consumer it is a parse error
+            # where an empty answer belongs, and the two are indistinguishable
+            # from the exit code.
+            sys.stdout.write(json.dumps([], indent=2))
+            return
         console.print("[yellow]Google Flights: no results (or none matched the routing).[/]")
         return
+
+    # `-n` is one number for everything the user can act on. Google's page
+    # serves its whole board (~30 rows) whatever count is asked of it, so the
+    # count is a trim rather than a query parameter, and everything below this
+    # line is drawn from the same rows: the table, the JSON document, the range
+    # `--pick` accepts, the itineraries the award matcher is fanned out over.
+    # The trim is HERE rather than in the query because the wide board is what
+    # the Tier-2 post-filter above and the multi-cabin join elsewhere are drawn
+    # from — narrowing the query would answer a filtered search with fewer rows
+    # than exist, which is the failure this backend is most prone to.
+    results = _price_ordered(results)[:top_n]
+    # A link follows only where one is asked for and the format has room for it:
+    # `--format json` emits none at all, and neither does a run with both URL
+    # flags off. The range is still reported; the fallback is not claimed.
+    pick = _pick_in_range(
+        pick, len(results), links_follow=not json_out and (matrix_url or google_url)
+    )
 
     # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType,
     #                 reportUnknownArgumentType, reportUnknownParameterType]
@@ -2164,14 +2683,31 @@ def _run_gflight_path(
         out: list[Any] = []
         for r in results:
             items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
-            dumped = [{**g.flight.model_dump(mode="json"), "flight_id": g.flight_id} for g in items]
+            dumped = [_gflight_json_row(g) for g in items]
             out.append(dumped if isinstance(r, tuple) else dumped[0])
         sys.stdout.write(json.dumps(out, indent=2, default=str))
         return
 
     awards_only = sel.awards_only if sel is not None else False
-    if not awards_only:
-        _render_gflight_table(results, legs=legs, top_n=top_n, match_carriers=_match_carriers(legs))
+    # `not json_out` as well as `not awards_only`: the early return above fires
+    # only with awards OFF, so with them on the document is written further
+    # down by the award renderer and every human surface between here and it
+    # would land in the same stream. A caller asking for a document gets a
+    # document — one, and nothing else — whatever else was asked for beside it.
+    if not awards_only and not json_out:
+        try:
+            _render_gflight_table(
+                results, legs=legs, top_n=top_n, match_carriers=_match_carriers(legs)
+            )
+        except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
+            raise
+        except Exception as e:
+            # The table IS the output on this path — there is no Matrix half to
+            # fall back on — so a renderer meeting a drifted row shape decides
+            # the command. Typed and non-zero, because the alternative is a
+            # traceback with nothing on either stream that a user could act on.
+            _report_paint_failure(e)
+            raise typer.Exit(1) from e
 
     # Always adapt to SearchResult shape so the URL emission has segment
     # info for the pinned link (cheap: just shuffles existing fields).
@@ -2192,13 +2728,287 @@ def _run_gflight_path(
             cash_per_cabin=_cash_per_cabin_single(sr, opts.cabin),
         )
 
-    _emit_urls(
-        SpecificDateSearch(legs=legs, options=opts),
-        matrix_url=matrix_url,
-        google_url=google_url,
-        result=sr,
-        pick=pick,
-    )
+    # The URL lines are prose on stdout, and `_emit_urls` is shared text that
+    # cannot know which format asked for it, so the guard belongs here.
+    if not json_out:
+        _emit_urls(
+            SpecificDateSearch(legs=legs, options=opts),
+            matrix_url=matrix_url,
+            google_url=google_url,
+            result=sr,
+            # The pin LABEL names the row it pins. `sr` is built from the rows
+            # the table numbered, so row 1 is the default pin — but a one-way
+            # board keeps Google's own ranking, where row 1 need not be the
+            # cheapest, and the label "cheapest itinerary" over it is simply
+            # false. `1` makes the label say what the link does on every board.
+            pick=pick or 1,
+        )
+
+
+def _paint_first_gf_table(
+    state: dict[str, Any],
+    gf: list[Any],
+    *,
+    legs: tuple[Leg, ...],
+    top_n: int,
+    awards_only: bool,
+) -> None:
+    """The Google Flights table, painted while Matrix is still in flight.
+
+    Guarded for the same reason the Matrix task beside it is: this runs INSIDE
+    the weave's task group, so a renderer raising on a drifted row shape would
+    cancel Matrix and end the command as a bare ExceptionGroup — a traceback in
+    place of the answer the other backend was about to give. The failure is
+    stashed and reported after the weave, like every other one here.
+
+    The note on the empty branch is true when it prints: it is gated on there
+    being no Google refusal stashed, so Matrix really is the only half still
+    running. A Google half that FAILED is a different sentence, and
+    `_report_enriched_gf_failure` is where the difference is made.
+
+    BOTH sentences go to stderr, and for one reason: each names the MATRIX half
+    from inside the weave, before that half has resolved. Neither can be true
+    when it prints, because whether Matrix answers is not yet known. On the run
+    where it does not, a promise on stdout is a sentence saying a table follows
+    on a stream where nothing else ever arrives — and the command exits 0. The
+    rule is that no stdout sentence promises a half that never came, which is
+    narrower than "owed zero bytes": the run below paints a real table first and
+    still may not keep this promise."""
+    if gf and not awards_only:
+        try:
+            _render_gflight_table(gf, legs=legs, top_n=top_n, match_carriers=_match_carriers(legs))
+        except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
+            raise
+        except Exception as e:  # noqa: BLE001 — see the docstring
+            state["paint_err"] = e
+        else:
+            err.print("[dim]…refining with Matrix (authoritative fares)…[/]")
+    elif not gf and "gf_err" not in state:
+        err.print("[yellow]Google Flights: no results; awaiting Matrix…[/]")
+
+
+async def _matrix_into(
+    state: dict[str, Any], search: Search, rps: float, impersonate: str, cache: bool
+) -> None:
+    """The Matrix half of a weave: run the search, stash every way it can fail.
+
+    The client is BUILT in here, inside the task, because building it resolves
+    the API key — the disk cache first, then the network. Built beside the task
+    group instead, a key that will not resolve ends the command before the
+    Google Flights thread is ever started, and the user gets nothing on a query
+    `--fast` answers with a table. In here it is one half of a weave failing,
+    which is what the other half is for.
+
+    Nothing leaves this task. Anything `execute()` does not wrap — a connect
+    timeout, a TLS failure, a key that will not resolve, a transport that will
+    not close — would cancel the still-pending Google Flights paint and end the
+    command as a bare ExceptionGroup. Every stash here is read after the weave.
+
+    A result and a `MatrixApiError` cannot be stashed together: this package
+    builds that error at exactly one site, under `execute()`, and closing the
+    client awaits the transport and nothing that raises one — so the arm below
+    reaches `state["matrix"]` only through the value `execute()` returned, and
+    reaching it at all means nothing raised. The single-origin half is asserted
+    rather than described, in `tests/test_refusal_markup.py`.
+    """
+    try:
+        async with MatrixClient(rps=rps, impersonate=impersonate) as c:
+            state["matrix"] = await c.execute(search, cache=cache)
+    except MatrixApiError as e:
+        state["matrix_err"] = e
+    except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
+        raise
+    except Exception as e:  # noqa: BLE001 — see the docstring: this task must not tear the group down
+        state["matrix_unexpected"] = e
+
+
+def _run_the_weave(
+    go: Callable[[], Coroutine[Any, Any, None]],
+    state: dict[str, Any],
+    gf_mode: GfTransportMode,
+) -> None:
+    """Run the weave and stash anything that escapes it, so the reporters below
+    it decide the outcome.
+
+    Each task guards its own body, so what reaches here is what the weave
+    itself does: opening the loop, starting the group, and the group's own
+    unwinding. Untyped, any of that is a traceback with both streams empty on
+    the most ordinary command there is — and the rows the other backend already
+    has go with it. A stash is not an outcome: every path out of its caller
+    reads it, including the one whose other half succeeded."""
+    from ._gf_browser import interrupt_guard  # noqa: PLC0415 — patchright off the import path
+
+    try:
+        try:
+            # OUTSIDE `anyio.run`, and it may not move inward. `asyncio.Runner`
+            # installs a SIGINT handler of its own only when the disposition is
+            # still the default (`asyncio/runners.py:102-104`) and restores that
+            # default on the way out (`:125-129`), so a guard armed from inside a
+            # coroutine or a worker would be replaced or reset. Armed here, the
+            # Runner installs nothing. `_run_enriched_path` is the only caller,
+            # so this is the enriched search path and nothing else.
+            #
+            # Armed only for the transport that can open a browser. This half
+            # runs on a worker no interrupt reaches, so on the transports that
+            # hold no driver the first Ctrl-C has nothing to free and an ignored
+            # second one takes away the only thing that could end the process.
+            with interrupt_guard(armed=gf_mode == TRANSPORT_BROWSER):
+                anyio.run(go)
+        except* KeyboardInterrupt:
+            # With no Runner handler installed, the interrupt lands wherever the
+            # main thread stands — which includes the task group's own host
+            # frame, and the group appends it and re-raises it wrapped. Every
+            # handler from here to the exit matches the BARE class: typer turns a
+            # `KeyboardInterrupt` into exit 130 and a group of them into a
+            # traceback and exit 1, so unwrapped the user's stop reads as a crash.
+            # `except*` because a nested group unwraps the same way for free.
+            #
+            # A group carrying an interrupt AND a non-`Exception` leaf still
+            # propagates as a group, unchanged. Widening this arm to catch that
+            # would swallow the other leaf; it needs two of them in the same
+            # instant, and the shape below is the one that has a caller.
+            raise KeyboardInterrupt from None
+    except (typer.Exit, typer.Abort):
+        # An orderly exit is a decision, not a failure. `typer.Exit` subclasses
+        # `RuntimeError` on the installed click, so the arm below would catch it
+        # and report the exit CODE as a Matrix error message. This arm is for
+        # an exit raised by the weave itself; one raised inside the task group
+        # arrives wrapped, which is what the next line is for — and on the
+        # installed click that next line covers this one too, leaving this the
+        # guard that still works if `typer.Exit` stops subclassing `Exception`.
+        raise
+    except Exception as e:  # noqa: BLE001 — reported by _report_search_matrix_failure
+        # Backend-neutral, both times. This group spans BOTH halves, so what it
+        # hands over names whatever any of its tasks left in it — a broken pipe
+        # out of the Google paint among them. "Matrix search failed" in front of
+        # that sends the user to the backend that did not fail. `_run` and
+        # `_run_matrix_multi` keep the Matrix banner: their groups hold nothing
+        # else.
+        _reraise_if_orderly(e, said="Search failed")
+        # Its own key. The Matrix task stashes what IT could not do; this is
+        # what the weave itself could not do, and one key for both means
+        # whichever lands second is the only one anybody reads.
+        state["weave_err"] = e
+
+
+def _report_paint_failure(e: object) -> None:
+    """The one sentence for a Google Flights table that could not be drawn.
+
+    Both paths that draw one say it: the weave, where Matrix may still answer,
+    and the Google-only path, where it is the whole outcome. What differs is
+    what happens next, not what the user is told."""
+    err.print(f"[yellow]Google Flights results could not be rendered:[/] {_safe_text(e)}")
+
+
+def _report_weave_aftermath(state: dict[str, Any]) -> None:
+    """What the weave left behind on a run that ANSWERED.
+
+    A Google Flights table that could not be drawn, a Matrix half that failed
+    after producing its result — a transport that would not close, a console
+    write that failed — and the weave's own unwinding. None of them is the
+    outcome, and none of them may be silence: a value stashed on one path and
+    read only on another is a failure the command hid.
+
+    Every stash, not the first: `state["matrix"]` is written by the last
+    statement inside its `async with`, so a Matrix half can leave a result AND
+    a failure behind, and a run that answered can still have lost the table
+    beside it."""
+    if state.get("paint_err") is not None:
+        _report_paint_failure(state["paint_err"])
+    if state.get("matrix_unexpected") is not None:
+        err.print(
+            f"[yellow]Matrix answered, then failed:[/] {_failure_text(state['matrix_unexpected'])}"
+        )
+    if state.get("weave_err") is not None:
+        err.print(
+            f"[yellow]The search answered, then failed:[/] {_failure_text(state['weave_err'])}"
+        )
+
+
+def _report_enriched_gf_failure(
+    e: Exception,
+    *,
+    matrix_answered: bool,
+    awards_only: bool,
+    transport: GfTransportMode = TRANSPORT_HTTP,
+) -> None:
+    """Say why the Google Flights half of the weave produced nothing.
+
+    Where Matrix answered it is still authoritative, so a typed refusal is a
+    note beside its table rather than the outcome — but it stays named, or the
+    merged table just looks like Google had nothing cheaper.
+
+    Where Matrix did not answer there is no table for the note to sit beside,
+    and "showing Matrix only" promises a half that never arrives — on the most
+    likely both-halves-fail shape there is, a stale key with no route to either
+    backend. The same refusal then reads as what it is: half of the outcome,
+    on the stream the other half is about to be named on, leaving stdout the
+    zero bytes a run that answered nothing owes a caller.
+
+    `matrix_answered` is necessary for that sentence and not sufficient, and
+    `awards_only` is the rest of it. It is read AFTER the weave, so the Matrix
+    half is in hand — but under `awards_only` the merged table is never
+    rendered, so "showing Matrix only" names a surface this run does not print
+    even though the half behind it answered. Worse, the award renderer has two
+    arms that return without writing a byte to stdout, so on those the promise
+    is the ENTIRE document at exit 0 with its retraction on stderr. Only the
+    both-true arm keeps the sentence, and only there is stdout certain to carry
+    a Matrix table under it; the awards arm says the same news on `err`, where
+    a run that ends up printing nothing owes nothing.
+
+    That is also why this sentence can sit on stdout at all while its sibling in
+    `_paint_first_gf_table` cannot: the sibling is painted from inside the weave
+    and can only guess.
+
+    `transport` is the rung the search actually ran on. Every wording below is
+    dispatched with it, or the browser rung's throttle — which has no retry
+    ladder to wait for — reaches the default search path telling the user to
+    wait a moment and try again."""
+    if not isinstance(e, GfBackendError):
+        err.print(f"[yellow]Google Flights query failed:[/] {_safe_text(e)}")
+    else:
+        refusal = _gf_refusal(e, transport=transport)
+        if matrix_answered and not awards_only:
+            console.print(f"[dim]{refusal.note} — showing Matrix only.[/]")
+        elif matrix_answered:
+            err.print(
+                f"[yellow]{refusal.note}[/] — awards only; no fare table is printed on this arm."
+            )
+        else:
+            err.print(refusal.message)
+
+
+def _report_search_matrix_failure(state: dict[str, Any]) -> None:
+    """Print the stderr message for a search that produced no Matrix result: a
+    known `MatrixApiError` through the shared reporter, an unexpected one out
+    of the Matrix task, the weave's own unwinding, or a task that never
+    finished.
+
+    EVERY stash held, not the first of them. The three can coexist — the task
+    stashes what Matrix could not do while the weave stashes what the group
+    could not do — and reporting one of two is the same defect as reporting
+    the group instead of its leaves: the user fixes one thing and runs the
+    same command again. It is the rule `_failure_text` already applies to
+    several failures inside one group, applied to several stashes beside it.
+
+    The last arm is not decoration. A cancellation is a `BaseException`, so
+    nothing stashes it, and without a fall-through the command exits non-zero
+    with both streams empty — which is the one outcome every reporter here
+    exists to prevent."""
+    e = state.get("matrix_err")
+    said = False
+    if e is not None:
+        _print_matrix_error(e)
+        said = True
+    if state.get("matrix_unexpected") is not None:
+        err.print(f"[red]Matrix search failed:[/] {_failure_text(state['matrix_unexpected'])}")
+        said = True
+    if state.get("weave_err") is not None:
+        # Neutral, because this group spans both backends; see `_run_the_weave`.
+        err.print(f"[red]Search failed:[/] {_failure_text(state['weave_err'])}")
+        said = True
+    if not said:
+        err.print("[yellow]Matrix search did not complete.[/]")
 
 
 def _run_enriched_path(
@@ -2214,88 +3024,139 @@ def _run_enriched_path(
     rps: float,
     impersonate: str,
     no_cache: bool,
+    gf_mode: GfTransportMode = TRANSPORT_HTTP,
+    gf_headed: bool = False,
 ) -> None:
     """GF-serveable query, progressive: dispatch Google Flights + Matrix
     concurrently under one event loop, paint GF immediately (~1s), then repaint a
     reconciled GF+Matrix table once Matrix lands (~45s). PP/awards + URLs run on
     the Matrix (authoritative) result. `--fast` skips this for GF-only speed."""
+    # Imported here rather than deeper in: every enriched run executes these two
+    # lines, so a packaging fault in either module fails the same way on every
+    # run instead of only on the runs where Matrix happens to land.
     from ._enrich import merge_results  # noqa: PLC0415
     from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
 
+    _pin_cap_note(legs=legs, top_n=top_n)
     matrix_search = SpecificDateSearch(legs=legs, options=opts)
     awards_only = sel.awards_only if sel is not None else False
     state: dict[str, Any] = {}
 
-    async def _matrix(c: MatrixClient) -> None:
-        try:
-            state["matrix"] = await c.execute(matrix_search, cache=not no_cache)
-        except MatrixApiError as e:
-            state["matrix_err"] = e
-
     async def _go() -> None:
-        async with (
-            MatrixClient(rps=rps, impersonate=impersonate) as c,
-            anyio.create_task_group() as tg,
-        ):
-            tg.start_soon(_matrix, c)
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(_matrix_into, state, matrix_search, rps, impersonate, not no_cache)
             # Google Flights is sync (curl_cffi) — run it in a worker thread so the
             # Matrix request progresses concurrently on the event loop.
             try:
-                gf = await anyio.to_thread.run_sync(_gflight_results, legs, opts, top_n)
+                gf = await anyio.to_thread.run_sync(
+                    _gflight_results, legs, opts, top_n, gf_mode, gf_headed
+                )
+            except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
+                raise
             except Exception as e:  # noqa: BLE001 - reported below; Matrix may still succeed
                 state["gf_err"] = e
                 gf = []
             state["gf"] = gf
-            # First paint, while Matrix is still in flight.
-            if gf and not awards_only:
-                _render_gflight_table(
-                    gf, legs=legs, top_n=top_n, match_carriers=_match_carriers(legs)
-                )
-                console.print("[dim]…refining with Matrix (authoritative fares)…[/]")
-            elif not gf and "gf_err" not in state:
-                console.print("[yellow]Google Flights: no results; awaiting Matrix…[/]")
+            _paint_first_gf_table(state, gf, legs=legs, top_n=top_n, awards_only=awards_only)
 
-    anyio.run(_go)
+    _run_the_weave(_go, state, gf_mode)
 
     gf: list[Any] = state.get("gf") or []
-    if "gf_err" in state:
-        from ._gflight_ids import GfThrottledError  # noqa: PLC0415
-
-        e = state["gf_err"]
-        if isinstance(e, GfThrottledError):
-            console.print("[dim]Google Flights rate-limited — showing Matrix only.[/]")
-        else:
-            err.print(f"[yellow]Google Flights query failed:[/] {_safe_text(e)}")
+    # What reached the USER, which is not the same question as what was
+    # fetched. The paint is gated on `not awards_only` and on the renderer not
+    # failing, so a non-empty `gf` can still mean a byte-empty stdout — and an
+    # exit code that reports success on one is the command lying about it. One
+    # expression for both, because two that must agree eventually will not.
+    painted = bool(gf) and not awards_only and state.get("paint_err") is None
+    # The Google half's report needs both of the things that decide whether a
+    # refusal is a footnote or the outcome: whether Matrix answered, and whether
+    # a Matrix table is printed at all. "Showing Matrix only" promises a half
+    # that never arrives without the first, and a surface this run never renders
+    # without the second. Passing the two flags is what carries that; where the
+    # read sits relative to the block below is not, since the reporter never
+    # touches `state`.
     matrix_res = state.get("matrix")
+    if "gf_err" in state:
+        _report_enriched_gf_failure(
+            state["gf_err"],
+            matrix_answered=matrix_res is not None,
+            awards_only=awards_only,
+            transport=gf_mode,
+        )
     if matrix_res is None:
-        # Matrix failed; the GF table (if any) was already painted.
-        e = state.get("matrix_err")
-        if e is not None:
-            _print_matrix_error(e)
-        if not gf:
+        # Every stash is read here: the paint failure is part of why nothing
+        # reached the user, and the Matrix one IS the outcome.
+        if state.get("paint_err") is not None:
+            _report_paint_failure(state["paint_err"])
+        _report_search_matrix_failure(state)
+        if not painted:
             raise typer.Exit(1)
         return
     matrix_res = cast("SearchResult", matrix_res)
+    _report_weave_aftermath(state)
 
-    # Repaint: reconciled GF + Matrix, prices attributed. `--pick` indexes the
-    # rendered merged rows; with no merged table (awards-only) it falls back to
-    # Matrix's own ordering, which is then what the user saw.
-    pin_res = matrix_res
+    # Repaint: reconciled GF + Matrix, prices attributed.
+    #
+    # `shown` is the list the user saw numbered, which is what `--pick N` names
+    # and what the pin label claims. The merged rows are price-sorted and can
+    # include Google-only itineraries, so their order and their length both
+    # differ from `matrix_res.solutions`: indexing those instead pins a row the
+    # table numbered differently, under the number read off the screen.
+    pinnable: SearchResult | None = None
     if not awards_only:
         merged = merge_results(fli_results_to_search_result(gf), matrix_res)
         _render_merged(merged, legs=legs, top_n=top_n)
-        pin_res = _pin_source_from_merged(merged, top_n, matrix_res)
+        shown = [r.itinerary for r in merged[:top_n]]
+        # The same contract `_run_gflight_path` has: the range a pick is
+        # measured against is the VISIBLE count. Clamping here also means the
+        # duplicate warning inside `_emit_urls` is never reached from this path.
+        #
+        # An empty board is numbered nowhere, so it gets no clamp sentence at
+        # all: `(1-0)` is an empty interval that cannot say what a valid pick
+        # would be, and the fallback clause beside it would name a pin that does
+        # not happen — this arm renders a header-only table and carries on where
+        # the sibling has already returned.
+        pick = (
+            _pick_in_range(pick, len(shown), links_follow=matrix_url or google_url)
+            if shown
+            else None
+        )
+        pinnable = matrix_res.model_copy(update={"solutions": shown})
+    else:
+        # Nothing this arm prints carries a row number: the award renderer is
+        # the only surface it has and its columns hold no `#`. So a pick names
+        # no row here — not one out of range, one that does not exist — and it
+        # is refused rather than clamped. The links stay unpinned for the same
+        # reason: with no numbered list, neither `itinerary #N` nor `cheapest
+        # itinerary` is a label the user could check against anything.
+        #
+        # That second clause is conditional for the reason `_pick_in_range`'s
+        # own is: `--no-matrix-url --no-google-url` leaves this arm printing no
+        # link at all, and a sentence describing how links below are labelled
+        # is then describing something that does not happen.
+        if pick is not None:
+            unpinned = "; the links below are unpinned." if (matrix_url or google_url) else "."
+            err.print(
+                f"[yellow]--pick {pick:d} names a row in the results table, and this mode "
+                f"prints none{unpinned}[/]"
+            )
+        pick = None
 
     if run_pp:
         _overlay_awards(matrix_res, legs=legs, opts=opts, sel=sel, awards_only=awards_only)
 
+    # A result built from the rows the table numbered, so `_emit_urls`' label
+    # expression is true by construction. A Google-only row carries no
+    # `Itinerary.id`, so the Matrix line falls back to the plain deep link while
+    # the Google line still pins from that row's slices. Unpinned where no
+    # table was numbered, which is what makes both lines fall back to the label
+    # that claims nothing.
     _emit_urls(
         matrix_search,
         matrix_url=matrix_url,
         google_url=google_url,
-        result=pin_res,
-        pick=pick,
-        rendered=top_n,
+        result=pinnable,
+        pick=pick or 1,
     )
 
 
@@ -2306,13 +3167,58 @@ def _run_enriched_path(
 # cheapest business on a given route are often different carriers entirely
 # (e.g. JFK-LHR: VS in economy, FI in business) — a top-5 query per cabin
 # almost never overlaps, leaving the J column rendered as all "—".
-# Bumping per-cabin queries to ~25-50 itineraries lets the join surface
-# matching itineraries that exist in both cabins' results.
+#
+# What the bump widens is how many LEG-1 rows each cabin keeps. It does NOT
+# widen a round trip's pinned fan-out, which `_gflight_ids._PINNED_FANOUT_CAP`
+# clamps whatever this returns — see that constant for the budget and its cost.
 #
 # Capped to bound response size (each itinerary costs bytes + parse time);
 # Matrix and gflight both tolerate page sizes in this range comfortably.
 _MULTI_CABIN_QUERY_BUMP_FACTOR = 5
 _MULTI_CABIN_QUERY_BUMP_CAP = 100
+
+
+def _pin_cap_note(*, legs: tuple[Leg, ...], top_n: int) -> None:
+    """Say so when a round trip will search fewer outbounds than were asked for.
+
+    A round trip prices returns against the outbounds Google ranks first, and
+    the number of those is capped however large `-n` is. Without a word the user
+    reads a short table as the market rather than as the budget, so every
+    round-trip path says it: the enriched one, `--fast`, `--format json` and
+    multi-cabin alike.
+
+    Ranked first, not cheapest: the pin loop slices the board in the order the
+    page served it. A note claiming otherwise is checkably false on the
+    repository's own capture, whose lowest fare sits in the second block and is
+    never pinned at all below `-n 3`.
+
+    "Up to", because the cap bounds the count and the board may hold fewer. The
+    exact number is knowable only inside the pin loop, and carrying it back out
+    means a new return type on a recursive function to replace a true sentence
+    with a truer one.
+
+    stderr, so a `--format json` document on stdout stays a document."""
+    from ._gflight_ids import pinned_fanout  # noqa: PLC0415
+
+    pins = pinned_fanout(top_n)
+    if len(legs) >= _ROUND_TRIP_LEGS and pins < top_n:
+        err.print(
+            f"[dim]Google Flights combines returns against up to {pins:d} "
+            f"first-ranked outbounds.[/]"
+        )
+
+
+def _multi_cabin_join_note(pins: int) -> str:
+    """Why a cabin cell can be empty on a multi-cabin round trip.
+
+    The count comes from the pin budget rather than a literal, because the
+    sentence is only true while they agree: the cap is what decides how many
+    outbounds the join can see, and `-n` below it lowers the number further.
+    Every part is ours, so there is nothing here to escape."""
+    return (
+        f"Google Flights joins cabins on up to {pins} of each cabin's first-ranked "
+        "outbounds; '—' means no shared itinerary, not no fare."
+    )
 
 
 def _bumped_query_top_n(top_n: int, cabin_count: int) -> int:
@@ -2322,6 +3228,9 @@ def _bumped_query_top_n(top_n: int, cabin_count: int) -> int:
     `top_n * factor` capped at the bump ceiling. The visible row count
     after merge is still `top_n` (renderer trims by sort cabin) — the
     bump only widens the search space the join can draw from.
+
+    On the page transport a round trip's pinned fan-out is capped on its own
+    budget, so raising this does not widen the outbounds such a join sees.
     """
     if cabin_count <= 1:
         return top_n
@@ -2416,6 +3325,15 @@ def _run_matrix_multi(
                 f"({_safe_text(e.kind)}): {_safe_text(e.message)}[/]"
             )
             return
+        except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
+            raise
+        except Exception as e:  # noqa: BLE001 — see below: one cabin is not the group
+            # Soft here for the same reason the arm above it is soft, and for
+            # one more: an exception leaving this task cancels its siblings and
+            # surfaces as an ExceptionGroup, so one cabin's unreachable network
+            # would take the cabins that answered with it.
+            err.print(f"[yellow]Matrix {cab.value} query failed: {_safe_text(e)}[/]")
+            return
         results[cab] = cast("SearchResult", res)
 
     async def go() -> None:
@@ -2428,9 +3346,114 @@ def _run_matrix_multi(
 
     try:
         anyio.run(go)
-    except MatrixApiError as e:
-        _print_matrix_error(e)
+    except (typer.Exit, typer.Abort):
+        # An orderly exit is not a failure. Redundant with the
+        # `_reraise_if_orderly` below on the installed click, and the only guard
+        # left if `typer.Exit` ever stops subclassing `Exception`.
+        raise
+    except Exception as e:
+        # No cabin FAILURE reaches here — those are caught per cabin — so this
+        # is the shared client failing to open or close at all. A deliberate
+        # stop does reach it: `typer.Exit` subclasses `RuntimeError`, the
+        # per-cabin arm re-raises it on purpose, and `_reraise_if_orderly`
+        # below unwraps it from the group anyio put it in. A `BaseException`
+        # leaf is outside both arms whichever way it arrives — anyio hands a
+        # generic one back inside a `BaseExceptionGroup` and the runner
+        # re-raises a `KeyboardInterrupt` or a `SystemExit` bare — and neither
+        # form is an `Exception`, so it leaves by the door a deliberate stop
+        # should leave by. Widening either arm to catch it would report that
+        # stop as a backend failure. Typed
+        # rather than a traceback, and worded like every other Matrix failure.
+        # One arm and not two: a `MatrixApiError` arrives here either bare, from
+        # the client's own open or close, or wrapped in the group a task raised
+        # it inside — and `except MatrixApiError` catches only the first.
+        _reraise_if_orderly(e, said="Matrix search failed")
+        err.print(f"[red]Matrix search failed:[/] {_failure_text(e)}")
+        # `str()` of a Matrix error is its message alone, so a group hands this
+        # line the one field of three that a reader cannot act on by itself.
+        # Each one inside `e` goes on to the reporter that keeps `kind` and
+        # `request_id` — the pair that says whether to fix the query or wait out
+        # a brownout.
+        for f in _failures_inside(e):
+            if isinstance(f, MatrixApiError):
+                _print_matrix_error(f)
         raise typer.Exit(1) from e
+    return results
+
+
+def _gflight_cabins_in_series(
+    *,
+    legs: tuple[Leg, ...],
+    opts: SearchOptions,
+    cabins: tuple[Cabin, ...],
+    top_n: int,
+    gf_headed: bool,
+) -> dict[Cabin, list[Any]] | None:
+    """Rung 2's multi-cabin shape: one Chrome, one cabin at a time, on this thread.
+
+    The parallel fan-out below cannot run rung 2. A thread per cabin is a
+    session per cabin, and Chromium single-instances the profile directory, so
+    the second cabin fails on the first one's lock. Serialising here is what
+    lets ONE session serve every cabin: the launch is paid once, and every
+    navigation runs on the thread that made the session.
+
+    No task group and no worker thread on this arm, so the loop runs on the
+    thread the interrupt is delivered to and a Ctrl-C is honoured where it
+    lands rather than after the cabin in flight finishes.
+
+    ONE guard around the whole loop, never one per cabin. A guard clears the
+    interrupt latch on its way in, so a second cabin's guard would erase the
+    stop the first one recorded and re-arm a SIGINT the first one had set to be
+    ignored.
+
+    `None` says rung 2 never opened at all, and the caller then runs the whole
+    fan-out on rung 1. Only before the first cabin is served: once a cabin has
+    rows, re-running the fan-out would discard them, and a table whose columns
+    came from two different rungs is not one answer.
+    """
+    from ._gf_browser import interrupt_guard, session_scope  # noqa: PLC0415 — GF-only
+    from ._gflight_ids import shared_throttle_ladder  # noqa: PLC0415 — fli, ~95 ms
+
+    def note_missing_column(cab: Cabin, e: GfBackendError) -> None:
+        """Why this cabin's column will be missing. Left to the bare arm below,
+        a typed refusal reads as an unexplained failure."""
+        # `removesuffix`, because a browser refusal's note already ends in the
+        # full stop its remedy carries and every other refusal's does not.
+        note = _gf_refusal(e, transport=TRANSPORT_BROWSER).note.removesuffix(".")
+        err.print(f"[yellow]Google Flights {cab.value}: {note}.[/]")
+
+    results: dict[Cabin, list[Any]] = {}
+    with shared_throttle_ladder(), interrupt_guard(), session_scope():
+        for cab in cabins:
+            try:
+                results[cab] = _gflight_results(
+                    legs,
+                    opts.model_copy(update={"cabin": cab}),
+                    top_n,
+                    TRANSPORT_BROWSER,
+                    gf_headed,
+                )
+            except GfBrowserUnavailableError as e:
+                # Ahead of the `GfBackendError` arm below, which is its base
+                # class and would otherwise report a rung that never opened as
+                # one cabin's missing column.
+                if not results:
+                    # The phrase leads the line so that no console width can
+                    # break it. The remedy follows the reason because the other
+                    # half of it — install Chrome, point the binary — is what a
+                    # user whose http rung is also refused has left to try.
+                    err.print(
+                        f"[dim]multi-cabin is using http: "
+                        f"{_safe_text(e.reason)} {_safe_text(e.remedy)}[/]"
+                    )
+                    return None
+                note_missing_column(cab, e)
+            except GfBackendError as e:
+                note_missing_column(cab, e)
+            except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
+                raise
+            except Exception as e:  # noqa: BLE001 — fli has no documented exception surface
+                err.print(f"[yellow]Google Flights {cab.value} query failed: {_safe_text(e)}[/]")
     return results
 
 
@@ -2440,22 +3463,51 @@ def _run_gflight_multi(
     opts: SearchOptions,
     cabins: tuple[Cabin, ...],
     top_n: int,
+    gf_mode: GfTransportMode = TRANSPORT_HTTP,
+    gf_headed: bool = False,
 ) -> dict[Cabin, list[Any]]:
     """Fan out N parallel gflight queries (one per cabin). fli is sync, so
-    each query runs in a worker thread via `anyio.to_thread.run_sync`."""
-    from ._gflight_ids import search_with_ids  # noqa: PLC0415
-    from .fli_bridge import to_fli_filter  # noqa: PLC0415
+    each query runs in a worker thread via `anyio.to_thread.run_sync`.
 
+    Each cabin runs the SAME query builder as the single-cabin path, so the
+    native filters and the Tier-2 post-filter cannot drift apart. They also
+    share ONE throttle ladder: Google's wall is per-IP, so a cabin per thread
+    laddering against it separately spends the cabin count times the requests to
+    be told the same thing."""
+    from ._gflight_ids import shared_throttle_ladder  # noqa: PLC0415
+
+    if gf_mode == TRANSPORT_BROWSER:
+        served = _gflight_cabins_in_series(
+            legs=legs, opts=opts, cabins=cabins, top_n=top_n, gf_headed=gf_headed
+        )
+        if served is not None:
+            return served
+
+    # Rung 1 for every cabin below: either the caller asked for it, or rung 2
+    # could not open at all and said so. A browser mode reaching the fan-out
+    # would open a session per worker thread, which is the profile-lock
+    # collision the series runner exists to avoid.
+    fanout_mode = TRANSPORT_HTTP if gf_mode == TRANSPORT_BROWSER else gf_mode
     results: dict[Cabin, list[Any]] = {}
 
     def query_sync(cab: Cabin) -> list[Any]:
-        cabin_opts = opts.model_copy(update={"cabin": cab})
-        search = SpecificDateSearch(legs=legs, options=cabin_opts)
-        return search_with_ids(to_fli_filter(search), top_n=top_n) or []
+        return _gflight_results(
+            legs, opts.model_copy(update={"cabin": cab}), top_n, fanout_mode, gf_headed
+        )
 
     async def query_cabin(cab: Cabin) -> None:
         try:
             results[cab] = await anyio.to_thread.run_sync(query_sync, cab)
+        except GfBackendError as e:
+            # A typed refusal is why this cabin's column will be missing; the
+            # bare handler below would print it as an unexplained failure.
+            refusal = _gf_refusal(e)
+            err.print(f"[yellow]Google Flights {cab.value}: {refusal.note}.[/]")
+        except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
+            # `typer.Exit` subclasses `RuntimeError` on the installed click, so
+            # the arm below would swallow the stop and print the exit CODE as
+            # this cabin's error message.
+            raise
         except Exception as e:  # noqa: BLE001 — fli has no documented exception surface
             err.print(f"[yellow]Google Flights {cab.value} query failed: {_safe_text(e)}[/]")
 
@@ -2464,7 +3516,30 @@ def _run_gflight_multi(
             for cab in cabins:
                 tg.start_soon(query_cabin, cab)
 
-    anyio.run(go)
+    with shared_throttle_ladder():
+        try:
+            anyio.run(go)
+        except (typer.Exit, typer.Abort):
+            # An orderly exit is a decision, not a failure. Redundant with the
+            # `_reraise_if_orderly` below on the installed click, and the only
+            # guard left if `typer.Exit` ever stops subclassing `Exception`.
+            raise
+        except Exception as e:
+            # No cabin FAILURE reaches here — those are caught per cabin — so
+            # this is the fan-out itself: opening the loop, starting the group,
+            # or the group's own unwinding. A deliberate stop does reach it:
+            # `typer.Exit` subclasses `RuntimeError`, the per-cabin arm
+            # re-raises it on purpose, and `_reraise_if_orderly` below unwraps
+            # it from its group. A `BaseException` leaf passes both arms
+            # instead — whether anyio hands it back wrapped or the runner
+            # re-raises it bare, it is not an `Exception`; that is the door a
+            # deliberate stop leaves by, and widening this to catch it would
+            # answer one with a backend's name. Untyped, what this DOES
+            # receive is a bare traceback with both streams empty, which is the
+            # one outcome every reporter on this path exists to prevent.
+            _reraise_if_orderly(e, said="Google Flights search failed")
+            err.print(f"[red]Google Flights search failed:[/] {_failure_text(e)}")
+            raise typer.Exit(1) from e
     return results
 
 
@@ -2580,7 +3655,9 @@ def _run_matrix_path_multi(
         return
 
     rows = _merge_cabins(results_by_cabin, sort_by=sort_by, top_n=top_n)
-    if not sel.awards_only:
+    # `not json_out` for the reason given at the same gate in
+    # `_run_gflight_path`: with awards on, the document is written below this.
+    if not sel.awards_only and not json_out:
         _render_multi_cabin_search(rows, cabins=cabins, sort_by=sort_by)
 
     if run_pp:
@@ -2607,11 +3684,12 @@ def _run_matrix_path_multi(
     # link for the sort cabin — it's the "primary" surface in the rendered
     # table and the one a user is most likely to click through to.
     sort_opts = opts.model_copy(update={"cabin": sort_by})
-    _emit_urls(
-        SpecificDateSearch(legs=legs, options=sort_opts),
-        matrix_url=matrix_url,
-        google_url=google_url,
-    )
+    if not json_out:
+        _emit_urls(
+            SpecificDateSearch(legs=legs, options=sort_opts),
+            matrix_url=matrix_url,
+            google_url=google_url,
+        )
 
 
 def _run_gflight_path_multi(
@@ -2624,11 +3702,33 @@ def _run_gflight_path_multi(
     json_out: bool,
     run_pp: bool,
     sel: ProviderSelection,
+    gf_mode: GfTransportMode = TRANSPORT_HTTP,
+    gf_headed: bool = False,
 ) -> None:
-    """Google Flights multi-cabin: N parallel cabin queries (threadpool) → join → render."""
+    """Google Flights multi-cabin: N cabin queries → join → render.
+
+    Parallel on rung 1 and serial on rung 2; `_run_gflight_multi` chooses."""
     # Widen per-cabin queries so the join has overlap; see _bumped_query_top_n.
     query_top_n = _bumped_query_top_n(top_n, len(cabins))
-    fli_by_cabin = _run_gflight_multi(legs=legs, opts=opts, cabins=cabins, top_n=query_top_n)
+    # The user's count, not the bumped one. The bump widens the pool each cabin
+    # keeps so the join has overlap; it is not what anyone asked for, and
+    # quoting it tells someone who asked for a handful of rows that returns are
+    # combined against the whole pin cap — more than they wanted, from a note
+    # whose whole job is to say when they will get fewer.
+    _pin_cap_note(legs=legs, top_n=top_n)
+    if len(legs) >= _ROUND_TRIP_LEGS and len(cabins) > 1:
+        from ._gflight_ids import pinned_fanout  # noqa: PLC0415
+
+        join_note = _multi_cabin_join_note(pinned_fanout(query_top_n))
+        err.print(f"[dim]{join_note}[/]")
+    fli_by_cabin = _run_gflight_multi(
+        legs=legs,
+        opts=opts,
+        cabins=cabins,
+        top_n=query_top_n,
+        gf_mode=gf_mode,
+        gf_headed=gf_headed,
+    )
     if not fli_by_cabin:
         err.print("[red]All Google Flights cabin queries failed.[/]")
         raise typer.Exit(1)
@@ -2637,11 +3737,14 @@ def _run_gflight_path_multi(
         out: dict[str, Any] = {}
         for cab, fli_results in fli_by_cabin.items():
             cab_dumped: list[Any] = []
-            for r in fli_results:
+            # The user's count per cabin, not the bumped one the cabins were
+            # queried at: the bump exists to give the join overlap to work
+            # with, and quoting it back answers a small `-n` with a whole
+            # bumped page. The table path gets the same number through
+            # `_merge_cabins`.
+            for r in _price_ordered(fli_results)[:top_n]:
                 items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
-                dumped = [
-                    {**g.flight.model_dump(mode="json"), "flight_id": g.flight_id} for g in items
-                ]
+                dumped = [_gflight_json_row(g) for g in items]
                 cab_dumped.append(dumped if isinstance(r, tuple) else dumped[0])
             out[cab.value] = cab_dumped
         sys.stdout.write(json.dumps(out, indent=2, default=str))
@@ -2649,7 +3752,9 @@ def _run_gflight_path_multi(
 
     results_by_cabin = _gflight_to_search_result_per_cabin(fli_by_cabin)
     rows = _merge_cabins(results_by_cabin, sort_by=sort_by, top_n=top_n)
-    if not sel.awards_only:
+    # `not json_out` for the reason given at the same gate in
+    # `_run_gflight_path`: with awards on, the document is written below this.
+    if not sel.awards_only and not json_out:
         _render_multi_cabin_search(
             rows, cabins=cabins, sort_by=sort_by, title_prefix="Google Flights"
         )
@@ -2741,7 +3846,22 @@ def _render_gflight_table(
 
     Accepts our `GFlightWithId` wrappers — `.flight` is fli's FlightResult,
     `.amenities` is per-leg legroom data parsed from Google's response.
-    `match_carriers` enables codeshare-aware leg labels (see `_leg_display`)."""
+    `match_carriers` enables codeshare-aware leg labels (see `_leg_display`).
+
+    A round-trip combination can print two DIFFERENT prices, on its `Na` and
+    `Nb` rows, and that reads as a bug until you know what each is: the `a` row
+    carries the outbound board's own quote — the cheapest total reachable from
+    that outbound — while the `b` row carries THIS combination's total, from
+    the return board fetched with that outbound pinned. They agree only where
+    this combination IS the cheapest one reachable from that outbound, which is
+    the total the `a` row was quoting; on the committed capture two of the nine
+    combinations read that way. Printing each member's own number is
+    deliberate, because both are true of the row they sit on and the pair is
+    what says which combination costs what. The itinerary fare downstream is
+    the terminal member's; the argument and the measurements are under
+    "What a round-trip row's price means." in
+    docs/memories/gf_routing_and_carriers.md and in
+    `tests/pp/test_gflight_adapter.py`."""
     origin = legs[0].origins[0] if legs[0].origins else "?"
     destination = legs[0].destinations[0] if legs[0].destinations else "?"
     has_return = len(legs) >= _ROUND_TRIP_LEGS
@@ -2758,7 +3878,7 @@ def _render_gflight_table(
     t.add_column("legs")
     t.add_column("legroom")
     any_legroom = False
-    for i, r in enumerate(results[:top_n], 1):
+    for i, r in enumerate(_price_ordered(results)[:top_n], 1):
         items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
         for j, g in enumerate(items):
             fr = g.flight  # unwrap GFlightWithId → fli FlightResult
@@ -2773,12 +3893,12 @@ def _render_gflight_table(
             legroom_str = _fmt_gflight_legroom(fr.legs, amenities)
             if legroom_str:
                 any_legroom = True
+            # A row Google did not price is SHOWN, with the placeholder every
+            # other absent amount in this CLI uses. Dropping it would shorten a
+            # board the user asked `-n` rows of and make the count a lie, and a
+            # currency prefix over nothing would read as a fare of zero.
             t.add_row(
                 label,
-                # fli types `price` as `NonNegativeFloat | None` ("None when not
-                # surfaced"). The gflight adapter already tolerates that; this
-                # renderer formatted it unguarded and raised TypeError, so one
-                # price-less row took down the whole cash table.
                 ("—" if fr.price is None else f"{_safe_text(fr.currency or 'USD')}{fr.price:.2f}"),
                 _safe_text(fr.stops),
                 dur,
@@ -2964,6 +4084,33 @@ def _resolve_no_cache(flag: bool) -> bool:
     return _config.cache_disabled()
 
 
+def _resolve_gf_transport(mode: str) -> GfTransportMode:
+    """Validate `--gf-transport`, returning the mode as the ladder's own type.
+
+    The ONE narrowing seam. typer hands over a plain `str`, every search passes
+    through here, and everything downstream — `_gflight_results` and both render
+    paths — takes a `GfTransportMode`, so no call site needs a `cast` and none
+    can be reached with a mode that was never checked.
+
+    Returning the matched member is what narrows: `mode in VALID_TRANSPORT_MODES`
+    tells the type checker nothing about a `str`. The accepted set is derived
+    from the `Literal` in `_gf_common`, so a rung added to the type is offered
+    here the same day it is added.
+
+    A mode string, not a `GfTransport`, because every search validates this while
+    only a Google Flights search should pay for `_gflight_ids` — building the
+    value here would put fli's import on the Matrix path too, measured at ~95 ms
+    on top of an already-loaded `cli`. `_gflight_results` builds it instead; that
+    is the first point which has already paid."""
+    for known in VALID_TRANSPORT_MODES:
+        if mode == known:
+            return known
+    raise typer.BadParameter(
+        f"unknown transport {mode!r}; expected one of {'/'.join(VALID_TRANSPORT_MODES)}",
+        param_hint="--gf-transport",
+    )
+
+
 # ─────────────────────────── --format / --json ─────────────────────────────
 
 # Output formats currently implemented end-to-end. csv/tsv/yaml were in the
@@ -2990,19 +4137,28 @@ _JSON_OPT = typer.Option(
 
 # URL emission flags shared by `search` / `calendar` / `detail`.
 #
-# Both URLs encode the search criteria. The Google-Flights URL ALSO pins
-# the cheapest matched itinerary (deep link to that specific selection)
-# when an itinerary row is available; Matrix's URL only encodes the
-# search (Matrix's SPA doesn't surface a per-itinerary URL state).
+# Both URLs encode the search criteria. The Google-Flights URL ALSO pins one
+# matched itinerary — the row `--pick` names, defaulting to the first row the
+# FINAL table printed — when an itinerary row is available; Matrix's URL only
+# encodes the search (Matrix's SPA doesn't surface a per-itinerary URL state).
+# The enriched path prints two numbered tables and the pin names a row of the
+# second, so "the first row printed" would name a different itinerary from the
+# one the link opens.
+#
+# Neither line is printed under `--format json`, and the suppression is at the
+# call sites rather than in `_emit_urls`, which cannot know which format asked
+# for it. Both help strings say so, because a flag whose text promises output
+# it does not produce is the same defect on either of them.
 _MATRIX_URL_HELP = (
     "Print the Matrix ITA search URL (pre-fills the search; Matrix's SPA "
     "doesn't expose per-itinerary URL state, so this is the deepest link "
-    "available)."
+    "available). No link line is printed under --format json."
 )
 _GOOGLE_URL_HELP = (
-    "Print the Google Flights URL. When a cheapest itinerary is resolved "
-    "from the results, the URL deep-links to that specific itinerary "
-    "(pins selected flights). Otherwise it pre-fills the search."
+    "Print the Google Flights URL. When an itinerary can be resolved from the "
+    "results the URL deep-links to the row --pick names, or to the first row of "
+    "the final table; the label says which. Otherwise it pre-fills the search. "
+    "No link line is printed under --format json."
 )
 
 
@@ -3143,18 +4299,31 @@ def search(
     allow_airport_changes: bool = typer.Option(
         True,
         "--allow-airport-changes/--no-airport-changes",
+        help=(
+            "Allow an itinerary to change airports within a city. "
+            "Matrix only: --no-airport-changes routes the search to Matrix."
+        ),
         rich_help_panel=_GROUP_FILTERING,
     ),
     only_available: bool = typer.Option(
         True,
         "--only-available/--include-unavailable",
+        help=(
+            "Show only itineraries with seats available for sale. "
+            "Matrix only: --include-unavailable routes the search to Matrix."
+        ),
         rich_help_panel=_GROUP_FILTERING,
     ),
     page_size: int = typer.Option(
         10,
         "--n",
         "-n",
-        help="Result count (matrix: page size; gflight: top_n).",
+        min=1,
+        help=(
+            "Result count (matrix: page size; gflight: top_n). On Google Flights it "
+            "keeps the board in Google's ranking and round-trip combinations in "
+            "price order."
+        ),
         rich_help_panel=_GROUP_OUTPUT,
     ),
     rps: float | None = _RPS_OPT,
@@ -3177,7 +4346,9 @@ def search(
         None,
         "--pick",
         help="Pin itinerary #N (1-based, as shown in the table) in the "
-        "--matrix-url/--google-url deep links. Default: cheapest.",
+        "--matrix-url/--google-url deep links. Default: the first row of the "
+        "final table. Ignored under --format json, which emits no link lines "
+        "at all.",
         rich_help_panel=_GROUP_OUTPUT,
     ),
     no_cache: bool = _NO_CACHE_OPT,
@@ -3188,6 +4359,30 @@ def search(
         help="Skip Matrix enrichment: show only the fast Google Flights result "
         "(~1s) instead of also reconciling against Matrix. Default: enrich when "
         "Google Flights can serve the query.",
+        rich_help_panel=_GROUP_BACKEND,
+    ),
+    gf_transport: str = typer.Option(
+        TRANSPORT_HTTP,
+        "--gf-transport",
+        help=(
+            "How the Google Flights backend fetches its search page: "
+            "[bold]http[/] (default) is one curl_cffi GET; [bold]browser[/] launches a real "
+            "Chrome (headless unless [bold]--gf-headed[/]) against the same URL, a few "
+            "seconds per search, and survives the rate limit that blocks http; "
+            "[bold]auto[/] is identical to http today (escalate-on-throttle lands "
+            "separately). A multi-cabin [bold]browser[/] search runs its cabins one at "
+            "a time through a single Chrome (~10s for two cabins, ~14s for three, against "
+            "~1.3s over http), and falls back to http if Chrome cannot open. Needs "
+            # Escaped: rich reads `[browser]` as a style tag and deletes it, which
+            # printed an install command that silently omits the extra.
+            "[bold]uv pip install 'flight-cli\\[browser]'[/] for browser."
+        ),
+        rich_help_panel=_GROUP_BACKEND,
+    ),
+    gf_headed: bool = typer.Option(
+        False,
+        "--gf-headed",
+        help="Show the Chrome window --gf-transport browser opens. Default: headless.",
         rich_help_panel=_GROUP_BACKEND,
     ),
     providers: str | None = typer.Option(
@@ -3265,20 +4460,27 @@ def search(
         slice_specs=slice_specs,
         depart_times=depart_times,
         return_times=return_times,
+        stops=stops,
+        children=children,
         seniors=seniors,
         youth=youth,
         inf_seat=inf_seat,
         inf_lap=inf_lap,
+        origin=origin,
+        destination=destination,
+        allow_airport_changes=allow_airport_changes,
+        show_only_available=only_available,
     )
     if slice_specs:
         legs = tuple(_parse_slice_spec(s) for s in slice_specs)
     elif origin and destination and dep:
+        origins, destinations = _require_airports(origin, destination)
         out_times = _parse_times(depart_times)
         ret_times = _parse_times(return_times)
         legs = (
             Leg.of(
-                _parse_iata_list(origin),
-                _parse_iata_list(destination),
+                origins,
+                destinations,
                 _parse_date(dep),
                 route_language=routing,
                 extension=extension,
@@ -3288,8 +4490,8 @@ def search(
         if ret:
             legs += (
                 Leg.of(
-                    _parse_iata_list(destination),
-                    _parse_iata_list(origin),
+                    destinations,
+                    origins,
                     _parse_date(ret),
                     route_language=routing,
                     extension=extension,
@@ -3326,12 +4528,18 @@ def search(
     )
 
     run_awards = _should_run_awards(sel)
+    # Validated for every backend, so a typo is caught whether or not this
+    # particular query happens to reach Google Flights. Bound to a new name
+    # rather than reassigned: the parameter is declared `str` for typer's sake,
+    # and reassigning it would throw away the narrowing this call just did.
+    gf_mode = _resolve_gf_transport(gf_transport)
 
     if len(cabins_tuple) > 1:
-        # The multi-cabin gflight path doesn't apply the routing/extension
-        # filters yet, so a constrained multi-cabin search goes to Matrix to
-        # honor the routing correctly (the single-cabin gflight path filters).
-        if resolved == BACKEND_GFLIGHT and not (routing or extension):
+        # `_pick_backend` already refused anything the page can't encode, so a
+        # constraint that survived to here is one the fan-out honours natively.
+        # Re-testing `routing or extension` here would drop it to Matrix with no
+        # reason printed.
+        if resolved == BACKEND_GFLIGHT:
             _run_gflight_path_multi(
                 legs=legs,
                 opts=opts,
@@ -3341,6 +4549,8 @@ def search(
                 json_out=json_out,
                 run_pp=run_awards,
                 sel=sel,
+                gf_mode=gf_mode,
+                gf_headed=gf_headed,
             )
             return
         _run_matrix_path_multi(
@@ -3377,6 +4587,8 @@ def search(
                 rps=_resolve_rps(rps),
                 impersonate=_resolve_impersonate(impersonate),
                 no_cache=_resolve_no_cache(no_cache),
+                gf_mode=gf_mode,
+                gf_headed=gf_headed,
             )
             return
         _run_gflight_path(
@@ -3389,6 +4601,8 @@ def search(
             matrix_url=matrix_url,
             google_url=google_url,
             pick=pick,
+            gf_mode=gf_mode,
+            gf_headed=gf_headed,
         )
         return
 
@@ -3463,7 +4677,7 @@ def fare(
         True, "--allow-airport-changes/--no-airport-changes"
     ),
     only_available: bool = typer.Option(True, "--only-available/--include-unavailable"),
-    page_size: int = typer.Option(10, "--n", "-n"),
+    page_size: int = typer.Option(10, "--n", "-n", min=1),
     rps: float | None = _RPS_OPT,
     impersonate: str | None = _IMPERSONATE_OPT,
     fmt: str = _FORMAT_OPT,
@@ -3509,15 +4723,19 @@ def fare(
     )
     if pp:
         err.print("[dim]Note: `--pp` is now a no-op (PP is implicit on Matrix backend).[/]")
+    # This block is `search`'s, near-duplicated. Deliberately not shared: `fare`
+    # is deprecated and prints so on every run, and a helper spanning a command
+    # on its way out ties the survivor's leg building to the leaving one.
     if slice_specs:
         legs = tuple(_parse_slice_spec(s) for s in slice_specs)
     elif origin and destination and dep:
+        origins, destinations = _require_airports(origin, destination)
         out_times = _parse_times(depart_times)
         ret_times = _parse_times(return_times)
         legs = (
             Leg.of(
-                _parse_iata_list(origin),
-                _parse_iata_list(destination),
+                origins,
+                destinations,
                 _parse_date(dep),
                 route_language=routing,
                 extension=extension,
@@ -3527,8 +4745,8 @@ def fare(
         if ret:
             legs += (
                 Leg.of(
-                    _parse_iata_list(destination),
-                    _parse_iata_list(origin),
+                    destinations,
+                    origins,
                     _parse_date(ret),
                     route_language=routing,
                     extension=extension,
@@ -4005,7 +5223,7 @@ def gflight(
     cabin: str = "economy",
     adults: int = 1,
     children: int = 0,
-    top_n: Annotated[int, typer.Option("--n", "-n")] = 5,
+    top_n: Annotated[int, typer.Option("--n", "-n", min=1)] = 5,
     fmt: str = _FORMAT_OPT,
     json_out: bool = _JSON_OPT,
 ) -> None:
@@ -4015,9 +5233,41 @@ def gflight(
         "[yellow]`flight gflight` is deprecated; use `flight search` "
         "(or `flight search --backend gflight` to force).[/]",
     )
-    legs = (Leg.of(origin, destination, _parse_date(dep)),)
+    # Airports split the way `search` splits them, so `JFK,LAX` is a
+    # multi-airport query the picker routes to Matrix rather than a string
+    # `Leg.of` rejects as one bad IATA code.
+    #
+    # Legs first: `_pick_backend` announces the backend it chose, and a genuinely
+    # bad airport must not be reported after a line claiming the query is already
+    # on its way.
+    origins, destinations = _require_airports(origin, destination)
+    legs = (Leg.of(origins, destinations, _parse_date(dep)),)
     if ret:
-        legs += (Leg.of(destination, origin, _parse_date(ret)),)
+        legs += (Leg.of(destinations, origins, _parse_date(ret)),)
+    # This alias has no --backend flag, so it resolves like `search` on auto
+    # rather than forcing Google Flights: `--children N` can't be priced on the
+    # page transport, and taking the backend that can price it beats erroring on
+    # a query the alias accepts. `_pick_backend` prints the reason either way.
+    resolved = _pick_backend(
+        backend=BACKEND_AUTO,
+        routing=None,
+        extension=None,
+        slice_specs=None,
+        depart_times=None,
+        return_times=None,
+        children=children,
+        seniors=0,
+        youth=0,
+        inf_seat=0,
+        inf_lap=0,
+        origin=origin,
+        destination=destination,
+        stops=None,
+        # The neutral values `_build_options` below hardcodes for this alias:
+        # it has no flag for either, so neither can be a reason here.
+        allow_airport_changes=True,
+        show_only_available=True,
+    )
     opts = _build_options(
         cabin=cabin,
         adults=adults,
@@ -4029,7 +5279,26 @@ def gflight(
         stops=None,
         allow_airport_changes=True,
         show_only_available=True,
+        page_size=top_n,
     )
+    if resolved == BACKEND_MATRIX:
+        _run_matrix_path(
+            legs=legs,
+            opts=opts,
+            rps=_resolve_rps(None),
+            impersonate=_resolve_impersonate(None),
+            no_cache=_resolve_no_cache(False),
+            json_out=json_out,
+            matrix_url=False,
+            google_url=False,
+            run_pp=False,
+            # This alias predates the provider flags: cash only, no awards.
+            sel=_resolve_providers(
+                providers=None, cash_only=True, awards_only=False, provider_opt=()
+            ),
+            pick=None,
+        )
+        return
     _run_gflight_path(legs=legs, opts=opts, top_n=top_n, json_out=json_out)
 
 
@@ -4119,6 +5388,9 @@ def seatmap(
         aircraft=aircraft,
     )
     if not fetch:
+        # Escaped, not bare: this URL is printed to be copied, and rich would
+        # read a bracketed segment as markup and drop it from what the user
+        # pastes — a wrong URL is worse than a loud failure.
         console.print(_safe_text(api_url))
         return
     try:

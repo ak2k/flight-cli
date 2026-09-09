@@ -8,7 +8,7 @@ arrival can never read as landing before it departs.
 
 from __future__ import annotations
 
-from flight_cli.cli import _fmt_slice_cell, _fmt_slice_route, _fmt_slice_times
+from flight_cli.cli import _amount, _fmt_slice_cell, _fmt_slice_route, _fmt_slice_times
 from flight_cli.models import Slice, SliceEndpoint
 
 
@@ -76,3 +76,16 @@ def test_cell_includes_route_flights_times_and_duration() -> None:
 def test_cell_connection_shows_via_city() -> None:
     s = _slice(flights=["B6 100", "B6 200"], stops=[SliceEndpoint(code="DEN")])
     assert "MSY→DEN→MCO" in _fmt_slice_cell(s)
+
+
+# ───────────────────────────────── _amount ─────────────────────────────────
+
+
+def test_a_price_that_is_absent_renders_the_dash_placeholder() -> None:
+    """The placeholder is the whole answer for a row with no price, so it is
+    what a reader of the table sees where a fare would be. A currency prefix
+    over nothing would read as a fare of zero, and an empty cell as a column
+    that failed to render."""
+    assert _amount(None) == "—"
+    assert _amount("") == "—"
+    assert _amount("USD877.00") == "877.00"

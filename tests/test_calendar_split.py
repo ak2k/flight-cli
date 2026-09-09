@@ -2842,8 +2842,8 @@ def test_one_failing_cabin_does_not_take_the_other_cabins_down(
     good: list[Any] = [object()]
     asked: list[Cabin] = []
 
-    def _search_with_ids(search: Any, top_n: int = 5) -> list[Any]:
-        _ = top_n
+    def _search_with_ids(search: Any, top_n: int = 5, transport: Any = None) -> list[Any]:
+        _ = top_n, transport
         asked.append(search.options.cabin)
         if search.options.cabin is Cabin.BUSINESS:
             raise RuntimeError(f"fli said [/x]no{_DRIVES_THE_TERMINAL}")
@@ -3636,6 +3636,25 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_paint_calendar_first", "_GF_GRID_UNAVAILABLE_WEAVE_NOTE"),
         ("_resolve_format", "_FORMAT_CHOICES"),
         ("query_cabin", "cab.value"),  # a member of this module's own enum
+        ("note_missing_column", "cab.value"),  # the same enum, on the series runner
+        ("_gflight_cabins_in_series", "cab.value"),
+        # One of two sentences this module wrote, chosen by a flag. Each names
+        # what happens next to a link, so neither can be a bare clause the
+        # sentence above it carries.
+        ("_pick_in_range", "fallback"),
+        ("_run_enriched_path", "unpinned"),
+        ("_reraise_if_orderly", "plural"),  # "" or "s", off a count beside it
+        # `_gf_refusal` sanitizes every remote field it reads and leaves both of
+        # its own console-ready, so a wrapper at the sink would show a backslash
+        # in front of every bracket the remote text carried. The exactly-once
+        # tests in `tests/test_gf_browser.py` are what hold these.
+        ("_run_gflight_path", "refusal.message"),
+        ("_report_enriched_gf_failure", "refusal.note"),
+        ("_report_enriched_gf_failure", "refusal.message"),
+        ("query_cabin", "refusal.note"),
+        ("note_missing_column", "note"),
+        # Built here from the pin budget, and every part of it is ours.
+        ("_run_gflight_path_multi", "join_note"),
         ("_validate_sort_cabin", "sort_by.value"),  # the same enum, one command over
         ("_validate_sort_cabin", "names"),  # its members joined into a list
         ("_emit_urls", "pinned_label"),  # "#N" or "cheapest", built from an int

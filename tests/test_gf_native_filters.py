@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from typing import Any
 
 from fli.models.airport import Airport
@@ -24,6 +25,11 @@ from flight_cli.routing_predicates import (
     classify,
 )
 
+# fli's FlightSegment validator rejects a past travel date, so the fixture date
+# is derived from today rather than pinned — a literal rots the suite the day
+# it passes.
+_TRAVEL_DATE = (date.today() + timedelta(days=45)).isoformat()
+
 
 def _filters() -> Any:
     return FlightSearchFilters(
@@ -32,7 +38,7 @@ def _filters() -> Any:
             FlightSegment(
                 departure_airport=[[Airport["JFK"], 0]],
                 arrival_airport=[[Airport["LHR"], 0]],
-                travel_date="2026-08-15",
+                travel_date=_TRAVEL_DATE,
             )
         ],
         stops=MaxStops.ANY,

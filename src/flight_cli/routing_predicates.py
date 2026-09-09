@@ -16,6 +16,10 @@ it carries NO Tier-3 predicate (see `ClassifiedConstraints.requires_matrix`).
 We never honor part of a constraint on GF and silently drop the rest — an
 unrecognized token escalates the whole query to Matrix.
 
+`Tier` is the date grid's question ("could GF honor this at all"). The search
+path asks a narrower one — `page_can_encode`, "can the public page's tfs=
+parameter carry this" — because that transport has far fewer filter fields.
+
 Routing language is *positional* (`BA AA` = BA then AA), so it's parsed
 all-or-nothing per string: only single order-independent intents (one carrier
 with a `+`/`*` quantifier, one connection-airport token, nonstop, one flight
@@ -30,6 +34,16 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from enum import IntEnum
+from typing import TYPE_CHECKING, assert_never
+
+# A `reason` quotes the user's own --routing/--extension string back to them, so
+# it can carry any character. It is kept as PLAIN TEXT here and escaped by
+# whichever renderer needs it escaped — the CLI prints reasons two ways, through
+# a rich Console (markup, needs escaping) and through typer's BadParameter
+# (plain, must not be escaped or the user reads the backslashes).
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 
 class Tier(IntEnum):
@@ -350,6 +364,75 @@ def parse_extension(extension: str) -> list[Predicate]:
         if pred := _parse_extension_code(directive):
             out.append(pred)
     return out
+
+
+# ───────────────── search-page transport encodability ──────────────────
+#
+# `Tier` above answers "could Google Flights honor this at all" — the date
+# grid's question of its RPC. The search path's transport, the public page's
+# tfs= parameter, carries a much narrower filter set, so it gets its own
+# question: can `links.build_search_tfs` encode this?
+#
+# Today the answer is yes only for stops. Carrier/alliance/layover-airport
+# filters DO have tfs fields (3.6 / 3.7 / 3.15 / 3.17 / 3.18) and are the
+# obvious next widening; until they are encoded and verified, a query carrying
+# one goes to Matrix with the reason printed, because the alternative — post-
+# filtering Google's fixed ~30-row board with no back-fill — silently answers
+# a constrained search with "no results".
+
+
+# fli's MaxStops enum stops at TWO_OR_FEWER_STOPS; anything above is ANY, which
+# omits tfs field 3.5 entirely. Public because `cli._pick_backend` applies the
+# same ceiling to `--stops`, and two copies would drift.
+MAX_ENCODABLE_STOPS = 2
+
+
+def _page_reason(pred: Predicate) -> str | None:  # noqa: PLR0911, PLR0912 — one arm per predicate type
+    """Why `pred` can't ride the search page's tfs= parameter, or None if it can."""
+    match pred:
+        # fli's MaxStops tops out at "two or fewer", so a higher ceiling maps to
+        # ANY, which omits tfs field 3.5 entirely. Certifying it as encodable
+        # would drop the constraint with neither a native filter nor a reason.
+        case StopsPred() if pred.max_stops <= MAX_ENCODABLE_STOPS:
+            return None
+        case StopsPred():
+            return f"a stop ceiling above {MAX_ENCODABLE_STOPS} ({pred.max_stops})"
+        case UnsupportedPred():
+            return pred.reason
+        case CarrierPred():
+            codes = ", ".join(sorted(pred.codes))
+            article, kind = ("an", "operating carrier") if pred.operating else ("a", "carrier")
+            verb = "exclusion" if pred.exclude else "filter"
+            return f"{article} {kind} {verb} ({codes})"
+        case AlliancePred():
+            return f"an alliance filter ({', '.join(sorted(pred.codes))})"
+        case ConnectionAirportPred():
+            verb = "exclusion" if pred.exclude else "filter"
+            return f"a connecting-airport {verb} ({', '.join(sorted(pred.codes))})"
+        case MaxDurationPred():
+            return f"a maximum trip duration ({pred.minutes} min)"
+        case ConnectTimePred():
+            return "a layover-time bound"
+        case ExcludeRedeyesPred():
+            return "a red-eye exclusion"
+        case ExcludeOvernightsPred():
+            return "an overnight-stop exclusion"
+        case ExcludeCodesharePred():
+            return "a codeshare exclusion"
+        case SpecificFlightPred():
+            return f"a specific flight number ({pred.carrier}{pred.low})"
+        case _:
+            assert_never(pred)
+
+
+def page_can_encode(predicates: Iterable[Predicate]) -> tuple[bool, list[str]]:
+    """Whether the search-page tfs= encoder can honor every predicate natively.
+
+    Returns (encodable, reasons). `reasons` names each constraint that forces
+    Matrix, in the user's own vocabulary, so the caller can print why the fast
+    backend was declined instead of a generic apology."""
+    reasons = [reason for p in predicates if (reason := _page_reason(p)) is not None]
+    return not reasons, reasons
 
 
 def classify(routing: str | None, extension: str | None) -> ClassifiedConstraints:
