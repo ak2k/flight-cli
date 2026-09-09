@@ -2713,6 +2713,28 @@ def test_a_launch_asked_for_after_the_stop_refuses_before_it_opens_anything(
     assert session not in gfb._live
 
 
+def test_the_refusal_after_the_stop_comes_before_the_launch_is_announced(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """Where the latch is READ, which the refusal above cannot tell apart.
+
+    The notice says a Chrome is opening. Read below it, the same refusal still
+    raises and still opens nothing — every assertion above stays green — but the
+    run has already told the user it is opening a browser it then never opens,
+    on the one path where the user is watching for exactly that. It also spends
+    the once-per-process notice, so the next launch in the same run, which does
+    open one, is silent."""
+    pw = _install(monkeypatch, tmp_path)
+    session = gfb.GfBrowserSession(headed=False)
+    gfb._interrupt_state["seen"] = True
+
+    with pytest.raises(KeyboardInterrupt):
+        session._ensure_page()
+
+    assert gfb._notice_state["printed"] is False
+    assert pw.chromium.launches == 0  # the premise: nothing was opened to announce
+
+
 def test_a_driver_that_starts_after_the_stop_is_killed_before_the_browser_opens(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:

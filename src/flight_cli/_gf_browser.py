@@ -299,8 +299,10 @@ class GfBrowserSession:
         Chrome needs no signal of its own. The driver holds its remote-debugging
         pipe and Chrome exits when that peer disappears. That exit is asynchronous
         to this call and to the CLI's — nothing here waits for it — and it is what
-        clears `Singleton*`; measured at 0.08-0.11 s after the CLI's exit, and
-        load-dependent.
+        clears `Singleton*`, within about a tenth of a second of the CLI's exit.
+        That figure is a bound that has held rather than a measurement: the check
+        behind it polls at 0.1 s and cannot resolve a span that short, and the
+        settle moves with load. Nothing here should be tightened on a rerun.
 
         `SIGKILL` rather than the `SIGINT` the driver handles gracefully: the
         graceful path writes its last frames into a Python that is already
@@ -589,7 +591,10 @@ def interrupt_guard(*, armed: bool = True) -> Generator[None]:
     Armed by the caller, and the two arms decide differently. The fast arm arms
     it for every Google Flights search, before the transport is known: that
     search runs on the thread the signal is delivered to, so nothing after the
-    handler can block and the ignore lasts microseconds. The enriched arm arms it
+    handler can block. The ignore the handler installs is not scoped to that
+    wait, though: it is never restored, so it stands for the rest of the
+    process's life, and what makes arming this arm broadly safe is that by then
+    there is nothing left for a second Ctrl-C to stop. The enriched arm arms it
     only for the browser transport, because there the search runs on a worker no
     interrupt reaches — on any other transport the first Ctrl-C cannot free that
     worker, and an ignored second one leaves nothing that can. `auto` is `http`

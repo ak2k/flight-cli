@@ -102,10 +102,13 @@ interpreter shutdown on the main thread cannot see a worker's session.
 ## Ctrl-C
 
 **A SIGINT at any point of a browser search exits 130 within 0.06 s, on both
-arms.** The session closes exactly once, and within 0.11 s of that exit no
-Chrome survives and no `Singleton*` is left where it would block the next
-search — Chrome's exit is asynchronous to the CLI's by design, so that is a tail
-with a bound and not a property of the instant. stdout carries nothing partial —
+arms.** The session closes exactly once, and within about a tenth of a second
+of that exit no Chrome survives and no `Singleton*` is left where it would block
+the next search — Chrome's exit is asynchronous to the CLI's by design, so that
+is a tail with a bound and not a property of the instant. A bound is all it is:
+the check polls at 0.1 s, which cannot resolve a span of that size, and the
+settle is load-dependent — a loaded machine moves it, so a second decimal here
+would be arithmetic on the poll interval rather than a measurement. stdout carries nothing partial —
 a table already painted before the interrupt is a whole answer and stays — and
 stderr carries no line about the interruption at all, only the notices the run
 had already printed. Measured across fourteen cases: both arms at
