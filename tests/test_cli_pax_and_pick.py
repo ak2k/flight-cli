@@ -8,9 +8,9 @@ that isn't true of the search the user asked for.
 from __future__ import annotations
 
 from datetime import date, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from flight_cli.cli import _pinned_solution_index, _seated_pax
+from flight_cli.cli import _pick_in_range, _pinned_solution_index, _seated_pax
 from flight_cli.domain import Leg, Pax, SearchOptions, SpecificDateSearch
 from flight_cli.models import (
     Itinerary,
@@ -19,6 +19,9 @@ from flight_cli.models import (
     Slice,
     SliceEndpoint,
 )
+
+if TYPE_CHECKING:
+    import pytest
 
 # fli's FlightSegment validator rejects a past travel date, so the fixture date
 # is derived from today rather than pinned — a literal rots the suite the day
@@ -51,22 +54,46 @@ def _res(n: int) -> SearchResult:
 # ───────────── --pick must not name a row the user never saw ─────────────
 
 
+def _pinned(solutions: int, pick: int, rows: int) -> int | None:
+    """The pin index a run reaches, through both halves of the check.
+
+    `_pick_in_range` is measured against the count the table PRINTED and answers
+    None for a number that names no row on it; `_pinned_solution_index` turns
+    what survives into an index, and reads a None as "row one". Asserted as the
+    pair because neither half is the contract on its own — the first knows the
+    range and pins nothing, the second pins and cannot know it."""
+    return _pinned_solution_index(_res(solutions), _pick_in_range(pick, rows, links_follow=True))
+
+
 def test_pick_beyond_the_rendered_table_falls_back() -> None:
     """The table hardcoded 10 rows while `--pick` validated against the full
     solution list, so `-n 15 --pick 15` printed 10 rows and then emitted a
     booking link labelled "itinerary #15 pinned" — for a row never displayed,
     and with no out-of-range warning because 15 was in range for the
     unrendered list."""
-    assert _pinned_solution_index(_res(15), 15, 10) == 0  # fell back to cheapest
+    assert _pinned(15, 15, 10) == 0  # fell back to row one
 
 
 def test_pick_within_the_rendered_table_is_honoured() -> None:
-    assert _pinned_solution_index(_res(15), 8, 10) == 7
+    assert _pinned(15, 8, 10) == 7
 
 
 def test_pick_is_honoured_when_the_table_was_widened() -> None:
     """`-n 15` renders 15 rows, so `--pick 15` is now legitimate."""
-    assert _pinned_solution_index(_res(15), 15, 15) == 14
+    assert _pinned(15, 15, 15) == 14
+
+
+def test_a_pick_past_the_printed_table_is_reported_once(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """One fact, one sentence. Both halves used to hold a range check, so the
+    same out-of-range pick was answered twice — once on stderr against the rows
+    printed and once on stdout against the whole solution list, in a
+    `--format json` document's own stream and naming a different fallback."""
+    assert _pinned(15, 15, 10) == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""  # the document's stream stays the document's
+    assert captured.err.count("out of range") == 1
 
 
 # ───────────── every seated passenger reaches both backends ─────────────

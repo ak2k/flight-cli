@@ -1643,11 +1643,7 @@ def _run_calendar_enriched(
     _deliver_calendar(_write_answer)
 
 
-def _pinned_solution_index(
-    result: SearchResult | None,
-    pick: int | None,
-    rendered: int | None = None,
-) -> int | None:
+def _pinned_solution_index(result: SearchResult | None, pick: int | None) -> int | None:
     """0-based index into `result.solutions` of the itinerary to pin in a deep
     link. `pick` is the 1-based itinerary number the user saw in the table;
     None pins the cheapest (row 1). Out-of-range picks warn and fall back to
@@ -1657,13 +1653,9 @@ def _pinned_solution_index(
         return None
     if pick is None:
         return 0
-    # Bound by what the user could actually SEE. Validating against
-    # `len(result.solutions)` accepted a `--pick` beyond the rendered table and
-    # then labelled the link "itinerary #N pinned" for a row never displayed.
-    upper = len(result.solutions) if rendered is None else min(rendered, len(result.solutions))
-    if pick < 1 or pick > upper:
+    if pick < 1 or pick > len(result.solutions):
         console.print(
-            f"[yellow]--pick {pick:d} is out of range (1-{upper:d}); "
+            f"[yellow]--pick {pick:d} is out of range (1-{len(result.solutions):d}); "
             f"pinning the cheapest itinerary instead.[/]"
         )
         return 0
@@ -1755,9 +1747,8 @@ def _emit_urls(
     google_url: bool,
     result: SearchResult | None = None,
     pick: int | None = None,
-    rendered: int | None = None,
 ) -> None:
-    idx = _pinned_solution_index(result, pick, rendered)
+    idx = _pinned_solution_index(result, pick)
     # Only claim "#N" when we actually honored the user's pick; an out-of-range
     # pick falls back to idx 0 and must not mislabel the cheapest as "#N".
     pinned_label = (
