@@ -1,10 +1,10 @@
 """IATA metro codes and the airport sets Google Flights is asked for.
 
 Matrix takes a metro code (`NYC`) as one token; Google's search page takes
-airports only, repeated per leg. So the Google boundary (`fli_bridge`, the
-pinned link) expands a metro code here, and nothing upstream of it does: the
-domain `Search`, the Matrix request and the Matrix deep link keep the user's
-tokens."""
+airports only, repeated per leg. The two sites that build a Google request or
+link (`fli_bridge`, the pinned link) expand metro codes through this table, and
+the backend picker and the link caveats count them the same way. The domain
+`Search`, the Matrix request and the Matrix deep link keep the user's tokens."""
 
 from __future__ import annotations
 
