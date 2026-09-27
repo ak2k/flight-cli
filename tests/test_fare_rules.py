@@ -325,7 +325,7 @@ def test_the_backend_picker_sends_fare_rules_to_matrix() -> None:
 # ─────────────────────────── the rule text ──────────────────────────────────
 
 
-def test_rule_text_drops_its_note_asides_and_is_capped() -> None:
+def test_rule_text_drops_its_note_asides_and_keeps_the_rest() -> None:
     rule = FareRule(
         category=16,
         blocks=[
@@ -345,8 +345,22 @@ def test_rule_text_drops_its_note_asides_and_is_capped() -> None:
     assert cut == 3
     long = FareRule(category=33, blocks=["\n".join(f"LINE {i}" for i in range(40))])
     lines, cut = cli._rule_lines(long)
-    assert len(lines) == cli._RULE_TEXT_LINES
-    assert cut == 40 - cli._RULE_TEXT_LINES
+    assert len(lines) == 40
+    assert cut == 0
+
+
+def test_a_refund_rule_is_printed_to_its_last_alternative(matrix: _Matrix) -> None:
+    """Rule text lists alternatives under `OR -`, and a line after one can
+    qualify it: the captured refund rule's last alternative is "REFUND MAY BE
+    REQUESTED ANYTIME." and then "FARE AND TAXES ARE NONREFUNDABLE."."""
+    result = _run("--fare-rules", *_QUIET)
+    assert result.exit_code == 0, result.output
+    blocks = [s.split("\n\n", 1)[0] for s in result.stdout.split("Voluntary refunds")[1:]]
+    assert len(blocks) == 2
+    for block in blocks:
+        assert "REFUND MAY BE REQUESTED ANYTIME." in block
+        assert "FARE AND TAXES ARE NONREFUNDABLE. IF MIX OF PER FARE" in block
+        assert block.rstrip().endswith("PRICING UNIT AND COLLECT HIGHEST.")
 
 
 def test_hostile_rule_text_is_printed_as_text(

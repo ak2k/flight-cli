@@ -2356,9 +2356,6 @@ def _run_matrix_path(
 
 # The ATPCO rule categories a traveler reads before buying, in print order.
 _RULE_CATEGORIES = {16: "Penalties", 31: "Voluntary changes", 33: "Voluntary refunds"}
-# Lines of one rule printed once its NOTE blocks are dropped. The JSON document
-# carries every line.
-_RULE_TEXT_LINES = 16
 
 
 class _FareRulesAnswer(NamedTuple):
@@ -2450,11 +2447,13 @@ def _fare_rules_document(answer: _FareRulesAnswer | None) -> dict[str, Any] | No
 
 
 def _rule_lines(rule: FareRule) -> tuple[list[str], int]:
-    """A rule's text cut to a readable length, and how many lines were cut.
+    """A rule's text without its NOTE asides, and how many lines those held.
 
     ATPCO text sets its asides under an indented `NOTE -`: waivers, agency
     fees, how fares combine. They are most of a penalties rule by volume, and
-    dropping them is what leaves the cancel and change terms on screen."""
+    dropping them is what leaves the cancel and change terms on screen. The
+    rest is kept whole: a rule lists alternatives under `OR -`, and a line
+    after one can qualify it, so a rule cut short can end on the wrong answer."""
     lines = [ln.rstrip() for b in rule.blocks for ln in b.splitlines() if ln.strip()]
     kept: list[str] = []
     note_indent: int | None = None
@@ -2468,8 +2467,7 @@ def _rule_lines(rule: FareRule) -> tuple[list[str], int]:
             continue
         kept.append(ln)
     margin = min((len(ln) - len(ln.lstrip()) for ln in kept), default=0)
-    shown = [ln[margin:] for ln in kept[:_RULE_TEXT_LINES]]
-    return shown, len(lines) - len(shown)
+    return [ln[margin:] for ln in kept], len(lines) - len(kept)
 
 
 def _render_fare_rules(answer: _FareRulesAnswer) -> None:
