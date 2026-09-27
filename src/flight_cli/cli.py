@@ -2554,11 +2554,14 @@ def _render_one_fare(fr: FareRules) -> None:
             f"  [bold]{_safe_text(label)}[/] [dim](category {rule.category or 0:d})[/]"
             + (f" [dim]{_safe_text(rule.type)}[/]" if rule.type else "")
         )
-        lines, cut = _rule_lines(rule)
+        lines, asides = _rule_lines(rule)
         for line in lines:
             console.print(f"    {_safe_text(line)}")
-        if cut:
-            console.print(f"    [dim]… {cut:d} more lines; --format json carries the full text[/]")
+        if asides:
+            console.print(
+                f"    [dim]… {asides:d} lines of NOTE asides not shown; "
+                "--format json carries the full text[/]"
+            )
 
 
 # How much deeper to fetch when a Tier-2 routing post-filter will discard rows.

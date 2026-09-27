@@ -363,6 +363,17 @@ def test_a_refund_rule_is_printed_to_its_last_alternative(matrix: _Matrix) -> No
         assert block.rstrip().endswith("PRICING UNIT AND COLLECT HIGHEST.")
 
 
+def test_the_footer_says_the_lines_not_shown_are_note_asides(matrix: _Matrix) -> None:
+    """A bare "… 32 more lines" under the last penalty term reads as the terms
+    going on, when every term is on screen and the 32 are its NOTE asides."""
+    result = _run("--fare-rules", *_QUIET)
+    assert result.exit_code == 0, result.output
+    footers = [ln.strip() for ln in result.stdout.splitlines() if ln.strip().startswith("…")]
+    assert (
+        footers == ["… 32 lines of NOTE asides not shown; --format json carries the full text"] * 2
+    )
+
+
 def test_hostile_rule_text_is_printed_as_text(
     matrix: _Matrix, monkeypatch: pytest.MonkeyPatch
 ) -> None:
