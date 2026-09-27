@@ -113,7 +113,9 @@ def _carrier_pred_passes(slc: Slice, pred: CarrierPred) -> bool:
     legs = _leg_carriers(slc)
     if pred.operating:
         if pred.exclude:  # -OPAIRLINES — no leg operated by these
-            return not any(op in pred.codes for _, _, op in legs)
+            # A leg with no operating carrier fails, as it fails an include:
+            # the filter cannot tell, and must not keep a row Matrix drops.
+            return not any(op is None or op in pred.codes for _, _, op in legs)
         return all(op in pred.codes for _, _, op in legs)  # O:/OPAIRLINES — all operated by these
     if pred.exclude:
         # ~UA+ / -AIRLINES: no leg booked under an excluded carrier, which is
@@ -141,8 +143,9 @@ def _slice_passes(slc: Slice, predicates: Iterable[Predicate]) -> bool:
                 return False
         elif isinstance(p, ExcludeCodesharePred):
             for _, marketing, op in _leg_carriers(slc):
-                # codeshare = booked carrier(s) differ from the operating metal
-                if op is not None and marketing and op not in marketing:
+                # codeshare = booked carrier(s) differ from the operating metal;
+                # with no operating carrier it cannot be ruled out, so the leg fails
+                if op is None or (marketing and op not in marketing):
                     return False
         elif isinstance(p, SpecificFlightPred):
             flights = [f for fl in slc.flights if (f := _parse_flight(fl))]

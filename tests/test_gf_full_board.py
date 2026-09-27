@@ -185,6 +185,40 @@ def test_a_carrier_exclude_reads_the_carrier_each_leg_is_booked_under(
     assert len(rows) == 84  # of 101
 
 
+def _lhr_without_operating_identity(booked: str) -> str:
+    """The LHR capture with the first leg of the row booked as `booked`
+    carrying no operating tuple (`fl[22]`)."""
+    payload: list[Any] = json.loads(_ds1(_LHR))
+    for raw in gfid._rows_from_ds1(payload).rows:
+        if _booked(gfid._parse_flight_with_id(raw)) == booked:
+            raw[0][2][0][22] = None
+            break
+    else:
+        pytest.fail(f"{booked} is not on the capture")
+    return _page(
+        _answering(json.dumps(payload), origin=None, destination=None, date=_DEP.isoformat())
+    )
+
+
+@pytest.mark.parametrize("extension", ["-CODESHARE", "-OPAIRLINES VS"])
+def test_a_leg_with_no_operating_identity_fails_an_operating_filter(
+    extension: str, gf_session: Callable[..., Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """AF9656 is VS26 sold by Air France. Without its operating tuple nothing
+    says whether it is a codeshare or flown by VS, and a filter that cannot
+    tell must not answer with a row Matrix drops."""
+    gf_session(_lhr_without_operating_identity("AF9656"))
+    cli._run_gflight_path(
+        legs=(Leg.of("JFK", "LHR", _DEP, extension=extension),),
+        opts=SearchOptions(cabin=Cabin.COACH),
+        top_n=200,
+        json_out=True,
+    )
+    kept = {_json_booked(r) for r in json.loads(capsys.readouterr().out)}
+    assert kept, "the filter answered with nothing"
+    assert "Air France|9656" not in kept
+
+
 # ────────────────────────── round trip: filter, then pin ──────────────────
 
 
