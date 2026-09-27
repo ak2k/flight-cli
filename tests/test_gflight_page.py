@@ -1594,8 +1594,8 @@ def _round_trip_filters() -> Any:
 def test_the_pinned_fanout_is_capped_regardless_of_top_n(client: Any) -> None:
     """Each pinned outbound is another multi-megabyte page GET, and the
     multi-cabin path bumps top_n by 5x (capped at 100) to widen the pool it
-    filters — free on an RPC, not free here. At top_n=50 over a 30-row board
-    the round trip costs 1 outbound + 10 pins, not 1 + 30."""
+    filters — free on an RPC, not free here. At top_n=50 the round trip costs
+    1 outbound + 10 pins, not one pin per row of the board."""
     fake = client(
         _FakeResponse(text=_board_of(30)),  # the outbound board
         _FakeResponse(text=_return_board_of(1)),  # every pinned leg answers

@@ -458,3 +458,32 @@ def test_the_first_paint_prints_the_insight_too(capsys: pytest.CaptureFixture[st
         {}, board, legs=(Leg.of("JFK", "LAX", _DEP),), top_n=3, awards_only=False
     )
     assert "Price insight: prices are typical for this trip" in capsys.readouterr().out
+
+
+def test_a_cabin_the_routing_emptied_says_so(
+    gf_session: Callable[..., Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The multi-cabin table names a cabin with no matching row rather than
+    leaving its column silently empty."""
+    gf_session(_served(_LAX))
+    cli._run_gflight_path_multi(
+        legs=(Leg.of("JFK", "LAX", _DEP, route_language="O:LH+"),),
+        opts=SearchOptions(cabin=Cabin.COACH),
+        cabins=(Cabin.COACH,),
+        sort_by=Cabin.COACH,
+        top_n=5,
+        json_out=True,
+        run_pp=False,
+        sel=cli._resolve_providers(
+            providers=None,
+            cash_only=True,
+            awards_only=False,
+            provider_opt=(),
+            legacy_no_pp=False,
+            legacy_pp_only=False,
+            legacy_pp_airlines=None,
+            legacy_pp_cabin=None,
+        ),
+    )
+    err = " ".join(capsys.readouterr().err.split())
+    assert "Google Flights COACH: no itinerary matched the routing" in err

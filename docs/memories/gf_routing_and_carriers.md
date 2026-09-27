@@ -80,16 +80,48 @@ from the enum NAME, not its value**: fli maps codes to display names
 (`Airline._0B.value == "Blue Air"`) and underscore-prefixes digit-leading ones,
 so `airline.name.removeprefix("_")` is the code.
 
-**What the page costs us.** It serves Google's default board (~30 rows/leg) with
-no back-fill, so a `-n` above that returns fewer rows than the RPC did, and a
-round-trip costs one page fetch per pinned outbound. More importantly the tfs
-parameter carries far fewer filters than `f.req` did, so `routing_predicates.
-page_can_encode` is a SECOND, narrower gate in front of the Tier model below:
-today only a stop ceiling encodes, and everything else routes to Matrix with its
-reason printed. Post-filtering a fixed 30-row board would answer a constrained
-search with a plausible-looking "no results" — the exact failure this whole
-design is built to avoid. Re-widening `3.6`/`3.7`/`3.15`/`3.17`/`3.18` is the
-obvious next step and is tracked in bd work-h70kv.
+**What the page costs us.** Without `tfu=` it serves Google's top ~30 rows per
+leg. `links.google_flights_search_page_url` always sends `tfu=EgQIABABIgA`
+(`{2: {1: 0, 2: 1}, 4: {}}`, the "show all" bit), which serves the full board:
+JFK-LAX 30 -> 95 rows, JFK-LHR 22 -> 101 (measured 2026-09-27), at roughly twice
+the page size (3.6 -> 7.5 MB, +0.7 s). A round trip costs one page fetch per
+pinned outbound. The tfs parameter carries far fewer filters than `f.req` did:
+today only a stop ceiling encodes. On the full board the Tier-2 predicates the
+post-filter evaluates the way Matrix does are served by Google too, so the
+search gate is per predicate (`_gf_postfilter.search_page_reasons`): each one
+is either encodable (`page_can_encode`) or a post-filtered Tier-2 carrier /
+codeshare predicate, and anything else routes to Matrix with its reason
+printed. Re-widening `3.6`/`3.7`/`3.15`/`3.17`/`3.18` is the next step.
+
+**How the full board is served.**
+- Rows are deduped per itinerary (every leg's carrier, flight number and
+  departure datetime), keeping the priced and cheaper listing at the first
+  listing's place. No true duplicate has been measured; the key keeps dates, so
+  the same flight numbers a day apart stay two trips.
+- The routing filter runs inside `search_with_ids` as each board is served: on
+  the outbound BEFORE the pins are taken (pins are the first rows in board
+  order), on each return board after `_unpinned_board`. A pin whose return
+  board the filter empties is counted in a warning.
+- A pin names each leg's OPERATING flight (`fl[22]`). Pinned under the
+  codeshare number it is booked as (AA142 as AY3787), the return board comes
+  back empty; pinned as AA142 it serves 20 rows at the same $799 combo price
+  (2026-09-27). The row keeps its booking identity for the table, the JSON and
+  the post-filter.
+- An answer the filter emptied goes to Matrix under `auto` with the reason on
+  stderr, and says why under `--backend gflight` (stdout `[]` in JSON mode).
+  The multi-cabin path prints the reason per cabin.
+- `ds:1[5]` is Google's price insight: `[code, [None, cheapest], [None, _],
+  [None, _], [None, typical_low], [None, typical_high], ...]`. The level is
+  derived (below the range low, above it high); `[0]` looked like a level code
+  (4, 4, 5) in three samples and is not used. One `Price insight:` line prints
+  under the Google table, in the page's currency; the JSON document does not
+  carry it. The multi-cabin table does not print it yet.
+
+**Carrier exclude reads the booking carrier.** `~XX+` / `-AIRLINES XX` drops a
+row only when a leg is booked under XX (`flights[i]`), which is Matrix's meaning
+for the fare shown: AA100, AA-sold with BA among its other sellers, stays under
+`~BA+`, and BA178 booked as AA6939 stays too. Carrier include still matches the
+booking carrier or any listed seller.
 
 The encoder is an enforced allowlist, not a deny-list: every field on fli's
 `FlightSearchFilters` must be named in one of three sets (encoded / refused /
@@ -603,15 +635,14 @@ if an fli carrier/airport code doesn't map, that query dimension is skipped (no
 under-return) and the post-filter (a string-based backstop that also enforces
 marketing-include + connect-at) is the correctness guarantee.
 
-`_gf_postfilter.gf_can_serve` is the looser rule — no Tier-3, but Tier-2 is
-admitted as long as this module can evaluate it — and it has **no production
-caller**: `_pick_backend` asks `page_can_encode` instead. Only its own tests
-reach it. Re-wire it or delete it; don't cite it as the gate.
-
-**The SEARCH gate is `page_can_encode`**, above: strictly narrower, because the
-page's tfs= parameter has no field for most of Tier 1 and the ~30-row board
-makes post-filtering Tier 2 unsafe. `_gf_postfilter` stays wired in as the
-backstop; it just has less to do.
+**The SEARCH gate is `_gf_postfilter.search_page_reasons`**, above: a
+predicate passes when `page_can_encode` encodes it, or when it is Tier-2, the
+post-filter evaluates it, and it is neither a flight number nor a
+connection-airport exclude. Those two stay on Matrix because Matrix reads them
+positionally and the filter does not: bare `AS21` is one flight ("No solutions"
+on JFK-LAX, where the filter keeps AS21 connections), and `F* ~DUB F*` is one
+connection not at DUB (Matrix drops the nonstops the filter keeps). The Tier-1
+predicates the page cannot encode also stay on Matrix.
 
 Time-based Tier-2 predicates (`MINCONNECT`, `-REDEYES`, `-OVERNIGHTS`) currently
 escalate to Matrix — `_gf_postfilter` can't evaluate them yet (no per-segment

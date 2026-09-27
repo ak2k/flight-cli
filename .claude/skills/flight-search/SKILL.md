@@ -15,7 +15,7 @@ intent into the right invocation **on the first try**.
 
 | Command | Purpose |
 |---|---|
-| `flight search ORIGIN DEST --dep YYYY-MM-DD [--return YYYY-MM-DD]` | Specific-date search. Auto-picks Google Flights for plain cash queries and ITA Matrix when a Matrix-only flag is set (routing/extension/multi-city slice/time-of-day/extra pax types). Force with `--backend matrix\|gflight`. PointsPath award overlay runs on both backends when tokens are present. |
+| `flight search ORIGIN DEST --dep YYYY-MM-DD [--return YYYY-MM-DD]` | Specific-date search. Auto-picks Google Flights for plain cash queries and ITA Matrix when a constraint Google can't serve is set (most routing/extension, multi-city slice, time-of-day, extra pax types); a stop cap, carrier excludes (`~XX+`, `-AIRLINES`), operating carrier (`O:XX+`, `OPAIRLINES`) and `-CODESHARE` stay on Google, which serves its full board (`-n` above 30 works). Force with `--backend matrix\|gflight`. PointsPath award overlay runs on both backends when tokens are present. |
 | `flight calendar ORIGIN DEST --start YYYY-MM-DD [--end ...] [-d 5-7]` | Lowest-fare grid across a date window. Matrix only. Default round-trip; `--one-way` flips. |
 | `flight detail ORIGIN DEST --dep YYYY-MM-DD --start ... --end ...` | Phase-2 of the calendar flow: full itineraries for a date picked from the grid. Matrix only. |
 | `flight airport QUERY` | IATA / partial-name autocomplete. |

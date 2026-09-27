@@ -3772,6 +3772,12 @@ def _run_gflight_path_multi(
     if not fli_by_cabin:
         err.print("[red]All Google Flights cabin queries failed.[/]")
         raise typer.Exit(1)
+    for cab, cab_rows in fli_by_cabin.items():
+        if not cab_rows and getattr(cab_rows, "dropped", 0):
+            err.print(
+                f"[yellow]Google Flights {_safe_text(cab.value)}: "
+                "no itinerary matched the routing.[/]"
+            )
 
     if json_out and not run_pp:
         out: dict[str, Any] = {}
