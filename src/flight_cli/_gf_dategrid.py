@@ -64,7 +64,7 @@ from .fli_bridge import (
 from .routing_predicates import Tier, classify
 
 if TYPE_CHECKING:
-    from .domain import CalendarSearch
+    from .domain import CalendarSearch, Leg
     from .routing_predicates import Predicate
 
 _MAX_GRID_DAYS = 61  # GetCalendarGraph's per-request span limit
@@ -107,19 +107,25 @@ class GfGridUnavailableError(Exception):
     once instead of retrying, and say which backend priced the grid."""
 
 
-def grid_can_serve(search: CalendarSearch) -> bool:
-    """Whether the GF date-grid can fully serve this calendar: one-way,
-    single-airport per leg, and only Tier-1 constraints (the grid has no
+def grid_can_serve(search: CalendarSearch, *, round_trip: bool = False) -> bool:
+    """Whether the GF date-grid can fully serve this calendar: single-airport
+    per leg, and only Tier-1 constraints on every leg (the grid has no
     itineraries, so even Tier-2 can't be post-filtered — those go to Matrix).
-    Round-trip is excluded for now: a duration *range* doesn't map to the grid's
-    single-duration parameter."""
-    if len(search.legs) != 1:
+
+    One-way, unless the caller can serve a round trip (`round_trip`: the page's
+    price graph can, `date_grid` below cannot) AND the window names one trip
+    length. The graph prices a single trip length, so a duration range has no
+    one question to ask it."""
+    window = search.window
+    if len(search.legs) > 1 and not (round_trip and window.duration_min == window.duration_max):
         return False
-    leg = search.legs[0]
-    if len(leg.origins) != 1 or len(leg.destinations) != 1:
-        return False
-    constraints = classify(leg.route_language, leg.extension)
-    return all(p.tier is Tier.GF_NATIVE for p in constraints.predicates)
+    for leg in search.legs:
+        if len(leg.origins) != 1 or len(leg.destinations) != 1:
+            return False
+        constraints = classify(leg.route_language, leg.extension)
+        if any(p.tier is not Tier.GF_NATIVE for p in constraints.predicates):
+            return False
+    return True
 
 
 def _decliner_phrase(tier: str, *, routing: bool, extension_count: int) -> str:
@@ -157,8 +163,20 @@ def grid_routing_blocker(search: CalendarSearch) -> str | None:
     source by the same rule, so the reader learns which flag to edit whichever
     tier stopped the query, and `--extension` takes a `;`-separated list, so the
     phrase agrees in number with how many of its directives declined.
+
+    Every leg is read, outbound first. The return leg inherits `--routing` and
+    `--extension` unless `--routing-ret` / `--ext-ret` replace them, so a return
+    phrase is only ever about those two flags, and it says so.
     """
-    leg = search.legs[0]
+    for i, leg in enumerate(search.legs):
+        phrase = _leg_blocker(leg)
+        if phrase is not None:
+            return f"{phrase} on the return leg" if i else phrase
+    return None
+
+
+def _leg_blocker(leg: Leg) -> str | None:
+    """`grid_routing_blocker` for one leg."""
     routing_c = classify(leg.route_language, None)
     ext_c = classify(None, leg.extension)
     # Keyed on the TIER, not on `UnsupportedPred`: `grid_can_serve` decides by
