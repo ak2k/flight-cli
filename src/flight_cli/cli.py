@@ -7,6 +7,7 @@ Commands:
   flight calendar  — lowest-fare grid (Matrix only)
   flight detail    — phase-2 itineraries for a date picked from the grid
   flight airport   — IATA autocomplete
+  flight explore   — where an origin flies, cheapest first (Google Flights, Chrome)
   flight fare      — [deprecated] alias for `search --backend matrix`
   flight gflight   — [deprecated] alias for `search --backend gflight`
 """

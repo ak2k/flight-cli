@@ -72,6 +72,7 @@ Every result-printing command supports:
 - **Time-of-day filters** (`--depart-times`, `--return-times`): `morning,evening` etc.
 - **Stop limits** (`--stops N`): `0` = nonstop only, `1` = up to one stop, … Honored on both backends.
 - **Calendar-mode duration ranges** (`-d 5-7`): one search returns prices for 5-, 6-, and 7-night trips at every starting day.
+- **Sellers and explore** (Chrome, the `browser` extra): `flight search JFK LAX --dep 2026-10-20 --sellers --pick 2` lists every seller of row 2 with its price and fare name, cheapest first; `flight explore JFK --month 2026-11 --days 5-7 --max-price 300` lists where JFK flies that month and the cheapest round trip to each.
 
 ## Award overlay
 
