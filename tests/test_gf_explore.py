@@ -366,6 +366,16 @@ def test_none_priced_without_a_cap_is_a_refusal(monkeypatch: pytest.MonkeyPatch)
         pytest.param(["JFK", "--month", "0000-05"], "YYYY-MM", id="month-year-zero"),
         pytest.param(["JFK", "--days", "3-7"], "weekend (1-4 nights)", id="days-span-two"),
         pytest.param(["JFK", "--days", "10-12"], "two weeks (13-16 nights)", id="days-in-a-gap"),
+        pytest.param(
+            ["JFK", "--days", "3-7"],
+            "overlaps weekend and one week; it must overlap exactly one",
+            id="days-span-two-names-both",
+        ),
+        pytest.param(
+            ["JFK", "--days", "10-12"],
+            "overlaps no trip length; it must overlap exactly one",
+            id="days-in-a-gap-says-so",
+        ),
         pytest.param(["JFK", "--days", "7-5"], "below min", id="days-reversed"),
     ],
 )

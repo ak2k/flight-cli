@@ -5568,9 +5568,10 @@ def _explore_trip_length(days: str | None) -> TripLength:
     hits = trip_lengths_overlapping(lo, hi)
     if len(hits) != 1:
         choices = ", ".join(f"{t.name} ({t.nights[0]}-{t.nights[1]} nights)" for t in TRIP_LENGTHS)
+        overlap = " and ".join(t.name for t in hits) or "no trip length"
         err.print(
-            f"[red]--days {_quote(days)} must fall within one of the page's trip "
-            f"lengths: {_safe_text(choices)}.[/]"
+            f"[red]--days {_quote(days)} overlaps {_safe_text(overlap)}; it must overlap "
+            f"exactly one of the page's trip lengths: {_safe_text(choices)}.[/]"
         )
         raise typer.Exit(2)
     return hits[0]
