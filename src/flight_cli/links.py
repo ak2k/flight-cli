@@ -924,6 +924,15 @@ def extract_pin_segments_from_slice(s: Slice) -> list[dict[str, str]] | None:
     return out
 
 
+def pin_dates_are_guessed(s: Slice) -> bool:
+    """Whether `extract_pin_segments_from_slice` has to guess a flight's date:
+    a connection with no per-flight dates that lands on another day than it
+    leaves. Its last flight may have left before midnight or after."""
+    departed = s.departure or ""
+    arrived = s.arrival or departed
+    return not s.segment_dates and len(s.flights) > 1 and arrived[:10] != departed[:10]
+
+
 def google_flights_url(s: Search, *, currency: str = "USD", language: str = "en") -> str:
     """Build a Google Flights `tfs=` URL that opens directly into a populated
     search result. Multi-airport is flattened to first IATA per leg (Google

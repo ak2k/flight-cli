@@ -665,6 +665,61 @@ def test_enriched_sellers_open_the_merged_tables_row(
     assert len(fake.urls) == 1
 
 
+def _matrix_connection(arrival: str) -> dict[str, Any]:
+    """AA100 JFK-ORD then AA200 ORD-LAX, leaving in the evening. Matrix dates
+    the slice's two ends and neither flight."""
+    return {
+        "displayTotal": "USD150.00",
+        "itinerary": {
+            "slices": [
+                {
+                    "flights": ["AA100", "AA200"],
+                    "departure": f"{_DEP.isoformat()}T17:00",
+                    "arrival": arrival,
+                    "origin": {"code": "JFK"},
+                    "destination": {"code": "LAX"},
+                    "stops": [{"code": "ORD"}],
+                }
+            ]
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("arrival_day", "opened"),
+    [
+        pytest.param(1, False, id="lands-next-day"),
+        pytest.param(0, True, id="lands-same-day"),
+    ],
+)
+def test_enriched_sellers_open_a_matrix_connection_only_when_its_flights_dates_are_known(
+    monkeypatch: pytest.MonkeyPatch, board: list[Any], arrival_day: int, opened: bool
+) -> None:
+    """A connection that lands the next day has a last flight that left on
+    either day, and Matrix does not say which. A booking page asked for the
+    wrong day prices another trip under this row's number."""
+    landed = (_DEP + timedelta(days=arrival_day)).isoformat()
+    monkeypatch.setattr(
+        cli, "_matrix_into", _matrix_answers([_matrix_connection(f"{landed}T00:30")])
+    )
+    fake = _serve(
+        monkeypatch,
+        _booking_body(
+            _option("American", 150, airline=True, flights=[["AA", "100"], ["AA", "200"]])
+        ),
+    )
+    result = _run("--sellers", "--no-matrix-url", "--no-google-url")
+    if opened:
+        assert result.exit_code == 0, result.output
+        assert "Booking options for #1" in result.stdout
+        assert len(fake.urls) == 1
+    else:
+        assert result.exit_code == 1, result.output
+        assert "No booking options for #1" in result.stderr
+        assert "--fast" in result.stderr
+        assert fake.urls == []
+
+
 async def _no_matrix(*_a: object, **_kw: object) -> None:
     return None
 
