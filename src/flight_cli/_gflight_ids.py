@@ -44,7 +44,7 @@ import threading
 import time
 import urllib.parse
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, assert_never, cast
 
@@ -1526,8 +1526,9 @@ def _fetch_page(filters: FlightSearchFilters) -> PageFetch:
 
 @dataclass(frozen=True)
 class PriceInsight:
-    """Google's price insight for a search: its cheapest fare and the range
-    fares for this trip usually fall in, in the page's currency.
+    """The price insight for a search: the cheapest fare it answers with and
+    the range Google says fares for this trip usually fall in, in the page's
+    currency.
 
     From `ds:1[5]`, measured as `[code, [None, cheapest], [None, _], [None, _],
     [None, typical_low], [None, typical_high], ...]`. `[0]` looks like a level
@@ -1586,6 +1587,27 @@ def _price_insight(payload: list[Any], rows: list[GFlightWithId]) -> PriceInsigh
     if cheapest is None or low is None or high is None or low > high or currency is None:
         return None
     return PriceInsight(cheapest=cheapest, typical_low=low, typical_high=high, currency=currency)
+
+
+def _kept_insight(
+    insight: PriceInsight | None,
+    rows: Iterable[GFlightWithId | tuple[GFlightWithId, ...]],
+    dropped: int,
+) -> PriceInsight | None:
+    """`insight` for the rows a routing filter kept.
+
+    Google's cheapest is the unfiltered board's, so once the filter has removed
+    a row the level is restated from the cheapest fare kept, against Google's
+    own range. A combination's fare is its last member's. With no priced row
+    kept there is no level to state."""
+    if insight is None or not dropped:
+        return insight
+    fares = [
+        fare
+        for row in rows
+        if (fare := (row[-1] if isinstance(row, tuple) else row).flight.price) is not None
+    ]
+    return replace(insight, cheapest=min(fares)) if fares else None
 
 
 class Board[T](list[T]):
@@ -2054,7 +2076,8 @@ def search_with_ids(
     rows in board order and a filter applied after them answers from pins it
     then discards. It runs on each return board after the pin check, so a page
     that ignored its pin is refused as one rather than read as "no return
-    matches". The result carries the outbound page's price insight."""
+    matches". The result carries the outbound page's price insight, restated
+    for the rows the filter kept."""
     first = _one_call_laddered(filters, transport)
     if not first:
         return None
@@ -2066,7 +2089,7 @@ def search_with_ids(
     dropped = len(first) - len(board)
     # One-way, or the last leg already — no further iteration.
     if filters.trip_type == TripType.ONE_WAY or selected_count >= num_segments - 1 or not board:
-        return Board(board, insight=first.insight, dropped=dropped)
+        return Board(board, insight=_kept_insight(first.insight, board, dropped), dropped=dropped)
 
     combos: list[GFlightWithId | tuple[GFlightWithId, ...]] = []
     pins = board[: pinned_fanout(top_n)]
@@ -2145,7 +2168,8 @@ def search_with_ids(
     )
     if not combos and not dropped_returns:
         return None
-    return Board(combos, insight=first.insight, dropped=dropped + dropped_returns)
+    dropped += dropped_returns
+    return Board(combos, insight=_kept_insight(first.insight, combos, dropped), dropped=dropped)
 
 
 def _report_pin_outcome(

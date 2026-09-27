@@ -464,6 +464,81 @@ def test_the_insight_prints_one_line_under_the_table_in_the_page_currency(
     assert "$" not in lines[0]
 
 
+def _insight_lines(stdout: str) -> list[str]:
+    return [ln for ln in stdout.splitlines() if ln.startswith("Price insight:")]
+
+
+def test_a_filtered_board_states_the_level_of_the_fares_it_kept(
+    gf_session: Callable[..., Any],
+) -> None:
+    """Google's cheapest is the unfiltered board's USD293, typical. `O:LH+`
+    keeps three fares from USD319, above the range Google calls usual."""
+    gf_session(_served(_LHR))
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            *_SEARCH,
+            "JFK",
+            "LHR",
+            "--dep",
+            _DEP.isoformat(),
+            "--routing",
+            "O:LH+",
+            "--backend",
+            "gflight",
+            "--fast",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "USD319.00" in result.stdout
+    assert _insight_lines(result.stdout) == [
+        "Price insight: prices are high for this trip (usually USD170.00-USD295.00)."
+    ]
+
+
+def test_a_filter_that_kept_no_priced_fare_prints_no_insight(
+    gf_session: Callable[..., Any],
+) -> None:
+    """`O:SK+` keeps only the four SK rows Google did not price, so no fare is
+    left to state a level for."""
+    gf_session(_served(_LHR))
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            *_SEARCH,
+            "JFK",
+            "LHR",
+            "--dep",
+            _DEP.isoformat(),
+            "--routing",
+            "O:SK+",
+            "--backend",
+            "gflight",
+            "--fast",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "SK916" in result.stdout
+    assert _insight_lines(result.stdout) == []
+
+
+def test_a_filtered_round_trip_states_the_level_of_its_combination_fares(
+    gf_session: Callable[..., Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A combination is priced by its return member, USD6616 on the served
+    return board, not by the outbound board's unfiltered cheapest."""
+    gf_session(_lhr_board_with_ba_first(), _return_board())
+    cli._run_gflight_path(
+        legs=_round_trip("~BA+"),
+        opts=SearchOptions(cabin=Cabin.COACH),
+        top_n=1,
+        json_out=False,
+    )
+    assert _insight_lines(capsys.readouterr().out) == [
+        "Price insight: prices are high for this trip (usually USD170.00-USD295.00)."
+    ]
+
+
 def test_the_json_document_does_not_carry_the_insight(gf_session: Callable[..., Any]) -> None:
     gf_session(_served(_LAX))
     result = CliRunner().invoke(

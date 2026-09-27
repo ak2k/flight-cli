@@ -115,7 +115,10 @@ printed. Re-widening `3.6`/`3.7`/`3.15`/`3.17`/`3.18` is the next step.
   derived (below the range low, above it high); `[0]` looked like a level code
   (4, 4, 5) in three samples and is not used. One `Price insight:` line prints
   under the Google table, in the page's currency; the JSON document does not
-  carry it. The multi-cabin table does not print it yet.
+  carry it. The multi-cabin table does not print it yet. Google's cheapest is
+  the unfiltered board's, so when the routing filter removed rows the level is
+  restated from the cheapest fare kept (a combination's by its return member)
+  against Google's range, and no line prints when no priced row is kept.
 
 **Carrier exclude reads the booking carrier.** `~XX+` / `-AIRLINES XX` drops a
 row only when a leg is booked under XX (`flights[i]`), which is Matrix's meaning
