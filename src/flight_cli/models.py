@@ -318,3 +318,110 @@ class Location(_Loose):
     city_name: str | None = Field(None, alias="cityName")
     type: str | None = None
     timezone: str | None = None
+
+
+# ─────────────────────────── /v1/summarize answers ───────────────────────────
+
+
+class FareSegment(_Loose):
+    origin: str | None = None
+    destination: str | None = None
+
+
+class FareBookingInfo(_Loose):
+    segment: FareSegment | None = None
+    booking_code: str | None = Field(None, alias="bookingCode")
+    cabin: str | None = None
+
+
+class PricedFare(_Loose):
+    """One fare component of a pricing. `carrier` is the bare code here, where
+    `fareRules` sends an object."""
+
+    key: str | None = None  # what a fare-rules request names this fare by
+    carrier: str | None = None
+    code: str | None = None  # the fare basis
+    origin_city: str | None = Field(None, alias="originCity")
+    destination_city: str | None = Field(None, alias="destinationCity")
+    booking_infos: list[FareBookingInfo] = Field(
+        default_factory=list[FareBookingInfo], alias="bookingInfos"
+    )
+
+
+class FareCalculation(_Loose):
+    lines: list[str] = Field(default_factory=list[str])
+
+
+class TicketPricing(_Loose):
+    fares: list[PricedFare] = Field(default_factory=list[PricedFare])
+    fare_calculations: list[FareCalculation] = Field(
+        default_factory=list[FareCalculation], alias="fareCalculations"
+    )
+    notes: list[str] = Field(default_factory=list[str])
+    display_price: str | None = Field(None, alias="displayPrice")
+
+
+class Ticket(_Loose):
+    pricings: list[TicketPricing] = Field(default_factory=list[TicketPricing])
+
+
+class BookingDetails(_Loose):
+    tickets: list[Ticket] = Field(default_factory=list[Ticket])
+    display_total: str | None = Field(None, alias="displayTotal")
+
+    @property
+    def pricings(self) -> list[TicketPricing]:
+        return [p for t in self.tickets for p in t.pricings]
+
+    @property
+    def fares(self) -> list[PricedFare]:
+        return [f for p in self.pricings for f in p.fares]
+
+
+class BookingDetailsResult(_Loose):
+    """/v1/summarize `viewDetails` response."""
+
+    booking_details: BookingDetails | None = Field(None, alias="bookingDetails")
+    raw: dict[str, Any] | None = None
+
+    @classmethod
+    def from_api(cls, body: dict[str, Any]) -> BookingDetailsResult:
+        return cls(bookingDetails=body.get("bookingDetails"), raw=body)
+
+
+class FareRule(_Loose):
+    category: int | None = None  # the ATPCO rule category
+    type: str | None = None  # GENERAL-RULE / RULE / FOOTNOTE; absent on category 0
+    blocks: list[str] = Field(default_factory=list[str])
+
+
+class FareRuleSet(_Loose):
+    rules: list[FareRule] = Field(default_factory=list[FareRule])
+
+
+class FareCarrier(_Loose):
+    code: str | None = None
+    short_name: str | None = Field(None, alias="shortName")
+
+
+class FareRules(_Loose):
+    carrier: FareCarrier | None = None
+    code: str | None = None  # the fare basis
+    origin_city: str | None = Field(None, alias="originCity")
+    destination_city: str | None = Field(None, alias="destinationCity")
+    rule_sets: list[FareRuleSet] = Field(default_factory=list[FareRuleSet], alias="ruleSets")
+
+    @property
+    def rules(self) -> list[FareRule]:
+        return [r for rs in self.rule_sets for r in rs.rules]
+
+
+class FareRulesResult(_Loose):
+    """/v1/summarize `viewRules` response for one fare key."""
+
+    fare_rules: FareRules | None = Field(None, alias="fareRules")
+    raw: dict[str, Any] | None = None
+
+    @classmethod
+    def from_api(cls, body: dict[str, Any]) -> FareRulesResult:
+        return cls(fareRules=body.get("fareRules"), raw=body)

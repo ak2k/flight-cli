@@ -11,6 +11,8 @@ new case via `typing.assert_never`.
 
 from __future__ import annotations
 
+import re
+
 # resolves type hints at validation time and needs the symbol present in the
 # module's runtime globals, even with `from __future__ import annotations`.
 from datetime import date as _date  # noqa: TC003
@@ -104,6 +106,16 @@ class SearchOptions(BaseModel):
     # derived default (-1 when stops constrained, 1 otherwise).
     extra_stops: int | None = None
     page_size: int = 25
+    # ISO 4217 code to price in. None = each backend's own default (USD for
+    # every request this CLI sends), and leaves the Matrix body without the key.
+    currency: str | None = None
+
+    @field_validator("currency")
+    @classmethod
+    def _validate_currency(cls, v: str | None) -> str | None:
+        if v is not None and not re.fullmatch(r"[A-Z]{3}", v):
+            raise ValueError(f"Not a 3-letter ISO 4217 currency code: {v!r}")
+        return v
 
 
 _IATA_CODE_LEN = 3

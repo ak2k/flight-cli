@@ -13,8 +13,8 @@ import httpx
 from ._api_key import ApiKeyResolutionError, invalidate_cache, resolve_api_key
 from ._http import HttpTransport
 from .domain import CalendarFollowup, CalendarSearch, Search, SpecificDateSearch
-from .models import CalendarResult, Location, SearchResult
-from .wire import to_wire
+from .models import BookingDetailsResult, CalendarResult, FareRulesResult, Location, SearchResult
+from .wire import booking_details_body, fare_rules_body, to_wire
 
 # Re-export so callers can `from flight_cli.client import ApiKeyResolutionError`.
 __all__ = [
@@ -25,6 +25,7 @@ __all__ = [
 
 BASE = "https://content-alkalimatrix-pa.googleapis.com"
 SEARCH_URL = f"{BASE}/v1/search"
+SUMMARIZE_URL = f"{BASE}/v1/summarize"
 
 
 class MatrixApiError(Exception):
@@ -108,19 +109,18 @@ class MatrixClient:
 
     # ─────────────────────────── search execution ──────────────────────────
 
-    async def execute(self, search: Search, *, cache: bool = True) -> SearchResult | CalendarResult:
-        """Run any flavor of search. Returns SearchResult or CalendarResult
-        depending on the search variant.
+    async def _post(self, url: str, body: dict[str, Any], *, cache: bool) -> dict[str, Any]:
+        """POST a body to Matrix and return its decoded answer, Matrix errors
+        raised as `MatrixApiError`.
 
         On a 403 from Matrix (typically a stale or wrong cached API key),
         invalidate the cache, re-bootstrap once, and retry. If the retry
         also 403s, surface ApiKeyResolutionError with the recovery guidance
         from _api_key._help_text — instead of a raw httpx traceback.
         """
-        body = to_wire(search).as_json()
         try:
             data = await self._http.post_json(
-                SEARCH_URL,
+                url,
                 body,
                 params={"key": self._api_key, "alt": "json"},
                 cache=cache,
@@ -132,7 +132,7 @@ class MatrixClient:
             self._api_key = resolve_api_key(force_bootstrap=True)
             try:
                 data = await self._http.post_json(
-                    SEARCH_URL,
+                    url,
                     body,
                     params={"key": self._api_key, "alt": "json"},
                     cache=cache,
@@ -147,7 +147,37 @@ class MatrixClient:
                     ) from e2
                 raise
         _raise_if_api_error(data)
+        return data
+
+    async def execute(self, search: Search, *, cache: bool = True) -> SearchResult | CalendarResult:
+        """Run any flavor of search. Returns SearchResult or CalendarResult
+        depending on the search variant."""
+        data = await self._post(SEARCH_URL, to_wire(search).as_json(), cache=cache)
         return _parse_response(search, data)
+
+    # ──────────────────────── follow-ups on a search ───────────────────────
+    # Answered from the search's session, which Matrix holds for a while after
+    # the search returns, so any client may ask. Never cached: the body names a
+    # session, and an answer kept past that session's life is one Matrix would
+    # no longer give.
+
+    async def booking_details(
+        self, *, session: str, solution_set: str, solution_id: str
+    ) -> BookingDetailsResult:
+        body = booking_details_body(
+            session=session, solution_set=solution_set, solution_id=solution_id
+        )
+        data = await self._post(SUMMARIZE_URL, body.as_json(), cache=False)
+        return BookingDetailsResult.from_api(data)
+
+    async def fare_rules(
+        self, *, session: str, solution_set: str, solution_id: str, fare_key: str
+    ) -> FareRulesResult:
+        body = fare_rules_body(
+            session=session, solution_set=solution_set, solution_id=solution_id, fare_key=fare_key
+        )
+        data = await self._post(SUMMARIZE_URL, body.as_json(), cache=False)
+        return FareRulesResult.from_api(data)
 
     # ───────────────────────── ancillary helpers ───────────────────────────
 
