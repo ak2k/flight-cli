@@ -248,6 +248,29 @@ def test_json_carries_the_search_and_the_whole_rule_bodies(matrix: _Matrix) -> N
     assert "DEATH OF THE PASSENGER" in json.dumps(rules["rules"])
 
 
+@pytest.mark.parametrize(
+    ("summarize", "said"),
+    [
+        (
+            {"error": {"message": "session [/x] expired", "type": "INVALID"}},
+            "Matrix returned an error (INVALID): session [/x] expired",
+        ),
+        ({"bookingDetails": {}}, "Matrix returned no booking details for itinerary #1."),
+    ],
+)
+def test_json_keeps_the_search_when_its_rules_fail(
+    matrix: _Matrix, summarize: dict[str, Any], said: str
+) -> None:
+    """The table path prints the fares before it asks for their rules; the
+    document carries the search the same way, and the exit status still says
+    the rules failed."""
+    matrix.summarize = summarize
+    result = _run("--fare-rules", "--format", "json", "--cash-only")
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {"search": matrix.search, "fare_rules": None}
+    assert said in result.stderr
+
+
 def test_json_of_an_empty_search_has_no_rules(matrix: _Matrix) -> None:
     matrix.search = {"solutionCount": 0}
     result = _run("--fare-rules", "--format", "json", "--cash-only")

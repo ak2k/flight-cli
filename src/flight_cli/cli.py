@@ -2298,14 +2298,19 @@ def _run_matrix_path(
             fare_rules=True,
         )
     if json_out and not run_pp:
+        if not fare_rules:
+            sys.stdout.write(json.dumps(res.raw, indent=2))
+            return
         # `--fare-rules` refuses JSON with awards on, so its document is always
-        # written here.
-        doc = (
-            {"search": res.raw, "fare_rules": _fare_rules_document(_rules())}
-            if fare_rules
-            else res.raw
-        )
-        sys.stdout.write(json.dumps(doc, indent=2))
+        # written here. It carries the search even when the rules fail, as the
+        # table path prints the fares before asking for them; the exit status
+        # still reports the failure.
+        try:
+            rules_doc = _fare_rules_document(_rules())
+        except typer.Exit:
+            sys.stdout.write(json.dumps({"search": res.raw, "fare_rules": None}, indent=2))
+            raise
+        sys.stdout.write(json.dumps({"search": res.raw, "fare_rules": rules_doc}, indent=2))
         return
     # `not json_out` for the reason given at the same gate in
     # `_run_gflight_path`: with awards on, the document is written below this.
