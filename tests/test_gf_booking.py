@@ -665,17 +665,44 @@ def test_enriched_sellers_open_the_merged_tables_row(
     assert len(fake.urls) == 1
 
 
-def test_enriched_sellers_with_no_matrix_answer_fail_rather_than_go_quiet(
+async def _no_matrix(*_a: object, **_kw: object) -> None:
+    return None
+
+
+def test_enriched_sellers_with_no_matrix_answer_open_the_google_tables_row(
     monkeypatch: pytest.MonkeyPatch, board: list[Any]
 ) -> None:
-    async def _nothing(*_a: object, **_kw: object) -> None:
-        return None
+    """With Matrix silent, the Google table painted first is the only numbered
+    table on screen, so `--pick 2` names its row 2 (B6 123)."""
+    monkeypatch.setattr(cli, "_matrix_into", _no_matrix)
+    fake = _serve(
+        monkeypatch, _booking_body(_option("JetBlue", 170, airline=True, flights=[["B6", "123"]]))
+    )
+    result = _run("--sellers", "--pick", "2", "--no-matrix-url", "--no-google-url")
+    assert result.exit_code == 0, result.output
+    out = result.stdout
+    assert out.index("Google Flights · JFK→LAX") < out.index("Booking options for #2")
+    assert "JetBlue at USD170.00 beats the table price, USD179.00." in out
+    raw = base64.urlsafe_b64decode(
+        urllib.parse.parse_qs(urllib.parse.urlsplit(fake.urls[0]).query)["tfs"][0] + "=="
+    )
+    assert b"123" in raw
+    assert b"1523" not in raw
 
-    monkeypatch.setattr(cli, "_matrix_into", _nothing)
+
+def test_enriched_sellers_with_no_table_at_all_fail_rather_than_go_quiet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _empty(*_a: object, **_kw: object) -> list[Any]:
+        return []
+
+    monkeypatch.setattr(cli, "_gflight_results", _empty)
+    monkeypatch.setattr(cli, "_matrix_into", _no_matrix)
     _no_chrome(monkeypatch)
     result = _run("--sellers", "--no-matrix-url", "--no-google-url")
     assert result.exit_code == 1, result.output
-    assert "without Matrix there is none" in " ".join(result.stderr.split())
+    assert "No booking options" in result.stderr
+    assert result.stdout == ""
 
 
 def test_a_round_trip_opens_the_booking_page_for_both_legs(monkeypatch: pytest.MonkeyPatch) -> None:

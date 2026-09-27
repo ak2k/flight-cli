@@ -3263,7 +3263,8 @@ def _run_enriched_path(  # noqa: PLR0915 — one weave's outcome arms, read in o
     the Matrix (authoritative) result. `--fast` skips this for GF-only speed.
 
     `sellers` opens row `pick` of the merged table, the one the Google link
-    pins, and prints its booking options last."""
+    pins, or of the Google table when Matrix does not answer, and prints its
+    booking options last."""
     # Imported here rather than deeper in: every enriched run executes these two
     # lines, so a packaging fault in either module fails the same way on every
     # run instead of only on the runs where Matrix happens to land.
@@ -3322,10 +3323,20 @@ def _run_enriched_path(  # noqa: PLR0915 — one weave's outcome arms, read in o
         if state.get("paint_err") is not None:
             _report_paint_failure(state["paint_err"])
         _report_search_matrix_failure(state)
+        if sellers and not painted:
+            _no_booking_options("No booking options", "no table was printed to pick a row from.")
         if sellers:
-            _no_booking_options(
-                "No booking options",
-                "--sellers opens a row of the merged table, and without Matrix there is none.",
+            # The Google table painted first is the only numbered one on
+            # screen, so the pick names its row, as it does under `--fast`.
+            rows = _price_ordered(gf)[:top_n]
+            n = _pick_for_sellers(pick, len(rows))
+            sr = fli_results_to_search_result(rows)
+            _print_booking_options(
+                matrix_search,
+                sr,
+                n,
+                table_prices=[sr.solutions[n - 1].price],
+                headed=gf_headed,
             )
         if not painted:
             raise typer.Exit(1)
