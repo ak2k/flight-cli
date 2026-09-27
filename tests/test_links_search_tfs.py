@@ -218,6 +218,32 @@ def test_selected_leg_uses_the_iata_code_not_the_airline_name(airline: Any, code
     assert leg[6] == [b"123"]
 
 
+def test_a_pinned_leg_over_an_airport_set_keeps_the_set_on_both_slices() -> None:
+    """A round trip over a set pins the outbound and re-fetches the returns: the
+    pinned request carries the chosen legs AND every airport of both slices."""
+    nyc = [[Airport["JFK"], 0], [Airport["LGA"], 0], [Airport["EWR"], 0]]
+    rt = _filters(
+        flight_segments=[
+            FlightSegment(
+                departure_airport=nyc,
+                arrival_airport=[[Airport["LAX"], 0]],
+                travel_date=_OUT.isoformat(),
+                selected_flight=_picked(Airline["B6"], "123"),
+            ),
+            FlightSegment(
+                departure_airport=[[Airport["LAX"], 0]],
+                arrival_airport=nyc,
+                travel_date=_BACK.isoformat(),
+            ),
+        ],
+        trip_type=TripType.ROUND_TRIP,
+    )
+    out, back = _slices(build_search_tfs(rt))
+    assert _decode(out[4][0])[6] == [b"123"]
+    assert (_endpoints(out, 13), _endpoints(out, 14)) == ([b"JFK", b"LGA", b"EWR"], [b"LAX"])
+    assert (_endpoints(back, 13), _endpoints(back, 14)) == ([b"LAX"], [b"JFK", b"LGA", b"EWR"])
+
+
 def test_unpinned_segment_carries_no_selected_leg() -> None:
     rt = _filters(
         flight_segments=[
