@@ -473,8 +473,8 @@ def test_the_table_names_the_trip_length_and_keeps_the_links(
     _graph_is(monkeypatch, _RT)
     _calendar(one_way=False, duration="7")
     out = " ".join(capsys.readouterr().out.split())
-    assert out.startswith("2 priced days · cheapest: 399 (USD)")
-    assert "lowest round-trip fare (7 nights) per departure day" in out
+    assert out.startswith("2 priced days · 7-night round trip · cheapest: 399 (USD)")
+    assert "lowest fare per departure day (Google Flights)" in out
     assert "Matrix deep-link:" in out
 
 

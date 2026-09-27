@@ -3707,8 +3707,8 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_render_calendar", "res.solution_count"),
         ("_render_calendar", "duration_note"),
         ("_render_date_grid", "priced_days"),
-        # A literal, or one around the trip length its `:d` spec proves a number.
-        ("_render_date_grid", "fare"),
+        # Empty, or a literal around the trip length its `:d` spec proves a number.
+        ("_render_date_grid", "trip"),
         ("_render_gflight_table", "_LEGROOM_KEY"),  # the legend it wrote
         # Sanitized where the currency was read, so the summary line and the table
         # title interpolate one value that was wrapped once.

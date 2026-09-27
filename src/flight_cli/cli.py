@@ -2123,15 +2123,15 @@ def _render_date_grid(
         return
     priced_days = len(grid)
     cheapest = min(grid.values())
+    trip = "" if trip_length is None else f"  · {trip_length:d}-night round trip"
     console.print(
-        f"[bold]{priced_days} priced days[/]  · cheapest: "
+        f"[bold]{priced_days} priced days[/]{trip}  · cheapest: "
         f"[bold cyan]{cheapest:.0f} ({_safe_text(currency)})[/]  · "
         f"window {_safe_text(sd.isoformat())} → {_safe_text(ed.isoformat())}"
     )
-    fare = "fare" if trip_length is None else f"round-trip fare ({trip_length:d} nights)"
     t = Table(
         title=f"{_safe_text(','.join(origin))} → {_safe_text(','.join(destination))}: "
-        f"lowest {fare} per departure day (Google Flights)",
+        "lowest fare per departure day (Google Flights)",
         show_header=True,
         header_style="bold green",
     )
