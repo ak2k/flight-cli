@@ -69,6 +69,7 @@ from .links import (
     matrix_itinerary_url,
 )
 from .log import configure as configure_logging
+from .models import FareRulesResult
 from .pp.auth import load_tokens
 from .pp.cli import auth_app, run_pp_for_search
 from .providers.base import LegQuery
@@ -81,7 +82,6 @@ if TYPE_CHECKING:
         CalendarResult,
         FareRule,
         FareRules,
-        FareRulesResult,
         LegInfo,
         Location,
         SearchResult,
@@ -2364,7 +2364,7 @@ _RULE_TEXT_LINES = 16
 class _FareRulesAnswer(NamedTuple):
     itinerary: int  # 1-based, the number the table printed
     details: BookingDetailsResult
-    rules: list[FareRulesResult]  # one per fare key, in the booking details' order
+    rules: list[FareRulesResult]  # one per fare, in the booking details' order
 
 
 def _refuse_fare_rules_conflicts(
@@ -2413,6 +2413,8 @@ def _fetch_fare_rules(
                 session=session, solution_set=solution_set, solution_id=solution_id
             )
             fares = details.booking_details.fares if details.booking_details else []
+            # A fare named without a key cannot be asked for its rules. It keeps
+            # its place as an empty answer, so the block says so for that fare.
             rules = [
                 await c.fare_rules(
                     session=session,
@@ -2420,8 +2422,9 @@ def _fetch_fare_rules(
                     solution_id=solution_id,
                     fare_key=f.key,
                 )
-                for f in fares
                 if f.key
+                else FareRulesResult(fareRules=None)
+                for f in fares
             ]
             return _FareRulesAnswer(idx + 1, details, rules)
 
@@ -2498,10 +2501,12 @@ def _render_fare_rules(answer: _FareRulesAnswer) -> None:
             for line in calc.lines:
                 console.print(f"  [dim]Fare calculation:[/] {_safe_text(line)}")
     seen: set[tuple[str | None, ...]] = set()
-    for result in answer.rules:
+    for fare, result in zip(bd.fares, answer.rules, strict=True):
         fr = result.fare_rules
         if fr is None:
-            console.print("[yellow]Matrix returned no rules for one of this itinerary's fares.[/]")
+            console.print(
+                f"[yellow]Matrix returned no rules for fare {_safe_text(fare.code or '?')}.[/]"
+            )
             continue
         # Several passengers can price on one fare, and its rules are one text.
         identity = (

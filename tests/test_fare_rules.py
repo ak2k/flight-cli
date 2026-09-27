@@ -163,6 +163,55 @@ def test_a_summarize_error_fails_the_run_after_the_table(matrix: _Matrix) -> Non
     assert "Matrix returned an error (INVALID): session [/x] expired" in result.stderr
 
 
+def _keyless_details() -> dict[str, Any]:
+    details = _fixture("summarize/booking_details_jfk_lhr_rt_gbp.json")
+    for ticket in details["bookingDetails"]["tickets"]:
+        for pricing in ticket["pricings"]:
+            for fare in pricing["fares"]:
+                del fare["key"]
+    return details
+
+
+def _answer_details_with(
+    matrix: _Matrix, monkeypatch: pytest.MonkeyPatch, details: dict[str, Any]
+) -> None:
+    real = matrix.handler
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if request.url.path != "/v1/search" and body["summarizerSet"] == "viewDetails":
+            matrix.bodies.append(body)
+            return httpx.Response(200, json=details)
+        return real(request)
+
+    monkeypatch.setattr(matrix, "handler", _handler)
+
+
+def test_a_fare_without_a_rules_key_says_its_rules_are_missing(
+    matrix: _Matrix, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fare the booking details name without a key cannot be asked for its
+    rules; the block says so for that fare instead of reading as complete."""
+    _answer_details_with(matrix, monkeypatch, _keyless_details())
+    result = _run("--fare-rules", *_QUIET)
+    assert result.exit_code == 0, result.output
+    out = result.stdout
+    assert "fare basis OLN0T0BV" in out
+    assert "Matrix returned no rules for fare OLN0T0BV." in out
+    assert "Matrix returned no rules for fare OLN0T1BV." in out
+    kinds = [b["summarizerSet"] for b in matrix.summarize_bodies()]
+    assert kinds == ["viewDetails"]
+
+
+def test_json_marks_a_fare_without_a_rules_key(
+    matrix: _Matrix, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _answer_details_with(matrix, monkeypatch, _keyless_details())
+    result = _run("--fare-rules", "--format", "json", "--cash-only")
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["fare_rules"]["rules"] == [None, None]
+
+
 def test_an_empty_search_asks_for_no_rules(matrix: _Matrix) -> None:
     matrix.search = {"solutionCount": 0, "session": "s", "solutionSet": "ss"}
     result = _run("--fare-rules", *_QUIET)
