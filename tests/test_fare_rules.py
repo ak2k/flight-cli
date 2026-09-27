@@ -212,6 +212,18 @@ def test_json_marks_a_fare_without_a_rules_key(
     assert json.loads(result.stdout)["fare_rules"]["rules"] == [None, None]
 
 
+@pytest.mark.parametrize("details", [{}, {"bookingDetails": {}}])
+def test_booking_details_with_no_fares_fail_the_run_after_the_table(
+    matrix: _Matrix, details: dict[str, Any]
+) -> None:
+    matrix.summarize = details
+    result = _run("--fare-rules", *_QUIET)
+    assert result.exit_code == 1, result.output
+    assert "Itineraries" in result.stdout
+    assert "Fare rules" not in result.stdout
+    assert "Matrix returned no booking details for itinerary #1." in result.stderr
+
+
 def test_an_empty_search_asks_for_no_rules(matrix: _Matrix) -> None:
     matrix.search = {"solutionCount": 0, "session": "s", "solutionSet": "ss"}
     result = _run("--fare-rules", *_QUIET)

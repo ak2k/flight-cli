@@ -2429,7 +2429,8 @@ def _fetch_fare_rules(
             return _FareRulesAnswer(idx + 1, details, rules)
 
     answer = _run_matrix(go, said="Matrix fare rules failed")
-    if answer.details.booking_details is None:
+    # Details that name no fare have no basis, booking code or rule to show.
+    if answer.details.booking_details is None or not answer.details.booking_details.fares:
         err.print(
             f"[red]Matrix returned no booking details for itinerary #{answer.itinerary:d}.[/]"
         )
