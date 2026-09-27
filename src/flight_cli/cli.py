@@ -1435,7 +1435,7 @@ def _report_calendar_failures(state: dict[str, Any], *, answered: bool = False) 
 # coming at all.
 _GF_GRID_UNAVAILABLE_NOTE = (
     "Google Flights price grid unavailable: the calendar RPC currently returns "
-    "no data to this client (tracked in work-h70kv.5)."
+    "no data to this client."
 )
 _GF_GRID_UNAVAILABLE_WEAVE_NOTE = f"{_GF_GRID_UNAVAILABLE_NOTE} …awaiting Matrix calendar…"
 
