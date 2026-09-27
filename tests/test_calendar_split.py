@@ -2862,8 +2862,10 @@ def test_one_failing_cabin_does_not_take_the_other_cabins_down(
     good: list[Any] = [object()]
     asked: list[Cabin] = []
 
-    def _search_with_ids(search: Any, top_n: int = 5, transport: Any = None) -> list[Any]:
-        _ = top_n, transport
+    def _search_with_ids(
+        search: Any, top_n: int = 5, transport: Any = None, currency: str = "USD"
+    ) -> list[Any]:
+        _ = top_n, transport, currency
         asked.append(search.options.cabin)
         if search.options.cabin is Cabin.BUSINESS:
             raise RuntimeError(f"fli said [/x]no{_DRIVES_THE_TERMINAL}")

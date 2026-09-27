@@ -1,0 +1,407 @@
+# pyright: reportPrivateUsage=false
+"""`--currency X`: every money figure the CLI prints is in X or carries its own
+label, and a figure that would mix currencies is not printed at all.
+
+Matrix takes the code as `inputs.currency` (the wire bodies are pinned in
+`test_wire_round_trip.py`); Google Flights takes it as the page's `curr=`. The
+one Google surface that cannot price in it is the date grid, which a non-USD
+calendar never reaches."""
+
+from __future__ import annotations
+
+import json
+import pathlib
+from datetime import date, timedelta
+from typing import TYPE_CHECKING, Any, cast
+
+import pydantic
+import pytest
+import typer
+from typer.testing import CliRunner
+
+from flight_cli import _gflight_ids as gfid
+from flight_cli import cli
+from flight_cli._multi_cabin import MultiCabinRow
+from flight_cli.domain import (
+    Cabin,
+    CalendarSearch,
+    CalendarWindow,
+    Leg,
+    SearchOptions,
+    SpecificDateSearch,
+)
+from flight_cli.fli_bridge import to_fli_filter
+from flight_cli.links import google_flights_pinned_url, google_flights_url
+from flight_cli.models import CalendarResult, Itinerary, SearchResult
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+FIXTURES = pathlib.Path(__file__).parent / "fixtures"
+# fli's validator rejects a past travel date, so this is derived.
+_DEP = date.today() + timedelta(days=45)
+_RET = _DEP + timedelta(days=7)
+
+
+def _run(args: list[str]) -> Any:
+    return CliRunner().invoke(cli.app, args)
+
+
+# ───────────────────────────── the CLI seam ─────────────────────────────────
+
+
+def test_a_currency_is_upper_cased() -> None:
+    assert cli._resolve_currency("eur") == "EUR"
+    assert cli._resolve_currency(None) is None
+
+
+@pytest.mark.parametrize("bad", ["EURO", "E1R", "", "€"])
+def test_a_currency_that_is_not_three_letters_is_a_usage_error(
+    bad: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(typer.Exit) as exc:
+        cli._resolve_currency(bad)
+    assert exc.value.exit_code == 2
+    assert "3-letter ISO 4217" in capsys.readouterr().err
+
+
+def test_the_domain_refuses_a_code_the_cli_did_not_normalize() -> None:
+    with pytest.raises(pydantic.ValidationError):
+        SearchOptions(currency="eur")
+
+
+# ──────────────────────────── Google Flights ────────────────────────────────
+
+
+def _search(currency: str | None) -> SpecificDateSearch:
+    return SpecificDateSearch(
+        legs=(Leg.of("JFK", "LAX", _DEP), Leg.of("LAX", "JFK", _RET)),
+        options=SearchOptions(currency=currency),
+    )
+
+
+def test_the_google_links_carry_the_searchs_currency() -> None:
+    seg = {"origin": "JFK", "date": _DEP.isoformat(), "destination": "LAX", "carrier": "AA"}
+    seg["flight"] = "1"
+    back = {**seg, "origin": "LAX", "destination": "JFK", "date": _RET.isoformat()}
+    assert "&curr=EUR" in google_flights_url(_search("EUR"))
+    assert "&curr=EUR" in google_flights_pinned_url(
+        _search("EUR"), outbound_segments=[seg], return_segments=[back]
+    )
+    # Unset is USD, as before; an explicit argument still wins.
+    assert "&curr=USD" in google_flights_url(_search(None))
+    assert "&curr=GBP" in google_flights_url(_search("EUR"), currency="GBP")
+
+
+def test_the_page_is_asked_for_the_currency(
+    gf_session: Callable[..., Any], gf_capture: Callable[[str], str]
+) -> None:
+    fake = gf_session(gf_capture("ds1_jfk_lax_3rows.json"))
+    filters = to_fli_filter(SpecificDateSearch(legs=(Leg.of("JFK", "LAX", _DEP),)))
+    assert gfid.search_with_ids(filters, currency="EUR")
+    assert len(fake.gets) == 1
+    assert fake.gets[0].endswith("&curr=EUR")
+    assert gfid.search_page_url(filters).endswith("&curr=USD")
+
+
+def test_every_board_of_a_round_trip_is_asked_for_the_currency(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    """The return boards are fetched by the recursion, one per pinned outbound."""
+    asked: list[str] = []
+
+    def _board(_f: Any, _t: Any, *, currency: str) -> list[Any]:
+        asked.append(currency)
+        return gf_rows("ds1_jfk_lax_3rows.json")[:1] if len(asked) == 1 else []
+
+    monkeypatch.setattr(gfid, "_one_call_laddered", _board)
+    filters = to_fli_filter(_search(None))
+    gfid.search_with_ids(filters, top_n=1, currency="EUR")
+    assert asked == ["EUR", "EUR"]
+
+
+def _rows(gf_rows: Callable[..., list[Any]], *currencies: str | None) -> list[Any]:
+    rows = gf_rows("ds1_jfk_lax_3rows.json")[: len(currencies)]
+    return [
+        gfid.GFlightWithId(
+            flight=r.flight.model_copy(update={"currency": c}),
+            flight_id=r.flight_id,
+            amenities=r.amenities,
+        )
+        for r, c in zip(rows, currencies, strict=True)
+    ]
+
+
+def test_a_row_with_no_decoded_currency_takes_its_boards(
+    gf_rows: Callable[..., list[Any]],
+) -> None:
+    """fli returns None when a price token does not decode; the page's other
+    rows say what currency it was priced in, and the requested code is only
+    the fallback."""
+    board = gfid._with_board_currency(_rows(gf_rows, "EUR", None, "EUR"), "GBP")
+    assert [r.flight.currency for r in board] == ["EUR", "EUR", "EUR"]
+    board = gfid._with_board_currency(_rows(gf_rows, None, None), "GBP")
+    assert [r.flight.currency for r in board] == ["GBP", "GBP"]
+
+
+def test_a_row_in_another_currency_keeps_it_and_the_run_says_so(
+    gf_rows: Callable[..., list[Any]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    board = gfid._with_board_currency(_rows(gf_rows, "USD", "EUR"), "EUR")
+    assert [r.flight.currency for r in board] == ["USD", "EUR"]
+    cli._note_other_currencies(board, "EUR")
+    err = capsys.readouterr().err
+    assert "USD" in err
+    assert "EUR" in err
+    cli._note_other_currencies(_rows(gf_rows, "EUR", "EUR"), "EUR")
+    assert capsys.readouterr().err == ""
+
+
+def test_the_search_asks_google_for_the_currency(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str] = []
+
+    def _search_with_ids(_f: Any, *, top_n: int, transport: Any, currency: str) -> list[Any]:
+        _ = top_n, transport
+        seen.append(currency)
+        return []
+
+    monkeypatch.setattr(gfid, "search_with_ids", _search_with_ids)
+    legs = (Leg.of("JFK", "LAX", _DEP),)
+    cli._gflight_results(legs, SearchOptions(currency="EUR"), 5)
+    cli._gflight_results(legs, SearchOptions(), 5)
+    assert seen == ["EUR", "USD"]
+
+
+# ───────────────────────────── the date grid ────────────────────────────────
+
+
+def _calendar(currency: str | None) -> CalendarSearch:
+    return CalendarSearch(
+        legs=(Leg.of("JFK", "LAX"),),
+        options=SearchOptions(currency=currency),
+        window=CalendarWindow(
+            start=_DEP, end=_DEP + timedelta(days=6), duration_min=5, duration_max=7
+        ),
+    )
+
+
+def test_the_grid_blocker_refuses_a_non_usd_currency_first() -> None:
+    """First, so an admission branch added later cannot let a non-USD calendar
+    through to a grid that prices in USD."""
+    kw: dict[str, Any] = {"json_out": True, "one_way": False, "origins": ("JFK", "EWR")}
+    assert cli._grid_branch_blocker(_calendar("EUR"), dests=("LAX",), **kw) == "a non-USD currency"
+    assert cli._grid_branch_blocker(_calendar("USD"), dests=("LAX",), **kw) == "JSON output"
+
+
+def _calendar_args(*extra: str) -> list[str]:
+    start = _DEP.isoformat()
+    end = (_DEP + timedelta(days=6)).isoformat()
+    return ["calendar", "JFK", "LAX", "--start", start, "--end", end, "--one-way", *extra]
+
+
+def test_a_fast_calendar_refuses_a_non_usd_currency() -> None:
+    result = _run(_calendar_args("--currency", "eur", "--fast"))
+    assert result.exit_code == 1
+    assert "non-USD currency" in result.stderr
+    assert result.stdout == ""
+
+
+def test_a_non_usd_calendar_is_priced_by_matrix_in_that_currency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked: list[CalendarSearch] = []
+
+    def _matrix(search: CalendarSearch, **_kw: Any) -> tuple[CalendarResult, int]:
+        asked.append(search)
+        return CalendarResult.from_api({"solutionCount": 0}), 0
+
+    def _no_grid(*_a: Any, **_kw: Any) -> None:
+        raise AssertionError("a non-USD calendar reached the USD date grid")
+
+    monkeypatch.setattr(cli, "_run_calendar", _matrix)
+    monkeypatch.setattr(cli, "_run_calendar_enriched", _no_grid)
+    monkeypatch.setattr(cli, "_run_fast_calendar_grid", _no_grid)
+    result = _run([*_calendar_args("--currency", "GBP"), "--no-matrix-url"])
+    assert result.exit_code == 0, result.output
+    assert [s.options.currency for s in asked] == ["GBP"]
+
+
+# ───────────────────────────── Matrix commands ──────────────────────────────
+
+
+def _gbp_result() -> SearchResult:
+    body = json.loads(
+        (FIXTURES / "matrix_currency" / "specific_jfk_lhr_rt_gbp_resp.json").read_text()
+    )
+    return SearchResult.from_api(body)
+
+
+def test_detail_prices_in_the_currency_and_titles_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    asked: list[Any] = []
+
+    def _matrix(search: Any, *_a: Any) -> SearchResult:
+        asked.append(search)
+        return _gbp_result()
+
+    monkeypatch.setattr(cli, "_run", _matrix)
+    result = _run(
+        [
+            "detail",
+            "JFK",
+            "LHR",
+            "--dep",
+            _DEP.isoformat(),
+            "--return",
+            _RET.isoformat(),
+            "--currency",
+            "GBP",
+            "--no-matrix-url",
+            "--no-google-url",
+        ]
+    )
+    assert result.exit_code == 0, result.output
+    assert [s.options.currency for s in asked] == ["GBP"]
+    assert "Itineraries (GBP)" in result.stdout
+    assert "USD" not in result.stdout
+
+
+def test_a_matrix_search_sends_the_currency_it_was_given(monkeypatch: pytest.MonkeyPatch) -> None:
+    asked: list[Any] = []
+
+    def _matrix(search: Any, *_a: Any) -> SearchResult:
+        asked.append(search)
+        return _gbp_result()
+
+    monkeypatch.setattr(cli, "_run", _matrix)
+    result = _run(
+        [
+            "search",
+            "JFK",
+            "LHR",
+            "--dep",
+            _DEP.isoformat(),
+            "--return",
+            _RET.isoformat(),
+            "--backend",
+            "matrix",
+            "--currency",
+            "gbp",
+            "--cash-only",
+            "--format",
+            "json",
+        ]
+    )
+    assert result.exit_code == 0, result.output
+    assert [s.options.currency for s in asked] == ["GBP"]
+    assert json.loads(result.stdout) == _gbp_result().raw
+
+
+# ────────────────────────── the enriched Google path ────────────────────────
+
+
+def test_the_enriched_table_asks_both_backends_and_titles_the_currency(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    """The default search: Google and Matrix both asked for EUR, and the merged
+    table says EUR where it used to say nothing."""
+    gf_asked: list[str | None] = []
+    matrix_asked: list[str | None] = []
+    rows = _rows(gf_rows, "EUR")
+
+    def _gf(_legs: Any, opts: SearchOptions, *_a: Any) -> list[Any]:
+        gf_asked.append(opts.currency)
+        return rows
+
+    class _Client:
+        def __init__(self, **_kw: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _Client:
+            return self
+
+        async def __aexit__(self, *_a: object) -> None:
+            return None
+
+        async def execute(self, search: Any, *, cache: bool) -> SearchResult:
+            _ = cache
+            matrix_asked.append(search.options.currency)
+            return SearchResult.model_validate({"solutions": [{"ext": {"price": "EUR321.00"}}]})
+
+    monkeypatch.setattr(cli, "_gflight_results", _gf)
+    monkeypatch.setattr(cli, "MatrixClient", _Client)
+    result = _run(
+        [
+            "search",
+            "JFK",
+            "LAX",
+            "--dep",
+            _DEP.isoformat(),
+            "--currency",
+            "EUR",
+            "--cash-only",
+            "--no-matrix-url",
+            "--no-google-url",
+        ]
+    )
+    assert result.exit_code == 0, result.output
+    assert gf_asked == ["EUR"]
+    assert matrix_asked == ["EUR"]
+    assert "(EUR)" in result.stdout
+    assert "USD" not in result.stdout
+
+
+# ──────────────────────────── the rendered tables ───────────────────────────
+
+
+def _itin(price: str) -> Itinerary:
+    return Itinerary.model_validate({"ext": {"price": price}})
+
+
+def test_the_multi_cabin_header_names_the_currency(capsys: pytest.CaptureFixture[str]) -> None:
+    row = MultiCabinRow(itinerary=_itin("EUR100.00"))
+    row.prices[Cabin.COACH] = "EUR100.00"
+    row.prices[Cabin.BUSINESS] = "USD900.00"
+    cli._render_multi_cabin_search([row], cabins=(Cabin.COACH, Cabin.BUSINESS), sort_by=Cabin.COACH)
+    out = capsys.readouterr().out
+    assert "Y (EUR)" in out
+    assert "$" not in out
+    # The one price in another currency keeps its own label under the EUR title.
+    assert "USD900.00" in out
+    assert "EUR100.00" not in out
+
+
+def test_the_merged_title_names_the_currency(capsys: pytest.CaptureFixture[str]) -> None:
+    class _Row:
+        def __init__(self, gf: str, mx: str) -> None:
+            self.itinerary = _itin(gf)
+            self.source = "both"
+            self.gf_price = gf
+            self.matrix_price = mx
+
+    cli._render_merged(
+        [_Row("EUR100.00", "EUR101.00"), _Row("USD99.00", "EUR98.00")],
+        legs=(Leg.of("JFK", "LAX", _DEP),),
+        top_n=5,
+    )
+    out = capsys.readouterr().out
+    assert "(EUR)" in out
+    assert "USD99.00" in out
+    assert "EUR101.00" not in out
+
+
+# ─────────────────────── derived figures: cents per mile ────────────────────
+
+
+def test_no_cents_per_mile_is_computed_from_a_non_usd_fare() -> None:
+    """The award table divides this cash by miles and prints cents. A GBP fare
+    read as dollars is a wrong valuation printed as a right one."""
+    usd, dollar, gbp = _itin("USD600.00"), _itin("$1,200"), _itin("GBP617.39")
+    res = SearchResult.model_validate({"solutions": [usd, dollar, gbp]})
+    single = cli._cash_per_cabin_single(res, Cabin.COACH)
+    assert single == {id(usd): {"Economy": 600.0}, id(dollar): {"Economy": 1200.0}}
+
+    row = MultiCabinRow(itinerary=gbp)
+    row.prices[Cabin.COACH] = "GBP617.39"
+    row.prices[Cabin.BUSINESS] = "USD3000.00"
+    assert cli._cash_per_cabin_multi([row]) == {id(gbp): {"Business": 3000.0}}
+    assert cast("dict[int, Any]", cli._cash_per_cabin_multi([MultiCabinRow(itinerary=usd)])) == {}

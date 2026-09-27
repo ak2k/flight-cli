@@ -394,7 +394,7 @@ def _filters(*, round_trip: bool) -> Any:
 def no_rung_one(monkeypatch: pytest.MonkeyPatch) -> None:
     """Rung 1 must not run at all under `--gf-transport browser`."""
 
-    def _forbidden(_f: Any) -> list[GFlightWithId]:
+    def _forbidden(_f: Any, **_kw: Any) -> list[GFlightWithId]:
         raise AssertionError("rung 2 fell back into rung 1's GET")
 
     monkeypatch.setattr(gfid, "_one_call", _forbidden)
@@ -527,7 +527,7 @@ def test_the_http_rungs_never_consult_the_browser(
     def _forbidden(*, headed: bool) -> object:
         raise AssertionError(f"mode={mode} reached the browser rung (headed={headed})")
 
-    def _rung_one(_filters_arg: Any) -> list[GFlightWithId]:
+    def _rung_one(_filters_arg: Any, **_kw: Any) -> list[GFlightWithId]:
         return gfid._rows_from_page_html(gfid.PageFetch(_page(), _PAGE_URL, 200))
 
     monkeypatch.setattr(gfb, "session", _forbidden)
@@ -552,7 +552,7 @@ def test_a_browser_refusal_is_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
         assert headed is False
         return session
 
-    def _rung_one(_filters_arg: Any) -> list[GFlightWithId]:
+    def _rung_one(_filters_arg: Any, **_kw: Any) -> list[GFlightWithId]:
         pytest.fail("rung 2 fell back into rung 1's retry ladder")
 
     monkeypatch.setattr(gfb, "session", _hand_out)
@@ -998,7 +998,7 @@ def test_a_round_trip_pays_for_one_launch_and_navigates_per_leg(
     )
     monkeypatch.setattr(gfb, "_sessions", threading.local())
 
-    def _rung_one(_f: Any) -> list[GFlightWithId]:
+    def _rung_one(_f: Any, **_kw: Any) -> list[GFlightWithId]:
         raise AssertionError("rung 2 fell back into rung 1's GET")
 
     monkeypatch.setattr(gfid, "_one_call", _rung_one)
@@ -1221,11 +1221,11 @@ def test_every_documented_transport_has_a_rung(
     query."""
     rungs: list[str] = []
 
-    def _http(_filters: Any) -> list[Any]:
+    def _http(_filters: Any, **_kw: Any) -> list[Any]:
         rungs.append("http")
         return []
 
-    def _browser(_filters: Any, *, headed: bool) -> list[Any]:
+    def _browser(_filters: Any, *, headed: bool, **_kw: Any) -> list[Any]:
         assert headed is False
         rungs.append("browser")
         return []

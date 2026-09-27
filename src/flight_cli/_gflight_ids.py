@@ -42,8 +42,9 @@ import re
 import threading
 import time
 import urllib.parse
+from collections import Counter
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, NamedTuple, assert_never, cast
 
@@ -1320,10 +1321,10 @@ def _rows_from_ds1(payload: list[Any]) -> _Ds1Board:
     return _Ds1Board(rows, blocks_seen, tuple(misplaced))
 
 
-def search_page_url(filters: FlightSearchFilters) -> str:
+def search_page_url(filters: FlightSearchFilters, *, currency: str = "USD") -> str:
     """The public search-page URL for `filters` — the one address both rungs
     fetch, so neither can drift into asking Google a different question."""
-    return google_flights_search_page_url(build_search_tfs(filters))
+    return google_flights_search_page_url(build_search_tfs(filters), currency=currency)
 
 
 class _RetryableTransportError(GfTransportError):
@@ -1477,7 +1478,7 @@ def _get_search_page(client: Any, url: str) -> Any:
         raise
 
 
-def _fetch_page(filters: FlightSearchFilters) -> PageFetch:
+def _fetch_page(filters: FlightSearchFilters, *, currency: str = "USD") -> PageFetch:
     """One GET of the public search page.
 
     Everything visible in the bytes themselves is left to
@@ -1492,7 +1493,7 @@ def _fetch_page(filters: FlightSearchFilters) -> PageFetch:
     backs off on."""
     client = get_client()
     _seed_cookies_once(client)
-    resp = _get_search_page(client, search_page_url(filters))
+    resp = _get_search_page(client, search_page_url(filters, currency=currency))
     return PageFetch(
         html=resp.text,  # pyright: ignore[reportAny]  # fli/curl_cffi untyped
         final_url=str(resp.url),  # pyright: ignore[reportAny]  # fli/curl_cffi untyped
@@ -1600,9 +1601,9 @@ def _rows_from_page_html(page: PageFetch) -> list[GFlightWithId]:
     return out
 
 
-def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
+def _one_call(filters: FlightSearchFilters, *, currency: str = "USD") -> list[GFlightWithId]:
     """Rung 1: fetch the search page over curl_cffi and read its rows."""
-    rows = _rows_from_page_html(_fetch_page(filters))
+    rows = _rows_from_page_html(_fetch_page(filters, currency=currency))
     # A page we could READ means Google answered a warm session — save its
     # cookies (NID) so the next one-shot CLI process starts warm instead of
     # cold. Rung-1 only: rung 2 keeps its own Chrome profile, and its cookies
@@ -1708,10 +1709,12 @@ def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
         ladder.stand_down()
 
 
-def _one_call_with_retry(filters: FlightSearchFilters) -> list[GFlightWithId]:
+def _one_call_with_retry(
+    filters: FlightSearchFilters, *, currency: str = "USD"
+) -> list[GFlightWithId]:
     """`_one_call` under the throttle retry only — a parsed-empty page is an
     answer, so it costs exactly one GET and no sleep."""
-    return retry_throttled(lambda: _one_call(filters), retry_empty=False)
+    return retry_throttled(lambda: _one_call(filters, currency=currency), retry_empty=False)
 
 
 @dataclass(frozen=True)
@@ -1739,7 +1742,9 @@ class GfTransport:
 HTTP_TRANSPORT = GfTransport()
 
 
-def _one_call_browser(filters: FlightSearchFilters, *, headed: bool) -> list[GFlightWithId]:
+def _one_call_browser(
+    filters: FlightSearchFilters, *, headed: bool, currency: str = "USD"
+) -> list[GFlightWithId]:
     """Rung 2: one real-Chrome navigation of the same URL, read by the same parser.
 
     No retry ladder around it. Rung 2 costs a browser launch and up to a 30 s
@@ -1750,11 +1755,13 @@ def _one_call_browser(filters: FlightSearchFilters, *, headed: bool) -> list[GFl
     a test can substitute the session without a browser anywhere in the
     process."""
     return _rows_from_page_html(
-        _gf_browser.session(headed=headed).get_html(search_page_url(filters))
+        _gf_browser.session(headed=headed).get_html(search_page_url(filters, currency=currency))
     )
 
 
-def _one_call_laddered(filters: FlightSearchFilters, transport: GfTransport) -> list[GFlightWithId]:
+def _one_call_laddered(
+    filters: FlightSearchFilters, transport: GfTransport, *, currency: str = "USD"
+) -> list[GFlightWithId]:
     """One leg on the rung `transport` asks for.
 
     The single place that knows which rungs exist, so `search_with_ids` — and
@@ -1772,9 +1779,9 @@ def _one_call_laddered(filters: FlightSearchFilters, transport: GfTransport) -> 
     mode and match all of them."""
     match transport.mode:
         case "browser":
-            return _one_call_browser(filters, headed=transport.headed)
+            return _one_call_browser(filters, headed=transport.headed, currency=currency)
         case "http" | "auto":
-            return _one_call_with_retry(filters)
+            return _one_call_with_retry(filters, currency=currency)
         case _:
             assert_never(transport.mode)
 
@@ -1865,11 +1872,30 @@ def _unpinned_board(
     return None
 
 
+def _with_board_currency(board: list[GFlightWithId], requested: str) -> list[GFlightWithId]:
+    """`board` with a currency on every row.
+
+    fli reads a row's currency from a token beside its price and returns None
+    when that decode fails, and every renderer downstream would then label the
+    price USD. One page is priced in one currency, so the row takes the
+    currency the rows beside it decoded to, and the requested one only when
+    none did."""
+    decoded = Counter(r.flight.currency for r in board if r.flight.currency)
+    fill = decoded.most_common(1)[0][0] if decoded else requested
+    return [
+        r
+        if r.flight.currency
+        else replace(r, flight=r.flight.model_copy(update={"currency": fill}))
+        for r in board
+    ]
+
+
 def search_with_ids(
     filters: FlightSearchFilters,
     *,
     top_n: int = 5,
     transport: GfTransport = HTTP_TRANSPORT,
+    currency: str = "USD",
 ) -> list[GFlightWithId | tuple[GFlightWithId, ...]] | None:
     """Drop-in for fli's `SearchFlights().search()` but each result carries
     its Google Flights opaque flight_id.
@@ -1894,8 +1920,11 @@ def search_with_ids(
 
     `transport` rides the recursion so every leg of one trip runs on the same
     rung — a round trip that opened Chrome for its outbound must not silently
-    drop back to curl_cffi for the returns."""
-    first = _one_call_laddered(filters, transport)
+    drop back to curl_cffi for the returns. `currency` rides it for the same
+    reason: every board of one trip is asked for in one currency."""
+    first = _with_board_currency(
+        _one_call_laddered(filters, transport, currency=currency), currency
+    )
     if not first:
         return None
 
@@ -1923,7 +1952,7 @@ def search_with_ids(
         next_filters = deepcopy(filters)
         next_filters.flight_segments[selected_count].selected_flight = picked.flight
         try:
-            nxt = search_with_ids(next_filters, top_n=top_n, transport=transport)
+            nxt = search_with_ids(next_filters, top_n=top_n, transport=transport, currency=currency)
         except (GfThrottledError, GfTransportError, GfBrowserUnavailableError) as e:
             # None of the three is a fact about THIS pin. The wall is per-IP and
             # the network is one network, so every remaining pin walks into the

@@ -74,9 +74,19 @@ from .pp.cli import auth_app, run_pp_for_search
 from .providers.base import LegQuery
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import Callable, Coroutine, Iterable
 
-    from .models import CalendarResult, LegInfo, Location, SearchResult, Slice
+    from .models import (
+        BookingDetailsResult,
+        CalendarResult,
+        FareRule,
+        FareRules,
+        FareRulesResult,
+        LegInfo,
+        Location,
+        SearchResult,
+        Slice,
+    )
 
 # Tuple-length sentinels for `--slice` parser (`ORIGIN-DEST:DATE[:r=...:e=...]`).
 _SLICE_MIN_PARTS = 2
@@ -101,15 +111,38 @@ def _split_price(s: str | None) -> tuple[str, str]:
     return (m.group(1), m.group(2)) if m else ("", s)
 
 
-def _amount(s: str | None) -> str:
+def _amount(s: str | None, title_ccy: str = "") -> str:
     """The amount with its currency prefix stripped, ready for a markup console;
     '—' where there is no price.
+
+    With `title_ccy`, the prefix is stripped only when it is that currency, the
+    one the table's title names: a price in any other currency keeps its own
+    label rather than reading as the title's.
 
     Sanitized here rather than at each print site: Matrix chooses the whole string
     and every caller drops it into a Rich table cell or a summary line, both of
     which parse markup — an unbalanced `[/x]` there raises `MarkupError` and loses
     a query that succeeded."""
-    return _safe_text(_split_price(s)[1]) if s else "—"
+    if not s:
+        return "—"
+    ccy, amount = _split_price(s)
+    return _safe_text(amount if not title_ccy or ccy == title_ccy else s)
+
+
+def _title_currency(prices: Iterable[str | None]) -> str:
+    """The currency of the first price that names one, for a table's title."""
+    return next((c for c in (_split_price(p)[0] for p in prices) if c), "")
+
+
+def _usd_amount(price: str | None) -> float | None:
+    """The number in a USD price, or None for any other currency or none.
+
+    The award table computes cents per mile from this, and a fare in another
+    currency divided as though it were dollars is a wrong valuation printed as
+    a right one."""
+    ccy, _ = _split_price(price)
+    usd = ccy == "USD" or (not ccy and (price or "").lstrip().startswith("$"))
+    return parse_price(price) if usd else None
 
 
 app = typer.Typer(
@@ -417,6 +450,23 @@ def _resolve_cabin_list(csv: str) -> tuple[Cabin, ...]:
     return tuple(seen)
 
 
+_RE_CURRENCY = re.compile(r"\A[A-Z]{3}\Z")
+
+
+def _resolve_currency(code: str | None) -> str | None:
+    """`--currency`, upper-cased, or None when it was not given.
+
+    The shape only: which codes a backend prices in is that backend's answer,
+    and Matrix names a code it does not know in its own error."""
+    if code is None:
+        return None
+    up = code.strip().upper()
+    if not _RE_CURRENCY.match(up):
+        err.print(f"[red]bad currency {_quote(code)}; use a 3-letter ISO 4217 code such as EUR[/]")
+        raise typer.Exit(2)
+    return up
+
+
 def _build_options(
     *,
     cabin: str,
@@ -430,6 +480,7 @@ def _build_options(
     allow_airport_changes: bool,
     show_only_available: bool,
     page_size: int = 25,
+    currency: str | None = None,
 ) -> SearchOptions:
     return SearchOptions(
         cabin=_resolve_cabin(cabin),
@@ -445,6 +496,7 @@ def _build_options(
         allow_airport_changes=allow_airport_changes,
         show_only_available=show_only_available,
         page_size=page_size,
+        currency=currency,
     )
 
 
@@ -490,7 +542,7 @@ def _gf_unserveable_reasons(backend: str, origin: str | None, destination: str |
     return [f"a city code rather than an airport ({', '.join(bad)})"] if bad else []
 
 
-def _pick_backend(
+def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Matrix
     *,
     backend: str,
     routing: str | None,
@@ -508,6 +560,7 @@ def _pick_backend(
     destination: str | None,
     allow_airport_changes: bool,
     show_only_available: bool,
+    fare_rules: bool = False,
 ) -> str:
     """Resolve --backend to a concrete backend.
 
@@ -528,7 +581,8 @@ def _pick_backend(
     `--origin`/`--destination` set (the GF bridge flattens those to the first
     code, so serving them on GF would silently drop the rest), and
     `--no-airport-changes` / `--include-unavailable`, which the search page's
-    `tfs=` parameter has no field for at all.
+    `tfs=` parameter has no field for at all. `--fare-rules` too: fare bases and
+    rules come from Matrix's `/v1/summarize`, which Google has no equivalent of.
 
     A constraint the page cannot carry has to be a reason here and nowhere
     else. Left out, `auto` serves it on Google with the constraint silently
@@ -549,6 +603,8 @@ def _pick_backend(
     )
 
     reasons: list[str] = []
+    if fare_rules:
+        reasons.append("fare rules")
     if slice_specs:
         reasons.append("a multi-city itinerary")
     if depart_times or return_times:
@@ -956,6 +1012,12 @@ def _run(
         async with MatrixClient(rps=rps, impersonate=impersonate) as c:
             return await c.execute(search, cache=not no_cache)
 
+    return _run_matrix(go, said="Matrix search failed")
+
+
+def _run_matrix[T](go: Callable[[], Coroutine[Any, Any, T]], *, said: str) -> T:
+    """Run one Matrix conversation to its answer, or leave with a typed line and
+    exit 1. `said` opens that line; it is escaped like any value printed here."""
     try:
         return anyio.run(go)
     except MatrixApiError as e:
@@ -972,8 +1034,8 @@ def _run(
         # with the cause hundreds of lines down, on the most ordinary command
         # there is — and this package's rule is that a third-party transport
         # error never reaches a caller untyped.
-        _reraise_if_orderly(e, said="Matrix search failed")
-        err.print(f"[red]Matrix search failed:[/] {_failure_text(e)}")
+        _reraise_if_orderly(e, said=said)
+        err.print(f"[red]{_safe_text(said)}:[/] {_failure_text(e)}")
         # `str()` of a Matrix error is its message alone, so a group hands this
         # line the one field of three that a reader cannot act on by itself.
         # Each one inside `e` goes on to the reporter that keeps `kind` and
@@ -2072,7 +2134,13 @@ def _grid_branch_blocker(
     instead, because a constraint the grid can't honor is not visible in the shape
     of the command line. Ordered cheapest-first so the fli-heavy `_gf_dategrid`
     import is still skipped for the shapes that never need it.
+
+    The currency comes first, ahead of every admission test after it: the grid
+    prices in USD whatever the page is asked for, so no shape of calendar makes
+    it an answer in another currency.
     """
+    if search.options.currency not in (None, "USD"):
+        return "a non-USD currency"
     if json_out:
         return "JSON output"
     if not one_way:
@@ -2194,26 +2262,59 @@ def _run_matrix_path(
     run_pp: bool,
     sel: ProviderSelection,
     pick: int | None = None,
+    fare_rules: bool = False,
 ) -> None:
-    """Matrix path: Alkali call → optional cash render → optional PP augmentation → URLs."""
+    """Matrix path: Alkali call → optional cash render → optional fare rules →
+    optional PP augmentation → URLs."""
     search = SpecificDateSearch(legs=legs, options=opts)
+    rps, impersonate = _resolve_rps(rps), _resolve_impersonate(impersonate)
     # SpecificDateSearch → SearchResult by client._parse_response dispatch.
     res = cast(
         "SearchResult",
         _run(
             search,
-            _resolve_rps(rps),
-            _resolve_impersonate(impersonate),
-            _resolve_no_cache(no_cache),
+            rps,
+            impersonate,
+            # Fare rules are asked of the search's session, and a cached answer
+            # carries one Matrix may no longer hold.
+            fare_rules or _resolve_no_cache(no_cache),
         ),
     )
+    shown = res.solutions[: opts.page_size]
+
+    def _rules() -> _FareRulesAnswer | None:
+        if not shown:
+            err.print("[yellow]No itinerary to show fare rules for.[/]")
+            return None
+        return _fetch_fare_rules(res, (pick or 1) - 1, rps=rps, impersonate=impersonate)
+
+    if fare_rules and shown:
+        # Checked ahead of the JSON arm, because under `--format json` a pick
+        # still chooses the itinerary whose rules the document carries.
+        pick = _pick_in_range(
+            pick,
+            len(shown),
+            links_follow=not json_out and (matrix_url or google_url),
+            fare_rules=True,
+        )
     if json_out and not run_pp:
-        sys.stdout.write(json.dumps(res.raw, indent=2))
+        # `--fare-rules` refuses JSON with awards on, so its document is always
+        # written here.
+        doc = (
+            {"search": res.raw, "fare_rules": _fare_rules_document(_rules())}
+            if fare_rules
+            else res.raw
+        )
+        sys.stdout.write(json.dumps(doc, indent=2))
         return
     # `not json_out` for the reason given at the same gate in
     # `_run_gflight_path`: with awards on, the document is written below this.
     if not sel.awards_only and not json_out:
         _render_search(res, opts.page_size)
+    # After the table, so a failure fetching the rules leaves the fares shown.
+    rules = _rules() if fare_rules else None
+    if rules is not None:
+        _render_fare_rules(rules)
     if run_pp:
         p = opts.pax
         run_pp_for_search(
@@ -2243,13 +2344,217 @@ def _run_matrix_path(
         #
         # An empty result is numbered nowhere, so it gets no sentence at all
         # rather than an empty `(1-0)` interval and a pin claim nothing honours.
-        shown = res.solutions[: opts.page_size]
         pick = (
             _pick_in_range(pick, len(shown), links_follow=matrix_url or google_url)
             if shown
             else None
         )
         _emit_urls(search, matrix_url=matrix_url, google_url=google_url, result=res, pick=pick)
+
+
+# ─────────────────────────────── fare rules ────────────────────────────────
+
+# The ATPCO rule categories a traveler reads before buying, in print order.
+_RULE_CATEGORIES = {16: "Penalties", 31: "Voluntary changes", 33: "Voluntary refunds"}
+# Lines of one rule printed once its NOTE blocks are dropped. The JSON document
+# carries every line.
+_RULE_TEXT_LINES = 16
+
+
+class _FareRulesAnswer(NamedTuple):
+    itinerary: int  # 1-based, the number the table printed
+    details: BookingDetailsResult
+    rules: list[FareRulesResult]  # one per fare key, in the booking details' order
+
+
+def _refuse_fare_rules_conflicts(
+    *, cabins: tuple[Cabin, ...], sel: ProviderSelection, json_out: bool
+) -> None:
+    """Refuse `--fare-rules` where there is no single cash row for it to describe,
+    or no document it can be written into."""
+    if sel.awards_only:
+        err.print(
+            "[red]--fare-rules describes a row of the fare table, and --awards-only prints none.[/]"
+        )
+        raise typer.Exit(2)
+    if len(cabins) > 1:
+        err.print(
+            "[red]--fare-rules takes one --cabin: it describes one itinerary's fares, "
+            "and a multi-cabin row is several.[/]"
+        )
+        raise typer.Exit(2)
+    if json_out and _should_run_awards(sel):
+        err.print(
+            "[red]--fare-rules with --format json needs --cash-only: with awards on, "
+            "the document is the award match.[/]"
+        )
+        raise typer.Exit(2)
+
+
+def _fetch_fare_rules(
+    res: SearchResult, idx: int, *, rps: float, impersonate: str
+) -> _FareRulesAnswer:
+    """Booking details for solution `idx` of `res`, then the rules of each fare
+    they name — a round trip usually has two, on different fare bases.
+
+    A run and a client of its own: Matrix answers these from the search's
+    session, which outlives the client that ran the search."""
+    session, solution_set, solution_id = res.session, res.solution_set, res.solutions[idx].id
+    if not (session and solution_set and solution_id):
+        err.print(
+            "[red]Matrix answered without a session for this itinerary, "
+            "so its fare rules cannot be asked for.[/]"
+        )
+        raise typer.Exit(1)
+
+    async def go() -> _FareRulesAnswer:
+        async with MatrixClient(rps=rps, impersonate=impersonate) as c:
+            details = await c.booking_details(
+                session=session, solution_set=solution_set, solution_id=solution_id
+            )
+            fares = details.booking_details.fares if details.booking_details else []
+            rules = [
+                await c.fare_rules(
+                    session=session,
+                    solution_set=solution_set,
+                    solution_id=solution_id,
+                    fare_key=f.key,
+                )
+                for f in fares
+                if f.key
+            ]
+            return _FareRulesAnswer(idx + 1, details, rules)
+
+    answer = _run_matrix(go, said="Matrix fare rules failed")
+    if answer.details.booking_details is None:
+        err.print(
+            f"[red]Matrix returned no booking details for itinerary #{answer.itinerary:d}.[/]"
+        )
+        raise typer.Exit(1)
+    return answer
+
+
+def _fare_rules_document(answer: _FareRulesAnswer | None) -> dict[str, Any] | None:
+    """Matrix's own bodies, whole: the table trims rule text, this does not."""
+    if answer is None:
+        return None
+    return {
+        "itinerary": answer.itinerary,
+        "booking_details": (answer.details.raw or {}).get("bookingDetails"),
+        "rules": [(r.raw or {}).get("fareRules") for r in answer.rules],
+    }
+
+
+def _rule_lines(rule: FareRule) -> tuple[list[str], int]:
+    """A rule's text cut to a readable length, and how many lines were cut.
+
+    ATPCO text sets its asides under an indented `NOTE -`: waivers, agency
+    fees, how fares combine. They are most of a penalties rule by volume, and
+    dropping them is what leaves the cancel and change terms on screen."""
+    lines = [ln.rstrip() for b in rule.blocks for ln in b.splitlines() if ln.strip()]
+    kept: list[str] = []
+    note_indent: int | None = None
+    for ln in lines:
+        indent = len(ln) - len(ln.lstrip())
+        if note_indent is not None and indent > note_indent:
+            continue
+        note_indent = None
+        if ln.strip() == "NOTE -":
+            note_indent = indent
+            continue
+        kept.append(ln)
+    margin = min((len(ln) - len(ln.lstrip()) for ln in kept), default=0)
+    shown = [ln[margin:] for ln in kept[:_RULE_TEXT_LINES]]
+    return shown, len(lines) - len(shown)
+
+
+def _render_fare_rules(answer: _FareRulesAnswer) -> None:
+    """The fare-rules block under the table: per segment the fare basis, booking
+    code and cabin, the fare calculation, then per fare its title and its
+    penalty, change and refund rules, then the pricing notes.
+
+    Every value is Matrix's. Amounts inside the rule text and the fare
+    calculation are quoted in the fare's filing currency, as filed."""
+    bd = answer.details.booking_details
+    if bd is None:
+        return
+    console.print()
+    console.print(
+        f"[bold]Fare rules[/] · itinerary #{answer.itinerary:d}"
+        + (f" · {_safe_text(bd.display_total)}" if bd.display_total else "")
+    )
+    for fare in bd.fares:
+        for info in fare.booking_infos:
+            seg = info.segment
+            console.print(
+                f"  {_safe_text(seg.origin if seg and seg.origin else '?')}→"
+                f"{_safe_text(seg.destination if seg and seg.destination else '?')}  "
+                f"{_safe_text(fare.carrier or '?')}  fare basis {_safe_text(fare.code or '?')}  "
+                f"booking code {_safe_text(info.booking_code or '?')}  "
+                f"{_safe_text(info.cabin or '?')}"
+            )
+    for pricing in bd.pricings:
+        for calc in pricing.fare_calculations:
+            for line in calc.lines:
+                console.print(f"  [dim]Fare calculation:[/] {_safe_text(line)}")
+    seen: set[tuple[str | None, ...]] = set()
+    for result in answer.rules:
+        fr = result.fare_rules
+        if fr is None:
+            console.print("[yellow]Matrix returned no rules for one of this itinerary's fares.[/]")
+            continue
+        # Several passengers can price on one fare, and its rules are one text.
+        identity = (
+            fr.carrier.code if fr.carrier else None,
+            fr.code,
+            fr.origin_city,
+            fr.destination_city,
+        )
+        if identity not in seen:
+            seen.add(identity)
+            _render_one_fare(fr)
+    notes = [n for p in bd.pricings for n in p.notes]
+    if notes:
+        console.print()
+        console.print("[bold]Notes[/]")
+        for note in notes:
+            console.print(f"  {_safe_text(note)}")
+
+
+def _render_one_fare(fr: FareRules) -> None:
+    """One fare: carrier, basis and cities, its title — the first line of its
+    category-0 text, since Matrix sends no title field — then its penalty,
+    change and refund rules, each rule of a category in turn."""
+    title = next(
+        (
+            " ".join(r.blocks[0].strip().splitlines()[0].split())
+            for r in fr.rules
+            if r.category == 0 and r.blocks and r.blocks[0].strip()
+        ),
+        "",
+    )
+    console.print()
+    console.print(
+        f"[bold]{_safe_text(fr.carrier.code if fr.carrier and fr.carrier.code else '?')} "
+        f"{_safe_text(fr.code or '?')}[/]  "
+        f"{_safe_text(fr.origin_city or '?')}→{_safe_text(fr.destination_city or '?')}"
+        + (f"  {_safe_text(title)}" if title else "")
+    )
+    filed = [
+        (label, r) for cat, label in _RULE_CATEGORIES.items() for r in fr.rules if r.category == cat
+    ]
+    if not filed:
+        console.print("  [dim]No penalty, change or refund rules are filed for this fare.[/]")
+    for label, rule in filed:
+        console.print(
+            f"  [bold]{_safe_text(label)}[/] [dim](category {rule.category or 0:d})[/]"
+            + (f" [dim]{_safe_text(rule.type)}[/]" if rule.type else "")
+        )
+        lines, cut = _rule_lines(rule)
+        for line in lines:
+            console.print(f"    {_safe_text(line)}")
+        if cut:
+            console.print(f"    [dim]… {cut:d} more lines; --format json carries the full text[/]")
 
 
 # How much deeper to fetch when a Tier-2 routing post-filter will discard rows.
@@ -2311,8 +2616,12 @@ def _gflight_results(
     # filter choose from a real candidate pool; the final slice below still
     # honours the user's `top_n`.
     fetch_n = top_n * _POSTFILTER_OVERFETCH if any(per_slice_preds) else top_n
+    requested = opts.currency or "USD"
     try:
-        results: list[Any] = search_with_ids(fli_filter, top_n=fetch_n, transport=transport) or []
+        results: list[Any] = (
+            search_with_ids(fli_filter, top_n=fetch_n, transport=transport, currency=requested)
+            or []
+        )
     finally:
         # Named positively, because only rung 2 opens anything to close. The
         # call would be a no-op on the others, but reaching for it would read
@@ -2326,10 +2635,28 @@ def _gflight_results(
     if results and any(per_slice_preds):
         keep = set(surviving_indices(fli_results_to_search_result(results), per_slice_preds))
         results = [r for i, r in enumerate(results) if i in keep]
+    _note_other_currencies(results, requested)
     # Untrimmed on purpose: a round trip's combinations are built pin-major, so
     # the first `top_n` of them are one outbound's returns and nothing else.
     # Every caller trims what it renders, in the order that surface ranks by.
     return results
+
+
+def _note_other_currencies(results: list[Any], requested: str) -> None:
+    """One stderr line when Google priced rows in a currency other than the one
+    asked for. Each such row keeps its own label in the table and the JSON, so
+    this is the note that says why two currencies are on one board."""
+    other: set[str] = set()
+    for r in results:
+        for m in cast("tuple[Any, ...]", r) if isinstance(r, tuple) else (r,):
+            ccy = cast("str | None", getattr(getattr(m, "flight", None), "currency", None))
+            if ccy and ccy != requested:
+                other.add(ccy)
+    if other:
+        err.print(
+            f"[yellow]Google Flights priced some rows in {_safe_text(', '.join(sorted(other)))}, "
+            f"not the requested {_safe_text(requested)}; each row is labeled with its own.[/]"
+        )
 
 
 def _gflight_json_row(g: Any) -> dict[str, Any]:
@@ -2381,7 +2708,9 @@ def _price_ordered(results: list[Any]) -> list[Any]:
     return sorted(results, key=_terminal_fare_key)
 
 
-def _pick_in_range(pick: int | None, rows: int, *, links_follow: bool) -> int | None:
+def _pick_in_range(
+    pick: int | None, rows: int, *, links_follow: bool, fare_rules: bool = False
+) -> int | None:
     """`pick` when it names one of the `rows` the user was shown, else None
     with the reason on stderr.
 
@@ -2412,10 +2741,20 @@ def _pick_in_range(pick: int | None, rows: int, *, links_follow: bool) -> int | 
     different row from the one the link opens.
 
     stderr, because a `--format json` document on stdout stays a document —
-    the same rule every other note on this path follows."""
+    the same rule every other note on this path follows.
+
+    `fare_rules` is the other thing a pick chooses: the fare rules shown are
+    row one's too, and the clause says so for the same reason."""
     if pick is None or 1 <= pick <= rows:
         return pick
-    fallback = "; pinning itinerary #1 instead." if links_follow else "."
+    if links_follow and fare_rules:
+        fallback = "; pinning itinerary #1 and showing its fare rules instead."
+    elif links_follow:
+        fallback = "; pinning itinerary #1 instead."
+    elif fare_rules:
+        fallback = "; showing itinerary #1's fare rules instead."
+    else:
+        fallback = "."
     err.print(f"[yellow]--pick {pick:d} is out of range (1-{rows:d}){fallback}[/]")
     return None
 
@@ -2576,9 +2915,11 @@ def _render_merged(rows: list[Any], *, legs: tuple[Leg, ...], top_n: int) -> Non
     origin = legs[0].origins[0] if legs[0].origins else "?"
     destination = legs[0].destinations[0] if legs[0].destinations else "?"
     has_return = len(legs) >= _ROUND_TRIP_LEGS
+    ccy = _title_currency(p for r in rows[:top_n] for p in (r.matrix_price, r.gf_price))
     t = Table(
         title=f"Google Flights + Matrix · {_safe_text(origin)}→{_safe_text(destination)}"
-        + (" + return" if has_return else ""),
+        + (" + return" if has_return else "")
+        + (f" ({_safe_text(ccy)})" if ccy else ""),
         show_header=True,
         header_style="bold green",
     )
@@ -2598,8 +2939,8 @@ def _render_merged(rows: list[Any], *, legs: tuple[Leg, ...], top_n: int) -> Non
             # `rows` is duck-typed, and the lookup falls back to the tag it was
             # handed when it is not one of the three this module writes.
             _safe_text(_MERGE_SOURCE_TAG.get(row.source, row.source)),
-            _amount(row.matrix_price),
-            _amount(row.gf_price),
+            _amount(row.matrix_price, ccy),
+            _amount(row.gf_price, ccy),
             out,
             ret,
         )
@@ -3277,12 +3618,13 @@ def _cash_per_cabin_single(res: SearchResult, query_cabin: Cabin) -> dict[int, d
     The PP renderer needs to know which PP cabin name the cash field on each
     itinerary corresponds to — otherwise it can't compute ¢/mi against the
     right cash basis. For single-cabin runs the answer is the queried cabin
-    applied uniformly.
+    applied uniformly. A fare in any currency but USD is left out, so no ¢/mi
+    is computed from it.
     """
     name = _CABIN_TO_PP_NAME[query_cabin]
     out: dict[int, dict[str, float]] = {}
     for it in res.solutions:
-        cash = parse_price(it.price)
+        cash = _usd_amount(it.price)
         if cash is not None:
             out[id(it)] = {name: cash}
     return out
@@ -3299,7 +3641,7 @@ def _cash_per_cabin_multi(rows: list[MultiCabinRow]) -> dict[int, dict[str, floa
     for r in rows:
         prices: dict[str, float] = {}
         for cab, price in r.prices.items():
-            cash = parse_price(price)
+            cash = _usd_amount(price)
             if cash is not None:
                 prices[_CABIN_TO_PP_NAME[cab]] = cash
         if prices:
@@ -3570,21 +3912,12 @@ def _render_multi_cabin_search(
     sort_by: Cabin,
     title_prefix: str = "Itineraries",
 ) -> None:
-    """Render multi-cabin merged rows. One row per itinerary, one $ column
+    """Render multi-cabin merged rows. One row per itinerary, one price column
     per requested cabin, '—' for missing."""
     if not rows:
         console.print("[yellow]No itineraries.[/]")
         return
-    # Use the first present price to surface a currency tag in the title.
-    ccy = ""
-    for row in rows:
-        for p in row.prices.values():
-            ccy_candidate, _ = _split_price(p)
-            if ccy_candidate:
-                ccy = ccy_candidate
-                break
-        if ccy:
-            break
+    ccy = _title_currency(p for row in rows for p in row.prices.values())
     ccy_tag = f" ({_safe_text(ccy)})" if ccy else ""
     cabin_labels = "+".join(_CABIN_TO_LETTER[c] for c in cabins)
     sort_label = _CABIN_TO_LETTER[sort_by]
@@ -3602,7 +3935,7 @@ def _render_multi_cabin_search(
     t.add_column("outbound")
     t.add_column("return")
     for letter in (_CABIN_TO_LETTER[c] for c in cabins):
-        t.add_column(f"{letter} $", justify="right")
+        t.add_column(f"{letter}{ccy_tag}", justify="right")
 
     for i, row in enumerate(rows, 1):
         itn = row.itinerary.itinerary
@@ -3612,7 +3945,7 @@ def _render_multi_cabin_search(
 
         out_cell = _fmt_slice_cell(slcs[0]) if slcs else "—"
         ret_cell = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
-        price_cells = [_amount(row.prices.get(cab)) for cab in cabins]
+        price_cells = [_amount(row.prices.get(cab), ccy) for cab in cabins]
         t.add_row(f"{i:d}", carriers or "?", out_cell, ret_cell, *price_cells)
     console.print(t)
 
@@ -4164,6 +4497,11 @@ _MATRIX_URL_HELP = (
     "doesn't expose per-itinerary URL state, so this is the deepest link "
     "available). No link line is printed under --format json."
 )
+_CURRENCY_HELP = (
+    "Price in this currency: a 3-letter ISO 4217 code such as EUR. Default: USD. "
+    "Matrix and Google Flights both price in it; the Matrix link does not carry it."
+)
+
 _GOOGLE_URL_HELP = (
     "Print the Google Flights URL. When an itinerary can be resolved from the "
     "results the URL deep-links to the row --pick names, or to the first row of "
@@ -4239,7 +4577,7 @@ def search(
         "--cabin",
         help=(
             "Cabin, or comma list for multi-cabin compare ('economy,business'). "
-            "Multi-cabin renders one $ column per cabin; '—' means the itinerary "
+            "Multi-cabin renders one price column per cabin; '—' means the itinerary "
             "wasn't in that cabin's top-N (cabin unavailable OR priced out). "
             "Bump -n for broader overlap across cabins."
         ),
@@ -4356,11 +4694,26 @@ def search(
         None,
         "--pick",
         help="Pin itinerary #N (1-based, as shown in the table) in the "
-        "--matrix-url/--google-url deep links. Default: the first row of the "
-        "final table. Ignored under --format json, which emits no link lines "
-        "at all.",
+        "--matrix-url/--google-url deep links, and pick the itinerary --fare-rules "
+        "describes. Default: the first row of the final table. Under --format json, "
+        "which emits no link lines, only --fare-rules reads it.",
         rich_help_panel=_GROUP_OUTPUT,
     ),
+    currency: Annotated[
+        str | None,
+        typer.Option("--currency", help=_CURRENCY_HELP, rich_help_panel=_GROUP_OUTPUT),
+    ] = None,
+    fare_rules: Annotated[
+        bool,
+        typer.Option(
+            "--fare-rules",
+            help="After the table, show the fare basis, booking codes and fare rules "
+            "(penalties, changes, refunds) of the itinerary --pick names (default 1). "
+            "Matrix only: sends the search to Matrix. One --cabin; with --format json, "
+            "--cash-only.",
+            rich_help_panel=_GROUP_OUTPUT,
+        ),
+    ] = False,
     no_cache: bool = _NO_CACHE_OPT,
     fast: bool = typer.Option(
         False,
@@ -4446,6 +4799,7 @@ def search(
     extra pax types/PP config). Force with --backend matrix|gflight.
     """
     json_out = _resolve_format(fmt=fmt, json_flag=json_out) == "json"
+    ccy = _resolve_currency(currency)
     # Deprecated-flag warning surfaces at runtime since hidden=True hides the
     # banner from --help.
     if no_pp or pp_only or pp_airlines or pp_cabin:
@@ -4463,6 +4817,10 @@ def search(
         legacy_pp_airlines=pp_airlines,
         legacy_pp_cabin=pp_cabin,
     )
+    if fare_rules:
+        # Before the backend is announced: a refusal after "Using Matrix" reads
+        # as a search that started and then failed.
+        _refuse_fare_rules_conflicts(cabins=_resolve_cabin_list(cabin), sel=sel, json_out=json_out)
     resolved = _pick_backend(
         backend=backend,
         routing=routing,
@@ -4480,6 +4838,7 @@ def search(
         destination=destination,
         allow_airport_changes=allow_airport_changes,
         show_only_available=only_available,
+        fare_rules=fare_rules,
     )
     if slice_specs:
         legs = tuple(_parse_slice_spec(s) for s in slice_specs)
@@ -4535,6 +4894,7 @@ def search(
         allow_airport_changes=allow_airport_changes,
         show_only_available=only_available,
         page_size=page_size,
+        currency=ccy,
     )
 
     run_awards = _should_run_awards(sel)
@@ -4628,6 +4988,7 @@ def search(
         run_pp=run_awards,
         sel=sel,
         pick=pick,
+        fare_rules=fare_rules,
     )
 
 
@@ -4931,6 +5292,15 @@ def calendar(
         help=_GOOGLE_URL_HELP + " (calendar mode emits the search URL only.)",
         rich_help_panel=_GROUP_OUTPUT,
     ),
+    currency: Annotated[
+        str | None,
+        typer.Option(
+            "--currency",
+            help=_CURRENCY_HELP + " A non-USD currency skips the Google Flights date grid, "
+            "which prices in USD only, so --fast refuses it.",
+            rich_help_panel=_GROUP_OUTPUT,
+        ),
+    ] = None,
     no_cache: bool = _NO_CACHE_OPT,
     fast: bool = typer.Option(
         False,
@@ -4961,6 +5331,7 @@ def calendar(
 ) -> None:
     """Lowest-fare grid across a date window. Default round-trip; --one-way to flip."""
     json_out = _resolve_format(fmt=fmt, json_flag=json_out) == "json"
+    ccy = _resolve_currency(currency)
     origins = _parse_iata_list(origin)
     dests = _parse_iata_list(destination)
     sd = _parse_date(start)
@@ -4995,6 +5366,7 @@ def calendar(
         stops=stops,
         allow_airport_changes=allow_airport_changes,
         show_only_available=only_available,
+        currency=ccy,
     )
     window = CalendarWindow(start=sd, end=ed, duration_min=dmin, duration_max=dmax)
     search = CalendarSearch(legs=legs, options=opts, window=window)
@@ -5169,10 +5541,15 @@ def detail(
         help=_GOOGLE_URL_HELP,
         rich_help_panel=_GROUP_OUTPUT,
     ),
+    currency: Annotated[
+        str | None,
+        typer.Option("--currency", help=_CURRENCY_HELP, rich_help_panel=_GROUP_OUTPUT),
+    ] = None,
     no_cache: bool = _NO_CACHE_OPT,
 ) -> None:
     """Phase-2 of the calendar flow: full itineraries for a picked date."""
     json_out = _resolve_format(fmt=fmt, json_flag=json_out) == "json"
+    ccy = _resolve_currency(currency)
     origins = _parse_iata_list(origin)
     dests = _parse_iata_list(destination)
     dep_d = _parse_date(dep)
@@ -5204,6 +5581,7 @@ def detail(
         stops=stops,
         allow_airport_changes=allow_airport_changes,
         show_only_available=True,
+        currency=ccy,
     )
     window = CalendarWindow(start=sd, end=ed, duration_min=dmin, duration_max=dmax)
     search = CalendarFollowup(legs=legs, options=opts, window=window)
