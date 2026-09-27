@@ -555,10 +555,8 @@ _TFS_REFUSED_FIELDS: tuple[tuple[str, str], ...] = (
     ("sort_by", "a server-side sort order"),
 )
 # Read and deliberately not acted on. `show_all_results` defaults to True and there is
-# no tfs= field for it. The page serves Google's default board (~30 rows per
-# leg, measured 2026-09-02) with no back-fill, so a top-N above that returns
-# fewer rows than asked for. That's a board ceiling, not a dropped constraint —
-# nothing the user asked for goes unhonoured.
+# no tfs= field for it: the page URL asks for the full board on every search
+# through its own `tfu=` parameter instead (`google_flights_search_page_url`).
 _TFS_IGNORED_FIELDS = frozenset({"show_all_results"})
 
 # Non-adult passengers ride tfs field 8 under distinct kind codes (2 child,
@@ -573,6 +571,9 @@ _TFS_REFUSED_PAX: tuple[tuple[str, str], ...] = (
 )
 
 _TFS_MULTI_CITY = 3  # fli TripType.MULTI_CITY — the page inlines no rows for it
+
+# `{2: {1: 0, 2: 1}, 4: {}}`: field 2.2 is the page's "show all flights" bit.
+_GF_SHOW_ALL_TFU = "EgQIABABIgA"
 
 
 def _tfs_iata(value: Any) -> str:
@@ -685,11 +686,16 @@ def google_flights_search_page_url(
 
     `gl=` is explicit because the page's row set and its consent behaviour both
     key off the resolved country, and IP geolocation is not stable enough to
-    leave it implicit."""
+    leave it implicit.
+
+    `tfu=` sets the "show all" bit. Without it the page inlines only Google's
+    top ~30 rows (JFK-LAX 30 of 95, JFK-LHR 22 of 101), so a larger `-n` comes
+    back short and a post-filter answers from a partial board. The cost: the
+    page roughly doubles (JFK-LAX 3.6 MB to 7.5 MB, about 0.7 s more)."""
     b64 = base64.urlsafe_b64encode(tfs).rstrip(b"=").decode()
     return (
         f"https://www.google.com/travel/flights?tfs={urllib.parse.quote(b64)}"
-        f"&hl={language}&gl={country}&curr={currency}"
+        f"&hl={language}&gl={country}&curr={currency}&tfu={_GF_SHOW_ALL_TFU}"
     )
 
 

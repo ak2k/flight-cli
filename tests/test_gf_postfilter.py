@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from flight_cli._gf_postfilter import apply_postfilter, can_postfilter, gf_can_serve
+from flight_cli._gf_postfilter import apply_postfilter, can_postfilter, search_page_reasons
 from flight_cli.models import (
     Itinerary,
     ItineraryDetails,
@@ -82,14 +82,18 @@ def test_operating_exclude_drops_matching() -> None:
 # ─────────────────────────── marketing exclude ─────────────────────────
 
 
-def test_marketing_exclude_drops_by_booking_or_codeshare() -> None:
+def test_marketing_exclude_drops_by_the_booking_carrier_only() -> None:
+    """Matrix's `~UA+` keeps a fare booked under another carrier even when UA
+    also sells the flight, so the sellers listed beside the booking carrier
+    are not the row's fare and do not exclude it."""
     res = _result(
         _slice([("UA100", "UA", ["UA"])]),  # booked UA -> excluded
         _slice([("LH9498", "EN", ["LH"])]),  # LH/Air Dolomiti, no UA -> kept
-        _slice([("LH900", "LH", ["UA"])]),  # UA codeshare in marketing set -> excluded
+        _slice([("LH900", "LH", ["UA"])]),  # booked LH, UA also sells it -> kept
+        _slice([("UA9000", "LH", ["UA", "LH"])]),  # booked under UA's number -> excluded
     )
     kept = _filter(res, CarrierPred(frozenset({"UA"}), exclude=True, operating=False))
-    assert kept == ["LH9498"]
+    assert kept == ["LH9498", "LH900"]
 
 
 # ─────────────────────────── connection airport ────────────────────────
@@ -163,11 +167,20 @@ def test_can_postfilter_supported_vs_unsupported() -> None:
     assert not can_postfilter(ExcludeRedeyesPred())
 
 
-def test_gf_can_serve() -> None:
-    assert gf_can_serve(classify("O:LH+", "AIRLINES BA AF; MAXSTOPS 1"))
-    assert not gf_can_serve(classify("LH+", "F bc=y"))  # Tier-3 fare basis
-    assert not gf_can_serve(classify("LH+", "MINCONNECT 1:00"))  # unsupported Tier-2
-    assert not gf_can_serve(classify("LH+", "-REDEYES"))
+def test_the_search_page_serves_encodable_and_post_filterable_predicates() -> None:
+    assert search_page_reasons(classify("O:LH+", "-CODESHARE; MAXSTOPS 1").predicates) == []
+    assert search_page_reasons(classify("~BA+", "-AIRLINES AF").predicates) == []
+
+
+def test_every_other_predicate_keeps_its_own_reason() -> None:
+    """One reason per predicate the page can't serve, and none for the ones it
+    can: the user reads which constraint sent the search to Matrix."""
+    reasons = search_page_reasons(classify("~BA+", "MINCONNECT 1:00; -REDEYES").predicates)
+    assert reasons == ["a layover-time bound", "a red-eye exclusion"]
+    assert search_page_reasons(classify("LH+", "F bc=y").predicates)  # include, Tier 3
+    # Evaluable here, but Matrix reads both positionally and the filter does not.
+    assert search_page_reasons(classify("AS21", None).predicates)
+    assert search_page_reasons(classify("F* ~DUB F*", None).predicates)
 
 
 def test_apply_postfilter_no_predicates_is_noop() -> None:

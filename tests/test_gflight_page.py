@@ -54,7 +54,10 @@ import anyio
 import anyio.to_thread
 import pytest
 
-from conftest import _answering  # one home for the re-pointing rule; see its docstring
+from conftest import (
+    _answering,  # one home for the re-pointing rule; see its docstring
+    distinct_clones,
+)
 from flight_cli import _gflight_ids as gfid
 from flight_cli._gf_errors import (
     GfBackendError,
@@ -1478,8 +1481,7 @@ def _cloned_ds1(n: int) -> str:
     """A ds:1 payload carrying `n` parseable rows, cloned from the real
     capture."""
     payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
-    row = payload[2][0][0]
-    payload[2] = [[copy.deepcopy(row) for _ in range(n)]]
+    payload[2] = [distinct_clones(payload[2][0][0], n)]
     payload[3] = None
     return json.dumps(payload)
 

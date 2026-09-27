@@ -8,10 +8,9 @@ needn't be (slow) or gflight is invoked for inexpressible queries (errors
 deep in fli).
 
 The second load-bearing fact is the search transport: Google's public page,
-whose `tfs=` parameter carries only a stop ceiling today. Anything else goes to
-Matrix WITH ITS REASON, because the alternative — post-filtering Google's fixed
-~30-row board — answers a constrained search with a plausible-looking "no
-results"."""
+whose `tfs=` parameter carries only a stop ceiling today. The page serves its
+full board, so the Tier-2 carrier predicates the post-filter evaluates are
+served there too. Anything else goes to Matrix WITH ITS REASON."""
 
 from __future__ import annotations
 
@@ -133,22 +132,50 @@ def test_stop_ceiling_above_two_goes_to_matrix() -> None:
     [
         ("routing", "LH+"),  # marketing carrier
         ("routing", "F* X:FRA F*"),  # via airport
-        ("routing", "O:LH+"),  # operating carrier
+        ("routing", "X:FRA"),
         ("extension", "MAXCONNECT 2:00"),  # layover max
         ("extension", "ALLIANCE star-alliance"),
-        ("extension", "-CODESHARE"),
         ("extension", "MAXDUR 10:00"),
         ("extension", "F bc=y"),  # fare basis (Tier 3)
         ("extension", "MAXMILES 8000"),  # mileage (Tier 3)
         ("routing", "BA AA"),  # ordered carrier chain
+        ("routing", "~BA"),  # direct, not BA (Tier 3)
         ("extension", "MINCONNECT 1:00"),
         ("extension", "-REDEYES"),
+        # Post-filterable, but Matrix reads both positionally and the filter
+        # does not: bare AS21 is one flight, `F* ~DUB F*` one connection.
+        ("routing", "AS21"),
+        ("routing", "AS21+"),
+        ("routing", "F* ~DUB F*"),
+        ("extension", "-CITIES DUB"),
     ],
 )
 def test_auto_unencodable_constraint_picks_matrix(flag: str, value: object) -> None:
-    """Anything the page's tfs= parameter cannot carry goes to Matrix, including
-    constraints only a server-side filter could apply."""
+    """Anything the page's tfs= parameter cannot carry and the post-filter does
+    not serve goes to Matrix."""
     assert _call(**{flag: value}) == BACKEND_MATRIX  # pyright: ignore[reportArgumentType]
+
+
+@pytest.mark.parametrize(
+    "flag,value",
+    [
+        ("routing", "O:LH+"),  # operating carrier
+        ("extension", "-CODESHARE"),
+        ("routing", "~LH+"),  # no LH-booked leg
+        ("extension", "-AIRLINES LH"),
+        ("extension", "OPAIRLINES LH"),
+        ("routing", "~BA+"),
+    ],
+)
+def test_auto_serves_post_filterable_tier2_on_google(flag: str, value: object) -> None:
+    """The page serves its full board, so a Tier-2 carrier predicate the post-
+    filter evaluates is served by Google, on either backend spelling."""
+    assert _call(**{flag: value}) == BACKEND_GFLIGHT  # pyright: ignore[reportArgumentType]
+    assert _call(BACKEND_GFLIGHT, **{flag: value}) == BACKEND_GFLIGHT  # pyright: ignore[reportArgumentType]
+
+
+def test_a_post_filterable_predicate_beside_one_that_is_not_still_picks_matrix() -> None:
+    assert _call(routing="~BA+", extension="MINCONNECT 1:00") == BACKEND_MATRIX
 
 
 def test_auto_mixed_encodable_and_not_still_picks_matrix() -> None:

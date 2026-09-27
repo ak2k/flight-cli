@@ -559,7 +559,7 @@ def test_multi_cabin_fan_out_honours_an_encodable_constraint(
     seen: list[Any] = []
     rungs: list[Any] = []
 
-    def _capture(filters: Any, top_n: int, transport: Any) -> list[Any]:
+    def _capture(filters: Any, top_n: int, transport: Any, keep: Any) -> list[Any]:
         seen.append(filters)
         rungs.append(transport)
         return []
