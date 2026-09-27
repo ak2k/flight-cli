@@ -18,7 +18,12 @@ Two flavors of grouping:
 
 These resolve to "any of the city's airports" automatically. Prefer these
 over manual comma-lists when one exists — they're shorter and Matrix
-handles the airport-equivalence semantics:
+handles the airport-equivalence semantics.
+
+A metro code routes the search to Matrix, because Google Flights takes airport
+codes only — the six below that are also an airport code (`HOU`, `LAX`, `BER`,
+`SHA`, `BKK`, `DPS`) are the exception and stay on Google Flights as that one
+airport.
 
 | Metro | IATA metro | Constituent airports |
 |---|---|---|

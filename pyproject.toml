@@ -30,13 +30,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Heavier interactive-login path. Patchright is a Playwright fork that
-# patches CDP leaks + navigator.webdriver detection so Cloudflare's bot
-# fingerprint check passes — required for the PP login flow (Cloudflare-
-# protected). Package itself is small; `patchright install chrome` is what
-# pulls the real Chrome binary (~150MB) and is only needed for the headed
-# login path, so it's not auto-installed.
-browser-login = ["patchright>=1.59"]
+# Patchright is a Playwright fork that patches CDP leaks + navigator.webdriver
+# detection, so it passes both bot checks this project meets: Cloudflare's on the
+# PointsPath login, and Google's on the `--gf-transport browser` search rung.
+# The package itself is small. `patchright install chrome` is what pulls a
+# browser (~150MB) and is deliberately NOT run: both paths drive the installed
+# real Chrome through `channel="chrome"`.
+browser = ["patchright>=1.59"]
+# The login flow needs exactly what the search rung needs, so it points at that
+# extra rather than repeating the pin — two copies of a version floor drift.
+browser-login = ["flight-cli[browser]"]
 
 [dependency-groups]
 dev = [
@@ -45,8 +48,12 @@ dev = [
     "pytest>=8.3",
     "pytest-cov>=5",
     "hypothesis>=6.100",
-    # Pulled in only for type-checking; `patchright install chrome` is NOT
-    # run automatically — the dev Python package itself is small.
+    # The browser fake binds its launch keywords against patchright's real
+    # signature, so the suite needs the package installed to RUN, not only to
+    # type against: without it 22 tests fail while collection still succeeds,
+    # because the import is function-local. `patchright install chrome` is
+    # still NOT run automatically and no test launches a browser — the dev
+    # Python package itself is small.
     "patchright>=1.59",
 ]
 
@@ -135,6 +142,12 @@ reportAny = "none"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers --strict-config"
+# `tests/` on sys.path, so `from conftest import _answering` resolves by
+# declaration rather than by accident. Without it the import works only under
+# pytest's default `prepend` import mode, which inserts each test module's own
+# basedir because `tests/` has no `__init__.py` — and `tests/pp/` and
+# `tests/seats_aero/` already have one, so the arrangement is not even uniform.
+pythonpath = ["tests"]
 xfail_strict = true
 filterwarnings = [
     "error",  # deprecations become test failures — catch early
@@ -144,6 +157,7 @@ markers = [
     # Pre-declare custom markers here; `--strict-markers` rejects undeclared ones.
     # "slow: marks tests as slow (deselect with -m 'not slow')",
     # "integration: requires external services",
+    "gf_browser: exercises the launcher seam itself (a missing patchright, the guard) and so must reach _playwright_factory; opts out of the conftest guard, and NOT a way to let a test start Chrome — a test that installs its own fake playwright has already replaced that seam and must stay unmarked",
 ]
 
 # --- coverage ---

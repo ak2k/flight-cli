@@ -75,6 +75,20 @@ choice that fits the rest of the stack — don't substitute.
   golden-file tests at `tests/fixtures/` catch field-name and ordering
   regressions in <100ms — exactly the class of bugs that hit us during the
   initial build.
+- **Run pytest after any change to `cli.py` too**, and read
+  [`docs/memories/console_sanitizing.md`](./docs/memories/console_sanitizing.md)
+  before adding a print or a table cell there. `cli.py` is the one file with a
+  whole-file AST gate over it — the `escape_scan` helper in
+  `tests/test_calendar_split.py`, run as
+  `tests/test_calendar_split.py::test_calendar_paths_escape_every_printed_value`.
+  A value reaches a Rich console or table one of four ways: through `_quote` or
+  `_safe_text`, or through `_amount` or `_failure_text`, the two formatters the
+  gate knows by name (any other formatter that wraps inside itself is admitted
+  at its call sites, one allowlist entry each); as a named entry in the
+  identifier allowlist; through a format spec only a number survives; or as a
+  renderable this scope built. Anything else in a call this gate reads fails it.
+  Those are four ways a value REACHES a console; they are not the four things
+  that can BACK an allowlist entry, which `console_sanitizing.md` sets out.
 - **New SPA captures go in `research/`** (gitignored). Use
   `research/record_user_session.py` to drive a real browser, capture a wire
   body, drop it into `tests/fixtures/`, and write a reconstruction test.
@@ -144,6 +158,15 @@ choice that fits the rest of the stack — don't substitute.
      is the signal, not line coverage.
    - See "Appropriate divergence" table for the Profile-A→A/B-edge
      tunings (reportAny, Pydantic `extra` on boundary models).
+   - `_gf_browser.py` writes its "opening Chrome" notice to a
+     module-level `Console(stderr=True)` instead of leaving user-facing
+     output to `cli`. A browser launch costs a few seconds the user would
+     otherwise wait through unexplained; at the launch site no caller can
+     forget to announce it.
+   - Neither patchright extra runs `patchright install chrome`. Both
+     drive the *installed* real Chrome via `channel="chrome"` — a
+     bundled Chromium would have the same thin fingerprint the curl_cffi
+     rung already has, so downloading ~150 MB would buy nothing.
 
 5. **Ask when guessing.** Unknown Matrix wire shape, new SPA capture
    needed, irresolvable type error → ask. Don't invent the shape; capture
@@ -228,9 +251,13 @@ Full detail at [`docs/memories/MEMORY.md`](./docs/memories/MEMORY.md).
    therefore always runs a multi-airport query as one sub-search per
    (origin, destination), in parallel (Matrix tolerates ≥16 concurrent with flat
    latency), and merges the grids — the only way to get complete results
-   (`_calendar_split.py` + `cli._run_calendar`). The gflight backend has an
-   analogous empty-failure mode (cold curl_cffi session) handled separately by
-   retry + NID-cookie persistence in `_gflight_ids.py`.
+   (`_calendar_split.py` + `cli._run_calendar`). The gflight **date grid** — still
+   an RPC POST — has an analogous empty-failure mode (cold curl_cffi session)
+   handled separately by retry + NID-cookie persistence in `_gflight_ids.py`.
+   The gflight **search** path fetches Google's public page instead
+   (`GetShoppingResults` has been gated since 2026-08), where an empty board is
+   authoritative and every refusal is typed — see
+   [`gf_routing_and_carriers.md`](./docs/memories/gf_routing_and_carriers.md).
 8. **Two-phase calendar flow.** `name: "calendar"` returns the date grid;
    user picks a date in the UI; `name: "calendarFollowup"` returns full
    itineraries for that date. Both use the same `/v1/search` endpoint.

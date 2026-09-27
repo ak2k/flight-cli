@@ -154,3 +154,55 @@ def _diff(expected: Any, actual: Any, path: str = "") -> str:
     elif expected != actual:
         lines.append(f"  ≠ {path}: expected={expected!r} actual={actual!r}")
     return "Differences:\n" + "\n".join(lines) if lines else ""
+
+
+# ─────────────────── one-way calendars carry no trip-length ────────────────
+# `inputs.layover` is the range of NIGHTS between the outbound and the return,
+# so a one-way body has nothing to measure. Matrix does not ignore it: it answers
+# HTTP 200 + "Internal server error" (verified live 2026-09-02, work-h70kv.7).
+
+
+def _oneway_calendar() -> CalendarSearch:
+    return CalendarSearch(
+        legs=(Leg.of("JFK", "LAX"),),
+        options=SearchOptions(cabin=Cabin.COACH, pax=Pax(adults=1)),
+        window=CalendarWindow(
+            start=date(2026, 10, 10), end=date(2026, 10, 20), duration_min=3, duration_max=5
+        ),
+    )
+
+
+def test_one_way_calendar_omits_trip_length():
+    body = to_wire(_oneway_calendar()).as_json()
+    assert "layover" not in body["inputs"]
+    assert body["summarizerSet"] == "calendarOneWay"  # still the one-way summarizer set
+
+
+def test_round_trip_calendar_keeps_trip_length():
+    captured = _strip(_load("calendar_nyc_munich_frankfurt.json"), "bgProgramResponse")
+    search = CalendarSearch(
+        legs=(
+            Leg.of("NYC", ["MUC", "FRA"], route_language="LH+", extension="MAXCONNECT 2:00"),
+            Leg.of(["MUC", "FRA"], "NYC"),
+        ),
+        options=SearchOptions(cabin=Cabin.COACH, pax=Pax(adults=1)),
+        window=CalendarWindow(
+            start=date.fromisoformat(captured["inputs"]["startDate"]),
+            end=date.fromisoformat(captured["inputs"]["endDate"]),
+            duration_min=5,
+            duration_max=7,
+        ),
+    )
+    body = to_wire(search).as_json()
+    assert body["inputs"]["layover"] == {"min": 5, "max": 7}
+
+
+def test_one_way_followup_omits_trip_length():
+    search = CalendarFollowup(
+        legs=(Leg.of("JFK", "LAX", date(2026, 10, 10)),),
+        options=SearchOptions(cabin=Cabin.COACH, pax=Pax(adults=1)),
+        window=CalendarWindow(
+            start=date(2026, 10, 10), end=date(2026, 10, 20), duration_min=3, duration_max=5
+        ),
+    )
+    assert "layover" not in to_wire(search).as_json()["inputs"]

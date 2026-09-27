@@ -12,6 +12,8 @@ cabin auto-derivation."""
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 import typer
 
@@ -375,3 +377,501 @@ def test_bumped_query_top_n_cabin_count_doesnt_compound():
     5x per cabin is enough regardless of cabin count."""
     assert _bumped_query_top_n(5, cabin_count=3) == _bumped_query_top_n(5, cabin_count=2)
     assert _bumped_query_top_n(5, cabin_count=4) == _bumped_query_top_n(5, cabin_count=2)
+
+
+# ── multi-cabin gflight: JSON shape + the constraint guard (work-h70kv.5) ──
+
+
+def _one_gflight_row() -> Any:
+    """A real GFlightWithId, parsed from the committed ds:1 capture."""
+    import json as _json
+    import pathlib as _pathlib
+
+    from flight_cli import _gflight_ids as gfid
+
+    fixture = (
+        _pathlib.Path(__file__).parent / "fixtures" / "gflight_page" / "ds1_jfk_lax_3rows.json"
+    )
+    rows = gfid._rows_from_ds1(_json.loads(fixture.read_text())).rows
+    return gfid._parse_flight_with_id(rows[0])
+
+
+def test_multi_cabin_json_carries_legroom_like_the_single_cabin_path(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Both JSON paths must emit the same row shape: a bare `model_dump()` in
+    either one loses the legroom/amenities the other carries."""
+    import json as _json
+    from datetime import date as _date
+
+    from flight_cli import cli
+    from flight_cli.domain import Cabin as _Cabin
+    from flight_cli.domain import Leg as _Leg
+    from flight_cli.domain import SearchOptions as _SearchOptions
+
+    row = _one_gflight_row()
+
+    def _fan_out(**_kw: Any) -> dict[Any, list[Any]]:
+        return {_Cabin.COACH: [row]}
+
+    monkeypatch.setattr(cli, "_run_gflight_multi", _fan_out)
+    cli._run_gflight_path_multi(
+        legs=(_Leg.of("JFK", "LAX", _date(2026, 10, 14)),),
+        opts=_SearchOptions(cabin=_Cabin.COACH),
+        cabins=(_Cabin.COACH, _Cabin.BUSINESS),
+        sort_by=_Cabin.COACH,
+        top_n=5,
+        json_out=True,
+        run_pp=False,
+        sel=cli._resolve_providers(
+            providers=None, cash_only=True, awards_only=False, provider_opt=()
+        ),
+    )
+    dumped: Any = _json.loads(capsys.readouterr().out)["COACH"][0]
+    assert dumped["flight_id"] == row.flight_id
+    # Compare through JSON: the helper keeps tuples that a dump turns into lists.
+    expected: Any = _json.loads(_json.dumps(cli._gflight_json_row(row), default=str))
+    assert dumped == expected
+    assert dumped["legs"][0]["legroom_class"]
+
+
+@pytest.mark.parametrize(
+    ("legs_wanted", "cabins_wanted", "shown"),
+    [
+        pytest.param(2, 2, True, id="a-round-trip-across-two-cabins"),
+        pytest.param(1, 2, False, id="one-way-has-no-pinned-fan-out"),
+        pytest.param(2, 1, False, id="one-cabin-has-nothing-to-join"),
+    ],
+)
+def test_a_multi_cabin_round_trip_says_what_its_join_is_drawn_from(
+    monkeypatch: pytest.MonkeyPatch, legs_wanted: int, cabins_wanted: int, shown: bool
+) -> None:
+    """`_PINNED_FANOUT_CAP` decides what the cabin join can even see, so a blank
+    cabin cell on a round trip means "these ten outbounds had no fare in both
+    cabins" and reads as "that fare does not exist". Only where the cap bites:
+    a one-way pins nothing and a single cabin joins nothing."""
+    import io as _io
+    from datetime import date as _date
+
+    from rich.console import Console as _Console
+
+    from flight_cli import cli
+    from flight_cli.domain import Cabin as _Cabin
+    from flight_cli.domain import Leg as _Leg
+    from flight_cli.domain import SearchOptions as _SearchOptions
+
+    buf = _io.StringIO()
+    monkeypatch.setattr(cli, "err", _Console(file=buf, width=1000, no_color=True, highlight=False))
+
+    row = _one_gflight_row()
+    cabins = (_Cabin.COACH, _Cabin.BUSINESS)[:cabins_wanted]
+
+    def _fan_out(**_kw: Any) -> dict[Any, list[Any]]:
+        return {cab: [row] for cab in cabins}
+
+    monkeypatch.setattr(cli, "_run_gflight_multi", _fan_out)
+    legs = (_Leg.of("JFK", "LAX", _date(2026, 10, 14)),)
+    if legs_wanted > 1:
+        legs += (_Leg.of("LAX", "JFK", _date(2026, 10, 21)),)
+    cli._run_gflight_path_multi(
+        legs=legs,
+        opts=_SearchOptions(cabin=_Cabin.COACH),
+        cabins=cabins,
+        sort_by=_Cabin.COACH,
+        top_n=5,
+        json_out=True,
+        run_pp=False,
+        sel=cli._resolve_providers(
+            providers=None, cash_only=True, awards_only=False, provider_opt=()
+        ),
+    )
+    from flight_cli._gflight_ids import pinned_fanout
+
+    pins = pinned_fanout(cli._bumped_query_top_n(5, len(cabins)))
+    assert (f"up to {pins} of each cabin's first-ranked" in buf.getvalue()) is shown, buf.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("top_n", "expected"),
+    [
+        pytest.param(10, 10, id="the-default-sits-on-the-cap"),
+        pytest.param(1, 5, id="a-small-n-pins-fewer-than-the-cap"),
+    ],
+)
+def test_the_join_note_counts_the_outbounds_that_were_actually_pinned(
+    monkeypatch: pytest.MonkeyPatch, top_n: int, expected: int
+) -> None:
+    """The number is the point of the sentence, so it comes from the pin budget
+    rather than a literal. Below the cap `-n` decides, and a note still saying
+    "10" would explain an empty cell with a number that never happened."""
+    import io as _io
+    from datetime import date as _date
+
+    from rich.console import Console as _Console
+
+    from flight_cli import cli
+    from flight_cli.domain import Cabin as _Cabin
+    from flight_cli.domain import Leg as _Leg
+    from flight_cli.domain import SearchOptions as _SearchOptions
+
+    buf = _io.StringIO()
+    monkeypatch.setattr(cli, "err", _Console(file=buf, width=1000, no_color=True, highlight=False))
+    row = _one_gflight_row()
+    cabins = (_Cabin.COACH, _Cabin.BUSINESS)
+
+    def _fan_out(**_kw: Any) -> dict[Any, list[Any]]:
+        return {c: [row] for c in cabins}
+
+    monkeypatch.setattr(cli, "_run_gflight_multi", _fan_out)
+    cli._run_gflight_path_multi(
+        legs=(
+            _Leg.of("JFK", "LAX", _date(2026, 10, 14)),
+            _Leg.of("LAX", "JFK", _date(2026, 10, 21)),
+        ),
+        opts=_SearchOptions(cabin=_Cabin.COACH),
+        cabins=cabins,
+        sort_by=_Cabin.COACH,
+        top_n=top_n,
+        json_out=True,
+        run_pp=False,
+        sel=cli._resolve_providers(
+            providers=None, cash_only=True, awards_only=False, provider_opt=()
+        ),
+    )
+    # "up to", because the cap bounds how many outbounds the join can see and
+    # the board may hold fewer. The number is still the pin budget's.
+    assert f"up to {expected} of each cabin's first-ranked" in buf.getvalue(), buf.getvalue()
+
+
+def test_multi_cabin_fan_out_honours_an_encodable_constraint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_pick_backend` keeps an encodable constraint on gflight for multi-cabin
+    too, which is only correct if the fan-out actually applies it."""
+    from datetime import date as _date
+
+    from flight_cli import _gflight_ids as gfid
+    from flight_cli import cli
+    from flight_cli.domain import Cabin as _Cabin
+    from flight_cli.domain import Leg as _Leg
+    from flight_cli.domain import SearchOptions as _SearchOptions
+
+    seen: list[Any] = []
+    rungs: list[Any] = []
+
+    def _capture(filters: Any, top_n: int, transport: Any) -> list[Any]:
+        seen.append(filters)
+        rungs.append(transport)
+        return []
+
+    monkeypatch.setattr(gfid, "search_with_ids", _capture)
+    cli._run_gflight_multi(
+        legs=(_Leg.of("JFK", "LAX", _date(2026, 10, 14), extension="MAXSTOPS 1"),),
+        opts=_SearchOptions(cabin=_Cabin.COACH),
+        cabins=(_Cabin.COACH,),
+        top_n=5,
+    )
+    assert seen, "the fan-out never queried"
+    assert seen[0].stops.name == "ONE_STOP_OR_FEWER"
+    # The fan-out names rung 1 now instead of omitting the argument. Same value,
+    # so nothing about the fan-out changed — and the profile lock means it must
+    # stay rung 1: a thread per cabin cannot each hold the one Chrome profile.
+    assert rungs == [gfid.HTTP_TRANSPORT]
+
+
+def _fan_out_over(monkeypatch: pytest.MonkeyPatch, failure: BaseException) -> str:
+    """Run the real fan-out with every cabin's query raising `failure`, and
+    return what the user was told on stderr.
+
+    Markup is left ON, because surviving the markup pass is the point."""
+    from datetime import date as _date
+
+    from conftest import capture_err
+    from flight_cli import _gflight_ids as gfid
+    from flight_cli import cli
+    from flight_cli.domain import Cabin as _Cabin
+    from flight_cli.domain import Leg as _Leg
+    from flight_cli.domain import SearchOptions as _SearchOptions
+
+    buf = capture_err(monkeypatch)
+
+    def _raise(*_a: Any, **_kw: Any) -> list[Any]:
+        raise failure
+
+    monkeypatch.setattr(gfid, "search_with_ids", _raise)
+    out = cli._run_gflight_multi(
+        legs=(_Leg.of("JFK", "LAX", _date(2026, 10, 14)),),
+        opts=_SearchOptions(cabin=_Cabin.COACH),
+        cabins=(_Cabin.COACH, _Cabin.BUSINESS),
+        top_n=5,
+    )
+    assert out == {}, "a cabin that raised must not land a column"
+    return buf.getvalue()
+
+
+def test_a_cabin_that_refuses_is_named_and_carries_the_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A typed refusal is WHY a cabin's column is missing, and the fan-out has to
+    say both halves. Without the cabin name the user cannot tell which column
+    went; without the refusal's own note it reads as an unexplained failure and
+    Google Flights looks like it simply had nothing in business class."""
+    from flight_cli import cli
+    from flight_cli._gf_errors import GfThrottledError
+
+    text = _fan_out_over(monkeypatch, GfThrottledError("Google Flights rate-limited the request"))
+    assert "COACH" in text
+    assert "BUSINESS" in text
+    # Compared against the production wording rather than a copy of it, so a
+    # reworded refusal does not need this test edited to keep passing.
+    assert text.count(cli._gf_refusal(GfThrottledError("x")).note) == 2
+    # The note alone would still be found if the typed branch were deleted: the
+    # generic handler prints `str(e)`, which contains the same words. What tells
+    # the two apart is that only the generic one says "query failed".
+    assert "query failed" not in text
+
+
+def test_a_cabin_crash_carrying_markup_renders_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
+    """fli has no documented exception surface, so this handler prints arbitrary
+    text through a markup-mode console. A closing tag the text never opened
+    raises `MarkupError` from inside the task group, which turns one cabin's
+    failure into the whole fan-out's — including the cabins that succeeded."""
+    text = _fan_out_over(monkeypatch, RuntimeError("fli said [/x] no"))
+    assert text.count("[/x]") == 2
+    assert "COACH" in text
+    assert "BUSINESS" in text
+
+
+def _dispatch(monkeypatch: pytest.MonkeyPatch, *args: str) -> tuple[list[str], str]:
+    """Run the real `flight search` with both multi-cabin backends stubbed, and
+    report which one it chose. Driven through CliRunner because calling the
+    typer command directly hands every option its OptionInfo sentinel."""
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    called: list[str] = []
+
+    def _gf(**_kw: Any) -> None:
+        called.append("gflight")
+
+    def _mx(**_kw: Any) -> None:
+        called.append("matrix")
+
+    monkeypatch.setattr(cli, "_run_gflight_path_multi", _gf)
+    monkeypatch.setattr(cli, "_run_matrix_path_multi", _mx)
+    result = CliRunner().invoke(cli.app, ["search", *args])
+    assert result.exit_code == 0, result.output
+    return called, result.output
+
+
+def test_multi_cabin_encodable_constraint_stays_on_gflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The multi-cabin guard defers to `_pick_backend`. Re-testing
+    `routing or extension` there drops an encodable constraint to Matrix
+    silently."""
+    called, _ = _dispatch(
+        monkeypatch,
+        "JFK",
+        "LAX",
+        "--dep",
+        "2026-10-14",
+        "--cabin",
+        "coach,business",
+        "--extension",
+        "MAXSTOPS 1",
+        "--cash-only",
+    )
+    assert called == ["gflight"]
+
+
+def test_multi_cabin_unencodable_constraint_goes_to_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called, output = _dispatch(
+        monkeypatch,
+        "JFK",
+        "LAX",
+        "--dep",
+        "2026-10-14",
+        "--cabin",
+        "coach,business",
+        "--routing",
+        "DL+",
+        "--cash-only",
+    )
+    assert called == ["matrix"]
+    assert "a carrier filter (DL)" in output
+
+
+def test_a_browser_refusal_fits_every_capture_console_in_this_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rung-2 refusal can reach this module's fan-out, and it is a long line.
+
+    The captures here were 400 columns wide while `tests/conftest.py` captures
+    at 1000, so the longest of those refusals wrapped in this module and not in
+    the other — and a substring assertion then failed on where rich broke the
+    line rather than on what the fan-out said. Every capture console in this
+    file is read out of the file's own source, so widening one and leaving
+    another behind fails here rather than in whichever test the refusal reaches
+    first."""
+    import io as _io
+    import pathlib as _pathlib
+    import re as _re
+
+    from rich.console import Console as _Console
+
+    from flight_cli._gf_common import TRANSPORT_BROWSER as _BROWSER
+    from flight_cli._gf_errors import GfBrowserUnavailableError as _Unavailable
+    from flight_cli.cli import _gf_refusal
+
+    _ = monkeypatch
+    source = _pathlib.Path(__file__).read_text(encoding="utf-8")
+    widths = {int(w) for w in _re.findall(r"Console\(file=buf, width=(\d+)", source)}
+    assert widths == {1000}, f"every capture console here must match conftest's: {widths}"
+
+    profile = "/home/somebody/.cache/flight-cli/gf-browser-profile"
+    lock = _Unavailable(
+        f"Chrome could not open Google Flights' browser profile at {profile}: "
+        "BrowserType.launch_persistent_context: Failed to create a ProcessSingleton for "
+        "your profile directory. This usually means that the profile is already in use "
+        "by another instance of Chromium.",
+        remedy=(
+            "Another `flight` process is holding it, or an interrupted run left it "
+            f"locked; wait for the other run to finish, or remove {profile}/Singleton* "
+            "and retry. Retry, or use `--gf-transport http` (or `--backend matrix`)."
+        ),
+    )
+    line = f"[yellow]Google Flights BUSINESS: {_gf_refusal(lock, transport=_BROWSER).note}.[/]"
+
+    def _rendered(width: int) -> list[str]:
+        out = _io.StringIO()
+        _Console(file=out, width=width, no_color=True, highlight=False).print(line)
+        return out.getvalue().rstrip("\n").split("\n")
+
+    # Long enough that the old width would have wrapped it: without this the
+    # assertion below would hold for a line no console could break.
+    assert len(_rendered(4000)[0]) > 400
+    for width in widths:
+        assert len(_rendered(width)) == 1, _rendered(width)
+
+
+@pytest.mark.parametrize(
+    ("legs_out", "top_n", "expected"),
+    [
+        pytest.param(True, 30, True, id="a-round-trip-above-the-cap-says-so"),
+        pytest.param(True, 4, False, id="below-the-cap-there-is-nothing-to-say"),
+        pytest.param(False, 30, False, id="a-one-way-pins-nothing"),
+    ],
+)
+def test_a_round_trip_says_how_many_outbounds_it_will_actually_combine(
+    monkeypatch: pytest.MonkeyPatch, legs_out: bool, top_n: int, expected: bool
+) -> None:
+    """`-n 30` on a round trip searches ten outbounds, not thirty, and said so
+    on exactly one path — the multi-cabin one. Everywhere else a user reading a
+    short table saw the market rather than the budget.
+
+    The note is stderr, so it reaches a human on `--fast` and under
+    `--format json` alike without touching the document on stdout."""
+    import io as _io
+    from datetime import date as _date
+    from datetime import timedelta as _timedelta
+
+    from rich.console import Console as _Console
+
+    from flight_cli import cli
+    from flight_cli._gflight_ids import pinned_fanout
+    from flight_cli.domain import Leg as _Leg
+
+    buf = _io.StringIO()
+    monkeypatch.setattr(cli, "err", _Console(file=buf, width=1000, no_color=True, highlight=False))
+    dep = _date.today() + _timedelta(days=45)
+    legs = (_Leg.of("JFK", "LHR", dep),)
+    if legs_out:
+        legs = (*legs, _Leg.of("LHR", "JFK", dep + _timedelta(days=7)))
+
+    cli._pin_cap_note(legs=legs, top_n=top_n)
+
+    printed = buf.getvalue()
+    assert ("first-ranked outbounds" in printed) is expected, printed
+    if expected:
+        assert f"up to {pinned_fanout(top_n)} first-ranked" in printed, printed
+        assert str(top_n) not in printed, "the note must not quote the number it is correcting"
+        # Ranked, not cheapest: the pins are the board in page order, and the
+        # repository's own capture has its cheapest outbound outside them.
+        assert "cheapest" not in printed, printed
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param(["search", "JFK", "LHR"], id="the-default-enriched-path"),
+        pytest.param(["search", "JFK", "LHR", "--fast"], id="fast-skips-matrix"),
+        pytest.param(["search", "JFK", "LHR", "--format", "json"], id="json"),
+        pytest.param(["search", "JFK", "LHR", "--cabin", "y,j"], id="multi-cabin"),
+    ],
+)
+def test_every_round_trip_surface_says_how_many_outbounds_it_combines(
+    monkeypatch: pytest.MonkeyPatch, command: list[str]
+) -> None:
+    """Every surface, because a unit test on the helper says nothing about which
+    commands call it: the requirement is where the sentence appears, so the test
+    drives the commands.
+
+    Driven through the real commands, because "which surfaces say it" is the
+    whole requirement. `--format json` is here for the second half of it — the
+    note is stderr, so the document on stdout stays a document."""
+    import json as _json
+    from datetime import date as _date
+    from datetime import timedelta as _timedelta
+
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    row = _one_gflight_row()
+
+    def _rows(*_a: object, **_kw: object) -> list[Any]:
+        return [row]
+
+    def _by_cabin(**kw: Any) -> dict[Any, list[Any]]:
+        return {c: [row] for c in kw["cabins"]}
+
+    monkeypatch.setattr(cli, "_gflight_results", _rows)
+    monkeypatch.setattr(cli, "_run_gflight_multi", _by_cabin)
+
+    def _gflight_backend(**_kw: object) -> str:
+        return cast("str", cli.BACKEND_GFLIGHT)
+
+    monkeypatch.setattr(cli, "_pick_backend", _gflight_backend)
+
+    dep = _date.today() + _timedelta(days=45)
+    ret = dep + _timedelta(days=7)
+    result = CliRunner().invoke(
+        cli.app,
+        # `--cash-only` so the JSON branch is reached: award output owns stdout
+        # when it runs, and this is about where the NOTE goes.
+        [
+            *command,
+            "--dep",
+            dep.isoformat(),
+            "--return",
+            ret.isoformat(),
+            "-n",
+            "30",
+            "--cash-only",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    # This exact sentence, not merely the words: the multi-cabin path also
+    # prints the join note, which says something adjacent about the same cap and
+    # would answer for a call site that is no longer there.
+    assert "combines returns against up to" in result.stderr, result.stderr
+    # stderr on every surface, which is what lets the JSON case have it at all:
+    # a document on stdout stays a document.
+    if "json" in command:
+        _json.loads(result.stdout)  # the assertion is that this does not raise
+        assert "first-ranked outbounds" not in result.stdout, result.stdout

@@ -129,16 +129,6 @@ def to_fli_filter(s: Search) -> Any:
     )
 
 
-def run_gflight_search(s: Search, *, top_n: int = 5) -> Any:
-    """Build a fli filter from a Search and run the Google Flights query."""
-
-    from fli.search.flights import (  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
-        SearchFlights,
-    )
-
-    return SearchFlights().search(to_fli_filter(s), top_n=top_n)
-
-
 def _fli_max_stops(max_stops: int) -> Any:
     """Map a stop count to fli's MaxStops enum (it tops out at 'two or fewer')."""
     from fli.models.google_flights.base import (  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]

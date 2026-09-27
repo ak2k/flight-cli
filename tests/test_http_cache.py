@@ -52,6 +52,16 @@ def test_matrix_error_envelope_is_not_cacheable() -> None:
     assert is_cacheable_body({"error": {"message": "QPX Warning.  Bad route"}}) is False
 
 
+def test_an_error_key_that_is_not_an_object_is_refused_too() -> None:
+    """The guard keys on the presence of `error`, not on its type. `client.py`'s
+    own raiser only fires on an `error` OBJECT, so a body carrying a bare string
+    or a null under that key is a shape we have never seen and cannot read as a
+    result — refusing it costs one refetch and keeps an unreadable body out of
+    the store."""
+    assert is_cacheable_body({"error": "not an object", "calendar": {"months": []}}) is False
+    assert is_cacheable_body({"error": None}) is False
+
+
 def test_error_response_is_refetched_not_memoized(tmp_path: pathlib.Path) -> None:
     """The bug this prevents: a transient brownout became permanent. A live
     cache inspected during review held 19 such entries, each replayed forever

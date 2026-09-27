@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .domain import (
     CalendarFollowup,
     CalendarSearch,
+    CalendarWindow,
     Leg,
     Pax,
     Search,
@@ -201,6 +202,18 @@ def _base_inputs(opts: SearchOptions, slices: list[WireSlice]) -> WireInputs:
     )
 
 
+def _set_trip_length(inputs: WireInputs, window: CalendarWindow) -> None:
+    """Attach the trip-LENGTH range (nights between the outbound and the return).
+
+    Round-trip only, keyed off the leg count rather than the summarizer string:
+    with one slice there is no return to measure against, and Matrix answers a
+    one-way `calendar` / `calendarFollowup` that carries it with HTTP 200 +
+    "Internal server error". Verified 2026-09-02 against live Matrix — the same
+    bodies without `layover` return a grid (10 solutions on the followup);
+    changing only the summarizer does not help (work-h70kv.7)."""
+    inputs.layover = WireLayover(min=window.duration_min, max=window.duration_max)
+
+
 def to_wire(s: Search) -> WireBody:
     """Map a domain search to its Matrix wire body. The match is exhaustive;
     adding a new Search variant breaks type-check until handled here."""
@@ -223,8 +236,9 @@ def to_wire(s: Search) -> WireBody:
             inputs.filter = {}
             inputs.startDate = s.window.start.isoformat()
             inputs.endDate = s.window.end.isoformat()
-            inputs.layover = WireLayover(min=s.window.duration_min, max=s.window.duration_max)
             rt = len(s.legs) == _ROUND_TRIP_LEGS
+            if rt:
+                _set_trip_length(inputs, s.window)
             return WireBody(
                 summarizers=_SUMMARIZERS_CALENDAR,
                 summarizerSet="calendarRoundTrip" if rt else "calendarOneWay",
@@ -241,7 +255,8 @@ def to_wire(s: Search) -> WireBody:
             inputs.page = WirePage(current=1, size=s.options.page_size)
             inputs.startDate = s.window.start.isoformat()
             inputs.endDate = s.window.end.isoformat()
-            inputs.layover = WireLayover(min=s.window.duration_min, max=s.window.duration_max)
+            if len(s.legs) == _ROUND_TRIP_LEGS:
+                _set_trip_length(inputs, s.window)
             return WireBody(
                 summarizers=_SUMMARIZERS_FOLLOWUP,
                 summarizerSet="wholeTrip",

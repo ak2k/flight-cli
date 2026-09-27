@@ -186,7 +186,9 @@ Full reference: [uponarriving.com ITA Matrix guide](https://www.uponarriving.com
 
 When users mention regions / metros, expand to the right IATA list. Two flavors:
 
-**IATA metro codes Matrix accepts as a single token** (prefer these):
+**IATA metro codes Matrix accepts as a single token** (prefer these). Every one
+below except `HOU` routes the search to Matrix, because Google Flights takes
+airport codes only:
 
 | Metro | Code | Airports it covers |
 |---|---|---|
