@@ -993,10 +993,11 @@ def _print_matrix_error(e: MatrixApiError) -> None:
     console. Every Matrix reporter that FAILS a command reports through here — the
     calendar sites, `_run` (which serves `detail` and the search path), the search
     weave and the group-level multi-cabin arm — so one Matrix error reads the same
-    whichever command asked for it. The per-cabin fan-out is the one exception and
-    is deliberate: its failure is soft, one cabin of several, so it prints a yellow
-    line naming that cabin and wraps the two fields itself rather than reporting a
-    red failure for a command that is still going to answer."""
+    whichever command asked for it. The per-cabin fan-out and a calendar fan-out
+    that lost only some groups are the exceptions, and deliberate: each failure is
+    soft, one part of several, so it prints a yellow line naming that part and
+    wraps the fields itself rather than reporting a red failure for a command that
+    is still going to answer."""
     err.print(f"[red]Matrix returned an error ({_safe_text(e.kind)}):[/] {_safe_text(e.message)}")
     if e.request_id:
         err.print(f"[dim]request_id: {_safe_text(e.request_id)}[/]")
@@ -1246,6 +1247,19 @@ def _report_calendar_fanout(fan: _CalendarFanout, total: int, *, merged_empty: b
         f"[yellow]{fan.failed:d} of {total:d} sub-queries failed; those origin/destination "
         f"groups are missing from the grid below: {_safe_text(', '.join(fan.lost))}.[/]"
     )
+    # Each group with its own cause, because a brownout is waited out and a
+    # refused query is rewritten. Yellow, like the per-cabin fan-out's line: the
+    # grid below still answers, so this is not a failed command's red report.
+    for route, cause in zip(fan.lost, fan.failures, strict=True):
+        if isinstance(cause, MatrixApiError):
+            err.print(
+                f"[yellow]  {_safe_text(route)}: Matrix returned an error "
+                f"({_safe_text(cause.kind)}): {_safe_text(cause.message)}[/]"
+            )
+            if cause.request_id:
+                err.print(f"[dim]  request_id: {_safe_text(cause.request_id)}[/]")
+        else:
+            err.print(f"[yellow]  {_safe_text(route)}: {_failure_text(cause)}[/]")
 
 
 def _calendar_route_label(s: CalendarSearch) -> str:
@@ -2223,11 +2237,16 @@ def _run_matrix_path(
         # `_pinned_solution_index` would otherwise answer it on stdout, in a
         # `--format json` sibling's stream and with a different fallback.
         #
+        # The visible count is the render's trim, not `len(res.solutions)`:
+        # Matrix is asked for `page_size` rows and nothing holds its answer to
+        # that.
+        #
         # An empty result is numbered nowhere, so it gets no sentence at all
         # rather than an empty `(1-0)` interval and a pin claim nothing honours.
+        shown = res.solutions[: opts.page_size]
         pick = (
-            _pick_in_range(pick, len(res.solutions), links_follow=matrix_url or google_url)
-            if res.solutions
+            _pick_in_range(pick, len(shown), links_follow=matrix_url or google_url)
+            if shown
             else None
         )
         _emit_urls(search, matrix_url=matrix_url, google_url=google_url, result=res, pick=pick)

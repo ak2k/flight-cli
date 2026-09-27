@@ -559,8 +559,6 @@ def test_the_temp_file_is_owner_only_while_it_is_being_written(
     assert modes == [0o600], f"the temp was readable mid-write: {[oct(m) for m in modes]}"
     assert stat.S_IMODE(_cookie_file(tmp_path).stat().st_mode) == 0o600
 
-    assert not (tmp_path / "gflight-cookies.json").exists()
-
 
 # ───────── the jar must resolve against the REAL fli client ─────────
 

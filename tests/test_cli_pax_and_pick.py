@@ -96,6 +96,61 @@ def test_a_pick_past_the_printed_table_is_reported_once(
     assert captured.err.count("out of range") == 1
 
 
+def _matrix_path(
+    monkeypatch: pytest.MonkeyPatch, *, solutions: int, page_size: int, pick: int
+) -> None:
+    """The real Matrix path with its search answered in process: `solutions`
+    rows back, `-n page_size` asked for, and the three server identifiers a
+    pinned Matrix link needs."""
+    from flight_cli import cli
+
+    res = _res(solutions).model_copy(update={"session": "s-1", "solution_set": "ss-1"})
+
+    def _answered(*_a: object, **_kw: object) -> SearchResult:
+        return res
+
+    monkeypatch.setattr(cli, "_run", _answered)
+    cli._run_matrix_path(
+        legs=(Leg(origins=("JFK",), destinations=("LHR",), date=_TRAVEL_DATE),),
+        opts=SearchOptions(page_size=page_size),
+        rps=1.0,
+        impersonate="chrome",
+        no_cache=True,
+        json_out=False,
+        matrix_url=True,
+        google_url=False,
+        run_pp=False,
+        sel=cli.ProviderSelection(
+            provider_filter=None, cash_only=True, awards_only=False, provider_opts={}
+        ),
+        pick=pick,
+    )
+
+
+def test_a_pick_past_the_rows_the_matrix_path_printed_falls_back(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Matrix is asked for `-n` rows, and nothing holds its answer to that. Back
+    with 15 and printing 10, `--pick 15` names a row the table never showed, so
+    it warns and pins the cheapest rather than labeling a link "#15"."""
+    _matrix_path(monkeypatch, solutions=15, page_size=10, pick=15)
+    captured = capsys.readouterr()
+
+    assert "--pick 15 is out of range (1-10)" in captured.err, captured.err
+    assert "itinerary #15" not in captured.out, captured.out
+    assert "Matrix (cheapest itinerary pinned)" in captured.out, captured.out
+
+
+def test_a_pick_the_matrix_path_printed_still_pins(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _matrix_path(monkeypatch, solutions=15, page_size=10, pick=5)
+    captured = capsys.readouterr()
+
+    assert "out of range" not in captured.out + captured.err, captured.err
+    assert "Matrix (itinerary #5 pinned)" in captured.out, captured.out
+
+
 # ───────────── every seated passenger reaches both backends ─────────────
 
 

@@ -31,6 +31,7 @@ from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from rich.console import Console
 
 from flight_cli import cli
 from flight_cli.domain import Cabin, Leg, SearchOptions
@@ -410,6 +411,69 @@ def test_a_pick_the_enriched_table_printed_is_honoured(
 
     assert "out of range" not in captured.out + captured.err, captured.out + captured.err
     assert "itinerary #3 pinned" in captured.out, captured.out
+
+
+def _identified_matrix() -> Any:
+    """A Matrix half carrying the three server IDs a pinned Matrix link is built
+    from, and slices, so its rows reach the merged table as themselves."""
+    from flight_cli.models import SearchResult
+
+    def _slice(flight: str) -> dict[str, Any]:
+        return {
+            "flights": [flight],
+            "departure": f"{_DEP.isoformat()}T09:00:00",
+            "arrival": f"{_DEP.isoformat()}T12:00:00",
+            "origin": {"code": "HNL"},
+            "destination": {"code": "MIA"},
+            "stops": [],
+        }
+
+    return SearchResult.model_validate(
+        {
+            "session": "sess-1",
+            "solutionSet": "set-1",
+            "solutionCount": 3,
+            "solutions": [
+                {
+                    "id": f"sol-{i}",
+                    "displayTotal": f"USD{500 + i}.00",
+                    "itinerary": {"slices": [_slice(f"AA{i}")], "carriers": []},
+                }
+                for i in (1, 2, 3)
+            ],
+        }
+    )
+
+
+def _matrix_pin(printed: str) -> dict[str, Any]:
+    """The `solution` block behind the pinned Matrix link: the server IDs the
+    SPA opens the row from, which the label above the link does not show. Read
+    off a console wide enough to print the URL on one line."""
+    import base64
+    import re
+    import urllib.parse
+
+    m = re.search(r"matrix\.itasoftware\.com/itinerary\?search=(\S+)", printed)
+    assert m is not None, printed
+    payload: Any = json.loads(base64.b64decode(urllib.parse.unquote(m.group(1))))
+    return cast("dict[str, Any]", payload["solution"])
+
+
+def test_an_enriched_pin_on_a_matrix_row_keeps_its_server_ids(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The pinned link is built from a result rebuilt around the merged rows,
+    and a Matrix link needs the session and solutionSet the response carried as
+    well as the row's own id. A rebuild that dropped either would degrade the
+    link to a plain deep link."""
+    monkeypatch.setattr(cli, "console", Console(width=1000, no_color=True, highlight=False))
+    _enriched(monkeypatch, [], top_n=3, pick=2, matrix=_identified_matrix())
+    out = capsys.readouterr().out
+
+    assert "Matrix (itinerary #2 pinned)" in out, out
+    pin = _matrix_pin(out)
+    assert (pin["sessionId"], pin["rh"], pin["Si"]) == ("sess-1", "set-1", "sol-2"), pin
 
 
 def test_an_empty_merged_board_reports_no_range_and_claims_no_pin(

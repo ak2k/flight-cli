@@ -1389,6 +1389,26 @@ def test_a_calendar_fanout_that_loses_some_sub_queries_says_how_many(
     assert "1 of 2 sub-queries failed" in _flat(capsys.readouterr().err)
 
 
+def test_a_partly_lost_fanout_names_each_lost_group_with_its_cause(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The count says a group is missing; the cause says what to do about it. A
+    brownout is waited out and a refused query is rewritten, and a note that
+    names the route alone leaves the reader unable to tell which one this was."""
+    _FanoutFailClient.fails = frozenset({"VIE"})
+    monkeypatch.setattr(cli, "MatrixClient", _FanoutFailClient)
+    cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
+        _cal(["VIE", "PAR"]), rps=10.0, impersonate="chrome", no_cache=True
+    )
+    cap = capsys.readouterr()
+    line = _flat(cap.err)
+    assert "MIA→VIE" in line
+    assert line.count("VIE UNAVAILABLE") == 1  # named, and named once
+    assert "internal" in line
+    assert "req-VIE" in line
+    assert cap.out == ""
+
+
 class _FanoutEmptyRestClient(_PricedClient):
     """Refuses the destinations named, and prices no day at all for the rest."""
 
