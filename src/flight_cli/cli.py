@@ -3884,6 +3884,19 @@ def _leg_display(leg: Any, amenity: Any, match_carriers: frozenset[str]) -> str:
     return booking
 
 
+def _gflight_route(legs: Any) -> str:
+    """One itinerary's airports, first departure to last arrival with every
+    connection between, wrapped per code as `_fmt_slice_route` does. A change of
+    airports at a connection shows both codes rather than hiding one."""
+    codes: list[str] = []
+    for leg in legs:
+        for airport in (leg.departure_airport, leg.arrival_airport):
+            code = _safe_text(getattr(airport, "name", "?"))
+            if not codes or codes[-1] != code:
+                codes.append(code)
+    return "→".join(codes)
+
+
 def _render_gflight_table(
     results: list[Any],
     *,
@@ -3914,6 +3927,12 @@ def _render_gflight_table(
     origin = ",".join(legs[0].origins) or "?"
     destination = ",".join(legs[0].destinations) or "?"
     has_return = len(legs) >= _ROUND_TRIP_LEGS
+    # One board ranks every airport of a set, so only the row can say which
+    # airports it flies.
+    per_row_route = any(
+        len(expand_airports(lg.origins)) > 1 or len(expand_airports(lg.destinations)) > 1
+        for lg in legs
+    )
     t = Table(
         title=f"Google Flights · {_safe_text(origin)}→{_safe_text(destination)}"
         + (" + return" if has_return else ""),
@@ -3933,10 +3952,12 @@ def _render_gflight_table(
             fr = g.flight  # unwrap GFlightWithId → fli FlightResult
             amenities = getattr(g, "amenities", []) or []
             label = f"{i}{'a' if j == 0 else 'b'}" if len(items) > 1 else str(i)
-            legs_str = " → ".join(
+            flights = " → ".join(
                 _leg_display(leg, amenities[k] if k < len(amenities) else None, match_carriers)
                 for k, leg in enumerate(fr.legs)
             )
+            route = _gflight_route(fr.legs) if per_row_route else ""
+            legs_str = " ".join(p for p in (route, flights) if p)
             mins = fr.duration
             dur = f"{mins // 60}h{mins % 60:02d}m"
             legroom_str = _fmt_gflight_legroom(fr.legs, amenities)

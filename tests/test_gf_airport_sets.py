@@ -22,6 +22,7 @@ import pytest
 from rich.console import Console
 from typer.testing import CliRunner
 
+from conftest import _ds1  # the one reader of the committed captures
 from flight_cli import cli
 from flight_cli.domain import Leg, SearchOptions, SpecificDateSearch
 from flight_cli.fli_bridge import to_fli_filter
@@ -249,3 +250,45 @@ def test_the_google_table_titles_name_the_whole_set(capsys: pytest.CaptureFixtur
     out = capsys.readouterr().out
     assert "Google Flights · JFK,EWR→LHR" in out, out
     assert "Google Flights + Matrix · JFK,EWR→LHR" in out, out
+
+
+def _board_from_jfk_and_ewr() -> list[Any]:
+    """The captured JFK->LAX board with its last row moved to EWR, parsed: one
+    ranking over both origins, as Google answers JFK,EWR -> LAX."""
+    from flight_cli import _gflight_ids as gfid
+
+    payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
+    row = payload[3][0][1][0]
+    row[3] = "EWR"
+    row[2][0][3] = "EWR"
+    row[2][0][4] = "Newark Liberty International Airport"
+    return [gfid._parse_flight_with_id(r) for r in gfid._rows_from_ds1(payload).rows]
+
+
+def _table(rows: list[Any], search: SpecificDateSearch) -> list[str]:
+    buf = io.StringIO()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(cli, "console", Console(file=buf, width=400, no_color=True, highlight=False))
+        cli._render_gflight_table(rows, legs=search.legs, top_n=5)
+    return buf.getvalue().splitlines()
+
+
+@pytest.mark.parametrize("origin", ["JFK,EWR", "NYC"])
+def test_a_set_search_table_names_each_rows_own_airports(origin: str) -> None:
+    """One board ranks every airport of the set, so the title can't say which
+    airport a row flies from; the row says it."""
+    rows = _board_from_jfk_and_ewr()
+    lines = _table(rows, _search(origin, "LAX"))
+    departures: list[str] = []
+    for g in rows:
+        first, last = g.flight.legs[0], g.flight.legs[-1]
+        departures.append(first.departure_airport.name)
+        (line,) = [ln for ln in lines if f"{first.airline.name} {first.flight_number} " in ln]
+        assert f"{first.departure_airport.name}→" in line, line
+        assert f"→{last.arrival_airport.name}" in line, line
+    assert sorted(set(departures)) == ["EWR", "JFK"]
+
+
+def test_a_one_airport_search_table_is_titled_and_its_rows_are_not() -> None:
+    lines = _table(_board_from_jfk_and_ewr()[:2], _search("JFK", "LAX"))
+    assert sum("JFK→" in ln for ln in lines) == 1, lines
