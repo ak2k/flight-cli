@@ -73,7 +73,9 @@ def result_payloads(body: str, *, what: str) -> list[Any]:
                 payloads.append(_payload(cast("list[Any]", row), what=what))
     except ValueError as e:
         raise GfPageRpcError(unreadable) from e
-    if not payloads:
+    # Text left after the last chunk this reader could find is an answer it
+    # read only part of: explore's prices come a chunk after its destinations.
+    if not payloads or text[at:].strip():
         raise GfPageRpcError(unreadable)
     return payloads
 

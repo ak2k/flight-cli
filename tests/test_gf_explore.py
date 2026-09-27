@@ -347,6 +347,21 @@ def test_a_cap_below_every_price_is_an_answer(monkeypatch: pytest.MonkeyPatch) -
     assert json.loads(doc.stdout) == []
 
 
+def test_a_price_chunk_that_cannot_be_read_is_a_refusal_not_none_under_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The destinations arrive a chunk ahead of their prices, so a body read
+    only that far lists every destination unpriced, which under a cap reads as
+    "none under P"."""
+    lines = _explore_body([_info("/m/1", "Austin")], [_fare("/m/1", 40)]).split("\n")
+    lines[-3:-1] = ["BROKEN PRICE CHUNK"]
+    _serve(monkeypatch, "\n".join(lines))
+    result = _explore("JFK", "--max-price", "300", "--format", "json")
+    assert result.exit_code == 1, result.output
+    assert "could not be read" in result.stderr
+    assert result.stdout == ""
+
+
 def test_none_priced_without_a_cap_is_a_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
     _serve(monkeypatch, _explore_body([_info("/m/1", "Austin")], []))
     result = _explore("JFK", "--format", "json")

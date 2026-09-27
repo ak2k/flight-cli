@@ -80,6 +80,13 @@ def test_a_body_with_nothing_readable_is_a_refusal_not_an_empty_answer(body: str
         result_payloads(body, what=_WHAT)
 
 
+def test_a_body_read_only_part_of_the_way_is_a_refusal() -> None:
+    """The rows before an unreadable chunk are not the whole answer."""
+    body = _envelope(["wrb.fr", None, json.dumps([1])]) + "BROKEN CHUNK\n"
+    with pytest.raises(GfPageRpcError, match="could not be read"):
+        result_payloads(body, what=_WHAT)
+
+
 def test_dig_stops_where_the_path_runs_out() -> None:
     value = [[1, [2, 3]], None]
     assert dig(value, 0, 1, 1) == 3
