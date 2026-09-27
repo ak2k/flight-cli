@@ -5599,7 +5599,7 @@ def _render_explore(
             f"{i:d}",
             _safe_text(", ".join(x for x in (d.name, d.country) if x) or "—"),
             _safe_text(d.code or "—"),
-            f"{_safe_text(answer.currency)}{d.price or 0.0:.2f}",
+            "—" if d.price is None else f"{_safe_text(answer.currency)}{d.price:.2f}",
             _safe_text(_explore_dates(d)),
             "—" if d.nights is None else f"{d.nights:d}",
             _safe_text(d.carrier or "—"),
@@ -5675,10 +5675,10 @@ def explore(
         sys.stdout.write(json.dumps(document(answer), indent=2))
     elif priced:
         _render_explore(answer, origin=code, month=first, trip=trip, max_price=max_price)
-    else:
+    elif max_price is not None:
         console.print(
             f"[yellow]No destination from {_safe_text(code)} is priced at or under "
-            f"{_safe_text(answer.currency)}{max_price or 0:d}.[/]"
+            f"{_safe_text(answer.currency)}{max_price:d}.[/]"
         )
     if unpriced:
         err.print(f"[dim]{unpriced:d} more destinations have no price under this query.[/]")

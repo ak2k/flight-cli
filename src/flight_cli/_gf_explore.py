@@ -21,8 +21,7 @@ from http import HTTPStatus
 from typing import Any, NamedTuple, cast
 
 from . import _gf_browser
-from ._gf_booking import url_currency
-from ._gf_rpc_shared import GfPageRpcError, dig, refuse_a_wall, result_payloads
+from ._gf_rpc_shared import GfPageRpcError, dig, refuse_a_wall, result_payloads, url_currency
 
 _EXPLORE_RPC = "/GetExploreDestinations"
 _WHAT = "Google Flights' explore page response"

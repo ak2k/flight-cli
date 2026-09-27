@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.parse
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, cast
 
@@ -109,6 +110,12 @@ def _error_code(row: list[Any]) -> int | None:
     except (IndexError, TypeError):
         return None
     return code if isinstance(code, int) and not isinstance(code, bool) else None
+
+
+def url_currency(url: str) -> str:
+    """The currency a page prices in: its URL's `curr=`. No response names
+    one, and the page prices in whatever its URL asks for."""
+    return urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["curr"][0]
 
 
 def refuse_a_wall(page: PageFetch) -> None:

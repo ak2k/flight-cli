@@ -25,7 +25,7 @@ from flight_cli import _gf_browser as gfb
 from flight_cli import cli
 from flight_cli._gf_browser import CapturedResponse
 from flight_cli._gf_errors import GfBrowserUnavailableError
-from flight_cli._gf_rpc_shared import GfPageRpcError, refuse_a_wall
+from flight_cli._gf_rpc_shared import GfPageRpcError, refuse_a_wall, url_currency
 from flight_cli.domain import Leg, SearchOptions, SpecificDateSearch
 from flight_cli.links import google_flights_booking_url, google_flights_pinned_url
 from flight_cli.models import SearchResult
@@ -162,7 +162,8 @@ def test_the_error_13_body_is_a_typed_refusal() -> None:
 
 
 def test_the_currency_is_the_one_the_url_asks_for() -> None:
-    assert gb.url_currency("https://www.google.com/travel/flights/booking?tfs=x&curr=EUR") == "EUR"
+    url = "https://www.google.com/travel/flights/booking?tfs=x&curr=EUR"
+    assert url_currency(url) == "EUR"
 
 
 # ───────────────────────────── the URL ───────────────────────────────────────
@@ -675,3 +676,44 @@ def test_enriched_sellers_with_no_matrix_answer_fail_rather_than_go_quiet(
     result = _run("--sellers", "--no-matrix-url", "--no-google-url")
     assert result.exit_code == 1, result.output
     assert "without Matrix there is none" in " ".join(result.stderr.split())
+
+
+def test_a_round_trip_opens_the_booking_page_for_both_legs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A round-trip row is an outbound and a return; the page is asked for the
+    pair and must list sellers of the pair, not of the outbound alone."""
+    outbound, returning, _ = _gf_rows()
+
+    def _pairs(*_a: object, **_kw: object) -> list[Any]:
+        return [(outbound, returning)]
+
+    monkeypatch.setattr(cli, "_gflight_results", _pairs)
+    fake = _serve(
+        monkeypatch,
+        _booking_body(
+            _option("JetBlue", 350, airline=True, flights=[["B6", "1523"], ["B6", "123"]])
+        ),
+    )
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "search",
+            "JFK",
+            "LAX",
+            "--dep",
+            _DEP.isoformat(),
+            "--return",
+            (_DEP + timedelta(days=7)).isoformat(),
+            "--cash-only",
+            "--fast",
+            "--sellers",
+            "--no-matrix-url",
+            "--no-google-url",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "USD350.00" in result.stdout.split("Booking options for #1", 1)[1]
+    raw = base64.urlsafe_b64decode(
+        urllib.parse.parse_qs(urllib.parse.urlsplit(fake.urls[0]).query)["tfs"][0] + "=="
+    )
+    assert b"1523" in raw
+    assert b"123" in raw.split(b"1523", 1)[1]

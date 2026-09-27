@@ -17,7 +17,7 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from . import _gf_browser
-from ._gf_rpc_shared import GfPageRpcError, dig, refuse_a_wall, result_payloads
+from ._gf_rpc_shared import GfPageRpcError, dig, refuse_a_wall, result_payloads, url_currency
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -42,12 +42,6 @@ class BookingOptions(NamedTuple):
 
     currency: str
     sellers: tuple[Seller, ...]
-
-
-def url_currency(url: str) -> str:
-    """The currency a page prices in: its URL's `curr=`. Neither response
-    names one."""
-    return urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["curr"][0]
 
 
 def _is_booking_rpc(url: str) -> bool:
