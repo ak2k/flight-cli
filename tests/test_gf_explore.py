@@ -363,6 +363,7 @@ def test_none_priced_without_a_cap_is_a_refusal(monkeypatch: pytest.MonkeyPatch)
         pytest.param(["JFK", "--month", "2027-03"], "2026-09 to 2027-02", id="month-too-far"),
         pytest.param(["JFK", "--month", "2026-08"], "2026-09 to 2027-02", id="month-past"),
         pytest.param(["JFK", "--month", "2026-13"], "YYYY-MM", id="month-malformed"),
+        pytest.param(["JFK", "--month", "0000-05"], "YYYY-MM", id="month-year-zero"),
         pytest.param(["JFK", "--days", "3-7"], "weekend (1-4 nights)", id="days-span-two"),
         pytest.param(["JFK", "--days", "10-12"], "two weeks (13-16 nights)", id="days-in-a-gap"),
         pytest.param(["JFK", "--days", "7-5"], "below min", id="days-reversed"),

@@ -5525,10 +5525,13 @@ def _explore_month(month: str | None) -> date | None:
     if month is None:
         return None
     m = _RE_MONTH.match(month.strip())
-    if m is None or not 1 <= int(m.group(2)) <= 12:  # noqa: PLR2004 — calendar months
+    try:
+        first = None if m is None else date(int(m.group(1)), int(m.group(2)), 1)
+    except ValueError:
+        first = None
+    if first is None:
         err.print(f"[red]bad month {_quote(month)}; use YYYY-MM[/]")
         raise typer.Exit(2)
-    first = date(int(m.group(1)), int(m.group(2)), 1)
     from ._gf_explore import months_open  # noqa: PLC0415 — fli, paid only by explore
 
     open_months = months_open(_today())
