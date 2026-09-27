@@ -2007,7 +2007,7 @@ def _render_search(res: SearchResult, limit: int = _DEFAULT_RENDER_LIMIT) -> Non
         for row in cm.rows:
             cells = [_safe_text(row.label) if row.label is not None else "?"]
             for c in row.cells:
-                p = _amount(c.min_price)
+                p = _amount(c.min_price, ccy)
                 mark = "★" if c.min_price_in_grid else ("·" if c.min_price_in_row else "")
                 cells.append(f"{p} {mark}")
             t.add_row(*cells)
@@ -2026,7 +2026,7 @@ def _render_search(res: SearchResult, limit: int = _DEFAULT_RENDER_LIMIT) -> Non
 
         out = _fmt_slice_cell(slcs[0]) if slcs else "—"
         ret = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
-        st.add_row(f"{i:d}", _amount(it.price), it_carriers or "?", out, ret)
+        st.add_row(f"{i:d}", _amount(it.price, ccy), it_carriers or "?", out, ret)
     console.print(st)
 
 
@@ -2206,11 +2206,11 @@ def _render_calendar(
             t.add_column(f"{dur:d}n", justify="right")
     t.add_column("sols", justify="right")
     for d in sorted(res.priced_days, key=lambda x: x.price_value or 9e9):
-        row = [f"{d.date:d}", _amount(d.min_price)]
+        row = [f"{d.date:d}", _amount(d.min_price, ccy)]
         if round_trip:
             opts = {o.trip_length: o.min_price for o in d.options}
             for dur in range(dmin, dmax + 1):
-                row.append(_amount(opts.get(dur)))
+                row.append(_amount(opts.get(dur), ccy))
         row.append(f"{d.solution_count:d}")
         t.add_row(*row)
     console.print(t)

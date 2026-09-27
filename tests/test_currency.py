@@ -296,6 +296,94 @@ def test_a_matrix_search_sends_the_currency_it_was_given(monkeypatch: pytest.Mon
     assert json.loads(result.stdout) == _gbp_result().raw
 
 
+def test_a_matrix_price_in_another_currency_keeps_its_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The tables are titled with the cheapest fare's currency; a row or a grid
+    cell Matrix priced in another one keeps its own code."""
+    body = json.loads(
+        (FIXTURES / "matrix_currency" / "specific_jfk_lhr_rt_gbp_resp.json").read_text()
+    )
+    body["solutionList"]["solutions"][1]["ext"]["price"] = "USD900.00"
+    body["carrierStopMatrix"]["rows"][0]["cells"][2]["minPrice"] = "USD729.00"
+
+    def _matrix(*_a: Any) -> SearchResult:
+        return SearchResult.from_api(body)
+
+    monkeypatch.setattr(cli, "_run", _matrix)
+    result = _run(
+        [
+            "search",
+            "JFK",
+            "LHR",
+            "--dep",
+            _DEP.isoformat(),
+            "--return",
+            _RET.isoformat(),
+            "--backend",
+            "matrix",
+            "--currency",
+            "GBP",
+            "-n",
+            "2",
+            "--cash-only",
+            "--no-matrix-url",
+            "--no-google-url",
+        ]
+    )
+    assert result.exit_code == 0, result.output
+    assert "Itineraries (GBP)" in result.stdout
+    assert "USD900.00" in result.stdout
+    assert "USD729.00" in result.stdout
+    assert "618.00" in result.stdout
+    assert "GBP618.00" not in result.stdout
+
+
+def test_a_calendar_price_in_another_currency_keeps_its_code(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    res = CalendarResult.from_api(
+        {
+            "solutionCount": 5,
+            "currencyNotice": {"ext": {"price": "GBP300.00"}},
+            "calendar": {
+                "months": [
+                    {
+                        "weeks": [
+                            {
+                                "days": [
+                                    {"date": 20, "solutionCount": 3, "minPrice": "GBP300.00"},
+                                    {
+                                        "date": 21,
+                                        "solutionCount": 2,
+                                        "minPrice": "USD400.00",
+                                        "tripDuration": {
+                                            "options": [{"tripLength": 7, "minPrice": "USD410.00"}]
+                                        },
+                                    },
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            },
+        }
+    )
+    cli._render_calendar(
+        res,
+        dmin=7,
+        dmax=7,
+        origin=("JFK",),
+        destination=("LHR",),
+        sd=_DEP,
+        ed=_DEP + timedelta(days=6),
+        round_trip=True,
+    )
+    out = capsys.readouterr().out
+    assert "cheapest: 300.00 (GBP)" in out
+    assert "USD400.00" in out
+    assert "USD410.00" in out
+    assert "GBP300.00" not in out
+
+
 # ────────────────────────── the enriched Google path ────────────────────────
 
 
