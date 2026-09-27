@@ -36,6 +36,7 @@ from ._calendar_split import is_empty_calendar, merge_calendar_results, split_ca
 # One definition, so the CLI's accepted set cannot drift from the ladder's type.
 from ._gf_common import TRANSPORT_BROWSER, TRANSPORT_HTTP, VALID_TRANSPORT_MODES, GfTransportMode
 from ._gf_errors import (
+    BROWSER_DEFAULT_REMEDY,
     GfBackendError,
     GfBrowserUnavailableError,
     GfConsentError,
@@ -1483,6 +1484,18 @@ def _paint_calendar_first(
         err.print("[dim]…awaiting Matrix calendar…[/]")
 
 
+def _http_date_grid(search: CalendarSearch, *, json_out: bool) -> dict[str, float]:
+    """`date_grid`, for the one shape it prices: one-way dates, into a table.
+
+    A round trip and a JSON document are the page grid's, so they get the gate's
+    note and its remedy rather than a one-way grid under a round-trip question."""
+    from ._gf_dategrid import GfGridUnavailableError, date_grid  # noqa: PLC0415
+
+    if json_out or len(search.legs) == _ROUND_TRIP_LEGS:
+        raise GfGridUnavailableError
+    return date_grid(search)
+
+
 def _run_fast_calendar_grid(
     search: CalendarSearch,
     *,
@@ -1492,14 +1505,15 @@ def _run_fast_calendar_grid(
     ed: date,
     matrix_url: bool,
     google_url: bool,
+    json_out: bool = False,
 ) -> None:
-    """`--fast`: the Google Flights date-grid alone, or a refusal. No Matrix."""
-    from ._gf_dategrid import GfGridUnavailableError, date_grid  # noqa: PLC0415
+    """`--fast` over http: the Google Flights date-grid alone, or a refusal. No Matrix."""
+    from ._gf_dategrid import GfGridUnavailableError  # noqa: PLC0415
     from ._gflight_ids import GfThrottledError  # noqa: PLC0415
 
     grid: dict[str, float] = {}
     try:
-        grid = date_grid(search)
+        grid = _http_date_grid(search, json_out=json_out)
     # Each handler only says WHY there is no grid; the single exit below says THAT
     # there is none. Under `--fast` there is no Matrix to fall back to, so every
     # no-grid outcome — gate, throttle, an empty grid, or a bad airport or date
@@ -1513,8 +1527,13 @@ def _run_fast_calendar_grid(
     except GfThrottledError:
         err.print("[dim]Google Flights rate-limited; no grid to show.[/]")
     except GfGridUnavailableError:
-        # Ahead of the broad except, as in the weave.
-        err.print(f"[dim]{_GF_GRID_UNAVAILABLE_NOTE}[/]")
+        # Ahead of the broad except, as in the weave. The remedy is this arm's
+        # alone: the weave's note shares the sentence above, and there
+        # `--gf-transport` is a usage error.
+        err.print(
+            f"[dim]{_GF_GRID_UNAVAILABLE_NOTE} Use [bold]--gf-transport browser[/] "
+            "(or [bold]auto[/]) to read it from the page in Chrome.[/]"
+        )
     except (typer.Exit, typer.Abort):
         raise  # an orderly exit is not a grid failure; see the weave's arm
     except Exception as e:  # noqa: BLE001 — any other cause is still just "no grid"
@@ -1531,6 +1550,70 @@ def _run_fast_calendar_grid(
         # calendar instead would change what the flag means.
         err.print("[yellow]No Google Flights grid; drop --fast for Matrix.[/]")
         raise typer.Exit(1)
+
+
+def _run_fast_browser_grid(
+    search: CalendarSearch,
+    *,
+    origins: tuple[str, ...],
+    dests: tuple[str, ...],
+    sd: date,
+    ed: date,
+    json_out: bool,
+    headed: bool,
+    matrix_url: bool,
+    google_url: bool,
+) -> None:
+    """`--fast` over the browser: the search page's own price graph, or a refusal.
+
+    Every no-grid outcome leaves by the one exit at the bottom, on stderr, exactly
+    as `_run_fast_calendar_grid`'s do, so stdout carries a grid or nothing.
+
+    The guard is armed and the session scope held here, outside any `anyio.run`:
+    the page loads run on this thread, the one a Ctrl-C lands on, and the scope
+    closes Chrome once however many loads the window took."""
+    from ._gf_browser import interrupt_guard, session_scope  # noqa: PLC0415 — GF-only
+    from ._gf_calgraph import document, price_graph  # noqa: PLC0415 — fli, ~95 ms
+
+    graph = None
+    try:
+        with interrupt_guard(), session_scope():
+            graph = price_graph(search, headed=headed)
+    except GfThrottledError:
+        err.print("[dim]Google Flights rate-limited the browser rung; no grid to show.[/]")
+    except GfBrowserUnavailableError as e:
+        # The default remedy offers `--gf-transport http`, which has no grid to
+        # serve under `--fast`; a launch or install remedy is kept.
+        remedy = e.remedy.removesuffix(BROWSER_DEFAULT_REMEDY).strip()
+        err.print(
+            f"[yellow]{_safe_text(_GF_GRID_NAME)} failed:[/] "
+            f"{_safe_text(f'{e.reason} {remedy}'.strip())}"
+        )
+    except (typer.Exit, typer.Abort):
+        raise  # an orderly exit is not a grid failure; see the weave's arm
+    except Exception as e:  # noqa: BLE001 — any other cause is still just "no grid"
+        err.print(f"[yellow]{_safe_text(_GF_GRID_NAME)} failed:[/] {_safe_text(e)}")
+    if graph is None:
+        err.print("[yellow]No Google Flights grid; drop --fast for Matrix.[/]")
+        raise typer.Exit(1)
+    priced = graph
+
+    def _write_answer() -> None:
+        if json_out:
+            doc = document(priced, origin=origins[0], destination=dests[0])
+            sys.stdout.write(json.dumps(doc, indent=2))
+            return
+        _render_date_grid(
+            {cell.departure.isoformat(): cell.price for cell in priced.cells},
+            origin=origins,
+            destination=dests,
+            sd=sd,
+            ed=ed,
+            trip_length=priced.trip_length,
+        )
+        _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
+
+    _deliver_calendar(_write_answer, backend=_GF_GRID_NAME)
 
 
 def _run_calendar_enriched(
@@ -2030,65 +2113,89 @@ def _render_date_grid(
     destination: tuple[str, ...],
     sd: date,
     ed: date,
+    trip_length: int | None = None,
+    currency: str = "USD",
 ) -> None:
-    """Render the GF native date-grid: cheapest fare per departure day (USD),
-    sorted cheapest-first. One-way only (the grid's shape)."""
+    """Render the GF native date-grid: cheapest fare per departure day, sorted
+    cheapest-first. One-way, or a round trip of one `trip_length` in nights,
+    which the grid prices by departure day alone."""
     if not grid:
         return
     priced_days = len(grid)
     cheapest = min(grid.values())
     console.print(
         f"[bold]{priced_days} priced days[/]  · cheapest: "
-        f"[bold cyan]{cheapest:.0f} (USD)[/]  · "
+        f"[bold cyan]{cheapest:.0f} ({_safe_text(currency)})[/]  · "
         f"window {_safe_text(sd.isoformat())} → {_safe_text(ed.isoformat())}"
     )
+    fare = "fare" if trip_length is None else f"round-trip fare ({trip_length:d} nights)"
     t = Table(
         title=f"{_safe_text(','.join(origin))} → {_safe_text(','.join(destination))}: "
-        "lowest fare per departure day (Google Flights)",
+        f"lowest {fare} per departure day (Google Flights)",
         show_header=True,
         header_style="bold green",
     )
     t.add_column("departure", justify="right")
-    t.add_column("min (USD)", justify="right")
+    t.add_column(f"min ({_safe_text(currency)})", justify="right")
     for day, price in sorted(grid.items(), key=lambda kv: kv[1]):
         # The day is a key off the Google Flights grid, not a date this module built.
         t.add_row(_safe_text(day), f"{price:.0f}")
     console.print(t)
 
 
-def _grid_branch_blocker(
+def _grid_branch_blocker(  # noqa: PLR0911 — one return per named reason, cheapest first
     search: CalendarSearch,
     *,
     json_out: bool,
     one_way: bool,
     origins: tuple[str, ...],
     dests: tuple[str, ...],
+    fast: bool = False,
 ) -> str | None:
     """Why the GF date-grid can't serve this calendar, or None if it can.
 
     The string is user-facing: it completes "this is …" in the `--fast` refusal, so
-    every branch returns a noun phrase. The first three name the SHAPE, which is
+    every branch returns a noun phrase. The shape branches name the SHAPE, which is
     the whole story for them; the routing branch names the flag and the tier
     instead, because a constraint the grid can't honor is not visible in the shape
     of the command line. Ordered cheapest-first so the fli-heavy `_gf_dategrid`
     import is still skipped for the shapes that never need it.
+
+    The grid has no itineraries, so it is served only when the request carries
+    EVERY constraint on the search; anything else would price a wider question and
+    print it as the answer. Under `--fast` that request is the search page's URL,
+    whose encoder carries fewer constraints than the RPC the weave calls, so its
+    limits apply there alone. JSON and a round trip of one trip length are served
+    by that page grid too, so without `--fast` they still go to Matrix.
     """
-    if json_out:
+    if json_out and not fast:
         return "JSON output"
-    if not one_way:
+    if not one_way and not fast:
         return "a round-trip window"
+    window = search.window
+    if not one_way and window.duration_min != window.duration_max:
+        return f"a trip-length range ({window.duration_min:d}-{window.duration_max:d} nights)"
     if len(origins) > 1 or len(dests) > 1:
         return "a multi-airport route"
+    # Before anything builds an fli filter: fli has no member for most city codes
+    # and resolves two of them to another city's airport.
+    city_codes = _gf_unserveable_reasons(BACKEND_GFLIGHT, ",".join(origins), ",".join(dests))
+    if city_codes:
+        return city_codes[0]
     from ._gf_dategrid import grid_can_serve, grid_routing_blocker  # noqa: PLC0415
 
-    if not grid_can_serve(search):
+    if not grid_can_serve(search, round_trip=fast):
         # `grid_can_serve` is False for Tier-2 AND Tier-3, so ask which: the grid
         # returns no itineraries (Tier-2's problem) and cannot reach fare
         # construction at all (Tier-3's), and only one of those is a routing tier
         # the reader can do anything about. The fallback covers a future gate
         # condition that routing does not explain.
         return grid_routing_blocker(search) or "a constraint the price grid can't honor"
-    return None
+    if not fast:
+        return None
+    from ._gf_calgraph import page_blocker  # noqa: PLC0415 — fli, like the import above
+
+    return page_blocker(search)
 
 
 def _render_calendar(
@@ -4936,10 +5043,34 @@ def calendar(
         False,
         "--fast/--enrich",
         "--no-enrich/--no-fast",
-        help="Skip the Matrix enrichment: show only the fast Google Flights "
-        "date grid (one-way, single-airport, Tier-1 filters) instead of also "
-        "running the authoritative Matrix calendar. Exits 1 rather than falling "
-        "back, so a no-grid result is never mistaken for a fast one.",
+        help="Skip the Matrix enrichment: show only the Google Flights price "
+        "grid instead of also running the authoritative Matrix calendar. Serves a "
+        "single-airport calendar, one-way or a round trip of one trip length "
+        "('-d 7'), whose filters Google Flights' search page can carry (cabin, "
+        "adults, stops up to 2); table or JSON. Needs [bold]--gf-transport browser[/] "
+        "(or [bold]auto[/]) while the direct RPC returns no data. Exits 1 rather "
+        "than falling back, so a no-grid result is never mistaken for a fast one.",
+        rich_help_panel=_GROUP_BACKEND,
+    ),
+    gf_transport: str = typer.Option(
+        TRANSPORT_HTTP,
+        "--gf-transport",
+        help=(
+            "How [bold]--fast[/] reaches Google Flights' price grid: [bold]http[/] "
+            "(default) calls the calendar RPC directly, which Google currently answers "
+            "with no data; [bold]browser[/] opens the filtered search page in a real "
+            "Chrome (headless unless [bold]--gf-headed[/]), clicks Price graph and reads "
+            "the page's own response, a few seconds per five weeks of window; "
+            "[bold]auto[/] is browser. Needs [bold]uv pip install "
+            # Escaped: rich reads `[browser]` as a style tag and deletes it.
+            "'flight-cli\\[browser]'[/] for browser."
+        ),
+        rich_help_panel=_GROUP_BACKEND,
+    ),
+    gf_headed: bool = typer.Option(
+        False,
+        "--gf-headed",
+        help="Show the Chrome window --gf-transport browser opens. Default: headless.",
         rich_help_panel=_GROUP_BACKEND,
     ),
     max_per_query: int = typer.Option(
@@ -4961,6 +5092,14 @@ def calendar(
 ) -> None:
     """Lowest-fare grid across a date window. Default round-trip; --one-way to flip."""
     json_out = _resolve_format(fmt=fmt, json_flag=json_out) == "json"
+    gf_mode = _resolve_gf_transport(gf_transport)
+    if not fast and (gf_mode != TRANSPORT_HTTP or gf_headed):
+        # Only the `--fast` grid reaches Google Flights; ignoring the flag would
+        # run the Matrix calendar as though the transport had been honored.
+        raise typer.BadParameter(
+            "applies only with --fast, the one calendar Google Flights serves",
+            param_hint="--gf-transport" if gf_mode != TRANSPORT_HTTP else "--gf-headed",
+        )
     origins = _parse_iata_list(origin)
     dests = _parse_iata_list(destination)
     sd = _parse_date(start)
@@ -5004,7 +5143,7 @@ def calendar(
     # windows. Paint it first, then enrich with the authoritative Matrix calendar
     # (full per-duration grid). `--fast` stops after the grid.
     blocker = _grid_branch_blocker(
-        search, json_out=json_out, one_way=one_way, origins=origins, dests=dests
+        search, json_out=json_out, one_way=one_way, origins=origins, dests=dests, fast=fast
     )
     if fast and blocker is not None:
         # `--fast` exists only inside the branch below. Everywhere else there is no
@@ -5018,8 +5157,9 @@ def calendar(
         # prose. The other shapes go the same way so the stream doesn't depend on which
         # condition failed.
         err.print(
-            "[yellow]--fast applies only to one-way, single-airport, non-JSON "
-            f"calendars; this is {_safe_text(blocker)}. Run without --fast for Matrix.[/]"
+            "[yellow]--fast applies only to single-airport calendars, one-way or of one "
+            "trip length, whose every filter Google Flights' search page can carry; "
+            f"this is {_safe_text(blocker)}. Run without --fast for Matrix.[/]"
         )
         raise typer.Exit(1)
     if blocker is None:
@@ -5042,12 +5182,28 @@ def calendar(
                 google_url=google_url,
             )
             return
-        _run_fast_calendar_grid(
+        if gf_mode == TRANSPORT_HTTP:
+            _run_fast_calendar_grid(
+                search,
+                origins=origins,
+                dests=dests,
+                sd=sd,
+                ed=ed,
+                matrix_url=matrix_url,
+                google_url=google_url,
+                json_out=json_out,
+            )
+            return
+        # `auto` is the browser here: under `--fast` the http grid has nothing to
+        # serve, so escalating is the only way `auto` differs from failing.
+        _run_fast_browser_grid(
             search,
             origins=origins,
             dests=dests,
             sd=sd,
             ed=ed,
+            json_out=json_out,
+            headed=gf_headed,
             matrix_url=matrix_url,
             google_url=google_url,
         )
