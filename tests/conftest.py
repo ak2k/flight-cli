@@ -27,17 +27,33 @@ from __future__ import annotations
 import datetime
 import io
 import json
+import os
 import pathlib
 import threading
 import time
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from typer import rich_utils
+
+# Rich settles whether a console styles its output when the console is built, and
+# `flight_cli` builds its consoles at import, so this precedes that import.
+# `TTY_COMPATIBLE=0` outranks `FORCE_COLOR`, which would otherwise style the output
+# and break the suite's text assertions.
+os.environ["TTY_COMPATIBLE"] = "0"
 
 from flight_cli import _gf_browser
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+
+@pytest.fixture(autouse=True)
+def _no_forced_terminal(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[reportUnusedFunction] - autouse pytest fixture
+    """CI sets `GITHUB_ACTIONS`, which makes Typer style the help it renders and
+    breaks assertions on its text. Typer passes `force_terminal` explicitly, which
+    outranks `TTY_COMPATIBLE`, so the setting above does not reach it."""
+    monkeypatch.setattr(rich_utils, "FORCE_TERMINAL", False)
 
 
 @pytest.fixture(autouse=True)
