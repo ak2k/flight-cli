@@ -2605,7 +2605,8 @@ def _answer_gf_empty(dropped: int, *, json_out: bool, matrix_fallback: bool) -> 
         return dropped
     if dropped:
         err.print(
-            f"[yellow]Google Flights: none of the {dropped:d} results matched the routing.[/]"
+            f"[yellow]Google Flights: no itinerary matched the routing "
+            f"({dropped:d} rows filtered out).[/]"
         )
     if json_out:
         # No rows is a value, and a document is what was asked for. A sentence
@@ -2819,8 +2820,7 @@ def _paint_first_gf_table(
     elif not gf and "gf_err" not in state:
         if getattr(gf, "dropped", 0):
             err.print(
-                f"[yellow]Google Flights: none of the {getattr(gf, 'dropped', 0):d} results "
-                "matched the routing; awaiting Matrix…[/]"
+                "[yellow]Google Flights: no itinerary matched the routing; awaiting Matrix…[/]"
             )
         else:
             err.print("[yellow]Google Flights: no results; awaiting Matrix…[/]")
@@ -4657,8 +4657,8 @@ def search(
         if unmatched is None:
             return
         err.print(
-            f"[dim]Using Matrix: none of the {unmatched:d} Google Flights results "
-            "matched the routing.[/]"
+            f"[dim]Using Matrix: no Google Flights itinerary matched the routing "
+            f"({unmatched:d} rows filtered out).[/]"
         )
 
     _run_matrix_path(

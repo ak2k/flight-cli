@@ -2126,9 +2126,9 @@ def search_with_ids(
             for nx in nxt
             if keep is None or keep(selected_count + 1, nx[0] if isinstance(nx, tuple) else nx)
         ]
+        dropped_returns += len(nxt) - len(kept)
         if not kept:
             unmatched += 1
-            dropped_returns += len(nxt)
             continue
         for nx in kept:
             if isinstance(nx, tuple):
