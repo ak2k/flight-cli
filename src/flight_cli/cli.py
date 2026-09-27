@@ -1842,7 +1842,7 @@ def _sellers_blocker(
         return "needs a Google Flights result, and this search runs on Matrix"
     if awards_json:
         return "cannot join the award document --format json writes; add --cash-only"
-    n = pick or 1
+    n = 1 if pick is None else pick
     if not 1 <= n <= page_size:
         return f"--pick {n:d} names no row of the {page_size:d} that -n asks for"
     return None
@@ -1860,7 +1860,7 @@ def _pick_for_sellers(pick: int | None, rows: int) -> int:
     to the search and none to `--sellers`, so it fails the command."""
     if rows == 0:
         _no_booking_options("No booking options", "the search returned no itinerary to open.")
-    n = pick or 1
+    n = 1 if pick is None else pick
     if not 1 <= n <= rows:
         err.print(f"[red]--pick {n:d} is out of range (1-{rows:d}); --sellers opens that row.[/]")
         raise typer.Exit(2)
