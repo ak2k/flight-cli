@@ -21,6 +21,7 @@ import urllib.parse
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, cast
 
+from . import _gf_browser
 from ._gf_errors import GfBackendError, GfConsentError, GfThrottledError, GfUpstreamStatusError
 from ._gflight_ids import (
     _is_consent_page,  # pyright: ignore[reportPrivateUsage]
@@ -28,6 +29,9 @@ from ._gflight_ids import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from ._gf_browser import CapturedResponse
     from ._gf_common import PageFetch
 
 _XSSI_GUARD = ")]}'"
@@ -52,6 +56,23 @@ class GfPageRpcError(GfBackendError):
         """Say what came back; `code` is the error row's, if there was one."""
         self.code = code
         super().__init__(reason)
+
+
+def capture(url: str, wanted: Callable[[str], bool], *, headed: bool) -> CapturedResponse:
+    """The first response to a request `wanted` accepts that the page at `url`
+    receives, read through this thread's browser session, walls named by
+    `refuse_a_wall`.
+
+    An error out of a session a Ctrl-C finished is reported as that Ctrl-C.
+    The capture still removes its listeners after the stop, and the stopped
+    driver's error from that step would otherwise replace the interrupt."""
+    session = _gf_browser.session(headed=headed)
+    try:
+        return session.capture(url, wanted, check_page=refuse_a_wall)
+    except Exception as e:
+        if session.finished:
+            raise KeyboardInterrupt from e
+        raise
 
 
 def result_payloads(body: str, *, what: str) -> list[Any]:

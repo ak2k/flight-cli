@@ -236,6 +236,7 @@ class _FakeSession:
         self.urls: list[str] = []
         self.checks: list[object] = []
         self.held: list[tuple[int, object]] = []
+        self.finished = False
 
     def capture(
         self,

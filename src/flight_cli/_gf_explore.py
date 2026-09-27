@@ -20,8 +20,7 @@ from datetime import date
 from http import HTTPStatus
 from typing import Any, NamedTuple, cast
 
-from . import _gf_browser
-from ._gf_rpc_shared import GfPageRpcError, dig, refuse_a_wall, result_payloads, url_currency
+from ._gf_rpc_shared import GfPageRpcError, capture, dig, result_payloads, url_currency
 
 _EXPLORE_RPC = "/GetExploreDestinations"
 _WHAT = "Google Flights' explore page response"
@@ -204,9 +203,7 @@ def explore(url: str, *, origin: str, month: date | None, headed: bool) -> Explo
     """Open the explore page at `url` and read what it lists.
 
     The caller arms `interrupt_guard` and holds `session_scope` around this."""
-    captured = _gf_browser.session(headed=headed).capture(
-        url, _is_explore_rpc, check_page=refuse_a_wall
-    )
+    captured = capture(url, _is_explore_rpc, headed=headed)
     if not HTTPStatus.OK <= captured.status < HTTPStatus.MULTIPLE_CHOICES:
         raise GfPageRpcError(f"Google Flights' explore request returned HTTP {captured.status:d}")
     return ExploreAnswer(

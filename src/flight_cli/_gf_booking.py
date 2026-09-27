@@ -16,8 +16,7 @@ import urllib.parse
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
-from . import _gf_browser
-from ._gf_rpc_shared import GfPageRpcError, dig, refuse_a_wall, result_payloads, url_currency
+from ._gf_rpc_shared import GfPageRpcError, capture, dig, result_payloads, url_currency
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -120,9 +119,7 @@ def booking_options(
     """Open the booking page at `url` and read who sells the itinerary.
 
     The caller arms `interrupt_guard` and holds `session_scope` around this."""
-    captured = _gf_browser.session(headed=headed).capture(
-        url, _is_booking_rpc, check_page=refuse_a_wall
-    )
+    captured = capture(url, _is_booking_rpc, headed=headed)
     if not HTTPStatus.OK <= captured.status < HTTPStatus.MULTIPLE_CHOICES:
         raise GfPageRpcError(f"Google Flights' booking request returned HTTP {captured.status:d}")
     return BookingOptions(url_currency(url), parse_sellers(captured.body, flights=flights))
