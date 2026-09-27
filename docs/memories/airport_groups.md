@@ -20,10 +20,15 @@ These resolve to "any of the city's airports" automatically. Prefer these
 over manual comma-lists when one exists — they're shorter and Matrix
 handles the airport-equivalence semantics.
 
-A metro code routes the search to Matrix, because Google Flights takes airport
-codes only — the six below that are also an airport code (`HOU`, `LAX`, `BER`,
-`SHA`, `BKK`, `DPS`) are the exception and stay on Google Flights as that one
-airport.
+`flight search` serves a metro code on Google Flights by asking for every
+member airport below at once, because Google's search page takes airport codes
+only (repeated per leg); Matrix still gets the code itself. The six below that
+are also an airport code (`HOU`, `LAX`, `BER`, `SHA`, `BKK`, `DPS`) stay that one
+airport on Google Flights. A leg of more than 11 airports, origins plus
+destinations after expansion, goes to Matrix: Google's page declined 15 on one
+side outright. `src/flight_cli/_metro.py` holds the same table, and
+`tests/test_metro.py` fails when the two differ. The calendar's Google grid does
+not expand anything (see `gf_routing_and_carriers.md`).
 
 | Metro | IATA metro | Constituent airports |
 |---|---|---|

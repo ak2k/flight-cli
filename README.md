@@ -23,6 +23,7 @@ Requires Python 3.11+.
 ```sh
 # specific-date search — auto-picks the backend.
 # Plain cash search → Google Flights (fast, broad coverage).
+# Airport sets and metro codes (JFK,EWR or NYC) stay there too, up to 11 airports a leg.
 flight search JFK LHR --dep 2026-08-15 --return 2026-08-22
 
 # Power-user flag → auto-flips to ITA Matrix (routing language,
