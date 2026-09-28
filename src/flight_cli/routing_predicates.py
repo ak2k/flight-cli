@@ -16,9 +16,10 @@ it carries NO Tier-3 predicate (see `ClassifiedConstraints.requires_matrix`).
 We never honor part of a constraint on GF and silently drop the rest — an
 unrecognized token escalates the whole query to Matrix.
 
-`Tier` is the date grid's question ("could GF honor this at all"). The search
-path asks a narrower one — `page_can_encode`, "can the public page's tfs=
-parameter carry this" — because that transport has far fewer filter fields.
+`Tier` is the date grid's question ("could GF honor this at all"), and
+`page_can_encode` the Chrome price graph's ("can the page's tfs= carry this
+with no rows to check it on"). The search path asks its own,
+`_gf_postfilter.search_page_reasons`, because it has rows to check.
 
 Routing language is *positional* (`BA AA` = BA then AA), so it's parsed
 all-or-nothing per string: only single order-independent intents (one carrier
@@ -116,8 +117,9 @@ class MaxDurationPred:
 
 @dataclass(frozen=True, slots=True)
 class ConnectTimePred:
-    """Layover-time bound in minutes. GF natively filters the *max* layover; a
-    *min* layover has no query knob, so a min bound is a post-filter."""
+    """Layover-time bound in minutes. GF natively filters the *max* layover. The
+    search page encodes a *min* as well (3.17), but a min stays a post-filter:
+    the date grids have no rows to check it on, so they refuse it."""
 
     min_minutes: int | None
     max_minutes: int | None
@@ -369,15 +371,15 @@ def parse_extension(extension: str) -> list[Predicate]:
 # ───────────────── search-page transport encodability ──────────────────
 #
 # `Tier` above answers "could Google Flights honor this at all" — the date
-# grid's question of its RPC. The search path's transport, the public page's
-# tfs= parameter, carries a much narrower filter set, so it gets its own
-# question: can `links.build_search_tfs` encode this?
+# grid's question of its RPC. `page_can_encode` below answers for the Chrome
+# price graph, which reads the public page's tfs= and has no rows to check: yes
+# only for a stop ceiling.
 #
-# Today the answer is yes only for stops. Carrier/alliance/layover-airport
-# filters DO have tfs fields (3.6 / 3.7 / 3.15 / 3.17 / 3.18) and are the
-# obvious next widening. The page serves its full board, so the search gate
-# (`_gf_postfilter.search_page_reasons`) also admits the Tier-2 predicates the
-# post-filter evaluates the way Matrix does; anything else goes to Matrix with
+# The search gate (`_gf_postfilter.search_page_reasons`) starts from this and
+# admits more, because a search has rows: the carrier and alliance includes,
+# the duration and the layover bounds the page also encodes (3.6 / 3.12 /
+# 3.17 / 3.18), checked on the rows too, and the Tier-2 predicates the
+# post-filter evaluates the way Matrix does. Anything else goes to Matrix with
 # the reason printed.
 
 

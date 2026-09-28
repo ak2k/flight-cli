@@ -3281,7 +3281,7 @@ def _gf_refusal(  # noqa: PLR0911 — one return per refusal type; see the docst
                 f"Use [bold]--backend matrix[/]. ({_safe_text(e)})",
             )
         case GfTfsUnsupportedError():
-            # Generic note: `page_can_encode` keeps these queries off Google
+            # Generic note: the backend picker keeps these queries off Google
             # Flights, so the enrich path never has one to render.
             return _GfRefusal(
                 _GF_DECLINED,

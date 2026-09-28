@@ -63,15 +63,30 @@ guards both. Field layout, reverse-engineered and cross-checked against fli
 PR #230:
 
 ```
-1  = 28 (constant)          8  = passenger kind, repeated (adult = 1)
-2  = 2 (constant)           9  = cabin class
-3  = segment, repeated      14 = 1 (constant)
-3.2  = departure date       16 = max-uint64 pin (booking deep links only)
-3.4  = selected leg, rep.   19 = 2 one-way, 1 round-trip (3 multi-city is unusable)
-3.5  = stop ceiling         3.13 = origin   3.14 = destination
-3.6/3.7 = carrier incl/excl (NOT written yet — see below)
-3.15 = layover airports     3.17/3.18 = min/max layover minutes
+1  = 28 (constant)          8  = passenger kind, one per traveler:
+2  = 2 (constant)                1 adult, 2 child, 3 infant on lap, 4 infant in seat
+3  = segment, repeated      9  = cabin class
+3.2  = departure date       14 = 1 (constant)
+3.4  = selected leg, rep.   16 = max-uint64 pin (booking deep links only)
+3.5  = stop ceiling         19 = 2 one-way, 1 round-trip (3 multi-city is unusable)
+3.6  = carrier include, repeated: bare IATA codes and alliance names
+       (ONEWORLD, SKYTEAM, STAR_ALLIANCE) in one list
+3.7  = carrier exclude (Google ignored it on JFK-LHR; not written)
+3.8/3.9   = earliest/latest departure hour   3.10/3.11 = earliest/latest arrival hour
+3.12 = maximum duration, minutes
+3.13 = origin   3.14 = destination   3.15 = layover airports (not written)
+3.17/3.18 = min/max layover minutes
 ```
+
+The hour fields are whole hours and a "latest" hour is the last hour included:
+the UI's "9:00 PM" latest arrival wrote 20 and "end of day" wrote 23, and all
+four are written once any one is set (the unset side of a pair as 0 and 23).
+So Matrix's morning (8:00-11:00) asks for 8 to 11, Google also returns 11:01 to
+11:59, and the row filter drops those. Infant codes 3 and 4 are the reverse of
+fast_flights' enum names: BA112 JFK-LHR priced $295 for one adult, $324 beside
+a 3 (a tenth of the fare, a lap) and $589 beside a 4 (a seat). Every writer
+(`build_search_tfs`, the pinned and booking links, `google_flights_url`)
+writes Google's codes.
 
 Two traps in that layout. **`3.5` is zero-based** while fli's `MaxStops` is
 one-based (ANY=0, NON_STOP=1, …), so it's `enum.value - 1` and **omitted** for
@@ -85,13 +100,33 @@ leg. `links.google_flights_search_page_url` always sends `tfu=EgQIABABIgA`
 (`{2: {1: 0, 2: 1}, 4: {}}`, the "show all" bit), which serves the full board:
 JFK-LAX 30 -> 95 rows, JFK-LHR 22 -> 101 (measured 2026-09-27), at roughly twice
 the page size (3.6 -> 7.5 MB, +0.7 s). A round trip costs one page fetch per
-pinned outbound. The tfs parameter carries far fewer filters than `f.req` did:
-today only a stop ceiling encodes. On the full board the Tier-2 predicates the
-post-filter evaluates the way Matrix does are served by Google too, so the
-search gate is per predicate (`_gf_postfilter.search_page_reasons`): each one
-is either encodable (`page_can_encode`) or a post-filtered Tier-2 carrier /
-codeshare predicate, and anything else routes to Matrix with its reason
-printed. Re-widening `3.6`/`3.7`/`3.15`/`3.17`/`3.18` is the next step.
+pinned outbound. The page encodes a stop ceiling, a carrier or alliance
+include, a maximum duration, layover minutes, a departure-hour window per leg
+and children; each was sent live and the board honored it (2026-09-27). On the
+full board the Tier-2 predicates the post-filter evaluates the way Matrix does
+are served by Google too, so the search gate is per predicate
+(`_gf_postfilter.search_page_reasons`), and anything else routes to Matrix with
+its reason printed. Still on Matrix: carrier and alliance excludes as encoded
+fields (they stay post-filters), connection airports (3.15; Matrix's meaning is
+positional), infants (Google answered JFK-LAX with no rows for any infant, so an
+empty answer would not be one), seniors and youth (no Google kind), time
+buckets that do not form one window, an alliance beside another carrier or
+alliance include (3.6 is one list, so Google would answer either), a zero
+`MAXCONNECT`, and a carrier code fli has no member for.
+
+**Encoded constraints are checked on the rows too.** Google has ignored a field
+it was sent (the carrier exclude on JFK-LHR), so `_gf_postfilter.routing_keep`
+holds every row to what the row can show: the carrier include (any seller, the
+marketing reading), Google's own total duration (`FlightResult.duration`, never
+a difference of leg datetimes, which are local to each airport and off by the
+zone offset), every layover's minutes (same airport, same zone), and the first
+departure's clock time, to the minute. An alliance is the one encoded filter
+not checked: nothing here says which carrier is in which alliance. When these
+checks empty a board, the empty-answer line names every active check.
+
+The date grids do not serve any of the new constraints yet: `page_can_encode`
+and each predicate's `Tier` still answer for them, and they have no rows to
+check against. Only the strictest-stops rule reached them.
 
 **How the full board is served.**
 - Rows are deduped per itinerary (every leg's carrier, flight number and
@@ -623,10 +658,12 @@ predicate set, each tagged with a tier:
 
 - **Tier 1 — native GF filter** (`fli_bridge.apply_gf_native_filters`): marketing
   carrier *include* (`LH+`, `AIRLINES`), alliance, connect-at airport
-  (`F* X:FRA F*`), `MAXCONNECT`, `MAXDUR`, nonstop/`MAXSTOPS`.
+  (`F* X:FRA F*`), `MAXCONNECT`, `MAXDUR`, nonstop/`MAXSTOPS`. With several stop
+  limits (`--stops` and any `MAXSTOPS`/`N`) the strictest wins.
 - **Tier 2 — post-filter on the result** (`_gf_postfilter`): operating carrier
   (`O:`/`OPAIRLINES`), marketing/airport *exclude* (`~UA`, `~DFW`, `-CITIES`,
-  `-AIRLINES`), `-CODESHARE`, specific flight #/range.
+  `-AIRLINES`), `-CODESHARE`, specific flight #/range, `MINCONNECT` (the search
+  page also encodes it as 3.17; the grids have no rows to check it on).
 - **Tier 3 — Matrix only**: fare construction (`F bc=y`, `aa.lon.yup`), mileage,
   `PADCONNECT`, aircraft, and anything the parser can't confidently classify.
 
@@ -646,18 +683,20 @@ under-return) and the post-filter (a string-based backstop that also enforces
 marketing-include + connect-at) is the correctness guarantee.
 
 **The SEARCH gate is `_gf_postfilter.search_page_reasons`**, above: a
-predicate passes when `page_can_encode` encodes it, or when it is Tier-2, the
-post-filter evaluates it, and it is neither a flight number nor a
-connection-airport exclude. Those two stay on Matrix because Matrix reads them
-positionally and the filter does not: bare `AS21` is one flight ("No solutions"
-on JFK-LAX, where the filter keeps AS21 connections), and `F* ~DUB F*` is one
-connection not at DUB (Matrix drops the nonstops the filter keeps). The Tier-1
-predicates the page cannot encode also stay on Matrix.
+predicate passes when the page encodes it (`page_can_encode`'s stop ceiling, or
+`_served_by_page`: carrier include, alliance, `MAXDUR`, `MINCONNECT`/
+`MAXCONNECT` with a positive maximum), or when it is Tier-2, the post-filter
+evaluates it, and it is neither a flight number nor a connection-airport
+exclude. Those two stay on Matrix because Matrix reads them positionally and
+the filter does not: bare `AS21` is one flight ("No solutions" on JFK-LAX, where
+the filter keeps AS21 connections), and `F* ~DUB F*` is one connection not at
+DUB (Matrix drops the nonstops the filter keeps). `page_can_encode` itself was
+left narrow on purpose: the Chrome price graph (`_gf_calgraph.page_blocker`)
+reads it, and a graph cannot check rows.
 
-Time-based Tier-2 predicates (`MINCONNECT`, `-REDEYES`, `-OVERNIGHTS`) currently
-escalate to Matrix — `_gf_postfilter` can't evaluate them yet (no per-segment
-times threaded through `LegInfo`). Promote by threading those times, then adding
-them to `_SUPPORTED` + `_slice_passes`.
+`-REDEYES` and `-OVERNIGHTS` still escalate to Matrix. The raw-row checks in
+`_gf_postfilter._row_passes` read per-leg datetimes, so either could be added
+there.
 
 ## Progressive enrich (`_run_enriched_path`)
 
