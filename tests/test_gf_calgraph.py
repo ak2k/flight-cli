@@ -12,11 +12,13 @@ from __future__ import annotations
 import json
 import pathlib
 import signal
+import sys
 from datetime import date, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import pytest
 import typer
+from typer.testing import CliRunner
 
 from flight_cli import _gf_browser as gfb
 from flight_cli import _gf_calgraph as cg
@@ -36,6 +38,8 @@ from flight_cli.domain import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from click.testing import Result
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures" / "gf_calgraph"
 _GRAPH_URL = (
@@ -599,3 +603,117 @@ def test_a_transport_flag_without_fast_is_a_usage_error(
     with pytest.raises(typer.BadParameter, match="--fast") as e:
         _calendar(fast=False, **overrides)
     assert e.value.param_hint == flag
+
+
+# ───────────────────── the transport a bare `--fast` takes ───────────────────
+
+
+def _calendar_cli(*extra: str) -> Result:
+    """`calendar` through the CLI parser: a direct call cannot leave an option
+    out, because the omitted parameter would be typer's `OptionInfo` rather than
+    the option's default."""
+    end = _START + timedelta(days=13)
+    args = ["calendar", "JFK", "LAX", "--start", _START.isoformat(), "--end", end.isoformat()]
+    return CliRunner().invoke(cli.app, [*args, "--one-way", *extra])
+
+
+class _NoChrome:
+    """A driver that starts, in front of a Chrome that is not installed."""
+
+    def __init__(self) -> None:
+        self.chromium = self
+
+    def start(self) -> _NoChrome:
+        return self
+
+    def launch_persistent_context(self, **_kwargs: object) -> NoReturn:
+        raise RuntimeError("Chromium distribution 'chrome' is not found.")
+
+    def stop(self) -> None:
+        return None
+
+
+def test_a_bare_fast_reads_the_price_graph_through_the_browser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _no_matrix(monkeypatch)
+    fake = _serve(monkeypatch, _body(_cells(_START - timedelta(days=7), 38)))
+    result = _calendar_cli("--fast", "--format", "json")
+    assert result.exit_code == 0, result.stderr
+    assert [url for url, _ in fake.calls] == [f"page:{_START}"]
+    assert len(json.loads(result.stdout)["grid"]) == 14
+
+
+@pytest.mark.gf_browser  # the real launcher seam, over an import that cannot succeed
+def test_a_bare_fast_without_patchright_names_the_install(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    _no_matrix(monkeypatch)
+    monkeypatch.setenv("MATRIX_CACHE_DIR", str(tmp_path))
+    monkeypatch.setitem(sys.modules, "patchright.sync_api", None)
+    result = _calendar_cli("--fast")
+    err = " ".join(result.stderr.split())
+    assert result.exit_code == 1
+    assert "needs patchright" in err
+    assert "uv pip install 'flight-cli[browser]'" in err
+    assert err.count("No Google Flights grid; drop --fast for Matrix.") == 1
+    assert result.stdout == ""
+
+
+def test_a_bare_fast_without_chrome_names_the_chrome_install(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The install hint for patchright also names the Chrome install, so the
+    launch failure is told apart by what it leaves out."""
+    _no_matrix(monkeypatch)
+    monkeypatch.setenv("MATRIX_CACHE_DIR", str(tmp_path))
+    monkeypatch.delenv(gfb._BROWSER_BIN_ENV, raising=False)
+
+    def _factory() -> type[_NoChrome]:
+        return _NoChrome
+
+    monkeypatch.setattr(gfb, "_playwright_factory", _factory)
+    result = _calendar_cli("--fast")
+    err = " ".join(result.stderr.split())
+    assert result.exit_code == 1
+    assert "Chromium distribution 'chrome' is not found." in err
+    assert "patchright install chrome" in err
+    assert "flight-cli[browser]" not in err
+    assert "--gf-transport http" not in err  # no grid there to offer
+    assert err.count("No Google Flights grid; drop --fast for Matrix.") == 1
+    assert result.stdout == ""
+
+
+@pytest.mark.parametrize("extra", [(), ("--gf-transport", "http")], ids=["unset", "http"])
+def test_without_fast_an_unset_or_http_transport_runs_matrix(
+    extra: tuple[str, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ran: list[CalendarSearch] = []
+
+    def _weave(search: CalendarSearch, **_kwargs: object) -> None:
+        ran.append(search)
+
+    monkeypatch.setattr(cli, "_run_calendar_enriched", _weave)
+    result = _calendar_cli(*extra)
+    assert result.exit_code == 0, result.stderr
+    assert len(ran) == 1
+
+
+@pytest.mark.parametrize(
+    ("extra", "flag"),
+    [
+        (("--gf-transport", "browser"), "--gf-transport"),
+        (("--gf-transport", "auto"), "--gf-transport"),
+        (("--gf-headed",), "--gf-headed"),
+    ],
+    ids=["browser", "auto", "headed"],
+)
+def test_without_fast_a_browser_flag_is_still_a_usage_error(
+    extra: tuple[str, ...], flag: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_matrix(monkeypatch)
+    result = _calendar_cli(*extra)
+    err = " ".join(result.stderr.split())
+    assert result.exit_code == 2
+    assert flag in err
+    assert "applies only with --fast" in err

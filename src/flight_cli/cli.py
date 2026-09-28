@@ -5489,23 +5489,23 @@ def calendar(
         "grid instead of also running the authoritative Matrix calendar. Serves a "
         "single-airport calendar, one-way or a round trip of one trip length "
         "('-d 7'), whose filters Google Flights' search page can carry (cabin, "
-        "adults, stops up to 2); table or JSON. Needs [bold]--gf-transport browser[/] "
-        "(or [bold]auto[/]) while the direct RPC returns no data. Exits 1 rather "
+        "adults, stops up to 2); table or JSON. Reads the grid from the search page "
+        "in a real Chrome (see [bold]--gf-transport[/]). Exits 1 rather "
         "than falling back, so a no-grid result is never mistaken for a fast one.",
         rich_help_panel=_GROUP_BACKEND,
     ),
-    gf_transport: str = typer.Option(
-        TRANSPORT_HTTP,
+    gf_transport: str | None = typer.Option(
+        None,
         "--gf-transport",
         help=(
-            "How [bold]--fast[/] reaches Google Flights' price grid: [bold]http[/] "
-            "(default) calls the calendar RPC directly, which Google currently answers "
-            "with no data; [bold]browser[/] opens the filtered search page in a real "
-            "Chrome (headless unless [bold]--gf-headed[/]), clicks Price graph and reads "
-            "the page's own response, a few seconds per five weeks of window; "
-            "[bold]auto[/] is browser. Needs [bold]uv pip install "
+            "How [bold]--fast[/] reaches Google Flights' price grid: [bold]auto[/] "
+            "(default) is browser; [bold]browser[/] opens the filtered search page in a "
+            "real Chrome (headless unless [bold]--gf-headed[/]), clicks Price graph and "
+            "reads the page's own response, a few seconds per five weeks of window; "
+            "[bold]http[/] calls the calendar RPC directly, which Google currently "
+            "answers with no data. Browser needs [bold]uv pip install "
             # Escaped: rich reads `[browser]` as a style tag and deletes it.
-            "'flight-cli\\[browser]'[/] for browser."
+            "'flight-cli\\[browser]'[/] and an installed Chrome."
         ),
         rich_help_panel=_GROUP_BACKEND,
     ),
@@ -5534,6 +5534,11 @@ def calendar(
 ) -> None:
     """Lowest-fare grid across a date window. Default round-trip; --one-way to flip."""
     json_out = _resolve_format(fmt=fmt, json_flag=json_out) == "json"
+    if gf_transport is None:
+        # `--fast` asks for Google's grid, and only the browser returns one while
+        # the direct RPC answers with no data. Without `--fast` nothing reaches
+        # Google, so unset stays the one mode the check below accepts.
+        gf_transport = "auto" if fast else TRANSPORT_HTTP
     gf_mode = _resolve_gf_transport(gf_transport)
     if not fast and (gf_mode != TRANSPORT_HTTP or gf_headed):
         # Only the `--fast` grid reaches Google Flights; ignoring the flag would
