@@ -206,6 +206,7 @@ def test_stop_ceiling_above_two_goes_to_matrix() -> None:
         ("routing", "~BA"),  # direct, not BA (Tier 3)
         ("extension", "-REDEYES"),
         ("extension", "MAXCONNECT 0:00"),  # fli's layover maximum is positive
+        ("extension", "MAXDUR 0:00"),  # and so is its duration maximum
         ("routing", "XX+"),  # no fli member, so no row would come back
         # 3.6 is one include list: Google would answer either.
         ("extension", "ALLIANCE oneworld; ALLIANCE skyteam"),
@@ -319,6 +320,7 @@ def test_page_can_encode_names_every_constraint_it_refuses() -> None:
         ({"adults": 0, "children": 1}, "a child passenger with no adult"),
         ({"adults": 9, "children": 1}, "more than 9 passengers"),
         ({"extension": "MAXCONNECT 0:00"}, "a maximum layover of 0 min"),
+        ({"extension": "MAXDUR 0:00"}, "a maximum trip duration (0 min)"),
         ({"routing": "XX+"}, "a carrier Google Flights has no code for (XX)"),
         (
             {"routing": "AA+", "extension": "ALLIANCE oneworld"},

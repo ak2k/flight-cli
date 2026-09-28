@@ -93,10 +93,13 @@ def _served_by_page(pred: Predicate) -> bool:
     `page_can_encode` admits. That function also answers for the date grids,
     which have no rows to check these on."""
     match pred:
-        case CarrierPred(exclude=False, operating=False) | AlliancePred() | MaxDurationPred():
+        case CarrierPred(exclude=False, operating=False) | AlliancePred():
             return True
+        # fli's maximums take a positive number only; assigning the duration
+        # skips that check, so a zero would reach the page as 3.12=0.
+        case MaxDurationPred():
+            return pred.minutes != 0
         case ConnectTimePred():
-            # fli's layover maximum takes a positive number only.
             return pred.max_minutes != 0
         case _:
             return False

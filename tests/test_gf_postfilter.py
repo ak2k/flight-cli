@@ -243,6 +243,14 @@ def test_a_zero_maximum_layover_goes_to_matrix_naming_it() -> None:
     ]
 
 
+def test_a_zero_maximum_duration_goes_to_matrix_naming_it() -> None:
+    """fli's duration maximum is positive, and assigning it skips that check,
+    so the page would be sent 3.12=0."""
+    assert search_page_reasons(classify(None, "MAXDUR 0:00").predicates) == [
+        "a maximum trip duration (0 min)"
+    ]
+
+
 # ─────────────────────────── checks on the raw row ─────────────────────────
 
 _DAY = datetime(2026, 11, 4)
