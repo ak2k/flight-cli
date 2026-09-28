@@ -35,6 +35,7 @@ import pytest
 # capture; each helper's own docstring says why it is shaped as it is.
 from conftest import _answering, _ds1, capture_err
 from conftest import _page as _page_carrying
+from flight_cli import _gf_booking, _gf_explore
 from flight_cli import _gf_browser as gfb
 from flight_cli import _gf_common as gfc
 from flight_cli import _gflight_ids as gfid
@@ -184,6 +185,7 @@ class _FakePage:
         self.on_wait: list[_Event] = []
         self.click_error: BaseException | None = None
         self.wait_error: BaseException | None = None
+        self.remove_error: BaseException | None = None
         self.clicks: list[tuple[str, str, bool, float]] = []
         self.waits: list[float] = []
         self.listeners: dict[str, list[Callable[[Any], None]]] = {}
@@ -198,6 +200,8 @@ class _FakePage:
         from patchright.sync_api import Page
 
         inspect.signature(Page.remove_listener).bind(None, event, f)
+        if self.remove_error is not None:
+            raise self.remove_error
         self.listeners[event].remove(f)
         if not self.listeners[event]:
             del self.listeners[event]
@@ -3732,6 +3736,54 @@ def test_a_ctrl_c_during_the_capture_wait_is_not_turned_into_a_refusal(
     assert session.finished
     assert page.listeners == {}
     session.close()
+
+
+_BOOKING_URL = "https://www.google.com/travel/flights/booking?tfs=x&curr=USD"
+_EXPLORE_URL = "https://www.google.com/travel/explore?tfs=x&curr=USD"
+
+
+def _interrupted_page(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    """A Ctrl-C in the capture's wait, after which removing a listener raises
+    as patchright's does once the interrupt has unwound its event loop."""
+    page = _capture_page(monkeypatch, tmp_path)
+    page.on_goto = [("request", _nav_request())]
+    page.wait_error = KeyboardInterrupt()
+    page.remove_error = RuntimeError(": no running event loop")
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        pytest.param(
+            lambda: _gf_booking.booking_options(_BOOKING_URL, flights=[("DL", "1")], headed=False),
+            id="sellers",
+        ),
+        pytest.param(
+            lambda: _gf_explore.explore(_EXPLORE_URL, origin="JFK", month=None, headed=False),
+            id="explore",
+        ),
+    ],
+)
+def test_a_ctrl_c_during_a_page_capture_reaches_the_reader_as_the_interrupt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, read: Callable[[], object]
+) -> None:
+    _interrupted_page(monkeypatch, tmp_path)
+    with pytest.raises(KeyboardInterrupt), gfb.session_scope():
+        read()
+
+
+def test_a_ctrl_c_during_explore_exits_130_without_a_traceback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, keep_sigint: None
+) -> None:
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    _interrupted_page(monkeypatch, tmp_path)
+    result = CliRunner().invoke(cli.app, ["explore", "JFK"])
+    assert result.exit_code == 130, (result.exit_code, result.output)
+    assert result.stdout == ""
+    assert "Traceback" not in result.stderr
 
 
 def test_capture_shares_the_session_and_its_one_page_with_get_html(

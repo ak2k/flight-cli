@@ -713,6 +713,43 @@ def google_flights_pinned_url(
     Verified against captured headed-browser navigation in
     research/capture/manual-1779193717/. See `_encode_gflight_pinned_tfs`
     docstring for the protobuf schema notes."""
+    b64 = _pinned_tfs_b64(s, outbound_segments, return_segments)
+    curr = currency or s.options.currency or "USD"
+    return (
+        f"https://www.google.com/travel/flights/search?"
+        f"tfs={urllib.parse.quote(b64)}&hl={language}&curr={curr}"
+    )
+
+
+def google_flights_booking_url(
+    s: Search,
+    *,
+    outbound_segments: list[dict[str, str]],
+    return_segments: list[dict[str, str]] | None = None,
+    currency: str = "USD",
+    language: str = "en",
+    country: str = "US",
+) -> str:
+    """The booking page for one itinerary: the pinned link's `tfs=` on
+    `/travel/flights/booking`, which lists every seller of that itinerary.
+
+    The page needs no booking token; the legs in `tfs=` are enough. `gl=` is
+    explicit for the reason the search page's is: sellers and their prices key
+    off the resolved country, and they are compared against a table priced
+    under `gl=US`."""
+    b64 = _pinned_tfs_b64(s, outbound_segments, return_segments)
+    return (
+        f"https://www.google.com/travel/flights/booking?"
+        f"tfs={urllib.parse.quote(b64)}&hl={language}&gl={country}&curr={currency}"
+    )
+
+
+def _pinned_tfs_b64(
+    s: Search,
+    outbound_segments: list[dict[str, str]],
+    return_segments: list[dict[str, str]] | None,
+) -> str:
+    """The pinned-itinerary `tfs=` value, shared by the search and booking pages."""
     if not isinstance(s, SpecificDateSearch | CalendarFollowup):
         raise TypeError(
             "google_flights_pinned_url only meaningful for specific-date / "
@@ -759,11 +796,61 @@ def google_flights_pinned_url(
         infants_in_seat=p.infants_in_seat,
         infants_on_lap=p.infants_in_lap,
     )
-    b64 = base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
-    curr = currency or s.options.currency or "USD"
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+# The explore page's `tfs=`, decoded from the URLs its own controls write. Field
+# 16 holds the month and the trip length: 16.1 is the month minus one with NO
+# year (Google picks the next such month; the value 0 answered the next January),
+# or the all-ones sentinel for "the next six months"; 16.2 is 1 for a weekend,
+# 3 for two weeks, and absent (or 2) for one week.
+_EXPLORE_ANY_MONTH = (1 << 64) - 1
+_EXPLORE_MODE = 3
+_EXPLORE_TRIP_ROUND_TRIP = 1
+
+
+def google_flights_explore_url(
+    origin: str,
+    *,
+    month: int | None,
+    trip_length: int | None,
+    max_price: int | None,
+    currency: str = "USD",
+    language: str = "en",
+    country: str = "US",
+) -> str:
+    """The explore page from `origin`: round trips to everywhere Google prices.
+
+    `month` is 1-12, None for the next six months; `trip_length` is 16.2's code,
+    None for one week. The origin is always written: without one the page
+    geolocates and answers for wherever it thinks the user is.
+
+    `tfu=GgA` is what the page's own URLs carry, an empty message."""
+    w = _PbWriter()
+    w.varint(1, 28)
+    w.varint(2, _EXPLORE_MODE)
+    for side in (13, 14):
+        airport = _PbWriter()
+        airport.varint(1, 1)
+        airport.string(2, origin)
+        slice_w = _PbWriter()
+        slice_w.message(side, airport)
+        w.message(3, slice_w)
+    w.varint(8, 1)
+    w.varint(9, 1)
+    if max_price is not None:
+        w.varint(12, max_price)
+    w.varint(14, 2)
+    when = _PbWriter()
+    when.varint(1, _EXPLORE_ANY_MONTH if month is None else month - 1)
+    if trip_length is not None:
+        when.varint(2, trip_length)
+    w.message(16, when)
+    w.varint(19, _EXPLORE_TRIP_ROUND_TRIP)
+    b64 = base64.urlsafe_b64encode(bytes(w.buf)).rstrip(b"=").decode()
     return (
-        f"https://www.google.com/travel/flights/search?"
-        f"tfs={urllib.parse.quote(b64)}&hl={language}&curr={curr}"
+        f"https://www.google.com/travel/explore?tfs={urllib.parse.quote(b64)}"
+        f"&tfu=GgA&hl={language}&gl={country}&curr={currency}"
     )
 
 
@@ -856,6 +943,16 @@ def extract_pin_segments_from_slice(s: Slice) -> list[dict[str, str]] | None:
             }
         )
     return out
+
+
+def pin_dates_are_stated(s: Slice) -> bool:
+    """Whether the slice's source dates every one of its flights: one date per
+    flight in `segment_dates`, or a single flight, which leaves on the slice's
+    departure day. A connection's two end dates do not date the flights
+    between them: one that crosses the date line lands on the day it left
+    while its second flight leaves the next day."""
+    n = len(s.flights)
+    return n == 1 or (n > 0 and len(s.segment_dates) == n)
 
 
 def google_flights_url(s: Search, *, currency: str | None = None, language: str = "en") -> str:
