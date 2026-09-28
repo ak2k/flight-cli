@@ -726,7 +726,7 @@ def google_flights_booking_url(
     *,
     outbound_segments: list[dict[str, str]],
     return_segments: list[dict[str, str]] | None = None,
-    currency: str = "USD",
+    currency: str | None = None,
     language: str = "en",
     country: str = "US",
 ) -> str:
@@ -736,11 +736,13 @@ def google_flights_booking_url(
     The page needs no booking token; the legs in `tfs=` are enough. `gl=` is
     explicit for the reason the search page's is: sellers and their prices key
     off the resolved country, and they are compared against a table priced
-    under `gl=US`."""
+    under `gl=US`. `currency` defaults to the search's own, then USD, so the
+    sellers are priced in the table's currency."""
     b64 = _pinned_tfs_b64(s, outbound_segments, return_segments)
+    curr = currency or s.options.currency or "USD"
     return (
         f"https://www.google.com/travel/flights/booking?"
-        f"tfs={urllib.parse.quote(b64)}&hl={language}&gl={country}&curr={currency}"
+        f"tfs={urllib.parse.quote(b64)}&hl={language}&gl={country}&curr={curr}"
     )
 
 

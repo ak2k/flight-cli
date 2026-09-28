@@ -425,6 +425,30 @@ def test_a_seller_at_the_table_price_does_not_beat_it(
     assert "beats" not in result.stdout
 
 
+def test_the_booking_page_is_asked_in_the_currency_the_table_was_priced_in(
+    monkeypatch: pytest.MonkeyPatch, board: list[Any]
+) -> None:
+    gbp = [
+        GFlightWithId(
+            flight=r.flight.model_copy(update={"currency": "GBP"}),
+            flight_id=r.flight_id,
+            amenities=r.amenities,
+        )
+        for r in board
+    ]
+
+    def _gf(*_a: object, **_kw: object) -> list[Any]:
+        return list(gbp)
+
+    monkeypatch.setattr(cli, "_gflight_results", _gf)
+    fake = _serve(monkeypatch, _booking_body(_option("Kiwi.com", 170, flights=_B6_1523)))
+    result = _run("--fast", "--sellers", "--currency", "GBP", "--no-matrix-url", "--no-google-url")
+    assert result.exit_code == 0, result.output
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(fake.urls[0]).query)
+    assert query["curr"] == ["GBP"]
+    assert "Kiwi.com at GBP170.00 beats the table price, GBP179.00." in result.stdout
+
+
 def _opts(*prices: int | None, currency: str = "USD") -> Any:
     return gb.BookingOptions(
         currency, tuple(gb.Seller(f"s{i}", p, None, False) for i, p in enumerate(prices))
