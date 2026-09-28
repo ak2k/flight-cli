@@ -121,8 +121,9 @@ def _carrier_pred_passes(slc: Slice, pred: CarrierPred) -> bool:
         # ~UA+ / -AIRLINES: no leg booked under an excluded carrier, which is
         # Matrix's reading for the fare shown. The other sellers of a leg are
         # not the row's fare: AA100 sold also by BA stays under ~BA+, and so
-        # does BA178 booked as AA6939.
-        return not any(booking in pred.codes for booking, _, _ in legs)
+        # does BA178 booked as AA6939. A leg with no booking carrier fails, as
+        # an unknown operator fails the operating exclude.
+        return not any(booking is None or booking in pred.codes for booking, _, _ in legs)
     # marketing include (LH+ / AIRLINES) — every leg sold by an allowed carrier.
     # Applied natively too; this is the correctness backstop if an fli code didn't map.
     return all(marketing & pred.codes for _, marketing, _ in legs)

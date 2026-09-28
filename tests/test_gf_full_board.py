@@ -185,19 +185,29 @@ def test_a_carrier_exclude_reads_the_carrier_each_leg_is_booked_under(
     assert len(rows) == 84  # of 101
 
 
-def _lhr_without_operating_identity(booked: str) -> str:
-    """The LHR capture with the first leg of the row booked as `booked`
-    carrying no operating tuple (`fl[22]`)."""
+def _lhr_with_first_leg_edited(booked: str, edit: Callable[[list[Any]], None]) -> str:
+    """The LHR capture with `edit` applied to the first leg of the row booked
+    as `booked`."""
     payload: list[Any] = json.loads(_ds1(_LHR))
     for raw in gfid._rows_from_ds1(payload).rows:
         if _booked(gfid._parse_flight_with_id(raw)) == booked:
-            raw[0][2][0][22] = None
+            edit(raw[0][2][0])
             break
     else:
         pytest.fail(f"{booked} is not on the capture")
     return _page(
         _answering(json.dumps(payload), origin=None, destination=None, date=_DEP.isoformat())
     )
+
+
+def _lhr_without_operating_identity(booked: str) -> str:
+    """The LHR capture with the first leg of the row booked as `booked`
+    carrying no operating tuple (`fl[22]`)."""
+
+    def _drop(leg: list[Any]) -> None:
+        leg[22] = None
+
+    return _lhr_with_first_leg_edited(booked, _drop)
 
 
 @pytest.mark.parametrize("extension", ["-CODESHARE", "-OPAIRLINES VS"])
@@ -217,6 +227,32 @@ def test_a_leg_with_no_operating_identity_fails_an_operating_filter(
     kept = {_json_booked(r) for r in json.loads(capsys.readouterr().out)}
     assert kept, "the filter answered with nothing"
     assert "Air France|9656" not in kept
+
+
+@pytest.mark.parametrize(("routing", "extension"), [("~AA+", None), (None, "-AIRLINES AA")])
+def test_a_leg_with_no_booking_flight_number_fails_a_marketing_exclude(
+    routing: str | None,
+    extension: str | None,
+    gf_session: Callable[..., Any],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """AA100 is booked and flown by AA. Without its flight number the booking
+    carrier cannot be read off the leg, and an exclude that cannot tell must
+    not answer with a row Matrix drops."""
+
+    def _no_number(leg: list[Any]) -> None:
+        leg[22][1] = None
+
+    gf_session(_lhr_with_first_leg_edited("AA100", _no_number))
+    cli._run_gflight_path(
+        legs=(Leg.of("JFK", "LHR", _DEP, route_language=routing, extension=extension),),
+        opts=SearchOptions(cabin=Cabin.COACH),
+        top_n=200,
+        json_out=True,
+    )
+    kept = {_json_booked(r) for r in json.loads(capsys.readouterr().out)}
+    assert kept, "the filter answered with nothing"
+    assert not any("American Airlines" in k for k in kept)
 
 
 # ────────────────────────── round trip: filter, then pin ──────────────────
