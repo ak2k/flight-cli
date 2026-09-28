@@ -208,8 +208,10 @@ def apply_gf_native_filters(filters: Any, predicates: Iterable[Predicate]) -> bo
     layover bounds -> layover min/max; MAXDUR -> max_duration; nonstop /
     MAXSTOPS -> stops, the strictest of them and `--stops` winning.
 
-    Returns False if a predicate names a carrier or airport code fli can't map —
-    the caller falls back to Matrix rather than silently dropping the constraint.
+    Returns False if a predicate names a carrier or airport code fli can't map;
+    that list is then left out whole, so the filters ask for more than the
+    predicates allow. The search picker sends such requests to Matrix before
+    this runs (`unmappable_codes`); the date grids do not check the return.
     Other predicates are ignored here (the post-filter and gate own those). The
     date grids refuse a minimum layover before calling this: they have no rows
     to check it on."""
@@ -259,7 +261,7 @@ def apply_gf_native_filters(filters: Any, predicates: Iterable[Predicate]) -> bo
         layover_min = None
     # Apply a code-list dimension only if EVERY code mapped — a partial list
     # would narrow the query and drop the unmapped carrier's/airport's flights
-    # (under-return). When skipped, the post-filter enforces it from result data.
+    # (under-return).
     if airlines and not unmapped:
         filters.airlines = airlines
     use_airports = bool(layover_airports) and airports_ok
