@@ -714,16 +714,18 @@ wrapping rule, the two helpers and the AST guard over `cli.py` are in
 The grid paint in the weave is runtime-dead until the gate flips;
 `_run_calendar_enriched` itself still runs (it is what paints Matrix).
 
-### `--fast --gf-transport browser`: the page's own price graph
+### `--fast`: the page's own price graph, through Chrome
 
 The search page signs its own `GetCalendarGraph`, so `_gf_calgraph` lets the page
 ask: Chrome opens the filtered search page on the window's first date, clicks
 "Price graph", and `GfBrowserSession.capture` returns the response the page
 received — no script runs in the page and no request is written or altered.
 Measured 2026-09-27: status 200, `x-goog-batchexecute-bgr` set, no error row, on
-a cold headless profile. `auto` is the browser under `--fast`; `http` stays the
-default and refuses with a note naming the browser, and without `--fast` either
-transport flag is a usage error.
+a cold headless profile. Under `--fast` an unset `--gf-transport` is `auto`,
+which is the browser; `http` has to be asked for and refuses with a note naming
+the browser. A missing patchright or Chrome exits 1 with the rung's install
+remedy, never a fallback. Without `--fast`, unset or `http` runs Matrix and
+`browser`, `auto` or `--gf-headed` is a usage error.
 
 - **Shape.** One-way, or a round trip of ONE trip length (`-d 7`): the page's
   graph prices the trip length its own dates imply, so `5-7` refuses. Every

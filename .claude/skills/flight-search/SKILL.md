@@ -16,7 +16,7 @@ intent into the right invocation **on the first try**.
 | Command | Purpose |
 |---|---|
 | `flight search ORIGIN DEST --dep YYYY-MM-DD [--return YYYY-MM-DD]` | Specific-date search. Auto-picks Google Flights for plain cash queries and ITA Matrix when a Matrix-only flag is set (routing/extension/multi-city slice/time-of-day/extra pax types). Force with `--backend matrix\|gflight`. PointsPath award overlay runs on both backends when tokens are present. |
-| `flight calendar ORIGIN DEST --start YYYY-MM-DD [--end ...] [-d 5-7]` | Lowest-fare grid across a date window. Matrix by default. Default round-trip; `--one-way` flips. `--fast --gf-transport browser` reads Google Flights' price graph instead (single airport, one-way or one trip length like `-d 7`, stops/cabin/adults only); it exits 1 rather than fall back. |
+| `flight calendar ORIGIN DEST --start YYYY-MM-DD [--end ...] [-d 5-7]` | Lowest-fare grid across a date window. Matrix by default. Default round-trip; `--one-way` flips. `--fast` reads Google Flights' price graph instead, through a real Chrome (single airport, one-way or one trip length like `-d 7`, stops/cabin/adults only); it exits 1 rather than fall back. |
 | `flight detail ORIGIN DEST --dep YYYY-MM-DD --start ... --end ...` | Phase-2 of the calendar flow: full itineraries for a date picked from the grid. Matrix only. |
 | `flight airport QUERY` | IATA / partial-name autocomplete. |
 | `flight fare` / `flight gflight` | **Deprecated** aliases for `search --backend matrix` / `search --backend gflight` — still work for one release; emit a deprecation warning. Prefer `flight search` for new invocations. |

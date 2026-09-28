@@ -301,5 +301,4 @@ lets the throttle tests substitute it.
 throttle plus the once-per-process latch is the follow-up. Also out, each a bd
 follow-up under `work-udpp1`: booking options and parallel tabs. The calendar
 date grid through the browser is in
-[gf_routing_and_carriers.md](gf_routing_and_carriers.md) (`--fast
---gf-transport browser`).
+[gf_routing_and_carriers.md](gf_routing_and_carriers.md) (`--fast`).
