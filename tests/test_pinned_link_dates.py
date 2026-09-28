@@ -95,3 +95,69 @@ def test_a_matrix_connection_matched_to_a_google_row_is_pinned_on_googles_days(
     assert googles_own is not None
     assert googles_own in printed
     assert _D1.encode() in _tfs(googles_own).split(b"104", 1)[1]
+
+
+def _matrix_path(
+    monkeypatch: pytest.MonkeyPatch, *, pick: int, matrix_url: bool, fare_rules: bool = False
+) -> None:
+    """The Matrix path with `_matrix_row()` as its answer, carrying the server
+    ids a pinned Matrix link is built from, and the Google link on."""
+    res = _matrix_row().model_copy(update={"session": "s-1", "solution_set": "ss-1"})
+
+    def _answered(*_a: object, **_kw: object) -> SearchResult:
+        return res
+
+    def _no_rules(*_a: object, **_kw: object) -> None:
+        return None
+
+    monkeypatch.setattr(cli, "_run", _answered)
+    monkeypatch.setattr(cli, "_fetch_fare_rules", _no_rules)
+    cli._run_matrix_path(
+        legs=_SEARCH.legs,
+        opts=SearchOptions(),
+        rps=1.0,
+        impersonate="chrome",
+        no_cache=True,
+        json_out=False,
+        matrix_url=matrix_url,
+        google_url=True,
+        run_pp=False,
+        sel=cli.ProviderSelection(
+            provider_filter=None, cash_only=True, awards_only=False, provider_opts={}
+        ),
+        pick=pick,
+        fare_rules=fare_rules,
+    )
+
+
+def test_an_out_of_range_pick_claims_no_pin_when_no_link_below_pins(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _matrix_path(monkeypatch, pick=9, matrix_url=False)
+    captured = capsys.readouterr()
+    err = " ".join(captured.err.split())
+    assert "--pick 9 is out of range (1-1)." in err, err
+    assert "pinning" not in err, err
+    assert "Google Flights (tfs= structured):" in captured.out, captured.out
+
+
+def test_an_out_of_range_pick_with_fare_rules_claims_only_the_rules(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _matrix_path(monkeypatch, pick=9, matrix_url=False, fare_rules=True)
+    captured = capsys.readouterr()
+    err = " ".join(captured.err.split())
+    assert "--pick 9 is out of range (1-1); showing itinerary #1's fare rules instead." in err, err
+    assert "pinning" not in err, err
+    assert "Google Flights (tfs= structured):" in captured.out, captured.out
+
+
+def test_an_out_of_range_pick_still_names_the_pin_a_matrix_link_makes(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _matrix_path(monkeypatch, pick=9, matrix_url=True)
+    captured = capsys.readouterr()
+    err = " ".join(captured.err.split())
+    assert "--pick 9 is out of range (1-1); pinning itinerary #1 instead." in err, err
+    assert "Matrix (cheapest itinerary pinned):" in captured.out, captured.out
+    assert "Google Flights (tfs= structured):" in captured.out, captured.out

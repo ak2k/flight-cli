@@ -2808,6 +2808,36 @@ def test_a_table_the_google_only_path_cannot_draw_is_typed_and_non_zero(
     _assert_drives_no_terminal(printed)
 
 
+def test_a_pick_past_a_board_that_cannot_be_drawn_still_reaches_the_typed_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whether a pinned link follows is asked of the rows before the render
+    checks them, so a row the link builders cannot read pins nothing rather
+    than escaping as a traceback."""
+    from flight_cli import cli
+
+    buf = _capture(monkeypatch)
+
+    def _rows(*_a: object, **_kw: object) -> list[Any]:
+        return [cast("Any", object())]
+
+    def _cannot_draw(*_a: object, **_kw: object) -> None:
+        raise AttributeError("row shape drifted")
+
+    monkeypatch.setattr(cli, "_gflight_results", _rows)
+    monkeypatch.setattr(cli, "_render_gflight_table", _cannot_draw)
+    legs, opts = _gf_legs_and_opts()
+    with pytest.raises(typer.Exit) as excinfo:
+        cli._run_gflight_path(
+            legs=legs, opts=opts, top_n=3, json_out=False, google_url=True, pick=9
+        )
+
+    assert excinfo.value.exit_code == 1
+    printed = buf.getvalue()
+    assert "--pick 9 is out of range (1-1)." in printed, printed
+    assert "could not be rendered" in printed, printed
+
+
 def test_a_key_failure_leaves_a_real_google_board_on_screen(
     monkeypatch: pytest.MonkeyPatch,
     gf_session: Any,
