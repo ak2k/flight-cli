@@ -2067,8 +2067,8 @@ def _booking_options(
     heading = f"No booking options for #{n:d}"
     # A page asked for a day the row does not state answers for another trip
     # with the same flight numbers, which the seller check cannot tell apart
-    # from this one. Checked before the segments are built because building
-    # them dates an undated connection's flights from the slice's two ends.
+    # from this one. `_pin_segments` refuses such a row too; checking first
+    # lets the refusal name the reason and its remedy.
     itinerary = result.solutions[n - 1].itinerary
     if itinerary is not None and not all(pin_dates_are_stated(s) for s in itinerary.slices):
         _no_booking_options(
