@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import base64
 import pathlib
-from typing import Any
+from typing import Any, cast
 
 from flight_cli.links import (
     _encode_gflight_pinned_tfs,  # pyright: ignore[reportPrivateUsage]  # test-only: lock byte-exact regression
@@ -294,11 +294,10 @@ def _field8_values(buf: bytes) -> list[int]:
 
 
 def test_passenger_types_are_not_all_encoded_as_adults() -> None:
-    """Field 8 carries each occupant's TYPE (Google's Passenger enum, read from
-    fast_flights' generated protobuf: ADULT=1, CHILD=2, INFANT_IN_SEAT=3,
-    INFANT_ON_LAP=4). Emitting a bare 1 for everyone made a pinned link for
-    1 adult + 1 child search and price as 2 adults — a different, costlier
-    itinerary than the row the user picked."""
+    """Field 8 carries each occupant's TYPE: 1 adult, 2 child, 3 an infant on a
+    lap, 4 an infant in a seat. Google prices BA112 JFK-LHR at $295 for one
+    adult, $324 with a 3 beside it and $589 with a 4. A bare 1 for everyone
+    would search and price a child as an adult."""
     from flight_cli.links import _encode_gflight_pinned_tfs  # pyright: ignore[reportPrivateUsage]
 
     buf = _encode_gflight_pinned_tfs(
@@ -309,7 +308,56 @@ def test_passenger_types_are_not_all_encoded_as_adults() -> None:
         infants_in_seat=1,
         infants_on_lap=1,
     )
-    assert _field8_values(buf) == [1, 2, 3, 4]
+    assert _field8_values(buf) == [1, 2, 4, 3]
+
+
+def test_each_infant_kind_has_its_own_code_in_the_pinned_link() -> None:
+    from flight_cli.links import _encode_gflight_pinned_tfs  # pyright: ignore[reportPrivateUsage]
+
+    def field8(*, seat: int, lap: int) -> list[int]:
+        return _field8_values(
+            _encode_gflight_pinned_tfs(
+                slices=[_pin_slice("JFK", "LHR", "2026-11-04")],
+                cabin=1,
+                adults=1,
+                children=0,
+                infants_in_seat=seat,
+                infants_on_lap=lap,
+            )
+        )
+
+    assert field8(seat=1, lap=0) == [1, 4]
+    assert field8(seat=0, lap=1) == [1, 3]
+
+
+def _search_url_passengers(**pax: int) -> list[int]:
+    """Field 8 of `google_flights_url`'s tfs=, read with fast_flights' own schema."""
+    import urllib.parse
+    from datetime import date
+
+    from fast_flights import flights_pb2  # pyright: ignore[reportMissingTypeStubs]
+
+    from flight_cli.domain import Leg, Pax, SearchOptions, SpecificDateSearch
+    from flight_cli.links import google_flights_url
+
+    url = google_flights_url(
+        SpecificDateSearch(
+            legs=(Leg(origins=("JFK",), destinations=("LHR",), date=date(2026, 11, 4)),),
+            options=SearchOptions(pax=Pax(**pax)),
+        )
+    )
+    raw = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["tfs"][0]
+    # The generated module is untyped.
+    info = cast("Any", flights_pb2).Info.FromString(base64.b64decode(raw + "=" * (-len(raw) % 4)))
+    return [int(kind) for kind in info.passengers]
+
+
+def test_the_search_link_writes_googles_infant_codes() -> None:
+    """The link calendar and every unpinned search print is built through
+    fast_flights, whose enum names 3 an infant in a seat and 4 one on a lap."""
+    assert _search_url_passengers(adults=1, infants_in_seat=1) == [1, 4]
+    assert _search_url_passengers(adults=1, infants_in_lap=1) == [1, 3]
+    assert _search_url_passengers(adults=1, children=1) == [1, 2]
 
 
 def test_two_adults_still_encode_as_two_adults() -> None:
