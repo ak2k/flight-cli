@@ -202,7 +202,8 @@ def _calendar_args(*extra: str) -> list[str]:
 def test_a_fast_calendar_refuses_a_non_usd_currency() -> None:
     result = _run(_calendar_args("--currency", "eur", "--fast"))
     assert result.exit_code == 1
-    assert "non-USD currency" in result.stderr
+    # rich wraps the refusal at ~80 columns, so a phrase can straddle two lines.
+    assert "non-USD currency" in " ".join(result.stderr.split())
     assert result.stdout == ""
 
 
