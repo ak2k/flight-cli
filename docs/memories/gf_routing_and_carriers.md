@@ -110,6 +110,11 @@ printed. Re-widening `3.6`/`3.7`/`3.15`/`3.17`/`3.18` is the next step.
 - An answer the filter emptied goes to Matrix under `auto` with the reason on
   stderr, and says why under `--backend gflight` (stdout `[]` in JSON mode).
   The multi-cabin path prints the reason per cabin.
+- A round trip that took pins answers with a board even when no pair survives,
+  its count covering the rows removed on both legs, so it takes the same route.
+  Under `--backend gflight` the line also names how many outbounds were pinned:
+  the ones below the pins were never searched for returns. With nothing
+  removed, Google serving no return for any pin stays "no results".
 - `ds:1[5]` is Google's price insight: `[code, [None, cheapest], [None, _],
   [None, _], [None, typical_low], [None, typical_high], ...]`. The level is
   derived (below the range low, above it high); `[0]` looked like a level code
@@ -123,7 +128,9 @@ printed. Re-widening `3.6`/`3.7`/`3.15`/`3.17`/`3.18` is the next step.
 **Carrier exclude reads the booking carrier.** `~XX+` / `-AIRLINES XX` drops a
 row only when a leg is booked under XX (`flights[i]`), which is Matrix's meaning
 for the fare shown: AA100, AA-sold with BA among its other sellers, stays under
-`~BA+`, and BA178 booked as AA6939 stays too. Carrier include still matches the
+`~BA+`, and BA178 booked as AA6939 stays too. A leg whose booking carrier cannot
+be read (no flight number) fails the exclude, as a leg with no operating carrier
+fails `-CODESHARE` and `-OPAIRLINES`. Carrier include still matches the
 booking carrier or any listed seller.
 
 The encoder is an enforced allowlist, not a deny-list: every field on fli's
