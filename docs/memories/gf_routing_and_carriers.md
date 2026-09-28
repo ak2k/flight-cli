@@ -670,11 +670,11 @@ the exception that proves it: that one is on stdout because a Matrix calendar
 follows it there. While the gate stands, a bad airport or date is one of the gate's own
 exits rather than the broad except's, so what the user reads is the standing
 reason; the broad except keeps the same exit code for whatever a live transport
-throws once the gate flips. When the grid branch does not apply at all (JSON
-output, a round-trip window, a multi-airport route, or routing above Tier-1)
-`--fast` refuses up front on **stderr**, naming the shape, before any Matrix call
-or JSON write — stdout under a JSON request carries a document or nothing, never
-prose (work-h70kv.9). So a wrapper doing `--fast || fallback` can trust the exit
+throws once the gate flips. When the grid branch does not apply at all (a
+multi-airport route, a city code, routing above Tier-1, a trip-length range, or
+a constraint the search page's URL cannot carry) `--fast` refuses up front on
+**stderr**, naming the shape, before any Matrix call or JSON write — stdout under
+a JSON request carries a document or nothing, never prose (work-h70kv.9). So a wrapper doing `--fast || fallback` can trust the exit
 code unconditionally: `--fast` means "the GF grid alone, ~1s", and answering it
 with the ~45s Matrix calendar — silently or otherwise — would change what the
 flag means.
@@ -711,9 +711,43 @@ onto a markup console, and so does every response field a renderer shows. The
 wrapping rule, the two helpers and the AST guard over `cli.py` are in
 [console_sanitizing.md](console_sanitizing.md).
 
-The grid paint in the weave and
-`_render_date_grid` are runtime-dead until the gate flips;
+The grid paint in the weave is runtime-dead until the gate flips;
 `_run_calendar_enriched` itself still runs (it is what paints Matrix).
+
+### `--fast --gf-transport browser`: the page's own price graph
+
+The search page signs its own `GetCalendarGraph`, so `_gf_calgraph` lets the page
+ask: Chrome opens the filtered search page on the window's first date, clicks
+"Price graph", and `GfBrowserSession.capture` returns the response the page
+received — no script runs in the page and no request is written or altered.
+Measured 2026-09-27: status 200, `x-goog-batchexecute-bgr` set, no error row, on
+a cold headless profile. `auto` is the browser under `--fast`; `http` stays the
+default and refuses with a note naming the browser, and without `--fast` either
+transport flag is a usage error.
+
+- **Shape.** One-way, or a round trip of ONE trip length (`-d 7`): the page's
+  graph prices the trip length its own dates imply, so `5-7` refuses. Every
+  round-trip cell's return date is checked against that length.
+- **Admission.** The graph has no itineraries, so it is served only when the
+  page URL carries every constraint: a city code, a time window, a non-adult
+  passenger, `--no-airport-changes`, `--include-unavailable`, a stop ceiling
+  above two, any predicate `page_can_encode` refuses (carriers, alliances,
+  layovers, max duration), and round-trip legs with different predicates each
+  refuse by name. The URL takes the LOWEST stop limit from `--stops` and every
+  leg's `StopsPred`, because the bridge reads `--stops` alone and
+  `apply_gf_native_filters` overwrites it with the last predicate it meets.
+- **Span and paging.** One load covers about five weeks (seven days before the
+  opening date to thirty after, on the page measured). The span is read from
+  the response; a longer window re-navigates at the first uncovered date, stops
+  on a graph that covers nothing new, and refuses past eight loads.
+- **Envelope.** `rt=c` chunks, one `wrb.fr` row; cells at `inner[1]` as
+  `[dep, ret, [[null, price], token], 1]`. An error row has an empty payload and
+  its code at `row[5][0]`. Error 13 there is a refusal of the browser session,
+  not a throttle, so it never goes through `_is_throttle_block`.
+- **Output.** The table is `_render_date_grid` with the trip length in the
+  summary line; `--format json` writes
+  `{origin, destination, currency, trip_length, grid: [{departure, return?, price}]}`
+  alone on stdout, with no URL lines.
 
 **Re-enabling is not just `_GRID_RPC_GATED = False`.** Nothing executes the
 transport below the gate — there is no captured GetCalendarGraph envelope to test

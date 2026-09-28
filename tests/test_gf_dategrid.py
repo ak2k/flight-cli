@@ -70,6 +70,31 @@ def test_grid_declines_multi_airport_and_round_trip() -> None:
     round_trip = (Leg.of(["SFO"], ["FRA"]), Leg.of(["FRA"], ["SFO"]))
     assert not grid_can_serve(_cal(legs=(Leg.of(["SFO", "OAK"], ["FRA"]),)))  # multi-airport
     assert not grid_can_serve(_cal(legs=round_trip))
+    # The http grid never prices a round trip; the page grid prices ONE trip length,
+    # so the default 5-7 range still has no single question to ask it.
+    assert not grid_can_serve(_cal(legs=round_trip), round_trip=True)
+
+
+def _round_trip(nights: int, *, ret_routing: str | None = None) -> CalendarSearch:
+    return CalendarSearch(
+        legs=(Leg.of(["SFO"], ["FRA"]), Leg.of(["FRA"], ["SFO"], route_language=ret_routing)),
+        window=CalendarWindow(
+            start=date(2026, 8, 10), end=date(2026, 8, 25), duration_min=nights, duration_max=nights
+        ),
+    )
+
+
+def test_the_page_grid_serves_a_round_trip_of_one_length() -> None:
+    assert grid_can_serve(_round_trip(7), round_trip=True)
+    assert not grid_can_serve(_round_trip(7))  # the http grid's default
+
+
+def test_the_return_legs_constraints_are_read_too() -> None:
+    """The gate used to read `legs[0]` alone, so a Tier-2 `--routing-ret` rode
+    along unexamined; the phrase names the leg because the flag differs."""
+    search = _round_trip(7, ret_routing="O:LH+")
+    assert not grid_can_serve(search, round_trip=True)
+    assert grid_routing_blocker(search) == "Tier-2 routing on the return leg"
 
 
 # ─────────────────────────── parse ─────────────────────────────────────

@@ -39,7 +39,8 @@ import logging
 import os
 import signal
 import threading
-from typing import TYPE_CHECKING, Any
+import time
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from rich.console import Console
 
@@ -68,6 +69,14 @@ _NAV_TIMEOUT_MS = 30_000
 # The one bound on the body read: `response.text()` has no timeout of its own,
 # so the wait state has to hold the body inside `goto`'s ceiling (module docstring).
 _WAIT_UNTIL = "domcontentloaded"
+# One deadline for the whole of `capture` — navigation, click and the wait for
+# the page's own request to finish — so a slow step shortens the next one's
+# allowance instead of adding its own.
+_CAPTURE_TIMEOUT_S = 45.0
+_CLICK_TIMEOUT_MS = 20_000
+# The sync API delivers events only while one of its calls is running, so the
+# capture waits in short driver-side sleeps and reads what they delivered.
+_POLL_MS = 100
 # Escape hatch for a Chrome that isn't where `channel="chrome"` looks; pointing
 # it at a missing binary is also how a caller forces the typed refusal.
 _BROWSER_BIN_ENV = "FLIGHT_CLI_GF_BROWSER_BIN"
@@ -177,6 +186,23 @@ def _announce() -> None:
     _err.print("[dim]Google Flights: opening Chrome (rung 2)…[/]")
 
 
+class Control(NamedTuple):
+    """A control on the page, found the way assistive technology finds it: by
+    ARIA role and exact accessible name. Not a CSS selector, which Google's
+    generated class names change without notice."""
+
+    role: str
+    name: str
+
+
+class CapturedResponse(NamedTuple):
+    """One response the page's own code received, with its whole body."""
+
+    url: str
+    status: int
+    body: str
+
+
 class GfBrowserSession:
     """A persistent-context Chrome, opened lazily and reused across legs.
 
@@ -258,6 +284,119 @@ class GfBrowserSession:
             self._dead = True
             raise
         return PageFetch(html=html, final_url=final_url, status_code=status_code)
+
+    def capture(
+        self,
+        url: str,
+        wanted: Callable[[str], bool],
+        *,
+        click: Control | None = None,
+        check_page: Callable[[PageFetch], object] | None = None,
+        timeout_s: float = _CAPTURE_TIMEOUT_S,
+    ) -> CapturedResponse:
+        """Navigate to `url`, optionally click one control, and return the first
+        response the page itself receives whose URL `wanted` accepts.
+
+        The page makes the request, so it carries whatever the page signs it
+        with; nothing here runs script in the page or touches a request.
+
+        The listeners go on BEFORE the navigation, so a request the page fires
+        while loading is seen. The page is reused across calls, so only requests
+        issued after this navigation's own main-frame request count: a late
+        answer to the previous document's request is not this page's answer.
+
+        The body is read only once the request has finished — `response.text()`
+        takes no timeout, and a chunked body read earlier would come back cut
+        short or never. Navigation, click and that wait all draw on one deadline
+        of `timeout_s`.
+
+        `check_page` is handed the navigation's own response before any click,
+        and refuses by raising: a throttle or consent interstitial has no
+        control to click, so without it those walls would surface as a click
+        timeout. Its exception propagates unwrapped. Every other failure is
+        `GfBrowserUnavailableError`."""
+        page = self._ensure_page()
+        deadline = time.monotonic() + timeout_s
+        requests: list[Any] = []
+        responses: list[Any] = []
+        finished: list[Any] = []
+
+        # Functions, not bound `list.append`s: the driver caches its wrapper on
+        # the handler object, and a builtin method takes no attributes.
+        def on_request(request: Any) -> None:
+            requests.append(request)
+
+        def on_response(response: Any) -> None:
+            responses.append(response)
+
+        def on_finished(request: Any) -> None:
+            finished.append(request)
+
+        installed: list[tuple[str, Callable[[Any], None]]] = []
+        try:
+            for event, handler in (
+                ("request", on_request),
+                ("response", on_response),
+                ("requestfinished", on_finished),
+            ):
+                page.on(event, handler)
+                installed.append((event, handler))
+            nav = self._drive(
+                "Chrome could not load Google Flights' page",
+                lambda: page.goto(
+                    url, wait_until=_WAIT_UNTIL, timeout=_budget_ms(deadline, _NAV_TIMEOUT_MS)
+                ),
+            )
+            if nav is None:
+                raise GfBrowserUnavailableError(
+                    "Chrome navigated to Google Flights' page but returned no response."
+                )
+            if check_page is not None:
+                check_page(
+                    self._drive(
+                        "Chrome loaded Google Flights' page but its body could not be read",
+                        lambda: PageFetch(
+                            html=nav.text(), final_url=str(nav.url), status_code=int(nav.status)
+                        ),
+                    )
+                )
+            if click is not None:
+                self._drive(
+                    f"Chrome could not click {click.name!r} on Google Flights' page",
+                    lambda: page.get_by_role(click.role, name=click.name, exact=True).click(
+                        timeout=_budget_ms(deadline, _CLICK_TIMEOUT_MS)
+                    ),
+                )
+            while (hit := _first_finished_match(requests, responses, finished, wanted)) is None:
+                self._drive(
+                    "Chrome stopped while waiting for Google Flights' page",
+                    lambda: page.wait_for_timeout(_budget_ms(deadline, _POLL_MS)),
+                )
+            body = self._drive(
+                "Chrome received the page's response but its body could not be read", hit.text
+            )
+            return CapturedResponse(url=str(hit.url), status=int(hit.status), body=body)
+        finally:
+            for event, handler in installed:
+                page.remove_listener(event, handler)
+
+    def _drive[T](self, failure: str, step: Callable[[], T]) -> T:
+        """Run one call into the driver with this session's failure handling.
+
+        The same two arms as `get_html`: an error is a refusal, unless it is the
+        echo of a stop we made; an interrupt records that the driver's greenlet
+        died and goes on untouched."""
+        try:
+            return step()
+        except GfBrowserUnavailableError:
+            raise
+        # patchright's error tree is broad, and all of it means the same thing here.
+        except Exception as e:
+            self._interrupted_or_raise()
+            raise GfBrowserUnavailableError(f"{failure}: {_detail(e)}") from e
+        except BaseException:
+            self._dead = True
+            raise
 
     def _stop_a_late_driver_or_raise(self, manager: Any) -> None:
         """Stop a driver that finished starting after the interrupt went past.
@@ -514,6 +653,50 @@ def _detail(e: BaseException) -> str:
     lines = [line.strip() for line in str(e).strip().splitlines() if line.strip()]
     text = lines[0] if lines else e.__class__.__name__
     return text if text.endswith((".", "!", "?")) else f"{text}."
+
+
+def _budget_ms(deadline: float, cap_ms: float) -> float:
+    """What is left of a capture's deadline for one driver call, capped.
+
+    Refuses rather than returning zero: to patchright a zero timeout means NO
+    timeout, which would turn a spent deadline into an unbounded wait."""
+    left_ms = (deadline - time.monotonic()) * 1000
+    if left_ms <= 0:
+        raise GfBrowserUnavailableError(
+            "Google Flights' page did not deliver the response it was expected to make in time."
+        )
+    return min(cap_ms, left_ms)
+
+
+def _is_main_navigation(request: Any) -> bool:
+    """True for a navigation of the page's top frame."""
+    try:
+        return bool(request.is_navigation_request()) and request.frame.parent_frame is None
+    # `frame` raises for a service-worker request, which is not a navigation.
+    except Exception:  # noqa: BLE001 — patchright's `Error` is not importable here unguarded
+        return False
+
+
+def _first_finished_match(
+    requests: list[Any], responses: list[Any], finished: list[Any], wanted: Callable[[str], bool]
+) -> Any | None:
+    """The first response to this navigation that `wanted` accepts, once its
+    request has finished; None while there is none, or while it is still
+    arriving.
+
+    "This navigation" is every request from its own main-frame request on.
+    Requests are compared by identity: patchright hands out one wrapper per
+    request, so the object a response names is the one the listener saw."""
+    start = next((i for i, r in enumerate(requests) if _is_main_navigation(r)), None)
+    if start is None:
+        return None
+    ours = requests[start:]
+    for response in responses:
+        request = response.request
+        if not any(request is r for r in ours) or not wanted(str(response.url)):
+            continue
+        return response if any(request is f for f in finished) else None
+    return None
 
 
 def _driver_process_id(manager: Any) -> int | None:
