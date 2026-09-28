@@ -369,3 +369,58 @@ def test_the_checks_are_named_in_the_users_words() -> None:
         "a departure-time window (morning)",
         "a return-time window (evening)",
     ]
+
+
+# ─────────────────────────── the date grids are unchanged ──────────────────
+
+
+@pytest.mark.parametrize(
+    ("routing", "extension", "times", "children"),
+    [
+        ("AA+", None, (), 0),
+        (None, "ALLIANCE oneworld", (), 0),
+        (None, "MAXDUR 6:20", (), 0),
+        (None, "MINCONNECT 2:00", (), 0),
+        (None, "MAXCONNECT 2:00", (), 0),
+        (None, None, (TimeOfDay.MORNING,), 0),
+        (None, None, (), 1),
+    ],
+)
+def test_the_price_graph_still_refuses_what_only_a_search_can_check(
+    routing: str | None, extension: str | None, times: tuple[TimeOfDay, ...], children: int
+) -> None:
+    """The search page serves these because it has rows to check them on; the
+    Chrome price graph reads the same page and has none."""
+    from datetime import date
+
+    from flight_cli._gf_calgraph import page_blocker
+    from flight_cli.domain import CalendarSearch, CalendarWindow, Leg, Pax, SearchOptions
+
+    start = date.today() + timedelta(days=45)
+    search = CalendarSearch(
+        legs=(
+            Leg.of("JFK", "LAX", route_language=routing, extension=extension, time_ranges=times),
+        ),
+        window=CalendarWindow(
+            start=start, end=start + timedelta(days=13), duration_min=0, duration_max=0
+        ),
+        options=SearchOptions(pax=Pax(children=children)),
+    )
+    assert page_blocker(search) is not None
+    assert search_page_reasons(classify(routing, extension).predicates) == []
+
+
+def test_the_rpc_grid_still_refuses_a_minimum_layover() -> None:
+    from datetime import date
+
+    from flight_cli._gf_dategrid import grid_can_serve
+    from flight_cli.domain import CalendarSearch, CalendarWindow, Leg
+
+    start = date.today() + timedelta(days=45)
+    search = CalendarSearch(
+        legs=(Leg.of("JFK", "LAX", extension="MINCONNECT 2:00"),),
+        window=CalendarWindow(
+            start=start, end=start + timedelta(days=13), duration_min=0, duration_max=0
+        ),
+    )
+    assert not grid_can_serve(search)
