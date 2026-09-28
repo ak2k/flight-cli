@@ -482,6 +482,16 @@ def _opts(*prices: int | None, currency: str = "USD") -> Any:
         pytest.param(_opts(294), ["USD294.49"], None, id="whole-unit-could-be-above"),
         pytest.param(_opts(294), ["USD294.50"], 294.5, id="whole-unit-surely-below"),
         pytest.param(_opts(282), ["EUR295.00"], None, id="other-currency"),
+        pytest.param(
+            _opts(200, currency="EUR"),
+            ["USD179.00", "EUR900.00"],
+            None,
+            id="below-the-row-price-in-its-currency-only",
+        ),
+        pytest.param(
+            _opts(170), ["USD179.00", "EUR100.00"], None, id="row-price-in-another-currency"
+        ),
+        pytest.param(_opts(282), ["USDn/a", "USD300.00"], None, id="row-price-that-does-not-parse"),
         pytest.param(_opts(282), ["USD290.00", "USD280.00"], None, id="lower-of-two-row-prices"),
         pytest.param(_opts(282), [None, "USD300.00"], 300.0, id="one-side-unpriced"),
         pytest.param(_opts(282), [None], None, id="no-table-price"),
@@ -753,6 +763,27 @@ def test_enriched_sellers_are_asked_in_the_currency_of_the_rows_google_price(
     assert "Booking options for #1" in result.stdout
     query = urllib.parse.parse_qs(urllib.parse.urlsplit(fake.urls[0]).query)
     assert query["curr"] == [asked]
+
+
+@pytest.mark.parametrize(
+    ("matrix_price", "seller"),
+    [
+        pytest.param("EUR900.00", 200, id="between-the-two-prices"),
+        pytest.param("EUR100.00", 170, id="below-the-google-price-only"),
+    ],
+)
+def test_no_seller_beats_a_row_priced_in_two_currencies(
+    monkeypatch: pytest.MonkeyPatch, board: list[Any], matrix_price: str, seller: int
+) -> None:
+    """The merged row shows Google's USD179.00 beside Matrix's price in EUR
+    under `--currency EUR`. A seller is compared with the row in one currency
+    only, so none is said to beat it, and the sellers still print."""
+    _merged_with(monkeypatch, board, "B61523", matrix_price)
+    _serve(monkeypatch, _booking_body(_option("Kiwi.com", seller, flights=_B6_1523)))
+    result = _run("--sellers", "--currency", "EUR", "--no-matrix-url", "--no-google-url")
+    assert result.exit_code == 0, result.output
+    assert "Kiwi.com" in result.stdout.split("Booking options for #1", 1)[1]
+    assert "beats" not in result.stdout
 
 
 def _matrix_connection(arrival: str) -> dict[str, Any]:

@@ -2130,18 +2130,22 @@ def _print_booking_options(
 def _undercut(options: BookingOptions, table_prices: list[str | None]) -> float | None:
     """The table price the cheapest seller beats, or None.
 
-    Only a table price in the sellers' currency counts. A seller price is whole
-    units, so `d` stands for anything below `d + 0.5`: it beats a table price
-    only when that whole range sits under it."""
+    A seller beats the table only by beating every price the row shows, so one
+    in another currency than the sellers', or one that does not parse, leaves
+    nothing to claim. A seller price is whole units, so `d` stands for anything
+    below `d + 0.5`: it beats a table price only when that whole range sits
+    under it."""
     amounts: list[float] = []
     for price in table_prices:
+        if not price:
+            continue
         currency, amount = _split_price(price)
         if currency != options.currency:
-            continue
+            return None
         try:
             amounts.append(float(amount.replace(",", "")))
         except ValueError:
-            continue
+            return None
     cheapest = options.sellers[0].price
     if not amounts or cheapest is None or cheapest + 0.5 > min(amounts):
         return None
