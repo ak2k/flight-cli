@@ -1617,14 +1617,22 @@ class Board[T](list[T]):
     retry, `search_with_ids`' `if not first`) still reads the rows alone.
     `dropped` counts the rows a routing filter removed on the way here, which
     is how an empty answer tells "none matched the routing" from "Google has no
-    flights"."""
+    flights". `pinned` counts the outbounds a round trip searched returns for,
+    because an empty answer from those says nothing about the outbounds below
+    them."""
 
     def __init__(
-        self, rows: Iterable[T] = (), *, insight: PriceInsight | None = None, dropped: int = 0
+        self,
+        rows: Iterable[T] = (),
+        *,
+        insight: PriceInsight | None = None,
+        dropped: int = 0,
+        pinned: int = 0,
     ) -> None:
         super().__init__(rows)
         self.insight = insight
         self.dropped = dropped
+        self.pinned = pinned
 
 
 def _itinerary_key(row: GFlightWithId) -> tuple[tuple[Airline, str, datetime.datetime], ...]:
@@ -2166,10 +2174,16 @@ def search_with_ids(
         skipped=skipped,
         unmatched=unmatched,
     )
-    if not combos and not dropped_returns:
-        return None
+    # A Board even with no pair in it: the pins were taken from rows Google
+    # served, so the rows the filter removed on either leg are why it is empty,
+    # and None would read as Google serving nothing.
     dropped += dropped_returns
-    return Board(combos, insight=_kept_insight(first.insight, combos, dropped), dropped=dropped)
+    return Board(
+        combos,
+        insight=_kept_insight(first.insight, combos, dropped),
+        dropped=dropped,
+        pinned=len(pins),
+    )
 
 
 def _report_pin_outcome(

@@ -395,6 +395,117 @@ def test_under_explicit_gflight_it_says_why_and_the_document_is_empty(
     )
 
 
+def _flightless() -> str:
+    return _page(_ds1("ds1_flightless_board.json"))
+
+
+def _round_trip_search(*extra: str) -> list[str]:
+    return [
+        *_SEARCH,
+        "JFK",
+        "LHR",
+        "--dep",
+        _DEP.isoformat(),
+        "--return",
+        _RET.isoformat(),
+        "--fast",
+        *extra,
+    ]
+
+
+def test_under_auto_a_round_trip_whose_returns_google_left_empty_goes_to_matrix(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`~AA+` removed 17 outbound rows before the pins were taken, and Google
+    served every pinned return board empty. Those rows are why the answer is
+    empty, so it goes to Matrix rather than being printed as Google's."""
+    gf_session(_served(_LHR), _flightless())
+    ran: list[bool] = []
+
+    def _matrix(**_kw: object) -> None:
+        ran.append(True)
+
+    monkeypatch.setattr(cli, "_run_matrix_path", _matrix)
+    result = CliRunner().invoke(
+        cli.app, _round_trip_search("--routing", "~AA+", "-n", "3", "--format", "json")
+    )
+    assert result.exit_code == 0, result.output
+    assert ran == [True]
+    assert result.stdout == ""
+    assert "Using Matrix: no Google Flights itinerary matched the routing (17 rows" in " ".join(
+        result.stderr.split()
+    )
+
+
+def test_under_explicit_gflight_a_round_trip_whose_returns_google_left_empty_says_why(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gf_session(_served(_LHR), _flightless())
+
+    def _matrix(**_kw: object) -> None:
+        pytest.fail("the search went to Matrix")
+
+    monkeypatch.setattr(cli, "_run_matrix_path", _matrix)
+    result = CliRunner().invoke(
+        cli.app,
+        _round_trip_search(
+            "--routing", "~AA+", "-n", "3", "--backend", "gflight", "--format", "json"
+        ),
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == []
+    assert (
+        "no round trip matched the routing (17 rows filtered out; "
+        "returns were searched for the first 3 outbound options)"
+    ) in " ".join(result.stderr.split())
+
+
+def test_a_round_trip_the_routing_emptied_names_the_outbounds_it_tried(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every return on the served board is AA, so under `~AA+` both pinned
+    outbounds come back with no return. The outbounds below the pins were never
+    tried, and the line says how many were rather than reading as the answer
+    for the whole board."""
+    fake = gf_session(_served(_LHR), _return_board())
+
+    def _matrix(**_kw: object) -> None:
+        pytest.fail("the search went to Matrix")
+
+    monkeypatch.setattr(cli, "_run_matrix_path", _matrix)
+    result = CliRunner().invoke(
+        cli.app,
+        _round_trip_search(
+            "--routing", "~AA+", "-n", "2", "--backend", "gflight", "--format", "json"
+        ),
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == []
+    assert (
+        "no round trip matched the routing (23 rows filtered out; "
+        "returns were searched for the first 2 outbound options)"
+    ) in " ".join(result.stderr.split())
+    assert len(fake.gets) == 3  # the outbound, then two pins
+
+
+@pytest.mark.parametrize("outbound_served", [False, True])
+def test_with_no_filter_a_round_trip_google_served_empty_is_no_results(
+    outbound_served: bool, gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Google's empty is its answer, whether the outbound board or every pinned
+    return board was the one served empty: no routing reason, and no Matrix."""
+    gf_session(*((_served(_LHR), _flightless()) if outbound_served else (_flightless(),)))
+
+    def _matrix(**_kw: object) -> None:
+        pytest.fail("the search went to Matrix")
+
+    monkeypatch.setattr(cli, "_run_matrix_path", _matrix)
+    result = CliRunner().invoke(cli.app, _round_trip_search("-n", "2"))
+    assert result.exit_code == 0, result.output
+    assert "Google Flights: no results." in result.stdout
+    assert "routing" not in result.stderr
+
+
 # ──────────────────────────────── price insight ───────────────────────────
 
 

@@ -2594,16 +2594,29 @@ def _render_merged(rows: list[Any], *, legs: tuple[Leg, ...], top_n: int) -> Non
     console.print(t)
 
 
-def _answer_gf_empty(dropped: int, *, json_out: bool, matrix_fallback: bool) -> int | None:
+def _answer_gf_empty(
+    dropped: int, *, json_out: bool, matrix_fallback: bool, pinned: int = 0
+) -> int | None:
     """Answer a Google Flights search that has no rows, or hand it on.
 
     `dropped` is how many served rows the routing filter removed. When it
     removed them all and `matrix_fallback` is set, nothing is printed and the
     count comes back for the caller to run Matrix with. Otherwise the reason
-    goes to stderr, so a `--format json` stdout is still the one document."""
+    goes to stderr, so a `--format json` stdout is still the one document.
+
+    `pinned` is how many outbounds a round trip searched returns for. The
+    reason names it, because outbounds below the pins may have matching
+    returns that were never searched."""
     if dropped and matrix_fallback:
         return dropped
-    if dropped:
+    if dropped and pinned:
+        plural = "" if pinned == 1 else "s"
+        err.print(
+            f"[yellow]Google Flights: no round trip matched the routing "
+            f"({dropped:d} rows filtered out; returns were searched for the first "
+            f"{pinned:d} outbound option{plural}).[/]"
+        )
+    elif dropped:
         err.print(
             f"[yellow]Google Flights: no itinerary matched the routing "
             f"({dropped:d} rows filtered out).[/]"
@@ -2676,7 +2689,10 @@ def _run_gflight_path(
 
     if not results:
         return _answer_gf_empty(
-            getattr(results, "dropped", 0), json_out=json_out, matrix_fallback=matrix_fallback
+            getattr(results, "dropped", 0),
+            json_out=json_out,
+            matrix_fallback=matrix_fallback,
+            pinned=getattr(results, "pinned", 0),
         )
 
     # `-n` is one number for everything the user can act on. Google's page
@@ -3233,9 +3249,9 @@ def _pin_cap_note(*, legs: tuple[Leg, ...], top_n: int) -> None:
     never pinned at all below `-n 3`.
 
     "Up to", because the cap bounds the count and the board may hold fewer. The
-    exact number is knowable only inside the pin loop, and carrying it back out
-    means a new return type on a recursive function to replace a true sentence
-    with a truer one.
+    exact number is known only once the pin loop has run, after this note; an
+    empty filtered round trip states it (`_answer_gf_empty`), where it changes
+    what the answer means.
 
     stderr, so a `--format json` document on stdout stays a document."""
     from ._gflight_ids import pinned_fanout  # noqa: PLC0415

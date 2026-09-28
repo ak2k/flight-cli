@@ -3666,6 +3666,7 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_pick_in_range", "fallback"),
         ("_run_enriched_path", "unpinned"),
         ("_reraise_if_orderly", "plural"),  # "" or "s", off a count beside it
+        ("_answer_gf_empty", "plural"),
         # `_gf_refusal` sanitizes every remote field it reads and leaves both of
         # its own console-ready, so a wrapper at the sink would show a backslash
         # in front of every bracket the remote text carried. The exactly-once
