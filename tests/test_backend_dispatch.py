@@ -8,9 +8,11 @@ needn't be (slow) or gflight is invoked for inexpressible queries (errors
 deep in fli).
 
 The second load-bearing fact is the search transport: Google's public page,
-whose `tfs=` parameter carries only a stop ceiling today. The page serves its
-full board, so the Tier-2 carrier predicates the post-filter evaluates are
-served there too. Anything else goes to Matrix WITH ITS REASON."""
+whose `tfs=` parameter carries a stop ceiling, a carrier or alliance include, a
+maximum duration, layover minutes, a departure-hour window per leg and child
+passengers. The page serves its full board, so the Tier-2 carrier predicates
+the post-filter evaluates are served there too. Anything else goes to Matrix
+WITH ITS REASON."""
 
 from __future__ import annotations
 
@@ -63,9 +65,8 @@ def test_auto_plain_search_picks_gflight() -> None:
     "flag,value",
     [
         ("slice_specs", ["JFK-LHR:2026-08-15"]),  # multi-city
-        ("depart_times", "morning"),
-        ("return_times", "evening"),
-        ("children", 1),
+        ("depart_times", "morning,evening"),  # two windows; the page takes one
+        ("return_times", "early,afternoon"),
         ("seniors", 1),
         ("youth", 1),
         ("inf_seat", 1),
@@ -197,18 +198,18 @@ def test_stop_ceiling_above_two_goes_to_matrix() -> None:
 @pytest.mark.parametrize(
     "flag,value",
     [
-        ("routing", "LH+"),  # marketing carrier
         ("routing", "F* X:FRA F*"),  # via airport
         ("routing", "X:FRA"),
-        ("extension", "MAXCONNECT 2:00"),  # layover max
-        ("extension", "ALLIANCE star-alliance"),
-        ("extension", "MAXDUR 10:00"),
         ("extension", "F bc=y"),  # fare basis (Tier 3)
         ("extension", "MAXMILES 8000"),  # mileage (Tier 3)
         ("routing", "BA AA"),  # ordered carrier chain
         ("routing", "~BA"),  # direct, not BA (Tier 3)
-        ("extension", "MINCONNECT 1:00"),
         ("extension", "-REDEYES"),
+        ("extension", "MAXCONNECT 0:00"),  # fli's layover maximum is positive
+        ("routing", "XX+"),  # no fli member, so no row would come back
+        # 3.6 is one include list: Google would answer either.
+        ("extension", "ALLIANCE oneworld; ALLIANCE skyteam"),
+        ("extension", "AIRLINES AA; ALLIANCE star-alliance"),
         # Post-filterable, but Matrix reads both positionally and the filter
         # does not: bare AS21 is one flight, `F* ~DUB F*` one connection.
         ("routing", "AS21"),
@@ -242,12 +243,46 @@ def test_auto_serves_post_filterable_tier2_on_google(flag: str, value: object) -
 
 
 def test_a_post_filterable_predicate_beside_one_that_is_not_still_picks_matrix() -> None:
-    assert _call(routing="~BA+", extension="MINCONNECT 1:00") == BACKEND_MATRIX
+    assert _call(routing="~BA+", extension="-REDEYES") == BACKEND_MATRIX
 
 
 def test_auto_mixed_encodable_and_not_still_picks_matrix() -> None:
-    """A partially-encodable set is not partially honoured."""
-    assert _call(extension="ALLIANCE star-alliance; MAXSTOPS 1") == BACKEND_MATRIX
+    """A partially-encodable set is not partially honored."""
+    assert _call(extension="ALLIANCE star-alliance; MAXSTOPS 1; -REDEYES") == BACKEND_MATRIX
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"routing": "AA+"},
+        {"routing": "N:AA"},
+        {"extension": "AIRLINES AA DL"},
+        {"routing": "AA+", "extension": "AIRLINES DL"},  # both checked on the rows
+        {"extension": "ALLIANCE oneworld"},
+        {"extension": "ALLIANCE oneworld|skyteam"},  # one directive is one union
+        {"extension": "MAXDUR 6:20"},
+        {"extension": "MINCONNECT 2:00"},
+        {"extension": "MINCONNECT 0:00"},
+        {"extension": "MAXCONNECT 2:00"},
+        {"extension": "MINCONNECT 1:00; MAXCONNECT 3:00; MAXSTOPS 1"},
+        {"routing": "~BA+", "extension": "MINCONNECT 1:00"},
+        {"depart_times": "morning"},
+        {"depart_times": "early,morning,midday"},
+        {"depart_times": "night"},
+        {"return_times": "evening,night"},
+        {"depart_times": "morning", "return_times": "evening"},
+        {"children": 1},
+        {"children": 2, "adults": 2},
+    ],
+)
+def test_auto_serves_what_the_page_encodes_on_google(
+    overrides: dict[str, object], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Encoded in the page's tfs= and, wherever the rows show it, checked on
+    them too, on either backend spelling."""
+    assert _call(**overrides) == BACKEND_GFLIGHT  # pyright: ignore[reportArgumentType]
+    assert capsys.readouterr().err == ""
+    assert _call(BACKEND_GFLIGHT, **overrides) == BACKEND_GFLIGHT  # pyright: ignore[reportArgumentType]
 
 
 # ─────────────────────────── the printed reason ────────────────────────────
@@ -277,15 +312,29 @@ def test_page_can_encode_names_every_constraint_it_refuses() -> None:
 @pytest.mark.parametrize(
     "overrides,expected",
     [
-        ({"routing": "DL+"}, "a carrier filter (DL)"),
-        ({"children": 1}, "a passenger type beyond adults"),
+        ({"routing": "BA AA"}, "routing 'BA AA' not GF-expressible"),
+        ({"inf_lap": 1}, "an infant passenger"),
+        ({"inf_seat": 1}, "an infant passenger"),
+        ({"seniors": 1}, "a senior or youth passenger"),
+        ({"adults": 0, "children": 1}, "a child passenger with no adult"),
+        ({"adults": 9, "children": 1}, "more than 9 passengers"),
+        ({"extension": "MAXCONNECT 0:00"}, "a maximum layover of 0 min"),
+        ({"routing": "XX+"}, "a carrier Google Flights has no code for (XX)"),
+        (
+            {"routing": "AA+", "extension": "ALLIANCE oneworld"},
+            "an alliance filter combined with another carrier or alliance filter",
+        ),
         # A code that is neither an fli airport nor a metro code in the member
         # table: reaching the bridge with one is an AttributeError before any
         # request, and on `--format json` that is exit 1 and an empty document.
         ({"origin": "YTO"}, "a city code rather than an airport (YTO)"),
         ({"origin": "JFK,ZZZ"}, "a city code rather than an airport (ZZZ)"),
         ({"slice_specs": ["JFK-LHR:2026-08-15"]}, "a multi-city itinerary"),
-        ({"depart_times": "morning"}, "a departure/arrival time window"),
+        ({"depart_times": "morning,evening"}, "departure times that are not one window"),
+        (
+            {"return_times": "early,night,early"},
+            "return times that are not one window (early_morning, night)",
+        ),
         ({"allow_airport_changes": False}, "a ban on changing airports"),
         ({"show_only_available": False}, "unavailable itineraries included"),
     ],
@@ -346,18 +395,39 @@ def test_explicit_gflight_rejects_unserveable_request() -> None:
 
 
 def test_explicit_gflight_error_names_the_constraint() -> None:
-    with pytest.raises(typer.BadParameter, match=r"a carrier filter \(DL\)"):
-        _call(BACKEND_GFLIGHT, routing="DL+")
+    with pytest.raises(typer.BadParameter, match="a red-eye exclusion"):
+        _call(BACKEND_GFLIGHT, extension="-REDEYES")
 
 
 def test_explicit_gflight_error_names_the_pax_type() -> None:
-    with pytest.raises(typer.BadParameter, match="passenger type beyond adults"):
-        _call(BACKEND_GFLIGHT, children=1)
+    with pytest.raises(typer.BadParameter, match="an infant passenger"):
+        _call(BACKEND_GFLIGHT, inf_seat=1)
 
 
 def test_explicit_gflight_error_lists_every_reason() -> None:
-    with pytest.raises(typer.BadParameter, match=r"beyond adults and a carrier filter \(DL\)"):
-        _call(BACKEND_GFLIGHT, children=1, routing="DL+")
+    with pytest.raises(typer.BadParameter, match="an infant passenger and a red-eye exclusion"):
+        _call(BACKEND_GFLIGHT, inf_seat=1, extension="-REDEYES")
+
+
+def test_an_unknown_time_of_day_is_refused_before_any_backend_is_named(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(typer.Exit):
+        _call(depart_times="brunch")
+    printed = capsys.readouterr().err
+    assert "bad time-of-day" in printed
+    assert "Using Matrix" not in printed
+
+
+def test_explicit_matrix_does_not_look_carriers_up_in_fli() -> None:
+    """The lookup costs fli's import, which a Matrix run should not pay."""
+    from flight_cli.cli import _gf_unmappable_reasons
+
+    preds = classify("XX+", None).predicates
+    assert _gf_unmappable_reasons(BACKEND_MATRIX, preds) == []
+    assert _gf_unmappable_reasons(BACKEND_AUTO, preds) == [
+        "a carrier Google Flights has no code for (XX)"
+    ]
 
 
 @pytest.mark.parametrize("overrides", [{"origin": "JFK,EWR"}, {"origin": "NYC"}])
@@ -436,17 +506,26 @@ def test_gflight_alias_still_uses_google_flights_for_a_plain_search(
     assert called == ["gflight"]
 
 
-def test_gflight_alias_takes_matrix_for_a_child_passenger(
+def test_gflight_alias_uses_google_flights_for_a_child_beside_an_adult(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The page transport can't price a child — the tfs writer emits one adult
-    varint per occupant. The alias has no --backend flag, so it resolves like
-    `search` on auto rather than erroring on a query it accepts."""
     called, output = _gflight_alias(
         monkeypatch, "JFK", "LAX", "--dep", "2026-10-14", "--children", "1"
     )
+    assert called == ["gflight"]
+    assert "Using Matrix" not in output
+
+
+def test_gflight_alias_takes_matrix_for_a_child_with_no_adult(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The alias has no --backend flag, so it resolves like `search` on auto
+    rather than erroring on a query it accepts."""
+    called, output = _gflight_alias(
+        monkeypatch, "JFK", "LAX", "--dep", "2026-10-14", "--adults", "0", "--children", "1"
+    )
     assert called == ["matrix"]
-    assert "a passenger type beyond adults" in output
+    assert "a child passenger with no adult" in output
 
 
 def test_gflight_alias_splits_a_multi_airport_argument_like_search(

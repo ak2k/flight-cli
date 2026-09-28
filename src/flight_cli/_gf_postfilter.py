@@ -1,14 +1,20 @@
-"""Post-filter Google Flights results against Tier-2 predicates the GF query
-can't express natively.
+"""Post-filter Google Flights results against the constraints a search asked
+for.
 
 Runs only on the gflight path (Matrix legs don't carry the per-leg carrier
 identity these predicates need). `search_page_reasons` is the search page's
 gate: a predicate rides there when the page's tfs= encodes it or this module
-post-filters it on the full board. The date grid does not reach here at all —
-`_gf_dategrid.grid_can_serve` admits Tier-1 only, because the grid returns
-prices per date and there are no itineraries to post-filter. Anything this
-module can't evaluate (min-layover, red-eyes, overnight stops) escalates the
-whole query to Matrix rather than being silently dropped.
+post-filters it on the full board. The date grids do not reach here at all:
+they return prices per date and there are no itineraries to post-filter, so
+they refuse what they cannot ask for (`_gf_dategrid.grid_can_serve`,
+`_gf_calgraph.page_blocker`). Anything this module can't evaluate (red-eyes,
+overnight stops) escalates the whole query to Matrix rather than being
+silently dropped.
+
+Google has ignored a field it was sent (a carrier exclude on JFK-LHR), so what
+the page encodes is checked here too wherever the row shows it: the carrier
+include, the maximum duration, the layover minutes and the departure time.
+Only an alliance goes unchecked, for want of a membership table.
 
 Supported Tier-2 predicates:
   - operating carrier include/exclude (`O:LH+`, `OPAIRLINES`, `-OPAIRLINES`)
@@ -16,18 +22,25 @@ Supported Tier-2 predicates:
   - connection-airport exclude (`~DFW`, `-CITIES`)
   - no codeshare (`-CODESHARE`)
   - specific flight # / range (`UA882`, `UA1000-2000`)
+  - minimum layover (`MINCONNECT`), on the raw row and encoded as well
 """
 
 from __future__ import annotations
 
+import itertools
 import re
 from typing import TYPE_CHECKING, Any
 
+from .domain import time_bounds
 from .routing_predicates import (
+    AlliancePred,
     CarrierPred,
     ConnectionAirportPred,
+    ConnectTimePred,
     ExcludeCodesharePred,
+    MaxDurationPred,
     SpecificFlightPred,
+    StopsPred,
     Tier,
     page_can_encode,
 )
@@ -35,12 +48,13 @@ from .routing_predicates import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
 
+    from .domain import TimeOfDay
     from .models import Itinerary, SearchResult, Slice
     from .routing_predicates import Predicate
 
-# Tier-2 predicate types this module can evaluate. Other Tier-2 predicates
-# (ConnectTimePred min, red-eyes, overnights) need per-segment times we don't
-# yet thread through, so they escalate to Matrix at the gate.
+# Tier-2 predicate types `_slice_passes` evaluates on a parsed slice. A minimum
+# layover is checked on the raw row instead (`_row_passes`); red-eyes and
+# overnights escalate to Matrix at the gate.
 _SUPPORTED: tuple[type, ...] = (
     CarrierPred,
     ConnectionAirportPred,
@@ -74,16 +88,43 @@ def _served_by_postfilter(pred: Predicate) -> bool:
     )
 
 
+def _served_by_page(pred: Predicate) -> bool:
+    """A predicate the search page's tfs= encodes beyond the stop ceiling
+    `page_can_encode` admits. That function also answers for the date grids,
+    which have no rows to check these on."""
+    match pred:
+        case CarrierPred(exclude=False, operating=False) | AlliancePred() | MaxDurationPred():
+            return True
+        case ConnectTimePred():
+            # fli's layover maximum takes a positive number only.
+            return pred.max_minutes != 0
+        case _:
+            return False
+
+
 def search_page_reasons(predicates: Iterable[Predicate]) -> list[str]:
     """Why the search page can't serve `predicates`: one reason per predicate
     that its tfs= cannot encode and this module does not post-filter. Empty
-    when the page serves them all."""
-    return [
+    when the page serves them all.
+
+    3.6 is one include list, so an alliance written beside a carrier or another
+    alliance asks Google for either, and no row check narrows an alliance back."""
+    preds = list(predicates)
+    reasons = [
         reason
-        for p in predicates
-        if not _served_by_postfilter(p)
-        for reason in page_can_encode([p])[1]
+        for p in preds
+        if not (_served_by_postfilter(p) or _served_by_page(p))
+        for reason in (
+            ["a maximum layover of 0 min"]
+            if isinstance(p, ConnectTimePred) and p.max_minutes == 0
+            else page_can_encode([p])[1]
+        )
     ]
+    alliances = sum(isinstance(p, AlliancePred) for p in preds)
+    includes = any(isinstance(p, CarrierPred) and not (p.exclude or p.operating) for p in preds)
+    if alliances > 1 or (alliances and includes):
+        reasons.append("an alliance filter combined with another carrier or alliance filter")
+    return reasons
 
 
 def _parse_flight(flight: str) -> tuple[str, int] | None:
@@ -155,26 +196,94 @@ def _slice_passes(slc: Slice, predicates: Iterable[Predicate]) -> bool:
     return True
 
 
+def _layovers(legs: Sequence[Any]) -> list[int]:
+    """Minutes between each arrival and the next departure. Both ends are
+    local to the connecting airport, so the difference needs no time zone."""
+    return [
+        int((b.departure_datetime - a.arrival_datetime).total_seconds() // 60)
+        for a, b in itertools.pairwise(legs)
+    ]
+
+
+def _row_passes(flight: Any, predicates: Iterable[Predicate], times: Sequence[TimeOfDay]) -> bool:
+    """The checks read off fli's raw row, which `models.Slice` does not carry.
+
+    The duration is Google's own total: leg datetimes are local to each leg's
+    airport, so the last arrival minus the first departure is off by the zone
+    difference. A departure time must fall inside one of `times`, bounds
+    included, to the minute: Google's own window is in whole hours."""
+    legs: Sequence[Any] = flight.legs
+    if times:
+        if not legs:
+            return False
+        dep = legs[0].departure_datetime
+        clock = dep.hour * 60 + dep.minute
+        if not any(lo <= clock <= hi for lo, hi in map(time_bounds, times)):
+            return False
+    for p in predicates:
+        if isinstance(p, MaxDurationPred):
+            if flight.duration is None or flight.duration > p.minutes:
+                return False
+        elif isinstance(p, ConnectTimePred):
+            for gap in _layovers(legs):
+                if p.min_minutes is not None and gap < p.min_minutes:
+                    return False
+                if p.max_minutes is not None and gap > p.max_minutes:
+                    return False
+    return True
+
+
 def routing_keep(
     per_slice_predicates: Sequence[Sequence[Predicate]],
+    per_slice_times: Sequence[Sequence[TimeOfDay]] = (),
 ) -> Callable[[int, Any], bool] | None:
     """The per-leg filter `_gflight_ids.search_with_ids` applies to each board
     it is served: `keep(i, row)` is whether one Google Flights row passes slice
-    `i`'s predicates. None when no slice carries any."""
-    if not any(per_slice_predicates):
+    `i`'s predicates and departs inside its time window. None when no slice
+    carries either."""
+    if not any(per_slice_predicates) and not any(per_slice_times):
         return None
-    # Deferred: the adapter pulls in the award client, which only a Google
-    # Flights search with a routing filter has any use for.
-    from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
 
     def keep(leg: int, row: Any) -> bool:
         preds = per_slice_predicates[leg] if leg < len(per_slice_predicates) else ()
+        times = per_slice_times[leg] if leg < len(per_slice_times) else ()
+        if not _row_passes(row.flight, preds, times):
+            return False
         if not preds:
             return True
+        # Deferred: the adapter pulls in the award client, which only a Google
+        # Flights search with a routing filter has any use for.
+        from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
+
         itn = fli_results_to_search_result([row]).solutions[0].itinerary
         return itn is None or _slice_passes(itn.slices[0], preds)
 
     return keep
+
+
+def _row_check_name(pred: Predicate) -> str | None:
+    match pred:
+        case AlliancePred() | StopsPred():
+            return None  # Google's own filter; the rows are not checked
+        case ConnectTimePred(min_minutes=int() as low, max_minutes=None):
+            return f"a minimum layover ({low:d} min)"
+        case ConnectTimePred(min_minutes=None, max_minutes=int() as high):
+            return f"a maximum layover ({high:d} min)"
+        case _:
+            return next(iter(page_can_encode([pred])[1]), None)
+
+
+def row_check_names(
+    per_slice_predicates: Sequence[Sequence[Predicate]],
+    per_slice_times: Sequence[Sequence[TimeOfDay]] = (),
+) -> list[str]:
+    """Every check `routing_keep` applies to a row, in the user's vocabulary,
+    for the sentence that says what emptied a board."""
+    names = [name for preds in per_slice_predicates for p in preds if (name := _row_check_name(p))]
+    for label, times in zip(("departure", "return"), per_slice_times, strict=False):
+        if times:
+            names.append(f"a {label}-time window ({', '.join(t.value for t in times)})")
+    return list(dict.fromkeys(names))
 
 
 def _itinerary_passes(it: Itinerary, per_slice_predicates: Sequence[Sequence[Predicate]]) -> bool:
