@@ -48,6 +48,7 @@ import sys
 import textwrap
 import threading
 import time
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import anyio
@@ -537,6 +538,33 @@ def test_one_call_parses_ids_and_legroom_from_the_page(client: Any) -> None:
     assert all(g.flight_id for g in out)
     assert all(a.legroom_class for g in out for a in g.amenities)
     assert len(fake.gets) == 1
+
+
+def _board_from_jfk_and_ewr() -> str:
+    """The captured JFK->LAX board with its last row moved to EWR, as a board
+    for JFK,EWR -> LAX comes back: one ranking over both origins."""
+    payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
+    row = payload[3][0][1][0]
+    row[3] = "EWR"
+    row[2][0][3] = "EWR"
+    row[2][0][4] = "Newark Liberty International Airport"
+    return json.dumps(payload)
+
+
+def test_a_board_over_an_airport_set_keeps_every_origins_rows(client: Any) -> None:
+    from fli.models import Airport  # pyright: ignore[reportMissingTypeStubs]  # fli ships no stubs
+
+    client(_FakeResponse(text=_page(_board_from_jfk_and_ewr())))
+    out = gfid._one_call(_FILTERS)
+    assert [g.flight.legs[0].departure_airport.name for g in out] == ["JFK", "JFK", "EWR"]
+    # A board is checked against the whole set it was asked for, so both pass.
+    # A namespace, because fli's segment validator refuses the fixture's past date.
+    wanted = SimpleNamespace(
+        departure_airport=[[Airport["JFK"], 0], [Airport["EWR"], 0]],
+        arrival_airport=[[Airport["LAX"], 0]],
+        travel_date=out[0].flight.legs[0].departure_datetime.date().isoformat(),
+    )
+    assert gfid._unpinned_board(list(out), cast("Any", wanted)) is None
 
 
 # ─────────────────────── refusals are never "no results" ───────────────

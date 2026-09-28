@@ -3718,9 +3718,10 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_render_calendar", "ccy_tag"),
         ("_render_multi_cabin_search", "ccy_tag"),
         # Cells and rows composed in the renderer from leaves each wrapped where
-        # it was read — `_fmt_slice_cell`, `_leg_display`, `_fmt_gflight_legroom`
-        # and `_amount` — and NOT wrapped again around the composition, because
-        # `_fmt_legroom_one` writes a `[red]` on the pitch token on purpose.
+        # it was read — `_fmt_slice_cell`, `_leg_display`, `_gflight_route`,
+        # `_fmt_gflight_legroom` and `_amount` — and NOT wrapped again around the
+        # composition, because `_fmt_legroom_one` writes a `[red]` on the pitch
+        # token on purpose.
         ("_render_search", "cells"),
         ("_render_search", "it_carriers"),
         ("_render_search", "out"),

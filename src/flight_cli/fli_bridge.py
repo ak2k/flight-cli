@@ -1,15 +1,16 @@
 """Convert a domain Search to fli's FlightSearchFilters and run the
 Google Flights query. Used for the `flight gflight` handoff.
 
-fli has no notion of multi-airport per slice or calendar mode — so we
-flatten to the first IATA per leg, and for calendar searches we use the
-window start as departure + mean(duration) as return."""
+Each leg carries every airport of its origin and destination sets, metro codes
+expanded (`_metro`). fli has no calendar mode, so for calendar searches we use
+the window start as departure + mean(duration) as return."""
 
 from __future__ import annotations
 
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, assert_never
 
+from ._metro import expand_airports
 from .domain import (
     Cabin,
     CalendarFollowup,
@@ -27,7 +28,7 @@ from .routing_predicates import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
 
     from .routing_predicates import Predicate
 
@@ -60,12 +61,10 @@ def to_fli_filter(s: Search) -> Any:
         Cabin.FIRST: SeatType.FIRST,
     }
 
-    def _seg(origin: str, dest: str, dt: str) -> FlightSegment:
-        o = getattr(FliAirport, origin)
-        d = getattr(FliAirport, dest)
+    def _seg(origins: Sequence[str], dests: Sequence[str], dt: str) -> FlightSegment:
         return FlightSegment(
-            departure_airport=[[o, 0]],
-            arrival_airport=[[d, 0]],
+            departure_airport=[[getattr(FliAirport, a), 0] for a in expand_airports(origins)],
+            arrival_airport=[[getattr(FliAirport, a), 0] for a in expand_airports(dests)],
             travel_date=dt,
         )
 
@@ -79,17 +78,17 @@ def to_fli_filter(s: Search) -> Any:
                     raise AssertionError(
                         f"{type(s).__name__}.leg.date should be set after validation",
                     )
-                segs.append(_seg(leg.origins[0], leg.destinations[0], leg.date.isoformat()))
+                segs.append(_seg(leg.origins, leg.destinations, leg.date.isoformat()))
         case CalendarSearch():
             mean_dur = (s.window.duration_min + s.window.duration_max) // 2
             out = s.legs[0]
             ret = s.legs[1] if len(s.legs) == _ROUND_TRIP_LEGS else None
-            segs.append(_seg(out.origins[0], out.destinations[0], s.window.start.isoformat()))
+            segs.append(_seg(out.origins, out.destinations, s.window.start.isoformat()))
             if ret:
                 segs.append(
                     _seg(
-                        ret.origins[0],
-                        ret.destinations[0],
+                        ret.origins,
+                        ret.destinations,
                         (s.window.start + timedelta(days=mean_dur)).isoformat(),
                     )
                 )

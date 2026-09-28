@@ -18,6 +18,7 @@ this test fails immediately and tells us to re-RE."""
 
 from __future__ import annotations
 
+import base64
 import pathlib
 from typing import Any
 
@@ -90,6 +91,39 @@ def test_pinned_tfs_aa_via_lax_byte_exact() -> None:
         "Re-capture via research/record_user_session.py --auto and inspect "
         "the diff: Google Flights may have changed the protobuf schema."
     )
+
+
+# Google's own search page for JFK+LGA+EWR -> LAX, one-way, economy, 1 adult,
+# read off a live page load (it served 45 rows from all three origins). It has
+# no field 16: that is the pinned booking link's marker, not the search page's.
+_RECON_LAX_MULTI = (
+    "CBwQAhowEgoyMDI2LTExLTA0agcIARIDSkZLagcIARIDTEdBagcIARIDRVdScgcIARIDTEFYQAFIAXABmAEC"
+)
+
+
+def _search_page_tfs(origin: str | list[str], destination: str | list[str]) -> bytes:
+    return _encode_gflight_pinned_tfs(
+        slices=[
+            {"date": "2026-11-04", "origin": origin, "destination": destination, "segments": []}
+        ],
+        cabin=1,
+        adults=1,
+        children=0,
+        infants_in_seat=0,
+        infants_on_lap=0,
+        pin_max_u64=False,
+    )
+
+
+def test_an_airport_set_encodes_byte_exact_to_googles_own_search_page() -> None:
+    raw = _search_page_tfs(["JFK", "LGA", "EWR"], ["LAX"])
+    assert base64.urlsafe_b64encode(raw).rstrip(b"=").decode() == _RECON_LAX_MULTI
+
+
+def test_a_one_airport_sequence_encodes_exactly_as_the_bare_code() -> None:
+    """A str is also a sequence of one-letter strings; the encoder must read
+    "HNL" as one airport, and `["HNL"]` as the same one."""
+    assert _search_page_tfs("JFK", "LAX") == _search_page_tfs(["JFK"], ["LAX"])
 
 
 def test_extract_pin_segments_same_day_one_stop() -> None:

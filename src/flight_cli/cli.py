@@ -47,6 +47,7 @@ from ._gf_errors import (
     GfTransportError,
     GfUpstreamStatusError,
 )
+from ._metro import expand_airports, gf_leg_refusal
 from ._multi_cabin import MultiCabinRow, parse_price
 from ._multi_cabin import merge as _merge_cabins
 from .client import MatrixApiError, MatrixClient
@@ -526,6 +527,11 @@ def _gf_unserveable_reasons(backend: str, origin: str | None, destination: str |
     `AttributeError` out of the bridge before any request, or a query silently
     run against the wrong airport — and neither is an answer to what was asked.
 
+    Each token must be ONE fli airport, because some callers encode one airport
+    per token. `_pick_backend` hands over a metro code's member airports
+    (`_metro.expand_airports`), so on search a code reported here is neither an
+    airport nor a metro code in that table.
+
     Checked with the same attribute lookup the bridge performs, so this cannot
     drift from what the bridge will accept, and only where Google Flights is
     still in the running: a Matrix run pays neither the import nor the check."""
@@ -578,12 +584,16 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
     it to "any", so the tfs field would be omitted and the constraint lost),
     any pax type beyond adults (the page's
     passenger field has kind codes for children and infants that we have never
-    verified against a live priced search), a multi-airport
-    `--origin`/`--destination` set (the GF bridge flattens those to the first
-    code, so serving them on GF would silently drop the rest), and
+    verified against a live priced search), and
     `--no-airport-changes` / `--include-unavailable`, which the search page's
     `tfs=` parameter has no field for at all. `--fare-rules` too: fare bases and
     rules come from Matrix's `/v1/summarize`, which Google has no equivalent of.
+
+    An airport set or a metro code stays on Google Flights, which is asked for
+    every member airport (`_metro`). What goes to Matrix is a leg the page can't
+    take (`gf_leg_refusal`: more than `MAX_GF_LEG_AIRPORTS` airports, or one
+    airport at both ends) and a code that is neither an airport nor a metro code
+    in the table.
 
     A constraint the page cannot carry has to be a reason here and nowhere
     else. Left out, `auto` serves it on Google with the constraint silently
@@ -621,9 +631,15 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
         reasons.append("a ban on changing airports")
     if not show_only_available:
         reasons.append("unavailable itineraries included")
-    if len(_parse_iata_list(origin or "")) > 1 or len(_parse_iata_list(destination or "")) > 1:
-        reasons.append("a multi-airport origin/destination")
-    reasons.extend(_gf_unserveable_reasons(backend, origin, destination))
+    origins, destinations = _parse_iata_list(origin or ""), _parse_iata_list(destination or "")
+    leg_refusal = gf_leg_refusal(origins, destinations)
+    if leg_refusal is not None:
+        reasons.append(leg_refusal)
+    reasons.extend(
+        _gf_unserveable_reasons(
+            backend, ",".join(expand_airports(origins)), ",".join(expand_airports(destinations))
+        )
+    )
     if stops is not None and stops > MAX_ENCODABLE_STOPS:
         # Same ceiling as the routing-language spelling below, and the same
         # wording: fli's MaxStops maps anything higher to ANY, which omits the
@@ -1933,6 +1949,8 @@ def _emit_urls(
             if pinned is not None:
                 console.print(f"[dim]Google Flights ({pinned_label} pinned):[/]")
                 console.print(f"  [link]{_safe_text(pinned)}[/]")
+                for note in _pinned_gflight_url_caveats(search):
+                    console.print(f"  [yellow]note: {_safe_text(note)}[/]")
             else:
                 console.print("[dim]Google Flights (tfs= structured):[/]")
                 console.print(f"  [link]{_safe_text(google_flights_url(search))}[/]")
@@ -1957,18 +1975,39 @@ def _gflight_url_caveats(search: Search) -> list[str]:
 
     We still emit the link — it is a useful starting point, and booking hands
     off to Google — but the ways it differs are now stated.
+
+    A metro code counts as its member airports: fast_flights writes the code
+    itself as the airport, which is not the set the search covered.
     """
     legs: tuple[Leg, ...] = getattr(search, "legs", ()) or ()
     notes: list[str] = []
-    if legs and any(len(lg.origins) > 1 or len(lg.destinations) > 1 for lg in legs):
-        first = legs[0]
-        notes.append(
-            f"multi-airport search narrowed to {first.origins[0]}→{first.destinations[0]} "
-            "(Google's link format takes one airport pair)"
-        )
+    for lg in legs:
+        origins, destinations = expand_airports(lg.origins), expand_airports(lg.destinations)
+        if len(origins) > 1 or len(destinations) > 1:
+            notes.append(
+                f"multi-airport search narrowed to {lg.origins[0]}→{lg.destinations[0]} "
+                "(Google's link format takes one airport code per end; the search covered "
+                f"{','.join(origins)}→{','.join(destinations)})"
+            )
+            break
     if any(lg.route_language or lg.extension for lg in legs):
         notes.append("routing/extension codes are not expressible in a Google link")
     return notes
+
+
+def _pinned_gflight_url_caveats(search: Search) -> list[str]:
+    """The pinned Google link's one narrowing: a leg whose airport sets Google's
+    page can't take is pinned with the itinerary's own airports instead."""
+    legs: tuple[Leg, ...] = getattr(search, "legs", ()) or ()
+    reason = next(
+        (r for lg in legs if (r := gf_leg_refusal(lg.origins, lg.destinations)) is not None), None
+    )
+    if reason is None:
+        return []
+    return [
+        "the link shows the pinned itinerary's own airports, not every airport searched: "
+        f"Google's page can't take {reason}"
+    ]
 
 
 def _parse_iso(s: str) -> datetime | None:
@@ -3031,8 +3070,8 @@ _MERGE_SOURCE_TAG = {"both": "GF+MX", "matrix": "MX", "gf": "GF"}
 def _render_merged(rows: list[Any], *, legs: tuple[Leg, ...], top_n: int) -> None:
     """Render the reconciled GF+Matrix view: one row per itinerary with the GF
     and Matrix prices attributed side-by-side and a source tag."""
-    origin = legs[0].origins[0] if legs[0].origins else "?"
-    destination = legs[0].destinations[0] if legs[0].destinations else "?"
+    origin = ",".join(legs[0].origins) or "?"
+    destination = ",".join(legs[0].destinations) or "?"
     has_return = len(legs) >= _ROUND_TRIP_LEGS
     ccy = _title_currency(p for r in rows[:top_n] for p in (r.matrix_price, r.gf_price))
     t = Table(
@@ -4297,6 +4336,19 @@ def _leg_display(leg: Any, amenity: Any, match_carriers: frozenset[str]) -> str:
     return booking
 
 
+def _gflight_route(legs: Any) -> str:
+    """One itinerary's airports, first departure to last arrival with every
+    connection between, wrapped per code as `_fmt_slice_route` does. A change of
+    airports at a connection shows both codes rather than hiding one."""
+    codes: list[str] = []
+    for leg in legs:
+        for airport in (leg.departure_airport, leg.arrival_airport):
+            code = _safe_text(getattr(airport, "name", "?"))
+            if not codes or codes[-1] != code:
+                codes.append(code)
+    return "→".join(codes)
+
+
 def _render_gflight_table(
     results: list[Any],
     *,
@@ -4324,9 +4376,15 @@ def _render_gflight_table(
     "What a round-trip row's price means." in
     docs/memories/gf_routing_and_carriers.md and in
     `tests/pp/test_gflight_adapter.py`."""
-    origin = legs[0].origins[0] if legs[0].origins else "?"
-    destination = legs[0].destinations[0] if legs[0].destinations else "?"
+    origin = ",".join(legs[0].origins) or "?"
+    destination = ",".join(legs[0].destinations) or "?"
     has_return = len(legs) >= _ROUND_TRIP_LEGS
+    # One board ranks every airport of a set, so only the row can say which
+    # airports it flies.
+    per_row_route = any(
+        len(expand_airports(lg.origins)) > 1 or len(expand_airports(lg.destinations)) > 1
+        for lg in legs
+    )
     t = Table(
         title=f"Google Flights · {_safe_text(origin)}→{_safe_text(destination)}"
         + (" + return" if has_return else ""),
@@ -4346,10 +4404,12 @@ def _render_gflight_table(
             fr = g.flight  # unwrap GFlightWithId → fli FlightResult
             amenities = getattr(g, "amenities", []) or []
             label = f"{i}{'a' if j == 0 else 'b'}" if len(items) > 1 else str(i)
-            legs_str = " → ".join(
+            flights = " → ".join(
                 _leg_display(leg, amenities[k] if k < len(amenities) else None, match_carriers)
                 for k, leg in enumerate(fr.legs)
             )
+            route = _gflight_route(fr.legs) if per_row_route else ""
+            legs_str = " ".join(p for p in (route, flights) if p)
             mins = fr.duration
             dur = f"{mins // 60}h{mins % 60:02d}m"
             legroom_str = _fmt_gflight_legroom(fr.legs, amenities)

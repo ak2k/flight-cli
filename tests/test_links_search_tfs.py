@@ -218,6 +218,32 @@ def test_selected_leg_uses_the_iata_code_not_the_airline_name(airline: Any, code
     assert leg[6] == [b"123"]
 
 
+def test_a_pinned_leg_over_an_airport_set_keeps_the_set_on_both_slices() -> None:
+    """A round trip over a set pins the outbound and re-fetches the returns: the
+    pinned request carries the chosen legs AND every airport of both slices."""
+    nyc = [[Airport["JFK"], 0], [Airport["LGA"], 0], [Airport["EWR"], 0]]
+    rt = _filters(
+        flight_segments=[
+            FlightSegment(
+                departure_airport=nyc,
+                arrival_airport=[[Airport["LAX"], 0]],
+                travel_date=_OUT.isoformat(),
+                selected_flight=_picked(Airline["B6"], "123"),
+            ),
+            FlightSegment(
+                departure_airport=[[Airport["LAX"], 0]],
+                arrival_airport=nyc,
+                travel_date=_BACK.isoformat(),
+            ),
+        ],
+        trip_type=TripType.ROUND_TRIP,
+    )
+    out, back = _slices(build_search_tfs(rt))
+    assert _decode(out[4][0])[6] == [b"123"]
+    assert (_endpoints(out, 13), _endpoints(out, 14)) == ([b"JFK", b"LGA", b"EWR"], [b"LAX"])
+    assert (_endpoints(back, 13), _endpoints(back, 14)) == ([b"LAX"], [b"JFK", b"LGA", b"EWR"])
+
+
 def test_unpinned_segment_carries_no_selected_leg() -> None:
     rt = _filters(
         flight_segments=[
@@ -282,9 +308,13 @@ def test_multi_city_raises() -> None:
     assert excinfo.value.field == "trip_type"
 
 
-def test_multi_airport_leg_raises() -> None:
-    """The bridge flattens airport sets to the first code, so encoding one
-    would answer a JFK,EWR search with JFK only."""
+def _endpoints(sl: dict[int, list[Any]], field: int) -> list[bytes]:
+    return [_decode(entry)[2][0] for entry in sl[field]]
+
+
+def test_a_multi_airport_leg_repeats_every_airport_in_order() -> None:
+    """The page takes a repeated 3.13/3.14 entry per airport; carrying only the
+    first would answer a JFK,EWR search with JFK only."""
     f = _filters(
         flight_segments=[
             FlightSegment(
@@ -294,9 +324,34 @@ def test_multi_airport_leg_raises() -> None:
             )
         ]
     )
-    with pytest.raises(GfTfsUnsupportedError) as excinfo:
-        build_search_tfs(f)
-    assert excinfo.value.field == "flight_segments"
+    sl = _slices(build_search_tfs(f))[0]
+    assert _endpoints(sl, 13) == [b"JFK", b"EWR"]
+    assert _endpoints(sl, 14) == [b"LAX"]
+    # Kind 1 (an airport) on every entry.
+    assert [_decode(entry)[1] for entry in sl[13]] == [[1], [1]]
+
+
+def test_a_round_trip_over_sets_runs_the_return_from_the_destination_set() -> None:
+    nyc = [[Airport["JFK"], 0], [Airport["LGA"], 0], [Airport["EWR"], 0]]
+    lon = [[Airport["LHR"], 0], [Airport["LGW"], 0]]
+    f = _filters(
+        flight_segments=[
+            FlightSegment(departure_airport=nyc, arrival_airport=lon, travel_date=_OUT.isoformat()),
+            FlightSegment(
+                departure_airport=lon, arrival_airport=nyc, travel_date=_BACK.isoformat()
+            ),
+        ],
+        trip_type=TripType.ROUND_TRIP,
+    )
+    out, back = _slices(build_search_tfs(f))
+    assert (_endpoints(out, 13), _endpoints(out, 14)) == (
+        [b"JFK", b"LGA", b"EWR"],
+        [b"LHR", b"LGW"],
+    )
+    assert (_endpoints(back, 13), _endpoints(back, 14)) == (
+        [b"LHR", b"LGW"],
+        [b"JFK", b"LGA", b"EWR"],
+    )
 
 
 def test_a_default_populated_filter_does_not_raise() -> None:
