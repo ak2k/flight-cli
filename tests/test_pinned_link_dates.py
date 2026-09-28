@@ -161,3 +161,17 @@ def test_an_out_of_range_pick_still_names_the_pin_a_matrix_link_makes(
     assert "--pick 9 is out of range (1-1); pinning itinerary #1 instead." in err, err
     assert "Matrix (cheapest itinerary pinned):" in captured.out, captured.out
     assert "Google Flights (tfs= structured):" in captured.out, captured.out
+
+
+def test_the_pick_help_says_a_link_may_not_pin_the_row() -> None:
+    """A Matrix connection no source dates gets the unpinned Google link
+    whatever the pick, so the help cannot promise the pin unconditionally."""
+    import click
+    import typer
+
+    group = typer.main.get_command(cli.app)
+    assert isinstance(group, click.Group)
+    command = group.commands["search"]
+    (pick,) = [p for p in command.params if isinstance(p, click.Option) and "--pick" in p.opts]
+    help_text = " ".join((pick.help or "").split())
+    assert "A link that cannot pin that row pre-fills the search instead" in help_text, help_text

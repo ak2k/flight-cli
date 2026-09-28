@@ -5266,8 +5266,9 @@ def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes th
         "--pick",
         help="Itinerary #N (1-based, as shown in the final table) to pin in the "
         "--matrix-url/--google-url deep links, to describe with --fare-rules and to "
-        "open with --sellers. Default: the first row. A pick outside the table falls "
-        "back to row 1 for the links and --fare-rules and is refused with --sellers. "
+        "open with --sellers. Default: the first row. A link that cannot pin that row "
+        "pre-fills the search instead; its label says which. A pick outside the table "
+        "falls back to row 1 for the links and --fare-rules and is refused with --sellers. "
         "--format json emits no link lines, so there it only chooses the --fare-rules "
         "or --sellers row.",
         rich_help_panel=_GROUP_OUTPUT,
