@@ -55,7 +55,10 @@ import anyio
 import anyio.to_thread
 import pytest
 
-from conftest import _answering  # one home for the re-pointing rule; see its docstring
+from conftest import (
+    _answering,  # one home for the re-pointing rule; see its docstring
+    distinct_clones,
+)
 from flight_cli import _gflight_ids as gfid
 from flight_cli._gf_errors import (
     GfBackendError,
@@ -1506,8 +1509,7 @@ def _cloned_ds1(n: int) -> str:
     """A ds:1 payload carrying `n` parseable rows, cloned from the real
     capture."""
     payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
-    row = payload[2][0][0]
-    payload[2] = [[copy.deepcopy(row) for _ in range(n)]]
+    payload[2] = [distinct_clones(payload[2][0][0], n)]
     payload[3] = None
     return json.dumps(payload)
 
@@ -1620,8 +1622,8 @@ def _round_trip_filters() -> Any:
 def test_the_pinned_fanout_is_capped_regardless_of_top_n(client: Any) -> None:
     """Each pinned outbound is another multi-megabyte page GET, and the
     multi-cabin path bumps top_n by 5x (capped at 100) to widen the pool it
-    filters — free on an RPC, not free here. At top_n=50 over a 30-row board
-    the round trip costs 1 outbound + 10 pins, not 1 + 30."""
+    filters — free on an RPC, not free here. At top_n=50 the round trip costs
+    1 outbound + 10 pins, not one pin per row of the board."""
     fake = client(
         _FakeResponse(text=_board_of(30)),  # the outbound board
         _FakeResponse(text=_return_board_of(1)),  # every pinned leg answers

@@ -2888,9 +2888,13 @@ def test_one_failing_cabin_does_not_take_the_other_cabins_down(
     asked: list[Cabin] = []
 
     def _search_with_ids(
-        search: Any, top_n: int = 5, transport: Any = None, currency: str = "USD"
+        search: Any,
+        top_n: int = 5,
+        transport: Any = None,
+        currency: str = "USD",
+        keep: Any = None,
     ) -> list[Any]:
-        _ = top_n, transport, currency
+        _ = top_n, transport, currency, keep
         asked.append(search.options.cabin)
         if search.options.cabin is Cabin.BUSINESS:
             raise RuntimeError(f"fli said [/x]no{_DRIVES_THE_TERMINAL}")
@@ -3691,6 +3695,7 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_pick_in_range", "fallback"),
         ("_run_enriched_path", "unpinned"),
         ("_reraise_if_orderly", "plural"),  # "" or "s", off a count beside it
+        ("_answer_gf_empty", "plural"),
         # `_gf_refusal` sanitizes every remote field it reads and leaves both of
         # its own console-ready, so a wrapper at the sink would show a backslash
         # in front of every bracket the remote text carried. The exactly-once

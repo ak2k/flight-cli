@@ -375,10 +375,10 @@ def parse_extension(extension: str) -> list[Predicate]:
 #
 # Today the answer is yes only for stops. Carrier/alliance/layover-airport
 # filters DO have tfs fields (3.6 / 3.7 / 3.15 / 3.17 / 3.18) and are the
-# obvious next widening; until they are encoded and verified, a query carrying
-# one goes to Matrix with the reason printed, because the alternative — post-
-# filtering Google's fixed ~30-row board with no back-fill — silently answers
-# a constrained search with "no results".
+# obvious next widening. The page serves its full board, so the search gate
+# (`_gf_postfilter.search_page_reasons`) also admits the Tier-2 predicates the
+# post-filter evaluates the way Matrix does; anything else goes to Matrix with
+# the reason printed.
 
 
 # fli's MaxStops enum stops at TWO_OR_FEWER_STOPS; anything above is ANY, which

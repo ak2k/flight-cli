@@ -235,6 +235,19 @@ def gf_session(
     return install
 
 
+def distinct_clones(row: list[Any], n: int) -> list[Any]:
+    """`n` copies of one captured row, each departing a minute apart.
+
+    A board of identical copies is one itinerary listed `n` times, which the
+    parser collapses to one row. Moving the first departure's minute makes
+    each copy its own itinerary and leaves every other field as captured."""
+    clones: list[Any] = [json.loads(json.dumps(row)) for _ in range(n)]
+    for i, clone in enumerate(clones):
+        first_leg = cast("list[Any]", clone[0][2][0])
+        first_leg[8] = [cast("list[Any]", first_leg[8])[0], i % 60]
+    return clones
+
+
 def _board(rows: int, *, distinct_at: int | None = None) -> str:
     """A page carrying `rows` parseable rows, cloned from a live capture.
 
@@ -244,7 +257,7 @@ def _board(rows: int, *, distinct_at: int | None = None) -> str:
     payload: list[Any] = json.loads(_ds1("ds1_metadata_blocks_kept.json"))
     board: list[Any] = cast("list[Any]", payload[2][0]) + cast("list[Any]", payload[3][0])
     filler, odd_one = board[0], board[-1]
-    cloned = [json.loads(json.dumps(filler)) for _ in range(rows)]
+    cloned = distinct_clones(filler, rows)
     if distinct_at is not None:
         cloned[distinct_at] = json.loads(json.dumps(odd_one))
     payload[2] = [cloned]

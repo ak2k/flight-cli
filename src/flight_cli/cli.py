@@ -85,6 +85,7 @@ if TYPE_CHECKING:
 
     from ._gf_booking import BookingOptions
     from ._gf_explore import Destination, ExploreAnswer, TripLength
+    from ._gflight_ids import Board, PriceInsight
     from .models import (
         BookingDetailsResult,
         CalendarResult,
@@ -579,11 +580,10 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
 
     auto: matrix iff the request needs it, else gflight (~1s vs Matrix's ~45s).
     `--routing`/`--extension` don't force Matrix on their own — they're parsed
-    and classified, and Google Flights serves them when the search page's tfs=
-    parameter can encode every one (`page_can_encode`). A constraint it can't
-    carry goes to Matrix WITH ITS REASON PRINTED, rather than being post-
-    filtered out of Google's fixed ~30-row board, which would answer a
-    constrained search with a plausible-looking "no results".
+    and classified, and Google Flights serves them when every predicate is
+    either encoded in the search page's tfs= or a Tier-2 predicate the post-
+    filter applies to the page's full board (`search_page_reasons`). Any other
+    constraint goes to Matrix WITH ITS REASON PRINTED.
 
     Hard-Matrix flags always force Matrix: `--slice` (multi-city),
     `--depart-times`/`--return-times`, a `--stops` ceiling above two (fli maps
@@ -613,10 +613,10 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
 
     Explicit --backend matrix: matrix. --backend gflight: gflight, unless the
     request is inexpressible on GF (error)."""
+    from ._gf_postfilter import search_page_reasons  # noqa: PLC0415
     from .routing_predicates import (  # noqa: PLC0415
         MAX_ENCODABLE_STOPS,
         classify,
-        page_can_encode,
     )
 
     reasons: list[str] = []
@@ -652,7 +652,7 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
         # tfs field, so `--stops 3` would encode byte-identically to no --stops.
         reasons.append(f"a stop ceiling above {MAX_ENCODABLE_STOPS} ({stops})")
     if routing or extension:
-        reasons.extend(page_can_encode(classify(routing, extension).predicates)[1])
+        reasons.extend(search_page_reasons(classify(routing, extension).predicates))
 
     # The same reasons go out two ways, and only one of them is markup. A
     # reason quotes the user's --routing string verbatim, so one square bracket
@@ -2911,22 +2911,18 @@ def _render_one_fare(fr: FareRules) -> None:
             )
 
 
-# How much deeper to fetch when a Tier-2 routing post-filter will discard rows.
-# Bounded rather than unlimited: Google's own result depth is finite and each
-# extra page costs a round trip.
-_POSTFILTER_OVERFETCH = 5
-
-
 def _gflight_results(
     legs: tuple[Leg, ...],
     opts: SearchOptions,
     top_n: int,
     gf_mode: GfTransportMode = TRANSPORT_HTTP,
     gf_headed: bool = False,
-) -> list[Any]:
+) -> Board[Any]:
     """Query Google Flights for `legs`, honoring routing/extension: Tier-1
     predicates narrow the fli query natively, the Tier-2 post-filter drops
-    violating solutions. Returns the (filtered) raw fli result list.
+    violating rows from each board as it is served. Returns the (filtered) raw
+    fli result list, with the page's price insight and the count of rows the
+    filter dropped.
 
     `search` applies the same routing/extension to every leg, so the first leg's
     constraints cover the trip for the native query; the post-filter is per slice.
@@ -2941,10 +2937,9 @@ def _gflight_results(
     # Every import in this block is deferred for one reason: the Google Flights
     # backend must not load on a Matrix-only search, and this function is the
     # first point that has committed to Google Flights.
-    from ._gf_postfilter import surviving_indices  # noqa: PLC0415 — GF-only; see above
-    from ._gflight_ids import GfTransport, search_with_ids  # noqa: PLC0415 — fli, ~95 ms
+    from ._gf_postfilter import routing_keep  # noqa: PLC0415 — GF-only; see above
+    from ._gflight_ids import Board, GfTransport, search_with_ids  # noqa: PLC0415 — fli, ~95 ms
     from .fli_bridge import apply_gf_native_filters, to_fli_filter  # noqa: PLC0415 — fli
-    from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415 — GF-only
     from .routing_predicates import classify  # noqa: PLC0415 — pulled in by the two above
 
     # Built here rather than at the CLI seam: this is the first point that has
@@ -2962,19 +2957,14 @@ def _gflight_results(
     if out_constraints and out_constraints.predicates:
         apply_gf_native_filters(fli_filter, out_constraints.predicates)
     per_slice_preds = [list(classify(lg.route_language, lg.extension).predicates) for lg in legs]
-
-    # Fetch deeper than we need when a Tier-2 post-filter will run, because it
-    # drops rows AFTER truncation: `-n 1 --routing AA+` fetched exactly one
-    # itinerary, discarded it for violating the routing, and reported "no
-    # results" while a qualifying one sat at rank 2. Over-fetching lets the
-    # filter choose from a real candidate pool; the final slice below still
-    # honours the user's `top_n`.
-    fetch_n = top_n * _POSTFILTER_OVERFETCH if any(per_slice_preds) else top_n
     requested = opts.currency or "USD"
     try:
-        results: list[Any] = (
-            search_with_ids(fli_filter, top_n=fetch_n, transport=transport, currency=requested)
-            or []
+        results = search_with_ids(
+            fli_filter,
+            top_n=top_n,
+            transport=transport,
+            currency=requested,
+            keep=routing_keep(per_slice_preds),
         )
     finally:
         # Named positively, because only rung 2 opens anything to close. The
@@ -2986,9 +2976,8 @@ def _gflight_results(
             from ._gf_browser import close_thread_session  # noqa: PLC0415 — GF-only; see above
 
             close_thread_session()
-    if results and any(per_slice_preds):
-        keep = set(surviving_indices(fli_results_to_search_result(results), per_slice_preds))
-        results = [r for i, r in enumerate(results) if i in keep]
+    if results is None:  # nothing served
+        results = Board[Any]()
     _note_other_currencies(results, requested)
     # Untrimmed on purpose: a round trip's combinations are built pin-major, so
     # the first `top_n` of them are one outbound's returns and nothing else.
@@ -3312,6 +3301,43 @@ def _render_merged(rows: list[Any], *, legs: tuple[Leg, ...], top_n: int) -> Non
     console.print(t)
 
 
+def _answer_gf_empty(
+    dropped: int, *, json_out: bool, matrix_fallback: bool, pinned: int = 0
+) -> int | None:
+    """Answer a Google Flights search that has no rows, or hand it on.
+
+    `dropped` is how many served rows the routing filter removed. When it
+    removed them all and `matrix_fallback` is set, nothing is printed and the
+    count comes back for the caller to run Matrix with. Otherwise the reason
+    goes to stderr, so a `--format json` stdout is still the one document.
+
+    `pinned` is how many outbounds a round trip searched returns for. The
+    reason names it, because outbounds below the pins may have matching
+    returns that were never searched."""
+    if dropped and matrix_fallback:
+        return dropped
+    if dropped and pinned:
+        plural = "" if pinned == 1 else "s"
+        err.print(
+            f"[yellow]Google Flights: no round trip matched the routing "
+            f"({dropped:d} rows filtered out; returns were searched for the first "
+            f"{pinned:d} outbound option{plural}).[/]"
+        )
+    elif dropped:
+        err.print(
+            f"[yellow]Google Flights: no itinerary matched the routing "
+            f"({dropped:d} rows filtered out).[/]"
+        )
+    if json_out:
+        # No rows is a value, and a document is what was asked for. A sentence
+        # is for a person; to a consumer it is a parse error where an empty
+        # answer belongs, and the two are indistinguishable from the exit code.
+        sys.stdout.write(json.dumps([], indent=2))
+    elif not dropped:
+        console.print("[yellow]Google Flights: no results.[/]")
+    return None
+
+
 def _run_gflight_path(
     *,
     legs: tuple[Leg, ...],
@@ -3326,8 +3352,14 @@ def _run_gflight_path(
     gf_mode: GfTransportMode = TRANSPORT_HTTP,
     gf_headed: bool = False,
     sellers: bool = False,
-) -> None:
+    matrix_fallback: bool = False,
+) -> int | None:
     """Google Flights path: build fli filter → query → render. Single-leg or round-trip.
+
+    Returns None once it has answered. The one answer it does not give itself:
+    when the routing filter emptied Google's board and `matrix_fallback` is set,
+    it prints nothing and returns how many rows the filter dropped, for the
+    caller to hand the search to Matrix with that reason.
 
     When run_pp=True, fli's results are adapted into a SearchResult shape so
     the existing PP matcher + renderer reuse cleanly. PP runs on the same
@@ -3371,18 +3403,15 @@ def _run_gflight_path(
     # nothing to open.
     seller_row = _pick_for_sellers(pick, min(len(results), top_n)) if sellers else None
     if not results:
-        if json_out:
-            # No rows is a value, and a document is what was asked for. The
-            # sentence below is for a person; to a consumer it is a parse error
-            # where an empty answer belongs, and the two are indistinguishable
-            # from the exit code.
-            sys.stdout.write(json.dumps([], indent=2))
-            return
-        console.print("[yellow]Google Flights: no results (or none matched the routing).[/]")
-        return
+        return _answer_gf_empty(
+            getattr(results, "dropped", 0),
+            json_out=json_out,
+            matrix_fallback=matrix_fallback,
+            pinned=getattr(results, "pinned", 0),
+        )
 
     # `-n` is one number for everything the user can act on. Google's page
-    # serves its whole board (~30 rows) whatever count is asked of it, so the
+    # serves its whole board whatever count is asked of it, so the
     # count is a trim rather than a query parameter, and everything below this
     # line is drawn from the same rows: the table, the JSON document, the range
     # `--pick` accepts, the itineraries the award matcher is fanned out over.
@@ -3390,6 +3419,7 @@ def _run_gflight_path(
     # the Tier-2 post-filter above and the multi-cabin join elsewhere are drawn
     # from — narrowing the query would answer a filtered search with fewer rows
     # than exist, which is the failure this backend is most prone to.
+    insight = getattr(results, "insight", None)
     results = _price_ordered(results)[:top_n]
     # A link follows only where one is asked for and the format has room for it:
     # `--format json` emits none at all, and neither does a run with both URL
@@ -3417,7 +3447,7 @@ def _run_gflight_path(
             )
         )
         sys.stdout.write(json.dumps(doc, indent=2, default=str))
-        return
+        return None
 
     awards_only = sel.awards_only if sel is not None else False
     # `not json_out` as well as `not awards_only`: the early return above fires
@@ -3428,7 +3458,11 @@ def _run_gflight_path(
     if not awards_only and not json_out:
         try:
             _render_gflight_table(
-                results, legs=legs, top_n=top_n, match_carriers=_match_carriers(legs)
+                results,
+                legs=legs,
+                top_n=top_n,
+                match_carriers=_match_carriers(legs),
+                insight=insight,
             )
         except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
             raise
@@ -3482,6 +3516,7 @@ def _run_gflight_path(
             table_prices=[sr.solutions[seller_row - 1].price],
             headed=gf_headed,
         )
+    return None
 
 
 def _paint_first_gf_table(
@@ -3515,7 +3550,13 @@ def _paint_first_gf_table(
     still may not keep this promise."""
     if gf and not awards_only:
         try:
-            _render_gflight_table(gf, legs=legs, top_n=top_n, match_carriers=_match_carriers(legs))
+            _render_gflight_table(
+                gf,
+                legs=legs,
+                top_n=top_n,
+                match_carriers=_match_carriers(legs),
+                insight=getattr(gf, "insight", None),
+            )
         except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
             raise
         except Exception as e:  # noqa: BLE001 — see the docstring
@@ -3523,7 +3564,12 @@ def _paint_first_gf_table(
         else:
             err.print("[dim]…refining with Matrix (authoritative fares)…[/]")
     elif not gf and "gf_err" not in state:
-        err.print("[yellow]Google Flights: no results; awaiting Matrix…[/]")
+        if getattr(gf, "dropped", 0):
+            err.print(
+                "[yellow]Google Flights: no itinerary matched the routing; awaiting Matrix…[/]"
+            )
+        else:
+            err.print("[yellow]Google Flights: no results; awaiting Matrix…[/]")
 
 
 async def _matrix_into(
@@ -3791,6 +3837,7 @@ def _run_enriched_path(  # noqa: PLR0915 — one weave's outcome arms, read in o
             tg.start_soon(_matrix_into, state, matrix_search, rps, impersonate, not no_cache)
             # Google Flights is sync (curl_cffi) — run it in a worker thread so the
             # Matrix request progresses concurrently on the event loop.
+            gf: list[Any]
             try:
                 gf = await anyio.to_thread.run_sync(
                     _gflight_results, legs, opts, top_n, gf_mode, gf_headed
@@ -3964,9 +4011,9 @@ def _pin_cap_note(*, legs: tuple[Leg, ...], top_n: int) -> None:
     never pinned at all below `-n 3`.
 
     "Up to", because the cap bounds the count and the board may hold fewer. The
-    exact number is knowable only inside the pin loop, and carrying it back out
-    means a new return type on a recursive function to replace a true sentence
-    with a truer one.
+    exact number is known only once the pin loop has run, after this note; an
+    empty filtered round trip states it (`_answer_gf_empty`), where it changes
+    what the answer means.
 
     stderr, so a `--format json` document on stdout stays a document."""
     from ._gflight_ids import pinned_fanout  # noqa: PLC0415
@@ -4495,6 +4542,12 @@ def _run_gflight_path_multi(
     if not fli_by_cabin:
         err.print("[red]All Google Flights cabin queries failed.[/]")
         raise typer.Exit(1)
+    for cab, cab_rows in fli_by_cabin.items():
+        if not cab_rows and getattr(cab_rows, "dropped", 0):
+            err.print(
+                f"[yellow]Google Flights {_safe_text(cab.value)}: "
+                "no itinerary matched the routing.[/]"
+            )
 
     if json_out and not run_pp:
         out: dict[str, Any] = {}
@@ -4617,12 +4670,15 @@ def _render_gflight_table(
     legs: tuple[Leg, ...],
     top_n: int,
     match_carriers: frozenset[str] = frozenset(),
+    insight: PriceInsight | None = None,
 ) -> None:
     """Render fli results as a rich table. Duck-typed: fli has no type stubs.
 
     Accepts our `GFlightWithId` wrappers — `.flight` is fli's FlightResult,
     `.amenities` is per-leg legroom data parsed from Google's response.
     `match_carriers` enables codeshare-aware leg labels (see `_leg_display`).
+    `insight`, Google's price insight for the search, is one line under the
+    table, its amounts formatted the way the price column formats them.
 
     A round-trip combination can print two DIFFERENT prices, on its `Na` and
     `Nb` rows, and that reads as a bug until you know what each is: the `a` row
@@ -4692,6 +4748,12 @@ def _render_gflight_table(
     console.print(t)
     if any_legroom:
         console.print(_LEGROOM_KEY)
+    if insight is not None:
+        console.print(
+            f"Price insight: prices are {_safe_text(insight.level)} for this trip "
+            f"(usually {_safe_text(insight.currency)}{insight.typical_low:.2f}"
+            f"-{_safe_text(insight.currency)}{insight.typical_high:.2f})."
+        )
 
 
 # AVERAGE/BELOW/ABOVE are pitch-relative judgments — collapse them to color on
@@ -4970,7 +5032,7 @@ def _resolve_format(*, fmt: str, json_flag: bool) -> str:
 
 
 @app.command()
-def search(
+def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes the search
     origin: Annotated[
         str | None,
         typer.Argument(help="Origin IATA (comma-list ok for multi-airport)"),
@@ -5427,7 +5489,7 @@ def search(
                 sellers=sellers,
             )
             return
-        _run_gflight_path(
+        unmatched = _run_gflight_path(
             legs=legs,
             opts=opts,
             top_n=page_size,
@@ -5440,8 +5502,14 @@ def search(
             gf_mode=gf_mode,
             gf_headed=gf_headed,
             sellers=sellers,
+            matrix_fallback=backend == BACKEND_AUTO,
         )
-        return
+        if unmatched is None:
+            return
+        err.print(
+            f"[dim]Using Matrix: no Google Flights itinerary matched the routing "
+            f"({unmatched:d} rows filtered out).[/]"
+        )
 
     _run_matrix_path(
         legs=legs,

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import urllib.parse
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
@@ -100,8 +101,12 @@ def test_the_page_is_asked_for_the_currency(
     filters = to_fli_filter(SpecificDateSearch(legs=(Leg.of("JFK", "LAX", _DEP),)))
     assert gfid.search_with_ids(filters, currency="EUR")
     assert len(fake.gets) == 1
-    assert fake.gets[0].endswith("&curr=EUR")
-    assert gfid.search_page_url(filters).endswith("&curr=USD")
+    assert _curr(fake.gets[0]) == ["EUR"]
+    assert _curr(gfid.search_page_url(filters)) == ["USD"]
+
+
+def _curr(url: str) -> list[str]:
+    return urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["curr"]
 
 
 def test_every_board_of_a_round_trip_is_asked_for_the_currency(
@@ -110,9 +115,9 @@ def test_every_board_of_a_round_trip_is_asked_for_the_currency(
     """The return boards are fetched by the recursion, one per pinned outbound."""
     asked: list[str] = []
 
-    def _board(_f: Any, _t: Any, *, currency: str) -> list[Any]:
+    def _board(_f: Any, _t: Any, *, currency: str) -> gfid.Board[Any]:
         asked.append(currency)
-        return gf_rows("ds1_jfk_lax_3rows.json")[:1] if len(asked) == 1 else []
+        return gfid.Board(gf_rows("ds1_jfk_lax_3rows.json")[:1] if len(asked) == 1 else [])
 
     monkeypatch.setattr(gfid, "_one_call_laddered", _board)
     filters = to_fli_filter(_search(None))
@@ -138,16 +143,16 @@ def test_a_row_with_no_decoded_currency_takes_its_boards(
     """fli returns None when a price token does not decode; the page's other
     rows say what currency it was priced in, and the requested code is only
     the fallback."""
-    board = gfid._with_board_currency(_rows(gf_rows, "EUR", None, "EUR"), "GBP")
+    board = gfid._with_board_currency(gfid.Board(_rows(gf_rows, "EUR", None, "EUR")), "GBP")
     assert [r.flight.currency for r in board] == ["EUR", "EUR", "EUR"]
-    board = gfid._with_board_currency(_rows(gf_rows, None, None), "GBP")
+    board = gfid._with_board_currency(gfid.Board(_rows(gf_rows, None, None)), "GBP")
     assert [r.flight.currency for r in board] == ["GBP", "GBP"]
 
 
 def test_a_row_in_another_currency_keeps_it_and_the_run_says_so(
     gf_rows: Callable[..., list[Any]], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    board = gfid._with_board_currency(_rows(gf_rows, "USD", "EUR"), "EUR")
+    board = gfid._with_board_currency(gfid.Board(_rows(gf_rows, "USD", "EUR")), "EUR")
     assert [r.flight.currency for r in board] == ["USD", "EUR"]
     cli._note_other_currencies(board, "EUR")
     err = capsys.readouterr().err
@@ -160,8 +165,10 @@ def test_a_row_in_another_currency_keeps_it_and_the_run_says_so(
 def test_the_search_asks_google_for_the_currency(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[str] = []
 
-    def _search_with_ids(_f: Any, *, top_n: int, transport: Any, currency: str) -> list[Any]:
-        _ = top_n, transport
+    def _search_with_ids(
+        _f: Any, *, top_n: int, transport: Any, currency: str, keep: Any
+    ) -> list[Any]:
+        _ = top_n, transport, keep
         seen.append(currency)
         return []
 
