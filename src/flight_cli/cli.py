@@ -2048,12 +2048,18 @@ def _report_page_refusal(heading: str, e: GfBackendError) -> None:
 
 
 def _booking_options(
-    search: SpecificDateSearch, result: SearchResult, n: int, *, headed: bool
+    search: SpecificDateSearch,
+    result: SearchResult,
+    n: int,
+    *,
+    gf_price: str | None,
+    headed: bool,
 ) -> BookingOptions:
     """Row `n`'s sellers, read off its booking page in Chrome, or exit 1 with
     the reason on stderr.
 
-    The URL is the pinned link's, so the row opened is the row the link pins.
+    The URL is the pinned link's, so the row opened is the row the link pins,
+    and the page is asked in the currency of `gf_price`, the row's Google price.
     This step owns its Chrome: the search before it may not have opened one."""
     from ._gf_booking import booking_options  # noqa: PLC0415 — Chrome paths only
     from ._gf_browser import interrupt_guard, session_scope  # noqa: PLC0415 — patchright
@@ -2076,7 +2082,12 @@ def _booking_options(
             heading, "its flights cannot be written into a Google Flights booking link."
         )
     outbound, returning = segments
-    url = google_flights_booking_url(search, outbound_segments=outbound, return_segments=returning)
+    url = google_flights_booking_url(
+        search,
+        outbound_segments=outbound,
+        return_segments=returning,
+        currency=_split_price(gf_price)[0] or None,
+    )
     flights = [(seg["carrier"], seg["flight"]) for seg in (*outbound, *(returning or []))]
     try:
         with interrupt_guard(), session_scope():
@@ -2090,10 +2101,13 @@ def _search_and_sellers(
     search_doc: list[Any], search: SpecificDateSearch, result: SearchResult, n: int, *, headed: bool
 ) -> dict[str, Any]:
     """The `--sellers --format json` document: the search's own document
-    unchanged, beside row `n`'s booking options."""
+    unchanged, beside row `n`'s booking options. `result` is the Google board
+    the document lists."""
     from ._gf_booking import document  # noqa: PLC0415 — Chrome paths only
 
-    options = _booking_options(search, result, n, headed=headed)
+    options = _booking_options(
+        search, result, n, gf_price=result.solutions[n - 1].price, headed=headed
+    )
     return {"search": search_doc, "booking_options": document(options)}
 
 
@@ -2102,12 +2116,15 @@ def _print_booking_options(
     result: SearchResult,
     n: int,
     *,
-    table_prices: list[str | None],
+    gf_price: str | None,
+    matrix_price: str | None = None,
     headed: bool,
 ) -> None:
-    """Row `n`'s booking options under the table it was numbered in."""
-    options = _booking_options(search, result, n, headed=headed)
-    _render_booking_options(options, n=n, table_prices=table_prices)
+    """Row `n`'s booking options under the table it was numbered in, set
+    against the prices that row shows: its Google price, and on the merged
+    table its Matrix price."""
+    options = _booking_options(search, result, n, gf_price=gf_price, headed=headed)
+    _render_booking_options(options, n=n, table_prices=[gf_price, matrix_price])
 
 
 def _undercut(options: BookingOptions, table_prices: list[str | None]) -> float | None:
@@ -3513,7 +3530,7 @@ def _run_gflight_path(
             SpecificDateSearch(legs=legs, options=opts),
             sr,
             seller_row,
-            table_prices=[sr.solutions[seller_row - 1].price],
+            gf_price=sr.solutions[seller_row - 1].price,
             headed=gf_headed,
         )
     return None
@@ -3892,7 +3909,7 @@ def _run_enriched_path(  # noqa: PLR0915 — one weave's outcome arms, read in o
                 matrix_search,
                 sr,
                 n,
-                table_prices=[sr.solutions[n - 1].price],
+                gf_price=sr.solutions[n - 1].price,
                 headed=gf_headed,
             )
         if not painted:
@@ -3909,7 +3926,7 @@ def _run_enriched_path(  # noqa: PLR0915 — one weave's outcome arms, read in o
     # differ from `matrix_res.solutions`: indexing those instead pins a row the
     # table numbered differently, under the number read off the screen.
     pinnable: SearchResult | None = None
-    booking_row: tuple[SearchResult, int, list[str | None]] | None = None
+    booking_row: tuple[SearchResult, int, str | None, str | None] | None = None
     if not awards_only:
         merged = merge_results(fli_results_to_search_result(gf), matrix_res)
         _render_merged(merged, legs=legs, top_n=top_n)
@@ -3931,10 +3948,8 @@ def _run_enriched_path(  # noqa: PLR0915 — one weave's outcome arms, read in o
         )
         pinnable = matrix_res.model_copy(update={"solutions": shown})
         if seller_row is not None:
-            # Both prices the row shows: a seller beats the table only where it
-            # beats the lower of them.
             chosen = merged[seller_row - 1]
-            booking_row = (pinnable, seller_row, [chosen.gf_price, chosen.matrix_price])
+            booking_row = (pinnable, seller_row, chosen.gf_price, chosen.matrix_price)
     else:
         # Nothing this arm prints carries a row number: the award renderer is
         # the only surface it has and its columns hold no `#`. So a pick names
@@ -3972,9 +3987,14 @@ def _run_enriched_path(  # noqa: PLR0915 — one weave's outcome arms, read in o
         pick=pick or 1,
     )
     if booking_row is not None:
-        result, n, table_prices = booking_row
+        result, n, gf_price, matrix_price = booking_row
         _print_booking_options(
-            matrix_search, result, n, table_prices=table_prices, headed=gf_headed
+            matrix_search,
+            result,
+            n,
+            gf_price=gf_price,
+            matrix_price=matrix_price,
+            headed=gf_headed,
         )
 
 

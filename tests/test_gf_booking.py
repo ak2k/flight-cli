@@ -425,28 +425,47 @@ def test_a_seller_at_the_table_price_does_not_beat_it(
     assert "beats" not in result.stdout
 
 
-def test_the_booking_page_is_asked_in_the_currency_the_table_was_priced_in(
-    monkeypatch: pytest.MonkeyPatch, board: list[Any]
-) -> None:
-    gbp = [
+def _priced_in(monkeypatch: pytest.MonkeyPatch, rows: list[Any], currency: str) -> None:
+    """Google answers with `rows` priced in `currency`, whatever was asked of it."""
+    relabeled = [
         GFlightWithId(
-            flight=r.flight.model_copy(update={"currency": "GBP"}),
+            flight=r.flight.model_copy(update={"currency": currency}),
             flight_id=r.flight_id,
             amenities=r.amenities,
         )
-        for r in board
+        for r in rows
     ]
 
     def _gf(*_a: object, **_kw: object) -> list[Any]:
-        return list(gbp)
+        return list(relabeled)
 
     monkeypatch.setattr(cli, "_gflight_results", _gf)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param(["--fast"], id="fast"),
+        pytest.param(["--fast", "--format", "json"], id="fast-json"),
+        pytest.param([], id="enriched-matrix-silent"),
+    ],
+)
+def test_the_booking_page_is_asked_in_the_currency_google_priced_the_row_in(
+    monkeypatch: pytest.MonkeyPatch, board: list[Any], args: list[str]
+) -> None:
+    """Google priced the rows in GBP under `--currency EUR`, and the sellers
+    are compared with the row, so they are asked for in GBP."""
+    _priced_in(monkeypatch, board, "GBP")
+    monkeypatch.setattr(cli, "_matrix_into", _no_matrix)
     fake = _serve(monkeypatch, _booking_body(_option("Kiwi.com", 170, flights=_B6_1523)))
-    result = _run("--fast", "--sellers", "--currency", "GBP", "--no-matrix-url", "--no-google-url")
+    result = _run(*args, "--sellers", "--currency", "EUR", "--no-matrix-url", "--no-google-url")
     assert result.exit_code == 0, result.output
     query = urllib.parse.parse_qs(urllib.parse.urlsplit(fake.urls[0]).query)
     assert query["curr"] == ["GBP"]
-    assert "Kiwi.com at GBP170.00 beats the table price, GBP179.00." in result.stdout
+    if "json" in args:
+        assert json.loads(result.stdout)["booking_options"][0]["currency"] == "GBP"
+    else:
+        assert "Kiwi.com at GBP170.00 beats the table price, GBP179.00." in result.stdout
 
 
 def _opts(*prices: int | None, currency: str = "USD") -> Any:
@@ -661,8 +680,8 @@ def _matrix_answers(solutions: list[dict[str, Any]]) -> Any:
     return _answer
 
 
-def _matrix_solution(flight: str, price: str) -> dict[str, Any]:
-    day = (_DEP).isoformat()
+def _matrix_solution(flight: str, price: str, flies: date = _DEP) -> dict[str, Any]:
+    day = flies.isoformat()
     return {
         "displayTotal": price,
         "itinerary": {
@@ -695,6 +714,45 @@ def test_enriched_sellers_open_the_merged_tables_row(
     assert "Google Flights + Matrix" in result.stdout
     assert "Booking options for #2" in result.stdout
     assert len(fake.urls) == 1
+
+
+def _merged_with(
+    monkeypatch: pytest.MonkeyPatch, board: list[Any], flight: str, price: str
+) -> None:
+    """Google answers with B6 1523 alone at USD179.00, and Matrix with `flight`
+    at `price` on the day B6 1523 flies: B6 1523 is one merged row showing both
+    prices, and any other flight a row of its own."""
+    _priced_in(monkeypatch, board[:1], "USD")
+    flies = board[0].flight.legs[0].departure_datetime.date()
+    monkeypatch.setattr(
+        cli, "_matrix_into", _matrix_answers([_matrix_solution(flight, price, flies)])
+    )
+
+
+@pytest.mark.parametrize(
+    ("flight", "sold", "asked"),
+    [
+        pytest.param("B61523", _B6_1523, "USD", id="google-priced-the-row"),
+        pytest.param("DL100", [["DL", "100"]], "EUR", id="google-did-not-show-the-row"),
+    ],
+)
+def test_enriched_sellers_are_asked_in_the_currency_of_the_rows_google_price(
+    monkeypatch: pytest.MonkeyPatch,
+    board: list[Any],
+    flight: str,
+    sold: list[list[str]],
+    asked: str,
+) -> None:
+    """Under `--currency EUR`, Google priced B6 1523 in USD and Matrix priced
+    row 1 in EUR. The page is asked in the currency of the row's Google price,
+    and for a row Google did not show, in the requested one."""
+    _merged_with(monkeypatch, board, flight, "EUR150.00")
+    fake = _serve(monkeypatch, _booking_body(_option("Kiwi.com", 170, flights=sold)))
+    result = _run("--sellers", "--currency", "EUR", "--no-matrix-url", "--no-google-url")
+    assert result.exit_code == 0, result.output
+    assert "Booking options for #1" in result.stdout
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(fake.urls[0]).query)
+    assert query["curr"] == [asked]
 
 
 def _matrix_connection(arrival: str) -> dict[str, Any]:

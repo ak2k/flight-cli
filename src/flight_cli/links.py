@@ -742,8 +742,10 @@ def google_flights_booking_url(
     The page needs no booking token; the legs in `tfs=` are enough. `gl=` is
     explicit for the reason the search page's is: sellers and their prices key
     off the resolved country, and they are compared against a table priced
-    under `gl=US`. `currency` defaults to the search's own, then USD, so the
-    sellers are priced in the table's currency."""
+    under `gl=US`. `currency` is the currency of the picked row's Google price:
+    Google can price a row in another currency than the search asked for, and
+    the sellers are compared with that row. A row with no Google price is
+    asked in the search's currency, then USD."""
     b64 = _pinned_tfs_b64(s, outbound_segments, return_segments)
     curr = currency or s.options.currency or "USD"
     return (
