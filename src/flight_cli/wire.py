@@ -103,6 +103,8 @@ class WireInputs(_Wire):
     # Specific-date keeps an empty `filter`; followup omits it. We default
     # to None and set explicitly per variant in to_wire().
     filter: dict[str, Any] | None = None
+    # Omitted unless asked for, so a body without it is the SPA's byte for byte.
+    currency: str | None = None
 
 
 class WireBody(_Wire):
@@ -114,6 +116,51 @@ class WireBody(_Wire):
     def as_json(self) -> dict[str, Any]:
         """Serialize to JSON dict (camelCase keys, drop None fields)."""
         return self.model_dump(by_alias=True, exclude_none=True)
+
+
+class WireSummarizeInputs(_Wire):
+    solution: str  # "<solutionSet>/<solution id>"
+    fareKeys: str | None = None  # one key, "0/1", despite the plural
+
+
+class WireSummarizeBody(_Wire):
+    """A `/v1/summarize` request: a follow-up question about one solution of
+    a search, answered from that search's live session."""
+
+    summarizerSet: Literal["viewDetails", "viewRules"]
+    summarizers: list[str]
+    solutionSet: str
+    session: str
+    inputs: WireSummarizeInputs
+
+    def as_json(self) -> dict[str, Any]:
+        return self.model_dump(by_alias=True, exclude_none=True)
+
+
+def booking_details_body(*, session: str, solution_set: str, solution_id: str) -> WireSummarizeBody:
+    """Fare basis, booking codes, fare-calculation line and fare keys for one
+    solution."""
+    return WireSummarizeBody(
+        summarizerSet="viewDetails",
+        summarizers=["bookingDetails"],
+        solutionSet=solution_set,
+        session=session,
+        inputs=WireSummarizeInputs(solution=f"{solution_set}/{solution_id}"),
+    )
+
+
+def fare_rules_body(
+    *, session: str, solution_set: str, solution_id: str, fare_key: str
+) -> WireSummarizeBody:
+    """The rule categories of one fare, named by a key `booking_details_body`
+    returned."""
+    return WireSummarizeBody(
+        summarizerSet="viewRules",
+        summarizers=["fareRules"],
+        solutionSet=solution_set,
+        session=session,
+        inputs=WireSummarizeInputs(solution=f"{solution_set}/{solution_id}", fareKeys=fare_key),
+    )
 
 
 # ──────────────────────────────── adapter ──────────────────────────────────
@@ -199,6 +246,7 @@ def _base_inputs(opts: SearchOptions, slices: list[WireSlice]) -> WireInputs:
             1 if opts.max_extra_stops is None or opts.max_extra_stops < 0 else opts.max_extra_stops
         ),
         slices=slices,
+        currency=opts.currency,
     )
 
 

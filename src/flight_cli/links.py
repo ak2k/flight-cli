@@ -698,11 +698,12 @@ def google_flights_pinned_url(
     *,
     outbound_segments: list[dict[str, str]],
     return_segments: list[dict[str, str]] | None = None,
-    currency: str = "USD",
+    currency: str | None = None,
     language: str = "en",
 ) -> str:
     """Build a Google Flights URL that pre-selects a specific itinerary
-    (not just pre-filled search criteria).
+    (not just pre-filled search criteria). `currency` defaults to the
+    search's own, then USD.
 
     `outbound_segments` / `return_segments` shape per segment:
         {"origin": "HNL", "date": "2026-10-14",
@@ -756,9 +757,10 @@ def google_flights_pinned_url(
         infants_on_lap=p.infants_in_lap,
     )
     b64 = base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+    curr = currency or s.options.currency or "USD"
     return (
         f"https://www.google.com/travel/flights/search?"
-        f"tfs={urllib.parse.quote(b64)}&hl={language}&curr={currency}"
+        f"tfs={urllib.parse.quote(b64)}&hl={language}&curr={curr}"
     )
 
 
@@ -837,10 +839,11 @@ def extract_pin_segments_from_slice(s: Slice) -> list[dict[str, str]] | None:
     return out
 
 
-def google_flights_url(s: Search, *, currency: str = "USD", language: str = "en") -> str:
+def google_flights_url(s: Search, *, currency: str | None = None, language: str = "en") -> str:
     """Build a Google Flights `tfs=` URL that opens directly into a populated
     search result. Multi-airport is flattened to first IATA per leg (Google
-    Flights URL grammar doesn't support airport sets per slice).
+    Flights URL grammar doesn't support airport sets per slice). `currency`
+    defaults to the search's own, then USD.
 
     For CalendarSearch (no per-leg dates), uses window start as departure
     and start + mean(duration) as return — gives the user a representative
@@ -915,7 +918,8 @@ def google_flights_url(s: Search, *, currency: str = "USD", language: str = "en"
         max_stops=s.options.max_extra_stops,
     )
     b64 = td.as_b64().decode()
+    curr = currency or s.options.currency or "USD"
     return (
         f"https://www.google.com/travel/flights/search?"
-        f"tfs={urllib.parse.quote(b64)}&hl={language}&curr={currency}"
+        f"tfs={urllib.parse.quote(b64)}&hl={language}&curr={curr}"
     )

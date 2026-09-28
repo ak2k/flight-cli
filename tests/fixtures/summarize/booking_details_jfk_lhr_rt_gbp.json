@@ -1,0 +1,375 @@
+{
+ "bookingDetails": {
+  "ext": {
+   "totalPrice": "GBP617.39"
+  },
+  "itinerary": {
+   "distance": {
+    "units": "MI",
+    "value": 6880
+   },
+   "slices": [
+    {
+     "destination": {
+      "city": {
+       "name": "London"
+      },
+      "code": "LHR",
+      "name": "London Heathrow"
+     },
+     "origin": {
+      "city": {
+       "name": "New York"
+      },
+      "code": "JFK",
+      "name": "New York John F Kennedy International"
+     },
+     "segments": [
+      {
+       "bookingInfos": [
+        {
+         "bookingCode": "B",
+         "cabin": "COACH"
+        }
+       ],
+       "carrier": {
+        "code": "AA",
+        "shortName": "American"
+       },
+       "destination": {
+        "city": {
+         "name": "London"
+        },
+        "code": "LHR"
+       },
+       "flight": {
+        "number": 142
+       },
+       "legs": [
+        {
+         "aircraft": {
+          "shortName": "Boeing 777"
+         },
+         "destination": {
+          "city": {
+           "name": "London"
+          },
+          "code": "LHR",
+          "name": "London Heathrow"
+         },
+         "origin": {
+          "city": {
+           "name": "New York"
+          },
+          "code": "JFK"
+         },
+         "services": [
+          {
+           "amenities": [
+            "Movie",
+            "Audio programming",
+            "In-seat Video Player/Library",
+            "Wi-Fi",
+            "Lie-flat Seat First",
+            "Lie-flat Seat Business"
+           ],
+           "meals": [
+            "Lunch",
+            "Snack or Brunch"
+           ]
+          }
+         ],
+         "arrival": "2026-10-20T21:40+01:00",
+         "departure": "2026-10-20T09:35-04:00",
+         "duration": 425
+        }
+       ],
+       "origin": {
+        "city": {
+         "name": "New York"
+        },
+        "code": "JFK"
+       },
+       "arrival": "2026-10-20T21:40+01:00",
+       "departure": "2026-10-20T09:35-04:00",
+       "duration": 425
+      }
+     ],
+     "arrival": "2026-10-20T21:40+01:00",
+     "departure": "2026-10-20T09:35-04:00",
+     "stopCount": 0
+    },
+    {
+     "destination": {
+      "city": {
+       "name": "New York"
+      },
+      "code": "JFK",
+      "name": "New York John F Kennedy International"
+     },
+     "origin": {
+      "city": {
+       "name": "London"
+      },
+      "code": "LHR",
+      "name": "London Heathrow"
+     },
+     "segments": [
+      {
+       "bookingInfos": [
+        {
+         "bookingCode": "B",
+         "cabin": "COACH"
+        }
+       ],
+       "carrier": {
+        "code": "AA",
+        "shortName": "American"
+       },
+       "destination": {
+        "city": {
+         "name": "New York"
+        },
+        "code": "JFK"
+       },
+       "flight": {
+        "number": 107
+       },
+       "legs": [
+        {
+         "aircraft": {
+          "shortName": "Boeing 777"
+         },
+         "destination": {
+          "city": {
+           "name": "New York"
+          },
+          "code": "JFK",
+          "name": "New York John F Kennedy International"
+         },
+         "origin": {
+          "city": {
+           "name": "London"
+          },
+          "code": "LHR"
+         },
+         "services": [
+          {
+           "amenities": [
+            "Movie",
+            "Audio programming",
+            "In-seat Video Player/Library",
+            "Wi-Fi",
+            "Lie-flat Seat First",
+            "Lie-flat Seat Business"
+           ],
+           "meals": [
+            "Lunch",
+            "Snack or Brunch"
+           ]
+          }
+         ],
+         "arrival": "2026-10-27T19:35-04:00",
+         "departure": "2026-10-27T15:35+00:00",
+         "duration": 480
+        }
+       ],
+       "origin": {
+        "city": {
+         "name": "London"
+        },
+        "code": "LHR"
+       },
+       "arrival": "2026-10-27T19:35-04:00",
+       "departure": "2026-10-27T15:35+00:00",
+       "duration": 480
+      }
+     ],
+     "arrival": "2026-10-27T19:35-04:00",
+     "departure": "2026-10-27T15:35+00:00",
+     "stopCount": 0
+    }
+   ]
+  },
+  "pricings": [
+   {
+    "ext": {
+     "pax": {
+      "adults": 1
+     },
+     "totalPrice": "GBP617.39"
+    },
+    "displayPrice": "GBP617.39"
+   }
+  ],
+  "tickets": [
+   {
+    "pricings": [
+     {
+      "ext": {
+       "pax": {
+        "adults": 1
+       },
+       "taxTotals": [
+        {
+         "tax": {
+          "key": "0/0",
+          "name": "United States Passenger Civil Aviation Security Service Fee"
+         },
+         "code": "AY",
+         "totalDisplayPrice": "GBP4.20"
+        },
+        {
+         "tax": {
+          "key": "0/1",
+          "name": "US International Departure Tax"
+         },
+         "code": "US",
+         "totalDisplayPrice": "GBP35.40"
+        },
+        {
+         "tax": {
+          "key": "0/2",
+          "name": "US Passenger Facility Charge"
+         },
+         "code": "XF",
+         "totalDisplayPrice": "GBP3.40"
+        },
+        {
+         "tax": {
+          "key": "0/3",
+          "name": "AA YR surcharge"
+         },
+         "code": "YR",
+         "totalDisplayPrice": "GBP393.20"
+        },
+        {
+         "tax": {
+          "key": "0/4",
+          "name": "United Kingdom Air Passenger Duty APD"
+         },
+         "code": "GB",
+         "totalDisplayPrice": "GBP102.00"
+        },
+        {
+         "tax": {
+          "key": "0/5",
+          "name": "United Kingdom Passenger Service Charge Departures"
+         },
+         "code": "UB",
+         "totalDisplayPrice": "GBP50.79"
+        },
+        {
+         "tax": {
+          "key": "0/7",
+          "name": "United States APHIS Passenger Fee Passengers"
+         },
+         "code": "XA",
+         "totalDisplayPrice": "GBP2.90"
+        },
+        {
+         "tax": {
+          "key": "0/8",
+          "name": "United States Immigration User Fee"
+         },
+         "code": "XY",
+         "totalDisplayPrice": "GBP5.30"
+        },
+        {
+         "tax": {
+          "key": "0/9",
+          "name": "United States Customs User Fee"
+         },
+         "code": "YC",
+         "totalDisplayPrice": "GBP5.60"
+        },
+        {
+         "tax": {
+          "key": "0/10",
+          "name": "AA YQ surcharge"
+         },
+         "code": "YQ",
+         "totalDisplayPrice": "GBP13.60"
+        }
+       ],
+       "totalPrice": "GBP617.39"
+      },
+      "fareCalculations": [
+       {
+        "lines": [
+         "NYC AA LON M 0.50OLN0T0BV AA NYC M 0.50OLN0T1BV NUC 1.00 END ROE 1.00 XT 5.60YC 5.30XY 2.90XA 35.40US 4.20AY 102.00GB 50.79UB 13.60YQ 393.20YR 3.40XF JFK4.50"
+        ]
+       }
+      ],
+      "fares": [
+       {
+        "bookingInfos": [
+         {
+          "segment": {
+           "destination": "LHR",
+           "origin": "JFK"
+          },
+          "bookingCode": "B",
+          "cabin": "COACH"
+         }
+        ],
+        "ptcs": [
+         "ADT"
+        ],
+        "carrier": "AA",
+        "code": "OLN0T0BV",
+        "destinationCity": "LON",
+        "displayAdjustedPrice": "GBP0.37",
+        "key": "0/0",
+        "originCity": "NYC",
+        "tag": "ROUND-TRIP"
+       },
+       {
+        "bookingInfos": [
+         {
+          "segment": {
+           "destination": "JFK",
+           "origin": "LHR"
+          },
+          "bookingCode": "B",
+          "cabin": "COACH"
+         }
+        ],
+        "ptcs": [
+         "ADT"
+        ],
+        "carrier": "AA",
+        "code": "OLN0T1BV",
+        "destinationCity": "NYC",
+        "displayAdjustedPrice": "GBP0.37",
+        "key": "0/1",
+        "originCity": "LON",
+        "tag": "ROUND-TRIP"
+       }
+      ],
+      "notes": [
+       "No changes may be made to this ticket after purchase.",
+       "This ticket is non-refundable."
+      ],
+      "pricingTaxes": [
+       {
+        "code": "YQ",
+        "displayPrice": "GBP13.60",
+        "name": "AA YQ surcharge"
+       }
+      ],
+      "displayPrice": "GBP617.39"
+     }
+    ],
+    "displayPrice": "GBP617.39"
+   }
+  ],
+  "displayTotal": "GBP617.39",
+  "id": "N25Nzp5fqpPUmjlJKFJCNN004",
+  "passengerCount": 1
+ },
+ "id": "t8g1vznovQeZkRpxI0lDpH",
+ "session": "GH00lDpG140w39E3xKEQB04LA",
+ "solutionCount": 88,
+ "solutionSet": "0c29OA6KbpPNTCLiYFmEpY8"
+}

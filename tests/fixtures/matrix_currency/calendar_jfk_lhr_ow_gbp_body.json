@@ -1,0 +1,47 @@
+{
+ "summarizers": [
+  "calendar",
+  "overnightFlightsCalendar",
+  "itineraryStopCountList",
+  "itineraryCarrierList",
+  "currencyNotice"
+ ],
+ "summarizerSet": "calendarOneWay",
+ "name": "calendar",
+ "inputs": {
+  "pax": {
+   "adults": 1
+  },
+  "cabin": "COACH",
+  "page": {
+   "size": 25
+  },
+  "sliceIndex": 0,
+  "sorts": "default",
+  "firstDayOfWeek": "SUNDAY",
+  "internalUser": false,
+  "changeOfAirport": true,
+  "checkAvailability": true,
+  "maxLegsRelativeToMin": 1,
+  "slices": [
+   {
+    "origins": [
+     "JFK"
+    ],
+    "destinations": [
+     "LHR"
+    ],
+    "filter": {
+     "warnings": {
+      "values": []
+     }
+    },
+    "selected": false
+   }
+  ],
+  "startDate": "2026-10-20",
+  "endDate": "2026-10-26",
+  "filter": {},
+  "currency": "GBP"
+ }
+}
