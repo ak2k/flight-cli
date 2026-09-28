@@ -337,6 +337,18 @@ measures the pick against its length, and `_emit_urls` is handed a result whose
 solutions ARE it. The label is then true by construction rather than by
 agreement between two call sites.
 
+**The Google line pins a row only on dates its source states.** A pinned link
+names each flight's departure day, and Matrix gives a slice's two ends and no
+flight's date. The ends do not date the flights between them: NZ104 SYD-AKL
+plus NZ10 AKL-HNL lands on the day it left while NZ10 leaves the next day, and
+an eastbound red-eye second flight leaves the day before the slice lands.
+`links.extract_pin_segments_from_slice` therefore pins a slice only when
+`pin_dates_are_stated` holds: one date per flight in `segment_dates`, or a
+nonstop, dated by its departure day. A Matrix connection gets those dates from
+`_enrich.merge_results` when a Google row names the same flights and leaves and
+lands on the same days; a Matrix-only connection gets the unpinned search link,
+and `--sellers` refuses it with the `--fast` remedy.
+
 **And it keeps two different orders, because the two sets are ordered by
 different things.** A one-way board arrives ranked by Google — a composite of
 price, duration and stops that nothing here reproduces — so the trim keeps the
