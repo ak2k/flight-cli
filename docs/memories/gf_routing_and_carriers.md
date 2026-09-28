@@ -121,8 +121,9 @@ holds every row to what the row can show: the carrier include (any seller, the
 marketing reading), Google's own total duration (`FlightResult.duration`, never
 a difference of leg datetimes, which are local to each airport and off by the
 zone offset), every layover's minutes (same airport, same zone), and the first
-departure's clock time, to the minute. An alliance is the one encoded filter
-not checked: nothing here says which carrier is in which alliance. When these
+departure's clock time, to the minute. The stop ceiling and an alliance are
+not checked: the stops are left to Google's own filter, and nothing here says
+which carrier is in which alliance. Children are priced, not checked. When these
 checks empty a board, the empty-answer line names every active check.
 
 The date grids do not serve any of the new constraints yet: `page_can_encode`

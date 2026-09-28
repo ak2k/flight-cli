@@ -27,8 +27,8 @@ Requires Python 3.11+.
 flight search JFK LHR --dep 2026-08-15 --return 2026-08-22
 
 # A carrier or alliance, a maximum duration, a layover bound, one time-of-day
-# window or a child stays on Google Flights, which is asked for it and every
-# row is checked against it too.
+# window or a child stays on Google Flights, which is asked for it. Every row
+# is also checked against the carrier, duration, layover and time window.
 flight search MIA PAR --dep 2026-06-15 \
     --routing "LH+" --ext "MAXCONNECT 2:00"
 

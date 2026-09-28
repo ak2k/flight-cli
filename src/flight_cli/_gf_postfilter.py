@@ -14,7 +14,8 @@ silently dropped.
 Google has ignored a field it was sent (a carrier exclude on JFK-LHR), so what
 the page encodes is checked here too wherever the row shows it: the carrier
 include, the maximum duration, the layover minutes and the departure time.
-Only an alliance goes unchecked, for want of a membership table.
+The stop ceiling is left to Google's own filter, and so is an alliance, for
+want of a membership table.
 
 Supported Tier-2 predicates:
   - operating carrier include/exclude (`O:LH+`, `OPAIRLINES`, `-OPAIRLINES`)

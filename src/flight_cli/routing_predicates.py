@@ -378,9 +378,9 @@ def parse_extension(extension: str) -> list[Predicate]:
 # The search gate (`_gf_postfilter.search_page_reasons`) starts from this and
 # admits more, because a search has rows: the carrier and alliance includes,
 # the duration and the layover bounds the page also encodes (3.6 / 3.12 /
-# 3.17 / 3.18), checked on the rows too, and the Tier-2 predicates the
-# post-filter evaluates the way Matrix does. Anything else goes to Matrix with
-# the reason printed.
+# 3.17 / 3.18), all but the alliance checked on the rows too, and the Tier-2
+# predicates the post-filter evaluates the way Matrix does. Anything else goes
+# to Matrix with the reason printed.
 
 
 # fli's MaxStops enum stops at TWO_OR_FEWER_STOPS; anything above is ANY, which
