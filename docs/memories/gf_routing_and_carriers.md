@@ -112,7 +112,8 @@ positional), infants (Google answered JFK-LAX with no rows for any infant, so an
 empty answer would not be one), seniors and youth (no Google kind), time
 buckets that do not form one window, an alliance beside another carrier or
 alliance include (3.6 is one list, so Google would answer either), a zero
-`MAXCONNECT`, and a carrier code fli has no member for.
+`MAXCONNECT` or `MAXDUR` (fli's maximums are positive), and a carrier code fli
+has no member for.
 
 **Encoded constraints are checked on the rows too.** Google has ignored a field
 it was sent (the carrier exclude on JFK-LHR), so `_gf_postfilter.routing_keep`
