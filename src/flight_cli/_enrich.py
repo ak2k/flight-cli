@@ -9,7 +9,8 @@ the gflight adapter emits marketing flight numbers (work-fjibi.1), the same
 identity Matrix uses. Matched rows carry both prices (they should agree; we show
 both, attributed); Matrix-only rows are added (its fare coverage is broader),
 GF-only rows are kept and flagged (ULCC / codeshare inventory Matrix misses).
-The Matrix itinerary is authoritative for a matched row's structure.
+The Matrix itinerary is authoritative for a matched row's structure; the Google
+slice adds the per-flight dates Matrix does not state.
 """
 
 from __future__ import annotations
@@ -70,6 +71,30 @@ def _itin_key(it: Itinerary) -> tuple[tuple[tuple[str, ...], str], ...] | None:
     return tuple(parts)
 
 
+def _with_google_dates(m: Itinerary, g: Itinerary) -> Itinerary:
+    """`m` with each slice's per-flight dates taken from the matched Google
+    slice, which states them where Matrix states only the slice's two ends.
+
+    A slice takes them only when both sides name the same flights and land on
+    the same day: the match key fixes the first flight's day, not the later
+    flights', so a Google row whose layover is a day longer shares it."""
+    mi, gi = m.itinerary, g.itinerary
+    if mi is None or gi is None or len(mi.slices) != len(gi.slices):
+        return m
+    slices = [
+        ms.model_copy(update={"segment_dates": list(gs.segment_dates)})
+        if not ms.segment_dates
+        and ms.flights == gs.flights
+        and len(gs.segment_dates) == len(ms.flights)
+        and ms.arrival is not None
+        and gs.arrival is not None
+        and ms.arrival[:10] == gs.arrival[:10]
+        else ms
+        for ms, gs in zip(mi.slices, gi.slices, strict=True)
+    ]
+    return m.model_copy(update={"itinerary": mi.model_copy(update={"slices": slices})})
+
+
 def merge_results(gf: SearchResult, matrix: SearchResult) -> list[MergedRow]:
     """Reconcile GF + Matrix cash results into price-sorted merged rows."""
     gf_keyed: dict[object, Itinerary] = {}
@@ -96,7 +121,7 @@ def merge_results(gf: SearchResult, matrix: SearchResult) -> list[MergedRow]:
         g = gf_keyed.get(k)
         rows.append(
             MergedRow(
-                itinerary=m,  # Matrix structure authoritative when matched
+                itinerary=_with_google_dates(m, g) if g else m,
                 gf_price=g.price if g else None,
                 matrix_price=m.price,
                 source="both" if g else "matrix",

@@ -12,6 +12,7 @@ from flight_cli.models import (
     ItineraryExt,
     SearchResult,
     Slice,
+    SliceEndpoint,
 )
 
 
@@ -78,3 +79,56 @@ def test_unkeyed_itineraries_stay_single_source() -> None:
 
 def test_empty_inputs() -> None:
     assert merge_results(_sr(), _sr()) == []
+
+
+# ───────── a matched row takes Google's per-flight dates ─────────
+
+_D, _D1 = "2026-10-20", "2026-10-21"
+
+
+def _nz(arrival: str = f"{_D}T10:00", segment_dates: list[str] | None = None) -> Slice:
+    """NZ104 SYD-AKL, then NZ10 AKL-HNL, which leaves Auckland after midnight
+    and lands in Honolulu on the day the trip began."""
+    return Slice(
+        flights=["NZ104", "NZ10"],
+        departure=f"{_D}T18:00",
+        arrival=arrival,
+        origin=SliceEndpoint(code="SYD"),
+        destination=SliceEndpoint(code="HNL"),
+        stops=[SliceEndpoint(code="AKL")],
+        segment_dates=segment_dates or [],
+    )
+
+
+def _nz_row(price: str, s: Slice, sid: str | None = None) -> Itinerary:
+    return Itinerary(id=sid, ext=ItineraryExt(price=price), itinerary=ItineraryDetails(slices=[s]))
+
+
+def test_a_matched_matrix_connection_takes_googles_flight_dates() -> None:
+    gf = _sr(_nz_row("USD900.00", _nz(segment_dates=[_D, _D1])))
+    matrix = _sr(_nz_row("USD880.00", _nz(), sid="sol-1"))
+    (row,) = merge_results(gf, matrix)
+    assert row.source == "both"
+    assert row.itinerary.itinerary is not None
+    assert row.itinerary.itinerary.slices[0].segment_dates == [_D, _D1]
+    # Still Matrix's itinerary: its id pins the Matrix link, its price is Matrix's.
+    assert row.itinerary.id == "sol-1"
+    assert row.itinerary.price == "USD880.00"
+
+
+def test_the_merge_leaves_both_results_as_they_were() -> None:
+    gf = _sr(_nz_row("USD900.00", _nz(segment_dates=[_D, _D1])))
+    matrix = _sr(_nz_row("USD880.00", _nz(), sid="sol-1"))
+    before = (gf.model_dump(), matrix.model_dump())
+    merge_results(gf, matrix)
+    assert (gf.model_dump(), matrix.model_dump()) == before
+
+
+def test_a_google_row_landing_on_another_day_lends_no_dates() -> None:
+    """Same flights leaving the same day share the match key, but a Google row
+    whose NZ10 leaves a day later does not date Matrix's NZ10."""
+    late = _nz(arrival=f"{_D1}T10:00", segment_dates=[_D, "2026-10-22"])
+    (row,) = merge_results(_sr(_nz_row("USD900.00", late)), _sr(_nz_row("USD880.00", _nz())))
+    assert row.source == "both"
+    assert row.itinerary.itinerary is not None
+    assert row.itinerary.itinerary.slices[0].segment_dates == []
