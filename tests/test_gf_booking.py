@@ -14,10 +14,16 @@ import json
 import pathlib
 import signal
 import urllib.parse
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from fli.models import (  # pyright: ignore[reportMissingTypeStubs] — fli ships no stubs
+    Airline,
+    Airport,
+    FlightLeg,
+    FlightResult,
+)
 from typer.testing import CliRunner
 
 from flight_cli import _gf_booking as gb
@@ -26,6 +32,7 @@ from flight_cli import cli
 from flight_cli._gf_browser import CapturedResponse
 from flight_cli._gf_errors import GfBrowserUnavailableError
 from flight_cli._gf_rpc_shared import GfPageRpcError, refuse_a_wall, url_currency
+from flight_cli._gflight_ids import GFlightWithId
 from flight_cli.domain import Leg, SearchOptions, SpecificDateSearch
 from flight_cli.links import google_flights_booking_url, google_flights_pinned_url
 from flight_cli.models import SearchResult
@@ -687,22 +694,22 @@ def _matrix_connection(arrival: str) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize(
-    ("arrival_day", "opened"),
+    "arrival",
     [
-        pytest.param(1, False, id="lands-next-day"),
-        pytest.param(0, True, id="lands-same-day"),
+        pytest.param(f"{(_DEP + timedelta(days=1)).isoformat()}T00:30", id="lands-next-day"),
+        # The same two stamps a connection crossing the date line carries: it
+        # lands on the day it left while its second flight leaves the next day.
+        pytest.param(f"{_DEP.isoformat()}T22:30", id="lands-the-day-it-leaves"),
     ],
 )
 def test_enriched_sellers_open_a_matrix_connection_only_when_its_flights_dates_are_known(
-    monkeypatch: pytest.MonkeyPatch, board: list[Any], arrival_day: int, opened: bool
+    monkeypatch: pytest.MonkeyPatch, board: list[Any], arrival: str
 ) -> None:
-    """A connection that lands the next day has a last flight that left on
-    either day, and Matrix does not say which. A booking page asked for the
-    wrong day prices another trip under this row's number."""
-    landed = (_DEP + timedelta(days=arrival_day)).isoformat()
-    monkeypatch.setattr(
-        cli, "_matrix_into", _matrix_answers([_matrix_connection(f"{landed}T00:30")])
-    )
+    """Matrix dates a connection's two ends and none of its flights, and the
+    ends do not date the flights between them, whatever day it lands. A
+    booking page asked for the wrong day prices another trip under this row's
+    number."""
+    monkeypatch.setattr(cli, "_matrix_into", _matrix_answers([_matrix_connection(arrival)]))
     fake = _serve(
         monkeypatch,
         _booking_body(
@@ -710,15 +717,123 @@ def test_enriched_sellers_open_a_matrix_connection_only_when_its_flights_dates_a
         ),
     )
     result = _run("--sellers", "--no-matrix-url", "--no-google-url")
-    if opened:
-        assert result.exit_code == 0, result.output
-        assert "Booking options for #1" in result.stdout
-        assert len(fake.urls) == 1
-    else:
-        assert result.exit_code == 1, result.output
-        assert "No booking options for #1" in result.stderr
-        assert "--fast" in result.stderr
-        assert fake.urls == []
+    assert result.exit_code == 1, result.output
+    assert "No booking options for #1" in result.stderr
+    assert "--fast" in result.stderr
+    assert fake.urls == []
+
+
+def _booking_tfs(url: str) -> bytes:
+    return base64.urlsafe_b64decode(
+        urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["tfs"][0] + "=="
+    )
+
+
+def test_enriched_sellers_open_a_matrix_nonstop_on_the_day_it_leaves(
+    monkeypatch: pytest.MonkeyPatch, board: list[Any]
+) -> None:
+    """A nonstop's one flight leaves on the slice's departure day, which Matrix
+    states, also when it lands the next day."""
+    day, next_day = _DEP.isoformat(), (_DEP + timedelta(days=1)).isoformat()
+    red_eye = _matrix_solution("DL100", "USD150.00")
+    red_eye["itinerary"]["slices"][0].update(departure=f"{day}T23:00", arrival=f"{next_day}T07:30")
+    monkeypatch.setattr(cli, "_matrix_into", _matrix_answers([red_eye]))
+    fake = _serve(
+        monkeypatch, _booking_body(_option("Delta", 150, airline=True, flights=[["DL", "100"]]))
+    )
+    result = _run("--sellers", "--no-matrix-url", "--no-google-url")
+    assert result.exit_code == 0, result.output
+    assert "Booking options for #1" in result.stdout
+    raw = _booking_tfs(fake.urls[0])
+    # Once for the searched slice, once for the flight.
+    assert raw.count(day.encode()) == 2
+    assert next_day.encode() not in raw
+
+
+def _nz_over_the_date_line(day: date) -> GFlightWithId:
+    """NZ104 Sydney-Auckland, then NZ10 Auckland-Honolulu, which leaves after
+    midnight in Auckland and lands in Honolulu on the calendar day the trip
+    began. Local times, as Google gives them."""
+    next_day = day + timedelta(days=1)
+
+    def leg(
+        number: str, frm: str, to: str, leaves: datetime, lands: datetime, minutes: int
+    ) -> FlightLeg:
+        return FlightLeg(
+            airline=Airline["NZ"],
+            flight_number=number,
+            departure_airport=Airport[frm],
+            arrival_airport=Airport[to],
+            departure_datetime=leaves,
+            arrival_datetime=lands,
+            duration=minutes,
+        )
+
+    flight = FlightResult(
+        price=900.0,
+        currency="USD",
+        duration=780,
+        stops=1,
+        legs=[
+            leg(
+                "104",
+                "SYD",
+                "AKL",
+                datetime.combine(day, time(18, 0)),
+                datetime.combine(day, time(23, 0)),
+                180,
+            ),
+            leg(
+                "10",
+                "AKL",
+                "HNL",
+                datetime.combine(next_day, time(0, 30)),
+                datetime.combine(day, time(10, 0)),
+                510,
+            ),
+        ],
+    )
+    return GFlightWithId(flight=flight, flight_id="", amenities=[])
+
+
+def test_fast_sellers_open_a_google_connection_on_the_days_google_gives_its_flights(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The slice leaves and lands on the same day, and its second flight is
+    asked for on the next, the day Google gives it."""
+    row = _nz_over_the_date_line(_DEP)
+
+    def _one_row(*_a: object, **_kw: object) -> list[Any]:
+        return [row]
+
+    monkeypatch.setattr(cli, "_gflight_results", _one_row)
+    fake = _serve(
+        monkeypatch,
+        _booking_body(
+            _option("Air New Zealand", 900, airline=True, flights=[["NZ", "104"], ["NZ", "10"]])
+        ),
+    )
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "search",
+            "SYD",
+            "HNL",
+            "--dep",
+            _DEP.isoformat(),
+            "--cash-only",
+            "--fast",
+            "--sellers",
+            "--no-matrix-url",
+            "--no-google-url",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Booking options for #1" in result.stdout
+    raw = _booking_tfs(fake.urls[0])
+    # The searched slice and NZ104 on the day the trip began, NZ10 on the next.
+    assert raw.count(_DEP.isoformat().encode()) == 2
+    assert (_DEP + timedelta(days=1)).isoformat().encode() in raw.split(b"104", 1)[1]
 
 
 async def _no_matrix(*_a: object, **_kw: object) -> None:

@@ -924,13 +924,14 @@ def extract_pin_segments_from_slice(s: Slice) -> list[dict[str, str]] | None:
     return out
 
 
-def pin_dates_are_guessed(s: Slice) -> bool:
-    """Whether `extract_pin_segments_from_slice` has to guess a flight's date:
-    a connection with no per-flight dates that lands on another day than it
-    leaves. Its last flight may have left before midnight or after."""
-    departed = s.departure or ""
-    arrived = s.arrival or departed
-    return not s.segment_dates and len(s.flights) > 1 and arrived[:10] != departed[:10]
+def pin_dates_are_stated(s: Slice) -> bool:
+    """Whether the slice's source dates every one of its flights: one date per
+    flight in `segment_dates`, or a single flight, which leaves on the slice's
+    departure day. A connection's two end dates do not date the flights
+    between them: one that crosses the date line lands on the day it left
+    while its second flight leaves the next day."""
+    n = len(s.flights)
+    return n == 1 or (n > 0 and len(s.segment_dates) == n)
 
 
 def google_flights_url(s: Search, *, currency: str = "USD", language: str = "en") -> str:

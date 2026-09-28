@@ -71,7 +71,7 @@ from .links import (
     google_flights_url,
     matrix_deep_link,
     matrix_itinerary_url,
-    pin_dates_are_guessed,
+    pin_dates_are_stated,
 )
 from .log import configure as configure_logging
 from .pp.auth import load_tokens
@@ -1897,19 +1897,21 @@ def _booking_options(
     from ._gf_browser import interrupt_guard, session_scope  # noqa: PLC0415 — patchright
 
     heading = f"No booking options for #{n:d}"
+    # A page asked for a day the row does not state answers for another trip
+    # with the same flight numbers, which the seller check cannot tell apart
+    # from this one. Checked before the segments are built because building
+    # them dates an undated connection's flights from the slice's two ends.
+    itinerary = result.solutions[n - 1].itinerary
+    if itinerary is not None and not all(pin_dates_are_stated(s) for s in itinerary.slices):
+        _no_booking_options(
+            heading,
+            "Matrix gives no date for each flight of this connection. With --fast, rows "
+            "come from Google and carry each flight's date.",
+        )
     segments = _pin_segments(result, n - 1)
     if segments is None:
         _no_booking_options(
             heading, "its flights cannot be written into a Google Flights booking link."
-        )
-    # A page asked for a guessed day answers for another trip with the same
-    # flight numbers, which the seller check cannot tell apart from this one.
-    itinerary = result.solutions[n - 1].itinerary
-    if itinerary is not None and any(pin_dates_are_guessed(s) for s in itinerary.slices):
-        _no_booking_options(
-            heading,
-            "Matrix gives no date for each flight of a connection that lands on another "
-            "day. With --fast, rows come from Google and carry each flight's date.",
         )
     outbound, returning = segments
     url = google_flights_booking_url(search, outbound_segments=outbound, return_segments=returning)
