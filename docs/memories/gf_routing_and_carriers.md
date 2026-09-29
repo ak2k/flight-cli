@@ -183,9 +183,10 @@ asked for, silently.
 One more trap: a stop ceiling only encodes up to **two**. fli's `MaxStops` tops
 out at `TWO_OR_FEWER_STOPS`, so a ceiling of 3+ maps to `ANY` and omits field
 3.5 entirely — `--stops 3` then encodes byte-identically to no `--stops` at all.
-Both spellings hit the same ceiling (`routing_predicates.MAX_ENCODABLE_STOPS`,
-shared so the two sites can't drift): the routing-language `MAXSTOPS 3` through
-`page_can_encode`, and the `--stops` flag through `_pick_backend` directly.
+The search gate (`_gf_postfilter.search_page_reasons`) holds only the strictest
+of `--stops` and every `MAXSTOPS` (or `N`) to that ceiling, since that one limit
+is all the page is asked for: `--stops 3` alone goes to Matrix, and beside
+`MAXSTOPS 0` it is a nonstop search the page serves.
 
 **That page has two rungs.** Rung 1 is the curl_cffi GET above. Rung 2
 (`--gf-transport browser`) drives a real Chrome to the *same* URL and hands its

@@ -384,8 +384,7 @@ def parse_extension(extension: str) -> list[Predicate]:
 
 
 # fli's MaxStops enum stops at TWO_OR_FEWER_STOPS; anything above is ANY, which
-# omits tfs field 3.5 entirely. Public because `cli._pick_backend` applies the
-# same ceiling to `--stops`, and two copies would drift.
+# omits tfs field 3.5 entirely.
 MAX_ENCODABLE_STOPS = 2
 
 

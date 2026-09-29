@@ -612,11 +612,12 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
     filter applies to the page's full board (`search_page_reasons`). Any other
     constraint goes to Matrix WITH ITS REASON PRINTED.
 
-    Hard-Matrix flags always force Matrix: `--slice` (multi-city), a `--stops`
-    ceiling above two (fli maps it to "any", so the tfs field would be omitted
-    and the constraint lost), seniors and youth (Google has no such passenger
-    kind), infants (Google prices them, but answered JFK-LAX with no rows at all
-    for any infant, so its empty answer would not be one), and
+    Hard-Matrix flags always force Matrix: `--slice` (multi-city), a stop
+    ceiling above two, the strictest of `--stops` and every `MAXSTOPS` being the
+    one the page is asked for (fli maps a higher one to "any", so the tfs field
+    would be omitted and the constraint lost), seniors and youth (Google has no
+    such passenger kind), infants (Google prices them, but answered JFK-LAX with
+    no rows at all for any infant, so its empty answer would not be one), and
     `--no-airport-changes` / `--include-unavailable`, which the search page's
     `tfs=` parameter has no field for at all. `--fare-rules` too: fare bases and
     rules come from Matrix's `/v1/summarize`, which Google has no equivalent of.
@@ -643,10 +644,7 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
     Explicit --backend matrix: matrix. --backend gflight: gflight, unless the
     request is inexpressible on GF (error)."""
     from ._gf_postfilter import search_page_reasons  # noqa: PLC0415
-    from .routing_predicates import (  # noqa: PLC0415
-        MAX_ENCODABLE_STOPS,
-        classify,
-    )
+    from .routing_predicates import classify  # noqa: PLC0415
 
     reasons: list[str] = []
     if fare_rules:
@@ -684,15 +682,9 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
             backend, ",".join(expand_airports(origins)), ",".join(expand_airports(destinations))
         )
     )
-    if stops is not None and stops > MAX_ENCODABLE_STOPS:
-        # Same ceiling as the routing-language spelling below, and the same
-        # wording: fli's MaxStops maps anything higher to ANY, which omits the
-        # tfs field, so `--stops 3` would encode byte-identically to no --stops.
-        reasons.append(f"a stop ceiling above {MAX_ENCODABLE_STOPS} ({stops})")
-    if routing or extension:
-        predicates = classify(routing, extension).predicates
-        reasons.extend(search_page_reasons(predicates))
-        reasons.extend(_gf_unmappable_reasons(backend, predicates))
+    predicates = classify(routing, extension).predicates
+    reasons.extend(search_page_reasons(predicates, stops))
+    reasons.extend(_gf_unmappable_reasons(backend, predicates))
 
     # The same reasons go out two ways, and only one of them is markup. A
     # reason quotes the user's --routing string verbatim, so one square bracket

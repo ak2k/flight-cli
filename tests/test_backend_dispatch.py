@@ -180,6 +180,30 @@ def test_an_encodable_stop_ceiling_stays_on_gflight(stops: int) -> None:
     assert _call(stops=stops) == BACKEND_GFLIGHT
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"stops": 3, "extension": "MAXSTOPS 0"},
+        {"stops": 0, "extension": "MAXSTOPS 3"},
+        {"stops": 3, "routing": "N"},
+    ],
+)
+def test_only_the_strictest_stop_limit_is_held_to_the_ceiling(
+    overrides: dict[str, object],
+) -> None:
+    """The page is asked for the strictest of `--stops` and every `MAXSTOPS`,
+    so a looser limit beside it leaves nothing the page cannot encode."""
+    assert _call(**overrides) == BACKEND_GFLIGHT  # pyright: ignore[reportArgumentType]
+
+
+def test_a_stop_ceiling_above_two_is_named_once_at_its_strictest(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert _call(stops=4, extension="MAXSTOPS 3") == BACKEND_MATRIX
+    printed = " ".join(capsys.readouterr().err.split())
+    assert "can't serve a stop ceiling above 2 (3)." in printed, printed
+
+
 def test_explicit_gflight_rejects_a_stop_ceiling_above_two() -> None:
     with pytest.raises(typer.BadParameter, match=r"a stop ceiling above 2 \(3\)"):
         _call(BACKEND_GFLIGHT, stops=3)
