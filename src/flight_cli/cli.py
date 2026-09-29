@@ -5954,8 +5954,7 @@ def calendar(
             param_hint="--gf-transport" if gf_mode != TRANSPORT_HTTP else "--gf-headed",
         )
     ccy = _resolve_currency(currency)
-    origins = _parse_iata_list(origin)
-    dests = _parse_iata_list(destination)
+    origins, dests = _require_airports(origin, destination)
     sd = _parse_date(start)
     ed = _parse_date(end) if end else sd + timedelta(days=30)
     dmin, dmax = _resolve_duration(duration, round_trip=not one_way)

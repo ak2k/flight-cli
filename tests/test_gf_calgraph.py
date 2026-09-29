@@ -736,6 +736,51 @@ def test_the_page_asks_for_every_airport_of_both_sets() -> None:
 
 
 @pytest.mark.parametrize(
+    ("origin", "destination"),
+    [(",", "LHR"), ("LHR", ","), (" , ", "LHR"), ("", "LHR")],
+    ids=["origin-comma", "destination-comma", "origin-blanks", "origin-empty"],
+)
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ("--one-way", "--fast"),
+        ("-d", "7", "--fast"),
+        ("--one-way", "--fast", "--format", "json"),
+        ("--one-way", "--fast", "--gf-transport", "http"),
+        ("--one-way",),
+        (),
+    ],
+    ids=["fast", "fast-rt", "fast-json", "fast-http", "one-way", "round-trip"],
+)
+def test_a_blank_airport_side_is_an_input_error_on_every_calendar_path(
+    origin: str, destination: str, extra: tuple[str, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_parse_iata_list` drops blank entries, so each of these is an empty
+    airport set, and nothing past the parse refuses one as the input it is: the
+    page gate finds no airport over its bound or outside fli's table, the page's
+    encoder then fails as though Google had, and without `--fast` it is a Matrix
+    query with no airports."""
+    reached: list[str] = []
+
+    def _unreached(name: str) -> Callable[..., NoReturn]:
+        def _run(*_a: object, **_k: object) -> NoReturn:
+            reached.append(name)
+            raise AssertionError(f"{name} ran on a calendar with no airports")
+
+        return _run
+
+    for name in ("_run_calendar", "_run_calendar_enriched", "_http_date_grid"):
+        monkeypatch.setattr(cli, name, _unreached(name))
+    monkeypatch.setattr(cg, "price_graph", _unreached("price_graph"))
+    end = _START + timedelta(days=13)
+    window = ["--start", _START.isoformat(), "--end", end.isoformat()]
+    result = CliRunner().invoke(cli.app, ["calendar", origin, destination, *window, *extra])
+    assert (result.exit_code, reached) == (2, []), result.output
+    assert "origin and destination are required" in result.stderr
+    assert result.stdout == ""
+
+
+@pytest.mark.parametrize(
     ("overrides", "flag"),
     [
         ({"gf_transport": "browser"}, "--gf-transport"),
