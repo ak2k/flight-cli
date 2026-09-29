@@ -514,6 +514,24 @@ def test_a_capped_matrix_document_lists_and_counts_only_the_kept_fares() -> None
 
 
 @pytest.mark.usefixtures("matrix_gbp")
+@pytest.mark.parametrize("cap", ["736", "10000"])
+def test_a_cap_over_the_whole_page_leaves_matrix_s_own_count(cap: str) -> None:
+    """Every fare of the page is under the cap, so the fares past it went
+    unchecked, and the count stays Matrix's total (88 beside 25 rows)."""
+    uncapped = json.loads(_matrix_cli("--format", "json").stdout)
+    doc = json.loads(_matrix_cli("--max-price", cap, "--format", "json").stdout)
+    assert len(doc["solutionList"]["solutions"]) == len(uncapped["solutionList"]["solutions"])
+    assert doc["solutionCount"] == uncapped["solutionCount"] > len(doc["solutionList"]["solutions"])
+    assert doc["solutionList"]["solutionCount"] == uncapped["solutionList"]["solutionCount"]
+    total = uncapped["solutionCount"]
+    assert f"{total} solutions" in _matrix_cli("--max-price", cap).stdout
+    capped = cli._price_capped(
+        SearchResult.from_api(_gbp_body()), SearchOptions(currency="GBP", max_price=int(cap))
+    )
+    assert capped.solution_count == total
+
+
+@pytest.mark.usefixtures("matrix_gbp")
 def test_a_matrix_cap_in_another_currency_keeps_nothing() -> None:
     result = _search_cli("--backend", "matrix", "--max-price", "5000", "--format", "json")
     assert result.exit_code == 0, result.output

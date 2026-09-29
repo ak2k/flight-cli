@@ -156,10 +156,14 @@ Both are top-level fields, written after the cabin (9) and before 14.
 - Matrix has no price input. `cli._price_capped` cuts its page to the fares
   under the cap before the pick, the fare rules, the awards, the links and the
   enriched merge read it; Matrix answers in price order, so the cut loses no
-  cheaper fare. Under a cap the JSON's `solutionCount` (top level and in
-  `solutionList`) counts the kept rows of this page, not Matrix's total; the
-  facets, the price slider and `carrierStopMatrix` stay as served. The table
-  prints no carrier x stops grid, whose cells are minima over every fare.
+  cheaper fare. When the cap drops a row of the fetched page, the JSON's
+  `solutionCount` (top level and in `solutionList`) and the table's count are
+  the kept rows (the GBP JFK-LHR page at 690 keeps 14 of 25). When it drops
+  none, the fares past the page went unchecked, so both keep Matrix's total, as
+  uncapped (88 beside the same page's 25 rows at 736); a larger `-n` fetches
+  more of them. The facets, the price slider and `carrierStopMatrix` stay as
+  served. The table prints no carrier x stops grid, whose cells are minima
+  over every fare.
 - Field 13 is `{2: carry-on, 3: checked}`. The forms sent live left a zero
   count out (checked 1 = `agIYAQ`, carry-on 1 = `agIQAQ`); the UI writes both
   (`agQQARgB` for one of each). JFK-LAX with one checked bag repriced all 95

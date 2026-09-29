@@ -2793,11 +2793,13 @@ def _price_capped(res: SearchResult, opts: SearchOptions) -> SearchResult:
     under its price cap, or `res` itself when there is no cap.
 
     Matrix has no price input, and it answers in price order, so the cut loses
-    no cheaper fare. `solutionCount`, at the top of the raw document and in its
-    solution list, becomes the count kept on this page. The carrier x stops grid
-    is dropped from the table, because its cells are minima over every fare; in
-    the JSON it and Matrix's other blocks stay as served, describing its whole
-    answer."""
+    no cheaper fare. Where the cap drops a fare of this page, the fares past the
+    page are over it too, so `solutionCount`, at the top of the raw document and
+    in its solution list, becomes the count kept. Where it drops none, the fares
+    past the page went unchecked, so Matrix's own total stays. The carrier x
+    stops grid is dropped from the table, because its cells are minima over
+    every fare; in the JSON it and Matrix's other blocks stay as served,
+    describing its whole answer."""
     cap = opts.max_price
     if cap is None:
         return res
@@ -2812,9 +2814,10 @@ def _price_capped(res: SearchResult, opts: SearchOptions) -> SearchResult:
         return within_price_cap(value, code, cap=cap, cap_currency=currency)
 
     kept = [it for it in res.solutions if admitted(it.price)]
+    count = {"solutionCount": len(kept)} if len(kept) < len(res.solutions) else {}
     raw = res.raw
     if raw is not None:
-        raw = {**raw, "solutionCount": len(kept)}
+        raw = {**raw, **count}
         listing = raw.get("solutionList")
         if isinstance(listing, dict):
             served = cast("dict[str, Any]", listing)
@@ -2825,12 +2828,12 @@ def _price_capped(res: SearchResult, opts: SearchOptions) -> SearchResult:
                     for sol in cast("list[Any]", served.get("solutions") or [])
                     if admitted(Itinerary.model_validate(sol).price)
                 ],
-                "solutionCount": len(kept),
+                **count,
             }
     return res.model_copy(
         update={
             "solutions": kept,
-            "solution_count": len(kept),
+            "solution_count": count.get("solutionCount", res.solution_count),
             "carrier_stop_matrix": None,
             "raw": raw,
         }
