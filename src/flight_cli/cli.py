@@ -3280,11 +3280,8 @@ def _bags_by_itinerary(
     """Each itinerary of `sr`, by `id`, to the bags Google states for each of
     its members, in slice order. `sr` is `results` adapted, and the adapter
     carries no itinerary for an empty combination, so neither does this."""
-    members: list[list[Any]] = []
-    for r in results:
-        items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
-        if items:
-            members.append(items)
+    members = [list(cast("tuple[Any, ...]", r)) if isinstance(r, tuple) else [r] for r in results]
+    members = [items for items in members if items]
     return {
         id(it): [cast("tuple[int | None, int | None]", g.bags_included) for g in items]
         for it, items in zip(sr.solutions, members, strict=True)
