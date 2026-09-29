@@ -16,7 +16,7 @@ intent into the right invocation **on the first try**.
 | Command | Purpose |
 |---|---|
 | `flight search ORIGIN DEST --dep YYYY-MM-DD [--return YYYY-MM-DD]` | Specific-date search. Auto-picks Google Flights for plain cash queries and ITA Matrix when a constraint Google can't serve is set (ordered or positional routing, fare construction, `-REDEYES`/`-OVERNIGHTS`, multi-city slice, time-of-day buckets with a gap like `morning,evening`, infants, seniors, youth); a stop cap, a carrier include (`XX+`, `AIRLINES`) or one `ALLIANCE` (not both), `MAXDUR`, `MINCONNECT`/`MAXCONNECT`, one time-of-day window per leg, `--children`, carrier excludes (`~XX+`, `-AIRLINES`), operating carrier (`O:XX+`, `OPAIRLINES`) and `-CODESHARE` stay on Google, which serves its full board (`-n` above 30 works) and checks every row against them except the stop cap, `ALLIANCE` and `--children`, where Google's answer is taken as given. Force with `--backend matrix\|gflight`. PointsPath award overlay runs on both backends when tokens are present. |
-| `flight calendar ORIGIN DEST --start YYYY-MM-DD [--end ...] [-d 5-7]` | Lowest-fare grid across a date window. Matrix by default. Default round-trip; `--one-way` flips. `--fast` reads Google Flights' price graph instead, through a real Chrome (single airport, one-way or one trip length like `-d 7`, stops/cabin/adults only); it exits 1 rather than fall back. |
+| `flight calendar ORIGIN DEST --start YYYY-MM-DD [--end ...] [-d 5-7]` | Lowest-fare grid across a date window. Matrix by default. Default round-trip; `--one-way` flips. `--fast` reads Google Flights' price graph instead, through a real Chrome (airports, comma-lists or metro codes up to 11 airports a leg, each date priced at the set's cheapest; one-way or one trip length like `-d 7`; stops/cabin/adults only); it exits 1 rather than fall back. |
 | `flight detail ORIGIN DEST --dep YYYY-MM-DD --start ... --end ...` | Phase-2 of the calendar flow: full itineraries for a date picked from the grid. Matrix only. |
 | `flight explore ORIGIN [--month YYYY-MM] [--days A-B] [--max-price P]` | "Where can I fly from here, under this price?": Google Flights' explore page (Chrome), priced destinations cheapest first; `--days` must overlap exactly one of weekend (1-4), one week (6-9), two weeks (13-16) nights, and the trips listed span that whole length (5-7 lists 6-9 nights); `--month` must be in the next six months. For "who sells this itinerary cheapest", add `--sellers [--pick N]` to `flight search`. |
 | `flight airport QUERY` | IATA / partial-name autocomplete. |
@@ -190,10 +190,11 @@ Full reference: [uponarriving.com ITA Matrix guide](https://www.uponarriving.com
 When users mention regions / metros, expand to the right IATA list. Two flavors:
 
 **IATA metro codes Matrix accepts as a single token** (prefer these). `flight
-search` serves them on Google Flights over every airport listed; `HOU`, `LAX`,
-`BER`, `SHA`, `BKK` and `DPS` are also airport codes and stay that one airport
-there. A leg of more than 11 airports (origins plus destinations, metro codes
-counted as their members) goes to Matrix:
+search` and `flight calendar --fast` serve them on Google Flights over every
+airport listed; `HOU`, `LAX`, `BER`, `SHA`, `BKK` and `DPS` are also airport
+codes and stay that one airport there. A leg of more than 11 airports (origins
+plus destinations, metro codes counted as their members) goes to Matrix, and
+`--fast` refuses it:
 
 | Metro | Code | Airports it covers |
 |---|---|---|

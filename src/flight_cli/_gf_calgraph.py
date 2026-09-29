@@ -103,13 +103,14 @@ def page_blocker(search: CalendarSearch) -> str | None:
     or None when it can.
 
     The phrase completes "this is …" in the `--fast` refusal. Shape (one leg or
-    two, one airport per side, Tier-1 routing only) and city codes are checked
-    before this by the caller; what is left are the constraints the page
-    encoder has no field for. A departure-time window, a passenger other than an
-    adult, the two availability switches and every predicate but a stop limit
-    of two or fewer are dropped by the encoder or refused by it, and the page
-    carries ONE predicate set for both slices, so a round trip whose legs differ
-    cannot be asked either."""
+    two, Tier-1 routing only) and the airports (at most 11 a leg, every one in
+    fli's table once metro codes are expanded) are checked before this by the
+    caller; what is left are the constraints the page encoder has no field for.
+    A departure-time window, a passenger other than an adult, the two
+    availability switches and every predicate but a stop limit of two or fewer
+    are dropped by the encoder or refused by it, and the page carries ONE
+    predicate set for both slices, so a round trip whose legs differ cannot be
+    asked either."""
     for leg, which in zip(search.legs, ("departure", "return"), strict=False):
         if leg.time_ranges:
             return f"a {which}-time window"
