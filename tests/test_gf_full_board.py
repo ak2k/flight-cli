@@ -971,3 +971,170 @@ def test_under_explicit_gflight_an_emptied_cabin_says_so_and_stays_empty(
     assert "Google Flights BUSINESS: no itinerary matched the routing." in err
     assert "Google Flights COACH:" not in err
     assert "Using Matrix" not in err
+
+
+# ────────────── notes on Google's table, and the hand-off to Matrix ─────────
+
+_PIN_CAP_NOTE = "Google Flights combines returns against up to 10 first-ranked outbounds."
+_JOIN_NOTE = (
+    "Google Flights joins cabins on up to 10 of each cabin's first-ranked outbounds; "
+    "'—' means no shared itinerary, not no fare."
+)
+_CURRENCY_NOTE = (
+    "Google Flights priced some rows in USD, not the requested EUR; "
+    "each row is labeled with its own."
+)
+
+
+def _usd_rows() -> list[Any]:
+    return [
+        gfid.GFlightWithId(
+            flight=r.flight.model_copy(update={"currency": "USD"}),
+            flight_id=r.flight_id,
+            amenities=r.amenities,
+        )
+        for r in _board(_served(_LAX))[:3]
+    ]
+
+
+def _google_serves(
+    monkeypatch: pytest.MonkeyPatch, *, coach: gfid.Board[Any], business: gfid.Board[Any]
+) -> None:
+    """Each cabin's board, served below `_gflight_results`, so every caller of
+    it runs as shipped wherever along the path a note is printed."""
+
+    def _search(f: Any, **_kw: object) -> gfid.Board[Any]:
+        return business if f.seat_type.name == "BUSINESS" else coach
+
+    monkeypatch.setattr(gfid, "search_with_ids", _search)
+
+
+def _multi_cabin_round_trip(*extra: str) -> list[str]:
+    return [
+        *_SEARCH,
+        "JFK",
+        "LAX",
+        "--dep",
+        _DEP.isoformat(),
+        "--return",
+        _RET.isoformat(),
+        "--cabin",
+        "economy,business",
+        "--routing",
+        "O:LH+",
+        "-n",
+        "15",
+        "--currency",
+        "EUR",
+        "--format",
+        "json",
+        *extra,
+    ]
+
+
+_RUNGS = [
+    pytest.param((), id="concurrent-fan-out"),
+    pytest.param(("--gf-transport", "browser"), id="rung-2-series"),
+]
+
+
+@pytest.mark.parametrize("rung", _RUNGS)
+def test_a_multi_cabin_hand_off_prints_no_note_about_googles_table(
+    monkeypatch: pytest.MonkeyPatch, rung: tuple[str, ...]
+) -> None:
+    """Matrix answers the whole search, so a note on how Google pinned its
+    outbounds, joined its cabins or priced its rows describes a table nobody
+    sees. The join note would also misread Matrix's '—', a cabin with no price."""
+    _google_serves(monkeypatch, coach=gfid.Board(_usd_rows()), business=gfid.Board(dropped=7))
+    ran = _matrix_multi(monkeypatch)
+    result = CliRunner().invoke(cli.app, _multi_cabin_round_trip(*rung))
+    assert result.exit_code == 0, result.output
+    assert ran == [(Cabin.COACH, Cabin.BUSINESS)]
+    err = " ".join(result.stderr.split())
+    assert (
+        "Using Matrix: no Google Flights itinerary matched the routing in "
+        "BUSINESS (7 rows filtered out)."
+    ) in err
+    for note in (_PIN_CAP_NOTE, _JOIN_NOTE, _CURRENCY_NOTE):
+        assert note not in err, err
+
+
+@pytest.mark.parametrize("rung", _RUNGS)
+@pytest.mark.parametrize(
+    ("backend", "business_emptied"),
+    [
+        pytest.param("gflight", True, id="gflight-keeps-an-emptied-cabin"),
+        pytest.param("auto", False, id="auto-with-nothing-emptied"),
+    ],
+)
+def test_a_multi_cabin_google_answer_prints_its_notes_before_the_document(
+    monkeypatch: pytest.MonkeyPatch, rung: tuple[str, ...], backend: str, business_emptied: bool
+) -> None:
+    """The currency note once per cabin board that has rows in another currency."""
+    business = gfid.Board(dropped=7) if business_emptied else gfid.Board(_usd_rows())
+    _google_serves(monkeypatch, coach=gfid.Board(_usd_rows()), business=business)
+    ran = _matrix_multi(monkeypatch)
+    result = CliRunner().invoke(cli.app, _multi_cabin_round_trip("--backend", backend, *rung))
+    assert result.exit_code == 0, result.output
+    assert ran == []
+    assert len(json.loads(result.stdout)["COACH"]) == 3
+    shown = " ".join(result.output.split())
+    document = shown.index("{")
+    boards_in_usd = 1 if business_emptied else 2
+    for note, count in ((_PIN_CAP_NOTE, 1), (_JOIN_NOTE, 1), (_CURRENCY_NOTE, boards_in_usd)):
+        assert shown.count(note) == count, result.stderr
+        assert shown.index(note) < document, result.output
+    assert shown.index(_PIN_CAP_NOTE) < shown.index(_JOIN_NOTE) < shown.index(_CURRENCY_NOTE)
+
+
+@pytest.mark.parametrize(("backend", "handed_off"), [("auto", True), ("gflight", False)])
+def test_a_round_trip_handed_to_matrix_prints_no_pin_note(
+    monkeypatch: pytest.MonkeyPatch, backend: str, handed_off: bool
+) -> None:
+    """The pin note describes Google's search, and the answer is Matrix's."""
+
+    def _search(*_a: object, **_kw: object) -> gfid.Board[Any]:
+        return gfid.Board(dropped=17, pinned=10)
+
+    monkeypatch.setattr(gfid, "search_with_ids", _search)
+    ran: list[bool] = []
+
+    def _matrix(**_kw: object) -> None:
+        ran.append(True)
+
+    monkeypatch.setattr(cli, "_run_matrix_path", _matrix)
+    result = CliRunner().invoke(
+        cli.app,
+        _round_trip_search(
+            "--routing", "~AA+", "-n", "15", "--backend", backend, "--format", "json"
+        ),
+    )
+    assert result.exit_code == 0, result.output
+    assert ran == ([True] if handed_off else [])
+    assert (_PIN_CAP_NOTE in " ".join(result.stderr.split())) is not handed_off, result.stderr
+
+
+def test_a_single_cabin_answer_prints_its_notes_before_the_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _google_serves(monkeypatch, coach=gfid.Board(_usd_rows()), business=gfid.Board())
+    result = CliRunner().invoke(
+        cli.app, _round_trip_search("-n", "15", "--currency", "EUR", "--format", "json")
+    )
+    assert result.exit_code == 0, result.output
+    assert len(json.loads(result.stdout)) == 3
+    shown = " ".join(result.output.split())
+    assert shown.count(_PIN_CAP_NOTE) == shown.count(_CURRENCY_NOTE) == 1, result.stderr
+    assert shown.index(_PIN_CAP_NOTE) < shown.index(_CURRENCY_NOTE) < shown.index("["), shown
+
+
+def test_the_enriched_answer_notes_rows_in_another_currency_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _google_serves(monkeypatch, coach=gfid.Board(_usd_rows()), business=gfid.Board())
+    monkeypatch.setattr(cli, "MatrixClient", _MatrixFindsNothing)
+    result = CliRunner().invoke(
+        cli.app, [*_SEARCH, "JFK", "LAX", "--dep", _DEP.isoformat(), "--currency", "EUR"]
+    )
+    assert result.exit_code == 0, result.output
+    assert " ".join(result.stderr.split()).count(_CURRENCY_NOTE) == 1, result.stderr
