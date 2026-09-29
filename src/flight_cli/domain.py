@@ -143,8 +143,10 @@ class SearchOptions(BaseModel):
     # derived default (-1 when stops constrained, 1 otherwise).
     extra_stops: int | None = None
     page_size: int = 25
-    # ISO 4217 code to price in. None = each backend's own default (USD for
-    # every request this CLI sends), and leaves the Matrix body without the key.
+    # ISO 4217 code to price in. None leaves the Matrix body without the key, so
+    # Matrix prices in its own default, often the origin's currency (GBP from
+    # LHR), while Google Flights prices in USD. A search that merges the two or
+    # applies a price cap asks Matrix for USD instead.
     currency: str | None = None
     # Whole units of `currency` (USD when None), compared with the printed
     # price, which for a party is the total. Matrix has no input for a cap or
