@@ -76,6 +76,7 @@ from .links import (
     matrix_deep_link,
     matrix_itinerary_url,
     pin_dates_are_stated,
+    search_page_cap,
 )
 from .log import configure as configure_logging
 from .models import FareRulesResult, Itinerary
@@ -2759,6 +2760,14 @@ def _cap_text(opts: SearchOptions | None) -> str | None:
     return f"{opts.currency or 'USD'} {opts.max_price:d}"
 
 
+def _page_cap_text(opts: SearchOptions | None) -> str | None:
+    """`_cap_text`, where Google's page was asked for the cap; otherwise None,
+    since a board fetched uncapped is not emptied by it."""
+    if opts is None or search_page_cap(opts.max_price, opts.currency or "USD") is None:
+        return None
+    return _cap_text(opts)
+
+
 def _price_capped(res: SearchResult, opts: SearchOptions) -> SearchResult:
     """`res` holding only the solutions priced in the search's currency at or
     under its price cap, or `res` itself when there is no cap.
@@ -3606,8 +3615,8 @@ def _answer_gf_empty(
 
     `pinned` is how many outbounds a round trip searched returns for. The
     reason names it, because outbounds below the pins may have matching
-    returns that were never searched. `cap` names the search's price cap, which
-    the page was asked for, so a board it served empty says no fare is under it."""
+    returns that were never searched. `cap` names the price cap the page was
+    asked for, if it was, so a board it served empty says no fare is under it."""
     if dropped and matrix_fallback:
         return dropped
     if dropped and pinned:
@@ -3705,7 +3714,7 @@ def _run_gflight_path(
             matrix_fallback=matrix_fallback,
             pinned=getattr(results, "pinned", 0),
             checks=_row_checks(legs, opts),
-            cap=_cap_text(opts),
+            cap=_page_cap_text(opts),
         )
 
     # `-n` is one number for everything the user can act on. Google's page
@@ -3865,7 +3874,7 @@ def _paint_first_gf_table(
         else:
             err.print("[dim]…refining with Matrix (authoritative fares)…[/]")
     elif not gf and "gf_err" not in state:
-        cap = _cap_text(opts)
+        cap = _page_cap_text(opts)
         if getattr(gf, "dropped", 0):
             err.print(
                 f"[yellow]Google Flights: no itinerary matched "

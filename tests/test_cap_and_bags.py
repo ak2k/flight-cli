@@ -416,9 +416,24 @@ def test_under_bags_a_board_the_cap_empties_is_answered_empty(
 def test_google_s_own_empty_board_under_a_cap_says_no_fare_is_under_it(
     served: _Page,
 ) -> None:
-    result = _search_cli("--max-price", "250", "--currency", "EUR", "--fast")
+    result = _search_cli("--max-price", "250", "--fast")
     assert result.exit_code == 0, result.output
-    assert "Google Flights: no fare at or under EUR 250." in result.stdout
+    assert "Google Flights: no fare at or under USD 250." in result.stdout
+
+
+# Off USD, or past an int32, the page is fetched uncapped, so an empty board is
+# Google having no rows at all.
+_UNASKED_CAPS: list[tuple[list[str], int]] = [(["--currency", "EUR"], 250), ([], 2**31)]
+
+
+@pytest.mark.parametrize(("args", "cap"), _UNASKED_CAPS, ids=["eur", "past-int32"])
+def test_an_empty_board_the_page_was_not_asked_to_cap_is_not_blamed_on_it(
+    served: _Page, args: list[str], cap: int
+) -> None:
+    result = _search_cli("--max-price", str(cap), *args, "--fast")
+    assert result.exit_code == 0, result.output
+    assert "Google Flights: no results." in result.stdout
+    assert "at or under" not in result.output
 
 
 def test_the_enriched_paint_names_the_cap(capsys: pytest.CaptureFixture[str]) -> None:
@@ -426,6 +441,12 @@ def test_the_enriched_paint_names_the_cap(capsys: pytest.CaptureFixture[str]) ->
     opts = SearchOptions(max_price=250)
     cli._paint_first_gf_table({}, gfid.Board([]), legs=legs, top_n=5, awards_only=False, opts=opts)
     assert "no fare at or under USD 250; awaiting Matrix" in capsys.readouterr().err
+    for args, cap in _UNASKED_CAPS:
+        unasked = SearchOptions(max_price=cap, currency=args[1] if args else None)
+        cli._paint_first_gf_table(
+            {}, gfid.Board([]), legs=legs, top_n=5, awards_only=False, opts=unasked
+        )
+        assert "Google Flights: no results; awaiting Matrix" in capsys.readouterr().err
     cli._paint_first_gf_table(
         {}, gfid.Board([], dropped=3), legs=legs, top_n=5, awards_only=False, opts=opts
     )

@@ -712,6 +712,17 @@ def _tfs_slice(
 _TFS_MAX_PRICE = 2**31 - 1
 
 
+def search_page_cap(max_price: int | None, currency: str) -> int | None:
+    """The price cap a search page priced in `currency` is asked for (field 12),
+    or None where the row check alone applies it.
+
+    Only a USD page is asked. A EUR page asked for a cap served fewer of the
+    fares under it than its uncapped board (JFK-LAX at EUR 240: 34 of 45)."""
+    if currency != "USD" or max_price is None or max_price > _TFS_MAX_PRICE:
+        return None
+    return max_price
+
+
 def build_search_tfs(filters: Any, *, currency: str = "USD") -> bytes:
     """Encode an fli `FlightSearchFilters` as the search page's tfs= protobuf,
     for a page priced in `currency`.
@@ -757,13 +768,10 @@ def build_search_tfs(filters: Any, *, currency: str = "USD") -> bytes:
         "layover_min": layover.min_duration if layover else None,
         "layover_max": layover.max_duration if layover else None,
     }
-    # Only a USD page is asked for the cap. A EUR page asked for one served
-    # fewer of the fares under it than its uncapped board (JFK-LAX at EUR 240:
-    # 34 of 45), so elsewhere the row check alone applies it.
-    price_limit = filters.price_limit if currency == "USD" else None
-    max_price = price_limit.max_price if price_limit is not None else None
-    if max_price is not None and max_price > _TFS_MAX_PRICE:
-        max_price = None
+    price_limit = filters.price_limit
+    max_price = search_page_cap(
+        price_limit.max_price if price_limit is not None else None, currency
+    )
     bags = filters.bags
     return _encode_gflight_pinned_tfs(
         slices=[

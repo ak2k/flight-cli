@@ -147,8 +147,10 @@ Both are top-level fields, written after the cabin (9) and before 14.
   applies the cap. Every row is still held to it:
   `routing_keep` drops a row priced over the cap, unpriced, or priced in
   another currency, on every board, and an emptied board is reported as not
-  matching "a price cap of USD 250". N is compared with the printed price,
-  which for a party is the total.
+  matching "a price cap of USD 250". A board Google served empty says "no fare
+  at or under USD 250" only when the page was asked for the cap; one fetched
+  uncapped says "no results". N is compared with the printed price, which for
+  a party is the total.
 - Matrix has no price input. `cli._price_capped` cuts its page to the fares
   under the cap before the pick, the fare rules, the awards, the links and the
   enriched merge read it; Matrix answers in price order, so the cut loses no
