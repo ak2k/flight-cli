@@ -4546,10 +4546,19 @@ def _run_gflight_path_multi(
     sel: ProviderSelection,
     gf_mode: GfTransportMode = TRANSPORT_HTTP,
     gf_headed: bool = False,
-) -> None:
+    matrix_fallback: bool = False,
+) -> dict[Cabin, int] | None:
     """Google Flights multi-cabin: N cabin queries → join → render.
 
-    Parallel on rung 1 and serial on rung 2; `_run_gflight_multi` chooses."""
+    Parallel on rung 1 and serial on rung 2; `_run_gflight_multi` chooses.
+
+    Returns None once it has answered. When the routing filter emptied any
+    cabin's board and `matrix_fallback` is set, it prints nothing to stdout and
+    no per-cabin line, and returns each emptied cabin with the count of rows the
+    filter dropped from it, for the caller to hand the WHOLE search to Matrix: a
+    per-cabin hand-off would put Google's rows and Matrix's documents in one
+    answer and join prices from two sources. A cabin Google served nothing for
+    is Google's answer and is not handed on."""
     # Widen per-cabin queries so the join has overlap; see _bumped_query_top_n.
     query_top_n = _bumped_query_top_n(top_n, len(cabins))
     # The user's count, not the bumped one. The bump widens the pool each cabin
@@ -4574,12 +4583,21 @@ def _run_gflight_path_multi(
     if not fli_by_cabin:
         err.print("[red]All Google Flights cabin queries failed.[/]")
         raise typer.Exit(1)
-    for cab, cab_rows in fli_by_cabin.items():
-        if not cab_rows and getattr(cab_rows, "dropped", 0):
-            err.print(
-                f"[yellow]Google Flights {_safe_text(cab.value)}: "
-                "no itinerary matched the routing.[/]"
-            )
+    # In the order the cabins were asked for; the fan-out fills `fli_by_cabin`
+    # in the order they finish.
+    emptied: dict[Cabin, int] = {
+        cab: dropped
+        for cab in cabins
+        if cab in fli_by_cabin
+        and not fli_by_cabin[cab]
+        and (dropped := getattr(fli_by_cabin[cab], "dropped", 0))
+    }
+    if emptied and matrix_fallback:
+        return emptied
+    for cab in emptied:
+        err.print(
+            f"[yellow]Google Flights {_safe_text(cab.value)}: no itinerary matched the routing.[/]"
+        )
 
     if json_out and not run_pp:
         out: dict[str, Any] = {}
@@ -4596,7 +4614,7 @@ def _run_gflight_path_multi(
                 cab_dumped.append(dumped if isinstance(r, tuple) else dumped[0])
             out[cab.value] = cab_dumped
         sys.stdout.write(json.dumps(out, indent=2, default=str))
-        return
+        return None
 
     results_by_cabin = _gflight_to_search_result_per_cabin(fli_by_cabin)
     rows = _merge_cabins(
@@ -4624,6 +4642,7 @@ def _run_gflight_path_multi(
             seats_sources=sel.seats_sources(),
             cash_per_cabin=_cash_per_cabin_multi(rows),
         )
+    return None
 
 
 def _merge_results_into_one(
@@ -5473,7 +5492,7 @@ def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes th
         # Re-testing `routing or extension` here would drop it to Matrix with no
         # reason printed.
         if resolved == BACKEND_GFLIGHT:
-            _run_gflight_path_multi(
+            emptied = _run_gflight_path_multi(
                 legs=legs,
                 opts=opts,
                 cabins=cabins_tuple,
@@ -5484,8 +5503,17 @@ def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes th
                 sel=sel,
                 gf_mode=gf_mode,
                 gf_headed=gf_headed,
+                matrix_fallback=backend == BACKEND_AUTO,
             )
-            return
+            if emptied is None:
+                return
+            reasons = ", ".join(
+                f"{cab.value} ({dropped:d} rows filtered out)" for cab, dropped in emptied.items()
+            )
+            err.print(
+                f"[dim]Using Matrix: no Google Flights itinerary matched the routing "
+                f"in {_safe_text(reasons)}.[/]"
+            )
         _run_matrix_path_multi(
             legs=legs,
             opts=opts,

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import json
+import sys
 import urllib.parse
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
@@ -743,3 +744,131 @@ def test_a_cabin_the_routing_emptied_says_so(
     )
     err = " ".join(capsys.readouterr().err.split())
     assert "Google Flights COACH: no itinerary matched the routing" in err
+
+
+# ──────────────────── multi-cabin: the empty filtered answer ───────────────
+
+
+def _multi_cabin(*extra: str) -> list[str]:
+    return [
+        *_SEARCH,
+        "JFK",
+        "LAX",
+        "--dep",
+        _DEP.isoformat(),
+        "--cabin",
+        "economy,business",
+        "--routing",
+        "O:LH+",
+        "--fast",
+        "--format",
+        "json",
+        *extra,
+    ]
+
+
+def _matrix_multi(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Cabin, ...]]:
+    """Stub the Matrix multi-cabin path. Each run records the cabins it was
+    asked for and writes a marker document, so stdout says whose answer it is."""
+    ran: list[tuple[Cabin, ...]] = []
+
+    def _matrix(*, cabins: tuple[Cabin, ...], **_kw: object) -> None:
+        ran.append(cabins)
+        sys.stdout.write('{"answered_by": "matrix"}')
+
+    monkeypatch.setattr(cli, "_run_matrix_path_multi", _matrix)
+    return ran
+
+
+def _boards_per_cabin(monkeypatch: pytest.MonkeyPatch, boards: dict[Cabin, list[Any]]) -> None:
+    """Google answers each cabin's query with its own board."""
+
+    def _gf(_legs: object, opts: SearchOptions, *_a: object) -> list[Any]:
+        return boards[opts.cabin]
+
+    monkeypatch.setattr(cli, "_gflight_results", _gf)
+
+
+def test_under_auto_a_multi_cabin_search_the_routing_emptied_goes_to_matrix(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`O:LH+` empties the JFK-LAX board in both cabins. Auto hands the search
+    to Matrix, as it does a single cabin, instead of answering with two empty
+    cabins."""
+    gf_session(_served(_LAX))
+    ran = _matrix_multi(monkeypatch)
+    result = CliRunner().invoke(cli.app, _multi_cabin())
+    assert result.exit_code == 0, result.output
+    assert ran == [(Cabin.COACH, Cabin.BUSINESS)]
+    assert json.loads(result.stdout) == {"answered_by": "matrix"}
+    err = " ".join(result.stderr.split())
+    assert (
+        "Using Matrix: no Google Flights itinerary matched the routing in "
+        "COACH (95 rows filtered out), BUSINESS (95 rows filtered out)."
+    ) in err
+    assert "Google Flights COACH:" not in err
+    assert "Google Flights BUSINESS:" not in err
+
+
+def _partial(monkeypatch: pytest.MonkeyPatch, *, business_dropped: int) -> None:
+    """COACH served three rows; BUSINESS came back empty, with
+    `business_dropped` rows removed by the routing filter."""
+    rows = list(_board(_served(_LAX))[:3])
+    _boards_per_cabin(
+        monkeypatch,
+        {
+            Cabin.COACH: gfid.Board(rows),
+            Cabin.BUSINESS: gfid.Board(dropped=business_dropped),
+        },
+    )
+
+
+def test_under_auto_one_emptied_cabin_sends_every_cabin_to_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Matrix answers the whole search, COACH included: one document holds one
+    backend's cabins, and its prices come from one source."""
+    _partial(monkeypatch, business_dropped=7)
+    ran = _matrix_multi(monkeypatch)
+    result = CliRunner().invoke(cli.app, _multi_cabin())
+    assert result.exit_code == 0, result.output
+    assert ran == [(Cabin.COACH, Cabin.BUSINESS)]
+    assert json.loads(result.stdout) == {"answered_by": "matrix"}
+    err = " ".join(result.stderr.split())
+    assert (
+        "Using Matrix: no Google Flights itinerary matched the routing in "
+        "BUSINESS (7 rows filtered out)."
+    ) in err
+
+
+def test_under_auto_a_cabin_google_served_nothing_for_stays_on_google(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty board the filter removed nothing from is Google's answer on
+    every backend."""
+    _partial(monkeypatch, business_dropped=0)
+    ran = _matrix_multi(monkeypatch)
+    result = CliRunner().invoke(cli.app, _multi_cabin())
+    assert result.exit_code == 0, result.output
+    assert ran == []
+    doc = json.loads(result.stdout)
+    assert len(doc["COACH"]) == 3
+    assert doc["BUSINESS"] == []
+    assert "Using Matrix" not in result.stderr
+
+
+def test_under_explicit_gflight_an_emptied_cabin_says_so_and_stays_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _partial(monkeypatch, business_dropped=7)
+    ran = _matrix_multi(monkeypatch)
+    result = CliRunner().invoke(cli.app, _multi_cabin("--backend", "gflight"))
+    assert result.exit_code == 0, result.output
+    assert ran == []
+    doc = json.loads(result.stdout)
+    assert len(doc["COACH"]) == 3
+    assert doc["BUSINESS"] == []
+    err = " ".join(result.stderr.split())
+    assert "Google Flights BUSINESS: no itinerary matched the routing." in err
+    assert "Google Flights COACH:" not in err
+    assert "Using Matrix" not in err
