@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from . import _gf_browser
 from ._gf_browser import Control
-from ._gf_errors import GfBackendError, GfPageShapeError
+from ._gf_errors import GfBackendError, GfBrowserUnavailableError, GfPageShapeError
 from ._gflight_ids import (
     _rows_from_page_html,  # pyright: ignore[reportPrivateUsage]
     search_page_url,
@@ -182,6 +182,17 @@ def _refuse_a_wall(page: PageFetch) -> None:
         _rows_from_page_html(page)
 
 
+class _WallCheck:
+    """`_refuse_a_wall`, remembering whether the page got past it."""
+
+    def __init__(self) -> None:
+        self.passed = False
+
+    def __call__(self, page: PageFetch) -> None:
+        _refuse_a_wall(page)
+        self.passed = True
+
+
 def _envelope_rows(body: str) -> list[Any]:
     rows: list[Any] = []
     text = body.removeprefix(_XSSI_GUARD)
@@ -282,6 +293,11 @@ def price_graph(search: CalendarSearch, *, headed: bool, pages: int = _MAX_PAGES
     because it differs by page. Paging stops on a graph that covers nothing
     from its opening date on, and after `pages` loads.
 
+    A page that passed the wall check and then drew no graph in time is loaded
+    once more, from the same budget: Google serves such a page now and then, and
+    loading it again is not asking a wall again. A wall, a failed navigation and
+    any answer the graph gave are raised as they are.
+
     The caller arms `interrupt_guard` and holds `session_scope` around this."""
     window = search.window
     trip_length = window.duration_min if len(search.legs) > 1 else None
@@ -289,11 +305,24 @@ def price_graph(search: CalendarSearch, *, headed: bool, pages: int = _MAX_PAGES
     found: dict[date, GraphCell] = {}
     cursor = window.start
     loads = 0
-    for _ in range(pages):
+    missed = False
+    while True:
+        if loads >= pages:
+            raise GfPriceGraphError(
+                f"the window needs more than {pages} price-graph pages; narrow --start/--end"
+            )
         loads += 1
-        captured = session.capture(
-            page_url(search, cursor), _is_graph_rpc, click=_PRICE_GRAPH, check_page=_refuse_a_wall
-        )
+        check = _WallCheck()
+        try:
+            captured = session.capture(
+                page_url(search, cursor), _is_graph_rpc, click=_PRICE_GRAPH, check_page=check
+            )
+        except GfBrowserUnavailableError:
+            if not check.passed or missed or loads >= pages:
+                raise
+            missed = True
+            continue
+        missed = False
         if not HTTPStatus.OK <= captured.status < HTTPStatus.MULTIPLE_CHOICES:
             raise GfPriceGraphError(
                 f"Google Flights' price graph request returned HTTP {captured.status}"
@@ -310,10 +339,6 @@ def price_graph(search: CalendarSearch, *, headed: bool, pages: int = _MAX_PAGES
         if page.last >= window.end:
             break
         cursor = page.last + timedelta(days=1)
-    else:
-        raise GfPriceGraphError(
-            f"the window needs more than {pages} price-graph pages; narrow --start/--end"
-        )
     if not found:
         raise GfPriceGraphError("Google Flights' price graph priced no date in the window")
     return PriceGraph(trip_length, tuple(found[d] for d in sorted(found)), loads)

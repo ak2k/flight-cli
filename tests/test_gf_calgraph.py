@@ -14,7 +14,7 @@ import pathlib
 import signal
 import sys
 from datetime import date, timedelta
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn
 
 import pytest
 import typer
@@ -25,7 +25,7 @@ from flight_cli import _gf_calgraph as cg
 from flight_cli import cli
 from flight_cli._gf_browser import CapturedResponse
 from flight_cli._gf_common import PageFetch
-from flight_cli._gf_errors import GfBrowserUnavailableError, GfThrottledError
+from flight_cli._gf_errors import GfBrowserUnavailableError, GfConsentError, GfThrottledError
 from flight_cli.domain import (
     Cabin,
     CalendarSearch,
@@ -156,13 +156,46 @@ def test_an_unpriced_date_counts_toward_coverage_but_is_not_a_fare() -> None:
 # ───────────────────────────── paging across a window ─────────────────────────
 
 
-class _FakeSession:
-    """Answers each capture with the next body, recording what was asked."""
+# What the wall check is handed on a results page that loaded: no rows it can
+# find, which the check lets through.
+_LOADED = PageFetch(
+    html="<html>no rows</html>", final_url="https://www.google.com/travel/flights", status_code=200
+)
+_SORRY = PageFetch(
+    html="<html>unusual traffic</html>",
+    final_url="https://www.google.com/sorry/index?continue=x",
+    status_code=200,
+)
+_CONSENT = PageFetch(
+    html="<html>before you continue</html>",
+    final_url="https://consent.google.com/ml?continue=x",
+    status_code=200,
+)
+_CLICK_TIMEOUT = (
+    "Chrome could not click 'Price graph' on Google Flights' page: "
+    "Locator.click: Timeout 20000ms exceeded."
+)
 
-    def __init__(self, answers: list[tuple[int, str]]) -> None:
+
+class _Unloaded(NamedTuple):
+    """A capture that fails before there is a page to check."""
+
+    error: Exception
+
+
+_Answer = tuple[int, str] | PageFetch | Exception | _Unloaded
+
+
+class _FakeSession:
+    """Answers each capture with the next answer, recording what was asked.
+
+    A `(status, body)` or an exception comes from a page that loaded, so the
+    wall check sees `_LOADED` first; a `PageFetch` is the page the check sees,
+    and has to be refused there."""
+
+    def __init__(self, answers: list[_Answer]) -> None:
         self._answers = answers
         self.calls: list[tuple[str, gfb.Control | None]] = []
-        self.checks: list[Callable[..., object] | None] = []
 
     def capture(
         self,
@@ -170,18 +203,26 @@ class _FakeSession:
         wanted: Callable[[str], bool],
         *,
         click: gfb.Control | None = None,
-        check_page: Callable[..., object] | None = None,
+        check_page: Callable[[PageFetch], object] | None = None,
     ) -> CapturedResponse:
         assert wanted(_GRAPH_URL)
         assert not wanted("https://www.google.com/_/FlightsFrontendUi/data/x/GetCalendarGrid")
         self.calls.append((url, click))
-        self.checks.append(check_page)
-        status, body = self._answers[len(self.calls) - 1]
+        answer = self._answers[len(self.calls) - 1]
+        if isinstance(answer, _Unloaded):
+            raise answer.error
+        assert check_page is not None
+        check_page(answer if isinstance(answer, PageFetch) else _LOADED)
+        if isinstance(answer, PageFetch):
+            raise AssertionError(f"the wall check let {answer.final_url} through")
+        if isinstance(answer, Exception):
+            raise answer
+        status, body = answer
         return CapturedResponse(url=_GRAPH_URL, status=status, body=body)
 
 
-def _serve(monkeypatch: pytest.MonkeyPatch, *bodies: str | tuple[int, str]) -> _FakeSession:
-    fake = _FakeSession([b if isinstance(b, tuple) else (200, b) for b in bodies])
+def _serve(monkeypatch: pytest.MonkeyPatch, *bodies: str | _Answer) -> _FakeSession:
+    fake = _FakeSession([(200, b) if isinstance(b, str) else b for b in bodies])
 
     def _session(*, headed: bool) -> _FakeSession:
         del headed
@@ -201,7 +242,6 @@ def test_one_load_covers_a_window_inside_the_graphs_span(monkeypatch: pytest.Mon
     graph = cg.price_graph(search, headed=False)
     assert [url for url, _ in fake.calls] == ["page:2026-10-20"]
     assert fake.calls[0][1] == gfb.Control("button", "Price graph")
-    assert fake.checks[0] is cg._refuse_a_wall
     # Clipped to the window: the graph opened seven days early and ran past it.
     assert graph.cells[0].departure == date(2026, 10, 20)
     assert graph.cells[-1].departure == date(2026, 11, 2)
@@ -265,6 +305,83 @@ def test_a_graph_counts_the_loads_it_took(monkeypatch: pytest.MonkeyPatch) -> No
     _serve(monkeypatch, _fixture("ow_jfk_lax.body"))
     search = _search(start=date(2026, 10, 20), end=date(2026, 11, 2))
     assert cg.price_graph(search, headed=False).loads == 1
+
+
+# ───────────────────────────── a page that draws no graph ────────────────────
+
+
+def test_a_page_that_drew_no_graph_is_loaded_once_more(monkeypatch: pytest.MonkeyPatch) -> None:
+    miss = GfBrowserUnavailableError(_CLICK_TIMEOUT)
+    fake = _serve(monkeypatch, miss, _fixture("ow_jfk_lax.body"))
+    search = _search(start=date(2026, 10, 20), end=date(2026, 11, 2))
+    graph = cg.price_graph(search, headed=False)
+    assert [url for url, _ in fake.calls] == ["page:2026-10-20", "page:2026-10-20"]
+    assert graph.loads == 2
+    assert len(graph.cells) == 14
+
+
+def test_a_second_miss_on_the_same_page_surfaces(monkeypatch: pytest.MonkeyPatch) -> None:
+    miss = GfBrowserUnavailableError(_CLICK_TIMEOUT)
+    fake = _serve(monkeypatch, miss, miss, _fixture("ow_jfk_lax.body"))
+    with pytest.raises(GfBrowserUnavailableError) as e:
+        cg.price_graph(_search(), headed=False)
+    assert e.value.reason == _CLICK_TIMEOUT
+    assert len(fake.calls) == 2
+
+
+def test_each_page_of_a_window_gets_its_own_second_load(monkeypatch: pytest.MonkeyPatch) -> None:
+    miss = GfBrowserUnavailableError(_CLICK_TIMEOUT)
+    second = _body(_cells(date(2026, 11, 13), 45, price=300.0))
+    fake = _serve(monkeypatch, miss, _fixture("ow_jfk_lax.body"), miss, second)
+    graph = cg.price_graph(_search(start=date(2026, 10, 20), end=date(2026, 12, 10)), headed=False)
+    assert [url for url, _ in fake.calls] == [
+        "page:2026-10-20",
+        "page:2026-10-20",
+        "page:2026-11-20",
+        "page:2026-11-20",
+    ]
+    assert graph.loads == 4
+
+
+def test_the_second_load_is_spent_from_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    miss = GfBrowserUnavailableError(_CLICK_TIMEOUT)
+    fake = _serve(monkeypatch, miss, _fixture("ow_jfk_lax.body"))
+    with pytest.raises(GfBrowserUnavailableError):
+        cg.price_graph(_search(), headed=False, pages=1)
+    assert len(fake.calls) == 1
+    fake = _serve(monkeypatch, miss, _fixture("ow_jfk_lax.body"), _fixture("ow_jfk_lax.body"))
+    window = _search(start=date(2026, 10, 20), end=date(2026, 12, 10))
+    with pytest.raises(cg.GfPriceGraphError, match="more than 2 price-graph pages"):
+        cg.price_graph(window, headed=False, pages=2)
+    assert len(fake.calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("answer", "error"),
+    [
+        (_SORRY, GfThrottledError),
+        (_CONSENT, GfConsentError),
+        ((429, ""), cg.GfPriceGraphError),
+        ((500, "oops"), cg.GfPriceGraphError),
+        ("<html>not an envelope</html>", cg.GfPriceGraphError),
+        (_fixture("error13.body"), cg.GfPriceGraphError),
+        (
+            _Unloaded(GfBrowserUnavailableError("Chrome could not load Google Flights' page: x.")),
+            GfBrowserUnavailableError,
+        ),
+    ],
+    ids=["throttle", "consent", "http-429", "http-500", "unreadable", "error-13", "not-loaded"],
+)
+def test_a_wall_an_answer_or_a_page_that_never_loaded_is_not_loaded_again(
+    answer: str | _Answer, error: type[Exception], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Loading a wall again spends the budget that put it there; an answer the
+    graph came back with is Google's, not a page that failed to draw; and a
+    navigation that failed says nothing a second one would not."""
+    fake = _serve(monkeypatch, answer, _fixture("ow_jfk_lax.body"))
+    with pytest.raises(error):
+        cg.price_graph(_search(start=date(2026, 10, 20), end=date(2026, 11, 2)), headed=False)
+    assert len(fake.calls) == 1
 
 
 def test_one_graph_per_trip_length_within_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
