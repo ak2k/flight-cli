@@ -84,7 +84,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Iterable, Sequence
 
     from ._gf_booking import BookingOptions
-    from ._gf_calgraph import PriceGraph
+    from ._gf_calgraph import GraphRange, LostLength, PriceGraph
     from ._gf_explore import Destination, ExploreAnswer, TripLength
     from ._gflight_ids import Board, PriceInsight
     from .models import (
@@ -1961,12 +1961,13 @@ def _run_calendar_beside_graph(
     from ._gf_browser import interrupt_guard, session_scope, stop_all_drivers  # noqa: PLC0415
     from ._gf_calgraph import price_graphs  # noqa: PLC0415 — the gate already loaded it
 
-    def _read_graphs() -> list[PriceGraph]:
+    def _read_graphs() -> GraphRange:
         with session_scope():
             return price_graphs(search, headed=headed)
 
     matrix_exit: typer.Exit | None = None
-    graphs: list[PriceGraph] = []
+    graphs: Sequence[PriceGraph] = ()
+    lost: Sequence[LostLength] = ()
     failure: Exception | None = None
     try:
         with interrupt_guard(), ThreadPoolExecutor(max_workers=1) as pool:
@@ -1983,7 +1984,7 @@ def _run_calendar_beside_graph(
                 stop_all_drivers()
                 raise
             try:
-                graphs = job.result()
+                graphs, lost = job.result()
             except Exception as e:  # noqa: BLE001 — every cause is one line; Matrix stands
                 failure = e
     except* KeyboardInterrupt:
@@ -1998,7 +1999,10 @@ def _run_calendar_beside_graph(
         except Exception as e:  # noqa: BLE001 — Google's table must not fail Matrix's run
             failure = e
     if failure is not None:
-        _report_graph_failure(failure)
+        _report_graph_failure(_graph_failure_text(failure))
+    elif lost:
+        named = (f"{nights}-night trips: {_graph_failure_text(cause)}" for nights, cause in lost)
+        _report_graph_failure(" ".join(named))
     if matrix_exit is not None:
         raise matrix_exit
 
@@ -2031,8 +2035,8 @@ def _show_graphs(
     )
 
 
-def _report_graph_failure(cause: Exception) -> None:
-    """The one line for a price graph that could not be shown beside Matrix.
+def _graph_failure_text(cause: Exception) -> str:
+    """A price-graph failure in the words of the line that reports it.
 
     A launch or install remedy is kept. The default one offers `--backend
     matrix`, which the calendar has no use for; the line ends by offering the
@@ -2044,8 +2048,12 @@ def _report_graph_failure(cause: Exception) -> None:
         text = "Google Flights rate-limited the browser rung."
     else:
         text = str(cause).strip() or type(cause).__name__
-    if not text.endswith((".", "!", "?")):
-        text = f"{text}."
+    return text if text.endswith((".", "!", "?")) else f"{text}."
+
+
+def _report_graph_failure(text: str) -> None:
+    """The one line for a price graph, or the trip lengths of one, that could not
+    be shown beside Matrix."""
     err.print(
         f"[yellow]Google Flights price graph not shown:[/] {_safe_text(text)} "
         "[dim]--gf-transport http skips Chrome.[/]"

@@ -379,6 +379,18 @@ def test_a_trip_length_range_asks_each_length_with_the_loads_left(
     assert len({s["thread"] for s in seen}) == 1
 
 
+def _google_part(result: Result, base: Result) -> str:
+    """What the run printed after Matrix's own output, flattened."""
+    assert result.stdout.startswith(base.stdout)
+    return _flat(result.stdout[len(base.stdout) :])
+
+
+def _missed(loads: int = 2) -> cg.GfGraphStalledError:
+    """A length whose page drew no graph on either of its loads."""
+    click = "Chrome could not click 'Price graph' on Google Flights' page: Locator.click: Timeout."
+    return cg.GfGraphStalledError(GfBrowserUnavailableError(click), loads=loads)
+
+
 def test_a_length_no_load_is_left_for_is_named_not_dropped(
     monkeypatch: pytest.MonkeyPatch, matrix: None
 ) -> None:
@@ -388,9 +400,91 @@ def test_a_length_no_load_is_left_for_is_named_not_dropped(
     err = _flat(result.stderr)
     assert result.exit_code == 0, result.output
     assert [s["nights"] for s in seen] == [5, 6]
+    assert "┃ departure ┃ min (USD) ┃ 5n ┃ 6n ┃" in _google_part(result, base)
     assert err.count(_NOT_SHOWN) == 1
-    assert "7-night trips: no price-graph load of the 8 was left." in err
+    assert f"{_NOT_SHOWN} 7-night trips: no price-graph load of the 8 was left." in err
+
+
+@pytest.mark.parametrize(
+    ("lost", "columns"),
+    [(7, "┃ 5n ┃ 6n ┃"), (6, "┃ 5n ┃ 7n ┃"), (5, "┃ 6n ┃ 7n ┃")],
+    ids=["last", "middle", "first"],
+)
+def test_a_length_whose_page_drew_no_graph_leaves_the_others_and_is_named(
+    lost: int, columns: str, monkeypatch: pytest.MonkeyPatch, matrix: None
+) -> None:
+    """Its column is absent rather than a column of dashes nobody priced, and the
+    one line names it with the browser's own words."""
+    answers: dict[int | None, cg.PriceGraph | BaseException] = {
+        n: _graph(n, (0, 300.0 + n), (1, 310.0 + n)) for n in (5, 6, 7)
+    }
+    answers[lost] = _missed()
+    seen = _graphs_are(monkeypatch, answers)
+    base = _run("NYC", "LON", "-d", "5-7", "--gf-transport", "http")
+    result = _run("NYC", "LON", "-d", "5-7")
+    err = _flat(result.stderr)
+    google = _google_part(result, base)
+    assert result.exit_code == 0, result.output
+    assert [s["nights"] for s in seen] == [5, 6, 7]
+    assert f"┃ departure ┃ min (USD) {columns}" in google
+    assert f"{lost}n" not in google
+    assert err.count(_NOT_SHOWN) == 1
+    assert (
+        f"{_NOT_SHOWN} {lost}-night trips: Chrome could not click 'Price graph' on "
+        "Google Flights' page: Locator.click: Timeout. --gf-transport http skips Chrome."
+    ) in err
+
+
+def test_a_wall_on_one_length_names_it_and_the_lengths_not_asked_after_it(
+    monkeypatch: pytest.MonkeyPatch, matrix: None
+) -> None:
+    seen = _graphs_are(
+        monkeypatch,
+        {5: _graph(5, (0, 305.0)), 6: GfThrottledError("x"), 7: _graph(7, (0, 307.0))},
+    )
+    base = _run("NYC", "LON", "-d", "5-7", "--gf-transport", "http")
+    result = _run("NYC", "LON", "-d", "5-7")
+    err = _flat(result.stderr)
+    google = _google_part(result, base)
+    assert result.exit_code == 0, result.output
+    assert [s["nights"] for s in seen] == [5, 6]
+    assert google.startswith("1 priced days · 5-night round trip · cheapest: 305 (USD)")
+    assert err.count(_NOT_SHOWN) == 1
+    assert (
+        f"{_NOT_SHOWN} 6-night trips: Google Flights rate-limited the browser rung. "
+        "7-night trips: not asked after 6-night trips failed."
+    ) in err
+
+
+@pytest.mark.parametrize(
+    ("answers", "said"),
+    [
+        (
+            {n: _missed() for n in (5, 6, 7)},
+            f"{_NOT_SHOWN} Chrome could not click 'Price graph' on Google Flights' page: "
+            "Locator.click: Timeout. --gf-transport http skips Chrome.",
+        ),
+        (
+            {5: cg.GfPriceGraphError("Google Flights answered the price graph with error 13")},
+            f"{_NOT_SHOWN} 5-night trips: Google Flights answered the price graph with error 13.",
+        ),
+    ],
+    ids=["every-page-missed", "error-row"],
+)
+def test_a_range_with_no_length_priced_keeps_its_one_line(
+    answers: dict[int | None, cg.PriceGraph | BaseException],
+    said: str,
+    monkeypatch: pytest.MonkeyPatch,
+    matrix: None,
+) -> None:
+    _graphs_are(monkeypatch, answers)
+    base = _run("NYC", "LON", "-d", "5-7", "--gf-transport", "http")
+    result = _run("NYC", "LON", "-d", "5-7")
+    err = _flat(result.stderr)
+    assert result.exit_code == 0, result.output
     assert result.stdout == base.stdout
+    assert err.count(_NOT_SHOWN) == 1
+    assert said in err
 
 
 # ───────────────────────────── Google's table ────────────────────────────────

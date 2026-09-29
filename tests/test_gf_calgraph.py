@@ -323,9 +323,10 @@ def test_a_page_that_drew_no_graph_is_loaded_once_more(monkeypatch: pytest.Monke
 def test_a_second_miss_on_the_same_page_surfaces(monkeypatch: pytest.MonkeyPatch) -> None:
     miss = GfBrowserUnavailableError(_CLICK_TIMEOUT)
     fake = _serve(monkeypatch, miss, miss, _fixture("ow_jfk_lax.body"))
-    with pytest.raises(GfBrowserUnavailableError) as e:
+    with pytest.raises(cg.GfGraphStalledError) as e:
         cg.price_graph(_search(), headed=False)
     assert e.value.reason == _CLICK_TIMEOUT
+    assert e.value.loads == 2
     assert len(fake.calls) == 2
 
 
@@ -346,8 +347,9 @@ def test_each_page_of_a_window_gets_its_own_second_load(monkeypatch: pytest.Monk
 def test_the_second_load_is_spent_from_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     miss = GfBrowserUnavailableError(_CLICK_TIMEOUT)
     fake = _serve(monkeypatch, miss, _fixture("ow_jfk_lax.body"))
-    with pytest.raises(GfBrowserUnavailableError):
+    with pytest.raises(cg.GfGraphStalledError) as e:
         cg.price_graph(_search(), headed=False, pages=1)
+    assert e.value.loads == 1
     assert len(fake.calls) == 1
     fake = _serve(monkeypatch, miss, _fixture("ow_jfk_lax.body"), _fixture("ow_jfk_lax.body"))
     window = _search(start=date(2026, 10, 20), end=date(2026, 12, 10))
@@ -379,8 +381,9 @@ def test_a_wall_an_answer_or_a_page_that_never_loaded_is_not_loaded_again(
     graph came back with is Google's, not a page that failed to draw; and a
     navigation that failed says nothing a second one would not."""
     fake = _serve(monkeypatch, answer, _fixture("ow_jfk_lax.body"))
-    with pytest.raises(error):
+    with pytest.raises(error) as e:
         cg.price_graph(_search(start=date(2026, 10, 20), end=date(2026, 11, 2)), headed=False)
+    assert not isinstance(e.value, cg.GfGraphStalledError)
     assert len(fake.calls) == 1
 
 
@@ -397,29 +400,118 @@ def test_one_graph_per_trip_length_within_the_budget(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(cg, "price_graph", _price_graph)
     one_way = _search()
-    assert [g.trip_length for g in cg.price_graphs(one_way, headed=False)] == [None]
+    assert [g.trip_length for g in cg.price_graphs(one_way, headed=False).graphs] == [None]
     assert asked == [(None, cg._MAX_PAGES)]
     asked.clear()
-    window = one_way.window.model_copy(update={"duration_min": 5, "duration_max": 7})
-    ranged = _search(nights=5).model_copy(update={"window": window})
-    with pytest.raises(cg.GfPriceGraphError, match=r"^7-night trips: no price-graph load"):
-        cg.price_graphs(ranged, headed=False)
+    got = cg.price_graphs(_ranged(), headed=False)
     assert asked == [(5, 8), (6, 4)]
+    assert [g.trip_length for g in got.graphs] == [5, 6]
+    assert _lost(got) == [(7, "no price-graph load of the 8 was left")]
 
 
-def test_a_failing_length_fails_the_range_and_is_named(monkeypatch: pytest.MonkeyPatch) -> None:
+def _ranged() -> CalendarSearch:
+    window = _search().window.model_copy(update={"duration_min": 5, "duration_max": 7})
+    return _search(nights=5).model_copy(update={"window": window})
+
+
+def _lost(got: cg.GraphRange) -> list[tuple[int | None, str]]:
+    return [(lost.nights, str(lost.cause)) for lost in got.lost]
+
+
+def _lengths_answer(
+    monkeypatch: pytest.MonkeyPatch, answers: dict[int, cg.PriceGraph | Exception]
+) -> list[tuple[int, int]]:
+    """Stand in for each trip length's graph, recording the loads it was given."""
+    asked: list[tuple[int, int]] = []
+
     def _price_graph(search: CalendarSearch, *, headed: bool, pages: int) -> cg.PriceGraph:
-        del headed, pages
-        if search.window.duration_min == 6:
-            raise cg.GfPriceGraphError("error 13", code=13)
-        return cg.PriceGraph(search.window.duration_min, ())
+        del headed
+        asked.append((search.window.duration_min, pages))
+        answer = answers[search.window.duration_min]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
 
     monkeypatch.setattr(cg, "price_graph", _price_graph)
-    window = _search().window.model_copy(update={"duration_min": 5, "duration_max": 7})
-    ranged = _search(nights=5).model_copy(update={"window": window})
-    with pytest.raises(cg.GfPriceGraphError, match=r"^6-night trips: error 13$") as e:
-        cg.price_graphs(ranged, headed=False)
-    assert e.value.code == 13
+    return asked
+
+
+def _missed(loads: int) -> cg.GfGraphStalledError:
+    return cg.GfGraphStalledError(GfBrowserUnavailableError(_CLICK_TIMEOUT), loads=loads)
+
+
+def test_a_length_whose_page_drew_no_graph_is_lost_and_the_next_is_asked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The loads the lost length spent are spent: the next length has what is left."""
+    asked = _lengths_answer(
+        monkeypatch, {5: cg.PriceGraph(5, (), 1), 6: _missed(3), 7: cg.PriceGraph(7, (), 1)}
+    )
+    got = cg.price_graphs(_ranged(), headed=False)
+    assert asked == [(5, 8), (6, 7), (7, 4)]
+    assert [g.trip_length for g in got.graphs] == [5, 7]
+    assert _lost(got) == [(6, str(_missed(3)))]
+
+
+def test_any_other_failure_loses_its_length_and_the_ones_after_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wall, an error row or a Chrome that could not load the page would meet
+    the next length the same way, and asking it would spend a load to learn so."""
+    asked = _lengths_answer(
+        monkeypatch,
+        {
+            5: cg.PriceGraph(5, (), 1),
+            6: cg.GfPriceGraphError("error 13", code=13),
+            7: cg.PriceGraph(7, (), 1),
+        },
+    )
+    got = cg.price_graphs(_ranged(), headed=False)
+    assert [n for n, _ in asked] == [5, 6]
+    assert [g.trip_length for g in got.graphs] == [5]
+    assert _lost(got) == [(6, "error 13"), (7, "not asked after 6-night trips failed")]
+
+
+@pytest.mark.parametrize(
+    ("answers", "asked", "raised", "message"),
+    [
+        (
+            {5: cg.GfPriceGraphError("error 13", code=13)},
+            [5],
+            cg.GfPriceGraphError,
+            "5-night trips: error 13",
+        ),
+        (
+            {5: GfBrowserUnavailableError("Chrome could not load Google Flights' page: x.")},
+            [5],
+            GfBrowserUnavailableError,
+            "Chrome could not load Google Flights' page: x.",
+        ),
+        (
+            {5: _missed(2), 6: _missed(2), 7: GfThrottledError("rate-limited")},
+            [5, 6, 7],
+            cg.GfGraphStalledError,
+            _CLICK_TIMEOUT,
+        ),
+    ],
+    ids=["error-row", "chrome", "every-length"],
+)
+def test_a_range_that_priced_no_length_raises_its_first_failure_as_before(
+    answers: dict[int, cg.PriceGraph | Exception],
+    asked: list[int],
+    raised: type[Exception],
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The graph's own error is named with its length; a browser's is its own line."""
+    seen = _lengths_answer(monkeypatch, answers)
+    with pytest.raises(raised) as e:
+        cg.price_graphs(_ranged(), headed=False)
+    assert [n for n, _ in seen] == asked
+    shown = e.value.reason if isinstance(e.value, GfBrowserUnavailableError) else str(e.value)
+    assert shown == message
+    if isinstance(e.value, cg.GfPriceGraphError):
+        assert e.value.code == 13
 
 
 def test_a_graph_with_no_fare_in_the_window_is_a_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
