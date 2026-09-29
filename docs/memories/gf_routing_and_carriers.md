@@ -348,8 +348,10 @@ nonstop, dated by its departure day. A Matrix connection gets those dates from
 `_enrich.merge_results` when a Google row names the same flights, leaves on the
 same day and lands at the same local minute (the landing day alone does not date
 the last flight: one flight number flown at different hours on two days can land
-on the same day both times); a Matrix-only connection gets the unpinned search
-link, and `--sellers` refuses it with the `--fast` remedy.
+on the same day both times). Every Google row sharing the match key is tried,
+not only the first; two that qualify but date a flight differently lend nothing.
+A connection no Google row dates gets the unpinned search link, and `--sellers`
+refuses it with the `--fast` remedy.
 
 **And it keeps two different orders, because the two sets are ordered by
 different things.** A one-way board arrives ranked by Google — a composite of

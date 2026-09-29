@@ -174,3 +174,39 @@ def test_a_google_row_landing_at_the_same_minute_lends_its_dates() -> None:
 
 def test_a_one_minute_skew_between_the_sources_lends_no_dates() -> None:
     assert _dates_lent("2026-11-02T13:31:00", "2026-11-02T13:30-05:00") == []
+
+
+def test_the_google_row_that_is_the_same_trip_lends_its_dates_whatever_its_place() -> None:
+    """Two Google rows share the Matrix row's match key; only the second is its
+    trip. It lends the dates and the Google price, in either order."""
+    late = _nz_row("USD900.00", _nz(arrival=f"{_D1}T10:00:00", segment_dates=[_D, "2026-10-22"]))
+    same = _nz_row("USD910.00", _nz(arrival=f"{_D}T10:00:00", segment_dates=[_D, _D1]))
+    matrix = _sr(_nz_row("USD880.00", _nz(arrival=f"{_D}T10:00-10:00"), sid="sol-1"))
+    for google in (_sr(late, same), _sr(same, late)):
+        (row,) = merge_results(google, matrix)
+        assert row.source == "both"
+        assert row.itinerary.itinerary is not None
+        assert row.itinerary.itinerary.slices[0].segment_dates == [_D, _D1]
+        assert row.gf_price == "USD910.00"
+
+
+def _three_flights(segment_dates: list[str] | None = None) -> Slice:
+    return Slice(
+        flights=["AA1", "AA2", "AA3"],
+        departure="2026-11-01T07:00",
+        arrival="2026-11-03T09:00",
+        segment_dates=segment_dates or [],
+    )
+
+
+def test_two_google_rows_that_are_the_trip_on_other_days_lend_no_dates() -> None:
+    """Both land at Matrix's minute, but AA2 leaves on another day in each, and
+    Matrix states no day for it: neither row can say which one Matrix's is."""
+    a = _nz_row("USD700.00", _three_flights(["2026-11-01", "2026-11-01", "2026-11-03"]))
+    b = _nz_row("USD720.00", _three_flights(["2026-11-01", "2026-11-02", "2026-11-03"]))
+    matrix = _sr(_nz_row("USD690.00", _three_flights()))
+    for google in (_sr(a, b), _sr(b, a)):
+        (row,) = merge_results(google, matrix)
+        assert row.source == "both"
+        assert row.itinerary.itinerary is not None
+        assert row.itinerary.itinerary.slices[0].segment_dates == []
