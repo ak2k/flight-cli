@@ -62,7 +62,7 @@ Every result-printing command supports:
 - `--matrix-url` — print a deep-link that opens the same search in ITA Matrix's web UI
 - `--google-url` — print a structured Google Flights URL (`tfs=` protobuf) that opens directly to the search
 - `--pick N` — pin itinerary #N (1-based, as shown in the table) in the `--matrix-url` / `--google-url` deep links instead of the cheapest
-- `--currency EUR` — price in that currency on both backends (`search`, `calendar`, `detail`); a non-USD calendar skips the USD-only Google Flights date grid
+- `--currency EUR` — price in that currency on both backends (`search`, `calendar`, `detail`); a non-USD calendar is Matrix's alone, without the USD-only Google Flights price graph
 - `--fare-rules` (`search`) — after the table, print itinerary `--pick N`'s fare basis, booking codes and fare rules (penalties, changes, refunds) from Matrix
 - `--json` — machine-readable output
 - `--no-cache` — bypass the on-disk response cache (`~/.cache/flight-cli/`)

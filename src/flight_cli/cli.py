@@ -6170,19 +6170,23 @@ def calendar(
         "search page can carry (cabin, adults, stops up to 2); table or JSON. Reads "
         "the grid from the search page in a real Chrome (see [bold]--gf-transport[/]). "
         "Exits 1 rather than falling back, so a no-grid result is never mistaken for "
-        "a fast one.",
+        "a fast one. Without it, a table calendar prints the same graph after "
+        "Matrix's, one column per trip length of a range.",
         rich_help_panel=_GROUP_BACKEND,
     ),
     gf_transport: str | None = typer.Option(
         None,
         "--gf-transport",
         help=(
-            "How [bold]--fast[/] reaches Google Flights' price grid: [bold]auto[/] "
-            "(default) is browser; [bold]browser[/] opens the filtered search page in a "
-            "real Chrome (headless unless [bold]--gf-headed[/]), clicks Price graph and "
-            "reads the page's own response, a few seconds per five weeks of window; "
-            "[bold]http[/] calls the calendar RPC directly, which Google currently "
-            "answers with no data. Browser needs [bold]uv pip install "
+            "How Google Flights' price grid is read: [bold]auto[/] (default) is "
+            "browser; [bold]browser[/] opens the filtered search page in a real Chrome "
+            "(headless unless [bold]--gf-headed[/]), clicks Price graph and reads the "
+            "page's own response, a few seconds per five weeks of window. Under "
+            "[bold]--fast[/] that grid is the answer; without it the graph is read while "
+            "Matrix runs and printed after Matrix's calendar, and a Google failure is one "
+            "line on stderr. [bold]http[/] calls the calendar RPC directly, which Google "
+            "currently answers with no data, so without [bold]--fast[/] it is Matrix's "
+            "calendar alone and opens no Chrome. Browser needs [bold]uv pip install "
             # Escaped: rich reads `[browser]` as a style tag and deletes it.
             "'flight-cli\\[browser]'[/] and an installed Chrome."
         ),
@@ -6191,7 +6195,7 @@ def calendar(
     gf_headed: bool = typer.Option(
         False,
         "--gf-headed",
-        help="Show the Chrome window --gf-transport browser opens. Default: headless.",
+        help="Show the Chrome window that reads the price graph. Default: headless.",
         rich_help_panel=_GROUP_BACKEND,
     ),
     max_per_query: int = typer.Option(
