@@ -391,12 +391,11 @@ def page_budget_blocker(search: CalendarSearch) -> str | None:
     phrase completes "this is …"."""
     window = search.window
     days = (window.end - window.start).days + 1
-    loads = len(graph_lengths(search)) * -(-days // _PAGE_DAYS)
+    graphs = len(graph_lengths(search))
+    loads = graphs * -(-days // _PAGE_DAYS)
     if loads > _MAX_PAGES:
-        return (
-            f"a window and trip-length range needing {loads:d} price-graph loads "
-            f"(at most {_MAX_PAGES:d})"
-        )
+        what = "a window" if graphs == 1 else "a window and trip-length range"
+        return f"{what} needing {loads:d} price-graph loads (at most {_MAX_PAGES:d})"
     return None
 
 

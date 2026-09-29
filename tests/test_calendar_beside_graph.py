@@ -197,8 +197,13 @@ def test_airports_sets_and_metro_codes_are_asked_one_way_and_round_trip(
             _START + timedelta(days=30),
             "needing 10 price-graph loads (at most 8).",
         ),
+        (
+            ("NYC", "LON", "--one-way"),
+            _START + timedelta(days=258),
+            f"{_NOT_ASKED} a window needing 9 price-graph loads (at most 8).",
+        ),
     ],
-    ids=["currency", "tier-2", "times", "ten-loads"],
+    ids=["currency", "tier-2", "times", "ten-loads", "one-way-nine-loads"],
 )
 def test_a_calendar_the_graph_cannot_answer_says_so_and_runs_matrix_alone(
     args: tuple[str, ...], end: date, reason: str, monkeypatch: pytest.MonkeyPatch, matrix: None
@@ -227,6 +232,18 @@ def test_a_ten_load_window_is_refused_before_any_load() -> None:
     )
     one_way = search.model_copy(update={"legs": legs[:1]})
     assert cg.page_budget_blocker(one_way) is None  # a one-way is one graph
+
+
+@pytest.mark.parametrize("round_trip", [False, True], ids=["one-way", "one-trip-length"])
+def test_a_single_graph_refused_for_its_window_names_no_trip_length_range(
+    round_trip: bool,
+) -> None:
+    window = CalendarWindow(
+        start=_START, end=_START + timedelta(days=258), duration_min=7, duration_max=7
+    )
+    legs = (Leg.of("JFK", "LHR"), Leg.of("LHR", "JFK"))
+    search = CalendarSearch(legs=legs if round_trip else legs[:1], window=window)
+    assert cg.page_budget_blocker(search) == "a window needing 9 price-graph loads (at most 8)"
 
 
 def test_json_is_matrixs_document_alone_and_says_nothing(
