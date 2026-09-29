@@ -3849,7 +3849,13 @@ def _run_enriched_path(  # noqa: PLR0915 — one weave's outcome arms, read in o
     from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
 
     _pin_cap_note(legs=legs, top_n=top_n)
-    matrix_search = SpecificDateSearch(legs=legs, options=opts)
+    # Matrix is asked in the currency Google is asked in, so the merged table
+    # ranks like with like: left unset, Matrix prices in its own default (GBP
+    # from LHR) while Google prices in USD. Only this path merges the two.
+    requested = opts.currency or "USD"
+    matrix_search = SpecificDateSearch(
+        legs=legs, options=opts.model_copy(update={"currency": requested})
+    )
     awards_only = sel.awards_only if sel is not None else False
     state: dict[str, Any] = {}
 
@@ -3932,7 +3938,7 @@ def _run_enriched_path(  # noqa: PLR0915 — one weave's outcome arms, read in o
     pinnable: SearchResult | None = None
     booking_row: tuple[SearchResult, int, str | None, str | None] | None = None
     if not awards_only:
-        merged = merge_results(fli_results_to_search_result(gf), matrix_res)
+        merged = merge_results(fli_results_to_search_result(gf), matrix_res, currency=requested)
         _render_merged(merged, legs=legs, top_n=top_n)
         shown = [r.itinerary for r in merged[:top_n]]
         seller_row = _pick_for_sellers(pick, len(shown)) if sellers else None
@@ -4488,7 +4494,9 @@ def _run_matrix_path_multi(
         )
         return
 
-    rows = _merge_cabins(results_by_cabin, sort_by=sort_by, top_n=top_n)
+    rows = _merge_cabins(
+        results_by_cabin, sort_by=sort_by, top_n=top_n, currency=opts.currency or "USD"
+    )
     # `not json_out` for the reason given at the same gate in
     # `_run_gflight_path`: with awards on, the document is written below this.
     if not sel.awards_only and not json_out:
@@ -4591,7 +4599,9 @@ def _run_gflight_path_multi(
         return
 
     results_by_cabin = _gflight_to_search_result_per_cabin(fli_by_cabin)
-    rows = _merge_cabins(results_by_cabin, sort_by=sort_by, top_n=top_n)
+    rows = _merge_cabins(
+        results_by_cabin, sort_by=sort_by, top_n=top_n, currency=opts.currency or "USD"
+    )
     # `not json_out` for the reason given at the same gate in
     # `_run_gflight_path`: with awards on, the document is written below this.
     if not sel.awards_only and not json_out:
@@ -5025,8 +5035,10 @@ _MATRIX_URL_HELP = (
     "available). No link line is printed under --format json."
 )
 _CURRENCY_HELP = (
-    "Price in this currency: a 3-letter ISO 4217 code such as EUR. Default: USD. "
-    "Matrix and Google Flights both price in it; the Matrix link does not carry it."
+    "Price in this currency: a 3-letter ISO 4217 code such as EUR. Matrix and "
+    "Google Flights both price in it; the Matrix link does not carry it. Unset, "
+    "Google Flights prices in USD and Matrix in its own default, often the "
+    "origin's currency, except in a table merging the two, where both use USD."
 )
 
 _GOOGLE_URL_HELP = (

@@ -176,6 +176,7 @@ def test_merge_full_overlap():
         {Cabin.COACH: _result(a), Cabin.BUSINESS: _result(b)},
         sort_by=Cabin.COACH,
         top_n=10,
+        currency="USD",
     )
     assert len(rows) == 1
     assert rows[0].prices == {Cabin.COACH: "USD600.00", Cabin.BUSINESS: "USD3000.00"}
@@ -188,6 +189,7 @@ def test_merge_partial_overlap_missing_filled_with_absent_keys():
         {Cabin.COACH: _result(a), Cabin.BUSINESS: _result(b)},
         sort_by=Cabin.COACH,
         top_n=10,
+        currency="USD",
     )
     assert len(rows) == 2
     by_carrier = {row.itinerary.itinerary.slices[0].flights[0]: row for row in rows}
@@ -207,6 +209,7 @@ def test_merge_sort_by_missing_sinks_to_bottom():
         },
         sort_by=Cabin.COACH,
         top_n=10,
+        currency="USD",
     )
     flight_nums = [r.itinerary.itinerary.slices[0].flights[0] for r in rows]
     assert flight_nums == ["DL300", "AA100", "BA200"]
@@ -220,6 +223,7 @@ def test_merge_top_n_truncates_after_sort():
         {Cabin.COACH: _result(c, a, b)},
         sort_by=Cabin.COACH,
         top_n=2,
+        currency="USD",
     )
     assert [r.itinerary.itinerary.slices[0].flights[0] for r in rows] == ["AA1", "BB2"]
 
@@ -234,6 +238,7 @@ def test_merge_skips_unkeyable_itineraries():
         {Cabin.COACH: _result(keyed, unkeyed)},
         sort_by=Cabin.COACH,
         top_n=10,
+        currency="USD",
     )
     assert len(rows) == 1
 
@@ -248,6 +253,7 @@ def test_merge_preserves_first_itinerary_for_render():
         {Cabin.COACH: _result(coach_it), Cabin.BUSINESS: _result(biz_it)},
         sort_by=Cabin.COACH,
         top_n=10,
+        currency="USD",
     )
     # Coach was first; the row's `itinerary` reference must be `coach_it`.
     assert rows[0].itinerary is coach_it

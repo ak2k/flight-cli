@@ -18,11 +18,12 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ._multi_cabin import price_currency, price_rank
+
 if TYPE_CHECKING:
     from .models import Itinerary, SearchResult
 
 _PRICE_DIGITS = re.compile(r"[\d,]*\d+")
-_NO_PRICE = 10**12  # sort key for itineraries with no parseable price (last)
 
 Source = str  # "both" | "matrix" | "gf"
 
@@ -42,18 +43,29 @@ class MergedRow:
     source: Source
 
 
-def _price_int(price: str | None) -> int:
-    """Leading integer dollars from 'USD877.00' / '$877' / '877 USD'; _NO_PRICE
-    when absent (sorts such rows last)."""
+def _price_int(price: str | None) -> int | None:
+    """Leading integer units from 'USD877.00' / '$877' / '877 USD'; None when
+    absent (`price_rank` sorts such rows last)."""
     if not price:
-        return _NO_PRICE
+        return None
     m = _PRICE_DIGITS.search(price)
     if not m:
-        return _NO_PRICE
+        return None
     try:
         return int(m.group(0).replace(",", "").split(".")[0])
     except ValueError:
-        return _NO_PRICE
+        return None
+
+
+def _rank_price(row: MergedRow, currency: str) -> str | None:
+    """The price a row ranks on: its price in `currency`, Matrix's when both
+    sides are, else Matrix's or Google's. A matched row priced in two
+    currencies then ranks among the requested ones by the price it shows in
+    that currency."""
+    both = (row.matrix_price, row.gf_price)
+    return next((p for p in both if price_currency(p) == currency), None) or (
+        row.matrix_price or row.gf_price
+    )
 
 
 def _itin_key(it: Itinerary) -> tuple[tuple[tuple[str, ...], str], ...] | None:
@@ -70,8 +82,13 @@ def _itin_key(it: Itinerary) -> tuple[tuple[tuple[str, ...], str], ...] | None:
     return tuple(parts)
 
 
-def merge_results(gf: SearchResult, matrix: SearchResult) -> list[MergedRow]:
-    """Reconcile GF + Matrix cash results into price-sorted merged rows."""
+def merge_results(gf: SearchResult, matrix: SearchResult, *, currency: str) -> list[MergedRow]:
+    """Reconcile GF + Matrix cash results into price-sorted merged rows.
+
+    Sorted under `price_rank` on each row's `_rank_price`: rows priced in
+    `currency` first by amount, any other currency after them, so a caller
+    trimming the list never drops a fare for a smaller number in another
+    currency."""
     gf_keyed: dict[object, Itinerary] = {}
     gf_unkeyed: list[Itinerary] = []
     for it in gf.solutions:
@@ -114,5 +131,9 @@ def merge_results(gf: SearchResult, matrix: SearchResult) -> list[MergedRow]:
         for it in gf_unkeyed
     )
 
-    rows.sort(key=lambda r: _price_int(r.matrix_price or r.gf_price))
+    def rank(row: MergedRow) -> tuple[int, str, float]:
+        price = _rank_price(row, currency)
+        return price_rank(price, _price_int(price), currency=currency)
+
+    rows.sort(key=rank)
     return rows

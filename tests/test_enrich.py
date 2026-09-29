@@ -35,7 +35,7 @@ def test_matched_itinerary_carries_both_prices_matrix_authoritative() -> None:
     gf = _sr(_it("USD500.00", ["LH455"], dep="2026-08-15T08:00"))
     # Same flight + date, different time + price -> still a match (flight# + date).
     matrix = _sr(_it("USD505.00", ["LH455"], dep="2026-08-15T09:30"))
-    (row,) = merge_results(gf, matrix)
+    (row,) = merge_results(gf, matrix, currency="USD")
     assert row.source == "both"
     assert row.gf_price == "USD500.00"
     assert row.matrix_price == "USD505.00"
@@ -43,14 +43,14 @@ def test_matched_itinerary_carries_both_prices_matrix_authoritative() -> None:
 
 
 def test_matrix_only_row() -> None:
-    (row,) = merge_results(_sr(), _sr(_it("USD600.00", ["AF83"])))
+    (row,) = merge_results(_sr(), _sr(_it("USD600.00", ["AF83"])), currency="USD")
     assert row.source == "matrix"
     assert row.matrix_price == "USD600.00"
     assert row.gf_price is None
 
 
 def test_gf_only_row() -> None:
-    (row,) = merge_results(_sr(_it("USD380.00", ["UA58"])), _sr())
+    (row,) = merge_results(_sr(_it("USD380.00", ["UA58"])), _sr(), currency="USD")
     assert row.source == "gf"
     assert row.gf_price == "USD380.00"
     assert row.matrix_price is None
@@ -59,7 +59,7 @@ def test_gf_only_row() -> None:
 def test_merge_sorts_by_best_price_and_tags_sources() -> None:
     gf = _sr(_it("USD380.00", ["UA58"]), _it("USD500.00", ["LH455"]))
     matrix = _sr(_it("USD505.00", ["LH455"]), _it("USD900.00", ["AF83"]))
-    rows = merge_results(gf, matrix)
+    rows = merge_results(gf, matrix, currency="USD")
     assert [(r.source, _first_flight(r.itinerary)) for r in rows] == [
         ("gf", "UA58"),  # 380 — GF-only (ULCC/codeshare)
         ("both", "LH455"),  # 500/505 — matched
@@ -71,10 +71,10 @@ def test_unkeyed_itineraries_stay_single_source() -> None:
     # No flights -> unmatchable -> kept as a single-source row, not merged.
     gf = _sr(_it("USD100.00", []))
     matrix = _sr(_it("USD100.00", []))
-    rows = merge_results(gf, matrix)
+    rows = merge_results(gf, matrix, currency="USD")
     assert len(rows) == 2
     assert {r.source for r in rows} == {"gf", "matrix"}
 
 
 def test_empty_inputs() -> None:
-    assert merge_results(_sr(), _sr()) == []
+    assert merge_results(_sr(), _sr(), currency="USD") == []
