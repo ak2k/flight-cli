@@ -166,9 +166,9 @@ def test_the_search_asks_google_for_the_currency(monkeypatch: pytest.MonkeyPatch
     seen: list[str] = []
 
     def _search_with_ids(
-        _f: Any, *, top_n: int, transport: Any, currency: str, keep: Any
+        _f: Any, *, top_n: int, transport: Any, currency: str, keep: Any, checks: str
     ) -> list[Any]:
-        _ = top_n, transport, keep
+        _ = top_n, transport, keep, checks
         seen.append(currency)
         return []
 

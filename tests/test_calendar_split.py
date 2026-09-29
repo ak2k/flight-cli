@@ -2893,8 +2893,9 @@ def test_one_failing_cabin_does_not_take_the_other_cabins_down(
         transport: Any = None,
         currency: str = "USD",
         keep: Any = None,
+        checks: str = "the routing",
     ) -> list[Any]:
-        _ = top_n, transport, currency, keep
+        _ = top_n, transport, currency, keep, checks
         asked.append(search.options.cabin)
         if search.options.cabin is Cabin.BUSINESS:
             raise RuntimeError(f"fli said [/x]no{_DRIVES_THE_TERMINAL}")

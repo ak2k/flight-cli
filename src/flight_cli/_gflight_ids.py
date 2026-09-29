@@ -2112,6 +2112,7 @@ def search_with_ids(
     transport: GfTransport = HTTP_TRANSPORT,
     currency: str = "USD",
     keep: Callable[[int, GFlightWithId], bool] | None = None,
+    checks: str = "the routing",
 ) -> Board[GFlightWithId | tuple[GFlightWithId, ...]] | None:
     """Drop-in for fli's `SearchFlights().search()` but each result carries
     its Google Flights opaque flight_id.
@@ -2145,7 +2146,8 @@ def search_with_ids(
     then discards. It runs on each return board after the pin check, so a page
     that ignored its pin is refused as one rather than read as "no return
     matches". The result carries the outbound page's price insight, restated
-    for the rows the filter kept."""
+    for the rows the filter kept. `checks` names what `keep` holds a row to,
+    for the warning that counts the pins it left with no return."""
     first = _with_board_currency(
         _one_call_laddered(filters, transport, currency=currency), currency
     )
@@ -2236,6 +2238,7 @@ def search_with_ids(
         skipped=skipped,
         unmatched=unmatched,
         bags=filters.bags is not None,
+        checks=checks,
     )
     # A Board even with no pair in it: the pins were taken from rows Google
     # served, so the rows the filter removed on either leg are why it is empty,
@@ -2258,12 +2261,13 @@ def _report_pin_outcome(
     skipped: int,
     unmatched: int = 0,
     bags: bool = False,
+    checks: str = "the routing",
 ) -> None:
     """Account for what the pin loop met: a counted warning, or a raise.
 
-    `unmatched` pins had return boards the routing filter emptied. They are
-    counted, not raised: that board was served, and "no return matches the
-    routing" is its answer.
+    `unmatched` pins had return boards the row filter emptied, holding rows to
+    `checks`. They are counted, not raised: that board was served, and "no
+    return matches `checks`" is its answer.
 
     Raising is for the case where nothing at all was served — then the refusal
     IS the outcome, and swallowing it reports a round trip with no return legs
@@ -2277,9 +2281,10 @@ def _report_pin_outcome(
     # page-shape change is the news, and this is the only place it is said.
     if unmatched:
         log.warning(
-            "%d of %d pinned outbounds have no return flight matching the routing",
+            "%d of %d pinned outbounds have no return flight matching %s",
             unmatched,
             pins,
+            checks,
         )
     if refused:
         log.warning("%d of %d return boards unavailable: %s", len(refused), pins, refused[-1])

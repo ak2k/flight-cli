@@ -3199,6 +3199,8 @@ def _gflight_results(
                 max_price=opts.max_price,
                 currency=requested,
             ),
+            # A cap can empty a return board with no routing asked at all.
+            checks=_row_checks(legs, opts) if opts.max_price is not None else "the routing",
         )
     finally:
         # Named positively, because only rung 2 opens anything to close. The

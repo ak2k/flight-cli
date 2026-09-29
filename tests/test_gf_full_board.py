@@ -363,6 +363,24 @@ def test_a_return_board_the_routing_empties_is_counted_and_routed_to_matrix(
     assert "1 of 1 pinned outbounds have no return flight matching the routing" in caplog.text
 
 
+def test_a_return_board_the_price_cap_empties_is_counted_naming_the_cap(
+    gf_session: Callable[..., Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    """The outbound fares sit under the cap and every return total above it,
+    and no routing was asked: the count says it was the cap."""
+    gf_session(_served(_LHR), _return_board())
+    cli._run_gflight_path(
+        legs=_round_trip(),
+        opts=SearchOptions(cabin=Cabin.COACH, max_price=1000),
+        top_n=1,
+        json_out=True,
+    )
+    assert (
+        "1 of 1 pinned outbounds have no return flight matching a price cap of USD 1000"
+        in caplog.text
+    ), caplog.text
+
+
 # ─────────────────────────── the empty filtered answer ────────────────────
 
 
