@@ -109,7 +109,12 @@ printed. Re-widening `3.6`/`3.7`/`3.15`/`3.17`/`3.18` is the next step.
   the post-filter.
 - An answer the filter emptied goes to Matrix under `auto` with the reason on
   stderr, and says why under `--backend gflight` (stdout `[]` in JSON mode).
-  The multi-cabin path prints the reason per cabin.
+  A multi-cabin search goes to Matrix WHOLE under `auto` when the filter
+  emptied any cabin (one `Using Matrix:` line names each emptied cabin and its
+  count): handing on only that cabin would put Google's rows beside Matrix's
+  documents in one answer and join prices from two sources. A cabin Google
+  served nothing for stays Google's answer. Under `--backend gflight` the
+  multi-cabin path prints the reason per cabin and leaves the cabin empty.
 - A round trip that took pins answers with a board even when no pair survives,
   its count covering the rows removed on both legs, so it takes the same route.
   Under `--backend gflight` the line also names how many outbounds were pinned:
@@ -359,6 +364,21 @@ enriched weave, which hands the untrimmed board to `merge_results` and bounds th
 merged table afterwards in `_render_merged`. The multi-cabin `--format json` arm
 trims per cabin for the same reason, to the user's count and not the bumped one —
 the same count as the table beside it, drawn from a different set.
+
+**Neither merge ranks two currencies by their numbers.** `_multi_cabin.merge`
+and `_enrich.merge_results` sort through `_multi_cabin.price_rank`: rows priced
+in the requested currency (`--currency`, else USD) first by amount, then each
+other currency in code order by its own amounts, then prices naming no currency,
+unpriced rows last. No exchange rate is applied or derived, so a fare in another
+currency ranks after every requested one, and a list in one currency orders by
+amount exactly as before. A merged row ranks on its price in the requested
+currency, Matrix's when both sides have one. The enriched weave asks Matrix in
+the currency Google is asked in, so its merge is one currency at the source:
+left unset, Matrix prices in its own default (GBP from LHR, 2026-09-28) and the
+merged LHR-JFK table ranked GBP1004 above USD1043 (about GBP780) before the
+trim. The rank is the backstop for a row Google still prices in another
+currency, which `cli._note_other_currencies` names on stderr. A Google board is
+one page in one currency, so `cli._price_ordered` keeps bare amounts.
 
 **What a round-trip row's price means.** The two boards price different things.
 An outbound row carries the cheapest round-trip TOTAL reachable from that
