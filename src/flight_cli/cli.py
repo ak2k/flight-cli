@@ -3432,6 +3432,18 @@ def _gf_refusal(  # noqa: PLR0911 — one return per refusal type; see the docst
                 "[yellow]Google served its consent page instead of flight results.[/] "
                 f"{remedy_opening}.",
             )
+        case GfBrowserUnavailableError() if bags and e.remedy.endswith(BROWSER_DEFAULT_REMEDY):
+            # The default remedy's last resort is Matrix, which prices no bags.
+            browser_remedy = (
+                e.remedy.removesuffix(BROWSER_DEFAULT_REMEDY)
+                + "Retry, or use `--gf-transport http` (or drop `--bags` to search Matrix, "
+                "which prices no bags)."
+            )
+            return _GfRefusal(
+                f"Google Flights' browser rung is unavailable — "
+                f"{_safe_text(e.reason)} {_safe_text(browser_remedy)}",
+                f"[yellow]{_safe_text(f'{e.reason} {browser_remedy}')}[/]",
+            )
         case GfBrowserUnavailableError():
             # The note carries the reason AND the remedy. It is not the short
             # form of the message here: the enrich path is the DEFAULT search
