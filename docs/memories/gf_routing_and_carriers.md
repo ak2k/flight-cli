@@ -833,15 +833,27 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
   `6n` `7n`) beside the row minimum, "—" where a length priced nothing that
   date. For a set or metro code the title says each cell is the cheapest
   across every airport pair: the graph gives no per-pair answer. Any Google
-  failure, one length's included, is ONE stderr line starting `Google Flights
-  price graph not shown:`, keeping a launch or install remedy; stdout up to
-  Google's table and the exit code are the `http` run's, and a Matrix failure
-  keeps its lines and exit 1 with Google's table still printed. The SIGINT
-  guard is armed around both halves, so a Ctrl-C stops the driver and exits
-  130. Measured 2026-09-29, NYC→LON round trip over 2026-10-20..11-02: each of
-  5, 6 and 7 nights priced 14 of 14 dates in one load of about 12 s, and one
-  of four loads failed on a Price-graph click timeout, which drops the whole
-  Google table of a three-length run to that one line.
+  failure is ONE stderr line starting `Google Flights price graph not shown:`,
+  keeping a launch or install remedy. A range that loses some lengths prints
+  the ones that priced, with no column for a lost length, and that one line
+  names each lost length with its cause (`7-night trips: <cause>`). Only a
+  page that drew no graph lets the next length be asked; any other failure
+  loses the lengths after it too (`not asked after 6-night trips failed`). A
+  range that priced no length prints its first failure alone, as a single
+  graph does. Stdout up to Google's table and the exit code are the `http`
+  run's, and a Matrix failure keeps its lines and exit 1 with Google's table
+  still printed. The SIGINT guard is armed around both halves, so a Ctrl-C
+  stops the driver and exits 130. Measured 2026-09-29, NYC→LON round trip over
+  2026-10-20..11-02: each of 5, 6 and 7 nights priced 14 of 14 dates in one
+  load of about 12 s.
+- **A page that draws no graph.** About one load in fourteen (2 of 27-29 live
+  loads, 2026-09-28/29) passes the wall check and then times out on the
+  "Price graph" click. One of the two was the first load of a fresh Chrome, so
+  a reused session is not what causes it; the cause is not identified (12
+  probe loads set up to snapshot the page on a failure all priced).
+  `price_graph` loads such a page once more, from the same eight-load budget,
+  under `--fast` too; a second miss raises `GfGraphStalledError`. A wall, a
+  failed navigation and any answer the graph gave are never loaded again.
 
 **Re-enabling is not just `_GRID_RPC_GATED = False`.** Nothing executes the
 transport below the gate — there is no captured GetCalendarGraph envelope to test
