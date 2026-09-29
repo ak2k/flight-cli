@@ -786,6 +786,12 @@ def _is_google_domain(domain: str) -> bool:
 # Mirrors the PP browser extension's parser (chunk-5KW5VSHS.js: `a = n[17]`).
 _FLIGHT_ID_IDX = 17
 
+# `row[4][6]` is [checked, carry-on]: the bags the row's price covers, counted
+# for the whole party. It matched the page's own text ("1 carry-on bag
+# included. 0 checked bags included" for [0, 1]).
+_ROW_FARE_IDX = 4
+_FARE_BAGS_IDX = 6
+
 # Per-leg field indices in `data[0][2][i]`. Mirrors the Legrooms+ extension's
 # parser (load_flight_data.js function `u`). See docs/memories/legroom_recipe.md.
 _LEG_AMENITIES_IDX = 12  # array — bit positions decoded into wifi/power/video
@@ -1034,6 +1040,9 @@ class GFlightWithId:
     # None where the tuple has none. Kept off `amenities` because `--format json`
     # dumps every amenities field.
     operating: tuple[tuple[Airline, str] | None, ...] = ()
+    # (checked, carry-on) bags Google says the price covers; None where it does
+    # not say.
+    bags_included: tuple[int | None, int | None] = (None, None)
 
 
 def _operating_identity(fl: list[Any]) -> tuple[Airline, str] | None:
@@ -1046,6 +1055,23 @@ def _operating_identity(fl: list[Any]) -> tuple[Airline, str] | None:
         return _parse_airline(code), number
     except AttributeError:  # a code fli has no member for
         return None
+
+
+def _bag_count(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _bags_included(data: list[Any]) -> tuple[int | None, int | None]:
+    """The row's bag statement. A missing, short or malformed slot says
+    nothing, which is never a reason to drop the row."""
+    fare = data[_ROW_FARE_IDX] if len(data) > _ROW_FARE_IDX else None
+    if not isinstance(fare, list) or len(cast("list[Any]", fare)) <= _FARE_BAGS_IDX:
+        return None, None
+    slot = cast("list[Any]", fare)[_FARE_BAGS_IDX]
+    if not isinstance(slot, list):
+        return None, None
+    counts = [*cast("list[Any]", slot)[:2], None, None]
+    return _bag_count(counts[0]), _bag_count(counts[1])
 
 
 def _parse_flight_with_id(data: list[Any]) -> GFlightWithId:
@@ -1069,6 +1095,7 @@ def _parse_flight_with_id(data: list[Any]) -> GFlightWithId:
         flight_id=flight_id,
         amenities=amenities,
         operating=tuple(_operating_identity(fl) for fl in leg_tuples),
+        bags_included=_bags_included(data),
     )
 
 

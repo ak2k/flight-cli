@@ -10,11 +10,17 @@ answered without them.
 
 from __future__ import annotations
 
+import copy
+import json
+from collections import Counter
 from datetime import date, timedelta
+from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
+from flight_cli import _gflight_ids as gfid
 from flight_cli.domain import Bags, Leg, SearchOptions, SpecificDateSearch
 from flight_cli.fli_bridge import to_fli_filter
 from flight_cli.links import matrix_deep_link
@@ -23,6 +29,23 @@ from flight_cli.wire import to_wire
 # fli's validator rejects a past travel date, so the dates are derived.
 _DEP = date.today() + timedelta(days=45)
 _RET = _DEP + timedelta(days=7)
+_PAGES = Path(__file__).parent / "fixtures" / "gflight_page"
+_ABSENT = object()
+
+
+def _page_rows(name: str) -> list[Any]:
+    return gfid._rows_from_ds1(json.loads((_PAGES / f"{name}.json").read_text())).rows
+
+
+def _raw_row(slot: object = _ABSENT) -> list[Any]:
+    """A JFK-LAX row off a committed page, with `row[4][6]` replaced by
+    `slot`, or cut off before it."""
+    row = copy.deepcopy(_page_rows("ds1_jfk_lax_3rows")[0])
+    if slot is _ABSENT:
+        row[4] = row[4][:6]
+    else:
+        row[4][6] = slot
+    return row
 
 
 def _search(**options: object) -> SpecificDateSearch:
@@ -68,3 +91,36 @@ def test_bags_refuse_a_count_google_cannot_be_asked_for(kwargs: dict[str, int]) 
 def test_a_cap_below_one_is_refused() -> None:
     with pytest.raises(ValidationError):
         SearchOptions(max_price=0)
+
+
+# ─────────────────────────── the row's bag statement ─────────────────────────
+
+
+def test_each_row_carries_the_bags_google_says_its_price_covers() -> None:
+    def stated(name: str) -> Counter[tuple[int | None, int | None]]:
+        return Counter(gfid._parse_flight_with_id(r).bags_included for r in _page_rows(name))
+
+    assert stated("ds1_jfk_lax_tfu") == {(0, 1): 95}
+    # JFK-LHR states no checked allowance at all, and four rows state nothing.
+    assert stated("ds1_jfk_lhr_tfu") == {(None, 1): 97, (None, None): 4}
+
+
+@pytest.mark.parametrize(
+    "slot,stated",
+    [
+        ([1, 1], (1, 1)),
+        ([None, 1], (None, 1)),
+        (_ABSENT, (None, None)),
+        ([1], (1, None)),
+        (None, (None, None)),
+        ("[1, 1]", (None, None)),
+        ([True, -1], (None, None)),
+    ],
+    ids=["both", "checked-unstated", "no-slot", "short", "null", "string", "bool-and-negative"],
+)
+def test_a_missing_short_or_malformed_statement_says_nothing(
+    slot: object, stated: tuple[int | None, int | None]
+) -> None:
+    row = gfid._parse_flight_with_id(_raw_row(slot))
+    assert row.bags_included == stated
+    assert row.flight.price is not None  # the row itself still parses whole

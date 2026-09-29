@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -377,6 +378,38 @@ def test_the_checks_are_named_in_the_users_words() -> None:
         "a departure-time window (morning)",
         "a return-time window (evening)",
     ]
+
+
+def _priced(price: float | None, currency: str | None = "USD") -> GFlightWithId:
+    row = _row(("AA", "JFK", "LAX", _h(8), _h(11)), duration=360)
+    return replace(row, flight=row.flight.model_copy(update={"price": price, "currency": currency}))
+
+
+def test_a_price_cap_keeps_only_rows_priced_at_or_under_it_in_its_currency() -> None:
+    """A row over the cap, a row Google did not price and a row priced in
+    another currency are each dropped: none of them is shown to be under it."""
+    keep = routing_keep([[], []], max_price=250, currency="USD")
+    assert keep is not None
+    rows = [_priced(250.0), _priced(204.0), _priced(250.01), _priced(None), _priced(200.0, "EUR")]
+    assert [keep(0, r) for r in rows] == [True, True, False, False, False]
+
+
+def test_a_price_cap_holds_every_board_of_a_round_trip() -> None:
+    keep = routing_keep([[], []], max_price=500, currency="USD")
+    assert keep is not None
+    assert not keep(1, _priced(501.0))
+    assert keep(1, _priced(442.0))
+
+
+def test_a_price_cap_is_held_beside_the_routing() -> None:
+    keep = routing_keep([classify("AA+", None).predicates], max_price=250)
+    assert keep is not None
+    assert keep(0, _priced(249.0))
+    assert not keep(0, _priced(251.0))
+
+
+def test_a_price_cap_is_named_with_its_currency() -> None:
+    assert row_check_names([[]], max_price=250, currency="EUR") == ["a price cap of EUR 250"]
 
 
 # ─────────────────────────── the date grids are unchanged ──────────────────
