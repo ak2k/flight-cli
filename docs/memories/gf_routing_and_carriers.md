@@ -76,7 +76,7 @@ PR #230:
 3.12 = maximum duration, minutes
 3.13 = origin   3.14 = destination   3.15 = layover airports (not written)
 3.17/3.18 = min/max layover minutes
-12 = price cap, whole units of the page's `curr=` (sent on a USD page only)
+12 = price cap, whole units of the page's `curr=` (sent on a USD page only, up to 2**31-1)
 13 = bags {2: carry-on (0 or 1), 3: checked count}, a zero count left out
 ```
 

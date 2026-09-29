@@ -30,7 +30,7 @@ from flight_cli import cli
 from flight_cli._gf_errors import GfBackendError, GfTfsUnsupportedError
 from flight_cli.domain import Bags, Leg, SearchOptions, SpecificDateSearch
 from flight_cli.fli_bridge import to_fli_filter
-from flight_cli.links import matrix_deep_link
+from flight_cli.links import build_search_tfs, matrix_deep_link
 from flight_cli.models import SearchResult
 from flight_cli.wire import to_wire
 
@@ -359,6 +359,17 @@ def test_only_a_usd_page_is_asked_for_the_cap() -> None:
     assert gfid.search_page_url(capped, currency="USD") != gfid.search_page_url(
         plain, currency="USD"
     )
+
+
+def test_a_cap_wider_than_an_int32_is_left_to_the_row_check() -> None:
+    """2**64 would be an 11-byte varint, which no protobuf reader accepts, and
+    how the page reads a cap past an int32 was never measured. No USD fare
+    comes near one, so the page is fetched uncapped instead."""
+    plain = gfid.search_page_url(_one_way_filter(), currency="USD")
+    for cap in (2**31, 2**64):
+        assert gfid.search_page_url(_one_way_filter(max_price=cap), currency="USD") == plain
+    widest = build_search_tfs(_one_way_filter(max_price=2**31 - 1))
+    assert b"\x60\xff\xff\xff\xff\x07" in widest  # field 12, five bytes
 
 
 def test_a_eur_cap_still_holds_every_row(served: _Page) -> None:

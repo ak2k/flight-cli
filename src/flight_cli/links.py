@@ -706,6 +706,12 @@ def _tfs_slice(
     }
 
 
+# The widest cap every protobuf integer type reads back unchanged; how the page
+# reads a wider one was never measured. No USD fare comes near it, so a wider
+# cap is left to the row check.
+_TFS_MAX_PRICE = 2**31 - 1
+
+
 def build_search_tfs(filters: Any, *, currency: str = "USD") -> bytes:
     """Encode an fli `FlightSearchFilters` as the search page's tfs= protobuf,
     for a page priced in `currency`.
@@ -755,6 +761,9 @@ def build_search_tfs(filters: Any, *, currency: str = "USD") -> bytes:
     # fewer of the fares under it than its uncapped board (JFK-LAX at EUR 240:
     # 34 of 45), so elsewhere the row check alone applies it.
     price_limit = filters.price_limit if currency == "USD" else None
+    max_price = price_limit.max_price if price_limit is not None else None
+    if max_price is not None and max_price > _TFS_MAX_PRICE:
+        max_price = None
     bags = filters.bags
     return _encode_gflight_pinned_tfs(
         slices=[
@@ -767,7 +776,7 @@ def build_search_tfs(filters: Any, *, currency: str = "USD") -> bytes:
         infants_in_seat=0,
         infants_on_lap=0,
         pin_max_u64=False,
-        max_price=price_limit.max_price if price_limit is not None else None,
+        max_price=max_price,
         bags=(bags.checked_bags, int(bags.carry_on)) if bags is not None else None,
     )
 
