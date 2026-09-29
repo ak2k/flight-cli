@@ -122,11 +122,15 @@ it was sent (the carrier exclude on JFK-LHR), so `_gf_postfilter.routing_keep`
 holds every row to what the row can show: the carrier include (any seller, the
 marketing reading), Google's own total duration (`FlightResult.duration`, never
 a difference of leg datetimes, which are local to each airport and off by the
-zone offset), every layover's minutes (same airport, same zone), and the first
-departure's clock time, to the minute. The stop ceiling and an alliance are
-not checked: the stops are left to Google's own filter, and nothing here says
-which carrier is in which alliance. Children are priced, not checked. When these
-checks empty a board, the empty-answer line names every active check.
+zone offset), every layover's minutes, and the first departure's clock time, to
+the minute. A layover is the page's own figure for that connection
+(`data[0][13]`, elapsed minutes). Where the row states none it is the clock
+difference at the connecting airport, which a daylight-saving change there puts
+an hour out; a negative one is such a change and is not held against the row.
+The stop ceiling and an alliance are not checked: the stops are left to Google's
+own filter, and nothing here says which carrier is in which alliance. Children
+are priced, not checked. When these checks empty a board, the empty-answer line
+names every active check.
 
 **A price cap and bags (`search --max-price N`, `--bags CHECKED[,CARRY]`).**
 Both are top-level fields, written after the cabin (9) and before 14.
@@ -234,9 +238,10 @@ asked for, silently.
 One more trap: a stop ceiling only encodes up to **two**. fli's `MaxStops` tops
 out at `TWO_OR_FEWER_STOPS`, so a ceiling of 3+ maps to `ANY` and omits field
 3.5 entirely — `--stops 3` then encodes byte-identically to no `--stops` at all.
-Both spellings hit the same ceiling (`routing_predicates.MAX_ENCODABLE_STOPS`,
-shared so the two sites can't drift): the routing-language `MAXSTOPS 3` through
-`page_can_encode`, and the `--stops` flag through `_pick_backend` directly.
+The search gate (`_gf_postfilter.search_page_reasons`) holds only the strictest
+of `--stops` and every `MAXSTOPS` (or `N`) to that ceiling, since that one limit
+is all the page is asked for: `--stops 3` alone goes to Matrix, and beside
+`MAXSTOPS 0` it is a nonstop search the page serves.
 
 **That page has two rungs.** Rung 1 is the curl_cffi GET above. Rung 2
 (`--gf-transport browser`) drives a real Chrome to the *same* URL and hands its

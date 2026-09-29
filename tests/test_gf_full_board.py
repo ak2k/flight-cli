@@ -550,13 +550,22 @@ def test_an_encoded_constraint_is_asked_of_the_page_and_held_on_its_rows(
     assert {f: sl.get(f) for f in fields} == fields
 
 
+@pytest.mark.parametrize(
+    ("stops", "extension"),
+    [("0", "MAXSTOPS 2"), ("3", "MAXSTOPS 0"), ("0", "MAXSTOPS 3")],
+    ids=["looser-ext", "looser-flag-past-the-ceiling", "looser-ext-past-the-ceiling"],
+)
 def test_the_strictest_stop_limit_is_the_one_asked(
-    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+    stops: str,
+    extension: str,
+    gf_session: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`--stops 0` beside `MAXSTOPS 2` asked the page for two stops or fewer."""
+    """A nonstop limit asks the page for nonstops beside any looser one, even
+    one past the stop ceiling the page can encode."""
     fake = gf_session(_served(_LAX))
     monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
-    result = CliRunner().invoke(cli.app, _search_json("--stops", "0", "--ext", "MAXSTOPS 2"))
+    result = CliRunner().invoke(cli.app, _search_json("--stops", stops, "--ext", extension))
     assert result.exit_code == 0, result.output
     assert _decode_slice(_tfs(fake.gets[0]))[5] == [0]
 

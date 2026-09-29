@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from flight_cli.routing_predicates import (
     AlliancePred,
     CarrierPred,
@@ -173,6 +175,15 @@ def test_extension_alliance_multiple_and_unknown() -> None:
     assert ok == AlliancePred(codes=frozenset({"oneworld", "skyteam"}))
     (bad,) = parse_extension("ALLIANCE galactic")
     assert isinstance(bad, UnsupportedPred)
+
+
+@pytest.mark.parametrize("directive", ["ALLIANCE |", "ALLIANCE | |", "ALLIANCE ||"])
+def test_an_alliance_directive_naming_none_escalates_as_a_bare_one_does(directive: str) -> None:
+    """An empty alliance list would filter nothing wherever it was honored."""
+    (p,) = parse_extension(directive)
+    reason = f"extension {directive!r} not expressible on GF"
+    assert p == UnsupportedPred(token=directive, reason=reason)
+    assert classify(None, directive).requires_matrix
 
 
 def test_extension_airlines_include_exclude_operating() -> None:
