@@ -481,12 +481,18 @@ def _encode_gflight_pinned_tfs(
     infants_in_seat: int,
     infants_on_lap: int,
     pin_max_u64: bool = True,
+    max_price: int | None = None,
+    bags: tuple[int, int] | None = None,
 ) -> bytes:
     """Encode the tfs= protobuf for a Google Flights URL.
 
     One writer serves both flavors. A pinned booking link keeps `pin_max_u64`
     (field 16), which Google's own pinned URLs carry and the byte-exact fixture
     asserts; the search page doesn't need it and `build_search_tfs` omits it.
+
+    `max_price` is top-level field 12, whole units of the page's `curr=`.
+    `bags` is (checked, carry-on), top-level field 13 as `{2: carry-on,
+    3: checked}`; a zero count is left out, the form Google honored live.
 
     `slices`: list of dicts shaped:
         {
@@ -529,6 +535,16 @@ def _encode_gflight_pinned_tfs(
         w.varint(8, kind)
 
     w.varint(9, cabin)
+    if max_price is not None:
+        w.varint(12, max_price)
+    if bags is not None and any(bags):
+        checked, carry_on = bags
+        bag_w = _PbWriter()
+        if carry_on:
+            bag_w.varint(2, carry_on)
+        if checked:
+            bag_w.varint(3, checked)
+        w.message(13, bag_w)
     w.varint(14, 1)
 
     if pin_max_u64:
@@ -569,7 +585,8 @@ def _encode_gflight_pinned_tfs(
 
 # Fields this encoder reads and writes into the tfs= payload. `airlines` carries
 # alliance names as well as carrier codes: the bridge writes an alliance there,
-# and 3.6 takes both in one list.
+# and 3.6 takes both in one list. `price_limit` is read for its amount only: the
+# page prices in its `curr=`, so fli's currency on the cap is never written.
 _TFS_ENCODED_FIELDS = frozenset(
     {
         "trip_type",
@@ -580,10 +597,12 @@ _TFS_ENCODED_FIELDS = frozenset(
         "airlines",
         "max_duration",
         "layover_restrictions",
+        "price_limit",
+        "bags",
     }
 )
 
-# Filters with no tfs= field, checked against fli's own model default rather
+# Filters this encoder refuses, checked against fli's own model default rather
 # than truthiness: fli populates sort_by, emissions, exclude_basic_economy and
 # show_all_results on EVERY filter, so `if filters.sort_by` would refuse every
 # search. Each entry is (field name, how to describe it to a user).
@@ -592,8 +611,6 @@ _TFS_REFUSED_FIELDS: tuple[tuple[str, str], ...] = (
     ("airlines_exclude", "a carrier exclude list"),
     ("alliances", "an alliance filter"),
     ("alliances_exclude", "an alliance exclude filter"),
-    ("price_limit", "a price cap"),
-    ("bags", "a bag-count fare adjustment"),
     ("emissions", "an emissions filter"),
     ("exclude_basic_economy", "a basic-economy exclusion"),
     ("sort_by", "a server-side sort order"),
@@ -733,6 +750,8 @@ def build_search_tfs(filters: Any) -> bytes:
         "layover_min": layover.min_duration if layover else None,
         "layover_max": layover.max_duration if layover else None,
     }
+    price_limit = filters.price_limit
+    bags = filters.bags
     return _encode_gflight_pinned_tfs(
         slices=[
             _tfs_slice(seg, max_stops=max_stops, trip_filters=trip_filters)
@@ -744,6 +763,8 @@ def build_search_tfs(filters: Any) -> bytes:
         infants_in_seat=0,
         infants_on_lap=0,
         pin_max_u64=False,
+        max_price=price_limit.max_price if price_limit is not None else None,
+        bags=(bags.checked_bags, int(bags.carry_on)) if bags is not None else None,
     )
 
 
