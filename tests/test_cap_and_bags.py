@@ -574,6 +574,62 @@ def test_each_member_of_a_round_trip_pair_says_what_its_price_covers() -> None:
     assert back["bags_included"] == {"checked": None, "carry_on": None}
 
 
+@pytest.fixture
+def awards_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An award provider configured and matching nothing, so every cash row
+    reaches the award document on its own."""
+    from flight_cli.pp import cli as pp_cli
+
+    async def _gather(*, legs: list[Any], **_kw: Any) -> tuple[list[list[Any]], list[Any]]:
+        return ([[] for _ in legs], [])
+
+    def _configured(_sel: cli.ProviderSelection) -> bool:
+        return True
+
+    monkeypatch.setattr(cli, "_should_run_awards", _configured)
+    monkeypatch.setattr(pp_cli, "gather_awards", _gather)
+    monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
+
+
+def _award_document(*args: str) -> list[dict[str, Any]]:
+    result = CliRunner().invoke(
+        cli.app,
+        ["search", "JFK", "LAX", "--dep", _DEP.isoformat(), "--fast", "--format", "json", *args],
+    )
+    assert result.exit_code == 0, result.output
+    return json.loads(result.stdout)
+
+
+@pytest.mark.usefixtures("awards_on")
+def test_each_cash_row_beside_the_awards_says_what_its_price_covers(served: _Page) -> None:
+    served.board.extend(_gf_row(204.0, slot=slot) for slot in _STATEMENTS)
+    [leg] = _award_document("--bags", "1")
+    assert [m["bags_included"] for m in leg["matches"]] == [
+        {"checked": 1, "carry_on": 1},
+        {"checked": 0, "carry_on": 1},
+        {"checked": None, "carry_on": 1},
+        {"checked": None, "carry_on": None},
+    ]
+
+
+@pytest.mark.usefixtures("awards_on")
+def test_each_leg_beside_the_awards_says_what_its_own_member_covers(served: _Page) -> None:
+    served.board.append((_gf_row(398.0, slot=[1, 1]), _gf_row(398.0, slot=_ABSENT)))
+    out, back = _award_document("--return", _RET.isoformat(), "--bags", "1")
+    assert [m["bags_included"] for m in out["matches"]] == [{"checked": 1, "carry_on": 1}]
+    assert [m["bags_included"] for m in back["matches"]] == [{"checked": None, "carry_on": None}]
+
+
+@pytest.mark.usefixtures("awards_on")
+def test_without_bags_the_cash_rows_beside_the_awards_carry_no_statement(
+    served: _Page,
+) -> None:
+    served.board.extend(_gf_row(204.0, slot=slot) for slot in _STATEMENTS)
+    [leg] = _award_document()
+    assert len(leg["matches"]) == len(_STATEMENTS)
+    assert all("bags_included" not in m for m in leg["matches"])
+
+
 def _table(monkeypatch: pytest.MonkeyPatch, bags: Bags | None) -> str:
     buffer = io.StringIO()
     monkeypatch.setattr(cli, "console", Console(file=buffer, width=250, no_color=True))

@@ -3265,6 +3265,23 @@ def _gflight_json_document(results: list[Any], bags: Bags | None = None) -> list
     return out
 
 
+def _bags_by_itinerary(
+    results: list[Any], sr: SearchResult
+) -> dict[int, list[tuple[int | None, int | None]]]:
+    """Each itinerary of `sr`, by `id`, to the bags Google states for each of
+    its members, in slice order. `sr` is `results` adapted, and the adapter
+    carries no itinerary for an empty combination, so neither does this."""
+    members: list[list[Any]] = []
+    for r in results:
+        items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
+        if items:
+            members.append(items)
+    return {
+        id(it): [cast("tuple[int | None, int | None]", g.bags_included) for g in items]
+        for it, items in zip(sr.solutions, members, strict=True)
+    }
+
+
 def _terminal_fare_key(r: Any) -> tuple[int, float]:
     """Sort key for one round-trip combination: its terminal member's fare,
     with a row Google did not price ordered last.
@@ -3773,6 +3790,7 @@ def _run_gflight_path(
             provider_filter=sel.provider_filter if sel is not None else None,
             seats_sources=sel.seats_sources() if sel is not None else None,
             cash_per_cabin=_cash_per_cabin_single(sr, opts.cabin),
+            bags_included=_bags_by_itinerary(results, sr) if opts.bags is not None else None,
         )
 
     # The URL lines are prose on stdout, and `_emit_urls` is shared text that

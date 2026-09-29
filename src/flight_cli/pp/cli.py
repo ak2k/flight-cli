@@ -36,7 +36,7 @@ from .gflight_adapter import cash_hints_from_search_result
 from .match import MatchedFare, join
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
     from ..models import SearchResult
     from ..providers.base import AwardFlight, LegQuery
@@ -288,6 +288,7 @@ def run_pp_for_search(
     provider_filter: tuple[str, ...] | None = None,
     seats_sources: tuple[str, ...] | None = None,
     cash_per_cabin: Mapping[int, Mapping[str, float]] | None = None,
+    bags_included: Mapping[int, Sequence[tuple[int | None, int | None]]] | None = None,
 ) -> None:
     """Run award augmentation through the provider registry, join against
     `res`'s cash itineraries, render. Registry hands back any configured
@@ -306,6 +307,10 @@ def run_pp_for_search(
     economy cash). Callers should build it from the cabins they queried —
     single-cabin invocations pass a one-entry inner dict; multi-cabin
     passes one entry per queried cabin. When None, no CPM is shown.
+
+    `bags_included` maps `id(itinerary)` to the `(checked, carry_on)` bags
+    Google says each of its slices is priced with, None where it does not say.
+    When given, each cash match in the JSON document carries its slice's.
     """
     # PP tokens are required only if PP is actually going to run. Skip the
     # pre-flight check when the filter excludes PP — otherwise a seats-only
@@ -378,7 +383,7 @@ def run_pp_for_search(
         for leg, awards in zip(legs, per_leg, strict=True)
     ]
     if json_out:
-        sys.stdout.write(_serialize_matches_per_leg(matches_per_leg, legs))
+        sys.stdout.write(_serialize_matches_per_leg(matches_per_leg, legs, bags_included))
         return
     for leg, matches in zip(legs, matches_per_leg, strict=True):
         console.print(f"\n[bold]Leg: {leg.label}[/]")
@@ -770,11 +775,18 @@ def _serialize_award(af: AwardFlight) -> dict[str, Any]:
     }
 
 
-def _serialize_matches(matches: list[MatchedFare], slice_index: int = 0) -> str:
+def _serialize_matches(
+    matches: list[MatchedFare],
+    slice_index: int = 0,
+    bags_included: Mapping[int, Sequence[tuple[int | None, int | None]]] | None = None,
+) -> str:
     """`slice_index` selects the leg to describe — it MUST match the leg whose
     awards are being serialized. Hardcoding slice 0 made the `--json` return
     leg report the OUTBOUND flight number, route and departure beside the
-    return leg's awards, while the wrapper labelled it "return"."""
+    return leg's awards, while the wrapper labelled it "return".
+
+    With `bags_included`, each match also says what bags its slice is priced
+    with; a slice the map does not cover says nothing, as null."""
     out: list[dict[str, Any]] = []
     for m in matches:
         itn = m.itinerary.itinerary
@@ -783,28 +795,33 @@ def _serialize_matches(matches: list[MatchedFare], slice_index: int = 0) -> str:
             if itn and itn.slices and slice_index < len(itn.slices)
             else None
         )
-        out.append(
-            {
-                "flight": (s.flights[0] if s and s.flights else None),
-                "departure": (s.departure if s else None),
-                "origin": (s.origin.code if s and s.origin else None),
-                "destination": (s.destination.code if s and s.destination else None),
-                "cash_price": m.itinerary.price,
-                "awards": [_serialize_award(af) for af in m.awards],
-            },
-        )
+        row: dict[str, Any] = {
+            "flight": (s.flights[0] if s and s.flights else None),
+            "departure": (s.departure if s else None),
+            "origin": (s.origin.code if s and s.origin else None),
+            "destination": (s.destination.code if s and s.destination else None),
+            "cash_price": m.itinerary.price,
+        }
+        if bags_included is not None:
+            stated = bags_included.get(id(m.itinerary), ())
+            checked, carry_on = stated[slice_index] if slice_index < len(stated) else (None, None)
+            row["bags_included"] = {"checked": checked, "carry_on": carry_on}
+        row["awards"] = [_serialize_award(af) for af in m.awards]
+        out.append(row)
     return json.dumps(out, indent=2)
 
 
 def _serialize_matches_per_leg(
-    matches_per_leg: list[list[MatchedFare]], legs: list[LegQuery]
+    matches_per_leg: list[list[MatchedFare]],
+    legs: list[LegQuery],
+    bags_included: Mapping[int, Sequence[tuple[int | None, int | None]]] | None = None,
 ) -> str:
     return json.dumps(
         [
             {
                 "leg": leg.label,
                 "slice_index": leg.slice_index,
-                "matches": json.loads(_serialize_matches(matches, leg.slice_index)),
+                "matches": json.loads(_serialize_matches(matches, leg.slice_index, bags_included)),
             }
             for leg, matches in zip(legs, matches_per_leg, strict=True)
         ],
