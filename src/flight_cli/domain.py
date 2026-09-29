@@ -11,15 +11,19 @@ new case via `typing.assert_never`.
 
 from __future__ import annotations
 
+import itertools
 import re
 
 # resolves type hints at validation time and needs the symbol present in the
 # module's runtime globals, even with `from __future__ import annotations`.
 from datetime import date as _date  # noqa: TC003
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 # ──────────────────────────────── enums ────────────────────────────────────
 
@@ -60,6 +64,24 @@ def time_range_for(t: TimeOfDay) -> dict[str, str]:
     """Return the wire-format {min,max} dict for a TimeOfDay."""
     lo, hi = _TIME_RANGE_FOR[t]
     return {"min": lo, "max": hi}
+
+
+def _clock_minutes(hhmm: str) -> int:
+    hours, minutes = hhmm.split(":")
+    return int(hours) * 60 + int(minutes)
+
+
+def time_bounds(t: TimeOfDay) -> tuple[int, int]:
+    """A TimeOfDay's first and last minute after midnight, both included."""
+    lo, hi = _TIME_RANGE_FOR[t]
+    return _clock_minutes(lo), _clock_minutes(hi)
+
+
+def covers_one_window(buckets: Iterable[TimeOfDay]) -> bool:
+    """Whether `buckets` together cover one unbroken clock window. Neighbors
+    share a bound ("11:00" ends morning and starts midday), so they join."""
+    spans = sorted(time_bounds(b) for b in set(buckets))
+    return all(lo <= prev_hi for (_, prev_hi), (lo, _) in itertools.pairwise(spans))
 
 
 # ──────────────────────────────── shared ───────────────────────────────────

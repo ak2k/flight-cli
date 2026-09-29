@@ -123,10 +123,10 @@ class Slice(_Loose):
     # Per-segment departure dates ("YYYY-MM-DD") when known, empty
     # otherwise. gflight populates this from per-leg `departure_datetime`
     # (precise). Matrix's slice envelope doesn't expose per-leg dates, so
-    # Matrix-built slices leave it empty and the URL builder falls back to
-    # a heuristic (departure-date for all segments, arrival-date for the
-    # last segment when the slice spans midnight). Length, when non-empty,
-    # equals `len(flights)`.
+    # Matrix-built slices leave it empty unless the slice was matched to a
+    # Google one (`_enrich.merge_results`), and the pinned URL builder then
+    # pins only a single-flight slice, on its departure day. Length, when
+    # non-empty, equals `len(flights)`.
     segment_dates: list[str] = Field(default_factory=list[str])
     # Provider-supplied opaque ID for this leg (Google Flights data[0][17]).
     # Populated when the cash side is built from fli's response (gflight backend);

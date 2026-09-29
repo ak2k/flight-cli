@@ -8,11 +8,14 @@
 link, so the byte-exact pin fixture (test_links_gflight_pin.py) is the other
 half of this file's coverage. What's asserted here is the search flavor: the
 field-16 pin omitted, the zero-based stop ceiling, carrier codes taken from
-fli's enum NAME, and a refusal for every filter the page has no field for.
+fli's enum NAME, the filters Google honored on a live page (checked field by
+field against the pages' own URLs), and a refusal for every filter the page
+has no field for.
 """
 
 from __future__ import annotations
 
+import base64
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -261,20 +264,29 @@ def test_unpinned_segment_carries_no_selected_leg() -> None:
 @pytest.mark.parametrize(
     "field,kwargs",
     [
-        ("airlines", {"airlines": [Airline["AA"]]}),
         ("airlines_exclude", {"airlines_exclude": [Airline["AA"]]}),
         ("alliances", {"alliances": [Alliance.ONEWORLD]}),
         ("alliances_exclude", {"alliances_exclude": [Alliance.SKYTEAM]}),
-        ("layover_restrictions", {"layover_restrictions": LayoverRestrictions(max_duration=120)}),
-        ("max_duration", {"max_duration": 600}),
         ("price_limit", {"price_limit": PriceLimit(max_price=500)}),
         ("bags", {"bags": BagsFilter(checked_bags=1)}),
         ("emissions", {"emissions": EmissionsFilter.LESS}),
         ("exclude_basic_economy", {"exclude_basic_economy": True}),
         ("sort_by", {"sort_by": SortBy.CHEAPEST}),
-        ("children", {"passenger_info": PassengerInfo(adults=1, children=1)}),
         ("infants_in_seat", {"passenger_info": PassengerInfo(adults=1, infants_in_seat=1)}),
         ("infants_on_lap", {"passenger_info": PassengerInfo(adults=1, infants_on_lap=1)}),
+        # 3.15 exists, but a connection airport means one position to Matrix.
+        (
+            "layover_restrictions",
+            {"layover_restrictions": LayoverRestrictions(airports=[Airport["ORD"]])},
+        ),
+        (
+            "layover_restrictions",
+            {
+                "layover_restrictions": LayoverRestrictions(
+                    airports=[Airport["ORD"]], max_duration=120
+                )
+            },
+        ),
     ],
 )
 def test_unencodable_filter_raises_naming_the_field(field: str, kwargs: dict[str, Any]) -> None:
@@ -283,15 +295,130 @@ def test_unencodable_filter_raises_naming_the_field(field: str, kwargs: dict[str
     assert excinfo.value.field == field
 
 
-def test_time_restrictions_raise() -> None:
-    f = _filters(
+# ───────────── the filters Google honored, against its own URLs ─────────────
+#
+# Each is the tfs= of a JFK page Google served with the filter applied: the
+# UI's own URL for the time window and the duration, the ones the live check
+# fetched for the others. Only the travel date differs from what the encoder
+# writes today.
+
+_PAGE_CARRIER_AA = "CBwQAhoiEgoyMDI2LTExLTA0MgJBQWoHCAESA0pGS3IHCAESA0xBWEABSAFwAZgBAg"
+_PAGE_ONEWORLD_LHR = "CBwQAhooEgoyMDI2LTExLTA0MghPTkVXT1JMRGoHCAESA0pGS3IHCAESA0xIUkABSAFwAZgBAg"
+_PAGE_MAX_380_MIN = "CBwQAhohEgoyMDI2LTExLTA0YPwCagcIARIDSkZLcgcIARIDTEFYQAFIAXABmAEC"
+_PAGE_DEPART_6_TO_11 = "CBwQAhomEgoyMDI2LTExLTA0QAZIC1AAWBdqBwgBEgNKRktyBwgBEgNMQVhAAUgBcAGYAQI"
+_PAGE_LAYOVER_120_TO_240 = "CBwQAholEgoyMDI2LTExLTA0agcIARIDSkZLcgcIARIDTEFYiAF4kAHwAUABSAFwAZgBAg"
+_PAGE_ADULT_AND_CHILD = "CBwQAhoeEgoyMDI2LTExLTA0agcIARIDSkZLcgcIARIDTEFYQAFAAkgBcAGYAQI"
+
+
+def _undated(raw: bytes) -> tuple[dict[int, list[Any]], list[dict[int, list[Any]]]]:
+    """(envelope without its slices, each slice without its date)."""
+    envelope = _decode(raw)
+    slices = [_decode(s) for s in envelope.pop(3)]
+    for sl in slices:
+        sl.pop(2)
+    return envelope, slices
+
+
+def _page_tfs(b64: str) -> bytes:
+    return base64.urlsafe_b64decode(b64 + "=" * (-len(b64) % 4))
+
+
+@pytest.mark.parametrize(
+    "page,kwargs",
+    [
+        (_PAGE_CARRIER_AA, {"airlines": [Airline["AA"]]}),
+        (
+            _PAGE_ONEWORLD_LHR,
+            {
+                "airlines": [Airline["ONEWORLD"]],
+                "flight_segments": [_segment("JFK", "LHR", _OUT)],
+            },
+        ),
+        (_PAGE_MAX_380_MIN, {"max_duration": 380}),
+        (
+            _PAGE_DEPART_6_TO_11,
+            {
+                "flight_segments": [
+                    _segment(
+                        "JFK",
+                        "LAX",
+                        _OUT,
+                        time_restrictions=TimeRestrictions(
+                            earliest_departure=6, latest_departure=11
+                        ),
+                    )
+                ]
+            },
+        ),
+        (
+            _PAGE_LAYOVER_120_TO_240,
+            {"layover_restrictions": LayoverRestrictions(min_duration=120, max_duration=240)},
+        ),
+        (_PAGE_ADULT_AND_CHILD, {"passenger_info": PassengerInfo(adults=1, children=1)}),
+    ],
+    ids=["carrier", "alliance", "duration", "departure-window", "layover", "child"],
+)
+def test_a_filter_encodes_as_the_page_google_served_it(page: str, kwargs: dict[str, Any]) -> None:
+    assert _undated(build_search_tfs(_filters(**kwargs))) == _undated(_page_tfs(page))
+
+
+def test_the_ui_writes_all_four_hours_once_one_is_set() -> None:
+    """The UI's URL for "6:00 AM to end of day, arriving by 9:00 PM": a latest
+    hour is the last hour included, so 9 PM is 20 and the end of the day 23."""
+    ui = _slices(
+        _page_tfs(
+            "CBwQAhopEgoyMDI2LTExLTA0QAZIF1AAWBRg4ANqBwgBEgNKRktyBwgBEgNMQVhAAUgBcAGCAQsI____________AZgBAg"
+        )
+    )[0]
+    assert (ui[8], ui[9], ui[10], ui[11]) == ([6], [23], [0], [20])
+    window = TimeRestrictions(earliest_departure=6, latest_arrival=20)
+    ours = _slices(
+        build_search_tfs(
+            _filters(flight_segments=[_segment("JFK", "LAX", _OUT, time_restrictions=window)])
+        )
+    )[0]
+    assert (ours[8], ours[9], ours[10], ours[11]) == ([6], [23], [0], [20])
+
+
+def test_a_minimum_layover_is_written_alone() -> None:
+    sl = _slices(
+        build_search_tfs(_filters(layover_restrictions=LayoverRestrictions(min_duration=120)))
+    )[0]
+    assert sl[17] == [120]
+    assert 18 not in sl
+
+
+def test_carriers_repeat_and_take_the_iata_code_not_the_name() -> None:
+    sl = _slices(build_search_tfs(_filters(airlines=[Airline["AA"], Airline["_9W"]])))[0]
+    assert sl[6] == [b"AA", b"9W"]
+
+
+def test_a_round_trip_carries_the_trip_filters_on_both_slices_and_each_its_own_window() -> None:
+    rt = _filters(
         flight_segments=[
-            _segment("JFK", "LAX", _OUT, time_restrictions=TimeRestrictions(earliest_departure=6))
-        ]
+            _segment(
+                "JFK",
+                "LAX",
+                _OUT,
+                time_restrictions=TimeRestrictions(earliest_departure=8, latest_departure=11),
+            ),
+            _segment("LAX", "JFK", _BACK),
+        ],
+        trip_type=TripType.ROUND_TRIP,
+        airlines=[Airline["AA"]],
+        max_duration=380,
+        layover_restrictions=LayoverRestrictions(max_duration=90),
     )
-    with pytest.raises(GfTfsUnsupportedError) as excinfo:
-        build_search_tfs(f)
-    assert excinfo.value.field == "time_restrictions"
+    out, back = _slices(build_search_tfs(rt))
+    for sl in (out, back):
+        assert (sl[6], sl[12], sl[18]) == ([b"AA"], [380], [90])
+    assert (out[8], out[9], out[10], out[11]) == ([8], [11], [0], [23])
+    assert not {8, 9, 10, 11} & set(back)
+
+
+def test_an_unset_filter_writes_nothing() -> None:
+    sl = _slices(build_search_tfs(_filters()))[0]
+    assert not {6, 7, 8, 9, 10, 11, 12, 15, 17, 18} & set(sl)
 
 
 def test_multi_city_raises() -> None:
@@ -379,6 +506,7 @@ def test_every_filter_field_is_claimed_by_exactly_one_set() -> None:
     # The three sets ARE the unit under test, so reaching for them is the point.
     from flight_cli.links import (
         _TFS_ENCODED_FIELDS,  # pyright: ignore[reportPrivateUsage]
+        _TFS_ENCODED_PAX,  # pyright: ignore[reportPrivateUsage]
         _TFS_IGNORED_FIELDS,  # pyright: ignore[reportPrivateUsage]
         _TFS_REFUSED_FIELDS,  # pyright: ignore[reportPrivateUsage]
         _TFS_REFUSED_PAX,  # pyright: ignore[reportPrivateUsage]
@@ -393,9 +521,24 @@ def test_every_filter_field_is_claimed_by_exactly_one_set() -> None:
     # new one there is just as silent — `PassengerInfo` gaining a passenger kind
     # would price it as nothing at all.
     pax_refused = {field for field, _ in _TFS_REFUSED_PAX}
-    assert pax_refused | {"adults"} == set(PassengerInfo.model_fields)
-    segment_read = {"departure_airport", "arrival_airport", "travel_date", "selected_flight"}
-    assert segment_read | {"time_restrictions"} == set(FlightSegment.model_fields)
+    assert pax_refused | _TFS_ENCODED_PAX == set(PassengerInfo.model_fields)
+    assert not (pax_refused & _TFS_ENCODED_PAX)
+    segment_read = {
+        "departure_airport",
+        "arrival_airport",
+        "travel_date",
+        "selected_flight",
+        "time_restrictions",
+    }
+    assert segment_read == set(FlightSegment.model_fields)
+    # `airports` is read to refuse it.
+    assert {"airports", "min_duration", "max_duration"} == set(LayoverRestrictions.model_fields)
+    assert {
+        "earliest_departure",
+        "latest_departure",
+        "earliest_arrival",
+        "latest_arrival",
+    } == set(TimeRestrictions.model_fields)
 
 
 def test_a_filter_field_fli_grows_later_is_refused() -> None:

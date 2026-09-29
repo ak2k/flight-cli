@@ -949,6 +949,63 @@ def test_fast_sellers_open_a_google_connection_on_the_days_google_gives_its_flig
     assert (_DEP + timedelta(days=1)).isoformat().encode() in raw.split(b"104", 1)[1]
 
 
+def test_enriched_sellers_open_a_matrix_connection_on_the_days_its_google_match_gives(
+    monkeypatch: pytest.MonkeyPatch, board: list[Any]
+) -> None:
+    """Matrix lists the same two NZ flights as Google, dating only the slice's
+    ends. The merged row takes Google's date for each flight, so it is opened,
+    with NZ10 asked for on the day after the trip began."""
+    row = _nz_over_the_date_line(_DEP)
+
+    def _one_row(*_a: object, **_kw: object) -> list[Any]:
+        return [row]
+
+    monkeypatch.setattr(cli, "_gflight_results", _one_row)
+    day = _DEP.isoformat()
+    connection = {
+        "displayTotal": "USD880.00",
+        "itinerary": {
+            "slices": [
+                {
+                    "flights": ["NZ104", "NZ10"],
+                    "departure": f"{day}T18:00+11:00",
+                    "arrival": f"{day}T10:00-10:00",
+                    "origin": {"code": "SYD"},
+                    "destination": {"code": "HNL"},
+                    "stops": [{"code": "AKL"}],
+                }
+            ]
+        },
+    }
+    monkeypatch.setattr(cli, "_matrix_into", _matrix_answers([connection]))
+    fake = _serve(
+        monkeypatch,
+        _booking_body(
+            _option("Air New Zealand", 880, airline=True, flights=[["NZ", "104"], ["NZ", "10"]])
+        ),
+    )
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "search",
+            "SYD",
+            "HNL",
+            "--dep",
+            day,
+            "--cash-only",
+            "--sellers",
+            "--no-matrix-url",
+            "--no-google-url",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Google Flights + Matrix" in result.stdout
+    assert "Booking options for #1" in result.stdout
+    raw = _booking_tfs(fake.urls[0])
+    assert raw.count(day.encode()) == 2
+    assert (_DEP + timedelta(days=1)).isoformat().encode() in raw.split(b"104", 1)[1]
+
+
 async def _no_matrix(*_a: object, **_kw: object) -> None:
     return None
 

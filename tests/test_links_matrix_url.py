@@ -181,7 +181,7 @@ def test_multi_city_keeps_one_slice_per_leg() -> None:
         assert dates["returnDate"] == ""
 
 
-# ───────── pinned segment dates: a segment is dated by when it DEPARTS ─────────
+# ───────── pinned segment dates: only a stated date pins a flight ─────────
 
 
 def _slice(
@@ -198,10 +198,9 @@ def _slice(
 
 
 def test_overnight_nonstop_is_dated_by_departure() -> None:
-    """A nonstop satisfies `i == n - 1`, so the last-segment rule dated it by
-    ARRIVAL — pinning BA178 JFK->LHR (dep 2026-12-31, arr 2027-01-01) to
-    2027-01-01 and sending the user to a search for the wrong day, across a
-    year boundary."""
+    """A nonstop's one flight leaves on the slice's departure day: BA178
+    JFK->LHR leaving 2026-12-31 is pinned to 2026-12-31, though it lands in the
+    next year."""
     segs = extract_pin_segments_from_slice(
         _slice(["BA178"], "2026-12-31T22:00-05:00", "2027-01-01T10:00+00:00", "JFK", "LHR"),
     )
@@ -209,9 +208,9 @@ def test_overnight_nonstop_is_dated_by_departure() -> None:
     assert [x["date"] for x in segs] == ["2026-12-31"]
 
 
-def test_overnight_connection_still_dates_its_last_leg_by_arrival() -> None:
-    """The rule the nonstop case was over-applying is real for a genuine
-    connection: the second leg does depart on the following day."""
+def test_a_connection_with_no_flight_dates_is_not_pinned() -> None:
+    """The slice's two ends do not date its second flight: a BOS-LHR red-eye
+    leaves the evening before it lands, so the arrival day is the wrong one."""
     segs = extract_pin_segments_from_slice(
         _slice(
             ["AA100", "BA200"],
@@ -222,8 +221,7 @@ def test_overnight_connection_still_dates_its_last_leg_by_arrival() -> None:
             ["BOS"],
         ),
     )
-    assert segs is not None
-    assert [x["date"] for x in segs] == ["2026-12-31", "2027-01-01"]
+    assert segs is None
 
 
 def test_same_day_nonstop_unchanged() -> None:

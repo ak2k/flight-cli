@@ -63,6 +63,7 @@ from .domain import (
     SearchOptions,
     SpecificDateSearch,
     TimeOfDay,
+    covers_one_window,
 )
 from .links import (
     extract_pin_segments_from_slice,
@@ -81,7 +82,7 @@ from .pp.cli import auth_app, run_pp_for_search
 from .providers.base import LegQuery
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Iterable
+    from collections.abc import Callable, Coroutine, Iterable, Sequence
 
     from ._gf_booking import BookingOptions
     from ._gf_explore import Destination, ExploreAnswer, TripLength
@@ -96,6 +97,7 @@ if TYPE_CHECKING:
         SearchResult,
         Slice,
     )
+    from .routing_predicates import Predicate
 
 # Tuple-length sentinels for `--slice` parser (`ORIGIN-DEST:DATE[:r=...:e=...]`).
 _SLICE_MIN_PARTS = 2
@@ -556,6 +558,30 @@ def _gf_unserveable_reasons(backend: str, origin: str | None, destination: str |
     return [f"a city code rather than an airport ({', '.join(bad)})"] if bad else []
 
 
+def _gf_unmappable_reasons(backend: str, predicates: Sequence[Predicate]) -> list[str]:
+    """Reasons a carrier include keeps this request off Google Flights: a code
+    fli has no member for is left out of the page's include list, and the rows'
+    carriers are read through the same table, so none would come back.
+
+    Checked with the bridge's own lookup, and only where Google Flights is still
+    in the running: a Matrix run pays neither the fli import nor the check."""
+    from .routing_predicates import AlliancePred, CarrierPred  # noqa: PLC0415
+
+    if backend == BACKEND_MATRIX or not any(
+        isinstance(p, CarrierPred | AlliancePred) for p in predicates
+    ):
+        return []
+    from .fli_bridge import unmappable_codes  # noqa: PLC0415 — imports fli
+
+    bad = unmappable_codes(predicates)
+    return [f"a carrier Google Flights has no code for ({', '.join(bad)})"] if bad else []
+
+
+# Google's passenger picker stops at nine travelers: a larger party asks for a
+# page its own UI never builds.
+_GF_MAX_PASSENGERS = 9
+
+
 def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Matrix
     *,
     backend: str,
@@ -575,6 +601,7 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
     allow_airport_changes: bool,
     show_only_available: bool,
     fare_rules: bool = False,
+    adults: int = 1,
 ) -> str:
     """Resolve --backend to a concrete backend.
 
@@ -585,15 +612,18 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
     filter applies to the page's full board (`search_page_reasons`). Any other
     constraint goes to Matrix WITH ITS REASON PRINTED.
 
-    Hard-Matrix flags always force Matrix: `--slice` (multi-city),
-    `--depart-times`/`--return-times`, a `--stops` ceiling above two (fli maps
-    it to "any", so the tfs field would be omitted and the constraint lost),
-    any pax type beyond adults (the page's
-    passenger field has kind codes for children and infants that we have never
-    verified against a live priced search), and
+    Hard-Matrix flags always force Matrix: `--slice` (multi-city), a stop
+    ceiling above two, the strictest of `--stops` and every `MAXSTOPS` being the
+    one the page is asked for (fli maps a higher one to "any", so the tfs field
+    would be omitted and the constraint lost), seniors and youth (Google has no
+    such passenger kind), infants (Google prices them, but answered JFK-LAX with
+    no rows at all for any infant, so its empty answer would not be one), and
     `--no-airport-changes` / `--include-unavailable`, which the search page's
     `tfs=` parameter has no field for at all. `--fare-rules` too: fare bases and
     rules come from Matrix's `/v1/summarize`, which Google has no equivalent of.
+    Children stay on Google beside an adult, in a party of nine or fewer.
+    `--depart-times`/`--return-times` stay on Google when a leg's buckets form
+    one window: the page takes one hour window per leg.
 
     An airport set or a metro code stays on Google Flights, which is asked for
     every member airport (`_metro`). What goes to Matrix is a leg the page can't
@@ -614,20 +644,26 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
     Explicit --backend matrix: matrix. --backend gflight: gflight, unless the
     request is inexpressible on GF (error)."""
     from ._gf_postfilter import search_page_reasons  # noqa: PLC0415
-    from .routing_predicates import (  # noqa: PLC0415
-        MAX_ENCODABLE_STOPS,
-        classify,
-    )
+    from .routing_predicates import classify  # noqa: PLC0415
 
     reasons: list[str] = []
     if fare_rules:
         reasons.append("fare rules")
     if slice_specs:
         reasons.append("a multi-city itinerary")
-    if depart_times or return_times:
-        reasons.append("a departure/arrival time window")
-    if children or seniors or youth or inf_seat or inf_lap:
-        reasons.append("a passenger type beyond adults")
+    for which, flag in (("departure", depart_times), ("return", return_times)):
+        buckets = _parse_times(flag)
+        if buckets and not covers_one_window(buckets):
+            names = ", ".join(dict.fromkeys(b.value for b in buckets))
+            reasons.append(f"{which} times that are not one window ({names})")
+    if seniors or youth:
+        reasons.append("a senior or youth passenger")
+    if inf_seat or inf_lap:
+        reasons.append("an infant passenger")
+    if children and not adults:
+        reasons.append("a child passenger with no adult")
+    if adults + children > _GF_MAX_PASSENGERS:
+        reasons.append(f"more than {_GF_MAX_PASSENGERS:d} passengers")
     if not allow_airport_changes:
         # Both of these reach the Matrix REQUEST and the Matrix deep link and
         # nothing else: `fli_bridge`, which the search page's `tfs=` is encoded
@@ -646,13 +682,9 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
             backend, ",".join(expand_airports(origins)), ",".join(expand_airports(destinations))
         )
     )
-    if stops is not None and stops > MAX_ENCODABLE_STOPS:
-        # Same ceiling as the routing-language spelling below, and the same
-        # wording: fli's MaxStops maps anything higher to ANY, which omits the
-        # tfs field, so `--stops 3` would encode byte-identically to no --stops.
-        reasons.append(f"a stop ceiling above {MAX_ENCODABLE_STOPS} ({stops})")
-    if routing or extension:
-        reasons.extend(search_page_reasons(classify(routing, extension).predicates))
+    predicates = classify(routing, extension).predicates
+    reasons.extend(search_page_reasons(predicates, stops))
+    reasons.extend(_gf_unmappable_reasons(backend, predicates))
 
     # The same reasons go out two ways, and only one of them is markup. A
     # reason quotes the user's --routing string verbatim, so one square bracket
@@ -2075,8 +2107,8 @@ def _booking_options(
     heading = f"No booking options for #{n:d}"
     # A page asked for a day the row does not state answers for another trip
     # with the same flight numbers, which the seller check cannot tell apart
-    # from this one. Checked before the segments are built because building
-    # them dates an undated connection's flights from the slice's two ends.
+    # from this one. `_pin_segments` refuses such a row too; checking first
+    # lets the refusal name the reason and its remedy.
     itinerary = result.solutions[n - 1].itinerary
     if itinerary is not None and not all(pin_dates_are_stated(s) for s in itinerary.slices):
         _no_booking_options(
@@ -2681,7 +2713,10 @@ def _run_matrix_path(
         pick = _pick_in_range(
             pick,
             len(shown),
-            links_follow=not json_out and (matrix_url or google_url),
+            pin_follows=lambda: (
+                not json_out
+                and _pins_row_one(search, res, matrix_url=matrix_url, google_url=google_url)
+            ),
             fare_rules=True,
         )
     if json_out and not run_pp:
@@ -2737,7 +2772,13 @@ def _run_matrix_path(
         # An empty result is numbered nowhere, so it gets no sentence at all
         # rather than an empty `(1-0)` interval and a pin claim nothing honours.
         pick = (
-            _pick_in_range(pick, len(shown), links_follow=matrix_url or google_url)
+            _pick_in_range(
+                pick,
+                len(shown),
+                pin_follows=lambda: _pins_row_one(
+                    search, res, matrix_url=matrix_url, google_url=google_url
+                ),
+            )
             if shown
             else None
         )
@@ -2963,9 +3004,10 @@ def _gflight_results(
     gf_mode: GfTransportMode = TRANSPORT_HTTP,
     gf_headed: bool = False,
 ) -> Board[Any]:
-    """Query Google Flights for `legs`, honoring routing/extension: Tier-1
-    predicates narrow the fli query natively, the Tier-2 post-filter drops
-    violating rows from each board as it is served. Returns the (filtered) raw
+    """Query Google Flights for `legs`, honoring routing/extension and time
+    windows: what the page encodes narrows the fli query natively, and the row
+    filter drops violating rows from each board as it is served, re-checking
+    what the page encodes wherever the row shows it. Returns the (filtered) raw
     fli result list, with the page's price insight and the count of rows the
     filter dropped.
 
@@ -3009,7 +3051,7 @@ def _gflight_results(
             top_n=top_n,
             transport=transport,
             currency=requested,
-            keep=routing_keep(per_slice_preds),
+            keep=routing_keep(per_slice_preds, [lg.time_ranges for lg in legs]),
         )
     finally:
         # Named positively, because only rung 2 opens anything to close. The
@@ -3107,8 +3149,19 @@ def _price_ordered(results: list[Any]) -> list[Any]:
     return sorted(results, key=_terminal_fare_key)
 
 
+def _pins_row_one(
+    search: Search, result: SearchResult | None, *, matrix_url: bool, google_url: bool
+) -> bool:
+    """Whether `_emit_urls` prints a link pinned to `result`'s first row, the
+    row an out-of-range pick falls back to. A link can follow and pin nothing:
+    the Google one refuses a row whose flights' dates no source states."""
+    return (matrix_url and _try_pinned_matrix_url(search, result, 0) is not None) or (
+        google_url and _try_pinned_gflight_url(search, result, 0) is not None
+    )
+
+
 def _pick_in_range(
-    pick: int | None, rows: int, *, links_follow: bool, fare_rules: bool = False
+    pick: int | None, rows: int, *, pin_follows: Callable[[], bool], fare_rules: bool = False
 ) -> int | None:
     """`pick` when it names one of the `rows` the user was shown, else None
     with the reason on stderr.
@@ -3123,9 +3176,12 @@ def _pick_in_range(
     Two clauses, and neither is unconditional. A number the user typed that
     names no row on screen is worth a line, and `rows` is what the line
     measures it against. What happens NEXT is a separate question: a run that
-    emits no link pins nothing, so `links_follow` is what keeps the second
+    emits no link pins nothing, and neither does one whose links cannot pin
+    row one (`_pins_row_one`), so `pin_follows` is what keeps the second
     clause from describing something that did not happen — the defect this
-    whole reporter exists to avoid, one sentence in.
+    whole reporter exists to avoid, one sentence in. It is asked only once a
+    pick has fallen back, because answering it can read rows the render has
+    yet to check: one it cannot read pins nothing, and the render reports it.
 
     A board with NO rows is the case the callers keep away from here rather
     than one this reports, and for the same reason the second clause exists:
@@ -3146,9 +3202,13 @@ def _pick_in_range(
     row one's too, and the clause says so for the same reason."""
     if pick is None or 1 <= pick <= rows:
         return pick
-    if links_follow and fare_rules:
+    try:
+        pinned = pin_follows()
+    except Exception:  # noqa: BLE001 - a row the link builders cannot read pins nothing
+        pinned = False
+    if pinned and fare_rules:
         fallback = "; pinning itinerary #1 and showing its fare rules instead."
-    elif links_follow:
+    elif pinned:
         fallback = "; pinning itinerary #1 instead."
     elif fare_rules:
         fallback = "; showing itinerary #1's fare rules instead."
@@ -3264,7 +3324,7 @@ def _gf_refusal(  # noqa: PLR0911 — one return per refusal type; see the docst
                 f"Use [bold]--backend matrix[/]. ({_safe_text(e)})",
             )
         case GfTfsUnsupportedError():
-            # Generic note: `page_can_encode` keeps these queries off Google
+            # Generic note: the backend picker keeps these queries off Google
             # Flights, so the enrich path never has one to render.
             return _GfRefusal(
                 _GF_DECLINED,
@@ -3346,15 +3406,34 @@ def _render_merged(rows: list[Any], *, legs: tuple[Leg, ...], top_n: int) -> Non
     console.print(t)
 
 
+def _row_checks(legs: tuple[Leg, ...]) -> str:
+    """What the row filter holds `legs`' rows to, for the sentence that says it
+    emptied a board. Plain text: it quotes the user's own codes."""
+    from ._gf_postfilter import row_check_names  # noqa: PLC0415 — GF-only
+    from .routing_predicates import classify  # noqa: PLC0415
+
+    names = row_check_names(
+        [classify(lg.route_language, lg.extension).predicates for lg in legs],
+        [lg.time_ranges for lg in legs],
+    )
+    return _join_reasons(names) or "the routing"
+
+
 def _answer_gf_empty(
-    dropped: int, *, json_out: bool, matrix_fallback: bool, pinned: int = 0
+    dropped: int,
+    *,
+    json_out: bool,
+    matrix_fallback: bool,
+    pinned: int = 0,
+    checks: str = "the routing",
 ) -> int | None:
     """Answer a Google Flights search that has no rows, or hand it on.
 
-    `dropped` is how many served rows the routing filter removed. When it
-    removed them all and `matrix_fallback` is set, nothing is printed and the
-    count comes back for the caller to run Matrix with. Otherwise the reason
-    goes to stderr, so a `--format json` stdout is still the one document.
+    `dropped` is how many served rows the row filter removed, and `checks`
+    names what it held them to (`_row_checks`). When it removed them all and
+    `matrix_fallback` is set, nothing is printed and the count comes back for
+    the caller to run Matrix with. Otherwise the reason goes to stderr, so a
+    `--format json` stdout is still the one document.
 
     `pinned` is how many outbounds a round trip searched returns for. The
     reason names it, because outbounds below the pins may have matching
@@ -3364,13 +3443,13 @@ def _answer_gf_empty(
     if dropped and pinned:
         plural = "" if pinned == 1 else "s"
         err.print(
-            f"[yellow]Google Flights: no round trip matched the routing "
+            f"[yellow]Google Flights: no round trip matched {_safe_text(checks)} "
             f"({dropped:d} rows filtered out; returns were searched for the first "
             f"{pinned:d} outbound option{plural}).[/]"
         )
     elif dropped:
         err.print(
-            f"[yellow]Google Flights: no itinerary matched the routing "
+            f"[yellow]Google Flights: no itinerary matched {_safe_text(checks)} "
             f"({dropped:d} rows filtered out).[/]"
         )
     if json_out:
@@ -3453,6 +3532,7 @@ def _run_gflight_path(
             json_out=json_out,
             matrix_fallback=matrix_fallback,
             pinned=getattr(results, "pinned", 0),
+            checks=_row_checks(legs),
         )
 
     # `-n` is one number for everything the user can act on. Google's page
@@ -3466,11 +3546,22 @@ def _run_gflight_path(
     # than exist, which is the failure this backend is most prone to.
     insight = getattr(results, "insight", None)
     results = _price_ordered(results)[:top_n]
-    # A link follows only where one is asked for and the format has room for it:
-    # `--format json` emits none at all, and neither does a run with both URL
-    # flags off. The range is still reported; the fallback is not claimed.
+    # A pinned link follows only where one is asked for, the format has room for
+    # it and row one can be pinned: `--format json` emits no link at all, and a
+    # Google row carries no ids a Matrix link could pin. The range is still
+    # reported; the fallback is not claimed.
     pick = seller_row or _pick_in_range(
-        pick, len(results), links_follow=not json_out and (matrix_url or google_url)
+        pick,
+        len(results),
+        pin_follows=lambda: (
+            not json_out
+            and _pins_row_one(
+                SpecificDateSearch(legs=legs, options=opts),
+                fli_results_to_search_result(results),
+                matrix_url=matrix_url,
+                google_url=google_url,
+            )
+        ),
     )
 
     # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType,
@@ -3611,7 +3702,8 @@ def _paint_first_gf_table(
     elif not gf and "gf_err" not in state:
         if getattr(gf, "dropped", 0):
             err.print(
-                "[yellow]Google Flights: no itinerary matched the routing; awaiting Matrix…[/]"
+                f"[yellow]Google Flights: no itinerary matched {_safe_text(_row_checks(legs))}; "
+                "awaiting Matrix…[/]"
             )
         else:
             err.print("[yellow]Google Flights: no results; awaiting Matrix…[/]")
@@ -3969,12 +4061,18 @@ def _run_enriched_path(  # noqa: PLR0915 — one weave's outcome arms, read in o
         # would be, and the fallback clause beside it would name a pin that does
         # not happen — this arm renders a header-only table and carries on where
         # the sibling has already returned.
+        pinnable = matrix_res.model_copy(update={"solutions": shown})
         pick = seller_row or (
-            _pick_in_range(pick, len(shown), links_follow=matrix_url or google_url)
+            _pick_in_range(
+                pick,
+                len(shown),
+                pin_follows=lambda: _pins_row_one(
+                    matrix_search, pinnable, matrix_url=matrix_url, google_url=google_url
+                ),
+            )
             if shown
             else None
         )
-        pinnable = matrix_res.model_copy(update={"solutions": shown})
         if seller_row is not None:
             chosen = merged[seller_row - 1]
             booking_row = (pinnable, seller_row, chosen.gf_price, chosen.matrix_price)
@@ -4594,7 +4692,7 @@ def _run_gflight_path_multi(
         if not cab_rows and getattr(cab_rows, "dropped", 0):
             err.print(
                 f"[yellow]Google Flights {_safe_text(cab.value)}: "
-                "no itinerary matched the routing.[/]"
+                f"no itinerary matched {_safe_text(_row_checks(legs))}.[/]"
             )
 
     if json_out and not run_pp:
@@ -5158,7 +5256,7 @@ def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes th
         str | None,
         typer.Option(
             "--routing",
-            help="Routing language ('LH+', 'BA AA', '[F* X F*]'). Matrix only.",
+            help="Routing language ('LH+', 'BA AA', '[F* X F*]').",
             rich_help_panel=_GROUP_FILTERING,
         ),
     ] = None,
@@ -5167,7 +5265,7 @@ def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes th
         typer.Option(
             "--extension",
             "--ext",
-            help="Extension codes ('MAXCONNECT 2:00', 'MAXSTOPS 1'). Matrix only.",
+            help="Extension codes ('MAXCONNECT 2:00', 'MAXSTOPS 1').",
             rich_help_panel=_GROUP_FILTERING,
         ),
     ] = None,
@@ -5175,7 +5273,7 @@ def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes th
         str | None,
         typer.Option(
             "--depart-times",
-            help="Preferred outbound times-of-day (comma list: morning,evening). Matrix only.",
+            help="Preferred outbound times-of-day (comma list: morning,midday).",
             rich_help_panel=_GROUP_FILTERING,
         ),
     ] = None,
@@ -5183,7 +5281,7 @@ def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes th
         str | None,
         typer.Option(
             "--return-times",
-            help="Preferred return times-of-day. Matrix only.",
+            help="Preferred return times-of-day.",
             rich_help_panel=_GROUP_FILTERING,
         ),
     ] = None,
@@ -5246,8 +5344,9 @@ def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes th
         "--pick",
         help="Itinerary #N (1-based, as shown in the final table) to pin in the "
         "--matrix-url/--google-url deep links, to describe with --fare-rules and to "
-        "open with --sellers. Default: the first row. A pick outside the table falls "
-        "back to row 1 for the links and --fare-rules and is refused with --sellers. "
+        "open with --sellers. Default: the first row. A link that cannot pin that row "
+        "pre-fills the search instead; its label says which. A pick outside the table "
+        "falls back to row 1 for the links and --fare-rules and is refused with --sellers. "
         "--format json emits no link lines, so there it only chooses the --fare-rules "
         "or --sellers row.",
         rich_help_panel=_GROUP_OUTPUT,
@@ -5402,6 +5501,7 @@ def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes th
         allow_airport_changes=allow_airport_changes,
         show_only_available=only_available,
         fare_rules=fare_rules,
+        adults=adults,
     )
     if slice_specs:
         legs = tuple(_parse_slice_spec(s) for s in slice_specs)
@@ -5555,8 +5655,8 @@ def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes th
         if unmatched is None:
             return
         err.print(
-            f"[dim]Using Matrix: no Google Flights itinerary matched the routing "
-            f"({unmatched:d} rows filtered out).[/]"
+            f"[dim]Using Matrix: no Google Flights itinerary matched "
+            f"{_safe_text(_row_checks(legs))} ({unmatched:d} rows filtered out).[/]"
         )
 
     _run_matrix_path(
@@ -6477,9 +6577,9 @@ def gflight(
     if ret:
         legs += (Leg.of(destinations, origins, _parse_date(ret)),)
     # This alias has no --backend flag, so it resolves like `search` on auto
-    # rather than forcing Google Flights: `--children N` can't be priced on the
-    # page transport, and taking the backend that can price it beats erroring on
-    # a query the alias accepts. `_pick_backend` prints the reason either way.
+    # rather than forcing Google Flights: a party the page can't take goes to
+    # the backend that can price it rather than erroring on a query the alias
+    # accepts. `_pick_backend` prints the reason either way.
     resolved = _pick_backend(
         backend=BACKEND_AUTO,
         routing=None,
@@ -6499,6 +6599,7 @@ def gflight(
         # it has no flag for either, so neither can be a reason here.
         allow_airport_changes=True,
         show_only_available=True,
+        adults=adults,
     )
     opts = _build_options(
         cabin=cabin,

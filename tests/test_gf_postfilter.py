@@ -1,4 +1,4 @@
-# pyright: reportCallIssue=false
+# pyright: reportCallIssue=false, reportPrivateUsage=false
 # DIVERGE: pydantic Field(alias=...) on _Loose models trips basedpyright into
 # treating alias names as required kwargs even though populate_by_name=True is
 # set. Same posture as tests/pp/test_match.py + pp/gflight_adapter.py.
@@ -6,9 +6,26 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import json
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING, Any
 
-from flight_cli._gf_postfilter import apply_postfilter, can_postfilter, search_page_reasons
+import pytest
+from fli.models import FlightLeg, FlightResult  # pyright: ignore[reportMissingTypeStubs]
+from fli.models.airline import Airline  # pyright: ignore[reportMissingTypeStubs]
+from fli.models.airport import Airport  # pyright: ignore[reportMissingTypeStubs]
+
+from conftest import _ds1
+from flight_cli import _gflight_ids as gfid
+from flight_cli._gf_postfilter import (
+    apply_postfilter,
+    can_postfilter,
+    routing_keep,
+    row_check_names,
+    search_page_reasons,
+)
+from flight_cli._gflight_ids import GFlightWithId, LegAmenities
+from flight_cli.domain import TimeOfDay
 from flight_cli.models import (
     Itinerary,
     ItineraryDetails,
@@ -175,8 +192,10 @@ def test_the_search_page_serves_encodable_and_post_filterable_predicates() -> No
 def test_every_other_predicate_keeps_its_own_reason() -> None:
     """One reason per predicate the page can't serve, and none for the ones it
     can: the user reads which constraint sent the search to Matrix."""
-    reasons = search_page_reasons(classify("~BA+", "MINCONNECT 1:00; -REDEYES").predicates)
-    assert reasons == ["a layover-time bound", "a red-eye exclusion"]
+    reasons = search_page_reasons(
+        classify("~BA+", "MINCONNECT 1:00; -REDEYES; -OVERNIGHTS").predicates
+    )
+    assert reasons == ["a red-eye exclusion", "an overnight-stop exclusion"]
     assert search_page_reasons(classify("LH+", "F bc=y").predicates)  # include, Tier 3
     # Evaluable here, but Matrix reads both positionally and the filter does not.
     assert search_page_reasons(classify("AS21", None).predicates)
@@ -187,3 +206,276 @@ def test_apply_postfilter_no_predicates_is_noop() -> None:
     res = _result(_slice([("UA1", "UA", ["UA"])]))
     out = apply_postfilter(res, [[]])
     assert out.solution_count == 1
+
+
+@pytest.mark.parametrize(
+    "routing,extension",
+    [
+        ("AA+", None),
+        (None, "AIRLINES AA DL"),
+        (None, "ALLIANCE oneworld"),
+        (None, "ALLIANCE oneworld|star-alliance"),
+        (None, "MAXDUR 6:20"),
+        (None, "MINCONNECT 2:00; MAXCONNECT 5:00"),
+        ("AA+", "AIRLINES DL; MAXSTOPS 1"),
+    ],
+)
+def test_the_search_page_serves_what_its_tfs_encodes(
+    routing: str | None, extension: str | None
+) -> None:
+    assert search_page_reasons(classify(routing, extension).predicates) == []
+
+
+@pytest.mark.parametrize(
+    "routing,extension",
+    [("AA+", "ALLIANCE oneworld"), (None, "ALLIANCE oneworld; ALLIANCE skyteam")],
+)
+def test_an_alliance_beside_another_include_goes_to_matrix(
+    routing: str | None, extension: str | None
+) -> None:
+    """3.6 is one list, so Google would answer either, and nothing narrows an
+    alliance back on the rows."""
+    assert search_page_reasons(classify(routing, extension).predicates) == [
+        "an alliance filter combined with another carrier or alliance filter"
+    ]
+
+
+def test_a_zero_maximum_layover_goes_to_matrix_naming_it() -> None:
+    assert search_page_reasons(classify(None, "MAXCONNECT 0:00").predicates) == [
+        "a maximum layover of 0 min"
+    ]
+
+
+def test_a_zero_maximum_duration_goes_to_matrix_naming_it() -> None:
+    """fli's duration maximum is positive, and assigning it skips that check,
+    so the page would be sent 3.12=0."""
+    assert search_page_reasons(classify(None, "MAXDUR 0:00").predicates) == [
+        "a maximum trip duration (0 min)"
+    ]
+
+
+# ─────────────────────────── checks on the raw row ─────────────────────────
+
+_DAY = datetime(2026, 11, 4)
+
+
+def _row(
+    *legs: tuple[str, str, str, int, int],
+    duration: int,
+    marketing: tuple[tuple[str, ...], ...] = (),
+) -> GFlightWithId:
+    """legs = (booking carrier, from, to, departure minute of the day, arrival
+    minute of the day), both local to their own airport."""
+    fli_legs = [
+        FlightLeg(
+            airline=Airline[carrier],
+            flight_number=str(100 + i),
+            departure_airport=Airport[frm],
+            arrival_airport=Airport[to],
+            departure_datetime=_DAY + timedelta(minutes=dep),
+            arrival_datetime=_DAY + timedelta(minutes=arr),
+            duration=max(arr - dep, 1),
+        )
+        for i, (carrier, frm, to, dep, arr) in enumerate(legs)
+    ]
+    amenities = [
+        LegAmenities(marketing_carriers=marketing[i] if i < len(marketing) else (carrier,))
+        for i, (carrier, *_rest) in enumerate(legs)
+    ]
+    flight = FlightResult(
+        price=300.0, currency="USD", duration=duration, stops=len(legs) - 1, legs=fli_legs
+    )
+    return GFlightWithId(flight=flight, flight_id="", amenities=amenities)
+
+
+def _keeps(row: GFlightWithId, routing: str | None, extension: str | None, leg: int = 0) -> bool:
+    keep = routing_keep([classify(routing, extension).predicates] * 2)
+    assert keep is not None
+    return keep(leg, row)
+
+
+def _h(hours: float) -> int:
+    return int(hours * 60)
+
+
+def test_the_duration_check_reads_googles_total() -> None:
+    westbound = _row(("AA", "JFK", "LAX", _h(8), _h(11.25)), duration=375)
+    assert _keeps(westbound, None, "MAXDUR 6:20")
+    long_way = _row(("AA", "JFK", "LAX", _h(8), _h(11.5)), duration=390)
+    assert not _keeps(long_way, None, "MAXDUR 6:20")
+
+
+def test_an_eastbound_row_inside_the_limit_is_kept_though_its_local_times_are_not() -> None:
+    """LAX 08:00 to JFK 16:30 local is 8h30 on the clocks and 5h30 in the air:
+    leg datetimes are local to each airport, so their difference is off by the
+    zone offset."""
+    eastbound = _row(("AA", "LAX", "JFK", _h(8), _h(16.5)), duration=330)
+    assert _keeps(eastbound, None, "MAXDUR 6:20", leg=1)
+
+
+def test_layover_bounds_hold_every_connection() -> None:
+    def connecting(gap: int) -> GFlightWithId:
+        return _row(
+            ("AA", "LGA", "ORD", _h(7), _h(9)),
+            ("AA", "ORD", "LAX", _h(9) + gap, _h(12) + gap),
+            duration=420 + gap,
+        )
+
+    assert not _keeps(connecting(119), None, "MINCONNECT 2:00")
+    assert _keeps(connecting(120), None, "MINCONNECT 2:00")
+    assert _keeps(connecting(60), None, "MAXCONNECT 1:00")
+    assert not _keeps(connecting(61), None, "MAXCONNECT 1:00")
+    nonstop = _row(("AA", "LGA", "LAX", _h(7), _h(10)), duration=360)
+    assert _keeps(nonstop, None, "MINCONNECT 2:00")
+
+
+def _seattle_connection(
+    day: list[int], arrival: list[int], departure: list[int], stated: int, at: str = "SEA"
+) -> GFlightWithId:
+    """The JFK-LAX capture's row through SEA with its connection moved to `day`:
+    landing at `arrival` and leaving at `departure`, [hour, minute] on SEA's
+    clocks, the page stating a layover of `stated` minutes at `at`."""
+    payload: list[Any] = json.loads(_ds1("ds1_jfk_lax_tfu.json"))
+    raw = next(r for r in gfid._rows_from_ds1(payload).rows if r[0][2][0][6] == "SEA")
+    inbound, outbound = raw[0][2]
+    inbound[21], inbound[10] = day, arrival
+    outbound[20], outbound[8] = day, departure
+    raw[0][13][0][0:3] = [stated, at, at]
+    return gfid._parse_flight_with_id(raw)
+
+
+def test_a_layover_across_a_clock_change_is_measured_as_the_page_states_it() -> None:
+    """Leg times are clock readings at each airport. Landing 01:50 and leaving
+    01:20 once the clocks fall back is 30 minutes on the ground, and so is 01:50
+    to 03:20 across the spring change."""
+    fall_back = _seattle_connection([2026, 11, 1], [1, 50], [1, 20], stated=30)
+    assert _keeps(fall_back, None, "MINCONNECT 0:30")
+    assert not _keeps(fall_back, None, "MINCONNECT 0:45")
+    spring_forward = _seattle_connection([2027, 3, 14], [1, 50], [3, 20], stated=30)
+    assert _keeps(spring_forward, None, "MAXCONNECT 1:00")
+    assert not _keeps(spring_forward, None, "MINCONNECT 1:00")
+
+
+def test_a_layover_stated_at_another_airport_is_not_that_connections() -> None:
+    assert _seattle_connection([2026, 11, 4], [10, 23], [11, 30], stated=67).layovers == (67,)
+    assert _seattle_connection([2026, 11, 4], [10, 23], [11, 30], 67, at="PDX").layovers == (None,)
+
+
+def test_a_layover_the_clocks_cannot_place_is_not_held_against_the_row() -> None:
+    """With no layover stated, leaving before landing on the clocks is a
+    fall-back change, and the row gives nothing to measure the gap by."""
+    fall_back = _row(
+        ("AA", "LGA", "ORD", _h(0), _h(1) + 50),
+        ("AA", "ORD", "LAX", _h(1) + 20, _h(4)),
+        duration=330,
+    )
+    assert _keeps(fall_back, None, "MINCONNECT 0:30")
+    assert _keeps(fall_back, None, "MAXCONNECT 1:00")
+
+
+def test_a_carrier_include_keeps_a_leg_any_allowed_carrier_sells() -> None:
+    """Matrix's marketing reading of `AA+`: a leg sold as AA passes whatever
+    carrier it is booked under."""
+    assert _keeps(_row(("AA", "JFK", "LAX", _h(8), _h(11)), duration=360), "AA+", None)
+    assert not _keeps(_row(("DL", "JFK", "LAX", _h(8), _h(11)), duration=360), "AA+", None)
+    codeshare = _row(("B6", "JFK", "LAX", _h(8), _h(11)), duration=360, marketing=(("B6", "AA"),))
+    assert _keeps(codeshare, "AA+", None)
+
+
+def _departing(hour: int, minute: int) -> GFlightWithId:
+    start = hour * 60 + minute
+    return _row(("AA", "JFK", "LAX", start, start + 200), duration=380)
+
+
+def test_a_departure_window_holds_the_rows_to_the_minute_on_its_own() -> None:
+    """Google's window is whole hours (11 answers up to 11:59); Matrix's morning
+    ends at 11:00. A time window alone still builds a filter."""
+    keep = routing_keep([[]], [(TimeOfDay.MORNING,)])
+    assert keep is not None
+    assert [keep(0, _departing(h, m)) for h, m in ((7, 59), (8, 0), (11, 0), (11, 1))] == [
+        False,
+        True,
+        True,
+        False,
+    ]
+
+
+def test_each_leg_is_held_to_its_own_window() -> None:
+    keep = routing_keep([[], []], [(TimeOfDay.MORNING,), (TimeOfDay.EVENING, TimeOfDay.NIGHT)])
+    assert keep is not None
+    assert keep(0, _departing(9, 0))
+    assert not keep(1, _departing(9, 0))
+    assert keep(1, _departing(23, 30))
+
+
+def test_no_predicate_and_no_window_is_no_filter() -> None:
+    assert routing_keep([[], []], [(), ()]) is None
+
+
+def test_the_checks_are_named_in_the_users_words() -> None:
+    preds = classify("AA+", "MAXDUR 6:20; MINCONNECT 2:00; ALLIANCE oneworld; MAXSTOPS 1")
+    names = row_check_names(
+        [preds.predicates, preds.predicates], [(TimeOfDay.MORNING,), (TimeOfDay.EVENING,)]
+    )
+    assert names == [
+        "a carrier filter (AA)",
+        "a maximum trip duration (380 min)",
+        "a minimum layover (120 min)",
+        "a departure-time window (morning)",
+        "a return-time window (evening)",
+    ]
+
+
+# ─────────────────────────── the date grids are unchanged ──────────────────
+
+
+@pytest.mark.parametrize(
+    ("routing", "extension", "times", "children"),
+    [
+        ("AA+", None, (), 0),
+        (None, "ALLIANCE oneworld", (), 0),
+        (None, "MAXDUR 6:20", (), 0),
+        (None, "MINCONNECT 2:00", (), 0),
+        (None, "MAXCONNECT 2:00", (), 0),
+        (None, None, (TimeOfDay.MORNING,), 0),
+        (None, None, (), 1),
+    ],
+)
+def test_the_price_graph_still_refuses_what_only_a_search_can_check(
+    routing: str | None, extension: str | None, times: tuple[TimeOfDay, ...], children: int
+) -> None:
+    """The search page serves these because it has rows to check them on; the
+    Chrome price graph reads the same page and has none."""
+    from datetime import date
+
+    from flight_cli._gf_calgraph import page_blocker
+    from flight_cli.domain import CalendarSearch, CalendarWindow, Leg, Pax, SearchOptions
+
+    start = date.today() + timedelta(days=45)
+    search = CalendarSearch(
+        legs=(
+            Leg.of("JFK", "LAX", route_language=routing, extension=extension, time_ranges=times),
+        ),
+        window=CalendarWindow(
+            start=start, end=start + timedelta(days=13), duration_min=0, duration_max=0
+        ),
+        options=SearchOptions(pax=Pax(children=children)),
+    )
+    assert page_blocker(search) is not None
+    assert search_page_reasons(classify(routing, extension).predicates) == []
+
+
+def test_the_rpc_grid_still_refuses_a_minimum_layover() -> None:
+    from datetime import date
+
+    from flight_cli._gf_dategrid import grid_can_serve
+    from flight_cli.domain import CalendarSearch, CalendarWindow, Leg
+
+    start = date.today() + timedelta(days=45)
+    search = CalendarSearch(
+        legs=(Leg.of("JFK", "LAX", extension="MINCONNECT 2:00"),),
+        window=CalendarWindow(
+            start=start, end=start + timedelta(days=13), duration_min=0, duration_max=0
+        ),
+    )
+    assert not grid_can_serve(search)
