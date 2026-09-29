@@ -64,11 +64,13 @@ from .fli_bridge import (
     apply_gf_native_filters,
 )
 from .routing_predicates import (
+    MAX_ENCODABLE_STOPS,
     AlliancePred,
     CarrierPred,
     ConnectionAirportPred,
     ConnectTimePred,
     MaxDurationPred,
+    StopsPred,
     Tier,
     classify,
 )
@@ -127,7 +129,7 @@ def grid_can_serve(
     """Whether the GF date-grid can fully serve this calendar: only Tier-1
     constraints on every leg (the grid has no itineraries, so even Tier-2 can't
     be post-filtered — those go to Matrix), each of which the request carries
-    in full (`unwritten_constraint`).
+    in full (`unwritten_constraint`), and so does the `--stops` ceiling.
 
     One-way, unless the caller can serve a round trip (`round_trip`: the page's
     price graph can, `date_grid` below cannot) AND the window names one trip
@@ -139,6 +141,8 @@ def grid_can_serve(
     first). The caller checks the tokens themselves: a metro code is one token."""
     window = search.window
     if len(search.legs) > 1 and not (round_trip and window.duration_min == window.duration_max):
+        return False
+    if unwritten_constraint(_stops_option(search)) is not None:
         return False
     for leg in search.legs:
         if not airport_sets and (len(leg.origins) != 1 or len(leg.destinations) != 1):
@@ -165,9 +169,13 @@ def unwritten_constraint(predicates: Iterable[Predicate]) -> str | None:
     Both grids build their request with that function and have no rows to check
     afterwards, so what it leaves out is priced as though never asked: a code
     list with one unmappable code is left out whole, fli's encoder omits a
-    maximum duration that is zero, and a zero MAXCONNECT raises inside fli."""
+    maximum duration that is zero, a zero MAXCONNECT raises inside fli, and
+    fli's stop enum ends at "two or fewer", so a higher ceiling is written as
+    no ceiling."""
     for p in predicates:
         match p:
+            case StopsPred(max_stops=ceiling) if ceiling > MAX_ENCODABLE_STOPS:
+                return f"a stop ceiling above {MAX_ENCODABLE_STOPS} ({ceiling})"
             case MaxDurationPred(minutes=0):
                 return "a maximum trip duration of 0 minutes"
             case ConnectTimePred(max_minutes=0):
@@ -232,13 +240,21 @@ def grid_routing_blocker(search: CalendarSearch) -> str | None:
 
     Every leg is read, outbound first. The return leg inherits `--routing` and
     `--extension` unless `--routing-ret` / `--ext-ret` replace them, so a return
-    phrase is only ever about those two flags, and it says so.
+    phrase is only ever about those two flags, and it says so. `--stops` is read
+    last, in the same words as a MAXSTOPS the request cannot carry.
     """
     for i, leg in enumerate(search.legs):
         phrase = _leg_blocker(leg)
         if phrase is not None:
             return f"{phrase} on the return leg" if i else phrase
-    return None
+    return unwritten_constraint(_stops_option(search))
+
+
+def _stops_option(search: CalendarSearch) -> list[Predicate]:
+    """`--stops` as the predicate its ceiling amounts to: both grids write it
+    through the same fli stop enum as a MAXSTOPS."""
+    ceiling = search.options.max_extra_stops
+    return [] if ceiling is None else [StopsPred(max_stops=ceiling)]
 
 
 def _leg_blocker(leg: Leg) -> str | None:

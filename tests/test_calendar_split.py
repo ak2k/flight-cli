@@ -1234,6 +1234,8 @@ def _matrix_or_weave(monkeypatch: Any) -> None:
         {"routing": "F* X:QQQ F*"},
         {"extension": "MAXDUR 0:00"},
         {"extension": "MAXCONNECT 0:00"},
+        {"extension": "MAXSTOPS 3"},
+        {"stops": 3},
         {"origin": "NYC", "destination": "LON"},
         {"origin": "JFK,EWR"},
     ],
@@ -1243,6 +1245,8 @@ def _matrix_or_weave(monkeypatch: Any) -> None:
         "connect-at",
         "maxdur-zero",
         "maxconnect-zero",
+        "maxstops-three",
+        "stops-three",
         "metro",
         "list",
     ],
@@ -1260,8 +1264,14 @@ def test_without_fast_what_the_grid_would_narrow_goes_to_the_matrix_fanout(
 
 @pytest.mark.parametrize(
     "overrides",
-    [{"routing": "AA+"}, {"extension": "MAXDUR 6:00"}, {"extension": "MAXCONNECT 1:00"}],
-    ids=["carrier", "maxdur", "maxconnect"],
+    [
+        {"routing": "AA+"},
+        {"extension": "MAXDUR 6:00"},
+        {"extension": "MAXCONNECT 1:00"},
+        {"extension": "MAXSTOPS 2"},
+        {"stops": 2},
+    ],
+    ids=["carrier", "maxdur", "maxconnect", "maxstops", "stops"],
 )
 def test_without_fast_a_constraint_the_grid_carries_keeps_the_weave(
     overrides: dict[str, Any], monkeypatch: Any
