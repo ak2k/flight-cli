@@ -153,10 +153,13 @@ Both are top-level fields, written after the cabin (9) and before 14.
   a party is the total. `--sellers` holds the booking page's offers to the
   same rule, in its table and in `booking_options`; when none is left it says
   so on one stderr line and exits 1.
-- Matrix has no price input. `cli._price_capped` cuts its page to the fares
-  under the cap before the pick, the fare rules, the awards, the links and the
-  enriched merge read it; Matrix answers in price order, so the cut loses no
-  cheaper fare. When the cap drops a row of the fetched page, the JSON's
+- Matrix has no price input, so it is asked in the cap's currency (USD when
+  `--currency` is unset). Left unset, it priced LHR-JFK in GBP (cheapest
+  GBP1004) and a USD 2000 cap kept none of it (2026-09-29). `cli._price_capped`
+  cuts its page to the fares under the cap before the pick, the fare rules, the
+  awards, the links and the enriched merge read it; Matrix answers in price
+  order, so the cut loses no cheaper fare. When the cap drops a row of the
+  fetched page, the JSON's
   `solutionCount` (top level and in `solutionList`) and the table's count are
   the kept rows (the GBP JFK-LHR page at 690 keeps 14 of 25). When it drops
   none, the fares past the page went unchecked, so both keep Matrix's total, as

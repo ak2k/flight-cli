@@ -2881,6 +2881,11 @@ def _run_matrix_path(
 ) -> None:
     """Matrix path: Alkali call → optional cash render → optional fare rules →
     optional PP augmentation → URLs."""
+    # A cap holds each fare in the cap's currency, so Matrix is asked in it:
+    # left unset, it prices in its own default (GBP from LHR) and the cap keeps
+    # nothing. Uncapped, the body stays without the key.
+    if opts.max_price is not None:
+        opts = opts.model_copy(update={"currency": opts.currency or "USD"})
     search = SpecificDateSearch(legs=legs, options=opts)
     rps, impersonate = _resolve_rps(rps), _resolve_impersonate(impersonate)
     # SpecificDateSearch → SearchResult by client._parse_response dispatch.
@@ -5511,7 +5516,8 @@ _CURRENCY_HELP = (
     "Price in this currency: a 3-letter ISO 4217 code such as EUR. Matrix and "
     "Google Flights both price in it; the Matrix link does not carry it. Unset, "
     "Google Flights prices in USD and Matrix in its own default, often the "
-    "origin's currency, except in a table merging the two, where both use USD."
+    "origin's currency, except in a table merging the two or under --max-price, "
+    "where both use USD."
 )
 
 _GOOGLE_URL_HELP = (
@@ -5684,7 +5690,8 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                 "Show only fares at or under N, in the search's currency (--currency; "
                 "default USD). N is compared with the printed price, which for a party "
                 "is the total. Google Flights is asked for a USD cap, and every row "
-                "is checked; a Matrix answer is cut to the fares under it. One --cabin."
+                "is checked; Matrix is asked in the cap's currency and its answer cut to "
+                "the fares under it. One --cabin."
             ),
             rich_help_panel=_GROUP_FILTERING,
         ),

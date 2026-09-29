@@ -545,6 +545,76 @@ def test_an_empty_capped_matrix_answer_names_the_cap() -> None:
     assert "No solutions at or under GBP 100." in result.stdout
 
 
+def _matrix_bodies(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Every Matrix search body a run sends, each answered with the GBP page."""
+    bodies: list[dict[str, Any]] = []
+
+    class _Client:
+        def __init__(self, **_kw: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _Client:
+            return self
+
+        async def __aexit__(self, *_a: object) -> None:
+            return None
+
+        async def execute(self, search: Any, *, cache: bool) -> SearchResult:
+            _ = cache
+            bodies.append(to_wire(search).as_json())
+            return SearchResult.from_api(_gbp_body())
+
+    monkeypatch.setattr(cli, "MatrixClient", _Client)
+    return bodies
+
+
+@pytest.mark.parametrize(
+    ("args", "currency"),
+    [pytest.param([], "USD", id="unset"), pytest.param(["--currency", "GBP"], "GBP", id="gbp")],
+)
+def test_a_capped_matrix_search_asks_matrix_in_the_cap_s_currency(
+    monkeypatch: pytest.MonkeyPatch, args: list[str], currency: str
+) -> None:
+    """Unset, Matrix prices in its own default (GBP from LHR), and a USD cap
+    would drop every one of its fares as another currency's."""
+    bodies = _matrix_bodies(monkeypatch)
+    result = _search_cli("--backend", "matrix", "--max-price", "2000", "--format", "json", *args)
+    assert result.exit_code == 0, result.output
+    assert [b["inputs"].get("currency") for b in bodies] == [currency]
+
+
+def test_a_capped_matrix_body_is_the_uncapped_one_plus_the_currency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bodies = _matrix_bodies(monkeypatch)
+    for args in (["--max-price", "2000"], []):
+        result = _search_cli("--backend", "matrix", "--format", "json", *args)
+        assert result.exit_code == 0, result.output
+    capped, uncapped = bodies
+    assert capped["inputs"].pop("currency") == "USD"
+    assert capped == uncapped
+
+
+def test_an_uncapped_matrix_search_leaves_the_currency_to_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bodies = _matrix_bodies(monkeypatch)
+    result = _search_cli("--backend", "matrix", "--format", "json")
+    assert result.exit_code == 0, result.output
+    assert [b["inputs"].get("currency", "unset") for b in bodies] == ["unset"]
+    assert json.loads(result.stdout) == _gbp_body()
+
+
+def test_a_search_the_cap_hands_to_matrix_asks_it_in_the_cap_s_currency(
+    served: _Page, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bodies = _matrix_bodies(monkeypatch)
+    served.board.extend([_gf_row(300.0), _gf_row(410.0)])
+    result = _search_cli("--max-price", "250", "--fast", "--format", "json")
+    assert result.exit_code == 0, result.output
+    assert [b["inputs"].get("currency") for b in bodies] == ["USD"]
+
+
 def test_the_enriched_path_merges_only_the_matrix_fares_under_the_cap(
     served: _Page, monkeypatch: pytest.MonkeyPatch
 ) -> None:
