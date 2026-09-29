@@ -264,7 +264,7 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> Any:
     """Install a fake GF client and keep cookie seeding off the real cache."""
     _reset_cookie_latches(monkeypatch, tmp_path)
 
-    def _stub_tfs(filters: Any) -> bytes:
+    def _stub_tfs(filters: Any, *, currency: str = "USD") -> bytes:
         """The REAL encoder wherever there are filters to encode.
 
         A constant here would make every pinned leg of a round trip request the
@@ -273,7 +273,7 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> Any:
         pass no filters at all, which never reach the encoder in production."""
         if filters is None:
             return b"\x08\x1c"
-        return _real_tfs(filters)
+        return _real_tfs(filters, currency=currency)
 
     monkeypatch.setattr(gfid, "build_search_tfs", _stub_tfs)
 
