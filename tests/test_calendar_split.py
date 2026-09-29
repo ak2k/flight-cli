@@ -3776,7 +3776,13 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_run_calendar", "n"),  # fan-out counters
         ("_run_calendar", "rounds"),
         ("_run_calendar", "conc"),
-        ("calendar", "n_split"),  # how many sub-searches were merged
+        ("_run_matrix_calendar", "n_split"),  # how many sub-searches were merged
+        # A title clause this module wrote, printed only for an airport set.
+        ("_render_date_grid", "_ACROSS_SET_TITLE"),
+        ("_render_graph_range", "_ACROSS_SET_TITLE"),
+        # One cell per trip length, each a price this function formatted with
+        # `:.0f` or the literal dash for a length that priced nothing.
+        ("_render_graph_range", "cells"),
         ("_run_fast_calendar_grid", "_GF_GRID_UNAVAILABLE_NOTE"),
         ("_paint_calendar_first", "_GF_GRID_UNAVAILABLE_WEAVE_NOTE"),
         ("_resolve_format", "_FORMAT_CHOICES"),

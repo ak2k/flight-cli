@@ -48,6 +48,10 @@ _GRAPH_RPC = "/GetCalendarGraph"
 # days before it to thirty after; another page gave sixty days), so eight loads
 # cover most of a year. A window needing more is refused, never paged unbounded.
 _MAX_PAGES = 8
+# What one load is counted as covering when a window is admitted, from the date
+# it opens on. Only an estimate: the loads themselves page by the span each
+# response reports.
+_PAGE_DAYS = 31
 _XSSI_GUARD = ")]}'"
 # A batchexecute `rt=c` body is chunked: a length line, then one JSON array of
 # rows. The stated length does not count what `len(str)` counts, so each chunk
@@ -84,10 +88,12 @@ class GraphCell(NamedTuple):
 
 class PriceGraph(NamedTuple):
     """The priced dates inside the window, by departure. `trip_length` is the
-    nights between outbound and return, None for one-way."""
+    nights between outbound and return, None for one-way; `loads` is how many
+    page loads it took."""
 
     trip_length: int | None
     cells: tuple[GraphCell, ...]
+    loads: int = 1
 
 
 class _GraphPage(NamedTuple):
@@ -267,14 +273,14 @@ def _error_code(row: list[Any]) -> int | None:
     return code if isinstance(code, int) and not isinstance(code, bool) else None
 
 
-def price_graph(search: CalendarSearch, *, headed: bool) -> PriceGraph:
+def price_graph(search: CalendarSearch, *, headed: bool, pages: int = _MAX_PAGES) -> PriceGraph:
     """The cheapest fare per departure date across the window.
 
     One page load when the graph's span covers the window, and more when it
     does not: each load after the first opens on the first date the last one
     did not cover. The span is read from each response rather than assumed,
     because it differs by page. Paging stops on a graph that covers nothing
-    from its opening date on, and after `_MAX_PAGES` loads.
+    from its opening date on, and after `pages` loads.
 
     The caller arms `interrupt_guard` and holds `session_scope` around this."""
     window = search.window
@@ -282,7 +288,9 @@ def price_graph(search: CalendarSearch, *, headed: bool) -> PriceGraph:
     session = _gf_browser.session(headed=headed)
     found: dict[date, GraphCell] = {}
     cursor = window.start
-    for _ in range(_MAX_PAGES):
+    loads = 0
+    for _ in range(pages):
+        loads += 1
         captured = session.capture(
             page_url(search, cursor), _is_graph_rpc, click=_PRICE_GRAPH, check_page=_refuse_a_wall
         )
@@ -304,11 +312,72 @@ def price_graph(search: CalendarSearch, *, headed: bool) -> PriceGraph:
         cursor = page.last + timedelta(days=1)
     else:
         raise GfPriceGraphError(
-            f"the window needs more than {_MAX_PAGES} price-graph pages; narrow --start/--end"
+            f"the window needs more than {pages} price-graph pages; narrow --start/--end"
         )
     if not found:
         raise GfPriceGraphError("Google Flights' price graph priced no date in the window")
-    return PriceGraph(trip_length, tuple(found[d] for d in sorted(found)))
+    return PriceGraph(trip_length, tuple(found[d] for d in sorted(found)), loads)
+
+
+def graph_lengths(search: CalendarSearch) -> tuple[int | None, ...]:
+    """The trip lengths one graph each answers: every length in a round trip's
+    range, and a one-way's single graph, which has no trip length."""
+    if len(search.legs) == 1:
+        return (None,)
+    window = search.window
+    return tuple(range(window.duration_min, window.duration_max + 1))
+
+
+def page_budget_blocker(search: CalendarSearch) -> str | None:
+    """Why this calendar's graphs would not fit in `_MAX_PAGES` loads, or None.
+
+    Counted before any load, at `_PAGE_DAYS` a load for every trip length. The
+    phrase completes "this is …"."""
+    window = search.window
+    days = (window.end - window.start).days + 1
+    loads = len(graph_lengths(search)) * -(-days // _PAGE_DAYS)
+    if loads > _MAX_PAGES:
+        return (
+            f"a window and trip-length range needing {loads:d} price-graph loads "
+            f"(at most {_MAX_PAGES:d})"
+        )
+    return None
+
+
+def price_graphs(search: CalendarSearch, *, headed: bool) -> list[PriceGraph]:
+    """One graph per trip length, in order, within `_MAX_PAGES` loads in all.
+
+    Each length is asked with the loads still left, since a page's span can fall
+    short of the estimate that admitted the window. A length that fails, or that
+    no load is left for, fails the whole call and is named: a graph that answered
+    for some lengths and not others would print the missing ones as dates nobody
+    priced.
+
+    The caller arms `interrupt_guard` and holds `session_scope` around this."""
+    lengths = graph_lengths(search)
+    graphs: list[PriceGraph] = []
+    used = 0
+    for nights in lengths:
+        left = _MAX_PAGES - used
+        if left <= 0:
+            raise GfPriceGraphError(
+                f"{nights}-night trips: no price-graph load of the {_MAX_PAGES:d} was left"
+            )
+        one = search
+        if nights is not None:
+            window = search.window.model_copy(
+                update={"duration_min": nights, "duration_max": nights}
+            )
+            one = search.model_copy(update={"window": window})
+        try:
+            graph = price_graph(one, headed=headed, pages=left)
+        except GfPriceGraphError as e:
+            if len(lengths) == 1:
+                raise
+            raise GfPriceGraphError(f"{nights}-night trips: {e}", code=e.code) from e
+        used += graph.loads
+        graphs.append(graph)
+    return graphs
 
 
 def document(

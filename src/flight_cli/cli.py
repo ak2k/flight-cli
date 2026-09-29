@@ -81,9 +81,10 @@ from .pp.cli import auth_app, run_pp_for_search
 from .providers.base import LegQuery
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Iterable
+    from collections.abc import Callable, Coroutine, Iterable, Sequence
 
     from ._gf_booking import BookingOptions
+    from ._gf_calgraph import PriceGraph
     from ._gf_explore import Destination, ExploreAnswer, TripLength
     from ._gflight_ids import Board, PriceInsight
     from .models import (
@@ -1721,17 +1722,20 @@ def _run_calendar_enriched(
     matrix_url: bool,
     google_url: bool,
 ) -> None:
-    """GF-serveable calendar (one-way, single-airport), progressive: dispatch the
-    Google Flights date-grid and the Matrix calendar CONCURRENTLY under one event
-    loop, paint the GF grid immediately (~1s) while Matrix is in flight, then paint
-    the authoritative Matrix calendar (~45s) — total ≈ max(GF, Matrix), not the sum.
-    Mirrors the SHAPE of `_run_enriched_path` (the search-path weave) and not its
-    stream discipline: every status line here goes to stderr, while that one still
-    writes some of its own to stdout. `--fast` never reaches here
-    (the command serves the grid alone for that). Without `--fast` the gate keeps an
-    airport set or metro code off this path, so the Matrix side is one `execute` (no
-    fan-out): one combined Matrix calendar under-reports a set (quirk #7), and
-    `date_grid` writes one airport per side. A set goes to `_run_calendar` instead.
+    """The `--gf-transport http` calendar for a GF-serveable window (one-way,
+    single-airport), progressive: dispatch the Google Flights date-grid and the
+    Matrix calendar CONCURRENTLY under one event loop, paint the GF grid
+    immediately (~1s) while Matrix is in flight, then paint the authoritative
+    Matrix calendar (~45s) — total ≈ max(GF, Matrix), not the sum. Mirrors the
+    SHAPE of `_run_enriched_path` (the search-path weave) and not its stream
+    discipline: every status line here goes to stderr, while that one still writes
+    some of its own to stdout. `--fast` never reaches here (the command serves the
+    grid alone for that), and neither does the default transport, which reads the
+    page's price graph beside Matrix instead (`_run_calendar_beside_graph`). The
+    gate keeps an airport set or metro code off this path, so the Matrix side is
+    one `execute` (no fan-out): one combined Matrix calendar under-reports a set
+    (quirk #7), and `date_grid` writes one airport per side. A set goes to
+    `_run_calendar` instead.
 
     While the GF grid RPC is gated (`GfGridUnavailableError`), the grid arm raises
     before it opens a client, so the first-paint branch below is runtime-dead and
@@ -1830,6 +1834,222 @@ def _run_calendar_enriched(
         _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
 
     _deliver_calendar(_write_answer)
+
+
+def _run_matrix_calendar(
+    search: CalendarSearch,
+    *,
+    origins: tuple[str, ...],
+    dests: tuple[str, ...],
+    sd: date,
+    ed: date,
+    dmin: int,
+    dmax: int,
+    rps: float,
+    impersonate: str,
+    no_cache: bool,
+    max_per_query: int,
+    max_concurrency: int,
+    json_out: bool,
+    matrix_url: bool,
+    google_url: bool,
+) -> None:
+    """The Matrix calendar, delivered: the whole answer for every calendar that
+    neither `--fast` nor the http weave serves, and the half of the default one
+    that Google's price graph is printed after.
+
+    Authoritative, and the only path for Tier-2/3 routing and for JSON. On a
+    multi-airport brownout `_run_calendar` splits into one sub-query per
+    (origin, destination group) and merges."""
+    # CalendarSearch → CalendarResult by client._parse_response dispatch.
+    res, n_split = _run_calendar(
+        search,
+        rps=rps,
+        impersonate=impersonate,
+        no_cache=no_cache,
+        max_per_query=max_per_query,
+        max_concurrency=max_concurrency,
+    )
+    if json_out:
+        sys.stdout.write(json.dumps(res.raw, indent=2))
+        return
+    if n_split:
+        # On stderr, beside the coverage note the fan-out prints: it is provenance
+        # about the answer rather than part of it, and it is written BEFORE the
+        # delivery below, so on stdout a failure there would leave it standing alone
+        # under exit 1 — a document, to a caller that reads the stream.
+        err.print(
+            f"[dim]Queried {n_split} origin/destination groups separately and merged "
+            f"— Matrix under-reports the combined multi-airport calendar grid.[/]"
+        )
+
+    def _write_answer() -> None:
+        _render_calendar(
+            res,
+            dmin=dmin,
+            dmax=dmax,
+            origin=origins,
+            destination=dests,
+            sd=sd,
+            ed=ed,
+            round_trip=len(search.legs) == _ROUND_TRIP_LEGS,
+        )
+        _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
+
+    _deliver_calendar(_write_answer)
+
+
+def _default_graph_blocker(
+    search: CalendarSearch,
+    *,
+    json_out: bool,
+    one_way: bool,
+    origins: tuple[str, ...],
+    dests: tuple[str, ...],
+) -> str | None:
+    """Why the calendar without `--fast` does not ask Google's price graph, or
+    None when it does. The phrase completes "this is …".
+
+    The graph is a table printed after Matrix's, so a JSON document stays
+    Matrix's alone. Otherwise the `--fast` gate decides, over a copy of one trip
+    length: every length shares the legs and the filters, and each is asked as
+    a graph of its own. The page budget is counted over all of them."""
+    if json_out:
+        return "JSON output"
+    window = search.window
+    one_length = search.model_copy(
+        update={"window": window.model_copy(update={"duration_max": window.duration_min})}
+    )
+    reason = _grid_branch_blocker(
+        one_length, json_out=False, one_way=one_way, origins=origins, dests=dests, fast=True
+    )
+    if reason is not None:
+        return reason
+    from ._gf_calgraph import page_budget_blocker  # noqa: PLC0415 — the gate above loaded it
+
+    return page_budget_blocker(search)
+
+
+def _run_calendar_beside_graph(
+    search: CalendarSearch,
+    matrix: Callable[[], None],
+    *,
+    headed: bool,
+    origins: tuple[str, ...],
+    dests: tuple[str, ...],
+    sd: date,
+    ed: date,
+) -> None:
+    """Matrix's calendar, then Google's price graph read while Matrix ran.
+
+    `matrix` runs and delivers on this thread as it would alone. The graph is
+    read on a worker started before it and is waited for only once Matrix's
+    answer is out, so nothing of Google's holds that answer back or changes it:
+    Google's table follows it, any Google failure is one stderr line, and the
+    exit code is Matrix's.
+
+    A plain worker, not a second event loop: the graph is sync, and the pool's
+    exit waits for the worker on every path out, which is what keeps its Chrome
+    from outliving the command. The session is thread-local, so the scope that
+    closes it is held on the worker.
+
+    The guard is armed here, outside Matrix's `anyio.run`, as `_run_the_weave`
+    arms its own: a Ctrl-C stops the driver the worker is waiting on, and lands
+    on this thread as a plain `KeyboardInterrupt`."""
+    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415 — this path alone
+
+    from ._gf_browser import interrupt_guard, session_scope, stop_all_drivers  # noqa: PLC0415
+    from ._gf_calgraph import price_graphs  # noqa: PLC0415 — the gate already loaded it
+
+    def _read_graphs() -> list[PriceGraph]:
+        with session_scope():
+            return price_graphs(search, headed=headed)
+
+    matrix_exit: typer.Exit | None = None
+    graphs: list[PriceGraph] = []
+    failure: Exception | None = None
+    try:
+        with interrupt_guard(), ThreadPoolExecutor(max_workers=1) as pool:
+            job = pool.submit(_read_graphs)
+            try:
+                matrix()
+            except typer.Exit as e:
+                # Matrix failed and has said so. Its exit code is kept for the end,
+                # so a graph that priced still prints above it.
+                matrix_exit = e
+            except BaseException:
+                # The command ends here, and the pool's exit would otherwise wait
+                # out every page load still to come.
+                stop_all_drivers()
+                raise
+            try:
+                graphs = job.result()
+            except Exception as e:  # noqa: BLE001 — every cause is one line; Matrix stands
+                failure = e
+    except* KeyboardInterrupt:
+        # typer turns a bare `KeyboardInterrupt` into exit 130 and a group of them
+        # into a traceback; Matrix's task group can hand one back wrapped.
+        raise KeyboardInterrupt from None
+    if failure is None:
+        try:
+            _show_graphs(graphs, origins=origins, dests=dests, sd=sd, ed=ed)
+        except (typer.Exit, typer.Abort):
+            raise  # an orderly exit is not a render failure
+        except Exception as e:  # noqa: BLE001 — Google's table must not fail Matrix's run
+            failure = e
+    if failure is not None:
+        _report_graph_failure(failure)
+    if matrix_exit is not None:
+        raise matrix_exit
+
+
+def _show_graphs(
+    graphs: Sequence[PriceGraph],
+    *,
+    origins: tuple[str, ...],
+    dests: tuple[str, ...],
+    sd: date,
+    ed: date,
+) -> None:
+    """Google's table after Matrix's: the date grid for one graph, one column per
+    trip length for several."""
+    across_set = len(expand_airports(origins)) > 1 or len(expand_airports(dests)) > 1
+    if len(graphs) == 1:
+        (graph,) = graphs
+        _render_date_grid(
+            {cell.departure.isoformat(): cell.price for cell in graph.cells},
+            origin=origins,
+            destination=dests,
+            sd=sd,
+            ed=ed,
+            trip_length=graph.trip_length,
+            across_set=across_set,
+        )
+        return
+    _render_graph_range(
+        graphs, origin=origins, destination=dests, sd=sd, ed=ed, across_set=across_set
+    )
+
+
+def _report_graph_failure(cause: Exception) -> None:
+    """The one line for a price graph that could not be shown beside Matrix.
+
+    A launch or install remedy is kept. The default one offers `--backend
+    matrix`, which the calendar has no use for; the line ends by offering the
+    transport that opens no Chrome instead."""
+    if isinstance(cause, GfBrowserUnavailableError):
+        remedy = cause.remedy.removesuffix(BROWSER_DEFAULT_REMEDY).strip()
+        text = f"{cause.reason} {remedy}".strip()
+    elif isinstance(cause, GfThrottledError):
+        text = "Google Flights rate-limited the browser rung."
+    else:
+        text = str(cause).strip() or type(cause).__name__
+    if not text.endswith((".", "!", "?")):
+        text = f"{text}."
+    err.print(
+        f"[yellow]Google Flights price graph not shown:[/] {_safe_text(text)} "
+        "[dim]--gf-transport http skips Chrome.[/]"
+    )
 
 
 def _pinned_solution_index(result: SearchResult | None, pick: int | None) -> int | None:
@@ -2441,10 +2661,12 @@ def _render_date_grid(
     ed: date,
     trip_length: int | None = None,
     currency: str = "USD",
+    across_set: bool = False,
 ) -> None:
     """Render the GF native date-grid: cheapest fare per departure day, sorted
     cheapest-first. One-way, or a round trip of one `trip_length` in nights,
-    which the grid prices by departure day alone."""
+    which the grid prices by departure day alone. `across_set` says so in the
+    title when a cell is the cheapest of several airport pairs."""
     if not grid:
         return
     priced_days = len(grid)
@@ -2457,7 +2679,9 @@ def _render_date_grid(
     )
     t = Table(
         title=f"{_safe_text(','.join(origin))} → {_safe_text(','.join(destination))}: "
-        "lowest fare per departure day (Google Flights)",
+        "lowest fare per departure day"
+        + (_ACROSS_SET_TITLE if across_set else "")
+        + " (Google Flights)",
         show_header=True,
         header_style="bold green",
     )
@@ -2466,6 +2690,55 @@ def _render_date_grid(
     for day, price in sorted(grid.items(), key=lambda kv: kv[1]):
         # The day is a key off the Google Flights grid, not a date this module built.
         t.add_row(_safe_text(day), f"{price:.0f}")
+    console.print(t)
+
+
+# The graph prices each date at the cheapest pair of a set and says nothing about
+# which pair that was, so a cell read as one airport pair's fare would be wrong.
+_ACROSS_SET_TITLE = ", cheapest across every airport pair"
+
+
+def _render_graph_range(
+    graphs: Sequence[PriceGraph],
+    *,
+    origin: tuple[str, ...],
+    destination: tuple[str, ...],
+    sd: date,
+    ed: date,
+    across_set: bool,
+) -> None:
+    """Render one price graph per trip length side by side: a row per departure
+    date any length priced, its lowest price, then each length's, cheapest row
+    first. A length that priced nothing on a date shows "—" there."""
+    lengths = [g.trip_length or 0 for g in graphs]
+    by_day: dict[date, dict[int, float]] = {}
+    for nights, graph in zip(lengths, graphs, strict=True):
+        for cell in graph.cells:
+            by_day.setdefault(cell.departure, {})[nights] = cell.price
+    if not by_day:
+        return
+    rows = sorted(by_day.items(), key=lambda kv: (min(kv[1].values()), kv[0]))
+    cheapest = min(rows[0][1].values())
+    console.print(
+        f"[bold]{len(rows):d} priced days[/]  · {lengths[0]:d}-{lengths[-1]:d}-night round trips"
+        f"  · cheapest: [bold cyan]{cheapest:.0f} (USD)[/]  · "
+        f"window {_safe_text(sd.isoformat())} → {_safe_text(ed.isoformat())}"
+    )
+    t = Table(
+        title=f"{_safe_text(','.join(origin))} → {_safe_text(','.join(destination))}: "
+        "lowest fare per departure day and trip length"
+        + (_ACROSS_SET_TITLE if across_set else "")
+        + " (Google Flights)",
+        show_header=True,
+        header_style="bold green",
+    )
+    t.add_column("departure", justify="right")
+    t.add_column("min (USD)", justify="right")
+    for nights in lengths:
+        t.add_column(f"{nights:d}n", justify="right")
+    for day, prices in rows:
+        cells = [f"{prices[n]:.0f}" if n in prices else "—" for n in lengths]
+        t.add_row(_safe_text(day.isoformat()), f"{min(prices.values()):.0f}", *cells)
     console.print(t)
 
 
@@ -5940,18 +6213,20 @@ def calendar(
 ) -> None:
     """Lowest-fare grid across a date window. Default round-trip; --one-way to flip."""
     json_out = _resolve_format(fmt=fmt, json_flag=json_out) == "json"
+    # Said out loud when the graph is then not asked: a flag that asked for
+    # Chrome and was quietly dropped reads as though it had been honored.
+    asked_for_chrome = gf_transport is not None or gf_headed
     if gf_transport is None:
-        # `--fast` asks for Google's grid, and only the browser returns one while
-        # the direct RPC answers with no data. Without `--fast` nothing reaches
-        # Google, so unset stays the one mode the check below accepts.
-        gf_transport = "auto" if fast else TRANSPORT_HTTP
+        # Only the browser returns Google's grid while the direct RPC answers with
+        # no data, with `--fast` and beside Matrix alike.
+        gf_transport = "auto"
     gf_mode = _resolve_gf_transport(gf_transport)
-    if not fast and (gf_mode != TRANSPORT_HTTP or gf_headed):
-        # Only the `--fast` grid reaches Google Flights; ignoring the flag would
-        # run the Matrix calendar as though the transport had been honored.
+    if not fast and gf_mode == TRANSPORT_HTTP and gf_headed:
+        # Under `--fast` the flag has always passed silently, and that stays.
         raise typer.BadParameter(
-            "applies only with --fast, the one calendar Google Flights serves",
-            param_hint="--gf-transport" if gf_mode != TRANSPORT_HTTP else "--gf-headed",
+            "shows the Chrome window that reads Google Flights' price graph, and "
+            "--gf-transport http opens none",
+            param_hint="--gf-headed",
         )
     ccy = _resolve_currency(currency)
     origins = _parse_iata_list(origin)
@@ -5993,15 +6268,38 @@ def calendar(
     window = CalendarWindow(start=sd, end=ed, duration_min=dmin, duration_max=dmax)
     search = CalendarSearch(legs=legs, options=opts, window=window)
 
-    # Fast layer: the GF date-grid (dodges Matrix's compute-budget under-reporting)
-    # for Tier-1-only windows. Without `--fast` it covers one-way single-airport
-    # windows: paint it first, then enrich with the authoritative Matrix calendar
-    # (full per-duration grid). `--fast` stops after the grid, which the page reads
-    # for an airport set or a round trip of one trip length too.
+    # Fast layer: the GF grid alone, for a Tier-1 window the search page can ask.
+    # Without `--fast` Matrix answers first and in full, and Google's price graph
+    # for the same window follows it (`_run_calendar_beside_graph`), or under
+    # `--gf-transport http` the RPC grid is woven in ahead of it (a one-way window
+    # between two airports).
+    if not fast:
+        _calendar_without_fast(
+            search,
+            gf_mode=gf_mode,
+            headed=gf_headed,
+            asked_for_chrome=asked_for_chrome,
+            json_out=json_out,
+            one_way=one_way,
+            origins=origins,
+            dests=dests,
+            sd=sd,
+            ed=ed,
+            dmin=dmin,
+            dmax=dmax,
+            rps=rps,
+            impersonate=impersonate,
+            no_cache=no_cache,
+            max_per_query=max_per_query,
+            max_concurrency=max_concurrency,
+            matrix_url=matrix_url,
+            google_url=google_url,
+        )
+        return
     blocker = _grid_branch_blocker(
         search, json_out=json_out, one_way=one_way, origins=origins, dests=dests, fast=fast
     )
-    if fast and blocker is not None:
+    if blocker is not None:
         # `--fast` exists only inside the branch below. Everywhere else there is no
         # grid to serve, so it fails closed instead of letting the ~45s Matrix calendar
         # answer in its place at exit 0 — a wrapper doing `--fast || fallback` would
@@ -6019,93 +6317,121 @@ def calendar(
             f"this is {_safe_text(blocker)}. Run without --fast for Matrix.[/]"
         )
         raise typer.Exit(1)
-    if blocker is None:
-        if not fast:
-            # Progressive weave: dispatch the GF date-grid and the Matrix
-            # calendar concurrently, paint the grid first (~1s), then the
-            # authoritative Matrix calendar — total ≈ Matrix alone.
-            _run_calendar_enriched(
-                search,
-                origins=origins,
-                dests=dests,
-                sd=sd,
-                ed=ed,
-                dmin=dmin,
-                dmax=dmax,
-                rps=_resolve_rps(rps),
-                impersonate=_resolve_impersonate(impersonate),
-                no_cache=_resolve_no_cache(no_cache),
-                matrix_url=matrix_url,
-                google_url=google_url,
-            )
-            return
-        if gf_mode == TRANSPORT_HTTP:
-            _run_fast_calendar_grid(
-                search,
-                origins=origins,
-                dests=dests,
-                sd=sd,
-                ed=ed,
-                matrix_url=matrix_url,
-                google_url=google_url,
-                json_out=json_out,
-            )
-            return
-        # `auto` is the browser here: under `--fast` the http grid has nothing to
-        # serve, so escalating is the only way `auto` differs from failing.
-        _run_fast_browser_grid(
+    if gf_mode == TRANSPORT_HTTP:
+        _run_fast_calendar_grid(
             search,
             origins=origins,
             dests=dests,
             sd=sd,
             ed=ed,
+            matrix_url=matrix_url,
+            google_url=google_url,
             json_out=json_out,
-            headed=gf_headed,
+        )
+        return
+    # `auto` is the browser here: under `--fast` the http grid has nothing to
+    # serve, so escalating is the only way `auto` differs from failing.
+    _run_fast_browser_grid(
+        search,
+        origins=origins,
+        dests=dests,
+        sd=sd,
+        ed=ed,
+        json_out=json_out,
+        headed=gf_headed,
+        matrix_url=matrix_url,
+        google_url=google_url,
+    )
+
+
+def _calendar_without_fast(
+    search: CalendarSearch,
+    *,
+    gf_mode: GfTransportMode,
+    headed: bool,
+    asked_for_chrome: bool,
+    json_out: bool,
+    one_way: bool,
+    origins: tuple[str, ...],
+    dests: tuple[str, ...],
+    sd: date,
+    ed: date,
+    dmin: int,
+    dmax: int,
+    rps: float | None,
+    impersonate: str | None,
+    no_cache: bool,
+    max_per_query: int,
+    max_concurrency: int,
+    matrix_url: bool,
+    google_url: bool,
+) -> None:
+    """The calendar Matrix answers: alone, beside Google's price graph, or under
+    `--gf-transport http` behind the RPC grid's weave.
+
+    The settings are resolved after the gate, as they always were, and before the
+    graph's worker starts: a bad rps setting ends the command, and should do so
+    before Chrome is launched for it."""
+    if gf_mode == TRANSPORT_HTTP:
+        blocker = _grid_branch_blocker(
+            search, json_out=json_out, one_way=one_way, origins=origins, dests=dests
+        )
+    else:
+        blocker = _default_graph_blocker(
+            search, json_out=json_out, one_way=one_way, origins=origins, dests=dests
+        )
+        if blocker is not None and (asked_for_chrome or not json_out):
+            err.print(
+                f"[dim]Google Flights price graph not asked: this is {_safe_text(blocker)}.[/]"
+            )
+    rps_now = _resolve_rps(rps)
+    impersonate_now = _resolve_impersonate(impersonate)
+    no_cache_now = _resolve_no_cache(no_cache)
+    if gf_mode == TRANSPORT_HTTP and blocker is None:
+        # Progressive weave: dispatch the GF date-grid and the Matrix
+        # calendar concurrently, paint the grid first (~1s), then the
+        # authoritative Matrix calendar — total ≈ Matrix alone.
+        _run_calendar_enriched(
+            search,
+            origins=origins,
+            dests=dests,
+            sd=sd,
+            ed=ed,
+            dmin=dmin,
+            dmax=dmax,
+            rps=rps_now,
+            impersonate=impersonate_now,
+            no_cache=no_cache_now,
             matrix_url=matrix_url,
             google_url=google_url,
         )
         return
 
-    # Matrix (authoritative; also the only path for round-trip, multi-airport,
-    # Tier-2/3 routing, or when the grid was empty/throttled).
-    # CalendarSearch → CalendarResult by client._parse_response dispatch.
-    # On a multi-airport brownout, _run_calendar splits into one sub-query per
-    # (origin, destination group) and merges.
-    res, n_split = _run_calendar(
-        search,
-        rps=_resolve_rps(rps),
-        impersonate=_resolve_impersonate(impersonate),
-        no_cache=_resolve_no_cache(no_cache),
-        max_per_query=max_per_query,
-        max_concurrency=max_concurrency,
-    )
-    if json_out:
-        sys.stdout.write(json.dumps(res.raw, indent=2))
-        return
-    if n_split:
-        # On stderr, beside the coverage note the fan-out prints: it is provenance
-        # about the answer rather than part of it, and it is written BEFORE the
-        # delivery below, so on stdout a failure there would leave it standing alone
-        # under exit 1 — a document, to a caller that reads the stream.
-        err.print(
-            f"[dim]Queried {n_split} origin/destination groups separately and merged "
-            f"— Matrix under-reports the combined multi-airport calendar grid.[/]"
-        )
-
-    def _write_answer() -> None:
-        _render_calendar(
-            res,
-            dmin=dmin,
-            dmax=dmax,
-            origin=origins,
-            destination=dests,
+    def _matrix() -> None:
+        _run_matrix_calendar(
+            search,
+            origins=origins,
+            dests=dests,
             sd=sd,
             ed=ed,
-            round_trip=len(search.legs) == _ROUND_TRIP_LEGS,
+            dmin=dmin,
+            dmax=dmax,
+            rps=rps_now,
+            impersonate=impersonate_now,
+            no_cache=no_cache_now,
+            max_per_query=max_per_query,
+            max_concurrency=max_concurrency,
+            json_out=json_out,
+            matrix_url=matrix_url,
+            google_url=google_url,
         )
-        _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
 
-    _deliver_calendar(_write_answer)
+    if blocker is not None:
+        _matrix()
+        return
+    _run_calendar_beside_graph(
+        search, _matrix, headed=headed, origins=origins, dests=dests, sd=sd, ed=ed
+    )
 
 
 @app.command()
