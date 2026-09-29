@@ -132,3 +132,45 @@ def test_a_google_row_landing_on_another_day_lends_no_dates() -> None:
     assert row.source == "both"
     assert row.itinerary.itinerary is not None
     assert row.itinerary.itinerary.slices[0].segment_dates == []
+
+
+def _ua(arrival: str, segment_dates: list[str] | None = None) -> Slice:
+    """UA100 SFO-DEN, then UA200 DEN-EWR, landing on 2026-11-02 either way:
+    the same day's red-eye or the next morning's flight."""
+    return Slice(
+        flights=["UA100", "UA200"],
+        departure="2026-11-01T07:00",
+        arrival=arrival,
+        origin=SliceEndpoint(code="SFO"),
+        destination=SliceEndpoint(code="EWR"),
+        stops=[SliceEndpoint(code="DEN")],
+        segment_dates=segment_dates or [],
+    )
+
+
+def _dates_lent(google_arrival: str, matrix_arrival: str) -> list[str]:
+    google = _ua(google_arrival, segment_dates=["2026-11-01", "2026-11-01"])
+    (row,) = merge_results(
+        _sr(_nz_row("USD500.00", google)), _sr(_nz_row("USD480.00", _ua(matrix_arrival)))
+    )
+    assert row.source == "both"
+    assert row.itinerary.itinerary is not None
+    return row.itinerary.itinerary.slices[0].segment_dates
+
+
+def test_a_google_row_landing_at_another_time_that_day_lends_no_dates() -> None:
+    """Google's UA200 is the red-eye leaving on the 1st; Matrix's lands at
+    13:30, so it is the next morning's, and the 1st would pin the red-eye."""
+    assert _dates_lent("2026-11-02T02:45:00", "2026-11-02T13:30-05:00") == []
+
+
+def test_a_google_row_landing_at_the_same_minute_lends_its_dates() -> None:
+    """Google writes local time with no offset, Matrix with one."""
+    assert _dates_lent("2026-11-02T13:30:00", "2026-11-02T13:30-05:00") == [
+        "2026-11-01",
+        "2026-11-01",
+    ]
+
+
+def test_a_one_minute_skew_between_the_sources_lends_no_dates() -> None:
+    assert _dates_lent("2026-11-02T13:31:00", "2026-11-02T13:30-05:00") == []

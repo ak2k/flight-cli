@@ -345,9 +345,11 @@ an eastbound red-eye second flight leaves the day before the slice lands.
 `links.extract_pin_segments_from_slice` therefore pins a slice only when
 `pin_dates_are_stated` holds: one date per flight in `segment_dates`, or a
 nonstop, dated by its departure day. A Matrix connection gets those dates from
-`_enrich.merge_results` when a Google row names the same flights and leaves and
-lands on the same days; a Matrix-only connection gets the unpinned search link,
-and `--sellers` refuses it with the `--fast` remedy.
+`_enrich.merge_results` when a Google row names the same flights, leaves on the
+same day and lands at the same local minute (the landing day alone does not date
+the last flight: one flight number flown at different hours on two days can land
+on the same day both times); a Matrix-only connection gets the unpinned search
+link, and `--sellers` refuses it with the `--fast` remedy.
 
 **And it keeps two different orders, because the two sets are ordered by
 different things.** A one-way board arrives ranked by Google — a composite of

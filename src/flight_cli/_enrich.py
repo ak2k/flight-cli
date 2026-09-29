@@ -17,10 +17,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .models import Itinerary, SearchResult
+    from .models import Itinerary, SearchResult, Slice
 
 _PRICE_DIGITS = re.compile(r"[\d,]*\d+")
 _NO_PRICE = 10**12  # sort key for itineraries with no parseable price (last)
@@ -71,24 +72,45 @@ def _itin_key(it: Itinerary) -> tuple[tuple[tuple[str, ...], str], ...] | None:
     return tuple(parts)
 
 
+def _wall_clock(ts: str | None) -> datetime | None:
+    """`ts` as the airport's local time. Matrix writes its UTC offset and
+    Google writes none, so only the local time compares across the two."""
+    if ts is None:
+        return None
+    try:
+        return datetime.fromisoformat(ts).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _same_trip(ms: Slice, gs: Slice) -> bool:
+    """Whether Google slice `gs` is Matrix slice `ms`'s own trip, so its
+    per-flight dates are `ms`'s too.
+
+    The match key fixes only the first flight's day. The landing day does not
+    fix the last flight's: one flight number flown at different hours on two
+    days can land on the same day both times. The landing minute does. That
+    dates every flight of a one-stop slice; a middle flight of a longer one is
+    fixed by neither end, and Matrix states no day for it."""
+    arrival = _wall_clock(ms.arrival)
+    return (
+        ms.flights == gs.flights
+        and len(gs.segment_dates) == len(ms.flights)
+        and arrival is not None
+        and arrival == _wall_clock(gs.arrival)
+    )
+
+
 def _with_google_dates(m: Itinerary, g: Itinerary) -> Itinerary:
     """`m` with each slice's per-flight dates taken from the matched Google
-    slice, which states them where Matrix states only the slice's two ends.
-
-    A slice takes them only when both sides name the same flights and land on
-    the same day: the match key fixes the first flight's day, not the later
-    flights', so a Google row whose layover is a day longer shares it."""
+    slice, which states them where Matrix states only the slice's two ends,
+    on the slices where Google's is `m`'s own trip."""
     mi, gi = m.itinerary, g.itinerary
     if mi is None or gi is None or len(mi.slices) != len(gi.slices):
         return m
     slices = [
         ms.model_copy(update={"segment_dates": list(gs.segment_dates)})
-        if not ms.segment_dates
-        and ms.flights == gs.flights
-        and len(gs.segment_dates) == len(ms.flights)
-        and ms.arrival is not None
-        and gs.arrival is not None
-        and ms.arrival[:10] == gs.arrival[:10]
+        if not ms.segment_dates and _same_trip(ms, gs)
         else ms
         for ms, gs in zip(mi.slices, gi.slices, strict=True)
     ]
