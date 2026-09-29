@@ -7,7 +7,7 @@ let the rest pass through.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -24,6 +24,26 @@ def _none_to_empty_list(v: Any) -> Any:
     `outboundFlights` for shoulder dates, etc). Coerce to [] so consumers
     don't crash."""
     return [] if v is None else v
+
+
+def _stop_codes(v: Any) -> Any:
+    """PointsPath sends each stop either as a bare airport code or as
+    `{airport, layoverDurationMinutes}`; reduce both to the code. Anything
+    else is passed through unchanged so the `list[str]` check still rejects
+    it, with the offending value in the error."""
+    if v is None:
+        return []
+    if not isinstance(v, list):
+        return v
+    return [_stop_code(e) for e in cast("list[object]", v)]
+
+
+def _stop_code(e: object) -> object:
+    match e:
+        case {"airport": str() as code}:
+            return code
+        case _:
+            return e
 
 
 # ─────────────────────────── /api/airline-search ───────────────────────────
@@ -73,7 +93,7 @@ class OutboundFlight(_Loose):
     perCabinMilesPricing: list[PerCabinMilesPricing] = []
 
     _none_pricing = field_validator("perCabinMilesPricing", mode="before")(_none_to_empty_list)
-    _none_stops = field_validator("stops", mode="before")(_none_to_empty_list)
+    _stops = field_validator("stops", mode="before")(_stop_codes)
 
 
 class AirlineSearchResponse(_Loose):

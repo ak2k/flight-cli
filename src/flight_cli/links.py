@@ -1001,40 +1001,30 @@ def extract_pin_segments_from_slice(s: Slice) -> list[dict[str, str]] | None:
     that `google_flights_pinned_url` wants.
 
     Returns None if the slice doesn't carry enough data to deep-link
-    (no origin/destination, missing stops for a multi-leg slice, or a
-    flight identifier that doesn't parse as `<CARRIER><DIGITS>`).
+    (no origin/destination, missing stops for a multi-leg slice, a
+    flight identifier that doesn't parse as `<CARRIER><DIGITS>`, or a
+    flight whose date its source does not state — `pin_dates_are_stated`).
 
-    Per-segment dates:
-    - If `s.segment_dates` is populated (gflight backend), use those —
-      exact per-leg dates from fli's `departure_datetime`.
-    - Otherwise (Matrix backend), fall back to a heuristic: all
-      segments take the slice departure date, except the last segment
-      of a slice whose arrival falls on a later calendar day — that
-      one takes the arrival date. Exact for non-overnight 1-stop
-      routings and 1-stop routings with a single overnight layover;
-      3+ segment slices with multiple midnight crossings may be off
-      by a day.
+    Each segment takes its date from `s.segment_dates`, or, for a single
+    flight with none, from the slice's departure day.
     """
-    # Combined invariant check up front: required fields present,
-    # stops/flights topology valid, segment_dates either absent or
-    # matching length. Single bail-out → easier to reason about and
+    # Combined invariant check up front: every flight dated, required
+    # fields present, stops/flights topology valid, segment_dates either
+    # absent or matching length. Single bail-out → easier to reason about and
     # keeps the per-segment loop focused on flight-number parsing.
     n = len(s.flights)
     origin_code = s.origin.code if s.origin else None
     dest_code = s.destination.code if s.destination else None
-    has_exact_dates = bool(s.segment_dates)
     if (
-        n == 0
+        not pin_dates_are_stated(s)
         or not s.departure
         or not origin_code
         or not dest_code
         or n - 1 != len(s.stops)
-        or (has_exact_dates and len(s.segment_dates) != n)
+        or (s.segment_dates and len(s.segment_dates) != n)
     ):
         return None
-    dep_date = s.departure[:10]
-    arrival = s.arrival or s.departure
-    arr_date = arrival[:10]
+    dates = s.segment_dates or [s.departure[:10]]
     out: list[dict[str, str]] = []
     for i, fl in enumerate(s.flights):
         m = _FLIGHT_NUMBER_RE.match(fl)
@@ -1043,23 +1033,10 @@ def extract_pin_segments_from_slice(s: Slice) -> list[dict[str, str]] | None:
         if not m or not seg_origin or not seg_dest:
             return None
         carrier, flight_no = m.group(1), m.group(2)
-        if has_exact_dates:
-            seg_date = s.segment_dates[i]
-        else:
-            # A segment is dated by when it DEPARTS. The last segment of a
-            # multi-segment slice departs on the arrival date only when the
-            # slice spans midnight — and a NONSTOP is never that case, even
-            # though it satisfies `i == n - 1`: it departs on the departure
-            # date by definition. Treating an overnight nonstop as arrival-
-            # dated pinned BA178 JFK->LHR (dep 2026-12-31, arr 2027-01-01) to
-            # 2027-01-01, sending the user to a search for the wrong day.
-            spans_midnight = arr_date != dep_date
-            is_last_of_many = n > 1 and i == n - 1
-            seg_date = arr_date if (is_last_of_many and spans_midnight) else dep_date
         out.append(
             {
                 "origin": seg_origin,
-                "date": seg_date,
+                "date": dates[i],
                 "destination": seg_dest,
                 "carrier": carrier,
                 "flight": flight_no,

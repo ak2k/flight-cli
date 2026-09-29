@@ -2184,8 +2184,8 @@ def _booking_options(
     heading = f"No booking options for #{n:d}"
     # A page asked for a day the row does not state answers for another trip
     # with the same flight numbers, which the seller check cannot tell apart
-    # from this one. Checked before the segments are built because building
-    # them dates an undated connection's flights from the slice's two ends.
+    # from this one. `_pin_segments` refuses such a row too; checking first
+    # lets the refusal name the reason and its remedy.
     itinerary = result.solutions[n - 1].itinerary
     if itinerary is not None and not all(pin_dates_are_stated(s) for s in itinerary.slices):
         _no_booking_options(
@@ -2888,7 +2888,10 @@ def _run_matrix_path(
         pick = _pick_in_range(
             pick,
             len(shown),
-            links_follow=not json_out and (matrix_url or google_url),
+            pin_follows=lambda: (
+                not json_out
+                and _pins_row_one(search, res, matrix_url=matrix_url, google_url=google_url)
+            ),
             fare_rules=True,
         )
     if json_out and not run_pp:
@@ -2944,7 +2947,13 @@ def _run_matrix_path(
         # An empty result is numbered nowhere, so it gets no sentence at all
         # rather than an empty `(1-0)` interval and a pin claim nothing honours.
         pick = (
-            _pick_in_range(pick, len(shown), links_follow=matrix_url or google_url)
+            _pick_in_range(
+                pick,
+                len(shown),
+                pin_follows=lambda: _pins_row_one(
+                    search, res, matrix_url=matrix_url, google_url=google_url
+                ),
+            )
             if shown
             else None
         )
@@ -3342,8 +3351,19 @@ def _price_ordered(results: list[Any]) -> list[Any]:
     return sorted(results, key=_terminal_fare_key)
 
 
+def _pins_row_one(
+    search: Search, result: SearchResult | None, *, matrix_url: bool, google_url: bool
+) -> bool:
+    """Whether `_emit_urls` prints a link pinned to `result`'s first row, the
+    row an out-of-range pick falls back to. A link can follow and pin nothing:
+    the Google one refuses a row whose flights' dates no source states."""
+    return (matrix_url and _try_pinned_matrix_url(search, result, 0) is not None) or (
+        google_url and _try_pinned_gflight_url(search, result, 0) is not None
+    )
+
+
 def _pick_in_range(
-    pick: int | None, rows: int, *, links_follow: bool, fare_rules: bool = False
+    pick: int | None, rows: int, *, pin_follows: Callable[[], bool], fare_rules: bool = False
 ) -> int | None:
     """`pick` when it names one of the `rows` the user was shown, else None
     with the reason on stderr.
@@ -3358,9 +3378,12 @@ def _pick_in_range(
     Two clauses, and neither is unconditional. A number the user typed that
     names no row on screen is worth a line, and `rows` is what the line
     measures it against. What happens NEXT is a separate question: a run that
-    emits no link pins nothing, so `links_follow` is what keeps the second
+    emits no link pins nothing, and neither does one whose links cannot pin
+    row one (`_pins_row_one`), so `pin_follows` is what keeps the second
     clause from describing something that did not happen — the defect this
-    whole reporter exists to avoid, one sentence in.
+    whole reporter exists to avoid, one sentence in. It is asked only once a
+    pick has fallen back, because answering it can read rows the render has
+    yet to check: one it cannot read pins nothing, and the render reports it.
 
     A board with NO rows is the case the callers keep away from here rather
     than one this reports, and for the same reason the second clause exists:
@@ -3381,9 +3404,13 @@ def _pick_in_range(
     row one's too, and the clause says so for the same reason."""
     if pick is None or 1 <= pick <= rows:
         return pick
-    if links_follow and fare_rules:
+    try:
+        pinned = pin_follows()
+    except Exception:  # noqa: BLE001 - a row the link builders cannot read pins nothing
+        pinned = False
+    if pinned and fare_rules:
         fallback = "; pinning itinerary #1 and showing its fare rules instead."
-    elif links_follow:
+    elif pinned:
         fallback = "; pinning itinerary #1 instead."
     elif fare_rules:
         fallback = "; showing itinerary #1's fare rules instead."
@@ -3748,11 +3775,22 @@ def _run_gflight_path(
     # than exist, which is the failure this backend is most prone to.
     insight = getattr(results, "insight", None)
     results = _price_ordered(results)[:top_n]
-    # A link follows only where one is asked for and the format has room for it:
-    # `--format json` emits none at all, and neither does a run with both URL
-    # flags off. The range is still reported; the fallback is not claimed.
+    # A pinned link follows only where one is asked for, the format has room for
+    # it and row one can be pinned: `--format json` emits no link at all, and a
+    # Google row carries no ids a Matrix link could pin. The range is still
+    # reported; the fallback is not claimed.
     pick = seller_row or _pick_in_range(
-        pick, len(results), links_follow=not json_out and (matrix_url or google_url)
+        pick,
+        len(results),
+        pin_follows=lambda: (
+            not json_out
+            and _pins_row_one(
+                SpecificDateSearch(legs=legs, options=opts),
+                fli_results_to_search_result(results),
+                matrix_url=matrix_url,
+                google_url=google_url,
+            )
+        ),
     )
 
     # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType,
@@ -4264,12 +4302,18 @@ def _run_enriched_path(  # noqa: PLR0915 — one weave's outcome arms, read in o
         # would be, and the fallback clause beside it would name a pin that does
         # not happen — this arm renders a header-only table and carries on where
         # the sibling has already returned.
+        pinnable = matrix_res.model_copy(update={"solutions": shown})
         pick = seller_row or (
-            _pick_in_range(pick, len(shown), links_follow=matrix_url or google_url)
+            _pick_in_range(
+                pick,
+                len(shown),
+                pin_follows=lambda: _pins_row_one(
+                    matrix_search, pinnable, matrix_url=matrix_url, google_url=google_url
+                ),
+            )
             if shown
             else None
         )
-        pinnable = matrix_res.model_copy(update={"solutions": shown})
         if seller_row is not None:
             chosen = merged[seller_row - 1]
             booking_row = (pinnable, seller_row, chosen.gf_price, chosen.matrix_price)
@@ -5594,8 +5638,9 @@ def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes th
         "--pick",
         help="Itinerary #N (1-based, as shown in the final table) to pin in the "
         "--matrix-url/--google-url deep links, to describe with --fare-rules and to "
-        "open with --sellers. Default: the first row. A pick outside the table falls "
-        "back to row 1 for the links and --fare-rules and is refused with --sellers. "
+        "open with --sellers. Default: the first row. A link that cannot pin that row "
+        "pre-fills the search instead; its label says which. A pick outside the table "
+        "falls back to row 1 for the links and --fare-rules and is refused with --sellers. "
         "--format json emits no link lines, so there it only chooses the --fare-rules "
         "or --sellers row.",
         rich_help_panel=_GROUP_OUTPUT,
