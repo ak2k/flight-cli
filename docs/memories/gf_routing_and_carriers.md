@@ -213,7 +213,18 @@ check against. Only the strictest-stops rule reached them.
   the post-filter.
 - An answer the filter emptied goes to Matrix under `auto` with the reason on
   stderr, and says why under `--backend gflight` (stdout `[]` in JSON mode).
-  The multi-cabin path prints the reason per cabin.
+  A multi-cabin search goes to Matrix WHOLE under `auto` when the filter
+  emptied any cabin (one `Using Matrix:` line names each emptied cabin and its
+  count): handing on only that cabin would put Google's rows beside Matrix's
+  documents in one answer and join prices from two sources. When Matrix then
+  returns no itinerary for a cabin Google had rows for, failing or finding
+  none, the answer stays Matrix's and stderr names that cabin and
+  `--backend gflight`, which shows Google's rows.
+  A cabin Google served nothing for stays Google's answer. Under
+  `--backend gflight` the multi-cabin path prints the reason per cabin and
+  leaves the cabin empty. Neither hand-off prints a note on Google's table (the
+  pin cap, the cabin-join legend, rows in another currency): the table that
+  follows is Matrix's, where '—' is a cabin with no price.
 - A round trip that took pins answers with a board even when no pair survives,
   its count covering the rows removed on both legs, so it takes the same route.
   Under `--backend gflight` the line also names how many outbounds were pinned:
@@ -373,7 +384,8 @@ first-ranked outbounds; '—' means no shared itinerary, not no fare** — the b
 being `pinned_fanout` of the bumped page size, which the cap holds at 10 however
 large `-n` is. `cli._multi_cabin_join_note`
 builds that sentence from the pin budget rather than a literal, and
-`cli._run_gflight_path_multi` prints it on a multi-cabin round trip, because an
+`cli._run_gflight_path_multi` prints it on a multi-cabin round trip it does not
+hand to Matrix, because an
 empty cabin cell otherwise reads as "that fare does not exist". "Up to",
 because the cap bounds how many outbounds the join can see and a board may hold
 fewer — stating the budget as a count is the half of this that had to go. Widening the join means pinning
@@ -411,7 +423,8 @@ the untyped shape of that failure is worse than the failure:
 
 **A round trip says how many outbounds it will combine.** `cli._pin_cap_note`
 prints it on every round-trip path — the enriched one, `--fast`, `--format json`
-and multi-cabin — whenever the pin cap is below the `-n` asked for, and always
+and multi-cabin — whenever the pin cap is below the `-n` asked for and the
+search is not handed to Matrix, and always
 to stderr so a JSON document stays a document. It is passed the user's count,
 never the multi-cabin bump — a wider pool per cabin that nobody asked for — and
 prints the pin budget that count resolves to, which is the number the join will
@@ -480,6 +493,21 @@ enriched weave, which hands the untrimmed board to `merge_results` and bounds th
 merged table afterwards in `_render_merged`. The multi-cabin `--format json` arm
 trims per cabin for the same reason, to the user's count and not the bumped one —
 the same count as the table beside it, drawn from a different set.
+
+**Neither merge ranks two currencies by their numbers.** `_multi_cabin.merge`
+and `_enrich.merge_results` sort through `_multi_cabin.price_rank`: rows priced
+in the requested currency (`--currency`, else USD) first by amount, then each
+other currency in code order by its own amounts, then prices naming no currency,
+unpriced rows last. No exchange rate is applied or derived, so a fare in another
+currency ranks after every requested one, and a list in one currency orders by
+amount exactly as before. A merged row ranks on its price in the requested
+currency, Matrix's when both sides have one. The enriched weave asks Matrix in
+the currency Google is asked in, so its merge is one currency at the source:
+left unset, Matrix prices in its own default (GBP from LHR, 2026-09-28) and the
+merged LHR-JFK table ranked GBP1004 above USD1043 (about GBP780) before the
+trim. The rank is the backstop for a row Google still prices in another
+currency, which `cli._note_other_currencies` names on stderr. A Google board is
+one page in one currency, so `cli._price_ordered` keeps bare amounts.
 
 **What a round-trip row's price means.** The two boards price different things.
 An outbound row carries the cheapest round-trip TOTAL reachable from that
@@ -836,9 +864,11 @@ the exception that proves it: that one is on stdout because a Matrix calendar
 follows it there. While the gate stands, a bad airport or date is one of the gate's own
 exits rather than the broad except's, so what the user reads is the standing
 reason; the broad except keeps the same exit code for whatever a live transport
-throws once the gate flips. When the grid branch does not apply at all (a
-multi-airport route, a city code, routing above Tier-1, a trip-length range, or
-a constraint the search page's URL cannot carry) `--fast` refuses up front on
+throws once the gate flips. When the grid branch does not apply at all (a code
+that is neither an airport nor a metro code in `_metro.py`, a leg of more than
+11 airports or with one airport at both ends, routing above Tier-1, a Tier-1
+code or zero bound the request would leave out, a trip-length range, or a
+constraint the search page's URL cannot carry) `--fast` refuses up front on
 **stderr**, naming the shape, before any Matrix call or JSON write — stdout under
 a JSON request carries a document or nothing, never prose (work-h70kv.9). So a wrapper doing `--fast || fallback` can trust the exit
 code unconditionally: `--fast` means "the GF grid alone, ~1s", and answering it
@@ -872,6 +902,15 @@ extension is the whole story and differ by one when routing declined as well:
 "both Matrix-only routing and a Matrix-only extension code" carries two reasons,
 one per flag.
 
+A Tier-1 predicate is refused too when `apply_gf_native_filters` would not
+write it in full, because neither grid has rows to check afterwards: a carrier,
+alliance or connect-at code fli has no member for (the function then leaves the
+whole list out), a zero MAXDUR (fli's encoder omits a falsy bound) and a zero
+MAXCONNECT (fli's `LayoverRestrictions` raises). `unwritten_constraint` asks the
+bridge one code at a time, so it follows fli's own tables, and the phrase names
+the code or the bound. Without `--fast` such a calendar takes the Matrix
+fan-out rather than the weave.
+
 Those reason strings quote the user's `--routing` / `--extension` text verbatim
 onto a markup console, and so does every response field a renderer shows. The
 wrapping rule, the two helpers and the AST guard over `cli.py` are in
@@ -896,8 +935,21 @@ remedy, never a fallback. Without `--fast`, unset or `http` runs Matrix and
 - **Shape.** One-way, or a round trip of ONE trip length (`-d 7`): the page's
   graph prices the trip length its own dates imply, so `5-7` refuses. Every
   round-trip cell's return date is checked against that length.
+- **Airport sets.** A comma-list or metro code on either side is one page: the
+  bridge writes every member airport into the URL, and the graph prices each
+  date at the cheapest of them. Measured 2026-09-28, one-way, 14 dates each:
+  NYC→LAX equaled the per-date minimum of JFK, LGA and EWR on all 14 (each of
+  the three was the cheapest on some date), and JFK,EWR→LHR on all 14. A round
+  trip is not compared that way on purpose: the set page may return to another
+  airport of the origin set, as a Matrix metro code does, so its price can sit
+  below the minimum of mirrored pairs. The airports are checked as a search's
+  are (`gf_leg_refusal`, then `_gf_unserveable_reasons` on the expanded codes).
+  The JSON names the user's tokens (`"NYC"`, `"JFK,EWR"`), as the table title
+  does. Over `--gf-transport http` a set refuses with the browser note, since
+  `date_grid` writes one airport per side; without `--fast` it goes to the
+  Matrix fan-out.
 - **Admission.** The graph has no itineraries, so it is served only when the
-  page URL carries every constraint: a city code, a time window, a non-adult
+  page URL carries every constraint: an unknown code, a time window, a non-adult
   passenger, `--no-airport-changes`, `--include-unavailable`, a stop ceiling
   above two, any predicate `page_can_encode` refuses (carriers, alliances,
   layovers, max duration), and round-trip legs with different predicates each
@@ -924,10 +976,10 @@ guard, which is why the gate is a flag and not an unconditional raise (a raise, 
 `Final[bool]`, both make basedpyright treat the body as unreachable; measured).
 The procedure: capture a real envelope into `tests/fixtures/`, add an ungated
 contract test over it (request URL, encoded body, and the success / empty /
-throttle branches of `_one_grid_call`), teach `_grid_filters` to map or refuse
-city codes (they are not in fli's `Airport` enum, and while the gate stands it is
-the only thing between them and an `AttributeError`), run a live smoke, then
-flip. Do that when the RPC answers a plain client again, or when an attested
+throttle branches of `_one_grid_call`), keep `_grid_filters` behind the two
+refusals of an airport set or metro code (the gate without `--fast`,
+`cli._http_date_grid` with it; it writes one airport per side, and a metro code
+is not in fli's `Airport` enum), run a live smoke, then flip. Do that when the RPC answers a plain client again, or when an attested
 transport lands
 (work-udpp1).
 A per-date page fan-out (the transport upstream fli#230 uses for search) is the

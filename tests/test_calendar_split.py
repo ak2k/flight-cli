@@ -17,7 +17,7 @@ import sys
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, cast, override
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NoReturn, cast, override
 
 import anyio
 import httpx
@@ -1003,16 +1003,16 @@ def test_calendar_fast_throttled_exits_one(
     assert cap.out == ""
 
 
-@pytest.mark.parametrize("origin", ["NYC", "ZZZ"])
 @pytest.mark.parametrize("transport", ["http", "browser"])
 def test_calendar_fast_unresolvable_origin_is_refused_by_name(
-    origin: str, transport: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+    transport: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # Neither a city code (NYC — a real place fli's `Airport` enum has no member
-    # for) nor a bad IATA can be resolved into an fli filter. The gate names the
-    # code before anything builds one, so what the user reads is the reason and
-    # not `type object 'Airport' has no attribute 'NYC'` dressed up as a
-    # transport failure — on either transport, and before any page loads.
+    # A code that is neither an airport nor a metro code in the table cannot be
+    # resolved into an fli filter. The gate names the code before anything builds
+    # one, so what the user reads is the reason and not `type object 'Airport' has
+    # no attribute 'ZZZ'` dressed up as a transport failure — on either transport,
+    # and before any page loads.
+    origin = "ZZZ"
     monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
     monkeypatch.setattr("flight_cli._gf_browser.session", _no_browser)
     calls = _spy_renderers(monkeypatch)
@@ -1180,16 +1180,110 @@ def test_fast_over_http_names_the_browser_for_json_and_round_trip(
     assert calls["grid"] == 0
 
 
-def test_fast_refuses_multi_airport(monkeypatch: Any, capsys: pytest.CaptureFixture[str]) -> None:
+@pytest.mark.parametrize(
+    "overrides",
+    [{"destination": "LHR,CDG"}, {"origin": "NYC"}, {"origin": "QSF", "destination": "JFK"}],
+    ids=["list", "metro", "qsf"],
+)
+def test_fast_over_http_names_the_browser_for_an_airport_set(
+    overrides: dict[str, Any], monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The page grid asks for every airport of a set; `date_grid` writes one per
+    side. Over http the set gets the gate's note and the transport that serves
+    it, and `date_grid` is never asked."""
+
+    def _one_airport_grid(_search: object) -> dict[str, float]:
+        raise AssertionError("an airport set reached the one-airport date grid")
+
     monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    monkeypatch.setattr("flight_cli._gf_dategrid.date_grid", _one_airport_grid)
     calls = _spy_renderers(monkeypatch)
     with pytest.raises(typer.Exit) as excinfo:
-        _calendar_fast(destination="LHR,CDG")
+        _calendar_fast(**overrides)
     cap = capsys.readouterr()
     assert excinfo.value.exit_code == 1
-    assert "a multi-airport route" in _flat(cap.err)
+    err_out = _flat(cap.err)
+    assert err_out.count("price grid unavailable") == 1
+    assert "--gf-transport browser" in err_out
+    assert "drop --fast for Matrix" in err_out
     assert cap.out == ""
     assert calls["calendar"] == 0  # refused before any Matrix work
+    assert calls["grid"] == 0
+
+
+class _TookMatrix(Exception):
+    """`_run_calendar` was called: the Matrix fan-out answers."""
+
+
+def _matrix_or_weave(monkeypatch: Any) -> None:
+    def _matrix(*_a: object, **_k: object) -> NoReturn:
+        raise _TookMatrix
+
+    def _weave(*_a: object, **_k: object) -> NoReturn:
+        raise AssertionError("the weave took a calendar its grid cannot price in full")
+
+    monkeypatch.setattr(cli, "_run_calendar", _matrix)
+    monkeypatch.setattr(cli, "_run_calendar_enriched", _weave)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"routing": "BQ+"},
+        {"extension": "AIRLINES AA BQ"},
+        {"routing": "F* X:QQQ F*"},
+        {"extension": "MAXDUR 0:00"},
+        {"extension": "MAXCONNECT 0:00"},
+        {"extension": "MAXSTOPS 3"},
+        {"stops": 3},
+        {"origin": "NYC", "destination": "LON"},
+        {"origin": "JFK,EWR"},
+    ],
+    ids=[
+        "carrier",
+        "carrier-in-a-list",
+        "connect-at",
+        "maxdur-zero",
+        "maxconnect-zero",
+        "maxstops-three",
+        "stops-three",
+        "metro",
+        "list",
+    ],
+)
+def test_without_fast_what_the_grid_would_narrow_goes_to_the_matrix_fanout(
+    overrides: dict[str, Any], monkeypatch: Any
+) -> None:
+    """The weave paints the grid first; a grid that drops a constraint, or asks
+    for one airport of a set, would paint a wider or narrower answer above
+    Matrix's."""
+    _matrix_or_weave(monkeypatch)
+    with pytest.raises(_TookMatrix):
+        _calendar_fast(fast=False, **overrides)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"routing": "AA+"},
+        {"extension": "MAXDUR 6:00"},
+        {"extension": "MAXCONNECT 1:00"},
+        {"extension": "MAXSTOPS 2"},
+        {"stops": 2},
+    ],
+    ids=["carrier", "maxdur", "maxconnect", "maxstops", "stops"],
+)
+def test_without_fast_a_constraint_the_grid_carries_keeps_the_weave(
+    overrides: dict[str, Any], monkeypatch: Any
+) -> None:
+    woven: list[object] = []
+
+    def _weave(*a: object, **_k: object) -> None:
+        woven.append(a)
+
+    monkeypatch.setattr(cli, "_run_calendar_enriched", _weave)
+    _calendar_fast(fast=False, **overrides)
+    assert len(woven) == 1
 
 
 def test_fast_refuses_tier2_routing(monkeypatch: Any, capsys: pytest.CaptureFixture[str]) -> None:

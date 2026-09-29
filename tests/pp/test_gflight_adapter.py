@@ -447,10 +447,10 @@ def test_a_row_google_did_not_price_is_carried_with_no_price_and_sorted_last(
     # The cheapest is the cheapest of the rows that HAVE one.
     assert sr.cheapest_price == f"USD{board[2].flight.price:.2f}"
 
-    # And the merge orders it last: `_price_int` answers `_NO_PRICE` for an
-    # absent string, so the same row the table shows with a dash sits at the
-    # bottom of the merged view too.
-    merged = merge_results(sr, SearchResult.model_validate({"solutions": []}))
+    # And the merge orders it last: an absent string has no amount to rank on,
+    # so the same row the table shows with a dash sits at the bottom of the
+    # merged view too.
+    merged = merge_results(sr, SearchResult.model_validate({"solutions": []}), currency="USD")
     assert [r.gf_price for r in merged] == [
         f"USD{board[2].flight.price:.2f}",
         f"USD{board[0].flight.price:.2f}",

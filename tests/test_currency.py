@@ -34,6 +34,7 @@ from flight_cli.domain import (
 from flight_cli.fli_bridge import to_fli_filter
 from flight_cli.links import google_flights_pinned_url, google_flights_url
 from flight_cli.models import CalendarResult, Itinerary, SearchResult
+from flight_cli.wire import to_wire
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -444,6 +445,102 @@ def test_the_enriched_table_asks_both_backends_and_titles_the_currency(
     assert matrix_asked == ["EUR"]
     assert "(EUR)" in result.stdout
     assert "USD" not in result.stdout
+
+
+_MERGED_SEARCH = [
+    "search",
+    "JFK",
+    "LAX",
+    "--dep",
+    _DEP.isoformat(),
+    "--cash-only",
+    "--no-matrix-url",
+    "--no-google-url",
+]
+
+
+def _matrix_bodies(
+    monkeypatch: pytest.MonkeyPatch,
+    gf_rows: Callable[..., list[Any]],
+    *,
+    matrix_price: str = "GBP321.00",
+) -> list[dict[str, Any]]:
+    """Google answers with two USD rows and Matrix with one `matrix_price` fare;
+    every Matrix request body a run sends is recorded."""
+    bodies: list[dict[str, Any]] = []
+    rows = _rows(gf_rows, "USD", "USD")
+
+    def _gf(*_a: Any) -> list[Any]:
+        return rows
+
+    class _Client:
+        def __init__(self, **_kw: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _Client:
+            return self
+
+        async def __aexit__(self, *_a: object) -> None:
+            return None
+
+        async def execute(self, search: Any, *, cache: bool) -> SearchResult:
+            _ = cache
+            bodies.append(to_wire(search).as_json())
+            return SearchResult.model_validate({"solutions": [{"ext": {"price": matrix_price}}]})
+
+    monkeypatch.setattr(cli, "_gflight_results", _gf)
+    monkeypatch.setattr(cli, "MatrixClient", _Client)
+    return bodies
+
+
+@pytest.mark.parametrize(
+    ("args", "currency"),
+    [
+        pytest.param([], "USD", id="merged-unset"),
+        pytest.param(["--currency", "EUR"], "EUR", id="merged-eur"),
+        pytest.param(["--backend", "matrix"], None, id="matrix-only-unset"),
+    ],
+)
+def test_the_merged_table_asks_matrix_in_the_currency_google_is_asked_in(
+    monkeypatch: pytest.MonkeyPatch,
+    gf_rows: Callable[..., list[Any]],
+    args: list[str],
+    currency: str | None,
+) -> None:
+    """Unset, Matrix prices in its own default (GBP from LHR) while Google is
+    asked for USD, and the merged table would rank one against the other. The
+    merged run asks Matrix in Google's currency; a Matrix-only run merges
+    nothing and sends the body it always has."""
+    bodies = _matrix_bodies(monkeypatch, gf_rows)
+    result = _run([*_MERGED_SEARCH, *args])
+    assert result.exit_code == 0, result.output
+    assert [b["inputs"].get("currency") for b in bodies] == [currency]
+
+
+def test_the_merged_tables_matrix_body_differs_from_a_matrix_only_one_by_the_currency(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    bodies = _matrix_bodies(monkeypatch, gf_rows)
+    for args in ([], ["--backend", "matrix"]):
+        result = _run([*_MERGED_SEARCH, *args])
+        assert result.exit_code == 0, result.output
+    merged, matrix_only = bodies
+    assert merged["inputs"].pop("currency") == "USD"
+    assert merged == matrix_only
+
+
+def test_a_matrix_fare_in_another_currency_ranks_after_googles_on_the_merged_table(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    """Matrix answering in GBP although asked for USD: its fare is the smaller
+    number, and a trim by bare numbers keeps it over a USD fare. Ranked in the
+    requested USD, the two Google fares fill `-n 2`."""
+    _matrix_bodies(monkeypatch, gf_rows, matrix_price="GBP1.00")
+    result = _run([*_MERGED_SEARCH, "-n", "2"])
+    assert result.exit_code == 0, result.output
+    merged = result.stdout.split("Google Flights + Matrix", 1)[1]
+    assert "(USD)" in merged.splitlines()[0]
+    assert "GBP" not in merged
 
 
 # ──────────────────────────── the rendered tables ───────────────────────────

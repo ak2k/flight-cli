@@ -13,9 +13,10 @@ from __future__ import annotations
 import base64
 import itertools
 import json
+import sys
 import urllib.parse
 from datetime import date, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, override
 
 import pytest
 from typer.testing import CliRunner
@@ -24,7 +25,9 @@ from conftest import _answering, _ds1, _page, _unpriced
 from flight_cli import _gflight_ids as gfid
 from flight_cli import cli
 from flight_cli._gf_common import PageFetch
-from flight_cli.domain import Cabin, Leg, SearchOptions
+from flight_cli.client import MatrixApiError
+from flight_cli.domain import Cabin, Leg, SearchOptions, SpecificDateSearch
+from flight_cli.models import SearchResult
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -975,3 +978,400 @@ def test_a_cabin_the_routing_emptied_says_so(
     )
     err = " ".join(capsys.readouterr().err.split())
     assert "Google Flights COACH: no itinerary matched an operating carrier filter (LH)" in err
+
+
+# ──────────────────── multi-cabin: the empty filtered answer ───────────────
+
+
+def _multi_cabin(*extra: str) -> list[str]:
+    return [
+        *_SEARCH,
+        "JFK",
+        "LAX",
+        "--dep",
+        _DEP.isoformat(),
+        "--cabin",
+        "economy,business",
+        "--routing",
+        "O:LH+",
+        "--fast",
+        "--format",
+        "json",
+        *extra,
+    ]
+
+
+def _matrix_multi(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Cabin, ...]]:
+    """Stub the Matrix multi-cabin path. Each run records the cabins it was
+    asked for and writes a marker document, so stdout says whose answer it is."""
+    ran: list[tuple[Cabin, ...]] = []
+
+    def _matrix(*, cabins: tuple[Cabin, ...], **_kw: object) -> None:
+        ran.append(cabins)
+        sys.stdout.write('{"answered_by": "matrix"}')
+
+    monkeypatch.setattr(cli, "_run_matrix_path_multi", _matrix)
+    return ran
+
+
+def _boards_per_cabin(monkeypatch: pytest.MonkeyPatch, boards: dict[Cabin, list[Any]]) -> None:
+    """Google answers each cabin's query with its own board."""
+
+    def _gf(_legs: object, opts: SearchOptions, *_a: object) -> list[Any]:
+        return boards[opts.cabin]
+
+    monkeypatch.setattr(cli, "_gflight_results", _gf)
+
+
+def test_under_auto_a_multi_cabin_search_the_routing_emptied_goes_to_matrix(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`O:LH+` empties the JFK-LAX board in both cabins. Auto hands the search
+    to Matrix, as it does a single cabin, instead of answering with two empty
+    cabins."""
+    gf_session(_served(_LAX))
+    ran = _matrix_multi(monkeypatch)
+    result = CliRunner().invoke(cli.app, _multi_cabin())
+    assert result.exit_code == 0, result.output
+    assert ran == [(Cabin.COACH, Cabin.BUSINESS)]
+    assert json.loads(result.stdout) == {"answered_by": "matrix"}
+    err = " ".join(result.stderr.split())
+    assert (
+        "Using Matrix: no Google Flights itinerary matched an operating carrier filter (LH) "
+        "in "
+        "COACH (95 rows filtered out), BUSINESS (95 rows filtered out)."
+    ) in err
+    assert "Google Flights COACH:" not in err
+    assert "Google Flights BUSINESS:" not in err
+
+
+def _partial(monkeypatch: pytest.MonkeyPatch, *, business_dropped: int) -> None:
+    """COACH served three rows; BUSINESS came back empty, with
+    `business_dropped` rows removed by the routing filter."""
+    rows = list(_board(_served(_LAX))[:3])
+    _boards_per_cabin(
+        monkeypatch,
+        {
+            Cabin.COACH: gfid.Board(rows),
+            Cabin.BUSINESS: gfid.Board(dropped=business_dropped),
+        },
+    )
+
+
+def test_under_auto_one_emptied_cabin_sends_every_cabin_to_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Matrix answers the whole search, COACH included: one document holds one
+    backend's cabins, and its prices come from one source."""
+    _partial(monkeypatch, business_dropped=7)
+    ran = _matrix_multi(monkeypatch)
+    result = CliRunner().invoke(cli.app, _multi_cabin())
+    assert result.exit_code == 0, result.output
+    assert ran == [(Cabin.COACH, Cabin.BUSINESS)]
+    assert json.loads(result.stdout) == {"answered_by": "matrix"}
+    err = " ".join(result.stderr.split())
+    assert (
+        "Using Matrix: no Google Flights itinerary matched an operating carrier filter (LH) "
+        "in "
+        "BUSINESS (7 rows filtered out)."
+    ) in err
+
+
+class _MatrixDown:
+    """A Matrix client that cannot open."""
+
+    def __init__(self, **_kw: object) -> None: ...
+
+    async def __aenter__(self) -> _MatrixDown:
+        raise MatrixApiError("Matrix is down", kind="unavailable")
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+
+_NONE_FOUND: dict[str, Any] = {"solutionCount": 0}
+_ONE_FOUND: dict[str, Any] = {
+    "solutionCount": 1,
+    "solutionList": {"solutions": [{"displayTotal": "USD100.00"}]},
+}
+
+
+class _MatrixRefusesCoach(_MatrixDown):
+    """Matrix answering BUSINESS and refusing COACH."""
+
+    @override
+    async def __aenter__(self) -> _MatrixRefusesCoach:
+        return self
+
+    async def execute(self, search: SpecificDateSearch, *, cache: bool = True) -> SearchResult:
+        _ = cache
+        if search.options.cabin is Cabin.COACH:
+            raise MatrixApiError("refused", kind="internal")
+        return SearchResult.from_api(_NONE_FOUND)
+
+
+class _MatrixFindsNothing(_MatrixRefusesCoach):
+    @override
+    async def execute(self, search: SpecificDateSearch, *, cache: bool = True) -> SearchResult:
+        _ = (search, cache)
+        return SearchResult.from_api(_NONE_FOUND)
+
+
+class _MatrixFindsCoach(_MatrixRefusesCoach):
+    @override
+    async def execute(self, search: SpecificDateSearch, *, cache: bool = True) -> SearchResult:
+        _ = cache
+        return SearchResult.from_api(
+            _ONE_FOUND if search.options.cabin is Cabin.COACH else _NONE_FOUND
+        )
+
+
+@pytest.mark.parametrize(
+    ("client", "code", "stdout", "told"),
+    [
+        (_MatrixDown, 1, None, True),
+        (_MatrixRefusesCoach, 0, {"BUSINESS": _NONE_FOUND}, True),
+        (_MatrixFindsNothing, 0, {"COACH": _NONE_FOUND, "BUSINESS": _NONE_FOUND}, True),
+        (_MatrixFindsCoach, 0, {"COACH": _ONE_FOUND, "BUSINESS": _NONE_FOUND}, False),
+    ],
+)
+def test_under_auto_matrix_names_the_google_rows_its_answer_left_unshown(
+    monkeypatch: pytest.MonkeyPatch,
+    client: type[_MatrixDown],
+    code: int,
+    stdout: dict[str, Any] | None,
+    told: bool,
+) -> None:
+    """The hand-off set Google's three COACH rows aside for Matrix's answer. When
+    Matrix then returns no COACH itinerary, by failing or by finding none, the
+    answer stays Matrix's alone and never the emptied BUSINESS cabin, and stderr
+    says Google's COACH rows exist and how to see them."""
+    _partial(monkeypatch, business_dropped=7)
+    monkeypatch.setattr(cli, "MatrixClient", client)
+    result = CliRunner().invoke(cli.app, _multi_cabin())
+    assert result.exit_code == code, result.output
+    assert (json.loads(result.stdout) if result.stdout else None) == stdout
+    err = " ".join(result.stderr.split())
+    unshown = (
+        "Matrix returned no itinerary for COACH, where Google Flights had rows; "
+        "--backend gflight shows them."
+    )
+    assert (unshown in err) is told
+
+
+def test_under_auto_a_matrix_failure_claims_no_rows_google_did_not_have(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both cabins emptied: Google had no rows to leave unshown."""
+    _boards_per_cabin(
+        monkeypatch,
+        {Cabin.COACH: gfid.Board(dropped=3), Cabin.BUSINESS: gfid.Board(dropped=7)},
+    )
+    monkeypatch.setattr(cli, "MatrixClient", _MatrixDown)
+    result = CliRunner().invoke(cli.app, _multi_cabin())
+    assert result.exit_code == 1, result.output
+    assert result.stdout == ""
+    assert "where Google Flights had rows" not in result.stderr
+
+
+def test_under_auto_a_cabin_google_served_nothing_for_stays_on_google(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty board the filter removed nothing from is Google's answer on
+    every backend."""
+    _partial(monkeypatch, business_dropped=0)
+    ran = _matrix_multi(monkeypatch)
+    result = CliRunner().invoke(cli.app, _multi_cabin())
+    assert result.exit_code == 0, result.output
+    assert ran == []
+    doc = json.loads(result.stdout)
+    assert len(doc["COACH"]) == 3
+    assert doc["BUSINESS"] == []
+    assert "Using Matrix" not in result.stderr
+
+
+def test_under_explicit_gflight_an_emptied_cabin_says_so_and_stays_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _partial(monkeypatch, business_dropped=7)
+    ran = _matrix_multi(monkeypatch)
+    result = CliRunner().invoke(cli.app, _multi_cabin("--backend", "gflight"))
+    assert result.exit_code == 0, result.output
+    assert ran == []
+    doc = json.loads(result.stdout)
+    assert len(doc["COACH"]) == 3
+    assert doc["BUSINESS"] == []
+    err = " ".join(result.stderr.split())
+    assert "Google Flights BUSINESS: no itinerary matched an operating carrier filter (LH)." in (
+        err
+    )
+    assert "Google Flights COACH:" not in err
+    assert "Using Matrix" not in err
+
+
+# ────────────── notes on Google's table, and the hand-off to Matrix ─────────
+
+_PIN_CAP_NOTE = "Google Flights combines returns against up to 10 first-ranked outbounds."
+_JOIN_NOTE = (
+    "Google Flights joins cabins on up to 10 of each cabin's first-ranked outbounds; "
+    "'—' means no shared itinerary, not no fare."
+)
+_CURRENCY_NOTE = (
+    "Google Flights priced some rows in USD, not the requested EUR; "
+    "each row is labeled with its own."
+)
+
+
+def _usd_rows() -> list[Any]:
+    return [
+        gfid.GFlightWithId(
+            flight=r.flight.model_copy(update={"currency": "USD"}),
+            flight_id=r.flight_id,
+            amenities=r.amenities,
+        )
+        for r in _board(_served(_LAX))[:3]
+    ]
+
+
+def _google_serves(
+    monkeypatch: pytest.MonkeyPatch, *, coach: gfid.Board[Any], business: gfid.Board[Any]
+) -> None:
+    """Each cabin's board, served below `_gflight_results`, so every caller of
+    it runs as shipped wherever along the path a note is printed."""
+
+    def _search(f: Any, **_kw: object) -> gfid.Board[Any]:
+        return business if f.seat_type.name == "BUSINESS" else coach
+
+    monkeypatch.setattr(gfid, "search_with_ids", _search)
+
+
+def _multi_cabin_round_trip(*extra: str) -> list[str]:
+    return [
+        *_SEARCH,
+        "JFK",
+        "LAX",
+        "--dep",
+        _DEP.isoformat(),
+        "--return",
+        _RET.isoformat(),
+        "--cabin",
+        "economy,business",
+        "--routing",
+        "O:LH+",
+        "-n",
+        "15",
+        "--currency",
+        "EUR",
+        "--format",
+        "json",
+        *extra,
+    ]
+
+
+_RUNGS = [
+    pytest.param((), id="concurrent-fan-out"),
+    pytest.param(("--gf-transport", "browser"), id="rung-2-series"),
+]
+
+
+@pytest.mark.parametrize("rung", _RUNGS)
+def test_a_multi_cabin_hand_off_prints_no_note_about_googles_table(
+    monkeypatch: pytest.MonkeyPatch, rung: tuple[str, ...]
+) -> None:
+    """Matrix answers the whole search, so a note on how Google pinned its
+    outbounds, joined its cabins or priced its rows describes a table nobody
+    sees. The join note would also misread Matrix's '—', a cabin with no price."""
+    _google_serves(monkeypatch, coach=gfid.Board(_usd_rows()), business=gfid.Board(dropped=7))
+    ran = _matrix_multi(monkeypatch)
+    result = CliRunner().invoke(cli.app, _multi_cabin_round_trip(*rung))
+    assert result.exit_code == 0, result.output
+    assert ran == [(Cabin.COACH, Cabin.BUSINESS)]
+    err = " ".join(result.stderr.split())
+    assert (
+        "Using Matrix: no Google Flights itinerary matched an operating carrier filter (LH) "
+        "in "
+        "BUSINESS (7 rows filtered out)."
+    ) in err
+    for note in (_PIN_CAP_NOTE, _JOIN_NOTE, _CURRENCY_NOTE):
+        assert note not in err, err
+
+
+@pytest.mark.parametrize("rung", _RUNGS)
+@pytest.mark.parametrize(
+    ("backend", "business_emptied"),
+    [
+        pytest.param("gflight", True, id="gflight-keeps-an-emptied-cabin"),
+        pytest.param("auto", False, id="auto-with-nothing-emptied"),
+    ],
+)
+def test_a_multi_cabin_google_answer_prints_its_notes_before_the_document(
+    monkeypatch: pytest.MonkeyPatch, rung: tuple[str, ...], backend: str, business_emptied: bool
+) -> None:
+    """The currency note once per cabin board that has rows in another currency."""
+    business = gfid.Board(dropped=7) if business_emptied else gfid.Board(_usd_rows())
+    _google_serves(monkeypatch, coach=gfid.Board(_usd_rows()), business=business)
+    ran = _matrix_multi(monkeypatch)
+    result = CliRunner().invoke(cli.app, _multi_cabin_round_trip("--backend", backend, *rung))
+    assert result.exit_code == 0, result.output
+    assert ran == []
+    assert len(json.loads(result.stdout)["COACH"]) == 3
+    shown = " ".join(result.output.split())
+    document = shown.index("{")
+    boards_in_usd = 1 if business_emptied else 2
+    for note, count in ((_PIN_CAP_NOTE, 1), (_JOIN_NOTE, 1), (_CURRENCY_NOTE, boards_in_usd)):
+        assert shown.count(note) == count, result.stderr
+        assert shown.index(note) < document, result.output
+    assert shown.index(_PIN_CAP_NOTE) < shown.index(_JOIN_NOTE) < shown.index(_CURRENCY_NOTE)
+
+
+@pytest.mark.parametrize(("backend", "handed_off"), [("auto", True), ("gflight", False)])
+def test_a_round_trip_handed_to_matrix_prints_no_pin_note(
+    monkeypatch: pytest.MonkeyPatch, backend: str, handed_off: bool
+) -> None:
+    """The pin note describes Google's search, and the answer is Matrix's."""
+
+    def _search(*_a: object, **_kw: object) -> gfid.Board[Any]:
+        return gfid.Board(dropped=17, pinned=10)
+
+    monkeypatch.setattr(gfid, "search_with_ids", _search)
+    ran: list[bool] = []
+
+    def _matrix(**_kw: object) -> None:
+        ran.append(True)
+
+    monkeypatch.setattr(cli, "_run_matrix_path", _matrix)
+    result = CliRunner().invoke(
+        cli.app,
+        _round_trip_search(
+            "--routing", "~AA+", "-n", "15", "--backend", backend, "--format", "json"
+        ),
+    )
+    assert result.exit_code == 0, result.output
+    assert ran == ([True] if handed_off else [])
+    assert (_PIN_CAP_NOTE in " ".join(result.stderr.split())) is not handed_off, result.stderr
+
+
+def test_a_single_cabin_answer_prints_its_notes_before_the_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _google_serves(monkeypatch, coach=gfid.Board(_usd_rows()), business=gfid.Board())
+    result = CliRunner().invoke(
+        cli.app, _round_trip_search("-n", "15", "--currency", "EUR", "--format", "json")
+    )
+    assert result.exit_code == 0, result.output
+    assert len(json.loads(result.stdout)) == 3
+    shown = " ".join(result.output.split())
+    assert shown.count(_PIN_CAP_NOTE) == shown.count(_CURRENCY_NOTE) == 1, result.stderr
+    assert shown.index(_PIN_CAP_NOTE) < shown.index(_CURRENCY_NOTE) < shown.index("["), shown
+
+
+def test_the_enriched_answer_notes_rows_in_another_currency_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _google_serves(monkeypatch, coach=gfid.Board(_usd_rows()), business=gfid.Board())
+    monkeypatch.setattr(cli, "MatrixClient", _MatrixFindsNothing)
+    result = CliRunner().invoke(
+        cli.app, [*_SEARCH, "JFK", "LAX", "--dep", _DEP.isoformat(), "--currency", "EUR"]
+    )
+    assert result.exit_code == 0, result.output
+    assert " ".join(result.stderr.split()).count(_CURRENCY_NOTE) == 1, result.stderr
