@@ -15,7 +15,7 @@ import json
 import sys
 import urllib.parse
 from datetime import date, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, override
 
 import pytest
 from typer.testing import CliRunner
@@ -24,7 +24,9 @@ from conftest import _answering, _ds1, _page, _unpriced
 from flight_cli import _gflight_ids as gfid
 from flight_cli import cli
 from flight_cli._gf_common import PageFetch
-from flight_cli.domain import Cabin, Leg, SearchOptions
+from flight_cli.client import MatrixApiError
+from flight_cli.domain import Cabin, Leg, SearchOptions, SpecificDateSearch
+from flight_cli.models import SearchResult
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -839,6 +841,89 @@ def test_under_auto_one_emptied_cabin_sends_every_cabin_to_matrix(
         "Using Matrix: no Google Flights itinerary matched the routing in "
         "BUSINESS (7 rows filtered out)."
     ) in err
+
+
+class _MatrixDown:
+    """A Matrix client that cannot open."""
+
+    def __init__(self, **_kw: object) -> None: ...
+
+    async def __aenter__(self) -> _MatrixDown:
+        raise MatrixApiError("Matrix is down", kind="unavailable")
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+
+_NONE_FOUND: dict[str, Any] = {"solutionCount": 0}
+
+
+class _MatrixRefusesCoach(_MatrixDown):
+    """Matrix answering BUSINESS and refusing COACH."""
+
+    @override
+    async def __aenter__(self) -> _MatrixRefusesCoach:
+        return self
+
+    async def execute(self, search: SpecificDateSearch, *, cache: bool = True) -> SearchResult:
+        _ = cache
+        if search.options.cabin is Cabin.COACH:
+            raise MatrixApiError("refused", kind="internal")
+        return SearchResult.from_api(_NONE_FOUND)
+
+
+class _MatrixAnswers(_MatrixRefusesCoach):
+    @override
+    async def execute(self, search: SpecificDateSearch, *, cache: bool = True) -> SearchResult:
+        _ = (search, cache)
+        return SearchResult.from_api(_NONE_FOUND)
+
+
+@pytest.mark.parametrize(
+    ("client", "code", "stdout", "told"),
+    [
+        (_MatrixDown, 1, None, True),
+        (_MatrixRefusesCoach, 0, {"BUSINESS": _NONE_FOUND}, True),
+        (_MatrixAnswers, 0, {"COACH": _NONE_FOUND, "BUSINESS": _NONE_FOUND}, False),
+    ],
+)
+def test_under_auto_a_matrix_failure_names_the_google_rows_it_left_unshown(
+    monkeypatch: pytest.MonkeyPatch,
+    client: type[_MatrixDown],
+    code: int,
+    stdout: dict[str, Any] | None,
+    told: bool,
+) -> None:
+    """The hand-off set Google's three COACH rows aside for Matrix's answer. When
+    Matrix then fails to answer COACH, the answer stays Matrix's alone and never
+    the emptied BUSINESS cabin, and stderr says Google's COACH rows exist and
+    how to see them."""
+    _partial(monkeypatch, business_dropped=7)
+    monkeypatch.setattr(cli, "MatrixClient", client)
+    result = CliRunner().invoke(cli.app, _multi_cabin())
+    assert result.exit_code == code, result.output
+    assert (json.loads(result.stdout) if result.stdout else None) == stdout
+    err = " ".join(result.stderr.split())
+    unshown = (
+        "Matrix did not answer COACH, which Google Flights had rows for; "
+        "--backend gflight shows those rows."
+    )
+    assert (unshown in err) is told
+
+
+def test_under_auto_a_matrix_failure_claims_no_rows_google_did_not_have(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both cabins emptied: Google had no rows to leave unshown."""
+    _boards_per_cabin(
+        monkeypatch,
+        {Cabin.COACH: gfid.Board(dropped=3), Cabin.BUSINESS: gfid.Board(dropped=7)},
+    )
+    monkeypatch.setattr(cli, "MatrixClient", _MatrixDown)
+    result = CliRunner().invoke(cli.app, _multi_cabin())
+    assert result.exit_code == 1, result.output
+    assert result.stdout == ""
+    assert "which Google Flights had rows for" not in result.stderr
 
 
 def test_under_auto_a_cabin_google_served_nothing_for_stays_on_google(

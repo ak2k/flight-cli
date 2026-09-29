@@ -4454,6 +4454,17 @@ def _validate_sort_cabin(sort_by: Cabin, cabins: tuple[Cabin, ...]) -> None:
         raise typer.Exit(2)
 
 
+def _note_google_rows_unshown(cabins: Iterable[Cabin]) -> None:
+    """Name each cabin Google Flights had rows for that Matrix, answering the
+    search in its place, did not answer: those rows are not in the output."""
+    names = ", ".join(c.value for c in cabins)
+    if names:
+        err.print(
+            f"[yellow]Matrix did not answer {_safe_text(names)}, which Google Flights had "
+            "rows for; --backend gflight shows those rows.[/]"
+        )
+
+
 def _run_matrix_path_multi(
     *,
     legs: tuple[Leg, ...],
@@ -4469,20 +4480,30 @@ def _run_matrix_path_multi(
     google_url: bool,
     run_pp: bool,
     sel: ProviderSelection,
+    google_answered: tuple[Cabin, ...] = (),
 ) -> None:
-    """Matrix multi-cabin: N parallel cabin queries → client-side join → render."""
+    """Matrix multi-cabin: N parallel cabin queries → client-side join → render.
+
+    `google_answered` names the cabins Google Flights had rows for when the
+    search was handed here; any of them Matrix fails to answer is named on
+    stderr, since the hand-off already set Google's rows aside."""
     # Widen each per-cabin query so the join has overlap to render — top_n
     # rows visible after merge, but each cabin's underlying query pulls
     # `_bumped_query_top_n` candidates. See _bumped_query_top_n docstring.
     query_opts = opts.model_copy(update={"page_size": _bumped_query_top_n(top_n, len(cabins))})
-    results_by_cabin = _run_matrix_multi(
-        legs=legs,
-        opts=query_opts,
-        cabins=cabins,
-        rps=_resolve_rps(rps),
-        impersonate=_resolve_impersonate(impersonate),
-        no_cache=_resolve_no_cache(no_cache),
-    )
+    try:
+        results_by_cabin = _run_matrix_multi(
+            legs=legs,
+            opts=query_opts,
+            cabins=cabins,
+            rps=_resolve_rps(rps),
+            impersonate=_resolve_impersonate(impersonate),
+            no_cache=_resolve_no_cache(no_cache),
+        )
+    except typer.Exit:
+        _note_google_rows_unshown(google_answered)
+        raise
+    _note_google_rows_unshown(c for c in google_answered if c not in results_by_cabin)
     if not results_by_cabin:
         err.print("[red]All cabin queries failed.[/]")
         raise typer.Exit(1)
@@ -4534,6 +4555,13 @@ def _run_matrix_path_multi(
         )
 
 
+class _MatrixHandOff(NamedTuple):
+    """A multi-cabin search Google Flights hands WHOLE to Matrix."""
+
+    emptied: dict[Cabin, int]  # each cabin the routing emptied, with the rows it dropped
+    answered: tuple[Cabin, ...]  # each cabin Google had rows for, now set aside
+
+
 def _run_gflight_path_multi(
     *,
     legs: tuple[Leg, ...],
@@ -4547,18 +4575,17 @@ def _run_gflight_path_multi(
     gf_mode: GfTransportMode = TRANSPORT_HTTP,
     gf_headed: bool = False,
     matrix_fallback: bool = False,
-) -> dict[Cabin, int] | None:
+) -> _MatrixHandOff | None:
     """Google Flights multi-cabin: N cabin queries → join → render.
 
     Parallel on rung 1 and serial on rung 2; `_run_gflight_multi` chooses.
 
     Returns None once it has answered. When the routing filter emptied any
     cabin's board and `matrix_fallback` is set, it prints nothing to stdout and
-    no per-cabin line, and returns each emptied cabin with the count of rows the
-    filter dropped from it, for the caller to hand the WHOLE search to Matrix: a
-    per-cabin hand-off would put Google's rows and Matrix's documents in one
-    answer and join prices from two sources. A cabin Google served nothing for
-    is Google's answer and is not handed on."""
+    no per-cabin line, and returns the hand-off for the caller to give the WHOLE
+    search to Matrix: a per-cabin hand-off would put Google's rows and Matrix's
+    documents in one answer and join prices from two sources. A cabin Google
+    served nothing for is Google's answer and is not handed on."""
     # Widen per-cabin queries so the join has overlap; see _bumped_query_top_n.
     query_top_n = _bumped_query_top_n(top_n, len(cabins))
     # The user's count, not the bumped one. The bump widens the pool each cabin
@@ -4593,7 +4620,7 @@ def _run_gflight_path_multi(
         and (dropped := getattr(fli_by_cabin[cab], "dropped", 0))
     }
     if emptied and matrix_fallback:
-        return emptied
+        return _MatrixHandOff(emptied, tuple(cab for cab in cabins if fli_by_cabin.get(cab)))
     for cab in emptied:
         err.print(
             f"[yellow]Google Flights {_safe_text(cab.value)}: no itinerary matched the routing.[/]"
@@ -5491,8 +5518,9 @@ def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes th
         # constraint that survived to here is one the fan-out honours natively.
         # Re-testing `routing or extension` here would drop it to Matrix with no
         # reason printed.
+        google_answered: tuple[Cabin, ...] = ()
         if resolved == BACKEND_GFLIGHT:
-            emptied = _run_gflight_path_multi(
+            hand_off = _run_gflight_path_multi(
                 legs=legs,
                 opts=opts,
                 cabins=cabins_tuple,
@@ -5505,15 +5533,17 @@ def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes th
                 gf_headed=gf_headed,
                 matrix_fallback=backend == BACKEND_AUTO,
             )
-            if emptied is None:
+            if hand_off is None:
                 return
             reasons = ", ".join(
-                f"{cab.value} ({dropped:d} rows filtered out)" for cab, dropped in emptied.items()
+                f"{cab.value} ({dropped:d} rows filtered out)"
+                for cab, dropped in hand_off.emptied.items()
             )
             err.print(
                 f"[dim]Using Matrix: no Google Flights itinerary matched the routing "
                 f"in {_safe_text(reasons)}.[/]"
             )
+            google_answered = hand_off.answered
         _run_matrix_path_multi(
             legs=legs,
             opts=opts,
@@ -5528,6 +5558,7 @@ def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes th
             google_url=google_url,
             run_pp=run_awards,
             sel=sel,
+            google_answered=google_answered,
         )
         return
 
