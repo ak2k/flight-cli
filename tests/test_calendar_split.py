@@ -916,6 +916,11 @@ def test_calendar_enriched_city_code_gets_the_gate_note_not_an_attribute_error(
     assert cap.out == ""
 
 
+def _no_browser(*_a: object, **_k: object) -> object:
+    """A browser session nobody may ask for: a refusal comes before any page load."""
+    raise AssertionError("a refused calendar reached the browser")
+
+
 def _calendar_fast(**overrides: Any) -> None:
     """Drive the `calendar` command function directly (no CliRunner in this repo).
     Every typer.Option default has to be passed explicitly — an unpassed one is an
@@ -949,6 +954,8 @@ def _calendar_fast(**overrides: Any) -> None:
         "google_url": False,
         "no_cache": True,
         "fast": True,
+        "gf_transport": "http",
+        "gf_headed": False,
         "max_per_query": 1,
         "max_concurrency": 12,
     }
@@ -997,27 +1004,28 @@ def test_calendar_fast_throttled_exits_one(
 
 
 @pytest.mark.parametrize("origin", ["NYC", "ZZZ"])
-def test_calendar_fast_unresolvable_origin_gets_the_gate_note(
-    origin: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("transport", ["http", "browser"])
+def test_calendar_fast_unresolvable_origin_is_refused_by_name(
+    origin: str, transport: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # Neither a city code (NYC — a real place fli's `Airport` enum has no member
-    # for) nor a bad IATA can be resolved into an fli filter, and while the gate
-    # stands neither would have been priced anyway. The gate answers first, so what
-    # the user reads is the standing reason and not `type object 'Airport' has no
-    # attribute 'NYC'` dressed up as a transport failure. Real `date_grid` here
-    # (offline: it never reaches a client), so the path is genuine.
+    # for) nor a bad IATA can be resolved into an fli filter. The gate names the
+    # code before anything builds one, so what the user reads is the reason and
+    # not `type object 'Airport' has no attribute 'NYC'` dressed up as a
+    # transport failure — on either transport, and before any page loads.
     monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    monkeypatch.setattr("flight_cli._gf_browser.session", _no_browser)
     calls = _spy_renderers(monkeypatch)
     with pytest.raises(typer.Exit) as excinfo:
-        _calendar_fast(origin=origin)
+        _calendar_fast(origin=origin, gf_transport=transport)
     cap = capsys.readouterr()
     assert excinfo.value.exit_code == 1  # no grid is still no grid
     assert calls["grid"] == 0
     err_out = _flat(cap.err)
     assert "no attribute" not in err_out  # not an AttributeError in prose
     assert "date grid failed" not in err_out
-    assert err_out.count("price grid unavailable") == 1
-    assert "drop --fast for Matrix" in err_out
+    assert f"a city code rather than an airport ({origin})" in err_out
+    assert "Run without --fast for Matrix" in err_out
     assert cap.out == ""
 
 
@@ -1126,33 +1134,50 @@ def test_render_calendar_round_trip_keeps_nights_and_columns(
 # `--fast || fallback` read Matrix output as a fast grid. Each shape now refuses.
 
 
-def test_fast_refuses_round_trip(monkeypatch: Any, capsys: pytest.CaptureFixture[str]) -> None:
+@pytest.mark.parametrize("transport", ["http", "browser"])
+def test_fast_refuses_a_trip_length_range(
+    transport: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The page's graph prices ONE trip length, so the default `5-7` has no single
+    question to ask it, on either transport."""
     monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    monkeypatch.setattr("flight_cli._gf_browser.session", _no_browser)
     calls = _spy_renderers(monkeypatch)
     with pytest.raises(typer.Exit) as excinfo:
-        _calendar_fast(one_way=False)
+        _calendar_fast(one_way=False, gf_transport=transport)
     cap = capsys.readouterr()
     assert excinfo.value.exit_code == 1
     # The refusal is a diagnostic, so it goes to stderr on EVERY shape — one of the
     # shapes it refuses is `--format json`, and the stream must not depend on which.
-    assert "--fast applies only to one-way" in _flat(cap.err)
-    assert "a round-trip window" in _flat(cap.err)
+    assert "--fast applies only to" in _flat(cap.err)
+    assert "a trip-length range (5-7 nights)" in _flat(cap.err)
     assert cap.out == ""
     assert calls["calendar"] == 0  # refused before any Matrix work
 
 
-def test_fast_refuses_json_output(monkeypatch: Any, capsys: pytest.CaptureFixture[str]) -> None:
+@pytest.mark.parametrize(
+    "overrides", [{"fmt": "json"}, {"one_way": False, "duration": "7"}], ids=["json", "rt"]
+)
+def test_fast_over_http_names_the_browser_for_json_and_round_trip(
+    overrides: dict[str, Any], monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Both shapes are the page grid's. Over http there is nothing to serve them,
+    so the refusal is the gate's note with the transport that does."""
     monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
     calls = _spy_renderers(monkeypatch)
     with pytest.raises(typer.Exit) as excinfo:
-        _calendar_fast(fmt="json")
+        _calendar_fast(**overrides)
     cap = capsys.readouterr()
     assert excinfo.value.exit_code == 1
-    assert "JSON output" in _flat(cap.err)
+    err_out = _flat(cap.err)
+    assert err_out.count("price grid unavailable") == 1
+    assert "--gf-transport browser" in err_out
+    assert "drop --fast for Matrix" in err_out
     # Under a JSON request stdout carries a JSON document or nothing — never prose,
     # or a caller piping to `jq` gets a parse error instead of an empty result.
     assert cap.out == ""
     assert calls["calendar"] == 0  # refused before any Matrix work
+    assert calls["grid"] == 0
 
 
 def test_fast_refuses_multi_airport(monkeypatch: Any, capsys: pytest.CaptureFixture[str]) -> None:
@@ -2862,8 +2887,14 @@ def test_one_failing_cabin_does_not_take_the_other_cabins_down(
     good: list[Any] = [object()]
     asked: list[Cabin] = []
 
-    def _search_with_ids(search: Any, top_n: int = 5, transport: Any = None) -> list[Any]:
-        _ = top_n, transport
+    def _search_with_ids(
+        search: Any,
+        top_n: int = 5,
+        transport: Any = None,
+        currency: str = "USD",
+        keep: Any = None,
+    ) -> list[Any]:
+        _ = top_n, transport, currency, keep
         asked.append(search.options.cabin)
         if search.options.cabin is Cabin.BUSINESS:
             raise RuntimeError(f"fli said [/x]no{_DRIVES_THE_TERMINAL}")
@@ -3664,6 +3695,7 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_pick_in_range", "fallback"),
         ("_run_enriched_path", "unpinned"),
         ("_reraise_if_orderly", "plural"),  # "" or "s", off a count beside it
+        ("_answer_gf_empty", "plural"),
         # `_gf_refusal` sanitizes every remote field it reads and leaves both of
         # its own console-ready, so a wrapper at the sink would show a backslash
         # in front of every bracket the remote text carried. The exactly-once
@@ -3682,6 +3714,8 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_render_calendar", "res.solution_count"),
         ("_render_calendar", "duration_note"),
         ("_render_date_grid", "priced_days"),
+        # Empty, or a literal around the trip length its `:d` spec proves a number.
+        ("_render_date_grid", "trip"),
         ("_render_gflight_table", "_LEGROOM_KEY"),  # the legend it wrote
         # Sanitized where the currency was read, so the summary line and the table
         # title interpolate one value that was wrapped once.
@@ -3689,9 +3723,10 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_render_calendar", "ccy_tag"),
         ("_render_multi_cabin_search", "ccy_tag"),
         # Cells and rows composed in the renderer from leaves each wrapped where
-        # it was read — `_fmt_slice_cell`, `_leg_display`, `_fmt_gflight_legroom`
-        # and `_amount` — and NOT wrapped again around the composition, because
-        # `_fmt_legroom_one` writes a `[red]` on the pitch token on purpose.
+        # it was read — `_fmt_slice_cell`, `_leg_display`, `_gflight_route`,
+        # `_fmt_gflight_legroom` and `_amount` — and NOT wrapped again around the
+        # composition, because `_fmt_legroom_one` writes a `[red]` on the pitch
+        # token on purpose.
         ("_render_search", "cells"),
         ("_render_search", "it_carriers"),
         ("_render_search", "out"),

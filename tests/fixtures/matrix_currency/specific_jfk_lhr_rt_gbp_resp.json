@@ -1,0 +1,3157 @@
+{
+ "carrierStopMatrix": {
+  "columns": [
+   {
+    "label": {
+     "code": "AA",
+     "shortName": "American"
+    }
+   },
+   {
+    "label": {
+     "code": "*",
+     "shortName": "Multiple Carriers"
+    }
+   },
+   {
+    "label": {
+     "code": "BA",
+     "shortName": "British Airways"
+    }
+   }
+  ],
+  "rows": [
+   {
+    "cells": [
+     {
+      "minPrice": "GBP618.00",
+      "minPriceInColumn": true,
+      "minPriceInGrid": true,
+      "minPriceInRow": true
+     },
+     {
+      "minPrice": "GBP663.00",
+      "minPriceInColumn": true
+     },
+     {
+      "minPrice": "GBP729.00",
+      "minPriceInColumn": true
+     }
+    ],
+    "label": 0
+   }
+  ]
+ },
+ "currencyNotice": {
+  "ext": {
+   "price": "GBP618.00"
+  }
+ },
+ "durationSliderItinerary": [
+  {
+   "groups": [
+    {
+     "label": {
+      "end": 416,
+      "start": 415
+     },
+     "minPrice": "GBP684.00"
+    },
+    {
+     "label": {
+      "end": 421,
+      "start": 420
+     },
+     "minPrice": "GBP10102.00"
+    },
+    {
+     "label": {
+      "end": 426,
+      "start": 425
+     },
+     "minPrice": "GBP618.00",
+     "minPriceInSummary": true
+    },
+    {
+     "label": {
+      "end": 431,
+      "start": 430
+     },
+     "minPrice": "GBP684.00"
+    }
+   ],
+   "maxDuration": 430,
+   "minDuration": 415,
+   "index": 0
+  },
+  {
+   "groups": [
+    {
+     "label": {
+      "end": 471,
+      "start": 470
+     },
+     "minPrice": "GBP718.00"
+    },
+    {
+     "label": {
+      "end": 481,
+      "start": 480
+     },
+     "minPrice": "GBP618.00",
+     "minPriceInSummary": true
+    },
+    {
+     "label": {
+      "end": 486,
+      "start": 485
+     },
+     "minPrice": "GBP663.00"
+    }
+   ],
+   "maxDuration": 485,
+   "minDuration": 470,
+   "index": 1
+  }
+ ],
+ "itineraryArrivalTimeRanges": [
+  {
+   "groups": [
+    {
+     "label": {
+      "end": "08:00",
+      "start": "00:00"
+     },
+     "minPrice": "GBP618.00",
+     "minPriceInSummary": true
+    },
+    {
+     "label": {
+      "end": "11:00",
+      "start": "08:00"
+     },
+     "minPrice": "GBP684.00"
+    },
+    {
+     "label": {
+      "end": "14:00",
+      "start": "11:00"
+     },
+     "minPrice": "GBP5471.00"
+    },
+    {
+     "label": {
+      "end": "17:00",
+      "start": "14:00"
+     }
+    },
+    {
+     "label": {
+      "end": "21:00",
+      "start": "17:00"
+     },
+     "minPrice": "GBP684.00"
+    },
+    {
+     "label": {
+      "end": "23:59",
+      "start": "21:00"
+     },
+     "minPrice": "GBP618.00",
+     "minPriceInSummary": true
+    }
+   ]
+  },
+  {
+   "groups": [
+    {
+     "label": {
+      "end": "08:00",
+      "start": "00:00"
+     }
+    },
+    {
+     "label": {
+      "end": "11:00",
+      "start": "08:00"
+     }
+    },
+    {
+     "label": {
+      "end": "14:00",
+      "start": "11:00"
+     },
+     "minPrice": "GBP966.00"
+    },
+    {
+     "label": {
+      "end": "17:00",
+      "start": "14:00"
+     },
+     "minPrice": "GBP718.00"
+    },
+    {
+     "label": {
+      "end": "21:00",
+      "start": "17:00"
+     },
+     "minPrice": "GBP618.00",
+     "minPriceInSummary": true
+    },
+    {
+     "label": {
+      "end": "23:59",
+      "start": "21:00"
+     },
+     "minPrice": "GBP618.00",
+     "minPriceInSummary": true
+    }
+   ]
+  }
+ ],
+ "itineraryCarrierList": {
+  "groups": [
+   {
+    "label": {
+     "code": "AA",
+     "shortName": "American"
+    },
+    "minPrice": "GBP618.00",
+    "minPriceInSummary": true
+   },
+   {
+    "label": {
+     "code": "BA",
+     "shortName": "British Airways"
+    },
+    "minPrice": "GBP729.00"
+   },
+   {
+    "label": {
+     "code": "*",
+     "shortName": "Multiple Carriers"
+    },
+    "minPrice": "GBP663.00"
+   }
+  ]
+ },
+ "itineraryDepartureTimeRanges": [
+  {
+   "groups": [
+    {
+     "label": {
+      "end": "08:00",
+      "start": "00:00"
+     },
+     "minPrice": "GBP684.00"
+    },
+    {
+     "label": {
+      "end": "11:00",
+      "start": "08:00"
+     },
+     "minPrice": "GBP618.00",
+     "minPriceInSummary": true
+    },
+    {
+     "label": {
+      "end": "14:00",
+      "start": "11:00"
+     }
+    },
+    {
+     "label": {
+      "end": "17:00",
+      "start": "14:00"
+     }
+    },
+    {
+     "label": {
+      "end": "21:00",
+      "start": "17:00"
+     },
+     "minPrice": "GBP618.00",
+     "minPriceInSummary": true
+    },
+    {
+     "label": {
+      "end": "23:59",
+      "start": "21:00"
+     },
+     "minPrice": "GBP684.00"
+    }
+   ]
+  },
+  {
+   "groups": [
+    {
+     "label": {
+      "end": "08:00",
+      "start": "00:00"
+     }
+    },
+    {
+     "label": {
+      "end": "11:00",
+      "start": "08:00"
+     },
+     "minPrice": "GBP718.00"
+    },
+    {
+     "label": {
+      "end": "14:00",
+      "start": "11:00"
+     },
+     "minPrice": "GBP691.00"
+    },
+    {
+     "label": {
+      "end": "17:00",
+      "start": "14:00"
+     },
+     "minPrice": "GBP618.00",
+     "minPriceInSummary": true
+    },
+    {
+     "label": {
+      "end": "21:00",
+      "start": "17:00"
+     },
+     "minPrice": "GBP618.00",
+     "minPriceInSummary": true
+    },
+    {
+     "label": {
+      "end": "23:59",
+      "start": "21:00"
+     }
+    }
+   ]
+  }
+ ],
+ "itineraryDestinations": [
+  {
+   "groups": [
+    {
+     "label": {
+      "code": "LHR",
+      "name": "London Heathrow"
+     },
+     "minPrice": "GBP618.00",
+     "minPriceInSummary": true
+    }
+   ]
+  },
+  {
+   "groups": [
+    {
+     "label": {
+      "code": "JFK",
+      "name": "New York John F Kennedy International"
+     },
+     "minPrice": "GBP618.00",
+     "minPriceInSummary": true
+    }
+   ]
+  }
+ ],
+ "itineraryOrigins": [
+  {
+   "groups": [
+    {
+     "label": {
+      "code": "JFK",
+      "name": "New York John F Kennedy International"
+     },
+     "minPrice": "GBP618.00",
+     "minPriceInSummary": true
+    }
+   ]
+  },
+  {
+   "groups": [
+    {
+     "label": {
+      "code": "LHR",
+      "name": "London Heathrow"
+     },
+     "minPrice": "GBP618.00",
+     "minPriceInSummary": true
+    }
+   ]
+  }
+ ],
+ "itineraryPriceSlider": {
+  "groups": [
+   {
+    "label": {
+     "end": "GBP713.00",
+     "start": "GBP618.00"
+    }
+   },
+   {
+    "label": {
+     "end": "GBP808.00",
+     "start": "GBP713.00"
+    }
+   },
+   {
+    "label": {
+     "end": "GBP903.00",
+     "start": "GBP808.00"
+    }
+   },
+   {
+    "label": {
+     "end": "GBP998.00",
+     "start": "GBP903.00"
+    }
+   },
+   {
+    "label": {
+     "end": "GBP1093.00",
+     "start": "GBP998.00"
+    }
+   },
+   {
+    "label": {
+     "end": "GBP4988.00",
+     "start": "GBP4893.00"
+    }
+   },
+   {
+    "label": {
+     "end": "GBP5558.00",
+     "start": "GBP5463.00"
+    }
+   },
+   {
+    "label": {
+     "end": "GBP10118.00",
+     "start": "GBP10023.00"
+    }
+   }
+  ],
+  "maxPrice": "GBP10102.00",
+  "minPrice": "GBP618.00"
+ },
+ "itineraryStopCountList": {
+  "groups": [
+   {
+    "label": 0,
+    "minPrice": "GBP618.00",
+    "minPriceInSummary": true
+   }
+  ]
+ },
+ "solutionList": {
+  "pages": {
+   "count": 4,
+   "current": 1
+  },
+  "solutions": [
+   {
+    "ext": {
+     "price": "GBP618.00",
+     "pricePerMile": "GBP0.0898255814",
+     "totalPrice": "GBP617.39"
+    },
+    "itinerary": {
+     "ext": {
+      "dominantCarrier": {
+       "code": "AA",
+       "shortName": "American"
+      }
+     },
+     "slices": [
+      {
+       "origin": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "destination": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "arrival": "2026-10-20T21:40+01:00",
+       "departure": "2026-10-20T09:35-04:00",
+       "flights": [
+        "AA142"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 425
+      },
+      {
+       "origin": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "destination": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "arrival": "2026-10-27T19:35-04:00",
+       "departure": "2026-10-27T15:35+00:00",
+       "flights": [
+        "AA107"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 480
+      }
+     ],
+     "carriers": [
+      {
+       "code": "AA",
+       "shortName": "American"
+      }
+     ],
+     "singleCarrier": {
+      "code": "AA",
+      "shortName": "American"
+     },
+     "distance": {
+      "units": "MI",
+      "value": 6880
+     }
+    },
+    "pricings": [
+     {
+      "ext": {
+       "pax": {
+        "adults": 1
+       }
+      },
+      "displayPrice": "GBP617.39"
+     }
+    ],
+    "displayTotal": "GBP617.39",
+    "id": "N25Nzp5fqpPUmjlJKFJCNN004",
+    "passengerCount": 1
+   },
+   {
+    "ext": {
+     "price": "GBP618.00",
+     "pricePerMile": "GBP0.0898255814",
+     "totalPrice": "GBP617.39"
+    },
+    "itinerary": {
+     "ext": {
+      "dominantCarrier": {
+       "code": "AA",
+       "shortName": "American"
+      }
+     },
+     "slices": [
+      {
+       "origin": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "destination": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "arrival": "2026-10-20T21:40+01:00",
+       "departure": "2026-10-20T09:35-04:00",
+       "flights": [
+        "AA142"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 425
+      },
+      {
+       "origin": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "destination": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "arrival": "2026-10-27T21:00-04:00",
+       "departure": "2026-10-27T17:00+00:00",
+       "flights": [
+        "AA141"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 480
+      }
+     ],
+     "carriers": [
+      {
+       "code": "AA",
+       "shortName": "American"
+      }
+     ],
+     "singleCarrier": {
+      "code": "AA",
+      "shortName": "American"
+     },
+     "distance": {
+      "units": "MI",
+      "value": 6880
+     }
+    },
+    "pricings": [
+     {
+      "ext": {
+       "pax": {
+        "adults": 1
+       }
+      },
+      "displayPrice": "GBP617.39"
+     }
+    ],
+    "displayTotal": "GBP617.39",
+    "id": "N25Nzp5fqpPUmjlJKFJCNN002",
+    "passengerCount": 1
+   },
+   {
+    "ext": {
+     "price": "GBP618.00",
+     "pricePerMile": "GBP0.0898255814",
+     "totalPrice": "GBP617.39"
+    },
+    "itinerary": {
+     "ext": {
+      "dominantCarrier": {
+       "code": "AA",
+       "shortName": "American"
+      }
+     },
+     "slices": [
+      {
+       "origin": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "destination": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "arrival": "2026-10-21T07:20+01:00",
+       "departure": "2026-10-20T19:15-04:00",
+       "flights": [
+        "AA106"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 425,
+       "ext": {
+        "warnings": {
+         "types": [
+          "OVERNIGHT"
+         ],
+         "overnight": true
+        }
+       }
+      },
+      {
+       "origin": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "destination": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "arrival": "2026-10-27T19:35-04:00",
+       "departure": "2026-10-27T15:35+00:00",
+       "flights": [
+        "AA107"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 480
+      }
+     ],
+     "carriers": [
+      {
+       "code": "AA",
+       "shortName": "American"
+      }
+     ],
+     "singleCarrier": {
+      "code": "AA",
+      "shortName": "American"
+     },
+     "distance": {
+      "units": "MI",
+      "value": 6880
+     }
+    },
+    "pricings": [
+     {
+      "ext": {
+       "pax": {
+        "adults": 1
+       }
+      },
+      "displayPrice": "GBP617.39"
+     }
+    ],
+    "displayTotal": "GBP617.39",
+    "id": "N25Nzp5fqpPUmjlJKFJCNN003",
+    "passengerCount": 1
+   },
+   {
+    "ext": {
+     "price": "GBP618.00",
+     "pricePerMile": "GBP0.0898255814",
+     "totalPrice": "GBP617.39"
+    },
+    "itinerary": {
+     "ext": {
+      "dominantCarrier": {
+       "code": "AA",
+       "shortName": "American"
+      }
+     },
+     "slices": [
+      {
+       "origin": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "destination": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "arrival": "2026-10-21T07:20+01:00",
+       "departure": "2026-10-20T19:15-04:00",
+       "flights": [
+        "AA106"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 425,
+       "ext": {
+        "warnings": {
+         "types": [
+          "OVERNIGHT"
+         ],
+         "overnight": true
+        }
+       }
+      },
+      {
+       "origin": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "destination": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "arrival": "2026-10-27T21:00-04:00",
+       "departure": "2026-10-27T17:00+00:00",
+       "flights": [
+        "AA141"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 480
+      }
+     ],
+     "carriers": [
+      {
+       "code": "AA",
+       "shortName": "American"
+      }
+     ],
+     "singleCarrier": {
+      "code": "AA",
+      "shortName": "American"
+     },
+     "distance": {
+      "units": "MI",
+      "value": 6880
+     }
+    },
+    "pricings": [
+     {
+      "ext": {
+       "pax": {
+        "adults": 1
+       }
+      },
+      "displayPrice": "GBP617.39"
+     }
+    ],
+    "displayTotal": "GBP617.39",
+    "id": "N25Nzp5fqpPUmjlJKFJCNN001",
+    "passengerCount": 1
+   },
+   {
+    "ext": {
+     "price": "GBP663.00",
+     "pricePerMile": "GBP0.0963662791",
+     "totalPrice": "GBP662.19"
+    },
+    "itinerary": {
+     "ext": {
+      "dominantCarrier": {
+       "code": "*",
+       "shortName": "Multiple Carriers"
+      }
+     },
+     "slices": [
+      {
+       "origin": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "destination": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "arrival": "2026-10-20T21:40+01:00",
+       "departure": "2026-10-20T09:35-04:00",
+       "flights": [
+        "AA142"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 425
+      },
+      {
+       "origin": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "destination": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "arrival": "2026-10-27T22:10-04:00",
+       "departure": "2026-10-27T18:05+00:00",
+       "flights": [
+        "BA179"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 485
+      }
+     ],
+     "carriers": [
+      {
+       "code": "AA",
+       "shortName": "American"
+      },
+      {
+       "code": "BA",
+       "shortName": "British Airways"
+      }
+     ],
+     "singleCarrier": {
+      "code": "*",
+      "shortName": "Multiple Carriers"
+     },
+     "distance": {
+      "units": "MI",
+      "value": 6880
+     }
+    },
+    "pricings": [
+     {
+      "ext": {
+       "pax": {
+        "adults": 1
+       }
+      },
+      "displayPrice": "GBP662.19"
+     }
+    ],
+    "displayTotal": "GBP662.19",
+    "id": "N25Nzp5fqpPUmjlJKFJCNN005",
+    "passengerCount": 1
+   },
+   {
+    "ext": {
+     "price": "GBP663.00",
+     "pricePerMile": "GBP0.0963662791",
+     "totalPrice": "GBP662.19"
+    },
+    "itinerary": {
+     "ext": {
+      "dominantCarrier": {
+       "code": "*",
+       "shortName": "Multiple Carriers"
+      }
+     },
+     "slices": [
+      {
+       "origin": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "destination": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "arrival": "2026-10-21T07:20+01:00",
+       "departure": "2026-10-20T19:15-04:00",
+       "flights": [
+        "AA106"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 425,
+       "ext": {
+        "warnings": {
+         "types": [
+          "OVERNIGHT"
+         ],
+         "overnight": true
+        }
+       }
+      },
+      {
+       "origin": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "destination": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "arrival": "2026-10-27T22:10-04:00",
+       "departure": "2026-10-27T18:05+00:00",
+       "flights": [
+        "BA179"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 485
+      }
+     ],
+     "carriers": [
+      {
+       "code": "AA",
+       "shortName": "American"
+      },
+      {
+       "code": "BA",
+       "shortName": "British Airways"
+      }
+     ],
+     "singleCarrier": {
+      "code": "*",
+      "shortName": "Multiple Carriers"
+     },
+     "distance": {
+      "units": "MI",
+      "value": 6880
+     }
+    },
+    "pricings": [
+     {
+      "ext": {
+       "pax": {
+        "adults": 1
+       }
+      },
+      "displayPrice": "GBP662.19"
+     }
+    ],
+    "displayTotal": "GBP662.19",
+    "id": "N25Nzp5fqpPUmjlJKFJCNN006",
+    "passengerCount": 1
+   },
+   {
+    "ext": {
+     "price": "GBP684.00",
+     "pricePerMile": "GBP0.0994186047",
+     "totalPrice": "GBP683.39"
+    },
+    "itinerary": {
+     "ext": {
+      "dominantCarrier": {
+       "code": "*",
+       "shortName": "Multiple Carriers"
+      }
+     },
+     "slices": [
+      {
+       "origin": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "destination": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "arrival": "2026-10-20T19:45+01:00",
+       "departure": "2026-10-20T07:50-04:00",
+       "flights": [
+        "BA178"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 415
+      },
+      {
+       "origin": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "destination": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "arrival": "2026-10-27T19:35-04:00",
+       "departure": "2026-10-27T15:35+00:00",
+       "flights": [
+        "AA107"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 480
+      }
+     ],
+     "carriers": [
+      {
+       "code": "BA",
+       "shortName": "British Airways"
+      },
+      {
+       "code": "AA",
+       "shortName": "American"
+      }
+     ],
+     "singleCarrier": {
+      "code": "*",
+      "shortName": "Multiple Carriers"
+     },
+     "distance": {
+      "units": "MI",
+      "value": 6880
+     }
+    },
+    "pricings": [
+     {
+      "ext": {
+       "pax": {
+        "adults": 1
+       }
+      },
+      "displayPrice": "GBP683.39"
+     }
+    ],
+    "displayTotal": "GBP683.39",
+    "id": "N25Nzp5fqpPUmjlJKFJCNN007",
+    "passengerCount": 1
+   },
+   {
+    "ext": {
+     "price": "GBP684.00",
+     "pricePerMile": "GBP0.0994186047",
+     "totalPrice": "GBP683.39"
+    },
+    "itinerary": {
+     "ext": {
+      "dominantCarrier": {
+       "code": "*",
+       "shortName": "Multiple Carriers"
+      }
+     },
+     "slices": [
+      {
+       "origin": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "destination": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "arrival": "2026-10-20T19:45+01:00",
+       "departure": "2026-10-20T07:50-04:00",
+       "flights": [
+        "BA178"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 415
+      },
+      {
+       "origin": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "destination": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "arrival": "2026-10-27T21:00-04:00",
+       "departure": "2026-10-27T17:00+00:00",
+       "flights": [
+        "AA141"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 480
+      }
+     ],
+     "carriers": [
+      {
+       "code": "BA",
+       "shortName": "British Airways"
+      },
+      {
+       "code": "AA",
+       "shortName": "American"
+      }
+     ],
+     "singleCarrier": {
+      "code": "*",
+      "shortName": "Multiple Carriers"
+     },
+     "distance": {
+      "units": "MI",
+      "value": 6880
+     }
+    },
+    "pricings": [
+     {
+      "ext": {
+       "pax": {
+        "adults": 1
+       }
+      },
+      "displayPrice": "GBP683.39"
+     }
+    ],
+    "displayTotal": "GBP683.39",
+    "id": "N25Nzp5fqpPUmjlJKFJCNN009",
+    "passengerCount": 1
+   },
+   {
+    "ext": {
+     "price": "GBP684.00",
+     "pricePerMile": "GBP0.0994186047",
+     "totalPrice": "GBP683.39"
+    },
+    "itinerary": {
+     "ext": {
+      "dominantCarrier": {
+       "code": "*",
+       "shortName": "Multiple Carriers"
+      }
+     },
+     "slices": [
+      {
+       "origin": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "destination": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "arrival": "2026-10-21T07:45+01:00",
+       "departure": "2026-10-20T19:35-04:00",
+       "flights": [
+        "BA176"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 430,
+       "ext": {
+        "warnings": {
+         "types": [
+          "OVERNIGHT"
+         ],
+         "overnight": true
+        }
+       }
+      },
+      {
+       "origin": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "destination": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "arrival": "2026-10-27T19:35-04:00",
+       "departure": "2026-10-27T15:35+00:00",
+       "flights": [
+        "AA107"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 480
+      }
+     ],
+     "carriers": [
+      {
+       "code": "BA",
+       "shortName": "British Airways"
+      },
+      {
+       "code": "AA",
+       "shortName": "American"
+      }
+     ],
+     "singleCarrier": {
+      "code": "*",
+      "shortName": "Multiple Carriers"
+     },
+     "distance": {
+      "units": "MI",
+      "value": 6880
+     }
+    },
+    "pricings": [
+     {
+      "ext": {
+       "pax": {
+        "adults": 1
+       }
+      },
+      "displayPrice": "GBP683.39"
+     }
+    ],
+    "displayTotal": "GBP683.39",
+    "id": "N25Nzp5fqpPUmjlJKFJCNN00E",
+    "passengerCount": 1
+   },
+   {
+    "ext": {
+     "price": "GBP684.00",
+     "pricePerMile": "GBP0.0994186047",
+     "totalPrice": "GBP683.39"
+    },
+    "itinerary": {
+     "ext": {
+      "dominantCarrier": {
+       "code": "*",
+       "shortName": "Multiple Carriers"
+      }
+     },
+     "slices": [
+      {
+       "origin": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "destination": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "arrival": "2026-10-21T07:45+01:00",
+       "departure": "2026-10-20T19:35-04:00",
+       "flights": [
+        "BA176"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 430,
+       "ext": {
+        "warnings": {
+         "types": [
+          "OVERNIGHT"
+         ],
+         "overnight": true
+        }
+       }
+      },
+      {
+       "origin": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "destination": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "arrival": "2026-10-27T21:00-04:00",
+       "departure": "2026-10-27T17:00+00:00",
+       "flights": [
+        "AA141"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 480
+      }
+     ],
+     "carriers": [
+      {
+       "code": "BA",
+       "shortName": "British Airways"
+      },
+      {
+       "code": "AA",
+       "shortName": "American"
+      }
+     ],
+     "singleCarrier": {
+      "code": "*",
+      "shortName": "Multiple Carriers"
+     },
+     "distance": {
+      "units": "MI",
+      "value": 6880
+     }
+    },
+    "pricings": [
+     {
+      "ext": {
+       "pax": {
+        "adults": 1
+       }
+      },
+      "displayPrice": "GBP683.39"
+     }
+    ],
+    "displayTotal": "GBP683.39",
+    "id": "N25Nzp5fqpPUmjlJKFJCNN00D",
+    "passengerCount": 1
+   },
+   {
+    "ext": {
+     "price": "GBP684.00",
+     "pricePerMile": "GBP0.0994186047",
+     "totalPrice": "GBP683.39"
+    },
+    "itinerary": {
+     "ext": {
+      "dominantCarrier": {
+       "code": "*",
+       "shortName": "Multiple Carriers"
+      }
+     },
+     "slices": [
+      {
+       "origin": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "destination": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "arrival": "2026-10-21T10:35+01:00",
+       "departure": "2026-10-20T22:40-04:00",
+       "flights": [
+        "BA182"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 415,
+       "ext": {
+        "warnings": {
+         "types": [
+          "OVERNIGHT"
+         ],
+         "overnight": true
+        }
+       }
+      },
+      {
+       "origin": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "destination": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "arrival": "2026-10-27T19:35-04:00",
+       "departure": "2026-10-27T15:35+00:00",
+       "flights": [
+        "AA107"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 480
+      }
+     ],
+     "carriers": [
+      {
+       "code": "BA",
+       "shortName": "British Airways"
+      },
+      {
+       "code": "AA",
+       "shortName": "American"
+      }
+     ],
+     "singleCarrier": {
+      "code": "*",
+      "shortName": "Multiple Carriers"
+     },
+     "distance": {
+      "units": "MI",
+      "value": 6880
+     }
+    },
+    "pricings": [
+     {
+      "ext": {
+       "pax": {
+        "adults": 1
+       }
+      },
+      "displayPrice": "GBP683.39"
+     }
+    ],
+    "displayTotal": "GBP683.39",
+    "id": "N25Nzp5fqpPUmjlJKFJCNN00A",
+    "passengerCount": 1
+   },
+   {
+    "ext": {
+     "price": "GBP684.00",
+     "pricePerMile": "GBP0.0994186047",
+     "totalPrice": "GBP683.39"
+    },
+    "itinerary": {
+     "ext": {
+      "dominantCarrier": {
+       "code": "*",
+       "shortName": "Multiple Carriers"
+      }
+     },
+     "slices": [
+      {
+       "origin": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "destination": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "arrival": "2026-10-21T10:35+01:00",
+       "departure": "2026-10-20T22:40-04:00",
+       "flights": [
+        "IB3566"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 415,
+       "ext": {
+        "warnings": {
+         "types": [
+          "OVERNIGHT"
+         ],
+         "overnight": true
+        }
+       }
+      },
+      {
+       "origin": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "destination": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "arrival": "2026-10-27T19:35-04:00",
+       "departure": "2026-10-27T15:35+00:00",
+       "flights": [
+        "AA107"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 480
+      }
+     ],
+     "carriers": [
+      {
+       "code": "IB",
+       "shortName": "Iberia"
+      },
+      {
+       "code": "AA",
+       "shortName": "American"
+      }
+     ],
+     "singleCarrier": {
+      "code": "*",
+      "shortName": "Multiple Carriers"
+     },
+     "distance": {
+      "units": "MI",
+      "value": 6880
+     }
+    },
+    "pricings": [
+     {
+      "ext": {
+       "pax": {
+        "adults": 1
+       }
+      },
+      "displayPrice": "GBP683.39"
+     }
+    ],
+    "displayTotal": "GBP683.39",
+    "id": "N25Nzp5fqpPUmjlJKFJCNN00B",
+    "passengerCount": 1
+   },
+   {
+    "ext": {
+     "price": "GBP684.00",
+     "pricePerMile": "GBP0.0994186047",
+     "totalPrice": "GBP683.39"
+    },
+    "itinerary": {
+     "ext": {
+      "dominantCarrier": {
+       "code": "*",
+       "shortName": "Multiple Carriers"
+      }
+     },
+     "slices": [
+      {
+       "origin": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "destination": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "arrival": "2026-10-21T10:35+01:00",
+       "departure": "2026-10-20T22:40-04:00",
+       "flights": [
+        "BA182"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 415,
+       "ext": {
+        "warnings": {
+         "types": [
+          "OVERNIGHT"
+         ],
+         "overnight": true
+        }
+       }
+      },
+      {
+       "origin": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "destination": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "arrival": "2026-10-27T21:00-04:00",
+       "departure": "2026-10-27T17:00+00:00",
+       "flights": [
+        "AA141"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 480
+      }
+     ],
+     "carriers": [
+      {
+       "code": "BA",
+       "shortName": "British Airways"
+      },
+      {
+       "code": "AA",
+       "shortName": "American"
+      }
+     ],
+     "singleCarrier": {
+      "code": "*",
+      "shortName": "Multiple Carriers"
+     },
+     "distance": {
+      "units": "MI",
+      "value": 6880
+     }
+    },
+    "pricings": [
+     {
+      "ext": {
+       "pax": {
+        "adults": 1
+       }
+      },
+      "displayPrice": "GBP683.39"
+     }
+    ],
+    "displayTotal": "GBP683.39",
+    "id": "N25Nzp5fqpPUmjlJKFJCNN008",
+    "passengerCount": 1
+   },
+   {
+    "ext": {
+     "price": "GBP684.00",
+     "pricePerMile": "GBP0.0994186047",
+     "totalPrice": "GBP683.39"
+    },
+    "itinerary": {
+     "ext": {
+      "dominantCarrier": {
+       "code": "*",
+       "shortName": "Multiple Carriers"
+      }
+     },
+     "slices": [
+      {
+       "origin": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "destination": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "arrival": "2026-10-21T10:35+01:00",
+       "departure": "2026-10-20T22:40-04:00",
+       "flights": [
+        "IB3566"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 415,
+       "ext": {
+        "warnings": {
+         "types": [
+          "OVERNIGHT"
+         ],
+         "overnight": true
+        }
+       }
+      },
+      {
+       "origin": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "destination": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "arrival": "2026-10-27T21:00-04:00",
+       "departure": "2026-10-27T17:00+00:00",
+       "flights": [
+        "AA141"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 480
+      }
+     ],
+     "carriers": [
+      {
+       "code": "IB",
+       "shortName": "Iberia"
+      },
+      {
+       "code": "AA",
+       "shortName": "American"
+      }
+     ],
+     "singleCarrier": {
+      "code": "*",
+      "shortName": "Multiple Carriers"
+     },
+     "distance": {
+      "units": "MI",
+      "value": 6880
+     }
+    },
+    "pricings": [
+     {
+      "ext": {
+       "pax": {
+        "adults": 1
+       }
+      },
+      "displayPrice": "GBP683.39"
+     }
+    ],
+    "displayTotal": "GBP683.39",
+    "id": "N25Nzp5fqpPUmjlJKFJCNN00C",
+    "passengerCount": 1
+   },
+   {
+    "ext": {
+     "price": "GBP691.00",
+     "pricePerMile": "GBP0.1004360466",
+     "totalPrice": "GBP690.19"
+    },
+    "itinerary": {
+     "ext": {
+      "dominantCarrier": {
+       "code": "*",
+       "shortName": "Multiple Carriers"
+      }
+     },
+     "slices": [
+      {
+       "origin": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "destination": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "arrival": "2026-10-20T21:40+01:00",
+       "departure": "2026-10-20T09:35-04:00",
+       "flights": [
+        "AA142"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 425
+      },
+      {
+       "origin": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "destination": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "arrival": "2026-10-27T17:00-04:00",
+       "departure": "2026-10-27T12:55+00:00",
+       "flights": [
+        "BA177"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 485
+      }
+     ],
+     "carriers": [
+      {
+       "code": "AA",
+       "shortName": "American"
+      },
+      {
+       "code": "BA",
+       "shortName": "British Airways"
+      }
+     ],
+     "singleCarrier": {
+      "code": "*",
+      "shortName": "Multiple Carriers"
+     },
+     "distance": {
+      "units": "MI",
+      "value": 6880
+     }
+    },
+    "pricings": [
+     {
+      "ext": {
+       "pax": {
+        "adults": 1
+       }
+      },
+      "displayPrice": "GBP690.19"
+     }
+    ],
+    "displayTotal": "GBP690.19",
+    "id": "N25Nzp5fqpPUmjlJKFJCNN00G",
+    "passengerCount": 1
+   },
+   {
+    "ext": {
+     "price": "GBP691.00",
+     "pricePerMile": "GBP0.1004360466",
+     "totalPrice": "GBP690.19"
+    },
+    "itinerary": {
+     "ext": {
+      "dominantCarrier": {
+       "code": "*",
+       "shortName": "Multiple Carriers"
+      }
+     },
+     "slices": [
+      {
+       "origin": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "destination": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "arrival": "2026-10-20T21:40+01:00",
+       "departure": "2026-10-20T09:35-04:00",
+       "flights": [
+        "AA142"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 425
+      },
+      {
+       "origin": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "destination": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "arrival": "2026-10-27T18:20-04:00",
+       "departure": "2026-10-27T14:15+00:00",
+       "flights": [
+        "BA115"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 485
+      }
+     ],
+     "carriers": [
+      {
+       "code": "AA",
+       "shortName": "American"
+      },
+      {
+       "code": "BA",
+       "shortName": "British Airways"
+      }
+     ],
+     "singleCarrier": {
+      "code": "*",
+      "shortName": "Multiple Carriers"
+     },
+     "distance": {
+      "units": "MI",
+      "value": 6880
+     }
+    },
+    "pricings": [
+     {
+      "ext": {
+       "pax": {
+        "adults": 1
+       }
+      },
+      "displayPrice": "GBP690.19"
+     }
+    ],
+    "displayTotal": "GBP690.19",
+    "id": "N25Nzp5fqpPUmjlJKFJCNN00I",
+    "passengerCount": 1
+   },
+   {
+    "ext": {
+     "price": "GBP691.00",
+     "pricePerMile": "GBP0.1004360466",
+     "totalPrice": "GBP690.19"
+    },
+    "itinerary": {
+     "ext": {
+      "dominantCarrier": {
+       "code": "*",
+       "shortName": "Multiple Carriers"
+      }
+     },
+     "slices": [
+      {
+       "origin": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "destination": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "arrival": "2026-10-21T07:20+01:00",
+       "departure": "2026-10-20T19:15-04:00",
+       "flights": [
+        "AA106"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 425,
+       "ext": {
+        "warnings": {
+         "types": [
+          "OVERNIGHT"
+         ],
+         "overnight": true
+        }
+       }
+      },
+      {
+       "origin": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "destination": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "arrival": "2026-10-27T17:00-04:00",
+       "departure": "2026-10-27T12:55+00:00",
+       "flights": [
+        "BA177"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 485
+      }
+     ],
+     "carriers": [
+      {
+       "code": "AA",
+       "shortName": "American"
+      },
+      {
+       "code": "BA",
+       "shortName": "British Airways"
+      }
+     ],
+     "singleCarrier": {
+      "code": "*",
+      "shortName": "Multiple Carriers"
+     },
+     "distance": {
+      "units": "MI",
+      "value": 6880
+     }
+    },
+    "pricings": [
+     {
+      "ext": {
+       "pax": {
+        "adults": 1
+       }
+      },
+      "displayPrice": "GBP690.19"
+     }
+    ],
+    "displayTotal": "GBP690.19",
+    "id": "N25Nzp5fqpPUmjlJKFJCNN00F",
+    "passengerCount": 1
+   },
+   {
+    "ext": {
+     "price": "GBP691.00",
+     "pricePerMile": "GBP0.1004360466",
+     "totalPrice": "GBP690.19"
+    },
+    "itinerary": {
+     "ext": {
+      "dominantCarrier": {
+       "code": "*",
+       "shortName": "Multiple Carriers"
+      }
+     },
+     "slices": [
+      {
+       "origin": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "destination": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "arrival": "2026-10-21T07:20+01:00",
+       "departure": "2026-10-20T19:15-04:00",
+       "flights": [
+        "AA106"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 425,
+       "ext": {
+        "warnings": {
+         "types": [
+          "OVERNIGHT"
+         ],
+         "overnight": true
+        }
+       }
+      },
+      {
+       "origin": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "destination": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "arrival": "2026-10-27T18:20-04:00",
+       "departure": "2026-10-27T14:15+00:00",
+       "flights": [
+        "BA115"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 485
+      }
+     ],
+     "carriers": [
+      {
+       "code": "AA",
+       "shortName": "American"
+      },
+      {
+       "code": "BA",
+       "shortName": "British Airways"
+      }
+     ],
+     "singleCarrier": {
+      "code": "*",
+      "shortName": "Multiple Carriers"
+     },
+     "distance": {
+      "units": "MI",
+      "value": 6880
+     }
+    },
+    "pricings": [
+     {
+      "ext": {
+       "pax": {
+        "adults": 1
+       }
+      },
+      "displayPrice": "GBP690.19"
+     }
+    ],
+    "displayTotal": "GBP690.19",
+    "id": "N25Nzp5fqpPUmjlJKFJCNN00H",
+    "passengerCount": 1
+   },
+   {
+    "ext": {
+     "price": "GBP718.00",
+     "pricePerMile": "GBP0.1043604652",
+     "totalPrice": "GBP717.39"
+    },
+    "itinerary": {
+     "ext": {
+      "dominantCarrier": {
+       "code": "AA",
+       "shortName": "American"
+      }
+     },
+     "slices": [
+      {
+       "origin": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "destination": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "arrival": "2026-10-20T21:40+01:00",
+       "departure": "2026-10-20T09:35-04:00",
+       "flights": [
+        "AA142"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 425
+      },
+      {
+       "origin": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "destination": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "arrival": "2026-10-27T14:05-04:00",
+       "departure": "2026-10-27T10:15+00:00",
+       "flights": [
+        "AA103"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 470
+      }
+     ],
+     "carriers": [
+      {
+       "code": "AA",
+       "shortName": "American"
+      }
+     ],
+     "singleCarrier": {
+      "code": "AA",
+      "shortName": "American"
+     },
+     "distance": {
+      "units": "MI",
+      "value": 6880
+     }
+    },
+    "pricings": [
+     {
+      "ext": {
+       "pax": {
+        "adults": 1
+       }
+      },
+      "displayPrice": "GBP717.39"
+     }
+    ],
+    "displayTotal": "GBP717.39",
+    "id": "N25Nzp5fqpPUmjlJKFJCNN00K",
+    "passengerCount": 1
+   },
+   {
+    "ext": {
+     "price": "GBP718.00",
+     "pricePerMile": "GBP0.1043604652",
+     "totalPrice": "GBP717.39"
+    },
+    "itinerary": {
+     "ext": {
+      "dominantCarrier": {
+       "code": "AA",
+       "shortName": "American"
+      }
+     },
+     "slices": [
+      {
+       "origin": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "destination": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "arrival": "2026-10-21T07:20+01:00",
+       "departure": "2026-10-20T19:15-04:00",
+       "flights": [
+        "AA106"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 425,
+       "ext": {
+        "warnings": {
+         "types": [
+          "OVERNIGHT"
+         ],
+         "overnight": true
+        }
+       }
+      },
+      {
+       "origin": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "destination": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "arrival": "2026-10-27T14:05-04:00",
+       "departure": "2026-10-27T10:15+00:00",
+       "flights": [
+        "AA103"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 470
+      }
+     ],
+     "carriers": [
+      {
+       "code": "AA",
+       "shortName": "American"
+      }
+     ],
+     "singleCarrier": {
+      "code": "AA",
+      "shortName": "American"
+     },
+     "distance": {
+      "units": "MI",
+      "value": 6880
+     }
+    },
+    "pricings": [
+     {
+      "ext": {
+       "pax": {
+        "adults": 1
+       }
+      },
+      "displayPrice": "GBP717.39"
+     }
+    ],
+    "displayTotal": "GBP717.39",
+    "id": "N25Nzp5fqpPUmjlJKFJCNN00J",
+    "passengerCount": 1
+   },
+   {
+    "ext": {
+     "price": "GBP729.00",
+     "pricePerMile": "GBP0.1059593024",
+     "totalPrice": "GBP728.19"
+    },
+    "itinerary": {
+     "ext": {
+      "dominantCarrier": {
+       "code": "BA",
+       "shortName": "British Airways"
+      }
+     },
+     "slices": [
+      {
+       "origin": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "destination": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "arrival": "2026-10-20T19:45+01:00",
+       "departure": "2026-10-20T07:50-04:00",
+       "flights": [
+        "BA178"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 415
+      },
+      {
+       "origin": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "destination": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "arrival": "2026-10-27T22:10-04:00",
+       "departure": "2026-10-27T18:05+00:00",
+       "flights": [
+        "BA179"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 485
+      }
+     ],
+     "carriers": [
+      {
+       "code": "BA",
+       "shortName": "British Airways"
+      }
+     ],
+     "singleCarrier": {
+      "code": "BA",
+      "shortName": "British Airways"
+     },
+     "distance": {
+      "units": "MI",
+      "value": 6880
+     }
+    },
+    "pricings": [
+     {
+      "ext": {
+       "pax": {
+        "adults": 1
+       }
+      },
+      "displayPrice": "GBP728.19"
+     }
+    ],
+    "displayTotal": "GBP728.19",
+    "id": "N25Nzp5fqpPUmjlJKFJCNN00M",
+    "passengerCount": 1
+   },
+   {
+    "ext": {
+     "price": "GBP729.00",
+     "pricePerMile": "GBP0.1059593024",
+     "totalPrice": "GBP728.19"
+    },
+    "itinerary": {
+     "ext": {
+      "dominantCarrier": {
+       "code": "BA",
+       "shortName": "British Airways"
+      }
+     },
+     "slices": [
+      {
+       "origin": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "destination": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "arrival": "2026-10-21T07:45+01:00",
+       "departure": "2026-10-20T19:35-04:00",
+       "flights": [
+        "BA176"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 430,
+       "ext": {
+        "warnings": {
+         "types": [
+          "OVERNIGHT"
+         ],
+         "overnight": true
+        }
+       }
+      },
+      {
+       "origin": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "destination": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "arrival": "2026-10-27T22:10-04:00",
+       "departure": "2026-10-27T18:05+00:00",
+       "flights": [
+        "BA179"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 485
+      }
+     ],
+     "carriers": [
+      {
+       "code": "BA",
+       "shortName": "British Airways"
+      }
+     ],
+     "singleCarrier": {
+      "code": "BA",
+      "shortName": "British Airways"
+     },
+     "distance": {
+      "units": "MI",
+      "value": 6880
+     }
+    },
+    "pricings": [
+     {
+      "ext": {
+       "pax": {
+        "adults": 1
+       }
+      },
+      "displayPrice": "GBP728.19"
+     }
+    ],
+    "displayTotal": "GBP728.19",
+    "id": "N25Nzp5fqpPUmjlJKFJCNN00O",
+    "passengerCount": 1
+   },
+   {
+    "ext": {
+     "price": "GBP729.00",
+     "pricePerMile": "GBP0.1059593024",
+     "totalPrice": "GBP728.19"
+    },
+    "itinerary": {
+     "ext": {
+      "dominantCarrier": {
+       "code": "BA",
+       "shortName": "British Airways"
+      }
+     },
+     "slices": [
+      {
+       "origin": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "destination": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "arrival": "2026-10-21T10:35+01:00",
+       "departure": "2026-10-20T22:40-04:00",
+       "flights": [
+        "BA182"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 415,
+       "ext": {
+        "warnings": {
+         "types": [
+          "OVERNIGHT"
+         ],
+         "overnight": true
+        }
+       }
+      },
+      {
+       "origin": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "destination": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "arrival": "2026-10-27T22:10-04:00",
+       "departure": "2026-10-27T18:05+00:00",
+       "flights": [
+        "BA179"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 485
+      }
+     ],
+     "carriers": [
+      {
+       "code": "BA",
+       "shortName": "British Airways"
+      }
+     ],
+     "singleCarrier": {
+      "code": "BA",
+      "shortName": "British Airways"
+     },
+     "distance": {
+      "units": "MI",
+      "value": 6880
+     }
+    },
+    "pricings": [
+     {
+      "ext": {
+       "pax": {
+        "adults": 1
+       }
+      },
+      "displayPrice": "GBP728.19"
+     }
+    ],
+    "displayTotal": "GBP728.19",
+    "id": "N25Nzp5fqpPUmjlJKFJCNN00L",
+    "passengerCount": 1
+   },
+   {
+    "ext": {
+     "price": "GBP729.00",
+     "pricePerMile": "GBP0.1059593024",
+     "totalPrice": "GBP728.19"
+    },
+    "itinerary": {
+     "ext": {
+      "dominantCarrier": {
+       "code": "*",
+       "shortName": "Multiple Carriers"
+      }
+     },
+     "slices": [
+      {
+       "origin": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "destination": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "arrival": "2026-10-21T10:35+01:00",
+       "departure": "2026-10-20T22:40-04:00",
+       "flights": [
+        "IB3566"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 415,
+       "ext": {
+        "warnings": {
+         "types": [
+          "OVERNIGHT"
+         ],
+         "overnight": true
+        }
+       }
+      },
+      {
+       "origin": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "destination": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "arrival": "2026-10-27T22:10-04:00",
+       "departure": "2026-10-27T18:05+00:00",
+       "flights": [
+        "BA179"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 485
+      }
+     ],
+     "carriers": [
+      {
+       "code": "IB",
+       "shortName": "Iberia"
+      },
+      {
+       "code": "BA",
+       "shortName": "British Airways"
+      }
+     ],
+     "singleCarrier": {
+      "code": "*",
+      "shortName": "Multiple Carriers"
+     },
+     "distance": {
+      "units": "MI",
+      "value": 6880
+     }
+    },
+    "pricings": [
+     {
+      "ext": {
+       "pax": {
+        "adults": 1
+       }
+      },
+      "displayPrice": "GBP728.19"
+     }
+    ],
+    "displayTotal": "GBP728.19",
+    "id": "N25Nzp5fqpPUmjlJKFJCNN00N",
+    "passengerCount": 1
+   },
+   {
+    "ext": {
+     "price": "GBP736.00",
+     "pricePerMile": "GBP0.1069767442",
+     "totalPrice": "GBP735.19"
+    },
+    "itinerary": {
+     "ext": {
+      "dominantCarrier": {
+       "code": "*",
+       "shortName": "Multiple Carriers"
+      }
+     },
+     "slices": [
+      {
+       "origin": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "destination": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "arrival": "2026-10-20T21:40+01:00",
+       "departure": "2026-10-20T09:35-04:00",
+       "flights": [
+        "AA142"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 425
+      },
+      {
+       "origin": {
+        "code": "LHR",
+        "name": "London Heathrow"
+       },
+       "destination": {
+        "code": "JFK",
+        "name": "New York John F Kennedy International"
+       },
+       "arrival": "2026-10-27T14:05-04:00",
+       "departure": "2026-10-27T10:15+00:00",
+       "flights": [
+        "BA1516"
+       ],
+       "cabins": [
+        "COACH"
+       ],
+       "segments": [
+        {
+         "pricings": [
+          {
+           "paxCount": 1
+          }
+         ]
+        }
+       ],
+       "duration": 470
+      }
+     ],
+     "carriers": [
+      {
+       "code": "AA",
+       "shortName": "American"
+      },
+      {
+       "code": "BA",
+       "shortName": "British Airways"
+      }
+     ],
+     "singleCarrier": {
+      "code": "*",
+      "shortName": "Multiple Carriers"
+     },
+     "distance": {
+      "units": "MI",
+      "value": 6880
+     }
+    },
+    "pricings": [
+     {
+      "ext": {
+       "pax": {
+        "adults": 1
+       }
+      },
+      "displayPrice": "GBP735.19"
+     }
+    ],
+    "displayTotal": "GBP735.19",
+    "id": "N25Nzp5fqpPUmjlJKFJCNN00a",
+    "passengerCount": 1
+   }
+  ],
+  "minPrice": "GBP618.00",
+  "solutionCount": 88
+ },
+ "warningsItinerary": [
+  {
+   "groups": [
+    {
+     "label": "OVERNIGHT",
+     "minPrice": "GBP618.00",
+     "minPriceInSummary": true
+    }
+   ]
+  },
+  {}
+ ],
+ "id": "3J41Q3CpLXK903ciY0lDpG",
+ "session": "GH00lDpG140w39E3xKEQB04LA",
+ "solutionCount": 88,
+ "solutionSet": "0c29OA6KbpPNTCLiYFmEpY8"
+}

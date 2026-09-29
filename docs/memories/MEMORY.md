@@ -54,9 +54,9 @@ go into detail and are loaded on demand.
   transport that replaced the gated `GetShoppingResults` RPC (field layout, the
   zero-based stop ceiling, typed refusals), the `fl[15]`/`fl[18]`/`fl[22]`
   booking-carrier rule (marketing vs operating), the Tier-1/2/3 classification
-  (`routing_predicates`) that the date grid still uses, the narrower
-  `page_can_encode` gate the search path uses, the post-filter backstop
-  (`_gf_postfilter`), the concurrent GF-fast-paint + Matrix-enrich flow
+  (`routing_predicates`) that the date grid still uses, the search path's
+  per-predicate gate (`_gf_postfilter.search_page_reasons`: page-encodable or
+  post-filtered on the full board), the post-filter (`_gf_postfilter`), the concurrent GF-fast-paint + Matrix-enrich flow
   (`_run_enriched_path`), and codeshare-aware display. Read before touching
   `routing_predicates.py`, `_gf_postfilter.py`, `links.build_search_tfs`, or
   `_gflight_ids` carrier parsing.

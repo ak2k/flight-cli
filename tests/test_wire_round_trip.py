@@ -27,7 +27,7 @@ from flight_cli.domain import (
     SpecificDateSearch,
     TimeOfDay,
 )
-from flight_cli.wire import to_wire
+from flight_cli.wire import booking_details_body, fare_rules_body, to_wire
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 
@@ -206,3 +206,76 @@ def test_one_way_followup_omits_trip_length():
         ),
     )
     assert "layover" not in to_wire(search).as_json()["inputs"]
+
+
+# ─────────────────────────────── currency ──────────────────────────────────
+# Our own bodies plus `inputs.currency`, each sent live and answered in the
+# asked currency: the GBP round trip priced 181 fares GBP and none USD, the
+# calendar 23 and none. The SPA fixtures above carry no currency, and must not.
+
+
+def test_round_trip_carries_the_asked_currency():
+    captured = _load("matrix_currency/specific_jfk_lhr_rt_gbp_body.json")
+    search = SpecificDateSearch(
+        legs=(
+            Leg.of("JFK", "LHR", date(2026, 10, 20)),
+            Leg.of("LHR", "JFK", date(2026, 10, 27)),
+        ),
+        options=SearchOptions(currency="GBP"),
+    )
+    ours = to_wire(search).as_json()
+    assert ours == captured, _diff(captured, ours)
+
+
+def test_one_way_calendar_carries_the_asked_currency():
+    captured = _load("matrix_currency/calendar_jfk_lhr_ow_gbp_body.json")
+    search = CalendarSearch(
+        legs=(Leg.of("JFK", "LHR"),),
+        options=SearchOptions(currency="GBP"),
+        window=CalendarWindow(
+            start=date(2026, 10, 20), end=date(2026, 10, 26), duration_min=0, duration_max=0
+        ),
+    )
+    ours = to_wire(search).as_json()
+    assert ours == captured, _diff(captured, ours)
+
+
+def test_followup_carries_the_asked_currency():
+    search = CalendarFollowup(
+        legs=(Leg.of("JFK", "LHR", date(2026, 10, 20)),),
+        options=SearchOptions(currency="EUR"),
+        window=CalendarWindow(
+            start=date(2026, 10, 20), end=date(2026, 10, 26), duration_min=0, duration_max=0
+        ),
+    )
+    assert to_wire(search).as_json()["inputs"]["currency"] == "EUR"
+
+
+def test_no_currency_leaves_the_key_out():
+    search = SpecificDateSearch(legs=(Leg.of("JFK", "LHR", date(2026, 10, 20)),))
+    assert "currency" not in to_wire(search).as_json()["inputs"]
+
+
+# ─────────────────────────────── summarize ─────────────────────────────────
+# `/v1/summarize` bodies as sent live: each got its answer back.
+
+
+def test_booking_details_body_matches_the_sent_one():
+    captured = _load("summarize/booking_details_body.json")
+    solution_set, solution_id = captured["inputs"]["solution"].split("/")
+    ours = booking_details_body(
+        session=captured["session"], solution_set=solution_set, solution_id=solution_id
+    ).as_json()
+    assert ours == captured, _diff(captured, ours)
+
+
+def test_fare_rules_body_matches_the_sent_one():
+    captured = _load("summarize/fare_rules_body.json")
+    solution_set, solution_id = captured["inputs"]["solution"].split("/")
+    ours = fare_rules_body(
+        session=captured["session"],
+        solution_set=solution_set,
+        solution_id=solution_id,
+        fare_key=captured["inputs"]["fareKeys"],
+    ).as_json()
+    assert ours == captured, _diff(captured, ours)

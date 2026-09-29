@@ -48,13 +48,17 @@ import sys
 import textwrap
 import threading
 import time
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import anyio
 import anyio.to_thread
 import pytest
 
-from conftest import _answering  # one home for the re-pointing rule; see its docstring
+from conftest import (
+    _answering,  # one home for the re-pointing rule; see its docstring
+    distinct_clones,
+)
 from flight_cli import _gflight_ids as gfid
 from flight_cli._gf_errors import (
     GfBackendError,
@@ -537,6 +541,33 @@ def test_one_call_parses_ids_and_legroom_from_the_page(client: Any) -> None:
     assert all(g.flight_id for g in out)
     assert all(a.legroom_class for g in out for a in g.amenities)
     assert len(fake.gets) == 1
+
+
+def _board_from_jfk_and_ewr() -> str:
+    """The captured JFK->LAX board with its last row moved to EWR, as a board
+    for JFK,EWR -> LAX comes back: one ranking over both origins."""
+    payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
+    row = payload[3][0][1][0]
+    row[3] = "EWR"
+    row[2][0][3] = "EWR"
+    row[2][0][4] = "Newark Liberty International Airport"
+    return json.dumps(payload)
+
+
+def test_a_board_over_an_airport_set_keeps_every_origins_rows(client: Any) -> None:
+    from fli.models import Airport  # pyright: ignore[reportMissingTypeStubs]  # fli ships no stubs
+
+    client(_FakeResponse(text=_page(_board_from_jfk_and_ewr())))
+    out = gfid._one_call(_FILTERS)
+    assert [g.flight.legs[0].departure_airport.name for g in out] == ["JFK", "JFK", "EWR"]
+    # A board is checked against the whole set it was asked for, so both pass.
+    # A namespace, because fli's segment validator refuses the fixture's past date.
+    wanted = SimpleNamespace(
+        departure_airport=[[Airport["JFK"], 0], [Airport["EWR"], 0]],
+        arrival_airport=[[Airport["LAX"], 0]],
+        travel_date=out[0].flight.legs[0].departure_datetime.date().isoformat(),
+    )
+    assert gfid._unpinned_board(list(out), cast("Any", wanted)) is None
 
 
 # ─────────────────────── refusals are never "no results" ───────────────
@@ -1478,8 +1509,7 @@ def _cloned_ds1(n: int) -> str:
     """A ds:1 payload carrying `n` parseable rows, cloned from the real
     capture."""
     payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
-    row = payload[2][0][0]
-    payload[2] = [[copy.deepcopy(row) for _ in range(n)]]
+    payload[2] = [distinct_clones(payload[2][0][0], n)]
     payload[3] = None
     return json.dumps(payload)
 
@@ -1592,8 +1622,8 @@ def _round_trip_filters() -> Any:
 def test_the_pinned_fanout_is_capped_regardless_of_top_n(client: Any) -> None:
     """Each pinned outbound is another multi-megabyte page GET, and the
     multi-cabin path bumps top_n by 5x (capped at 100) to widen the pool it
-    filters — free on an RPC, not free here. At top_n=50 over a 30-row board
-    the round trip costs 1 outbound + 10 pins, not 1 + 30."""
+    filters — free on an RPC, not free here. At top_n=50 the round trip costs
+    1 outbound + 10 pins, not one pin per row of the board."""
     fake = client(
         _FakeResponse(text=_board_of(30)),  # the outbound board
         _FakeResponse(text=_return_board_of(1)),  # every pinned leg answers

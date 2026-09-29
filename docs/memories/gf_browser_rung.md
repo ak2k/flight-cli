@@ -299,5 +299,6 @@ lets the throttle tests substitute it.
 
 `auto` is accepted and documented as identical to `http`; escalate-on-persistent-
 throttle plus the once-per-process latch is the follow-up. Also out, each a bd
-follow-up under `work-udpp1`: the calendar date grid through the browser,
-booking options, and parallel tabs.
+follow-up under `work-udpp1`: booking options and parallel tabs. The calendar
+date grid through the browser is in
+[gf_routing_and_carriers.md](gf_routing_and_carriers.md) (`--fast`).

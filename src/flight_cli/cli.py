@@ -7,6 +7,7 @@ Commands:
   flight calendar  — lowest-fare grid (Matrix only)
   flight detail    — phase-2 itineraries for a date picked from the grid
   flight airport   — IATA autocomplete
+  flight explore   — where an origin flies, cheapest first (Google Flights, Chrome)
   flight fare      — [deprecated] alias for `search --backend matrix`
   flight gflight   — [deprecated] alias for `search --backend gflight`
 """
@@ -18,7 +19,7 @@ import re
 import sys
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
-from typing import TYPE_CHECKING, Annotated, Any, NamedTuple, assert_never, cast
+from typing import TYPE_CHECKING, Annotated, Any, NamedTuple, NoReturn, assert_never, cast
 
 import anyio
 import anyio.to_thread
@@ -36,6 +37,7 @@ from ._calendar_split import is_empty_calendar, merge_calendar_results, split_ca
 # One definition, so the CLI's accepted set cannot drift from the ladder's type.
 from ._gf_common import TRANSPORT_BROWSER, TRANSPORT_HTTP, VALID_TRANSPORT_MODES, GfTransportMode
 from ._gf_errors import (
+    BROWSER_DEFAULT_REMEDY,
     GfBackendError,
     GfBrowserUnavailableError,
     GfConsentError,
@@ -46,6 +48,7 @@ from ._gf_errors import (
     GfTransportError,
     GfUpstreamStatusError,
 )
+from ._metro import expand_airports, gf_leg_refusal
 from ._multi_cabin import MultiCabinRow, parse_price
 from ._multi_cabin import merge as _merge_cabins
 from .client import MatrixApiError, MatrixClient
@@ -63,20 +66,36 @@ from .domain import (
 )
 from .links import (
     extract_pin_segments_from_slice,
+    google_flights_booking_url,
+    google_flights_explore_url,
     google_flights_pinned_url,
     google_flights_url,
     matrix_deep_link,
     matrix_itinerary_url,
+    pin_dates_are_stated,
 )
 from .log import configure as configure_logging
+from .models import FareRulesResult
 from .pp.auth import load_tokens
 from .pp.cli import auth_app, run_pp_for_search
 from .providers.base import LegQuery
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import Callable, Coroutine, Iterable
 
-    from .models import CalendarResult, LegInfo, Location, SearchResult, Slice
+    from ._gf_booking import BookingOptions
+    from ._gf_explore import Destination, ExploreAnswer, TripLength
+    from ._gflight_ids import Board, PriceInsight
+    from .models import (
+        BookingDetailsResult,
+        CalendarResult,
+        FareRule,
+        FareRules,
+        LegInfo,
+        Location,
+        SearchResult,
+        Slice,
+    )
 
 # Tuple-length sentinels for `--slice` parser (`ORIGIN-DEST:DATE[:r=...:e=...]`).
 _SLICE_MIN_PARTS = 2
@@ -101,15 +120,38 @@ def _split_price(s: str | None) -> tuple[str, str]:
     return (m.group(1), m.group(2)) if m else ("", s)
 
 
-def _amount(s: str | None) -> str:
+def _amount(s: str | None, title_ccy: str = "") -> str:
     """The amount with its currency prefix stripped, ready for a markup console;
     '—' where there is no price.
+
+    With `title_ccy`, the prefix is stripped only when it is that currency, the
+    one the table's title names: a price in any other currency keeps its own
+    label rather than reading as the title's.
 
     Sanitized here rather than at each print site: Matrix chooses the whole string
     and every caller drops it into a Rich table cell or a summary line, both of
     which parse markup — an unbalanced `[/x]` there raises `MarkupError` and loses
     a query that succeeded."""
-    return _safe_text(_split_price(s)[1]) if s else "—"
+    if not s:
+        return "—"
+    ccy, amount = _split_price(s)
+    return _safe_text(amount if not title_ccy or ccy == title_ccy else s)
+
+
+def _title_currency(prices: Iterable[str | None]) -> str:
+    """The currency of the first price that names one, for a table's title."""
+    return next((c for c in (_split_price(p)[0] for p in prices) if c), "")
+
+
+def _usd_amount(price: str | None) -> float | None:
+    """The number in a USD price, or None for any other currency or none.
+
+    The award table computes cents per mile from this, and a fare in another
+    currency divided as though it were dollars is a wrong valuation printed as
+    a right one."""
+    ccy, _ = _split_price(price)
+    usd = ccy == "USD" or (not ccy and (price or "").lstrip().startswith("$"))
+    return parse_price(price) if usd else None
 
 
 app = typer.Typer(
@@ -417,6 +459,23 @@ def _resolve_cabin_list(csv: str) -> tuple[Cabin, ...]:
     return tuple(seen)
 
 
+_RE_CURRENCY = re.compile(r"\A[A-Z]{3}\Z")
+
+
+def _resolve_currency(code: str | None) -> str | None:
+    """`--currency`, upper-cased, or None when it was not given.
+
+    The shape only: which codes a backend prices in is that backend's answer,
+    and Matrix names a code it does not know in its own error."""
+    if code is None:
+        return None
+    up = code.strip().upper()
+    if not _RE_CURRENCY.match(up):
+        err.print(f"[red]bad currency {_quote(code)}; use a 3-letter ISO 4217 code such as EUR[/]")
+        raise typer.Exit(2)
+    return up
+
+
 def _build_options(
     *,
     cabin: str,
@@ -430,6 +489,7 @@ def _build_options(
     allow_airport_changes: bool,
     show_only_available: bool,
     page_size: int = 25,
+    currency: str | None = None,
 ) -> SearchOptions:
     return SearchOptions(
         cabin=_resolve_cabin(cabin),
@@ -445,6 +505,7 @@ def _build_options(
         allow_airport_changes=allow_airport_changes,
         show_only_available=show_only_available,
         page_size=page_size,
+        currency=currency,
     )
 
 
@@ -473,6 +534,11 @@ def _gf_unserveable_reasons(backend: str, origin: str | None, destination: str |
     `AttributeError` out of the bridge before any request, or a query silently
     run against the wrong airport — and neither is an answer to what was asked.
 
+    Each token must be ONE fli airport, because some callers encode one airport
+    per token. `_pick_backend` hands over a metro code's member airports
+    (`_metro.expand_airports`), so on search a code reported here is neither an
+    airport nor a metro code in that table.
+
     Checked with the same attribute lookup the bridge performs, so this cannot
     drift from what the bridge will accept, and only where Google Flights is
     still in the running: a Matrix run pays neither the import nor the check."""
@@ -490,7 +556,7 @@ def _gf_unserveable_reasons(backend: str, origin: str | None, destination: str |
     return [f"a city code rather than an airport ({', '.join(bad)})"] if bad else []
 
 
-def _pick_backend(
+def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Matrix
     *,
     backend: str,
     routing: str | None,
@@ -508,27 +574,32 @@ def _pick_backend(
     destination: str | None,
     allow_airport_changes: bool,
     show_only_available: bool,
+    fare_rules: bool = False,
 ) -> str:
     """Resolve --backend to a concrete backend.
 
     auto: matrix iff the request needs it, else gflight (~1s vs Matrix's ~45s).
     `--routing`/`--extension` don't force Matrix on their own — they're parsed
-    and classified, and Google Flights serves them when the search page's tfs=
-    parameter can encode every one (`page_can_encode`). A constraint it can't
-    carry goes to Matrix WITH ITS REASON PRINTED, rather than being post-
-    filtered out of Google's fixed ~30-row board, which would answer a
-    constrained search with a plausible-looking "no results".
+    and classified, and Google Flights serves them when every predicate is
+    either encoded in the search page's tfs= or a Tier-2 predicate the post-
+    filter applies to the page's full board (`search_page_reasons`). Any other
+    constraint goes to Matrix WITH ITS REASON PRINTED.
 
     Hard-Matrix flags always force Matrix: `--slice` (multi-city),
     `--depart-times`/`--return-times`, a `--stops` ceiling above two (fli maps
     it to "any", so the tfs field would be omitted and the constraint lost),
     any pax type beyond adults (the page's
     passenger field has kind codes for children and infants that we have never
-    verified against a live priced search), a multi-airport
-    `--origin`/`--destination` set (the GF bridge flattens those to the first
-    code, so serving them on GF would silently drop the rest), and
+    verified against a live priced search), and
     `--no-airport-changes` / `--include-unavailable`, which the search page's
-    `tfs=` parameter has no field for at all.
+    `tfs=` parameter has no field for at all. `--fare-rules` too: fare bases and
+    rules come from Matrix's `/v1/summarize`, which Google has no equivalent of.
+
+    An airport set or a metro code stays on Google Flights, which is asked for
+    every member airport (`_metro`). What goes to Matrix is a leg the page can't
+    take (`gf_leg_refusal`: more than `MAX_GF_LEG_AIRPORTS` airports, or one
+    airport at both ends) and a code that is neither an airport nor a metro code
+    in the table.
 
     A constraint the page cannot carry has to be a reason here and nowhere
     else. Left out, `auto` serves it on Google with the constraint silently
@@ -542,13 +613,15 @@ def _pick_backend(
 
     Explicit --backend matrix: matrix. --backend gflight: gflight, unless the
     request is inexpressible on GF (error)."""
+    from ._gf_postfilter import search_page_reasons  # noqa: PLC0415
     from .routing_predicates import (  # noqa: PLC0415
         MAX_ENCODABLE_STOPS,
         classify,
-        page_can_encode,
     )
 
     reasons: list[str] = []
+    if fare_rules:
+        reasons.append("fare rules")
     if slice_specs:
         reasons.append("a multi-city itinerary")
     if depart_times or return_times:
@@ -564,16 +637,22 @@ def _pick_backend(
         reasons.append("a ban on changing airports")
     if not show_only_available:
         reasons.append("unavailable itineraries included")
-    if len(_parse_iata_list(origin or "")) > 1 or len(_parse_iata_list(destination or "")) > 1:
-        reasons.append("a multi-airport origin/destination")
-    reasons.extend(_gf_unserveable_reasons(backend, origin, destination))
+    origins, destinations = _parse_iata_list(origin or ""), _parse_iata_list(destination or "")
+    leg_refusal = gf_leg_refusal(origins, destinations)
+    if leg_refusal is not None:
+        reasons.append(leg_refusal)
+    reasons.extend(
+        _gf_unserveable_reasons(
+            backend, ",".join(expand_airports(origins)), ",".join(expand_airports(destinations))
+        )
+    )
     if stops is not None and stops > MAX_ENCODABLE_STOPS:
         # Same ceiling as the routing-language spelling below, and the same
         # wording: fli's MaxStops maps anything higher to ANY, which omits the
         # tfs field, so `--stops 3` would encode byte-identically to no --stops.
         reasons.append(f"a stop ceiling above {MAX_ENCODABLE_STOPS} ({stops})")
     if routing or extension:
-        reasons.extend(page_can_encode(classify(routing, extension).predicates)[1])
+        reasons.extend(search_page_reasons(classify(routing, extension).predicates))
 
     # The same reasons go out two ways, and only one of them is markup. A
     # reason quotes the user's --routing string verbatim, so one square bracket
@@ -956,6 +1035,12 @@ def _run(
         async with MatrixClient(rps=rps, impersonate=impersonate) as c:
             return await c.execute(search, cache=not no_cache)
 
+    return _run_matrix(go, said="Matrix search failed")
+
+
+def _run_matrix[T](go: Callable[[], Coroutine[Any, Any, T]], *, said: str) -> T:
+    """Run one Matrix conversation to its answer, or leave with a typed line and
+    exit 1. `said` opens that line; it is escaped like any value printed here."""
     try:
         return anyio.run(go)
     except MatrixApiError as e:
@@ -972,8 +1057,8 @@ def _run(
         # with the cause hundreds of lines down, on the most ordinary command
         # there is — and this package's rule is that a third-party transport
         # error never reaches a caller untyped.
-        _reraise_if_orderly(e, said="Matrix search failed")
-        err.print(f"[red]Matrix search failed:[/] {_failure_text(e)}")
+        _reraise_if_orderly(e, said=said)
+        err.print(f"[red]{_safe_text(said)}:[/] {_failure_text(e)}")
         # `str()` of a Matrix error is its message alone, so a group hands this
         # line the one field of three that a reader cannot act on by itself.
         # Each one inside `e` goes on to the reporter that keeps `kind` and
@@ -1483,6 +1568,18 @@ def _paint_calendar_first(
         err.print("[dim]…awaiting Matrix calendar…[/]")
 
 
+def _http_date_grid(search: CalendarSearch, *, json_out: bool) -> dict[str, float]:
+    """`date_grid`, for the one shape it prices: one-way dates, into a table.
+
+    A round trip and a JSON document are the page grid's, so they get the gate's
+    note and its remedy rather than a one-way grid under a round-trip question."""
+    from ._gf_dategrid import GfGridUnavailableError, date_grid  # noqa: PLC0415
+
+    if json_out or len(search.legs) == _ROUND_TRIP_LEGS:
+        raise GfGridUnavailableError
+    return date_grid(search)
+
+
 def _run_fast_calendar_grid(
     search: CalendarSearch,
     *,
@@ -1492,14 +1589,15 @@ def _run_fast_calendar_grid(
     ed: date,
     matrix_url: bool,
     google_url: bool,
+    json_out: bool = False,
 ) -> None:
-    """`--fast`: the Google Flights date-grid alone, or a refusal. No Matrix."""
-    from ._gf_dategrid import GfGridUnavailableError, date_grid  # noqa: PLC0415
+    """`--fast` over http: the Google Flights date-grid alone, or a refusal. No Matrix."""
+    from ._gf_dategrid import GfGridUnavailableError  # noqa: PLC0415
     from ._gflight_ids import GfThrottledError  # noqa: PLC0415
 
     grid: dict[str, float] = {}
     try:
-        grid = date_grid(search)
+        grid = _http_date_grid(search, json_out=json_out)
     # Each handler only says WHY there is no grid; the single exit below says THAT
     # there is none. Under `--fast` there is no Matrix to fall back to, so every
     # no-grid outcome — gate, throttle, an empty grid, or a bad airport or date
@@ -1513,8 +1611,13 @@ def _run_fast_calendar_grid(
     except GfThrottledError:
         err.print("[dim]Google Flights rate-limited; no grid to show.[/]")
     except GfGridUnavailableError:
-        # Ahead of the broad except, as in the weave.
-        err.print(f"[dim]{_GF_GRID_UNAVAILABLE_NOTE}[/]")
+        # Ahead of the broad except, as in the weave. The remedy is this arm's
+        # alone: the weave's note shares the sentence above, and there
+        # `--gf-transport` is a usage error.
+        err.print(
+            f"[dim]{_GF_GRID_UNAVAILABLE_NOTE} Use [bold]--gf-transport browser[/] "
+            "(or [bold]auto[/]) to read it from the page in Chrome.[/]"
+        )
     except (typer.Exit, typer.Abort):
         raise  # an orderly exit is not a grid failure; see the weave's arm
     except Exception as e:  # noqa: BLE001 — any other cause is still just "no grid"
@@ -1531,6 +1634,70 @@ def _run_fast_calendar_grid(
         # calendar instead would change what the flag means.
         err.print("[yellow]No Google Flights grid; drop --fast for Matrix.[/]")
         raise typer.Exit(1)
+
+
+def _run_fast_browser_grid(
+    search: CalendarSearch,
+    *,
+    origins: tuple[str, ...],
+    dests: tuple[str, ...],
+    sd: date,
+    ed: date,
+    json_out: bool,
+    headed: bool,
+    matrix_url: bool,
+    google_url: bool,
+) -> None:
+    """`--fast` over the browser: the search page's own price graph, or a refusal.
+
+    Every no-grid outcome leaves by the one exit at the bottom, on stderr, exactly
+    as `_run_fast_calendar_grid`'s do, so stdout carries a grid or nothing.
+
+    The guard is armed and the session scope held here, outside any `anyio.run`:
+    the page loads run on this thread, the one a Ctrl-C lands on, and the scope
+    closes Chrome once however many loads the window took."""
+    from ._gf_browser import interrupt_guard, session_scope  # noqa: PLC0415 — GF-only
+    from ._gf_calgraph import document, price_graph  # noqa: PLC0415 — fli, ~95 ms
+
+    graph = None
+    try:
+        with interrupt_guard(), session_scope():
+            graph = price_graph(search, headed=headed)
+    except GfThrottledError:
+        err.print("[dim]Google Flights rate-limited the browser rung; no grid to show.[/]")
+    except GfBrowserUnavailableError as e:
+        # The default remedy offers `--gf-transport http`, which has no grid to
+        # serve under `--fast`; a launch or install remedy is kept.
+        remedy = e.remedy.removesuffix(BROWSER_DEFAULT_REMEDY).strip()
+        err.print(
+            f"[yellow]{_safe_text(_GF_GRID_NAME)} failed:[/] "
+            f"{_safe_text(f'{e.reason} {remedy}'.strip())}"
+        )
+    except (typer.Exit, typer.Abort):
+        raise  # an orderly exit is not a grid failure; see the weave's arm
+    except Exception as e:  # noqa: BLE001 — any other cause is still just "no grid"
+        err.print(f"[yellow]{_safe_text(_GF_GRID_NAME)} failed:[/] {_safe_text(e)}")
+    if graph is None:
+        err.print("[yellow]No Google Flights grid; drop --fast for Matrix.[/]")
+        raise typer.Exit(1)
+    priced = graph
+
+    def _write_answer() -> None:
+        if json_out:
+            doc = document(priced, origin=origins[0], destination=dests[0])
+            sys.stdout.write(json.dumps(doc, indent=2))
+            return
+        _render_date_grid(
+            {cell.departure.isoformat(): cell.price for cell in priced.cells},
+            origin=origins,
+            destination=dests,
+            sd=sd,
+            ed=ed,
+            trip_length=priced.trip_length,
+        )
+        _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
+
+    _deliver_calendar(_write_answer, backend=_GF_GRID_NAME)
 
 
 def _run_calendar_enriched(
@@ -1698,13 +1865,14 @@ def _try_pinned_matrix_url(search: Search, result: SearchResult | None, idx: int
         return None
 
 
-def _try_pinned_gflight_url(search: Search, result: SearchResult | None, idx: int) -> str | None:
-    """Build a Google Flights URL that pre-selects itinerary `idx` in `result`,
-    if the data supports it. Returns None when the result is empty, the search
-    shape doesn't support pinning (calendar-grid mode), or any slice can't be
+type _PinSegments = tuple[list[dict[str, str]], list[dict[str, str]] | None]
+
+
+def _pin_segments(result: SearchResult | None, idx: int) -> _PinSegments | None:
+    """Itinerary `idx`'s outbound and return segments in the shape the pinned
+    URL builders take, or None when the result is empty or any slice can't be
     reduced to a segment list (see `extract_pin_segments_from_slice` for the
-    bail-out cases).
-    """
+    bail-out cases)."""
     if result is None or idx >= len(result.solutions):
         return None
     itn = result.solutions[idx].itinerary
@@ -1718,6 +1886,18 @@ def _try_pinned_gflight_url(search: Search, result: SearchResult | None, idx: in
         ret_segments = extract_pin_segments_from_slice(itn.slices[1])
         if ret_segments is None:
             return None
+    return out_segments, ret_segments
+
+
+def _try_pinned_gflight_url(search: Search, result: SearchResult | None, idx: int) -> str | None:
+    """Build a Google Flights URL that pre-selects itinerary `idx` in `result`,
+    if the data supports it. Returns None when `_pin_segments` finds none or
+    the search shape doesn't support pinning (calendar-grid mode).
+    """
+    segments = _pin_segments(result, idx)
+    if segments is None:
+        return None
+    out_segments, ret_segments = segments
     try:
         return google_flights_pinned_url(
             search,
@@ -1788,6 +1968,8 @@ def _emit_urls(
             if pinned is not None:
                 console.print(f"[dim]Google Flights ({pinned_label} pinned):[/]")
                 console.print(f"  [link]{_safe_text(pinned)}[/]")
+                for note in _pinned_gflight_url_caveats(search):
+                    console.print(f"  [yellow]note: {_safe_text(note)}[/]")
             else:
                 console.print("[dim]Google Flights (tfs= structured):[/]")
                 console.print(f"  [link]{_safe_text(google_flights_url(search))}[/]")
@@ -1795,6 +1977,204 @@ def _emit_urls(
                     console.print(f"  [yellow]note: {_safe_text(note)}[/]")
         except Exception as e:  # noqa: BLE001 - third-party undocumented errors; non-fatal fallback
             console.print(f"[dim]Google Flights link: {_safe_text(e)}[/]")
+
+
+# ─────────────────────────── booking options (--sellers) ───────────────────
+
+
+def _sellers_blocker(
+    *,
+    backend: str,
+    multi_cabin: bool,
+    awards_only: bool,
+    awards_json: bool,
+    pick: int | None,
+    page_size: int,
+) -> str | None:
+    """Why `--sellers` cannot run on this search, or None. Decided before any
+    request, so a refusal costs the user nothing but the reading.
+
+    The flag names one row of one numbered table, so a run that prints none —
+    a multi-cabin table, the award overlay alone — has no row to open. Under
+    `--format json` with awards on, the award renderer owns the document and
+    there is nowhere to put the sellers."""
+    if multi_cabin:
+        return "opens one row of one table; drop the extra --cabin values"
+    if awards_only:
+        return "opens a row of the results table, and --awards-only prints none"
+    if backend == BACKEND_MATRIX:
+        return "needs a Google Flights result, and this search runs on Matrix"
+    if awards_json:
+        return "cannot join the award document --format json writes; add --cash-only"
+    n = 1 if pick is None else pick
+    if not 1 <= n <= page_size:
+        return f"--pick {n:d} names no row of the {page_size:d} that -n asks for"
+    return None
+
+
+def _no_booking_options(heading: str, why: str) -> NoReturn:
+    """Fail a `--sellers` run: the search may have answered, the sellers did not."""
+    err.print(f"[red]{_safe_text(heading)}:[/] {_safe_text(why)}")
+    raise typer.Exit(1)
+
+
+def _pick_for_sellers(pick: int | None, rows: int) -> int:
+    """The 1-based row `--sellers` opens, or exit 2. No fallback to row one: a
+    block headed "#N" has to describe row N. A board with no rows is an answer
+    to the search and none to `--sellers`, so it fails the command."""
+    if rows == 0:
+        _no_booking_options("No booking options", "the search returned no itinerary to open.")
+    n = 1 if pick is None else pick
+    if not 1 <= n <= rows:
+        err.print(f"[red]--pick {n:d} is out of range (1-{rows:d}); --sellers opens that row.[/]")
+        raise typer.Exit(2)
+    return n
+
+
+def _report_page_refusal(heading: str, e: GfBackendError) -> None:
+    """One line for a refusal on a page only Chrome can read: the booking page
+    behind `--sellers`, and `explore`. `_gf_refusal` is not used because its
+    remedies are `--gf-transport http` and `--backend matrix`, and neither
+    reads these pages."""
+    match e:
+        case GfBrowserUnavailableError():
+            remedy = e.remedy.removesuffix(BROWSER_DEFAULT_REMEDY).strip() or "Retry."
+            detail = f"{e.reason} {remedy}"
+        case GfUpstreamStatusError():
+            detail = f"Google Flights' page returned HTTP {e.status_code}"
+        case _:
+            detail = str(e)
+    err.print(f"[red]{_safe_text(heading)}:[/] {_safe_text(detail)}")
+
+
+def _booking_options(
+    search: SpecificDateSearch,
+    result: SearchResult,
+    n: int,
+    *,
+    gf_price: str | None,
+    headed: bool,
+) -> BookingOptions:
+    """Row `n`'s sellers, read off its booking page in Chrome, or exit 1 with
+    the reason on stderr.
+
+    The URL is the pinned link's, so the row opened is the row the link pins,
+    and the page is asked in the currency of `gf_price`, the row's Google price.
+    This step owns its Chrome: the search before it may not have opened one."""
+    from ._gf_booking import booking_options  # noqa: PLC0415 — Chrome paths only
+    from ._gf_browser import interrupt_guard, session_scope  # noqa: PLC0415 — patchright
+
+    heading = f"No booking options for #{n:d}"
+    # A page asked for a day the row does not state answers for another trip
+    # with the same flight numbers, which the seller check cannot tell apart
+    # from this one. Checked before the segments are built because building
+    # them dates an undated connection's flights from the slice's two ends.
+    itinerary = result.solutions[n - 1].itinerary
+    if itinerary is not None and not all(pin_dates_are_stated(s) for s in itinerary.slices):
+        _no_booking_options(
+            heading,
+            "Matrix gives no date for each flight of this connection. With --fast, rows "
+            "come from Google and carry each flight's date.",
+        )
+    segments = _pin_segments(result, n - 1)
+    if segments is None:
+        _no_booking_options(
+            heading, "its flights cannot be written into a Google Flights booking link."
+        )
+    outbound, returning = segments
+    url = google_flights_booking_url(
+        search,
+        outbound_segments=outbound,
+        return_segments=returning,
+        currency=_split_price(gf_price)[0] or None,
+    )
+    flights = [(seg["carrier"], seg["flight"]) for seg in (*outbound, *(returning or []))]
+    try:
+        with interrupt_guard(), session_scope():
+            return booking_options(url, flights=flights, headed=headed)
+    except GfBackendError as e:
+        _report_page_refusal(heading, e)
+        raise typer.Exit(1) from e
+
+
+def _search_and_sellers(
+    search_doc: list[Any], search: SpecificDateSearch, result: SearchResult, n: int, *, headed: bool
+) -> dict[str, Any]:
+    """The `--sellers --format json` document: the search's own document
+    unchanged, beside row `n`'s booking options. `result` is the Google board
+    the document lists."""
+    from ._gf_booking import document  # noqa: PLC0415 — Chrome paths only
+
+    options = _booking_options(
+        search, result, n, gf_price=result.solutions[n - 1].price, headed=headed
+    )
+    return {"search": search_doc, "booking_options": document(options)}
+
+
+def _print_booking_options(
+    search: SpecificDateSearch,
+    result: SearchResult,
+    n: int,
+    *,
+    gf_price: str | None,
+    matrix_price: str | None = None,
+    headed: bool,
+) -> None:
+    """Row `n`'s booking options under the table it was numbered in, set
+    against the prices that row shows: its Google price, and on the merged
+    table its Matrix price."""
+    options = _booking_options(search, result, n, gf_price=gf_price, headed=headed)
+    _render_booking_options(options, n=n, table_prices=[gf_price, matrix_price])
+
+
+def _undercut(options: BookingOptions, table_prices: list[str | None]) -> float | None:
+    """The table price the cheapest seller beats, or None.
+
+    A seller beats the table only by beating every price the row shows, so one
+    in another currency than the sellers', or one that does not parse, leaves
+    nothing to claim. A seller price is whole units, so `d` stands for anything
+    below `d + 0.5`: it beats a table price only when that whole range sits
+    under it."""
+    amounts: list[float] = []
+    for price in table_prices:
+        if not price:
+            continue
+        currency, amount = _split_price(price)
+        if currency != options.currency:
+            return None
+        try:
+            amounts.append(float(amount.replace(",", "")))
+        except ValueError:
+            return None
+    cheapest = options.sellers[0].price
+    if not amounts or cheapest is None or cheapest + 0.5 > min(amounts):
+        return None
+    return min(amounts)
+
+
+def _render_booking_options(
+    options: BookingOptions, *, n: int, table_prices: list[str | None]
+) -> None:
+    """The "Booking options for #N" block: every seller, cheapest first."""
+    t = Table(title=f"Booking options for #{n:d}", show_header=True, header_style="bold green")
+    t.add_column("seller")
+    t.add_column("price", justify="right")
+    t.add_column("fare")
+    for s in options.sellers:
+        t.add_row(
+            _safe_text(s.name),
+            "—" if s.price is None else f"{_safe_text(options.currency)}{s.price:.2f}",
+            _safe_text(s.fare or ""),
+        )
+    console.print(t)
+    table = _undercut(options, table_prices)
+    cheapest = options.sellers[0]
+    if table is not None and cheapest.price is not None:
+        console.print(
+            f"[green]{_safe_text(cheapest.name)} at "
+            f"{_safe_text(options.currency)}{cheapest.price:.2f} beats the table price, "
+            f"{_safe_text(options.currency)}{table:.2f}.[/]"
+        )
 
 
 # ─────────────────────────── result renderers ──────────────────────────────
@@ -1812,18 +2192,39 @@ def _gflight_url_caveats(search: Search) -> list[str]:
 
     We still emit the link — it is a useful starting point, and booking hands
     off to Google — but the ways it differs are now stated.
+
+    A metro code counts as its member airports: fast_flights writes the code
+    itself as the airport, which is not the set the search covered.
     """
     legs: tuple[Leg, ...] = getattr(search, "legs", ()) or ()
     notes: list[str] = []
-    if legs and any(len(lg.origins) > 1 or len(lg.destinations) > 1 for lg in legs):
-        first = legs[0]
-        notes.append(
-            f"multi-airport search narrowed to {first.origins[0]}→{first.destinations[0]} "
-            "(Google's link format takes one airport pair)"
-        )
+    for lg in legs:
+        origins, destinations = expand_airports(lg.origins), expand_airports(lg.destinations)
+        if len(origins) > 1 or len(destinations) > 1:
+            notes.append(
+                f"multi-airport search narrowed to {lg.origins[0]}→{lg.destinations[0]} "
+                "(Google's link format takes one airport code per end; the search covered "
+                f"{','.join(origins)}→{','.join(destinations)})"
+            )
+            break
     if any(lg.route_language or lg.extension for lg in legs):
         notes.append("routing/extension codes are not expressible in a Google link")
     return notes
+
+
+def _pinned_gflight_url_caveats(search: Search) -> list[str]:
+    """The pinned Google link's one narrowing: a leg whose airport sets Google's
+    page can't take is pinned with the itinerary's own airports instead."""
+    legs: tuple[Leg, ...] = getattr(search, "legs", ()) or ()
+    reason = next(
+        (r for lg in legs if (r := gf_leg_refusal(lg.origins, lg.destinations)) is not None), None
+    )
+    if reason is None:
+        return []
+    return [
+        "the link shows the pinned itinerary's own airports, not every airport searched: "
+        f"Google's page can't take {reason}"
+    ]
 
 
 def _parse_iso(s: str) -> datetime | None:
@@ -1945,7 +2346,7 @@ def _render_search(res: SearchResult, limit: int = _DEFAULT_RENDER_LIMIT) -> Non
         for row in cm.rows:
             cells = [_safe_text(row.label) if row.label is not None else "?"]
             for c in row.cells:
-                p = _amount(c.min_price)
+                p = _amount(c.min_price, ccy)
                 mark = "★" if c.min_price_in_grid else ("·" if c.min_price_in_row else "")
                 cells.append(f"{p} {mark}")
             t.add_row(*cells)
@@ -1964,7 +2365,7 @@ def _render_search(res: SearchResult, limit: int = _DEFAULT_RENDER_LIMIT) -> Non
 
         out = _fmt_slice_cell(slcs[0]) if slcs else "—"
         ret = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
-        st.add_row(f"{i:d}", _amount(it.price), it_carriers or "?", out, ret)
+        st.add_row(f"{i:d}", _amount(it.price, ccy), it_carriers or "?", out, ret)
     console.print(st)
 
 
@@ -2030,16 +2431,20 @@ def _render_date_grid(
     destination: tuple[str, ...],
     sd: date,
     ed: date,
+    trip_length: int | None = None,
+    currency: str = "USD",
 ) -> None:
-    """Render the GF native date-grid: cheapest fare per departure day (USD),
-    sorted cheapest-first. One-way only (the grid's shape)."""
+    """Render the GF native date-grid: cheapest fare per departure day, sorted
+    cheapest-first. One-way, or a round trip of one `trip_length` in nights,
+    which the grid prices by departure day alone."""
     if not grid:
         return
     priced_days = len(grid)
     cheapest = min(grid.values())
+    trip = "" if trip_length is None else f"  · {trip_length:d}-night round trip"
     console.print(
-        f"[bold]{priced_days} priced days[/]  · cheapest: "
-        f"[bold cyan]{cheapest:.0f} (USD)[/]  · "
+        f"[bold]{priced_days} priced days[/]{trip}  · cheapest: "
+        f"[bold cyan]{cheapest:.0f} ({_safe_text(currency)})[/]  · "
         f"window {_safe_text(sd.isoformat())} → {_safe_text(ed.isoformat())}"
     )
     t = Table(
@@ -2049,46 +2454,72 @@ def _render_date_grid(
         header_style="bold green",
     )
     t.add_column("departure", justify="right")
-    t.add_column("min (USD)", justify="right")
+    t.add_column(f"min ({_safe_text(currency)})", justify="right")
     for day, price in sorted(grid.items(), key=lambda kv: kv[1]):
         # The day is a key off the Google Flights grid, not a date this module built.
         t.add_row(_safe_text(day), f"{price:.0f}")
     console.print(t)
 
 
-def _grid_branch_blocker(
+def _grid_branch_blocker(  # noqa: PLR0911 — one return per named reason, cheapest first
     search: CalendarSearch,
     *,
     json_out: bool,
     one_way: bool,
     origins: tuple[str, ...],
     dests: tuple[str, ...],
+    fast: bool = False,
 ) -> str | None:
     """Why the GF date-grid can't serve this calendar, or None if it can.
 
     The string is user-facing: it completes "this is …" in the `--fast` refusal, so
-    every branch returns a noun phrase. The first three name the SHAPE, which is
+    every branch returns a noun phrase. The shape branches name the SHAPE, which is
     the whole story for them; the routing branch names the flag and the tier
     instead, because a constraint the grid can't honor is not visible in the shape
     of the command line. Ordered cheapest-first so the fli-heavy `_gf_dategrid`
     import is still skipped for the shapes that never need it.
+
+    The grid has no itineraries, so it is served only when the request carries
+    EVERY constraint on the search; anything else would price a wider question and
+    print it as the answer. Under `--fast` that request is the search page's URL,
+    whose encoder carries fewer constraints than the RPC the weave calls, so its
+    limits apply there alone. JSON and a round trip of one trip length are served
+    by that page grid too, so without `--fast` they still go to Matrix.
+
+    The currency comes first, ahead of every admission test after it: the grid
+    prices in USD whatever the page is asked for, so no shape of calendar makes
+    it an answer in another currency.
     """
-    if json_out:
+    if search.options.currency not in (None, "USD"):
+        return "a non-USD currency"
+    if json_out and not fast:
         return "JSON output"
-    if not one_way:
+    if not one_way and not fast:
         return "a round-trip window"
+    window = search.window
+    if not one_way and window.duration_min != window.duration_max:
+        return f"a trip-length range ({window.duration_min:d}-{window.duration_max:d} nights)"
     if len(origins) > 1 or len(dests) > 1:
         return "a multi-airport route"
+    # Before anything builds an fli filter: fli has no member for most city codes
+    # and resolves two of them to another city's airport.
+    city_codes = _gf_unserveable_reasons(BACKEND_GFLIGHT, ",".join(origins), ",".join(dests))
+    if city_codes:
+        return city_codes[0]
     from ._gf_dategrid import grid_can_serve, grid_routing_blocker  # noqa: PLC0415
 
-    if not grid_can_serve(search):
+    if not grid_can_serve(search, round_trip=fast):
         # `grid_can_serve` is False for Tier-2 AND Tier-3, so ask which: the grid
         # returns no itineraries (Tier-2's problem) and cannot reach fare
         # construction at all (Tier-3's), and only one of those is a routing tier
         # the reader can do anything about. The fallback covers a future gate
         # condition that routing does not explain.
         return grid_routing_blocker(search) or "a constraint the price grid can't honor"
-    return None
+    if not fast:
+        return None
+    from ._gf_calgraph import page_blocker  # noqa: PLC0415 — fli, like the import above
+
+    return page_blocker(search)
 
 
 def _render_calendar(
@@ -2138,11 +2569,11 @@ def _render_calendar(
             t.add_column(f"{dur:d}n", justify="right")
     t.add_column("sols", justify="right")
     for d in sorted(res.priced_days, key=lambda x: x.price_value or 9e9):
-        row = [f"{d.date:d}", _amount(d.min_price)]
+        row = [f"{d.date:d}", _amount(d.min_price, ccy)]
         if round_trip:
             opts = {o.trip_length: o.min_price for o in d.options}
             for dur in range(dmin, dmax + 1):
-                row.append(_amount(opts.get(dur)))
+                row.append(_amount(opts.get(dur), ccy))
         row.append(f"{d.solution_count:d}")
         t.add_row(*row)
     console.print(t)
@@ -2194,26 +2625,64 @@ def _run_matrix_path(
     run_pp: bool,
     sel: ProviderSelection,
     pick: int | None = None,
+    fare_rules: bool = False,
 ) -> None:
-    """Matrix path: Alkali call → optional cash render → optional PP augmentation → URLs."""
+    """Matrix path: Alkali call → optional cash render → optional fare rules →
+    optional PP augmentation → URLs."""
     search = SpecificDateSearch(legs=legs, options=opts)
+    rps, impersonate = _resolve_rps(rps), _resolve_impersonate(impersonate)
     # SpecificDateSearch → SearchResult by client._parse_response dispatch.
     res = cast(
         "SearchResult",
         _run(
             search,
-            _resolve_rps(rps),
-            _resolve_impersonate(impersonate),
-            _resolve_no_cache(no_cache),
+            rps,
+            impersonate,
+            # Fare rules are asked of the search's session, and a cached answer
+            # carries one Matrix may no longer hold.
+            fare_rules or _resolve_no_cache(no_cache),
         ),
     )
+    shown = res.solutions[: opts.page_size]
+
+    def _rules() -> _FareRulesAnswer | None:
+        if not shown:
+            err.print("[yellow]No itinerary to show fare rules for.[/]")
+            return None
+        return _fetch_fare_rules(res, (pick or 1) - 1, rps=rps, impersonate=impersonate)
+
+    if fare_rules and shown:
+        # Checked ahead of the JSON arm, because under `--format json` a pick
+        # still chooses the itinerary whose rules the document carries.
+        pick = _pick_in_range(
+            pick,
+            len(shown),
+            links_follow=not json_out and (matrix_url or google_url),
+            fare_rules=True,
+        )
     if json_out and not run_pp:
-        sys.stdout.write(json.dumps(res.raw, indent=2))
+        if not fare_rules:
+            sys.stdout.write(json.dumps(res.raw, indent=2))
+            return
+        # `--fare-rules` refuses JSON with awards on, so its document is always
+        # written here. It carries the search even when the rules fail, as the
+        # table path prints the fares before asking for them; the exit status
+        # still reports the failure.
+        try:
+            rules_doc = _fare_rules_document(_rules())
+        except typer.Exit:
+            sys.stdout.write(json.dumps({"search": res.raw, "fare_rules": None}, indent=2))
+            raise
+        sys.stdout.write(json.dumps({"search": res.raw, "fare_rules": rules_doc}, indent=2))
         return
     # `not json_out` for the reason given at the same gate in
     # `_run_gflight_path`: with awards on, the document is written below this.
     if not sel.awards_only and not json_out:
         _render_search(res, opts.page_size)
+    # After the table, so a failure fetching the rules leaves the fares shown.
+    rules = _rules() if fare_rules else None
+    if rules is not None:
+        _render_fare_rules(rules)
     if run_pp:
         p = opts.pax
         run_pp_for_search(
@@ -2243,7 +2712,6 @@ def _run_matrix_path(
         #
         # An empty result is numbered nowhere, so it gets no sentence at all
         # rather than an empty `(1-0)` interval and a pin claim nothing honours.
-        shown = res.solutions[: opts.page_size]
         pick = (
             _pick_in_range(pick, len(shown), links_follow=matrix_url or google_url)
             if shown
@@ -2252,10 +2720,216 @@ def _run_matrix_path(
         _emit_urls(search, matrix_url=matrix_url, google_url=google_url, result=res, pick=pick)
 
 
-# How much deeper to fetch when a Tier-2 routing post-filter will discard rows.
-# Bounded rather than unlimited: Google's own result depth is finite and each
-# extra page costs a round trip.
-_POSTFILTER_OVERFETCH = 5
+# ─────────────────────────────── fare rules ────────────────────────────────
+
+# The ATPCO rule categories a traveler reads before buying, in print order.
+_RULE_CATEGORIES = {16: "Penalties", 31: "Voluntary changes", 33: "Voluntary refunds"}
+
+
+class _FareRulesAnswer(NamedTuple):
+    itinerary: int  # 1-based, the number the table printed
+    details: BookingDetailsResult
+    rules: list[FareRulesResult]  # one per fare, in the booking details' order
+
+
+def _refuse_fare_rules_conflicts(
+    *, cabins: tuple[Cabin, ...], sel: ProviderSelection, json_out: bool
+) -> None:
+    """Refuse `--fare-rules` where there is no single cash row for it to describe,
+    or no document it can be written into."""
+    if sel.awards_only:
+        err.print(
+            "[red]--fare-rules describes a row of the fare table, and --awards-only prints none.[/]"
+        )
+        raise typer.Exit(2)
+    if len(cabins) > 1:
+        err.print(
+            "[red]--fare-rules takes one --cabin: it describes one itinerary's fares, "
+            "and a multi-cabin row is several.[/]"
+        )
+        raise typer.Exit(2)
+    if json_out and _should_run_awards(sel):
+        err.print(
+            "[red]--fare-rules with --format json needs --cash-only: with awards on, "
+            "the document is the award match.[/]"
+        )
+        raise typer.Exit(2)
+
+
+def _fetch_fare_rules(
+    res: SearchResult, idx: int, *, rps: float, impersonate: str
+) -> _FareRulesAnswer:
+    """Booking details for solution `idx` of `res`, then the rules of each fare
+    they name — a round trip usually has two, on different fare bases.
+
+    A run and a client of its own: Matrix answers these from the search's
+    session, which outlives the client that ran the search."""
+    session, solution_set, solution_id = res.session, res.solution_set, res.solutions[idx].id
+    if not (session and solution_set and solution_id):
+        err.print(
+            "[red]Matrix answered without a session for this itinerary, "
+            "so its fare rules cannot be asked for.[/]"
+        )
+        raise typer.Exit(1)
+
+    async def go() -> _FareRulesAnswer:
+        async with MatrixClient(rps=rps, impersonate=impersonate) as c:
+            details = await c.booking_details(
+                session=session, solution_set=solution_set, solution_id=solution_id
+            )
+            fares = details.booking_details.fares if details.booking_details else []
+            # A fare named without a key cannot be asked for its rules. It keeps
+            # its place as an empty answer, so the block says so for that fare.
+            rules = [
+                await c.fare_rules(
+                    session=session,
+                    solution_set=solution_set,
+                    solution_id=solution_id,
+                    fare_key=f.key,
+                )
+                if f.key
+                else FareRulesResult(fareRules=None)
+                for f in fares
+            ]
+            return _FareRulesAnswer(idx + 1, details, rules)
+
+    answer = _run_matrix(go, said="Matrix fare rules failed")
+    # Details that name no fare have no basis, booking code or rule to show.
+    if answer.details.booking_details is None or not answer.details.booking_details.fares:
+        err.print(
+            f"[red]Matrix returned no booking details for itinerary #{answer.itinerary:d}.[/]"
+        )
+        raise typer.Exit(1)
+    return answer
+
+
+def _fare_rules_document(answer: _FareRulesAnswer | None) -> dict[str, Any] | None:
+    """Matrix's own bodies, whole: the table trims rule text, this does not."""
+    if answer is None:
+        return None
+    return {
+        "itinerary": answer.itinerary,
+        "booking_details": (answer.details.raw or {}).get("bookingDetails"),
+        "rules": [(r.raw or {}).get("fareRules") for r in answer.rules],
+    }
+
+
+def _rule_lines(rule: FareRule) -> tuple[list[str], int]:
+    """A rule's text without its NOTE asides, and how many lines those held.
+
+    ATPCO text sets its asides under an indented `NOTE -`: waivers, agency
+    fees, how fares combine. They are most of a penalties rule by volume, and
+    dropping them is what leaves the cancel and change terms on screen. The
+    rest is kept whole: a rule lists alternatives under `OR -`, and a line
+    after one can qualify it, so a rule cut short can end on the wrong answer."""
+    lines = [ln.rstrip() for b in rule.blocks for ln in b.splitlines() if ln.strip()]
+    kept: list[str] = []
+    note_indent: int | None = None
+    for ln in lines:
+        indent = len(ln) - len(ln.lstrip())
+        if note_indent is not None and indent > note_indent:
+            continue
+        note_indent = None
+        if ln.strip() == "NOTE -":
+            note_indent = indent
+            continue
+        kept.append(ln)
+    margin = min((len(ln) - len(ln.lstrip()) for ln in kept), default=0)
+    return [ln[margin:] for ln in kept], len(lines) - len(kept)
+
+
+def _render_fare_rules(answer: _FareRulesAnswer) -> None:
+    """The fare-rules block under the table: per segment the fare basis, booking
+    code and cabin, the fare calculation, then per fare its title and its
+    penalty, change and refund rules, then the pricing notes.
+
+    Every value is Matrix's. Amounts inside the rule text and the fare
+    calculation are quoted in the fare's filing currency, as filed."""
+    bd = answer.details.booking_details
+    if bd is None:
+        return
+    console.print()
+    console.print(
+        f"[bold]Fare rules[/] · itinerary #{answer.itinerary:d}"
+        + (f" · {_safe_text(bd.display_total)}" if bd.display_total else "")
+    )
+    for fare in bd.fares:
+        for info in fare.booking_infos:
+            seg = info.segment
+            console.print(
+                f"  {_safe_text(seg.origin if seg and seg.origin else '?')}→"
+                f"{_safe_text(seg.destination if seg and seg.destination else '?')}  "
+                f"{_safe_text(fare.carrier or '?')}  fare basis {_safe_text(fare.code or '?')}  "
+                f"booking code {_safe_text(info.booking_code or '?')}  "
+                f"{_safe_text(info.cabin or '?')}"
+            )
+    for pricing in bd.pricings:
+        for calc in pricing.fare_calculations:
+            for line in calc.lines:
+                console.print(f"  [dim]Fare calculation:[/] {_safe_text(line)}")
+    seen: set[tuple[str | None, ...]] = set()
+    for fare, result in zip(bd.fares, answer.rules, strict=True):
+        fr = result.fare_rules
+        if fr is None:
+            console.print(
+                f"[yellow]Matrix returned no rules for fare {_safe_text(fare.code or '?')}.[/]"
+            )
+            continue
+        # Several passengers can price on one fare, and its rules are one text.
+        identity = (
+            fr.carrier.code if fr.carrier else None,
+            fr.code,
+            fr.origin_city,
+            fr.destination_city,
+        )
+        if identity not in seen:
+            seen.add(identity)
+            _render_one_fare(fr)
+    notes = [n for p in bd.pricings for n in p.notes]
+    if notes:
+        console.print()
+        console.print("[bold]Notes[/]")
+        for note in notes:
+            console.print(f"  {_safe_text(note)}")
+
+
+def _render_one_fare(fr: FareRules) -> None:
+    """One fare: carrier, basis and cities, its title — the first line of its
+    category-0 text, since Matrix sends no title field — then its penalty,
+    change and refund rules, each rule of a category in turn."""
+    title = next(
+        (
+            " ".join(r.blocks[0].strip().splitlines()[0].split())
+            for r in fr.rules
+            if r.category == 0 and r.blocks and r.blocks[0].strip()
+        ),
+        "",
+    )
+    console.print()
+    console.print(
+        f"[bold]{_safe_text(fr.carrier.code if fr.carrier and fr.carrier.code else '?')} "
+        f"{_safe_text(fr.code or '?')}[/]  "
+        f"{_safe_text(fr.origin_city or '?')}→{_safe_text(fr.destination_city or '?')}"
+        + (f"  {_safe_text(title)}" if title else "")
+    )
+    filed = [
+        (label, r) for cat, label in _RULE_CATEGORIES.items() for r in fr.rules if r.category == cat
+    ]
+    if not filed:
+        console.print("  [dim]No penalty, change or refund rules are filed for this fare.[/]")
+    for label, rule in filed:
+        console.print(
+            f"  [bold]{_safe_text(label)}[/] [dim](category {rule.category or 0:d})[/]"
+            + (f" [dim]{_safe_text(rule.type)}[/]" if rule.type else "")
+        )
+        lines, asides = _rule_lines(rule)
+        for line in lines:
+            console.print(f"    {_safe_text(line)}")
+        if asides:
+            console.print(
+                f"    [dim]… {asides:d} lines of NOTE asides not shown; "
+                "--format json carries the full text[/]"
+            )
 
 
 def _gflight_results(
@@ -2264,10 +2938,12 @@ def _gflight_results(
     top_n: int,
     gf_mode: GfTransportMode = TRANSPORT_HTTP,
     gf_headed: bool = False,
-) -> list[Any]:
+) -> Board[Any]:
     """Query Google Flights for `legs`, honoring routing/extension: Tier-1
     predicates narrow the fli query natively, the Tier-2 post-filter drops
-    violating solutions. Returns the (filtered) raw fli result list.
+    violating rows from each board as it is served. Returns the (filtered) raw
+    fli result list, with the page's price insight and the count of rows the
+    filter dropped.
 
     `search` applies the same routing/extension to every leg, so the first leg's
     constraints cover the trip for the native query; the post-filter is per slice.
@@ -2282,10 +2958,9 @@ def _gflight_results(
     # Every import in this block is deferred for one reason: the Google Flights
     # backend must not load on a Matrix-only search, and this function is the
     # first point that has committed to Google Flights.
-    from ._gf_postfilter import surviving_indices  # noqa: PLC0415 — GF-only; see above
-    from ._gflight_ids import GfTransport, search_with_ids  # noqa: PLC0415 — fli, ~95 ms
+    from ._gf_postfilter import routing_keep  # noqa: PLC0415 — GF-only; see above
+    from ._gflight_ids import Board, GfTransport, search_with_ids  # noqa: PLC0415 — fli, ~95 ms
     from .fli_bridge import apply_gf_native_filters, to_fli_filter  # noqa: PLC0415 — fli
-    from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415 — GF-only
     from .routing_predicates import classify  # noqa: PLC0415 — pulled in by the two above
 
     # Built here rather than at the CLI seam: this is the first point that has
@@ -2303,16 +2978,15 @@ def _gflight_results(
     if out_constraints and out_constraints.predicates:
         apply_gf_native_filters(fli_filter, out_constraints.predicates)
     per_slice_preds = [list(classify(lg.route_language, lg.extension).predicates) for lg in legs]
-
-    # Fetch deeper than we need when a Tier-2 post-filter will run, because it
-    # drops rows AFTER truncation: `-n 1 --routing AA+` fetched exactly one
-    # itinerary, discarded it for violating the routing, and reported "no
-    # results" while a qualifying one sat at rank 2. Over-fetching lets the
-    # filter choose from a real candidate pool; the final slice below still
-    # honours the user's `top_n`.
-    fetch_n = top_n * _POSTFILTER_OVERFETCH if any(per_slice_preds) else top_n
+    requested = opts.currency or "USD"
     try:
-        results: list[Any] = search_with_ids(fli_filter, top_n=fetch_n, transport=transport) or []
+        results = search_with_ids(
+            fli_filter,
+            top_n=top_n,
+            transport=transport,
+            currency=requested,
+            keep=routing_keep(per_slice_preds),
+        )
     finally:
         # Named positively, because only rung 2 opens anything to close. The
         # call would be a no-op on the others, but reaching for it would read
@@ -2323,13 +2997,30 @@ def _gflight_results(
             from ._gf_browser import close_thread_session  # noqa: PLC0415 — GF-only; see above
 
             close_thread_session()
-    if results and any(per_slice_preds):
-        keep = set(surviving_indices(fli_results_to_search_result(results), per_slice_preds))
-        results = [r for i, r in enumerate(results) if i in keep]
+    if results is None:  # nothing served
+        results = Board[Any]()
+    _note_other_currencies(results, requested)
     # Untrimmed on purpose: a round trip's combinations are built pin-major, so
     # the first `top_n` of them are one outbound's returns and nothing else.
     # Every caller trims what it renders, in the order that surface ranks by.
     return results
+
+
+def _note_other_currencies(results: list[Any], requested: str) -> None:
+    """One stderr line when Google priced rows in a currency other than the one
+    asked for. Each such row keeps its own label in the table and the JSON, so
+    this is the note that says why two currencies are on one board."""
+    other: set[str] = set()
+    for r in results:
+        for m in cast("tuple[Any, ...]", r) if isinstance(r, tuple) else (r,):
+            ccy = cast("str | None", getattr(getattr(m, "flight", None), "currency", None))
+            if ccy and ccy != requested:
+                other.add(ccy)
+    if other:
+        err.print(
+            f"[yellow]Google Flights priced some rows in {_safe_text(', '.join(sorted(other)))}, "
+            f"not the requested {_safe_text(requested)}; each row is labeled with its own.[/]"
+        )
 
 
 def _gflight_json_row(g: Any) -> dict[str, Any]:
@@ -2348,6 +3039,17 @@ def _gflight_json_row(g: Any) -> dict[str, Any]:
         # this write silently replaces it and needs its own key.
         leg["amenities"] = asdict(a)
     return row
+
+
+def _gflight_json_document(results: list[Any]) -> list[Any]:
+    """The `--format json` document of a Google board: one row per itinerary,
+    a round trip's as its `[outbound, return]` pair."""
+    out: list[Any] = []
+    for r in results:
+        items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
+        dumped = [_gflight_json_row(g) for g in items]
+        out.append(dumped if isinstance(r, tuple) else dumped[0])
+    return out
 
 
 def _terminal_fare_key(r: Any) -> tuple[int, float]:
@@ -2381,7 +3083,9 @@ def _price_ordered(results: list[Any]) -> list[Any]:
     return sorted(results, key=_terminal_fare_key)
 
 
-def _pick_in_range(pick: int | None, rows: int, *, links_follow: bool) -> int | None:
+def _pick_in_range(
+    pick: int | None, rows: int, *, links_follow: bool, fare_rules: bool = False
+) -> int | None:
     """`pick` when it names one of the `rows` the user was shown, else None
     with the reason on stderr.
 
@@ -2412,10 +3116,20 @@ def _pick_in_range(pick: int | None, rows: int, *, links_follow: bool) -> int | 
     different row from the one the link opens.
 
     stderr, because a `--format json` document on stdout stays a document —
-    the same rule every other note on this path follows."""
+    the same rule every other note on this path follows.
+
+    `fare_rules` is the other thing a pick chooses: the fare rules shown are
+    row one's too, and the clause says so for the same reason."""
     if pick is None or 1 <= pick <= rows:
         return pick
-    fallback = "; pinning itinerary #1 instead." if links_follow else "."
+    if links_follow and fare_rules:
+        fallback = "; pinning itinerary #1 and showing its fare rules instead."
+    elif links_follow:
+        fallback = "; pinning itinerary #1 instead."
+    elif fare_rules:
+        fallback = "; showing itinerary #1's fare rules instead."
+    else:
+        fallback = "."
     err.print(f"[yellow]--pick {pick:d} is out of range (1-{rows:d}){fallback}[/]")
     return None
 
@@ -2573,12 +3287,14 @@ _MERGE_SOURCE_TAG = {"both": "GF+MX", "matrix": "MX", "gf": "GF"}
 def _render_merged(rows: list[Any], *, legs: tuple[Leg, ...], top_n: int) -> None:
     """Render the reconciled GF+Matrix view: one row per itinerary with the GF
     and Matrix prices attributed side-by-side and a source tag."""
-    origin = legs[0].origins[0] if legs[0].origins else "?"
-    destination = legs[0].destinations[0] if legs[0].destinations else "?"
+    origin = ",".join(legs[0].origins) or "?"
+    destination = ",".join(legs[0].destinations) or "?"
     has_return = len(legs) >= _ROUND_TRIP_LEGS
+    ccy = _title_currency(p for r in rows[:top_n] for p in (r.matrix_price, r.gf_price))
     t = Table(
         title=f"Google Flights + Matrix · {_safe_text(origin)}→{_safe_text(destination)}"
-        + (" + return" if has_return else ""),
+        + (" + return" if has_return else "")
+        + (f" ({_safe_text(ccy)})" if ccy else ""),
         show_header=True,
         header_style="bold green",
     )
@@ -2598,12 +3314,49 @@ def _render_merged(rows: list[Any], *, legs: tuple[Leg, ...], top_n: int) -> Non
             # `rows` is duck-typed, and the lookup falls back to the tag it was
             # handed when it is not one of the three this module writes.
             _safe_text(_MERGE_SOURCE_TAG.get(row.source, row.source)),
-            _amount(row.matrix_price),
-            _amount(row.gf_price),
+            _amount(row.matrix_price, ccy),
+            _amount(row.gf_price, ccy),
             out,
             ret,
         )
     console.print(t)
+
+
+def _answer_gf_empty(
+    dropped: int, *, json_out: bool, matrix_fallback: bool, pinned: int = 0
+) -> int | None:
+    """Answer a Google Flights search that has no rows, or hand it on.
+
+    `dropped` is how many served rows the routing filter removed. When it
+    removed them all and `matrix_fallback` is set, nothing is printed and the
+    count comes back for the caller to run Matrix with. Otherwise the reason
+    goes to stderr, so a `--format json` stdout is still the one document.
+
+    `pinned` is how many outbounds a round trip searched returns for. The
+    reason names it, because outbounds below the pins may have matching
+    returns that were never searched."""
+    if dropped and matrix_fallback:
+        return dropped
+    if dropped and pinned:
+        plural = "" if pinned == 1 else "s"
+        err.print(
+            f"[yellow]Google Flights: no round trip matched the routing "
+            f"({dropped:d} rows filtered out; returns were searched for the first "
+            f"{pinned:d} outbound option{plural}).[/]"
+        )
+    elif dropped:
+        err.print(
+            f"[yellow]Google Flights: no itinerary matched the routing "
+            f"({dropped:d} rows filtered out).[/]"
+        )
+    if json_out:
+        # No rows is a value, and a document is what was asked for. A sentence
+        # is for a person; to a consumer it is a parse error where an empty
+        # answer belongs, and the two are indistinguishable from the exit code.
+        sys.stdout.write(json.dumps([], indent=2))
+    elif not dropped:
+        console.print("[yellow]Google Flights: no results.[/]")
+    return None
 
 
 def _run_gflight_path(
@@ -2619,8 +3372,15 @@ def _run_gflight_path(
     pick: int | None = None,
     gf_mode: GfTransportMode = TRANSPORT_HTTP,
     gf_headed: bool = False,
-) -> None:
+    sellers: bool = False,
+    matrix_fallback: bool = False,
+) -> int | None:
     """Google Flights path: build fli filter → query → render. Single-leg or round-trip.
+
+    Returns None once it has answered. The one answer it does not give itself:
+    when the routing filter emptied Google's board and `matrix_fallback` is set,
+    it prints nothing and returns how many rows the filter dropped, for the
+    caller to hand the search to Matrix with that reason.
 
     When run_pp=True, fli's results are adapted into a SearchResult shape so
     the existing PP matcher + renderer reuse cleanly. PP runs on the same
@@ -2633,6 +3393,9 @@ def _run_gflight_path(
 
     `gf_mode` defaults to rung 1 — the deprecated `gflight` command has no
     transport flag, so it never asks for another.
+
+    `sellers` adds row `pick`'s booking options after everything else, or
+    wraps the JSON document as `{"search": …, "booking_options": …}`.
     """
     _pin_cap_note(legs=legs, top_n=top_n)
     # Deferred like the adapter below: this arm reaches rung 2 only when the
@@ -2656,19 +3419,20 @@ def _run_gflight_path(
         err.print(f"[red]Google Flights query failed:[/] {_safe_text(e)}")
         raise typer.Exit(1) from e
 
+    # Checked before anything is printed: a `--sellers` pick outside the table
+    # is a usage error, not a pin to fall back from, and an empty board leaves
+    # nothing to open.
+    seller_row = _pick_for_sellers(pick, min(len(results), top_n)) if sellers else None
     if not results:
-        if json_out:
-            # No rows is a value, and a document is what was asked for. The
-            # sentence below is for a person; to a consumer it is a parse error
-            # where an empty answer belongs, and the two are indistinguishable
-            # from the exit code.
-            sys.stdout.write(json.dumps([], indent=2))
-            return
-        console.print("[yellow]Google Flights: no results (or none matched the routing).[/]")
-        return
+        return _answer_gf_empty(
+            getattr(results, "dropped", 0),
+            json_out=json_out,
+            matrix_fallback=matrix_fallback,
+            pinned=getattr(results, "pinned", 0),
+        )
 
     # `-n` is one number for everything the user can act on. Google's page
-    # serves its whole board (~30 rows) whatever count is asked of it, so the
+    # serves its whole board whatever count is asked of it, so the
     # count is a trim rather than a query parameter, and everything below this
     # line is drawn from the same rows: the table, the JSON document, the range
     # `--pick` accepts, the itineraries the award matcher is fanned out over.
@@ -2676,11 +3440,12 @@ def _run_gflight_path(
     # the Tier-2 post-filter above and the multi-cabin join elsewhere are drawn
     # from — narrowing the query would answer a filtered search with fewer rows
     # than exist, which is the failure this backend is most prone to.
+    insight = getattr(results, "insight", None)
     results = _price_ordered(results)[:top_n]
     # A link follows only where one is asked for and the format has room for it:
     # `--format json` emits none at all, and neither does a run with both URL
     # flags off. The range is still reported; the fallback is not claimed.
-    pick = _pick_in_range(
+    pick = seller_row or _pick_in_range(
         pick, len(results), links_follow=not json_out and (matrix_url or google_url)
     )
 
@@ -2690,13 +3455,20 @@ def _run_gflight_path(
     # models. Suppressing the noisy unknown-type chatter for this rendering
     # block keeps the boundary localized.
     if json_out and not run_pp:
-        out: list[Any] = []
-        for r in results:
-            items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
-            dumped = [_gflight_json_row(g) for g in items]
-            out.append(dumped if isinstance(r, tuple) else dumped[0])
-        sys.stdout.write(json.dumps(out, indent=2, default=str))
-        return
+        out = _gflight_json_document(results)
+        doc = (
+            out
+            if seller_row is None
+            else _search_and_sellers(
+                out,
+                SpecificDateSearch(legs=legs, options=opts),
+                fli_results_to_search_result(results),
+                seller_row,
+                headed=gf_headed,
+            )
+        )
+        sys.stdout.write(json.dumps(doc, indent=2, default=str))
+        return None
 
     awards_only = sel.awards_only if sel is not None else False
     # `not json_out` as well as `not awards_only`: the early return above fires
@@ -2707,7 +3479,11 @@ def _run_gflight_path(
     if not awards_only and not json_out:
         try:
             _render_gflight_table(
-                results, legs=legs, top_n=top_n, match_carriers=_match_carriers(legs)
+                results,
+                legs=legs,
+                top_n=top_n,
+                match_carriers=_match_carriers(legs),
+                insight=insight,
             )
         except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
             raise
@@ -2753,6 +3529,15 @@ def _run_gflight_path(
             # false. `1` makes the label say what the link does on every board.
             pick=pick or 1,
         )
+    if seller_row is not None:
+        _print_booking_options(
+            SpecificDateSearch(legs=legs, options=opts),
+            sr,
+            seller_row,
+            gf_price=sr.solutions[seller_row - 1].price,
+            headed=gf_headed,
+        )
+    return None
 
 
 def _paint_first_gf_table(
@@ -2786,7 +3571,13 @@ def _paint_first_gf_table(
     still may not keep this promise."""
     if gf and not awards_only:
         try:
-            _render_gflight_table(gf, legs=legs, top_n=top_n, match_carriers=_match_carriers(legs))
+            _render_gflight_table(
+                gf,
+                legs=legs,
+                top_n=top_n,
+                match_carriers=_match_carriers(legs),
+                insight=getattr(gf, "insight", None),
+            )
         except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
             raise
         except Exception as e:  # noqa: BLE001 — see the docstring
@@ -2794,7 +3585,12 @@ def _paint_first_gf_table(
         else:
             err.print("[dim]…refining with Matrix (authoritative fares)…[/]")
     elif not gf and "gf_err" not in state:
-        err.print("[yellow]Google Flights: no results; awaiting Matrix…[/]")
+        if getattr(gf, "dropped", 0):
+            err.print(
+                "[yellow]Google Flights: no itinerary matched the routing; awaiting Matrix…[/]"
+            )
+        else:
+            err.print("[yellow]Google Flights: no results; awaiting Matrix…[/]")
 
 
 async def _matrix_into(
@@ -3021,7 +3817,7 @@ def _report_search_matrix_failure(state: dict[str, Any]) -> None:
         err.print("[yellow]Matrix search did not complete.[/]")
 
 
-def _run_enriched_path(
+def _run_enriched_path(  # noqa: PLR0915 — one weave's outcome arms, read in one place
     *,
     legs: tuple[Leg, ...],
     opts: SearchOptions,
@@ -3036,11 +3832,16 @@ def _run_enriched_path(
     no_cache: bool,
     gf_mode: GfTransportMode = TRANSPORT_HTTP,
     gf_headed: bool = False,
+    sellers: bool = False,
 ) -> None:
     """GF-serveable query, progressive: dispatch Google Flights + Matrix
     concurrently under one event loop, paint GF immediately (~1s), then repaint a
     reconciled GF+Matrix table once Matrix lands (~45s). PP/awards + URLs run on
-    the Matrix (authoritative) result. `--fast` skips this for GF-only speed."""
+    the Matrix (authoritative) result. `--fast` skips this for GF-only speed.
+
+    `sellers` opens row `pick` of the merged table, the one the Google link
+    pins, or of the Google table when Matrix does not answer, and prints its
+    booking options last."""
     # Imported here rather than deeper in: every enriched run executes these two
     # lines, so a packaging fault in either module fails the same way on every
     # run instead of only on the runs where Matrix happens to land.
@@ -3057,6 +3858,7 @@ def _run_enriched_path(
             tg.start_soon(_matrix_into, state, matrix_search, rps, impersonate, not no_cache)
             # Google Flights is sync (curl_cffi) — run it in a worker thread so the
             # Matrix request progresses concurrently on the event loop.
+            gf: list[Any]
             try:
                 gf = await anyio.to_thread.run_sync(
                     _gflight_results, legs, opts, top_n, gf_mode, gf_headed
@@ -3099,6 +3901,21 @@ def _run_enriched_path(
         if state.get("paint_err") is not None:
             _report_paint_failure(state["paint_err"])
         _report_search_matrix_failure(state)
+        if sellers and not painted:
+            _no_booking_options("No booking options", "no table was printed to pick a row from.")
+        if sellers:
+            # The Google table painted first is the only numbered one on
+            # screen, so the pick names its row, as it does under `--fast`.
+            rows = _price_ordered(gf)[:top_n]
+            n = _pick_for_sellers(pick, len(rows))
+            sr = fli_results_to_search_result(rows)
+            _print_booking_options(
+                matrix_search,
+                sr,
+                n,
+                gf_price=sr.solutions[n - 1].price,
+                headed=gf_headed,
+            )
         if not painted:
             raise typer.Exit(1)
         return
@@ -3113,10 +3930,12 @@ def _run_enriched_path(
     # differ from `matrix_res.solutions`: indexing those instead pins a row the
     # table numbered differently, under the number read off the screen.
     pinnable: SearchResult | None = None
+    booking_row: tuple[SearchResult, int, str | None, str | None] | None = None
     if not awards_only:
         merged = merge_results(fli_results_to_search_result(gf), matrix_res)
         _render_merged(merged, legs=legs, top_n=top_n)
         shown = [r.itinerary for r in merged[:top_n]]
+        seller_row = _pick_for_sellers(pick, len(shown)) if sellers else None
         # The same contract `_run_gflight_path` has: the range a pick is
         # measured against is the VISIBLE count. Clamping here also means the
         # duplicate warning inside `_emit_urls` is never reached from this path.
@@ -3126,12 +3945,15 @@ def _run_enriched_path(
         # would be, and the fallback clause beside it would name a pin that does
         # not happen — this arm renders a header-only table and carries on where
         # the sibling has already returned.
-        pick = (
+        pick = seller_row or (
             _pick_in_range(pick, len(shown), links_follow=matrix_url or google_url)
             if shown
             else None
         )
         pinnable = matrix_res.model_copy(update={"solutions": shown})
+        if seller_row is not None:
+            chosen = merged[seller_row - 1]
+            booking_row = (pinnable, seller_row, chosen.gf_price, chosen.matrix_price)
     else:
         # Nothing this arm prints carries a row number: the award renderer is
         # the only surface it has and its columns hold no `#`. So a pick names
@@ -3168,6 +3990,16 @@ def _run_enriched_path(
         result=pinnable,
         pick=pick or 1,
     )
+    if booking_row is not None:
+        result, n, gf_price, matrix_price = booking_row
+        _print_booking_options(
+            matrix_search,
+            result,
+            n,
+            gf_price=gf_price,
+            matrix_price=matrix_price,
+            headed=gf_headed,
+        )
 
 
 # ─────────────────────────── multi-cabin orchestration ─────────────────────
@@ -3203,9 +4035,9 @@ def _pin_cap_note(*, legs: tuple[Leg, ...], top_n: int) -> None:
     never pinned at all below `-n 3`.
 
     "Up to", because the cap bounds the count and the board may hold fewer. The
-    exact number is knowable only inside the pin loop, and carrying it back out
-    means a new return type on a recursive function to replace a true sentence
-    with a truer one.
+    exact number is known only once the pin loop has run, after this note; an
+    empty filtered round trip states it (`_answer_gf_empty`), where it changes
+    what the answer means.
 
     stderr, so a `--format json` document on stdout stays a document."""
     from ._gflight_ids import pinned_fanout  # noqa: PLC0415
@@ -3277,12 +4109,13 @@ def _cash_per_cabin_single(res: SearchResult, query_cabin: Cabin) -> dict[int, d
     The PP renderer needs to know which PP cabin name the cash field on each
     itinerary corresponds to — otherwise it can't compute ¢/mi against the
     right cash basis. For single-cabin runs the answer is the queried cabin
-    applied uniformly.
+    applied uniformly. A fare in any currency but USD is left out, so no ¢/mi
+    is computed from it.
     """
     name = _CABIN_TO_PP_NAME[query_cabin]
     out: dict[int, dict[str, float]] = {}
     for it in res.solutions:
-        cash = parse_price(it.price)
+        cash = _usd_amount(it.price)
         if cash is not None:
             out[id(it)] = {name: cash}
     return out
@@ -3299,7 +4132,7 @@ def _cash_per_cabin_multi(rows: list[MultiCabinRow]) -> dict[int, dict[str, floa
     for r in rows:
         prices: dict[str, float] = {}
         for cab, price in r.prices.items():
-            cash = parse_price(price)
+            cash = _usd_amount(price)
             if cash is not None:
                 prices[_CABIN_TO_PP_NAME[cab]] = cash
         if prices:
@@ -3570,21 +4403,12 @@ def _render_multi_cabin_search(
     sort_by: Cabin,
     title_prefix: str = "Itineraries",
 ) -> None:
-    """Render multi-cabin merged rows. One row per itinerary, one $ column
+    """Render multi-cabin merged rows. One row per itinerary, one price column
     per requested cabin, '—' for missing."""
     if not rows:
         console.print("[yellow]No itineraries.[/]")
         return
-    # Use the first present price to surface a currency tag in the title.
-    ccy = ""
-    for row in rows:
-        for p in row.prices.values():
-            ccy_candidate, _ = _split_price(p)
-            if ccy_candidate:
-                ccy = ccy_candidate
-                break
-        if ccy:
-            break
+    ccy = _title_currency(p for row in rows for p in row.prices.values())
     ccy_tag = f" ({_safe_text(ccy)})" if ccy else ""
     cabin_labels = "+".join(_CABIN_TO_LETTER[c] for c in cabins)
     sort_label = _CABIN_TO_LETTER[sort_by]
@@ -3602,7 +4426,7 @@ def _render_multi_cabin_search(
     t.add_column("outbound")
     t.add_column("return")
     for letter in (_CABIN_TO_LETTER[c] for c in cabins):
-        t.add_column(f"{letter} $", justify="right")
+        t.add_column(f"{letter}{ccy_tag}", justify="right")
 
     for i, row in enumerate(rows, 1):
         itn = row.itinerary.itinerary
@@ -3612,7 +4436,7 @@ def _render_multi_cabin_search(
 
         out_cell = _fmt_slice_cell(slcs[0]) if slcs else "—"
         ret_cell = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
-        price_cells = [_amount(row.prices.get(cab)) for cab in cabins]
+        price_cells = [_amount(row.prices.get(cab), ccy) for cab in cabins]
         t.add_row(f"{i:d}", carriers or "?", out_cell, ret_cell, *price_cells)
     console.print(t)
 
@@ -3742,6 +4566,12 @@ def _run_gflight_path_multi(
     if not fli_by_cabin:
         err.print("[red]All Google Flights cabin queries failed.[/]")
         raise typer.Exit(1)
+    for cab, cab_rows in fli_by_cabin.items():
+        if not cab_rows and getattr(cab_rows, "dropped", 0):
+            err.print(
+                f"[yellow]Google Flights {_safe_text(cab.value)}: "
+                "no itinerary matched the routing.[/]"
+            )
 
     if json_out and not run_pp:
         out: dict[str, Any] = {}
@@ -3845,18 +4675,34 @@ def _leg_display(leg: Any, amenity: Any, match_carriers: frozenset[str]) -> str:
     return booking
 
 
+def _gflight_route(legs: Any) -> str:
+    """One itinerary's airports, first departure to last arrival with every
+    connection between, wrapped per code as `_fmt_slice_route` does. A change of
+    airports at a connection shows both codes rather than hiding one."""
+    codes: list[str] = []
+    for leg in legs:
+        for airport in (leg.departure_airport, leg.arrival_airport):
+            code = _safe_text(getattr(airport, "name", "?"))
+            if not codes or codes[-1] != code:
+                codes.append(code)
+    return "→".join(codes)
+
+
 def _render_gflight_table(
     results: list[Any],
     *,
     legs: tuple[Leg, ...],
     top_n: int,
     match_carriers: frozenset[str] = frozenset(),
+    insight: PriceInsight | None = None,
 ) -> None:
     """Render fli results as a rich table. Duck-typed: fli has no type stubs.
 
     Accepts our `GFlightWithId` wrappers — `.flight` is fli's FlightResult,
     `.amenities` is per-leg legroom data parsed from Google's response.
     `match_carriers` enables codeshare-aware leg labels (see `_leg_display`).
+    `insight`, Google's price insight for the search, is one line under the
+    table, its amounts formatted the way the price column formats them.
 
     A round-trip combination can print two DIFFERENT prices, on its `Na` and
     `Nb` rows, and that reads as a bug until you know what each is: the `a` row
@@ -3872,9 +4718,15 @@ def _render_gflight_table(
     "What a round-trip row's price means." in
     docs/memories/gf_routing_and_carriers.md and in
     `tests/pp/test_gflight_adapter.py`."""
-    origin = legs[0].origins[0] if legs[0].origins else "?"
-    destination = legs[0].destinations[0] if legs[0].destinations else "?"
+    origin = ",".join(legs[0].origins) or "?"
+    destination = ",".join(legs[0].destinations) or "?"
     has_return = len(legs) >= _ROUND_TRIP_LEGS
+    # One board ranks every airport of a set, so only the row can say which
+    # airports it flies.
+    per_row_route = any(
+        len(expand_airports(lg.origins)) > 1 or len(expand_airports(lg.destinations)) > 1
+        for lg in legs
+    )
     t = Table(
         title=f"Google Flights · {_safe_text(origin)}→{_safe_text(destination)}"
         + (" + return" if has_return else ""),
@@ -3894,10 +4746,12 @@ def _render_gflight_table(
             fr = g.flight  # unwrap GFlightWithId → fli FlightResult
             amenities = getattr(g, "amenities", []) or []
             label = f"{i}{'a' if j == 0 else 'b'}" if len(items) > 1 else str(i)
-            legs_str = " → ".join(
+            flights = " → ".join(
                 _leg_display(leg, amenities[k] if k < len(amenities) else None, match_carriers)
                 for k, leg in enumerate(fr.legs)
             )
+            route = _gflight_route(fr.legs) if per_row_route else ""
+            legs_str = " ".join(p for p in (route, flights) if p)
             mins = fr.duration
             dur = f"{mins // 60}h{mins % 60:02d}m"
             legroom_str = _fmt_gflight_legroom(fr.legs, amenities)
@@ -3918,6 +4772,12 @@ def _render_gflight_table(
     console.print(t)
     if any_legroom:
         console.print(_LEGROOM_KEY)
+    if insight is not None:
+        console.print(
+            f"Price insight: prices are {_safe_text(insight.level)} for this trip "
+            f"(usually {_safe_text(insight.currency)}{insight.typical_low:.2f}"
+            f"-{_safe_text(insight.currency)}{insight.typical_high:.2f})."
+        )
 
 
 # AVERAGE/BELOW/ABOVE are pitch-relative judgments — collapse them to color on
@@ -4164,6 +5024,11 @@ _MATRIX_URL_HELP = (
     "doesn't expose per-itinerary URL state, so this is the deepest link "
     "available). No link line is printed under --format json."
 )
+_CURRENCY_HELP = (
+    "Price in this currency: a 3-letter ISO 4217 code such as EUR. Default: USD. "
+    "Matrix and Google Flights both price in it; the Matrix link does not carry it."
+)
+
 _GOOGLE_URL_HELP = (
     "Print the Google Flights URL. When an itinerary can be resolved from the "
     "results the URL deep-links to the row --pick names, or to the first row of "
@@ -4191,7 +5056,7 @@ def _resolve_format(*, fmt: str, json_flag: bool) -> str:
 
 
 @app.command()
-def search(
+def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes the search
     origin: Annotated[
         str | None,
         typer.Argument(help="Origin IATA (comma-list ok for multi-airport)"),
@@ -4239,7 +5104,7 @@ def search(
         "--cabin",
         help=(
             "Cabin, or comma list for multi-cabin compare ('economy,business'). "
-            "Multi-cabin renders one $ column per cabin; '—' means the itinerary "
+            "Multi-cabin renders one price column per cabin; '—' means the itinerary "
             "wasn't in that cabin's top-N (cabin unavailable OR priced out). "
             "Bump -n for broader overlap across cabins."
         ),
@@ -4355,12 +5220,39 @@ def search(
     pick: int | None = typer.Option(
         None,
         "--pick",
-        help="Pin itinerary #N (1-based, as shown in the table) in the "
-        "--matrix-url/--google-url deep links. Default: the first row of the "
-        "final table. Ignored under --format json, which emits no link lines "
-        "at all.",
+        help="Itinerary #N (1-based, as shown in the final table) to pin in the "
+        "--matrix-url/--google-url deep links, to describe with --fare-rules and to "
+        "open with --sellers. Default: the first row. A pick outside the table falls "
+        "back to row 1 for the links and --fare-rules and is refused with --sellers. "
+        "--format json emits no link lines, so there it only chooses the --fare-rules "
+        "or --sellers row.",
         rich_help_panel=_GROUP_OUTPUT,
     ),
+    sellers: bool = typer.Option(
+        False,
+        "--sellers",
+        help="After the Google Flights table, open itinerary #N's booking page "
+        "(--pick; default 1) in Chrome and list every seller with its price and fare "
+        "name, cheapest first. Needs a Google Flights result and the browser extra; "
+        "refused on multi-cabin and --awards-only searches. With --format json the "
+        'document becomes {"search": …, "booking_options": […]}.',
+        rich_help_panel=_GROUP_OUTPUT,
+    ),
+    currency: Annotated[
+        str | None,
+        typer.Option("--currency", help=_CURRENCY_HELP, rich_help_panel=_GROUP_OUTPUT),
+    ] = None,
+    fare_rules: Annotated[
+        bool,
+        typer.Option(
+            "--fare-rules",
+            help="After the table, show the fare basis, booking codes and fare rules "
+            "(penalties, changes, refunds) of the itinerary --pick names (default 1). "
+            "Matrix only: sends the search to Matrix. One --cabin; with --format json, "
+            "--cash-only.",
+            rich_help_panel=_GROUP_OUTPUT,
+        ),
+    ] = False,
     no_cache: bool = _NO_CACHE_OPT,
     fast: bool = typer.Option(
         False,
@@ -4446,6 +5338,7 @@ def search(
     extra pax types/PP config). Force with --backend matrix|gflight.
     """
     json_out = _resolve_format(fmt=fmt, json_flag=json_out) == "json"
+    ccy = _resolve_currency(currency)
     # Deprecated-flag warning surfaces at runtime since hidden=True hides the
     # banner from --help.
     if no_pp or pp_only or pp_airlines or pp_cabin:
@@ -4463,6 +5356,10 @@ def search(
         legacy_pp_airlines=pp_airlines,
         legacy_pp_cabin=pp_cabin,
     )
+    if fare_rules:
+        # Before the backend is announced: a refusal after "Using Matrix" reads
+        # as a search that started and then failed.
+        _refuse_fare_rules_conflicts(cabins=_resolve_cabin_list(cabin), sel=sel, json_out=json_out)
     resolved = _pick_backend(
         backend=backend,
         routing=routing,
@@ -4480,6 +5377,7 @@ def search(
         destination=destination,
         allow_airport_changes=allow_airport_changes,
         show_only_available=only_available,
+        fare_rules=fare_rules,
     )
     if slice_specs:
         legs = tuple(_parse_slice_spec(s) for s in slice_specs)
@@ -4535,6 +5433,7 @@ def search(
         allow_airport_changes=allow_airport_changes,
         show_only_available=only_available,
         page_size=page_size,
+        currency=ccy,
     )
 
     run_awards = _should_run_awards(sel)
@@ -4543,6 +5442,18 @@ def search(
     # rather than reassigned: the parameter is declared `str` for typer's sake,
     # and reassigning it would throw away the narrowing this call just did.
     gf_mode = _resolve_gf_transport(gf_transport)
+    if sellers and (
+        blocker := _sellers_blocker(
+            backend=resolved,
+            multi_cabin=len(cabins_tuple) > 1,
+            awards_only=sel.awards_only,
+            awards_json=run_awards and json_out,
+            pick=pick,
+            page_size=page_size,
+        )
+    ):
+        err.print(f"[red]--sellers {_safe_text(blocker)}.[/]")
+        raise typer.Exit(2)
 
     if len(cabins_tuple) > 1:
         # `_pick_backend` already refused anything the page can't encode, so a
@@ -4599,9 +5510,10 @@ def search(
                 no_cache=_resolve_no_cache(no_cache),
                 gf_mode=gf_mode,
                 gf_headed=gf_headed,
+                sellers=sellers,
             )
             return
-        _run_gflight_path(
+        unmatched = _run_gflight_path(
             legs=legs,
             opts=opts,
             top_n=page_size,
@@ -4613,8 +5525,15 @@ def search(
             pick=pick,
             gf_mode=gf_mode,
             gf_headed=gf_headed,
+            sellers=sellers,
+            matrix_fallback=backend == BACKEND_AUTO,
         )
-        return
+        if unmatched is None:
+            return
+        err.print(
+            f"[dim]Using Matrix: no Google Flights itinerary matched the routing "
+            f"({unmatched:d} rows filtered out).[/]"
+        )
 
     _run_matrix_path(
         legs=legs,
@@ -4628,6 +5547,7 @@ def search(
         run_pp=run_awards,
         sel=sel,
         pick=pick,
+        fare_rules=fare_rules,
     )
 
 
@@ -4931,15 +5851,48 @@ def calendar(
         help=_GOOGLE_URL_HELP + " (calendar mode emits the search URL only.)",
         rich_help_panel=_GROUP_OUTPUT,
     ),
+    currency: Annotated[
+        str | None,
+        typer.Option(
+            "--currency",
+            help=_CURRENCY_HELP + " A non-USD currency skips the Google Flights date grid, "
+            "which prices in USD only, so --fast refuses it.",
+            rich_help_panel=_GROUP_OUTPUT,
+        ),
+    ] = None,
     no_cache: bool = _NO_CACHE_OPT,
     fast: bool = typer.Option(
         False,
         "--fast/--enrich",
         "--no-enrich/--no-fast",
-        help="Skip the Matrix enrichment: show only the fast Google Flights "
-        "date grid (one-way, single-airport, Tier-1 filters) instead of also "
-        "running the authoritative Matrix calendar. Exits 1 rather than falling "
-        "back, so a no-grid result is never mistaken for a fast one.",
+        help="Skip the Matrix enrichment: show only the Google Flights price "
+        "grid instead of also running the authoritative Matrix calendar. Serves a "
+        "single-airport calendar, one-way or a round trip of one trip length "
+        "('-d 7'), whose filters Google Flights' search page can carry (cabin, "
+        "adults, stops up to 2); table or JSON. Reads the grid from the search page "
+        "in a real Chrome (see [bold]--gf-transport[/]). Exits 1 rather "
+        "than falling back, so a no-grid result is never mistaken for a fast one.",
+        rich_help_panel=_GROUP_BACKEND,
+    ),
+    gf_transport: str | None = typer.Option(
+        None,
+        "--gf-transport",
+        help=(
+            "How [bold]--fast[/] reaches Google Flights' price grid: [bold]auto[/] "
+            "(default) is browser; [bold]browser[/] opens the filtered search page in a "
+            "real Chrome (headless unless [bold]--gf-headed[/]), clicks Price graph and "
+            "reads the page's own response, a few seconds per five weeks of window; "
+            "[bold]http[/] calls the calendar RPC directly, which Google currently "
+            "answers with no data. Browser needs [bold]uv pip install "
+            # Escaped: rich reads `[browser]` as a style tag and deletes it.
+            "'flight-cli\\[browser]'[/] and an installed Chrome."
+        ),
+        rich_help_panel=_GROUP_BACKEND,
+    ),
+    gf_headed: bool = typer.Option(
+        False,
+        "--gf-headed",
+        help="Show the Chrome window --gf-transport browser opens. Default: headless.",
         rich_help_panel=_GROUP_BACKEND,
     ),
     max_per_query: int = typer.Option(
@@ -4961,6 +5914,20 @@ def calendar(
 ) -> None:
     """Lowest-fare grid across a date window. Default round-trip; --one-way to flip."""
     json_out = _resolve_format(fmt=fmt, json_flag=json_out) == "json"
+    if gf_transport is None:
+        # `--fast` asks for Google's grid, and only the browser returns one while
+        # the direct RPC answers with no data. Without `--fast` nothing reaches
+        # Google, so unset stays the one mode the check below accepts.
+        gf_transport = "auto" if fast else TRANSPORT_HTTP
+    gf_mode = _resolve_gf_transport(gf_transport)
+    if not fast and (gf_mode != TRANSPORT_HTTP or gf_headed):
+        # Only the `--fast` grid reaches Google Flights; ignoring the flag would
+        # run the Matrix calendar as though the transport had been honored.
+        raise typer.BadParameter(
+            "applies only with --fast, the one calendar Google Flights serves",
+            param_hint="--gf-transport" if gf_mode != TRANSPORT_HTTP else "--gf-headed",
+        )
+    ccy = _resolve_currency(currency)
     origins = _parse_iata_list(origin)
     dests = _parse_iata_list(destination)
     sd = _parse_date(start)
@@ -4995,6 +5962,7 @@ def calendar(
         stops=stops,
         allow_airport_changes=allow_airport_changes,
         show_only_available=only_available,
+        currency=ccy,
     )
     window = CalendarWindow(start=sd, end=ed, duration_min=dmin, duration_max=dmax)
     search = CalendarSearch(legs=legs, options=opts, window=window)
@@ -5004,7 +5972,7 @@ def calendar(
     # windows. Paint it first, then enrich with the authoritative Matrix calendar
     # (full per-duration grid). `--fast` stops after the grid.
     blocker = _grid_branch_blocker(
-        search, json_out=json_out, one_way=one_way, origins=origins, dests=dests
+        search, json_out=json_out, one_way=one_way, origins=origins, dests=dests, fast=fast
     )
     if fast and blocker is not None:
         # `--fast` exists only inside the branch below. Everywhere else there is no
@@ -5018,8 +5986,9 @@ def calendar(
         # prose. The other shapes go the same way so the stream doesn't depend on which
         # condition failed.
         err.print(
-            "[yellow]--fast applies only to one-way, single-airport, non-JSON "
-            f"calendars; this is {_safe_text(blocker)}. Run without --fast for Matrix.[/]"
+            "[yellow]--fast applies only to single-airport calendars, one-way or of one "
+            "trip length, whose every filter Google Flights' search page can carry; "
+            f"this is {_safe_text(blocker)}. Run without --fast for Matrix.[/]"
         )
         raise typer.Exit(1)
     if blocker is None:
@@ -5042,12 +6011,28 @@ def calendar(
                 google_url=google_url,
             )
             return
-        _run_fast_calendar_grid(
+        if gf_mode == TRANSPORT_HTTP:
+            _run_fast_calendar_grid(
+                search,
+                origins=origins,
+                dests=dests,
+                sd=sd,
+                ed=ed,
+                matrix_url=matrix_url,
+                google_url=google_url,
+                json_out=json_out,
+            )
+            return
+        # `auto` is the browser here: under `--fast` the http grid has nothing to
+        # serve, so escalating is the only way `auto` differs from failing.
+        _run_fast_browser_grid(
             search,
             origins=origins,
             dests=dests,
             sd=sd,
             ed=ed,
+            json_out=json_out,
+            headed=gf_headed,
             matrix_url=matrix_url,
             google_url=google_url,
         )
@@ -5169,10 +6154,15 @@ def detail(
         help=_GOOGLE_URL_HELP,
         rich_help_panel=_GROUP_OUTPUT,
     ),
+    currency: Annotated[
+        str | None,
+        typer.Option("--currency", help=_CURRENCY_HELP, rich_help_panel=_GROUP_OUTPUT),
+    ] = None,
     no_cache: bool = _NO_CACHE_OPT,
 ) -> None:
     """Phase-2 of the calendar flow: full itineraries for a picked date."""
     json_out = _resolve_format(fmt=fmt, json_flag=json_out) == "json"
+    ccy = _resolve_currency(currency)
     origins = _parse_iata_list(origin)
     dests = _parse_iata_list(destination)
     dep_d = _parse_date(dep)
@@ -5204,6 +6194,7 @@ def detail(
         stops=stops,
         allow_airport_changes=allow_airport_changes,
         show_only_available=True,
+        currency=ccy,
     )
     window = CalendarWindow(start=sd, end=ed, duration_min=dmin, duration_max=dmax)
     search = CalendarFollowup(legs=legs, options=opts, window=window)
@@ -5222,6 +6213,210 @@ def detail(
         return
     _render_search(res)
     _emit_urls(search, matrix_url=matrix_url, google_url=google_url, result=res)
+
+
+# ─────────────────────────── explore ───────────────────────────────────────
+
+_RE_MONTH = re.compile(r"\A(\d{4})-(\d{2})\Z")
+
+
+def _today() -> date:
+    """Today, behind a seam: which months `--month` may name moves with it."""
+    return date.today()
+
+
+def _explore_origin(origin: str) -> str:
+    """The one airport `explore` flies from, or exit 2.
+
+    Refused with the search path's own reason where Google Flights cannot take
+    the code, since the page would answer for somewhere else."""
+    codes = _parse_iata_list(origin)
+    if len(codes) != 1 or not re.fullmatch(r"[A-Z]{3}", codes[0]):
+        err.print(f"[red]explore takes one origin airport code; got {_quote(origin)}[/]")
+        raise typer.Exit(2)
+    reasons = _gf_unserveable_reasons(BACKEND_GFLIGHT, codes[0], None)
+    if reasons:
+        err.print(f"[red]Google Flights' explore page can't take {_safe_text(reasons[0])}.[/]")
+        raise typer.Exit(2)
+    return codes[0]
+
+
+def _explore_month(month: str | None) -> date | None:
+    """The first day of the month `--month` names, None for the next six months,
+    or exit 2.
+
+    The page's month field carries no year, so it is limited to the months it
+    can mean unambiguously; a later one would silently come back as another
+    year's."""
+    if month is None:
+        return None
+    m = _RE_MONTH.match(month.strip())
+    try:
+        first = None if m is None else date(int(m.group(1)), int(m.group(2)), 1)
+    except ValueError:
+        first = None
+    if first is None:
+        err.print(f"[red]bad month {_quote(month)}; use YYYY-MM[/]")
+        raise typer.Exit(2)
+    from ._gf_explore import months_open  # noqa: PLC0415 — fli, paid only by explore
+
+    open_months = months_open(_today())
+    if first not in open_months:
+        err.print(
+            f"[red]--month {_quote(month)} is outside "
+            f"{_safe_text(f'{open_months[0]:%Y-%m}')} to {_safe_text(f'{open_months[-1]:%Y-%m}')}: "
+            "the page's month carries no year, so a month further out would "
+            "return another year's.[/]"
+        )
+        raise typer.Exit(2)
+    return first
+
+
+def _explore_trip_length(days: str | None) -> TripLength:
+    """The page's trip length `--days` overlaps, or exit 2. It offers three,
+    and a range that overlaps none or several has no single answer."""
+    from ._gf_explore import ONE_WEEK, TRIP_LENGTHS, trip_lengths_overlapping  # noqa: PLC0415
+
+    if days is None:
+        return ONE_WEEK
+    lo, hi = _parse_duration(days)
+    hits = trip_lengths_overlapping(lo, hi)
+    if len(hits) != 1:
+        choices = ", ".join(f"{t.name} ({t.nights[0]}-{t.nights[1]} nights)" for t in TRIP_LENGTHS)
+        overlap = " and ".join(t.name for t in hits) or "no trip length"
+        err.print(
+            f"[red]--days {_quote(days)} overlaps {_safe_text(overlap)}; it must overlap "
+            f"exactly one of the page's trip lengths: {_safe_text(choices)}.[/]"
+        )
+        raise typer.Exit(2)
+    return hits[0]
+
+
+def _explore_dates(d: Destination) -> str:
+    dep = "—" if d.departure is None else d.departure.isoformat()
+    ret = "—" if d.return_date is None else d.return_date.isoformat()
+    return f"{dep} → {ret}"
+
+
+def _stops_label(stops: int | None) -> str:
+    if stops is None:
+        return "—"
+    return "nonstop" if stops == 0 else f"{stops} stop{'' if stops == 1 else 's'}"
+
+
+def _render_explore(
+    answer: ExploreAnswer,
+    *,
+    origin: str,
+    month: date | None,
+    trip: TripLength,
+    max_price: int | None,
+) -> None:
+    """The priced destinations, cheapest first, one row each."""
+    when = "the next six months" if month is None else f"{month:%B %Y}"
+    t = Table(
+        title=f"Google Flights explore · from {_safe_text(origin)} · {_safe_text(when)} · "
+        f"{_safe_text(trip.name)} ({trip.nights[0]:d}-{trip.nights[1]:d} nights)"
+        + ("" if max_price is None else f" · up to {_safe_text(answer.currency)}{max_price:d}"),
+        show_header=True,
+        header_style="bold green",
+    )
+    for name in ("#", "destination", "airport", "price", "dates", "nights", "carrier", "stops"):
+        t.add_column(_safe_text(name), justify="right" if name in ("#", "price") else "left")
+    t.add_column("duration")
+    for i, d in enumerate(answer.priced, 1):
+        t.add_row(
+            f"{i:d}",
+            _safe_text(", ".join(x for x in (d.name, d.country) if x) or "—"),
+            _safe_text(d.code or "—"),
+            "—" if d.price is None else f"{_safe_text(answer.currency)}{d.price:.2f}",
+            _safe_text(_explore_dates(d)),
+            "—" if d.nights is None else f"{d.nights:d}",
+            _safe_text(d.carrier or "—"),
+            _safe_text(_stops_label(d.stops)),
+            "—"
+            if d.duration_min is None
+            else f"{d.duration_min // 60:d}h{d.duration_min % 60:02d}m",
+        )
+    console.print(t)
+
+
+@app.command()
+def explore(
+    origin: Annotated[str, typer.Argument(help="Origin airport (IATA).")],
+    month: Annotated[
+        str | None,
+        typer.Option(
+            "--month",
+            help="YYYY-MM: this month or one of the next five. Default: the next six months.",
+        ),
+    ] = None,
+    days: Annotated[
+        str | None,
+        typer.Option(
+            "--days",
+            help="Trip length in nights, 'A-B'. Picks the page's weekend (1-4), one "
+            "week (6-9) or two weeks (13-16); a range must overlap exactly one. "
+            "Default: one week.",
+        ),
+    ] = None,
+    max_price: Annotated[
+        int | None,
+        typer.Option(
+            "--max-price", min=1, help="List only destinations priced at or under this, in USD."
+        ),
+    ] = None,
+    fmt: str = _FORMAT_OPT,
+    gf_headed: bool = typer.Option(
+        False, "--gf-headed", help="Show the Chrome window explore opens. Default: headless."
+    ),
+) -> None:
+    """Where ORIGIN flies, and the cheapest round trip to each: Google Flights' explore page.
+
+    Reads the page in Chrome (the browser extra). Only priced destinations are
+    listed, cheapest first; a price cap leaves the rest unpriced."""
+    from ._gf_browser import interrupt_guard, session_scope  # noqa: PLC0415 — patchright
+    from ._gf_explore import document  # noqa: PLC0415 — fli, paid only by explore
+    from ._gf_explore import explore as read_explore  # noqa: PLC0415
+
+    json_out = _resolve_format(fmt=fmt, json_flag=False) == "json"
+    code = _explore_origin(origin)
+    first = _explore_month(month)
+    trip = _explore_trip_length(days)
+    url = google_flights_explore_url(
+        code,
+        month=None if first is None else first.month,
+        trip_length=trip.code,
+        max_price=max_price,
+    )
+    try:
+        with interrupt_guard(), session_scope():
+            answer = read_explore(url, origin=code, month=first, headed=gf_headed)
+    except GfBackendError as e:
+        _report_page_refusal("No explore results", e)
+        raise typer.Exit(1) from e
+    priced = answer.priced
+    unpriced = len(answer.destinations) - len(priced)
+    if not priced and max_price is None:
+        _no_explore_results(
+            f"Google Flights' explore page priced none of its {unpriced:d} destinations."
+        )
+    if json_out:
+        sys.stdout.write(json.dumps(document(answer), indent=2))
+    elif priced:
+        _render_explore(answer, origin=code, month=first, trip=trip, max_price=max_price)
+    elif max_price is not None:
+        console.print(
+            f"[yellow]No destination from {_safe_text(code)} is priced at or under "
+            f"{_safe_text(answer.currency)}{max_price:d}.[/]"
+        )
+    if unpriced:
+        err.print(f"[dim]{unpriced:d} more destinations have no price under this query.[/]")
+
+
+def _no_explore_results(why: str) -> NoReturn:
+    err.print(f"[red]No explore results:[/] {_safe_text(why)}")
+    raise typer.Exit(1)
 
 
 @app.command(deprecated=True)

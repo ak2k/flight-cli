@@ -559,7 +559,8 @@ def test_multi_cabin_fan_out_honours_an_encodable_constraint(
     seen: list[Any] = []
     rungs: list[Any] = []
 
-    def _capture(filters: Any, top_n: int, transport: Any) -> list[Any]:
+    def _capture(filters: Any, top_n: int, transport: Any, currency: str, keep: Any) -> list[Any]:
+        assert currency == "USD"  # no --currency: the page is asked for its default
         seen.append(filters)
         rungs.append(transport)
         return []

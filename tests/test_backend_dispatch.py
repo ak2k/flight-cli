@@ -8,10 +8,9 @@ needn't be (slow) or gflight is invoked for inexpressible queries (errors
 deep in fli).
 
 The second load-bearing fact is the search transport: Google's public page,
-whose `tfs=` parameter carries only a stop ceiling today. Anything else goes to
-Matrix WITH ITS REASON, because the alternative — post-filtering Google's fixed
-~30-row board — answers a constrained search with a plausible-looking "no
-results"."""
+whose `tfs=` parameter carries only a stop ceiling today. The page serves its
+full board, so the Tier-2 carrier predicates the post-filter evaluates are
+served there too. Anything else goes to Matrix WITH ITS REASON."""
 
 from __future__ import annotations
 
@@ -71,8 +70,6 @@ def test_auto_plain_search_picks_gflight() -> None:
         ("youth", 1),
         ("inf_seat", 1),
         ("inf_lap", 1),
-        ("origin", "JFK,EWR"),  # airport set — the GF bridge keeps only the first
-        ("destination", "LHR,LGW"),
         # Neither reaches the search page at all: `fli_bridge`, which the `tfs=`
         # parameter is encoded from, has no field for either, so a query served
         # on Google is served with the constraint simply gone.
@@ -83,6 +80,75 @@ def test_auto_plain_search_picks_gflight() -> None:
 def test_auto_hard_matrix_flag_picks_matrix(flag: str, value: object) -> None:
     """Flags the GF bridge can't map at all always force Matrix."""
     assert _call(**{flag: value}) == BACKEND_MATRIX  # pyright: ignore[reportArgumentType]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"origin": "JFK,EWR"},
+        {"destination": "LHR,LGW"},
+        # Metro codes reach Google as their member airports. QSF and SAO are in
+        # fli's table as other cities' airports, and are served through the
+        # member table all the same.
+        {"origin": "NYC", "destination": "LAX"},
+        {"origin": "QSF"},
+        {"destination": "SAO"},
+        {"origin": "NYC", "destination": "LON"},
+    ],
+)
+def test_auto_airport_sets_and_metro_codes_stay_on_gflight(
+    overrides: dict[str, object], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Google's page takes a set of airports per leg, so an airport set is
+    answered there over every airport, not flattened and not sent to Matrix."""
+    assert _call(**overrides) == BACKEND_GFLIGHT  # pyright: ignore[reportArgumentType]
+    assert capsys.readouterr().err == ""
+
+
+# Ten origins: with one destination, a leg of exactly the bound's 11 airports.
+_TEN = ("JFK", "LGA", "EWR", "BOS", "IAD", "DCA", "BWI", "PHL", "ATL", "MIA")
+
+
+def test_a_leg_of_exactly_eleven_airports_stays_on_gflight() -> None:
+    assert _call(origin=",".join(_TEN), destination="LAX") == BACKEND_GFLIGHT
+
+
+def test_a_leg_of_twelve_airports_goes_to_matrix_naming_the_count(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Google's page declined 15 airports in one leg outright; the bound keeps
+    region lists Matrix answered on Matrix rather than failing on Google."""
+    assert _call(origin=",".join(_TEN), destination="LAX,SFO") == BACKEND_MATRIX
+    printed = " ".join(capsys.readouterr().err.split())
+    assert "12 airports on one leg (its limit is 11)" in printed, printed
+
+
+def test_the_bound_counts_a_metro_code_as_its_members() -> None:
+    # LON is six airports: 6 + 6 = 12.
+    assert _call(origin="LON", destination="JFK,LGA,EWR,BOS,IAD,DCA") == BACKEND_MATRIX
+    assert _call(origin="LON", destination="JFK,LGA,EWR,BOS,IAD") == BACKEND_GFLIGHT
+
+
+def test_explicit_gflight_refuses_a_leg_over_the_bound() -> None:
+    with pytest.raises(typer.BadParameter, match=r"12 airports on one leg \(its limit is 11\)"):
+        _call(BACKEND_GFLIGHT, origin=",".join(_TEN), destination="LAX,SFO")
+
+
+@pytest.mark.parametrize(
+    "origin,destination,shared",
+    [
+        ("NYC", "JFK", "JFK"),
+        ("JFK,EWR", "EWR,LHR", "EWR"),
+    ],
+)
+def test_an_airport_at_both_ends_of_a_leg_goes_to_matrix(
+    origin: str, destination: str, shared: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """fli checks only the first airport of each side: `NYC JFK` raised out of
+    the bridge, and `JFK,EWR EWR,LHR` would be sent with EWR at both ends."""
+    assert _call(origin=origin, destination=destination) == BACKEND_MATRIX
+    printed = " ".join(capsys.readouterr().err.split())
+    assert f"an airport at both ends of a leg ({shared})" in printed, printed
 
 
 def test_auto_stop_ceiling_stays_on_gflight() -> None:
@@ -133,22 +199,50 @@ def test_stop_ceiling_above_two_goes_to_matrix() -> None:
     [
         ("routing", "LH+"),  # marketing carrier
         ("routing", "F* X:FRA F*"),  # via airport
-        ("routing", "O:LH+"),  # operating carrier
+        ("routing", "X:FRA"),
         ("extension", "MAXCONNECT 2:00"),  # layover max
         ("extension", "ALLIANCE star-alliance"),
-        ("extension", "-CODESHARE"),
         ("extension", "MAXDUR 10:00"),
         ("extension", "F bc=y"),  # fare basis (Tier 3)
         ("extension", "MAXMILES 8000"),  # mileage (Tier 3)
         ("routing", "BA AA"),  # ordered carrier chain
+        ("routing", "~BA"),  # direct, not BA (Tier 3)
         ("extension", "MINCONNECT 1:00"),
         ("extension", "-REDEYES"),
+        # Post-filterable, but Matrix reads both positionally and the filter
+        # does not: bare AS21 is one flight, `F* ~DUB F*` one connection.
+        ("routing", "AS21"),
+        ("routing", "AS21+"),
+        ("routing", "F* ~DUB F*"),
+        ("extension", "-CITIES DUB"),
     ],
 )
 def test_auto_unencodable_constraint_picks_matrix(flag: str, value: object) -> None:
-    """Anything the page's tfs= parameter cannot carry goes to Matrix, including
-    constraints only a server-side filter could apply."""
+    """Anything the page's tfs= parameter cannot carry and the post-filter does
+    not serve goes to Matrix."""
     assert _call(**{flag: value}) == BACKEND_MATRIX  # pyright: ignore[reportArgumentType]
+
+
+@pytest.mark.parametrize(
+    "flag,value",
+    [
+        ("routing", "O:LH+"),  # operating carrier
+        ("extension", "-CODESHARE"),
+        ("routing", "~LH+"),  # no LH-booked leg
+        ("extension", "-AIRLINES LH"),
+        ("extension", "OPAIRLINES LH"),
+        ("routing", "~BA+"),
+    ],
+)
+def test_auto_serves_post_filterable_tier2_on_google(flag: str, value: object) -> None:
+    """The page serves its full board, so a Tier-2 carrier predicate the post-
+    filter evaluates is served by Google, on either backend spelling."""
+    assert _call(**{flag: value}) == BACKEND_GFLIGHT  # pyright: ignore[reportArgumentType]
+    assert _call(BACKEND_GFLIGHT, **{flag: value}) == BACKEND_GFLIGHT  # pyright: ignore[reportArgumentType]
+
+
+def test_a_post_filterable_predicate_beside_one_that_is_not_still_picks_matrix() -> None:
+    assert _call(routing="~BA+", extension="MINCONNECT 1:00") == BACKEND_MATRIX
 
 
 def test_auto_mixed_encodable_and_not_still_picks_matrix() -> None:
@@ -185,17 +279,11 @@ def test_page_can_encode_names_every_constraint_it_refuses() -> None:
     [
         ({"routing": "DL+"}, "a carrier filter (DL)"),
         ({"children": 1}, "a passenger type beyond adults"),
-        ({"origin": "JFK,EWR"}, "a multi-airport origin/destination"),
-        # A metro code is ONE token, so the comma-list check above does not see
-        # it. Google Flights resolves an origin against fli's airport table,
-        # which has no member for most of the metro codes the docs steer users
-        # onto — reaching the bridge with one is an AttributeError before any
+        # A code that is neither an fli airport nor a metro code in the member
+        # table: reaching the bridge with one is an AttributeError before any
         # request, and on `--format json` that is exit 1 and an empty document.
-        ({"origin": "NYC"}, "a city code rather than an airport (NYC)"),
-        # The quieter half: QSF is in fli's table, as Ain Arnat in Algeria. A
-        # membership test alone reads it as serveable and the query is built
-        # and sent for the wrong airport, so the collisions are named too.
-        ({"origin": "QSF"}, "a city code rather than an airport (QSF)"),
+        ({"origin": "YTO"}, "a city code rather than an airport (YTO)"),
+        ({"origin": "JFK,ZZZ"}, "a city code rather than an airport (ZZZ)"),
         ({"slice_specs": ["JFK-LHR:2026-08-15"]}, "a multi-city itinerary"),
         ({"depart_times": "morning"}, "a departure/arrival time window"),
         ({"allow_airport_changes": False}, "a ban on changing airports"),
@@ -272,19 +360,22 @@ def test_explicit_gflight_error_lists_every_reason() -> None:
         _call(BACKEND_GFLIGHT, children=1, routing="DL+")
 
 
-def test_explicit_gflight_error_names_the_airport_set() -> None:
-    with pytest.raises(typer.BadParameter, match="multi-airport"):
-        _call(BACKEND_GFLIGHT, origin="JFK,EWR")
+@pytest.mark.parametrize("overrides", [{"origin": "JFK,EWR"}, {"origin": "NYC"}])
+def test_explicit_gflight_serves_an_airport_set_and_a_metro_code(
+    overrides: dict[str, object],
+) -> None:
+    assert _call(BACKEND_GFLIGHT, **overrides) == BACKEND_GFLIGHT  # pyright: ignore[reportArgumentType]
 
 
-def test_explicit_gflight_refuses_a_metro_code_rather_than_crashing() -> None:
-    """Asked for outright, the metro code is a parameter error: exit 2 with the
-    reason, in place of the `AttributeError` the bridge raises when it looks the
-    code up. The failure it replaces is silent on stdout — `--format json` and
-    `--fast` both skip the enrich path, so the crash was the whole outcome and
-    the document was zero bytes."""
-    with pytest.raises(typer.BadParameter, match=r"a city code rather than an airport \(NYC\)"):
-        _call(BACKEND_GFLIGHT, origin="NYC")
+def test_explicit_gflight_refuses_an_unknown_city_code_rather_than_crashing() -> None:
+    """Asked for outright, a code that is neither an airport nor in the member
+    table is a parameter error: exit 2 with the reason, in place of the
+    `AttributeError` the bridge raises when it looks the code up. The failure it
+    replaces is silent on stdout — `--format json` and `--fast` both skip the
+    enrich path, so the crash was the whole outcome and the document was zero
+    bytes."""
+    with pytest.raises(typer.BadParameter, match=r"a city code rather than an airport \(YTO\)"):
+        _call(BACKEND_GFLIGHT, origin="YTO")
 
 
 @pytest.mark.parametrize(
@@ -362,12 +453,12 @@ def test_gflight_alias_splits_a_multi_airport_argument_like_search(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A comma-separated argument is a list of airports here exactly as it is
-    in `flight search`, and a multi-airport query belongs to Matrix. Parsing it
-    as one opaque airport code turns a query the CLI answers into a model
-    validation panel."""
+    in `flight search`, and Google Flights serves the set. Parsing it as one
+    opaque airport code turns a query the CLI answers into a model validation
+    panel."""
     called, output = _gflight_alias(monkeypatch, "JFK,LAX", "MIA", "--dep", _future_dep())
-    assert called == ["matrix"]
-    assert "a multi-airport origin/destination" in output
+    assert called == ["gflight"]
+    assert "Using Matrix" not in output
     assert "validation error" not in output.lower()
 
 

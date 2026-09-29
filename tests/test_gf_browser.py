@@ -25,6 +25,7 @@ import pathlib
 import signal
 import sys
 import threading
+import time
 from datetime import date
 from typing import TYPE_CHECKING, Any, cast
 
@@ -34,6 +35,7 @@ import pytest
 # capture; each helper's own docstring says why it is shaped as it is.
 from conftest import _answering, _ds1, capture_err
 from conftest import _page as _page_carrying
+from flight_cli import _gf_booking, _gf_explore
 from flight_cli import _gf_browser as gfb
 from flight_cli import _gf_common as gfc
 from flight_cli import _gflight_ids as gfid
@@ -104,13 +106,137 @@ class _FakeResponse:
         return self._body
 
 
+class _FakeFrame:
+    def __init__(self, parent_frame: _FakeFrame | None) -> None:
+        self.parent_frame = parent_frame
+
+
+_MAIN_FRAME = _FakeFrame(None)
+_CHILD_FRAME = _FakeFrame(_MAIN_FRAME)
+
+
+class _FakeRequest:
+    """A request as the capture sees it. `frame=None` is a service worker's,
+    whose `frame` raises in patchright rather than returning nothing."""
+
+    def __init__(self, url: str, *, navigation: bool = False, frame: _FakeFrame | None) -> None:
+        self.url = url
+        self._navigation = navigation
+        self._frame = frame
+        self.finished = False
+
+    def is_navigation_request(self) -> bool:
+        return self._navigation
+
+    @property
+    def frame(self) -> _FakeFrame:
+        if self._frame is None:
+            raise RuntimeError("Service Worker requests do not have an associated frame.")
+        return self._frame
+
+
+class _FakeRpcResponse:
+    """A response the page's own code received. Its body is refused until the
+    request has finished, which is the order the capture promises to read in."""
+
+    def __init__(self, request: _FakeRequest, *, body: str, status: int = 200) -> None:
+        self.request = request
+        self.url = request.url
+        self.status = status
+        self._body = body
+        self.reads = 0
+
+    def text(self) -> str:
+        assert self.request.finished, "body read before the request finished"
+        self.reads += 1
+        return self._body
+
+
+# One step of what the page does: an event name and what it carries.
+type _Event = tuple[str, Any]
+
+
+class _FakeLocator:
+    def __init__(self, page: _FakePage, role: str, name: str, exact: bool) -> None:
+        self._page = page
+        self._found = (role, name, exact)
+
+    def click(self, *, timeout: float) -> None:
+        from patchright.sync_api import Locator
+
+        inspect.signature(Locator.click).bind(None, timeout=timeout)
+        self._page.clicks.append((*self._found, timeout))
+        if self._page.click_error is not None:
+            raise self._page.click_error
+        self._page.emit_all(self._page.on_click)
+
+
 class _FakePage:
     def __init__(self, outcomes: list[Any]) -> None:
         self._outcomes = outcomes
-        self.gotos: list[tuple[str, str, int]] = []
+        self.gotos: list[tuple[str, str, float]] = []
         self.url = ""
+        # What the page does, by the call that lets it happen: every event in
+        # `on_goto` fires inside the navigation and every one in `on_click`
+        # inside the click, in order; `on_wait` delivers ONE event per driver
+        # sleep, so a test can put time between a response and its finish.
+        self.on_goto: list[_Event] = []
+        self.on_click: list[_Event] = []
+        self.on_wait: list[_Event] = []
+        self.click_error: BaseException | None = None
+        self.wait_error: BaseException | None = None
+        self.remove_error: BaseException | None = None
+        self.clicks: list[tuple[str, str, bool, float]] = []
+        self.waits: list[float] = []
+        self.listeners: dict[str, list[Callable[[Any], None]]] = {}
 
-    def goto(self, url: str, *, wait_until: str, timeout: int) -> _FakeResponse | None:
+    def on(self, event: str, f: Callable[[Any], None]) -> None:
+        from patchright.sync_api import Page
+
+        inspect.signature(Page.on).bind(None, event, f)
+        self.listeners.setdefault(event, []).append(f)
+
+    def remove_listener(self, event: str, f: Callable[[Any], None]) -> None:
+        from patchright.sync_api import Page
+
+        inspect.signature(Page.remove_listener).bind(None, event, f)
+        if self.remove_error is not None:
+            raise self.remove_error
+        self.listeners[event].remove(f)
+        if not self.listeners[event]:
+            del self.listeners[event]
+
+    def emit(self, event: str, payload: Any) -> None:
+        if event == "requestfinished":
+            payload.finished = True
+        for f in list(self.listeners.get(event, [])):
+            f(payload)
+
+    def emit_all(self, events: list[_Event]) -> None:
+        for event, payload in events:
+            self.emit(event, payload)
+
+    def get_by_role(self, role: str, *, name: str, exact: bool) -> _FakeLocator:
+        from patchright.sync_api import Page
+
+        inspect.signature(Page.get_by_role).bind(None, role, name=name, exact=exact)
+        return _FakeLocator(self, role, name, exact)
+
+    def wait_for_timeout(self, timeout: float) -> None:
+        from patchright.sync_api import Page
+
+        inspect.signature(Page.wait_for_timeout).bind(None, timeout)
+        self.waits.append(timeout)
+        if self.wait_error is not None:
+            raise self.wait_error
+        if self.on_wait:
+            self.emit(*self.on_wait.pop(0))
+        else:
+            # Nothing left to happen: let real time pass, so a deadline test
+            # ends on the clock rather than on a spin.
+            time.sleep(timeout / 1000)
+
+    def goto(self, url: str, *, wait_until: str, timeout: float) -> _FakeResponse | None:
         self.gotos.append((url, wait_until, timeout))
         self.url = url
         outcome = self._outcomes[min(len(self.gotos) - 1, len(self._outcomes) - 1)]
@@ -120,6 +246,7 @@ class _FakePage:
         # answering a question nobody asked instead of raising the interrupt.
         if isinstance(outcome, BaseException):
             raise outcome
+        self.emit_all(self.on_goto)
         return cast("_FakeResponse | None", outcome)
 
 
@@ -394,7 +521,7 @@ def _filters(*, round_trip: bool) -> Any:
 def no_rung_one(monkeypatch: pytest.MonkeyPatch) -> None:
     """Rung 1 must not run at all under `--gf-transport browser`."""
 
-    def _forbidden(_f: Any) -> list[GFlightWithId]:
+    def _forbidden(_f: Any, **_kw: Any) -> list[GFlightWithId]:
         raise AssertionError("rung 2 fell back into rung 1's GET")
 
     monkeypatch.setattr(gfid, "_one_call", _forbidden)
@@ -527,7 +654,7 @@ def test_the_http_rungs_never_consult_the_browser(
     def _forbidden(*, headed: bool) -> object:
         raise AssertionError(f"mode={mode} reached the browser rung (headed={headed})")
 
-    def _rung_one(_filters_arg: Any) -> list[GFlightWithId]:
+    def _rung_one(_filters_arg: Any, **_kw: Any) -> list[GFlightWithId]:
         return gfid._rows_from_page_html(gfid.PageFetch(_page(), _PAGE_URL, 200))
 
     monkeypatch.setattr(gfb, "session", _forbidden)
@@ -552,7 +679,7 @@ def test_a_browser_refusal_is_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
         assert headed is False
         return session
 
-    def _rung_one(_filters_arg: Any) -> list[GFlightWithId]:
+    def _rung_one(_filters_arg: Any, **_kw: Any) -> list[GFlightWithId]:
         pytest.fail("rung 2 fell back into rung 1's retry ladder")
 
     monkeypatch.setattr(gfb, "session", _hand_out)
@@ -998,7 +1125,7 @@ def test_a_round_trip_pays_for_one_launch_and_navigates_per_leg(
     )
     monkeypatch.setattr(gfb, "_sessions", threading.local())
 
-    def _rung_one(_f: Any) -> list[GFlightWithId]:
+    def _rung_one(_f: Any, **_kw: Any) -> list[GFlightWithId]:
         raise AssertionError("rung 2 fell back into rung 1's GET")
 
     monkeypatch.setattr(gfid, "_one_call", _rung_one)
@@ -1221,11 +1348,11 @@ def test_every_documented_transport_has_a_rung(
     query."""
     rungs: list[str] = []
 
-    def _http(_filters: Any) -> list[Any]:
+    def _http(_filters: Any, **_kw: Any) -> list[Any]:
         rungs.append("http")
         return []
 
-    def _browser(_filters: Any, *, headed: bool) -> list[Any]:
+    def _browser(_filters: Any, *, headed: bool, **_kw: Any) -> list[Any]:
         assert headed is False
         rungs.append("browser")
         return []
@@ -3394,3 +3521,288 @@ def test_a_ctrl_c_after_the_first_table_is_painted_still_exits_130(
     assert "JFK" in result.stdout
     assert "Traceback" not in result.stdout
     assert "Traceback" not in result.stderr
+
+
+# ───────────── capture: a response the page's own code receives ─────────────
+
+_RPC_URL = "https://www.google.com/_/FlightsFrontendUi/data/travel.frontend.flights.FlightsFrontendService/GetCalendarGraph?rpcids=x"
+_GRAPH = gfb.Control("button", "Price graph")
+
+
+def _wants_graph(url: str) -> bool:
+    return "GetCalendarGraph" in url
+
+
+def _nav_request() -> _FakeRequest:
+    return _FakeRequest(_PAGE_URL, navigation=True, frame=_MAIN_FRAME)
+
+
+def _rpc(body: str = "graph") -> tuple[_FakeRequest, _FakeRpcResponse]:
+    request = _FakeRequest(_RPC_URL, frame=_MAIN_FRAME)
+    return request, _FakeRpcResponse(request, body=body)
+
+
+def _served(request: _FakeRequest, response: _FakeRpcResponse) -> list[_Event]:
+    return [("request", request), ("response", response), ("requestfinished", request)]
+
+
+def _capture_page(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> _FakePage:
+    pw = _install(
+        monkeypatch,
+        tmp_path,
+        outcomes=[_FakeResponse(body=_page(), url=_PAGE_URL, status=200, body_error=None)],
+    )
+    return _page_of(pw)
+
+
+def test_capture_catches_a_response_fired_while_the_page_loads(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The listeners are on before the navigation starts, so an RPC the page
+    makes on load — before `goto` has even returned — is the one handed back."""
+    page = _capture_page(monkeypatch, tmp_path)
+    request, response = _rpc("on load")
+    page.on_goto = [("request", _nav_request()), *_served(request, response)]
+    with gfb.GfBrowserSession(headed=False) as session:
+        got = session.capture(_PAGE_URL, _wants_graph)
+    assert got == gfb.CapturedResponse(url=_RPC_URL, status=200, body="on load")
+    assert page.clicks == []
+    [(url, wait_until, timeout)] = page.gotos
+    assert (url, wait_until) == (_PAGE_URL, "domcontentloaded")
+    assert 0 < timeout <= gfb._NAV_TIMEOUT_MS
+    assert page.listeners == {}
+
+
+def test_capture_clicks_the_control_by_role_and_exact_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    page = _capture_page(monkeypatch, tmp_path)
+    page.on_goto = [("request", _nav_request())]
+    request, response = _rpc("after click")
+    page.on_click = _served(request, response)
+    with gfb.GfBrowserSession(headed=False) as session:
+        got = session.capture(_PAGE_URL, _wants_graph, click=_GRAPH)
+    assert got.body == "after click"
+    [(role, name, exact, timeout)] = page.clicks
+    assert (role, name, exact) == ("button", "Price graph", True)
+    assert 0 < timeout <= gfb._CLICK_TIMEOUT_MS
+    assert page.listeners == {}
+
+
+def test_capture_ignores_the_previous_documents_traffic(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The page is reused, so the last document's requests can still be
+    answering when the next navigation starts. Only requests issued from this
+    navigation's own main-frame request on are this page's; the rest match the
+    predicate and are still not the answer. A child frame's navigation and a
+    service worker's request (whose `frame` raises) do not open the gate."""
+    page = _capture_page(monkeypatch, tmp_path)
+    stale_done, stale_done_response = _rpc("stale, finished")
+    stale_late, stale_late_response = _rpc("stale, answered late")
+    fresh, fresh_response = _rpc("fresh")
+    page.on_goto = [
+        ("request", stale_late),
+        *_served(stale_done, stale_done_response),
+        ("request", _FakeRequest(_PAGE_URL, navigation=True, frame=_CHILD_FRAME)),
+        ("request", _FakeRequest(_PAGE_URL, frame=None)),
+        ("request", _nav_request()),
+        ("response", stale_late_response),
+        ("requestfinished", stale_late),
+        *_served(fresh, fresh_response),
+    ]
+    with gfb.GfBrowserSession(headed=False) as session:
+        got = session.capture(_PAGE_URL, _wants_graph)
+    assert got.body == "fresh"
+
+
+def test_capture_reads_the_first_match_only_once_its_request_finished(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """A body read before the request finishes can come back cut short, and
+    `text()` has no deadline to stop it. The capture waits for the finish, and
+    holds out for the FIRST match rather than taking a later one that happened
+    to finish sooner."""
+    page = _capture_page(monkeypatch, tmp_path)
+    first, first_response = _rpc("first, streamed")
+    second, second_response = _rpc("second")
+    page.on_goto = [("request", _nav_request())]
+    page.on_click = [
+        ("request", first),
+        ("response", first_response),
+        *_served(second, second_response),
+    ]
+    page.on_wait = [
+        ("request", _FakeRequest(_PAGE_URL, frame=_MAIN_FRAME)),
+        ("requestfinished", first),
+    ]
+    with gfb.GfBrowserSession(headed=False) as session:
+        got = session.capture(_PAGE_URL, _wants_graph, click=_GRAPH)
+    assert got.body == "first, streamed"
+    assert (first_response.reads, second_response.reads) == (1, 0)
+    assert len(page.waits) == 2
+    assert all(0 < w <= gfb._POLL_MS for w in page.waits)
+
+
+def test_capture_refuses_once_its_deadline_is_spent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """A page that never makes the request ends in a typed refusal on the
+    deadline, never in an unbounded wait: every wait handed to the driver is
+    positive, because patchright reads a zero timeout as none at all."""
+    page = _capture_page(monkeypatch, tmp_path)
+    page.on_goto = [("request", _nav_request())]
+    with gfb.GfBrowserSession(headed=False) as session:  # noqa: SIM117 — nesting keeps the session's lifetime separate from what raises inside it
+        with pytest.raises(GfBrowserUnavailableError, match="in time"):
+            session.capture(_PAGE_URL, _wants_graph, timeout_s=0.05)
+    assert page.waits
+    assert all(w > 0 for w in page.waits)
+    assert page.listeners == {}
+
+
+def test_a_spent_deadline_is_refused_never_passed_as_no_timeout() -> None:
+    with pytest.raises(GfBrowserUnavailableError):
+        gfb._budget_ms(time.monotonic() - 1, 1_000)
+    assert gfb._budget_ms(time.monotonic() + 60, 1_000) == 1_000
+
+
+def test_a_missing_control_is_a_typed_refusal_that_names_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    page = _capture_page(monkeypatch, tmp_path)
+    page.on_goto = [("request", _nav_request())]
+    page.click_error = RuntimeError("Timeout 20000ms exceeded.\ncall log:\n  - waiting for locator")
+    with gfb.GfBrowserSession(headed=False) as session:  # noqa: SIM117 — nesting keeps the session's lifetime separate from what raises inside it
+        with pytest.raises(GfBrowserUnavailableError, match=r"'Price graph'.*Timeout 20000ms"):
+            session.capture(_PAGE_URL, _wants_graph, click=_GRAPH)
+    assert page.listeners == {}
+
+
+@pytest.mark.parametrize(
+    "outcome,expected",
+    [(RuntimeError("net::ERR_ABORTED\ncall log:"), "could not load"), (None, "no response")],
+)
+def test_a_failed_capture_navigation_is_a_typed_refusal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, outcome: Any, expected: str
+) -> None:
+    pw = _install(monkeypatch, tmp_path, outcomes=[outcome])
+    with gfb.GfBrowserSession(headed=False) as session:  # noqa: SIM117 — nesting keeps the session's lifetime separate from what raises inside it
+        with pytest.raises(GfBrowserUnavailableError, match=expected):
+            session.capture(_PAGE_URL, _wants_graph, click=_GRAPH)
+    assert _page_of(pw).clicks == []
+    assert _page_of(pw).listeners == {}
+
+
+def test_check_page_sees_the_navigation_and_its_refusal_is_not_rewrapped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """A throttle interstitial has no control to click. Handed the navigation
+    first, the caller's parser names the wall; the capture neither clicks nor
+    turns that verdict into "Chrome could not …"."""
+    pw = _install(
+        monkeypatch,
+        tmp_path,
+        outcomes=[
+            _FakeResponse(body="<html>sorry</html>", url=_SORRY_URL, status=200, body_error=None)
+        ],
+    )
+    seen: list[gfc.PageFetch] = []
+
+    def _refuse(fetch: gfc.PageFetch) -> None:
+        seen.append(fetch)
+        raise GfThrottledError("Google Flights rate-limited the request")
+
+    with gfb.GfBrowserSession(headed=False) as session:  # noqa: SIM117 — nesting keeps the session's lifetime separate from what raises inside it
+        with pytest.raises(GfThrottledError):
+            session.capture(_PAGE_URL, _wants_graph, click=_GRAPH, check_page=_refuse)
+    assert seen == [gfc.PageFetch(html="<html>sorry</html>", final_url=_SORRY_URL, status_code=200)]
+    assert _page_of(pw).clicks == []
+    assert _page_of(pw).listeners == {}
+
+
+def test_a_ctrl_c_during_the_capture_wait_is_not_turned_into_a_refusal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The wait is where a capture spends its time. An interrupt there is the
+    user's, and it leaves the session marked finished so the close that follows
+    stops the driver instead of driving a dead sync API."""
+    page = _capture_page(monkeypatch, tmp_path)
+    page.on_goto = [("request", _nav_request())]
+    page.wait_error = KeyboardInterrupt()
+    session = gfb.GfBrowserSession(headed=False)
+    with pytest.raises(KeyboardInterrupt) as e:
+        session.capture(_PAGE_URL, _wants_graph)
+    assert not isinstance(e.value, GfBrowserUnavailableError)
+    assert session.finished
+    assert page.listeners == {}
+    session.close()
+
+
+_BOOKING_URL = "https://www.google.com/travel/flights/booking?tfs=x&curr=USD"
+_EXPLORE_URL = "https://www.google.com/travel/explore?tfs=x&curr=USD"
+
+
+def _interrupted_page(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    """A Ctrl-C in the capture's wait, after which removing a listener raises
+    as patchright's does once the interrupt has unwound its event loop."""
+    page = _capture_page(monkeypatch, tmp_path)
+    page.on_goto = [("request", _nav_request())]
+    page.wait_error = KeyboardInterrupt()
+    page.remove_error = RuntimeError(": no running event loop")
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        pytest.param(
+            lambda: _gf_booking.booking_options(_BOOKING_URL, flights=[("DL", "1")], headed=False),
+            id="sellers",
+        ),
+        pytest.param(
+            lambda: _gf_explore.explore(_EXPLORE_URL, origin="JFK", month=None, headed=False),
+            id="explore",
+        ),
+    ],
+)
+def test_a_ctrl_c_during_a_page_capture_reaches_the_reader_as_the_interrupt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, read: Callable[[], object]
+) -> None:
+    _interrupted_page(monkeypatch, tmp_path)
+    with pytest.raises(KeyboardInterrupt), gfb.session_scope():
+        read()
+
+
+def test_a_ctrl_c_during_explore_exits_130_without_a_traceback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, keep_sigint: None
+) -> None:
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    _interrupted_page(monkeypatch, tmp_path)
+    result = CliRunner().invoke(cli.app, ["explore", "JFK"])
+    assert result.exit_code == 130, (result.exit_code, result.output)
+    assert result.stdout == ""
+    assert "Traceback" not in result.stderr
+
+
+def test_capture_shares_the_session_and_its_one_page_with_get_html(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """One launch serves a search page fetch and two captures, and no capture
+    leaves a listener behind for the next navigation to trip."""
+    pw = _install(
+        monkeypatch,
+        tmp_path,
+        outcomes=[_FakeResponse(body=_page(), url=_PAGE_URL, status=200, body_error=None)],
+    )
+    page = _page_of(pw)
+    with gfb.GfBrowserSession(headed=False) as session:
+        session.get_html(_PAGE_URL)
+        for body in ("one", "two"):
+            request, response = _rpc(body)
+            page.on_goto = [("request", _nav_request()), *_served(request, response)]
+            assert session.capture(_PAGE_URL, _wants_graph).body == body
+            assert page.listeners == {}
+    assert pw.chromium.launches == 1
+    assert len(page.gotos) == 3

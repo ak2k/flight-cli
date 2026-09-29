@@ -15,9 +15,10 @@ intent into the right invocation **on the first try**.
 
 | Command | Purpose |
 |---|---|
-| `flight search ORIGIN DEST --dep YYYY-MM-DD [--return YYYY-MM-DD]` | Specific-date search. Auto-picks Google Flights for plain cash queries and ITA Matrix when a Matrix-only flag is set (routing/extension/multi-city slice/time-of-day/extra pax types). Force with `--backend matrix\|gflight`. PointsPath award overlay runs on both backends when tokens are present. |
-| `flight calendar ORIGIN DEST --start YYYY-MM-DD [--end ...] [-d 5-7]` | Lowest-fare grid across a date window. Matrix only. Default round-trip; `--one-way` flips. |
+| `flight search ORIGIN DEST --dep YYYY-MM-DD [--return YYYY-MM-DD]` | Specific-date search. Auto-picks Google Flights for plain cash queries and ITA Matrix when a constraint Google can't serve is set (most routing/extension, multi-city slice, time-of-day, extra pax types); a stop cap, carrier excludes (`~XX+`, `-AIRLINES`), operating carrier (`O:XX+`, `OPAIRLINES`) and `-CODESHARE` stay on Google, which serves its full board (`-n` above 30 works). Force with `--backend matrix\|gflight`. PointsPath award overlay runs on both backends when tokens are present. |
+| `flight calendar ORIGIN DEST --start YYYY-MM-DD [--end ...] [-d 5-7]` | Lowest-fare grid across a date window. Matrix by default. Default round-trip; `--one-way` flips. `--fast` reads Google Flights' price graph instead, through a real Chrome (single airport, one-way or one trip length like `-d 7`, stops/cabin/adults only); it exits 1 rather than fall back. |
 | `flight detail ORIGIN DEST --dep YYYY-MM-DD --start ... --end ...` | Phase-2 of the calendar flow: full itineraries for a date picked from the grid. Matrix only. |
+| `flight explore ORIGIN [--month YYYY-MM] [--days A-B] [--max-price P]` | "Where can I fly from here, under this price?": Google Flights' explore page (Chrome), priced destinations cheapest first; `--days` must overlap exactly one of weekend (1-4), one week (6-9), two weeks (13-16) nights, and the trips listed span that whole length (5-7 lists 6-9 nights); `--month` must be in the next six months. For "who sells this itinerary cheapest", add `--sellers [--pick N]` to `flight search`. |
 | `flight airport QUERY` | IATA / partial-name autocomplete. |
 | `flight fare` / `flight gflight` | **Deprecated** aliases for `search --backend matrix` / `search --backend gflight` — still work for one release; emit a deprecation warning. Prefer `flight search` for new invocations. |
 
@@ -28,6 +29,8 @@ Global flags (every search-printing command):
 - `--matrix-url` / `--google-url` — toggle deep-link emission
 - `--cash-only` — skip all award providers; show only the cash table
 - `--awards-only` — skip the cash table; show only the award provider output
+- `--currency EUR` — price in that ISO 4217 currency on both backends (`search`, `calendar`, `detail`)
+- `--fare-rules [--pick N]` — `search` only, routes to Matrix: fare basis, booking codes and refund/change penalties for itinerary N (default 1)
 - `--providers pp[,seats]` — restrict to a named subset of award providers (default: all configured)
 - `--provider-opt KEY=VAL` — per-provider override, repeatable, e.g. `--provider-opt pp.airlines=United,Delta` or `--provider-opt pp.cabins=Economy,Business`. Defaults live in `~/.config/flight-cli/config.toml` under `[providers.<name>]` tables.
 
@@ -186,9 +189,11 @@ Full reference: [uponarriving.com ITA Matrix guide](https://www.uponarriving.com
 
 When users mention regions / metros, expand to the right IATA list. Two flavors:
 
-**IATA metro codes Matrix accepts as a single token** (prefer these). Every one
-below except `HOU` routes the search to Matrix, because Google Flights takes
-airport codes only:
+**IATA metro codes Matrix accepts as a single token** (prefer these). `flight
+search` serves them on Google Flights over every airport listed; `HOU`, `LAX`,
+`BER`, `SHA`, `BKK` and `DPS` are also airport codes and stay that one airport
+there. A leg of more than 11 airports (origins plus destinations, metro codes
+counted as their members) goes to Matrix:
 
 | Metro | Code | Airports it covers |
 |---|---|---|

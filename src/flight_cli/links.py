@@ -22,6 +22,7 @@ from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any, Literal, assert_never, cast
 
 from ._gf_errors import GfTfsUnsupportedError
+from ._metro import expand_airports, gf_leg_refusal
 from .domain import (
     Cabin,
     CalendarFollowup,
@@ -34,6 +35,8 @@ from .domain import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from .models import Slice
 
 # ───────────────────────── Matrix deep-link URL ────────────────────────────
@@ -412,6 +415,11 @@ class _PbWriter:
         self.buf.extend(data)
 
 
+def _endpoint_codes(value: str | Sequence[str]) -> tuple[str, ...]:
+    # A str is itself a Sequence[str]: iterated, "HNL" would write H, N and L.
+    return (value,) if isinstance(value, str) else tuple(value)
+
+
 def _encode_gflight_pinned_tfs(
     *,
     slices: list[dict[str, Any]],
@@ -431,8 +439,8 @@ def _encode_gflight_pinned_tfs(
     `slices`: list of dicts shaped:
         {
             "date": "YYYY-MM-DD",
-            "origin": "HNL",
-            "destination": "MIA",
+            "origin": "HNL",         # or a sequence of airports, one entry each
+            "destination": "MIA",    # likewise
             "max_stops": 0,          # optional, zero-based ceiling; see below
             "segments": [
                 {"origin": "HNL", "date": "2026-10-14",
@@ -466,18 +474,15 @@ def _encode_gflight_pinned_tfs(
             seg_w.string(5, seg["carrier"])
             seg_w.string(6, seg["flight"])
             s.message(4, seg_w)
-        # Pax info — slice origin/destination. Field 1 is observed to be
-        # the constant `1` regardless of pax count (verified at adults=3:
-        # encoded as `1` not `3`). The repeated field 8 at top level
-        # encodes the per-pax-type count, not this varint.
-        origin_w = _PbWriter()
-        origin_w.varint(1, 1)
-        origin_w.string(2, sl["origin"])
-        s.message(13, origin_w)
-        dest_w = _PbWriter()
-        dest_w.varint(1, 1)
-        dest_w.string(2, sl["destination"])
-        s.message(14, dest_w)
+        # Slice origins (13) and destinations (14), one repeated entry per
+        # airport. Field 1 is the endpoint kind: 1 an airport (Google's UI
+        # writes 3 for a city, with a Knowledge Graph id in place of the code).
+        for field, key in ((13, "origin"), (14, "destination")):
+            for code in _endpoint_codes(sl[key]):
+                end_w = _PbWriter()
+                end_w.varint(1, 1)
+                end_w.string(2, code)
+                s.message(field, end_w)
         w.message(3, s)
 
     # Field 8: one repeated varint per occupant, carrying that occupant's TYPE.
@@ -555,10 +560,8 @@ _TFS_REFUSED_FIELDS: tuple[tuple[str, str], ...] = (
     ("sort_by", "a server-side sort order"),
 )
 # Read and deliberately not acted on. `show_all_results` defaults to True and there is
-# no tfs= field for it. The page serves Google's default board (~30 rows per
-# leg, measured 2026-09-02) with no back-fill, so a top-N above that returns
-# fewer rows than asked for. That's a board ceiling, not a dropped constraint —
-# nothing the user asked for goes unhonoured.
+# no tfs= field for it: the page URL asks for the full board on every search
+# through its own `tfu=` parameter instead (`google_flights_search_page_url`).
 _TFS_IGNORED_FIELDS = frozenset({"show_all_results"})
 
 # Non-adult passengers ride tfs field 8 under distinct kind codes (2 child,
@@ -573,6 +576,9 @@ _TFS_REFUSED_PAX: tuple[tuple[str, str], ...] = (
 )
 
 _TFS_MULTI_CITY = 3  # fli TripType.MULTI_CITY — the page inlines no rows for it
+
+# `{2: {1: 0, 2: 1}, 4: {}}`: field 2.2 is the page's "show all flights" bit.
+_GF_SHOW_ALL_TFU = "EgQIABABIgA"
 
 
 def _tfs_iata(value: Any) -> str:
@@ -600,15 +606,11 @@ def _tfs_slice(segment: Any, *, max_stops: int | None) -> dict[str, Any]:
     """One tfs= slice from an fli FlightSegment, refusing what it can't carry."""
     if segment.time_restrictions is not None:
         raise GfTfsUnsupportedError("time_restrictions", "a departure/arrival time window")
-    origins = [_tfs_iata(entry[0]) for entry in segment.departure_airport]
-    destinations = [_tfs_iata(entry[0]) for entry in segment.arrival_airport]
-    if len(origins) != 1 or len(destinations) != 1:
-        raise GfTfsUnsupportedError("flight_segments", "more than one airport per leg")
     selected = segment.selected_flight
     return {
         "date": segment.travel_date,
-        "origin": origins[0],
-        "destination": destinations[0],
+        "origin": [_tfs_iata(entry[0]) for entry in segment.departure_airport],
+        "destination": [_tfs_iata(entry[0]) for entry in segment.arrival_airport],
         "max_stops": max_stops,
         # A pinned leg (round-trip expansion sets `selected_flight` on the
         # outbound and re-fetches) becomes repeated field 3.4, which is how the
@@ -685,11 +687,16 @@ def google_flights_search_page_url(
 
     `gl=` is explicit because the page's row set and its consent behaviour both
     key off the resolved country, and IP geolocation is not stable enough to
-    leave it implicit."""
+    leave it implicit.
+
+    `tfu=` sets the "show all" bit. Without it the page inlines only Google's
+    top ~30 rows (JFK-LAX 30 of 95, JFK-LHR 22 of 101), so a larger `-n` comes
+    back short and a post-filter answers from a partial board. The cost: the
+    page roughly doubles (JFK-LAX 3.6 MB to 7.5 MB, about 0.7 s more)."""
     b64 = base64.urlsafe_b64encode(tfs).rstrip(b"=").decode()
     return (
         f"https://www.google.com/travel/flights?tfs={urllib.parse.quote(b64)}"
-        f"&hl={language}&gl={country}&curr={currency}"
+        f"&hl={language}&gl={country}&curr={currency}&tfu={_GF_SHOW_ALL_TFU}"
     )
 
 
@@ -698,11 +705,12 @@ def google_flights_pinned_url(
     *,
     outbound_segments: list[dict[str, str]],
     return_segments: list[dict[str, str]] | None = None,
-    currency: str = "USD",
+    currency: str | None = None,
     language: str = "en",
 ) -> str:
     """Build a Google Flights URL that pre-selects a specific itinerary
-    (not just pre-filled search criteria).
+    (not just pre-filled search criteria). `currency` defaults to the
+    search's own, then USD.
 
     `outbound_segments` / `return_segments` shape per segment:
         {"origin": "HNL", "date": "2026-10-14",
@@ -711,6 +719,47 @@ def google_flights_pinned_url(
     Verified against captured headed-browser navigation in
     research/capture/manual-1779193717/. See `_encode_gflight_pinned_tfs`
     docstring for the protobuf schema notes."""
+    b64 = _pinned_tfs_b64(s, outbound_segments, return_segments)
+    curr = currency or s.options.currency or "USD"
+    return (
+        f"https://www.google.com/travel/flights/search?"
+        f"tfs={urllib.parse.quote(b64)}&hl={language}&curr={curr}"
+    )
+
+
+def google_flights_booking_url(
+    s: Search,
+    *,
+    outbound_segments: list[dict[str, str]],
+    return_segments: list[dict[str, str]] | None = None,
+    currency: str | None = None,
+    language: str = "en",
+    country: str = "US",
+) -> str:
+    """The booking page for one itinerary: the pinned link's `tfs=` on
+    `/travel/flights/booking`, which lists every seller of that itinerary.
+
+    The page needs no booking token; the legs in `tfs=` are enough. `gl=` is
+    explicit for the reason the search page's is: sellers and their prices key
+    off the resolved country, and they are compared against a table priced
+    under `gl=US`. `currency` is the currency of the picked row's Google price:
+    Google can price a row in another currency than the search asked for, and
+    the sellers are compared with that row. A row with no Google price is
+    asked in the search's currency, then USD."""
+    b64 = _pinned_tfs_b64(s, outbound_segments, return_segments)
+    curr = currency or s.options.currency or "USD"
+    return (
+        f"https://www.google.com/travel/flights/booking?"
+        f"tfs={urllib.parse.quote(b64)}&hl={language}&gl={country}&curr={curr}"
+    )
+
+
+def _pinned_tfs_b64(
+    s: Search,
+    outbound_segments: list[dict[str, str]],
+    return_segments: list[dict[str, str]] | None,
+) -> str:
+    """The pinned-itinerary `tfs=` value, shared by the search and booking pages."""
     if not isinstance(s, SpecificDateSearch | CalendarFollowup):
         raise TypeError(
             "google_flights_pinned_url only meaningful for specific-date / "
@@ -719,11 +768,12 @@ def google_flights_pinned_url(
     out = s.legs[0]
     if out.date is None:
         raise AssertionError("outbound leg.date must be set after validation")
-    slices = [
+    out_origins, out_dests = _pinned_slice_airports(out, outbound_segments)
+    slices: list[dict[str, Any]] = [
         {
             "date": out.date.isoformat(),
-            "origin": out.origins[0],
-            "destination": out.destinations[0],
+            "origin": out_origins,
+            "destination": out_dests,
             "segments": outbound_segments,
         }
     ]
@@ -737,11 +787,12 @@ def google_flights_pinned_url(
             raise AssertionError(
                 "return_segments given but return leg has no date set",
             )
+        ret_origins, ret_dests = _pinned_slice_airports(ret, return_segments)
         slices.append(
             {
                 "date": ret.date.isoformat(),
-                "origin": ret.origins[0],
-                "destination": ret.destinations[0],
+                "origin": ret_origins,
+                "destination": ret_dests,
                 "segments": return_segments,
             }
         )
@@ -755,11 +806,78 @@ def google_flights_pinned_url(
         infants_in_seat=p.infants_in_seat,
         infants_on_lap=p.infants_in_lap,
     )
-    b64 = base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+# The explore page's `tfs=`, decoded from the URLs its own controls write. Field
+# 16 holds the month and the trip length: 16.1 is the month minus one with NO
+# year (Google picks the next such month; the value 0 answered the next January),
+# or the all-ones sentinel for "the next six months"; 16.2 is 1 for a weekend,
+# 3 for two weeks, and absent (or 2) for one week.
+_EXPLORE_ANY_MONTH = (1 << 64) - 1
+_EXPLORE_MODE = 3
+_EXPLORE_TRIP_ROUND_TRIP = 1
+
+
+def google_flights_explore_url(
+    origin: str,
+    *,
+    month: int | None,
+    trip_length: int | None,
+    max_price: int | None,
+    currency: str = "USD",
+    language: str = "en",
+    country: str = "US",
+) -> str:
+    """The explore page from `origin`: round trips to everywhere Google prices.
+
+    `month` is 1-12, None for the next six months; `trip_length` is 16.2's code,
+    None for one week. The origin is always written: without one the page
+    geolocates and answers for wherever it thinks the user is.
+
+    `tfu=GgA` is what the page's own URLs carry, an empty message."""
+    w = _PbWriter()
+    w.varint(1, 28)
+    w.varint(2, _EXPLORE_MODE)
+    for side in (13, 14):
+        airport = _PbWriter()
+        airport.varint(1, 1)
+        airport.string(2, origin)
+        slice_w = _PbWriter()
+        slice_w.message(side, airport)
+        w.message(3, slice_w)
+    w.varint(8, 1)
+    w.varint(9, 1)
+    if max_price is not None:
+        w.varint(12, max_price)
+    w.varint(14, 2)
+    when = _PbWriter()
+    when.varint(1, _EXPLORE_ANY_MONTH if month is None else month - 1)
+    if trip_length is not None:
+        when.varint(2, trip_length)
+    w.message(16, when)
+    w.varint(19, _EXPLORE_TRIP_ROUND_TRIP)
+    b64 = base64.urlsafe_b64encode(bytes(w.buf)).rstrip(b"=").decode()
     return (
-        f"https://www.google.com/travel/flights/search?"
-        f"tfs={urllib.parse.quote(b64)}&hl={language}&curr={currency}"
+        f"https://www.google.com/travel/explore?tfs={urllib.parse.quote(b64)}"
+        f"&tfu=GgA&hl={language}&gl={country}&curr={currency}"
     )
+
+
+def _pinned_slice_airports(
+    leg: Leg, segments: list[dict[str, str]]
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """A pinned slice's origin and destination airports.
+
+    The leg's own sets, metro codes expanded, while Google's page can take them
+    (`gf_leg_refusal`). Past that, the pinned itinerary's first departure and last
+    arrival: one airport per end is a shape the page serves, and the caller's
+    caveat says the link shows the itinerary's airports rather than the set."""
+    if gf_leg_refusal(leg.origins, leg.destinations) is None:
+        return expand_airports(leg.origins), expand_airports(leg.destinations)
+    if not segments:
+        raise AssertionError("a pinned slice past the page's airport limit needs its segments")
+    return (segments[0]["origin"],), (segments[-1]["destination"],)
 
 
 _FLIGHT_NUMBER_RE = re.compile(r"^([A-Z][A-Z0-9])([0-9]+)$")
@@ -837,10 +955,21 @@ def extract_pin_segments_from_slice(s: Slice) -> list[dict[str, str]] | None:
     return out
 
 
-def google_flights_url(s: Search, *, currency: str = "USD", language: str = "en") -> str:
+def pin_dates_are_stated(s: Slice) -> bool:
+    """Whether the slice's source dates every one of its flights: one date per
+    flight in `segment_dates`, or a single flight, which leaves on the slice's
+    departure day. A connection's two end dates do not date the flights
+    between them: one that crosses the date line lands on the day it left
+    while its second flight leaves the next day."""
+    n = len(s.flights)
+    return n == 1 or (n > 0 and len(s.segment_dates) == n)
+
+
+def google_flights_url(s: Search, *, currency: str | None = None, language: str = "en") -> str:
     """Build a Google Flights `tfs=` URL that opens directly into a populated
-    search result. Multi-airport is flattened to first IATA per leg (Google
-    Flights URL grammar doesn't support airport sets per slice).
+    search result. Multi-airport is flattened to first IATA per leg: fast_flights'
+    proto takes one airport per slice end, where Google's own tfs= repeats them.
+    `currency` defaults to the search's own, then USD.
 
     For CalendarSearch (no per-leg dates), uses window start as departure
     and start + mean(duration) as return — gives the user a representative
@@ -915,7 +1044,8 @@ def google_flights_url(s: Search, *, currency: str = "USD", language: str = "en"
         max_stops=s.options.max_extra_stops,
     )
     b64 = td.as_b64().decode()
+    curr = currency or s.options.currency or "USD"
     return (
         f"https://www.google.com/travel/flights/search?"
-        f"tfs={urllib.parse.quote(b64)}&hl={language}&curr={currency}"
+        f"tfs={urllib.parse.quote(b64)}&hl={language}&curr={curr}"
     )

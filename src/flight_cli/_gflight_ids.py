@@ -19,8 +19,9 @@ serves both. Verified live 2026-09-02: flight_id at data[0][17], 33-element leg
 tuples, leg[13] legroom class present, round-trip pins return correctly-directed
 returns with distinct flight_ids.
 
-The board the page serves is Google's default (~30 rows per leg) with no
-back-fill, so a top-N above that returns fewer rows than asked for.
+The page URL asks for the full board (`tfu=`, see
+`links.google_flights_search_page_url`), so every row Google has for a leg is
+parsed and a top-N is the caller's trim.
 
 That page has two transports (`GfTransport`, `_one_call_laddered`): rung 1 is
 the curl_cffi GET below, rung 2 is a real Chrome navigating the same URL
@@ -42,12 +43,14 @@ import re
 import threading
 import time
 import urllib.parse
+from collections import Counter
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, NamedTuple, assert_never, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, assert_never, cast
 
 from fli.models import (  # pyright: ignore[reportMissingTypeStubs]
+    Airline,
     Airport,
     FlightLeg,
     FlightResult,
@@ -95,8 +98,9 @@ from ._gf_errors import (
 from .links import build_search_tfs, google_flights_search_page_url
 
 if TYPE_CHECKING:
+    import datetime
     import pathlib
-    from collections.abc import Callable, Generator
+    from collections.abc import Callable, Generator, Iterable
 
     from fli.models.google_flights.flights import (  # pyright: ignore[reportMissingTypeStubs]
         FlightSearchFilters,
@@ -1026,6 +1030,22 @@ class GFlightWithId:
     flight: FlightResult
     flight_id: str
     amenities: list[LegAmenities]
+    # Per leg, the operating carrier's (airline, flight number) from fl[22], or
+    # None where the tuple has none. Kept off `amenities` because `--format json`
+    # dumps every amenities field.
+    operating: tuple[tuple[Airline, str] | None, ...] = ()
+
+
+def _operating_identity(fl: list[Any]) -> tuple[Airline, str] | None:
+    """The (airline, flight number) of the metal a leg flies on, or None."""
+    raw = fl[_LEG_OPERATING_IDX] if len(fl) > _LEG_OPERATING_IDX else None
+    code, number, _ = _carrier_entry(raw)
+    if not code or not number:
+        return None
+    try:
+        return _parse_airline(code), number
+    except AttributeError:  # a code fli has no member for
+        return None
 
 
 def _parse_flight_with_id(data: list[Any]) -> GFlightWithId:
@@ -1044,7 +1064,12 @@ def _parse_flight_with_id(data: list[Any]) -> GFlightWithId:
         legs=[_flight_leg(fl) for fl in leg_tuples],
     )
     amenities = [_parse_leg_amenities(fl) for fl in leg_tuples]
-    return GFlightWithId(flight=flight, flight_id=flight_id, amenities=amenities)
+    return GFlightWithId(
+        flight=flight,
+        flight_id=flight_id,
+        amenities=amenities,
+        operating=tuple(_operating_identity(fl) for fl in leg_tuples),
+    )
 
 
 def _flight_leg(fl: list[Any]) -> FlightLeg:
@@ -1320,10 +1345,10 @@ def _rows_from_ds1(payload: list[Any]) -> _Ds1Board:
     return _Ds1Board(rows, blocks_seen, tuple(misplaced))
 
 
-def search_page_url(filters: FlightSearchFilters) -> str:
+def search_page_url(filters: FlightSearchFilters, *, currency: str = "USD") -> str:
     """The public search-page URL for `filters` — the one address both rungs
     fetch, so neither can drift into asking Google a different question."""
-    return google_flights_search_page_url(build_search_tfs(filters))
+    return google_flights_search_page_url(build_search_tfs(filters), currency=currency)
 
 
 class _RetryableTransportError(GfTransportError):
@@ -1477,7 +1502,7 @@ def _get_search_page(client: Any, url: str) -> Any:
         raise
 
 
-def _fetch_page(filters: FlightSearchFilters) -> PageFetch:
+def _fetch_page(filters: FlightSearchFilters, *, currency: str = "USD") -> PageFetch:
     """One GET of the public search page.
 
     Everything visible in the bytes themselves is left to
@@ -1492,7 +1517,7 @@ def _fetch_page(filters: FlightSearchFilters) -> PageFetch:
     backs off on."""
     client = get_client()
     _seed_cookies_once(client)
-    resp = _get_search_page(client, search_page_url(filters))
+    resp = _get_search_page(client, search_page_url(filters, currency=currency))
     return PageFetch(
         html=resp.text,  # pyright: ignore[reportAny]  # fli/curl_cffi untyped
         final_url=str(resp.url),  # pyright: ignore[reportAny]  # fli/curl_cffi untyped
@@ -1500,7 +1525,151 @@ def _fetch_page(filters: FlightSearchFilters) -> PageFetch:
     )
 
 
-def _rows_from_page_html(page: PageFetch) -> list[GFlightWithId]:
+@dataclass(frozen=True)
+class PriceInsight:
+    """The price insight for a search: the cheapest fare it answers with and
+    the range Google says fares for this trip usually fall in, in the page's
+    currency.
+
+    From `ds:1[5]`, measured as `[code, [None, cheapest], [None, _], [None, _],
+    [None, typical_low], [None, typical_high], ...]`. `[0]` looks like a level
+    code (4 on two captures priced inside the range, 5 on one priced above it),
+    but three samples do not pin its values, so it is not used and the level is
+    derived from the numbers instead."""
+
+    cheapest: float
+    typical_low: float
+    typical_high: float
+    currency: str
+
+    @property
+    def level(self) -> Literal["low", "typical", "high"]:
+        if self.cheapest < self.typical_low:
+            return "low"
+        if self.cheapest > self.typical_high:
+            return "high"
+        return "typical"
+
+
+_INSIGHT_IDX = 5
+_INSIGHT_CHEAPEST_IDX = 1
+_INSIGHT_TYPICAL_LOW_IDX = 4
+_INSIGHT_TYPICAL_HIGH_IDX = 5
+
+
+def _insight_amount(block: list[Any], index: int) -> float | None:
+    """The number in a `[None, amount]` pair at `block[index]`, or None."""
+    pair = block[index] if len(block) > index else None
+    if not isinstance(pair, list) or len(cast("list[Any]", pair)) < 2:  # noqa: PLR2004 — a pair
+        return None
+    amount = cast("list[Any]", pair)[1]
+    if isinstance(amount, bool) or not isinstance(amount, int | float):
+        return None
+    return float(amount)
+
+
+def _price_insight(payload: list[Any], rows: list[GFlightWithId]) -> PriceInsight | None:
+    """The page's price insight, or None when it carries none.
+
+    The currency is read off a priced row of the same page: Google states the
+    insight in the page's currency and writes no currency beside it, and an
+    unpriced row carries none."""
+    block = payload[_INSIGHT_IDX] if len(payload) > _INSIGHT_IDX else None
+    if not isinstance(block, list):
+        return None
+    items = cast("list[Any]", block)
+    cheapest = _insight_amount(items, _INSIGHT_CHEAPEST_IDX)
+    low = _insight_amount(items, _INSIGHT_TYPICAL_LOW_IDX)
+    high = _insight_amount(items, _INSIGHT_TYPICAL_HIGH_IDX)
+    currency = next(
+        (r.flight.currency for r in rows if r.flight.price is not None and r.flight.currency),
+        None,
+    )
+    if cheapest is None or low is None or high is None or low > high or currency is None:
+        return None
+    return PriceInsight(cheapest=cheapest, typical_low=low, typical_high=high, currency=currency)
+
+
+def _kept_insight(
+    insight: PriceInsight | None,
+    rows: Iterable[GFlightWithId | tuple[GFlightWithId, ...]],
+    dropped: int,
+) -> PriceInsight | None:
+    """`insight` for the rows a routing filter kept.
+
+    Google's cheapest is the unfiltered board's, so once the filter has removed
+    a row the level is restated from the cheapest fare kept, against Google's
+    own range. A combination's fare is its last member's. With no priced row
+    kept there is no level to state."""
+    if insight is None or not dropped:
+        return insight
+    fares = [
+        fare
+        for row in rows
+        if (fare := (row[-1] if isinstance(row, tuple) else row).flight.price) is not None
+    ]
+    return replace(insight, cheapest=min(fares)) if fares else None
+
+
+class Board[T](list[T]):
+    """Rows as a search served them, plus what the page said beside them.
+
+    A list, so every test of "was anything served" (`retry_throttled`'s empty
+    retry, `search_with_ids`' `if not first`) still reads the rows alone.
+    `dropped` counts the rows a routing filter removed on the way here, which
+    is how an empty answer tells "none matched the routing" from "Google has no
+    flights". `pinned` counts the outbounds a round trip searched returns for,
+    because an empty answer from those says nothing about the outbounds below
+    them."""
+
+    def __init__(
+        self,
+        rows: Iterable[T] = (),
+        *,
+        insight: PriceInsight | None = None,
+        dropped: int = 0,
+        pinned: int = 0,
+    ) -> None:
+        super().__init__(rows)
+        self.insight = insight
+        self.dropped = dropped
+        self.pinned = pinned
+
+
+def _itinerary_key(row: GFlightWithId) -> tuple[tuple[Airline, str, datetime.datetime], ...]:
+    return tuple(
+        (leg.airline, leg.flight_number, leg.departure_datetime) for leg in row.flight.legs
+    )
+
+
+def _fares_better(row: GFlightWithId, than: GFlightWithId) -> bool:
+    """A priced row beats an unpriced one, and a cheaper one a dearer one."""
+    price, other = row.flight.price, than.flight.price
+    return price is not None and (other is None or price < other)
+
+
+def _deduped(rows: list[GFlightWithId]) -> list[GFlightWithId]:
+    """One row per itinerary, keeping the better fare.
+
+    Google can list one itinerary twice at two prices, and only the cheaper is
+    on offer. The key is every leg's carrier, flight number and departure time,
+    dates included: the same flight numbers a day apart are a different trip.
+    The first listing keeps its place, because the round-trip pins are taken in
+    board order."""
+    at: dict[tuple[tuple[Airline, str, datetime.datetime], ...], int] = {}
+    out: list[GFlightWithId] = []
+    for row in rows:
+        key = _itinerary_key(row)
+        seen = at.get(key)
+        if seen is None:
+            at[key] = len(out)
+            out.append(row)
+        elif _fares_better(row, out[seen]):
+            out[seen] = row
+    return out
+
+
+def _rows_from_page_html(page: PageFetch) -> Board[GFlightWithId]:
     """The flight rows a rendered search page carries — the single parser both
     rungs go through; a rung supplies bytes, never interpretation.
 
@@ -1512,7 +1681,7 @@ def _rows_from_page_html(page: PageFetch) -> list[GFlightWithId]:
 
     Refusals are typed and raised (`GfThrottledError` / `GfUpstreamStatusError`
     / `GfConsentError` / `GfPageShapeError`); a page that decodes with zero rows
-    returns `[]`, which is Google's authoritative answer and not retried."""
+    returns an empty board, which is Google's authoritative answer and not retried."""
     html, final_url, status_code = page
     # Both rungs arrive here carrying the status they were served: rung 1 reads
     # it off the response, rung 2 off the navigation, and neither rules on it.
@@ -1576,7 +1745,7 @@ def _rows_from_page_html(page: PageFetch) -> list[GFlightWithId]:
                 list(_DS_ROW_BLOCKS),
                 [type(payload[i]).__name__ for i in _DS_ROW_BLOCKS],
             )
-        return []  # Google's own answer: this leg has no flights.
+        return Board()  # Google's own answer: this leg has no flights.
     out: list[GFlightWithId] = []
     reasons: list[str] = []
     for fd in rows:
@@ -1597,12 +1766,12 @@ def _rows_from_page_html(page: PageFetch) -> list[GFlightWithId]:
             f"none of {len(rows)} Google Flights rows parsed; "
             f"the row shape changed (sample reasons: {sample})"
         )
-    return out
+    return Board(_deduped(out), insight=_price_insight(payload, out))
 
 
-def _one_call(filters: FlightSearchFilters) -> list[GFlightWithId]:
+def _one_call(filters: FlightSearchFilters, *, currency: str = "USD") -> Board[GFlightWithId]:
     """Rung 1: fetch the search page over curl_cffi and read its rows."""
-    rows = _rows_from_page_html(_fetch_page(filters))
+    rows = _rows_from_page_html(_fetch_page(filters, currency=currency))
     # A page we could READ means Google answered a warm session — save its
     # cookies (NID) so the next one-shot CLI process starts warm instead of
     # cold. Rung-1 only: rung 2 keeps its own Chrome profile, and its cookies
@@ -1708,10 +1877,12 @@ def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
         ladder.stand_down()
 
 
-def _one_call_with_retry(filters: FlightSearchFilters) -> list[GFlightWithId]:
+def _one_call_with_retry(
+    filters: FlightSearchFilters, *, currency: str = "USD"
+) -> Board[GFlightWithId]:
     """`_one_call` under the throttle retry only — a parsed-empty page is an
     answer, so it costs exactly one GET and no sleep."""
-    return retry_throttled(lambda: _one_call(filters), retry_empty=False)
+    return retry_throttled(lambda: _one_call(filters, currency=currency), retry_empty=False)
 
 
 @dataclass(frozen=True)
@@ -1739,7 +1910,9 @@ class GfTransport:
 HTTP_TRANSPORT = GfTransport()
 
 
-def _one_call_browser(filters: FlightSearchFilters, *, headed: bool) -> list[GFlightWithId]:
+def _one_call_browser(
+    filters: FlightSearchFilters, *, headed: bool, currency: str = "USD"
+) -> Board[GFlightWithId]:
     """Rung 2: one real-Chrome navigation of the same URL, read by the same parser.
 
     No retry ladder around it. Rung 2 costs a browser launch and up to a 30 s
@@ -1750,11 +1923,13 @@ def _one_call_browser(filters: FlightSearchFilters, *, headed: bool) -> list[GFl
     a test can substitute the session without a browser anywhere in the
     process."""
     return _rows_from_page_html(
-        _gf_browser.session(headed=headed).get_html(search_page_url(filters))
+        _gf_browser.session(headed=headed).get_html(search_page_url(filters, currency=currency))
     )
 
 
-def _one_call_laddered(filters: FlightSearchFilters, transport: GfTransport) -> list[GFlightWithId]:
+def _one_call_laddered(
+    filters: FlightSearchFilters, transport: GfTransport, *, currency: str = "USD"
+) -> Board[GFlightWithId]:
     """One leg on the rung `transport` asks for.
 
     The single place that knows which rungs exist, so `search_with_ids` — and
@@ -1772,9 +1947,9 @@ def _one_call_laddered(filters: FlightSearchFilters, transport: GfTransport) -> 
     mode and match all of them."""
     match transport.mode:
         case "browser":
-            return _one_call_browser(filters, headed=transport.headed)
+            return _one_call_browser(filters, headed=transport.headed, currency=currency)
         case "http" | "auto":
-            return _one_call_with_retry(filters)
+            return _one_call_with_retry(filters, currency=currency)
         case _:
             assert_never(transport.mode)
 
@@ -1865,12 +2040,49 @@ def _unpinned_board(
     return None
 
 
+def _with_board_currency(board: Board[GFlightWithId], requested: str) -> Board[GFlightWithId]:
+    """`board` with a currency on every row.
+
+    fli reads a row's currency from a token beside its price and returns None
+    when that decode fails, and every renderer downstream would then label the
+    price USD. One page is priced in one currency, so the row takes the
+    currency the rows beside it decoded to, and the requested one only when
+    none did. The page's price insight rides along."""
+    decoded = Counter(r.flight.currency for r in board if r.flight.currency)
+    fill = decoded.most_common(1)[0][0] if decoded else requested
+    return Board(
+        (
+            r
+            if r.flight.currency
+            else replace(r, flight=r.flight.model_copy(update={"currency": fill}))
+            for r in board
+        ),
+        insight=board.insight,
+        dropped=board.dropped,
+        pinned=board.pinned,
+    )
+
+
+def _pinned_flight(picked: GFlightWithId) -> FlightResult:
+    """`picked.flight` with every leg named by its operating flight, which is
+    what a pin has to carry: AA142 pinned as AY3787, the codeshare number it is
+    booked under, comes back with no return board at all, and pinned as AA142
+    with twenty rows. A leg with no operating identity keeps its booking one."""
+    legs = list(picked.flight.legs)
+    for i, op in enumerate(picked.operating[: len(legs)]):
+        if op is not None:
+            legs[i] = legs[i].model_copy(update={"airline": op[0], "flight_number": op[1]})
+    return picked.flight.model_copy(update={"legs": legs})
+
+
 def search_with_ids(
     filters: FlightSearchFilters,
     *,
     top_n: int = 5,
     transport: GfTransport = HTTP_TRANSPORT,
-) -> list[GFlightWithId | tuple[GFlightWithId, ...]] | None:
+    currency: str = "USD",
+    keep: Callable[[int, GFlightWithId], bool] | None = None,
+) -> Board[GFlightWithId | tuple[GFlightWithId, ...]] | None:
     """Drop-in for fli's `SearchFlights().search()` but each result carries
     its Google Flights opaque flight_id.
 
@@ -1894,25 +2106,38 @@ def search_with_ids(
 
     `transport` rides the recursion so every leg of one trip runs on the same
     rung — a round trip that opened Chrome for its outbound must not silently
-    drop back to curl_cffi for the returns."""
-    first = _one_call_laddered(filters, transport)
+    drop back to curl_cffi for the returns. `currency` rides it for the same
+    reason: every board of one trip is asked for in one currency.
+
+    `keep(i, row)` is the routing filter for segment `i`. It runs on the
+    outbound board BEFORE the pins are taken, because the pins are the first
+    rows in board order and a filter applied after them answers from pins it
+    then discards. It runs on each return board after the pin check, so a page
+    that ignored its pin is refused as one rather than read as "no return
+    matches". The result carries the outbound page's price insight, restated
+    for the rows the filter kept."""
+    first = _with_board_currency(
+        _one_call_laddered(filters, transport, currency=currency), currency
+    )
     if not first:
         return None
 
-    if filters.trip_type == TripType.ONE_WAY:
-        return list(first)
-
     num_segments = len(filters.flight_segments)
     selected_count = sum(1 for s in filters.flight_segments if s.selected_flight is not None)
-    # Last leg already — no further iteration.
-    if selected_count >= num_segments - 1:
-        return list(first)
+    # A pinned board is filtered by the caller, after its pin check.
+    board = first if keep is None or selected_count else [r for r in first if keep(0, r)]
+    dropped = len(first) - len(board)
+    # One-way, or the last leg already — no further iteration.
+    if filters.trip_type == TripType.ONE_WAY or selected_count >= num_segments - 1 or not board:
+        return Board(board, insight=_kept_insight(first.insight, board, dropped), dropped=dropped)
 
     combos: list[GFlightWithId | tuple[GFlightWithId, ...]] = []
-    pins = first[: pinned_fanout(top_n)]
+    pins = board[: pinned_fanout(top_n)]
     refused: list[GfBackendError] = []
     stopped: GfBackendError | None = None
     skipped = 0
+    unmatched = 0  # pins whose whole return board the routing filter removed
+    dropped_returns = 0
     # The segment the recursion below is asked to FILL, which is the one after
     # the pin it is given — checking the pinned segment instead would compare a
     # return board against the outbound and accept a page that ignored the pin,
@@ -1921,9 +2146,9 @@ def search_with_ids(
     wanted = filters.flight_segments[selected_count + 1]
     for index, picked in enumerate(pins):
         next_filters = deepcopy(filters)
-        next_filters.flight_segments[selected_count].selected_flight = picked.flight
+        next_filters.flight_segments[selected_count].selected_flight = _pinned_flight(picked)
         try:
-            nxt = search_with_ids(next_filters, top_n=top_n, transport=transport)
+            nxt = search_with_ids(next_filters, top_n=top_n, transport=transport, currency=currency)
         except (GfThrottledError, GfTransportError, GfBrowserUnavailableError) as e:
             # None of the three is a fact about THIS pin. The wall is per-IP and
             # the network is one network, so every remaining pin walks into the
@@ -1959,15 +2184,38 @@ def search_with_ids(
             # and nothing served at all still raises.
             refused.append(GfPinIgnoredError(ignored))
             continue
-        for nx in nxt:
+        kept = [
+            nx
+            for nx in nxt
+            if keep is None or keep(selected_count + 1, nx[0] if isinstance(nx, tuple) else nx)
+        ]
+        dropped_returns += len(nxt) - len(kept)
+        if not kept:
+            unmatched += 1
+            continue
+        for nx in kept:
             if isinstance(nx, tuple):
                 combos.append((picked, *nx))
             else:
                 combos.append((picked, nx))
     _report_pin_outcome(
-        served=bool(combos), pins=len(pins), refused=refused, stopped=stopped, skipped=skipped
+        served=bool(combos),
+        pins=len(pins),
+        refused=refused,
+        stopped=stopped,
+        skipped=skipped,
+        unmatched=unmatched,
     )
-    return combos or None
+    # A Board even with no pair in it: the pins were taken from rows Google
+    # served, so the rows the filter removed on either leg are why it is empty,
+    # and None would read as Google serving nothing.
+    dropped += dropped_returns
+    return Board(
+        combos,
+        insight=_kept_insight(first.insight, combos, dropped),
+        dropped=dropped,
+        pinned=len(pins),
+    )
 
 
 def _report_pin_outcome(
@@ -1977,8 +2225,13 @@ def _report_pin_outcome(
     refused: list[GfBackendError],
     stopped: GfBackendError | None,
     skipped: int,
+    unmatched: int = 0,
 ) -> None:
     """Account for what the pin loop met: a counted warning, or a raise.
+
+    `unmatched` pins had return boards the routing filter emptied. They are
+    counted, not raised: that board was served, and "no return matches the
+    routing" is its answer.
 
     Raising is for the case where nothing at all was served — then the refusal
     IS the outcome, and swallowing it reports a round trip with no return legs
@@ -1990,6 +2243,12 @@ def _report_pin_outcome(
     # the per-URL refusals with it, and "rate-limited, wait and retry" is the
     # wrong advice for a round trip whose return boards no longer parse — the
     # page-shape change is the news, and this is the only place it is said.
+    if unmatched:
+        log.warning(
+            "%d of %d pinned outbounds have no return flight matching the routing",
+            unmatched,
+            pins,
+        )
     if refused:
         log.warning("%d of %d return boards unavailable: %s", len(refused), pins, refused[-1])
     if stopped is not None:

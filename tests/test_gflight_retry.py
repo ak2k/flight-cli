@@ -105,7 +105,7 @@ def test_search_path_costs_one_call_on_an_empty_board(monkeypatch: Any) -> None:
     calls = {"n": 0}
     sleeps: list[float] = []
 
-    def fake_one_call(_f: Any) -> list[GFlightWithId]:
+    def fake_one_call(_f: Any, **_kw: Any) -> list[GFlightWithId]:
         calls["n"] += 1
         return []
 

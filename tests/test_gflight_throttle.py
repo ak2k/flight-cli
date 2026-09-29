@@ -141,7 +141,7 @@ def test_retry_recovers_from_transient_throttle(monkeypatch: pytest.MonkeyPatch)
     calls = {"n": 0}
     data: list[Any] = [object()]
 
-    def fake(_f: Any) -> list[Any]:
+    def fake(_f: Any, **_kw: Any) -> list[Any]:
         calls["n"] += 1
         if calls["n"] <= 2:
             raise GfThrottledError("throttled")
@@ -155,7 +155,7 @@ def test_retry_recovers_from_transient_throttle(monkeypatch: pytest.MonkeyPatch)
 def test_retry_raises_when_throttle_persists(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = {"n": 0}
 
-    def fake(_f: Any) -> list[Any]:
+    def fake(_f: Any, **_kw: Any) -> list[Any]:
         calls["n"] += 1
         raise GfThrottledError("throttled")
 
@@ -170,7 +170,7 @@ def test_search_path_does_not_retry_a_parsed_empty(monkeypatch: pytest.MonkeyPat
     Retrying it would re-fetch megabytes to be told the same thing."""
     calls = {"n": 0}
 
-    def fake(_f: Any) -> list[Any]:
+    def fake(_f: Any, **_kw: Any) -> list[Any]:
         calls["n"] += 1
         return []
 
@@ -869,7 +869,7 @@ def test_throttle_backoff_survives_an_empty_result(monkeypatch: pytest.MonkeyPat
     seq: list[Any] = ["throttle", []]
     calls = {"n": 0}
 
-    def fake(_f: Any) -> list[Any]:
+    def fake(_f: Any, **_kw: Any) -> list[Any]:
         item = seq[calls["n"]]
         calls["n"] += 1
         if item == "throttle":
