@@ -409,9 +409,11 @@ def price_graphs(search: CalendarSearch, *, headed: bool) -> GraphRange:
     stand without it: kept as an empty column, it would print as dates nobody
     priced.
 
-    Only a page that drew no graph lets the next length be asked. Any other
-    failure would meet the next length's page the same way, a wall's at the
-    cost of another load, so the lengths after it are lost with it.
+    Only a page that drew no graph lets the next length be asked. A wall, an
+    error row or a Chrome that cannot load the page would meet the next
+    length's page too, and a wall would take another load to say so; no other
+    failure is told apart from those, so after any of them the lengths still
+    to come are lost with it.
 
     When no length priced, the first failure is raised as it came, and the
     graph's own error is named with its trip length.
