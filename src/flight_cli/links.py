@@ -342,12 +342,25 @@ _GF_TRIP_ONE_WAY = 2
 _GF_TRIP_MULTI_CITY = 3
 
 # tfs= field 8 is a repeated varint, one entry per occupant, carrying the
-# passenger TYPE. Values are Google's own `Passenger` enum, read out of
-# fast_flights' generated protobuf (flights_pb2.Passenger) rather than guessed.
+# passenger TYPE. The infant codes are the reverse of what fast_flights' enum
+# (flights_pb2.Passenger) names them: Google prices 3 at a tenth of the adult
+# fare, a lap, and 4 at the full fare, a seat.
 _GF_PAX_ADULT = 1
 _GF_PAX_CHILD = 2
-_GF_PAX_INFANT_IN_SEAT = 3
-_GF_PAX_INFANT_ON_LAP = 4
+_GF_PAX_INFANT_ON_LAP = 3
+_GF_PAX_INFANT_IN_SEAT = 4
+
+
+def _gf_pax_kinds(
+    *, adults: int, children: int, infants_in_seat: int, infants_on_lap: int
+) -> list[int]:
+    """Field 8's entries: one passenger-kind code per occupant."""
+    return (
+        [_GF_PAX_ADULT] * adults
+        + [_GF_PAX_CHILD] * children
+        + [_GF_PAX_INFANT_IN_SEAT] * infants_in_seat
+        + [_GF_PAX_INFANT_ON_LAP] * infants_on_lap
+    )
 
 
 # ───────────────── Google Flights tfs= protobuf (RE'd) ──────────────────────
@@ -420,6 +433,45 @@ def _endpoint_codes(value: str | Sequence[str]) -> tuple[str, ...]:
     return (value,) if isinstance(value, str) else tuple(value)
 
 
+def _tfs_slice_message(sl: dict[str, Any]) -> _PbWriter:
+    """One slice (top-level field 3) of `_encode_gflight_pinned_tfs`."""
+    s = _PbWriter()
+    s.string(2, sl["date"])
+    # Stop ceiling is ZERO-based here (0 = nonstop) and absent means "any";
+    # writing 0 for "any" would pin every search to nonstop. Emitted before
+    # the selected legs to match the field order Google's own URLs carry.
+    max_stops = sl.get("max_stops")
+    if max_stops is not None:
+        s.varint(5, max_stops)
+    for code in sl.get("carriers") or ():
+        s.string(6, code)
+    for field, hour in zip((8, 9, 10, 11), sl.get("hours") or (), strict=False):
+        s.varint(field, hour)
+    if (max_duration := sl.get("max_duration")) is not None:
+        s.varint(12, max_duration)
+    for seg in sl["segments"]:
+        seg_w = _PbWriter()
+        seg_w.string(1, seg["origin"])
+        seg_w.string(2, seg["date"])
+        seg_w.string(3, seg["destination"])
+        seg_w.string(5, seg["carrier"])
+        seg_w.string(6, seg["flight"])
+        s.message(4, seg_w)
+    # Slice origins (13) and destinations (14), one repeated entry per
+    # airport. Field 1 is the endpoint kind: 1 an airport (Google's UI
+    # writes 3 for a city, with a Knowledge Graph id in place of the code).
+    for field, key in ((13, "origin"), (14, "destination")):
+        for code in _endpoint_codes(sl[key]):
+            end_w = _PbWriter()
+            end_w.varint(1, 1)
+            end_w.string(2, code)
+            s.message(field, end_w)
+    for field, key in ((17, "layover_min"), (18, "layover_max")):
+        if (minutes := sl.get(key)) is not None:
+            s.varint(field, minutes)
+    return s
+
+
 def _encode_gflight_pinned_tfs(
     *,
     slices: list[dict[str, Any]],
@@ -442,6 +494,12 @@ def _encode_gflight_pinned_tfs(
             "origin": "HNL",         # or a sequence of airports, one entry each
             "destination": "MIA",    # likewise
             "max_stops": 0,          # optional, zero-based ceiling; see below
+            # Optional search filters; each absent key writes nothing.
+            "carriers": ["AA", "ONEWORLD"],  # 3.6: IATA codes and alliance names
+            "hours": (6, 11, 0, 23),  # 3.8-3.11: dep from/to, arr from/to
+            "max_duration": 380,     # 3.12, minutes
+            "layover_min": 120,      # 3.17, minutes
+            "layover_max": 240,      # 3.18, minutes
             "segments": [
                 {"origin": "HNL", "date": "2026-10-14",
                  "destination": "LAX", "carrier": "AA", "flight": "162"},
@@ -458,45 +516,17 @@ def _encode_gflight_pinned_tfs(
     w.varint(2, 2)
 
     for sl in slices:
-        s = _PbWriter()
-        s.string(2, sl["date"])
-        # Stop ceiling is ZERO-based here (0 = nonstop) and absent means "any";
-        # writing 0 for "any" would pin every search to nonstop. Emitted before
-        # the selected legs to match the field order Google's own URLs carry.
-        max_stops = sl.get("max_stops")
-        if max_stops is not None:
-            s.varint(5, max_stops)
-        for seg in sl["segments"]:
-            seg_w = _PbWriter()
-            seg_w.string(1, seg["origin"])
-            seg_w.string(2, seg["date"])
-            seg_w.string(3, seg["destination"])
-            seg_w.string(5, seg["carrier"])
-            seg_w.string(6, seg["flight"])
-            s.message(4, seg_w)
-        # Slice origins (13) and destinations (14), one repeated entry per
-        # airport. Field 1 is the endpoint kind: 1 an airport (Google's UI
-        # writes 3 for a city, with a Knowledge Graph id in place of the code).
-        for field, key in ((13, "origin"), (14, "destination")):
-            for code in _endpoint_codes(sl[key]):
-                end_w = _PbWriter()
-                end_w.varint(1, 1)
-                end_w.string(2, code)
-                s.message(field, end_w)
-        w.message(3, s)
+        w.message(3, _tfs_slice_message(sl))
 
-    # Field 8: one repeated varint per occupant, carrying that occupant's TYPE.
-    # Emitting a bare `1` for everyone encoded children and infants as ADULTS,
-    # so a pinned link for 1 adult + 1 child priced and searched as 2 adults —
-    # a different, more expensive itinerary than the row the user picked.
-    for _type, _count in (
-        (_GF_PAX_ADULT, adults),
-        (_GF_PAX_CHILD, children),
-        (_GF_PAX_INFANT_IN_SEAT, infants_in_seat),
-        (_GF_PAX_INFANT_ON_LAP, infants_on_lap),
+    # Field 8 carries each occupant's TYPE: a bare `1` for everyone would price
+    # a child or an infant as an adult.
+    for kind in _gf_pax_kinds(
+        adults=adults,
+        children=children,
+        infants_in_seat=infants_in_seat,
+        infants_on_lap=infants_on_lap,
     ):
-        for _ in range(_count):
-            w.varint(8, _type)
+        w.varint(8, kind)
 
     w.varint(9, cabin)
     w.varint(14, 1)
@@ -532,27 +562,36 @@ def _encode_gflight_pinned_tfs(
 # field on fli's model must be named in exactly one of the three sets below, and
 # `build_search_tfs` raises on anything left over. A deny-list would be quietly
 # wrong the day `flights>=0.9` (an open floor) adds a filter — the new field
-# would encode as if unset, dropping a constraint the user asked for. Honouring
+# would encode as if unset, dropping a constraint the user asked for. Honoring
 # some of a user's constraints while dropping the rest is a silent wrong answer.
-# `routing_predicates.page_can_encode` keeps those queries on Matrix; anything
-# that reaches here anyway raises.
+# The backend picker (`_gf_postfilter.search_page_reasons`) keeps those queries
+# on Matrix; anything that reaches here anyway raises.
 
-# Fields this encoder reads and writes into the tfs= payload.
+# Fields this encoder reads and writes into the tfs= payload. `airlines` carries
+# alliance names as well as carrier codes: the bridge writes an alliance there,
+# and 3.6 takes both in one list.
 _TFS_ENCODED_FIELDS = frozenset(
-    {"trip_type", "passenger_info", "flight_segments", "stops", "seat_type"}
+    {
+        "trip_type",
+        "passenger_info",
+        "flight_segments",
+        "stops",
+        "seat_type",
+        "airlines",
+        "max_duration",
+        "layover_restrictions",
+    }
 )
 
 # Filters with no tfs= field, checked against fli's own model default rather
 # than truthiness: fli populates sort_by, emissions, exclude_basic_economy and
 # show_all_results on EVERY filter, so `if filters.sort_by` would refuse every
 # search. Each entry is (field name, how to describe it to a user).
+# The exclude lists do have a field (3.7), but Google ignored it on JFK-LHR.
 _TFS_REFUSED_FIELDS: tuple[tuple[str, str], ...] = (
-    ("airlines", "a carrier include list"),
     ("airlines_exclude", "a carrier exclude list"),
     ("alliances", "an alliance filter"),
     ("alliances_exclude", "an alliance exclude filter"),
-    ("layover_restrictions", "a layover airport or duration restriction"),
-    ("max_duration", "a maximum itinerary duration"),
     ("price_limit", "a price cap"),
     ("bags", "a bag-count fare adjustment"),
     ("emissions", "an emissions filter"),
@@ -564,13 +603,12 @@ _TFS_REFUSED_FIELDS: tuple[tuple[str, str], ...] = (
 # through its own `tfu=` parameter instead (`google_flights_search_page_url`).
 _TFS_IGNORED_FIELDS = frozenset({"show_all_results"})
 
-# Non-adult passengers ride tfs field 8 under distinct kind codes (2 child,
-# 3 infant-in-seat, 4 infant-on-lap) that we have never verified against a
-# live priced search. Emitting `1` for them — what the pinned writer does,
-# where every occupant is already a chosen traveller — would price a child as
-# an adult, so search refuses them and the backend picker sends them to Matrix.
+# Passenger kinds field 8 carries for a search. Google prices both infant kinds
+# correctly, but answered JFK-LAX with an empty board for any infant, so an
+# empty answer would not mean there are no flights: search refuses them and the
+# backend picker sends them to Matrix.
+_TFS_ENCODED_PAX = frozenset({"adults", "children"})
 _TFS_REFUSED_PAX: tuple[tuple[str, str], ...] = (
-    ("children", "a child passenger"),
     ("infants_in_seat", "an infant-in-seat passenger"),
     ("infants_on_lap", "an infant-on-lap passenger"),
 )
@@ -602,16 +640,37 @@ def _tfs_field_is_default(filters: Any, field: str) -> bool:
     return bool(getattr(filters, field, None) == spec.default)
 
 
-def _tfs_slice(segment: Any, *, max_stops: int | None) -> dict[str, Any]:
-    """One tfs= slice from an fli FlightSegment, refusing what it can't carry."""
-    if segment.time_restrictions is not None:
-        raise GfTfsUnsupportedError("time_restrictions", "a departure/arrival time window")
+# The hours 3.8-3.11 take when a window leaves its side open. A "latest" hour
+# includes its every minute, so the day ends at 23.
+_TFS_FIRST_HOUR = 0
+_TFS_LAST_HOUR = 23
+
+
+def _tfs_hours(window: Any) -> tuple[int, int, int, int] | None:
+    """3.8-3.11 for an fli `TimeRestrictions`: all four once any is set."""
+    if window is None:
+        return None
+    return (
+        _TFS_FIRST_HOUR if window.earliest_departure is None else window.earliest_departure,
+        _TFS_LAST_HOUR if window.latest_departure is None else window.latest_departure,
+        _TFS_FIRST_HOUR if window.earliest_arrival is None else window.earliest_arrival,
+        _TFS_LAST_HOUR if window.latest_arrival is None else window.latest_arrival,
+    )
+
+
+def _tfs_slice(
+    segment: Any, *, max_stops: int | None, trip_filters: dict[str, Any]
+) -> dict[str, Any]:
+    """One tfs= slice from an fli FlightSegment. `trip_filters` are the
+    search-wide filters, which the page takes on every slice."""
     selected = segment.selected_flight
     return {
+        **trip_filters,
         "date": segment.travel_date,
         "origin": [_tfs_iata(entry[0]) for entry in segment.departure_airport],
         "destination": [_tfs_iata(entry[0]) for entry in segment.arrival_airport],
         "max_stops": max_stops,
+        "hours": _tfs_hours(segment.time_restrictions),
         # A pinned leg (round-trip expansion sets `selected_flight` on the
         # outbound and re-fetches) becomes repeated field 3.4, which is how the
         # page is asked for returns against a chosen outbound.
@@ -660,16 +719,28 @@ def build_search_tfs(filters: Any) -> bytes:
     for field, description in _TFS_REFUSED_PAX:
         if getattr(filters.passenger_info, field, 0):
             raise GfTfsUnsupportedError(field, description)
+    layover = filters.layover_restrictions
+    if layover is not None and layover.airports:
+        raise GfTfsUnsupportedError("layover_restrictions", "a connecting-airport restriction")
 
     # fli's MaxStops is one-based (ANY=0, NON_STOP=1, …); tfs field 3.5 is
     # zero-based and omitted for "any".
     stops = filters.stops.value
     max_stops = stops - 1 if stops else None
+    trip_filters: dict[str, Any] = {
+        "carriers": [_tfs_iata(a) for a in filters.airlines or ()],
+        "max_duration": filters.max_duration,
+        "layover_min": layover.min_duration if layover else None,
+        "layover_max": layover.max_duration if layover else None,
+    }
     return _encode_gflight_pinned_tfs(
-        slices=[_tfs_slice(seg, max_stops=max_stops) for seg in filters.flight_segments],
+        slices=[
+            _tfs_slice(seg, max_stops=max_stops, trip_filters=trip_filters)
+            for seg in filters.flight_segments
+        ],
         cabin=filters.seat_type.value,
         adults=filters.passenger_info.adults,
-        children=0,
+        children=filters.passenger_info.children,
         infants_in_seat=0,
         infants_on_lap=0,
         pin_max_u64=False,
@@ -1004,16 +1075,26 @@ def google_flights_url(s: Search, *, currency: str | None = None, language: str 
         trip = "multi-city"
 
     p = s.options.pax
+    adults = (p.adults + p.seniors + p.youth) or 1
+    passengers = Passengers(
+        adults=adults,
+        children=p.children,
+        infants_in_seat=p.infants_in_seat,
+        infants_on_lap=p.infants_in_lap,
+    )
+    # Built for its checks (at most nine, a lap per infant), then given Google's
+    # codes: fast_flights writes an infant in a seat as a lap and the reverse.
+    passengers.pb = _gf_pax_kinds(
+        adults=adults,
+        children=p.children,
+        infants_in_seat=p.infants_in_seat,
+        infants_on_lap=p.infants_in_lap,
+    )
     td = TFSData.from_interface(
         flight_data=flight_data,
         seat=_CABIN_TFS[s.options.cabin],
         trip=trip,
-        passengers=Passengers(
-            adults=(p.adults + p.seniors + p.youth) or 1,
-            children=p.children,
-            infants_in_seat=p.infants_in_seat,
-            infants_on_lap=p.infants_in_lap,
-        ),
+        passengers=passengers,
         # The stop limit is a TFSData-level field, not per-FlightData. Omitting
         # it made a `--stops 0` link byte-identical to an unconstrained one, so
         # a nonstop-only result table handed the user a page that also offered
