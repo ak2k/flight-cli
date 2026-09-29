@@ -124,10 +124,11 @@ zone offset), every layover's minutes, and the first departure's clock time, to
 the minute. A layover is the page's own figure for that connection
 (`data[0][13]`, elapsed minutes). Where the row states none it is the clock
 difference at the connecting airport, which a daylight-saving change there puts
-an hour out; a negative one is such a change and is not held against the row. The stop ceiling and an alliance are
-not checked: the stops are left to Google's own filter, and nothing here says
-which carrier is in which alliance. Children are priced, not checked. When these
-checks empty a board, the empty-answer line names every active check.
+an hour out; a negative one is such a change and is not held against the row.
+The stop ceiling and an alliance are not checked: the stops are left to Google's
+own filter, and nothing here says which carrier is in which alliance. Children
+are priced, not checked. When these checks empty a board, the empty-answer line
+names every active check.
 
 The date grids do not serve any of the new constraints yet: `page_can_encode`
 and each predicate's `Tier` still answer for them, and they have no rows to
