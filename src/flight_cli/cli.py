@@ -5494,8 +5494,8 @@ def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes th
             help=(
                 "Show only fares at or under N, in the search's currency (--currency; "
                 "default USD). N is compared with the printed price, which for a party "
-                "is the total. Google Flights is asked for the cap and every row is "
-                "checked; a Matrix answer is cut to the fares under it. One --cabin."
+                "is the total. Google Flights is asked for a USD cap, and every row "
+                "is checked; a Matrix answer is cut to the fares under it. One --cabin."
             ),
             rich_help_panel=_GROUP_FILTERING,
         ),

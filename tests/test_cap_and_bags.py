@@ -342,6 +342,32 @@ def test_a_capped_google_search_asks_the_page_and_prints_no_row_over_it(
     assert [f.price_limit.max_price for f in served.asked] == [250]
 
 
+def _one_way_filter(**options: Any) -> Any:
+    return to_fli_filter(
+        SpecificDateSearch(legs=(Leg.of("JFK", "LAX", _DEP),), options=SearchOptions(**options))
+    )
+
+
+def test_only_a_usd_page_is_asked_for_the_cap() -> None:
+    """A EUR page asked for a cap served fewer of the fares under it than the
+    uncapped page (JFK-LAX at EUR 240: 34 of 45), so off USD the page is asked
+    for the whole board and the row check alone applies the cap."""
+    capped, plain = _one_way_filter(max_price=240), _one_way_filter()
+    assert gfid.search_page_url(capped, currency="EUR") == gfid.search_page_url(
+        plain, currency="EUR"
+    )
+    assert gfid.search_page_url(capped, currency="USD") != gfid.search_page_url(
+        plain, currency="USD"
+    )
+
+
+def test_a_eur_cap_still_holds_every_row(served: _Page) -> None:
+    served.board.extend([_gf_row(196.0, "EUR"), _gf_row(241.0, "EUR"), _gf_row(200.0, "USD")])
+    result = _search_cli("--max-price", "240", "--currency", "EUR", "--fast", "--format", "json")
+    assert result.exit_code == 0, result.output
+    assert [(r["price"], r["currency"]) for r in json.loads(result.stdout)] == [(196.0, "EUR")]
+
+
 def test_a_board_the_cap_empties_goes_to_matrix_naming_the_cap(
     served: _Page, monkeypatch: pytest.MonkeyPatch
 ) -> None:

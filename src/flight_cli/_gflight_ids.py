@@ -1375,7 +1375,9 @@ def _rows_from_ds1(payload: list[Any]) -> _Ds1Board:
 def search_page_url(filters: FlightSearchFilters, *, currency: str = "USD") -> str:
     """The public search-page URL for `filters` — the one address both rungs
     fetch, so neither can drift into asking Google a different question."""
-    return google_flights_search_page_url(build_search_tfs(filters), currency=currency)
+    return google_flights_search_page_url(
+        build_search_tfs(filters, currency=currency), currency=currency
+    )
 
 
 class _RetryableTransportError(GfTransportError):

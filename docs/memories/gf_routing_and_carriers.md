@@ -76,7 +76,7 @@ PR #230:
 3.12 = maximum duration, minutes
 3.13 = origin   3.14 = destination   3.15 = layover airports (not written)
 3.17/3.18 = min/max layover minutes
-12 = price cap, whole units of the page's `curr=`
+12 = price cap, whole units of the page's `curr=` (sent on a USD page only)
 13 = bags {2: carry-on (0 or 1), 3: checked count}, a zero count left out
 ```
 
@@ -134,7 +134,13 @@ Both are top-level fields, written after the cabin (9) and before 14.
   2026-11-04 page a cap of 250 served 26 rows at $204-$249, prices unchanged;
   JFK-LHR at 300 served priced rows at $293-$299 and kept 4 unpriced rows.
   Google honored it on a round trip's pinned return board as well (JFK-LAX
-  10-20/27 at 450: all 15 returns $398-$442). Every row is still held to it:
+  10-20/27 at 450: all 15 returns $398-$442). Only a USD page is asked for
+  it: a EUR page asked for a cap served fewer of the fares under it than the
+  uncapped EUR page. JFK-LAX 2026-10-20 at EUR 240 served 34 rows against 45
+  at or under 240 uncapped, all at the same prices; the 11 missing were AA
+  connections at EUR 196-232. The USD page at 250 served all 16 rows the
+  uncapped page had at or under $250. Off USD the page is fetched uncapped and the row check alone
+  applies the cap. Every row is still held to it:
   `routing_keep` drops a row priced over the cap, unpriced, or priced in
   another currency, on every board, and an emptied board is reported as not
   matching "a price cap of USD 250". N is compared with the printed price,

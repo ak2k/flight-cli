@@ -706,8 +706,9 @@ def _tfs_slice(
     }
 
 
-def build_search_tfs(filters: Any) -> bytes:
-    """Encode an fli `FlightSearchFilters` as the search page's tfs= protobuf.
+def build_search_tfs(filters: Any, *, currency: str = "USD") -> bytes:
+    """Encode an fli `FlightSearchFilters` as the search page's tfs= protobuf,
+    for a page priced in `currency`.
 
     Raises `GfTfsUnsupportedError` for any filter this transport has no field
     for — see `_TFS_REFUSED_FIELDS` for why that's an allowlist and not a
@@ -750,7 +751,10 @@ def build_search_tfs(filters: Any) -> bytes:
         "layover_min": layover.min_duration if layover else None,
         "layover_max": layover.max_duration if layover else None,
     }
-    price_limit = filters.price_limit
+    # Only a USD page is asked for the cap. A EUR page asked for one served
+    # fewer of the fares under it than its uncapped board (JFK-LAX at EUR 240:
+    # 34 of 45), so elsewhere the row check alone applies it.
+    price_limit = filters.price_limit if currency == "USD" else None
     bags = filters.bags
     return _encode_gflight_pinned_tfs(
         slices=[

@@ -251,7 +251,7 @@ def routing_keep(
     `currency` at or under `max_price`. None when nothing is asked of a row.
 
     The cap is checked on every board, a round trip's outbound as well as each
-    return: the page was asked for it, and every row is still held to it."""
+    return: whether or not the page was asked for it, every row is held to it."""
     if not any(per_slice_predicates) and not any(per_slice_times) and max_price is None:
         return None
 
