@@ -3065,7 +3065,6 @@ def _gflight_results(
             close_thread_session()
     if results is None:  # nothing served
         results = Board[Any]()
-    _note_other_currencies(results, requested)
     # Untrimmed on purpose: a round trip's combinations are built pin-major, so
     # the first `top_n` of them are one outbound's returns and nothing else.
     # Every caller trims what it renders, in the order that surface ranks by.
@@ -3075,7 +3074,11 @@ def _gflight_results(
 def _note_other_currencies(results: list[Any], requested: str) -> None:
     """One stderr line when Google priced rows in a currency other than the one
     asked for. Each such row keeps its own label in the table and the JSON, so
-    this is the note that says why two currencies are on one board."""
+    this is the note that says why two currencies are on one board.
+
+    Called by each path that answers with the board, not by `_gflight_results`:
+    a multi-cabin search can still hand its boards to Matrix, and the note would
+    then describe rows nobody is shown."""
     other: set[str] = set()
     for r in results:
         for m in cast("tuple[Any, ...]", r) if isinstance(r, tuple) else (r,):
@@ -3420,26 +3423,17 @@ def _row_checks(legs: tuple[Leg, ...]) -> str:
 
 
 def _answer_gf_empty(
-    dropped: int,
-    *,
-    json_out: bool,
-    matrix_fallback: bool,
-    pinned: int = 0,
-    checks: str = "the routing",
-) -> int | None:
-    """Answer a Google Flights search that has no rows, or hand it on.
+    dropped: int, *, json_out: bool, pinned: int = 0, checks: str = "the routing"
+) -> None:
+    """Answer a Google Flights search that has no rows and is not handed on.
 
     `dropped` is how many served rows the row filter removed, and `checks`
-    names what it held them to (`_row_checks`). When it removed them all and
-    `matrix_fallback` is set, nothing is printed and the count comes back for
-    the caller to run Matrix with. Otherwise the reason goes to stderr, so a
+    names what it held them to (`_row_checks`). The reason goes to stderr, so a
     `--format json` stdout is still the one document.
 
     `pinned` is how many outbounds a round trip searched returns for. The
     reason names it, because outbounds below the pins may have matching
     returns that were never searched."""
-    if dropped and matrix_fallback:
-        return dropped
     if dropped and pinned:
         plural = "" if pinned == 1 else "s"
         err.print(
@@ -3459,7 +3453,6 @@ def _answer_gf_empty(
         sys.stdout.write(json.dumps([], indent=2))
     elif not dropped:
         console.print("[yellow]Google Flights: no results.[/]")
-    return None
 
 
 def _run_gflight_path(
@@ -3500,7 +3493,6 @@ def _run_gflight_path(
     `sellers` adds row `pick`'s booking options after everything else, or
     wraps the JSON document as `{"search": …, "booking_options": …}`.
     """
-    _pin_cap_note(legs=legs, top_n=top_n)
     # Deferred like the adapter below: this arm reaches rung 2 only when the
     # transport says so, and the module pulls in nothing patchright at import.
     from ._gf_browser import interrupt_guard  # noqa: PLC0415 — GF-only; see above
@@ -3522,18 +3514,27 @@ def _run_gflight_path(
         err.print(f"[red]Google Flights query failed:[/] {_safe_text(e)}")
         raise typer.Exit(1) from e
 
-    # Checked before anything is printed: a `--sellers` pick outside the table
-    # is a usage error, not a pin to fall back from, and an empty board leaves
-    # nothing to open.
+    dropped: int = getattr(results, "dropped", 0)
+    # Handed on before either note, because both describe Google's answer and
+    # Matrix gives this one. Never with `--sellers`: an empty board fails that
+    # below, as a board with no row to open.
+    if not results and dropped and matrix_fallback and not sellers:
+        return dropped
+    _pin_cap_note(legs=legs, top_n=top_n)
+    _note_other_currencies(results, opts.currency or "USD")
+
+    # Checked before the answer is printed: a `--sellers` pick outside the
+    # table is a usage error, not a pin to fall back from, and an empty board
+    # leaves nothing to open.
     seller_row = _pick_for_sellers(pick, min(len(results), top_n)) if sellers else None
     if not results:
-        return _answer_gf_empty(
-            getattr(results, "dropped", 0),
+        _answer_gf_empty(
+            dropped,
             json_out=json_out,
-            matrix_fallback=matrix_fallback,
             pinned=getattr(results, "pinned", 0),
             checks=_row_checks(legs),
         )
+        return None
 
     # `-n` is one number for everything the user can act on. Google's page
     # serves its whole board whatever count is asked of it, so the
@@ -3965,7 +3966,13 @@ def _run_enriched_path(  # noqa: PLR0915 — one weave's outcome arms, read in o
     from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
 
     _pin_cap_note(legs=legs, top_n=top_n)
-    matrix_search = SpecificDateSearch(legs=legs, options=opts)
+    # Matrix is asked in the currency Google is asked in, so the merged table
+    # ranks like with like: left unset, Matrix prices in its own default (GBP
+    # from LHR) while Google prices in USD. Only this path merges the two.
+    requested = opts.currency or "USD"
+    matrix_search = SpecificDateSearch(
+        legs=legs, options=opts.model_copy(update={"currency": requested})
+    )
     awards_only = sel.awards_only if sel is not None else False
     state: dict[str, Any] = {}
 
@@ -3985,6 +3992,7 @@ def _run_enriched_path(  # noqa: PLR0915 — one weave's outcome arms, read in o
                 state["gf_err"] = e
                 gf = []
             state["gf"] = gf
+            _note_other_currencies(gf, requested)
             _paint_first_gf_table(state, gf, legs=legs, top_n=top_n, awards_only=awards_only)
 
     _run_the_weave(_go, state, gf_mode)
@@ -4048,7 +4056,7 @@ def _run_enriched_path(  # noqa: PLR0915 — one weave's outcome arms, read in o
     pinnable: SearchResult | None = None
     booking_row: tuple[SearchResult, int, str | None, str | None] | None = None
     if not awards_only:
-        merged = merge_results(fli_results_to_search_result(gf), matrix_res)
+        merged = merge_results(fli_results_to_search_result(gf), matrix_res, currency=requested)
         _render_merged(merged, legs=legs, top_n=top_n)
         shown = [r.itinerary for r in merged[:top_n]]
         seller_row = _pick_for_sellers(pick, len(shown)) if sellers else None
@@ -4149,7 +4157,8 @@ def _pin_cap_note(*, legs: tuple[Leg, ...], top_n: int) -> None:
     the number of those is capped however large `-n` is. Without a word the user
     reads a short table as the market rather than as the budget, so every
     round-trip path says it: the enriched one, `--fast`, `--format json` and
-    multi-cabin alike.
+    multi-cabin alike. A search handed to Matrix does not, because the table it
+    prints is Matrix's.
 
     Ranked first, not cheapest: the pin loop slices the board in the order the
     page served it. A note claiming otherwise is checkably false on the
@@ -4157,9 +4166,9 @@ def _pin_cap_note(*, legs: tuple[Leg, ...], top_n: int) -> None:
     never pinned at all below `-n 3`.
 
     "Up to", because the cap bounds the count and the board may hold fewer. The
-    exact number is known only once the pin loop has run, after this note; an
-    empty filtered round trip states it (`_answer_gf_empty`), where it changes
-    what the answer means.
+    exact number is known only once the pin loop has run; an empty filtered
+    round trip states it (`_answer_gf_empty`), where it changes what the answer
+    means.
 
     stderr, so a `--format json` document on stdout stays a document."""
     from ._gflight_ids import pinned_fanout  # noqa: PLC0415
@@ -4570,6 +4579,18 @@ def _validate_sort_cabin(sort_by: Cabin, cabins: tuple[Cabin, ...]) -> None:
         raise typer.Exit(2)
 
 
+def _note_google_rows_unshown(cabins: Iterable[Cabin]) -> None:
+    """Name each cabin Google Flights had rows for that Matrix, answering the
+    search in its place, returned no itinerary for: those rows are not in the
+    output."""
+    names = ", ".join(c.value for c in cabins)
+    if names:
+        err.print(
+            f"[yellow]Matrix returned no itinerary for {_safe_text(names)}, where Google "
+            "Flights had rows; --backend gflight shows them.[/]"
+        )
+
+
 def _run_matrix_path_multi(
     *,
     legs: tuple[Leg, ...],
@@ -4585,20 +4606,32 @@ def _run_matrix_path_multi(
     google_url: bool,
     run_pp: bool,
     sel: ProviderSelection,
+    google_answered: tuple[Cabin, ...] = (),
 ) -> None:
-    """Matrix multi-cabin: N parallel cabin queries → client-side join → render."""
+    """Matrix multi-cabin: N parallel cabin queries → client-side join → render.
+
+    `google_answered` names the cabins Google Flights had rows for when the
+    search was handed here; any of them Matrix returns no itinerary for, by
+    failing or by finding none, is named on stderr, since the hand-off already
+    set Google's rows aside."""
     # Widen each per-cabin query so the join has overlap to render — top_n
     # rows visible after merge, but each cabin's underlying query pulls
     # `_bumped_query_top_n` candidates. See _bumped_query_top_n docstring.
     query_opts = opts.model_copy(update={"page_size": _bumped_query_top_n(top_n, len(cabins))})
-    results_by_cabin = _run_matrix_multi(
-        legs=legs,
-        opts=query_opts,
-        cabins=cabins,
-        rps=_resolve_rps(rps),
-        impersonate=_resolve_impersonate(impersonate),
-        no_cache=_resolve_no_cache(no_cache),
-    )
+    try:
+        results_by_cabin = _run_matrix_multi(
+            legs=legs,
+            opts=query_opts,
+            cabins=cabins,
+            rps=_resolve_rps(rps),
+            impersonate=_resolve_impersonate(impersonate),
+            no_cache=_resolve_no_cache(no_cache),
+        )
+    except typer.Exit:
+        _note_google_rows_unshown(google_answered)
+        raise
+    found = {c for c, r in results_by_cabin.items() if r.solutions}
+    _note_google_rows_unshown(c for c in google_answered if c not in found)
     if not results_by_cabin:
         err.print("[red]All cabin queries failed.[/]")
         raise typer.Exit(1)
@@ -4610,7 +4643,9 @@ def _run_matrix_path_multi(
         )
         return
 
-    rows = _merge_cabins(results_by_cabin, sort_by=sort_by, top_n=top_n)
+    rows = _merge_cabins(
+        results_by_cabin, sort_by=sort_by, top_n=top_n, currency=opts.currency or "USD"
+    )
     # `not json_out` for the reason given at the same gate in
     # `_run_gflight_path`: with awards on, the document is written below this.
     if not sel.awards_only and not json_out:
@@ -4648,6 +4683,13 @@ def _run_matrix_path_multi(
         )
 
 
+class _MatrixHandOff(NamedTuple):
+    """A multi-cabin search Google Flights hands WHOLE to Matrix."""
+
+    emptied: dict[Cabin, int]  # each cabin the routing emptied, with the rows it dropped
+    answered: tuple[Cabin, ...]  # each cabin Google had rows for, now set aside
+
+
 def _run_gflight_path_multi(
     *,
     legs: tuple[Leg, ...],
@@ -4660,23 +4702,20 @@ def _run_gflight_path_multi(
     sel: ProviderSelection,
     gf_mode: GfTransportMode = TRANSPORT_HTTP,
     gf_headed: bool = False,
-) -> None:
+    matrix_fallback: bool = False,
+) -> _MatrixHandOff | None:
     """Google Flights multi-cabin: N cabin queries → join → render.
 
-    Parallel on rung 1 and serial on rung 2; `_run_gflight_multi` chooses."""
+    Parallel on rung 1 and serial on rung 2; `_run_gflight_multi` chooses.
+
+    Returns None once it has answered. When the routing filter emptied any
+    cabin's board and `matrix_fallback` is set, it prints nothing to stdout and
+    no note on Google's table, and returns the hand-off for the caller to give
+    the WHOLE search to Matrix: a per-cabin hand-off would put Google's rows and
+    Matrix's documents in one answer and join prices from two sources. A cabin
+    Google served nothing for is Google's answer and is not handed on."""
     # Widen per-cabin queries so the join has overlap; see _bumped_query_top_n.
     query_top_n = _bumped_query_top_n(top_n, len(cabins))
-    # The user's count, not the bumped one. The bump widens the pool each cabin
-    # keeps so the join has overlap; it is not what anyone asked for, and
-    # quoting it tells someone who asked for a handful of rows that returns are
-    # combined against the whole pin cap — more than they wanted, from a note
-    # whose whole job is to say when they will get fewer.
-    _pin_cap_note(legs=legs, top_n=top_n)
-    if len(legs) >= _ROUND_TRIP_LEGS and len(cabins) > 1:
-        from ._gflight_ids import pinned_fanout  # noqa: PLC0415
-
-        join_note = _multi_cabin_join_note(pinned_fanout(query_top_n))
-        err.print(f"[dim]{join_note}[/]")
     fli_by_cabin = _run_gflight_multi(
         legs=legs,
         opts=opts,
@@ -4688,12 +4727,39 @@ def _run_gflight_path_multi(
     if not fli_by_cabin:
         err.print("[red]All Google Flights cabin queries failed.[/]")
         raise typer.Exit(1)
-    for cab, cab_rows in fli_by_cabin.items():
-        if not cab_rows and getattr(cab_rows, "dropped", 0):
-            err.print(
-                f"[yellow]Google Flights {_safe_text(cab.value)}: "
-                f"no itinerary matched {_safe_text(_row_checks(legs))}.[/]"
-            )
+    # In the order the cabins were asked for; the fan-out fills `fli_by_cabin`
+    # in the order they finish.
+    emptied: dict[Cabin, int] = {
+        cab: dropped
+        for cab in cabins
+        if cab in fli_by_cabin
+        and not fli_by_cabin[cab]
+        and (dropped := getattr(fli_by_cabin[cab], "dropped", 0))
+    }
+    if emptied and matrix_fallback:
+        return _MatrixHandOff(emptied, tuple(cab for cab in cabins if fli_by_cabin.get(cab)))
+    # Only below the hand-off: each note describes Google's table, and a
+    # handed-off search prints Matrix's, where '—' is a cabin with no price.
+    #
+    # The user's count, not the bumped one. The bump widens the pool each cabin
+    # keeps so the join has overlap; it is not what anyone asked for, and
+    # quoting it tells someone who asked for a handful of rows that returns are
+    # combined against the whole pin cap — more than they wanted, from a note
+    # whose whole job is to say when they will get fewer.
+    _pin_cap_note(legs=legs, top_n=top_n)
+    if len(legs) >= _ROUND_TRIP_LEGS and len(cabins) > 1:
+        from ._gflight_ids import pinned_fanout  # noqa: PLC0415
+
+        join_note = _multi_cabin_join_note(pinned_fanout(query_top_n))
+        err.print(f"[dim]{join_note}[/]")
+    for cab in cabins:
+        if cab in fli_by_cabin:
+            _note_other_currencies(fli_by_cabin[cab], opts.currency or "USD")
+    for cab in emptied:
+        err.print(
+            f"[yellow]Google Flights {_safe_text(cab.value)}: "
+            f"no itinerary matched {_safe_text(_row_checks(legs))}.[/]"
+        )
 
     if json_out and not run_pp:
         out: dict[str, Any] = {}
@@ -4710,10 +4776,12 @@ def _run_gflight_path_multi(
                 cab_dumped.append(dumped if isinstance(r, tuple) else dumped[0])
             out[cab.value] = cab_dumped
         sys.stdout.write(json.dumps(out, indent=2, default=str))
-        return
+        return None
 
     results_by_cabin = _gflight_to_search_result_per_cabin(fli_by_cabin)
-    rows = _merge_cabins(results_by_cabin, sort_by=sort_by, top_n=top_n)
+    rows = _merge_cabins(
+        results_by_cabin, sort_by=sort_by, top_n=top_n, currency=opts.currency or "USD"
+    )
     # `not json_out` for the reason given at the same gate in
     # `_run_gflight_path`: with awards on, the document is written below this.
     if not sel.awards_only and not json_out:
@@ -4736,6 +4804,7 @@ def _run_gflight_path_multi(
             seats_sources=sel.seats_sources(),
             cash_per_cabin=_cash_per_cabin_multi(rows),
         )
+    return None
 
 
 def _merge_results_into_one(
@@ -5147,8 +5216,10 @@ _MATRIX_URL_HELP = (
     "available). No link line is printed under --format json."
 )
 _CURRENCY_HELP = (
-    "Price in this currency: a 3-letter ISO 4217 code such as EUR. Default: USD. "
-    "Matrix and Google Flights both price in it; the Matrix link does not carry it."
+    "Price in this currency: a 3-letter ISO 4217 code such as EUR. Matrix and "
+    "Google Flights both price in it; the Matrix link does not carry it. Unset, "
+    "Google Flights prices in USD and Matrix in its own default, often the "
+    "origin's currency, except in a table merging the two, where both use USD."
 )
 
 _GOOGLE_URL_HELP = (
@@ -5584,8 +5655,9 @@ def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes th
         # constraint that survived to here is one the fan-out honours natively.
         # Re-testing `routing or extension` here would drop it to Matrix with no
         # reason printed.
+        google_answered: tuple[Cabin, ...] = ()
         if resolved == BACKEND_GFLIGHT:
-            _run_gflight_path_multi(
+            hand_off = _run_gflight_path_multi(
                 legs=legs,
                 opts=opts,
                 cabins=cabins_tuple,
@@ -5596,8 +5668,19 @@ def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes th
                 sel=sel,
                 gf_mode=gf_mode,
                 gf_headed=gf_headed,
+                matrix_fallback=backend == BACKEND_AUTO,
             )
-            return
+            if hand_off is None:
+                return
+            reasons = ", ".join(
+                f"{cab.value} ({dropped:d} rows filtered out)"
+                for cab, dropped in hand_off.emptied.items()
+            )
+            err.print(
+                f"[dim]Using Matrix: no Google Flights itinerary matched "
+                f"{_safe_text(_row_checks(legs))} in {_safe_text(reasons)}.[/]"
+            )
+            google_answered = hand_off.answered
         _run_matrix_path_multi(
             legs=legs,
             opts=opts,
@@ -5612,6 +5695,7 @@ def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes th
             google_url=google_url,
             run_pp=run_awards,
             sel=sel,
+            google_answered=google_answered,
         )
         return
 

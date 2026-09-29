@@ -36,7 +36,7 @@ def test_matched_itinerary_carries_both_prices_matrix_authoritative() -> None:
     gf = _sr(_it("USD500.00", ["LH455"], dep="2026-08-15T08:00"))
     # Same flight + date, different time + price -> still a match (flight# + date).
     matrix = _sr(_it("USD505.00", ["LH455"], dep="2026-08-15T09:30"))
-    (row,) = merge_results(gf, matrix)
+    (row,) = merge_results(gf, matrix, currency="USD")
     assert row.source == "both"
     assert row.gf_price == "USD500.00"
     assert row.matrix_price == "USD505.00"
@@ -44,14 +44,14 @@ def test_matched_itinerary_carries_both_prices_matrix_authoritative() -> None:
 
 
 def test_matrix_only_row() -> None:
-    (row,) = merge_results(_sr(), _sr(_it("USD600.00", ["AF83"])))
+    (row,) = merge_results(_sr(), _sr(_it("USD600.00", ["AF83"])), currency="USD")
     assert row.source == "matrix"
     assert row.matrix_price == "USD600.00"
     assert row.gf_price is None
 
 
 def test_gf_only_row() -> None:
-    (row,) = merge_results(_sr(_it("USD380.00", ["UA58"])), _sr())
+    (row,) = merge_results(_sr(_it("USD380.00", ["UA58"])), _sr(), currency="USD")
     assert row.source == "gf"
     assert row.gf_price == "USD380.00"
     assert row.matrix_price is None
@@ -60,7 +60,7 @@ def test_gf_only_row() -> None:
 def test_merge_sorts_by_best_price_and_tags_sources() -> None:
     gf = _sr(_it("USD380.00", ["UA58"]), _it("USD500.00", ["LH455"]))
     matrix = _sr(_it("USD505.00", ["LH455"]), _it("USD900.00", ["AF83"]))
-    rows = merge_results(gf, matrix)
+    rows = merge_results(gf, matrix, currency="USD")
     assert [(r.source, _first_flight(r.itinerary)) for r in rows] == [
         ("gf", "UA58"),  # 380 — GF-only (ULCC/codeshare)
         ("both", "LH455"),  # 500/505 — matched
@@ -68,17 +68,40 @@ def test_merge_sorts_by_best_price_and_tags_sources() -> None:
     ]
 
 
+def test_a_fare_in_another_currency_ranks_after_the_requested_ones() -> None:
+    """Matrix priced in GBP and Google in USD. By bare numbers GBP1027 ranks
+    above USD1043 (about GBP780); ranked in the requested USD, the Google fare
+    leads, the matched row follows on its USD price, and the Matrix-only GBP
+    fare comes after every USD one."""
+    gf = _sr(_it("USD1330.00", ["VS45"]), _it("USD1043.00", ["TK1988", "TK1"]))
+    matrix = _sr(_it("GBP1004.00", ["VS45"]), _it("GBP1027.00", ["AA101"]))
+    rows = merge_results(gf, matrix, currency="USD")
+    assert [(r.source, _first_flight(r.itinerary)) for r in rows] == [
+        ("gf", "TK1988"),
+        ("both", "VS45"),
+        ("matrix", "AA101"),
+    ]
+    assert (rows[1].matrix_price, rows[1].gf_price) == ("GBP1004.00", "USD1330.00")
+
+
+def test_a_one_currency_merge_orders_by_amount_whatever_was_asked_for() -> None:
+    gf = _sr(_it("GBP380.00", ["UA58"]), _it("GBP500.00", ["LH455"]))
+    matrix = _sr(_it("GBP505.00", ["LH455"]), _it("GBP90.00", ["AF83"]))
+    rows = merge_results(gf, matrix, currency="USD")
+    assert [_first_flight(r.itinerary) for r in rows] == ["AF83", "UA58", "LH455"]
+
+
 def test_unkeyed_itineraries_stay_single_source() -> None:
     # No flights -> unmatchable -> kept as a single-source row, not merged.
     gf = _sr(_it("USD100.00", []))
     matrix = _sr(_it("USD100.00", []))
-    rows = merge_results(gf, matrix)
+    rows = merge_results(gf, matrix, currency="USD")
     assert len(rows) == 2
     assert {r.source for r in rows} == {"gf", "matrix"}
 
 
 def test_empty_inputs() -> None:
-    assert merge_results(_sr(), _sr()) == []
+    assert merge_results(_sr(), _sr(), currency="USD") == []
 
 
 # ───────── a matched row takes Google's per-flight dates ─────────
@@ -107,7 +130,7 @@ def _nz_row(price: str, s: Slice, sid: str | None = None) -> Itinerary:
 def test_a_matched_matrix_connection_takes_googles_flight_dates() -> None:
     gf = _sr(_nz_row("USD900.00", _nz(segment_dates=[_D, _D1])))
     matrix = _sr(_nz_row("USD880.00", _nz(), sid="sol-1"))
-    (row,) = merge_results(gf, matrix)
+    (row,) = merge_results(gf, matrix, currency="USD")
     assert row.source == "both"
     assert row.itinerary.itinerary is not None
     assert row.itinerary.itinerary.slices[0].segment_dates == [_D, _D1]
@@ -120,7 +143,7 @@ def test_the_merge_leaves_both_results_as_they_were() -> None:
     gf = _sr(_nz_row("USD900.00", _nz(segment_dates=[_D, _D1])))
     matrix = _sr(_nz_row("USD880.00", _nz(), sid="sol-1"))
     before = (gf.model_dump(), matrix.model_dump())
-    merge_results(gf, matrix)
+    merge_results(gf, matrix, currency="USD")
     assert (gf.model_dump(), matrix.model_dump()) == before
 
 
@@ -128,7 +151,9 @@ def test_a_google_row_landing_on_another_day_lends_no_dates() -> None:
     """Same flights leaving the same day share the match key, but a Google row
     whose NZ10 leaves a day later does not date Matrix's NZ10."""
     late = _nz(arrival=f"{_D1}T10:00", segment_dates=[_D, "2026-10-22"])
-    (row,) = merge_results(_sr(_nz_row("USD900.00", late)), _sr(_nz_row("USD880.00", _nz())))
+    (row,) = merge_results(
+        _sr(_nz_row("USD900.00", late)), _sr(_nz_row("USD880.00", _nz())), currency="USD"
+    )
     assert row.source == "both"
     assert row.itinerary.itinerary is not None
     assert row.itinerary.itinerary.slices[0].segment_dates == []
@@ -151,7 +176,9 @@ def _ua(arrival: str, segment_dates: list[str] | None = None) -> Slice:
 def _dates_lent(google_arrival: str, matrix_arrival: str) -> list[str]:
     google = _ua(google_arrival, segment_dates=["2026-11-01", "2026-11-01"])
     (row,) = merge_results(
-        _sr(_nz_row("USD500.00", google)), _sr(_nz_row("USD480.00", _ua(matrix_arrival)))
+        _sr(_nz_row("USD500.00", google)),
+        _sr(_nz_row("USD480.00", _ua(matrix_arrival))),
+        currency="USD",
     )
     assert row.source == "both"
     assert row.itinerary.itinerary is not None
@@ -183,7 +210,7 @@ def test_the_google_row_that_is_the_same_trip_lends_its_dates_whatever_its_place
     same = _nz_row("USD910.00", _nz(arrival=f"{_D}T10:00:00", segment_dates=[_D, _D1]))
     matrix = _sr(_nz_row("USD880.00", _nz(arrival=f"{_D}T10:00-10:00"), sid="sol-1"))
     for google in (_sr(late, same), _sr(same, late)):
-        (row,) = merge_results(google, matrix)
+        (row,) = merge_results(google, matrix, currency="USD")
         assert row.source == "both"
         assert row.itinerary.itinerary is not None
         assert row.itinerary.itinerary.slices[0].segment_dates == [_D, _D1]
@@ -206,7 +233,7 @@ def test_two_google_rows_that_are_the_trip_on_other_days_lend_no_dates() -> None
     b = _nz_row("USD720.00", _three_flights(["2026-11-01", "2026-11-02", "2026-11-03"]))
     matrix = _sr(_nz_row("USD690.00", _three_flights()))
     for google in (_sr(a, b), _sr(b, a)):
-        (row,) = merge_results(google, matrix)
+        (row,) = merge_results(google, matrix, currency="USD")
         assert row.source == "both"
         assert row.itinerary.itinerary is not None
         assert row.itinerary.itinerary.slices[0].segment_dates == []

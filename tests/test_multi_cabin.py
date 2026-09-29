@@ -176,6 +176,7 @@ def test_merge_full_overlap():
         {Cabin.COACH: _result(a), Cabin.BUSINESS: _result(b)},
         sort_by=Cabin.COACH,
         top_n=10,
+        currency="USD",
     )
     assert len(rows) == 1
     assert rows[0].prices == {Cabin.COACH: "USD600.00", Cabin.BUSINESS: "USD3000.00"}
@@ -188,6 +189,7 @@ def test_merge_partial_overlap_missing_filled_with_absent_keys():
         {Cabin.COACH: _result(a), Cabin.BUSINESS: _result(b)},
         sort_by=Cabin.COACH,
         top_n=10,
+        currency="USD",
     )
     assert len(rows) == 2
     by_carrier = {row.itinerary.itinerary.slices[0].flights[0]: row for row in rows}
@@ -207,6 +209,7 @@ def test_merge_sort_by_missing_sinks_to_bottom():
         },
         sort_by=Cabin.COACH,
         top_n=10,
+        currency="USD",
     )
     flight_nums = [r.itinerary.itinerary.slices[0].flights[0] for r in rows]
     assert flight_nums == ["DL300", "AA100", "BA200"]
@@ -220,6 +223,7 @@ def test_merge_top_n_truncates_after_sort():
         {Cabin.COACH: _result(c, a, b)},
         sort_by=Cabin.COACH,
         top_n=2,
+        currency="USD",
     )
     assert [r.itinerary.itinerary.slices[0].flights[0] for r in rows] == ["AA1", "BB2"]
 
@@ -234,6 +238,7 @@ def test_merge_skips_unkeyable_itineraries():
         {Cabin.COACH: _result(keyed, unkeyed)},
         sort_by=Cabin.COACH,
         top_n=10,
+        currency="USD",
     )
     assert len(rows) == 1
 
@@ -248,9 +253,63 @@ def test_merge_preserves_first_itinerary_for_render():
         {Cabin.COACH: _result(coach_it), Cabin.BUSINESS: _result(biz_it)},
         sort_by=Cabin.COACH,
         top_n=10,
+        currency="USD",
     )
     # Coach was first; the row's `itinerary` reference must be `coach_it`.
     assert rows[0].itinerary is coach_it
+
+
+def _priced(*prices: str) -> list[Itinerary]:
+    """One distinct JFK-LHR itinerary per price, in the order given."""
+    return [
+        _itin((f"XX{i}", "2026-08-15T09:00", "JFK", "LHR"), price=p) for i, p in enumerate(prices)
+    ]
+
+
+def test_merge_never_trims_a_fare_for_a_smaller_number_in_another_currency():
+    """JPY500 is the smaller number, and without a rate nothing says it is the
+    cheaper fare; the USD fare the search asked for keeps the top row."""
+    rows = merge(
+        {Cabin.COACH: _result(*_priced("JPY500", "USD1000.00"))},
+        sort_by=Cabin.COACH,
+        top_n=1,
+        currency="USD",
+    )
+    assert [r.prices[Cabin.COACH] for r in rows] == ["USD1000.00"]
+
+
+def test_merge_ranks_the_requested_currency_first_then_each_other_by_code():
+    """Asked for EUR: EUR rows by amount, then GBP and USD in code order, each by
+    its own amounts, then a price naming no currency, then a row with no fare in
+    the sort cabin."""
+    coach = _priced("USD50.00", "EUR900.00", "$10", "GBP100.00", "EUR800.00", "USD40.00")
+    no_coach = _itin(("ZZ9", "2026-08-15T09:00", "JFK", "LHR"), price="USD1.00")
+    rows = merge(
+        {Cabin.COACH: _result(*coach), Cabin.BUSINESS: _result(no_coach)},
+        sort_by=Cabin.COACH,
+        top_n=10,
+        currency="EUR",
+    )
+    assert [r.prices.get(Cabin.COACH) for r in rows] == [
+        "EUR800.00",
+        "EUR900.00",
+        "GBP100.00",
+        "USD40.00",
+        "USD50.00",
+        "$10",
+        None,
+    ]
+
+
+@pytest.mark.parametrize("currency", ["USD", "GBP"])
+def test_merge_orders_a_one_currency_list_by_amount_whatever_was_asked_for(currency: str):
+    rows = merge(
+        {Cabin.COACH: _result(*_priced("GBP300.00", "GBP100.00", "GBP200.00"))},
+        sort_by=Cabin.COACH,
+        top_n=10,
+        currency=currency,
+    )
+    assert [r.prices[Cabin.COACH] for r in rows] == ["GBP100.00", "GBP200.00", "GBP300.00"]
 
 
 # ────────────────────────── _derive_pp_cabins ──────────────────────────────

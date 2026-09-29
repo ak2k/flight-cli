@@ -26,6 +26,7 @@ SliceKey = tuple[str, str]  # (FLIGHT_NUMBER_UPPER_NOSPACE, "YYYY-MM-DD")
 ItineraryKey = tuple[SliceKey, ...]
 
 _CASH_NUM_RE = re.compile(r"[\d,]*\d+(?:\.\d+)?")
+_CURRENCY_RE = re.compile(r"[A-Z]{3}")
 
 
 def _norm_fn(fn: str | None) -> str:
@@ -72,6 +73,32 @@ def parse_price(s: str | None) -> float | None:
         return None
 
 
+def price_currency(price: str | None) -> str | None:
+    """The ISO 4217 prefix of a price string ('USD' of 'USD530.00'); None for a
+    price that names none, such as '$1,078'."""
+    m = _CURRENCY_RE.match(price or "")
+    return m.group(0) if m else None
+
+
+def price_rank(price: str | None, amount: float | None, *, currency: str) -> tuple[int, str, float]:
+    """Sort key for a price that never compares two currencies' numbers.
+
+    Prices in `currency`, the one the search asked for, come first, then each
+    other currency in code order, then prices naming none, each group by
+    `amount`; a price with no amount goes last. No exchange rate is known here,
+    so a fare in another currency ranks after every requested one rather than
+    among them by a number in a different unit.
+
+    `amount` is the caller's own parse of `price`, so a list priced in one
+    currency keeps exactly the order that parse gives it."""
+    if amount is None:
+        return (3, "", 0.0)
+    code = price_currency(price)
+    if code is None:
+        return (2, "", amount)
+    return (0, "", amount) if code == currency else (1, code, amount)
+
+
 @dataclass
 class MultiCabinRow:
     """One itinerary observed across one or more cabin queries.
@@ -91,10 +118,13 @@ def merge(
     *,
     sort_by: Cabin,
     top_n: int,
+    currency: str,
 ) -> list[MultiCabinRow]:
-    """Join itineraries across cabins. Sorted by `sort_by`'s parsed price
-    (asc); rows missing the sort cabin's price sink to the bottom. Truncated
-    to `top_n` rows.
+    """Join itineraries across cabins. Sorted by `sort_by`'s price under
+    `price_rank`: rows priced in `currency` first by amount, any other
+    currency after them; rows missing the sort cabin's price sink to the
+    bottom. Truncated to `top_n` rows, so the trim never drops a fare for a
+    smaller number in another currency.
 
     Itineraries that can't be keyed (missing flight# or departure on any
     slice) are skipped.
@@ -113,9 +143,9 @@ def merge(
             if price:
                 row.prices[cabin] = price
 
-    def sort_value(row: MultiCabinRow) -> float:
-        p = parse_price(row.prices.get(sort_by))
-        return p if p is not None else float("inf")
+    def sort_value(row: MultiCabinRow) -> tuple[int, str, float]:
+        price = row.prices.get(sort_by)
+        return price_rank(price, parse_price(price), currency=currency)
 
     rows = sorted(by_key.values(), key=sort_value)
     return rows[:top_n]
