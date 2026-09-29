@@ -2172,8 +2172,8 @@ def _booking_options(
     gf_price: str | None,
     headed: bool,
 ) -> BookingOptions:
-    """Row `n`'s sellers, read off its booking page in Chrome, or exit 1 with
-    the reason on stderr.
+    """Row `n`'s sellers, read off its booking page in Chrome and held to the
+    search's price cap, or exit 1 with the reason on stderr.
 
     The URL is the pinned link's, so the row opened is the row the link pins,
     and the page is asked in the currency of `gf_price`, the row's Google price.
@@ -2208,10 +2208,30 @@ def _booking_options(
     flights = [(seg["carrier"], seg["flight"]) for seg in (*outbound, *(returning or []))]
     try:
         with interrupt_guard(), session_scope():
-            return booking_options(url, flights=flights, headed=headed)
+            options = booking_options(url, flights=flights, headed=headed)
     except GfBackendError as e:
         _report_page_refusal(heading, e)
         raise typer.Exit(1) from e
+    return _offers_under_cap(options, search.options, heading)
+
+
+def _offers_under_cap(options: BookingOptions, opts: SearchOptions, heading: str) -> BookingOptions:
+    """`options` holding only the offers the search's price cap admits, by the
+    rule every row is held to, or `options` itself when there is no cap. None
+    left fails the command, as no seller at all does: an empty list would read
+    as nobody selling the row."""
+    cap = opts.max_price
+    if cap is None:
+        return options
+    currency = opts.currency or "USD"
+    kept = tuple(
+        s
+        for s in options.sellers
+        if within_price_cap(s.price, options.currency, cap=cap, cap_currency=currency)
+    )
+    if not kept:
+        _no_booking_options(heading, f"no booking offer is at or under {currency} {cap:d}.")
+    return options._replace(sellers=kept)
 
 
 def _search_and_sellers(

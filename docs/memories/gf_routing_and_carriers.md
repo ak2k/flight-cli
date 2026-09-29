@@ -150,7 +150,9 @@ Both are top-level fields, written after the cabin (9) and before 14.
   matching "a price cap of USD 250". A board Google served empty says "no fare
   at or under USD 250" only when the page was asked for the cap; one fetched
   uncapped says "no results". N is compared with the printed price, which for
-  a party is the total.
+  a party is the total. `--sellers` holds the booking page's offers to the
+  same rule, in its table and in `booking_options`; when none is left it says
+  so on one stderr line and exits 1.
 - Matrix has no price input. `cli._price_capped` cuts its page to the fares
   under the cap before the pick, the fare rules, the awards, the links and the
   enriched merge read it; Matrix answers in price order, so the cut loses no

@@ -1028,3 +1028,97 @@ def test_a_round_trip_opens_the_booking_page_for_both_legs(monkeypatch: pytest.M
     )
     assert b"1523" in raw
     assert b"123" in raw.split(b"1523", 1)[1]
+
+
+# ───────────────────────────── under a price cap ─────────────────────────────
+
+_CAP = "190"
+
+# Each path that opens a booking page: Google's own table, its document, the
+# table painted while Matrix stays silent, and the merged table.
+_CAPPED_PATHS = [
+    pytest.param(["--fast"], None, id="fast"),
+    pytest.param(["--fast", "--format", "json"], None, id="fast-json"),
+    pytest.param([], _no_matrix, id="enriched-matrix-silent"),
+    pytest.param([], "USD175.00", id="enriched-merged"),
+]
+
+
+def _capped_run(
+    monkeypatch: pytest.MonkeyPatch,
+    board: list[Any],
+    args: list[str],
+    matrix: object,
+    currency: str = "USD",
+) -> Any:
+    """Row 1 is B6 1523, which Google priced at 179 in `currency`; `matrix` is
+    what Matrix answers, or on the merged table B6 1523's Matrix price."""
+    if isinstance(matrix, str):
+        _merged_with(monkeypatch, board, "B61523", matrix)
+        board = board[:1]
+    elif matrix is not None:
+        monkeypatch.setattr(cli, "_matrix_into", matrix)
+    _priced_in(monkeypatch, board, currency)
+    return _run(*args, "--sellers", "--max-price", _CAP, "--no-matrix-url", "--no-google-url")
+
+
+@pytest.mark.parametrize(("args", "matrix"), _CAPPED_PATHS)
+def test_under_a_cap_no_booking_offer_over_it_is_printed_or_listed(
+    monkeypatch: pytest.MonkeyPatch, board: list[Any], args: list[str], matrix: object
+) -> None:
+    """The row is under the cap and one of its sellers is not; an unpriced
+    seller cannot be shown to be under it, so it goes as well."""
+    _serve(
+        monkeypatch,
+        _booking_body(
+            _option("Agency", 200, flights=_B6_1523),
+            _option("JetBlue", 179, fare="Blue", airline=True, flights=_B6_1523),
+            _option("Kiwi.com", 170, flights=_B6_1523),
+            _option("Unpriced", None, flights=_B6_1523),
+        ),
+    )
+    result = _capped_run(monkeypatch, board, args, matrix)
+    assert result.exit_code == 0, result.output
+    if "json" in args:
+        offers = json.loads(result.stdout)["booking_options"]
+        assert [(o["seller"], o["price"]) for o in offers] == [("Kiwi.com", 170), ("JetBlue", 179)]
+        return
+    block = result.stdout.split("Booking options for #1", 1)[1]
+    assert "Kiwi.com" in block
+    assert "JetBlue" in block
+    assert "Agency" not in block
+    assert "USD200.00" not in block
+    assert "Unpriced" not in block
+
+
+@pytest.mark.parametrize(("args", "matrix"), _CAPPED_PATHS)
+@pytest.mark.parametrize(
+    ("currency", "prices"),
+    [
+        pytest.param("USD", (200, 210), id="over"),
+        pytest.param("GBP", (170, 179), id="other-currency"),
+    ],
+)
+def test_under_a_cap_with_no_booking_offer_under_it_one_line_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+    board: list[Any],
+    args: list[str],
+    matrix: object,
+    currency: str,
+    prices: tuple[int, int],
+) -> None:
+    """Google priced the row in `currency`, so its booking page answers in it:
+    GBP offers are not under a USD cap, whatever their amount."""
+    fake = _serve(
+        monkeypatch,
+        _booking_body(*(_option(f"s{p}", p, flights=_B6_1523) for p in prices)),
+    )
+    result = _capped_run(monkeypatch, board, args, matrix, currency)
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(fake.urls[0]).query)
+    assert query["curr"] == [currency]
+    assert result.exit_code == 1, result.output
+    said = [line for line in result.stderr.splitlines() if "booking" in line.lower()]
+    assert said == [f"No booking options for #1: no booking offer is at or under USD {_CAP}."]
+    assert "Booking options" not in result.stdout
+    if "json" in args:
+        assert result.stdout == ""
