@@ -47,7 +47,7 @@ from flight_cli._gf_errors import (
     GfUpstreamStatusError,
 )
 from flight_cli.cli import _resolve_gf_transport
-from flight_cli.domain import Cabin, Leg, SearchOptions, SpecificDateSearch
+from flight_cli.domain import Bags, Cabin, Leg, SearchOptions, SpecificDateSearch
 from flight_cli.fli_bridge import to_fli_filter
 
 if TYPE_CHECKING:
@@ -510,11 +510,11 @@ class _RecordingSession:
         return gfid.PageFetch(html=body, final_url=_PAGE_URL, status_code=200)
 
 
-def _filters(*, round_trip: bool) -> Any:
+def _filters(*, round_trip: bool, bags: Bags | None = None) -> Any:
     legs = (Leg(origins=("JFK",), destinations=("LAX",), date=date(2026, 10, 14)),)
     if round_trip:
         legs += (Leg(origins=("LAX",), destinations=("JFK",), date=date(2026, 10, 24)),)
-    return to_fli_filter(SpecificDateSearch(legs=legs, options=SearchOptions()))
+    return to_fli_filter(SpecificDateSearch(legs=legs, options=SearchOptions(bags=bags)))
 
 
 @pytest.fixture
@@ -642,6 +642,35 @@ def test_a_browser_that_dies_after_a_served_pin_still_says_what_to_do(
     assert "--backend matrix" in caplog.text, caplog.text
     assert "was unreachable" not in caplog.text, caplog.text  # not the wrong diagnosis
     assert "2 of 3 return boards skipped" in caplog.text, caplog.text  # the served count
+
+
+@pytest.mark.usefixtures("no_rung_one")
+def test_under_bags_a_browser_that_dies_after_a_served_pin_points_at_dropping_them(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Matrix prices no bags, so under `--bags` the remedy's last resort is
+    dropping them, not `--backend matrix`, which `--bags` refuses."""
+    session = _RecordingSession(
+        pages=[_page(), _return_page(), GfBrowserUnavailableError("Chrome died.")]
+    )
+
+    def _session(*, headed: bool) -> _RecordingSession:
+        return session
+
+    monkeypatch.setattr(gfb, "session", _session)
+
+    with caplog.at_level("WARNING", logger="flight_cli._gflight_ids"):
+        out = gfid.search_with_ids(
+            _filters(round_trip=True, bags=Bags(checked=1)),
+            top_n=3,
+            transport=gfid.GfTransport(mode="browser"),
+        )
+    assert out is not None
+    assert len(out) == 3
+    assert "Chrome died." in caplog.text, caplog.text
+    assert "--gf-transport http" in caplog.text, caplog.text
+    assert "--backend matrix" not in caplog.text, caplog.text
+    assert "drop `--bags`" in caplog.text, caplog.text
 
 
 @pytest.mark.parametrize("mode", ["http", "auto"])

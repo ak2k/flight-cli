@@ -86,6 +86,7 @@ from fli.search.flights import SearchFlights  # pyright: ignore[reportMissingTyp
 from . import _gf_browser
 from ._gf_common import TRANSPORT_HTTP, GfTransportMode, PageFetch, cache_dir
 from ._gf_errors import (
+    BROWSER_DEFAULT_REMEDY,
     GfBackendError,
     GfBrowserUnavailableError,
     GfConsentError,
@@ -2234,6 +2235,7 @@ def search_with_ids(
         stopped=stopped,
         skipped=skipped,
         unmatched=unmatched,
+        bags=filters.bags is not None,
     )
     # A Board even with no pair in it: the pins were taken from rows Google
     # served, so the rows the filter removed on either leg are why it is empty,
@@ -2255,6 +2257,7 @@ def _report_pin_outcome(
     stopped: GfBackendError | None,
     skipped: int,
     unmatched: int = 0,
+    bags: bool = False,
 ) -> None:
     """Account for what the pin loop met: a counted warning, or a raise.
 
@@ -2299,7 +2302,7 @@ def _report_pin_outcome(
             "stopped pinning: %d of %d return boards skipped; %s",
             skipped,
             pins,
-            _why_pinning_stopped(stopped),
+            _why_pinning_stopped(stopped, bags=bags),
         )
     elif refused and not served:
         # "Nothing was served", rather than "every pin refused": one pin
@@ -2327,7 +2330,21 @@ def _report_pin_outcome(
         raise refused[-1]
 
 
-def _why_pinning_stopped(stopped: GfBackendError) -> str:
+# Matrix, the default remedy's last resort, prices no bags.
+_BROWSER_BAGS_REMEDY = (
+    "Retry, or use `--gf-transport http` (or drop `--bags` to search Matrix, which prices no bags)."
+)
+
+
+def browser_remedy(e: GfBrowserUnavailableError, *, bags: bool) -> str:
+    """`e`'s remedy, ending on dropping `--bags` rather than on Matrix when
+    the search asked for bags."""
+    if bags and e.remedy.endswith(BROWSER_DEFAULT_REMEDY):
+        return e.remedy.removesuffix(BROWSER_DEFAULT_REMEDY) + _BROWSER_BAGS_REMEDY
+    return e.remedy
+
+
+def _why_pinning_stopped(stopped: GfBackendError, *, bags: bool = False) -> str:
     """The clause naming what ended the fan-out, in the failure's own words.
 
     Not one fixed phrase, because the three stops send the reader to three
@@ -2339,5 +2356,5 @@ def _why_pinning_stopped(stopped: GfBackendError) -> str:
     if isinstance(stopped, GfThrottledError):
         return "Google Flights rate-limited this IP"
     if isinstance(stopped, GfBrowserUnavailableError):
-        return f"the browser rung stopped — {stopped}"
+        return f"the browser rung stopped — {stopped.reason} {browser_remedy(stopped, bags=bags)}"
     return "Google Flights was unreachable"
