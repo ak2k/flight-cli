@@ -19,6 +19,8 @@ from flight_cli._gf_dategrid import (
     grid_routing_blocker,
 )
 from flight_cli.domain import CalendarSearch, CalendarWindow, Leg
+from flight_cli.fli_bridge import apply_gf_native_filters, to_fli_filter
+from flight_cli.routing_predicates import classify
 
 
 def _cal(
@@ -73,6 +75,71 @@ def test_grid_declines_multi_airport_and_round_trip() -> None:
     # The http grid never prices a round trip; the page grid prices ONE trip length,
     # so the default 5-7 range still has no single question to ask it.
     assert not grid_can_serve(_cal(legs=round_trip), round_trip=True)
+
+
+def test_the_page_grid_asks_for_every_airport_of_a_set() -> None:
+    cal = _cal(legs=(Leg.of(["SFO", "OAK"], ["FRA", "MUC"]),))
+    assert grid_can_serve(cal, airport_sets=True)
+    assert not grid_can_serve(cal, round_trip=True)  # `round_trip` alone admits no set
+
+
+@pytest.mark.parametrize(
+    ("routing", "ext", "reason"),
+    [
+        ("BQ+", None, "a carrier Google Flights has no code for (BQ)"),
+        (None, "AIRLINES AA BQ", "a carrier Google Flights has no code for (BQ)"),
+        ("F* X:QQQ F*", None, "a connecting airport Google Flights has no code for (QQQ)"),
+        (None, "MAXDUR 0:00", "a maximum trip duration of 0 minutes"),
+        (None, "MAXCONNECT 0:00", "a maximum layover of 0 minutes"),
+    ],
+    ids=["carrier", "carrier-in-a-list", "connect-at", "maxdur-zero", "maxconnect-zero"],
+)
+def test_a_constraint_the_request_would_leave_out_is_refused_by_name(
+    routing: str | None, ext: str | None, reason: str
+) -> None:
+    """Both grids write their request with `apply_gf_native_filters` and have no
+    rows to check afterwards, so a code it cannot map or a zero bound it drops
+    would be priced as though the constraint were never asked."""
+    cal = _cal(routing=routing, ext=ext)
+    assert not grid_can_serve(cal)
+    assert not grid_can_serve(cal, round_trip=True, airport_sets=True)
+    assert grid_routing_blocker(cal) == reason
+
+
+@pytest.mark.parametrize(
+    ("routing", "ext"),
+    [("AA+", None), (None, "MAXDUR 6:00"), (None, "MAXCONNECT 1:00"), (None, "ALLIANCE oneworld")],
+)
+def test_a_constraint_the_request_carries_in_full_is_still_served(
+    routing: str | None, ext: str | None
+) -> None:
+    cal = _cal(routing=routing, ext=ext)
+    assert grid_can_serve(cal)
+    assert grid_routing_blocker(cal) is None
+
+
+@pytest.mark.parametrize(
+    ("routing", "ext"),
+    [
+        ("AA+", None),
+        ("BQ+", None),
+        (None, "AIRLINES AA BA"),
+        (None, "AIRLINES AA BQ"),
+        (None, "ALLIANCE oneworld"),
+        (None, "ALLIANCE star-alliance|skyteam"),
+        ("F* X:FRA F*", None),
+        ("F* X:QQQ F*", None),
+    ],
+)
+def test_the_gate_refuses_exactly_when_the_bridge_cannot_write_the_includes(
+    routing: str | None, ext: str | None
+) -> None:
+    """Pinned to the bridge itself rather than a list of codes: a code fli
+    learns or forgets moves both sides together."""
+    start = date.today() + timedelta(days=30)
+    cal = _cal(routing=routing, ext=ext, start=start, end=start + timedelta(days=15))
+    written = apply_gf_native_filters(to_fli_filter(cal), classify(routing, ext).predicates)
+    assert grid_can_serve(cal) is written
 
 
 def _round_trip(nights: int, *, ret_routing: str | None = None) -> CalendarSearch:

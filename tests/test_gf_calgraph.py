@@ -35,6 +35,8 @@ from flight_cli.domain import (
     SearchOptions,
     TimeOfDay,
 )
+from test_gf_airport_sets import _tfs
+from test_links_search_tfs import _decode, _slices
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -536,11 +538,25 @@ def test_no_grid_is_a_refusal_never_an_empty_answer(
     assert cap.out == ""
 
 
+# Five airports and six: one leg of 11, the page's bound; `_TWELVE` is one past it.
+_ELEVEN = ("JFK,EWR,LGA,BOS,PHL", "LHR,CDG,FRA,AMS,MAD,BCN")
+_TWELVE = (_ELEVEN[0], f"{_ELEVEN[1]},FCO")
+
+
 @pytest.mark.parametrize(
     ("overrides", "reason"),
     [
-        ({"origin": "NYC"}, "a city code rather than an airport (NYC)"),
-        ({"origin": "QSF", "destination": "JFK"}, "a city code rather than an airport (QSF)"),
+        ({"origin": "YTO", "destination": "LHR"}, "a city code rather than an airport (YTO)"),
+        ({"origin": "NYC", "destination": "JFK"}, "an airport at both ends of a leg (JFK)"),
+        (
+            {"origin": _TWELVE[0], "destination": _TWELVE[1]},
+            "12 airports on one leg (its limit is 11)",
+        ),
+        ({"routing": "BQ+"}, "a carrier Google Flights has no code for (BQ)"),
+        ({"extension": "AIRLINES AA BQ"}, "a carrier Google Flights has no code for (BQ)"),
+        ({"routing": "F* X:QQQ F*"}, "a connecting airport Google Flights has no code for (QQQ)"),
+        ({"extension": "MAXDUR 0:00"}, "a maximum trip duration of 0 minutes"),
+        ({"extension": "MAXCONNECT 0:00"}, "a maximum layover of 0 minutes"),
         ({"depart_times": "morning"}, "a departure-time window"),
         ({"allow_airport_changes": False}, "--no-airport-changes"),
         ({"only_available": False}, "--include-unavailable"),
@@ -550,11 +566,16 @@ def test_no_grid_is_a_refusal_never_an_empty_answer(
         ({"children": 1}, "a passenger type other than adults"),
         ({"one_way": False, "duration": "7", "routing_return": "N"}, "different routing"),
         ({"one_way": False, "duration": "5-7"}, "a trip-length range (5-7 nights)"),
-        ({"origin": "JFK,EWR"}, "a multi-airport route"),
     ],
     ids=[
-        "nyc",
-        "qsf",
+        "unknown-code",
+        "airport-at-both-ends",
+        "twelve-airports",
+        "unmapped-carrier",
+        "unmapped-carrier-in-a-list",
+        "unmapped-connect-at",
+        "maxdur-zero",
+        "maxconnect-zero",
         "times",
         "airport-changes",
         "unavailable",
@@ -564,7 +585,6 @@ def test_no_grid_is_a_refusal_never_an_empty_answer(
         "children",
         "legs-differ",
         "length-range",
-        "multi-airport",
     ],
 )
 def test_a_calendar_the_page_cannot_ask_is_refused_before_any_load(
@@ -584,6 +604,133 @@ def test_a_calendar_the_page_cannot_ask_is_refused_before_any_load(
     assert "Run without --fast for Matrix" in err
     assert seen == []
     assert cap.out == ""
+
+
+# ───────────────────────────── airport sets ─────────────────────────────────
+
+
+def _gate(origin: str, destination: str, *, fast: bool) -> str | None:
+    """`_grid_branch_blocker` on a one-way calendar, as the command builds it."""
+    origins, dests = cli._parse_iata_list(origin), cli._parse_iata_list(destination)
+    window = CalendarWindow(
+        start=_START, end=_START + timedelta(days=13), duration_min=0, duration_max=0
+    )
+    search = CalendarSearch(legs=(Leg.of(origins, dests),), window=window)
+    return cli._grid_branch_blocker(
+        search, json_out=False, one_way=True, origins=origins, dests=dests, fast=fast
+    )
+
+
+@pytest.mark.parametrize(
+    ("origin", "destination", "fast", "matrix"),
+    [
+        ("NYC", "LON", None, "a city code rather than an airport (NYC, LON)"),
+        ("JFK,EWR", "LHR", None, "a multi-airport route"),
+        ("QSF", "JFK", None, "a city code rather than an airport (QSF)"),
+        (*_ELEVEN, None, "a multi-airport route"),
+        ("YTO", "LHR", *["a city code rather than an airport (YTO)"] * 2),
+        (
+            "NYC",
+            "JFK",
+            "an airport at both ends of a leg (JFK)",
+            "a city code rather than an airport (NYC)",
+        ),
+        (*_TWELVE, "12 airports on one leg (its limit is 11)", "a multi-airport route"),
+    ],
+    ids=["metro", "list", "qsf", "eleven", "unknown-code", "both-ends", "twelve"],
+)
+def test_fast_takes_the_airport_sets_a_search_takes(
+    origin: str, destination: str, fast: str | None, matrix: str
+) -> None:
+    """Under `--fast` the page asks for every airport, so the airports are
+    checked as a search's are: expanded, against the page's per-leg bound and
+    fli's table. Without it a set keeps the reason that sends it to Matrix's
+    fan-out, because the weave's Matrix half is one query."""
+    assert _gate(origin, destination, fast=True) == fast
+    assert _gate(origin, destination, fast=False) == matrix
+
+
+@pytest.mark.parametrize(
+    ("origin", "destination"),
+    [("NYC", "LON"), ("JFK,EWR", "LHR"), ("QSF", "JFK"), _ELEVEN],
+    ids=["metro", "list", "qsf", "eleven"],
+)
+def test_a_set_is_one_page_and_the_document_names_it(
+    origin: str,
+    destination: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The page's graph already prices each date at the set's cheapest airport,
+    so one graph answers, and the document names what was asked, as the table
+    title does."""
+    _no_matrix(monkeypatch)
+    seen = _graph_is(monkeypatch, _OW)
+    _calendar(origin=origin, destination=destination, fmt="json")
+    doc = json.loads(capsys.readouterr().out)
+    assert (doc["origin"], doc["destination"]) == (origin, destination)
+    assert len(seen) == 1
+    leg = seen[0][0].legs[0]
+    assert (",".join(leg.origins), ",".join(leg.destinations)) == (origin, destination)
+
+
+def test_a_round_trip_over_a_set_names_it_and_its_trip_length(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _no_matrix(monkeypatch)
+    seen = _graph_is(monkeypatch, _RT)
+    _calendar(origin="JFK,EWR", destination="LHR", fmt="json", one_way=False, duration="7")
+    doc = json.loads(capsys.readouterr().out)
+    assert (doc["origin"], doc["destination"], doc["trip_length"]) == ("JFK,EWR", "LHR", 7)
+    assert len(seen) == 1
+
+
+def test_a_single_airport_document_is_byte_for_byte_what_it_was(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _no_matrix(monkeypatch)
+    _graph_is(monkeypatch, _OW)
+    _calendar(fmt="json")
+    assert capsys.readouterr().out == (
+        "{\n"
+        '  "origin": "JFK",\n'
+        '  "destination": "LAX",\n'
+        '  "currency": "USD",\n'
+        '  "trip_length": null,\n'
+        '  "grid": [\n'
+        "    {\n"
+        '      "departure": "2026-10-20",\n'
+        '      "price": 204\n'
+        "    },\n"
+        "    {\n"
+        '      "departure": "2026-10-21",\n'
+        '      "price": 214.5\n'
+        "    }\n"
+        "  ]\n"
+        "}"
+    )
+
+
+def _airports(entries: list[Any]) -> list[str]:
+    """The codes of a decoded slice's airport field, in the order written."""
+    return [_decode(entry)[2][0].decode() for entry in entries]
+
+
+def test_the_page_asks_for_every_airport_of_both_sets() -> None:
+    nyc, london = ["JFK", "LGA", "EWR"], ["LHR", "LGW", "STN", "LTN", "LCY", "SEN"]
+
+    def _window(nights: int) -> CalendarWindow:
+        end = _START + timedelta(days=13)
+        return CalendarWindow(start=_START, end=end, duration_min=nights, duration_max=nights)
+
+    one_way = CalendarSearch(legs=(Leg.of("NYC", "LON"),), window=_window(0))
+    (out,) = _slices(_tfs(cg.page_url(one_way, _START)))
+    assert (_airports(out[13]), _airports(out[14])) == (nyc, london)
+
+    legs = (Leg.of("NYC", "LON"), Leg.of("LON", "NYC"))
+    out, back = _slices(_tfs(cg.page_url(CalendarSearch(legs=legs, window=_window(7)), _START)))
+    assert (_airports(out[13]), _airports(out[14])) == (nyc, london)
+    assert (_airports(back[13]), _airports(back[14])) == (london, nyc)
 
 
 @pytest.mark.parametrize(

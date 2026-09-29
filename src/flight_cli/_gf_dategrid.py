@@ -31,7 +31,9 @@ only when a GF calendar is actually run.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Final
 
 from fli.models.airport import Airport  # pyright: ignore[reportMissingTypeStubs]
@@ -61,9 +63,19 @@ from .fli_bridge import (
     _fli_max_stops,  # pyright: ignore[reportPrivateUsage]
     apply_gf_native_filters,
 )
-from .routing_predicates import Tier, classify
+from .routing_predicates import (
+    AlliancePred,
+    CarrierPred,
+    ConnectionAirportPred,
+    ConnectTimePred,
+    MaxDurationPred,
+    Tier,
+    classify,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from .domain import CalendarSearch, Leg
     from .routing_predicates import Predicate
 
@@ -74,10 +86,12 @@ _MAX_GRID_DAYS = 61  # GetCalendarGraph's per-request span limit
 # one on, and inventing the shape is forbidden (AGENTS.md rule 5), so type-checking
 # is all that guards it. Re-enable procedure: (1) capture a real envelope into
 # tests/fixtures/, (2) add an ungated contract test over it — request URL, encoded
-# body, and the success / empty / throttle branches of `_one_grid_call`, (3) teach
-# `_grid_filters` to map or refuse city codes — NYC/LON/PAR/CHI are not in fli's
-# `Airport` enum, and while the gate stands it is the only thing between them and an
-# AttributeError, (4) run a live smoke, (5) then flip. Tracked on work-h70kv.5.
+# body, and the success / empty / throttle branches of `_one_grid_call`, (3) keep
+# `_grid_filters` behind the two refusals of an airport set or metro code:
+# `_grid_branch_blocker` without `--fast` and `cli._http_date_grid` with it. It
+# writes `origins[0]` and `destinations[0]`, which prices a set for one airport and
+# raises AttributeError on NYC/LON/PAR/CHI (not in fli's `Airport` enum), (4) run a
+# live smoke, (5) then flip. Tracked on work-h70kv.5.
 #
 # A flag rather than an unconditional raise precisely so basedpyright keeps checking
 # that code: `SearchDates.BASE_URL` and `DateSearchFilters.encode()` have no other
@@ -107,25 +121,77 @@ class GfGridUnavailableError(Exception):
     once instead of retrying, and say which backend priced the grid."""
 
 
-def grid_can_serve(search: CalendarSearch, *, round_trip: bool = False) -> bool:
-    """Whether the GF date-grid can fully serve this calendar: single-airport
-    per leg, and only Tier-1 constraints on every leg (the grid has no
-    itineraries, so even Tier-2 can't be post-filtered — those go to Matrix).
+def grid_can_serve(
+    search: CalendarSearch, *, round_trip: bool = False, airport_sets: bool = False
+) -> bool:
+    """Whether the GF date-grid can fully serve this calendar: only Tier-1
+    constraints on every leg (the grid has no itineraries, so even Tier-2 can't
+    be post-filtered — those go to Matrix), each of which the request carries
+    in full (`unwritten_constraint`).
 
     One-way, unless the caller can serve a round trip (`round_trip`: the page's
     price graph can, `date_grid` below cannot) AND the window names one trip
     length. The graph prices a single trip length, so a duration range has no
-    one question to ask it."""
+    one question to ask it.
+
+    One token per side, unless the caller asks for every airport of a set
+    (`airport_sets`: the page's URL carries them all, `date_grid` writes the
+    first). The caller checks the tokens themselves: a metro code is one token."""
     window = search.window
     if len(search.legs) > 1 and not (round_trip and window.duration_min == window.duration_max):
         return False
     for leg in search.legs:
-        if len(leg.origins) != 1 or len(leg.destinations) != 1:
+        if not airport_sets and (len(leg.origins) != 1 or len(leg.destinations) != 1):
             return False
-        constraints = classify(leg.route_language, leg.extension)
-        if any(p.tier is not Tier.GF_NATIVE for p in constraints.predicates):
+        predicates = classify(leg.route_language, leg.extension).predicates
+        if any(p.tier is not Tier.GF_NATIVE for p in predicates):
+            return False
+        if unwritten_constraint(predicates) is not None:
             return False
     return True
+
+
+_CODE_NOUN: Final = {
+    CarrierPred: "a carrier",
+    AlliancePred: "an alliance",
+    ConnectionAirportPred: "a connecting airport",
+}
+
+
+def unwritten_constraint(predicates: Iterable[Predicate]) -> str | None:
+    """The first Tier-1 constraint `apply_gf_native_filters` would not write in
+    full, as a noun phrase naming its code or bound, or None.
+
+    Both grids build their request with that function and have no rows to check
+    afterwards, so what it leaves out is priced as though never asked: a code
+    list with one unmappable code is left out whole, fli's encoder omits a
+    maximum duration that is zero, and a zero MAXCONNECT raises inside fli."""
+    for p in predicates:
+        match p:
+            case MaxDurationPred(minutes=0):
+                return "a maximum trip duration of 0 minutes"
+            case ConnectTimePred(max_minutes=0):
+                return "a maximum layover of 0 minutes"
+            case CarrierPred() | AlliancePred() | ConnectionAirportPred():
+                if bad := _unmapped_codes(p):
+                    noun = _CODE_NOUN[type(p)]
+                    return f"{noun} Google Flights has no code for ({', '.join(bad)})"
+            case _:
+                pass
+    return None
+
+
+def _unmapped_codes(p: CarrierPred | AlliancePred | ConnectionAirportPred) -> list[str]:
+    """`p`'s codes the bridge cannot write, asked of the bridge one code at a time.
+
+    Its own lookups decide, so this cannot drift from what the request carries;
+    it reports only that some code failed, hence one call per code. It writes
+    onto whatever it is handed, so a namespace takes the throwaway filters."""
+    return [
+        code
+        for code in sorted(p.codes)
+        if not apply_gf_native_filters(SimpleNamespace(), [replace(p, codes=frozenset({code}))])
+    ]
 
 
 def _decliner_phrase(tier: str, *, routing: bool, extension_count: int) -> str:
@@ -145,7 +211,7 @@ def _decliner_phrase(tier: str, *, routing: bool, extension_count: int) -> str:
 
 def grid_routing_blocker(search: CalendarSearch) -> str | None:
     """Name the constraint keeping the date-grid off this calendar, or None when
-    every predicate is Tier-1 (so no constraint is the reason).
+    every predicate is Tier-1 and written in full (so no constraint is the reason).
 
     A diagnostic only — `grid_can_serve` owns the decision, and also rejects
     shapes no constraint speaks to (round trip, multi-airport). Both tiers above
@@ -198,7 +264,7 @@ def _leg_blocker(leg: Leg) -> str | None:
         return _decliner_phrase(
             "Tier-2", routing=bool(routing_c.tier2), extension_count=len(ext_c.tier2)
         )
-    return None
+    return unwritten_constraint((*routing_c.predicates, *ext_c.predicates))
 
 
 def _grid_filters(
