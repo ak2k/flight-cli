@@ -51,12 +51,15 @@ go into detail and are loaded on demand.
   proof, and wire-through implementation notes.
 - [gf_routing_and_carriers.md](gf_routing_and_carriers.md) — How
   `--routing`/`--extension` reach Google Flights: the search-page `tfs=`
-  transport that replaced the gated `GetShoppingResults` RPC (field layout, the
-  zero-based stop ceiling, typed refusals), the `fl[15]`/`fl[18]`/`fl[22]`
+  transport that replaced the gated `GetShoppingResults` RPC (field layout:
+  carrier/alliance include, hour windows, duration, layover minutes, passenger
+  kinds with infant 3 = lap and 4 = seat; the zero-based stop ceiling, typed
+  refusals), the `fl[15]`/`fl[18]`/`fl[22]`
   booking-carrier rule (marketing vs operating), the Tier-1/2/3 classification
-  (`routing_predicates`) that the date grid still uses, the search path's
+  (`routing_predicates`) that the date grids still use, the search path's
   per-predicate gate (`_gf_postfilter.search_page_reasons`: page-encodable or
-  post-filtered on the full board), the post-filter (`_gf_postfilter`), the concurrent GF-fast-paint + Matrix-enrich flow
+  post-filtered on the full board), the post-filter (`_gf_postfilter`) and the
+  raw-row checks that re-verify what the page encodes, the concurrent GF-fast-paint + Matrix-enrich flow
   (`_run_enriched_path`), and codeshare-aware display. Read before touching
   `routing_predicates.py`, `_gf_postfilter.py`, `links.build_search_tfs`, or
   `_gflight_ids` carrier parsing.

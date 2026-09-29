@@ -160,6 +160,30 @@ def test_a_pick_past_the_visible_table_warns_and_falls_back_to_the_cheapest(
     assert "cheapest itinerary" not in captured.out, captured.out
 
 
+def test_a_pick_past_the_visible_table_claims_no_pin_the_matrix_link_cannot_make(
+    gf_session: Callable[..., Any],
+    gf_board: Callable[..., str],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A Google row carries none of the server ids a Matrix link pins, so with
+    the Google link off the one link below the sentence pins nothing."""
+    gf_session(gf_board(_BOARD_ROWS))
+    cli._run_gflight_path(
+        legs=_one_way(),
+        opts=SearchOptions(cabin=Cabin.COACH),
+        top_n=5,
+        json_out=False,
+        matrix_url=True,
+        google_url=False,
+        pick=6,
+    )
+    captured = capsys.readouterr()
+    err = " ".join(captured.err.split())
+    assert "--pick 6 is out of range (1-5)." in err, err
+    assert "pinning" not in err, err
+    assert "Matrix deep-link:" in captured.out, captured.out
+
+
 def test_a_pick_inside_the_visible_table_still_pins(
     gf_session: Callable[..., Any],
     gf_board: Callable[..., str],
@@ -474,6 +498,48 @@ def test_an_enriched_pin_on_a_matrix_row_keeps_its_server_ids(
     assert "Matrix (itinerary #2 pinned)" in out, out
     pin = _matrix_pin(out)
     assert (pin["sessionId"], pin["rh"], pin["Si"]) == ("sess-1", "set-1", "sol-2"), pin
+
+
+def test_an_enriched_out_of_range_pick_claims_no_pin_the_google_link_does_not_make(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Row 1 is a Matrix connection no Google row matched, so no source states
+    its second flight's day and the Google link below it is the unpinned one."""
+    from flight_cli.models import SearchResult
+
+    matrix = SearchResult.model_validate(
+        {
+            "session": "sess-1",
+            "solutionSet": "set-1",
+            "solutions": [
+                {
+                    "id": "sol-1",
+                    "displayTotal": "USD501.00",
+                    "itinerary": {
+                        "slices": [
+                            {
+                                "flights": ["AA1", "AA2"],
+                                "departure": f"{_DEP.isoformat()}T21:00:00",
+                                "arrival": f"{(_DEP + timedelta(days=1)).isoformat()}T12:00:00",
+                                "origin": {"code": "HNL"},
+                                "destination": {"code": "MIA"},
+                                "stops": [{"code": "DFW"}],
+                            }
+                        ],
+                        "carriers": [],
+                    },
+                }
+            ],
+        }
+    )
+    _enriched(monkeypatch, [], top_n=3, pick=9, matrix=matrix, matrix_url=False)
+    captured = capsys.readouterr()
+    err = " ".join(captured.err.split())
+
+    assert "--pick 9 is out of range (1-1)." in err, err
+    assert "pinning" not in err, err
+    assert "Google Flights (tfs= structured):" in captured.out, captured.out
 
 
 def test_an_empty_merged_board_reports_no_range_and_claims_no_pin(

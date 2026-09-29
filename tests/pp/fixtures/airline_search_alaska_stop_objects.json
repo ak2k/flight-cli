@@ -1,0 +1,118 @@
+{
+  "outboundFlights": [
+    {
+      "origin": "EWR",
+      "destination": "LAX",
+      "localDepartureDateTime": "2026-10-20T06:30:00",
+      "localArrivalDateTime": "2026-10-20T13:24:00",
+      "firstFlightNumber": "AS1399",
+      "googleAirlineName": "Alaska",
+      "numConnections": 1,
+      "stops": [
+        {
+          "airport": "PDX",
+          "layoverDurationMinutes": 76
+        }
+      ],
+      "travelDurationMinutes": 594,
+      "externalId": null,
+      "matchedGoogleFlightId": null,
+      "matchedGoogleFlightCashPriceUsd": null,
+      "perCabinMilesPricing": [
+        {
+          "cabinClass": "Economy",
+          "perPassengerPricing": {
+            "perPassengerMilesAmount": 15000,
+            "perPassengerTaxAmountUsd": 5.6,
+            "taxCurrencyCode": "USD",
+            "isBasicEconomyFare": null
+          }
+        },
+        {
+          "cabinClass": "Business",
+          "perPassengerPricing": {
+            "perPassengerMilesAmount": 97500,
+            "perPassengerTaxAmountUsd": 5.6,
+            "taxCurrencyCode": "USD",
+            "isBasicEconomyFare": null
+          }
+        }
+      ]
+    },
+    {
+      "origin": "JFK",
+      "destination": "LAX",
+      "localDepartureDateTime": "2026-10-20T07:22:00",
+      "localArrivalDateTime": "2026-10-20T14:34:00",
+      "firstFlightNumber": "AS21",
+      "googleAirlineName": "Alaska",
+      "numConnections": 1,
+      "stops": [
+        {
+          "airport": "SEA",
+          "layoverDurationMinutes": 58
+        }
+      ],
+      "travelDurationMinutes": 612,
+      "externalId": null,
+      "matchedGoogleFlightId": null,
+      "matchedGoogleFlightCashPriceUsd": null,
+      "perCabinMilesPricing": [
+        {
+          "cabinClass": "Economy",
+          "perPassengerPricing": {
+            "perPassengerMilesAmount": 15000,
+            "perPassengerTaxAmountUsd": 5.6,
+            "taxCurrencyCode": "USD",
+            "isBasicEconomyFare": null
+          }
+        },
+        {
+          "cabinClass": "Business",
+          "perPassengerPricing": {
+            "perPassengerMilesAmount": 52500,
+            "perPassengerTaxAmountUsd": 5.6,
+            "taxCurrencyCode": "USD",
+            "isBasicEconomyFare": null
+          }
+        }
+      ]
+    },
+    {
+      "origin": "EWR",
+      "destination": "LAX",
+      "localDepartureDateTime": "2026-10-20T18:19:00",
+      "localArrivalDateTime": "2026-10-20T21:29:00",
+      "firstFlightNumber": "AS287",
+      "googleAirlineName": "Alaska",
+      "numConnections": 0,
+      "stops": [],
+      "travelDurationMinutes": 370,
+      "externalId": null,
+      "matchedGoogleFlightId": null,
+      "matchedGoogleFlightCashPriceUsd": null,
+      "perCabinMilesPricing": [
+        {
+          "cabinClass": "Economy",
+          "perPassengerPricing": {
+            "perPassengerMilesAmount": 32500,
+            "perPassengerTaxAmountUsd": 5.6,
+            "taxCurrencyCode": "USD",
+            "isBasicEconomyFare": null
+          }
+        },
+        {
+          "cabinClass": "Business",
+          "perPassengerPricing": {
+            "perPassengerMilesAmount": 87500,
+            "perPassengerTaxAmountUsd": 5.6,
+            "taxCurrencyCode": "USD",
+            "isBasicEconomyFare": null
+          }
+        }
+      ]
+    }
+  ],
+  "inboundFlights": null,
+  "roundTripReturnState": null
+}

@@ -35,6 +35,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import functools
+import itertools
 import json
 import logging
 import os
@@ -785,6 +786,8 @@ def _is_google_domain(domain: str) -> bool:
 # Position of the opaque per-flight ID in Google Flights' API row array.
 # Mirrors the PP browser extension's parser (chunk-5KW5VSHS.js: `a = n[17]`).
 _FLIGHT_ID_IDX = 17
+# Per connection, `[minutes, arrival airport, departure airport, ...]`.
+_LAYOVERS_IDX = 13
 
 # Per-leg field indices in `data[0][2][i]`. Mirrors the Legrooms+ extension's
 # parser (load_flight_data.js function `u`). See docs/memories/legroom_recipe.md.
@@ -1034,6 +1037,9 @@ class GFlightWithId:
     # None where the tuple has none. Kept off `amenities` because `--format json`
     # dumps every amenities field.
     operating: tuple[tuple[Airline, str] | None, ...] = ()
+    # Per connection, the layover in minutes as the page states it, or None
+    # where it states none for that connection (`_layover_minutes`).
+    layovers: tuple[int | None, ...] = ()
 
 
 def _operating_identity(fl: list[Any]) -> tuple[Airline, str] | None:
@@ -1046,6 +1052,23 @@ def _operating_identity(fl: list[Any]) -> tuple[Airline, str] | None:
         return _parse_airline(code), number
     except AttributeError:  # a code fli has no member for
         return None
+
+
+def _layover_minutes(data: list[Any], leg_tuples: list[list[Any]]) -> tuple[int | None, ...]:
+    """The page's own minutes for each connection. Those are elapsed time; the
+    leg datetimes are clock readings, an hour out across a daylight-saving
+    change at the connecting airport. An entry naming other airports than the
+    legs either side of it is not that connection's, so it counts as none."""
+    raw = data[0][_LAYOVERS_IDX] if len(data[0]) > _LAYOVERS_IDX else None
+    entries = cast("list[Any]", raw) if isinstance(raw, list) else []
+    out: list[int | None] = []
+    for i, (inbound, outbound) in enumerate(itertools.pairwise(leg_tuples)):
+        entry = entries[i] if i < len(entries) else None
+        fields = cast("list[Any]", entry) if isinstance(entry, list) else []
+        minutes = fields[0] if fields else None
+        at = fields[1:3] == [inbound[6], outbound[3]]
+        out.append(minutes if isinstance(minutes, int) and minutes >= 0 and at else None)
+    return tuple(out)
 
 
 def _parse_flight_with_id(data: list[Any]) -> GFlightWithId:
@@ -1069,6 +1092,7 @@ def _parse_flight_with_id(data: list[Any]) -> GFlightWithId:
         flight_id=flight_id,
         amenities=amenities,
         operating=tuple(_operating_identity(fl) for fl in leg_tuples),
+        layovers=_layover_minutes(data, leg_tuples),
     )
 
 

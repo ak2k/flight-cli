@@ -698,12 +698,12 @@ def test_multi_cabin_unencodable_constraint_goes_to_matrix(
         "2026-10-14",
         "--cabin",
         "coach,business",
-        "--routing",
-        "DL+",
+        "--ext",
+        "-REDEYES",
         "--cash-only",
     )
     assert called == ["matrix"]
-    assert "a carrier filter (DL)" in output
+    assert "a red-eye exclusion" in output
 
 
 def test_a_browser_refusal_fits_every_capture_console_in_this_module(

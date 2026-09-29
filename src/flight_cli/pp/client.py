@@ -290,7 +290,14 @@ class PPClient:
             try:
                 out[airline] = await self.airline_search(spec, airline)
             except Exception as e:  # noqa: BLE001 - per-airline failures are non-fatal
-                log.warning("pp_airline_search_exception", airline=airline, error=str(e))
+                # Some exceptions, httpx.ReadTimeout among them, have an empty
+                # str(); the type is then the only reason the log carries.
+                log.warning(
+                    "pp_airline_search_exception",
+                    airline=airline,
+                    error=str(e),
+                    error_type=type(e).__name__,
+                )
 
         async with anyio.create_task_group() as tg:
             for a in to_call:
