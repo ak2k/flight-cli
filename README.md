@@ -32,6 +32,13 @@ flight search JFK LHR --dep 2026-08-15 --return 2026-08-22
 flight search MIA PAR --dep 2026-06-15 \
     --routing "LH+" --ext "MAXCONNECT 2:00"
 
+# A price cap in the search's currency: Google is asked for it and every row
+# is checked; a Matrix answer is cut to it. --bags prices fares with one checked
+# bag (1,1 adds a carry-on) and says per row whether the price includes them;
+# it is Google-only, so a search only Matrix could answer is refused.
+flight search JFK LAX --dep 2026-10-20 --max-price 250
+flight search JFK LAX --dep 2026-10-20 --bags 1
+
 # What Google can't serve auto-flips to ITA Matrix, naming why on stderr:
 # ordered routing, fare construction, multi-city slices, infants, time-of-day
 # buckets with a gap between them.
