@@ -3742,6 +3742,8 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_render_gflight_table", "dur"),  # "3h05m", from an integer count of minutes
         ("_render_gflight_table", "legs_str"),
         ("_render_gflight_table", "legroom_str"),
+        # Empty, or one of the three literals `_bag_cell` writes.
+        ("_render_gflight_table", "bag_cell"),
         # The cabin letters are this module's own map, keyed by its own enum.
         ("_render_multi_cabin_search", "cabin_labels"),
         ("_render_multi_cabin_search", "sort_label"),
