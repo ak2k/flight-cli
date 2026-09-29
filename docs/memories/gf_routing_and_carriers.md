@@ -171,7 +171,8 @@ Both are top-level fields, written after the cabin (9) and before 14.
   carry-on asked states `[0, 1]` on all 74. A missing, short or malformed slot
   is "not stated" and never drops the row; some rows of a round trip state
   nothing. Under `--bags` each JSON row (each member of a pair) carries
-  `bags_included: {checked, carry_on}`, null where not stated, and the table a
+  `bags_included: {checked, carry_on}`, null where not stated, as does each
+  cash match in the award document (its own slice's statement), and the table a
   `bags` column: `incl.` only when the row states at least the count asked of
   each kind asked for, `not incl.` when it states fewer, `unknown` otherwise.
 - The statement and field 13 both count the whole party: 2 adults state
