@@ -773,9 +773,11 @@ the exception that proves it: that one is on stdout because a Matrix calendar
 follows it there. While the gate stands, a bad airport or date is one of the gate's own
 exits rather than the broad except's, so what the user reads is the standing
 reason; the broad except keeps the same exit code for whatever a live transport
-throws once the gate flips. When the grid branch does not apply at all (a
-multi-airport route, a city code, routing above Tier-1, a trip-length range, or
-a constraint the search page's URL cannot carry) `--fast` refuses up front on
+throws once the gate flips. When the grid branch does not apply at all (a code
+that is neither an airport nor a metro code in `_metro.py`, a leg of more than
+11 airports or with one airport at both ends, routing above Tier-1, a Tier-1
+code or zero bound the request would leave out, a trip-length range, or a
+constraint the search page's URL cannot carry) `--fast` refuses up front on
 **stderr**, naming the shape, before any Matrix call or JSON write — stdout under
 a JSON request carries a document or nothing, never prose (work-h70kv.9). So a wrapper doing `--fast || fallback` can trust the exit
 code unconditionally: `--fast` means "the GF grid alone, ~1s", and answering it
@@ -809,6 +811,15 @@ extension is the whole story and differ by one when routing declined as well:
 "both Matrix-only routing and a Matrix-only extension code" carries two reasons,
 one per flag.
 
+A Tier-1 predicate is refused too when `apply_gf_native_filters` would not
+write it in full, because neither grid has rows to check afterwards: a carrier,
+alliance or connect-at code fli has no member for (the function then leaves the
+whole list out), a zero MAXDUR (fli's encoder omits a falsy bound) and a zero
+MAXCONNECT (fli's `LayoverRestrictions` raises). `unwritten_constraint` asks the
+bridge one code at a time, so it follows fli's own tables, and the phrase names
+the code or the bound. Without `--fast` such a calendar takes the Matrix
+fan-out rather than the weave.
+
 Those reason strings quote the user's `--routing` / `--extension` text verbatim
 onto a markup console, and so does every response field a renderer shows. The
 wrapping rule, the two helpers and the AST guard over `cli.py` are in
@@ -833,8 +844,21 @@ remedy, never a fallback. Without `--fast`, unset or `http` runs Matrix and
 - **Shape.** One-way, or a round trip of ONE trip length (`-d 7`): the page's
   graph prices the trip length its own dates imply, so `5-7` refuses. Every
   round-trip cell's return date is checked against that length.
+- **Airport sets.** A comma-list or metro code on either side is one page: the
+  bridge writes every member airport into the URL, and the graph prices each
+  date at the cheapest of them. Measured 2026-09-28, one-way, 14 dates each:
+  NYC→LAX equaled the per-date minimum of JFK, LGA and EWR on all 14 (each of
+  the three was the cheapest on some date), and JFK,EWR→LHR on all 14. A round
+  trip is not compared that way on purpose: the set page may return to another
+  airport of the origin set, as a Matrix metro code does, so its price can sit
+  below the minimum of mirrored pairs. The airports are checked as a search's
+  are (`gf_leg_refusal`, then `_gf_unserveable_reasons` on the expanded codes).
+  The JSON names the user's tokens (`"NYC"`, `"JFK,EWR"`), as the table title
+  does. Over `--gf-transport http` a set refuses with the browser note, since
+  `date_grid` writes one airport per side; without `--fast` it goes to the
+  Matrix fan-out.
 - **Admission.** The graph has no itineraries, so it is served only when the
-  page URL carries every constraint: a city code, a time window, a non-adult
+  page URL carries every constraint: an unknown code, a time window, a non-adult
   passenger, `--no-airport-changes`, `--include-unavailable`, a stop ceiling
   above two, any predicate `page_can_encode` refuses (carriers, alliances,
   layovers, max duration), and round-trip legs with different predicates each
@@ -861,10 +885,10 @@ guard, which is why the gate is a flag and not an unconditional raise (a raise, 
 `Final[bool]`, both make basedpyright treat the body as unreachable; measured).
 The procedure: capture a real envelope into `tests/fixtures/`, add an ungated
 contract test over it (request URL, encoded body, and the success / empty /
-throttle branches of `_one_grid_call`), teach `_grid_filters` to map or refuse
-city codes (they are not in fli's `Airport` enum, and while the gate stands it is
-the only thing between them and an `AttributeError`), run a live smoke, then
-flip. Do that when the RPC answers a plain client again, or when an attested
+throttle branches of `_one_grid_call`), keep `_grid_filters` behind the two
+refusals of an airport set or metro code (the gate without `--fast`,
+`cli._http_date_grid` with it; it writes one airport per side, and a metro code
+is not in fli's `Airport` enum), run a live smoke, then flip. Do that when the RPC answers a plain client again, or when an attested
 transport lands
 (work-udpp1).
 A per-date page fan-out (the transport upstream fli#230 uses for search) is the

@@ -35,7 +35,7 @@ import pytest
 # capture; each helper's own docstring says why it is shaped as it is.
 from conftest import _answering, _ds1, capture_err
 from conftest import _page as _page_carrying
-from flight_cli import _gf_booking, _gf_explore
+from flight_cli import _gf_booking, _gf_calgraph, _gf_explore, _gf_rpc_shared
 from flight_cli import _gf_browser as gfb
 from flight_cli import _gf_common as gfc
 from flight_cli import _gflight_ids as gfid
@@ -189,6 +189,10 @@ class _FakePage:
         self.clicks: list[tuple[str, str, bool, float]] = []
         self.waits: list[float] = []
         self.listeners: dict[str, list[Callable[[Any], None]]] = {}
+        # What `content()` serializes: the live DOM, which is not the response body.
+        self.dom = ""
+        self.content_error: BaseException | None = None
+        self.content_reads = 0
 
     def on(self, event: str, f: Callable[[Any], None]) -> None:
         from patchright.sync_api import Page
@@ -215,6 +219,15 @@ class _FakePage:
     def emit_all(self, events: list[_Event]) -> None:
         for event, payload in events:
             self.emit(event, payload)
+
+    def content(self) -> str:
+        from patchright.sync_api import Page
+
+        inspect.signature(Page.content).bind(None)
+        self.content_reads += 1
+        if self.content_error is not None:
+            raise self.content_error
+        return self.dom
 
     def get_by_role(self, role: str, *, name: str, exact: bool) -> _FakeLocator:
         from patchright.sync_api import Page
@@ -791,6 +804,117 @@ def test_an_unreadable_body_is_a_typed_refusal(
     with gfb.GfBrowserSession(headed=False) as session:  # noqa: SIM117 — nesting keeps the session's lifetime separate from what raises inside it
         with pytest.raises(GfBrowserUnavailableError, match="body could not be read"):
             session.get_html(_PAGE_URL)
+
+
+# The error Chrome returns for a navigation body its DevTools buffer dropped.
+_EVICTED = (
+    "Response.text: Protocol error (Network.getResponseBody): "
+    "Request content was evicted from inspector cache"
+)
+# Where the navigation settled, distinct from the URL asked for, so a test can
+# tell the navigation's own URL from the page's.
+_LANDED_URL = f"{_PAGE_URL}&gl=US"
+
+
+def _evicted_page(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, *, dom: str
+) -> _FakePage:
+    """A navigation whose body Chrome no longer holds, over a page whose DOM is `dom`."""
+    from patchright.sync_api import Error
+
+    pw = _install(
+        monkeypatch,
+        tmp_path,
+        outcomes=[_FakeResponse(body="", url=_LANDED_URL, status=200, body_error=Error(_EVICTED))],
+    )
+    page = _page_of(pw)
+    page.dom = dom
+    page.on_goto = [("request", _nav_request())]
+    return page
+
+
+def test_an_evicted_search_page_is_read_from_its_dom(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """A large search page's body can be gone from Chrome's buffer by the time
+    it is asked for. The rows then come from the page's DOM, under the
+    navigation's own URL and status, through the same parser."""
+    page = _evicted_page(monkeypatch, tmp_path, dom=_page())
+    with gfb.GfBrowserSession(headed=False) as session:
+        fetch = session.get_html(_PAGE_URL)
+    assert fetch == gfc.PageFetch(html=_page(), final_url=_LANDED_URL, status_code=200)
+    assert len(gfid._rows_from_page_html(fetch)) == 3
+    assert page.content_reads == 1
+
+
+def test_a_wall_in_an_evicted_search_pages_dom_is_still_a_wall(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The DOM keeps the throttle sentence a 200 at the asked-for URL carries,
+    so the parser still calls it a throttle rather than an empty board."""
+    _evicted_page(
+        monkeypatch,
+        tmp_path,
+        dom="<html><body>Our systems have detected unusual traffic from your "
+        "computer network.</body></html>",
+    )
+    with gfb.GfBrowserSession(headed=False) as session:
+        fetch = session.get_html(_PAGE_URL)
+    with pytest.raises(GfThrottledError):
+        gfid._rows_from_page_html(fetch)
+
+
+def test_a_search_body_lost_any_other_way_is_still_a_refusal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """Only the eviction falls back to the DOM; a body lost any other way says
+    nothing about the page, and the DOM is not asked to stand in for it."""
+    pw = _install(
+        monkeypatch,
+        tmp_path,
+        outcomes=[
+            _FakeResponse(
+                body="",
+                url=_PAGE_URL,
+                status=200,
+                body_error=RuntimeError("Target page, context or browser has been closed"),
+            )
+        ],
+    )
+    with gfb.GfBrowserSession(headed=False) as session:  # noqa: SIM117 — nesting keeps the session's lifetime separate from what raises inside it
+        with pytest.raises(
+            GfBrowserUnavailableError, match="search page but its body could not be read: Target"
+        ):
+            session.get_html(_PAGE_URL)
+    assert _page_of(pw).content_reads == 0
+
+
+def test_an_evicted_search_page_over_an_unreadable_dom_is_a_refusal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    page = _evicted_page(monkeypatch, tmp_path, dom="")
+    page.content_error = RuntimeError("Unable to retrieve content because the page is navigating")
+    with gfb.GfBrowserSession(headed=False) as session:  # noqa: SIM117 — nesting keeps the session's lifetime separate from what raises inside it
+        with pytest.raises(
+            GfBrowserUnavailableError,
+            match="search page but its body could not be read: Unable to retrieve content",
+        ):
+            session.get_html(_PAGE_URL)
+
+
+def test_a_ctrl_c_during_the_dom_read_leaves_as_the_interrupt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The DOM read is one more patchright call an interrupt can unwind, so it
+    is recorded the way the body read's is: the session is finished."""
+    page = _evicted_page(monkeypatch, tmp_path, dom="")
+    page.content_error = KeyboardInterrupt()
+    session = gfb.GfBrowserSession(headed=False)
+    with pytest.raises(KeyboardInterrupt) as e:
+        session.get_html(_PAGE_URL)
+    assert not isinstance(e.value, GfBrowserUnavailableError)
+    assert session.finished
+    session.close()
 
 
 def test_a_launch_failure_names_the_browser_not_the_route(
@@ -3718,6 +3842,114 @@ def test_check_page_sees_the_navigation_and_its_refusal_is_not_rewrapped(
     assert seen == [gfc.PageFetch(html="<html>sorry</html>", final_url=_SORRY_URL, status_code=200)]
     assert _page_of(pw).clicks == []
     assert _page_of(pw).listeners == {}
+
+
+def test_an_evicted_body_hands_check_page_the_dom_and_the_capture_goes_on(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """A large results page's body is gone from Chrome's buffer by the time it
+    is asked for. The wall check then reads the page's DOM, under the
+    navigation's own URL and status, and the capture carries on to the click."""
+    page = _evicted_page(monkeypatch, tmp_path, dom="<html><body>results</body></html>")
+    request, response = _rpc("after click")
+    page.on_click = _served(request, response)
+    seen: list[gfc.PageFetch] = []
+    with gfb.GfBrowserSession(headed=False) as session:
+        got = session.capture(_PAGE_URL, _wants_graph, click=_GRAPH, check_page=seen.append)
+    assert seen == [
+        gfc.PageFetch(
+            html="<html><body>results</body></html>", final_url=_LANDED_URL, status_code=200
+        )
+    ]
+    assert got.body == "after click"
+    assert page.content_reads == 1
+    assert page.listeners == {}
+
+
+@pytest.mark.parametrize(
+    "check_page",
+    [_gf_rpc_shared.refuse_a_wall, _gf_calgraph._refuse_a_wall],
+    ids=["sellers-and-explore", "price-graph"],
+)
+def test_a_wall_in_an_evicted_pages_dom_still_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    check_page: Callable[[gfc.PageFetch], object],
+) -> None:
+    """A throttle page served with a 200 at the URL asked for says so only in
+    its HTML. The DOM carries that sentence to both production wall checks, so
+    an evicted body never turns a wall into a click timeout."""
+    page = _evicted_page(
+        monkeypatch,
+        tmp_path,
+        dom="<html><body>Our systems have detected unusual traffic from your "
+        "computer network.</body></html>",
+    )
+    with gfb.GfBrowserSession(headed=False) as session:  # noqa: SIM117 — nesting keeps the session's lifetime separate from what raises inside it
+        with pytest.raises(GfThrottledError):
+            session.capture(_PAGE_URL, _wants_graph, click=_GRAPH, check_page=check_page)
+    assert page.content_reads == 1
+    assert page.clicks == []
+    assert page.listeners == {}
+
+
+def test_a_readable_body_is_what_check_page_sees_and_the_dom_is_not_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    page = _capture_page(monkeypatch, tmp_path)
+    page.dom = "<html>the DOM</html>"
+    request, response = _rpc("on load")
+    page.on_goto = [("request", _nav_request()), *_served(request, response)]
+    seen: list[gfc.PageFetch] = []
+    with gfb.GfBrowserSession(headed=False) as session:
+        got = session.capture(_PAGE_URL, _wants_graph, check_page=seen.append)
+    assert seen == [gfc.PageFetch(html=_page(), final_url=_PAGE_URL, status_code=200)]
+    assert got.body == "on load"
+    assert page.content_reads == 0
+
+
+def test_any_other_unreadable_body_is_still_a_refusal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """Only the eviction falls back to the DOM; a body lost any other way says
+    nothing about the page, and the DOM is not asked to stand in for it."""
+    pw = _install(
+        monkeypatch,
+        tmp_path,
+        outcomes=[
+            _FakeResponse(
+                body="",
+                url=_PAGE_URL,
+                status=200,
+                body_error=RuntimeError("Target page, context or browser has been closed"),
+            )
+        ],
+    )
+    page = _page_of(pw)
+    page.on_goto = [("request", _nav_request())]
+    seen: list[gfc.PageFetch] = []
+    with gfb.GfBrowserSession(headed=False) as session:  # noqa: SIM117 — nesting keeps the session's lifetime separate from what raises inside it
+        with pytest.raises(GfBrowserUnavailableError, match="body could not be read: Target page"):
+            session.capture(_PAGE_URL, _wants_graph, click=_GRAPH, check_page=seen.append)
+    assert seen == []
+    assert page.content_reads == 0
+    assert page.clicks == []
+
+
+def test_an_evicted_body_over_an_unreadable_dom_is_a_refusal_never_a_skipped_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    page = _evicted_page(monkeypatch, tmp_path, dom="")
+    page.content_error = RuntimeError("Unable to retrieve content because the page is navigating")
+    seen: list[gfc.PageFetch] = []
+    with gfb.GfBrowserSession(headed=False) as session:  # noqa: SIM117 — nesting keeps the session's lifetime separate from what raises inside it
+        with pytest.raises(
+            GfBrowserUnavailableError, match="body could not be read: Unable to retrieve content"
+        ):
+            session.capture(_PAGE_URL, _wants_graph, click=_GRAPH, check_page=seen.append)
+    assert seen == []
+    assert page.clicks == []
+    assert page.listeners == {}
 
 
 def test_a_ctrl_c_during_the_capture_wait_is_not_turned_into_a_refusal(
