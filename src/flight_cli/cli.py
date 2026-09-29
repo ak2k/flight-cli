@@ -2999,7 +2999,6 @@ def _gflight_results(
             close_thread_session()
     if results is None:  # nothing served
         results = Board[Any]()
-    _note_other_currencies(results, requested)
     # Untrimmed on purpose: a round trip's combinations are built pin-major, so
     # the first `top_n` of them are one outbound's returns and nothing else.
     # Every caller trims what it renders, in the order that surface ranks by.
@@ -3009,7 +3008,11 @@ def _gflight_results(
 def _note_other_currencies(results: list[Any], requested: str) -> None:
     """One stderr line when Google priced rows in a currency other than the one
     asked for. Each such row keeps its own label in the table and the JSON, so
-    this is the note that says why two currencies are on one board."""
+    this is the note that says why two currencies are on one board.
+
+    Called by each path that answers with the board, not by `_gflight_results`:
+    a multi-cabin search can still hand its boards to Matrix, and the note would
+    then describe rows nobody is shown."""
     other: set[str] = set()
     for r in results:
         for m in cast("tuple[Any, ...]", r) if isinstance(r, tuple) else (r,):
@@ -3322,21 +3325,15 @@ def _render_merged(rows: list[Any], *, legs: tuple[Leg, ...], top_n: int) -> Non
     console.print(t)
 
 
-def _answer_gf_empty(
-    dropped: int, *, json_out: bool, matrix_fallback: bool, pinned: int = 0
-) -> int | None:
-    """Answer a Google Flights search that has no rows, or hand it on.
+def _answer_gf_empty(dropped: int, *, json_out: bool, pinned: int = 0) -> None:
+    """Answer a Google Flights search that has no rows and is not handed on.
 
-    `dropped` is how many served rows the routing filter removed. When it
-    removed them all and `matrix_fallback` is set, nothing is printed and the
-    count comes back for the caller to run Matrix with. Otherwise the reason
+    `dropped` is how many served rows the routing filter removed. The reason
     goes to stderr, so a `--format json` stdout is still the one document.
 
     `pinned` is how many outbounds a round trip searched returns for. The
     reason names it, because outbounds below the pins may have matching
     returns that were never searched."""
-    if dropped and matrix_fallback:
-        return dropped
     if dropped and pinned:
         plural = "" if pinned == 1 else "s"
         err.print(
@@ -3356,7 +3353,6 @@ def _answer_gf_empty(
         sys.stdout.write(json.dumps([], indent=2))
     elif not dropped:
         console.print("[yellow]Google Flights: no results.[/]")
-    return None
 
 
 def _run_gflight_path(
@@ -3397,7 +3393,6 @@ def _run_gflight_path(
     `sellers` adds row `pick`'s booking options after everything else, or
     wraps the JSON document as `{"search": …, "booking_options": …}`.
     """
-    _pin_cap_note(legs=legs, top_n=top_n)
     # Deferred like the adapter below: this arm reaches rung 2 only when the
     # transport says so, and the module pulls in nothing patchright at import.
     from ._gf_browser import interrupt_guard  # noqa: PLC0415 — GF-only; see above
@@ -3419,17 +3414,22 @@ def _run_gflight_path(
         err.print(f"[red]Google Flights query failed:[/] {_safe_text(e)}")
         raise typer.Exit(1) from e
 
-    # Checked before anything is printed: a `--sellers` pick outside the table
-    # is a usage error, not a pin to fall back from, and an empty board leaves
-    # nothing to open.
+    dropped: int = getattr(results, "dropped", 0)
+    # Handed on before either note, because both describe Google's answer and
+    # Matrix gives this one. Never with `--sellers`: an empty board fails that
+    # below, as a board with no row to open.
+    if not results and dropped and matrix_fallback and not sellers:
+        return dropped
+    _pin_cap_note(legs=legs, top_n=top_n)
+    _note_other_currencies(results, opts.currency or "USD")
+
+    # Checked before the answer is printed: a `--sellers` pick outside the
+    # table is a usage error, not a pin to fall back from, and an empty board
+    # leaves nothing to open.
     seller_row = _pick_for_sellers(pick, min(len(results), top_n)) if sellers else None
     if not results:
-        return _answer_gf_empty(
-            getattr(results, "dropped", 0),
-            json_out=json_out,
-            matrix_fallback=matrix_fallback,
-            pinned=getattr(results, "pinned", 0),
-        )
+        _answer_gf_empty(dropped, json_out=json_out, pinned=getattr(results, "pinned", 0))
+        return None
 
     # `-n` is one number for everything the user can act on. Google's page
     # serves its whole board whatever count is asked of it, so the
@@ -3875,6 +3875,7 @@ def _run_enriched_path(  # noqa: PLR0915 — one weave's outcome arms, read in o
                 state["gf_err"] = e
                 gf = []
             state["gf"] = gf
+            _note_other_currencies(gf, requested)
             _paint_first_gf_table(state, gf, legs=legs, top_n=top_n, awards_only=awards_only)
 
     _run_the_weave(_go, state, gf_mode)
@@ -4033,7 +4034,8 @@ def _pin_cap_note(*, legs: tuple[Leg, ...], top_n: int) -> None:
     the number of those is capped however large `-n` is. Without a word the user
     reads a short table as the market rather than as the budget, so every
     round-trip path says it: the enriched one, `--fast`, `--format json` and
-    multi-cabin alike.
+    multi-cabin alike. A search handed to Matrix does not, because the table it
+    prints is Matrix's.
 
     Ranked first, not cheapest: the pin loop slices the board in the order the
     page served it. A note claiming otherwise is checkably false on the
@@ -4041,9 +4043,9 @@ def _pin_cap_note(*, legs: tuple[Leg, ...], top_n: int) -> None:
     never pinned at all below `-n 3`.
 
     "Up to", because the cap bounds the count and the board may hold fewer. The
-    exact number is known only once the pin loop has run, after this note; an
-    empty filtered round trip states it (`_answer_gf_empty`), where it changes
-    what the answer means.
+    exact number is known only once the pin loop has run; an empty filtered
+    round trip states it (`_answer_gf_empty`), where it changes what the answer
+    means.
 
     stderr, so a `--format json` document on stdout stays a document."""
     from ._gflight_ids import pinned_fanout  # noqa: PLC0415
@@ -4585,23 +4587,12 @@ def _run_gflight_path_multi(
 
     Returns None once it has answered. When the routing filter emptied any
     cabin's board and `matrix_fallback` is set, it prints nothing to stdout and
-    no per-cabin line, and returns the hand-off for the caller to give the WHOLE
-    search to Matrix: a per-cabin hand-off would put Google's rows and Matrix's
-    documents in one answer and join prices from two sources. A cabin Google
-    served nothing for is Google's answer and is not handed on."""
+    no note on Google's table, and returns the hand-off for the caller to give
+    the WHOLE search to Matrix: a per-cabin hand-off would put Google's rows and
+    Matrix's documents in one answer and join prices from two sources. A cabin
+    Google served nothing for is Google's answer and is not handed on."""
     # Widen per-cabin queries so the join has overlap; see _bumped_query_top_n.
     query_top_n = _bumped_query_top_n(top_n, len(cabins))
-    # The user's count, not the bumped one. The bump widens the pool each cabin
-    # keeps so the join has overlap; it is not what anyone asked for, and
-    # quoting it tells someone who asked for a handful of rows that returns are
-    # combined against the whole pin cap — more than they wanted, from a note
-    # whose whole job is to say when they will get fewer.
-    _pin_cap_note(legs=legs, top_n=top_n)
-    if len(legs) >= _ROUND_TRIP_LEGS and len(cabins) > 1:
-        from ._gflight_ids import pinned_fanout  # noqa: PLC0415
-
-        join_note = _multi_cabin_join_note(pinned_fanout(query_top_n))
-        err.print(f"[dim]{join_note}[/]")
     fli_by_cabin = _run_gflight_multi(
         legs=legs,
         opts=opts,
@@ -4624,6 +4615,23 @@ def _run_gflight_path_multi(
     }
     if emptied and matrix_fallback:
         return _MatrixHandOff(emptied, tuple(cab for cab in cabins if fli_by_cabin.get(cab)))
+    # Only below the hand-off: each note describes Google's table, and a
+    # handed-off search prints Matrix's, where '—' is a cabin with no price.
+    #
+    # The user's count, not the bumped one. The bump widens the pool each cabin
+    # keeps so the join has overlap; it is not what anyone asked for, and
+    # quoting it tells someone who asked for a handful of rows that returns are
+    # combined against the whole pin cap — more than they wanted, from a note
+    # whose whole job is to say when they will get fewer.
+    _pin_cap_note(legs=legs, top_n=top_n)
+    if len(legs) >= _ROUND_TRIP_LEGS and len(cabins) > 1:
+        from ._gflight_ids import pinned_fanout  # noqa: PLC0415
+
+        join_note = _multi_cabin_join_note(pinned_fanout(query_top_n))
+        err.print(f"[dim]{join_note}[/]")
+    for cab in cabins:
+        if cab in fli_by_cabin:
+            _note_other_currencies(fli_by_cabin[cab], opts.currency or "USD")
     for cab in emptied:
         err.print(
             f"[yellow]Google Flights {_safe_text(cab.value)}: no itinerary matched the routing.[/]"

@@ -118,7 +118,9 @@ printed. Re-widening `3.6`/`3.7`/`3.15`/`3.17`/`3.18` is the next step.
   `--backend gflight`, which shows Google's rows.
   A cabin Google served nothing for stays Google's answer. Under
   `--backend gflight` the multi-cabin path prints the reason per cabin and
-  leaves the cabin empty.
+  leaves the cabin empty. Neither hand-off prints a note on Google's table (the
+  pin cap, the cabin-join legend, rows in another currency): the table that
+  follows is Matrix's, where '—' is a cabin with no price.
 - A round trip that took pins answers with a board even when no pair survives,
   its count covering the rows removed on both legs, so it takes the same route.
   Under `--backend gflight` the line also names how many outbounds were pinned:
@@ -277,7 +279,8 @@ first-ranked outbounds; '—' means no shared itinerary, not no fare** — the b
 being `pinned_fanout` of the bumped page size, which the cap holds at 10 however
 large `-n` is. `cli._multi_cabin_join_note`
 builds that sentence from the pin budget rather than a literal, and
-`cli._run_gflight_path_multi` prints it on a multi-cabin round trip, because an
+`cli._run_gflight_path_multi` prints it on a multi-cabin round trip it does not
+hand to Matrix, because an
 empty cabin cell otherwise reads as "that fare does not exist". "Up to",
 because the cap bounds how many outbounds the join can see and a board may hold
 fewer — stating the budget as a count is the half of this that had to go. Widening the join means pinning
@@ -315,7 +318,8 @@ the untyped shape of that failure is worse than the failure:
 
 **A round trip says how many outbounds it will combine.** `cli._pin_cap_note`
 prints it on every round-trip path — the enriched one, `--fast`, `--format json`
-and multi-cabin — whenever the pin cap is below the `-n` asked for, and always
+and multi-cabin — whenever the pin cap is below the `-n` asked for and the
+search is not handed to Matrix, and always
 to stderr so a JSON document stays a document. It is passed the user's count,
 never the multi-cabin bump — a wider pool per cabin that nobody asked for — and
 prints the pin budget that count resolves to, which is the number the join will
