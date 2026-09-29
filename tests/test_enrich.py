@@ -67,6 +67,29 @@ def test_merge_sorts_by_best_price_and_tags_sources() -> None:
     ]
 
 
+def test_a_fare_in_another_currency_ranks_after_the_requested_ones() -> None:
+    """Matrix priced in GBP and Google in USD. By bare numbers GBP1027 ranks
+    above USD1043 (about GBP780); ranked in the requested USD, the Google fare
+    leads, the matched row follows on its USD price, and the Matrix-only GBP
+    fare comes after every USD one."""
+    gf = _sr(_it("USD1330.00", ["VS45"]), _it("USD1043.00", ["TK1988", "TK1"]))
+    matrix = _sr(_it("GBP1004.00", ["VS45"]), _it("GBP1027.00", ["AA101"]))
+    rows = merge_results(gf, matrix, currency="USD")
+    assert [(r.source, _first_flight(r.itinerary)) for r in rows] == [
+        ("gf", "TK1988"),
+        ("both", "VS45"),
+        ("matrix", "AA101"),
+    ]
+    assert (rows[1].matrix_price, rows[1].gf_price) == ("GBP1004.00", "USD1330.00")
+
+
+def test_a_one_currency_merge_orders_by_amount_whatever_was_asked_for() -> None:
+    gf = _sr(_it("GBP380.00", ["UA58"]), _it("GBP500.00", ["LH455"]))
+    matrix = _sr(_it("GBP505.00", ["LH455"]), _it("GBP90.00", ["AF83"]))
+    rows = merge_results(gf, matrix, currency="USD")
+    assert [_first_flight(r.itinerary) for r in rows] == ["AF83", "UA58", "LH455"]
+
+
 def test_unkeyed_itineraries_stay_single_source() -> None:
     # No flights -> unmatchable -> kept as a single-source row, not merged.
     gf = _sr(_it("USD100.00", []))

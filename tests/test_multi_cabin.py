@@ -259,6 +259,59 @@ def test_merge_preserves_first_itinerary_for_render():
     assert rows[0].itinerary is coach_it
 
 
+def _priced(*prices: str) -> list[Itinerary]:
+    """One distinct JFK-LHR itinerary per price, in the order given."""
+    return [
+        _itin((f"XX{i}", "2026-08-15T09:00", "JFK", "LHR"), price=p) for i, p in enumerate(prices)
+    ]
+
+
+def test_merge_never_trims_a_fare_for_a_smaller_number_in_another_currency():
+    """JPY500 is the smaller number, and without a rate nothing says it is the
+    cheaper fare; the USD fare the search asked for keeps the top row."""
+    rows = merge(
+        {Cabin.COACH: _result(*_priced("JPY500", "USD1000.00"))},
+        sort_by=Cabin.COACH,
+        top_n=1,
+        currency="USD",
+    )
+    assert [r.prices[Cabin.COACH] for r in rows] == ["USD1000.00"]
+
+
+def test_merge_ranks_the_requested_currency_first_then_each_other_by_code():
+    """Asked for EUR: EUR rows by amount, then GBP and USD in code order, each by
+    its own amounts, then a price naming no currency, then a row with no fare in
+    the sort cabin."""
+    coach = _priced("USD50.00", "EUR900.00", "$10", "GBP100.00", "EUR800.00", "USD40.00")
+    no_coach = _itin(("ZZ9", "2026-08-15T09:00", "JFK", "LHR"), price="USD1.00")
+    rows = merge(
+        {Cabin.COACH: _result(*coach), Cabin.BUSINESS: _result(no_coach)},
+        sort_by=Cabin.COACH,
+        top_n=10,
+        currency="EUR",
+    )
+    assert [r.prices.get(Cabin.COACH) for r in rows] == [
+        "EUR800.00",
+        "EUR900.00",
+        "GBP100.00",
+        "USD40.00",
+        "USD50.00",
+        "$10",
+        None,
+    ]
+
+
+@pytest.mark.parametrize("currency", ["USD", "GBP"])
+def test_merge_orders_a_one_currency_list_by_amount_whatever_was_asked_for(currency: str):
+    rows = merge(
+        {Cabin.COACH: _result(*_priced("GBP300.00", "GBP100.00", "GBP200.00"))},
+        sort_by=Cabin.COACH,
+        top_n=10,
+        currency=currency,
+    )
+    assert [r.prices[Cabin.COACH] for r in rows] == ["GBP100.00", "GBP200.00", "GBP300.00"]
+
+
 # ────────────────────────── _derive_pp_cabins ──────────────────────────────
 
 
