@@ -406,15 +406,20 @@ def test_a_length_no_load_is_left_for_is_named_not_dropped(
 
 
 @pytest.mark.parametrize(
-    ("lost", "columns"),
-    [(7, "┃ 5n ┃ 6n ┃"), (6, "┃ 5n ┃ 7n ┃"), (5, "┃ 6n ┃ 7n ┃")],
+    ("lost", "columns", "trips"),
+    [
+        (7, "┃ 5n ┃ 6n ┃", "5-6-night"),
+        (6, "┃ 5n ┃ 7n ┃", "5- and 7-night"),
+        (5, "┃ 6n ┃ 7n ┃", "6-7-night"),
+    ],
     ids=["last", "middle", "first"],
 )
 def test_a_length_whose_page_drew_no_graph_leaves_the_others_and_is_named(
-    lost: int, columns: str, monkeypatch: pytest.MonkeyPatch, matrix: None
+    lost: int, columns: str, trips: str, monkeypatch: pytest.MonkeyPatch, matrix: None
 ) -> None:
-    """Its column is absent rather than a column of dashes nobody priced, and the
-    one line names it with the browser's own words."""
+    """Its column is absent rather than a column of dashes nobody priced, the
+    summary names only the lengths shown, and the one line names the lost one
+    with the browser's own words."""
     answers: dict[int | None, cg.PriceGraph | BaseException] = {
         n: _graph(n, (0, 300.0 + n), (1, 310.0 + n)) for n in (5, 6, 7)
     }
@@ -426,6 +431,7 @@ def test_a_length_whose_page_drew_no_graph_leaves_the_others_and_is_named(
     google = _google_part(result, base)
     assert result.exit_code == 0, result.output
     assert [s["nights"] for s in seen] == [5, 6, 7]
+    assert google.startswith(f"2 priced days · {trips} round trips · cheapest:")
     assert f"┃ departure ┃ min (USD) {columns}" in google
     assert f"{lost}n" not in google
     assert err.count(_NOT_SHOWN) == 1
@@ -518,11 +524,32 @@ def test_the_range_table_has_a_column_per_length_and_the_row_minimum(
     ]
     text = _flat(out.getvalue())
     assert text.startswith(
-        f"3 priced days · 5-7-night round trips · cheapest: 380 (USD) · window {_START} → {_END}"
+        f"3 priced days · 5- and 7-night round trips · cheapest: 380 (USD) · "
+        f"window {_START} → {_END}"
     )
     assert "┃ departure ┃ min (USD) ┃ 5n ┃ 7n ┃" in text
     assert "lowest fare per departure day and trip length (Google Flights)" in text
     assert "cheapest across" not in text
+
+
+@pytest.mark.parametrize(
+    ("lengths", "trips"),
+    [
+        ((5, 6, 7), "5-7-night"),
+        ((5, 7), "5- and 7-night"),
+        ((5, 7, 8), "5-, 7- and 8-night"),
+    ],
+    ids=["unbroken", "one-gap", "gap-then-run"],
+)
+def test_the_range_summary_names_only_the_lengths_its_table_shows(
+    lengths: tuple[int, ...], trips: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = _console(monkeypatch)
+    graphs = [_graph(n, (0, 400.0 + n)) for n in lengths]
+    cli._render_graph_range(
+        graphs, origin=("JFK",), destination=("LHR",), sd=_START, ed=_END, across_set=False
+    )
+    assert _flat(out.getvalue()).startswith(f"1 priced days · {trips} round trips · cheapest:")
 
 
 @pytest.mark.parametrize(

@@ -2728,8 +2728,8 @@ def _render_graph_range(
     rows = sorted(by_day.items(), key=lambda kv: (min(kv[1].values()), kv[0]))
     cheapest = min(rows[0][1].values())
     console.print(
-        f"[bold]{len(rows):d} priced days[/]  · {lengths[0]:d}-{lengths[-1]:d}-night round trips"
-        f"  · cheapest: [bold cyan]{cheapest:.0f} (USD)[/]  · "
+        f"[bold]{len(rows):d} priced days[/]  · {_safe_text(_trip_lengths_text(lengths))} "
+        f"round trips  · cheapest: [bold cyan]{cheapest:.0f} (USD)[/]  · "
         f"window {_safe_text(sd.isoformat())} → {_safe_text(ed.isoformat())}"
     )
     t = Table(
@@ -2748,6 +2748,16 @@ def _render_graph_range(
         cells = [f"{prices[n]:.0f}" if n in prices else "—" for n in lengths]
         t.add_row(_safe_text(day.isoformat()), f"{min(prices.values()):.0f}", *cells)
     console.print(t)
+
+
+def _trip_lengths_text(lengths: Sequence[int]) -> str:
+    """The trip lengths a range table shows: "5-7-night" with no gap between
+    them, "5- and 7-night" with one. A lost length leaves a gap, and a span
+    across it would name a length the table has no column for."""
+    first, last = lengths[0], lengths[-1]
+    if list(lengths) == list(range(first, last + 1)):
+        return f"{first:d}-{last:d}-night"
+    return _join_reasons([*(f"{n:d}-" for n in lengths[:-1]), f"{last:d}-night"])
 
 
 def _grid_branch_blocker(  # noqa: PLR0911 — one return per named reason, cheapest first
