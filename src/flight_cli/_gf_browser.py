@@ -15,9 +15,11 @@ decoded 30 rows with the identical first `flight_id`.
 
 Three things are deliberate and easy to undo by accident:
 
-- **`response.text()`, never `page.content()`.** `content()` serializes the
-  live DOM, which Google's own JavaScript has already rewritten; `text()` is
-  the HTTP response body, the same bytes curl_cffi sees, `ds:1` blob intact.
+- **`response.text()`, never `page.content()`, for rows.** `content()`
+  serializes the live DOM, which Google's own JavaScript has already rewritten;
+  `text()` is the HTTP response body, the same bytes curl_cffi sees, `ds:1`
+  blob intact. A wall check needs no rows, so `capture` falls back to the DOM
+  when Chrome has dropped the body (`_navigated_page`).
 - **`wait_until="domcontentloaded"`, not `commit`.** Both return the same 30
   rows and the same first id (measured 2026-09-02), so this is not about what
   arrives — it is about what bounds it. `response.text()` takes NO timeout, at
@@ -74,6 +76,8 @@ _WAIT_UNTIL = "domcontentloaded"
 # allowance instead of adding its own.
 _CAPTURE_TIMEOUT_S = 45.0
 _CLICK_TIMEOUT_MS = 20_000
+# What Chrome says when asked for a body it has already dropped from its buffer.
+_EVICTED = "Request content was evicted from inspector cache"
 # The sync API delivers events only while one of its calls is running, so the
 # capture waits in short driver-side sleeps and reads what they delivered.
 _POLL_MS = 100
@@ -310,10 +314,11 @@ class GfBrowserSession:
         short or never. Navigation, click and that wait all draw on one deadline
         of `timeout_s`.
 
-        `check_page` is handed the navigation's own response before any click,
-        and refuses by raising: a throttle or consent interstitial has no
-        control to click, so without it those walls would surface as a click
-        timeout. Its exception propagates unwrapped. Every other failure is
+        `check_page` is handed the navigation's own page before any click (its
+        body, or its DOM once Chrome has dropped the body), and refuses by
+        raising: a throttle or consent interstitial has no control to click, so
+        without it those walls would surface as a click timeout. Its exception
+        propagates unwrapped. Every other failure is
         `GfBrowserUnavailableError`."""
         page = self._ensure_page()
         deadline = time.monotonic() + timeout_s
@@ -355,9 +360,7 @@ class GfBrowserSession:
                 check_page(
                     self._drive(
                         "Chrome loaded Google Flights' page but its body could not be read",
-                        lambda: PageFetch(
-                            html=nav.text(), final_url=str(nav.url), status_code=int(nav.status)
-                        ),
+                        lambda: _navigated_page(page, nav),
                     )
                 )
             if click is not None:
@@ -653,6 +656,24 @@ def _detail(e: BaseException) -> str:
     lines = [line.strip() for line in str(e).strip().splitlines() if line.strip()]
     text = lines[0] if lines else e.__class__.__name__
     return text if text.endswith((".", "!", "?")) else f"{text}."
+
+
+def _navigated_page(page: Any, nav: Any) -> PageFetch:
+    """The navigation's own page, as a wall check reads it.
+
+    Chrome answers the body read from its DevTools buffer, which can drop a
+    results page's bytes before they are asked for. The DOM stands in then: a
+    wall check reads the throttle sentence and the consent form out of the HTML,
+    and the DOM still carries both, while the URL and status are the
+    navigation's either way. Any other read failure propagates."""
+    try:
+        html = nav.text()
+    # patchright names its whole error tree `Error`; Chrome's message is the only tell.
+    except Exception as e:
+        if _EVICTED not in str(e):
+            raise
+        html = page.content()
+    return PageFetch(html=html, final_url=str(nav.url), status_code=int(nav.status))
 
 
 def _budget_ms(deadline: float, cap_ms: float) -> float:
