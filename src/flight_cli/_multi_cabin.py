@@ -123,8 +123,8 @@ def merge(
     """Join itineraries across cabins. Sorted by `sort_by`'s price under
     `price_rank`: rows priced in `currency` first by amount, any other
     currency after them; rows missing the sort cabin's price sink to the
-    bottom. Truncated to `top_n` rows, so the trim never keeps a fare over a
-    cheaper one on the strength of a number in another currency.
+    bottom. Truncated to `top_n` rows, so the trim never drops a fare for a
+    smaller number in another currency.
 
     Itineraries that can't be keyed (missing flight# or departure on any
     slice) are skipped.
