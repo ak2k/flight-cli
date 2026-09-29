@@ -62,7 +62,9 @@ def _pinned(solutions: int, pick: int, rows: int) -> int | None:
     what survives into an index, and reads a None as "row one". Asserted as the
     pair because neither half is the contract on its own — the first knows the
     range and pins nothing, the second pins and cannot know it."""
-    return _pinned_solution_index(_res(solutions), _pick_in_range(pick, rows, links_follow=True))
+    return _pinned_solution_index(
+        _res(solutions), _pick_in_range(pick, rows, pin_follows=lambda: True)
+    )
 
 
 def test_pick_beyond_the_rendered_table_falls_back() -> None:

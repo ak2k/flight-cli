@@ -11,10 +11,11 @@ captures are the `ds:1` of those full pages: JFK-LAX (95 rows) and JFK-LHR
 from __future__ import annotations
 
 import base64
+import itertools
 import json
 import sys
 import urllib.parse
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, override
 
 import pytest
@@ -396,9 +397,10 @@ def test_under_auto_an_answer_the_routing_emptied_goes_to_matrix_with_the_reason
     assert result.exit_code == 0, result.output
     assert ran == [True]
     assert result.stdout == ""  # the Matrix path, stubbed here, writes the document
-    assert "Using Matrix: no Google Flights itinerary matched the routing (95 rows" in " ".join(
-        result.stderr.split()
-    )
+    assert (
+        "Using Matrix: no Google Flights itinerary matched an operating carrier filter (LH) "
+        "(95 rows"
+    ) in " ".join(result.stderr.split())
 
 
 def test_under_explicit_gflight_it_says_why_and_the_document_is_empty(
@@ -429,9 +431,220 @@ def test_under_explicit_gflight_it_says_why_and_the_document_is_empty(
     )
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout) == []
-    assert "no itinerary matched the routing (95 rows filtered out)" in " ".join(
-        result.stderr.split()
+    assert "no itinerary matched an operating carrier filter (LH) (95 rows filtered out)" in (
+        " ".join(result.stderr.split())
     )
+
+
+# ───────────── constraints the page encodes, held on the rows too ─────────────
+
+
+def _search_json(*extra: str) -> list[str]:
+    return [
+        *_SEARCH,
+        "JFK",
+        "LAX",
+        "--dep",
+        _DEP.isoformat(),
+        "--backend",
+        "gflight",
+        "--fast",
+        "--format",
+        "json",
+        "-n",
+        "100",
+        *extra,
+    ]
+
+
+def _no_matrix(**_kw: object) -> None:
+    pytest.fail("the search went to Matrix")
+
+
+def _legs(member: dict[str, Any]) -> list[dict[str, Any]]:
+    return member["legs"]
+
+
+def _clock(stamp: str) -> str:
+    return stamp[11:16]
+
+
+def _gaps(member: dict[str, Any]) -> list[float]:
+    legs = _legs(member)
+    return [
+        (
+            datetime.fromisoformat(b["departure_datetime"])
+            - datetime.fromisoformat(a["arrival_datetime"])
+        ).total_seconds()
+        / 60
+        for a, b in itertools.pairwise(legs)
+    ]
+
+
+def _within_380_min(member: dict[str, Any]) -> bool:
+    return member["duration"] <= 380
+
+
+def _layovers_of_two_hours(member: dict[str, Any]) -> bool:
+    return all(gap >= 120 for gap in _gaps(member))
+
+
+def _departs_in_the_morning(member: dict[str, Any]) -> bool:
+    return "08:00" <= _clock(_legs(member)[0]["departure_datetime"]) <= "11:00"
+
+
+def _sold_as_aa(member: dict[str, Any]) -> bool:
+    return all(
+        leg["airline"] == "American Airlines" or "AA" in leg["amenities"]["marketing_carriers"]
+        for leg in _legs(member)
+    )
+
+
+@pytest.mark.parametrize(
+    ("extra", "fields", "holds"),
+    [
+        (("--routing", "AA+"), {6: [b"AA"]}, _sold_as_aa),
+        (("--ext", "MAXDUR 6:20"), {12: [380]}, _within_380_min),
+        (("--ext", "MINCONNECT 2:00"), {17: [120]}, _layovers_of_two_hours),
+        (
+            ("--depart-times", "morning"),
+            {8: [8], 9: [11], 10: [0], 11: [23]},
+            _departs_in_the_morning,
+        ),
+    ],
+    ids=["carrier", "duration", "layover", "departure-window"],
+)
+def test_an_encoded_constraint_is_asked_of_the_page_and_held_on_its_rows(
+    extra: tuple[str, ...],
+    fields: dict[int, list[Any]],
+    holds: Callable[[dict[str, Any]], bool],
+    gf_session: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Google has ignored a field it was sent, so the captured board (served
+    whatever the tfs= said) stands in for a page that ignored this one: every
+    row it prints still holds, and the page was asked."""
+    fake = gf_session(_served(_LAX))
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    result = CliRunner().invoke(cli.app, _search_json(*extra))
+    assert result.exit_code == 0, result.output
+    rows: list[dict[str, Any]] = json.loads(result.stdout)
+    assert 0 < len(rows) < 95
+    assert all(holds(m) for m in rows)
+    sl = _decode_slice(_tfs(fake.gets[0]))
+    assert {f: sl.get(f) for f in fields} == fields
+
+
+@pytest.mark.parametrize(
+    ("stops", "extension"),
+    [("0", "MAXSTOPS 2"), ("3", "MAXSTOPS 0"), ("0", "MAXSTOPS 3")],
+    ids=["looser-ext", "looser-flag-past-the-ceiling", "looser-ext-past-the-ceiling"],
+)
+def test_the_strictest_stop_limit_is_the_one_asked(
+    stops: str,
+    extension: str,
+    gf_session: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A nonstop limit asks the page for nonstops beside any looser one, even
+    one past the stop ceiling the page can encode."""
+    fake = gf_session(_served(_LAX))
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    result = CliRunner().invoke(cli.app, _search_json("--stops", stops, "--ext", extension))
+    assert result.exit_code == 0, result.output
+    assert _decode_slice(_tfs(fake.gets[0]))[5] == [0]
+
+
+def test_a_child_is_priced_as_a_child(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = gf_session(_served(_LAX))
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    result = CliRunner().invoke(cli.app, _search_json("--children", "1"))
+    assert result.exit_code == 0, result.output
+    assert len(json.loads(result.stdout)) == 95
+    assert _decode_fields(_tfs(fake.gets[0]))[8] == [1, 2]
+
+
+def _lax_departing_after(hour: int) -> str:
+    """The JFK-LAX capture cut to the rows that leave at `hour` or later."""
+    payload: list[Any] = json.loads(_ds1(_LAX))
+    rows = gfid._rows_from_ds1(payload).rows
+    parsed = [gfid._parse_flight_with_id(r) for r in rows]
+    late = [
+        raw
+        for raw, p in zip(rows, parsed, strict=True)
+        if p.flight.legs[0].departure_datetime.hour >= hour
+    ]
+    payload[2] = [late]
+    payload[3] = None
+    return _page(
+        _answering(json.dumps(payload), origin=None, destination=None, date=_DEP.isoformat())
+    )
+
+
+def test_a_departure_window_alone_that_empties_the_board_names_itself(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gf_session(_lax_departing_after(17))
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    result = CliRunner().invoke(cli.app, _search_json("--depart-times", "morning"))
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == []
+    printed = " ".join(result.stderr.split())
+    assert "no itinerary matched a departure-time window (morning) (" in printed, printed
+
+
+def test_under_auto_every_check_that_emptied_the_board_is_named(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gf_session(_served(_LAX))
+    ran: list[bool] = []
+
+    def _matrix(**_kw: object) -> None:
+        ran.append(True)
+
+    monkeypatch.setattr(cli, "_run_matrix_path", _matrix)
+    args = [a for a in _search_json("--routing", "AA+", "--ext", "MAXDUR 1:00") if a != "gflight"]
+    args.remove("--backend")
+    result = CliRunner().invoke(cli.app, args)
+    assert result.exit_code == 0, result.output
+    assert ran == [True]
+    printed = " ".join(result.stderr.split())
+    assert (
+        "Using Matrix: no Google Flights itinerary matched a carrier filter (AA) and a maximum "
+        "trip duration (60 min) (95 rows filtered out)"
+    ) in printed, printed
+
+
+def _decode_fields(buf: bytes) -> dict[int, list[Any]]:
+    out: dict[int, list[Any]] = {}
+    i = 0
+    while i < len(buf):
+        tag, i = _read_varint(buf, i)
+        field, wire = tag >> 3, tag & 0x07
+        if wire == 0:
+            value, i = _read_varint(buf, i)
+        else:
+            length, i = _read_varint(buf, i)
+            value, i = buf[i : i + length], i + length
+        out.setdefault(field, []).append(value)
+    return out
+
+
+def _read_varint(buf: bytes, i: int) -> tuple[int, int]:
+    value = shift = 0
+    while True:
+        byte = buf[i]
+        i += 1
+        value |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return value, i
+        shift += 7
+
+
+def _decode_slice(buf: bytes) -> dict[int, list[Any]]:
+    return _decode_fields(_decode_fields(buf)[3][0])
 
 
 def _flightless() -> str:
@@ -471,8 +684,9 @@ def test_under_auto_a_round_trip_whose_returns_google_left_empty_goes_to_matrix(
     assert result.exit_code == 0, result.output
     assert ran == [True]
     assert result.stdout == ""
-    assert "Using Matrix: no Google Flights itinerary matched the routing (17 rows" in " ".join(
-        result.stderr.split()
+    assert (
+        "Using Matrix: no Google Flights itinerary matched a carrier exclusion (AA) (17 rows"
+        in (" ".join(result.stderr.split()))
     )
 
 
@@ -494,7 +708,7 @@ def test_under_explicit_gflight_a_round_trip_whose_returns_google_left_empty_say
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout) == []
     assert (
-        "no round trip matched the routing (17 rows filtered out; "
+        "no round trip matched a carrier exclusion (AA) (17 rows filtered out; "
         "returns were searched for the first 3 outbound options)"
     ) in " ".join(result.stderr.split())
 
@@ -521,7 +735,7 @@ def test_a_round_trip_the_routing_emptied_names_the_outbounds_it_tried(
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout) == []
     assert (
-        "no round trip matched the routing (23 rows filtered out; "
+        "no round trip matched a carrier exclusion (AA) (23 rows filtered out; "
         "returns were searched for the first 2 outbound options)"
     ) in " ".join(result.stderr.split())
     assert len(fake.gets) == 3  # the outbound, then two pins
@@ -745,7 +959,7 @@ def test_a_cabin_the_routing_emptied_says_so(
         ),
     )
     err = " ".join(capsys.readouterr().err.split())
-    assert "Google Flights COACH: no itinerary matched the routing" in err
+    assert "Google Flights COACH: no itinerary matched an operating carrier filter (LH)" in err
 
 
 # ──────────────────── multi-cabin: the empty filtered answer ───────────────
@@ -805,7 +1019,8 @@ def test_under_auto_a_multi_cabin_search_the_routing_emptied_goes_to_matrix(
     assert json.loads(result.stdout) == {"answered_by": "matrix"}
     err = " ".join(result.stderr.split())
     assert (
-        "Using Matrix: no Google Flights itinerary matched the routing in "
+        "Using Matrix: no Google Flights itinerary matched an operating carrier filter (LH) "
+        "in "
         "COACH (95 rows filtered out), BUSINESS (95 rows filtered out)."
     ) in err
     assert "Google Flights COACH:" not in err
@@ -838,7 +1053,8 @@ def test_under_auto_one_emptied_cabin_sends_every_cabin_to_matrix(
     assert json.loads(result.stdout) == {"answered_by": "matrix"}
     err = " ".join(result.stderr.split())
     assert (
-        "Using Matrix: no Google Flights itinerary matched the routing in "
+        "Using Matrix: no Google Flights itinerary matched an operating carrier filter (LH) "
+        "in "
         "BUSINESS (7 rows filtered out)."
     ) in err
 
@@ -968,7 +1184,9 @@ def test_under_explicit_gflight_an_emptied_cabin_says_so_and_stays_empty(
     assert len(doc["COACH"]) == 3
     assert doc["BUSINESS"] == []
     err = " ".join(result.stderr.split())
-    assert "Google Flights BUSINESS: no itinerary matched the routing." in err
+    assert "Google Flights BUSINESS: no itinerary matched an operating carrier filter (LH)." in (
+        err
+    )
     assert "Google Flights COACH:" not in err
     assert "Using Matrix" not in err
 
@@ -1052,7 +1270,8 @@ def test_a_multi_cabin_hand_off_prints_no_note_about_googles_table(
     assert ran == [(Cabin.COACH, Cabin.BUSINESS)]
     err = " ".join(result.stderr.split())
     assert (
-        "Using Matrix: no Google Flights itinerary matched the routing in "
+        "Using Matrix: no Google Flights itinerary matched an operating carrier filter (LH) "
+        "in "
         "BUSINESS (7 rows filtered out)."
     ) in err
     for note in (_PIN_CAP_NOTE, _JOIN_NOTE, _CURRENCY_NOTE):
