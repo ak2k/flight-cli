@@ -35,6 +35,7 @@ from flight_cli.domain import (
     SearchOptions,
     TimeOfDay,
 )
+from flight_cli.models import CalendarResult
 from test_gf_airport_sets import _tfs
 from test_links_search_tfs import _decode, _slices
 
@@ -245,6 +246,65 @@ def test_the_number_of_loads_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(fake.calls) == cg._MAX_PAGES
 
 
+def test_a_smaller_budget_caps_the_loads_and_names_itself(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start = date(2026, 10, 20)
+    one_day_each = [_body(_cells(start + timedelta(days=i), 1)) for i in range(3)]
+    fake = _serve(monkeypatch, *one_day_each)
+    with pytest.raises(cg.GfPriceGraphError, match="more than 3 price-graph pages"):
+        cg.price_graph(_search(start=start, end=start + timedelta(days=60)), headed=False, pages=3)
+    assert len(fake.calls) == 3
+
+
+def test_a_graph_counts_the_loads_it_took(monkeypatch: pytest.MonkeyPatch) -> None:
+    second = _body(_cells(date(2026, 11, 13), 45, price=300.0))
+    _serve(monkeypatch, _fixture("ow_jfk_lax.body"), second)
+    search = _search(start=date(2026, 10, 20), end=date(2026, 12, 10))
+    assert cg.price_graph(search, headed=False).loads == 2
+    _serve(monkeypatch, _fixture("ow_jfk_lax.body"))
+    search = _search(start=date(2026, 10, 20), end=date(2026, 11, 2))
+    assert cg.price_graph(search, headed=False).loads == 1
+
+
+def test_one_graph_per_trip_length_within_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A one-way is one graph with no trip length; a range is one per length, each
+    asked with the loads the lengths before it left."""
+    asked: list[tuple[int | None, int]] = []
+
+    def _price_graph(search: CalendarSearch, *, headed: bool, pages: int) -> cg.PriceGraph:
+        del headed
+        nights = search.window.duration_min if len(search.legs) > 1 else None
+        asked.append((nights, pages))
+        return cg.PriceGraph(nights, (), 4)
+
+    monkeypatch.setattr(cg, "price_graph", _price_graph)
+    one_way = _search()
+    assert [g.trip_length for g in cg.price_graphs(one_way, headed=False)] == [None]
+    assert asked == [(None, cg._MAX_PAGES)]
+    asked.clear()
+    window = one_way.window.model_copy(update={"duration_min": 5, "duration_max": 7})
+    ranged = _search(nights=5).model_copy(update={"window": window})
+    with pytest.raises(cg.GfPriceGraphError, match=r"^7-night trips: no price-graph load"):
+        cg.price_graphs(ranged, headed=False)
+    assert asked == [(5, 8), (6, 4)]
+
+
+def test_a_failing_length_fails_the_range_and_is_named(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _price_graph(search: CalendarSearch, *, headed: bool, pages: int) -> cg.PriceGraph:
+        del headed, pages
+        if search.window.duration_min == 6:
+            raise cg.GfPriceGraphError("error 13", code=13)
+        return cg.PriceGraph(search.window.duration_min, ())
+
+    monkeypatch.setattr(cg, "price_graph", _price_graph)
+    window = _search().window.model_copy(update={"duration_min": 5, "duration_max": 7})
+    ranged = _search(nights=5).model_copy(update={"window": window})
+    with pytest.raises(cg.GfPriceGraphError, match=r"^6-night trips: error 13$") as e:
+        cg.price_graphs(ranged, headed=False)
+    assert e.value.code == 13
+
+
 def test_a_graph_with_no_fare_in_the_window_is_a_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
     """Priced dates exist, all outside the window: never an empty grid."""
     _serve(monkeypatch, _fixture("ow_jfk_lax.body"))
@@ -417,7 +477,10 @@ def _graph_is(monkeypatch: pytest.MonkeyPatch, answer: cg.PriceGraph | BaseExcep
     """Stand in for the page loads, recording the search and the transport's state."""
     seen: list[Any] = []
 
-    def _price_graph(search: CalendarSearch, *, headed: bool) -> cg.PriceGraph:
+    def _price_graph(
+        search: CalendarSearch, *, headed: bool, pages: int = cg._MAX_PAGES
+    ) -> cg.PriceGraph:
+        del pages
         seen.append((search, headed, gfb._scope_depth.n, signal.getsignal(signal.SIGINT)))
         if isinstance(answer, BaseException):
             raise answer
@@ -735,23 +798,45 @@ def test_the_page_asks_for_every_airport_of_both_sets() -> None:
     assert (_airports(back[13]), _airports(back[14])) == (london, nyc)
 
 
-@pytest.mark.parametrize(
-    ("overrides", "flag"),
-    [
-        ({"gf_transport": "browser"}, "--gf-transport"),
-        ({"gf_transport": "auto"}, "--gf-transport"),
-        ({"gf_transport": "http", "gf_headed": True}, "--gf-headed"),
-    ],
-)
-def test_a_transport_flag_without_fast_is_a_usage_error(
-    overrides: dict[str, Any], flag: str, monkeypatch: pytest.MonkeyPatch
+def test_a_headed_window_over_http_without_fast_is_a_usage_error(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Only `--fast` reaches Google Flights; honoring the flag nowhere would run
-    Matrix as though it had been."""
+    """http opens no Chrome, so a flag that shows its window would be honored
+    nowhere."""
     _no_matrix(monkeypatch)
-    with pytest.raises(typer.BadParameter, match="--fast") as e:
-        _calendar(fast=False, **overrides)
-    assert e.value.param_hint == flag
+    with pytest.raises(typer.BadParameter, match="--gf-transport http opens none") as e:
+        _calendar(fast=False, gf_transport="http", gf_headed=True)
+    assert e.value.param_hint == "--gf-headed"
+
+
+def _matrix_answers(monkeypatch: pytest.MonkeyPatch) -> list[CalendarSearch]:
+    """Stand in for the Matrix calendar with an empty answer, recording each ask."""
+    asked: list[CalendarSearch] = []
+
+    def _matrix(search: CalendarSearch, **_kw: object) -> tuple[CalendarResult, int]:
+        asked.append(search)
+        return CalendarResult.from_api({"solutionCount": 0}), 0
+
+    def _no_weave(*_a: object, **_k: object) -> object:
+        raise AssertionError("the http weave ran on the browser transport")
+
+    monkeypatch.setattr(cli, "_run_calendar", _matrix)
+    monkeypatch.setattr(cli, "_run_calendar_enriched", _no_weave)
+    return asked
+
+
+@pytest.mark.parametrize("transport", ["browser", "auto"])
+def test_without_fast_the_browser_transports_read_the_graph_beside_matrix(
+    transport: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    asked = _matrix_answers(monkeypatch)
+    seen = _graph_is(monkeypatch, _OW)
+    _calendar(fast=False, gf_transport=transport)
+    assert len(asked) == 1
+    assert len(seen) == 1
+    assert "lowest fare per departure day (Google Flights)" in " ".join(
+        capsys.readouterr().out.split()
+    )
 
 
 # ───────────────────── the transport a bare `--fast` takes ───────────────────
@@ -833,9 +918,8 @@ def test_a_bare_fast_without_chrome_names_the_chrome_install(
     assert result.stdout == ""
 
 
-@pytest.mark.parametrize("extra", [(), ("--gf-transport", "http")], ids=["unset", "http"])
-def test_without_fast_an_unset_or_http_transport_runs_matrix(
-    extra: tuple[str, ...], monkeypatch: pytest.MonkeyPatch
+def test_without_fast_an_http_transport_runs_the_weave_and_never_the_graph(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ran: list[CalendarSearch] = []
 
@@ -843,26 +927,41 @@ def test_without_fast_an_unset_or_http_transport_runs_matrix(
         ran.append(search)
 
     monkeypatch.setattr(cli, "_run_calendar_enriched", _weave)
-    result = _calendar_cli(*extra)
+    seen = _graph_is(monkeypatch, _OW)
+    result = _calendar_cli("--gf-transport", "http")
     assert result.exit_code == 0, result.stderr
     assert len(ran) == 1
+    assert seen == []
 
 
 @pytest.mark.parametrize(
-    ("extra", "flag"),
+    ("extra", "headed"),
     [
-        (("--gf-transport", "browser"), "--gf-transport"),
-        (("--gf-transport", "auto"), "--gf-transport"),
-        (("--gf-headed",), "--gf-headed"),
+        ((), False),
+        (("--gf-transport", "browser"), False),
+        (("--gf-transport", "auto"), False),
+        (("--gf-headed",), True),
     ],
-    ids=["browser", "auto", "headed"],
+    ids=["unset", "browser", "auto", "headed"],
 )
-def test_without_fast_a_browser_flag_is_still_a_usage_error(
-    extra: tuple[str, ...], flag: str, monkeypatch: pytest.MonkeyPatch
+def test_without_fast_an_unset_or_browser_transport_reads_the_graph_beside_matrix(
+    extra: tuple[str, ...], headed: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked = _matrix_answers(monkeypatch)
+    seen = _graph_is(monkeypatch, _OW)
+    result = _calendar_cli(*extra)
+    assert result.exit_code == 0, result.stderr
+    assert len(asked) == 1
+    assert [s[1] for s in seen] == [headed]
+    assert "lowest fare per departure day (Google Flights)" in " ".join(result.stdout.split())
+
+
+def test_without_fast_a_headed_window_over_http_is_a_usage_error(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _no_matrix(monkeypatch)
-    result = _calendar_cli(*extra)
+    result = _calendar_cli("--gf-headed", "--gf-transport", "http")
     err = " ".join(result.stderr.split())
     assert result.exit_code == 2
-    assert flag in err
-    assert "applies only with --fast" in err
+    assert "--gf-headed" in err
+    assert "--gf-transport http opens none" in err
