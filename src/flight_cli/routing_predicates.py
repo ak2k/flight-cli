@@ -340,8 +340,11 @@ def _parse_extension_code(directive: str) -> Predicate | None:  # noqa: PLR0911,
             return ExcludeRedeyesPred()
         case "-CODESHARE":
             return ExcludeCodesharePred()
-        case "ALLIANCE" if args:
-            codes = frozenset(c.lower() for c in " ".join(args).split("|") if c.strip())
+        # A list naming no alliance (`ALLIANCE |`) falls through to the bare
+        # directive's reason: as a filter it would admit every carrier.
+        case "ALLIANCE" if codes := frozenset(
+            c.lower() for c in " ".join(args).split("|") if c.strip()
+        ):
             if codes <= _ALLIANCES:
                 return AlliancePred(codes=codes)
             return UnsupportedPred(token=raw, reason=f"unknown alliance in {raw!r}")

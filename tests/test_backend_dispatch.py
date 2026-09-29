@@ -204,6 +204,17 @@ def test_a_stop_ceiling_above_two_is_named_once_at_its_strictest(
     assert "can't serve a stop ceiling above 2 (3)." in printed, printed
 
 
+def test_an_alliance_naming_none_takes_a_bare_alliances_route(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`ALLIANCE |` names no alliance, so the page would be asked for no filter."""
+    assert _call(extension="ALLIANCE |") == BACKEND_MATRIX
+    printed = " ".join(capsys.readouterr().err.split())
+    assert "extension 'ALLIANCE |' not expressible on GF" in printed, printed
+    with pytest.raises(typer.BadParameter, match=r"extension 'ALLIANCE \|' not expressible"):
+        _call(BACKEND_GFLIGHT, extension="ALLIANCE |")
+
+
 def test_explicit_gflight_rejects_a_stop_ceiling_above_two() -> None:
     with pytest.raises(typer.BadParameter, match=r"a stop ceiling above 2 \(3\)"):
         _call(BACKEND_GFLIGHT, stops=3)
