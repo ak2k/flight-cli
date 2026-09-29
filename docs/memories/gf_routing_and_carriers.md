@@ -113,8 +113,9 @@ printed. Re-widening `3.6`/`3.7`/`3.15`/`3.17`/`3.18` is the next step.
   emptied any cabin (one `Using Matrix:` line names each emptied cabin and its
   count): handing on only that cabin would put Google's rows beside Matrix's
   documents in one answer and join prices from two sources. When Matrix then
-  fails to answer a cabin Google had rows for, the answer stays Matrix's and
-  stderr names that cabin and `--backend gflight`, which shows Google's rows.
+  returns no itinerary for a cabin Google had rows for, failing or finding
+  none, the answer stays Matrix's and stderr names that cabin and
+  `--backend gflight`, which shows Google's rows.
   A cabin Google served nothing for stays Google's answer. Under
   `--backend gflight` the multi-cabin path prints the reason per cabin and
   leaves the cabin empty.

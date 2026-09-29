@@ -4456,12 +4456,13 @@ def _validate_sort_cabin(sort_by: Cabin, cabins: tuple[Cabin, ...]) -> None:
 
 def _note_google_rows_unshown(cabins: Iterable[Cabin]) -> None:
     """Name each cabin Google Flights had rows for that Matrix, answering the
-    search in its place, did not answer: those rows are not in the output."""
+    search in its place, returned no itinerary for: those rows are not in the
+    output."""
     names = ", ".join(c.value for c in cabins)
     if names:
         err.print(
-            f"[yellow]Matrix did not answer {_safe_text(names)}, which Google Flights had "
-            "rows for; --backend gflight shows those rows.[/]"
+            f"[yellow]Matrix returned no itinerary for {_safe_text(names)}, where Google "
+            "Flights had rows; --backend gflight shows them.[/]"
         )
 
 
@@ -4485,8 +4486,9 @@ def _run_matrix_path_multi(
     """Matrix multi-cabin: N parallel cabin queries → client-side join → render.
 
     `google_answered` names the cabins Google Flights had rows for when the
-    search was handed here; any of them Matrix fails to answer is named on
-    stderr, since the hand-off already set Google's rows aside."""
+    search was handed here; any of them Matrix returns no itinerary for, by
+    failing or by finding none, is named on stderr, since the hand-off already
+    set Google's rows aside."""
     # Widen each per-cabin query so the join has overlap to render — top_n
     # rows visible after merge, but each cabin's underlying query pulls
     # `_bumped_query_top_n` candidates. See _bumped_query_top_n docstring.
@@ -4503,7 +4505,8 @@ def _run_matrix_path_multi(
     except typer.Exit:
         _note_google_rows_unshown(google_answered)
         raise
-    _note_google_rows_unshown(c for c in google_answered if c not in results_by_cabin)
+    found = {c for c, r in results_by_cabin.items() if r.solutions}
+    _note_google_rows_unshown(c for c in google_answered if c not in found)
     if not results_by_cabin:
         err.print("[red]All cabin queries failed.[/]")
         raise typer.Exit(1)

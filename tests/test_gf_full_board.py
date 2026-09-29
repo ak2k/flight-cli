@@ -856,6 +856,10 @@ class _MatrixDown:
 
 
 _NONE_FOUND: dict[str, Any] = {"solutionCount": 0}
+_ONE_FOUND: dict[str, Any] = {
+    "solutionCount": 1,
+    "solutionList": {"solutions": [{"displayTotal": "USD100.00"}]},
+}
 
 
 class _MatrixRefusesCoach(_MatrixDown):
@@ -872,11 +876,20 @@ class _MatrixRefusesCoach(_MatrixDown):
         return SearchResult.from_api(_NONE_FOUND)
 
 
-class _MatrixAnswers(_MatrixRefusesCoach):
+class _MatrixFindsNothing(_MatrixRefusesCoach):
     @override
     async def execute(self, search: SpecificDateSearch, *, cache: bool = True) -> SearchResult:
         _ = (search, cache)
         return SearchResult.from_api(_NONE_FOUND)
+
+
+class _MatrixFindsCoach(_MatrixRefusesCoach):
+    @override
+    async def execute(self, search: SpecificDateSearch, *, cache: bool = True) -> SearchResult:
+        _ = cache
+        return SearchResult.from_api(
+            _ONE_FOUND if search.options.cabin is Cabin.COACH else _NONE_FOUND
+        )
 
 
 @pytest.mark.parametrize(
@@ -884,10 +897,11 @@ class _MatrixAnswers(_MatrixRefusesCoach):
     [
         (_MatrixDown, 1, None, True),
         (_MatrixRefusesCoach, 0, {"BUSINESS": _NONE_FOUND}, True),
-        (_MatrixAnswers, 0, {"COACH": _NONE_FOUND, "BUSINESS": _NONE_FOUND}, False),
+        (_MatrixFindsNothing, 0, {"COACH": _NONE_FOUND, "BUSINESS": _NONE_FOUND}, True),
+        (_MatrixFindsCoach, 0, {"COACH": _ONE_FOUND, "BUSINESS": _NONE_FOUND}, False),
     ],
 )
-def test_under_auto_a_matrix_failure_names_the_google_rows_it_left_unshown(
+def test_under_auto_matrix_names_the_google_rows_its_answer_left_unshown(
     monkeypatch: pytest.MonkeyPatch,
     client: type[_MatrixDown],
     code: int,
@@ -895,9 +909,9 @@ def test_under_auto_a_matrix_failure_names_the_google_rows_it_left_unshown(
     told: bool,
 ) -> None:
     """The hand-off set Google's three COACH rows aside for Matrix's answer. When
-    Matrix then fails to answer COACH, the answer stays Matrix's alone and never
-    the emptied BUSINESS cabin, and stderr says Google's COACH rows exist and
-    how to see them."""
+    Matrix then returns no COACH itinerary, by failing or by finding none, the
+    answer stays Matrix's alone and never the emptied BUSINESS cabin, and stderr
+    says Google's COACH rows exist and how to see them."""
     _partial(monkeypatch, business_dropped=7)
     monkeypatch.setattr(cli, "MatrixClient", client)
     result = CliRunner().invoke(cli.app, _multi_cabin())
@@ -905,8 +919,8 @@ def test_under_auto_a_matrix_failure_names_the_google_rows_it_left_unshown(
     assert (json.loads(result.stdout) if result.stdout else None) == stdout
     err = " ".join(result.stderr.split())
     unshown = (
-        "Matrix did not answer COACH, which Google Flights had rows for; "
-        "--backend gflight shows those rows."
+        "Matrix returned no itinerary for COACH, where Google Flights had rows; "
+        "--backend gflight shows them."
     )
     assert (unshown in err) is told
 
@@ -923,7 +937,7 @@ def test_under_auto_a_matrix_failure_claims_no_rows_google_did_not_have(
     result = CliRunner().invoke(cli.app, _multi_cabin())
     assert result.exit_code == 1, result.output
     assert result.stdout == ""
-    assert "which Google Flights had rows for" not in result.stderr
+    assert "where Google Flights had rows" not in result.stderr
 
 
 def test_under_auto_a_cabin_google_served_nothing_for_stays_on_google(
