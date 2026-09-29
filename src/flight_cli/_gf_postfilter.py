@@ -200,22 +200,30 @@ def _slice_passes(slc: Slice, predicates: Iterable[Predicate]) -> bool:
     return True
 
 
-def _layovers(legs: Sequence[Any]) -> list[int]:
-    """Minutes between each arrival and the next departure. Both ends are
-    local to the connecting airport, so the difference needs no time zone."""
-    return [
-        int((b.departure_datetime - a.arrival_datetime).total_seconds() // 60)
-        for a, b in itertools.pairwise(legs)
-    ]
+def _layovers(row: Any) -> list[int]:
+    """The minutes of each connection the row can measure: the page's own
+    figure, else the clock difference at the connecting airport. That
+    difference is an hour out across a daylight-saving change, and a negative
+    one is such a change, which leaves the gap unmeasured."""
+    stated: Sequence[int | None] = row.layovers
+    gaps: list[int] = []
+    for i, (a, b) in enumerate(itertools.pairwise(row.flight.legs)):
+        gap = stated[i] if i < len(stated) else None
+        if gap is None:
+            gap = int((b.departure_datetime - a.arrival_datetime).total_seconds() // 60)
+        if gap >= 0:
+            gaps.append(gap)
+    return gaps
 
 
-def _row_passes(flight: Any, predicates: Iterable[Predicate], times: Sequence[TimeOfDay]) -> bool:
-    """The checks read off fli's raw row, which `models.Slice` does not carry.
+def _row_passes(row: Any, predicates: Iterable[Predicate], times: Sequence[TimeOfDay]) -> bool:
+    """The checks read off the raw row, which `models.Slice` does not carry.
 
     The duration is Google's own total: leg datetimes are local to each leg's
     airport, so the last arrival minus the first departure is off by the zone
     difference. A departure time must fall inside one of `times`, bounds
     included, to the minute: Google's own window is in whole hours."""
+    flight = row.flight
     legs: Sequence[Any] = flight.legs
     if times:
         if not legs:
@@ -229,7 +237,7 @@ def _row_passes(flight: Any, predicates: Iterable[Predicate], times: Sequence[Ti
             if flight.duration is None or flight.duration > p.minutes:
                 return False
         elif isinstance(p, ConnectTimePred):
-            for gap in _layovers(legs):
+            for gap in _layovers(row):
                 if p.min_minutes is not None and gap < p.min_minutes:
                     return False
                 if p.max_minutes is not None and gap > p.max_minutes:
@@ -251,7 +259,7 @@ def routing_keep(
     def keep(leg: int, row: Any) -> bool:
         preds = per_slice_predicates[leg] if leg < len(per_slice_predicates) else ()
         times = per_slice_times[leg] if leg < len(per_slice_times) else ()
-        if not _row_passes(row.flight, preds, times):
+        if not _row_passes(row, preds, times):
             return False
         if not preds:
             return True

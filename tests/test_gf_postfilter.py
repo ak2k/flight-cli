@@ -1,4 +1,4 @@
-# pyright: reportCallIssue=false
+# pyright: reportCallIssue=false, reportPrivateUsage=false
 # DIVERGE: pydantic Field(alias=...) on _Loose models trips basedpyright into
 # treating alias names as required kwargs even though populate_by_name=True is
 # set. Same posture as tests/pp/test_match.py + pp/gflight_adapter.py.
@@ -6,14 +6,17 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from fli.models import FlightLeg, FlightResult  # pyright: ignore[reportMissingTypeStubs]
 from fli.models.airline import Airline  # pyright: ignore[reportMissingTypeStubs]
 from fli.models.airport import Airport  # pyright: ignore[reportMissingTypeStubs]
 
+from conftest import _ds1
+from flight_cli import _gflight_ids as gfid
 from flight_cli._gf_postfilter import (
     apply_postfilter,
     can_postfilter,
@@ -324,6 +327,50 @@ def test_layover_bounds_hold_every_connection() -> None:
     assert not _keeps(connecting(61), None, "MAXCONNECT 1:00")
     nonstop = _row(("AA", "LGA", "LAX", _h(7), _h(10)), duration=360)
     assert _keeps(nonstop, None, "MINCONNECT 2:00")
+
+
+def _seattle_connection(
+    day: list[int], arrival: list[int], departure: list[int], stated: int, at: str = "SEA"
+) -> GFlightWithId:
+    """The JFK-LAX capture's row through SEA with its connection moved to `day`:
+    landing at `arrival` and leaving at `departure`, [hour, minute] on SEA's
+    clocks, the page stating a layover of `stated` minutes at `at`."""
+    payload: list[Any] = json.loads(_ds1("ds1_jfk_lax_tfu.json"))
+    raw = next(r for r in gfid._rows_from_ds1(payload).rows if r[0][2][0][6] == "SEA")
+    inbound, outbound = raw[0][2]
+    inbound[21], inbound[10] = day, arrival
+    outbound[20], outbound[8] = day, departure
+    raw[0][13][0][0:3] = [stated, at, at]
+    return gfid._parse_flight_with_id(raw)
+
+
+def test_a_layover_across_a_clock_change_is_measured_as_the_page_states_it() -> None:
+    """Leg times are clock readings at each airport. Landing 01:50 and leaving
+    01:20 once the clocks fall back is 30 minutes on the ground, and so is 01:50
+    to 03:20 across the spring change."""
+    fall_back = _seattle_connection([2026, 11, 1], [1, 50], [1, 20], stated=30)
+    assert _keeps(fall_back, None, "MINCONNECT 0:30")
+    assert not _keeps(fall_back, None, "MINCONNECT 0:45")
+    spring_forward = _seattle_connection([2027, 3, 14], [1, 50], [3, 20], stated=30)
+    assert _keeps(spring_forward, None, "MAXCONNECT 1:00")
+    assert not _keeps(spring_forward, None, "MINCONNECT 1:00")
+
+
+def test_a_layover_stated_at_another_airport_is_not_that_connections() -> None:
+    assert _seattle_connection([2026, 11, 4], [10, 23], [11, 30], stated=67).layovers == (67,)
+    assert _seattle_connection([2026, 11, 4], [10, 23], [11, 30], 67, at="PDX").layovers == (None,)
+
+
+def test_a_layover_the_clocks_cannot_place_is_not_held_against_the_row() -> None:
+    """With no layover stated, leaving before landing on the clocks is a
+    fall-back change, and the row gives nothing to measure the gap by."""
+    fall_back = _row(
+        ("AA", "LGA", "ORD", _h(0), _h(1) + 50),
+        ("AA", "ORD", "LAX", _h(1) + 20, _h(4)),
+        duration=330,
+    )
+    assert _keeps(fall_back, None, "MINCONNECT 0:30")
+    assert _keeps(fall_back, None, "MAXCONNECT 1:00")
 
 
 def test_a_carrier_include_keeps_a_leg_any_allowed_carrier_sells() -> None:
