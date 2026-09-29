@@ -603,6 +603,19 @@ def test_under_bags_every_google_link_says_its_prices_leave_them_out() -> None:
     assert cli._pinned_gflight_url_caveats(plain) == []
 
 
+@pytest.mark.parametrize("bags", [["--bags", "1"], []], ids=["bags", "plain"])
+def test_under_bags_the_matrix_link_says_its_prices_leave_them_out(
+    served: _Page, bags: list[str]
+) -> None:
+    served.board.append(_gf_row(249.0, slot=[1, 1]))
+    args = ["search", "JFK", "LAX", "--dep", _DEP.isoformat(), "--cash-only", "--no-google-url"]
+    result = CliRunner().invoke(cli.app, [*args, "--fast", *bags])
+    assert result.exit_code == 0, result.output
+    matrix = _flat(result.stdout.partition("Matrix deep-link:")[2])
+    assert matrix, result.stdout
+    assert ("note: Matrix prices no bags" in matrix) == bool(bags), matrix
+
+
 def _published_refusals() -> list[GfBackendError]:
     def every(root: type[GfBackendError]) -> list[type[GfBackendError]]:
         return [c for child in root.__subclasses__() for c in (child, *every(child))]

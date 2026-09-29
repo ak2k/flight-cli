@@ -2076,6 +2076,8 @@ def _emit_urls(
         else:
             console.print("[dim]Matrix deep-link:[/]")
             console.print(f"  [link]{_safe_text(matrix_deep_link(search))}[/]")
+        for note in _matrix_link_caveats(search):
+            console.print(f"  [yellow]note: {_safe_text(note)}[/]")
     if google_url:
         # `google_flights_url` builds protobuf-encoded tfs= URLs via fast_flights.
         # That library has no documented exception surface — catch broadly so a
@@ -2359,6 +2361,12 @@ def _bag_link_caveats(search: Search) -> list[str]:
     if search.options.bags is None:
         return []
     return ["the linked page's prices do not include the bags --bags asked for"]
+
+
+def _matrix_link_caveats(search: Search) -> list[str]:
+    if search.options.bags is None:
+        return []
+    return ["Matrix prices no bags, so the linked page's prices leave out those --bags asked for"]
 
 
 def _parse_iso(s: str) -> datetime | None:
