@@ -78,7 +78,24 @@ def test_routing_specific_flight() -> None:
 
 def test_routing_flight_range() -> None:
     (p,) = parse_routing("UA1000-2000+")
-    assert p == SpecificFlightPred(carrier="UA", low=1000, high=2000)
+    assert p == SpecificFlightPred(carrier="UA", low=1000, high=2000, quantifier="+")
+
+
+@pytest.mark.parametrize(
+    ("token", "several", "text"),
+    [
+        ("UA882", False, "UA882"),
+        ("UA882?", False, "UA882?"),
+        ("ua882+", True, "UA882+"),
+        ("UA1000-2000*", True, "UA1000-2000*"),
+    ],
+)
+def test_a_flight_numbers_quantifier_says_one_flight_or_several(
+    token: str, several: bool, text: str
+) -> None:
+    (p,) = parse_routing(token)
+    assert isinstance(p, SpecificFlightPred)
+    assert (p.several, p.text) == (several, text)
 
 
 def test_routing_flight_exclusion_escalates() -> None:
@@ -198,9 +215,56 @@ def test_extension_airlines_include_exclude_operating() -> None:
     assert op.tier is Tier.GF_POSTFILTER
 
 
+@pytest.mark.parametrize(
+    ("directive", "named"),
+    [
+        ("-AIRLINES UA,DL", "'UA,DL', which is not an airline code"),
+        ("-AIRLINES UA, DL", "'UA,', which is not an airline code"),
+        ("-AIRLINES |", "'|', which is not an airline code"),
+        ("-OPAIRLINES UA,DL", "'UA,DL', which is not an airline code"),
+        ("OPAIRLINES |", "'|', which is not an airline code"),
+        ("AIRLINES ua,dl", "'ua,dl', which is not an airline code"),
+        ("-AIRLINES UAL DL 12", "'UAL' and '12', which are not airline codes"),
+    ],
+)
+def test_a_carrier_list_naming_a_token_that_is_not_an_airline_code_escalates(
+    directive: str, named: str
+) -> None:
+    """Matrix refuses a comma list ("UA,DL" is not a carrier), and Google
+    matches no row to such a token: `-AIRLINES UA,DL` excluded nothing, and
+    `-AIRLINES UA, DL` DL alone."""
+    (p,) = parse_extension(directive)
+    assert p == UnsupportedPred(
+        token=directive, reason=f"a carrier list naming {named} ({directive!r})"
+    )
+    assert p.tier is Tier.MATRIX_ONLY
+
+
+@pytest.mark.parametrize(
+    ("directive", "codes"),
+    [
+        ("-AIRLINES UA DL", {"UA", "DL"}),
+        ("-AIRLINES B6 9K", {"B6", "9K"}),
+        ("-airlines ua", {"UA"}),
+    ],
+)
+def test_a_space_separated_carrier_list_stays_a_carrier_predicate(
+    directive: str, codes: set[str]
+) -> None:
+    assert parse_extension(directive) == [
+        CarrierPred(frozenset(codes), exclude=True, operating=False)
+    ]
+
+
 def test_extension_cities_exclude() -> None:
     (p,) = parse_extension("-CITIES DFW ORD")
     assert p == ConnectionAirportPred(frozenset({"DFW", "ORD"}), exclude=True)
+
+
+def test_a_cities_list_is_not_held_to_the_airline_code_rule() -> None:
+    """`-CITIES` names airports, and the list is parsed as it always was."""
+    (p,) = parse_extension("-CITIES DUB,LHR")
+    assert p == ConnectionAirportPred(frozenset({"DUB,LHR"}), exclude=True)
 
 
 def test_extension_exclusion_flags() -> None:

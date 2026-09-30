@@ -622,15 +622,29 @@ def _gf_unmappable_reasons(backend: str, predicates: Sequence[Predicate]) -> lis
 
     Checked with the bridge's own lookup, and only where Google Flights is still
     in the running: a Matrix run pays neither the fli import nor the check."""
-    from .routing_predicates import AlliancePred, CarrierPred  # noqa: PLC0415
+    from .routing_predicates import (  # noqa: PLC0415
+        AlliancePred,
+        CarrierPred,
+        SpecificFlightPred,
+    )
 
+    # A flight number keeps only rows booked under its carrier, and a row whose
+    # carrier fli cannot name never decodes, so it asks what an include asks.
+    asked = [
+        *predicates,
+        *(
+            CarrierPred(frozenset({p.carrier}), exclude=False, operating=False)
+            for p in predicates
+            if isinstance(p, SpecificFlightPred)
+        ),
+    ]
     if backend == BACKEND_MATRIX or not any(
-        isinstance(p, CarrierPred | AlliancePred) for p in predicates
+        isinstance(p, CarrierPred | AlliancePred) for p in asked
     ):
         return []
     from .fli_bridge import unmappable_codes  # noqa: PLC0415 — imports fli
 
-    bad = unmappable_codes(predicates)
+    bad = unmappable_codes(asked)
     return [f"a carrier Google Flights has no code for ({', '.join(bad)})"] if bad else []
 
 
@@ -2021,9 +2035,9 @@ def _default_graph_blocker(
     None when it does. The phrase completes "this is …".
 
     The graph is a table printed after Matrix's, so a JSON document stays
-    Matrix's alone. Otherwise the `--fast` gate decides, over a copy of one trip
-    length: every length shares the legs and the filters, and each is asked as
-    a graph of its own. The page budget is counted over all of them."""
+    Matrix's alone. Otherwise the `--fast` browser gate decides, over a copy of one
+    trip length: every length shares the legs and the filters, and each is asked
+    as a graph of its own. The page budget is counted over all of them."""
     if json_out:
         return "JSON output"
     window = search.window
@@ -2031,7 +2045,13 @@ def _default_graph_blocker(
         update={"window": window.model_copy(update={"duration_max": window.duration_min})}
     )
     reason = _grid_branch_blocker(
-        one_length, json_out=False, one_way=one_way, origins=origins, dests=dests, fast=True
+        one_length,
+        json_out=False,
+        one_way=one_way,
+        origins=origins,
+        dests=dests,
+        fast=True,
+        graph=True,
     )
     if reason is not None:
         return reason
@@ -2921,7 +2941,7 @@ def _trip_lengths_text(lengths: Sequence[int]) -> str:
     return _join_reasons([*(f"{n:d}-" for n in lengths[:-1]), f"{last:d}-night"])
 
 
-def _grid_branch_blocker(  # noqa: PLR0911 — one return per named reason, cheapest first
+def _grid_branch_blocker(  # noqa: PLR0911, PLR0912 — one return per named reason, cheapest first
     search: CalendarSearch,
     *,
     json_out: bool,
@@ -2929,6 +2949,7 @@ def _grid_branch_blocker(  # noqa: PLR0911 — one return per named reason, chea
     origins: tuple[str, ...],
     dests: tuple[str, ...],
     fast: bool = False,
+    graph: bool = False,
 ) -> str | None:
     """Why the GF date-grid can't serve this calendar, or None if it can.
 
@@ -2947,6 +2968,16 @@ def _grid_branch_blocker(  # noqa: PLR0911 — one return per named reason, chea
     set or metro code are served by that page grid too, so without `--fast` they
     still go to Matrix: the weave's Matrix half is one query, and `date_grid`
     writes one airport per side.
+
+    `graph` (with `fast`) asks for Chrome's price graph, whose own gate
+    (`_gf_calgraph.graph_blocker`) replaces the routing and page checks: it
+    admits the carrier, alliance, duration and layover bounds and the time
+    windows Google was measured applying from the page URL. Without it,
+    `--fast --gf-transport http` keeps the narrower checks, and so does a
+    calendar whose extension runs one code into the next (`MAXSTOPS 1 MAXDUR
+    9:00`): the parser drops what follows the first code's argument, and the
+    graph's gate would take the constraints beside it and ask without the one
+    dropped.
 
     The page asks for every airport of a set, so under `--fast` the airports are
     checked as `_pick_backend` checks a search's: expanded, against the page's
@@ -2981,6 +3012,11 @@ def _grid_branch_blocker(  # noqa: PLR0911 — one return per named reason, chea
         city_codes = _gf_unserveable_reasons(BACKEND_GFLIGHT, ",".join(origins), ",".join(dests))
         if city_codes:
             return city_codes[0]
+    if fast and graph:
+        from ._gf_calgraph import extension_runs_on, graph_blocker  # noqa: PLC0415 — fli, as below
+
+        if not extension_runs_on(search):
+            return graph_blocker(search)
     from ._gf_dategrid import grid_can_serve, grid_routing_blocker  # noqa: PLC0415
 
     if not grid_can_serve(search, round_trip=fast, airport_sets=fast):
@@ -6712,7 +6748,10 @@ def calendar(
         "calendar one-way or a round trip of one trip length ('-d 7'), between "
         "airports, comma-lists or metro codes (NYC, LON; up to 11 airports a leg, "
         "each date priced at the cheapest of them), whose filters Google Flights' "
-        "search page can carry (cabin, adults, stops up to 2); table or JSON. Reads "
+        "search page can carry (cabin, adults, stops up to 2, one carrier or alliance "
+        "include, MAXDUR, MINCONNECT, MAXCONNECT, and on a one-way a --depart-times "
+        "window that runs to midnight; over [bold]--gf-transport http[/] only cabin, "
+        "adults and stops up to 2); table or JSON. Reads "
         "the grid from the search page in a real Chrome (see [bold]--gf-transport[/]). "
         "Exits 1 rather than falling back, so a no-grid result is never mistaken for "
         "a fast one. Without it, a table calendar prints the same graph after "
@@ -6845,7 +6884,13 @@ def calendar(
         )
         return
     blocker = _grid_branch_blocker(
-        search, json_out=json_out, one_way=one_way, origins=origins, dests=dests, fast=fast
+        search,
+        json_out=json_out,
+        one_way=one_way,
+        origins=origins,
+        dests=dests,
+        fast=fast,
+        graph=gf_mode != TRANSPORT_HTTP,
     )
     if blocker is not None:
         # `--fast` exists only inside the branch below. Everywhere else there is no

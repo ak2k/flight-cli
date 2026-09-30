@@ -224,8 +224,10 @@ def apply_gf_native_filters(filters: Any, predicates: Iterable[Predicate]) -> bo
     predicates allow. The search picker sends such requests to Matrix before
     this runs (`unmappable_codes`); the date grids do not check the return.
     Other predicates are ignored here (the post-filter and gate own those). The
-    date grids refuse a minimum layover before calling this: they have no rows
-    to check it on."""
+    RPC grid refuses a minimum layover before calling this: it has no rows to
+    check it on. The price graph takes one, which Google was measured applying
+    from the URL, and refuses a minimum above the maximum, which this drops,
+    and a second maximum, which replaces the first."""
     from fli.models.airport import (  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
         Airport,
     )
