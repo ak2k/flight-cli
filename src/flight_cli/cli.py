@@ -87,7 +87,7 @@ from .pp.cli import auth_app, run_pp_for_search
 from .providers.base import LegQuery
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Generator, Iterable, Sequence
+    from collections.abc import Callable, Coroutine, Generator, Iterable, Mapping, Sequence
 
     from ._gf_booking import BookingOptions
     from ._gf_calgraph import GraphRange, LostLength, PriceGraph
@@ -4823,11 +4823,11 @@ def _pin_cap_note(*, legs: tuple[Leg, ...], top_n: int) -> None:
 def _multi_cabin_join_note(pins: int, leader: Cabin | None) -> str:
     """Why a cabin cell can be empty on a multi-cabin round trip.
 
-    `leader` is the cabin whose outbounds every cabin pinned, or None when none
-    led and each cabin pinned its own. The count comes from the pin budget
-    rather than a literal, because the sentence is only true while they agree:
-    the cap is what decides how many outbounds the join can see, and `-n` below
-    it lowers the number further.
+    `leader` is the cabin whose outbounds every cabin was asked to pin, or None
+    when none led and each cabin pinned its own. The count comes from the pin
+    budget rather than a literal, because the sentence is only true while they
+    agree: the cap is what decides how many outbounds the join can see, and
+    `-n` below it lowers the number further.
 
     A led '—' is not always a board that lacks the itinerary: a filter such as
     `--max-price` can remove a fare the board lists, a return board can be
@@ -5006,6 +5006,21 @@ def _run_matrix_multi(
     return results
 
 
+class _CabinBoards(dict[Cabin, list[Any]]):
+    """Each cabin's answer from a Google Flights multi-cabin fan-out.
+
+    `leader` is the cabin whose outbounds every cabin was asked to pin, or None
+    when each pinned its own. The fan-out reports it rather than a board,
+    because a sort cabin whose every return board was refused has no board and
+    still led."""
+
+    def __init__(
+        self, boards: Mapping[Cabin, list[Any]] | None = None, *, leader: Cabin | None = None
+    ) -> None:
+        super().__init__(boards or {})
+        self.leader = leader
+
+
 class _CabinSearches(NamedTuple):
     """The per-cabin calls of one Google Flights multi-cabin fan-out.
 
@@ -5078,7 +5093,7 @@ def _gflight_cabins_in_series(
     top_n: int,
     gf_headed: bool,
     sort_by: Cabin | None = None,
-) -> dict[Cabin, list[Any]] | None:
+) -> _CabinBoards | None:
     """Rung 2's multi-cabin shape: one Chrome, one cabin at a time, on this thread.
 
     The parallel fan-out below cannot run rung 2. A thread per cabin is a
@@ -5144,6 +5159,7 @@ def _gflight_cabins_in_series(
         legs, opts, cabins, top_n, TRANSPORT_BROWSER, gf_headed, sort_by or cabins[0]
     )
     results: dict[Cabin, list[Any]] = {}
+    pins: list[ItineraryKey] = []
     with shared_throttle_ladder(), interrupt_guard(), session_scope():
         try:
             calls = {cab: plan.search(cab) for cab in cabins}
@@ -5168,7 +5184,10 @@ def _gflight_cabins_in_series(
             return None
     # In the order the cabins were asked for, which the sort cabin going first
     # would otherwise change for `--format json`.
-    return {cab: results[cab] for cab in cabins if cab in results}
+    return _CabinBoards(
+        {cab: results[cab] for cab in cabins if cab in results},
+        leader=plan.leader if pins else None,
+    )
 
 
 def _run_gflight_multi(
@@ -5180,7 +5199,7 @@ def _run_gflight_multi(
     gf_mode: GfTransportMode = TRANSPORT_HTTP,
     gf_headed: bool = False,
     sort_by: Cabin | None = None,
-) -> dict[Cabin, list[Any]]:
+) -> _CabinBoards:
     """Fan out N parallel gflight queries (one per cabin). fli is sync, so
     each query runs in a worker thread via `anyio.to_thread.run_sync`.
 
@@ -5211,7 +5230,7 @@ def _run_gflight_multi(
     # collision the series runner exists to avoid.
     fanout_mode = TRANSPORT_HTTP if gf_mode == TRANSPORT_BROWSER else gf_mode
     plan = _CabinSearches(legs, opts, cabins, top_n, fanout_mode, gf_headed, sort_by or cabins[0])
-    results: dict[Cabin, list[Any]] = {}
+    results = _CabinBoards()
 
     async def query_cabin[T](cab: Cabin, call: Callable[[], T], into: dict[Cabin, T]) -> None:
         try:
@@ -5243,6 +5262,7 @@ def _run_gflight_multi(
         pages: dict[Cabin, _Outbound] = {}
         await fan_out({cab: plan.outbound(cab) for cab in cabins}, pages)
         pins = plan.pins(pages.get(plan.leader))
+        results.leader = plan.leader if pins else None
         await fan_out(
             {cab: plan.led(cab, pins, pages[cab]) for cab in cabins if cab in pages}, results
         )
@@ -5508,11 +5528,7 @@ def _run_gflight_path_multi(
     if len(legs) >= _ROUND_TRIP_LEGS and len(cabins) > 1:
         from ._gflight_ids import pinned_fanout  # noqa: PLC0415
 
-        # The sort cabin led when it pinned anything: every other cabin was
-        # handed its pins. With its page refused or its filter keeping nothing,
-        # each cabin pinned its own.
-        led = getattr(fli_by_cabin.get(sort_by), "pinned", 0) > 0
-        join_note = _multi_cabin_join_note(pinned_fanout(query_top_n), sort_by if led else None)
+        join_note = _multi_cabin_join_note(pinned_fanout(query_top_n), fli_by_cabin.leader)
         err.print(f"[dim]{join_note}[/]")
     for cab in cabins:
         if cab in fli_by_cabin:

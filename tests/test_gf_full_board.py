@@ -1239,25 +1239,19 @@ def _google_serves(
     """Each cabin's board, served below `_gflight_results`, so every caller of
     it runs as shipped wherever along the path a note is printed.
 
-    A multi-cabin round trip fetches each cabin's outbound page first and hands
-    it back as `first`, so that page is served too, and the board it leads to
-    counts its pins as a pinned round trip's does."""
+    A multi-cabin round trip fetches each cabin's outbound page first and pins
+    the sort cabin's outbounds from it, so that page is served too, and every
+    row on it is kept, as the board the search returns keeps them all."""
 
-    def _board_for(f: Any) -> gfid.Board[Any]:
+    def _board_for(f: Any, **_kw: object) -> gfid.Board[Any]:
         return business if f.seat_type.name == "BUSINESS" else coach
 
-    def _page(f: Any, **_kw: object) -> gfid.Board[Any]:
-        return _board_for(f)
+    def _pins(first: gfid.Board[Any], *, top_n: int, **_kw: object) -> list[gfid.ItineraryKey]:
+        return [gfid._itinerary_key(r) for r in first[: gfid.pinned_fanout(top_n)]]
 
-    def _search(f: Any, *, top_n: int, **kw: object) -> gfid.Board[Any]:
-        board = _board_for(f)
-        if kw.get("first") is None:
-            return board
-        pinned = gfid.pinned_fanout(top_n) if board else 0
-        return gfid.Board(board, insight=board.insight, dropped=board.dropped, pinned=pinned)
-
-    monkeypatch.setattr(gfid, "outbound_page", _page)
-    monkeypatch.setattr(gfid, "search_with_ids", _search)
+    monkeypatch.setattr(gfid, "outbound_page", _board_for)
+    monkeypatch.setattr(gfid, "pin_keys", _pins)
+    monkeypatch.setattr(gfid, "search_with_ids", _board_for)
 
 
 def _multi_cabin_round_trip(*extra: str) -> list[str]:

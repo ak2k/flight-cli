@@ -417,11 +417,11 @@ may hold fewer.
 When the sort cabin pinned nothing — its page refused, or its filter kept no
 row — every cabin pins its own first-ranked outbounds, and the note says that
 instead: "joins cabins on up to `<pin budget>` of each cabin's first-ranked
-outbounds; '—' means no shared itinerary, not no fare." The note is chosen from
-the sort cabin's board (`pinned` above zero), so one case prints that sentence
-although the other cabins were led: the sort cabin's pins were taken and every
-one of its return boards then failed. Its column is empty and its refusal is
-printed beside the table.
+outbounds; '—' means no shared itinerary, not no fare." The fan-out reports
+which cabin led (`cli._CabinBoards.leader`) rather than leaving it to be read
+off a board, because a sort cabin whose pins were handed on and whose every
+return board then failed has no board and still led: its column is empty, its
+refusal is printed beside the table, and the note is the led one.
 
 The two counters are independent, so one leg can spend both budgets: four 429s,
 two transport blips and a final 429 costs 7 GETs. That is the ceiling, and it is

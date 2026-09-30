@@ -366,9 +366,11 @@ def test_a_joined_row_shows_the_sort_cabins_seats(monkeypatch: pytest.MonkeyPatc
 
     fan_out = cli._run_gflight_multi
 
-    def business_first(**kw: Any) -> dict[Cabin, list[Any]]:
+    def business_first(**kw: Any) -> cli._CabinBoards:
         out = fan_out(**kw)
-        return {cab: out[cab] for cab in reversed(kw["cabins"])}
+        return cli._CabinBoards(
+            {cab: out[cab] for cab in reversed(kw["cabins"])}, leader=out.leader
+        )
 
     monkeypatch.setattr(cli, "_run_gflight_multi", business_first)
     result = _search(monkeypatch, seated)
@@ -440,6 +442,25 @@ def test_a_refused_return_board_of_the_sort_cabin_leaves_the_followers_pins_alon
     result = _search(monkeypatch, google)
     assert result.exit_code == 0, result.output
     assert google.pins["ECONOMY"] == google.pins["BUSINESS"] == list(range(100, 110))
+
+
+def test_a_sort_cabin_whose_return_boards_are_all_refused_still_led(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Its pins were handed on before its return boards were refused, so
+    business priced economy's outbounds and the note says so, although the
+    sort cabin's own column is empty."""
+    refuse: dict[tuple[str, int | None], Exception] = {
+        ("ECONOMY", n): GfUpstreamStatusError(503) for n in range(100, 110)
+    }
+    google = _Google({"ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS}, refuse=refuse)
+    result = _search(monkeypatch, google)
+    assert result.exit_code == 0, result.output
+    assert google.pins["BUSINESS"] == list(range(100, 110))
+    err = _flat(result.stderr)
+    assert err.count("Google Flights COACH:") == 1, err
+    assert "prices every cabin on up to 10 of the Y cabin's first-ranked outbounds" in err
+    assert "each cabin's first-ranked" not in err
 
 
 def test_a_cabin_whose_page_is_empty_answers_as_it_does_alone(

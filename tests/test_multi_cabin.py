@@ -525,8 +525,8 @@ def test_a_multi_cabin_round_trip_says_what_its_join_is_drawn_from(
     row = _one_gflight_row()
     cabins = (_Cabin.COACH, _Cabin.BUSINESS)[:cabins_wanted]
 
-    def _fan_out(**_kw: Any) -> dict[Any, list[Any]]:
-        return {cab: [row] for cab in cabins}
+    def _fan_out(**_kw: Any) -> cli._CabinBoards:
+        return cli._CabinBoards({cab: [row] for cab in cabins})
 
     monkeypatch.setattr(cli, "_run_gflight_multi", _fan_out)
     legs = (_Leg.of("JFK", "LAX", _date(2026, 10, 14)),)
@@ -568,7 +568,6 @@ def test_the_join_note_counts_the_outbounds_that_were_actually_pinned(
 
     from rich.console import Console as _Console
 
-    from flight_cli import _gflight_ids as gfid
     from flight_cli import cli
     from flight_cli.domain import Cabin as _Cabin
     from flight_cli.domain import Leg as _Leg
@@ -579,9 +578,9 @@ def test_the_join_note_counts_the_outbounds_that_were_actually_pinned(
     row = _one_gflight_row()
     cabins = (_Cabin.COACH, _Cabin.BUSINESS)
 
-    def _fan_out(**_kw: Any) -> dict[Any, list[Any]]:
-        # Every cabin pinned the sort cabin's outbounds, as a round trip does.
-        return {c: gfid.Board([row], pinned=expected) for c in cabins}
+    def _fan_out(**_kw: Any) -> cli._CabinBoards:
+        # Every cabin was handed the sort cabin's pins, as a round trip is.
+        return cli._CabinBoards({c: [row] for c in cabins}, leader=_Cabin.COACH)
 
     monkeypatch.setattr(cli, "_run_gflight_multi", _fan_out)
     cli._run_gflight_path_multi(
@@ -900,8 +899,8 @@ def test_every_round_trip_surface_says_how_many_outbounds_it_combines(
     def _rows(*_a: object, **_kw: object) -> list[Any]:
         return [row]
 
-    def _by_cabin(**kw: Any) -> dict[Any, list[Any]]:
-        return {c: [row] for c in kw["cabins"]}
+    def _by_cabin(**kw: Any) -> cli._CabinBoards:
+        return cli._CabinBoards({c: [row] for c in kw["cabins"]})
 
     monkeypatch.setattr(cli, "_gflight_results", _rows)
     monkeypatch.setattr(cli, "_run_gflight_multi", _by_cabin)
