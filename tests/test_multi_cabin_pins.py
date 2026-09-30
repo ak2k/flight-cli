@@ -451,8 +451,8 @@ def _no_chrome(_seat: str, _flight: int | None, _transport: Any) -> None:
 def test_a_round_trip_at_rung_two_enters_the_interrupt_guard_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Both rounds inside one guard: a second guard would clear the interrupt
-    the first round recorded."""
+    """Every cabin inside one guard: a second guard would clear the interrupt
+    the first cabin recorded."""
     entries: list[bool] = []
     real = gfb.interrupt_guard
 
@@ -490,8 +490,8 @@ def test_a_round_trip_whose_chrome_never_opens_runs_both_rounds_over_http(
 def test_a_chrome_that_dies_on_the_first_cabins_pins_reruns_the_search_over_http(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Nothing is served yet in the round that failed, so the whole search moves
-    to rung 1, as a single cabin whose pins die does."""
+    """Nothing is served yet, so the whole search moves to rung 1, as a single
+    cabin whose pins die does."""
 
     def _dies_on_pins(seat: str, flight: int | None, transport: Any) -> None:
         if flight is not None:
@@ -502,11 +502,64 @@ def test_a_chrome_that_dies_on_the_first_cabins_pins_reruns_the_search_over_http
     out = _rung_two(google, monkeypatch, Cabin.COACH, Cabin.BUSINESS)
     assert sorted(out) == [Cabin.BUSINESS, Cabin.COACH]
     assert buf.getvalue().count("multi-cabin is using http") == 1
+    # The sort cabin's page and its first pin, as the cabin searched alone
+    # spends them: no follower's page is loaded for a search rung 1 reruns.
+    browser = [seat for seat, mode in google.modes if mode == gfc.TRANSPORT_BROWSER]
+    assert browser == ["ECONOMY", "ECONOMY"]
     http = [seat for seat, mode in google.modes if mode == gfc.TRANSPORT_HTTP]
     assert Counter(http) == {"ECONOMY": 11, "BUSINESS": 11}
 
 
-def test_a_later_cabins_chrome_failure_in_the_first_round_is_that_cabins_note(
+def _fails_from(navigation: int) -> Callable[[str, int | None, Any], None]:
+    """A Chrome that loads pages until its `navigation`-th, and none after."""
+    seen: list[tuple[str, int | None]] = []
+
+    def chrome(seat: str, flight: int | None, _transport: Any) -> None:
+        seen.append((seat, flight))
+        if len(seen) >= navigation:
+            raise GfBrowserUnavailableError(
+                "Chrome could not load Google Flights' search page: Timeout 30000ms exceeded"
+            )
+
+    return chrome
+
+
+def test_a_chrome_that_dies_before_any_cabin_is_served_says_only_that_it_moved_to_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Chrome loads the sort cabin's page and dies on its first pin. Rung 1 then
+    serves both columns, so a note that business's column is missing is false."""
+    buf = capture_err(monkeypatch)
+    google = _Google({"ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS}, chrome=_fails_from(2))
+    out = _rung_two(google, monkeypatch, Cabin.COACH, Cabin.BUSINESS)
+    assert sorted(out) == [Cabin.BUSINESS, Cabin.COACH]
+    err = _flat(buf.getvalue())
+    assert err.count("multi-cabin is using http") == 1, err
+    assert "Google Flights BUSINESS:" not in err, err
+
+
+def test_a_chrome_that_dies_after_the_sort_cabin_is_served_keeps_what_it_served(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Chrome serves the sort cabin's page and first pin, then dies. The sort
+    cabin keeps what it was served and business's column is missing, which is
+    what searching the cabins one after the other costs; rerunning over http
+    would load every page Chrome served a second time."""
+    buf = capture_err(monkeypatch)
+    google = _Google({"ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS}, chrome=_fails_from(3))
+    out = _rung_two(google, monkeypatch, Cabin.COACH, Cabin.BUSINESS)
+    assert list(out) == [Cabin.COACH]
+    assert len(out[Cabin.COACH]) == 5
+    assert Counter(google.modes) == {
+        ("ECONOMY", gfc.TRANSPORT_BROWSER): 3,
+        ("BUSINESS", gfc.TRANSPORT_BROWSER): 1,
+    }
+    err = _flat(buf.getvalue())
+    assert "multi-cabin is using http" not in err, err
+    assert err.count("Google Flights BUSINESS:") == 1, err
+
+
+def test_a_later_cabins_chrome_failure_is_that_cabins_note(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def _business_has_no_chrome(seat: str, flight: int | None, transport: Any) -> None:
@@ -525,9 +578,9 @@ def test_a_later_cabins_chrome_failure_in_the_first_round_is_that_cabins_note(
 def test_a_two_cabin_round_trip_at_rung_two_launches_one_chrome(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
-    """Both rounds navigate on the one session the scope keeps open: the
-    outbound page of each cabin, then its return boards. Unmarked, because the
-    fake playwright replaces the launcher seam the guard watches."""
+    """Each cabin's outbound page and its return boards navigate on the one
+    session the scope keeps open. Unmarked, because the fake playwright
+    replaces the launcher seam the guard watches."""
     from test_gf_browser import _PAGE_URL, _install, _page_of
 
     pw = _install(monkeypatch, tmp_path)

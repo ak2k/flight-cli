@@ -382,17 +382,24 @@ mean ~2 x 31 page fetches for a two-cabin round trip. The default `-n 10` is
 unchanged by the cap.
 
 The bump therefore widens the leg-1 rows each cabin keeps and NOT the round-trip
-pins. What makes the cabins' pins overlap is that the sort cabin leads. A
-multi-cabin round trip runs in two rounds (`cli._CabinSearches`): every cabin's
-outbound page, then every cabin's return boards. Between them every cabin pins,
-in the sort cabin's order, each outbound the sort cabin pins that its own
-filtered board lists, matched on the whole leg sequence `_itinerary_key` uses
-(`_gflight_ids.pin_keys`), then fills the rest of the same budget with its own
-rows in page order (`search_with_ids`' `prefer`). The sort cabin's pins are
-exactly the ones it takes alone, so the rows the table shows lose nothing. The
-cost is that a non-sort cabin's own cheapest outbounds get only the slots the
-sort cabin's leave, and its `--format json` list moves with them. Each page is
-fetched once (`search_with_ids`' `first`), so the GETs are unchanged.
+pins. What makes the cabins' pins overlap is that the sort cabin leads
+(`cli._CabinSearches`): every cabin pins, in the sort cabin's order, each
+outbound the sort cabin pins that its own filtered board lists, matched on the
+whole leg sequence `_itinerary_key` uses (`_gflight_ids.pin_keys`), then fills
+the rest of the same budget with its own rows in page order
+(`search_with_ids`' `prefer`). The sort cabin's pins are exactly the ones it
+takes alone, so the rows the table shows lose nothing. The cost is that a
+non-sort cabin's own cheapest outbounds get only the slots the sort cabin's
+leave, and its `--format json` list moves with them. Each page is fetched once
+(`search_with_ids`' `first`), so the GETs are unchanged.
+
+Rung 1 runs that in two parallel rounds: every cabin's outbound page, then
+every cabin's return boards. Rung 2 serves one cabin at a time, so it runs the
+sort cabin's page and pins first and then each other cabin's whole search: the
+order the cabins took before they shared pins when the sort cabin is the first
+`--cabin`. Every cabin's page ahead would load pages that a fallback to rung 1
+loads again, and a Chrome failure on a later cabin's page would print a
+missing-column note for a column that the fallback then serves.
 
 So **Google Flights prices every cabin on up to `<pin budget>` of the `<sort>`
 cabin's first-ranked outbounds; '—' means that cabin's search returned no fare

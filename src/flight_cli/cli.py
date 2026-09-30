@@ -5009,14 +5009,13 @@ def _run_matrix_multi(
 class _CabinSearches(NamedTuple):
     """The per-cabin calls of one Google Flights multi-cabin fan-out.
 
-    A round trip over two or more cabins runs in two rounds: every cabin's
-    outbound page, then every cabin's return boards from that page. Between
-    them the sort cabin leads: every cabin pins the outbounds the sort cabin
-    pins, wherever its own filtered board lists them, and fills the rest of the
-    same budget with its own rows in page order. A cabin pinning its own first
-    ten may price none of the itineraries the table shows, which are the sort
-    cabin's. Each page is fetched once, so the GETs are the ones each cabin
-    would spend alone. Anything else runs one round, each cabin's whole
+    On a round trip over two or more cabins the sort cabin leads: every cabin
+    pins the outbounds the sort cabin pins, wherever its own filtered board
+    lists them, and fills the rest of the same budget with its own rows in page
+    order. A cabin pinning its own first ten may price none of the itineraries
+    the table shows, which are the sort cabin's. The sort cabin's page is
+    fetched ahead of its pins and handed back to its search, so the GETs are
+    the ones each cabin would spend alone. Anything else is each cabin's whole
     search."""
 
     legs: tuple[Leg, ...]
@@ -5031,54 +5030,41 @@ class _CabinSearches(NamedTuple):
     def shares_pins(self) -> bool:
         return len(self.legs) >= _ROUND_TRIP_LEGS and len(self.cabins) > 1
 
-    def outbounds(self) -> dict[Cabin, Callable[[], _Outbound]]:
-        return {
-            cab: partial(
-                _gflight_outbound, self.legs, self._opts(cab), self.gf_mode, self.gf_headed
-            )
-            for cab in self.cabins
-        }
+    def outbound(self, cab: Cabin) -> Callable[[], _Outbound]:
+        return partial(_gflight_outbound, self.legs, self._opts(cab), self.gf_mode, self.gf_headed)
 
-    def searches(
-        self, pages: dict[Cabin, _Outbound] | None = None
-    ) -> dict[Cabin, Callable[[], list[Any]]]:
-        """Each cabin's whole search, or, given the first round's `pages`, the
-        search from its page for every cabin that has one.
-
-        The sort cabin's own pins come out of `pin_keys` as the ones it would
-        take alone, so its rows are unchanged. With no page for it, or nothing
-        its filter kept, there is nothing to lead with and each cabin pins its
-        own first-ranked rows."""
-        if pages is None:
-            return {
-                cab: partial(
-                    _gflight_results,
-                    self.legs,
-                    self._opts(cab),
-                    self.top_n,
-                    self.gf_mode,
-                    self.gf_headed,
-                )
-                for cab in self.cabins
-            }
+    def pins(self, lead: _Outbound | None) -> list[ItineraryKey]:
+        """The outbounds the sort cabin pins from its page `lead`: the ones it
+        would take alone, so its rows are unchanged. None with no page, or
+        nothing its filter kept, and then each cabin pins its own first-ranked
+        rows."""
+        if lead is None:
+            return []
         from ._gflight_ids import pin_keys  # noqa: PLC0415 — fli, ~95 ms
 
-        lead = pages.get(self.leader)
-        pins = [] if lead is None else pin_keys(lead.board, top_n=self.top_n, keep=lead.keep)
-        return {
-            cab: partial(
-                _gflight_results,
-                self.legs,
-                self._opts(cab),
-                self.top_n,
-                self.gf_mode,
-                self.gf_headed,
-                first=pages[cab].board,
-                prefer=pins,
-            )
-            for cab in self.cabins
-            if cab in pages
-        }
+        return pin_keys(lead.board, top_n=self.top_n, keep=lead.keep)
+
+    def search(self, cab: Cabin) -> Callable[[], list[Any]]:
+        """`cab`'s whole search."""
+        return partial(
+            _gflight_results, self.legs, self._opts(cab), self.top_n, self.gf_mode, self.gf_headed
+        )
+
+    def led(
+        self, cab: Cabin, pins: Sequence[ItineraryKey], page: _Outbound | None = None
+    ) -> Callable[[], list[Any]]:
+        """`cab`'s search pinning `pins` first, from `page` when that was
+        fetched ahead of it."""
+        return partial(
+            _gflight_results,
+            self.legs,
+            self._opts(cab),
+            self.top_n,
+            self.gf_mode,
+            self.gf_headed,
+            first=None if page is None else page.board,
+            prefer=pins,
+        )
 
     def _opts(self, cab: Cabin) -> SearchOptions:
         return self.opts.model_copy(update={"cabin": cab})
@@ -5099,23 +5085,28 @@ def _gflight_cabins_in_series(
     session per cabin, and Chromium single-instances the profile directory, so
     the second cabin fails on the first one's lock. Serialising here is what
     lets ONE session serve every cabin: the launch is paid once, and every
-    navigation runs on the thread that made the session. A round trip's two
-    rounds (`_CabinSearches`) run inside that one session too.
+    navigation runs on the thread that made the session.
+
+    A round trip's sort cabin goes first, its page and then its pins, because
+    every other cabin pins its outbounds (`_CabinSearches`); each other cabin
+    follows as one whole search. Fetching every cabin's page ahead instead
+    would load pages a fallback to rung 1 then loads again.
 
     No task group and no worker thread on this arm, so the loop runs on the
     thread the interrupt is delivered to and a Ctrl-C is honoured where it
     lands rather than after the cabin in flight finishes.
 
-    ONE guard around both rounds, never one per cabin. A guard clears the
+    ONE guard around the whole loop, never one per cabin. A guard clears the
     interrupt latch on its way in, so a second cabin's guard would erase the
     stop the first one recorded and re-arm a SIGINT the first one had set to be
     ignored.
 
     `None` says rung 2 never opened at all, and the caller then runs the whole
-    fan-out on rung 1. Only while the round that failed has served no cabin: an
-    outbound page is not yet an answer, but once a cabin has one, re-running the
-    fan-out would discard it, and a table whose columns came from two different
-    rungs is not one answer.
+    fan-out on rung 1. Only before the first cabin is served: once a cabin has
+    rows, re-running the fan-out would discard them, and a table whose columns
+    came from two different rungs is not one answer. The sort cabin's page is
+    not yet rows, so a Chrome that loads it and dies on its pins still moves
+    the search to rung 1.
     """
     from ._gf_browser import interrupt_guard, session_scope  # noqa: PLC0415 — GF-only
     from ._gflight_ids import shared_throttle_ladder  # noqa: PLC0415 — fli, ~95 ms
@@ -5155,14 +5146,14 @@ def _gflight_cabins_in_series(
     results: dict[Cabin, list[Any]] = {}
     with shared_throttle_ladder(), interrupt_guard(), session_scope():
         try:
-            pages: dict[Cabin, _Outbound] | None = None
+            calls = {cab: plan.search(cab) for cab in cabins}
             if plan.shares_pins:
-                pages = {}
-                for cab, call in plan.outbounds().items():
-                    page = serve_cabin(cab, call, served=bool(pages))
-                    if page is not None:
-                        pages[cab] = page
-            for cab, call in plan.searches(pages).items():
+                lead = serve_cabin(plan.leader, plan.outbound(plan.leader), served=False)
+                pins = plan.pins(lead)
+                calls = {cab: plan.led(cab, pins) for cab in cabins if cab != plan.leader}
+                if lead is not None:
+                    calls = {plan.leader: plan.led(plan.leader, pins, lead), **calls}
+            for cab, call in calls.items():
                 answer = serve_cabin(cab, call, served=bool(results))
                 if answer is not None:
                     results[cab] = answer
@@ -5175,7 +5166,9 @@ def _gflight_cabins_in_series(
                 f"[dim]multi-cabin is using http: {_safe_text(e.reason)} {_safe_text(e.remedy)}[/]"
             )
             return None
-    return results
+    # In the order the cabins were asked for, which the sort cabin going first
+    # would otherwise change for `--format json`.
+    return {cab: results[cab] for cab in cabins if cab in results}
 
 
 def _run_gflight_multi(
@@ -5195,9 +5188,9 @@ def _run_gflight_multi(
     native filters and the Tier-2 post-filter cannot drift apart. They also
     share ONE throttle ladder: Google's wall is per-IP, so a cabin per thread
     laddering against it separately spends the cabin count times the requests to
-    be told the same thing. A round trip's two rounds (`_CabinSearches`, led by
-    `sort_by`, default the first cabin) are two fan-outs inside that one ladder
-    and one event loop."""
+    be told the same thing. On a round trip (`_CabinSearches`, led by `sort_by`,
+    default the first cabin) every cabin's outbound page, then every cabin's
+    pins, are two fan-outs inside that one ladder and one event loop."""
     from ._gflight_ids import shared_throttle_ladder  # noqa: PLC0415
 
     if gf_mode == TRANSPORT_BROWSER:
@@ -5242,11 +5235,17 @@ def _run_gflight_multi(
                 tg.start_soon(query_cabin, cab, call, into)
 
     async def go() -> None:
-        pages: dict[Cabin, _Outbound] | None = None
-        if plan.shares_pins:
-            pages = {}
-            await fan_out(plan.outbounds(), pages)
-        await fan_out(plan.searches(pages), results)
+        if not plan.shares_pins:
+            await fan_out({cab: plan.search(cab) for cab in cabins}, results)
+            return
+        # Every cabin's page first, in parallel: a cabin's pins wait on the sort
+        # cabin's page, not on its whole search.
+        pages: dict[Cabin, _Outbound] = {}
+        await fan_out({cab: plan.outbound(cab) for cab in cabins}, pages)
+        pins = plan.pins(pages.get(plan.leader))
+        await fan_out(
+            {cab: plan.led(cab, pins, pages[cab]) for cab in cabins if cab in pages}, results
+        )
 
     with shared_throttle_ladder():
         try:
