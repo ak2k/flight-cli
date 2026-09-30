@@ -848,9 +848,11 @@ stays on Matrix too, which reports the error. So does a number whose carrier
 fli has no code for (`JP627`, `XX1`): the rows' carriers are read through fli's
 table, so the filter would match none, and the reason is the carrier include's,
 `a carrier Google Flights has no code for (JP)`. Multi-token forms (`AS21 F+`),
-`~AS21` and a carrier with a digit (`B6123`) are Tier 3. `page_can_encode` itself was
-left narrow on purpose: the Chrome price graph (`_gf_calgraph.page_blocker`)
-reads it, and a graph cannot check rows.
+`~AS21` and a carrier with a digit (`B6123`) are Tier 3. `page_can_encode` itself stays
+narrow: the `--fast --gf-transport http` gate (`_gf_calgraph.page_blocker`)
+reads it as it is. The Chrome price graph cannot check rows either, and has its
+own gate, `_gf_calgraph.graph_blocker`, which admits the includes and bounds
+Google was measured applying from the URL (Admission, below).
 
 `-REDEYES` and `-OVERNIGHTS` still escalate to Matrix. The raw-row checks in
 `_gf_postfilter._row_passes` read per-leg datetimes, so either could be added
@@ -994,18 +996,51 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
   does. Over `--gf-transport http` a set refuses with the browser note, since
   `date_grid` writes one airport per side; without `--fast` Matrix answers it
   through its fan-out and the graph over the whole set prints after it.
-- **Admission.** The graph has no itineraries, so it is served only when the
-  page URL carries every constraint: an unknown code, a time window, a non-adult
-  passenger, `--no-airport-changes`, `--include-unavailable`, a stop ceiling
-  above two, any predicate `page_can_encode` refuses (carriers, alliances,
-  layovers, max duration), and round-trip legs with different predicates each
-  refuse by name. The URL takes the LOWEST stop limit from `--stops` and every
-  leg's `StopsPred`, because the bridge reads `--stops` alone and
-  `apply_gf_native_filters` overwrites it with the last predicate it meets.
+- **Admission** (`_gf_calgraph.graph_blocker`). The graph has no itineraries,
+  so it is asked only when the page URL writes every constraint exactly AND
+  Google was measured applying it there. Admitted, per leg: a stop ceiling of
+  two or fewer, ONE marketing-carrier include (`AA+`, `AIRLINES AA DL`) or ONE
+  `ALLIANCE`, a positive `MAXDUR`, a `MINCONNECT`, a positive `MAXCONNECT`, and
+  on a one-way a `--depart-times` window whose buckets adjoin and end at 23:59
+  (`night`, `evening,night`, `afternoon,evening,night`). Measured 2026-09-30,
+  LGA→LAX one-way over 2026-10-20..11-02, one load each, dates priced
+  higher/equal/lower than an unfiltered baseline (a repeat baseline equaled it
+  on 14 of 14): `ALLIANCE skyteam` 13/1/0, `AA+` 14/0/0, `MAXDUR 9:00` 11/3/0,
+  `MINCONNECT 3:00` 9/5/0, `MAXCONNECT 1:00` 9/5/0, `evening,night` 14/0/0.
+  Google's layover bounds keep nonstops, as Matrix's do. Round trip `-d 7`,
+  same route and window: `AA+` 14/0/0, so the carrier, alliance, duration and
+  layover bounds are admitted on round trips too. Only 3.6 was probed on a
+  round-trip page; the others are admitted on the assumption that 3.12, 3.17
+  and 3.18 behave there as 3.6 does. A `--return-times night` round trip priced
+  no date at all, so a time window on either leg of a round trip refuses. Only
+  single codes were measured: a multi-code include is admitted as one 3.6 list,
+  which Google reads as any of its codes, as Matrix reads one include.
+  Refused as WIDER than asked: any other time window (Google reads a latest
+  hour to its 59th minute, so `morning` asks 8:00-11:59, and `midday,night`
+  the hull 11-23), two includes on a leg (one 3.6 list, read as either; named
+  `an alliance filter combined with another carrier or alliance filter` as the
+  search gate names it, or `a carrier filter combined with another carrier
+  filter`), a `MINCONNECT` above the `MAXCONNECT` (the bridge drops the
+  minimum), and two different `MAXDUR` or `MAXCONNECT` on a leg (the bridge
+  writes the last). Everything else refuses in the words and order of the
+  narrower gate `--fast --gf-transport http` keeps (`grid_can_serve`, then
+  `page_blocker`): Tier-2/3 routing and extension codes, a code or bound the URL
+  would leave out, a time window, a non-adult passenger, `--no-airport-changes`,
+  `--include-unavailable`, a predicate the page cannot carry (a connecting
+  airport), then round-trip legs with different predicates. The URL takes the
+  LOWEST stop limit from `--stops` and every leg's `StopsPred`, because the
+  bridge reads `--stops` alone and `apply_gf_native_filters` overwrites it with
+  the last predicate it meets, and it writes the outbound leg's predicates
+  alone: the gate has made them the return's, and both legs' together would
+  list each carrier twice.
 - **Span and paging.** One load covers about five weeks (seven days before the
   opening date to thirty after, on the page measured). The span is read from
-  the response; a longer window re-navigates at the first uncovered date, stops
-  on a graph that covers nothing new, and refuses past eight loads.
+  the response; a longer window re-navigates at the first uncovered date, and
+  stops on a graph that covers nothing new or at eight loads. Only a window
+  that needed all eight with no page loaded again is told to "narrow
+  --start/--end"; loads spent on a reload, or by the trip lengths before it,
+  end it with `GfGraphBudgetError`, "no price-graph load of the 8 was left for
+  the rest of the window", naming the reload when there was one.
 - **Envelope.** `rt=c` chunks, one `wrb.fr` row; cells at `inner[1]` as
   `[dep, ret, [[null, price], token], 1]`. An error row has an empty payload and
   its code at `row[5][0]`. Error 13 there is a refusal of the browser session,
@@ -1034,10 +1069,12 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
   keeping a launch or install remedy. A range that loses some lengths prints
   the ones that priced, with no column for a lost length, and that one line
   names each lost length with its cause (`7-night trips: <cause>`). Only a
-  page that drew no graph lets the next length be asked; any other failure
-  loses the lengths after it too (`not asked after 6-night trips failed`). A
-  range that priced no length prints its first failure alone, as a single
-  graph does. Stdout up to Google's table and the exit code are the `http`
+  page that drew no graph, or a length that ran out of loads, lets the next
+  length be asked, and the loads either spent are counted, so the lengths past
+  a spent budget read `no price-graph load of the 8 was left`; any other
+  failure loses the lengths after it too (`not asked after 6-night trips
+  failed`). A range that priced no length prints its first failure alone, as
+  a single graph does. Stdout up to Google's table and the exit code are the `http`
   run's, and a Matrix failure keeps its lines and exit 1 with Google's table
   still printed. The SIGINT guard is armed around both halves, so a Ctrl-C
   stops the driver and exits 130. Measured 2026-09-29, NYC→LON round trip over

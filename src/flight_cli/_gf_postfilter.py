@@ -6,8 +6,9 @@ identity these predicates need). `search_page_reasons` is the search page's
 gate: a predicate rides there when the page's tfs= encodes it or this module
 post-filters it on the full board. The date grids do not reach here at all:
 they return prices per date and there are no itineraries to post-filter, so
-they refuse what they cannot ask for (`_gf_dategrid.grid_can_serve`,
-`_gf_calgraph.page_blocker`). Anything this module can't evaluate (red-eyes,
+they refuse what they cannot ask for (`_gf_dategrid.grid_can_serve` and
+`_gf_calgraph.page_blocker` for the RPC grid, `_gf_calgraph.graph_blocker` for
+the Chrome price graph). Anything this module can't evaluate (red-eyes,
 overnight stops) escalates the whole query to Matrix rather than being
 silently dropped.
 
@@ -102,8 +103,10 @@ def _served_by_postfilter(pred: Predicate) -> bool:
 
 def _served_by_page(pred: Predicate) -> bool:
     """A predicate the search page's tfs= encodes beyond the stop ceiling
-    `page_can_encode` admits. That function also answers for the date grids,
-    which have no rows to check these on."""
+    `page_can_encode` admits. The `--fast --gf-transport http` gate asks that
+    function alone. The price graph, which has no rows to check these on
+    either, admits one of each a leg (`_gf_calgraph.graph_blocker`) because
+    Google was measured applying them from the URL."""
     match pred:
         case CarrierPred(exclude=False, operating=False) | AlliancePred():
             return True

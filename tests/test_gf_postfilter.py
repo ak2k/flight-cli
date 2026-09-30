@@ -50,6 +50,8 @@ from flight_cli.routing_predicates import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from flight_cli.domain import CalendarSearch
+
 
 def _slice(legs: Sequence[tuple[str, str | None, list[str]]], stops: Sequence[str] = ()) -> Slice:
     """legs = [(flight_number, operating_carrier, marketing_carriers)]."""
@@ -524,33 +526,37 @@ def test_a_price_cap_is_named_with_its_currency() -> None:
     assert row_check_names([[]], max_price=250, currency="EUR") == ["a price cap of EUR 250"]
 
 
-# ─────────────────────────── the date grids are unchanged ──────────────────
+# ─────────────────────────── the date grids ────────────────────────────────
+
+_SEARCH_ONLY = [
+    ("AA+", None, (), 0),
+    (None, "ALLIANCE oneworld", (), 0),
+    (None, "MAXDUR 6:20", (), 0),
+    (None, "MINCONNECT 2:00", (), 0),
+    (None, "MAXCONNECT 2:00", (), 0),
+    (None, None, (TimeOfDay.MORNING,), 0),
+    (None, None, (), 1),
+]
+_SEARCH_ONLY_IDS = [
+    "carrier",
+    "alliance",
+    "maxdur",
+    "minconnect",
+    "maxconnect",
+    "morning",
+    "children",
+]
 
 
-@pytest.mark.parametrize(
-    ("routing", "extension", "times", "children"),
-    [
-        ("AA+", None, (), 0),
-        (None, "ALLIANCE oneworld", (), 0),
-        (None, "MAXDUR 6:20", (), 0),
-        (None, "MINCONNECT 2:00", (), 0),
-        (None, "MAXCONNECT 2:00", (), 0),
-        (None, None, (TimeOfDay.MORNING,), 0),
-        (None, None, (), 1),
-    ],
-)
-def test_the_price_graph_still_refuses_what_only_a_search_can_check(
+def _one_way_calendar(
     routing: str | None, extension: str | None, times: tuple[TimeOfDay, ...], children: int
-) -> None:
-    """The search page serves these because it has rows to check them on; the
-    Chrome price graph reads the same page and has none."""
+) -> CalendarSearch:
     from datetime import date
 
-    from flight_cli._gf_calgraph import page_blocker
     from flight_cli.domain import CalendarSearch, CalendarWindow, Leg, Pax, SearchOptions
 
     start = date.today() + timedelta(days=45)
-    search = CalendarSearch(
+    return CalendarSearch(
         legs=(
             Leg.of("JFK", "LAX", route_language=routing, extension=extension, time_ranges=times),
         ),
@@ -559,8 +565,36 @@ def test_the_price_graph_still_refuses_what_only_a_search_can_check(
         ),
         options=SearchOptions(pax=Pax(children=children)),
     )
+
+
+@pytest.mark.parametrize(
+    ("routing", "extension", "times", "children"), _SEARCH_ONLY, ids=_SEARCH_ONLY_IDS
+)
+def test_the_http_grid_gate_still_refuses_what_only_a_search_can_check(
+    routing: str | None, extension: str | None, times: tuple[TimeOfDay, ...], children: int
+) -> None:
+    """The search page serves these because it has rows to check them on;
+    `page_blocker`, the `--fast --gf-transport http` gate, still refuses them."""
+    from flight_cli._gf_calgraph import page_blocker
+
+    search = _one_way_calendar(routing, extension, times, children)
     assert page_blocker(search) is not None
     assert search_page_reasons(classify(routing, extension).predicates) == []
+
+
+@pytest.mark.parametrize(
+    ("routing", "extension", "times", "children"), _SEARCH_ONLY, ids=_SEARCH_ONLY_IDS
+)
+def test_the_price_graph_takes_the_bounds_google_applies_and_not_the_rest(
+    routing: str | None, extension: str | None, times: tuple[TimeOfDay, ...], children: int
+) -> None:
+    """The Chrome price graph has no rows either, but Google was measured
+    applying the includes and the bounds from its URL. A morning window is
+    written to 11:59 and a child is not asked for."""
+    from flight_cli._gf_calgraph import graph_blocker
+
+    blocker = graph_blocker(_one_way_calendar(routing, extension, times, children))
+    assert (blocker is None) == (not times and not children)
 
 
 def test_the_rpc_grid_still_refuses_a_minimum_layover() -> None:

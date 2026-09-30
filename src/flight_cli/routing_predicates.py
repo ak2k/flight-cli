@@ -17,9 +17,11 @@ We never honor part of a constraint on GF and silently drop the rest — an
 unrecognized token escalates the whole query to Matrix.
 
 `Tier` is the date grid's question ("could GF honor this at all"), and
-`page_can_encode` the Chrome price graph's ("can the page's tfs= carry this
-with no rows to check it on"). The search path asks its own,
-`_gf_postfilter.search_page_reasons`, because it has rows to check.
+`page_can_encode` the `--fast --gf-transport http` gate's ("can the page's tfs=
+carry this with no rows to check it on"). The search path asks its own,
+`_gf_postfilter.search_page_reasons`, because it has rows to check, and the
+Chrome price graph asks `_gf_calgraph.graph_blocker`, which admits what Google
+was measured applying from the page URL.
 
 Routing language is *positional* (`BA AA` = BA then AA), so it's parsed
 all-or-nothing per string: only single order-independent intents (one carrier
@@ -403,16 +405,19 @@ def parse_extension(extension: str) -> list[Predicate]:
 # ───────────────── search-page transport encodability ──────────────────
 #
 # `Tier` above answers "could Google Flights honor this at all" — the date
-# grid's question of its RPC. `page_can_encode` below answers for the Chrome
-# price graph, which reads the public page's tfs= and has no rows to check: yes
-# only for a stop ceiling.
+# grid's question of its RPC. `page_can_encode` below answers what the public
+# page's tfs= carries with no rows to check: yes only for a stop ceiling. The
+# `--fast --gf-transport http` gate asks it as it is.
 #
-# The search gate (`_gf_postfilter.search_page_reasons`) starts from this and
-# admits more, because a search has rows: the carrier and alliance includes,
-# the duration and the layover bounds the page also encodes (3.6 / 3.12 /
-# 3.17 / 3.18), all but the alliance checked on the rows too, and the Tier-2
-# predicates the post-filter evaluates the way Matrix does. Anything else goes
-# to Matrix with the reason printed.
+# Two gates start from this and admit more. The search gate
+# (`_gf_postfilter.search_page_reasons`) has rows: the carrier and alliance
+# includes, the duration and the layover bounds the page also encodes (3.6 /
+# 3.12 / 3.17 / 3.18), all but the alliance checked on the rows too, and the
+# Tier-2 predicates the post-filter evaluates the way Matrix does. The Chrome
+# price graph's gate (`_gf_calgraph.graph_blocker`) has no rows and admits the
+# same includes and bounds, one of each a leg, because Google was measured
+# applying them from the URL. Anything else goes to Matrix with the reason
+# printed.
 
 
 # fli's MaxStops enum stops at TWO_OR_FEWER_STOPS; anything above is ANY, which
