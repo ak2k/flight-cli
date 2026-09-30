@@ -507,15 +507,19 @@ class _Doctor:
         tokens = pp_auth.get_valid_tokens()
         self.secrets.update((tokens.access_token, tokens.refresh_token))
 
-        async def go() -> int:
+        async def go() -> tuple[int, pp_auth.Tokens]:
             c = PPClient(tokens)
             try:
-                return len((await c.pricing_info(force_refresh=True)).pricingInfos)
+                programs = len((await c.pricing_info(force_refresh=True)).pricingInfos)
+                # The client refreshes and retries on a 401, so the token that
+                # answered can be newer than the one it was handed.
+                return programs, c._tokens  # pyright: ignore[reportPrivateUsage]
             finally:
                 await c.aclose()
 
-        programs = anyio.run(go)
-        expires = dt.datetime.fromtimestamp(tokens.expires_at, tz=dt.UTC)
+        programs, answered = anyio.run(go)
+        self.secrets.update((answered.access_token, answered.refresh_token))
+        expires = dt.datetime.fromtimestamp(answered.expires_at, tz=dt.UTC)
         return (
             "pass",
             f"token valid until {expires:%Y-%m-%d %H:%M} UTC; "
