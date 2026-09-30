@@ -5050,7 +5050,7 @@ class _CabinSearches(NamedTuple):
 
     def pins(self, lead: _Outbound | None) -> list[ItineraryKey]:
         """The outbounds the sort cabin pins from its page `lead`: the ones it
-        would take alone, so its rows are unchanged. None with no page, or
+        would take alone, so its rows are unchanged. Empty with no page, or
         nothing its filter kept, and then each cabin pins its own first-ranked
         rows."""
         if lead is None:
@@ -5162,13 +5162,14 @@ def _gflight_cabins_in_series(
     pins: list[ItineraryKey] = []
     with shared_throttle_ladder(), interrupt_guard(), session_scope():
         try:
-            calls = {cab: plan.search(cab) for cab in cabins}
             if plan.shares_pins:
                 lead = serve_cabin(plan.leader, plan.outbound(plan.leader), served=False)
                 pins = plan.pins(lead)
                 calls = {cab: plan.led(cab, pins) for cab in cabins if cab != plan.leader}
                 if lead is not None:
                     calls = {plan.leader: plan.led(plan.leader, pins, lead), **calls}
+            else:
+                calls = {cab: plan.search(cab) for cab in cabins}
             for cab, call in calls.items():
                 answer = serve_cabin(cab, call, served=bool(results))
                 if answer is not None:
