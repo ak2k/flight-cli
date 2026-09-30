@@ -347,8 +347,9 @@ flight detail NYC PAR --dep 2026-09-15 \
 ## When a query returns nothing
 
 Matrix sometimes returns zero solutions for queries that *should* match —
-the calendar grid in particular has occasional server-side brownouts.
-Recovery sequence:
+the calendar grid in particular has occasional server-side brownouts. When a
+search fails outright rather than coming back empty, run `flight doctor` first:
+it names the broken backend or credential. Recovery sequence:
 
 1. **Simplify constraints** — drop the narrowest one (specific
    `--routing`, narrow fare-basis, alliance restriction) and rerun.

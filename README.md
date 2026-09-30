@@ -90,6 +90,28 @@ Every result-printing command supports:
 - **Calendar-mode duration ranges** (`-d 5-7`): one search returns prices for 5-, 6-, and 7-night trips at every starting day.
 - **Sellers and explore** (Chrome, the `browser` extra): `flight search JFK LAX --dep 2026-10-20 --sellers --pick 2` lists every seller of row 2 with its price and fare name, cheapest first; `flight explore JFK --month 2026-11 --days 5-7 --max-price 300` lists where JFK flies that month and the cheapest round trip to each.
 
+## Checking the setup: `flight doctor`
+
+`flight doctor` prints pass, FAIL or skip for each backend, transport and
+credential; `--format json` gives the same checks as a document.
+
+| Check | What it checks |
+|---|---|
+| `config` | `config.toml` parses, if there is one |
+| `matrix-key` | which Matrix key a search would send (`FLIGHT_API_KEY`, the cache and its age, or none), without fetching one |
+| `cache` | the response cache opens |
+| `google-cookies` | the saved Google session cookie: its age and NID count |
+| `matrix-spa-key` | the key Matrix's page serves, and whether it is the one in use; nothing is cached |
+| `matrix-search` | one live Matrix search, JFK-LAX 30 days out; passes only on a priced solution |
+| `google-http`, `google-browser` | the same search on Google Flights' page over http and in Chrome; passes only on a priced row. Chrome is skipped when patchright or Chrome is missing |
+| `pointspath`, `seats-aero` | one authenticated request each when credentials are stored, skipped otherwise. The seats.aero check spends one unit of its daily quota |
+
+It exits 0 when nothing failed, 75 when every failure is a throttle, brownout
+or outage worth retrying, and 1 otherwise. Each failure names its cause; a
+`shape` failure means a parser no longer reads what Google or Matrix sends
+([docs/memories/doctor.md](docs/memories/doctor.md)). Credentials appear only
+as `sha256:` fingerprints.
+
 ## Award overlay
 
 When you've logged in (`flight auth pp login`), `flight search` automatically

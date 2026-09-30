@@ -64,9 +64,10 @@ choice that fits the rest of the stack — don't substitute.
   ```
   flight search JFK LHR --dep 2026-08-15 --return 2026-08-22 -n 2
   ```
-  If `make check` is green but the smoke test fails, suspect the API key
-  cache (`~/.cache/flight-cli/.matrix-key`, 30-day TTL) or a Matrix brownout
-  (see quirk #7 below). The key is resolved at runtime from Matrix's SPA
+  If `make check` is green but the smoke test fails, run `flight doctor`: it
+  names the failing backend, transport or credential and its cause. Suspect
+  the API key cache (`~/.cache/flight-cli/.matrix-key`, 30-day TTL) or a
+  Matrix brownout (see quirk #7 below). The key is resolved at runtime from Matrix's SPA
   bundle — never hardcode it; override via the `FLIGHT_API_KEY` env var.
 
 ## Editing rules
