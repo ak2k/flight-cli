@@ -286,14 +286,18 @@ def test_the_number_of_loads_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(fake.calls) == cg._MAX_PAGES
 
 
-def test_a_smaller_budget_caps_the_loads_and_names_itself(
+def test_a_smaller_budget_caps_the_loads_and_names_the_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The loads left by other trip lengths ran out, not the window's own eight:
+    narrowing the window is not the remedy."""
     start = date(2026, 10, 20)
     one_day_each = [_body(_cells(start + timedelta(days=i), 1)) for i in range(3)]
     fake = _serve(monkeypatch, *one_day_each)
-    with pytest.raises(cg.GfPriceGraphError, match="more than 3 price-graph pages"):
+    with pytest.raises(cg.GfGraphBudgetError) as e:
         cg.price_graph(_search(start=start, end=start + timedelta(days=60)), headed=False, pages=3)
+    assert str(e.value) == "no price-graph load of the 8 was left for the rest of the window"
+    assert e.value.loads == 3
     assert len(fake.calls) == 3
 
 
@@ -353,8 +357,13 @@ def test_the_second_load_is_spent_from_the_budget(monkeypatch: pytest.MonkeyPatc
     assert len(fake.calls) == 1
     fake = _serve(monkeypatch, miss, _fixture("ow_jfk_lax.body"), _fixture("ow_jfk_lax.body"))
     window = _search(start=date(2026, 10, 20), end=date(2026, 12, 10))
-    with pytest.raises(cg.GfPriceGraphError, match="more than 2 price-graph pages"):
+    with pytest.raises(cg.GfGraphBudgetError) as budget:
         cg.price_graph(window, headed=False, pages=2)
+    assert str(budget.value) == (
+        "no price-graph load of the 8 was left for the rest of the window "
+        "(a page that drew no graph was loaded again)"
+    )
+    assert budget.value.loads == 2
     assert len(fake.calls) == 2
 
 
@@ -832,8 +841,6 @@ _TWELVE = (_ELEVEN[0], f"{_ELEVEN[1]},FCO")
         ({"depart_times": "morning"}, "a departure-time window"),
         ({"allow_airport_changes": False}, "--no-airport-changes"),
         ({"only_available": False}, "--include-unavailable"),
-        ({"routing": "AA+"}, "a carrier filter (AA)"),
-        ({"extension": "MAXDUR 6:00"}, "a maximum trip duration"),
         ({"stops": 3}, "a stop ceiling above 2 (3)"),
         ({"extension": "MAXSTOPS 3"}, "a stop ceiling above 2 (3)"),
         ({"children": 1}, "a passenger type other than adults"),
@@ -852,8 +859,6 @@ _TWELVE = (_ELEVEN[0], f"{_ELEVEN[1]},FCO")
         "times",
         "airport-changes",
         "unavailable",
-        "carrier",
-        "maxdur",
         "stops-3",
         "maxstops-3",
         "children",

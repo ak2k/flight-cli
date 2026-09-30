@@ -2021,9 +2021,9 @@ def _default_graph_blocker(
     None when it does. The phrase completes "this is …".
 
     The graph is a table printed after Matrix's, so a JSON document stays
-    Matrix's alone. Otherwise the `--fast` gate decides, over a copy of one trip
-    length: every length shares the legs and the filters, and each is asked as
-    a graph of its own. The page budget is counted over all of them."""
+    Matrix's alone. Otherwise the `--fast` browser gate decides, over a copy of one
+    trip length: every length shares the legs and the filters, and each is asked
+    as a graph of its own. The page budget is counted over all of them."""
     if json_out:
         return "JSON output"
     window = search.window
@@ -2031,7 +2031,13 @@ def _default_graph_blocker(
         update={"window": window.model_copy(update={"duration_max": window.duration_min})}
     )
     reason = _grid_branch_blocker(
-        one_length, json_out=False, one_way=one_way, origins=origins, dests=dests, fast=True
+        one_length,
+        json_out=False,
+        one_way=one_way,
+        origins=origins,
+        dests=dests,
+        fast=True,
+        graph=True,
     )
     if reason is not None:
         return reason
@@ -2929,6 +2935,7 @@ def _grid_branch_blocker(  # noqa: PLR0911 — one return per named reason, chea
     origins: tuple[str, ...],
     dests: tuple[str, ...],
     fast: bool = False,
+    graph: bool = False,
 ) -> str | None:
     """Why the GF date-grid can't serve this calendar, or None if it can.
 
@@ -2947,6 +2954,12 @@ def _grid_branch_blocker(  # noqa: PLR0911 — one return per named reason, chea
     set or metro code are served by that page grid too, so without `--fast` they
     still go to Matrix: the weave's Matrix half is one query, and `date_grid`
     writes one airport per side.
+
+    `graph` (with `fast`) asks for Chrome's price graph, whose own gate
+    (`_gf_calgraph.graph_blocker`) replaces the routing and page checks: it
+    admits the carrier, alliance, duration and layover bounds and the time
+    windows Google was measured applying from the page URL. Without it,
+    `--fast --gf-transport http` keeps the narrower checks.
 
     The page asks for every airport of a set, so under `--fast` the airports are
     checked as `_pick_backend` checks a search's: expanded, against the page's
@@ -2981,6 +2994,10 @@ def _grid_branch_blocker(  # noqa: PLR0911 — one return per named reason, chea
         city_codes = _gf_unserveable_reasons(BACKEND_GFLIGHT, ",".join(origins), ",".join(dests))
         if city_codes:
             return city_codes[0]
+    if fast and graph:
+        from ._gf_calgraph import graph_blocker  # noqa: PLC0415 — fli, as the imports below
+
+        return graph_blocker(search)
     from ._gf_dategrid import grid_can_serve, grid_routing_blocker  # noqa: PLC0415
 
     if not grid_can_serve(search, round_trip=fast, airport_sets=fast):
@@ -6845,7 +6862,13 @@ def calendar(
         )
         return
     blocker = _grid_branch_blocker(
-        search, json_out=json_out, one_way=one_way, origins=origins, dests=dests, fast=fast
+        search,
+        json_out=json_out,
+        one_way=one_way,
+        origins=origins,
+        dests=dests,
+        fast=fast,
+        graph=gf_mode != TRANSPORT_HTTP,
     )
     if blocker is not None:
         # `--fast` exists only inside the branch below. Everywhere else there is no

@@ -8,8 +8,9 @@ page received. Nothing here writes a request or runs script in the page.
 
 The graph carries the cheapest fare per departure date and no itineraries, so
 nothing can be filtered afterwards. Every constraint on the search has to be on
-the page URL, or the grid answers a wider question and prints that as the
-answer; `page_blocker` names the constraints the URL cannot carry.
+the page URL exactly, and Google has to have been seen applying it there, or the
+grid answers a wider question and prints that as the answer; `graph_blocker`
+names the constraints that fail either test.
 
 fli is heavy, so `cli` imports this module only when a browser grid runs.
 """
@@ -26,21 +27,35 @@ from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from . import _gf_browser
 from ._gf_browser import Control
+from ._gf_dategrid import grid_routing_blocker, unwritten_constraint
 from ._gf_errors import GfBackendError, GfBrowserUnavailableError, GfPageShapeError
 from ._gflight_ids import (
     _rows_from_page_html,  # pyright: ignore[reportPrivateUsage]
     search_page_url,
 )
+from .domain import covers_one_window, time_bounds
 from .fli_bridge import (
     _fli_max_stops,  # pyright: ignore[reportPrivateUsage]
     apply_gf_native_filters,
     to_fli_filter,
 )
-from .routing_predicates import StopsPred, classify, page_can_encode
+from .routing_predicates import (
+    AlliancePred,
+    CarrierPred,
+    ConnectTimePred,
+    MaxDurationPred,
+    StopsPred,
+    Tier,
+    classify,
+    page_can_encode,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Collection, Sequence
+
     from ._gf_common import PageFetch
-    from .domain import CalendarSearch, SearchOptions
+    from .domain import CalendarSearch, SearchOptions, TimeOfDay
+    from .routing_predicates import Predicate
 
 _PRICE_GRAPH = Control("button", "Price graph")
 _GRAPH_RPC = "/GetCalendarGraph"
@@ -52,6 +67,9 @@ _MAX_PAGES = 8
 # it opens on. Only an estimate: the loads themselves page by the span each
 # response reports.
 _PAGE_DAYS = 31
+# Google reads a latest departure hour to its last minute, so whole hours bound
+# a window exactly only when it ends on the day's last minute.
+_DAY_END = 23 * 60 + 59
 _XSSI_GUARD = ")]}'"
 # A batchexecute `rt=c` body is chunked: a length line, then one JSON array of
 # rows. The stated length does not count what `len(str)` counts, so each chunk
@@ -76,6 +94,23 @@ class GfPriceGraphError(GfBackendError):
         """Say what came back; `code` is the error row's, if the graph had one."""
         self.code = code
         super().__init__(reason)
+
+
+class GfGraphBudgetError(GfPriceGraphError):
+    """The graph's page loads ran out before its window did, with loads spent
+    on something other than the window: a page loaded again because it drew no
+    graph, or the trip lengths before it. `loads` is every load it spent.
+
+    Its own type because "narrow --start/--end" would send the user to shorten
+    a window that fits in the budget on its own."""
+
+    def __init__(self, *, loads: int, reloaded: bool) -> None:
+        """Name the budget, and a page loaded again when one was."""
+        self.loads = loads
+        again = " (a page that drew no graph was loaded again)" if reloaded else ""
+        super().__init__(
+            f"no price-graph load of the {_MAX_PAGES:d} was left for the rest of the window{again}"
+        )
 
 
 class GfGraphStalledError(GfBrowserUnavailableError):
@@ -134,18 +169,16 @@ class _GraphPage(NamedTuple):
 
 
 def page_blocker(search: CalendarSearch) -> str | None:
-    """Why the search page's URL cannot carry every constraint on this calendar,
-    or None when it can.
+    """The `--fast --gf-transport http` gate's last check: a time window, a
+    non-adult passenger, an availability switch, any predicate but a stop limit
+    of two or fewer, or round-trip legs that differ, or None.
 
     The phrase completes "this is …" in the `--fast` refusal. Shape (one leg or
-    two, Tier-1 routing only) and the airports (at most 11 a leg, every one in
-    fli's table once metro codes are expanded) are checked before this by the
-    caller; what is left are the constraints the page encoder has no field for.
-    A departure-time window, a passenger other than an adult, the two
-    availability switches and every predicate but a stop limit of two or fewer
-    are dropped by the encoder or refused by it, and the page carries ONE
-    predicate set for both slices, so a round trip whose legs differ cannot be
-    asked either."""
+    two, Tier-1 routing only) and the airports are checked before this by the
+    caller. The price graph asks `graph_blocker` instead, which admits the
+    constraints Google was measured applying from the page URL; this narrower
+    set keeps the RPC grid's admission apart from what was measured on the
+    page."""
     for leg, which in zip(search.legs, ("departure", "return"), strict=False):
         if leg.time_ranges:
             return f"a {which}-time window"
@@ -162,8 +195,99 @@ def page_blocker(search: CalendarSearch) -> str | None:
     return None
 
 
+def graph_blocker(search: CalendarSearch) -> str | None:  # noqa: PLR0911 — one return per named reason, in order
+    """Why the price graph cannot be asked for this calendar, or None when it can.
+
+    The phrase completes "this is …". The caller has checked the currency, the
+    shape and the airports. What is left is every constraint the graph cannot
+    both find on the page URL exactly and trust Google to apply there, since it
+    has no rows to check afterwards. Admitted, per leg: a stop ceiling of two or
+    fewer, one marketing-carrier or alliance include, a maximum duration, a
+    minimum layover, a maximum layover, and a departure-time window the page's
+    whole hours bound exactly; each was measured narrowing the graph (one-way
+    LGA-LAX, and a carrier include on a round trip). A round trip's time window
+    drew a graph with no priced date, so it is refused.
+
+    Refusals are tried in the order the narrower gate tries them, so a calendar
+    that neither admits is named as that gate names it: routing the grids refuse
+    (`grid_routing_blocker`), then a code or bound the request would leave out,
+    then a time window, the options, a predicate the page cannot carry, a
+    combination the URL would write wider than asked, and legs that differ."""
+    per_leg = [classify(leg.route_language, leg.extension).predicates for leg in search.legs]
+    if any(p.tier is not Tier.GF_NATIVE and not _graph_takes(p) for ps in per_leg for p in ps):
+        return grid_routing_blocker(search) or "a constraint the price grid can't honor"
+    for i, predicates in enumerate(per_leg):
+        if (phrase := unwritten_constraint(predicates)) is not None:
+            return f"{phrase} on the return leg" if i else phrase
+    stops = search.options.max_extra_stops
+    if stops is not None and (phrase := unwritten_constraint([StopsPred(stops)])) is not None:
+        return phrase
+    round_trip = len(search.legs) > 1
+    for leg, which in zip(search.legs, ("departure", "return"), strict=False):
+        if leg.time_ranges and (round_trip or not _hours_bound_exactly(leg.time_ranges)):
+            return f"a {which}-time window"
+    if (switch := _option_blocker(search.options)) is not None:
+        return switch
+    _, reasons = page_can_encode(p for ps in per_leg for p in ps if not _graph_takes(p))
+    if reasons:
+        return "; ".join(dict.fromkeys(reasons))
+    for predicates in per_leg:
+        if (wider := _wider_url(set(predicates))) is not None:
+            return wider
+    if len(per_leg) > 1 and set(per_leg[0]) != set(per_leg[1]):
+        return "different routing or extension codes on the outbound and the return"
+    return None
+
+
+def _graph_takes(p: Predicate) -> bool:
+    """Whether the page URL writes `p` on its own exactly: `graph_blocker`
+    refuses a zero bound, a stop ceiling fli cannot write and an unmapped code
+    before asking this."""
+    match p:
+        case CarrierPred(exclude=False, operating=False):
+            return True
+        case StopsPred() | AlliancePred() | MaxDurationPred() | ConnectTimePred():
+            return True
+        case _:
+            return False
+
+
+def _hours_bound_exactly(buckets: Sequence[TimeOfDay]) -> bool:
+    """Whether the page's whole departure hours ask for exactly these buckets.
+
+    The page writes one earliest and one latest hour for the leg, so the
+    buckets have to adjoin, and every bucket starts on the hour, so only the
+    end can be widened: Google reads 11 as up to 11:59."""
+    return covers_one_window(buckets) and max(time_bounds(b)[1] for b in buckets) == _DAY_END
+
+
+def _wider_url(predicates: Collection[Predicate]) -> str | None:
+    """A combination on one leg that the URL would write wider than asked.
+
+    3.6 is one include list, which Google reads as any of its codes, where
+    Matrix requires every include. The bridge keeps the last maximum duration
+    and the last maximum layover it meets, and drops a minimum layover above
+    the maximum."""
+    includes = [p for p in predicates if isinstance(p, CarrierPred | AlliancePred)]
+    if len(includes) > 1:
+        if any(isinstance(p, AlliancePred) for p in includes):
+            return "an alliance filter combined with another carrier or alliance filter"
+        return "a carrier filter combined with another carrier filter"
+    durations = sorted({p.minutes for p in predicates if isinstance(p, MaxDurationPred)})
+    if len(durations) > 1:
+        return f"more than one maximum trip duration ({', '.join(f'{m} min' for m in durations)})"
+    layovers = [p for p in predicates if isinstance(p, ConnectTimePred)]
+    maxima = sorted({p.max_minutes for p in layovers if p.max_minutes is not None})
+    if len(maxima) > 1:
+        return f"more than one maximum layover ({', '.join(f'{m} min' for m in maxima)})"
+    minima = [p.min_minutes for p in layovers if p.min_minutes is not None]
+    if maxima and minima and max(minima) > maxima[0]:
+        return f"a minimum layover ({max(minima)} min) above the maximum ({maxima[0]} min)"
+    return None
+
+
 def _option_blocker(options: SearchOptions) -> str | None:
-    """`page_blocker` for the search-wide options the page has no field for."""
+    """The search-wide options the page has no field for, for both gates."""
     pax = options.pax
     if pax.children or pax.seniors or pax.youth or pax.infants_in_seat or pax.infants_in_lap:
         return "a passenger type other than adults"
@@ -181,13 +305,16 @@ def page_url(search: CalendarSearch, departure: date) -> str:
     return at `departure` plus the trip length. Then the legs' own predicates,
     then ONE stop limit: the lowest any source sets. The bridge reads `--stops`
     alone, and `apply_gf_native_filters` lets the last `StopsPred` it meets
-    overwrite it, so either order on its own can widen a nonstop request."""
+    overwrite it, so either order on its own can widen a nonstop request.
+
+    The bridge writes one predicate set onto every slice, and the gate admits a
+    round trip only when both legs carry the same set, so the outbound's is
+    written once: both legs' together would list each carrier twice."""
     window = search.window
     moved = window.model_copy(update={"start": departure, "end": max(departure, window.end)})
     filters = to_fli_filter(search.model_copy(update={"window": moved}))
-    predicates = [
-        p for leg in search.legs for p in classify(leg.route_language, leg.extension).predicates
-    ]
+    leg = search.legs[0]
+    predicates = list(dict.fromkeys(classify(leg.route_language, leg.extension).predicates))
     apply_gf_native_filters(filters, predicates)
     limits = [p.max_stops for p in predicates if isinstance(p, StopsPred)]
     if search.options.max_extra_stops is not None:
@@ -327,6 +454,10 @@ def price_graph(search: CalendarSearch, *, headed: bool, pages: int = _MAX_PAGES
     loading it again is not asking a wall again. A wall, a failed navigation and
     any answer the graph gave are raised as they are.
 
+    Running out of loads blames the window only when the window alone spent all
+    `_MAX_PAGES`; a reload, or a smaller budget left by other trip lengths, is
+    `GfGraphBudgetError`.
+
     The caller arms `interrupt_guard` and holds `session_scope` around this."""
     window = search.window
     trip_length = window.duration_min if len(search.legs) > 1 else None
@@ -334,9 +465,11 @@ def price_graph(search: CalendarSearch, *, headed: bool, pages: int = _MAX_PAGES
     found: dict[date, GraphCell] = {}
     cursor = window.start
     loads = 0
-    missed = False
+    missed = reloaded = False
     while True:
         if loads >= pages:
+            if reloaded or pages != _MAX_PAGES:
+                raise GfGraphBudgetError(loads=loads, reloaded=reloaded)
             raise GfPriceGraphError(
                 f"the window needs more than {pages} price-graph pages; narrow --start/--end"
             )
@@ -351,7 +484,7 @@ def price_graph(search: CalendarSearch, *, headed: bool, pages: int = _MAX_PAGES
                 raise
             if missed or loads >= pages:
                 raise GfGraphStalledError(e, loads=loads) from e
-            missed = True
+            missed = reloaded = True
             continue
         missed = False
         if not HTTPStatus.OK <= captured.status < HTTPStatus.MULTIPLE_CHOICES:
@@ -408,11 +541,12 @@ def price_graphs(search: CalendarSearch, *, headed: bool) -> GraphRange:
     stand without it: kept as an empty column, it would print as dates nobody
     priced.
 
-    Only a page that drew no graph lets the next length be asked. A wall, an
-    error row or a Chrome that cannot load the page would meet the next
-    length's page too, and a wall would take another load to say so; no other
-    failure is told apart from those, so after any of them the lengths still
-    to come are lost with it.
+    Only a page that drew no graph, or a length that ran out of loads, lets the
+    next length be asked; the loads either spent are counted, so after a length
+    that ran out the rest are lost for want of a load. A wall, an error row or a
+    Chrome that cannot load the page would meet the next length's page too, and
+    a wall would take another load to say so; no other failure is told apart
+    from those, so after any of them the lengths still to come are lost with it.
 
     When no length priced, the first failure is raised as it came, and the
     graph's own error is named with its trip length.
@@ -439,7 +573,7 @@ def price_graphs(search: CalendarSearch, *, headed: bool) -> GraphRange:
             one = search.model_copy(update={"window": window})
         try:
             graph = price_graph(one, headed=headed, pages=left)
-        except GfGraphStalledError as e:
+        except (GfGraphStalledError, GfGraphBudgetError) as e:
             used += e.loads
             lost.append(LostLength(nights, e))
             continue
