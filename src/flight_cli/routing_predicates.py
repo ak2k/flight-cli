@@ -315,6 +315,22 @@ def _carrier_codes(args: list[str]) -> frozenset[str]:
     return frozenset(a.upper() for a in args)
 
 
+_RE_AIRLINE = re.compile(r"^(?!\d\d$)[A-Z0-9]{2}$")
+
+
+def _carrier_list(raw: str, args: list[str], *, exclude: bool, operating: bool) -> Predicate:
+    """A carrier directive's predicate. Matrix takes space-separated airline
+    codes and refuses any other token ("UA,DL" is not a carrier). Google
+    matches no row to such a token, so an exclude naming it drops nothing and
+    an include keeps nothing: a list naming one is Matrix's to answer."""
+    bad = [a for a in args if not _RE_AIRLINE.match(a.upper())]
+    if not bad:
+        return CarrierPred(_carrier_codes(args), exclude=exclude, operating=operating)
+    named = " and ".join(repr(a) for a in bad)
+    what = "which is not an airline code" if len(bad) == 1 else "which are not airline codes"
+    return UnsupportedPred(token=raw, reason=f"a carrier list naming {named}, {what} ({raw!r})")
+
+
 def _parse_extension_code(directive: str) -> Predicate | None:  # noqa: PLR0911, PLR0912 - flat keyword dispatch over the extension grammar
     """Parse one extension directive (already split on ';'). None for an empty
     directive."""
@@ -349,13 +365,13 @@ def _parse_extension_code(directive: str) -> Predicate | None:  # noqa: PLR0911,
                 return AlliancePred(codes=codes)
             return UnsupportedPred(token=raw, reason=f"unknown alliance in {raw!r}")
         case "AIRLINES" if args:
-            return CarrierPred(_carrier_codes(args), exclude=False, operating=False)
+            return _carrier_list(raw, args, exclude=False, operating=False)
         case "-AIRLINES" if args:
-            return CarrierPred(_carrier_codes(args), exclude=True, operating=False)
+            return _carrier_list(raw, args, exclude=True, operating=False)
         case "OPAIRLINES" if args:
-            return CarrierPred(_carrier_codes(args), exclude=False, operating=True)
+            return _carrier_list(raw, args, exclude=False, operating=True)
         case "-OPAIRLINES" if args:
-            return CarrierPred(_carrier_codes(args), exclude=True, operating=True)
+            return _carrier_list(raw, args, exclude=True, operating=True)
         case "-CITIES" if args:
             return ConnectionAirportPred(_carrier_codes(args), exclude=True)
         case _:

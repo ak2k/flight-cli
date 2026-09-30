@@ -16,6 +16,7 @@ WITH ITS REASON."""
 
 from __future__ import annotations
 
+import re
 from datetime import date, timedelta
 
 import pytest
@@ -268,6 +269,8 @@ def test_auto_unencodable_constraint_picks_matrix(flag: str, value: object) -> N
         ("extension", "-CODESHARE"),
         ("routing", "~LH+"),  # no LH-booked leg
         ("extension", "-AIRLINES LH"),
+        ("extension", "-AIRLINES UA DL"),
+        ("extension", "-AIRLINES B6 9K"),
         ("extension", "OPAIRLINES LH"),
         ("routing", "~BA+"),
     ],
@@ -277,6 +280,29 @@ def test_auto_serves_post_filterable_tier2_on_google(flag: str, value: object) -
     filter evaluates is served by Google, on either backend spelling."""
     assert _call(**{flag: value}) == BACKEND_GFLIGHT  # pyright: ignore[reportArgumentType]
     assert _call(BACKEND_GFLIGHT, **{flag: value}) == BACKEND_GFLIGHT  # pyright: ignore[reportArgumentType]
+
+
+@pytest.mark.parametrize(
+    ("directive", "token"),
+    [
+        ("-AIRLINES UA,DL", "'UA,DL'"),
+        ("-AIRLINES UA, DL", "'UA,'"),
+        ("-AIRLINES |", "'|'"),
+        ("-OPAIRLINES UA,DL", "'UA,DL'"),
+        ("OPAIRLINES |", "'|'"),
+    ],
+)
+def test_a_carrier_list_naming_no_airline_code_goes_to_matrix_quoting_the_token(
+    directive: str, token: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Google read `-AIRLINES UA,DL` as a code no row carries and answered
+    JFK-LAX with DL742, DL747 and DL771 on the table."""
+    reason = f"a carrier list naming {token}, which is not an airline code ({directive!r})"
+    assert _call(extension=directive) == BACKEND_MATRIX
+    printed = " ".join(capsys.readouterr().err.split())
+    assert f"Using Matrix: Google Flights can't serve {reason}." in printed, printed
+    with pytest.raises(typer.BadParameter, match=re.escape(reason)):
+        _call(BACKEND_GFLIGHT, extension=directive)
 
 
 def test_a_post_filterable_predicate_beside_one_that_is_not_still_picks_matrix() -> None:
