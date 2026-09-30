@@ -793,6 +793,24 @@ def test_a_stale_pointspath_token_whose_refresh_fails_is_a_failure_not_a_skip(
     assert world.pp_calls == []
 
 
+@pytest.mark.parametrize(("status", "cause"), [(429, "throttled"), (503, "upstream")])
+def test_a_pointspath_refresh_supabase_throttles_or_cannot_serve_is_retryable(
+    world: World, monkeypatch: pytest.MonkeyPatch, status: int, cause: str
+) -> None:
+    tokens = pp_auth.load_tokens()
+    assert tokens is not None
+    tokens.expires_at = 0
+    pp_auth.save_tokens(tokens)
+
+    def answered(*_a: object, **_kw: object) -> httpx.Response:
+        return httpx.Response(status, text="Service Unavailable")
+
+    monkeypatch.setattr(pp_auth, "httpx", SimpleNamespace(post=answered))
+    report = _run()
+    assert f"HTTP {status}" in _fails_as(report, "pointspath", cause).detail
+    assert report.exit_code == 75
+
+
 # ───────────────────────────── no secret leaves ─────────────────────────────
 
 

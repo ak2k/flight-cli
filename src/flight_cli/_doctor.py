@@ -115,6 +115,8 @@ _MATRIX_BROWNOUT_KINDS = frozenset({"INTERNAL", "UNAVAILABLE", "DEADLINE_EXCEEDE
 # its answer to a body it rejects, which is why the canary contract reads a
 # brownout that persists across runs as a shape suspect.
 _MATRIX_INTERNAL_ERROR = re.compile(r"internal (server )?error", re.IGNORECASE)
+# `PPAuthError` carries Supabase's answer to a token refresh only in its text.
+_SUPABASE_REFRESH_STATUS = re.compile(r"^Supabase refresh failed: HTTP (\d{3})\b")
 
 _SECRET_ENV = ("FLIGHT_API_KEY", "PP_ACCESS_TOKEN", "PP_REFRESH_TOKEN", "SEATS_AERO_API_KEY")
 # No service here issues a credential this short, and replacing a shorter
@@ -629,7 +631,11 @@ def _classify(e: Exception) -> tuple[Cause, str]:  # noqa: PLR0911, PLR0912 — 
         case httpx.HTTPStatusError():
             return _status_cause(e.response.status_code), str(e)
         case pp_auth.PPAuthError():
-            return "auth", str(e)
+            # A throttle or an outage at Supabase lifts on its own; any other
+            # refusal of the refresh is a login the user has to redo.
+            refresh = _SUPABASE_REFRESH_STATUS.match(str(e))
+            cause = _status_cause(int(refresh.group(1))) if refresh else "auth"
+            return (cause if cause in RETRYABLE else "auth"), str(e)
         case PPApiError():
             return _status_cause(e.status), str(e)
         case SeatsAeroError():
