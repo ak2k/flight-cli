@@ -842,9 +842,10 @@ number with any quantifier, and a bare or `?` range, are served on Google.
 10 AA nonstops, so what `+`/`*` admits over a range (several flights in it, per
 `routing_language.md`) is unmeasured; those two stay on Matrix with the reason
 `a flight-number range (AA1-3000+)`. Matrix rejects a reversed range
-(`AA3000-1`) as `Bad route specification`, so that stays on Matrix too, which
-reports the error. Multi-token forms (`AS21 F+`), `~AS21` and a
-carrier with a digit (`B6123`) are Tier 3. `page_can_encode` itself was
+(`AA3000-1`), `AA0` and `AA10000` as `Bad route specification`, and reads
+`AA00001` as AA1 (2026-09-30), so a range that is not ascending within 1-9999
+stays on Matrix too, which reports the error. Multi-token forms (`AS21 F+`),
+`~AS21` and a carrier with a digit (`B6123`) are Tier 3. `page_can_encode` itself was
 left narrow on purpose: the Chrome price graph (`_gf_calgraph.page_blocker`)
 reads it, and a graph cannot check rows.
 

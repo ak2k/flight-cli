@@ -66,6 +66,7 @@ _SUPPORTED: tuple[type, ...] = (
 )
 
 _FLIGHT_RE = re.compile(r"^([A-Z0-9]{2})(\d+)$", re.IGNORECASE)
+_MAX_FLIGHT_NUMBER = 9999
 
 
 def can_postfilter(pred: Predicate) -> bool:
@@ -84,15 +85,16 @@ def _served_by_postfilter(pred: Predicate) -> bool:
     nonstops the filter keeps. Nor a flight-number range with `+` or `*`,
     which Matrix may read as several flights in the range: `AA1-3000+`
     answered JFK-LAX with the same ten nonstops as bare `AA1-3000`, so no
-    answer has shown which connections it admits. Nor a reversed range
-    (`AA3000-1`), which Matrix rejects as a bad route specification: Google's
-    empty board would stand in for that error."""
+    answer has shown which connections it admits. Nor a number Matrix rejects
+    as a bad route specification (`AA3000-1`, `AA0`, `AA10000`): Google's empty
+    board would stand in for that error. Matrix bounds the number, not its
+    digits: `AA00001` is AA1."""
     match pred:
         case ConnectionAirportPred():
             return False
         case SpecificFlightPred() if pred.several and pred.low != pred.high:
             return False
-        case SpecificFlightPred() if pred.low > pred.high:
+        case SpecificFlightPred() if not 1 <= pred.low <= pred.high <= _MAX_FLIGHT_NUMBER:
             return False
         case _:
             return pred.tier is Tier.GF_POSTFILTER and can_postfilter(pred)

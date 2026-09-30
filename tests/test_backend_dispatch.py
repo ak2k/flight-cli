@@ -278,6 +278,7 @@ def test_auto_unencodable_constraint_picks_matrix(flag: str, value: object) -> N
         ("routing", "AS21+"),
         ("routing", "DL747?"),
         ("routing", "AA1-3000"),
+        ("routing", "AA00001"),  # Matrix's AA1: the bound is the number, not its digits
     ],
 )
 def test_auto_serves_post_filterable_tier2_on_google(flag: str, value: object) -> None:
@@ -314,14 +315,16 @@ def test_a_carrier_list_naming_no_airline_code_goes_to_matrix_quoting_the_token(
     ("routing", "reason"),
     [
         ("AA3000-1", "a flight-number range (AA3000-1)"),
+        ("AA0", "a specific flight number (AA0)"),
+        ("AA10000", "a specific flight number (AA10000)"),
     ],
 )
 def test_a_flight_number_matrix_rejects_goes_to_matrix_with_its_reason(
     routing: str, reason: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Matrix answers `AA3000-1` with "Bad route specification", where the
-    post-filter keeps no row: Google's empty board would stand in for the
-    error."""
+    """Matrix answers `AA3000-1`, `AA0` and `AA10000` with "Bad route
+    specification", where the post-filter keeps no row: Google's empty board
+    would stand in for the error."""
     assert _call(routing=routing) == BACKEND_MATRIX
     printed = " ".join(capsys.readouterr().err.split())
     assert f"Using Matrix: Google Flights can't serve {reason}." in printed, printed
