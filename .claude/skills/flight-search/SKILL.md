@@ -31,6 +31,8 @@ Global flags (every search-printing command):
 - `--awards-only` — skip the cash table; show only the award provider output
 - `--currency EUR` — price in that ISO 4217 currency on both backends (`search`, `calendar`, `detail`)
 - `--fare-rules [--pick N]` — `search` only, routes to Matrix: fare basis, booking codes and refund/change penalties for itinerary N (default 1)
+- `--max-price N` — `search` only: fares at or under N in the search's currency (`--currency`, default USD), compared with the printed price (a party's total). Google is asked for it in USD and every row is checked; Matrix is asked in the cap's currency and its answer cut to it. One `--cabin`.
+- `--bags CHECKED[,CARRY]` — `search` only, Google Flights only: prices fares with CHECKED checked bags and CARRY (0 or 1, default 0) carry-ons, and labels each row with the bags Google says its price includes (`incl.` / `not incl.` / `unknown`; JSON `bags_included`). Refused rather than sent to Matrix (which prices no bags); one traveler, one `--cabin`, no `--sellers`.
 - `--providers pp[,seats]` — restrict to a named subset of award providers (default: all configured)
 - `--provider-opt KEY=VAL` — per-provider override, repeatable, e.g. `--provider-opt pp.airlines=United,Delta` or `--provider-opt pp.cabins=Economy,Business`. Defaults live in `~/.config/flight-cli/config.toml` under `[providers.<name>]` tables.
 

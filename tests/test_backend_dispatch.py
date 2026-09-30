@@ -28,6 +28,7 @@ from flight_cli.cli import (
     BACKEND_MATRIX,
     _pick_backend,
 )
+from flight_cli.domain import Bags
 from flight_cli.routing_predicates import classify, page_can_encode
 
 
@@ -500,6 +501,47 @@ def test_explicit_gflight_refuses_a_matrix_only_filter(
     still carries it — so the two surfaces describe different searches."""
     with pytest.raises(typer.BadParameter, match=expected):
         _call(BACKEND_GFLIGHT, **overrides)  # pyright: ignore[reportArgumentType]
+
+
+# ──────────────── --bags: Google Flights or a refusal, never Matrix ──────────
+
+_ONE_BAG = Bags(checked=1)
+
+
+def test_auto_serves_bags_on_gflight() -> None:
+    assert _call(bags=_ONE_BAG) == BACKEND_GFLIGHT
+
+
+def test_explicit_matrix_refuses_bags() -> None:
+    with pytest.raises(typer.BadParameter, match="Matrix prices no bags"):
+        _call(BACKEND_MATRIX, bags=_ONE_BAG)
+
+
+@pytest.mark.parametrize(
+    "flag,value,reason",
+    [
+        ("slice_specs", ["JFK-LHR:2026-08-15"], "a multi-city itinerary"),
+        ("inf_lap", 1, "an infant passenger"),
+        ("fare_rules", True, "fare rules"),
+    ],
+)
+def test_auto_refuses_bags_with_whatever_would_have_sent_it_to_matrix(
+    flag: str, value: object, reason: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(typer.BadParameter) as excinfo:
+        _call(bags=_ONE_BAG, **{flag: value})  # pyright: ignore[reportArgumentType]
+    message = str(excinfo.value)
+    assert f"--bags needs Google Flights, which can't serve {reason}" in message
+    assert "drop --bags" in message
+    assert "use --backend matrix" not in message
+    assert "Using Matrix" not in capsys.readouterr().err
+
+
+def test_explicit_gflight_under_bags_points_at_the_bags_not_at_matrix() -> None:
+    with pytest.raises(typer.BadParameter) as excinfo:
+        _call(BACKEND_GFLIGHT, inf_lap=1, bags=_ONE_BAG)
+    assert "drop --bags" in str(excinfo.value)
+    assert "use --backend matrix" not in str(excinfo.value)
 
 
 def test_unknown_backend_rejected() -> None:

@@ -54,7 +54,9 @@ go into detail and are loaded on demand.
   transport that replaced the gated `GetShoppingResults` RPC (field layout:
   carrier/alliance include, hour windows, duration, layover minutes, passenger
   kinds with infant 3 = lap and 4 = seat; the zero-based stop ceiling, typed
-  refusals), the `fl[15]`/`fl[18]`/`fl[22]`
+  refusals), the price cap (12) and bags (13) behind `search --max-price` and
+  `--bags`, with each row's bag statement `row[4][6]` and where Matrix stands on
+  both, the `fl[15]`/`fl[18]`/`fl[22]`
   booking-carrier rule (marketing vs operating), the Tier-1/2/3 classification
   (`routing_predicates`) that the date grids still use, the search path's
   per-predicate gate (`_gf_postfilter.search_page_reasons`: page-encodable or

@@ -20,7 +20,7 @@ from datetime import date as _date  # noqa: TC003
 from enum import StrEnum
 from typing import TYPE_CHECKING, Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -110,6 +110,21 @@ class Pax(BaseModel):
         )
 
 
+class Bags(BaseModel):
+    """The bags Google Flights is asked to price a fare with."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    checked: int = Field(default=0, ge=0)
+    # Google's filter takes a carry-on as present or absent.
+    carry_on: int = Field(default=0, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def _asks_for_a_bag(self) -> Bags:
+        if not (self.checked or self.carry_on):
+            raise ValueError("asks for no bag: give at least one checked or carry-on bag")
+        return self
+
+
 class SearchOptions(BaseModel):
     """Shared search constraints across all modes."""
 
@@ -128,9 +143,16 @@ class SearchOptions(BaseModel):
     # derived default (-1 when stops constrained, 1 otherwise).
     extra_stops: int | None = None
     page_size: int = 25
-    # ISO 4217 code to price in. None = each backend's own default (USD for
-    # every request this CLI sends), and leaves the Matrix body without the key.
+    # ISO 4217 code to price in. None leaves the Matrix body without the key, so
+    # Matrix prices in its own default, often the origin's currency (GBP from
+    # LHR), while Google Flights prices in USD. A search that merges the two or
+    # applies a price cap asks Matrix for USD instead.
     currency: str | None = None
+    # Whole units of `currency` (USD when None), compared with the printed
+    # price, which for a party is the total. Matrix has no input for a cap or
+    # for bags: a cap is applied to its answer, and bags keep a search off it.
+    max_price: int | None = Field(default=None, ge=1)
+    bags: Bags | None = None
 
     @field_validator("currency")
     @classmethod
@@ -138,6 +160,15 @@ class SearchOptions(BaseModel):
         if v is not None and not re.fullmatch(r"[A-Z]{3}", v):
             raise ValueError(f"Not a 3-letter ISO 4217 currency code: {v!r}")
         return v
+
+
+def within_price_cap(
+    amount: float | None, currency: str | None, *, cap: int, cap_currency: str
+) -> bool:
+    """Whether a fare may be shown under a price cap: priced, in the cap's
+    currency, at or under it. An unpriced fare, or one in another currency,
+    cannot be shown to be under the cap."""
+    return amount is not None and currency == cap_currency and amount <= cap
 
 
 _IATA_CODE_LEN = 3

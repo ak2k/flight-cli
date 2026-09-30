@@ -87,6 +87,7 @@ from fli.search.flights import SearchFlights  # pyright: ignore[reportMissingTyp
 from . import _gf_browser
 from ._gf_common import TRANSPORT_HTTP, GfTransportMode, PageFetch, cache_dir
 from ._gf_errors import (
+    BROWSER_DEFAULT_REMEDY,
     GfBackendError,
     GfBrowserUnavailableError,
     GfConsentError,
@@ -789,6 +790,12 @@ _FLIGHT_ID_IDX = 17
 # Per connection, `[minutes, arrival airport, departure airport, ...]`.
 _LAYOVERS_IDX = 13
 
+# `row[4][6]` is [checked, carry-on]: the bags the row's price covers, counted
+# for the whole party. It matched the page's own text ("1 carry-on bag
+# included. 0 checked bags included" for [0, 1]).
+_ROW_FARE_IDX = 4
+_FARE_BAGS_IDX = 6
+
 # Per-leg field indices in `data[0][2][i]`. Mirrors the Legrooms+ extension's
 # parser (load_flight_data.js function `u`). See docs/memories/legroom_recipe.md.
 _LEG_AMENITIES_IDX = 12  # array — bit positions decoded into wifi/power/video
@@ -1037,6 +1044,9 @@ class GFlightWithId:
     # None where the tuple has none. Kept off `amenities` because `--format json`
     # dumps every amenities field.
     operating: tuple[tuple[Airline, str] | None, ...] = ()
+    # (checked, carry-on) bags Google says the price covers; None where it does
+    # not say.
+    bags_included: tuple[int | None, int | None] = (None, None)
     # Per connection, the layover in minutes as the page states it, or None
     # where it states none for that connection (`_layover_minutes`).
     layovers: tuple[int | None, ...] = ()
@@ -1052,6 +1062,23 @@ def _operating_identity(fl: list[Any]) -> tuple[Airline, str] | None:
         return _parse_airline(code), number
     except AttributeError:  # a code fli has no member for
         return None
+
+
+def _bag_count(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _bags_included(data: list[Any]) -> tuple[int | None, int | None]:
+    """The row's bag statement. A missing, short or malformed slot says
+    nothing, which is never a reason to drop the row."""
+    fare = data[_ROW_FARE_IDX] if len(data) > _ROW_FARE_IDX else None
+    if not isinstance(fare, list) or len(cast("list[Any]", fare)) <= _FARE_BAGS_IDX:
+        return None, None
+    slot = cast("list[Any]", fare)[_FARE_BAGS_IDX]
+    if not isinstance(slot, list):
+        return None, None
+    counts = [*cast("list[Any]", slot)[:2], None, None]
+    return _bag_count(counts[0]), _bag_count(counts[1])
 
 
 def _layover_minutes(data: list[Any], leg_tuples: list[list[Any]]) -> tuple[int | None, ...]:
@@ -1092,6 +1119,7 @@ def _parse_flight_with_id(data: list[Any]) -> GFlightWithId:
         flight_id=flight_id,
         amenities=amenities,
         operating=tuple(_operating_identity(fl) for fl in leg_tuples),
+        bags_included=_bags_included(data),
         layovers=_layover_minutes(data, leg_tuples),
     )
 
@@ -1372,7 +1400,9 @@ def _rows_from_ds1(payload: list[Any]) -> _Ds1Board:
 def search_page_url(filters: FlightSearchFilters, *, currency: str = "USD") -> str:
     """The public search-page URL for `filters` — the one address both rungs
     fetch, so neither can drift into asking Google a different question."""
-    return google_flights_search_page_url(build_search_tfs(filters), currency=currency)
+    return google_flights_search_page_url(
+        build_search_tfs(filters, currency=currency), currency=currency
+    )
 
 
 class _RetryableTransportError(GfTransportError):
@@ -2106,6 +2136,7 @@ def search_with_ids(
     transport: GfTransport = HTTP_TRANSPORT,
     currency: str = "USD",
     keep: Callable[[int, GFlightWithId], bool] | None = None,
+    checks: str = "the routing",
 ) -> Board[GFlightWithId | tuple[GFlightWithId, ...]] | None:
     """Drop-in for fli's `SearchFlights().search()` but each result carries
     its Google Flights opaque flight_id.
@@ -2139,7 +2170,8 @@ def search_with_ids(
     then discards. It runs on each return board after the pin check, so a page
     that ignored its pin is refused as one rather than read as "no return
     matches". The result carries the outbound page's price insight, restated
-    for the rows the filter kept."""
+    for the rows the filter kept. `checks` names what `keep` holds a row to,
+    for the warning that counts the pins it left with no return."""
     first = _with_board_currency(
         _one_call_laddered(filters, transport, currency=currency), currency
     )
@@ -2229,6 +2261,8 @@ def search_with_ids(
         stopped=stopped,
         skipped=skipped,
         unmatched=unmatched,
+        bags=filters.bags is not None,
+        checks=checks,
     )
     # A Board even with no pair in it: the pins were taken from rows Google
     # served, so the rows the filter removed on either leg are why it is empty,
@@ -2250,12 +2284,14 @@ def _report_pin_outcome(
     stopped: GfBackendError | None,
     skipped: int,
     unmatched: int = 0,
+    bags: bool = False,
+    checks: str = "the routing",
 ) -> None:
     """Account for what the pin loop met: a counted warning, or a raise.
 
-    `unmatched` pins had return boards the routing filter emptied. They are
-    counted, not raised: that board was served, and "no return matches the
-    routing" is its answer.
+    `unmatched` pins had return boards the row filter emptied, holding rows to
+    `checks`. They are counted, not raised: that board was served, and "no
+    return matches `checks`" is its answer.
 
     Raising is for the case where nothing at all was served — then the refusal
     IS the outcome, and swallowing it reports a round trip with no return legs
@@ -2269,9 +2305,10 @@ def _report_pin_outcome(
     # page-shape change is the news, and this is the only place it is said.
     if unmatched:
         log.warning(
-            "%d of %d pinned outbounds have no return flight matching the routing",
+            "%d of %d pinned outbounds have no return flight matching %s",
             unmatched,
             pins,
+            checks,
         )
     if refused:
         log.warning("%d of %d return boards unavailable: %s", len(refused), pins, refused[-1])
@@ -2294,7 +2331,7 @@ def _report_pin_outcome(
             "stopped pinning: %d of %d return boards skipped; %s",
             skipped,
             pins,
-            _why_pinning_stopped(stopped),
+            _why_pinning_stopped(stopped, bags=bags),
         )
     elif refused and not served:
         # "Nothing was served", rather than "every pin refused": one pin
@@ -2322,7 +2359,21 @@ def _report_pin_outcome(
         raise refused[-1]
 
 
-def _why_pinning_stopped(stopped: GfBackendError) -> str:
+# Matrix, the default remedy's last resort, prices no bags.
+_BROWSER_BAGS_REMEDY = (
+    "Retry, or use `--gf-transport http` (or drop `--bags` to search Matrix, which prices no bags)."
+)
+
+
+def browser_remedy(e: GfBrowserUnavailableError, *, bags: bool) -> str:
+    """`e`'s remedy, ending on dropping `--bags` rather than on Matrix when
+    the search asked for bags."""
+    if bags and e.remedy.endswith(BROWSER_DEFAULT_REMEDY):
+        return e.remedy.removesuffix(BROWSER_DEFAULT_REMEDY) + _BROWSER_BAGS_REMEDY
+    return e.remedy
+
+
+def _why_pinning_stopped(stopped: GfBackendError, *, bags: bool = False) -> str:
     """The clause naming what ended the fan-out, in the failure's own words.
 
     Not one fixed phrase, because the three stops send the reader to three
@@ -2334,5 +2385,5 @@ def _why_pinning_stopped(stopped: GfBackendError) -> str:
     if isinstance(stopped, GfThrottledError):
         return "Google Flights rate-limited this IP"
     if isinstance(stopped, GfBrowserUnavailableError):
-        return f"the browser rung stopped — {stopped}"
+        return f"the browser rung stopped — {stopped.reason} {browser_remedy(stopped, bags=bags)}"
     return "Google Flights was unreachable"

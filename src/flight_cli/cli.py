@@ -53,6 +53,7 @@ from ._multi_cabin import MultiCabinRow, parse_price
 from ._multi_cabin import merge as _merge_cabins
 from .client import MatrixApiError, MatrixClient
 from .domain import (
+    Bags,
     Cabin,
     CalendarFollowup,
     CalendarSearch,
@@ -64,6 +65,7 @@ from .domain import (
     SpecificDateSearch,
     TimeOfDay,
     covers_one_window,
+    within_price_cap,
 )
 from .links import (
     extract_pin_segments_from_slice,
@@ -74,9 +76,10 @@ from .links import (
     matrix_deep_link,
     matrix_itinerary_url,
     pin_dates_are_stated,
+    search_page_cap,
 )
 from .log import configure as configure_logging
-from .models import FareRulesResult
+from .models import FareRulesResult, Itinerary
 from .pp.auth import load_tokens
 from .pp.cli import auth_app, run_pp_for_search
 from .providers.base import LegQuery
@@ -479,6 +482,55 @@ def _resolve_currency(code: str | None) -> str | None:
     return up
 
 
+# CHECKED or CHECKED,CARRY. Google's filter takes a carry-on as present or absent.
+_RE_BAGS = re.compile(r"\A(\d{1,2})(?:,([01]))?\Z")
+
+
+def _parse_bags(spec: str) -> Bags:
+    """`--bags` as CHECKED or CHECKED,CARRY, CARRY defaulting to 0, or exit 2
+    naming the value."""
+    m = _RE_BAGS.match("".join(spec.split()))
+    if m is None:
+        err.print(
+            f"[red]bad --bags {_quote(spec)}; use CHECKED or CHECKED,CARRY with CARRY "
+            "0 or 1, such as 1 or 1,1[/]"
+        )
+        raise typer.Exit(2)
+    checked, carry_on = int(m.group(1)), int(m.group(2) or 0)
+    if not (checked or carry_on):
+        err.print(f"[red]--bags {_quote(spec)} asks for no bag; drop it, or ask for one[/]")
+        raise typer.Exit(2)
+    return Bags(checked=checked, carry_on=carry_on)
+
+
+def _refuse_cap_and_bag_conflicts(
+    *, cabins: tuple[Cabin, ...], max_price: int | None, bags: Bags | None, seated: int
+) -> None:
+    """Refuse `--max-price` or `--bags` beside several cabins, whose compare
+    applies neither, and `--bags` for more than one seated traveler. Before the
+    backend is announced: a refusal after "Using Matrix" reads as a search that
+    started and then failed."""
+    if len(cabins) > 1 and max_price is not None:
+        err.print(
+            "[red]--max-price takes one --cabin: a multi-cabin compare applies no cap.[/] "
+            "Drop the extra --cabin values."
+        )
+        raise typer.Exit(2)
+    if len(cabins) > 1 and bags is not None:
+        err.print(
+            "[red]--bags takes one --cabin: a multi-cabin compare prices no bags.[/] "
+            "Drop the extra --cabin values."
+        )
+        raise typer.Exit(2)
+    if bags is not None and seated > 1:
+        err.print(
+            "[red]--bags takes one traveler:[/] Google counts the bags for the whole "
+            "party, and once they are asked for it says nothing of what a party's fare "
+            "includes. Drop --bags, or search for one traveler."
+        )
+        raise typer.Exit(2)
+
+
 def _build_options(
     *,
     cabin: str,
@@ -493,6 +545,8 @@ def _build_options(
     show_only_available: bool,
     page_size: int = 25,
     currency: str | None = None,
+    max_price: int | None = None,
+    bags: Bags | None = None,
 ) -> SearchOptions:
     return SearchOptions(
         cabin=_resolve_cabin(cabin),
@@ -509,6 +563,8 @@ def _build_options(
         show_only_available=show_only_available,
         page_size=page_size,
         currency=currency,
+        max_price=max_price,
+        bags=bags,
     )
 
 
@@ -603,6 +659,7 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
     show_only_available: bool,
     fare_rules: bool = False,
     adults: int = 1,
+    bags: Bags | None = None,
 ) -> str:
     """Resolve --backend to a concrete backend.
 
@@ -643,7 +700,17 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
     drop from one they can't.
 
     Explicit --backend matrix: matrix. --backend gflight: gflight, unless the
-    request is inexpressible on GF (error)."""
+    request is inexpressible on GF (error).
+
+    `--bags` needs Google Flights, because Matrix prices no bags. With it,
+    `--backend matrix` is refused, and so is any reason above: `auto` refuses
+    the search naming that reason instead of answering it on Matrix without the
+    bags. No refusal under `--bags` points at `--backend matrix`."""
+    if bags is not None and backend == BACKEND_MATRIX:
+        raise typer.BadParameter(
+            "--bags needs Google Flights: Matrix prices no bags. "
+            "Drop --bags, or drop --backend matrix."
+        )
     from ._gf_postfilter import search_page_reasons  # noqa: PLC0415
     from .routing_predicates import classify  # noqa: PLC0415
 
@@ -690,9 +757,20 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
     # The same reasons go out two ways, and only one of them is markup. A
     # reason quotes the user's --routing string verbatim, so one square bracket
     # decides between a MarkupError traceback and a backslash the user can see.
+    # Under --bags the way out is dropping it: Matrix prices no bags.
+    remedy = (
+        "drop --bags to search Matrix, which prices no bags"
+        if bags is not None
+        else "use --backend matrix"
+    )
     if backend == BACKEND_AUTO:
         if not reasons:
             return BACKEND_GFLIGHT
+        if bags is not None:
+            raise typer.BadParameter(
+                f"--bags needs Google Flights, which can't serve {_join_reasons(reasons)}. "
+                f"Drop it, or {remedy}.",
+            )
         err.print(
             f"[dim]Using Matrix: Google Flights can't serve "
             f"{_safe_text(_join_reasons(reasons))}.[/]"
@@ -703,7 +781,7 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
         # here would print the backslashes instead of hiding them.
         raise typer.BadParameter(
             f"--backend gflight can't serve this request: {_join_reasons(reasons)}. "
-            "Drop it, or use --backend matrix.",
+            f"Drop it, or {remedy}.",
         )
     if backend not in _VALID_BACKENDS:
         raise typer.BadParameter(f"--backend must be one of {_VALID_BACKENDS}; got {backend!r}")
@@ -2227,6 +2305,8 @@ def _emit_urls(
         else:
             console.print("[dim]Matrix deep-link:[/]")
             console.print(f"  [link]{_safe_text(matrix_deep_link(search))}[/]")
+        for note in _matrix_link_caveats(search):
+            console.print(f"  [yellow]note: {_safe_text(note)}[/]")
     if google_url:
         # `google_flights_url` builds protobuf-encoded tfs= URLs via fast_flights.
         # That library has no documented exception surface — catch broadly so a
@@ -2250,7 +2330,7 @@ def _emit_urls(
 # ─────────────────────────── booking options (--sellers) ───────────────────
 
 
-def _sellers_blocker(
+def _sellers_blocker(  # noqa: PLR0911 — one return per reason the run is refused
     *,
     backend: str,
     multi_cabin: bool,
@@ -2258,6 +2338,7 @@ def _sellers_blocker(
     awards_json: bool,
     pick: int | None,
     page_size: int,
+    bags: Bags | None = None,
 ) -> str | None:
     """Why `--sellers` cannot run on this search, or None. Decided before any
     request, so a refusal costs the user nothing but the reading.
@@ -2270,6 +2351,10 @@ def _sellers_blocker(
         return "opens one row of one table; drop the extra --cabin values"
     if awards_only:
         return "opens a row of the results table, and --awards-only prints none"
+    if bags is not None:
+        return (
+            "lists fares from a booking page that is not asked for bags; drop --bags or --sellers"
+        )
     if backend == BACKEND_MATRIX:
         return "needs a Google Flights result, and this search runs on Matrix"
     if awards_json:
@@ -2323,8 +2408,8 @@ def _booking_options(
     gf_price: str | None,
     headed: bool,
 ) -> BookingOptions:
-    """Row `n`'s sellers, read off its booking page in Chrome, or exit 1 with
-    the reason on stderr.
+    """Row `n`'s sellers, read off its booking page in Chrome and held to the
+    search's price cap, or exit 1 with the reason on stderr.
 
     The URL is the pinned link's, so the row opened is the row the link pins,
     and the page is asked in the currency of `gf_price`, the row's Google price.
@@ -2359,10 +2444,30 @@ def _booking_options(
     flights = [(seg["carrier"], seg["flight"]) for seg in (*outbound, *(returning or []))]
     try:
         with interrupt_guard(), session_scope():
-            return booking_options(url, flights=flights, headed=headed)
+            options = booking_options(url, flights=flights, headed=headed)
     except GfBackendError as e:
         _report_page_refusal(heading, e)
         raise typer.Exit(1) from e
+    return _offers_under_cap(options, search.options, heading)
+
+
+def _offers_under_cap(options: BookingOptions, opts: SearchOptions, heading: str) -> BookingOptions:
+    """`options` holding only the offers the search's price cap admits, by the
+    rule every row is held to, or `options` itself when there is no cap. None
+    left fails the command, as no seller at all does: an empty list would read
+    as nobody selling the row."""
+    cap = opts.max_price
+    if cap is None:
+        return options
+    currency = opts.currency or "USD"
+    kept = tuple(
+        s
+        for s in options.sellers
+        if within_price_cap(s.price, options.currency, cap=cap, cap_currency=currency)
+    )
+    if not kept:
+        _no_booking_options(heading, f"no booking offer is at or under {currency} {cap:d}.")
+    return options._replace(sellers=kept)
 
 
 def _search_and_sellers(
@@ -2477,22 +2582,40 @@ def _gflight_url_caveats(search: Search) -> list[str]:
             break
     if any(lg.route_language or lg.extension for lg in legs):
         notes.append("routing/extension codes are not expressible in a Google link")
-    return notes
+    return notes + _bag_link_caveats(search)
 
 
 def _pinned_gflight_url_caveats(search: Search) -> list[str]:
-    """The pinned Google link's one narrowing: a leg whose airport sets Google's
-    page can't take is pinned with the itinerary's own airports instead."""
+    """The pinned Google link's narrowings: a leg whose airport sets Google's
+    page can't take is pinned with the itinerary's own airports instead, and
+    the link asks for no bags."""
     legs: tuple[Leg, ...] = getattr(search, "legs", ()) or ()
     reason = next(
         (r for lg in legs if (r := gf_leg_refusal(lg.origins, lg.destinations)) is not None), None
     )
-    if reason is None:
+    notes = (
+        []
+        if reason is None
+        else [
+            "the link shows the pinned itinerary's own airports, not every airport searched: "
+            f"Google's page can't take {reason}"
+        ]
+    )
+    return notes + _bag_link_caveats(search)
+
+
+def _bag_link_caveats(search: Search) -> list[str]:
+    """A Google link carries no bag count, so under `--bags` its prices leave
+    the bags out."""
+    if search.options.bags is None:
         return []
-    return [
-        "the link shows the pinned itinerary's own airports, not every airport searched: "
-        f"Google's page can't take {reason}"
-    ]
+    return ["the linked page's prices do not include the bags --bags asked for"]
+
+
+def _matrix_link_caveats(search: Search) -> list[str]:
+    if search.options.bags is None:
+        return []
+    return ["Matrix prices no bags, so the linked page's prices leave out those --bags asked for"]
 
 
 def _parse_iso(s: str) -> datetime | None:
@@ -2574,8 +2697,11 @@ def _seated_pax(p: Pax) -> int:
 _DEFAULT_RENDER_LIMIT = 10  # matches the `-n/--page-size` default
 
 
-def _render_search(res: SearchResult, limit: int = _DEFAULT_RENDER_LIMIT) -> None:
-    """Render the itinerary table, showing at most `limit` rows.
+def _render_search(
+    res: SearchResult, limit: int = _DEFAULT_RENDER_LIMIT, cap: str | None = None
+) -> None:
+    """Render the itinerary table, showing at most `limit` rows. `cap` names a
+    price cap `res` was cut to, for the sentence an empty answer prints.
 
     `limit` MUST be the same bound `--pick` is validated against. It was
     hardcoded to 10 while `--pick` checked against `len(res.solutions)`, so
@@ -2583,6 +2709,9 @@ def _render_search(res: SearchResult, limit: int = _DEFAULT_RENDER_LIMIT) -> Non
     "itinerary #15 pinned" for a row the user never saw — with no out-of-range
     warning, because 15 was in range for the unrendered list.
     """
+    if res.solution_count == 0 and cap is not None:
+        console.print(f"[yellow]No solutions at or under {_safe_text(cap)}.[/]")
+        return
     if res.solution_count == 0:
         console.print("[yellow]No solutions returned.[/]")
         return
@@ -2959,6 +3088,73 @@ def _build_pp_legs(legs: tuple[Leg, ...]) -> list[LegQuery]:
     return out
 
 
+def _cap_text(opts: SearchOptions | None) -> str | None:
+    """A search's price cap with its currency ("USD 250"), or None."""
+    if opts is None or opts.max_price is None:
+        return None
+    return f"{opts.currency or 'USD'} {opts.max_price:d}"
+
+
+def _page_cap_text(opts: SearchOptions | None) -> str | None:
+    """`_cap_text`, where Google's page was asked for the cap; otherwise None,
+    since a board fetched uncapped is not emptied by it."""
+    if opts is None or search_page_cap(opts.max_price, opts.currency or "USD") is None:
+        return None
+    return _cap_text(opts)
+
+
+def _price_capped(res: SearchResult, opts: SearchOptions) -> SearchResult:
+    """`res` holding only the solutions priced in the search's currency at or
+    under its price cap, or `res` itself when there is no cap.
+
+    Matrix has no price input, and it answers in price order, so the cut loses
+    no cheaper fare. Where the cap drops a fare of this page, the fares past the
+    page are over it too, so `solutionCount`, at the top of the raw document and
+    in its solution list, becomes the count kept. Where it drops none, the fares
+    past the page went unchecked, so Matrix's own total stays. The carrier x
+    stops grid is dropped from the table, because its cells are minima over
+    every fare; in the JSON it and Matrix's other blocks stay as served,
+    describing its whole answer."""
+    cap = opts.max_price
+    if cap is None:
+        return res
+    currency = opts.currency or "USD"
+
+    def admitted(price: str | None) -> bool:
+        code, amount = _split_price(price)
+        try:
+            value = float(amount)
+        except ValueError:
+            return False
+        return within_price_cap(value, code, cap=cap, cap_currency=currency)
+
+    kept = [it for it in res.solutions if admitted(it.price)]
+    count = {"solutionCount": len(kept)} if len(kept) < len(res.solutions) else {}
+    raw = res.raw
+    if raw is not None:
+        raw = {**raw, **count}
+        listing = raw.get("solutionList")
+        if isinstance(listing, dict):
+            served = cast("dict[str, Any]", listing)
+            raw["solutionList"] = {
+                **served,
+                "solutions": [
+                    sol
+                    for sol in cast("list[Any]", served.get("solutions") or [])
+                    if admitted(Itinerary.model_validate(sol).price)
+                ],
+                **count,
+            }
+    return res.model_copy(
+        update={
+            "solutions": kept,
+            "solution_count": count.get("solutionCount", res.solution_count),
+            "carrier_stop_matrix": None,
+            "raw": raw,
+        }
+    )
+
+
 def _run_matrix_path(
     *,
     legs: tuple[Leg, ...],
@@ -2976,6 +3172,11 @@ def _run_matrix_path(
 ) -> None:
     """Matrix path: Alkali call → optional cash render → optional fare rules →
     optional PP augmentation → URLs."""
+    # A cap holds each fare in the cap's currency, so Matrix is asked in it:
+    # left unset, it prices in its own default (GBP from LHR) and the cap keeps
+    # nothing. Uncapped, the body stays without the key.
+    if opts.max_price is not None:
+        opts = opts.model_copy(update={"currency": opts.currency or "USD"})
     search = SpecificDateSearch(legs=legs, options=opts)
     rps, impersonate = _resolve_rps(rps), _resolve_impersonate(impersonate)
     # SpecificDateSearch → SearchResult by client._parse_response dispatch.
@@ -2990,6 +3191,9 @@ def _run_matrix_path(
             fare_rules or _resolve_no_cache(no_cache),
         ),
     )
+    # Before anything reads it, so the pick, the fare rules, the awards and the
+    # links all draw from the fares under the cap.
+    res = _price_capped(res, opts)
     shown = res.solutions[: opts.page_size]
 
     def _rules() -> _FareRulesAnswer | None:
@@ -3028,7 +3232,7 @@ def _run_matrix_path(
     # `not json_out` for the reason given at the same gate in
     # `_run_gflight_path`: with awards on, the document is written below this.
     if not sel.awards_only and not json_out:
-        _render_search(res, opts.page_size)
+        _render_search(res, opts.page_size, cap=_cap_text(opts))
     # After the table, so a failure fetching the rules leaves the fares shown.
     rules = _rules() if fare_rules else None
     if rules is not None:
@@ -3342,7 +3546,14 @@ def _gflight_results(
             top_n=top_n,
             transport=transport,
             currency=requested,
-            keep=routing_keep(per_slice_preds, [lg.time_ranges for lg in legs]),
+            keep=routing_keep(
+                per_slice_preds,
+                [lg.time_ranges for lg in legs],
+                max_price=opts.max_price,
+                currency=requested,
+            ),
+            # A cap can empty a return board with no routing asked at all.
+            checks=_row_checks(legs, opts) if opts.max_price is not None else "the routing",
         )
     finally:
         # Named positively, because only rung 2 opens anything to close. The
@@ -3383,11 +3594,14 @@ def _note_other_currencies(results: list[Any], requested: str) -> None:
         )
 
 
-def _gflight_json_row(g: Any) -> dict[str, Any]:
+def _gflight_json_row(g: Any, bags: Bags | None = None) -> dict[str, Any]:
     """One `--format json` itinerary: fli's FlightResult plus the two things
     only this backend knows — Google's opaque `flight_id` and the per-leg
     legroom/amenity extract, which the human table shows and `model_dump()`
-    alone doesn't carry."""
+    alone doesn't carry.
+
+    Under `--bags`, also `bags_included`: the checked and carry-on bags Google
+    says this row's price covers, null where it does not say."""
     row: dict[str, Any] = {**g.flight.model_dump(mode="json"), "flight_id": g.flight_id}
     legs: list[Any] = row.get("legs") or []
     amenities: list[Any] = list(g.amenities)
@@ -3398,18 +3612,35 @@ def _gflight_json_row(g: Any) -> dict[str, Any]:
         # only because `_flight_leg` never populates fli's — if it ever does,
         # this write silently replaces it and needs its own key.
         leg["amenities"] = asdict(a)
+    if bags is not None:
+        checked, carry_on = cast("tuple[int | None, int | None]", g.bags_included)
+        row["bags_included"] = {"checked": checked, "carry_on": carry_on}
     return row
 
 
-def _gflight_json_document(results: list[Any]) -> list[Any]:
+def _gflight_json_document(results: list[Any], bags: Bags | None = None) -> list[Any]:
     """The `--format json` document of a Google board: one row per itinerary,
     a round trip's as its `[outbound, return]` pair."""
     out: list[Any] = []
     for r in results:
         items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
-        dumped = [_gflight_json_row(g) for g in items]
+        dumped = [_gflight_json_row(g, bags) for g in items]
         out.append(dumped if isinstance(r, tuple) else dumped[0])
     return out
+
+
+def _bags_by_itinerary(
+    results: list[Any], sr: SearchResult
+) -> dict[int, list[tuple[int | None, int | None]]]:
+    """Each itinerary of `sr`, by `id`, to the bags Google states for each of
+    its members, in slice order. `sr` is `results` adapted, and the adapter
+    carries no itinerary for an empty combination, so neither does this."""
+    members = [list(cast("tuple[Any, ...]", r)) if isinstance(r, tuple) else [r] for r in results]
+    members = [items for items in members if items]
+    return {
+        id(it): [cast("tuple[int | None, int | None]", g.bags_included) for g in items]
+        for it, items in zip(sr.solutions, members, strict=True)
+    }
 
 
 def _terminal_fare_key(r: Any) -> tuple[int, float]:
@@ -3536,6 +3767,7 @@ def _gf_refusal(  # noqa: PLR0911 — one return per refusal type; see the docst
     e: GfBackendError,
     *,
     transport: GfTransportMode = TRANSPORT_HTTP,
+    bags: bool = False,
 ) -> _GfRefusal:
     """User-facing text for a typed Google Flights refusal.
 
@@ -3567,13 +3799,22 @@ def _gf_refusal(  # noqa: PLR0911 — one return per refusal type; see the docst
 
     `transport` only changes the throttle wording. The browser rung runs no
     retry ladder, so "wait a moment and retry" would describe a recovery the
-    caller does not have."""
+    caller does not have. `bags` changes the way out: Matrix prices no bags, so
+    under `--bags` it is reached only by dropping them."""
+    remedy, remedy_opening = (
+        (
+            "drop [bold]--bags[/] to search Matrix, which prices no bags",
+            "Drop [bold]--bags[/] to search Matrix, which prices no bags",
+        )
+        if bags
+        else ("use [bold]--backend matrix[/]", "Use [bold]--backend matrix[/]")
+    )
     match e:
         case GfThrottledError() if transport == TRANSPORT_BROWSER:
             return _GfRefusal(
                 "Google Flights rate-limited the browser rung",
                 "[yellow]Google Flights rate-limited the browser rung.[/] It does not "
-                "retry, so use [bold]--backend matrix[/].",
+                f"retry, so {remedy}.",
             )
         case GfThrottledError():
             # Not "this IP": the budget is per client context, which is why the
@@ -3581,13 +3822,22 @@ def _gf_refusal(  # noqa: PLR0911 — one return per refusal type; see the docst
             return _GfRefusal(
                 "Google Flights rate-limited",
                 "[yellow]Google Flights rate-limited the request.[/] Wait a moment and "
-                "retry, use [bold]--gf-transport browser[/], or use [bold]--backend matrix[/].",
+                f"retry, use [bold]--gf-transport browser[/], or {remedy}.",
             )
         case GfConsentError():
             return _GfRefusal(
                 "Google Flights served its consent page",
                 "[yellow]Google served its consent page instead of flight results.[/] "
-                "Use [bold]--backend matrix[/].",
+                f"{remedy_opening}.",
+            )
+        case GfBrowserUnavailableError() if bags and e.remedy.endswith(BROWSER_DEFAULT_REMEDY):
+            from ._gflight_ids import browser_remedy as _browser_remedy  # noqa: PLC0415 — fli
+
+            browser_remedy = _browser_remedy(e, bags=True)
+            return _GfRefusal(
+                f"Google Flights' browser rung is unavailable — "
+                f"{_safe_text(e.reason)} {_safe_text(browser_remedy)}",
+                f"[yellow]{_safe_text(f'{e.reason} {browser_remedy}')}[/]",
             )
         case GfBrowserUnavailableError():
             # The note carries the reason AND the remedy. It is not the short
@@ -3607,7 +3857,7 @@ def _gf_refusal(  # noqa: PLR0911 — one return per refusal type; see the docst
             status = _safe_text(e.status_code)
             return _GfRefusal(
                 f"Google Flights returned HTTP {status}",
-                f"[yellow]Google Flights returned HTTP {status}.[/] Use [bold]--backend matrix[/], "
+                f"[yellow]Google Flights returned HTTP {status}.[/] {remedy_opening}, "
                 "or fetch the page the other way with [bold]--gf-transport http[/] or "
                 "[bold]browser[/].",
             )
@@ -3615,7 +3865,7 @@ def _gf_refusal(  # noqa: PLR0911 — one return per refusal type; see the docst
             return _GfRefusal(
                 "Google Flights' page shape changed",
                 "[red]Google Flights' page shape changed[/] — no rows could be read. "
-                f"Use [bold]--backend matrix[/]. ({_safe_text(e)})",
+                f"{remedy_opening}. ({_safe_text(e)})",
             )
         case GfTfsUnsupportedError():
             # Generic note: the backend picker keeps these queries off Google
@@ -3623,7 +3873,7 @@ def _gf_refusal(  # noqa: PLR0911 — one return per refusal type; see the docst
             return _GfRefusal(
                 _GF_DECLINED,
                 f"[red]Google Flights can't express this search:[/] {escape(e.reason)}. "
-                "Use [bold]--backend matrix[/].",
+                f"{remedy_opening}.",
             )
         case GfTransportError():
             # "unreachable", the same word the pin loop uses for a spent
@@ -3637,7 +3887,7 @@ def _gf_refusal(  # noqa: PLR0911 — one return per refusal type; see the docst
             return _GfRefusal(
                 "Google Flights was unreachable",
                 f"[yellow]{_safe_text(e)}[/] — the connection failed, not the "
-                "query. Use [bold]--backend matrix[/].",
+                f"query. {remedy_opening}.",
             )
         case GfPinIgnoredError():
             # The page loaded, the rows parsed, and they describe a segment
@@ -3648,7 +3898,7 @@ def _gf_refusal(  # noqa: PLR0911 — one return per refusal type; see the docst
             return _GfRefusal(
                 "Google Flights answered the wrong leg",
                 f"[red]Google Flights served a board for a leg nobody asked for[/] — "
-                f"{_safe_text(e)}. Use [bold]--backend matrix[/].",
+                f"{_safe_text(e)}. {remedy_opening}.",
             )
         case GfBackendError():
             # The base type is raised directly — a 5xx from the search page is
@@ -3700,21 +3950,29 @@ def _render_merged(rows: list[Any], *, legs: tuple[Leg, ...], top_n: int) -> Non
     console.print(t)
 
 
-def _row_checks(legs: tuple[Leg, ...]) -> str:
+def _row_checks(legs: tuple[Leg, ...], opts: SearchOptions | None = None) -> str:
     """What the row filter holds `legs`' rows to, for the sentence that says it
-    emptied a board. Plain text: it quotes the user's own codes."""
+    emptied a board, `opts`' price cap among them. Plain text: it quotes the
+    user's own codes."""
     from ._gf_postfilter import row_check_names  # noqa: PLC0415 — GF-only
     from .routing_predicates import classify  # noqa: PLC0415
 
     names = row_check_names(
         [classify(lg.route_language, lg.extension).predicates for lg in legs],
         [lg.time_ranges for lg in legs],
+        max_price=opts.max_price if opts is not None else None,
+        currency=(opts.currency if opts is not None else None) or "USD",
     )
     return _join_reasons(names) or "the routing"
 
 
 def _answer_gf_empty(
-    dropped: int, *, json_out: bool, pinned: int = 0, checks: str = "the routing"
+    dropped: int,
+    *,
+    json_out: bool,
+    pinned: int = 0,
+    checks: str = "the routing",
+    cap: str | None = None,
 ) -> None:
     """Answer a Google Flights search that has no rows and is not handed on.
 
@@ -3724,7 +3982,8 @@ def _answer_gf_empty(
 
     `pinned` is how many outbounds a round trip searched returns for. The
     reason names it, because outbounds below the pins may have matching
-    returns that were never searched."""
+    returns that were never searched. `cap` names the price cap the page was
+    asked for, if it was, so a board it served empty says no fare is under it."""
     if dropped and pinned:
         plural = "" if pinned == 1 else "s"
         err.print(
@@ -3742,6 +4001,8 @@ def _answer_gf_empty(
         # is for a person; to a consumer it is a parse error where an empty
         # answer belongs, and the two are indistinguishable from the exit code.
         sys.stdout.write(json.dumps([], indent=2))
+    elif not dropped and cap is not None:
+        console.print(f"[yellow]Google Flights: no fare at or under {_safe_text(cap)}.[/]")
     elif not dropped:
         console.print("[yellow]Google Flights: no results.[/]")
 
@@ -3796,7 +4057,7 @@ def _run_gflight_path(
         with interrupt_guard():
             results = _gflight_results(legs, opts, top_n, gf_mode, gf_headed)
     except GfBackendError as e:
-        refusal = _gf_refusal(e, transport=gf_mode)
+        refusal = _gf_refusal(e, transport=gf_mode, bags=opts.bags is not None)
         err.print(refusal.message)
         raise typer.Exit(1) from e
     except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
@@ -3823,7 +4084,8 @@ def _run_gflight_path(
             dropped,
             json_out=json_out,
             pinned=getattr(results, "pinned", 0),
-            checks=_row_checks(legs),
+            checks=_row_checks(legs, opts),
+            cap=_page_cap_text(opts),
         )
         return None
 
@@ -3862,7 +4124,7 @@ def _run_gflight_path(
     # models. Suppressing the noisy unknown-type chatter for this rendering
     # block keeps the boundary localized.
     if json_out and not run_pp:
-        out = _gflight_json_document(results)
+        out = _gflight_json_document(results, opts.bags)
         doc = (
             out
             if seller_row is None
@@ -3891,6 +4153,7 @@ def _run_gflight_path(
                 top_n=top_n,
                 match_carriers=_match_carriers(legs),
                 insight=insight,
+                bags=opts.bags,
             )
         except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
             raise
@@ -3919,6 +4182,7 @@ def _run_gflight_path(
             provider_filter=sel.provider_filter if sel is not None else None,
             seats_sources=sel.seats_sources() if sel is not None else None,
             cash_per_cabin=_cash_per_cabin_single(sr, opts.cabin),
+            bags_included=_bags_by_itinerary(results, sr) if opts.bags is not None else None,
         )
 
     # The URL lines are prose on stdout, and `_emit_urls` is shared text that
@@ -3954,6 +4218,7 @@ def _paint_first_gf_table(
     legs: tuple[Leg, ...],
     top_n: int,
     awards_only: bool,
+    opts: SearchOptions | None = None,
 ) -> None:
     """The Google Flights table, painted while Matrix is still in flight.
 
@@ -3992,9 +4257,15 @@ def _paint_first_gf_table(
         else:
             err.print("[dim]…refining with Matrix (authoritative fares)…[/]")
     elif not gf and "gf_err" not in state:
+        cap = _page_cap_text(opts)
         if getattr(gf, "dropped", 0):
             err.print(
-                f"[yellow]Google Flights: no itinerary matched {_safe_text(_row_checks(legs))}; "
+                f"[yellow]Google Flights: no itinerary matched "
+                f"{_safe_text(_row_checks(legs, opts))}; awaiting Matrix…[/]"
+            )
+        elif cap is not None:
+            err.print(
+                f"[yellow]Google Flights: no fare at or under {_safe_text(cap)}; "
                 "awaiting Matrix…[/]"
             )
         else:
@@ -4284,7 +4555,9 @@ def _run_enriched_path(  # noqa: PLR0915 — one weave's outcome arms, read in o
                 gf = []
             state["gf"] = gf
             _note_other_currencies(gf, requested)
-            _paint_first_gf_table(state, gf, legs=legs, top_n=top_n, awards_only=awards_only)
+            _paint_first_gf_table(
+                state, gf, legs=legs, top_n=top_n, awards_only=awards_only, opts=opts
+            )
 
     _run_the_weave(_go, state, gf_mode)
 
@@ -4334,7 +4607,8 @@ def _run_enriched_path(  # noqa: PLR0915 — one weave's outcome arms, read in o
         if not painted:
             raise typer.Exit(1)
         return
-    matrix_res = cast("SearchResult", matrix_res)
+    # Before the merge and the award overlay, so neither sees a fare over the cap.
+    matrix_res = _price_capped(cast("SearchResult", matrix_res), opts)
     _report_weave_aftermath(state)
 
     # Repaint: reconciled GF + Matrix, prices attributed.
@@ -5177,6 +5451,7 @@ def _render_gflight_table(
     top_n: int,
     match_carriers: frozenset[str] = frozenset(),
     insight: PriceInsight | None = None,
+    bags: Bags | None = None,
 ) -> None:
     """Render fli results as a rich table. Duck-typed: fli has no type stubs.
 
@@ -5185,6 +5460,8 @@ def _render_gflight_table(
     `match_carriers` enables codeshare-aware leg labels (see `_leg_display`).
     `insight`, Google's price insight for the search, is one line under the
     table, its amounts formatted the way the price column formats them.
+    `bags`, the `--bags` asked for, adds a column saying whether each row's
+    price includes them (`_bag_cell`).
 
     A round-trip combination can print two DIFFERENT prices, on its `Na` and
     `Nb` rows, and that reads as a bug until you know what each is: the `a` row
@@ -5221,6 +5498,8 @@ def _render_gflight_table(
     t.add_column("duration")
     t.add_column("legs")
     t.add_column("legroom")
+    if bags is not None:
+        t.add_column("bags")
     any_legroom = False
     for i, r in enumerate(_price_ordered(results)[:top_n], 1):
         items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
@@ -5239,6 +5518,7 @@ def _render_gflight_table(
             legroom_str = _fmt_gflight_legroom(fr.legs, amenities)
             if legroom_str:
                 any_legroom = True
+            bag_cell = () if bags is None else (_bag_cell(g.bags_included, bags),)
             # A row Google did not price is SHOWN, with the placeholder every
             # other absent amount in this CLI uses. Dropping it would shorten a
             # board the user asked `-n` rows of and make the count a lie, and a
@@ -5250,6 +5530,7 @@ def _render_gflight_table(
                 dur,
                 legs_str,
                 legroom_str,
+                *bag_cell,
             )
     console.print(t)
     if any_legroom:
@@ -5260,6 +5541,22 @@ def _render_gflight_table(
             f"(usually {_safe_text(insight.currency)}{insight.typical_low:.2f}"
             f"-{_safe_text(insight.currency)}{insight.typical_high:.2f})."
         )
+
+
+def _bag_cell(stated: tuple[int | None, int | None], asked: Bags) -> str:
+    """Whether a row's price includes the bags asked for: `incl.` when the row
+    says it covers at least as many of each kind asked for, `not incl.` when it
+    says fewer of one, `unknown` when it says neither."""
+    pairs = [
+        (have, want)
+        for have, want in zip(stated, (asked.checked, asked.carry_on), strict=True)
+        if want
+    ]
+    if any(have is not None and have < want for have, want in pairs):
+        return "not incl."
+    if all(have is not None for have, _ in pairs):
+        return "incl."
+    return "unknown"
 
 
 # AVERAGE/BELOW/ABOVE are pitch-relative judgments — collapse them to color on
@@ -5510,7 +5807,8 @@ _CURRENCY_HELP = (
     "Price in this currency: a 3-letter ISO 4217 code such as EUR. Matrix and "
     "Google Flights both price in it; the Matrix link does not carry it. Unset, "
     "Google Flights prices in USD and Matrix in its own default, often the "
-    "origin's currency, except in a table merging the two, where both use USD."
+    "origin's currency, except in a table merging the two or under --max-price, "
+    "where both use USD."
 )
 
 _GOOGLE_URL_HELP = (
@@ -5540,7 +5838,7 @@ def _resolve_format(*, fmt: str, json_flag: bool) -> str:
 
 
 @app.command()
-def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes the search
+def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or reroutes the search
     origin: Annotated[
         str | None,
         typer.Argument(help="Origin IATA (comma-list ok for multi-airport)"),
@@ -5673,6 +5971,37 @@ def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes th
         ),
         rich_help_panel=_GROUP_FILTERING,
     ),
+    max_price: Annotated[
+        int | None,
+        typer.Option(
+            "--max-price",
+            min=1,
+            metavar="N",
+            help=(
+                "Show only fares at or under N, in the search's currency (--currency; "
+                "default USD). N is compared with the printed price, which for a party "
+                "is the total. Google Flights is asked for a USD cap, and every row "
+                "is checked; Matrix is asked in the cap's currency and its answer cut to "
+                "the fares under it. One --cabin."
+            ),
+            rich_help_panel=_GROUP_FILTERING,
+        ),
+    ] = None,
+    bags_spec: Annotated[
+        str | None,
+        typer.Option(
+            "--bags",
+            metavar="CHECKED,CARRY",
+            help=(
+                "Price fares with CHECKED checked bags and CARRY carry-on bags (0 or 1; "
+                "default 0): '1' is one checked bag, '1,1' adds a carry-on. Each row "
+                "then says whether its price includes them. Google Flights only, since "
+                "Matrix prices no bags: refused where the search needs Matrix. One "
+                "traveler and one --cabin."
+            ),
+            rich_help_panel=_GROUP_FILTERING,
+        ),
+    ] = None,
     page_size: int = typer.Option(
         10,
         "--n",
@@ -5824,6 +6153,7 @@ def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes th
     """
     json_out = _resolve_format(fmt=fmt, json_flag=json_out) == "json"
     ccy = _resolve_currency(currency)
+    bags = _parse_bags(bags_spec) if bags_spec is not None else None
     # Deprecated-flag warning surfaces at runtime since hidden=True hides the
     # banner from --help.
     if no_pp or pp_only or pp_airlines or pp_cabin:
@@ -5845,6 +6175,12 @@ def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes th
         # Before the backend is announced: a refusal after "Using Matrix" reads
         # as a search that started and then failed.
         _refuse_fare_rules_conflicts(cabins=_resolve_cabin_list(cabin), sel=sel, json_out=json_out)
+    _refuse_cap_and_bag_conflicts(
+        cabins=_resolve_cabin_list(cabin),
+        max_price=max_price,
+        bags=bags,
+        seated=adults + children,
+    )
     resolved = _pick_backend(
         backend=backend,
         routing=routing,
@@ -5864,6 +6200,7 @@ def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes th
         show_only_available=only_available,
         fare_rules=fare_rules,
         adults=adults,
+        bags=bags,
     )
     if slice_specs:
         legs = tuple(_parse_slice_spec(s) for s in slice_specs)
@@ -5920,6 +6257,8 @@ def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes th
         show_only_available=only_available,
         page_size=page_size,
         currency=ccy,
+        max_price=max_price,
+        bags=bags,
     )
 
     run_awards = _should_run_awards(sel)
@@ -5936,6 +6275,7 @@ def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes th
             awards_json=run_awards and json_out,
             pick=pick,
             page_size=page_size,
+            bags=bags,
         )
     ):
         err.print(f"[red]--sellers {_safe_text(blocker)}.[/]")
@@ -5993,8 +6333,11 @@ def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes th
     if resolved == BACKEND_GFLIGHT:
         # GF can serve this query — paint it fast (~1s), then enrich against
         # Matrix (authoritative) and repaint a merged table. `--fast` (or JSON
-        # output, which wants a single stable shape) takes the GF-only path.
-        if not fast and not json_out:
+        # output, which wants a single stable shape) takes the GF-only path, and
+        # so does `--bags`: Matrix would answer it without the bags.
+        if not fast and not json_out and bags is not None:
+            err.print("[dim]No Matrix enrichment: Matrix prices no bags.[/]")
+        elif not fast and not json_out:
             _run_enriched_path(
                 legs=legs,
                 opts=opts,
@@ -6025,13 +6368,13 @@ def search(  # noqa: PLR0912 — one branch per flag that refuses or reroutes th
             gf_mode=gf_mode,
             gf_headed=gf_headed,
             sellers=sellers,
-            matrix_fallback=backend == BACKEND_AUTO,
+            matrix_fallback=backend == BACKEND_AUTO and bags is None,
         )
         if unmatched is None:
             return
         err.print(
             f"[dim]Using Matrix: no Google Flights itinerary matched "
-            f"{_safe_text(_row_checks(legs))} ({unmatched:d} rows filtered out).[/]"
+            f"{_safe_text(_row_checks(legs, opts))} ({unmatched:d} rows filtered out).[/]"
         )
 
     _run_matrix_path(

@@ -2987,8 +2987,9 @@ def test_one_failing_cabin_does_not_take_the_other_cabins_down(
         transport: Any = None,
         currency: str = "USD",
         keep: Any = None,
+        checks: str = "the routing",
     ) -> list[Any]:
-        _ = top_n, transport, currency, keep
+        _ = top_n, transport, currency, keep, checks
         asked.append(search.options.cabin)
         if search.options.cabin is Cabin.BUSINESS:
             raise RuntimeError(f"fli said [/x]no{_DRIVES_THE_TERMINAL}")
@@ -3842,6 +3843,8 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_render_gflight_table", "dur"),  # "3h05m", from an integer count of minutes
         ("_render_gflight_table", "legs_str"),
         ("_render_gflight_table", "legroom_str"),
+        # Empty, or one of the three literals `_bag_cell` writes.
+        ("_render_gflight_table", "bag_cell"),
         # The cabin letters are this module's own map, keyed by its own enum.
         ("_render_multi_cabin_search", "cabin_labels"),
         ("_render_multi_cabin_search", "sort_label"),
