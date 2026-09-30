@@ -46,7 +46,9 @@ def to_fli_filter(s: Search) -> Any:
         Airport as FliAirport,
     )
     from fli.models.google_flights.base import (  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
+        BagsFilter,
         MaxStops,
+        PriceLimit,
         SeatType,
         TimeRestrictions,
         TripType,
@@ -132,6 +134,7 @@ def to_fli_filter(s: Search) -> Any:
     stops = stops_map.get(mx, MaxStops.ANY) if mx is not None else MaxStops.ANY
 
     p = s.options.pax
+    cap, bags = s.options.max_price, s.options.bags
     return FlightSearchFilters(
         # fli's PassengerInfo takes all four types and permits adults=0, so
         # pass the party through as asked. The old `or 1` SYNTHESIZED an adult
@@ -148,6 +151,14 @@ def to_fli_filter(s: Search) -> Any:
         stops=stops,
         seat_type=cab_map[s.options.cabin],
         trip_type=trip_map.get(len(segs), TripType.MULTI_CITY),
+        # The page prices the cap in its own `curr=`, so fli's currency would
+        # only restate it, or contradict it.
+        price_limit=PriceLimit(max_price=cap, currency=None) if cap is not None else None,
+        bags=(
+            BagsFilter(checked_bags=bags.checked, carry_on=bool(bags.carry_on))
+            if bags is not None
+            else None
+        ),
     )
 
 

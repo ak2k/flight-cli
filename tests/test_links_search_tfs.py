@@ -42,7 +42,11 @@ from fli.models.google_flights.flights import (
 )
 
 from flight_cli._gf_errors import GfTfsUnsupportedError
-from flight_cli.links import build_search_tfs, google_flights_search_page_url
+from flight_cli.links import (
+    _encode_gflight_pinned_tfs,  # pyright: ignore[reportPrivateUsage]  # byte-exact against Google's own pages
+    build_search_tfs,
+    google_flights_search_page_url,
+)
 
 # fli's FlightSegment validator rejects a past travel date, so the fixture dates
 # are derived from today rather than pinned — a literal rots the suite.
@@ -267,8 +271,6 @@ def test_unpinned_segment_carries_no_selected_leg() -> None:
         ("airlines_exclude", {"airlines_exclude": [Airline["AA"]]}),
         ("alliances", {"alliances": [Alliance.ONEWORLD]}),
         ("alliances_exclude", {"alliances_exclude": [Alliance.SKYTEAM]}),
-        ("price_limit", {"price_limit": PriceLimit(max_price=500)}),
-        ("bags", {"bags": BagsFilter(checked_bags=1)}),
         ("emissions", {"emissions": EmissionsFilter.LESS}),
         ("exclude_basic_economy", {"exclude_basic_economy": True}),
         ("sort_by", {"sort_by": SortBy.CHEAPEST}),
@@ -360,6 +362,77 @@ def _page_tfs(b64: str) -> bytes:
 )
 def test_a_filter_encodes_as_the_page_google_served_it(page: str, kwargs: dict[str, Any]) -> None:
     assert _undated(build_search_tfs(_filters(**kwargs))) == _undated(_page_tfs(page))
+
+
+# ─────────── a price cap (12) and bags (13), as Google served them ───────────
+#
+# The pages a live check fetched with each field set, JFK on 2026-11-04. Both
+# fields are top level, after the cabin (9) and before 14; a zero bag count is
+# left out of 13, the form those pages carried.
+
+_PAGE_LAX_CAP_250 = "CBwQAhoeEgoyMDI2LTExLTA0agcIARIDSkZLcgcIARIDTEFYQAFIAWD6AXABmAEC"
+_PAGE_LHR_CAP_300 = "CBwQAhoeEgoyMDI2LTExLTA0agcIARIDSkZLcgcIARIDTEhSQAFIAWCsAnABmAEC"
+_PAGE_LAX_CHECKED_1 = "CBwQAhoeEgoyMDI2LTExLTA0agcIARIDSkZLcgcIARIDTEFYQAFIAWoCGAFwAZgBAg"
+_PAGE_LAX_CARRY_1 = "CBwQAhoeEgoyMDI2LTExLTA0agcIARIDSkZLcgcIARIDTEFYQAFIAWoCEAFwAZgBAg"
+
+
+def _dated_page_tfs(dest: str, **kw: Any) -> bytes:
+    """The search-page tfs= for JFK to `dest` on the pages' own date, which
+    `build_search_tfs` cannot write: fli refuses a past travel date."""
+    return _encode_gflight_pinned_tfs(
+        slices=[{"date": "2026-11-04", "origin": "JFK", "destination": dest, "segments": []}],
+        cabin=1,
+        adults=1,
+        children=0,
+        infants_in_seat=0,
+        infants_on_lap=0,
+        pin_max_u64=False,
+        **kw,
+    )
+
+
+@pytest.mark.parametrize(
+    "page,dest,kwargs",
+    [
+        (_PAGE_LAX_CAP_250, "LAX", {"max_price": 250}),
+        (_PAGE_LHR_CAP_300, "LHR", {"max_price": 300}),
+        (_PAGE_LAX_CHECKED_1, "LAX", {"bags": (1, 0)}),
+        (_PAGE_LAX_CARRY_1, "LAX", {"bags": (0, 1)}),
+    ],
+    ids=["lax-cap-250", "lhr-cap-300", "checked-1", "carry-on-1"],
+)
+def test_a_cap_or_bags_encodes_byte_for_byte_as_google_served_it(
+    page: str, dest: str, kwargs: dict[str, Any]
+) -> None:
+    assert base64.urlsafe_b64encode(_dated_page_tfs(dest, **kwargs)).rstrip(b"=").decode() == page
+
+
+def test_both_bag_kinds_write_the_ui_s_own_field() -> None:
+    """The UI's bags dialog wrote `agQQARgB`, `{2: 1, 3: 1}`, for one of each."""
+    assert _page_tfs("agQQARgB") in _dated_page_tfs("LAX", bags=(1, 1))
+
+
+def test_no_bag_asked_for_writes_no_field() -> None:
+    assert _dated_page_tfs("LAX", bags=(0, 0)) == _dated_page_tfs("LAX")
+
+
+def test_the_search_page_carries_the_cap_and_the_bags() -> None:
+    fields = _decode(
+        build_search_tfs(
+            _filters(
+                price_limit=PriceLimit(max_price=250),
+                bags=BagsFilter(checked_bags=2, carry_on=True),
+            )
+        )
+    )
+    assert fields[12] == [250]
+    assert _decode(fields[13][0]) == {2: [1], 3: [2]}
+
+
+def test_a_search_with_neither_writes_neither_field() -> None:
+    fields = _decode(build_search_tfs(_filters()))
+    assert 12 not in fields
+    assert 13 not in fields
 
 
 def test_the_ui_writes_all_four_hours_once_one_is_set() -> None:
@@ -533,6 +606,9 @@ def test_every_filter_field_is_claimed_by_exactly_one_set() -> None:
     assert segment_read == set(FlightSegment.model_fields)
     # `airports` is read to refuse it.
     assert {"airports", "min_duration", "max_duration"} == set(LayoverRestrictions.model_fields)
+    # The cap's currency is the page's `curr=`, so only the amount is written.
+    assert {"max_price", "currency"} == set(PriceLimit.model_fields)
+    assert {"checked_bags", "carry_on"} == set(BagsFilter.model_fields)
     assert {
         "earliest_departure",
         "latest_departure",

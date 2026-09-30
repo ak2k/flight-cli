@@ -76,6 +76,8 @@ PR #230:
 3.12 = maximum duration, minutes
 3.13 = origin   3.14 = destination   3.15 = layover airports (not written)
 3.17/3.18 = min/max layover minutes
+12 = price cap, whole units of the page's `curr=` (sent on a USD page only, up to 2**31-1)
+13 = bags {2: carry-on (0 or 1), 3: checked count}, a zero count left out
 ```
 
 The hour fields are whole hours and a "latest" hour is the last hour included:
@@ -129,6 +131,70 @@ The stop ceiling and an alliance are not checked: the stops are left to Google's
 own filter, and nothing here says which carrier is in which alliance. Children
 are priced, not checked. When these checks empty a board, the empty-answer line
 names every active check.
+
+**A price cap and bags (`search --max-price N`, `--bags CHECKED[,CARRY]`).**
+Both are top-level fields, written after the cabin (9) and before 14.
+- Field 12 is a varint of whole units of the page's currency. On the JFK-LAX
+  2026-11-04 page a cap of 250 served 26 rows at $204-$249, prices unchanged;
+  JFK-LHR at 300 served priced rows at $293-$299 and kept 4 unpriced rows.
+  Google honored it on a round trip's pinned return board as well (JFK-LAX
+  10-20/27 at 450: all 15 returns $398-$442). Only a USD page is asked for
+  it: a EUR page asked for a cap served fewer of the fares under it than the
+  uncapped EUR page. JFK-LAX 2026-10-20 at EUR 240 served 34 rows against 45
+  at or under 240 uncapped, all at the same prices; the 11 missing were AA
+  connections at EUR 196-232. The USD page at 250 served all 16 rows the
+  uncapped page had at or under $250. Off USD the page is fetched uncapped and the row check alone
+  applies the cap. Every row is still held to it:
+  `routing_keep` drops a row priced over the cap, unpriced, or priced in
+  another currency, on every board, and an emptied board is reported as not
+  matching "a price cap of USD 250". A board Google served empty says "no fare
+  at or under USD 250" only when the page was asked for the cap; one fetched
+  uncapped says "no results". N is compared with the printed price, which for
+  a party is the total. `--sellers` holds the booking page's offers to the
+  same rule, in its table and in `booking_options`; when none is left it says
+  so on one stderr line and exits 1.
+- Matrix has no price input, so it is asked in the cap's currency (USD when
+  `--currency` is unset). Left unset, it priced LHR-JFK in GBP (cheapest
+  GBP1004) and a USD 2000 cap kept none of it (2026-09-29). `cli._price_capped`
+  cuts its page to the fares under the cap before the pick, the fare rules, the
+  awards, the links and the enriched merge read it; Matrix answers in price
+  order, so the cut loses no cheaper fare. When the cap drops a row of the
+  fetched page, the JSON's
+  `solutionCount` (top level and in `solutionList`) and the table's count are
+  the kept rows (the GBP JFK-LHR page at 690 keeps 14 of 25). When it drops
+  none, the fares past the page went unchecked, so both keep Matrix's total, as
+  uncapped (88 beside the same page's 25 rows at 736); a larger `-n` fetches
+  more of them. The facets, the price slider and `carrierStopMatrix` stay as
+  served. The table prints no carrier x stops grid, whose cells are minima
+  over every fare.
+- Field 13 is `{2: carry-on, 3: checked}`. The forms sent live left a zero
+  count out (checked 1 = `agIYAQ`, carry-on 1 = `agIQAQ`); the UI writes both
+  (`agQQARgB` for one of each). JFK-LAX with one checked bag repriced all 95
+  rows by $45-$55; EWR-ORD with a carry-on repriced the UA rows by $50-$95 and
+  F9 by $40, leaving AA, DL and B6, which include one; on JFK-LHR both were
+  no-ops. Google honors it on a pinned return board too.
+- `row[4][6]` is `[checked, carry-on]`: the bags the row's price covers,
+  matching the page's own "1 carry-on bag included. 0 checked bags included".
+  JFK-LAX states `[0, 1]` on all 95 rows and `[1, 1]` with one checked bag
+  asked; JFK-LHR states `[null, 1]` on 97 rows and nothing on 4; EWR-ORD with a
+  carry-on asked states `[0, 1]` on all 74. A missing, short or malformed slot
+  is "not stated" and never drops the row; some rows of a round trip state
+  nothing. Under `--bags` each JSON row (each member of a pair) carries
+  `bags_included: {checked, carry_on}`, null where not stated, as does each
+  cash match in the award document (its own slice's statement), and the table a
+  `bags` column: `incl.` only when the row states at least the count asked of
+  each kind asked for, `not incl.` when it states fewer, `unknown` otherwise.
+- The statement and field 13 both count the whole party: 2 adults state
+  `[0, 2]`, and with 13 set JFK-LAX 2 adults cost $45 more once and 102 of 102
+  rows stated nothing. So `--bags` takes one seated traveler.
+- Matrix prices no bags, so `--bags` never reaches it: `--backend matrix` is
+  refused, and on `auto` any reason that would send the search to Matrix
+  refuses it instead, naming the reason. It skips the Matrix enrichment and
+  the fallback after the row check empties a board, and `--sellers` is
+  refused, since the booking page is not asked for bags. No refusal under
+  `--bags` points at `--backend matrix`; it says to drop `--bags`.
+- Neither flag takes more than one `--cabin`. Printed Google links carry
+  neither field; under `--bags` each link says its prices leave the bags out.
 
 The date grids do not serve any of the new constraints yet: `page_can_encode`
 and each predicate's `Tier` still answer for them, and they have no rows to

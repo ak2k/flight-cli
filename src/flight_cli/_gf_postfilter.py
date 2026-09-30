@@ -13,7 +13,8 @@ silently dropped.
 
 Google has ignored a field it was sent (a carrier exclude on JFK-LHR), so what
 the page encodes is checked here too wherever the row shows it: the carrier
-include, the maximum duration, the layover minutes and the departure time.
+include, the maximum duration, the layover minutes, the departure time and a
+price cap.
 The stop ceiling is left to Google's own filter, and so is an alliance, for
 want of a membership table.
 
@@ -32,7 +33,7 @@ import itertools
 import re
 from typing import TYPE_CHECKING, Any
 
-from .domain import time_bounds
+from .domain import time_bounds, within_price_cap
 from .routing_predicates import (
     AlliancePred,
     CarrierPred,
@@ -254,15 +255,25 @@ def _row_passes(row: Any, predicates: Iterable[Predicate], times: Sequence[TimeO
 def routing_keep(
     per_slice_predicates: Sequence[Sequence[Predicate]],
     per_slice_times: Sequence[Sequence[TimeOfDay]] = (),
+    *,
+    max_price: int | None = None,
+    currency: str = "USD",
 ) -> Callable[[int, Any], bool] | None:
     """The per-leg filter `_gflight_ids.search_with_ids` applies to each board
     it is served: `keep(i, row)` is whether one Google Flights row passes slice
-    `i`'s predicates and departs inside its time window. None when no slice
-    carries either."""
-    if not any(per_slice_predicates) and not any(per_slice_times):
+    `i`'s predicates, departs inside its time window and is priced in
+    `currency` at or under `max_price`. None when nothing is asked of a row.
+
+    The cap is checked on every board, a round trip's outbound as well as each
+    return: whether or not the page was asked for it, every row is held to it."""
+    if not any(per_slice_predicates) and not any(per_slice_times) and max_price is None:
         return None
 
     def keep(leg: int, row: Any) -> bool:
+        if max_price is not None and not within_price_cap(
+            row.flight.price, row.flight.currency, cap=max_price, cap_currency=currency
+        ):
+            return False
         preds = per_slice_predicates[leg] if leg < len(per_slice_predicates) else ()
         times = per_slice_times[leg] if leg < len(per_slice_times) else ()
         if not _row_passes(row, preds, times):
@@ -294,6 +305,9 @@ def _row_check_name(pred: Predicate) -> str | None:
 def row_check_names(
     per_slice_predicates: Sequence[Sequence[Predicate]],
     per_slice_times: Sequence[Sequence[TimeOfDay]] = (),
+    *,
+    max_price: int | None = None,
+    currency: str = "USD",
 ) -> list[str]:
     """Every check `routing_keep` applies to a row, in the user's vocabulary,
     for the sentence that says what emptied a board."""
@@ -301,6 +315,8 @@ def row_check_names(
     for label, times in zip(("departure", "return"), per_slice_times, strict=False):
         if times:
             names.append(f"a {label}-time window ({', '.join(t.value for t in times)})")
+    if max_price is not None:
+        names.append(f"a price cap of {currency} {max_price:d}")
     return list(dict.fromkeys(names))
 
 
