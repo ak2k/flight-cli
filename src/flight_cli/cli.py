@@ -7540,7 +7540,7 @@ def doctor(fmt: str = _FORMAT_OPT) -> None:
     t = Table(title="flight doctor")
     t.add_column("check", no_wrap=True)
     t.add_column("status", no_wrap=True)
-    t.add_column("detail")
+    t.add_column("detail", overflow="fold")
     t.add_column("time", justify="right", no_wrap=True)
     for c in report.checks:
         t.add_row(
