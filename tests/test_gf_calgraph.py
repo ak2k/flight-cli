@@ -814,6 +814,22 @@ def test_the_graph_takes_what_google_applies_from_its_url(search: CalendarSearch
             ),
             "a minimum layover (180 min) above the maximum (60 min) on the return leg",
         ),
+        # Codes run together without `;`: the parser reads the first bound
+        # alone, so the page would ask without the rest. Refused as the base
+        # refused them.
+        (_search(extension="MAXDUR 9:00 MAXCONNECT 1:00"), "a maximum trip duration (540 min)"),
+        (_search(extension="MAXDUR 9:00 -CODESHARE"), "a maximum trip duration (540 min)"),
+        (_search(extension="MAXCONNECT 1:00 MINCONNECT 3:00"), "a layover-time bound"),
+        (_search(extension="MAXCONNECT 1:00 2:00"), "a layover-time bound"),
+        (_search(extension="MINCONNECT 3:00 MAXCONNECT 1:00"), "a Tier-2 extension code"),
+        (
+            _search(nights=7, extension="MAXDUR 9:00", extension_ret="MAXDUR 9:00 MAXCONNECT 1:00"),
+            "a maximum trip duration (540 min)",
+        ),
+        (
+            _search(nights=7, extension="MAXDUR 9:00 MAXCONNECT 1:00", extension_ret="MAXDUR 9:00"),
+            "a maximum trip duration (540 min)",
+        ),
     ],
     ids=[
         "operating-exclude",
@@ -849,6 +865,13 @@ def test_the_graph_takes_what_google_applies_from_its_url(search: CalendarSearch
         "wider-before-legs-differ",
         "return-leg-two-carriers",
         "return-leg-minimum-above-maximum",
+        "maxdur-runs-into-maxconnect",
+        "maxdur-runs-into-codeshare",
+        "maxconnect-runs-into-minconnect",
+        "maxconnect-two-arguments",
+        "minconnect-runs-into-maxconnect",
+        "return-leg-runs-on",
+        "outbound-runs-on",
     ],
 )
 def test_the_graph_refuses_the_rest_by_name(search: CalendarSearch, reason: str) -> None:
@@ -1233,6 +1256,9 @@ _KEPT = [
     ({"children": 1}, "a passenger type other than adults"),
     ({"extension": "MAXDUR 0:00"}, "a maximum trip duration of 0 minutes"),
     ({"depart_times": "morning"}, "a departure-time window"),
+    ({"extension": "MAXDUR 9:00 MAXCONNECT 1:00"}, "a maximum trip duration (540 min)"),
+    ({"extension": "MAXCONNECT 1:00 MINCONNECT 3:00"}, "a layover-time bound"),
+    ({"extension": "MINCONNECT 3:00 MAXCONNECT 1:00"}, "a Tier-2 extension code"),
 ]
 _KEPT_IDS = [
     "operating-exclude",
@@ -1242,6 +1268,9 @@ _KEPT_IDS = [
     "children",
     "maxdur-0",
     "morning",
+    "maxdur-runs-into-maxconnect",
+    "maxconnect-runs-into-minconnect",
+    "minconnect-runs-into-maxconnect",
 ]
 
 

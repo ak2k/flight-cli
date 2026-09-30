@@ -48,6 +48,7 @@ from .routing_predicates import (
     Tier,
     classify,
     page_can_encode,
+    parse_extension,
 )
 
 if TYPE_CHECKING:
@@ -206,7 +207,8 @@ def graph_blocker(search: CalendarSearch) -> str | None:  # noqa: PLR0911 — on
     minimum layover, a maximum layover, and a departure-time window the page's
     whole hours bound exactly; each was measured narrowing the graph (one-way
     LGA-LAX, and a carrier include on a round trip). A round trip's time window
-    drew a graph with no priced date, so it is refused.
+    drew a graph with no priced date, so it is refused, and so is a bound the
+    parser read from a directive that runs on past its argument.
 
     Refusals are tried in the order the narrower gate tries them, so a calendar
     that neither admits is named as that gate names it: routing the grids refuse
@@ -214,7 +216,9 @@ def graph_blocker(search: CalendarSearch) -> str | None:  # noqa: PLR0911 — on
     then a time window, the options, a predicate the page cannot carry, a
     combination the URL would write wider than asked, and legs that differ."""
     per_leg = [classify(leg.route_language, leg.extension).predicates for leg in search.legs]
-    if any(p.tier is not Tier.GF_NATIVE and not _graph_takes(p) for ps in per_leg for p in ps):
+    misread = _misread_bounds(search)
+    taken = {p for ps in per_leg for p in ps if p not in misread and _graph_takes(p)}
+    if any(p.tier is not Tier.GF_NATIVE and p not in taken for ps in per_leg for p in ps):
         return grid_routing_blocker(search) or "a constraint the price grid can't honor"
     for i, predicates in enumerate(per_leg):
         if (phrase := unwritten_constraint(predicates)) is not None:
@@ -228,7 +232,7 @@ def graph_blocker(search: CalendarSearch) -> str | None:  # noqa: PLR0911 — on
             return f"a {which}-time window"
     if (switch := _option_blocker(search.options)) is not None:
         return switch
-    _, reasons = page_can_encode(p for ps in per_leg for p in ps if not _graph_takes(p))
+    _, reasons = page_can_encode(p for ps in per_leg for p in ps if p not in taken)
     if reasons:
         return "; ".join(dict.fromkeys(reasons))
     for i, predicates in enumerate(per_leg):
@@ -250,6 +254,23 @@ def _graph_takes(p: Predicate) -> bool:
             return True
         case _:
             return False
+
+
+def _misread_bounds(search: CalendarSearch) -> set[Predicate]:
+    """The duration and layover bounds read from an extension directive with
+    words after its one argument.
+
+    The parser reads such a directive's first argument and drops the rest, so
+    `MAXDUR 9:00 MAXCONNECT 1:00`, two codes missing their `;`, is a duration
+    alone, and the page would ask without the layover bound."""
+    return {
+        p
+        for leg in search.legs
+        for directive in (leg.extension or "").split(";")
+        if len(directive.split()) > 2  # noqa: PLR2004 — a keyword and its one argument
+        for p in parse_extension(directive)
+        if isinstance(p, MaxDurationPred | ConnectTimePred)
+    }
 
 
 def _hours_bound_exactly(buckets: Sequence[TimeOfDay]) -> bool:
