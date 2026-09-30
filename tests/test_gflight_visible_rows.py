@@ -669,7 +669,7 @@ def test_the_routing_post_filter_still_reads_the_whole_board(
     past an `-n 5` window, and a search narrowed to five rows before filtering
     would answer a satisfiable constraint with 'no results'."""
     keeper = 24
-    gf_session(gf_board(_BOARD_ROWS, distinct_at=keeper))
+    gf_session(gf_board(_BOARD_ROWS, distinct_at=keeper, one_flight=True))
     cli._run_gflight_path(
         legs=_one_way(route_language="AS627"),
         opts=SearchOptions(cabin=Cabin.COACH),
@@ -678,7 +678,7 @@ def test_the_routing_post_filter_still_reads_the_whole_board(
     )
     rows = _json_rows(capsys)
     assert len(rows) == 1
-    assert [leg["flight_number"] for leg in rows[0]["legs"]] == ["627", "305"]
+    assert [leg["flight_number"] for leg in rows[0]["legs"]] == ["627", "627"]
 
 
 def _prices(rows: list[Any]) -> list[float]:

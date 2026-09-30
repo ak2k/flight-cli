@@ -78,7 +78,24 @@ def test_routing_specific_flight() -> None:
 
 def test_routing_flight_range() -> None:
     (p,) = parse_routing("UA1000-2000+")
-    assert p == SpecificFlightPred(carrier="UA", low=1000, high=2000)
+    assert p == SpecificFlightPred(carrier="UA", low=1000, high=2000, quantifier="+")
+
+
+@pytest.mark.parametrize(
+    ("token", "several", "text"),
+    [
+        ("UA882", False, "UA882"),
+        ("UA882?", False, "UA882?"),
+        ("ua882+", True, "UA882+"),
+        ("UA1000-2000*", True, "UA1000-2000*"),
+    ],
+)
+def test_a_flight_numbers_quantifier_says_one_flight_or_several(
+    token: str, several: bool, text: str
+) -> None:
+    (p,) = parse_routing(token)
+    assert isinstance(p, SpecificFlightPred)
+    assert (p.several, p.text) == (several, text)
 
 
 def test_routing_flight_exclusion_escalates() -> None:

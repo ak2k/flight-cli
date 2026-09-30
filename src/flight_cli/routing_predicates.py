@@ -153,13 +153,26 @@ class ExcludeCodesharePred:
 
 @dataclass(frozen=True, slots=True)
 class SpecificFlightPred:
-    """A specific flight number or range must appear — post-filter on flight #.
-    A single number has low == high."""
+    """A lone flight-number token, the whole slice to Matrix — post-filter on
+    flight #. A single number has low == high. `quantifier` is the token's own:
+    bare or `?` is one flight, every leg under one number; `+` or `*` is one or
+    more flights, each numbered in the range."""
 
     carrier: str
     low: int
     high: int
+    quantifier: str = ""
     tier: Tier = field(default=Tier.GF_POSTFILTER, init=False)
+
+    @property
+    def several(self) -> bool:
+        return self.quantifier in {"+", "*"}
+
+    @property
+    def text(self) -> str:
+        """The token, spelled canonically (`aa01+` reads `AA1+`)."""
+        numbers = f"{self.low}" if self.low == self.high else f"{self.low}-{self.high}"
+        return f"{self.carrier}{numbers}{self.quantifier}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,7 +240,7 @@ _ALLIANCES = frozenset({"oneworld", "skyteam", "star-alliance"})
 _RE_PLACEHOLDER = re.compile(r"^F[+*]$", re.IGNORECASE)
 _RE_NONSTOP = re.compile(r"^N(?::([A-Za-z]{2}))?$", re.IGNORECASE)
 _RE_CARRIER = re.compile(r"^(~?)(O:|C:)?([A-Za-z]{2})([+*])$", re.IGNORECASE)
-_RE_FLIGHTNUM = re.compile(r"^(~?)([A-Za-z]{2})(\d+)(?:-(\d+))?[+*?]?$", re.IGNORECASE)
+_RE_FLIGHTNUM = re.compile(r"^(~?)([A-Za-z]{2})(\d+)(?:-(\d+))?([+*?]?)$", re.IGNORECASE)
 _RE_AIRPORT = re.compile(r"^(~?)(?:X:)?([A-Za-z]{3}(?:,[A-Za-z]{3})*)$", re.IGNORECASE)
 
 
@@ -266,7 +279,7 @@ def _parse_single_routing_token(tok: str) -> list[Predicate] | None:
     if (m := _RE_FLIGHTNUM.match(tok)) and m.group(1) != "~":
         low = int(m.group(3))
         high = int(m.group(4)) if m.group(4) else low
-        return [SpecificFlightPred(carrier=m.group(2).upper(), low=low, high=high)]
+        return [SpecificFlightPred(m.group(2).upper(), low, high, quantifier=m.group(5))]
     return None
 
 
@@ -439,8 +452,10 @@ def _page_reason(pred: Predicate) -> str | None:  # noqa: PLR0911, PLR0912 — o
             return "an overnight-stop exclusion"
         case ExcludeCodesharePred():
             return "a codeshare exclusion"
+        case SpecificFlightPred() if pred.low == pred.high:
+            return f"a specific flight number ({pred.text})"
         case SpecificFlightPred():
-            return f"a specific flight number ({pred.carrier}{pred.low})"
+            return f"a flight-number range ({pred.text})"
         case _:
             assert_never(pred)
 

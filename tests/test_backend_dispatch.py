@@ -248,10 +248,10 @@ def test_stop_ceiling_above_two_goes_to_matrix() -> None:
         # 3.6 is one include list: Google would answer either.
         ("extension", "ALLIANCE oneworld; ALLIANCE skyteam"),
         ("extension", "AIRLINES AA; ALLIANCE star-alliance"),
-        # Post-filterable, but Matrix reads both positionally and the filter
-        # does not: bare AS21 is one flight, `F* ~DUB F*` one connection.
-        ("routing", "AS21"),
-        ("routing", "AS21+"),
+        # Post-filterable, but not with Matrix's meaning: `F* ~DUB F*` is one
+        # connection, and `AA1-3000+` may be several flights in the range.
+        ("routing", "AA1-3000+"),
+        ("routing", "AA1-3000*"),
         ("routing", "F* ~DUB F*"),
         ("extension", "-CITIES DUB"),
     ],
@@ -273,6 +273,11 @@ def test_auto_unencodable_constraint_picks_matrix(flag: str, value: object) -> N
         ("extension", "-AIRLINES B6 9K"),
         ("extension", "OPAIRLINES LH"),
         ("routing", "~BA+"),
+        # One flight, every leg of the slice: the filter reads it as Matrix does.
+        ("routing", "AS21"),
+        ("routing", "AS21+"),
+        ("routing", "DL747?"),
+        ("routing", "AA1-3000"),
     ],
 )
 def test_auto_serves_post_filterable_tier2_on_google(flag: str, value: object) -> None:
@@ -384,6 +389,7 @@ def test_page_can_encode_names_every_constraint_it_refuses() -> None:
         ({"extension": "MAXCONNECT 0:00"}, "a maximum layover of 0 min"),
         ({"extension": "MAXDUR 0:00"}, "a maximum trip duration (0 min)"),
         ({"routing": "XX+"}, "a carrier Google Flights has no code for (XX)"),
+        ({"routing": "aa1-3000+"}, "a flight-number range (AA1-3000+)"),
         (
             {"routing": "AA+", "extension": "ALLIANCE oneworld"},
             "an alliance filter combined with another carrier or alliance filter",
