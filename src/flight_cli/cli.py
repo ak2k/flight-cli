@@ -8,6 +8,7 @@ Commands:
   flight detail    — phase-2 itineraries for a date picked from the grid
   flight airport   — IATA autocomplete
   flight explore   — where an origin flies, cheapest first (Google Flights, Chrome)
+  flight doctor    — pass, fail or skip for every backend, transport and credential
   flight fare      — [deprecated] alias for `search --backend matrix`
   flight gflight   — [deprecated] alias for `search --backend gflight`
 """
@@ -7519,6 +7520,53 @@ def seatmap(
         console.print(f"[dim]API URL:[/] {_safe_text(api_url)}")
         raise typer.Exit(1)
     console.print(_safe_text(url))
+
+
+@app.command()
+def doctor(fmt: str = _FORMAT_OPT) -> None:
+    """Check every backend, transport and credential: one pass, fail or skip each.
+
+    Runs one live search per backend (JFK-LAX, 30 days out) and spends one unit
+    of the seats.aero daily quota when a key is stored. Exits 0 with no failure,
+    75 when every failure is a throttle, brownout or outage worth retrying, and
+    1 otherwise."""
+    from . import _doctor  # noqa: PLC0415 — fli and every provider client, paid only here
+
+    json_out = _resolve_format(fmt=fmt, json_flag=False) == "json"
+    report = _doctor.run(on_start=lambda what: err.print(f"[dim]{_safe_text(what)}…[/]"))
+    if json_out:
+        sys.stdout.write(json.dumps(report.document(), indent=2))
+        raise typer.Exit(report.exit_code)
+    t = Table(title="flight doctor")
+    t.add_column("check", no_wrap=True)
+    t.add_column("status", no_wrap=True)
+    t.add_column("detail")
+    t.add_column("time", justify="right", no_wrap=True)
+    for c in report.checks:
+        t.add_row(
+            _safe_text(c.id),
+            "[green]pass[/]"
+            if c.status == "pass"
+            else "[bold red]FAIL[/]"
+            if c.status == "fail"
+            else "[yellow]skip[/]",
+            _safe_text(c.detail)
+            if c.cause is None
+            else f"{_safe_text(c.cause)}: {_safe_text(c.detail)}",
+            f"{c.seconds:.1f}s" if c.seconds is not None else "",
+        )
+    console.print(t)
+    statuses = [c.status for c in report.checks]
+    console.print(
+        f"{statuses.count('pass'):d} passed, {statuses.count('fail'):d} failed, "
+        f"{statuses.count('skip'):d} skipped"
+        + (
+            " — every failure is retryable; run again later"
+            if report.exit_code == _doctor.EX_TEMPFAIL
+            else ""
+        )
+    )
+    raise typer.Exit(report.exit_code)
 
 
 if __name__ == "__main__":
