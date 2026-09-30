@@ -88,7 +88,7 @@ def test_a_matrix_connection_matched_to_a_google_row_is_pinned_on_googles_days(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     google = _google_row()
-    (row,) = merge_results(google, _matrix_row())
+    (row,) = merge_results(google, _matrix_row(), currency="USD")
     printed = _printed_google_link(google.model_copy(update={"solutions": [row.itinerary]}), capsys)
     assert "GoogleFlights(cheapestitinerarypinned):" in printed
     googles_own = cli._try_pinned_gflight_url(_SEARCH, google, 0)
