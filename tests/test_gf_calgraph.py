@@ -802,6 +802,18 @@ def test_the_graph_takes_what_google_applies_from_its_url(search: CalendarSearch
             _search(nights=7, routing="AA+", extension="AIRLINES DL", routing_ret="N"),
             "a carrier filter combined with another carrier filter",
         ),
+        (
+            _search(nights=7, routing="AA+", extension_ret="AIRLINES DL"),
+            "a carrier filter combined with another carrier filter on the return leg",
+        ),
+        (
+            _search(
+                nights=7,
+                extension="MAXCONNECT 1:00",
+                extension_ret="MINCONNECT 3:00; MAXCONNECT 1:00",
+            ),
+            "a minimum layover (180 min) above the maximum (60 min) on the return leg",
+        ),
     ],
     ids=[
         "operating-exclude",
@@ -835,6 +847,8 @@ def test_the_graph_takes_what_google_applies_from_its_url(search: CalendarSearch
         "two-durations",
         "two-maximum-layovers",
         "wider-before-legs-differ",
+        "return-leg-two-carriers",
+        "return-leg-minimum-above-maximum",
     ],
 )
 def test_the_graph_refuses_the_rest_by_name(search: CalendarSearch, reason: str) -> None:

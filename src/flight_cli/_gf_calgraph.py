@@ -231,9 +231,9 @@ def graph_blocker(search: CalendarSearch) -> str | None:  # noqa: PLR0911 — on
     _, reasons = page_can_encode(p for ps in per_leg for p in ps if not _graph_takes(p))
     if reasons:
         return "; ".join(dict.fromkeys(reasons))
-    for predicates in per_leg:
+    for i, predicates in enumerate(per_leg):
         if (wider := _wider_url(set(predicates))) is not None:
-            return wider
+            return f"{wider} on the return leg" if i else wider
     if len(per_leg) > 1 and set(per_leg[0]) != set(per_leg[1]):
         return "different routing or extension codes on the outbound and the return"
     return None
