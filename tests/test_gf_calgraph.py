@@ -814,22 +814,6 @@ def test_the_graph_takes_what_google_applies_from_its_url(search: CalendarSearch
             ),
             "a minimum layover (180 min) above the maximum (60 min) on the return leg",
         ),
-        # Codes run together without `;`: the parser reads the first bound
-        # alone, so the page would ask without the rest. Refused as the base
-        # refused them.
-        (_search(extension="MAXDUR 9:00 MAXCONNECT 1:00"), "a maximum trip duration (540 min)"),
-        (_search(extension="MAXDUR 9:00 -CODESHARE"), "a maximum trip duration (540 min)"),
-        (_search(extension="MAXCONNECT 1:00 MINCONNECT 3:00"), "a layover-time bound"),
-        (_search(extension="MAXCONNECT 1:00 2:00"), "a layover-time bound"),
-        (_search(extension="MINCONNECT 3:00 MAXCONNECT 1:00"), "a Tier-2 extension code"),
-        (
-            _search(nights=7, extension="MAXDUR 9:00", extension_ret="MAXDUR 9:00 MAXCONNECT 1:00"),
-            "a maximum trip duration (540 min)",
-        ),
-        (
-            _search(nights=7, extension="MAXDUR 9:00 MAXCONNECT 1:00", extension_ret="MAXDUR 9:00"),
-            "a maximum trip duration (540 min)",
-        ),
     ],
     ids=[
         "operating-exclude",
@@ -865,13 +849,6 @@ def test_the_graph_takes_what_google_applies_from_its_url(search: CalendarSearch
         "wider-before-legs-differ",
         "return-leg-two-carriers",
         "return-leg-minimum-above-maximum",
-        "maxdur-runs-into-maxconnect",
-        "maxdur-runs-into-codeshare",
-        "maxconnect-runs-into-minconnect",
-        "maxconnect-two-arguments",
-        "minconnect-runs-into-maxconnect",
-        "return-leg-runs-on",
-        "outbound-runs-on",
     ],
 )
 def test_the_graph_refuses_the_rest_by_name(search: CalendarSearch, reason: str) -> None:
@@ -1304,6 +1281,186 @@ def test_what_the_graph_still_refuses_keeps_the_bases_words_beside_matrix(
     assert err.count("Google Flights price graph not asked:") == 1
     assert f"Google Flights price graph not asked: this is {reason}." in err
     assert (len(asked), seen) == (1, [])
+
+
+# Codes run together without `;`: the parser reads a one-argument code's first
+# argument and drops the words after it, so a page would ask without them. Each
+# is decided in the base's words, beside a constraint the graph takes too.
+_RUNS_ON: list[tuple[tuple[str, ...], CalendarSearch, str]] = [
+    (
+        ("--one-way", "--ext", "MINCONNECT 2:00; MAXSTOPS 1 MAXDUR 0:00"),
+        _search(extension="MINCONNECT 2:00; MAXSTOPS 1 MAXDUR 0:00"),
+        "a Tier-2 extension code",
+    ),
+    (
+        ("--one-way", "--ext", "MINCONNECT 3:00; MAXSTOPS 1 MAXCONNECT 1:00"),
+        _search(extension="MINCONNECT 3:00; MAXSTOPS 1 MAXCONNECT 1:00"),
+        "a Tier-2 extension code",
+    ),
+    (
+        ("--one-way", "--ext", "MINCONNECT 3:00; MAXSTOPS 1 -CODESHARE"),
+        _search(extension="MINCONNECT 3:00; MAXSTOPS 1 -CODESHARE"),
+        "a Tier-2 extension code",
+    ),
+    (
+        ("--one-way", "--routing", "AA+", "--ext", "MAXSTOPS 1 MAXDUR 9:00"),
+        _search(routing="AA+", extension="MAXSTOPS 1 MAXDUR 9:00"),
+        "a carrier filter (AA)",
+    ),
+    (
+        ("--one-way", "--depart-times", "night", "--ext", "MAXSTOPS 1 MAXDUR 9:00"),
+        _search(extension="MAXSTOPS 1 MAXDUR 9:00", times=(_T.NIGHT,)),
+        "a departure-time window",
+    ),
+    (
+        ("--one-way", "--ext", "MAXDUR 9:00; MAXSTOPS 1 MAXCONNECT 1:00"),
+        _search(extension="MAXDUR 9:00; MAXSTOPS 1 MAXCONNECT 1:00"),
+        "a maximum trip duration (540 min)",
+    ),
+    (
+        ("-d", "7", "--ext", "MINCONNECT 3:00; MAXSTOPS 1 MAXCONNECT 1:00"),
+        _search(nights=7, extension="MINCONNECT 3:00; MAXSTOPS 1 MAXCONNECT 1:00"),
+        "a Tier-2 extension code",
+    ),
+    (
+        ("-d", "7", "--routing", "AA+", "--ext", "MAXSTOPS 1 MAXDUR 9:00"),
+        _search(nights=7, routing="AA+", extension="MAXSTOPS 1 MAXDUR 9:00"),
+        "a carrier filter (AA)",
+    ),
+]
+_RUNS_ON_IDS = [
+    "minconnect-maxstops-runs-into-maxdur-zero",
+    "minconnect-maxstops-runs-into-maxconnect",
+    "minconnect-maxstops-runs-into-codeshare",
+    "carrier-maxstops-runs-into-maxdur",
+    "night-maxstops-runs-into-maxdur",
+    "maxdur-maxstops-runs-into-maxconnect",
+    "round-trip-minconnect-maxstops-runs-into-maxconnect",
+    "round-trip-carrier-maxstops-runs-into-maxdur",
+]
+
+
+def _graph_gate(search: CalendarSearch) -> str | None:
+    """`_grid_branch_blocker` as `--fast` over the browser calls it."""
+    return cli._grid_branch_blocker(
+        search,
+        json_out=False,
+        one_way=len(search.legs) == 1,
+        origins=("JFK",),
+        dests=("LAX",),
+        fast=True,
+        graph=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("search", "reason"),
+    [
+        *((search, reason) for _, search, reason in _RUNS_ON),
+        (_search(extension="MAXDUR 9:00 MAXCONNECT 1:00"), "a maximum trip duration (540 min)"),
+        (_search(extension="MAXDUR 9:00 -CODESHARE"), "a maximum trip duration (540 min)"),
+        (_search(extension="MAXCONNECT 1:00 MINCONNECT 3:00"), "a layover-time bound"),
+        (_search(extension="MAXCONNECT 1:00 2:00"), "a layover-time bound"),
+        (_search(extension="MINCONNECT 3:00 MAXCONNECT 1:00"), "a Tier-2 extension code"),
+        (
+            _search(nights=7, extension="MAXDUR 9:00", extension_ret="MAXDUR 9:00 MAXCONNECT 1:00"),
+            "a maximum trip duration (540 min)",
+        ),
+        (
+            _search(nights=7, extension="MAXDUR 9:00 MAXCONNECT 1:00", extension_ret="MAXDUR 9:00"),
+            "a maximum trip duration (540 min)",
+        ),
+    ],
+    ids=[
+        *_RUNS_ON_IDS,
+        "maxdur-runs-into-maxconnect",
+        "maxdur-runs-into-codeshare",
+        "maxconnect-runs-into-minconnect",
+        "maxconnect-two-arguments",
+        "minconnect-runs-into-maxconnect",
+        "return-leg-runs-on",
+        "outbound-runs-on",
+    ],
+)
+def test_a_code_run_into_the_next_keeps_the_bases_gate(search: CalendarSearch, reason: str) -> None:
+    assert _graph_gate(search) == reason
+
+
+_FAST_JSON = ("--fast", "--gf-transport", "browser", "--format", "json")
+
+
+def _runs_on_cli(*extra: str) -> tuple[int, str, str]:
+    """`calendar` through the CLI parser; stderr with its line breaks flattened."""
+    end = _START + timedelta(days=13)
+    args = ["calendar", "JFK", "LAX", "--start", _START.isoformat(), "--end", end.isoformat()]
+    result = CliRunner().invoke(cli.app, [*args, "--no-cache", *extra])
+    return result.exit_code, result.stdout, " ".join(result.stderr.split())
+
+
+@pytest.mark.parametrize(("args", "search", "reason"), _RUNS_ON, ids=_RUNS_ON_IDS)
+def test_a_code_run_into_the_next_keeps_the_bases_words_under_fast(
+    args: tuple[str, ...], search: CalendarSearch, reason: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del search
+    _no_matrix(monkeypatch)
+    seen = _graph_is(monkeypatch, _OW)
+    code, out, err = _runs_on_cli(*args, *_FAST_JSON)
+    assert (code, out, seen) == (1, "", [])
+    assert f"search page can carry; this is {reason}. Run without --fast for Matrix." in err
+
+
+@pytest.mark.parametrize(("args", "search", "reason"), _RUNS_ON, ids=_RUNS_ON_IDS)
+def test_a_code_run_into_the_next_keeps_the_bases_words_beside_matrix(
+    args: tuple[str, ...], search: CalendarSearch, reason: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del search
+    asked = _matrix_answers(monkeypatch)
+    seen = _graph_is(monkeypatch, _OW)
+    code, _, err = _runs_on_cli(*args, "--gf-transport", "browser")
+    assert (code, len(asked), seen) == (0, 1, [])
+    assert err.count("Google Flights price graph not asked:") == 1
+    assert f"Google Flights price graph not asked: this is {reason}." in err
+
+
+@pytest.mark.parametrize("trip", [("--one-way",), ("-d", "7")], ids=["one-way", "round-trip"])
+def test_a_stop_ceiling_run_into_a_bound_alone_is_asked_as_the_base_asked_it(
+    trip: tuple[str, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The parser drops `MAXDUR 9:00` on every path, so the page carries the
+    stop ceiling alone, as the base's page did."""
+    _no_matrix(monkeypatch)
+    seen = _graph_is(monkeypatch, _RT if len(trip) > 1 else _OW)
+    code, out, _ = _runs_on_cli(*trip, "--ext", "MAXSTOPS 1 MAXDUR 9:00", *_FAST_JSON)
+    assert (code, len(seen)) == (0, 1)
+    assert json.loads(out)["grid"]
+    search = seen[0][0]
+    fields = (5, 6, 8, 9, 10, 11, 12, 17, 18)
+    asked = [
+        {k: v for k in fields if (v := only.get(k)) is not None}
+        for only in _slices(_tfs(cg.page_url(search, search.window.start)))
+    ]
+    assert asked == [{5: [1]}] * len(search.legs)
+
+
+@pytest.mark.parametrize(
+    ("ext", "reason"),
+    [
+        ("MINCONNECT 2:00; MAXSTOPS 1; MAXDUR 0:00", "a maximum trip duration of 0 minutes"),
+        (
+            "MINCONNECT 3:00; MAXSTOPS 1; MAXCONNECT 1:00",
+            "a minimum layover (180 min) above the maximum (60 min)",
+        ),
+    ],
+    ids=["maxdur-zero", "minimum-above-maximum"],
+)
+def test_the_same_codes_with_their_separators_are_refused_by_the_graph(
+    ext: str, reason: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_matrix(monkeypatch)
+    seen = _graph_is(monkeypatch, _OW)
+    code, _, err = _runs_on_cli("--one-way", "--ext", ext, *_FAST_JSON)
+    assert (code, seen) == (1, [])
+    assert f"this is {reason}." in err
 
 
 # `--fast --gf-transport http`'s stderr for each, as 6fce7b1 printed it.

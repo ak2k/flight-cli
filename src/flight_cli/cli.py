@@ -2927,7 +2927,7 @@ def _trip_lengths_text(lengths: Sequence[int]) -> str:
     return _join_reasons([*(f"{n:d}-" for n in lengths[:-1]), f"{last:d}-night"])
 
 
-def _grid_branch_blocker(  # noqa: PLR0911 — one return per named reason, cheapest first
+def _grid_branch_blocker(  # noqa: PLR0911, PLR0912 — one return per named reason, cheapest first
     search: CalendarSearch,
     *,
     json_out: bool,
@@ -2959,7 +2959,11 @@ def _grid_branch_blocker(  # noqa: PLR0911 — one return per named reason, chea
     (`_gf_calgraph.graph_blocker`) replaces the routing and page checks: it
     admits the carrier, alliance, duration and layover bounds and the time
     windows Google was measured applying from the page URL. Without it,
-    `--fast --gf-transport http` keeps the narrower checks.
+    `--fast --gf-transport http` keeps the narrower checks, and so does a
+    calendar whose extension runs one code into the next (`MAXSTOPS 1 MAXDUR
+    9:00`): the parser drops what follows the first code's argument, and the
+    graph's gate would take the constraints beside it and ask without the one
+    dropped.
 
     The page asks for every airport of a set, so under `--fast` the airports are
     checked as `_pick_backend` checks a search's: expanded, against the page's
@@ -2995,9 +2999,10 @@ def _grid_branch_blocker(  # noqa: PLR0911 — one return per named reason, chea
         if city_codes:
             return city_codes[0]
     if fast and graph:
-        from ._gf_calgraph import graph_blocker  # noqa: PLC0415 — fli, as the imports below
+        from ._gf_calgraph import extension_runs_on, graph_blocker  # noqa: PLC0415 — fli, as below
 
-        return graph_blocker(search)
+        if not extension_runs_on(search):
+            return graph_blocker(search)
     from ._gf_dategrid import grid_can_serve, grid_routing_blocker  # noqa: PLC0415
 
     if not grid_can_serve(search, round_trip=fast, airport_sets=fast):
