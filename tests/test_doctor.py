@@ -522,6 +522,17 @@ def test_matrix_answers_are_classified_by_what_they_say(
     assert said in _fails_as(_run(), "matrix-search", cause).detail
 
 
+@pytest.mark.parametrize("error", [{"code": 13, "message": None}, {"message": "x", "type": 7}])
+def test_a_matrix_error_with_a_null_message_or_a_numeric_kind_is_still_reported(
+    world: World, error: dict[str, Any]
+) -> None:
+    world.matrix = lambda _r: httpx.Response(200, json={"error": error})
+    result = _invoke("--format", "json")
+    assert isinstance(result.exception, SystemExit), repr(result.exception)
+    check = json.loads(result.stdout)["checks"][5]
+    assert (check["id"], check["status"], check["cause"]) == ("matrix-search", "fail", "rejected")
+
+
 def test_three_matrix_500s_are_an_outage_worth_retrying(world: World) -> None:
     world.matrix = lambda _r: httpx.Response(500, text="oops")
     with stamina.set_testing(True, attempts=3):

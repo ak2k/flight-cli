@@ -606,9 +606,12 @@ def _classify(e: Exception) -> tuple[Cause, str]:  # noqa: PLR0911, PLR0912 — 
         case GfBrowserUnavailableError():
             return "browser", str(e)
         case MatrixApiError():
-            said = f"Matrix answered {e.kind}: {e.message}"
-            brownout = e.kind.upper() in _MATRIX_BROWNOUT_KINDS or _MATRIX_INTERNAL_ERROR.search(
-                e.message
+            # Both fields are copied untyped from Matrix's error body, so either
+            # can be null or a number.
+            kind, message = str(e.kind), str(e.message)
+            said = f"Matrix answered {kind}: {message}"
+            brownout = kind.upper() in _MATRIX_BROWNOUT_KINDS or _MATRIX_INTERNAL_ERROR.search(
+                message
             )
             return ("brownout" if brownout else "rejected"), said
         case ApiKeyResolutionError():
