@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn
 
 import pytest
 import typer
+from rich.console import Console
 from typer.testing import CliRunner
 
 from flight_cli import _gf_browser as gfb
@@ -80,13 +81,22 @@ def _search(
     routing: str | None = None,
     extension: str | None = None,
     routing_ret: str | None = None,
+    extension_ret: str | None = None,
     options: SearchOptions | None = None,
     times: tuple[TimeOfDay, ...] = (),
+    ret_times: tuple[TimeOfDay, ...] = (),
 ) -> CalendarSearch:
     out = Leg.of("JFK", "LAX", route_language=routing, extension=extension, time_ranges=times)
     legs = (out,)
     if nights is not None:
-        legs += (Leg.of("LAX", "JFK", route_language=routing_ret or routing, extension=extension),)
+        back = Leg.of(
+            "LAX",
+            "JFK",
+            route_language=routing_ret or routing,
+            extension=extension_ret or extension,
+            time_ranges=ret_times,
+        )
+        legs += (back,)
     n = nights or 0
     window = CalendarWindow(
         start=start, end=end or start + timedelta(days=13), duration_min=n, duration_max=n
@@ -281,9 +291,12 @@ def test_the_number_of_loads_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
     start = date(2026, 10, 20)
     one_day_each = [_body(_cells(start + timedelta(days=i), 1)) for i in range(cg._MAX_PAGES)]
     fake = _serve(monkeypatch, *one_day_each)
-    with pytest.raises(cg.GfPriceGraphError, match=f"more than {cg._MAX_PAGES}"):
+    with pytest.raises(cg.GfPriceGraphError, match=f"more than {cg._MAX_PAGES}") as e:
         cg.price_graph(_search(start=start, end=start + timedelta(days=60)), headed=False)
     assert len(fake.calls) == cg._MAX_PAGES
+    # No reload and the whole budget: the window is what ran out.
+    assert not isinstance(e.value, cg.GfGraphBudgetError)
+    assert str(e.value) == "the window needs more than 8 price-graph pages; narrow --start/--end"
 
 
 def test_a_smaller_budget_caps_the_loads_and_names_the_budget(
@@ -481,6 +494,28 @@ def test_any_other_failure_loses_its_length_and_the_ones_after_it(
     assert _lost(got) == [(6, "error 13"), (7, "not asked after 6-night trips failed")]
 
 
+def test_a_length_that_ran_out_of_loads_counts_them_and_the_rest_name_the_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lengths after it were not lost to a failure the next page would meet:
+    no load was left for them."""
+    asked = _lengths_answer(
+        monkeypatch,
+        {
+            5: cg.PriceGraph(5, (), 7),
+            6: cg.GfGraphBudgetError(loads=1, reloaded=False),
+            7: cg.PriceGraph(7, (), 1),
+        },
+    )
+    got = cg.price_graphs(_ranged(), headed=False)
+    assert asked == [(5, 8), (6, 1)]
+    assert [g.trip_length for g in got.graphs] == [5]
+    assert _lost(got) == [
+        (6, "no price-graph load of the 8 was left for the rest of the window"),
+        (7, "no price-graph load of the 8 was left"),
+    ]
+
+
 @pytest.mark.parametrize(
     ("answers", "asked", "raised", "message"),
     [
@@ -630,6 +665,244 @@ def test_what_the_page_carries_is_admitted() -> None:
         cg.page_blocker(_search(options=SearchOptions(max_extra_stops=1, cabin=Cabin.BUSINESS)))
         is None
     )
+
+
+# ───────────────────────────── the graph's own gate ──────────────────────────
+
+_T = TimeOfDay
+
+
+@pytest.mark.parametrize(
+    "search",
+    [
+        _search(),
+        _search(routing="AA+"),
+        _search(extension="AIRLINES AA DL"),
+        _search(extension="ALLIANCE skyteam"),
+        _search(extension="ALLIANCE oneworld|skyteam"),
+        _search(extension="MAXDUR 6:20"),
+        _search(extension="MINCONNECT 2:00"),
+        _search(extension="MINCONNECT 0:00"),
+        _search(extension="MAXCONNECT 2:00"),
+        _search(extension="MINCONNECT 1:00; MAXCONNECT 2:00"),
+        _search(extension="MAXDUR 9:00; MAXDUR 9:00"),
+        _search(routing="AA+", extension="AIRLINES AA"),
+        _search(routing="N:AA", options=SearchOptions(max_extra_stops=1)),
+        _search(times=(_T.NIGHT,)),
+        _search(times=(_T.EVENING, _T.NIGHT)),
+        _search(times=(_T.AFTERNOON, _T.EVENING, _T.NIGHT)),
+        _search(times=tuple(_T)),
+        _search(nights=7, routing="AA+"),
+        _search(
+            nights=7, extension="ALLIANCE skyteam; MAXDUR 9:00; MINCONNECT 1:00; MAXCONNECT 3:00"
+        ),
+    ],
+    ids=[
+        "plain",
+        "carrier",
+        "carrier-list",
+        "alliance",
+        "alliance-list",
+        "maxdur",
+        "minconnect",
+        "minconnect-zero",
+        "maxconnect",
+        "layover-range",
+        "maxdur-twice",
+        "same-carrier-twice",
+        "nonstop-carrier",
+        "night",
+        "evening-night",
+        "afternoon-to-night",
+        "whole-day",
+        "round-trip-carrier",
+        "round-trip-bounds",
+    ],
+)
+def test_the_graph_takes_what_google_applies_from_its_url(search: CalendarSearch) -> None:
+    assert cg.graph_blocker(search) is None
+
+
+@pytest.mark.parametrize(
+    ("search", "reason"),
+    [
+        # What the base refused, in its words.
+        (_search(routing="~BA+"), "Tier-2 routing"),
+        (_search(routing="O:AA+"), "Tier-2 routing"),
+        (_search(extension="-CODESHARE"), "a Tier-2 extension code"),
+        (_search(extension="MINCONNECT 3:00; -CODESHARE"), "Tier-2 extension codes"),
+        (_search(routing="F* X:ORD F*"), "a connecting-airport filter (ORD)"),
+        (_search(routing="BQ+"), "a carrier Google Flights has no code for (BQ)"),
+        (_search(extension="MAXDUR 0:00"), "a maximum trip duration of 0 minutes"),
+        (_search(extension="MAXCONNECT 0:00"), "a maximum layover of 0 minutes"),
+        (_search(options=SearchOptions(max_extra_stops=3)), "a stop ceiling above 2 (3)"),
+        (_search(extension="MAXSTOPS 3"), "a stop ceiling above 2 (3)"),
+        (_search(options=SearchOptions(pax=Pax(children=1))), "a passenger type other than adults"),
+        (
+            _search(options=SearchOptions(allow_airport_changes=False)),
+            "an airport-change exclusion (--no-airport-changes)",
+        ),
+        (_search(times=(_T.MORNING,)), "a departure-time window"),
+        (_search(times=(_T.EARLY_MORNING,)), "a departure-time window"),
+        (_search(times=(_T.MIDDAY, _T.NIGHT)), "a departure-time window"),
+        (_search(nights=7, times=(_T.NIGHT,)), "a departure-time window"),
+        (_search(nights=7, ret_times=(_T.NIGHT,)), "a return-time window"),
+        (
+            _search(nights=7, routing="AA+", routing_ret="N"),
+            "different routing or extension codes on the outbound and the return",
+        ),
+        # Which reason wins, as at the base.
+        (
+            _search(extension="MAXDUR 0:00", options=SearchOptions(max_extra_stops=3)),
+            "a maximum trip duration of 0 minutes",
+        ),
+        (_search(routing="AA+", times=(_T.MORNING,)), "a departure-time window"),
+        (
+            _search(routing="F* X:ORD F*", options=SearchOptions(pax=Pax(children=1))),
+            "a passenger type other than adults",
+        ),
+        (
+            _search(nights=7, extension="-CODESHARE", extension_ret="MAXDUR 0:00"),
+            "a Tier-2 extension code",
+        ),
+        (
+            _search(nights=7, extension="MINCONNECT 3:00", extension_ret="MAXDUR 0:00"),
+            "a maximum trip duration of 0 minutes on the return leg",
+        ),
+        # A combination the URL would write wider than asked.
+        (
+            _search(routing="AA+", extension="AIRLINES DL"),
+            "a carrier filter combined with another carrier filter",
+        ),
+        (
+            _search(routing="N:AA", extension="AIRLINES DL"),
+            "a carrier filter combined with another carrier filter",
+        ),
+        (
+            _search(routing="AA+", extension="ALLIANCE skyteam"),
+            "an alliance filter combined with another carrier or alliance filter",
+        ),
+        (
+            _search(extension="ALLIANCE oneworld; ALLIANCE skyteam"),
+            "an alliance filter combined with another carrier or alliance filter",
+        ),
+        (
+            _search(extension="MINCONNECT 3:00; MAXCONNECT 1:00"),
+            "a minimum layover (180 min) above the maximum (60 min)",
+        ),
+        (
+            _search(extension="MAXDUR 6:00; MAXDUR 9:00"),
+            "more than one maximum trip duration (360 min, 540 min)",
+        ),
+        (
+            _search(extension="MAXCONNECT 3:00; MAXCONNECT 1:00"),
+            "more than one maximum layover (60 min, 180 min)",
+        ),
+        (
+            _search(nights=7, routing="AA+", extension="AIRLINES DL", routing_ret="N"),
+            "a carrier filter combined with another carrier filter",
+        ),
+    ],
+    ids=[
+        "operating-exclude",
+        "operating",
+        "codeshare",
+        "minconnect-and-codeshare",
+        "connect-at",
+        "unmapped-carrier",
+        "maxdur-zero",
+        "maxconnect-zero",
+        "stops-3",
+        "maxstops-3",
+        "children",
+        "airport-changes",
+        "morning",
+        "early",
+        "midday-and-night",
+        "round-trip-departure-window",
+        "round-trip-return-window",
+        "legs-differ",
+        "legs-before-stops",
+        "window-before-carrier",
+        "options-before-connect-at",
+        "return-tier-2-after-outbound",
+        "return-leg-zero",
+        "two-carriers",
+        "nonstop-carrier-and-another",
+        "carrier-and-alliance",
+        "two-alliances",
+        "minimum-above-maximum",
+        "two-durations",
+        "two-maximum-layovers",
+        "wider-before-legs-differ",
+    ],
+)
+def test_the_graph_refuses_the_rest_by_name(search: CalendarSearch, reason: str) -> None:
+    assert cg.graph_blocker(search) == reason
+
+
+# At 6fce7b1, for the shapes its gate admitted: the graph asks the same page.
+_FAR = date(2099, 6, 1)
+_BASE_PAGES = {
+    "one-way": "CBwQAhoeEgoyMDk5LTA2LTAxagcIARIDSkZLcgcIARIDTEFYQAFIAXABmAEC",
+    "round-trip-7": (
+        "CBwQAhoeEgoyMDk5LTA2LTAxagcIARIDSkZLcgcIARIDTEFYGh4SCjIwOTktMDYtMDhqBwgBEgNMQVhyBwgB"
+        "EgNKRktAAUgBcAGYAQE"
+    ),
+    "nonstop": "CBwQAhogEgoyMDk5LTA2LTAxKABqBwgBEgNKRktyBwgBEgNMQVhAAUgBcAGYAQI",
+    "nonstop-round-trip-7": (
+        "CBwQAhogEgoyMDk5LTA2LTAxKABqBwgBEgNKRktyBwgBEgNMQVgaIBIKMjA5OS0wNi0wOCgAagcIARIDTEFY"
+        "cgcIARIDSkZLQAFIAXABmAEB"
+    ),
+    "stops-1": "CBwQAhogEgoyMDk5LTA2LTAxKAFqBwgBEgNKRktyBwgBEgNMQVhAAUgBcAGYAQI",
+    "business": "CBwQAhoeEgoyMDk5LTA2LTAxagcIARIDSkZLcgcIARIDTEFYQAFIA3ABmAEC",
+}
+
+
+_BASE_SHAPES = {
+    "one-way": _search(start=_FAR),
+    "round-trip-7": _search(start=_FAR, nights=7),
+    "nonstop": _search(start=_FAR, routing="N"),
+    "nonstop-round-trip-7": _search(start=_FAR, nights=7, routing="N"),
+    "stops-1": _search(start=_FAR, options=SearchOptions(max_extra_stops=1)),
+    "business": _search(start=_FAR, options=SearchOptions(cabin=Cabin.BUSINESS)),
+}
+
+
+@pytest.mark.parametrize("shape", list(_BASE_SHAPES))
+def test_what_the_base_admitted_asks_the_same_page(shape: str) -> None:
+    tfs = _BASE_PAGES[shape]
+    assert cg.page_url(_BASE_SHAPES[shape], _FAR) == (
+        f"https://www.google.com/travel/flights?tfs={tfs}&hl=en&gl=US&curr=USD&tfu=EgQIABABIgA"
+    )
+
+
+def test_a_round_trip_asks_for_each_carrier_once_on_each_slice() -> None:
+    out, back = _slices(_tfs(cg.page_url(_search(nights=7, routing="AA+"), _START)))
+    assert (out[6], back[6]) == ([b"AA"], [b"AA"])
+    same = _search(routing="AA+", extension="AIRLINES AA")
+    (only,) = _slices(_tfs(cg.page_url(same, _START)))
+    assert only[6] == [b"AA"]
+
+
+@pytest.mark.parametrize(
+    ("search", "field", "value"),
+    [
+        (_search(extension="ALLIANCE skyteam"), 6, [b"SKYTEAM"]),
+        (_search(extension="MAXDUR 9:00"), 12, [540]),
+        (_search(extension="MINCONNECT 3:00"), 17, [180]),
+        (_search(extension="MAXCONNECT 1:00"), 18, [60]),
+        (_search(times=(_T.EVENING, _T.NIGHT)), 8, [17]),
+        (_search(times=(_T.EVENING, _T.NIGHT)), 9, [23]),
+    ],
+    ids=["alliance", "maxdur", "minconnect", "maxconnect", "earliest-hour", "latest-hour"],
+)
+def test_what_the_graph_takes_is_on_its_page(
+    search: CalendarSearch, field: int, value: list[Any]
+) -> None:
+    assert cg.graph_blocker(search) is None
+    (only,) = _slices(_tfs(cg.page_url(search, _START)))
+    assert only[field] == value
 
 
 # ───────────────────────────── the command ───────────────────────────────────
@@ -883,6 +1156,209 @@ def test_a_calendar_the_page_cannot_ask_is_refused_before_any_load(
     assert "Run without --fast for Matrix" in err
     assert seen == []
     assert cap.out == ""
+
+
+# What Google was measured applying from the page URL, as the command takes it.
+_TAKEN: list[dict[str, Any]] = [
+    {"routing": "AA+"},
+    {"extension": "ALLIANCE skyteam"},
+    {"extension": "MAXDUR 9:00"},
+    {"extension": "MINCONNECT 3:00"},
+    {"extension": "MAXCONNECT 1:00"},
+    {"depart_times": "evening,night"},
+]
+_TAKEN_IDS = ["carrier", "alliance", "maxdur", "minconnect", "maxconnect", "evening-night"]
+
+
+@pytest.mark.parametrize("overrides", _TAKEN, ids=_TAKEN_IDS)
+def test_fast_asks_the_graph_for_what_google_applies_from_its_url(
+    overrides: dict[str, Any], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _no_matrix(monkeypatch)
+    seen = _graph_is(monkeypatch, _OW)
+    _calendar(fmt="json", **overrides)
+    cap = capsys.readouterr()
+    assert len(json.loads(cap.out)["grid"]) == 2
+    assert len(seen) == 1
+    leg = seen[0][0].legs[0]
+    asked = leg.route_language or leg.extension or ",".join(t.value for t in leg.time_ranges)
+    assert asked == next(iter(overrides.values()))
+    assert "Run without --fast" not in cap.err
+
+
+@pytest.mark.parametrize("overrides", _TAKEN, ids=_TAKEN_IDS)
+def test_the_default_calendar_asks_the_graph_for_them_after_matrix(
+    overrides: dict[str, Any], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    asked = _matrix_answers(monkeypatch)
+    seen = _graph_is(monkeypatch, _OW)
+    _calendar(fast=False, **overrides)
+    cap = capsys.readouterr()
+    assert (len(asked), len(seen)) == (1, 1)
+    assert "not asked" not in cap.err
+    assert "lowest fare per departure day (Google Flights)" in " ".join(cap.out.split())
+
+
+_KEPT = [
+    ({"routing": "~BA+"}, "Tier-2 routing"),
+    ({"routing": "O:AA+"}, "Tier-2 routing"),
+    ({"extension": "-CODESHARE"}, "a Tier-2 extension code"),
+    ({"routing": "F* X:ORD F*"}, "a connecting-airport filter (ORD)"),
+    ({"children": 1}, "a passenger type other than adults"),
+    ({"extension": "MAXDUR 0:00"}, "a maximum trip duration of 0 minutes"),
+    ({"depart_times": "morning"}, "a departure-time window"),
+]
+_KEPT_IDS = [
+    "operating-exclude",
+    "operating",
+    "codeshare",
+    "connect-at",
+    "children",
+    "maxdur-0",
+    "morning",
+]
+
+
+@pytest.mark.parametrize(("overrides", "reason"), _KEPT, ids=_KEPT_IDS)
+def test_what_the_graph_still_refuses_keeps_the_bases_words_under_fast(
+    overrides: dict[str, Any],
+    reason: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _no_matrix(monkeypatch)
+    seen = _graph_is(monkeypatch, _OW)
+    with pytest.raises(typer.Exit):
+        _calendar(**overrides)
+    err = " ".join(capsys.readouterr().err.split())
+    assert f"search page can carry; this is {reason}. Run without --fast for Matrix." in err
+    assert seen == []
+
+
+@pytest.mark.parametrize(("overrides", "reason"), _KEPT, ids=_KEPT_IDS)
+def test_what_the_graph_still_refuses_keeps_the_bases_words_beside_matrix(
+    overrides: dict[str, Any],
+    reason: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    asked = _matrix_answers(monkeypatch)
+    seen = _graph_is(monkeypatch, _OW)
+    _calendar(fast=False, **overrides)
+    err = " ".join(capsys.readouterr().err.split())
+    assert err.count("Google Flights price graph not asked:") == 1
+    assert f"Google Flights price graph not asked: this is {reason}." in err
+    assert (len(asked), seen) == (1, [])
+
+
+# `--fast --gf-transport http`'s stderr for each, as 6fce7b1 printed it.
+_HTTP_HEAD = (
+    "--fast applies only to calendars one-way or of one trip length, between airports\n"
+    "or metro codes Google Flights can ask for (up to 11 airports a leg), whose every\n"
+    "filter its search page can carry; "
+)
+_HTTP_TAIL = {
+    "carrier": "this is a carrier filter (AA). Run without \n--fast for Matrix.\n",
+    "alliance": "this is an alliance filter (skyteam). Run \nwithout --fast for Matrix.\n",
+    "maxdur": "this is a maximum trip duration (540 min). Run\nwithout --fast for Matrix.\n",
+    "minconnect": "this is a Tier-2 extension code. Run without \n--fast for Matrix.\n",
+    "maxconnect": "this is a layover-time bound. Run without \n--fast for Matrix.\n",
+    "evening-night": "this is a departure-time window. Run without \n--fast for Matrix.\n",
+}
+_HTTP_ARGS = {
+    "carrier": ("--routing", "AA+"),
+    "alliance": ("--ext", "ALLIANCE skyteam"),
+    "maxdur": ("--ext", "MAXDUR 9:00"),
+    "minconnect": ("--ext", "MINCONNECT 3:00"),
+    "maxconnect": ("--ext", "MAXCONNECT 1:00"),
+    "evening-night": ("--depart-times", "evening,night"),
+}
+
+
+@pytest.mark.parametrize("trip", [(), ("-d", "7")], ids=["one-way", "round-trip"])
+@pytest.mark.parametrize("taken", list(_HTTP_ARGS))
+def test_fast_over_http_refuses_them_byte_for_byte_as_before(
+    taken: str, trip: tuple[str, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The RPC grid's admission is not the graph's: nothing it printed moves."""
+    _no_matrix(monkeypatch)
+    seen = _graph_is(monkeypatch, _OW)
+    monkeypatch.setenv("COLUMNS", "80")
+    monkeypatch.setattr(cli, "err", Console(stderr=True))
+    end = _START + timedelta(days=13)
+    args = ["calendar", "JFK", "LAX", "--start", _START.isoformat(), "--end", end.isoformat()]
+    args += [*(trip or ("--one-way",)), "--fast", "--gf-transport", "http", *_HTTP_ARGS[taken]]
+    result = CliRunner().invoke(cli.app, args)
+    assert (result.exit_code, result.stdout) == (1, "")
+    assert result.stderr == _HTTP_HEAD + _HTTP_TAIL[taken]
+    assert seen == []
+
+
+def test_a_reload_that_spends_the_eighth_load_blames_the_budget_not_the_window(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A 248-day window fits in eight loads; one of them went to a page loaded
+    again, so the last page's dates had no load left."""
+    _no_matrix(monkeypatch)
+    start = date(2026, 10, 20)
+    miss = GfBrowserUnavailableError(_CLICK_TIMEOUT)
+    pages = [_body(_cells(start + timedelta(days=31 * i - 7), 38)) for i in range(7)]
+    fake = _serve(monkeypatch, miss, *pages)
+    end = start + timedelta(days=247)
+    with pytest.raises(typer.Exit):
+        _calendar(start=start.isoformat(), end=end.isoformat(), fmt="json")
+    err = " ".join(capsys.readouterr().err.split())
+    assert (
+        "date grid failed: no price-graph load of the 8 was left for the rest of the window "
+        "(a page that drew no graph was loaded again)"
+    ) in err
+    assert "narrow" not in err
+    assert "price-graph pages" not in err
+    assert len(fake.calls) == cg._MAX_PAGES
+
+
+def _round_trip_page(first: date, nights: int) -> str:
+    """38 priced departures from `first`, each returning `nights` later."""
+    return _body(
+        [
+            [
+                (first + timedelta(days=i)).isoformat(),
+                (first + timedelta(days=i + nights)).isoformat(),
+                [[None, 400.0 + i], ""],
+                1,
+            ]
+            for i in range(38)
+        ]
+    )
+
+
+def test_a_reload_on_one_trip_length_leaves_the_last_one_out_of_loads(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Four lengths of two loads each fill the budget; a reload on the first
+    leaves the last one load, which is not a window that needs one page."""
+    asked = _matrix_answers(monkeypatch)
+    start = date(2026, 10, 20)
+    answers: list[str | _Answer] = [GfBrowserUnavailableError(_CLICK_TIMEOUT)]
+    for nights in (5, 6, 7, 8):
+        answers += [
+            _round_trip_page(start - timedelta(days=7), nights),
+            _round_trip_page(start + timedelta(days=24), nights),
+        ]
+    fake = _serve(monkeypatch, *answers)
+    _calendar(fast=False, one_way=False, duration="5-8", end="2026-12-10")
+    cap = capsys.readouterr()
+    err = " ".join(cap.err.split())
+    assert len(asked) == 1
+    assert len(fake.calls) == cg._MAX_PAGES
+    assert (
+        "Google Flights price graph not shown: 8-night trips: no price-graph load of the 8 "
+        "was left for the rest of the window."
+    ) in err
+    assert "narrow" not in err
+    assert "price-graph pages" not in err
+    assert all(f"{nights}n" in cap.out for nights in (5, 6, 7))
+    assert "8n" not in cap.out
 
 
 # ───────────────────────────── airport sets ─────────────────────────────────
