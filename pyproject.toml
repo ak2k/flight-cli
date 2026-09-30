@@ -55,6 +55,7 @@ dev = [
     # still NOT run automatically and no test launches a browser — the dev
     # Python package itself is small.
     "patchright>=1.59",
+    "time-machine>=3.2",
 ]
 
 [project.scripts]
