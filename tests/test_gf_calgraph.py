@@ -1199,6 +1199,18 @@ def test_the_default_calendar_asks_the_graph_for_them_after_matrix(
     assert "lowest fare per departure day (Google Flights)" in " ".join(cap.out.split())
 
 
+def test_the_help_names_what_the_graph_takes_and_what_http_keeps() -> None:
+    """`--help` makes the gate's claim: the graph takes what Google applies from
+    its URL, and the http grid still takes only cabin, adults and stops. A help
+    text naming the narrower set sends a user with a carrier filter to Matrix."""
+    result = CliRunner().invoke(cli.app, ["calendar", "--help"], env={"COLUMNS": "200"})
+    assert result.exit_code == 0
+    flat = " ".join(result.output.replace("│", " ").split())
+    assert "stops up to 2, one carrier or alliance include, MAXDUR, MINCONNECT," in flat
+    assert "a --depart-times window that runs to midnight" in flat
+    assert "over --gf-transport http only cabin, adults and stops up to 2" in flat
+
+
 _KEPT = [
     ({"routing": "~BA+"}, "Tier-2 routing"),
     ({"routing": "O:AA+"}, "Tier-2 routing"),
