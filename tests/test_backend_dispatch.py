@@ -522,6 +522,30 @@ def test_explicit_matrix_does_not_look_carriers_up_in_fli() -> None:
     ]
 
 
+@pytest.mark.parametrize("routing", ["JP627", "JP627?", "JP1-100", "XX1", "XX1-100"])
+def test_auto_sends_a_flight_number_fli_cannot_name_to_matrix(
+    routing: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The post-filter keeps rows booked under the flight's carrier, and a row
+    whose carrier fli has no code for never decodes: Google would answer an
+    empty board for flights Matrix can find."""
+    assert _call(routing=routing) == BACKEND_MATRIX
+    printed = " ".join(capsys.readouterr().err.split())
+    assert f"a carrier Google Flights has no code for ({routing[:2]})" in printed, printed
+
+
+@pytest.mark.parametrize(("routing", "code"), [("JP627", "JP"), ("XX1", "XX"), ("JP+", "JP")])
+def test_explicit_gflight_refuses_a_carrier_fli_cannot_name(routing: str, code: str) -> None:
+    with pytest.raises(
+        typer.BadParameter, match=re.escape(f"a carrier Google Flights has no code for ({code})")
+    ):
+        _call(BACKEND_GFLIGHT, routing=routing)
+
+
+def test_a_flight_number_fli_can_name_stays_on_google() -> None:
+    assert _call(routing="AS627") == BACKEND_GFLIGHT
+
+
 @pytest.mark.parametrize("overrides", [{"origin": "JFK,EWR"}, {"origin": "NYC"}])
 def test_explicit_gflight_serves_an_airport_set_and_a_metro_code(
     overrides: dict[str, object],

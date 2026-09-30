@@ -844,7 +844,10 @@ number with any quantifier, and a bare or `?` range, are served on Google.
 `a flight-number range (AA1-3000+)`. Matrix rejects a reversed range
 (`AA3000-1`), `AA0` and `AA10000` as `Bad route specification`, and reads
 `AA00001` as AA1 (2026-09-30), so a range that is not ascending within 1-9999
-stays on Matrix too, which reports the error. Multi-token forms (`AS21 F+`),
+stays on Matrix too, which reports the error. So does a number whose carrier
+fli has no code for (`JP627`, `XX1`): the rows' carriers are read through fli's
+table, so the filter would match none, and the reason is the carrier include's,
+`a carrier Google Flights has no code for (JP)`. Multi-token forms (`AS21 F+`),
 `~AS21` and a carrier with a digit (`B6123`) are Tier 3. `page_can_encode` itself was
 left narrow on purpose: the Chrome price graph (`_gf_calgraph.page_blocker`)
 reads it, and a graph cannot check rows.
