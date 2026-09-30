@@ -23,7 +23,8 @@ Supported Tier-2 predicates:
   - marketing-carrier exclude (`~UA+`, `-AIRLINES`)
   - connection-airport exclude (`~DFW`, `-CITIES`)
   - no codeshare (`-CODESHARE`)
-  - specific flight # / range (`UA882`, `UA1000-2000`)
+  - one flight by number or range (`UA882`, `UA882+`, `UA1000-2000`), every
+    leg of the slice that flight, as Matrix reads a lone flight-number token
   - minimum layover (`MINCONNECT`), on the raw row and encoded as well
 """
 
@@ -65,6 +66,7 @@ _SUPPORTED: tuple[type, ...] = (
 )
 
 _FLIGHT_RE = re.compile(r"^([A-Z0-9]{2})(\d+)$", re.IGNORECASE)
+_MAX_FLIGHT_NUMBER = 9999
 
 
 def can_postfilter(pred: Predicate) -> bool:
@@ -78,16 +80,24 @@ def can_postfilter(pred: Predicate) -> bool:
 def _served_by_postfilter(pred: Predicate) -> bool:
     """A Tier-2 predicate the search page can serve by post-filtering its board.
 
-    Not flight numbers and not connection-airport excludes, although this module
-    evaluates both: Matrix reads them positionally and the filter here does not.
-    Bare `AS21` is one flight to Matrix ("No solutions" where the filter keeps
-    AS21 connections), and `F* ~DUB F*` is one connection, not at DUB (Matrix
-    drops the nonstops the filter keeps)."""
-    return (
-        pred.tier is Tier.GF_POSTFILTER
-        and can_postfilter(pred)
-        and not isinstance(pred, SpecificFlightPred | ConnectionAirportPred)
-    )
+    Not connection-airport excludes, although this module evaluates them:
+    `F* ~DUB F*` is one connection, not at DUB, to Matrix, which drops the
+    nonstops the filter keeps. Nor a flight-number range with `+` or `*`,
+    which Matrix may read as several flights in the range: `AA1-3000+`
+    answered JFK-LAX with the same ten nonstops as bare `AA1-3000`, so no
+    answer has shown which connections it admits. Nor a number Matrix rejects
+    as a bad route specification (`AA3000-1`, `AA0`, `AA10000`): Google's empty
+    board would stand in for that error. Matrix bounds the number, not its
+    digits: `AA00001` is AA1."""
+    match pred:
+        case ConnectionAirportPred():
+            return False
+        case SpecificFlightPred() if pred.several and pred.low != pred.high:
+            return False
+        case SpecificFlightPred() if not 1 <= pred.low <= pred.high <= _MAX_FLIGHT_NUMBER:
+            return False
+        case _:
+            return pred.tier is Tier.GF_POSTFILTER and can_postfilter(pred)
 
 
 def _served_by_page(pred: Predicate) -> bool:
@@ -200,11 +210,26 @@ def _slice_passes(slc: Slice, predicates: Iterable[Predicate]) -> bool:
                 # with no operating carrier it cannot be ruled out, so the leg fails
                 if op is None or (marketing and op not in marketing):
                     return False
-        elif isinstance(p, SpecificFlightPred):
-            flights = [f for fl in slc.flights if (f := _parse_flight(fl))]
-            if not any(c == p.carrier and p.low <= n <= p.high for c, n in flights):
-                return False
+        elif isinstance(p, SpecificFlightPred) and not _flight_pred_passes(slc, p):
+            return False
     return True
+
+
+def _flight_pred_passes(slc: Slice, pred: SpecificFlightPred) -> bool:
+    """Matrix's reading of a lone flight-number token: the slice is that flight
+    and nothing else. Every leg is booked under the carrier and numbered in
+    range and, for one flight, under one number (bare `AS21` is "No solutions"
+    on JFK-LAX, where AS21 connects to other AS flights). A leg whose flight
+    number the row does not state fails: the filter cannot tell."""
+    flights = [_parse_flight(f) for f in slc.flights]
+    if not flights or len(flights) < len(slc.legs):
+        return False
+    numbers: set[int] = set()
+    for flight in flights:
+        if flight is None or flight[0] != pred.carrier or not pred.low <= flight[1] <= pred.high:
+            return False
+        numbers.add(flight[1])
+    return pred.several or len(numbers) == 1
 
 
 def _layovers(row: Any) -> list[int]:

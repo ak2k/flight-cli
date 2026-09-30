@@ -148,6 +148,67 @@ def test_specific_flight_number_and_range() -> None:
     assert _filter(res2, SpecificFlightPred("UA", 1000, 2000)) == []
 
 
+def _flies(pred: SpecificFlightPred, *flights: str, legs: int | None = None) -> bool:
+    """Whether a slice of `flights` passes `pred`; `legs` states more legs than
+    flights when the row leaves a flight number out."""
+    slc = _slice([(f, "XX", ["XX"]) for f in flights])
+    if legs is not None:
+        slc = slc.model_copy(update={"legs": [LegInfo(operating_carrier="XX")] * legs})
+    return bool(apply_postfilter(_result(slc), [[pred]]).solutions)
+
+
+def test_one_flight_is_every_leg_under_its_number() -> None:
+    """Matrix's flight is every leg under one number: bare AS21 answered
+    JFK-LAX with no solutions where Google listed AS21 connecting to AS487."""
+    one = SpecificFlightPred("XX", 1, 1)
+    assert _flies(one, "XX1")
+    assert _flies(one, "XX1", "XX1")
+    assert not _flies(one, "XX1", "XX2")
+    assert not _flies(one, "YY9", "XX1")
+    assert not _flies(SpecificFlightPred("XX", 1, 1, quantifier="+"), "XX1", "XX2")
+
+
+def test_a_one_flight_range_is_one_number_in_it() -> None:
+    assert _flies(SpecificFlightPred("XX", 1, 9), "XX5", "XX5")
+    assert not _flies(SpecificFlightPred("XX", 1, 9), "XX1", "XX2")
+    assert _flies(SpecificFlightPred("XX", 1, 9, quantifier="+"), "XX1", "XX2")
+    assert not _flies(SpecificFlightPred("XX", 1, 9, quantifier="+"), "XX1", "XX12")
+
+
+def test_a_leg_with_no_flight_number_fails_a_flight_number() -> None:
+    one = SpecificFlightPred("XX", 1, 1)
+    assert not _flies(one, "XX1", "XX")
+    assert not _flies(one, "XX1", legs=2)
+    assert not _flies(one)
+
+
+def _lax_kept(routing: str) -> list[str]:
+    """The JFK-LAX capture's rows a routing keeps, as booked flight numbers."""
+    payload: list[Any] = json.loads(_ds1("ds1_jfk_lax_tfu.json"))
+    keep = routing_keep([classify(routing, None).predicates])
+    assert keep is not None
+    rows = [gfid._parse_flight_with_id(raw) for raw in gfid._rows_from_ds1(payload).rows]
+    return [
+        "+".join(f"{leg.airline.name}{leg.flight_number}" for leg in row.flight.legs)
+        for row in rows
+        if keep(0, row)
+    ]
+
+
+def test_on_the_lax_board_a_flight_number_keeps_that_flight_alone() -> None:
+    assert sorted(r for r in _lax_kept("AS+") if r.startswith("AS21+")) == [
+        "AS21+AS1793",
+        "AS21+AS487",
+        "AS21+AS600",
+    ]
+    assert _lax_kept("AS21") == []
+    assert _lax_kept("AS21+") == []
+    assert _lax_kept("AA1") == ["AA1"]
+    assert _lax_kept("DL747") == ["DL747"]
+    served = _lax_kept("AA1-3000")
+    assert served and all(r.startswith("AA") and "+" not in r for r in served)
+
+
 # ─────────────────────────── per-slice scoping ─────────────────────────
 
 
@@ -198,9 +259,13 @@ def test_every_other_predicate_keeps_its_own_reason() -> None:
     )
     assert reasons == ["a red-eye exclusion", "an overnight-stop exclusion"]
     assert search_page_reasons(classify("LH+", "F bc=y").predicates)  # include, Tier 3
-    # Evaluable here, but Matrix reads both positionally and the filter does not.
-    assert search_page_reasons(classify("AS21", None).predicates)
+    # Evaluable here, but not with Matrix's meaning: one connection not at DUB,
+    # and a range that may be several flights.
     assert search_page_reasons(classify("F* ~DUB F*", None).predicates)
+    assert search_page_reasons(classify("AA1-3000+", None).predicates) == [
+        "a flight-number range (AA1-3000+)"
+    ]
+    assert search_page_reasons(classify("AS21", None).predicates) == []
 
 
 def test_apply_postfilter_no_predicates_is_noop() -> None:

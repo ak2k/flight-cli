@@ -251,6 +251,16 @@ be read (no flight number) fails the exclude, as a leg with no operating carrier
 fails `-CODESHARE` and `-OPAIRLINES`. Carrier include still matches the
 booking carrier or any listed seller.
 
+**A carrier list takes space-separated airline codes.** `AIRLINES`,
+`-AIRLINES`, `OPAIRLINES` and `-OPAIRLINES` naming any token that is not a
+two-character code (`-AIRLINES UA,DL`, `-AIRLINES UA, DL`, `OPAIRLINES |`)
+parse to one Matrix-only predicate whose reason quotes the token. Google matches
+no row to such a token, so `-AIRLINES UA,DL` excluded nothing and printed DL742,
+DL747 and DL771 on JFK-LAX, and `-AIRLINES UA, DL` excluded DL alone. Matrix
+refuses the list itself (`SLICE-PROHIBITED-CARRIERS: "UA,DL" is not a carrier`,
+exit 1) and answers `-AIRLINES UA DL`. `-CITIES` names airports and is not held
+to this rule.
+
 The encoder is an enforced allowlist, not a deny-list: every field on fli's
 `FlightSearchFilters` must be named in one of three sets (encoded / refused /
 deliberately ignored), and `build_search_tfs` raises on any remainder. `flights`
@@ -473,6 +483,19 @@ on the same day both times). Every Google row sharing the match key is tried,
 not only the first; two that qualify but date a flight differently lend nothing.
 A connection no Google row dates gets the unpinned search link, and `--sellers`
 refuses it with the `--fast` remedy.
+
+**Every row of either side is in the merged table once.** The match key fixes
+the flights and the first day, not the trip. Icelandair's FI614 then FI450 out
+of JFK connects in Keflavik the next morning or the one after: the JFK-LHR
+capture lists both (USD617 and USD690), and Matrix priced FI614/FI450 twice on
+2026-10-20 (USD884 and USD1180). Each Matrix row of a key first takes the Google
+row that is its own trip (`_date_lender`); only then does the key's first
+Matrix row, if it found none, take the first Google row left, undated. In the
+other order a USD884 Matrix fare would show the USD1180 trip's Google price.
+Every row left on either side is a row of its own, extra Google rows in board
+order and extra Matrix rows after their key's first, so where no key is shared
+the list is the one-row-per-key merge exactly
+(`test_enrich.test_a_board_with_no_shared_key_merges_as_it_always_did`).
 
 **And it keeps two different orders, because the two sets are ordered by
 different things.** A one-way board arrives ranked by Google — a composite of
@@ -782,7 +805,8 @@ predicate set, each tagged with a tier:
   `-AIRLINES`), `-CODESHARE`, specific flight #/range, `MINCONNECT` (the search
   page also encodes it as 3.17; the grids have no rows to check it on).
 - **Tier 3 — Matrix only**: fare construction (`F bc=y`, `aa.lon.yup`), mileage,
-  `PADCONNECT`, aircraft, and anything the parser can't confidently classify.
+  `PADCONNECT`, aircraft, a carrier list naming a token that is not an airline
+  code (`-AIRLINES UA,DL`), and anything the parser can't confidently classify.
 
 Routing language is **positional**, so it's parsed all-or-nothing: only single
 order-independent forms map (one carrier-with-quantifier, nonstop, one flight #,
@@ -803,11 +827,28 @@ marketing-include + connect-at) is the correctness guarantee.
 predicate passes when the page encodes it (`page_can_encode`'s stop ceiling, or
 `_served_by_page`: carrier include, alliance, `MAXDUR`, `MINCONNECT`/
 `MAXCONNECT` with a positive maximum), or when it is Tier-2, the post-filter
-evaluates it, and it is neither a flight number nor a connection-airport
-exclude. Those two stay on Matrix because Matrix reads them positionally and
-the filter does not: bare `AS21` is one flight ("No solutions" on JFK-LAX, where
-the filter keeps AS21 connections), and `F* ~DUB F*` is one connection not at
-DUB (Matrix drops the nonstops the filter keeps). `page_can_encode` itself was
+evaluates it, and it is neither a connection-airport exclude nor a
+flight-number range with `+` or `*`. `F* ~DUB F*` is one connection not at DUB
+to Matrix, which drops the nonstops the filter keeps.
+
+A lone flight-number token is the whole slice to Matrix, and the filter reads it
+that way: every leg booked under the carrier and numbered in the range, and for
+one flight (bare or `?`) every leg under one number, which is Matrix's flight.
+On JFK-LAX bare `AS21` is "No solutions" (2026-11-04) and `AS21+` 0 solutions
+(2026-10-20), while Google's board holds AS21+AS487 and AS21+AS696, which an
+any-leg filter kept; `DL747`, `AA300` and `AA1` are each one nonstop row. So one
+number with any quantifier, and a bare or `?` range, are served on Google.
+`AA1-3000`, `AA1-3000?`, `AA1-3000+` and `AA1-3000*` all answered with the same
+10 AA nonstops, so what `+`/`*` admits over a range (several flights in it, per
+`routing_language.md`) is unmeasured; those two stay on Matrix with the reason
+`a flight-number range (AA1-3000+)`. Matrix rejects a reversed range
+(`AA3000-1`), `AA0` and `AA10000` as `Bad route specification`, and reads
+`AA00001` as AA1 (2026-09-30), so a range that is not ascending within 1-9999
+stays on Matrix too, which reports the error. So does a number whose carrier
+fli has no code for (`JP627`, `XX1`): the rows' carriers are read through fli's
+table, so the filter would match none, and the reason is the carrier include's,
+`a carrier Google Flights has no code for (JP)`. Multi-token forms (`AS21 F+`),
+`~AS21` and a carrier with a digit (`B6123`) are Tier 3. `page_can_encode` itself was
 left narrow on purpose: the Chrome price graph (`_gf_calgraph.page_blocker`)
 reads it, and a graph cannot check rows.
 

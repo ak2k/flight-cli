@@ -622,15 +622,29 @@ def _gf_unmappable_reasons(backend: str, predicates: Sequence[Predicate]) -> lis
 
     Checked with the bridge's own lookup, and only where Google Flights is still
     in the running: a Matrix run pays neither the fli import nor the check."""
-    from .routing_predicates import AlliancePred, CarrierPred  # noqa: PLC0415
+    from .routing_predicates import (  # noqa: PLC0415
+        AlliancePred,
+        CarrierPred,
+        SpecificFlightPred,
+    )
 
+    # A flight number keeps only rows booked under its carrier, and a row whose
+    # carrier fli cannot name never decodes, so it asks what an include asks.
+    asked = [
+        *predicates,
+        *(
+            CarrierPred(frozenset({p.carrier}), exclude=False, operating=False)
+            for p in predicates
+            if isinstance(p, SpecificFlightPred)
+        ),
+    ]
     if backend == BACKEND_MATRIX or not any(
-        isinstance(p, CarrierPred | AlliancePred) for p in predicates
+        isinstance(p, CarrierPred | AlliancePred) for p in asked
     ):
         return []
     from .fli_bridge import unmappable_codes  # noqa: PLC0415 — imports fli
 
-    bad = unmappable_codes(predicates)
+    bad = unmappable_codes(asked)
     return [f"a carrier Google Flights has no code for ({', '.join(bad)})"] if bad else []
 
 
