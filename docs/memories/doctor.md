@@ -39,7 +39,7 @@ in use; with neither it is a skip naming `matrix-spa-key`.
 | `rejected` | no | any other `MatrixApiError` |
 | `consent` | no | `GfConsentError` |
 | `auth` | no | Matrix refusing the key twice, `PPAuthError` (a Supabase 429 or 5xx on the token refresh is `throttled` or `upstream`), HTTP 401/403 from a provider |
-| `config` | no | a local setting: unparseable config, malformed `FLIGHT_API_KEY`, an unopenable cache, an unreadable jar, `FLIGHT_CLI_GF_BROWSER_BIN` naming no executable file |
+| `config` | no | a local setting: unparseable config, malformed `FLIGHT_API_KEY`, an unopenable cache, an unreadable jar, a stored PointsPath or seats.aero credential file that cannot be read, `FLIGHT_CLI_GF_BROWSER_BIN` naming no executable file |
 | `browser` | no | `GfBrowserUnavailableError` (reason and remedy) |
 | `error` | no | anything else, as `Type: message` |
 

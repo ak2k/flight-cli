@@ -511,6 +511,8 @@ class _Doctor:
         # Stored, not `is_configured()`: that refreshes, and turns a refresh
         # that fails into "not configured" — a skip where the user needs a fail.
         if pp_auth.load_tokens() is None:
+            if pp_auth.TOKENS_PATH.exists():
+                raise _unreadable_store(pp_auth.TOKENS_PATH, "`flight auth pp login`")
             return "skip", "no PointsPath tokens stored; run `flight auth pp login`"
         self._starting("pointspath", "one PointsPath request")
         tokens = pp_auth.get_valid_tokens()
@@ -538,6 +540,8 @@ class _Doctor:
     def check_seats_aero(self) -> _Outcome:
         key = seats_auth.load_key()
         if key is None:
+            if seats_auth.KEY_PATH.exists():
+                raise _unreadable_store(seats_auth.KEY_PATH, "`flight auth seats-aero key <KEY>`")
             return "skip", "no seats.aero key stored; run `flight auth seats-aero key <KEY>`"
         self.secrets.add(key)
         self._starting("seats-aero", "one seats.aero request, one unit of its daily quota")
@@ -588,6 +592,14 @@ def _stored_secrets() -> set[str]:
         if isinstance(data, dict):
             found.update(str(data.get(f) or "") for f in fields)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
     return {s.strip() for s in found} | found
+
+
+def _unreadable_store(path: Path, login: str) -> _CheckFailedError:
+    # The loaders read a store they cannot parse as no store at all, so every
+    # search leaves the provider out; only the file's presence tells them apart.
+    return _CheckFailedError(
+        "config", f"{path} holds no credential this CLI can read; run {login} again"
+    )
 
 
 def _cut_head_redacted(text: str, secret: str) -> str:
