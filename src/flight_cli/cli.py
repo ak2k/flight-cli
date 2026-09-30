@@ -5013,11 +5013,11 @@ class _CabinSearches(NamedTuple):
     outbound page, then every cabin's return boards from that page. Between
     them the sort cabin leads: every cabin pins the outbounds the sort cabin
     pins, wherever its own filtered board lists them, and fills the rest of the
-    same budget with its own rows in page order. A cabin that pins its own first
-    ten instead prices none of the itineraries the table shows in the sort
-    cabin's order, and each page is still fetched once, so the GETs are the ones
-    each cabin would spend alone. Anything else runs one round, each cabin's
-    whole search."""
+    same budget with its own rows in page order. A cabin pinning its own first
+    ten may price none of the itineraries the table shows, which are the sort
+    cabin's. Each page is fetched once, so the GETs are the ones each cabin
+    would spend alone. Anything else runs one round, each cabin's whole
+    search."""
 
     legs: tuple[Leg, ...]
     opts: SearchOptions
@@ -5112,9 +5112,10 @@ def _gflight_cabins_in_series(
     ignored.
 
     `None` says rung 2 never opened at all, and the caller then runs the whole
-    fan-out on rung 1. Only before the first cabin is served in the round that
-    failed: once a cabin has rows, re-running the fan-out would discard them,
-    and a table whose columns came from two different rungs is not one answer.
+    fan-out on rung 1. Only while the round that failed has served no cabin: an
+    outbound page is not yet an answer, but once a cabin has one, re-running the
+    fan-out would discard it, and a table whose columns came from two different
+    rungs is not one answer.
     """
     from ._gf_browser import interrupt_guard, session_scope  # noqa: PLC0415 — GF-only
     from ._gflight_ids import shared_throttle_ladder  # noqa: PLC0415 — fli, ~95 ms

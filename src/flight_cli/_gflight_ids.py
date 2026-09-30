@@ -2023,7 +2023,7 @@ def _one_call_laddered(
 # above it, the round trip returns combinations for the ten first-ranked
 # outbounds rather than for all of them. A multi-cabin round trip spends every
 # cabin's budget on the sort cabin's outbounds first (`prefer`), because a cabin
-# that pins its own first ten can price none of the itineraries the table
+# that pins its own first ten may price none of the itineraries the table
 # shows; `cli._multi_cabin_join_note` says so where a user can see the
 # consequence.
 #
