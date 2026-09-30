@@ -568,6 +568,7 @@ def test_the_join_note_counts_the_outbounds_that_were_actually_pinned(
 
     from rich.console import Console as _Console
 
+    from flight_cli import _gflight_ids as gfid
     from flight_cli import cli
     from flight_cli.domain import Cabin as _Cabin
     from flight_cli.domain import Leg as _Leg
@@ -579,7 +580,8 @@ def test_the_join_note_counts_the_outbounds_that_were_actually_pinned(
     cabins = (_Cabin.COACH, _Cabin.BUSINESS)
 
     def _fan_out(**_kw: Any) -> dict[Any, list[Any]]:
-        return {c: [row] for c in cabins}
+        # Every cabin pinned the sort cabin's outbounds, as a round trip does.
+        return {c: gfid.Board([row], pinned=expected) for c in cabins}
 
     monkeypatch.setattr(cli, "_run_gflight_multi", _fan_out)
     cli._run_gflight_path_multi(
@@ -599,7 +601,7 @@ def test_the_join_note_counts_the_outbounds_that_were_actually_pinned(
     )
     # "up to", because the cap bounds how many outbounds the join can see and
     # the board may hold fewer. The number is still the pin budget's.
-    assert f"up to {expected} of each cabin's first-ranked" in buf.getvalue(), buf.getvalue()
+    assert f"up to {expected} of the Y cabin's first-ranked" in buf.getvalue(), buf.getvalue()
 
 
 def test_multi_cabin_fan_out_honours_an_encodable_constraint(

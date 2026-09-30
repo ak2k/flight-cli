@@ -102,7 +102,7 @@ from .links import build_search_tfs, google_flights_search_page_url
 if TYPE_CHECKING:
     import datetime
     import pathlib
-    from collections.abc import Callable, Generator, Iterable
+    from collections.abc import Callable, Generator, Iterable, Sequence
 
     from fli.models.google_flights.flights import (  # pyright: ignore[reportMissingTypeStubs]
         FlightSearchFilters,
@@ -1690,7 +1690,11 @@ class Board[T](list[T]):
         self.pinned = pinned
 
 
-def _itinerary_key(row: GFlightWithId) -> tuple[tuple[Airline, str, datetime.datetime], ...]:
+# One itinerary, as `_deduped` and the round-trip pins tell them apart.
+type ItineraryKey = tuple[tuple[Airline, str, datetime.datetime], ...]
+
+
+def _itinerary_key(row: GFlightWithId) -> ItineraryKey:
     return tuple(
         (leg.airline, leg.flight_number, leg.departure_datetime) for leg in row.flight.legs
     )
@@ -1710,7 +1714,7 @@ def _deduped(rows: list[GFlightWithId]) -> list[GFlightWithId]:
     dates included: the same flight numbers a day apart are a different trip.
     The first listing keeps its place, because the round-trip pins are taken in
     board order."""
-    at: dict[tuple[tuple[Airline, str, datetime.datetime], ...], int] = {}
+    at: dict[ItineraryKey, int] = {}
     out: list[GFlightWithId] = []
     for row in rows:
         key = _itinerary_key(row)
@@ -2016,9 +2020,12 @@ def _one_call_laddered(
 # on an RPC and is not free here. With the cap, a two-cabin round trip costs
 # 2 x 11 = 22 page fetches; without one, at the bumped top_n=100, it would cost
 # ~2 x 31. The default `-n 10` sits exactly on the cap and is unchanged by it;
-# above it, the round trip returns combinations for the ten best outbounds
-# rather than for all of them, and `cli._multi_cabin_join_note` says so where
-# a user can see the consequence.
+# above it, the round trip returns combinations for the ten first-ranked
+# outbounds rather than for all of them. A multi-cabin round trip spends every
+# cabin's budget on the sort cabin's outbounds first (`prefer`), because a cabin
+# that pins its own first ten can price none of the itineraries the table
+# shows; `cli._multi_cabin_join_note` says so where a user can see the
+# consequence.
 #
 # Multi-city never reaches this: `cli._pick_backend` routes a multi-city query
 # to Matrix, so the recursion below only ever runs the two legs of a round trip.
@@ -2028,6 +2035,47 @@ _PINNED_FANOUT_CAP = 10
 def pinned_fanout(top_n: int) -> int:
     """How many outbounds to pin, given the caller's top_n."""
     return min(top_n, _PINNED_FANOUT_CAP)
+
+
+def _kept_outbounds(
+    first: Board[GFlightWithId], keep: Callable[[int, GFlightWithId], bool] | None
+) -> list[GFlightWithId]:
+    return first if keep is None else [r for r in first if keep(0, r)]
+
+
+def _pins(
+    board: list[GFlightWithId], top_n: int, prefer: Sequence[ItineraryKey]
+) -> list[GFlightWithId]:
+    """Every `prefer` key `board` lists, in `prefer` order, then `board`'s other
+    rows in page order: `pinned_fanout(top_n)` in all, so `prefer` reorders the
+    budget and never grows it."""
+    budget = pinned_fanout(top_n)
+    at: dict[ItineraryKey, GFlightWithId] = {}
+    for row in board:
+        at.setdefault(_itinerary_key(row), row)
+    chosen = [at[k] for k in dict.fromkeys(prefer) if k in at][:budget]
+    taken = {id(r) for r in chosen}
+    return chosen + [r for r in board if id(r) not in taken][: budget - len(chosen)]
+
+
+def pin_keys(
+    first: Board[GFlightWithId],
+    *,
+    top_n: int,
+    keep: Callable[[int, GFlightWithId], bool] | None = None,
+    prefer: Sequence[ItineraryKey] = (),
+) -> list[ItineraryKey]:
+    """The outbounds `search_with_ids` pins when handed `first` with the same
+    arguments, as the keys another search can be asked to `prefer`."""
+    return [_itinerary_key(r) for r in _pins(_kept_outbounds(first, keep), top_n, prefer)]
+
+
+def outbound_page(
+    filters: FlightSearchFilters, *, transport: GfTransport, currency: str
+) -> Board[GFlightWithId]:
+    """The page `search_with_ids` starts from, for a caller that needs it before
+    the pins are chosen and hands it back as `first`."""
+    return _with_board_currency(_one_call_laddered(filters, transport, currency=currency), currency)
 
 
 def _unpinned_board(
@@ -2137,6 +2185,8 @@ def search_with_ids(
     currency: str = "USD",
     keep: Callable[[int, GFlightWithId], bool] | None = None,
     checks: str = "the routing",
+    first: Board[GFlightWithId] | None = None,
+    prefer: Sequence[ItineraryKey] = (),
 ) -> Board[GFlightWithId | tuple[GFlightWithId, ...]] | None:
     """Drop-in for fli's `SearchFlights().search()` but each result carries
     its Google Flights opaque flight_id.
@@ -2171,24 +2221,29 @@ def search_with_ids(
     that ignored its pin is refused as one rather than read as "no return
     matches". The result carries the outbound page's price insight, restated
     for the rows the filter kept. `checks` names what `keep` holds a row to,
-    for the warning that counts the pins it left with no return."""
-    first = _with_board_currency(
-        _one_call_laddered(filters, transport, currency=currency), currency
-    )
+    for the warning that counts the pins it left with no return.
+
+    `first` is this search's page when the caller already fetched it with
+    `outbound_page`, so it is not fetched twice. `prefer` puts those outbounds
+    first among the pins when the page lists them and `keep` passes them, which
+    is how one cabin prices another cabin's outbounds; the pin count is
+    unchanged by it."""
+    if first is None:
+        first = outbound_page(filters, transport=transport, currency=currency)
     if not first:
         return None
 
     num_segments = len(filters.flight_segments)
     selected_count = sum(1 for s in filters.flight_segments if s.selected_flight is not None)
     # A pinned board is filtered by the caller, after its pin check.
-    board = first if keep is None or selected_count else [r for r in first if keep(0, r)]
+    board = first if selected_count else _kept_outbounds(first, keep)
     dropped = len(first) - len(board)
     # One-way, or the last leg already — no further iteration.
     if filters.trip_type == TripType.ONE_WAY or selected_count >= num_segments - 1 or not board:
         return Board(board, insight=_kept_insight(first.insight, board, dropped), dropped=dropped)
 
     combos: list[GFlightWithId | tuple[GFlightWithId, ...]] = []
-    pins = board[: pinned_fanout(top_n)]
+    pins = _pins(board, top_n, prefer)
     refused: list[GfBackendError] = []
     stopped: GfBackendError | None = None
     skipped = 0
