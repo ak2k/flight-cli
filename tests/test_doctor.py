@@ -883,4 +883,4 @@ def test_help_adds_the_doctor_line_and_every_existing_command_stays() -> None:
     ]
     out = CliRunner().invoke(cli.app, ["--help"]).stdout
     assert "doctor" in out
-    assert "Check every backend, transport and credential" in out
+    assert "Pass, fail or skip for every backend, transport and credential." in out

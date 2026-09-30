@@ -7524,7 +7524,7 @@ def seatmap(
 
 @app.command()
 def doctor(fmt: str = _FORMAT_OPT) -> None:
-    """Check every backend, transport and credential: one pass, fail or skip each.
+    """Pass, fail or skip for every backend, transport and credential.
 
     Runs one live search per backend (JFK-LAX, 30 days out) and spends one unit
     of the seats.aero daily quota when a key is stored. Exits 0 with no failure,
