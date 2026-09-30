@@ -84,11 +84,15 @@ def _served_by_postfilter(pred: Predicate) -> bool:
     nonstops the filter keeps. Nor a flight-number range with `+` or `*`,
     which Matrix may read as several flights in the range: `AA1-3000+`
     answered JFK-LAX with the same ten nonstops as bare `AA1-3000`, so no
-    answer has shown which connections it admits."""
+    answer has shown which connections it admits. Nor a reversed range
+    (`AA3000-1`), which Matrix rejects as a bad route specification: Google's
+    empty board would stand in for that error."""
     match pred:
         case ConnectionAirportPred():
             return False
         case SpecificFlightPred() if pred.several and pred.low != pred.high:
+            return False
+        case SpecificFlightPred() if pred.low > pred.high:
             return False
         case _:
             return pred.tier is Tier.GF_POSTFILTER and can_postfilter(pred)

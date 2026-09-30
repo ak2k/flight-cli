@@ -310,6 +310,25 @@ def test_a_carrier_list_naming_no_airline_code_goes_to_matrix_quoting_the_token(
         _call(BACKEND_GFLIGHT, extension=directive)
 
 
+@pytest.mark.parametrize(
+    ("routing", "reason"),
+    [
+        ("AA3000-1", "a flight-number range (AA3000-1)"),
+    ],
+)
+def test_a_flight_number_matrix_rejects_goes_to_matrix_with_its_reason(
+    routing: str, reason: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Matrix answers `AA3000-1` with "Bad route specification", where the
+    post-filter keeps no row: Google's empty board would stand in for the
+    error."""
+    assert _call(routing=routing) == BACKEND_MATRIX
+    printed = " ".join(capsys.readouterr().err.split())
+    assert f"Using Matrix: Google Flights can't serve {reason}." in printed, printed
+    with pytest.raises(typer.BadParameter, match=re.escape(reason)):
+        _call(BACKEND_GFLIGHT, routing=routing)
+
+
 def test_a_post_filterable_predicate_beside_one_that_is_not_still_picks_matrix() -> None:
     assert _call(routing="~BA+", extension="-REDEYES") == BACKEND_MATRIX
 
