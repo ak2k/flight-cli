@@ -49,9 +49,9 @@ if TYPE_CHECKING:
 
 # Today, for the modules whose searches carry literal travel dates. fli refuses a
 # travel date before today, so those modules pin the clock before every date they
-# write, the earliest being 2026-10-14. Noon UTC keeps the local date before that
-# in any timezone, and a naive datetime leaves TZ alone, where an aware one would
-# make time-machine set TZ=UTC for the test.
+# search on, the earliest being 2026-10-14. time-machine reads a naive datetime as
+# UTC, and noon UTC keeps the local date before that in any timezone. Naive,
+# because an aware one makes time-machine set TZ=UTC for the test.
 LITERAL_DATES_NOW = datetime.datetime(2026, 9, 30, 12)
 
 
