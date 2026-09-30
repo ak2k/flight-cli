@@ -564,6 +564,17 @@ def test_a_matrix_429_is_a_throttle_and_a_timeout_is_a_brownout(world: World) ->
         _fails_as(_run(), "matrix-search", "unreachable")
 
 
+def test_a_matrix_timeout_names_the_limit_on_each_attempt(world: World) -> None:
+    def stall(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    world.matrix = stall
+    with stamina.set_testing(True, attempts=3):
+        c = _fails_as(_run(), "matrix-search", "brownout")
+    assert len(world.matrix_requests) == 3
+    assert c.detail == "Matrix did not answer within 60 s, the limit on each attempt"
+
+
 def test_a_key_matrix_refuses_twice_is_auth_and_never_exits_75(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -418,7 +418,8 @@ class _Doctor:
         except httpx.TimeoutException as e:
             raise _CheckFailedError(
                 "brownout",
-                f"Matrix did not answer within {_MATRIX_TIMEOUT_S:.0f} s, retries included",
+                f"Matrix did not answer within {_MATRIX_TIMEOUT_S:.0f} s, "
+                "the limit on each attempt",
             ) from e
         if not isinstance(res, SearchResult):
             raise TypeError(f"a specific-date search answered with {type(res).__name__}")
