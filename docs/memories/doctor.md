@@ -82,7 +82,9 @@ A dead Matrix key is `auth`, never `unreachable`, so it can never exit 75.
 - Every detail is redacted before it is stored: each stored credential (the
   four env vars, the cached and resolved Matrix key, the PointsPath tokens,
   the seats.aero key) becomes `sha256:` + 8 hex, and any `key=` query value
-  becomes `<redacted>`. httpx quotes the whole request URL in its errors, and
+  becomes `<redacted>`. A head of a secret that ends the text also becomes its
+  fingerprint: the providers' errors quote only the first 200 characters of a
+  body, which can cut a secret short. httpx quotes the whole request URL in its errors, and
   Matrix's carries the key.
 - During the run, stamina's retry log is swapped for one that redacts the
   same way, since its default hook logs `repr` of the exception and so the URL.

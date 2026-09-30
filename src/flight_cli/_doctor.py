@@ -270,9 +270,15 @@ class _Doctor:
         The stores are read again on every call rather than once, because a
         probe can write a new secret mid-run: a Matrix 403 re-caches the key, a
         stale PointsPath token is refreshed to disk."""
-        for secret in sorted(_stored_secrets() | self.secrets, key=len, reverse=True):
-            if len(secret) >= _MIN_SECRET_LEN:
-                text = text.replace(secret, fingerprint(secret))
+        secrets = sorted(
+            (s for s in _stored_secrets() | self.secrets if len(s) >= _MIN_SECRET_LEN),
+            key=len,
+            reverse=True,
+        )
+        for secret in secrets:
+            text = text.replace(secret, fingerprint(secret))
+        for secret in secrets:
+            text = _cut_head_redacted(text, secret)
         return _KEY_PARAM.sub("<redacted>", text)
 
     # ─────────────────────────────── local ────────────────────────────────
@@ -582,6 +588,17 @@ def _stored_secrets() -> set[str]:
         if isinstance(data, dict):
             found.update(str(data.get(f) or "") for f in fields)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
     return {s.strip() for s in found} | found
+
+
+def _cut_head_redacted(text: str, secret: str) -> str:
+    """`text` with a head of `secret` that ends it replaced by the fingerprint.
+
+    The providers' errors quote the first 200 characters of the body, so a
+    secret the body echoes can be cut short, and what is left ends the text."""
+    for n in range(len(secret) - 1, _MIN_SECRET_LEN - 1, -1):
+        if text.endswith(secret[:n]):
+            return text[:-n] + fingerprint(secret)
+    return text
 
 
 def _read_quietly(path: Path) -> str:

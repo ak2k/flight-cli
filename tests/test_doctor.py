@@ -885,6 +885,15 @@ def test_the_key_matrix_page_served_is_redacted_from_a_later_failure(world: Worl
     assert _doctor.fingerprint(_SPA_KEY) in _by_id(_run())["matrix-search"].detail
 
 
+@pytest.mark.parametrize("kept", [10, len(_SEATS_KEY) - 1])
+def test_a_secret_an_upstream_excerpt_cuts_short_is_still_redacted(world: World, kept: int) -> None:
+    # SeatsAeroError quotes the first 200 characters of the body.
+    world.seats = lambda _r: httpx.Response(401, text="x" * (200 - kept) + _SEATS_KEY)
+    c = _fails_as(_run(), "seats-aero", "auth")
+    assert _SEATS_KEY[:kept] not in c.detail
+    assert c.detail.endswith("x" + _doctor.fingerprint(_SEATS_KEY))
+
+
 def test_an_unknown_key_query_value_is_redacted(world: World) -> None:
     doc = _doctor._Doctor(dt.date(2026, 9, 30), lambda _s: None)
     assert doc.redact("GET https://x.example/v1?alt=json&key=AIzaUNKNOWN123&b=2") == (
