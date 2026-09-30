@@ -854,17 +854,17 @@ into the callers' broad `except` and prints `date grid failed: type object
 'Airport' has no attribute 'NYC'` — a transport fault named for a request no
 transport was going to carry.
 
-The weave `cli._run_calendar_enriched` prints one note — the observation plus the
-bd id, not a cause — and then waits for Matrix. The note can only promise to
-wait, not to deliver: it is printed while the Matrix request is still in flight,
-and Matrix can still fail after it. **`--fast` never exits 0 without a grid.**
+The weave `cli._run_calendar_enriched`, which only `--gf-transport http` reaches,
+prints one note — the observation plus the bd id, not a cause — and then waits
+for Matrix. The note can only promise to wait, not to deliver: it is printed
+while the Matrix request is still in flight, and Matrix can still fail after it.
+**`--fast` never exits 0 without a grid.**
 Every no-grid outcome — gate, throttle, an empty grid, or anything reaching the
 broad except — prints "No Google Flights grid; drop --fast for Matrix." once, on
 **stderr**, and exits 1. Every `--fast` refusal goes that way, the up-front ones
 and this one alike, so stdout under `--fast` carries a grid or nothing and a
 caller never has to parse the stream to learn which it got. The weave's note is
-the exception that proves it: that one is on stdout because a Matrix calendar
-follows it there. While the gate stands, a bad airport or date is one of the gate's own
+on stderr too, above a Matrix calendar that follows on stdout. While the gate stands, a bad airport or date is one of the gate's own
 exits rather than the broad except's, so what the user reads is the standing
 reason; the broad except keeps the same exit code for whatever a live transport
 throws once the gate flips. When the grid branch does not apply at all (a code
@@ -920,7 +920,8 @@ wrapping rule, the two helpers and the AST guard over `cli.py` are in
 [console_sanitizing.md](console_sanitizing.md).
 
 The grid paint in the weave is runtime-dead until the gate flips;
-`_run_calendar_enriched` itself still runs (it is what paints Matrix).
+`_run_calendar_enriched` itself still runs under `--gf-transport http` (it is
+what paints Matrix there).
 
 ### `--fast`: the page's own price graph, through Chrome
 
@@ -929,11 +930,12 @@ ask: Chrome opens the filtered search page on the window's first date, clicks
 "Price graph", and `GfBrowserSession.capture` returns the response the page
 received — no script runs in the page and no request is written or altered.
 Measured 2026-09-27: status 200, `x-goog-batchexecute-bgr` set, no error row, on
-a cold headless profile. Under `--fast` an unset `--gf-transport` is `auto`,
-which is the browser; `http` has to be asked for and refuses with a note naming
-the browser. A missing patchright or Chrome exits 1 with the rung's install
-remedy, never a fallback. Without `--fast`, unset or `http` runs Matrix and
-`browser`, `auto` or `--gf-headed` is a usage error.
+a cold headless profile. An unset `--gf-transport` is `auto`, which is the
+browser, with `--fast` or without it. Under `--fast` `http` has to be asked for
+and refuses with a note naming the browser, and a missing patchright or Chrome
+exits 1 with the rung's install remedy, never a fallback. Without `--fast` the
+same graph prints after Matrix's calendar (below); `http` keeps Matrix's
+calendar alone, and `--gf-headed` with `http` is a usage error.
 
 - **Shape.** One-way, or a round trip of ONE trip length (`-d 7`): the page's
   graph prices the trip length its own dates imply, so `5-7` refuses. Every
@@ -949,8 +951,8 @@ remedy, never a fallback. Without `--fast`, unset or `http` runs Matrix and
   are (`gf_leg_refusal`, then `_gf_unserveable_reasons` on the expanded codes).
   The JSON names the user's tokens (`"NYC"`, `"JFK,EWR"`), as the table title
   does. Over `--gf-transport http` a set refuses with the browser note, since
-  `date_grid` writes one airport per side; without `--fast` it goes to the
-  Matrix fan-out.
+  `date_grid` writes one airport per side; without `--fast` Matrix answers it
+  through its fan-out and the graph over the whole set prints after it.
 - **Admission.** The graph has no itineraries, so it is served only when the
   page URL carries every constraint: an unknown code, a time window, a non-adult
   passenger, `--no-airport-changes`, `--include-unavailable`, a stop ceiling
@@ -971,6 +973,43 @@ remedy, never a fallback. Without `--fast`, unset or `http` runs Matrix and
   summary line; `--format json` writes
   `{origin, destination, currency, trip_length, grid: [{departure, return?, price}]}`
   alone on stdout, with no URL lines.
+- **Without `--fast`.** A table calendar reads the graph beside Matrix
+  (`cli._run_calendar_beside_graph`). The graph runs on one worker thread,
+  started before Matrix's first request, and Matrix runs and delivers on the
+  main thread exactly as it would alone; the command waits for the graph only
+  after Matrix's output is out, then prints Google's table under it. Admission
+  is the `--fast` gate over a copy of the search with one trip length (every
+  length shares the legs and filters), plus a budget: trip lengths × ⌈window
+  days / 31⌉ ≤ 8, a one-way counting as one graph. A refused calendar prints one
+  dim stderr line, `Google Flights price graph not asked: this is <reason>.`,
+  and runs Matrix alone with no Chrome launch; JSON is Matrix's document alone
+  and says nothing unless `--gf-transport` or `--gf-headed` asked for Chrome. A
+  range asks one graph per length (`_gf_calgraph.price_graphs`), each with the
+  loads the lengths before it left, and prints one column per length (`5n`
+  `6n` `7n`) beside the row minimum, "—" where a length priced nothing that
+  date. For a set or metro code the title says each cell is the cheapest
+  across every airport pair: the graph gives no per-pair answer. Any Google
+  failure is ONE stderr line starting `Google Flights price graph not shown:`,
+  keeping a launch or install remedy. A range that loses some lengths prints
+  the ones that priced, with no column for a lost length, and that one line
+  names each lost length with its cause (`7-night trips: <cause>`). Only a
+  page that drew no graph lets the next length be asked; any other failure
+  loses the lengths after it too (`not asked after 6-night trips failed`). A
+  range that priced no length prints its first failure alone, as a single
+  graph does. Stdout up to Google's table and the exit code are the `http`
+  run's, and a Matrix failure keeps its lines and exit 1 with Google's table
+  still printed. The SIGINT guard is armed around both halves, so a Ctrl-C
+  stops the driver and exits 130. Measured 2026-09-29, NYC→LON round trip over
+  2026-10-20..11-02: each of 5, 6 and 7 nights priced 14 of 14 dates in one
+  load of about 12 s.
+- **A page that draws no graph.** About one load in fourteen (2 of 27-29 live
+  loads, 2026-09-28/29) passes the wall check and then times out on the
+  "Price graph" click. One of the two was the first load of a fresh Chrome, so
+  a reused session is not what causes it; the cause is not identified (12
+  probe loads set up to snapshot the page on a failure all priced).
+  `price_graph` loads such a page once more, from the same eight-load budget,
+  under `--fast` too; a second miss raises `GfGraphStalledError`. A wall, a
+  failed navigation and any answer the graph gave are never loaded again.
 
 **Re-enabling is not just `_GRID_RPC_GATED = False`.** Nothing executes the
 transport below the gate — there is no captured GetCalendarGraph envelope to test

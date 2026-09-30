@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from . import _gf_browser
 from ._gf_browser import Control
-from ._gf_errors import GfBackendError, GfPageShapeError
+from ._gf_errors import GfBackendError, GfBrowserUnavailableError, GfPageShapeError
 from ._gflight_ids import (
     _rows_from_page_html,  # pyright: ignore[reportPrivateUsage]
     search_page_url,
@@ -48,6 +48,10 @@ _GRAPH_RPC = "/GetCalendarGraph"
 # days before it to thirty after; another page gave sixty days), so eight loads
 # cover most of a year. A window needing more is refused, never paged unbounded.
 _MAX_PAGES = 8
+# What one load is counted as covering when a window is admitted, from the date
+# it opens on. Only an estimate: the loads themselves page by the span each
+# response reports.
+_PAGE_DAYS = 31
 _XSSI_GUARD = ")]}'"
 # A batchexecute `rt=c` body is chunked: a length line, then one JSON array of
 # rows. The stated length does not count what `len(str)` counts, so each chunk
@@ -74,6 +78,20 @@ class GfPriceGraphError(GfBackendError):
         super().__init__(reason)
 
 
+class GfGraphStalledError(GfBrowserUnavailableError):
+    """A page that passed the wall check drew no price graph in time, and its
+    second load did not either, or had no load left to try. `loads` is every
+    load the graph spent, these included.
+
+    Its own type because it is the one failure that says nothing about the next
+    trip length's page, which a range goes on to ask."""
+
+    def __init__(self, cause: GfBrowserUnavailableError, *, loads: int) -> None:
+        """Keep the browser's words and remedy; count what the graph spent."""
+        self.loads = loads
+        super().__init__(cause.reason, remedy=cause.remedy)
+
+
 class GraphCell(NamedTuple):
     """One priced departure date. `return_date` is set on a round trip only."""
 
@@ -84,10 +102,27 @@ class GraphCell(NamedTuple):
 
 class PriceGraph(NamedTuple):
     """The priced dates inside the window, by departure. `trip_length` is the
-    nights between outbound and return, None for one-way."""
+    nights between outbound and return, None for one-way; `loads` is how many
+    page loads it took."""
 
     trip_length: int | None
     cells: tuple[GraphCell, ...]
+    loads: int = 1
+
+
+class LostLength(NamedTuple):
+    """A trip length whose graph is not shown, and why."""
+
+    nights: int | None
+    cause: GfBackendError
+
+
+class GraphRange(NamedTuple):
+    """The graphs a calendar priced, by trip length in order, and the lengths it
+    lost."""
+
+    graphs: list[PriceGraph]
+    lost: list[LostLength]
 
 
 class _GraphPage(NamedTuple):
@@ -174,6 +209,17 @@ def _refuse_a_wall(page: PageFetch) -> None:
     is about the rows is not this path's to raise."""
     with contextlib.suppress(GfPageShapeError):
         _rows_from_page_html(page)
+
+
+class _WallCheck:
+    """`_refuse_a_wall`, remembering whether the page got past it."""
+
+    def __init__(self) -> None:
+        self.passed = False
+
+    def __call__(self, page: PageFetch) -> None:
+        _refuse_a_wall(page)
+        self.passed = True
 
 
 def _envelope_rows(body: str) -> list[Any]:
@@ -267,14 +313,19 @@ def _error_code(row: list[Any]) -> int | None:
     return code if isinstance(code, int) and not isinstance(code, bool) else None
 
 
-def price_graph(search: CalendarSearch, *, headed: bool) -> PriceGraph:
+def price_graph(search: CalendarSearch, *, headed: bool, pages: int = _MAX_PAGES) -> PriceGraph:
     """The cheapest fare per departure date across the window.
 
     One page load when the graph's span covers the window, and more when it
     does not: each load after the first opens on the first date the last one
     did not cover. The span is read from each response rather than assumed,
     because it differs by page. Paging stops on a graph that covers nothing
-    from its opening date on, and after `_MAX_PAGES` loads.
+    from its opening date on, and after `pages` loads.
+
+    A page that passed the wall check and then drew no graph in time is loaded
+    once more, from the same budget: Google serves such a page now and then, and
+    loading it again is not asking a wall again. A wall, a failed navigation and
+    any answer the graph gave are raised as they are.
 
     The caller arms `interrupt_guard` and holds `session_scope` around this."""
     window = search.window
@@ -282,10 +333,27 @@ def price_graph(search: CalendarSearch, *, headed: bool) -> PriceGraph:
     session = _gf_browser.session(headed=headed)
     found: dict[date, GraphCell] = {}
     cursor = window.start
-    for _ in range(_MAX_PAGES):
-        captured = session.capture(
-            page_url(search, cursor), _is_graph_rpc, click=_PRICE_GRAPH, check_page=_refuse_a_wall
-        )
+    loads = 0
+    missed = False
+    while True:
+        if loads >= pages:
+            raise GfPriceGraphError(
+                f"the window needs more than {pages} price-graph pages; narrow --start/--end"
+            )
+        loads += 1
+        check = _WallCheck()
+        try:
+            captured = session.capture(
+                page_url(search, cursor), _is_graph_rpc, click=_PRICE_GRAPH, check_page=check
+            )
+        except GfBrowserUnavailableError as e:
+            if not check.passed:
+                raise
+            if missed or loads >= pages:
+                raise GfGraphStalledError(e, loads=loads) from e
+            missed = True
+            continue
+        missed = False
         if not HTTPStatus.OK <= captured.status < HTTPStatus.MULTIPLE_CHOICES:
             raise GfPriceGraphError(
                 f"Google Flights' price graph request returned HTTP {captured.status}"
@@ -302,13 +370,92 @@ def price_graph(search: CalendarSearch, *, headed: bool) -> PriceGraph:
         if page.last >= window.end:
             break
         cursor = page.last + timedelta(days=1)
-    else:
-        raise GfPriceGraphError(
-            f"the window needs more than {_MAX_PAGES} price-graph pages; narrow --start/--end"
-        )
     if not found:
         raise GfPriceGraphError("Google Flights' price graph priced no date in the window")
-    return PriceGraph(trip_length, tuple(found[d] for d in sorted(found)))
+    return PriceGraph(trip_length, tuple(found[d] for d in sorted(found)), loads)
+
+
+def graph_lengths(search: CalendarSearch) -> tuple[int | None, ...]:
+    """The trip lengths one graph each answers: every length in a round trip's
+    range, and a one-way's single graph, which has no trip length."""
+    if len(search.legs) == 1:
+        return (None,)
+    window = search.window
+    return tuple(range(window.duration_min, window.duration_max + 1))
+
+
+def page_budget_blocker(search: CalendarSearch) -> str | None:
+    """Why this calendar's graphs would not fit in `_MAX_PAGES` loads, or None.
+
+    Counted before any load, at `_PAGE_DAYS` a load for every trip length. The
+    phrase completes "this is …"."""
+    window = search.window
+    days = (window.end - window.start).days + 1
+    graphs = len(graph_lengths(search))
+    loads = graphs * -(-days // _PAGE_DAYS)
+    if loads > _MAX_PAGES:
+        what = "a window" if graphs == 1 else "a window and trip-length range"
+        return f"{what} needing {loads:d} price-graph loads (at most {_MAX_PAGES:d})"
+    return None
+
+
+def price_graphs(search: CalendarSearch, *, headed: bool) -> GraphRange:
+    """One graph per trip length, in order, within `_MAX_PAGES` loads in all.
+
+    Each length is asked with the loads still left, since a page's span can fall
+    short of the estimate that admitted the window. A length that fails, or that
+    no load is left for, is lost with its cause, and the lengths that priced
+    stand without it: kept as an empty column, it would print as dates nobody
+    priced.
+
+    Only a page that drew no graph lets the next length be asked. A wall, an
+    error row or a Chrome that cannot load the page would meet the next
+    length's page too, and a wall would take another load to say so; no other
+    failure is told apart from those, so after any of them the lengths still
+    to come are lost with it.
+
+    When no length priced, the first failure is raised as it came, and the
+    graph's own error is named with its trip length.
+
+    The caller arms `interrupt_guard` and holds `session_scope` around this."""
+    lengths = graph_lengths(search)
+    graphs: list[PriceGraph] = []
+    lost: list[LostLength] = []
+    used = 0
+    for i, nights in enumerate(lengths):
+        left = _MAX_PAGES - used
+        if left <= 0:
+            lost.append(
+                LostLength(
+                    nights, GfPriceGraphError(f"no price-graph load of the {_MAX_PAGES:d} was left")
+                )
+            )
+            continue
+        one = search
+        if nights is not None:
+            window = search.window.model_copy(
+                update={"duration_min": nights, "duration_max": nights}
+            )
+            one = search.model_copy(update={"window": window})
+        try:
+            graph = price_graph(one, headed=headed, pages=left)
+        except GfGraphStalledError as e:
+            used += e.loads
+            lost.append(LostLength(nights, e))
+            continue
+        except GfBackendError as e:
+            lost.append(LostLength(nights, e))
+            after = GfPriceGraphError(f"not asked after {nights}-night trips failed")
+            lost.extend(LostLength(n, after) for n in lengths[i + 1 :])
+            break
+        used += graph.loads
+        graphs.append(graph)
+    if not graphs:
+        nights, cause = lost[0]
+        if isinstance(cause, GfPriceGraphError) and len(lengths) > 1:
+            raise GfPriceGraphError(f"{nights}-night trips: {cause}", code=cause.code) from cause
+        raise cause
+    return GraphRange(graphs, lost)
 
 
 def document(

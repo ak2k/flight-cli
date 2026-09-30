@@ -14,7 +14,7 @@ import pathlib
 import signal
 import sys
 from datetime import date, timedelta
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn
 
 import pytest
 import typer
@@ -25,7 +25,7 @@ from flight_cli import _gf_calgraph as cg
 from flight_cli import cli
 from flight_cli._gf_browser import CapturedResponse
 from flight_cli._gf_common import PageFetch
-from flight_cli._gf_errors import GfBrowserUnavailableError, GfThrottledError
+from flight_cli._gf_errors import GfBrowserUnavailableError, GfConsentError, GfThrottledError
 from flight_cli.domain import (
     Cabin,
     CalendarSearch,
@@ -35,6 +35,7 @@ from flight_cli.domain import (
     SearchOptions,
     TimeOfDay,
 )
+from flight_cli.models import CalendarResult
 from test_gf_airport_sets import _tfs
 from test_links_search_tfs import _decode, _slices
 
@@ -155,13 +156,46 @@ def test_an_unpriced_date_counts_toward_coverage_but_is_not_a_fare() -> None:
 # ───────────────────────────── paging across a window ─────────────────────────
 
 
-class _FakeSession:
-    """Answers each capture with the next body, recording what was asked."""
+# What the wall check is handed on a results page that loaded: no rows it can
+# find, which the check lets through.
+_LOADED = PageFetch(
+    html="<html>no rows</html>", final_url="https://www.google.com/travel/flights", status_code=200
+)
+_SORRY = PageFetch(
+    html="<html>unusual traffic</html>",
+    final_url="https://www.google.com/sorry/index?continue=x",
+    status_code=200,
+)
+_CONSENT = PageFetch(
+    html="<html>before you continue</html>",
+    final_url="https://consent.google.com/ml?continue=x",
+    status_code=200,
+)
+_CLICK_TIMEOUT = (
+    "Chrome could not click 'Price graph' on Google Flights' page: "
+    "Locator.click: Timeout 20000ms exceeded."
+)
 
-    def __init__(self, answers: list[tuple[int, str]]) -> None:
+
+class _Unloaded(NamedTuple):
+    """A capture that fails before there is a page to check."""
+
+    error: Exception
+
+
+_Answer = tuple[int, str] | PageFetch | Exception | _Unloaded
+
+
+class _FakeSession:
+    """Answers each capture with the next answer, recording what was asked.
+
+    A `(status, body)` or an exception comes from a page that loaded, so the
+    wall check sees `_LOADED` first; a `PageFetch` is the page the check sees,
+    and has to be refused there."""
+
+    def __init__(self, answers: list[_Answer]) -> None:
         self._answers = answers
         self.calls: list[tuple[str, gfb.Control | None]] = []
-        self.checks: list[Callable[..., object] | None] = []
 
     def capture(
         self,
@@ -169,18 +203,26 @@ class _FakeSession:
         wanted: Callable[[str], bool],
         *,
         click: gfb.Control | None = None,
-        check_page: Callable[..., object] | None = None,
+        check_page: Callable[[PageFetch], object] | None = None,
     ) -> CapturedResponse:
         assert wanted(_GRAPH_URL)
         assert not wanted("https://www.google.com/_/FlightsFrontendUi/data/x/GetCalendarGrid")
         self.calls.append((url, click))
-        self.checks.append(check_page)
-        status, body = self._answers[len(self.calls) - 1]
+        answer = self._answers[len(self.calls) - 1]
+        if isinstance(answer, _Unloaded):
+            raise answer.error
+        assert check_page is not None
+        check_page(answer if isinstance(answer, PageFetch) else _LOADED)
+        if isinstance(answer, PageFetch):
+            raise AssertionError(f"the wall check let {answer.final_url} through")
+        if isinstance(answer, Exception):
+            raise answer
+        status, body = answer
         return CapturedResponse(url=_GRAPH_URL, status=status, body=body)
 
 
-def _serve(monkeypatch: pytest.MonkeyPatch, *bodies: str | tuple[int, str]) -> _FakeSession:
-    fake = _FakeSession([b if isinstance(b, tuple) else (200, b) for b in bodies])
+def _serve(monkeypatch: pytest.MonkeyPatch, *bodies: str | _Answer) -> _FakeSession:
+    fake = _FakeSession([(200, b) if isinstance(b, str) else b for b in bodies])
 
     def _session(*, headed: bool) -> _FakeSession:
         del headed
@@ -200,7 +242,6 @@ def test_one_load_covers_a_window_inside_the_graphs_span(monkeypatch: pytest.Mon
     graph = cg.price_graph(search, headed=False)
     assert [url for url, _ in fake.calls] == ["page:2026-10-20"]
     assert fake.calls[0][1] == gfb.Control("button", "Price graph")
-    assert fake.checks[0] is cg._refuse_a_wall
     # Clipped to the window: the graph opened seven days early and ran past it.
     assert graph.cells[0].departure == date(2026, 10, 20)
     assert graph.cells[-1].departure == date(2026, 11, 2)
@@ -243,6 +284,234 @@ def test_the_number_of_loads_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(cg.GfPriceGraphError, match=f"more than {cg._MAX_PAGES}"):
         cg.price_graph(_search(start=start, end=start + timedelta(days=60)), headed=False)
     assert len(fake.calls) == cg._MAX_PAGES
+
+
+def test_a_smaller_budget_caps_the_loads_and_names_itself(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start = date(2026, 10, 20)
+    one_day_each = [_body(_cells(start + timedelta(days=i), 1)) for i in range(3)]
+    fake = _serve(monkeypatch, *one_day_each)
+    with pytest.raises(cg.GfPriceGraphError, match="more than 3 price-graph pages"):
+        cg.price_graph(_search(start=start, end=start + timedelta(days=60)), headed=False, pages=3)
+    assert len(fake.calls) == 3
+
+
+def test_a_graph_counts_the_loads_it_took(monkeypatch: pytest.MonkeyPatch) -> None:
+    second = _body(_cells(date(2026, 11, 13), 45, price=300.0))
+    _serve(monkeypatch, _fixture("ow_jfk_lax.body"), second)
+    search = _search(start=date(2026, 10, 20), end=date(2026, 12, 10))
+    assert cg.price_graph(search, headed=False).loads == 2
+    _serve(monkeypatch, _fixture("ow_jfk_lax.body"))
+    search = _search(start=date(2026, 10, 20), end=date(2026, 11, 2))
+    assert cg.price_graph(search, headed=False).loads == 1
+
+
+# ───────────────────────────── a page that draws no graph ────────────────────
+
+
+def test_a_page_that_drew_no_graph_is_loaded_once_more(monkeypatch: pytest.MonkeyPatch) -> None:
+    miss = GfBrowserUnavailableError(_CLICK_TIMEOUT)
+    fake = _serve(monkeypatch, miss, _fixture("ow_jfk_lax.body"))
+    search = _search(start=date(2026, 10, 20), end=date(2026, 11, 2))
+    graph = cg.price_graph(search, headed=False)
+    assert [url for url, _ in fake.calls] == ["page:2026-10-20", "page:2026-10-20"]
+    assert graph.loads == 2
+    assert len(graph.cells) == 14
+
+
+def test_a_second_miss_on_the_same_page_surfaces(monkeypatch: pytest.MonkeyPatch) -> None:
+    miss = GfBrowserUnavailableError(_CLICK_TIMEOUT)
+    fake = _serve(monkeypatch, miss, miss, _fixture("ow_jfk_lax.body"))
+    with pytest.raises(cg.GfGraphStalledError) as e:
+        cg.price_graph(_search(), headed=False)
+    assert e.value.reason == _CLICK_TIMEOUT
+    assert e.value.loads == 2
+    assert len(fake.calls) == 2
+
+
+def test_each_page_of_a_window_gets_its_own_second_load(monkeypatch: pytest.MonkeyPatch) -> None:
+    miss = GfBrowserUnavailableError(_CLICK_TIMEOUT)
+    second = _body(_cells(date(2026, 11, 13), 45, price=300.0))
+    fake = _serve(monkeypatch, miss, _fixture("ow_jfk_lax.body"), miss, second)
+    graph = cg.price_graph(_search(start=date(2026, 10, 20), end=date(2026, 12, 10)), headed=False)
+    assert [url for url, _ in fake.calls] == [
+        "page:2026-10-20",
+        "page:2026-10-20",
+        "page:2026-11-20",
+        "page:2026-11-20",
+    ]
+    assert graph.loads == 4
+
+
+def test_the_second_load_is_spent_from_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    miss = GfBrowserUnavailableError(_CLICK_TIMEOUT)
+    fake = _serve(monkeypatch, miss, _fixture("ow_jfk_lax.body"))
+    with pytest.raises(cg.GfGraphStalledError) as e:
+        cg.price_graph(_search(), headed=False, pages=1)
+    assert e.value.loads == 1
+    assert len(fake.calls) == 1
+    fake = _serve(monkeypatch, miss, _fixture("ow_jfk_lax.body"), _fixture("ow_jfk_lax.body"))
+    window = _search(start=date(2026, 10, 20), end=date(2026, 12, 10))
+    with pytest.raises(cg.GfPriceGraphError, match="more than 2 price-graph pages"):
+        cg.price_graph(window, headed=False, pages=2)
+    assert len(fake.calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("answer", "error"),
+    [
+        (_SORRY, GfThrottledError),
+        (_CONSENT, GfConsentError),
+        ((429, ""), cg.GfPriceGraphError),
+        ((500, "oops"), cg.GfPriceGraphError),
+        ("<html>not an envelope</html>", cg.GfPriceGraphError),
+        (_fixture("error13.body"), cg.GfPriceGraphError),
+        (
+            _Unloaded(GfBrowserUnavailableError("Chrome could not load Google Flights' page: x.")),
+            GfBrowserUnavailableError,
+        ),
+    ],
+    ids=["throttle", "consent", "http-429", "http-500", "unreadable", "error-13", "not-loaded"],
+)
+def test_a_wall_an_answer_or_a_page_that_never_loaded_is_not_loaded_again(
+    answer: str | _Answer, error: type[Exception], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Loading a wall again spends the budget that put it there; an answer the
+    graph came back with is Google's, not a page that failed to draw; and a
+    navigation that failed says nothing a second one would not."""
+    fake = _serve(monkeypatch, answer, _fixture("ow_jfk_lax.body"))
+    with pytest.raises(error) as e:
+        cg.price_graph(_search(start=date(2026, 10, 20), end=date(2026, 11, 2)), headed=False)
+    assert not isinstance(e.value, cg.GfGraphStalledError)
+    assert len(fake.calls) == 1
+
+
+def test_one_graph_per_trip_length_within_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A one-way is one graph with no trip length; a range is one per length, each
+    asked with the loads the lengths before it left."""
+    asked: list[tuple[int | None, int]] = []
+
+    def _price_graph(search: CalendarSearch, *, headed: bool, pages: int) -> cg.PriceGraph:
+        del headed
+        nights = search.window.duration_min if len(search.legs) > 1 else None
+        asked.append((nights, pages))
+        return cg.PriceGraph(nights, (), 4)
+
+    monkeypatch.setattr(cg, "price_graph", _price_graph)
+    one_way = _search()
+    assert [g.trip_length for g in cg.price_graphs(one_way, headed=False).graphs] == [None]
+    assert asked == [(None, cg._MAX_PAGES)]
+    asked.clear()
+    got = cg.price_graphs(_ranged(), headed=False)
+    assert asked == [(5, 8), (6, 4)]
+    assert [g.trip_length for g in got.graphs] == [5, 6]
+    assert _lost(got) == [(7, "no price-graph load of the 8 was left")]
+
+
+def _ranged() -> CalendarSearch:
+    window = _search().window.model_copy(update={"duration_min": 5, "duration_max": 7})
+    return _search(nights=5).model_copy(update={"window": window})
+
+
+def _lost(got: cg.GraphRange) -> list[tuple[int | None, str]]:
+    return [(lost.nights, str(lost.cause)) for lost in got.lost]
+
+
+def _lengths_answer(
+    monkeypatch: pytest.MonkeyPatch, answers: dict[int, cg.PriceGraph | Exception]
+) -> list[tuple[int, int]]:
+    """Stand in for each trip length's graph, recording the loads it was given."""
+    asked: list[tuple[int, int]] = []
+
+    def _price_graph(search: CalendarSearch, *, headed: bool, pages: int) -> cg.PriceGraph:
+        del headed
+        asked.append((search.window.duration_min, pages))
+        answer = answers[search.window.duration_min]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(cg, "price_graph", _price_graph)
+    return asked
+
+
+def _missed(loads: int) -> cg.GfGraphStalledError:
+    return cg.GfGraphStalledError(GfBrowserUnavailableError(_CLICK_TIMEOUT), loads=loads)
+
+
+def test_a_length_whose_page_drew_no_graph_is_lost_and_the_next_is_asked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The loads the lost length spent are spent: the next length has what is left."""
+    asked = _lengths_answer(
+        monkeypatch, {5: cg.PriceGraph(5, (), 1), 6: _missed(3), 7: cg.PriceGraph(7, (), 1)}
+    )
+    got = cg.price_graphs(_ranged(), headed=False)
+    assert asked == [(5, 8), (6, 7), (7, 4)]
+    assert [g.trip_length for g in got.graphs] == [5, 7]
+    assert _lost(got) == [(6, str(_missed(3)))]
+
+
+def test_any_other_failure_loses_its_length_and_the_ones_after_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wall, an error row or a Chrome that could not load the page would meet
+    the next length the same way, and asking it would spend a load to learn so."""
+    asked = _lengths_answer(
+        monkeypatch,
+        {
+            5: cg.PriceGraph(5, (), 1),
+            6: cg.GfPriceGraphError("error 13", code=13),
+            7: cg.PriceGraph(7, (), 1),
+        },
+    )
+    got = cg.price_graphs(_ranged(), headed=False)
+    assert [n for n, _ in asked] == [5, 6]
+    assert [g.trip_length for g in got.graphs] == [5]
+    assert _lost(got) == [(6, "error 13"), (7, "not asked after 6-night trips failed")]
+
+
+@pytest.mark.parametrize(
+    ("answers", "asked", "raised", "message"),
+    [
+        (
+            {5: cg.GfPriceGraphError("error 13", code=13)},
+            [5],
+            cg.GfPriceGraphError,
+            "5-night trips: error 13",
+        ),
+        (
+            {5: GfBrowserUnavailableError("Chrome could not load Google Flights' page: x.")},
+            [5],
+            GfBrowserUnavailableError,
+            "Chrome could not load Google Flights' page: x.",
+        ),
+        (
+            {5: _missed(2), 6: _missed(2), 7: GfThrottledError("rate-limited")},
+            [5, 6, 7],
+            cg.GfGraphStalledError,
+            _CLICK_TIMEOUT,
+        ),
+    ],
+    ids=["error-row", "chrome", "every-length"],
+)
+def test_a_range_that_priced_no_length_raises_its_first_failure_as_before(
+    answers: dict[int, cg.PriceGraph | Exception],
+    asked: list[int],
+    raised: type[Exception],
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The graph's own error is named with its length; a browser's is its own line."""
+    seen = _lengths_answer(monkeypatch, answers)
+    with pytest.raises(raised) as e:
+        cg.price_graphs(_ranged(), headed=False)
+    assert [n for n, _ in seen] == asked
+    shown = e.value.reason if isinstance(e.value, GfBrowserUnavailableError) else str(e.value)
+    assert shown == message
+    if isinstance(e.value, cg.GfPriceGraphError):
+        assert e.value.code == 13
 
 
 def test_a_graph_with_no_fare_in_the_window_is_a_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -417,7 +686,10 @@ def _graph_is(monkeypatch: pytest.MonkeyPatch, answer: cg.PriceGraph | BaseExcep
     """Stand in for the page loads, recording the search and the transport's state."""
     seen: list[Any] = []
 
-    def _price_graph(search: CalendarSearch, *, headed: bool) -> cg.PriceGraph:
+    def _price_graph(
+        search: CalendarSearch, *, headed: bool, pages: int = cg._MAX_PAGES
+    ) -> cg.PriceGraph:
+        del pages
         seen.append((search, headed, gfb._scope_depth.n, signal.getsignal(signal.SIGINT)))
         if isinstance(answer, BaseException):
             raise answer
@@ -780,23 +1052,45 @@ def test_a_blank_airport_side_is_an_input_error_on_every_calendar_path(
     assert result.stdout == ""
 
 
-@pytest.mark.parametrize(
-    ("overrides", "flag"),
-    [
-        ({"gf_transport": "browser"}, "--gf-transport"),
-        ({"gf_transport": "auto"}, "--gf-transport"),
-        ({"gf_transport": "http", "gf_headed": True}, "--gf-headed"),
-    ],
-)
-def test_a_transport_flag_without_fast_is_a_usage_error(
-    overrides: dict[str, Any], flag: str, monkeypatch: pytest.MonkeyPatch
+def test_a_headed_window_over_http_without_fast_is_a_usage_error(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Only `--fast` reaches Google Flights; honoring the flag nowhere would run
-    Matrix as though it had been."""
+    """http opens no Chrome, so a flag that shows its window would be honored
+    nowhere."""
     _no_matrix(monkeypatch)
-    with pytest.raises(typer.BadParameter, match="--fast") as e:
-        _calendar(fast=False, **overrides)
-    assert e.value.param_hint == flag
+    with pytest.raises(typer.BadParameter, match="--gf-transport http opens none") as e:
+        _calendar(fast=False, gf_transport="http", gf_headed=True)
+    assert e.value.param_hint == "--gf-headed"
+
+
+def _matrix_answers(monkeypatch: pytest.MonkeyPatch) -> list[CalendarSearch]:
+    """Stand in for the Matrix calendar with an empty answer, recording each ask."""
+    asked: list[CalendarSearch] = []
+
+    def _matrix(search: CalendarSearch, **_kw: object) -> tuple[CalendarResult, int]:
+        asked.append(search)
+        return CalendarResult.from_api({"solutionCount": 0}), 0
+
+    def _no_weave(*_a: object, **_k: object) -> object:
+        raise AssertionError("the http weave ran on the browser transport")
+
+    monkeypatch.setattr(cli, "_run_calendar", _matrix)
+    monkeypatch.setattr(cli, "_run_calendar_enriched", _no_weave)
+    return asked
+
+
+@pytest.mark.parametrize("transport", ["browser", "auto"])
+def test_without_fast_the_browser_transports_read_the_graph_beside_matrix(
+    transport: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    asked = _matrix_answers(monkeypatch)
+    seen = _graph_is(monkeypatch, _OW)
+    _calendar(fast=False, gf_transport=transport)
+    assert len(asked) == 1
+    assert len(seen) == 1
+    assert "lowest fare per departure day (Google Flights)" in " ".join(
+        capsys.readouterr().out.split()
+    )
 
 
 # ───────────────────── the transport a bare `--fast` takes ───────────────────
@@ -878,9 +1172,8 @@ def test_a_bare_fast_without_chrome_names_the_chrome_install(
     assert result.stdout == ""
 
 
-@pytest.mark.parametrize("extra", [(), ("--gf-transport", "http")], ids=["unset", "http"])
-def test_without_fast_an_unset_or_http_transport_runs_matrix(
-    extra: tuple[str, ...], monkeypatch: pytest.MonkeyPatch
+def test_without_fast_an_http_transport_runs_the_weave_and_never_the_graph(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ran: list[CalendarSearch] = []
 
@@ -888,26 +1181,41 @@ def test_without_fast_an_unset_or_http_transport_runs_matrix(
         ran.append(search)
 
     monkeypatch.setattr(cli, "_run_calendar_enriched", _weave)
-    result = _calendar_cli(*extra)
+    seen = _graph_is(monkeypatch, _OW)
+    result = _calendar_cli("--gf-transport", "http")
     assert result.exit_code == 0, result.stderr
     assert len(ran) == 1
+    assert seen == []
 
 
 @pytest.mark.parametrize(
-    ("extra", "flag"),
+    ("extra", "headed"),
     [
-        (("--gf-transport", "browser"), "--gf-transport"),
-        (("--gf-transport", "auto"), "--gf-transport"),
-        (("--gf-headed",), "--gf-headed"),
+        ((), False),
+        (("--gf-transport", "browser"), False),
+        (("--gf-transport", "auto"), False),
+        (("--gf-headed",), True),
     ],
-    ids=["browser", "auto", "headed"],
+    ids=["unset", "browser", "auto", "headed"],
 )
-def test_without_fast_a_browser_flag_is_still_a_usage_error(
-    extra: tuple[str, ...], flag: str, monkeypatch: pytest.MonkeyPatch
+def test_without_fast_an_unset_or_browser_transport_reads_the_graph_beside_matrix(
+    extra: tuple[str, ...], headed: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked = _matrix_answers(monkeypatch)
+    seen = _graph_is(monkeypatch, _OW)
+    result = _calendar_cli(*extra)
+    assert result.exit_code == 0, result.stderr
+    assert len(asked) == 1
+    assert [s[1] for s in seen] == [headed]
+    assert "lowest fare per departure day (Google Flights)" in " ".join(result.stdout.split())
+
+
+def test_without_fast_a_headed_window_over_http_is_a_usage_error(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _no_matrix(monkeypatch)
-    result = _calendar_cli(*extra)
+    result = _calendar_cli("--gf-headed", "--gf-transport", "http")
     err = " ".join(result.stderr.split())
     assert result.exit_code == 2
-    assert flag in err
-    assert "applies only with --fast" in err
+    assert "--gf-headed" in err
+    assert "--gf-transport http opens none" in err

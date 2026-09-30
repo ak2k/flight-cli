@@ -27,11 +27,11 @@ are also an airport code (`HOU`, `LAX`, `BER`, `SHA`, `BKK`, `DPS`) stay that on
 airport on Google Flights. A leg of more than 11 airports, origins plus
 destinations after expansion, goes to Matrix: Google's page declined 15 on one
 side outright. `src/flight_cli/_metro.py` holds the same table, and
-`tests/test_metro.py` fails when the two differ. `flight calendar --fast`
-expands them the same way, under the same bound: Google's price graph over a
-set prices each date at its cheapest member airport. Without `--fast` a set's
-calendar is Matrix's, one query per origin and destination (see
-`gf_routing_and_carriers.md`).
+`tests/test_metro.py` fails when the two differ. `flight calendar` expands
+them the same way, under the same bound: Google's price graph over a set
+prices each date at its cheapest member airport, alone under `--fast` and
+printed after Matrix's calendar without it. Matrix answers a set with one query
+per origin and destination (see `gf_routing_and_carriers.md`).
 
 | Metro | IATA metro | Constituent airports |
 |---|---|---|
