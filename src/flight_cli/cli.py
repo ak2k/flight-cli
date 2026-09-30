@@ -5540,7 +5540,12 @@ def _run_gflight_path_multi(
         sys.stdout.write(json.dumps(out, indent=2, default=str))
         return None
 
-    results_by_cabin = _gflight_to_search_result_per_cabin(fli_by_cabin)
+    # The sort cabin first, then the rest as asked: a row several cabins price
+    # shows the first itinerary `_merge_cabins` meets, so the table sorted on a
+    # cabin shows that cabin's seats whichever search finished first.
+    results_by_cabin = _gflight_to_search_result_per_cabin(
+        {cab: fli_by_cabin[cab] for cab in dict.fromkeys((sort_by, *cabins)) if cab in fli_by_cabin}
+    )
     rows = _merge_cabins(
         results_by_cabin, sort_by=sort_by, top_n=top_n, currency=opts.currency or "USD"
     )

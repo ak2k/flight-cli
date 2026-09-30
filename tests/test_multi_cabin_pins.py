@@ -152,7 +152,7 @@ def _table(stdout: str) -> list[tuple[int, list[str]]]:
 
 def _search(
     monkeypatch: pytest.MonkeyPatch,
-    google: _Google,
+    google: Callable[..., gfid.Board[gfid.GFlightWithId]],
     *extra: str,
     cabins: str = "economy,business",
     n: str = "10",
@@ -343,6 +343,40 @@ def test_with_three_cabins_both_followers_pin_the_leaders_outbounds(
     rows = _table(result.stdout)
     assert len(rows) == 10
     assert [prices for _, prices in rows if "—" in prices] == []
+
+
+def test_a_joined_row_shows_the_sort_cabins_seats(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fan-out hands the cabins back in the order their searches finish, and
+    a joined row is drawn from one cabin's itinerary: business finishing first
+    must not put its seats on the rows of a Y-sorted table."""
+    google = _Google({"ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS})
+
+    def seated(
+        filters: Any, transport: Any, *, currency: str = "USD"
+    ) -> gfid.Board[gfid.GFlightWithId]:
+        seat: str = filters.seat_type.name
+        economy = seat == "ECONOMY"
+        amenities = gfid.LegAmenities(
+            cabin=seat,
+            pitch_inches=31 if economy else None,
+            legroom_class="AVERAGE" if economy else "Suite",
+        )
+        board = google(filters, transport, currency=currency)
+        return gfid.Board([replace(r, amenities=[amenities]) for r in board])
+
+    fan_out = cli._run_gflight_multi
+
+    def business_first(**kw: Any) -> dict[Cabin, list[Any]]:
+        out = fan_out(**kw)
+        return {cab: out[cab] for cab in reversed(kw["cabins"])}
+
+    monkeypatch.setattr(cli, "_run_gflight_multi", business_first)
+    result = _search(monkeypatch, seated)
+    assert result.exit_code == 0, result.output
+    lines = result.stdout.splitlines()
+    details = [lines[i + 1] for i, line in enumerate(lines) if _TABLE_ROW.match(line)]
+    assert len(details) == 10
+    assert [d for d in details if 'Y 31"' not in d or "Suite" in d] == []
 
 
 # ──────────────────────────── failures and budget ──────────────────────────────
