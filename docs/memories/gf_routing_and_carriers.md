@@ -485,10 +485,11 @@ the untyped shape of that failure is worse than the failure:
 prints "combines returns against up to `<pin budget>` cheapest outbounds" on
 every round-trip path (the enriched one, `--fast`, `--format json` and
 multi-cabin) whenever the pin cap is below the `-n` asked for and the search is
-not handed to Matrix, and always to stderr so a JSON document stays a document. It is passed the user's count,
-never the multi-cabin bump — a wider pool per cabin that nobody asked for — and
-prints the pin budget that count resolves to, which is the number the join will
-actually see rather than the one being corrected. Above the cap the rows shown
+not handed to Matrix, and always to stderr so a JSON document stays a document.
+It is passed the user's count, never the multi-cabin bump — a wider pool per
+cabin that nobody asked for — and prints the pin budget that count resolves to,
+which is the number the join will actually see rather than the one being
+corrected. Above the cap the rows shown
 are the `-n` cheapest combinations of the ten cheapest outbounds, not the `-n`
 cheapest round trips on the board, and the note is what says so.
 
