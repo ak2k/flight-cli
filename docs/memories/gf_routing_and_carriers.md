@@ -3,8 +3,8 @@
 How `--routing`/`--extension` reach Google Flights, and the carrier-identity
 indices that make it correct. Read before touching `routing_predicates.py`,
 `_gf_postfilter.py`, `fli_bridge.apply_gf_native_filters`,
-`links.build_search_tfs`, or `_gflight_ids._parse_leg_amenities` /
-`_flight_leg`.
+`links.build_search_tfs`, `fli_bridge.fli_airport`, or
+`_gflight_ids._parse_leg_amenities` / `_flight_leg`.
 
 ## Booking carrier: `fl[15]` (marketing) vs `fl[22]` (operating)
 
@@ -96,6 +96,25 @@ ANY — writing a literal 0 pins every search to nonstop. **Carrier codes come
 from the enum NAME, not its value**: fli maps codes to display names
 (`Airline._0B.value == "Blue Air"`) and underscore-prefixes digit-leading ones,
 so `airline.name.removeprefix("_")` is the code.
+
+**Airport codes come from the member's name as well, and fli's enum aliases 48
+of them to another airport.** `Airport` is an enum over a code -> display-name
+table, so a code whose display name repeats an earlier one is an alias of that
+member: `Airport.OKA` is `Airport.NAH` (Naha in Indonesia, not Okinawa), as NTL
+is NCL, TRI is PSC, SVC is PGC and ZFA is FAO. A lookup through the enum asks
+Google for the other airport, and fli's row decoder has no entry for an alias,
+so every row Google serves at one fails. Build airport members only through
+`fli_bridge.fli_airport`, which gives each aliased code a member of its own,
+named that code with the same display name (so the JSON dump shows "Naha
+Airport" for OKA and NAH alike). `tests/test_airport_alias_requests.py` fails
+on any `getattr`/`hasattr` call on the enum or `Airport[...]` subscript under
+`src/`. MLH is the one alias kept: it is EuroAirport's second code, the same
+airport as BSL, and Google serves it only as BSL (JFK-MLH asked for MLH gave an
+empty board, asked for BSL 8 rows). Measured 2026-10-01: `flight search LAX OKA
+--dep 2026-10-20 --backend gflight --fast --format json` through the enum
+printed `[]` with exit 0; through `fli_airport` it printed 27 rows (CI, BR, CX
+via TPE or HKG, from USD577), each landing at OKA by its clock span: departure
+to arrival less elapsed time is +960 minutes from LAX, where NAH gives +900.
 
 **What the page costs us.** Without `tfu=` it serves Google's top ~30 rows per
 leg. `links.google_flights_search_page_url` always sends `tfu=EgQIABABIgA`
@@ -200,14 +219,33 @@ The date grids do not serve any of the new constraints yet: `page_can_encode`
 and each predicate's `Tier` still answer for them, and they have no rows to
 check against. Only the strictest-stops rule reached them.
 
+**Google's CO2 estimate (`row[22]`).** An 18-slot list on all 208 rows of six
+captures: `[7]` the row's grams (whole kilograms), `[8]` the route's typical
+grams (one value per board), `[3]` the signed integer percent from `[8]`, and
+`[2]` Google's label for that comparison (1 lower, 2 typical, 3 higher, 0 none).
+Each leg's own grams are `fl[31]`; `[7]` is their sum rounded to 1000. fli's
+decoder takes the label from `[11]`, which with `[10]` compares the row with the
+board's median grams instead. Google's help compares each flight with the
+route's typical, `[8]`, so the label is `[2]`: `[11]` differs from it on 35 of 95
+JFK-LAX and 40 of 101 JFK-LHR rows, and labels 13 rows lower at a percent of 0
+to +4. JFK-LAX states grams on 95 of 95 rows and JFK-LHR on 100 of 101 (VS46
+states only the typical). Each direction is its own: the HNL-MIA outbound page
+states 4264000 and its pinned return board 1539000, and no page states a pair
+total. Google says the estimate is for the passengers searched; only one adult
+has been measured. Each Google JSON row fills `co2_emissions_g`,
+`co2_emissions_typical_g`, `co2_emissions_delta_pct` and `emissions_tag`, and
+each leg `co2_emissions_g`, null where the slot is empty. The Google table adds
+`CO2 kg` (kilograms and the percent; green lower, red higher) when a shown row
+has a figure.
+
 **How the full board is served.**
 - Rows are deduped per itinerary (every leg's carrier, flight number and
   departure datetime), keeping the priced and cheaper listing at the first
   listing's place. No true duplicate has been measured; the key keeps dates, so
   the same flight numbers a day apart stay two trips.
 - The routing filter runs inside `search_with_ids` as each board is served: on
-  the outbound BEFORE the pins are taken (pins are the first rows in board
-  order), on each return board after `_unpinned_board`. A pin whose return
+  the outbound BEFORE the pins are taken (pins are the cheapest rows of the
+  board they are taken from), on each return board after `_unpinned_board`. A pin whose return
   board the filter empties is counted in a warning.
 - A pin names each leg's OPERATING flight (`fl[22]`). Pinned under the
   codeshare number it is booked as (AA142 as AY3787), the return board comes
@@ -240,8 +278,8 @@ check against. Only the strictest-stops rule reached them.
   follows is Matrix's, where '—' is a cabin with no price.
 - A round trip that took pins answers with a board even when no pair survives,
   its count covering the rows removed on both legs, so it takes the same route.
-  Under `--backend gflight` the line also names how many outbounds were pinned:
-  the ones below the pins were never searched for returns. With nothing
+  Under `--backend gflight` the line also names how many outbounds were pinned,
+  the cheapest ones: the rest were never searched for returns. With nothing
   removed, Google serving no return for any pin stays "no results".
 - `ds:1[5]` is Google's price insight: `[code, [None, cheapest], [None, _],
   [None, _], [None, typical_low], [None, typical_high], ...]`. The level is
@@ -401,12 +439,21 @@ widen the pool it filters, which was free on the old RPC and would otherwise
 mean ~2 x 31 page fetches for a two-cabin round trip. The default `-n 10` is
 unchanged by the cap.
 
+Which outbounds the budget buys is the cheapest ones the filtered board lists
+(`_gflight_ids._pins`, on the same `fare_key` the `-n` trim sorts by: ties in
+page order, unpriced rows last). An outbound row's price is already the cheapest
+round trip through it (see "What a round-trip row's price means" below), so the
+cheapest outbounds are where the cheapest combinations are. On the JFK-LHR
+capture the page lists five USD295 top flights before three USD293 rows; `-n 1`
+pins EI104+EI152, the sixth row, and spends the same two GETs it spent on the
+first.
+
 The bump therefore widens the leg-1 rows each cabin keeps and NOT the round-trip
 pins. What makes the cabins' pins overlap is that the sort cabin leads
 (`cli._CabinSearches`): every cabin pins, in the sort cabin's order, each
 outbound the sort cabin pins that its own filtered board lists, matched on the
 whole leg sequence `_itinerary_key` uses (`_gflight_ids.pin_keys`), then fills
-the rest of the same budget with its own rows in page order
+the rest of the same budget with its own cheapest rows
 (`search_with_ids`' `prefer`). The sort cabin's pins are exactly the ones it
 takes alone, so the rows the table shows lose nothing. The cost is that a
 non-sort cabin's own cheapest outbounds get only the slots the sort cabin's
@@ -422,7 +469,7 @@ loads again, and a Chrome failure on a later cabin's page would print a
 missing-column note for a column that the fallback then serves.
 
 So **Google Flights prices every cabin on up to `<pin budget>` of the `<sort>`
-cabin's first-ranked outbounds; '—' means that cabin's search returned no fare
+cabin's cheapest outbounds; '—' means that cabin's search returned no fare
 for the itinerary** — the budget being `pinned_fanout` of the bumped page size,
 which the cap holds at 10 however large `-n` is. `cli._multi_cabin_join_note`
 builds that sentence from the pin budget rather than a literal, and
@@ -435,8 +482,8 @@ and a row from a follower's own outbounds was never searched in the sort cabin.
 may hold fewer.
 
 When the sort cabin pinned nothing — its page refused, or its filter kept no
-row — every cabin pins its own first-ranked outbounds, and the note says that
-instead: "joins cabins on up to `<pin budget>` of each cabin's first-ranked
+row — every cabin pins its own cheapest outbounds, and the note says that
+instead: "joins cabins on up to `<pin budget>` of each cabin's cheapest
 outbounds; '—' means no shared itinerary, not no fare." The fan-out reports
 which cabin led (`cli._CabinBoards.leader`) rather than leaving it to be read
 off a board, because a sort cabin whose pins were handed on and whose every
@@ -473,18 +520,22 @@ the untyped shape of that failure is worse than the failure:
 | the enriched weave's own run | the same, for the loop and the task group themselves | a failure there is not one half of the weave failing, so nothing else in the command is left to report it |
 
 **A round trip says how many outbounds it will combine.** `cli._pin_cap_note`
-prints it on every round-trip path — the enriched one, `--fast`, `--format json`
-and multi-cabin — whenever the pin cap is below the `-n` asked for and the
-search is not handed to Matrix, and always
-to stderr so a JSON document stays a document. It is passed the user's count,
-never the multi-cabin bump — a wider pool per cabin that nobody asked for — and
-prints the pin budget that count resolves to, which is the number the join will
-actually see rather than the one being corrected.
+prints "combines returns against up to `<pin budget>` cheapest outbounds" on
+every round-trip path (the enriched one, `--fast`, `--format json` and
+multi-cabin) whenever the pin cap is below the `-n` asked for and the search is
+not handed to Matrix, and always to stderr so a JSON document stays a document.
+It is passed the user's count, never the multi-cabin bump — a wider pool per
+cabin that nobody asked for — and prints the pin budget that count resolves to,
+which is the number the join will actually see rather than the one being
+corrected. Above the cap the rows shown are the `-n` cheapest combinations of
+the ten cheapest outbounds, not the `-n` cheapest round trips on the board, and
+the note is what says so.
 
 **`-n` is one number, applied on the way out.** The page serves Google's whole
 board — around thirty rows; the dated measurement is at the top of this file —
 whatever count is asked of it, so the count is a trim rather than a query
-parameter. It bounds everything the user can act on, and all of it from one place
+parameter, and it keeps the cheapest rows (the order is set out below). It
+bounds everything the user can act on, and all of it from one place
 in `cli._run_gflight_path`: the table, the `--format json` document, the range
 `--pick` accepts and the itinerary the `--matrix-url` / `--google-url` lines pin,
 and the itineraries the award providers are fanned out over. All five hold on
@@ -535,17 +586,26 @@ order and extra Matrix rows after their key's first, so where no key is shared
 the list is the one-row-per-key merge exactly
 (`test_enrich.test_a_board_with_no_shared_key_merges_as_it_always_did`).
 
-**And it keeps two different orders, because the two sets are ordered by
-different things.** A one-way board arrives ranked by Google — a composite of
-price, duration and stops that nothing here reproduces — so the trim keeps the
-page's order and `-n` means the rows the page put first. A round trip's
-combinations are ours: the pin loop builds them outbound by outbound, so their
-order is the loop's artifact and carries no ranking at all. Left alone, `-n 3`
-there is three trips from one outbound with cheaper trips from the next outbound
-off the table entirely. `cli._price_ordered` sorts them on their terminal
-member — the pinned leg is what makes the combination that combination, so its
-fare is the one every surface prints — immediately before each of the three
-trims. The `-n` help string says both halves.
+**And it keeps one order: price, ascending.** `cli._price_ordered` sorts every
+Google answer immediately before each trim, on one key
+(`_gflight_ids.fare_key`, which the round-trip pins use too): a priced row by
+its fare, a row Google did not price after every row it did, and a stable sort,
+so equal fares keep the order they arrived in. A one-way row's fare is its own.
+A combination's is its terminal member's — the pinned leg is what makes the
+combination that combination, so its fare is the one every surface prints.
+
+One order, because every other list the CLI prints is already in it — the
+merged and multi-cabin tables, the date grid, explore — and because neither
+arrival order is a ranking a user can act on. A one-way board arrives with
+Google's top flights (`ds:1[2]`) ahead of the rest, a composite of price,
+duration and stops: on the JFK-LHR capture `-n 5` kept five USD295 top flights
+and left the board's three USD293 rows, at 6-8, off the table, and NYC-LAX,
+measured live on 2026-10-01, listed a 175 at row 6 under 169, 229, 229, 229 and
+234. A round trip's combinations arrive outbound by outbound, so `-n 3` unsorted
+is three trips from one outbound with cheaper trips from the next off the
+table. The trade is that a top-flights row, often a nonstop a few dollars
+dearer, can fall below a small `-n`; a larger `-n` brings it back. The page's
+order survives as the tie-break. The `-n` help string states the rule.
 
 Three things still read the whole board, and this is why the trim cannot move
 into the query: the Tier-2 post-filter, because a routing constraint is answered
@@ -600,9 +660,11 @@ therefore reports every one of them but the cheapest under its real fare. The
 human table prints each member's own price on its `Na`/`Nb` rows and
 `--format json` emits both, so both carry the true number; the SearchResult
 the award comparison reads carries one, and it is the total. The cash baseline
-that comparison is made against is therefore the cheapest of the rows SHOWN —
-one-way rows in Google's order, combinations in price order — and not the
-cheapest on the board, which is what `-n` bounding everything means.
+that comparison is made against is therefore the cheapest of the rows SHOWN,
+which with every Google list in price order is row one: a one-way board's
+lowest fare, and on a round trip the cheapest trip through the pinned outbounds.
+A single-cabin round trip pins its cheapest outbound first, so that is the
+board's cheapest round trip unless a return filter removed it.
 
 **Release before park.** A worker that is about to wait on another arm's round
 gives up any round it still owns first. Two workers can otherwise each hold what
@@ -979,7 +1041,8 @@ being the table's, from the pure `_cross_check.document`. Plain `--format json`
 does not cross-check; on auto a failed Google query is still handed to Matrix,
 as before, and `--fast` asks Matrix nothing. It needs no awards (`--cash-only`)
 and no `--sellers` (exit 2 otherwise); `--bags` prints the table's "No Matrix
-enrichment" note and the plain document. Matrix failing leaves `cross_check`
+enrichment" note and the plain document, and `--verify` prints its own such note
+and writes `{"search", "verify"}` instead. Matrix failing leaves `cross_check`
 null (exit 0), Google failing leaves `search` empty with every Matrix row
 `no_google_answer`, both failing is exit 1 with stdout empty.
 
@@ -1108,7 +1171,24 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
   The JSON names the user's tokens (`"NYC"`, `"JFK,EWR"`), as the table title
   does. Over `--gf-transport http` a set refuses with the browser note, since
   `date_grid` writes one airport per side; without `--fast` Matrix answers it
-  through its fan-out and the graph over the whole set prints after it.
+  through its fan-out and the graph over the whole set prints after it. That
+  fan-out splits a metro code into its member airports, asks one query per
+  airport pair, and merges the grids in one currency (USD with more than one
+  origin, unless `--currency`); each merged day and trip length names the pair
+  that priced it (`origin`, `destination` in the JSON; in the table a `route`
+  column for the day's minimum, and the pair beside any trip length another
+  pair priced), the two arguments `flight detail` takes. A round trip also runs the
+  user's own combined query beside the pairs, the only source of a return into
+  another airport of the set: it takes a day only when strictly cheaper than
+  every pair, its cells name the user's tokens, and a stderr note says so.
+  Measured 2026-10-01 over 2026-10-20..11-02: `LHR,DUB JFK --one-way` merged
+  DUB's EUR cells with LHR's GBP cells as bare numbers and showed GBP1137 and
+  GBP952 on two days DUB was cheaper; asked in USD, all 14 days came back USD,
+  each cheaper from DUB. `NYC LON -d 7` as one combined query priced 11 of 14
+  days (20 solutions, cheapest USD817); as 18 pairs plus that query it priced
+  14 of 14, cheaper on 7 days (10-27 USD766 EWR→LGW), the combined query was
+  below every pair on none, the 7 pairs into STN, LTN or SEN priced nothing,
+  and the 19 queries took about 110 s.
 - **Admission** (`_gf_calgraph.graph_blocker`). The graph has no itineraries,
   so it is asked only when the page URL writes every constraint exactly AND
   Google was measured applying it there. Admitted, per leg: a stop ceiling of

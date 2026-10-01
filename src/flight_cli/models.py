@@ -10,9 +10,9 @@ from __future__ import annotations
 # type hints at validation time and needs the symbol in the module's
 # runtime globals, even with `from __future__ import annotations`.
 from datetime import datetime  # noqa: TC003
-from typing import Any
+from typing import Any, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
 class _Loose(BaseModel):
@@ -207,7 +207,15 @@ class SearchResult(_Loose):
 
     @classmethod
     def from_api(cls, body: dict[str, Any]) -> SearchResult:
-        sol_container: dict[str, Any] = body.get("solutionList") or {}
+        listed: Any = body.get("solutionList", {})
+        # Refused as the model refuses a field of the wrong type, so a caller
+        # reads it as the shape change it is: `or {}` would read a list or a
+        # null as no solutions, and `.get` on anything else fails untyped.
+        if not isinstance(listed, dict):
+            raise ValidationError.from_exception_data(
+                cls.__name__, [{"type": "dict_type", "loc": ("solutionList",), "input": listed}]
+            )
+        sol_container = cast("dict[str, Any]", listed)
         sol_list: list[Any] = sol_container.get("solutions") or []
         return cls(
             solutionCount=body.get("solutionCount", len(sol_list)),
@@ -229,6 +237,10 @@ class DurationOption(_Loose):
     min_price: str = Field(alias="minPrice")
     solution_count: int = Field(0, alias="solutionCount")
     min_price_in_summary: bool = Field(False, alias="minPriceInSummary")
+    # Set only on a merged grid: the comma-joined airports of the sub-query that
+    # priced this length, the two arguments `flight detail` takes.
+    origin: str | None = None
+    destination: str | None = None
 
     @property
     def price_value(self) -> float:
@@ -248,6 +260,9 @@ class CalendarDay(_Loose):
     min_price: str | None = Field(None, alias="minPrice")
     min_price_in_week: bool = Field(False, alias="minPriceInWeek")
     trip_duration: TripDuration | None = Field(None, alias="tripDuration")
+    # Set only on a merged grid, as on `DurationOption`, for this day's `min_price`.
+    origin: str | None = None
+    destination: str | None = None
 
     @property
     def options(self) -> list[DurationOption]:
@@ -365,9 +380,52 @@ class Ticket(_Loose):
     pricings: list[TicketPricing] = Field(default_factory=list[TicketPricing])
 
 
+class BookedFlight(_Loose):
+    # Booking details send the number as an int, where a search's slice
+    # writes it inside a string ("AA142").
+    model_config = ConfigDict(extra="ignore", populate_by_name=True, coerce_numbers_to_str=True)
+
+    number: str | None = None
+
+
+class BookedLeg(_Loose):
+    """One takeoff and landing of a booked segment. Times keep Matrix's UTC
+    offset, so the first sixteen characters are the airport's wall clock."""
+
+    origin: SliceEndpoint | None = None
+    destination: SliceEndpoint | None = None
+    departure: str | None = None
+    arrival: str | None = None
+
+
+class BookedSegment(_Loose):
+    """One flight number of a booked slice: a through flight is one segment
+    with several legs. Every field is optional because `--fare-rules` reads
+    the same body and must not fail on a field Matrix leaves out."""
+
+    carrier: SliceCarrier | None = None
+    flight: BookedFlight | None = None
+    origin: SliceEndpoint | None = None
+    destination: SliceEndpoint | None = None
+    departure: str | None = None
+    arrival: str | None = None
+    legs: list[BookedLeg] = Field(default_factory=list[BookedLeg])
+
+
+class BookedSlice(_Loose):
+    segments: list[BookedSegment] = Field(default_factory=list[BookedSegment])
+
+
+class BookedItinerary(_Loose):
+    slices: list[BookedSlice] = Field(default_factory=list[BookedSlice])
+
+
 class BookingDetails(_Loose):
     tickets: list[Ticket] = Field(default_factory=list[Ticket])
     display_total: str | None = Field(None, alias="displayTotal")
+    # The only place Matrix dates each flight of a connection: a search's
+    # slice gives the day of its two ends alone.
+    itinerary: BookedItinerary | None = None
 
     @property
     def pricings(self) -> list[TicketPricing]:
