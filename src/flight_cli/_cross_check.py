@@ -59,7 +59,9 @@ class Answers:
     then cannot show a flight to be absent from Google. `stop_limit` says a
     stop limit was sent; without one Matrix searches one flight beyond the
     fewest a slice needs. `passengers` is the party: Google prices all of it,
-    while the price Matrix lists is one passenger's, rounded up."""
+    while the price Matrix lists is one passenger's, rounded up. `uncapped` is
+    Matrix's page before the cap, or None where it is `matrix`: a trip the cap
+    cut is still one Matrix answered."""
 
     matrix: SearchResult
     google: SearchResult | None
@@ -68,6 +70,7 @@ class Answers:
     round_trip: bool
     currency: str
     passengers: int = 1
+    uncapped: SearchResult | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +182,9 @@ class _Facts:
     # Per slice index, the fewest flights any Matrix row has on that slice.
     matrix_fewest: dict[int, int]
     matrix_trips: frozenset[tuple[_TripSlice, ...]]
+    # The trips the price cap cut from Matrix's page, each with Matrix's price
+    # for the party.
+    matrix_cut: dict[tuple[_TripSlice, ...], str | None]
     google_carriers: frozenset[str]
     google_outbounds: frozenset[_SliceKey]
     google_trips: frozenset[tuple[_TripSlice, ...]]
@@ -210,10 +216,16 @@ class _Facts:
             for c in it.itinerary.carriers
             if c.code
         ]
+        trips = _trips(a.matrix.solutions)
+        cut: dict[tuple[_TripSlice, ...], str | None] = {}
+        for it in a.uncapped.solutions if a.uncapped is not None else []:
+            if (t := _trip(_slices(it))) is not None and t not in trips:
+                cut.setdefault(t, _party_price(it.price, it, a.passengers))
         return cls(
             matrix_carriers=frozenset([*_carriers(_slices_of(a.matrix.solutions)), *listed]),
             matrix_fewest=fewest,
-            matrix_trips=_trips(a.matrix.solutions),
+            matrix_trips=trips,
+            matrix_cut=cut,
             google_carriers=frozenset([*_carriers(board), *named]),
             google_outbounds=frozenset(
                 k for it in google if (sl := _slices(it)) and (k := _key(sl[0])) is not None
@@ -292,6 +304,11 @@ def _google_only(
         # ends can fly on another day, and neither side says which, so this
         # row is not shown to be absent from Matrix's answer.
         return [("paired_elsewhere", "Matrix prices these flights on another row")]
+    if trip is not None and trip in facts.matrix_cut:
+        mp = facts.matrix_cut[trip]
+        return [
+            ("capped", "the price cap cut Matrix's fare for this trip" + (f", {mp}" if mp else ""))
+        ]
     found: list[tuple[str, str]] = []
     if bnd.complete and (
         absent := [c for c in _carriers(slices) if c not in facts.matrix_carriers]

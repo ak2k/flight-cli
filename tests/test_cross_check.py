@@ -606,6 +606,35 @@ def test_a_fare_the_cap_cannot_read_leaves_matrixs_answer_incomplete(
     assert not [r for r in xc["rows"] if "carrier_absent" in r["reasons"]]
 
 
+def _dearer_on_matrix(board: SearchResult) -> SearchResult:
+    """DL2+DL3 at USD250, then DL1788, Google's own trip, at USD800."""
+    return _answer(
+        _its(_slice(["DL2", "DL3"]), price="USD250.00"),
+        _as_matrix(board.solutions[0], "USD800.00"),
+    )
+
+
+def test_a_google_trip_the_cap_cut_from_matrix_names_matrixs_fare(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    """Google prices DL1788 at USD204 and Matrix at USD800, over a cap of
+    400: the trip is in Matrix's answer, so its row says the cap cut Matrix's
+    fare, not that Matrix lacks the trip."""
+    _weave(monkeypatch, gf_rows, matrix=_dearer_on_matrix)
+    capped = ["--max-price", "400", "-n", "30"]
+    cut = "the price cap cut Matrix's fare for this trip, USD800.00"
+    _, rows, _ = _merged_table(_run([*_SEARCH, *_LINKLESS, *capped]).stdout)
+    assert [r[5] for r in rows if "DL1788" in r[6]] == [cut]
+    xc = _document(_run([*_SEARCH, *capped, "--enrich", "--format", "json"]))["cross_check"]
+    row = next(r for r in xc["rows"] if r["slices"][0]["flights"] == ["DL1788"])
+    assert (row["source"], row["matrix_price"], row["reasons"], row["reason"]) == (
+        "google",
+        None,
+        ["capped"],
+        cut,
+    )
+
+
 def test_a_party_matrix_states_no_total_for_shows_no_delta() -> None:
     """Matrix's price per passenger is not the party's price."""
     board = _board()

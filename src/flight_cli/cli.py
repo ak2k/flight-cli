@@ -4704,16 +4704,19 @@ def _cross_check_answers(
     board: SearchResult,
     matrix_res: SearchResult,
     *,
+    uncapped: SearchResult,
     legs: tuple[Leg, ...],
     opts: SearchOptions,
     currency: str,
 ) -> Answers:
-    """The two answers a weave left, as the cross-check reads them. Google's
-    board is no answer where its half failed or never ran, and a board the row
-    filter cut cannot show a flight absent from what Google served."""
+    """The two answers a weave left, as the cross-check reads them, with
+    Matrix's page before the price cap as `uncapped`. Google's board is no
+    answer where its half failed or never ran, and a board the row filter cut
+    cannot show a flight absent from what Google served."""
     stops = opts.max_extra_stops
     return Answers(
         matrix=matrix_res,
+        uncapped=uncapped,
         google=board if "gf" in state and "gf_err" not in state else None,
         google_filtered=bool(getattr(state.get("gf"), "dropped", 0)),
         stop_limit=stops is not None and stops >= 0,
@@ -4773,14 +4776,13 @@ def _answer_cross_check_document(
         if not google_answered:
             raise typer.Exit(1)
     else:
-        matrix_res = _price_capped(
-            cast("SearchResult", matrix_res), opts, passengers=opts.pax.total
-        )
+        page = cast("SearchResult", matrix_res)
+        matrix_res = _price_capped(page, opts, passengers=opts.pax.total)
         _report_weave_aftermath(state)
         board = fli_results_to_search_result(gf)
         shown = merge_results(board, matrix_res, currency=currency)[:top_n]
         answers = _cross_check_answers(
-            state, board, matrix_res, legs=legs, opts=opts, currency=currency
+            state, board, matrix_res, uncapped=page, legs=legs, opts=opts, currency=currency
         )
         checked = cross_check_document(shown, cross_check(shown, answers))
     search = _gflight_json_document(_price_ordered(gf)[:top_n], opts.bags)
@@ -4919,7 +4921,8 @@ def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, 
             raise typer.Exit(1)
         return
     # Before the merge and the award overlay, so neither sees a fare over the cap.
-    matrix_res = _price_capped(cast("SearchResult", matrix_res), opts, passengers=opts.pax.total)
+    page = cast("SearchResult", matrix_res)
+    matrix_res = _price_capped(page, opts, passengers=opts.pax.total)
     _report_weave_aftermath(state)
 
     # Repaint: reconciled GF + Matrix, prices attributed.
@@ -4935,7 +4938,7 @@ def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, 
         board = fli_results_to_search_result(gf)
         merged = merge_results(board, matrix_res, currency=requested)
         answers = _cross_check_answers(
-            state, board, matrix_res, legs=legs, opts=opts, currency=requested
+            state, board, matrix_res, uncapped=page, legs=legs, opts=opts, currency=requested
         )
         _render_merged(merged, legs=legs, top_n=top_n, check=cross_check(merged[:top_n], answers))
         shown = [r.itinerary for r in merged[:top_n]]
