@@ -796,6 +796,19 @@ _LAYOVERS_IDX = 13
 _ROW_FARE_IDX = 4
 _FARE_BAGS_IDX = 6
 
+# `row[22]` is Google's CO2 estimate for the row's own flights: grams at [7], the
+# route's typical grams at [8], the row's signed percent from that typical at [3],
+# and at [2] Google's label for that same comparison. [10]/[11] compare with the
+# board's median instead, so [11]'s label differs from [2]'s on over a third of a
+# board's rows and is not the one Google's help describes.
+_ROW_CO2_IDX = 22
+_CO2_LABEL_IDX = 2
+_CO2_DELTA_IDX = 3
+_CO2_GRAMS_IDX = 7
+_CO2_TYPICAL_IDX = 8
+_CO2_LABEL: dict[int, str] = {1: "lower", 2: "typical", 3: "higher"}
+_LEG_CO2_IDX = 31  # the leg's own grams; the row's [7] is their sum, rounded
+
 # Per-leg field indices in `data[0][2][i]`. Mirrors the Legrooms+ extension's
 # parser (load_flight_data.js function `u`). See docs/memories/legroom_recipe.md.
 _LEG_AMENITIES_IDX = 12  # array — bit positions decoded into wifi/power/video
@@ -1081,6 +1094,30 @@ def _bags_included(data: list[Any]) -> tuple[int | None, int | None]:
     return _bag_count(counts[0]), _bag_count(counts[1])
 
 
+def _int_slot(block: Any, idx: int, *, signed: bool = False) -> int | None:
+    """`block[idx]` when it is an int, and not below 0 unless `signed`. Anything
+    else, or a block too short or not a list, says nothing."""
+    if not isinstance(block, list) or len(cast("list[Any]", block)) <= idx:
+        return None
+    value = cast("list[Any]", block)[idx]
+    if not isinstance(value, int) or isinstance(value, bool):
+        return None
+    return value if signed or value >= 0 else None
+
+
+def _row_co2(data: list[Any]) -> dict[str, Any]:
+    """The row's CO2 figures as Google states them, keyed as fli's FlightResult
+    names them; a slot Google leaves empty stays None."""
+    block = data[0][_ROW_CO2_IDX] if len(data[0]) > _ROW_CO2_IDX else None
+    label = _int_slot(block, _CO2_LABEL_IDX)
+    return {
+        "co2_emissions_g": _int_slot(block, _CO2_GRAMS_IDX),
+        "co2_emissions_typical_g": _int_slot(block, _CO2_TYPICAL_IDX),
+        "co2_emissions_delta_pct": _int_slot(block, _CO2_DELTA_IDX, signed=True),
+        "emissions_tag": None if label is None else _CO2_LABEL.get(label),
+    }
+
+
 def _layover_minutes(data: list[Any], leg_tuples: list[list[Any]]) -> tuple[int | None, ...]:
     """The page's own minutes for each connection. Those are elapsed time; the
     leg datetimes are clock readings, an hour out across a daylight-saving
@@ -1112,6 +1149,7 @@ def _parse_flight_with_id(data: list[Any]) -> GFlightWithId:
         duration=data[0][9],
         stops=len(leg_tuples) - 1,
         legs=[_flight_leg(fl) for fl in leg_tuples],
+        **_row_co2(data),
     )
     amenities = [_parse_leg_amenities(fl) for fl in leg_tuples]
     return GFlightWithId(
@@ -1143,6 +1181,7 @@ def _flight_leg(fl: list[Any]) -> FlightLeg:
         departure_datetime=_parse_datetime(fl[20], fl[8]),
         arrival_datetime=_parse_datetime(fl[21], fl[10]),
         duration=fl[11],
+        co2_emissions_g=_int_slot(fl, _LEG_CO2_IDX),
     )
 
 

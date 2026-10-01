@@ -5751,7 +5751,9 @@ def _render_gflight_table(
     `insight`, Google's price insight for the search, is one line under the
     table, its amounts formatted the way the price column formats them.
     `bags`, the `--bags` asked for, adds a column saying whether each row's
-    price includes them (`_bag_cell`).
+    price includes them (`_bag_cell`). A `CO2 kg` column (`_co2_cell`) shows
+    only when a shown row carries Google's estimate, so a board without one
+    keeps its width.
 
     A round-trip combination can print two DIFFERENT prices, on its `Na` and
     `Nb` rows, and that reads as a bug until you know what each is: the `a` row
@@ -5782,16 +5784,24 @@ def _render_gflight_table(
         show_header=True,
         header_style="bold green",
     )
+    shown = _price_ordered(results)[:top_n]
+    show_co2 = any(
+        getattr(m.flight, "co2_emissions_g", None) is not None
+        for r in shown
+        for m in (cast("tuple[Any, ...]", r) if isinstance(r, tuple) else (r,))
+    )
     t.add_column("#", justify="right")
     t.add_column("price", justify="right")
     t.add_column("stops", justify="right")
     t.add_column("duration")
     t.add_column("legs")
     t.add_column("legroom")
+    if show_co2:
+        t.add_column("CO2 kg", justify="right")
     if bags is not None:
         t.add_column("bags")
     any_legroom = False
-    for i, r in enumerate(_price_ordered(results)[:top_n], 1):
+    for i, r in enumerate(shown, 1):
         items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
         for j, g in enumerate(items):
             fr = g.flight  # unwrap GFlightWithId → fli FlightResult
@@ -5808,6 +5818,7 @@ def _render_gflight_table(
             legroom_str = _fmt_gflight_legroom(fr.legs, amenities)
             if legroom_str:
                 any_legroom = True
+            co2_cell = (_co2_cell(fr),) if show_co2 else ()
             bag_cell = () if bags is None else (_bag_cell(g.bags_included, bags),)
             # A row Google did not price is SHOWN, with the placeholder every
             # other absent amount in this CLI uses. Dropping it would shorten a
@@ -5820,17 +5831,40 @@ def _render_gflight_table(
                 dur,
                 legs_str,
                 legroom_str,
+                *co2_cell,
                 *bag_cell,
             )
     console.print(t)
     if any_legroom:
         console.print(_LEGROOM_KEY)
+    if show_co2:
+        console.print(
+            "[dim]CO2 kg: Google's estimate for the row's flights and its difference "
+            "from the route's typical ([green]green[/] lower, [red]red[/] higher).[/]"
+        )
     if insight is not None:
         console.print(
             f"Price insight: prices are {_safe_text(insight.level)} for this trip "
             f"(usually {_safe_text(insight.currency)}{insight.typical_low:.2f}"
             f"-{_safe_text(insight.currency)}{insight.typical_high:.2f})."
         )
+
+
+def _co2_cell(flight: Any) -> str:
+    """A row's CO2 as Google states it: whole kilograms, then its signed percent
+    from the route's typical, green where Google labels the row lower and red
+    where higher. Blank where Google gave no figure, never a zero."""
+    grams = getattr(flight, "co2_emissions_g", None)
+    if grams is None:
+        return ""
+    delta = getattr(flight, "co2_emissions_delta_pct", None)
+    text = f"{round(grams / 1000):d}" + ("" if delta is None else f" {delta:+d}%")
+    label = getattr(flight, "emissions_tag", None)
+    if label == "lower":
+        return f"[green]{text}[/]"
+    if label == "higher":
+        return f"[red]{text}[/]"
+    return text
 
 
 def _bag_cell(stated: tuple[int | None, int | None], asked: Bags) -> str:
