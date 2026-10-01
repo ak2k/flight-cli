@@ -8,9 +8,8 @@ post-filters it on the full board. The date grids do not reach here at all:
 they return prices per date and there are no itineraries to post-filter, so
 they refuse what they cannot ask for (`_gf_dategrid.grid_can_serve` and
 `_gf_calgraph.page_blocker` for the RPC grid, `_gf_calgraph.graph_blocker` for
-the Chrome price graph). Anything this module can't evaluate (red-eyes,
-overnight stops) escalates the whole query to Matrix rather than being
-silently dropped.
+the Chrome price graph). Anything this module can't evaluate escalates the
+whole query to Matrix rather than being silently dropped.
 
 Google has ignored a field it was sent (a carrier exclude on JFK-LHR), so what
 the page encodes is checked here too wherever the row shows it: the stop
@@ -26,6 +25,8 @@ Supported Tier-2 predicates:
   - one flight by number or range (`UA882`, `UA882+`, `UA1000-2000`), every
     leg of the slice that flight, as Matrix reads a lone flight-number token
   - minimum layover (`MINCONNECT`), on the raw row and encoded as well
+  - no red-eye flight (`-REDEYES`) and no overnight stop (`-OVERNIGHTS`), on
+    the raw row's local clocks
 """
 
 from __future__ import annotations
@@ -41,6 +42,8 @@ from .routing_predicates import (
     ConnectionAirportPred,
     ConnectTimePred,
     ExcludeCodesharePred,
+    ExcludeOvernightsPred,
+    ExcludeRedeyesPred,
     MaxDurationPred,
     SpecificFlightPred,
     StopsPred,
@@ -55,13 +58,16 @@ if TYPE_CHECKING:
     from .models import Itinerary, SearchResult, Slice
     from .routing_predicates import Predicate
 
-# Tier-2 predicate types `_slice_passes` evaluates on a parsed slice. A minimum
-# layover is checked on the raw row instead (`_row_passes`); red-eyes and
-# overnights escalate to Matrix at the gate.
+# Tier-2 predicate types this module evaluates: on a parsed slice
+# (`_slice_passes`), or on the raw row (`_row_passes`) for red-eyes and
+# overnight stops, which need each leg's own clocks. A minimum layover is
+# checked on the raw row too.
 _SUPPORTED: tuple[type, ...] = (
     CarrierPred,
     ConnectionAirportPred,
     ExcludeCodesharePred,
+    ExcludeOvernightsPred,
+    ExcludeRedeyesPred,
     SpecificFlightPred,
 )
 
@@ -277,25 +283,61 @@ def _row_passes(
     difference. The first departure must fall inside one of `times` and the
     last arrival inside one of `arrivals`, bounds included, to the minute:
     Google's own windows are in whole hours."""
-    flight = row.flight
-    legs: Sequence[Any] = flight.legs
+    legs: Sequence[Any] = row.flight.legs
     if (times or arrivals) and not (
         legs
         and (not times or _within(legs[0].departure_datetime, times))
         and (not arrivals or _within(legs[-1].arrival_datetime, arrivals))
     ):
         return False
-    for p in predicates:
-        if isinstance(p, MaxDurationPred):
-            if flight.duration is None or flight.duration > p.minutes:
-                return False
-        elif isinstance(p, ConnectTimePred):
-            for gap in _layovers(row):
-                if p.min_minutes is not None and gap < p.min_minutes:
-                    return False
-                if p.max_minutes is not None and gap > p.max_minutes:
-                    return False
-    return True
+    return not any(_row_fails(row, p) for p in predicates)
+
+
+def _row_fails(row: Any, pred: Predicate) -> bool:
+    flight = row.flight
+    match pred:
+        case MaxDurationPred():
+            return flight.duration is None or flight.duration > pred.minutes
+        case ConnectTimePred():
+            return any(
+                (pred.min_minutes is not None and gap < pred.min_minutes)
+                or (pred.max_minutes is not None and gap > pred.max_minutes)
+                for gap in _layovers(row)
+            )
+        case ExcludeRedeyesPred():
+            return any(map(_red_eye, flight.legs))
+        case ExcludeOvernightsPred():
+            return any(itertools.starmap(_overnight_stop, itertools.pairwise(flight.legs)))
+        case _:
+            return False
+
+
+# A flight in the air between midnight and 05:00 local flew the night.
+_NIGHT_ENDS_HOUR = 5
+# The most a leg's local clocks can gain or lose on its own duration without
+# crossing the date line.
+_DATE_LINE_SHIFT = 12 * 60
+
+
+def _red_eye(leg: Any) -> bool:
+    """A red-eye leg, on its own local clocks: it lands on a later local date
+    than it took off, or takes off 00:00-04:59, or its clocks and its duration
+    differ by twelve hours or more. That last is a leg across the date line,
+    where a night flight can land on its takeoff date (Tokyo 17:00 -> Los
+    Angeles 10:00). The date rule matched Matrix's own flag on 73 of 74
+    nonstops measured, none across the date line; the 74th (16:30 -> 00:52)
+    Matrix keeps and this drops."""
+    off, on = leg.departure_datetime, leg.arrival_datetime
+    shift = (on - off).total_seconds() // 60 - leg.duration
+    return on.date() > off.date() or off.hour < _NIGHT_ENDS_HOUR or abs(shift) >= _DATE_LINE_SHIFT
+
+
+def _overnight_stop(arrived: Any, leaves: Any) -> bool:
+    """A connection spent overnight, on the connecting airport's own clock:
+    the next leg leaves on a later date than the arrival, or the arrival is
+    00:00-04:59."""
+    lands = arrived.arrival_datetime
+    return leaves.departure_datetime.date() > lands.date() or lands.hour < _NIGHT_ENDS_HOUR
 
 
 def routing_keep(

@@ -3723,7 +3723,11 @@ def _gflight_query(
     from ._gf_postfilter import routing_keep  # noqa: PLC0415 — GF-only; see above
     from ._gflight_ids import GfTransport  # noqa: PLC0415 — fli, ~95 ms
     from .fli_bridge import apply_gf_native_filters, to_fli_filter  # noqa: PLC0415 — fli
-    from .routing_predicates import classify  # noqa: PLC0415 — pulled in by the two above
+    from .routing_predicates import (  # noqa: PLC0415 — pulled in by the two above
+        ExcludeOvernightsPred,
+        ExcludeRedeyesPred,
+        classify,
+    )
 
     # Built here rather than at the CLI seam: this is the first point that has
     # already paid for `_gflight_ids`.
@@ -3755,8 +3759,8 @@ def _gflight_query(
                 currency=requested,
                 max_stops=stops,
             ),
-            # A cap, a stop limit or a window can empty a return board with no
-            # routing asked at all.
+            # A cap, a stop limit, a window or a night-flight check can empty a
+            # return board with no routing asked at all.
             checks=(
                 _row_checks(legs, opts)
                 if opts.max_price is not None
@@ -3764,6 +3768,11 @@ def _gflight_query(
                 or any(
                     lg.arrival_ranges or any(isinstance(t, ClockWindow) for t in lg.time_ranges)
                     for lg in legs
+                )
+                or any(
+                    isinstance(p, ExcludeRedeyesPred | ExcludeOvernightsPred)
+                    for preds in per_slice_preds
+                    for p in preds
                 )
                 else "the routing"
             ),

@@ -248,7 +248,6 @@ def test_stop_ceiling_above_two_goes_to_matrix() -> None:
         ("extension", "MAXMILES 8000"),  # mileage (Tier 3)
         ("routing", "BA AA"),  # ordered carrier chain
         ("routing", "~BA"),  # direct, not BA (Tier 3)
-        ("extension", "-REDEYES"),
         ("extension", "MAXCONNECT 0:00"),  # fli's layover maximum is positive
         ("extension", "MAXDUR 0:00"),  # and so is its duration maximum
         ("routing", "XX+"),  # no fli member, so no row would come back
@@ -286,6 +285,9 @@ def test_auto_unencodable_constraint_picks_matrix(flag: str, value: object) -> N
         ("routing", "DL747?"),
         ("routing", "AA1-3000"),
         ("routing", "AA00001"),  # Matrix's AA1: the bound is the number, not its digits
+        # Read off each leg's local clocks.
+        ("extension", "-REDEYES"),
+        ("extension", "-OVERNIGHTS"),
     ],
 )
 def test_auto_serves_post_filterable_tier2_on_google(flag: str, value: object) -> None:
@@ -374,12 +376,14 @@ def test_a_flight_number_matrix_rejects_goes_to_matrix_with_its_reason(
 
 
 def test_a_post_filterable_predicate_beside_one_that_is_not_still_picks_matrix() -> None:
-    assert _call(routing="~BA+", extension="-REDEYES") == BACKEND_MATRIX
+    assert _call(routing="~BA+", extension="-CITIES DUB") == BACKEND_MATRIX
+    assert _call(routing="~BA+", extension="-REDEYES") == BACKEND_GFLIGHT
 
 
 def test_auto_mixed_encodable_and_not_still_picks_matrix() -> None:
     """A partially-encodable set is not partially honored."""
-    assert _call(extension="ALLIANCE star-alliance; MAXSTOPS 1; -REDEYES") == BACKEND_MATRIX
+    assert _call(extension="ALLIANCE star-alliance; MAXSTOPS 1; -CITIES DUB") == BACKEND_MATRIX
+    assert _call(extension="ALLIANCE star-alliance; MAXSTOPS 1; -REDEYES") == BACKEND_GFLIGHT
 
 
 @pytest.mark.parametrize(
@@ -529,8 +533,9 @@ def test_explicit_gflight_rejects_unserveable_request() -> None:
 
 
 def test_explicit_gflight_error_names_the_constraint() -> None:
-    with pytest.raises(typer.BadParameter, match="a red-eye exclusion"):
-        _call(BACKEND_GFLIGHT, extension="-REDEYES")
+    with pytest.raises(typer.BadParameter, match=re.escape("a connecting-airport exclusion (DUB)")):
+        _call(BACKEND_GFLIGHT, extension="-CITIES DUB")
+    assert _call(BACKEND_GFLIGHT, extension="-REDEYES") == BACKEND_GFLIGHT
 
 
 def test_explicit_gflight_error_names_the_pax_type() -> None:
