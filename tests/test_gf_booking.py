@@ -270,6 +270,10 @@ def test_an_entry_with_no_link_or_bags_gives_none(
         pytest.param(_five("javascript:alert(1)", [["u", "T"]]), None, id="javascript"),
         pytest.param(_five("https://www.google.com/\x1b[2J", [["u", "T"]]), None, id="esc"),
         pytest.param(_five("https://www.google.com/a b", [["u", "T"]]), None, id="space"),
+        # No URL character; a browser reads it as "/", and `escape` doubles one
+        # that ends the printed line.
+        pytest.param(_five("https://www.google.com/a\\b", [["u", "T"]]), None, id="backslash"),
+        pytest.param(_five("https://www.google.com/x\\", []), None, id="trailing-backslash"),
         pytest.param(_five("https://www.google.com/c?a=1", [["u", "T"]]), None, id="base-query"),
         pytest.param(_five("https://www.google.com/c#top", [["u", "T"]]), None, id="base-fragment"),
         pytest.param(_five("https:///c", [["u", "T"]]), None, id="no-host"),

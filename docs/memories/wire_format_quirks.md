@@ -263,7 +263,8 @@ entry in Google's `GetBookingResults` answer.
   the seller to price again). The URL is the base plus the pairs as its query,
   and null unless the base is printable ASCII, `https` on `www.google.com` with
   no user or port (the table's caption says each link goes through Google), with
-  no query or fragment of its own, and every pair is two strings.
+  no query or fragment of its own and no backslash (a browser reads it as `/`),
+  and every pair is two strings.
 - `bags` comes from `option[18]` = `[1st checked, 2nd checked, carry-on]`. A
   slot `[2, [[null, amount]], 1]` is a fee of `amount` in the page's currency
   and `[3]` is free; Google's page says the same ("First checked bag costs 45

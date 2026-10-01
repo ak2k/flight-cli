@@ -110,14 +110,15 @@ def _link(option: list[Any]) -> str | None:
     """`option[5][2] = [base URL, [[name, value], ...]]`, the form the page
     posts to reach the seller; Google answers the same pairs sent as a query.
     None unless the base is a printable https URL on `www.google.com`, as the
-    table's caption says, with no user, port, query or fragment of its own, and
-    every pair is two strings."""
+    table's caption says, with no user, port, query or fragment of its own and
+    no space or backslash, and every pair is two strings. A browser reads a
+    backslash as "/", and `escape` doubles one that ends a printed line."""
     base, form = dig(option, 5, 2, 0), _form(dig(option, 5, 2, 1))
     if (
         form is None
         or not isinstance(base, str)
         or not (base.isascii() and base.isprintable())
-        or any(c in base for c in " ?#")
+        or any(c in base for c in " ?#\\")
     ):
         return None
     try:
