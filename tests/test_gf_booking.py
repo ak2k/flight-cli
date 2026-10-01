@@ -691,6 +691,28 @@ def test_fast_sellers_print_each_sellers_bags_and_whole_link(
     assert lines[-1] == "Kiwi.com at USD170.00 beats the table price, USD179.00."
 
 
+def test_a_link_line_names_its_seller_as_the_table_row_does(
+    monkeypatch: pytest.MonkeyPatch, board: list[Any]
+) -> None:
+    """The console reads `:smile:` in a name as an emoji, and in a link it must
+    stay the text it was."""
+    _wide(monkeypatch)
+    body = _booking_body(
+        _option(
+            "Fly :smile: Co",
+            179,
+            flights=_B6_1523,
+            five=_five(f"{_CLK}/:smile:", [["u", "T"]]),
+        )
+    )
+    _serve(monkeypatch, body)
+    result = _run("--fast", "--sellers", "--no-matrix-url", "--no-google-url")
+    assert result.exit_code == 0, result.output
+    lines = result.stdout.split("Booking options for #1", 1)[1].splitlines()
+    (row,) = [_cells(line, "│") for line in lines if line.startswith("│")]
+    assert f"1 {row[1]} {_CLK}/:smile:?u=T" in lines
+
+
 def test_sellers_with_no_link_print_no_link_lines(
     monkeypatch: pytest.MonkeyPatch, board: list[Any]
 ) -> None:
