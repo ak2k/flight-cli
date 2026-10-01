@@ -51,7 +51,13 @@ from ._gf_errors import (
     GfTransportError,
     GfUpstreamStatusError,
 )
-from ._metro import expand_airports, gf_leg_refusal
+from ._metro import (
+    MAX_GF_LEG_AIRPORTS,
+    expand_airports,
+    gf_leg_pages,
+    gf_leg_refusal,
+    gf_pages_refusal,
+)
 from ._multi_cabin import MultiCabinRow, parse_price
 from ._multi_cabin import merge as _merge_cabins
 from .client import MatrixApiError, MatrixClient
@@ -716,6 +722,7 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
     adults: int = 1,
     bags: Bags | None = None,
     return_codes: tuple[str | None, str | None] | None = None,
+    multi_cabin: bool = False,
 ) -> str:
     """Resolve --backend to a concrete backend.
 
@@ -740,10 +747,12 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
     one window: the page takes one hour window per leg.
 
     An airport set or a metro code stays on Google Flights, which is asked for
-    every member airport (`_metro`). What goes to Matrix is a leg the page can't
-    take (`gf_leg_refusal`: more than `MAX_GF_LEG_AIRPORTS` airports, or one
-    airport at both ends) and a code that is neither an airport nor a metro code
-    in the table.
+    every member airport (`_metro`), as several pages when one page can't take
+    them all (`gf_leg_pages`). What goes to Matrix is a leg past that
+    (`gf_pages_refusal`: more than `MAX_GF_PAGES` pages, or one airport at both
+    ends), a code that is neither an airport nor a metro code in the table,
+    and a `multi_cabin` leg over one page (`gf_leg_refusal`), because every
+    cabin pins the sort cabin's outbounds from one page.
 
     The page writes one filter set onto every slice, so a round trip whose
     return (`return_codes`) carries a different predicate set from the
@@ -802,7 +811,7 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
     if not show_only_available:
         reasons.append("unavailable itineraries included")
     origins, destinations = _parse_iata_list(origin or ""), _parse_iata_list(destination or "")
-    leg_refusal = gf_leg_refusal(origins, destinations)
+    leg_refusal = (gf_leg_refusal if multi_cabin else gf_pages_refusal)(origins, destinations)
     if leg_refusal is not None:
         reasons.append(leg_refusal)
     reasons.extend(
@@ -3024,8 +3033,9 @@ def _grid_branch_blocker(  # noqa: PLR0911 — one return per named reason, chea
     `--fast --gf-transport http` keeps the narrower checks.
 
     The page asks for every airport of a set, so under `--fast` the airports are
-    checked as `_pick_backend` checks a search's: expanded, against the page's
-    per-leg bound and fli's airport table. The return leg is the same airports
+    checked expanded, against fli's airport table and ONE page's per-leg bound
+    (`gf_leg_refusal`): a grid is one page, where a single-cabin search over
+    the bound is asked as several. The return leg is the same airports
     reversed, so one check covers both.
 
     The currency comes first, ahead of every admission test after it: the grid
@@ -3684,9 +3694,15 @@ def _gflight_results(
     `first` and `prefer` go to `search_with_ids` as they are: the outbound page
     `_gflight_outbound` already fetched for the same arguments, and the
     outbounds to pin ahead of this board's own.
+
+    A leg with more airports than one page takes is asked as several pages
+    and their boards merged (`_gflight_pages`); with `first` or `prefer` the
+    caller has already chosen one page.
     """
     from ._gflight_ids import Board, search_with_ids  # noqa: PLC0415 — fli, ~95 ms
 
+    if first is None and not prefer and len(pages := _gf_pages(legs)) > 1:
+        return _gflight_pages(pages, opts, top_n, gf_mode, gf_headed)
     # Only a multi-cabin round trip sets either, so every other search makes
     # the one call to `search_with_ids` a single search makes.
     handed: dict[str, Any] = {}
@@ -3732,6 +3748,236 @@ def _gflight_outbound(
     with _gflight_query(legs, opts, gf_mode, gf_headed) as query:
         page = outbound_page(query.filters, transport=query.transport, currency=query.currency)
     return _Outbound(page, query.keep)
+
+
+def _gf_pages(legs: tuple[Leg, ...]) -> list[tuple[Leg, ...]]:
+    """`legs` as the Google pages that ask for them (`gf_leg_pages`): `legs`
+    itself unless the outbound's airports need more than one page.
+
+    A round trip's page flies back between the same two groups, which is the
+    return `search` builds: the outbound reversed. Any other return is left
+    whole, since no grouping of the outbound describes it."""
+    if not legs or len(legs) > _ROUND_TRIP_LEGS:
+        return [legs]
+    out = legs[0]
+    if len(legs) == _ROUND_TRIP_LEGS and (
+        expand_airports(legs[1].origins),
+        expand_airports(legs[1].destinations),
+    ) != (expand_airports(out.destinations), expand_airports(out.origins)):
+        return [legs]
+    plan = gf_leg_pages(out.origins, out.destinations)
+    if plan is None or len(plan) == 1:
+        return [legs]
+    pages: list[tuple[Leg, ...]] = []
+    for origins, destinations in plan:
+        page = (out.model_copy(update={"origins": origins, "destinations": destinations}),)
+        if len(legs) == _ROUND_TRIP_LEGS:
+            page += (legs[1].model_copy(update={"origins": destinations, "destinations": origins}),)
+        pages.append(page)
+    return pages
+
+
+class _PageAsk:
+    """The pages of one search, asked in order, and what each one met.
+
+    A refusal of one page's URL is that page's own, so the pages after it are
+    still asked. A throttle, a spent transport ladder or a dead browser is not
+    a fact about a page: the wall is per-IP, the network is one network, and
+    every later page would navigate on the same session. It ends the asking,
+    and every page after it is named as not asked."""
+
+    def __init__(
+        self, pages: list[tuple[Leg, ...]], *, gf_mode: GfTransportMode, bags: bool
+    ) -> None:
+        self.pages = pages
+        self.gf_mode: GfTransportMode = gf_mode
+        self.bags = bags
+        self.failed: dict[int, GfBackendError] = {}
+        self.unasked: set[int] = set()
+        self.stopped_at: int | None = None
+
+    def ask[T](self, i: int, call: Callable[[], T]) -> T | None:
+        """`call`'s answer for page `i`, or None once its failure is recorded."""
+        if self.stopped_at is not None:
+            self.unasked.add(i)
+            return None
+        try:
+            return call()
+        except (GfThrottledError, GfTransportError, GfBrowserUnavailableError) as e:
+            self.stopped_at = i
+            self.failed[i] = e
+        except GfBackendError as e:
+            self.failed[i] = e
+        return None
+
+    def report(self) -> None:
+        """One stderr line per page that did not answer, in page order."""
+        _report_pages(self)
+
+    def raise_if_empty(self, rows: list[Any]) -> None:
+        """Raise the first failed page's error when nothing was merged, as one
+        page raises its own. An empty board beside a page that never answered
+        would read as a route with no flights, and a refusal is handed to
+        Matrix or exits with its reason where that would not."""
+        if not rows and self.failed:
+            raise self.failed[min(self.failed)]
+
+
+def _report_pages(asked: _PageAsk) -> None:
+    n = len(asked.pages)
+    for i in sorted({*asked.failed, *asked.unasked}):
+        out = asked.pages[i][0]
+        e = asked.failed.get(i)
+        if e is not None:
+            why = _gf_refusal(e, transport=asked.gf_mode, bags=asked.bags).note.removesuffix(".")
+        else:
+            why = f"not asked after page {(asked.stopped_at or 0) + 1:d} stopped the search"
+        err.print(
+            f"[yellow]Google Flights page {i + 1:d} of {n:d} "
+            f"({_safe_text(','.join(out.origins))}→{_safe_text(','.join(out.destinations))}) "
+            f"is missing: {why}.[/]"
+        )
+
+
+def _merged_boards(boards: Sequence[Board[Any]]) -> list[Any]:
+    """Every row of `boards` once, by the whole trip (`row_key`): the cheaper
+    listing is kept, in the place the first one took."""
+    from ._gflight_ids import row_key  # noqa: PLC0415 — fli, ~95 ms
+
+    at: dict[tuple[ItineraryKey, ...], int] = {}
+    rows: list[Any] = []
+    for board in boards:
+        for r in board:
+            key = row_key(r)
+            seen = at.get(key)
+            if seen is None:
+                at[key] = len(rows)
+                rows.append(r)
+            elif _terminal_fare_key(r) < _terminal_fare_key(rows[seen]):
+                rows[seen] = r
+    return rows
+
+
+def _kept(outbound: _Outbound) -> list[Any]:
+    keep = outbound.keep
+    return [r for r in outbound.board if keep is None or keep(0, r)]
+
+
+def _union_pins(
+    outbounds: list[tuple[int, _Outbound]], top_n: int
+) -> dict[int, list[ItineraryKey]]:
+    """Each page's share of the `pinned_fanout(top_n)` cheapest outbounds kept
+    across every page, as the keys that page pins.
+
+    An outbound two pages list is pinned once, on the page that priced it
+    lower, so no return board is fetched twice for one flight."""
+    from ._gflight_ids import Board, pin_keys, row_key  # noqa: PLC0415 — fli, ~95 ms
+
+    owner: dict[ItineraryKey, int] = {}
+    union: list[Any] = []
+    at: dict[ItineraryKey, int] = {}
+    for i, outbound in outbounds:
+        for r in _kept(outbound):
+            (key,) = row_key(r)
+            seen = at.get(key)
+            if seen is None:
+                at[key] = len(union)
+                union.append(r)
+                owner[key] = i
+            elif _terminal_fare_key(r) < _terminal_fare_key(union[seen]):
+                union[seen] = r
+                owner[key] = i
+    shares: dict[int, list[ItineraryKey]] = {}
+    for key in pin_keys(Board(union), top_n=top_n):
+        shares.setdefault(owner[key], []).append(key)
+    return shares
+
+
+def _gflight_pages(
+    pages: list[tuple[Leg, ...]],
+    opts: SearchOptions,
+    top_n: int,
+    gf_mode: GfTransportMode,
+    gf_headed: bool,
+) -> Board[Any]:
+    """`pages`' boards as one board, each page asked as its own search and
+    the rows merged by the whole trip (`_merged_boards`).
+
+    A round trip fetches every page's outbounds first, then pins the
+    `pinned_fanout(top_n)` cheapest of all of them, each on its own page: a
+    GET a page plus one a pin, as one page costs. A return is priced on its
+    outbound's page, so it flies back between that page's airports.
+
+    `dropped` sums what every page's filter removed, its outbounds whether
+    pinned or not and its returns, because an empty board is handed to Matrix
+    on it. A page's price insight describes its own airports, so the merged
+    board carries none."""
+    from ._gflight_ids import Board  # noqa: PLC0415 — fli, ~95 ms
+
+    asked = _PageAsk(pages, gf_mode=gf_mode, bags=opts.bags is not None)
+    boards: list[Board[Any]] = []
+    dropped = pinned = 0
+    with _browser_scope(gf_mode):
+        if len(pages[0]) < _ROUND_TRIP_LEGS:
+            for i, page in enumerate(pages):
+                board = asked.ask(
+                    i, partial(_gflight_results, page, opts, top_n, gf_mode, gf_headed)
+                )
+                if board is not None:
+                    boards.append(board)
+                    dropped += board.dropped
+        else:
+            outbounds = [
+                (i, ob)
+                for i, page in enumerate(pages)
+                if (ob := asked.ask(i, partial(_gflight_outbound, page, opts, gf_mode, gf_headed)))
+                is not None
+            ]
+            shares = _union_pins(outbounds, top_n)
+            for i, ob in outbounds:
+                keys = shares.get(i, [])
+                board = (
+                    asked.ask(
+                        i,
+                        partial(
+                            _gflight_results,
+                            pages[i],
+                            opts,
+                            len(keys),
+                            gf_mode,
+                            gf_headed,
+                            first=ob.board,
+                            prefer=keys,
+                        ),
+                    )
+                    if keys
+                    else None
+                )
+                if board is None:
+                    dropped += len(ob.board) - len(_kept(ob))
+                else:
+                    boards.append(board)
+                    dropped += board.dropped
+                    pinned += board.pinned
+    asked.report()
+    rows = _merged_boards(boards)
+    asked.raise_if_empty(rows)
+    if rows and len(pages[0]) >= _ROUND_TRIP_LEGS:
+        err.print(
+            f"[dim]Google Flights asked this round trip as {len(pages):d} pages of at most "
+            f"{MAX_GF_LEG_AIRPORTS:d} airports; each return is priced within its own "
+            "page's airports.[/]"
+        )
+    return Board(rows, dropped=dropped, pinned=pinned)
+
+
+def _browser_scope(gf_mode: GfTransportMode) -> contextlib.AbstractContextManager[None]:
+    """One Chrome for every page of a browser search, closed once at the end."""
+    if gf_mode != TRANSPORT_BROWSER:
+        return contextlib.nullcontext()
+    from ._gf_browser import session_scope  # noqa: PLC0415 — GF-only
+
+    return session_scope()
 
 
 def _note_other_currencies(results: list[Any], requested: str) -> None:
@@ -6571,6 +6817,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         adults=adults,
         bags=bags,
         return_codes=return_codes,
+        multi_cabin=len(_resolve_cabin_list(cabin)) > 1,
     )
     if slice_specs:
         legs = tuple(_parse_slice_spec(s) for s in slice_specs)

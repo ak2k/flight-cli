@@ -116,25 +116,60 @@ def test_a_leg_of_exactly_eleven_airports_stays_on_gflight() -> None:
     assert _call(origin=",".join(_TEN), destination="LAX") == BACKEND_GFLIGHT
 
 
-def test_a_leg_of_twelve_airports_goes_to_matrix_naming_the_count(
+def test_a_single_cabin_leg_of_twelve_airports_stays_on_gflight(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Google's page declined 15 airports in one leg outright; the bound keeps
-    region lists Matrix answered on Matrix rather than failing on Google."""
-    assert _call(origin=",".join(_TEN), destination="LAX,SFO") == BACKEND_MATRIX
+    """Google's page declined 15 airports in one leg outright, so a leg over
+    its bound is asked as several pages, and the search stays on Google."""
+    for backend in (BACKEND_AUTO, BACKEND_GFLIGHT):
+        assert _call(backend, origin=",".join(_TEN), destination="LAX,SFO") == BACKEND_GFLIGHT
+    assert capsys.readouterr().err == ""
+
+
+def test_a_multi_cabin_leg_of_twelve_airports_goes_to_matrix_naming_the_count(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Every cabin pins the sort cabin's outbounds from one page, so a
+    multi-cabin leg keeps the one-page bound."""
+    assert _call(origin=",".join(_TEN), destination="LAX,SFO", multi_cabin=True) == BACKEND_MATRIX
     printed = " ".join(capsys.readouterr().err.split())
     assert "12 airports on one leg (its limit is 11)" in printed, printed
 
 
 def test_the_bound_counts_a_metro_code_as_its_members() -> None:
     # LON is six airports: 6 + 6 = 12.
-    assert _call(origin="LON", destination="JFK,LGA,EWR,BOS,IAD,DCA") == BACKEND_MATRIX
-    assert _call(origin="LON", destination="JFK,LGA,EWR,BOS,IAD") == BACKEND_GFLIGHT
+    assert (
+        _call(origin="LON", destination="JFK,LGA,EWR,BOS,IAD,DCA", multi_cabin=True)
+        == BACKEND_MATRIX
+    )
+    assert (
+        _call(origin="LON", destination="JFK,LGA,EWR,BOS,IAD", multi_cabin=True) == BACKEND_GFLIGHT
+    )
+    assert _call(origin="LON", destination="JFK,LGA,EWR,BOS,IAD,DCA") == BACKEND_GFLIGHT
 
 
-def test_explicit_gflight_refuses_a_leg_over_the_bound() -> None:
+def test_explicit_gflight_refuses_a_multi_cabin_leg_over_the_bound() -> None:
     with pytest.raises(typer.BadParameter, match=r"12 airports on one leg \(its limit is 11\)"):
-        _call(BACKEND_GFLIGHT, origin=",".join(_TEN), destination="LAX,SFO")
+        _call(BACKEND_GFLIGHT, origin=",".join(_TEN), destination="LAX,SFO", multi_cabin=True)
+
+
+# 15 + 15 airports: 3 x 3 = 9 pages of at most 11, one past the bound.
+_FIFTEEN_FROM = "JFK,LGA,EWR,BOS,IAD,DCA,BWI,PHL,ATL,MIA,FLL,CLT,RDU,DTW,PIT"
+_FIFTEEN_TO = "LHR,CDG,FRA,AMS,IST,MAD,BCN,FCO,MUC,ZRH,VIE,CPH,DUB,LIS,ATH"
+
+
+def test_a_leg_past_the_page_bound_goes_to_matrix_naming_why(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert _call(origin=_FIFTEEN_FROM, destination=_FIFTEEN_TO) == BACKEND_MATRIX
+    printed = " ".join(capsys.readouterr().err.split())
+    assert "30 airports on one leg (more than 8 pages of at most 11)" in printed, printed
+    with pytest.raises(
+        typer.BadParameter, match=r"30 airports on one leg \(more than 8 pages of at most 11\)"
+    ):
+        _call(BACKEND_GFLIGHT, origin=_FIFTEEN_FROM, destination=_FIFTEEN_TO)
+    # One airport fewer is the bound exactly: 4 x 2 = 8 pages.
+    assert _call(origin=_FIFTEEN_FROM, destination=_FIFTEEN_TO[:-4]) == BACKEND_GFLIGHT
 
 
 @pytest.mark.parametrize(

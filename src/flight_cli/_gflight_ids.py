@@ -1701,6 +1701,13 @@ def _itinerary_key(row: GFlightWithId) -> ItineraryKey:
     )
 
 
+def row_key(row: GFlightWithId | tuple[GFlightWithId, ...]) -> tuple[ItineraryKey, ...]:
+    """A served row as the trip it is: a one-way row's itinerary, or each
+    member's of a round-trip combination, in slice order."""
+    members = row if isinstance(row, tuple) else (row,)
+    return tuple(_itinerary_key(m) for m in members)
+
+
 def fare_key(row: GFlightWithId) -> tuple[int, float]:
     """Sort key for a Google row by its fare, a row Google did not price after
     every row it did.

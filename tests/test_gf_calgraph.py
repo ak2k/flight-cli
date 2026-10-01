@@ -1675,9 +1675,10 @@ def test_fast_takes_the_airport_sets_a_search_takes(
     origin: str, destination: str, fast: str | None, matrix: str
 ) -> None:
     """Under `--fast` the page asks for every airport, so the airports are
-    checked as a search's are: expanded, against the page's per-leg bound and
-    fli's table. Without it a set keeps the reason that sends it to Matrix's
-    fan-out, because the weave's Matrix half is one query."""
+    checked expanded, against fli's table and one page's per-leg bound: a grid
+    is one page, where a single-cabin search over the bound is several. Without
+    it a set keeps the reason that sends it to Matrix's fan-out, because the
+    weave's Matrix half is one query."""
     assert _gate(origin, destination, fast=True) == fast
     assert _gate(origin, destination, fast=False) == matrix
 

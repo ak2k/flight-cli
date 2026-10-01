@@ -3811,6 +3811,9 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_report_enriched_gf_failure", "refusal.message"),
         ("query_cabin", "refusal.note"),
         ("note_missing_column", "note"),
+        # A refusal's note, or a sentence around the page number that stopped
+        # the search; tests/test_gf_chunked_search.py prints a hostile one.
+        ("_report_pages", "why"),
         # Built here from the pin budget, and every part of it is ours.
         ("_run_gflight_path_multi", "join_note"),
         ("_validate_sort_cabin", "sort_by.value"),  # the same enum, one command over
