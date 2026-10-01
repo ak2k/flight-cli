@@ -199,6 +199,7 @@ def to_fli_filter(s: Search) -> Any:
             if bags is not None
             else None
         ),
+        exclude_basic_economy=s.options.exclude_basic,
     )
 
 

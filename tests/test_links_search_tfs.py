@@ -286,7 +286,6 @@ def test_unpinned_segment_carries_no_selected_leg() -> None:
         ("alliances", {"alliances": [Alliance.ONEWORLD]}),
         ("alliances_exclude", {"alliances_exclude": [Alliance.SKYTEAM]}),
         ("emissions", {"emissions": EmissionsFilter.LESS}),
-        ("exclude_basic_economy", {"exclude_basic_economy": True}),
         ("sort_by", {"sort_by": SortBy.CHEAPEST}),
         # 3.15 exists, but a connection airport means one position to Matrix.
         (
@@ -445,6 +444,35 @@ def test_a_search_with_neither_writes_neither_field() -> None:
     fields = _decode(build_search_tfs(_filters()))
     assert 12 not in fields
     assert 13 not in fields
+
+
+# ──────────── economy without basic fares (25), as Google served it ─────────
+#
+# The JFK-LAX page a live check fetched on 2026-10-20 with field 25 set, top
+# level after the trip type (19), the form the UI's own URL carried. Google
+# repriced 78 of its 93 fares up.
+
+_PAGE_LAX_NO_BASIC = "CBwQAhoeEgoyMDI2LTEwLTIwagcIARIDSkZLcgcIARIDTEFYQAFIAXABmAECyAEB"
+
+
+def test_leaving_out_basic_economy_encodes_byte_for_byte_as_google_served_it() -> None:
+    raw = _encode_gflight_pinned_tfs(
+        slices=[{"date": "2026-10-20", "origin": "JFK", "destination": "LAX", "segments": []}],
+        cabin=1,
+        adults=1,
+        children=0,
+        infants_in_seat=0,
+        infants_on_lap=0,
+        pin_max_u64=False,
+        exclude_basic=True,
+    )
+    assert base64.urlsafe_b64encode(raw).rstrip(b"=").decode() == _PAGE_LAX_NO_BASIC
+
+
+def test_the_search_page_leaves_out_basic_economy_only_when_asked() -> None:
+    plain = build_search_tfs(_filters())
+    assert build_search_tfs(_filters(exclude_basic_economy=True)) == plain + b"\xc8\x01\x01"
+    assert 25 not in _decode(plain)
 
 
 def test_the_ui_writes_all_four_hours_once_one_is_set() -> None:

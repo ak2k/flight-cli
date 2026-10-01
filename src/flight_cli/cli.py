@@ -584,12 +584,14 @@ def _refuse_cap_and_bag_conflicts(
     bags: Bags | None,
     seated: int,
     arrival_flags: tuple[str, ...] = (),
+    exclude_basic: bool = False,
 ) -> None:
     """Refuse `--max-price` or `--bags` beside several cabins, whose compare
     applies neither, an arrival window beside several cabins, whose compare
-    can end on Matrix, and `--bags` for more than one traveler. Before the
-    backend is announced: a refusal after "Using Matrix" reads as a search that
-    started and then failed."""
+    can end on Matrix, `--exclude-basic` beside any cabin but economy, and
+    `--bags` for more than one traveler. Before the backend is announced: a
+    refusal after "Using Matrix" reads as a search that started and then
+    failed."""
     if len(cabins) > 1 and max_price is not None:
         err.print(
             "[red]--max-price takes one --cabin: a multi-cabin compare applies no cap.[/] "
@@ -606,6 +608,13 @@ def _refuse_cap_and_bag_conflicts(
         err.print(
             f"[red]{_safe_text(arrival_flags[0])} takes one --cabin: a multi-cabin compare "
             "can end on Matrix, which takes no arrival time.[/] Drop the extra --cabin values."
+        )
+        raise typer.Exit(2)
+    if exclude_basic and cabins != (Cabin.COACH,):
+        err.print(
+            "[red]--exclude-basic takes --cabin economy alone:[/] basic economy is an "
+            "economy fare, and a multi-cabin compare can end on Matrix, which is not asked "
+            "to leave it out. Drop --exclude-basic, or search economy alone."
         )
         raise typer.Exit(2)
     if bags is not None and seated > 1:
@@ -671,6 +680,7 @@ def _build_options(
     currency: str | None = None,
     max_price: int | None = None,
     bags: Bags | None = None,
+    exclude_basic: bool = False,
 ) -> SearchOptions:
     return SearchOptions(
         cabin=_resolve_cabin(cabin),
@@ -689,6 +699,7 @@ def _build_options(
         currency=currency,
         max_price=max_price,
         bags=bags,
+        exclude_basic=exclude_basic,
     )
 
 
@@ -2744,13 +2755,13 @@ def _gflight_url_caveats(search: Search) -> list[str]:
             break
     if any(lg.route_language or lg.extension for lg in legs):
         notes.append("routing/extension codes are not expressible in a Google link")
-    return notes + _bag_link_caveats(search)
+    return notes + _google_option_link_caveats(search)
 
 
 def _pinned_gflight_url_caveats(search: Search) -> list[str]:
     """The pinned Google link's narrowings: a leg whose airport sets Google's
     page can't take is pinned with the itinerary's own airports instead, and
-    the link asks for no bags."""
+    the link asks for no bags and leaves basic economy in."""
     legs: tuple[Leg, ...] = getattr(search, "legs", ()) or ()
     reason = next(
         (r for lg in legs if (r := gf_leg_refusal(lg.origins, lg.destinations)) is not None), None
@@ -2763,15 +2774,19 @@ def _pinned_gflight_url_caveats(search: Search) -> list[str]:
             f"Google's page can't take {reason}"
         ]
     )
-    return notes + _bag_link_caveats(search)
+    return notes + _google_option_link_caveats(search)
 
 
-def _bag_link_caveats(search: Search) -> list[str]:
-    """A Google link carries no bag count, so under `--bags` its prices leave
-    the bags out."""
-    if search.options.bags is None:
-        return []
-    return ["the linked page's prices do not include the bags --bags asked for"]
+def _google_option_link_caveats(search: Search) -> list[str]:
+    """A Google link carries no bag count and no basic-economy exclusion, so
+    under `--bags` its prices leave the bags out, and under `--exclude-basic`
+    it may list basic fares."""
+    notes: list[str] = []
+    if search.options.bags is not None:
+        notes.append("the linked page's prices do not include the bags --bags asked for")
+    if search.options.exclude_basic:
+        notes.append("the linked page is not asked to leave out basic economy")
+    return notes
 
 
 def _matrix_link_caveats(search: Search) -> list[str]:
@@ -2779,6 +2794,10 @@ def _matrix_link_caveats(search: Search) -> list[str]:
     if search.options.bags is not None:
         notes.append(
             "Matrix prices no bags, so the linked page's prices leave out those --bags asked for"
+        )
+    if search.options.exclude_basic:
+        notes.append(
+            "Matrix is not asked to leave out basic economy, so the linked page may list it"
         )
     left_out = [
         window_label(w)
@@ -6515,6 +6534,19 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             rich_help_panel=_GROUP_FILTERING,
         ),
     ] = None,
+    exclude_basic: Annotated[
+        bool,
+        typer.Option(
+            "--exclude-basic",
+            help=(
+                "Ask Google Flights for economy fares without basic economy. No row says "
+                "whether its fare is basic, so the rows cannot be checked, and Google has "
+                "served basic fares under it (JFK-LHR). Google Flights only, since Matrix "
+                "is not asked: refused where the search needs Matrix. --cabin economy alone."
+            ),
+            rich_help_panel=_GROUP_FILTERING,
+        ),
+    ] = False,
     page_size: int = typer.Option(
         10,
         "--n",
@@ -6676,7 +6708,10 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         )
         raise typer.Exit(2)
     google_only = _google_only(
-        bags=bags, arrive_times=arrive_times, return_arrive_times=return_arrive_times
+        bags=bags,
+        arrive_times=arrive_times,
+        return_arrive_times=return_arrive_times,
+        exclude_basic=exclude_basic,
     )
     # Deprecated-flag warning surfaces at runtime since hidden=True hides the
     # banner from --help.
@@ -6712,6 +6747,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             )
             if windows
         ),
+        exclude_basic=exclude_basic,
     )
     if (routing_return is not None or extension_return is not None) and (slice_specs or not ret):
         err.print(
@@ -6756,6 +6792,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         return_codes=return_codes,
         arrive_times=arrive_times,
         return_arrive_times=return_arrive_times,
+        exclude_basic=exclude_basic,
         multi_cabin=len(_resolve_cabin_list(cabin)) > 1,
     )
     if slice_specs:
@@ -6817,6 +6854,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         currency=ccy,
         max_price=max_price,
         bags=bags,
+        exclude_basic=exclude_basic,
     )
 
     run_awards = _should_run_awards(sel)
@@ -6896,6 +6934,14 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         # auto without `--fast` still answers wherever the merged table would,
         # so a failed Google query hands it to Matrix whole. `--sellers` is not
         # handed on: its document wraps a Google row, which Matrix cannot supply.
+        if exclude_basic:
+            # On every run: whether Google left basic fares out cannot be told
+            # from the rows, and on JFK-LHR it did not.
+            err.print(
+                "[yellow]Google Flights was asked to leave out basic economy, but its rows "
+                "carry no fare-family mark to check, and it has served basic fares on "
+                "JFK-LHR anyway.[/]"
+            )
         if not fast and not json_out and google_only:
             gaps = _join_reasons(list(dict.fromkeys(gap for _, gap in google_only)))
             err.print(f"[dim]No Matrix enrichment: Matrix {_safe_text(gaps)}.[/]")

@@ -491,6 +491,7 @@ def _encode_gflight_pinned_tfs(
     pin_max_u64: bool = True,
     max_price: int | None = None,
     bags: tuple[int, int] | None = None,
+    exclude_basic: bool = False,
 ) -> bytes:
     """Encode the tfs= protobuf for a Google Flights URL.
 
@@ -501,6 +502,8 @@ def _encode_gflight_pinned_tfs(
     `max_price` is top-level field 12, whole units of the page's `curr=`.
     `bags` is (checked, carry-on), top-level field 13 as `{2: carry-on,
     3: checked}`; a zero count is left out, the form Google honored live.
+    `exclude_basic` is top-level field 25 = 1, after the trip type, as the
+    UI's own URL carries it.
 
     `slices`: list of dicts shaped:
         {
@@ -572,6 +575,8 @@ def _encode_gflight_pinned_tfs(
     else:
         trip_type = _GF_TRIP_MULTI_CITY
     w.varint(19, trip_type)
+    if exclude_basic:
+        w.varint(25, 1)
 
     return bytes(w.buf)
 
@@ -607,20 +612,20 @@ _TFS_ENCODED_FIELDS = frozenset(
         "layover_restrictions",
         "price_limit",
         "bags",
+        "exclude_basic_economy",
     }
 )
 
 # Filters this encoder refuses, checked against fli's own model default rather
-# than truthiness: fli populates sort_by, emissions, exclude_basic_economy and
-# show_all_results on EVERY filter, so `if filters.sort_by` would refuse every
-# search. Each entry is (field name, how to describe it to a user).
+# than truthiness: fli populates sort_by, emissions and show_all_results on
+# EVERY filter, so `if filters.sort_by` would refuse every search. Each entry
+# is (field name, how to describe it to a user).
 # The exclude lists do have a field (3.7), but Google ignored it on JFK-LHR.
 _TFS_REFUSED_FIELDS: tuple[tuple[str, str], ...] = (
     ("airlines_exclude", "a carrier exclude list"),
     ("alliances", "an alliance filter"),
     ("alliances_exclude", "an alliance exclude filter"),
     ("emissions", "an emissions filter"),
-    ("exclude_basic_economy", "a basic-economy exclusion"),
     ("sort_by", "a server-side sort order"),
 )
 # Read and deliberately not acted on. `show_all_results` defaults to True and there is
@@ -787,6 +792,7 @@ def build_search_tfs(filters: Any, *, currency: str = "USD") -> bytes:
         pin_max_u64=False,
         max_price=max_price,
         bags=(bags.checked_bags, int(bags.carry_on)) if bags is not None else None,
+        exclude_basic=filters.exclude_basic_economy,
     )
 
 

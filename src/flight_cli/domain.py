@@ -191,6 +191,8 @@ class SearchOptions(BaseModel):
     # for bags: a cap is applied to its answer, and bags keep a search off it.
     max_price: int | None = Field(default=None, ge=1)
     bags: Bags | None = None
+    # Google Flights only, and unchecked: no row marks a basic fare.
+    exclude_basic: bool = False
 
     @field_validator("currency")
     @classmethod
