@@ -534,6 +534,44 @@ def _refuse_cap_and_bag_conflicts(
         raise typer.Exit(2)
 
 
+def _return_codes(
+    *,
+    routing: str | None,
+    extension: str | None,
+    routing_return: str | None,
+    extension_return: str | None,
+) -> tuple[str | None, str | None]:
+    """A round trip's return (routing, extension): `--routing-ret`/`--ext-ret`
+    when given, `''` meaning none, else the outbound's.
+
+    No extension code is positional, so `--ext` is copied as it is. A routing is
+    copied only when it reads the same both ways: a slice's routing reads from
+    its own origin, so the outbound's `UA LH` on the return asks for UA then LH
+    from the far end. Such a routing without `--routing-ret` is refused before
+    the backend is announced, as `_refuse_cap_and_bag_conflicts` refuses."""
+    from .routing_predicates import direction_dependence, mirrored_routing  # noqa: PLC0415
+
+    if routing_return is None and routing and (why := direction_dependence(routing)):
+        mirror = mirrored_routing(routing)
+        err.print(
+            f"[red]--routing {_quote(routing)} {_safe_text(why)}.[/] Give the return its "
+            "own: "
+            + (
+                f"--routing-ret {_quote(mirror)} to fly it in reverse"
+                if mirror is not None
+                else "--routing-ret with the return's routing in its own order"
+                if "[" in routing or "]" in routing
+                else "--routing-ret with the return flight's number"
+            )
+            + ", or --routing-ret '' for no routing on the return."
+        )
+        raise typer.Exit(2)
+    return (
+        routing if routing_return is None else routing_return or None,
+        extension if extension_return is None else extension_return or None,
+    )
+
+
 def _build_options(
     *,
     cabin: str,
@@ -677,6 +715,7 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
     fare_rules: bool = False,
     adults: int = 1,
     bags: Bags | None = None,
+    return_codes: tuple[str | None, str | None] | None = None,
 ) -> str:
     """Resolve --backend to a concrete backend.
 
@@ -705,6 +744,10 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
     take (`gf_leg_refusal`: more than `MAX_GF_LEG_AIRPORTS` airports, or one
     airport at both ends) and a code that is neither an airport nor a metro code
     in the table.
+
+    The page writes one filter set onto every slice, so a round trip whose
+    return (`return_codes`) carries a different predicate set from the
+    outbound's is Matrix's.
 
     A constraint the page cannot carry has to be a reason here and nowhere
     else. Left out, `auto` serves it on Google with the constraint silently
@@ -770,6 +813,8 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
     predicates = classify(routing, extension).predicates
     reasons.extend(search_page_reasons(predicates, stops))
     reasons.extend(_gf_unmappable_reasons(backend, predicates))
+    if return_codes is not None and set(classify(*return_codes).predicates) != set(predicates):
+        reasons.append("different routing or extension codes on the outbound and the return")
 
     # The same reasons go out two ways, and only one of them is markup. A
     # reason quotes the user's --routing string verbatim, so one square bracket
@@ -6106,6 +6151,13 @@ _GOOGLE_URL_HELP = (
     "No link line is printed under --format json."
 )
 
+_ROUTING_RET_HELP = (
+    "The return's routing, read from the return's own origin; '' for none. Unset, "
+    "a round trip copies --routing when it reads the same both ways ('AA+', "
+    "'F* X:LHR F*'), and refuses an ordered chain ('UA LH') or a flight number."
+)
+_EXT_RET_HELP = "The return's extension codes; '' for none. Unset, a round trip copies --ext."
+
 
 def _resolve_format(*, fmt: str, json_flag: bool) -> str:
     """Collapse --format + deprecated --json into a single format string.
@@ -6205,7 +6257,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         str | None,
         typer.Option(
             "--routing",
-            help="Routing language ('LH+', 'BA AA', '[F* X F*]').",
+            help="Routing language ('LH+', 'BA AA', 'F* X:LHR F*').",
             rich_help_panel=_GROUP_FILTERING,
         ),
     ] = None,
@@ -6217,6 +6269,14 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             help="Extension codes ('MAXCONNECT 2:00', 'MAXSTOPS 1').",
             rich_help_panel=_GROUP_FILTERING,
         ),
+    ] = None,
+    routing_return: Annotated[
+        str | None,
+        typer.Option("--routing-ret", help=_ROUTING_RET_HELP, rich_help_panel=_GROUP_FILTERING),
+    ] = None,
+    extension_return: Annotated[
+        str | None,
+        typer.Option("--ext-ret", help=_EXT_RET_HELP, rich_help_panel=_GROUP_FILTERING),
     ] = None,
     depart_times: Annotated[
         str | None,
@@ -6470,6 +6530,26 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         bags=bags,
         seated=adults + children,
     )
+    if (routing_return is not None or extension_return is not None) and (slice_specs or not ret):
+        err.print(
+            "[red]--routing-ret and --ext-ret set the return's codes, and need a --return.[/] "
+            + (
+                "A --slice takes its own in its r= and e= fields."
+                if slice_specs
+                else "Drop them, or add --return."
+            )
+        )
+        raise typer.Exit(2)
+    return_codes = (
+        _return_codes(
+            routing=routing,
+            extension=extension,
+            routing_return=routing_return,
+            extension_return=extension_return,
+        )
+        if ret and not slice_specs and origin and destination and dep
+        else None
+    )
     resolved = _pick_backend(
         backend=backend,
         routing=routing,
@@ -6490,6 +6570,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         fare_rules=fare_rules,
         adults=adults,
         bags=bags,
+        return_codes=return_codes,
     )
     if slice_specs:
         legs = tuple(_parse_slice_spec(s) for s in slice_specs)
@@ -6507,14 +6588,14 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                 time_ranges=out_times,
             ),
         )
-        if ret:
+        if ret and return_codes is not None:
             legs += (
                 Leg.of(
                     destinations,
                     origins,
                     _parse_date(ret),
-                    route_language=routing,
-                    extension=extension,
+                    route_language=return_codes[0],
+                    extension=return_codes[1],
                     time_ranges=ret_times,
                 ),
             )
@@ -6953,10 +7034,10 @@ def calendar(
         None, "--extension", "--ext", rich_help_panel=_GROUP_FILTERING
     ),
     routing_return: str | None = typer.Option(
-        None, "--routing-ret", rich_help_panel=_GROUP_FILTERING
+        None, "--routing-ret", help=_ROUTING_RET_HELP, rich_help_panel=_GROUP_FILTERING
     ),
     extension_return: str | None = typer.Option(
-        None, "--ext-ret", rich_help_panel=_GROUP_FILTERING
+        None, "--ext-ret", help=_EXT_RET_HELP, rich_help_panel=_GROUP_FILTERING
     ),
     depart_times: str | None = typer.Option(
         None, "--depart-times", rich_help_panel=_GROUP_FILTERING
@@ -7091,12 +7172,18 @@ def calendar(
     )
     legs = (out_leg,)
     if not one_way:
+        ret_routing, ret_extension = _return_codes(
+            routing=routing,
+            extension=extension,
+            routing_return=routing_return,
+            extension_return=extension_return,
+        )
         legs += (
             Leg.of(
                 dests,
                 origins,
-                route_language=routing_return or routing,
-                extension=extension_return or extension,
+                route_language=ret_routing,
+                extension=ret_extension,
                 time_ranges=ret_times,
             ),
         )
@@ -7336,17 +7423,41 @@ def detail(
         None, "--extension", "--ext", rich_help_panel=_GROUP_FILTERING
     ),
     routing_return: str | None = typer.Option(
-        None, "--routing-ret", rich_help_panel=_GROUP_FILTERING
+        None, "--routing-ret", help=_ROUTING_RET_HELP, rich_help_panel=_GROUP_FILTERING
     ),
     extension_return: str | None = typer.Option(
-        None, "--ext-ret", rich_help_panel=_GROUP_FILTERING
+        None, "--ext-ret", help=_EXT_RET_HELP, rich_help_panel=_GROUP_FILTERING
     ),
+    depart_times: Annotated[
+        str | None,
+        typer.Option(
+            "--depart-times",
+            help="Outbound times-of-day, as the calendar was asked (comma list: morning,midday).",
+            rich_help_panel=_GROUP_FILTERING,
+        ),
+    ] = None,
+    return_times: Annotated[
+        str | None,
+        typer.Option(
+            "--return-times",
+            help="Return times-of-day, as the calendar was asked.",
+            rich_help_panel=_GROUP_FILTERING,
+        ),
+    ] = None,
     stops: int | None = typer.Option(None, "--stops", rich_help_panel=_GROUP_ITINERARY),
     allow_airport_changes: bool = typer.Option(
         True,
         "--allow-airport-changes/--no-airport-changes",
         rich_help_panel=_GROUP_FILTERING,
     ),
+    only_available: Annotated[
+        bool,
+        typer.Option(
+            "--only-available/--include-unavailable",
+            help="Show only itineraries with seats available for sale, as the calendar was asked.",
+            rich_help_panel=_GROUP_FILTERING,
+        ),
+    ] = True,
     rps: float | None = _RPS_OPT,
     impersonate: str | None = _IMPERSONATE_OPT,
     fmt: str = _FORMAT_OPT,
@@ -7380,15 +7491,31 @@ def detail(
     ed = _parse_date(end) if end else sd + timedelta(days=30)
     dmin, dmax = _resolve_duration(duration, round_trip=ret_d is not None)
 
-    legs = (Leg.of(origins, dests, dep_d, route_language=routing, extension=extension),)
+    legs = (
+        Leg.of(
+            origins,
+            dests,
+            dep_d,
+            route_language=routing,
+            extension=extension,
+            time_ranges=_parse_times(depart_times),
+        ),
+    )
     if ret_d:
+        ret_routing, ret_extension = _return_codes(
+            routing=routing,
+            extension=extension,
+            routing_return=routing_return,
+            extension_return=extension_return,
+        )
         legs += (
             Leg.of(
                 dests,
                 origins,
                 ret_d,
-                route_language=routing_return or routing,
-                extension=extension_return or extension,
+                route_language=ret_routing,
+                extension=ret_extension,
+                time_ranges=_parse_times(return_times),
             ),
         )
 
@@ -7402,7 +7529,7 @@ def detail(
         infants_in_lap=0,
         stops=stops,
         allow_airport_changes=allow_airport_changes,
-        show_only_available=True,
+        show_only_available=only_available,
         currency=ccy,
     )
     window = CalendarWindow(start=sd, end=ed, duration_min=dmin, duration_max=dmax)
