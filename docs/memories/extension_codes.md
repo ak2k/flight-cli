@@ -42,6 +42,22 @@ commandLine: "ALLIANCE star-alliance; -REDEYES; MAXSTOPS 1; +CABIN 2"
 commandLine: "MAXDUR 18:00; -OVERNIGHTS; -AIRCRAFT T:738"
 ```
 
+Each code takes a fixed number of arguments, so a missing `;` turns the next
+code into extra arguments of the one before it. Measured 2026-09-30:
+
+- Search, `MAXDUR 9:00 MAXCONNECT 1:00`: refused,
+  `MAXDUR expects exactly one argument`.
+- Calendar, `MAXSTOPS 1 MAXDUR 9:00`: refused,
+  `MAXSTOPS expects exactly one argument`.
+- Search, `-CODESHARE MAXDUR 9:00`: accepted, 10 JFK-LHR nonstops. What Matrix
+  read the extra words as was not measured.
+
+flight-cli holds MAXSTOPS, MAXDUR, MAXCONNECT and MINCONNECT to one argument
+and -OVERNIGHTS, -REDEYES and -CODESHARE to none. A directive with more words
+is Matrix-only, so Google never serves a code it read only in part: auto search
+goes to Matrix, `--backend gflight` and `--fast` refuse it, and the default
+calendar runs Matrix alone.
+
 Codes are **case-insensitive** for the keyword (`ALLIANCE` ≡ `alliance`).
 
 ## Units

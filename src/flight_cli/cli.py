@@ -8,6 +8,7 @@ Commands:
   flight detail    — phase-2 itineraries for a date picked from the grid
   flight airport   — IATA autocomplete
   flight explore   — where an origin flies, cheapest first (Google Flights, Chrome)
+  flight doctor    — pass, fail or skip for every backend, transport and credential
   flight fare      — [deprecated] alias for `search --backend matrix`
   flight gflight   — [deprecated] alias for `search --backend gflight`
 """
@@ -2943,7 +2944,7 @@ def _trip_lengths_text(lengths: Sequence[int]) -> str:
     return _join_reasons([*(f"{n:d}-" for n in lengths[:-1]), f"{last:d}-night"])
 
 
-def _grid_branch_blocker(  # noqa: PLR0911, PLR0912 — one return per named reason, cheapest first
+def _grid_branch_blocker(  # noqa: PLR0911 — one return per named reason, cheapest first
     search: CalendarSearch,
     *,
     json_out: bool,
@@ -2975,11 +2976,7 @@ def _grid_branch_blocker(  # noqa: PLR0911, PLR0912 — one return per named rea
     (`_gf_calgraph.graph_blocker`) replaces the routing and page checks: it
     admits the carrier, alliance, duration and layover bounds and the time
     windows Google was measured applying from the page URL. Without it,
-    `--fast --gf-transport http` keeps the narrower checks, and so does a
-    calendar whose extension runs one code into the next (`MAXSTOPS 1 MAXDUR
-    9:00`): the parser drops what follows the first code's argument, and the
-    graph's gate would take the constraints beside it and ask without the one
-    dropped.
+    `--fast --gf-transport http` keeps the narrower checks.
 
     The page asks for every airport of a set, so under `--fast` the airports are
     checked as `_pick_backend` checks a search's: expanded, against the page's
@@ -3015,10 +3012,9 @@ def _grid_branch_blocker(  # noqa: PLR0911, PLR0912 — one return per named rea
         if city_codes:
             return city_codes[0]
     if fast and graph:
-        from ._gf_calgraph import extension_runs_on, graph_blocker  # noqa: PLC0415 — fli, as below
+        from ._gf_calgraph import graph_blocker  # noqa: PLC0415 — fli, as below
 
-        if not extension_runs_on(search):
-            return graph_blocker(search)
+        return graph_blocker(search)
     from ._gf_dategrid import grid_can_serve, grid_routing_blocker  # noqa: PLC0415
 
     if not grid_can_serve(search, round_trip=fast, airport_sets=fast):
@@ -7828,6 +7824,53 @@ def seatmap(
         console.print(f"[dim]API URL:[/] {_safe_text(api_url)}")
         raise typer.Exit(1)
     console.print(_safe_text(url))
+
+
+@app.command()
+def doctor(fmt: str = _FORMAT_OPT) -> None:
+    """Pass, fail or skip for every backend, transport and credential.
+
+    Runs one live search per backend (JFK-LAX, 30 days out) and spends one unit
+    of the seats.aero daily quota when a key is stored. Exits 0 with no failure,
+    75 when every failure is a throttle, brownout or outage worth retrying, and
+    1 otherwise."""
+    from . import _doctor  # noqa: PLC0415 — fli and every provider client, paid only here
+
+    json_out = _resolve_format(fmt=fmt, json_flag=False) == "json"
+    report = _doctor.run(on_start=lambda what: err.print(f"[dim]{_safe_text(what)}…[/]"))
+    if json_out:
+        sys.stdout.write(json.dumps(report.document(), indent=2))
+        raise typer.Exit(report.exit_code)
+    t = Table(title="flight doctor")
+    t.add_column("check", no_wrap=True)
+    t.add_column("status", no_wrap=True)
+    t.add_column("detail", overflow="fold")
+    t.add_column("time", justify="right", no_wrap=True)
+    for c in report.checks:
+        t.add_row(
+            _safe_text(c.id),
+            "[green]pass[/]"
+            if c.status == "pass"
+            else "[bold red]FAIL[/]"
+            if c.status == "fail"
+            else "[yellow]skip[/]",
+            _safe_text(c.detail)
+            if c.cause is None
+            else f"{_safe_text(c.cause)}: {_safe_text(c.detail)}",
+            f"{c.seconds:.1f}s" if c.seconds is not None else "",
+        )
+    console.print(t)
+    statuses = [c.status for c in report.checks]
+    console.print(
+        f"{statuses.count('pass'):d} passed, {statuses.count('fail'):d} failed, "
+        f"{statuses.count('skip'):d} skipped"
+        + (
+            " — every failure is retryable; run again later"
+            if report.exit_code == _doctor.EX_TEMPFAIL
+            else ""
+        )
+    )
+    raise typer.Exit(report.exit_code)
 
 
 if __name__ == "__main__":

@@ -99,6 +99,10 @@ go into detail and are loaded on demand.
   `sessionId`/`rh`/`Si`), session-scoped lifetime caveat, and the
   battle-tested SPA-driving gotchas. Read before doing any new RE or
   recapture work.
+- [doctor.md](doctor.md) — `flight doctor`: the ten checks, the cause
+  each failure is filed under and which are retryable, exit codes 0/75/1, and
+  the canary contract (a persistent matrix-search `brownout` is a shape
+  suspect). Read before adding a check or a cause.
 
 ## When to add a new memory file
 

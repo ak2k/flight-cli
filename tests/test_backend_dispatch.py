@@ -312,6 +312,40 @@ def test_a_carrier_list_naming_no_airline_code_goes_to_matrix_quoting_the_token(
 
 
 @pytest.mark.parametrize(
+    ("directive", "keyword"),
+    [
+        ("MAXDUR 9:00 MAXCONNECT 1:00", "MAXDUR"),
+        ("MAXSTOPS 1 MAXDUR 9:00", "MAXSTOPS"),
+        ("MINCONNECT 3:00 -CODESHARE", "MINCONNECT"),
+        ("-CODESHARE MAXDUR 9:00", "-CODESHARE"),
+    ],
+)
+def test_a_code_given_more_arguments_than_it_takes_goes_to_matrix_quoting_it(
+    directive: str, keyword: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Google would be asked the first code alone, a wider question than the
+    one typed. Matrix answers `MAXDUR 9:00 MAXCONNECT 1:00` with "MAXDUR
+    expects exactly one argument"."""
+    reason = f"{keyword} with more arguments than it takes ({directive!r})"
+    assert _call(extension=directive) == BACKEND_MATRIX
+    printed = " ".join(capsys.readouterr().err.split())
+    assert f"Using Matrix: Google Flights can't serve {reason}." in printed, printed
+    with pytest.raises(typer.BadParameter, match=re.escape(reason)):
+        _call(BACKEND_GFLIGHT, extension=directive)
+
+
+@pytest.mark.parametrize(
+    "directive", ["MAXDUR 9:00; MAXCONNECT 1:00", "MINCONNECT 3:00; -CODESHARE"]
+)
+def test_the_same_codes_with_their_separator_stay_on_google(
+    directive: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _call(extension=directive) == BACKEND_GFLIGHT
+    assert _call(BACKEND_GFLIGHT, extension=directive) == BACKEND_GFLIGHT
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize(
     ("routing", "reason"),
     [
         ("AA3000-1", "a flight-number range (AA3000-1)"),
