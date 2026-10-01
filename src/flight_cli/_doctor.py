@@ -506,18 +506,18 @@ class _Doctor:
         return self._google_page(gfid.GfTransport(mode="http"))
 
     def check_google_browser(self) -> _Outcome:
+        override = os.environ.get(_BROWSER_BIN_ENV)
+        # Checked here rather than left to the launch, so a bad override is
+        # named as the setting it is and no Chrome is started to find out; and
+        # before the extra, so the setting is not hidden until it is installed.
+        if override and not (Path(override).is_file() and os.access(override, os.X_OK)):
+            raise _CheckFailedError(
+                "config",
+                f"{_BROWSER_BIN_ENV} names {override}, which is not an executable file",
+            )
         if not _patchright_installed():
             return "skip", "patchright is not installed. " + _gf_browser._INSTALL_HINT  # pyright: ignore[reportPrivateUsage]
-        override = os.environ.get(_BROWSER_BIN_ENV)
-        if override:
-            # Checked here rather than left to the launch, so a bad override is
-            # named as the setting it is and no Chrome is started to find out.
-            if not (Path(override).is_file() and os.access(override, os.X_OK)):
-                raise _CheckFailedError(
-                    "config",
-                    f"{_BROWSER_BIN_ENV} names {override}, which is not an executable file",
-                )
-        elif _chrome_channel_path() is None:
+        if not override and _chrome_channel_path() is None:
             return (
                 "skip",
                 f"no Chrome where patchright looks for it; install Chrome, or point "

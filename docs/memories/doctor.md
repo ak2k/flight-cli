@@ -16,7 +16,7 @@ shape change or flakiness?" for a scheduled canary. Code: `src/flight_cli/_docto
 | `matrix-spa-key` | live | Matrix's homepage and SPA bundle both answer 2xx and the bundle carries the key tagged `matrix`; says whether it is the key in use |
 | `matrix-search` | live | one search (JFK-LAX one-way, today + 30 days) returns a solution priced `^[A-Z]{3}\d` whose first slice names a flight |
 | `google-http` | live | the same leg on Google Flights' page over curl_cffi returns a row with a positive `flight.price` |
-| `google-browser` | live | the same, in Chrome. Skipped when patchright is not installed or, with no override, no Chrome is at patchright's `channel="chrome"` path |
+| `google-browser` | live | the same, in Chrome. Skipped when patchright is not installed or, with no override, no Chrome is at patchright's `channel="chrome"` path. An override naming no executable file fails first, whether patchright is installed or not |
 | `pointspath` | live | stored tokens are valid (refreshed if stale) and `/api/pricing-info` answers with a `pricingInfos` list. The answer is not cached: `pricing_info` writes a body over the catalog before parsing it |
 | `seats-aero` | live | the stored key passes the `whoami` probe. Costs one unit of the 1000-a-day quota |
 

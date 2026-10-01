@@ -764,9 +764,11 @@ def test_an_unreachable_google_is_retryable(world: World, monkeypatch: pytest.Mo
     _fails_as(_run(), "google-http", "unreachable")
 
 
+@pytest.mark.parametrize("patchright", [True, False], ids=["patchright", "no-patchright"])
 def test_a_missing_browser_override_fails_before_any_launch(
-    world: World, monkeypatch: pytest.MonkeyPatch
+    world: World, monkeypatch: pytest.MonkeyPatch, patchright: bool
 ) -> None:
+    monkeypatch.setattr(_doctor, "_patchright_installed", lambda: patchright)
     monkeypatch.setenv("FLIGHT_CLI_GF_BROWSER_BIN", "/nonexistent/flight-cli-no-chrome")
     lines: list[str] = []
     c = _fails_as(_run(lines), "google-browser", "config")
