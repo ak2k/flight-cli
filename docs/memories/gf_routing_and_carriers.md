@@ -973,7 +973,8 @@ document, the same -n rows>, "cross_check": {"currency", "delta":
 "google_minus_matrix", "matrix": {"listed", "solution_count", "complete",
 "last_price"}, "google": {"listed", "answered"}, "rows": [...]}}`, the rows
 being the table's, from the pure `_cross_check.document`. Plain `--format json`
-and `--fast` ask Matrix nothing, as before. It needs no awards (`--cash-only`)
+does not cross-check; on auto a failed Google query is still handed to Matrix,
+as before, and `--fast` asks Matrix nothing. It needs no awards (`--cash-only`)
 and no `--sellers` (exit 2 otherwise); `--bags` prints the table's "No Matrix
 enrichment" note and the plain document. Matrix failing leaves `cross_check`
 null (exit 0), Google failing leaves `search` empty with every Matrix row

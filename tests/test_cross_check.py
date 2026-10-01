@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -579,6 +580,26 @@ def test_a_document_without_enrich_asks_matrix_nothing(
     doc = _document(_run([*_SEARCH, "-n", "5", "--format", "json", *flag]))
     assert isinstance(doc, list)
     assert bodies == []
+
+
+_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_a_document_hands_a_failed_google_query_to_matrix_as_the_docs_say(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    """Plain `--format json` does not cross-check, but on auto a failed Google
+    query still goes to Matrix; the skill and the memo, which tell an agent
+    what a plain document asks Matrix, say so."""
+    bodies = _weave(monkeypatch, gf_rows, google_fails=True)
+    _document(_run([*_SEARCH, "-n", "5", "--format", "json"]))
+    assert len(bodies) == 1
+    for doc in (
+        _ROOT / ".claude" / "skills" / "flight-search" / "SKILL.md",
+        _ROOT / "docs" / "memories" / "gf_routing_and_carriers.md",
+    ):
+        text = " ".join(doc.read_text().split())
+        assert "a failed Google query is still handed to Matrix" in text, doc
 
 
 @pytest.mark.parametrize(
