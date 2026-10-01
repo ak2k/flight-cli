@@ -343,6 +343,31 @@ def test_a_round_trip_matrix_row_on_a_pinned_outbound_names_the_carrier_google_l
     assert c.reasons == ("carrier_absent_google",)
 
 
+def _bare(price: str, *more: Slice) -> Itinerary:
+    """A trip whose first slice states no flight numbers."""
+    first = Slice(departure="2026-11-04T09:00:00", arrival="2026-11-04T12:00:00")
+    return _its(first, *more, price=price)
+
+
+def test_a_row_stating_no_flights_is_never_called_absent_from_the_other_side() -> None:
+    """Without its flight numbers neither answer decides whether the other side
+    lists the trip, or whether Google priced a return for its outbound."""
+    board = _board()
+    _, google_row = _checked(_answer(*board.solutions, _bare("USD150.00")), _matrix_answer(board))
+    _, matrix_row = _checked(board, _matrix_answer(board, _bare("USD150.00")))
+    _, round_trip = _checked(
+        _round_trip(board),
+        _answer(_bare("USD300.00", _slice(["ZZ2"], day="2026-11-11"))),
+        round_trip=True,
+    )
+    assert [rows[k][1].reasons for rows, k in ((google_row, ""), (matrix_row, ""))] == [
+        ("unmatched",),
+        ("unmatched",),
+    ]
+    assert round_trip[" / ZZ2"][1].reasons == ("unmatched",)
+    assert google_row[""][1].reason == "cannot be matched: a flight, day or landing is unstated"
+
+
 # ───────────────────────────── the boundary and the document ────────────────
 
 

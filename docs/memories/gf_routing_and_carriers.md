@@ -965,7 +965,9 @@ combination (Google pins at most `pinned_fanout(-n)` outbounds);
 neither of those two on a board the row filter cut; otherwise `not_on_google`.
 Either side: `paired_elsewhere` where the other side lists the same flights,
 first day and landing minutes on another row, because a middle flight's day is
-then unstated. Point of sale is never a reason: Google is always `gl=US`,
+then unstated; `unmatched` where a row leaves a flight number, day or landing
+unstated, so neither absence and no unpriced outbound is decided for it (no
+live or fixture row has done so). Point of sale is never a reason: Google is always `gl=US`,
 Matrix is sent no sales city, and no row says where it was priced.
 
 **`--format json --enrich`** writes `{"search": <the plain --format json

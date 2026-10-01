@@ -40,6 +40,8 @@ _FLIGHT_RE = re.compile(r"^([A-Z0-9]{2})\d+$", re.IGNORECASE)
 _PRICE_RE = re.compile(r"^([A-Z]{3})([\d,]*\d(?:\.\d+)?)$")
 _SOURCE = {"both": "both", "gf": "google", "matrix": "matrix"}
 _ROUND_TRIP_SLICES = ("out", "back")
+# A row whose trip is unstated in part may or may not be on the other side.
+_UNMATCHED = ("unmatched", "cannot be matched: a flight, day or landing is unstated")
 
 # (flight numbers, departure day) of one slice: the merge's match key.
 _SliceKey = tuple[tuple[str, ...], str]
@@ -296,6 +298,8 @@ def _google_only(
     if not bnd.complete:
         to = f", to {bnd.last_price}" if bnd.last_price else ""
         found.append(("past_page", f"Matrix listed only {bnd.listed} of {bnd.solution_count}{to}"))
+    if trip is None:
+        return found or [_UNMATCHED]
     return found or [("not_in_matrix", f"not in Matrix's answer of {bnd.listed}")]
 
 
@@ -310,15 +314,17 @@ def _matrix_only(
     found: list[tuple[str, str]] = []
     # A round trip's board holds combinations only for the outbounds Google
     # pinned, so a carrier is absent from it only beside an outbound it priced.
+    # An outbound with no flights or day may be one of those, or not.
     out = _key(slices[0]) if slices else None
-    led = not a.round_trip or (out is not None and out in facts.google_outbounds)
-    if not a.google_filtered:
-        if not led:
+    if not a.google_filtered and (out is not None or not a.round_trip):
+        if a.round_trip and out not in facts.google_outbounds:
             found.append(("outbound_not_priced", "Google priced no return for this outbound"))
         elif absent := [c for c in _carriers(slices) if c not in facts.google_carriers]:
             found.append(
                 ("carrier_absent_google", f"no {_either(absent)} flight on Google's board")
             )
+    if trip is None:
+        return found or [_UNMATCHED]
     return found or [("not_on_google", f"not among Google's {bnd.google_listed} rows")]
 
 
