@@ -263,8 +263,8 @@ entry in Google's `GetBookingResults` answer.
   the seller to price again). The URL is the base plus the pairs as its query,
   and null unless the base is printable ASCII, `https` on `www.google.com` with
   no user or port (the table's caption says each link goes through Google), with
-  no query or fragment of its own and no backslash (a browser reads it as `/`),
-  and every pair is two strings.
+  no query or fragment of its own and no space or backslash (a browser reads a
+  backslash as `/`), and every pair is two strings.
 - `bags` comes from `option[18]` = `[1st checked, 2nd checked, carry-on]`. A
   slot `[2, [[null, amount]], 1]` is a fee of `amount` in the page's currency
   and `[3]` is free; Google's page says the same ("First checked bag costs 45
@@ -275,8 +275,10 @@ entry in Google's `GetBookingResults` answer.
   `checked` or `carry-on` and `fee` 0 meaning free.
 - On a round trip a bag fee covers the whole trip: AA on BA178 is 85/100 one
   way and 170/200 round trip, and the page says "Fare and baggage fees apply to
-  your entire trip". Not measured: party size (every capture is 1 adult) and a
-  page in a currency other than USD.
+  your entire trip". A page asked in another currency gives the fees in it:
+  DL747 JFK-LAX asked in EUR gave fees of EUR40/EUR49 and fares from EUR203,
+  where USD gave 45/55 and USD229 (measured 2026-10-01). Not measured: party
+  size (every capture is 1 adult).
 
 The table shows the same fields: a `#` column, `carry-on`, `1st checked` and
 `2nd checked` columns, then one line per seller with a link, `<#> <seller>
