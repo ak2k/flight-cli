@@ -88,7 +88,7 @@ Every result-printing command supports:
 - **Extension codes** (`--extension`): `MAXCONNECT 5:00`, `MAXSTOPS 1`, `MINMILES 3000`, `-REDEYES`, `-OVERNIGHTS`, `ALLIANCE oneworld`. A round trip copies them onto the return unless `--ext-ret` gives its own.
 - **Multi-airport**: `flight calendar MIA VIE,PAR,FCO,MAD --start ...` — search across N European cities at once.
 - **Time-of-day filters** (`--depart-times`, `--return-times`): `morning`, `morning,midday` etc. Buckets that make one window stay on Google Flights; `morning,evening` goes to Matrix.
-- **Stop limits** (`--stops N`): `0` = nonstop only, `1` = up to one stop, … Honored on both backends.
+- **Stop limits** (`--stops N`): at most N stops per direction, on every backend. `0` = nonstop only, `1` = up to one stop, …
 - **Calendar-mode duration ranges** (`-d 5-7`): one search returns prices for 5-, 6-, and 7-night trips at every starting day.
 - **Sellers and explore** (Chrome, the `browser` extra): `flight search JFK LAX --dep 2026-10-20 --sellers --pick 2` lists every seller of row 2 with its price and fare name, cheapest first; `flight explore JFK --month 2026-11 --days 5-7 --max-price 300` lists where JFK flies that month and the cheapest round trip to each.
 
@@ -99,7 +99,7 @@ credential; `--format json` gives the same checks as a document.
 
 | Check | What it checks |
 |---|---|
-| `config` | `config.toml` parses, if there is one, and the rps setting is a number |
+| `config` | `config.toml` parses, if there is one, and the rps setting is a number greater than 0 |
 | `matrix-key` | which Matrix key a search would send (`FLIGHT_API_KEY`, the cache and its age, or none), without fetching one |
 | `cache` | the response cache opens |
 | `google-cookies` | the saved Google session cookie: its age and NID count |
@@ -133,6 +133,18 @@ interface. Two providers ship today:
 
 Each configured provider auto-enables and fans out per leg; the cash↔award
 matcher and renderers are provider-blind.
+
+The providers take one airport per end, so an airport set (`JFK,EWR`) or a
+metro code (`NYC`, asked as JFK, LGA and EWR) is asked pair by pair, and an
+award attaches only to cash rows on its own airports. Each pair costs a
+PointsPath request per cabin and airline and one seats.aero quota unit, so a
+search asks at most 8 pairs, those its cash rows fly first, and every leg at
+least one. A leg with pairs left out gets one stderr line naming them, in
+every output format, and its JSON entry lists them as `pairs_not_asked`:
+
+```text
+Awards for outbound NYC→LON 2026-11-04: asked 4 of 18 airport pairs (at most 8 a search); not asked: JFK→LTN, ...
+```
 
 ```sh
 # implicit overlay — any search adds the award table when a provider is configured
@@ -206,6 +218,7 @@ Pass `--provider-opt 'pp.airlines=United,Delta,...'` to skip discovery and call 
 
 - ~~Browser-based login~~ (now the default — see Setup above)
 - Award overlay on `calendar` (lowest-fare-calendar) — fan-out is N days × M airlines; deserves its own design
+- Ask more than 8 airport pairs in one search — a set or metro search past that names the pairs it left out (stderr, JSON `pairs_not_asked`), and the cap has no flag
 - Match against airlines we don't yet support (the few in pricing-info but not enabled for your tier are silently skipped)
 
 ## Architecture

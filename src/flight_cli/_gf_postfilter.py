@@ -13,10 +13,9 @@ overnight stops) escalates the whole query to Matrix rather than being
 silently dropped.
 
 Google has ignored a field it was sent (a carrier exclude on JFK-LHR), so what
-the page encodes is checked here too wherever the row shows it: the carrier
-include, the maximum duration, the layover minutes, the departure time and a
-price cap.
-The stop ceiling is left to Google's own filter, and so is an alliance, for
+the page encodes is checked here too wherever the row shows it: the stop
+ceiling, the carrier include, the maximum duration, the layover minutes, the
+departure time and a price cap. An alliance is left to Google's own filter, for
 want of a membership table.
 
 Supported Tier-2 predicates:
@@ -251,6 +250,15 @@ def _layovers(row: Any) -> list[int]:
     return gaps
 
 
+def _stop_ceiling(predicates: Iterable[Predicate], max_stops: int | None) -> int | None:
+    """The strictest of `max_stops` and every stop ceiling in `predicates`, or
+    None when there is none. A negative `max_stops` is no limit."""
+    limits = [p.max_stops for p in predicates if isinstance(p, StopsPred)]
+    if max_stops is not None and max_stops >= 0:
+        limits.append(max_stops)
+    return min(limits, default=None)
+
+
 def _row_passes(row: Any, predicates: Iterable[Predicate], times: Sequence[TimeOfDay]) -> bool:
     """The checks read off the raw row, which `models.Slice` does not carry.
 
@@ -286,15 +294,26 @@ def routing_keep(
     *,
     max_price: int | None = None,
     currency: str = "USD",
+    max_stops: int | None = None,
 ) -> Callable[[int, Any], bool] | None:
     """The per-leg filter `_gflight_ids.search_with_ids` applies to each board
     it is served: `keep(i, row)` is whether one Google Flights row passes slice
-    `i`'s predicates, departs inside its time window and is priced in
-    `currency` at or under `max_price`. None when nothing is asked of a row.
+    `i`'s predicates, makes no more stops than `max_stops` or any stop ceiling
+    among them, departs inside its time window and is priced in `currency` at
+    or under `max_price`. None when nothing is asked of a row; a negative
+    `max_stops` asks nothing.
 
-    The cap is checked on every board, a round trip's outbound as well as each
-    return: whether or not the page was asked for it, every row is held to it."""
-    if not any(per_slice_predicates) and not any(per_slice_times) and max_price is None:
+    The cap and the stop ceiling are checked on every board, a round trip's
+    outbound as well as each return: whether or not the page was asked for
+    them, every row is held to them."""
+    if max_stops is not None and max_stops < 0:
+        max_stops = None
+    if (
+        not any(per_slice_predicates)
+        and not any(per_slice_times)
+        and max_price is None
+        and max_stops is None
+    ):
         return None
 
     def keep(leg: int, row: Any) -> bool:
@@ -304,6 +323,9 @@ def routing_keep(
             return False
         preds = per_slice_predicates[leg] if leg < len(per_slice_predicates) else ()
         times = per_slice_times[leg] if leg < len(per_slice_times) else ()
+        ceiling = _stop_ceiling(preds, max_stops)
+        if ceiling is not None and len(row.flight.legs) - 1 > ceiling:
+            return False
         if not _row_passes(row, preds, times):
             return False
         if not preds:
@@ -320,8 +342,10 @@ def routing_keep(
 
 def _row_check_name(pred: Predicate) -> str | None:
     match pred:
-        case AlliancePred() | StopsPred():
+        case AlliancePred():
             return None  # Google's own filter; the rows are not checked
+        case StopsPred():
+            return None  # `row_check_names` names the strictest ceiling once
         case ConnectTimePred(min_minutes=int() as low, max_minutes=None):
             return f"a minimum layover ({low:d} min)"
         case ConnectTimePred(min_minutes=None, max_minutes=int() as high):
@@ -336,10 +360,14 @@ def row_check_names(
     *,
     max_price: int | None = None,
     currency: str = "USD",
+    max_stops: int | None = None,
 ) -> list[str]:
     """Every check `routing_keep` applies to a row, in the user's vocabulary,
     for the sentence that says what emptied a board."""
     names = [name for preds in per_slice_predicates for p in preds if (name := _row_check_name(p))]
+    ceiling = _stop_ceiling(itertools.chain.from_iterable(per_slice_predicates), max_stops)
+    if ceiling is not None:
+        names.append(f"a stop ceiling of {ceiling:d}")
     for label, times in zip(("departure", "return"), per_slice_times, strict=False):
         if times:
             names.append(f"a {label}-time window ({', '.join(t.value for t in times)})")

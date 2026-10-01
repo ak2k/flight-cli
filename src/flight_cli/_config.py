@@ -129,26 +129,34 @@ def _truthy_env(name: str) -> bool:
     return v in {"1", "true", "yes", "on"}
 
 
+def checked_rps(value: Any, source: str) -> float:
+    """`value` as a rate the request limiter can pace by, or a ValueError naming
+    `source`. `float()` alone passes a rate of 0, which the limiter divides by,
+    and a negative or nan one, which leaves a search waiting forever."""
+    msg = f"{source}={value!r} is not a number greater than 0"
+    try:
+        rps = float(value)
+    # OverflowError: an integer too large for a float, which TOML allows.
+    except (TypeError, ValueError, OverflowError) as e:
+        raise ValueError(msg) from e
+    # `float()` reads a TOML boolean as 0 or 1; `not rps > 0` refuses nan,
+    # which `rps <= 0` would pass.
+    if isinstance(value, bool) or not rps > 0:
+        raise ValueError(msg)
+    return rps
+
+
 def http_rps(*, config: dict[str, Any] | None = None) -> float:
     """Resolve requests-per-second: env > config > default. Bad inputs surface
     a clear error rather than silent fallback to default."""
     env = os.environ.get(RPS_ENV)
     if env is not None:
-        try:
-            return float(env)
-        except ValueError as e:
-            msg = f"{RPS_ENV}={env!r} is not a number"
-            raise ValueError(msg) from e
+        return checked_rps(env, RPS_ENV)
     cfg = config if config is not None else load()
     http_any: Any = cfg.get("http", {})
     if isinstance(http_any, dict) and "rps" in http_any:
         http_dict = cast("dict[str, Any]", http_any)
-        v: Any = http_dict["rps"]
-        try:
-            return float(v)
-        except (TypeError, ValueError) as e:
-            msg = f"[http].rps={v!r} is not a number"
-            raise ValueError(msg) from e
+        return checked_rps(http_dict["rps"], "[http].rps")
     return DEFAULT_RPS
 
 

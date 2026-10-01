@@ -34,6 +34,7 @@ from __future__ import annotations
 import ast
 import io
 import pathlib
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -1406,9 +1407,16 @@ def _no_gf() -> Any:
     return _none
 
 
+def _undrawable_row() -> Any:
+    """A Google row carrying nothing but a fare: every Google board is put in
+    price order before it is trimmed, so a stub row has to sort, and nothing
+    past `.flight.price` is there for a renderer or a link builder to read."""
+    return SimpleNamespace(flight=SimpleNamespace(price=100.0))
+
+
 def _one_gf_row() -> Any:
     def _row(*_a: object, **_kw: object) -> list[Any]:
-        return [cast("Any", object())]
+        return [_undrawable_row()]
 
     return _row
 
@@ -2789,13 +2797,10 @@ def test_a_table_the_google_only_path_cannot_draw_is_typed_and_non_zero(
 
     buf = _capture(monkeypatch)
 
-    def _rows(*_a: object, **_kw: object) -> list[Any]:
-        return [cast("Any", object())]
-
     def _cannot_draw(*_a: object, **_kw: object) -> None:
         raise AttributeError(f"row shape drifted{_ESCAPES}")
 
-    monkeypatch.setattr(cli, "_gflight_results", _rows)
+    monkeypatch.setattr(cli, "_gflight_results", _one_gf_row())
     monkeypatch.setattr(cli, "_render_gflight_table", _cannot_draw)
     legs, opts = _gf_legs_and_opts()
     with pytest.raises(typer.Exit) as excinfo:
@@ -2818,13 +2823,10 @@ def test_a_pick_past_a_board_that_cannot_be_drawn_still_reaches_the_typed_failur
 
     buf = _capture(monkeypatch)
 
-    def _rows(*_a: object, **_kw: object) -> list[Any]:
-        return [cast("Any", object())]
-
     def _cannot_draw(*_a: object, **_kw: object) -> None:
         raise AttributeError("row shape drifted")
 
-    monkeypatch.setattr(cli, "_gflight_results", _rows)
+    monkeypatch.setattr(cli, "_gflight_results", _one_gf_row())
     monkeypatch.setattr(cli, "_render_gflight_table", _cannot_draw)
     legs, opts = _gf_legs_and_opts()
     with pytest.raises(typer.Exit) as excinfo:
