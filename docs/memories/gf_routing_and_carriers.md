@@ -923,7 +923,10 @@ consent) is named on stderr with its number and airports, `Google Flights page
 2 of 4 (JFK,LGA,EWR,BOS→FCO,MUC,ZRH,VIE,CPH,DUB) is missing: <reason>.`, and
 the next page is asked. A throttle, a spent transport ladder or a dead browser
 is not a fact about one page, as in the pin loop above, so it stops the asking,
-and each page after it is named `not asked after page N stopped the search`.
+and each page after it is named `not asked after page N stopped the search`. A
+round trip asks every page's outbounds before any page's returns, so a page
+whose outbounds answered before the stop is named `its returns were not asked
+after page N stopped the search`, and no GET follows a throttle.
 When nothing merged and a page failed, the first failed page's error is raised
 and takes the route a one-page refusal takes ("A Google query that FAILS",
 above). Otherwise the answer is the pages that answered and the JSON list keeps

@@ -518,6 +518,77 @@ def test_a_page_with_no_pin_costs_no_further_get(monkeypatch: pytest.MonkeyPatch
     assert {page for page, pin in google.calls if pin is not None} == {(_EAST[6:], ("LAX",))}
 
 
+def _round_trip_throttled_on_page_two(
+    monkeypatch: pytest.MonkeyPatch, *, from_get: int
+) -> tuple[Result, _Google, str]:
+    """The Example 6 round trip, page 2 throttled from its `from_get`-th GET on."""
+    second: Page = (_EX6_FROM[:4], _EX6_TO[7:])
+    gets: list[Page] = []
+
+    def refuse(page: Page) -> Exception | None:
+        gets.append(page)
+        return GfThrottledError("rate-limited") if gets.count(second) >= from_get else None
+
+    google = _Google(_EX6_PAIRS, fare=lambda i: 100.0 + (i * 37) % len(_EX6_PAIRS), refuse=refuse)
+    buf = capture_err(monkeypatch)
+    result = _search(
+        monkeypatch,
+        google,
+        ",".join(_EX6_FROM),
+        ",".join(_EX6_TO),
+        "--backend",
+        "gflight",
+        "--fast",
+        "--format",
+        "json",
+        ret=True,
+    )
+    return result, google, _flat(buf.getvalue())
+
+
+def _missing(n: int, why: str) -> str:
+    frm = _EX6_FROM[:4] if n <= 2 else _EX6_FROM[4:]
+    to = _EX6_TO[:7] if n % 2 else _EX6_TO[7:]
+    return f"page {n:d} of 4 ({','.join(frm)}→{','.join(to)}) is missing: {why}."
+
+
+def test_a_throttle_on_an_outbound_names_the_page_before_it_for_its_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every outbound is asked before any return, so page 1's returns come
+    after page 2's throttle and are not asked; page 1 was, and says so."""
+    result, google, printed = _round_trip_throttled_on_page_two(monkeypatch, from_get=1)
+    assert result.exit_code == 1, result.output
+    assert google.pages() == [(_EX6_FROM[:4], _EX6_TO[:7]), (_EX6_FROM[:4], _EX6_TO[7:])]
+    assert all(pin is None for _, pin in google.calls)
+    stopped = "not asked after page 2 stopped the search"
+    assert _missing(1, f"its returns were {stopped}") in printed, printed
+    assert _missing(2, "Google Flights rate-limited") in printed, printed
+    assert _missing(3, stopped) in printed, printed
+    assert _missing(4, stopped) in printed, printed
+
+
+def test_a_throttle_on_a_pin_names_the_later_pages_for_their_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pages 3 and 4 answered their outbounds; only their pins were stopped.
+    Page 1's pins came before the throttle and its round trips stand."""
+    result, google, printed = _round_trip_throttled_on_page_two(monkeypatch, from_get=2)
+    assert result.exit_code == 0, result.output
+    assert [pin for _, pin in google.calls[:4]] == [None] * 4
+    pinned_pages = list(dict.fromkeys(page for page, pin in google.calls if pin is not None))
+    assert pinned_pages == [(_EX6_FROM[:4], _EX6_TO[:7]), (_EX6_FROM[:4], _EX6_TO[7:])]
+    first = {i for i, (o, d) in enumerate(_EX6_PAIRS) if o in _EX6_FROM[:4] and d in _EX6_TO[:7]}
+    doc = json.loads(result.stdout)
+    assert doc
+    assert {int(pair[0]["legs"][0]["flight_number"]) for pair in doc} <= first
+    returns = "its returns were not asked after page 2 stopped the search"
+    assert "page 1 of 4" not in printed, printed
+    assert _missing(2, "Google Flights rate-limited") in printed, printed
+    assert _missing(3, returns) in printed, printed
+    assert _missing(4, returns) in printed, printed
+
+
 def test_every_page_filtered_empty_hands_the_round_trip_to_matrix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

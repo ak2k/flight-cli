@@ -3995,7 +3995,9 @@ class _PageAsk:
     still asked. A throttle, a spent transport ladder or a dead browser is not
     a fact about a page: the wall is per-IP, the network is one network, and
     every later page would navigate on the same session. It ends the asking,
-    and every page after it is named as not asked."""
+    and every page after it is named as not asked. A round trip asks every
+    page's outbounds before any page's returns, so a page that answered its
+    outbounds before the stop is named for the returns it did not get."""
 
     def __init__(
         self, pages: list[tuple[Leg, ...]], *, gf_mode: GfTransportMode, bags: bool
@@ -4005,6 +4007,7 @@ class _PageAsk:
         self.bags = bags
         self.failed: dict[int, GfBackendError] = {}
         self.unasked: set[int] = set()
+        self.answered: set[int] = set()
         self.stopped_at: int | None = None
 
     def ask[T](self, i: int, call: Callable[[], T]) -> T | None:
@@ -4013,12 +4016,15 @@ class _PageAsk:
             self.unasked.add(i)
             return None
         try:
-            return call()
+            answer = call()
         except (GfThrottledError, GfTransportError, GfBrowserUnavailableError) as e:
             self.stopped_at = i
             self.failed[i] = e
         except GfBackendError as e:
             self.failed[i] = e
+        else:
+            self.answered.add(i)
+            return answer
         return None
 
     def report(self) -> None:
@@ -4043,6 +4049,8 @@ def _report_pages(asked: _PageAsk) -> None:
             why = _gf_refusal(e, transport=asked.gf_mode, bags=asked.bags).note.removesuffix(".")
         else:
             why = f"not asked after page {(asked.stopped_at or 0) + 1:d} stopped the search"
+            if i in asked.answered:
+                why = f"its returns were {why}"
         err.print(
             f"[yellow]Google Flights page {i + 1:d} of {n:d} "
             f"({_safe_text(','.join(out.origins))}→{_safe_text(','.join(out.destinations))}) "
