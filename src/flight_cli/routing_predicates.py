@@ -29,7 +29,9 @@ with a `+`/`*` quantifier, one connection-airport token, nonstop, one flight
 number — placeholders ignored) are recognized; any ordered sequence, bare
 single-segment carrier, country filter, or unknown token sends the whole
 routing string to Matrix. Extension codes are order-independent and classified
-per directive. Grammar: docs/memories/routing_language.md + extension_codes.md.
+per directive; a code given more arguments than it takes is Matrix's, since
+read in part it would ask Google a wider question. Grammar:
+docs/memories/routing_language.md + extension_codes.md.
 """
 
 from __future__ import annotations
@@ -346,6 +348,19 @@ def _carrier_list(raw: str, args: list[str], *, exclude: bool, operating: bool) 
     return UnsupportedPred(token=raw, reason=f"a carrier list naming {named}, {what} ({raw!r})")
 
 
+# How many arguments each fixed-arity code takes. More words than that are two
+# codes missing their `;`, and the first read alone asks a wider question.
+_ARITY = {
+    "MAXSTOPS": 1,
+    "MAXDUR": 1,
+    "MAXCONNECT": 1,
+    "MINCONNECT": 1,
+    "-OVERNIGHTS": 0,
+    "-REDEYES": 0,
+    "-CODESHARE": 0,
+}
+
+
 def _parse_extension_code(directive: str) -> Predicate | None:  # noqa: PLR0911, PLR0912 - flat keyword dispatch over the extension grammar
     """Parse one extension directive (already split on ';'). None for an empty
     directive."""
@@ -355,6 +370,10 @@ def _parse_extension_code(directive: str) -> Predicate | None:  # noqa: PLR0911,
     keyword = parts[0].upper()
     args = parts[1:]
     raw = directive.strip()
+    if len(args) > _ARITY.get(keyword, len(args)):
+        return UnsupportedPred(
+            token=raw, reason=f"{keyword} with more arguments than it takes ({raw!r})"
+        )
 
     match keyword:
         case "MAXSTOPS" if args and args[0].isdigit():

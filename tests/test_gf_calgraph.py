@@ -1225,6 +1225,11 @@ def test_the_help_names_what_the_graph_takes_and_what_http_keeps() -> None:
     assert "over --gf-transport http only cabin, adults and stops up to 2" in flat
 
 
+def _run_on(keyword: str, raw: str) -> str:
+    """How every calendar gate names a code given more arguments than it takes."""
+    return f"a Matrix-only extension code ({keyword} with more arguments than it takes ('{raw}'))"
+
+
 _KEPT = [
     ({"routing": "~BA+"}, "Tier-2 routing"),
     ({"routing": "O:AA+"}, "Tier-2 routing"),
@@ -1233,9 +1238,18 @@ _KEPT = [
     ({"children": 1}, "a passenger type other than adults"),
     ({"extension": "MAXDUR 0:00"}, "a maximum trip duration of 0 minutes"),
     ({"depart_times": "morning"}, "a departure-time window"),
-    ({"extension": "MAXDUR 9:00 MAXCONNECT 1:00"}, "a maximum trip duration (540 min)"),
-    ({"extension": "MAXCONNECT 1:00 MINCONNECT 3:00"}, "a layover-time bound"),
-    ({"extension": "MINCONNECT 3:00 MAXCONNECT 1:00"}, "a Tier-2 extension code"),
+    (
+        {"extension": "MAXDUR 9:00 MAXCONNECT 1:00"},
+        _run_on("MAXDUR", "MAXDUR 9:00 MAXCONNECT 1:00"),
+    ),
+    (
+        {"extension": "MAXCONNECT 1:00 MINCONNECT 3:00"},
+        _run_on("MAXCONNECT", "MAXCONNECT 1:00 MINCONNECT 3:00"),
+    ),
+    (
+        {"extension": "MINCONNECT 3:00 MAXCONNECT 1:00"},
+        _run_on("MINCONNECT", "MINCONNECT 3:00 MAXCONNECT 1:00"),
+    ),
 ]
 _KEPT_IDS = [
     "operating-exclude",
@@ -1283,49 +1297,49 @@ def test_what_the_graph_still_refuses_keeps_the_bases_words_beside_matrix(
     assert (len(asked), seen) == (1, [])
 
 
-# Codes run together without `;`: the parser reads a one-argument code's first
-# argument and drops the words after it, so a page would ask without them. Each
-# is decided in the base's words, beside a constraint the graph takes too.
+# Codes run together without `;`. A page that read the first code alone would
+# ask without the words after it, so each is refused by name, beside a
+# constraint the graph takes too.
 _RUNS_ON: list[tuple[tuple[str, ...], CalendarSearch, str]] = [
     (
         ("--one-way", "--ext", "MINCONNECT 2:00; MAXSTOPS 1 MAXDUR 0:00"),
         _search(extension="MINCONNECT 2:00; MAXSTOPS 1 MAXDUR 0:00"),
-        "a Tier-2 extension code",
+        _run_on("MAXSTOPS", "MAXSTOPS 1 MAXDUR 0:00"),
     ),
     (
         ("--one-way", "--ext", "MINCONNECT 3:00; MAXSTOPS 1 MAXCONNECT 1:00"),
         _search(extension="MINCONNECT 3:00; MAXSTOPS 1 MAXCONNECT 1:00"),
-        "a Tier-2 extension code",
+        _run_on("MAXSTOPS", "MAXSTOPS 1 MAXCONNECT 1:00"),
     ),
     (
         ("--one-way", "--ext", "MINCONNECT 3:00; MAXSTOPS 1 -CODESHARE"),
         _search(extension="MINCONNECT 3:00; MAXSTOPS 1 -CODESHARE"),
-        "a Tier-2 extension code",
+        _run_on("MAXSTOPS", "MAXSTOPS 1 -CODESHARE"),
     ),
     (
         ("--one-way", "--routing", "AA+", "--ext", "MAXSTOPS 1 MAXDUR 9:00"),
         _search(routing="AA+", extension="MAXSTOPS 1 MAXDUR 9:00"),
-        "a carrier filter (AA)",
+        _run_on("MAXSTOPS", "MAXSTOPS 1 MAXDUR 9:00"),
     ),
     (
         ("--one-way", "--depart-times", "night", "--ext", "MAXSTOPS 1 MAXDUR 9:00"),
         _search(extension="MAXSTOPS 1 MAXDUR 9:00", times=(_T.NIGHT,)),
-        "a departure-time window",
+        _run_on("MAXSTOPS", "MAXSTOPS 1 MAXDUR 9:00"),
     ),
     (
         ("--one-way", "--ext", "MAXDUR 9:00; MAXSTOPS 1 MAXCONNECT 1:00"),
         _search(extension="MAXDUR 9:00; MAXSTOPS 1 MAXCONNECT 1:00"),
-        "a maximum trip duration (540 min)",
+        _run_on("MAXSTOPS", "MAXSTOPS 1 MAXCONNECT 1:00"),
     ),
     (
         ("-d", "7", "--ext", "MINCONNECT 3:00; MAXSTOPS 1 MAXCONNECT 1:00"),
         _search(nights=7, extension="MINCONNECT 3:00; MAXSTOPS 1 MAXCONNECT 1:00"),
-        "a Tier-2 extension code",
+        _run_on("MAXSTOPS", "MAXSTOPS 1 MAXCONNECT 1:00"),
     ),
     (
         ("-d", "7", "--routing", "AA+", "--ext", "MAXSTOPS 1 MAXDUR 9:00"),
         _search(nights=7, routing="AA+", extension="MAXSTOPS 1 MAXDUR 9:00"),
-        "a carrier filter (AA)",
+        _run_on("MAXSTOPS", "MAXSTOPS 1 MAXDUR 9:00"),
     ),
 ]
 _RUNS_ON_IDS = [
@@ -1357,18 +1371,27 @@ def _graph_gate(search: CalendarSearch) -> str | None:
     ("search", "reason"),
     [
         *((search, reason) for _, search, reason in _RUNS_ON),
-        (_search(extension="MAXDUR 9:00 MAXCONNECT 1:00"), "a maximum trip duration (540 min)"),
-        (_search(extension="MAXDUR 9:00 -CODESHARE"), "a maximum trip duration (540 min)"),
-        (_search(extension="MAXCONNECT 1:00 MINCONNECT 3:00"), "a layover-time bound"),
-        (_search(extension="MAXCONNECT 1:00 2:00"), "a layover-time bound"),
-        (_search(extension="MINCONNECT 3:00 MAXCONNECT 1:00"), "a Tier-2 extension code"),
+        (
+            _search(extension="MAXDUR 9:00 MAXCONNECT 1:00"),
+            _run_on("MAXDUR", "MAXDUR 9:00 MAXCONNECT 1:00"),
+        ),
+        (_search(extension="MAXDUR 9:00 -CODESHARE"), _run_on("MAXDUR", "MAXDUR 9:00 -CODESHARE")),
+        (
+            _search(extension="MAXCONNECT 1:00 MINCONNECT 3:00"),
+            _run_on("MAXCONNECT", "MAXCONNECT 1:00 MINCONNECT 3:00"),
+        ),
+        (_search(extension="MAXCONNECT 1:00 2:00"), _run_on("MAXCONNECT", "MAXCONNECT 1:00 2:00")),
+        (
+            _search(extension="MINCONNECT 3:00 MAXCONNECT 1:00"),
+            _run_on("MINCONNECT", "MINCONNECT 3:00 MAXCONNECT 1:00"),
+        ),
         (
             _search(nights=7, extension="MAXDUR 9:00", extension_ret="MAXDUR 9:00 MAXCONNECT 1:00"),
-            "a maximum trip duration (540 min)",
+            f"{_run_on('MAXDUR', 'MAXDUR 9:00 MAXCONNECT 1:00')} on the return leg",
         ),
         (
             _search(nights=7, extension="MAXDUR 9:00 MAXCONNECT 1:00", extension_ret="MAXDUR 9:00"),
-            "a maximum trip duration (540 min)",
+            _run_on("MAXDUR", "MAXDUR 9:00 MAXCONNECT 1:00"),
         ),
     ],
     ids=[
@@ -1382,8 +1405,18 @@ def _graph_gate(search: CalendarSearch) -> str | None:
         "outbound-runs-on",
     ],
 )
-def test_a_code_run_into_the_next_keeps_the_bases_gate(search: CalendarSearch, reason: str) -> None:
+def test_a_code_run_into_the_next_is_refused_by_name_at_the_gate(
+    search: CalendarSearch, reason: str
+) -> None:
     assert _graph_gate(search) == reason
+
+
+def test_a_carrier_list_that_repeats_a_code_is_asked_as_the_list_without_it() -> None:
+    """Every word of a carrier list is read, so a repeated code is the same
+    include, on the same page, as the list naming it once."""
+    once, twice = _search(extension="AIRLINES AA"), _search(extension="AIRLINES AA AA")
+    assert (_graph_gate(once), _graph_gate(twice)) == (None, None)
+    assert cg.page_url(twice, _START) == cg.page_url(once, _START)
 
 
 _FAST_JSON = ("--fast", "--gf-transport", "browser", "--format", "json")
@@ -1398,7 +1431,7 @@ def _runs_on_cli(*extra: str) -> tuple[int, str, str]:
 
 
 @pytest.mark.parametrize(("args", "search", "reason"), _RUNS_ON, ids=_RUNS_ON_IDS)
-def test_a_code_run_into_the_next_keeps_the_bases_words_under_fast(
+def test_a_code_run_into_the_next_is_refused_by_name_under_fast(
     args: tuple[str, ...], search: CalendarSearch, reason: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     del search
@@ -1410,7 +1443,7 @@ def test_a_code_run_into_the_next_keeps_the_bases_words_under_fast(
 
 
 @pytest.mark.parametrize(("args", "search", "reason"), _RUNS_ON, ids=_RUNS_ON_IDS)
-def test_a_code_run_into_the_next_keeps_the_bases_words_beside_matrix(
+def test_a_code_run_into_the_next_is_named_beside_matrix(
     args: tuple[str, ...], search: CalendarSearch, reason: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     del search
@@ -1422,24 +1455,56 @@ def test_a_code_run_into_the_next_keeps_the_bases_words_beside_matrix(
     assert f"Google Flights price graph not asked: this is {reason}." in err
 
 
+_STOPS_RUN_ON = ("--ext", "MAXSTOPS 1 MAXDUR 9:00")
+_STOPS_RUN_ON_REASON = _run_on("MAXSTOPS", "MAXSTOPS 1 MAXDUR 9:00")
+
+
 @pytest.mark.parametrize("trip", [("--one-way",), ("-d", "7")], ids=["one-way", "round-trip"])
-def test_a_stop_ceiling_run_into_a_bound_alone_is_asked_as_the_base_asked_it(
+def test_a_stop_ceiling_run_into_a_bound_is_refused_not_asked_alone(
     trip: tuple[str, ...], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The parser drops `MAXDUR 9:00` on every path, so the page carries the
-    stop ceiling alone, as the base's page did."""
+    """The page would carry the stop ceiling alone and price a wider question
+    than the one typed."""
     _no_matrix(monkeypatch)
     seen = _graph_is(monkeypatch, _RT if len(trip) > 1 else _OW)
-    code, out, _ = _runs_on_cli(*trip, "--ext", "MAXSTOPS 1 MAXDUR 9:00", *_FAST_JSON)
-    assert (code, len(seen)) == (0, 1)
-    assert json.loads(out)["grid"]
-    search = seen[0][0]
-    fields = (5, 6, 8, 9, 10, 11, 12, 17, 18)
-    asked = [
-        {k: v for k in fields if (v := only.get(k)) is not None}
-        for only in _slices(_tfs(cg.page_url(search, search.window.start)))
-    ]
-    assert asked == [{5: [1]}] * len(search.legs)
+    code, out, err = _runs_on_cli(*trip, *_STOPS_RUN_ON, *_FAST_JSON)
+    assert (code, out, seen) == (1, "", [])
+    assert f"this is {_STOPS_RUN_ON_REASON}. Run without --fast for Matrix." in err
+
+
+@pytest.mark.parametrize("trip", [("--one-way",), ("-d", "7")], ids=["one-way", "round-trip"])
+def test_fast_over_http_refuses_a_stop_ceiling_run_into_a_bound_by_name(
+    trip: tuple[str, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The RPC grid would be asked the stop ceiling alone, as the page would."""
+    _no_matrix(monkeypatch)
+    seen = _graph_is(monkeypatch, _OW)
+    asked: list[CalendarSearch] = []
+
+    def _grid(search: CalendarSearch, **_kwargs: object) -> None:
+        asked.append(search)
+
+    monkeypatch.setattr(cli, "_run_fast_calendar_grid", _grid)
+    code, out, err = _runs_on_cli(*trip, *_STOPS_RUN_ON, "--fast", "--gf-transport", "http")
+    assert (code, out, asked, seen) == (1, "", [], [])
+    assert f"this is {_STOPS_RUN_ON_REASON}. Run without --fast for Matrix." in err
+
+
+def test_the_default_calendar_over_http_runs_matrix_alone_for_a_code_run_into_the_next(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The weave would paint a grid asked the stop ceiling alone above
+    Matrix's answer."""
+    asked = _matrix_answers(monkeypatch)
+    woven: list[CalendarSearch] = []
+
+    def _weave(search: CalendarSearch, **_kwargs: object) -> None:
+        woven.append(search)
+
+    monkeypatch.setattr(cli, "_run_calendar_enriched", _weave)
+    seen = _graph_is(monkeypatch, _OW)
+    code, _, _ = _runs_on_cli("--one-way", *_STOPS_RUN_ON, "--gf-transport", "http")
+    assert (code, len(asked), woven, seen) == (0, 1, [], [])
 
 
 @pytest.mark.parametrize(

@@ -48,7 +48,6 @@ from .routing_predicates import (
     Tier,
     classify,
     page_can_encode,
-    parse_extension,
 )
 
 if TYPE_CHECKING:
@@ -200,10 +199,9 @@ def graph_blocker(search: CalendarSearch) -> str | None:  # noqa: PLR0911 — on
     """Why the price graph cannot be asked for this calendar, or None when it can.
 
     The phrase completes "this is …". The caller has checked the currency, the
-    shape and the airports, and that no extension directive runs on past what
-    the parser reads (`extension_runs_on`). What is left is every constraint the
-    graph cannot both find on the page URL exactly and trust Google to apply
-    there, since it has no rows to check afterwards. Admitted, per leg: a stop
+    shape and the airports. What is left is every constraint the graph cannot
+    both find on the page URL exactly and trust Google to apply there, since it
+    has no rows to check afterwards. Admitted, per leg: a stop
     ceiling of two or fewer, one marketing-carrier or alliance include, a
     maximum duration, a minimum layover, a maximum layover, and a departure-time
     window the page's whole hours bound exactly; each was measured narrowing the
@@ -252,21 +250,6 @@ def _graph_takes(p: Predicate) -> bool:
             return True
         case _:
             return False
-
-
-def extension_runs_on(search: CalendarSearch) -> bool:
-    """Whether an extension directive has words the parser drops.
-
-    The parser reads a one-argument code's first argument and nothing after it,
-    so `MAXSTOPS 1 MAXDUR 9:00`, two codes missing their `;`, is a stop ceiling
-    alone. A directive of more words that parses the same when cut to its
-    keyword and first argument is such a case, whatever its keyword."""
-    return any(
-        len(words := directive.split()) > 2  # noqa: PLR2004 — a keyword and its one argument
-        and parse_extension(" ".join(words[:2])) == parse_extension(directive)
-        for leg in search.legs
-        for directive in (leg.extension or "").split(";")
-    )
 
 
 def _hours_bound_exactly(buckets: Sequence[TimeOfDay]) -> bool:
