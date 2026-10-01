@@ -3093,8 +3093,14 @@ def _render_calendar(
 
 
 def _build_pp_legs(legs: tuple[Leg, ...]) -> list[LegQuery]:
-    """One PP query per Matrix leg. slice_index lets the matcher join PP
-    award results to the correct Itinerary slice in each Matrix solution."""
+    """One award query per airport pair of each leg, a metro code asked as its
+    member airports, in typed order. The providers take one airport per end.
+
+    A leg's queries share its slice_index, date and label, which names the
+    typed tokens: slice_index lets the matcher join award results to the
+    correct Itinerary slice, and `run_pp_for_search` reads consecutive queries
+    with one slice_index as one leg. A pair with one airport at both ends is
+    skipped, unless it is the only one a leg has."""
     out: list[LegQuery] = []
     for i, leg in enumerate(legs):
         if not leg.date or not leg.origins or not leg.destinations:
@@ -3110,14 +3116,14 @@ def _build_pp_legs(legs: tuple[Leg, ...]) -> list[LegQuery]:
             else "one-way"
         )
         iso = leg.date.isoformat()
-        out.append(
-            LegQuery(
-                origin=leg.origins[0],
-                destination=leg.destinations[0],
-                date=iso,
-                slice_index=i,
-                label=f"{kind} {leg.origins[0]}→{leg.destinations[0]} {iso}",
-            ),
+        label = f"{kind} {','.join(leg.origins)}→{','.join(leg.destinations)} {iso}"
+        origins, destinations = expand_airports(leg.origins), expand_airports(leg.destinations)
+        pairs = [(o, d) for o in origins for d in destinations if o != d] or [
+            (origins[0], destinations[0])
+        ]
+        out.extend(
+            LegQuery(origin=o, destination=d, date=iso, slice_index=i, label=label)
+            for o, d in pairs
         )
     return out
 

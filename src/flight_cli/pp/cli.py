@@ -2,17 +2,19 @@
 
 `run_pp_for_search` is wired into `flight search` (both backends): it runs
 implicitly whenever any provider's tokens are present (opt out with `--no-pp`).
-Iterates the provider registry, fans out each leg's queries in parallel,
-joins via match.py, and renders.
+Asks the provider registry about each airport pair of each leg, joins via
+match.py, and renders one entry per leg.
 """
 
 from __future__ import annotations
 
 import json
 import sys
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from itertools import groupby
 from pathlib import Path  # noqa: TC003 - typer evaluates annotations at runtime
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Final
 
 import anyio
 import typer
@@ -276,6 +278,81 @@ def _normalize_cabin(c: str) -> str:
     return _CABIN_ALIASES.get(k, c)
 
 
+# One airport-pair query costs PointsPath a request per cabin and airline, and
+# seats.aero one unit of its daily quota, so a metro round trip (`NYC LON` is
+# 36 pairs) is cut to this many and the output names the pairs left unasked.
+MAX_AWARD_PAIR_QUERIES: Final = 8
+
+
+def _pair_query_cap(n_legs: int) -> int:
+    """The most pair queries one search asks: never fewer than one a leg."""
+    return max(MAX_AWARD_PAIR_QUERIES, n_legs)
+
+
+@dataclass(frozen=True)
+class _AwardLeg:
+    """One leg of an award search: the pair queries asked, in the order they
+    go out, and those the cap left unasked."""
+
+    label: str
+    slice_index: int
+    asked: tuple[LegQuery, ...]
+    not_asked: tuple[LegQuery, ...]
+
+
+def _cash_flown_first(res: SearchResult, queries: list[LegQuery]) -> list[LegQuery]:
+    """One leg's queries with the pairs a cash row of `res` flies at that
+    slice first, in row order, then the rest in typed order: the awards a
+    capped search asks for are the ones the cash rows can show."""
+    if len(queries) == 1:
+        return queries
+    slice_index = queries[0].slice_index
+    flown: dict[tuple[str, str], int] = {}
+    for it in res.solutions:
+        itn = it.itinerary
+        if not itn or slice_index >= len(itn.slices):
+            continue
+        s = itn.slices[slice_index]
+        o = ((s.origin.code if s.origin else None) or "").upper()
+        d = ((s.destination.code if s.destination else None) or "").upper()
+        flown.setdefault((o, d), len(flown))
+    return sorted(
+        queries,
+        key=lambda q: flown.get((q.origin.upper(), q.destination.upper()), len(flown)),
+    )
+
+
+def _plan_pair_queries(res: SearchResult, queries: Sequence[LegQuery]) -> list[_AwardLeg]:
+    """`queries` regrouped into legs (consecutive queries with one
+    slice_index) and cut to the cap, which is dealt one query per leg per
+    round so every leg is asked at least its first pair. A search with more
+    legs than the cap is asked one pair a leg."""
+    legs = [
+        _cash_flown_first(res, list(group))
+        for _, group in groupby(queries, key=lambda q: q.slice_index)
+    ]
+    budget = _pair_query_cap(len(legs))
+    asked = [0] * len(legs)
+    for round_ in range(max((len(leg) for leg in legs), default=0)):
+        for i, leg in enumerate(legs):
+            if budget and round_ < len(leg):
+                asked[i] += 1
+                budget -= 1
+    return [
+        _AwardLeg(leg[0].label, leg[0].slice_index, tuple(leg[:n]), tuple(leg[n:]))
+        for leg, n in zip(legs, asked, strict=True)
+    ]
+
+
+def _not_asked_line(leg: _AwardLeg, cap: int) -> str:
+    pairs = ", ".join(f"{q.origin}→{q.destination}" for q in leg.not_asked)
+    total = len(leg.asked) + len(leg.not_asked)
+    return (
+        f"Awards for {leg.label}: asked {len(leg.asked)} of {total} airport pairs "
+        f"(at most {cap} a search); not asked: {pairs}"
+    )
+
+
 def run_pp_for_search(
     res: SearchResult,
     *,
@@ -293,6 +370,12 @@ def run_pp_for_search(
     """Run award augmentation through the provider registry, join against
     `res`'s cash itineraries, render. Registry hands back any configured
     providers (PointsPath, Seats.aero, ...); the matcher is provider-blind.
+
+    `legs` holds one query per airport pair, a leg's queries consecutive and
+    sharing its slice_index. At most `MAX_AWARD_PAIR_QUERIES` are asked
+    (`_plan_pair_queries`); a leg the cap cut is named on stderr, in table
+    and JSON runs alike, and its JSON entry lists the pairs not asked. A
+    leg's answers are joined, rendered and serialized as one entry.
 
     Errors are non-fatal — print and continue so the user still sees their
     cash results.
@@ -333,12 +416,36 @@ def run_pp_for_search(
     cabin_list = tuple(_normalize_cabin(c) for c in _parse_csv(cabins, DEFAULT_CABINS))
     explicit_airlines = _parse_csv(airlines, ()) if airlines else None
 
+    plan = _plan_pair_queries(res, legs)
+    cap = _pair_query_cap(len(plan))
+    for leg in plan:
+        if leg.not_asked:
+            err.print(
+                _not_asked_line(leg, cap),
+                style="yellow",
+                markup=False,
+                highlight=False,
+                soft_wrap=True,
+            )
+    queries = [q for leg in plan for q in leg.asked]
+
     # If `res` carries gflight-captured opaque flight IDs on its slices, build
-    # PP cash hints per leg so the request goes out with enable_matching=True
+    # PP cash hints per query so the request goes out with enable_matching=True
     # and the matcher's matched-id key becomes available. Matrix-built
-    # SearchResults won't have flight_id populated; hints stays empty.
-    cash_hints_per_leg: list[tuple[CashFlightHint, ...]] = [
-        tuple(cash_hints_from_search_result(res, slice_index=leg.slice_index)) for leg in legs
+    # SearchResults won't have flight_id populated; hints stays empty. A query
+    # carries only the hints of rows on its own pair, so a provider is never
+    # handed an id it could echo onto an award from another airport.
+    slice_hints = {
+        leg.slice_index: cash_hints_from_search_result(res, slice_index=leg.slice_index)
+        for leg in plan
+    }
+    cash_hints_per_query: list[tuple[CashFlightHint, ...]] = [
+        tuple(
+            h
+            for h in slice_hints[q.slice_index]
+            if (h.origin, h.dest) == (q.origin.upper(), q.destination.upper())
+        )
+        for q in queries
     ]
 
     async def _go() -> list[list[AwardFlight]]:
@@ -348,44 +455,51 @@ def run_pp_for_search(
         # anyio.run() — after this loop has closed — makes their teardown fire
         # `loop.call_soon` on a dead loop ("RuntimeError: Event loop is
         # closed", a full traceback + exit 1 on every otherwise-successful
-        # run). `per_leg` is plain data, safe to return after close (work-dgmkv).
-        per_leg, providers = await gather_awards(
-            legs=legs,
+        # run). `per_query` is plain data, safe to return after close.
+        per_query, providers = await gather_awards(
+            legs=queries,
             num_passengers=num_passengers,
             cabins=cabin_list,
             pp_airlines=explicit_airlines,
             seats_sources=seats_sources,
-            cash_hints_per_leg=cash_hints_per_leg,
+            cash_hints_per_leg=cash_hints_per_query,
             provider_filter=provider_filter,
         )
         try:
-            return per_leg
+            return per_query
         finally:
             await _aclose_all(providers)
 
     try:
-        per_leg = anyio.run(_go)
+        per_query = anyio.run(_go)
     except Exception as e:  # noqa: BLE001 — surface anything to user, don't crash CLI
         err.print(f"[red]--pp: award query failed: {e}[/]")
         return
 
+    per_leg: list[list[AwardFlight]] = []
+    start = 0
+    for leg in plan:
+        end = start + len(leg.asked)
+        per_leg.append([af for awards in per_query[start:end] for af in awards])
+        start = end
+
     if pp_only:
         if json_out:
-            sys.stdout.write(_serialize_pp_only_per_leg(per_leg, legs))
+            sys.stdout.write(_serialize_pp_only_per_leg(per_leg, plan))
             return
-        for leg, awards in zip(legs, per_leg, strict=True):
+        for leg, awards in zip(plan, per_leg, strict=True):
             console.print(f"\n[bold]Leg: {leg.label}[/]")
             _render_pp_only(awards)
         return
 
     matches_per_leg: list[list[MatchedFare]] = [
         join(res, awards, slice_index=leg.slice_index)
-        for leg, awards in zip(legs, per_leg, strict=True)
+        for leg, awards in zip(plan, per_leg, strict=True)
     ]
     if json_out:
-        sys.stdout.write(_serialize_matches_per_leg(matches_per_leg, legs, bags_included))
+        sys.stdout.write(_serialize_matches_per_leg(matches_per_leg, plan, bags_included))
         return
-    for leg, matches in zip(legs, matches_per_leg, strict=True):
+    for leg, matches in zip(plan, matches_per_leg, strict=True):
         console.print(f"\n[bold]Leg: {leg.label}[/]")
         _render_matches(
             matches,
@@ -811,18 +925,29 @@ def _serialize_matches(
     return json.dumps(out, indent=2)
 
 
+def _leg_entry(leg: _AwardLeg, key: str, value: object) -> dict[str, Any]:
+    """One leg of the award document. `pairs_not_asked` appears only on a
+    leg the cap cut, so an uncut leg keeps exactly its three keys."""
+    entry: dict[str, Any] = {"leg": leg.label, "slice_index": leg.slice_index, key: value}
+    if leg.not_asked:
+        entry["pairs_not_asked"] = [
+            {"origin": q.origin, "destination": q.destination} for q in leg.not_asked
+        ]
+    return entry
+
+
 def _serialize_matches_per_leg(
     matches_per_leg: list[list[MatchedFare]],
-    legs: list[LegQuery],
+    legs: list[_AwardLeg],
     bags_included: Mapping[int, Sequence[tuple[int | None, int | None]]] | None = None,
 ) -> str:
     return json.dumps(
         [
-            {
-                "leg": leg.label,
-                "slice_index": leg.slice_index,
-                "matches": json.loads(_serialize_matches(matches, leg.slice_index, bags_included)),
-            }
+            _leg_entry(
+                leg,
+                "matches",
+                json.loads(_serialize_matches(matches, leg.slice_index, bags_included)),
+            )
             for leg, matches in zip(legs, matches_per_leg, strict=True)
         ],
         indent=2,
@@ -831,15 +956,11 @@ def _serialize_matches_per_leg(
 
 def _serialize_pp_only_per_leg(
     per_leg: list[list[AwardFlight]],
-    legs: list[LegQuery],
+    legs: list[_AwardLeg],
 ) -> str:
     return json.dumps(
         [
-            {
-                "leg": leg.label,
-                "slice_index": leg.slice_index,
-                "awards": [_serialize_award(af) for af in awards],
-            }
+            _leg_entry(leg, "awards", [_serialize_award(af) for af in awards])
             for leg, awards in zip(legs, per_leg, strict=True)
         ],
         indent=2,
