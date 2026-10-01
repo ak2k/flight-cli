@@ -939,7 +939,11 @@ Google row whose price the row shows, and `same_trip` holds only where
 over shares the flights and the first day, not the trip (the FI614/FI450 rows
 above land on different days), so it shows no delta and the reason
 `trip_unconfirmed` names both landings; a pair in two currencies is
-`other_currency`. The merge's pairing and ranking are unchanged: a matched row
+`other_currency`. Google prices the whole party, while the price Matrix lists
+is one passenger's, rounded up (2 adults, 2026-10-01: `ext.price` USD229.00,
+`displayTotal` USD456.80, Google USD457), so for more than one passenger the
+Matrix column, the delta, the caption and the document read Matrix's
+`displayTotal`; where Matrix states none the row is `unpriced`. The merge's pairing and ranking are unchanged: a matched row
 still ranks on Matrix's price, so with the deeper page a Google fare that
 Matrix prices higher can rank below where it ranked on a page of `-n`.
 

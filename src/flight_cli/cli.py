@@ -4082,7 +4082,8 @@ def _render_merged(
             # `rows` is duck-typed, and the lookup falls back to the tag it was
             # handed when it is not one of the three this module writes.
             _safe_text(_MERGE_SOURCE_TAG.get(row.source, row.source)),
-            _amount(row.matrix_price, ccy),
+            # Explained, the column is Matrix's price for the party, as Google's is.
+            _amount(c.matrix_price if c is not None else row.matrix_price, ccy),
             _amount(row.gf_price, ccy),
             f"{delta:+,.2f}" if delta is not None else "—",
             # Carrier codes and prices in it are remote text.
@@ -4707,6 +4708,7 @@ def _cross_check_answers(
         stop_limit=stops is not None and stops >= 0,
         round_trip=len(legs) >= _ROUND_TRIP_LEGS,
         currency=currency,
+        passengers=opts.pax.total,
     )
 
 

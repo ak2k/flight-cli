@@ -401,14 +401,18 @@ def _weave(
     *,
     google_fails: bool = False,
     matrix_fails: bool = False,
+    matrix: Callable[[SearchResult], SearchResult] | None = None,
 ) -> list[dict[str, Any]]:
     """Google answers with the tracked JFK-LAX board and Matrix, in price
     order, with ZZ1, two of Google's own trips at USD199 and one landing a
-    minute off; every Matrix body a run sends is recorded."""
+    minute off, or with `matrix` of the board; every Matrix body a run sends
+    is recorded."""
     rows = gf_rows(_BOARD)
-    answer = _answer(
-        _its(_slice(["ZZ1"]), price="USD150.00"),
-        *_matrix_answer(fli_results_to_search_result(rows)).solutions,
+    board = fli_results_to_search_result(rows)
+    answer = (
+        matrix(board)
+        if matrix is not None
+        else _answer(_its(_slice(["ZZ1"]), price="USD150.00"), *_matrix_answer(board).solutions)
     )
     bodies: list[dict[str, Any]] = []
 
@@ -486,6 +490,51 @@ def test_the_merged_table_shows_each_delta_or_why_and_where_matrixs_page_ends(
     assert under.startswith(
         "Matrix listed 4 of 4 solutions (to USD199.00); Google listed 95 rows. "
         "delta = Google - Matrix."
+    )
+
+
+def _party_of_two(board: SearchResult) -> SearchResult:
+    """DL1788, Google's own trip, as Matrix prices it for two: USD103 a
+    passenger, its listed price rounded up, and USD203.60 for the party."""
+    m = _as_matrix(board.solutions[0], "USD103.00")
+    return _answer(m.model_copy(update={"display_total": "USD203.60"}))
+
+
+def test_a_party_is_compared_on_matrixs_total(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    """Google prices the whole party (USD204 for two) and Matrix lists one
+    passenger's price, so the Matrix column, the delta, the caption and the
+    document all read Matrix's total for the party."""
+    _weave(monkeypatch, gf_rows, matrix=_party_of_two)
+    result = _run([*_SEARCH, *_LINKLESS, "--adults", "2", "-n", "3"])
+    assert result.exit_code == 0, result.output
+    _, rows, under = _merged_table(result.stdout)
+    assert (rows[0][1], rows[0][2], rows[0][3], rows[0][4]) == (
+        "GF+MX",
+        "203.60",
+        "204.00",
+        "+0.40",
+    )
+    assert under.startswith("Matrix listed 1 of 1 solutions (to USD203.60);")
+    doc = _document(_run([*_SEARCH, "--adults", "2", "-n", "3", "--enrich", "--format", "json"]))
+    first = doc["cross_check"]["rows"][0]
+    assert (first["matrix_price"], first["google_price"]) == ("USD203.60", "USD204.00")
+    assert round(first["delta"], 2) == 0.40
+    assert doc["cross_check"]["matrix"]["last_price"] == "USD203.60"
+
+
+def test_a_party_matrix_states_no_total_for_shows_no_delta() -> None:
+    """Matrix's price per passenger is not the party's price."""
+    board = _board()
+    matrix = _answer(_as_matrix(board.solutions[0], "USD103.00"))
+    rows = [r for r in merge_results(board, matrix, currency="USD") if r.source == "both"]
+    c = cross_check(rows, Answers(matrix, board, False, False, False, "USD", passengers=2)).rows[0]
+    assert (rows[0].same_trip, c.delta, c.reasons, c.matrix_price) == (
+        True,
+        None,
+        ("unpriced",),
+        None,
     )
 
 

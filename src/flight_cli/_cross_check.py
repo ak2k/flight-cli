@@ -56,7 +56,8 @@ class Answers:
     `google_filtered` says the row filter removed rows from that board, which
     then cannot show a flight to be absent from Google. `stop_limit` says a
     stop limit was sent; without one Matrix searches one flight beyond the
-    fewest a slice needs."""
+    fewest a slice needs. `passengers` is the party: Google prices all of it,
+    while the price Matrix lists is one passenger's, rounded up."""
 
     matrix: SearchResult
     google: SearchResult | None
@@ -64,6 +65,7 @@ class Answers:
     stop_limit: bool
     round_trip: bool
     currency: str
+    passengers: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,11 +88,13 @@ class RowCheck:
     """One row: Google's price minus Matrix's, or the reasons there is none.
 
     `reasons` are codes and `reason` their text, joined; both are empty where
-    there is a delta."""
+    there is a delta. `matrix_price` is Matrix's price for the party, the one
+    `delta` subtracts, or None where Matrix states none."""
 
     delta: float | None
     reasons: tuple[str, ...]
     reason: str | None
+    matrix_price: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,7 +122,7 @@ def cross_check(rows: Sequence[Any], answers: Answers) -> CrossCheck:
 def document(rows: Sequence[Any], xc: CrossCheck) -> dict[str, Any]:
     """`xc` as JSON: the boundary, then one entry per row of `rows`, which are
     the rows `xc` explains, in its order. Prices are each side's own strings
-    and `delta` a number."""
+    for the party and `delta` a number."""
     b = xc.boundary
     return {
         "currency": xc.currency,
@@ -138,7 +142,7 @@ def _row_document(row: Any, c: RowCheck) -> dict[str, Any]:
     return {
         "source": _SOURCE.get(row.source, row.source),
         "google_price": row.gf_price,
-        "matrix_price": row.matrix_price,
+        "matrix_price": c.matrix_price,
         "delta": c.delta,
         "reasons": list(c.reasons),
         "reason": c.reason,
@@ -159,7 +163,7 @@ def _boundary(a: Answers) -> Boundary:
     return Boundary(
         listed=len(sols),
         solution_count=a.matrix.solution_count,
-        last_price=sols[-1].price if sols else None,
+        last_price=_party_price(sols[-1].price, sols[-1], a.passengers) if sols else None,
         google_listed=len(a.google.solutions) if a.google is not None else 0,
         google_answered=a.google is not None,
     )
@@ -218,30 +222,33 @@ class _Facts:
 
 def _check_row(row: Any, a: Answers, bnd: Boundary, facts: _Facts) -> RowCheck:
     slices = _slices(row.itinerary)
+    mp = _party_price(row.matrix_price, row.itinerary, a.passengers)
     found: list[tuple[str, str]]
     match row.source:
         case "both":
-            return _priced_by_both(row, slices, a.round_trip)
+            return _priced_by_both(row, mp, slices, a.round_trip)
         case "gf":
             found = _google_only(slices, a, bnd, facts)
         case "matrix":
             found = _matrix_only(slices, a, bnd, facts)
         case _:
-            return RowCheck(delta=None, reasons=(), reason=None)
+            return RowCheck(delta=None, reasons=(), reason=None, matrix_price=mp)
     return RowCheck(
         delta=None,
         reasons=tuple(code for code, _ in found),
         reason="; ".join(text for _, text in found),
+        matrix_price=mp,
     )
 
 
-def _priced_by_both(row: Any, slices: list[Slice], round_trip: bool) -> RowCheck:
-    """A delta only for the same trip in one currency."""
+def _priced_by_both(row: Any, mp: str | None, slices: list[Slice], round_trip: bool) -> RowCheck:
+    """A delta only for the same trip in one currency, from Matrix's price
+    for the party `mp`."""
     found: list[tuple[str, str]] = []
     google: Itinerary | None = getattr(row, "google", None)
     if not getattr(row, "same_trip", False):
         found.append(("trip_unconfirmed", _landings(slices, _slices(google), round_trip)))
-    gp, mp = row.gf_price, row.matrix_price
+    gp = row.gf_price
     g, m = _money(gp), _money(mp)
     if not gp or not mp:
         found.append(("unpriced", f"no {'Google' if not gp else 'Matrix'} price to compare"))
@@ -250,12 +257,21 @@ def _priced_by_both(row: Any, slices: list[Slice], round_trip: bool) -> RowCheck
             ("other_currency", f"Matrix in {_currency_name(mp)}, Google in {_currency_name(gp)}")
         )
     elif not found:
-        return RowCheck(delta=float(g[1] - m[1]), reasons=(), reason=None)
+        return RowCheck(delta=float(g[1] - m[1]), reasons=(), reason=None, matrix_price=mp)
     return RowCheck(
         delta=None,
         reasons=tuple(code for code, _ in found),
         reason="; ".join(text for _, text in found),
+        matrix_price=mp,
     )
+
+
+def _party_price(listed: str | None, it: Itinerary | None, passengers: int) -> str | None:
+    """Matrix's price for the party: `listed`, its price for one passenger,
+    or for more than one the total it states for `it`."""
+    if listed is None or passengers <= 1:
+        return listed
+    return it.display_total if it is not None else None
 
 
 def _google_only(
