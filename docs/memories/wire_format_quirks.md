@@ -249,8 +249,9 @@ Google cabin fails.
 ### `booking_options`: one object per seller
 
 `booking_options` lists the sellers cheapest first, each as `seller`, `price`,
-`currency`, `fare`, `airline`, `booking_url` and `bags`, every value read from
-that seller's own entry in Google's `GetBookingResults` answer.
+`currency`, `fare`, `airline`, `booking_url` and `bags`. `currency` is the one
+the booking page was asked in; every other value is read from that seller's own
+entry in Google's `GetBookingResults` answer.
 
 - `booking_url` comes from `option[5]` = `[display domain, null, [base URL,
   [[name, value], ...]]]`. In 153 entries over 9 captures (2026-09-27 and

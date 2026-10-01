@@ -6380,9 +6380,8 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         help="After the Google Flights table, open itinerary #N's booking page "
         "(--pick; default 1) in Chrome and list every seller with its price, fare name, "
         "bag fees and booking link, cheapest first. Needs a Google Flights result and the "
-        "browser extra; "
-        "refused on multi-cabin and --awards-only searches. With --format json the "
-        'document becomes {"search": …, "booking_options": […]}.',
+        "browser extra; refused on multi-cabin and --awards-only searches. With --format "
+        'json the document becomes {"search": …, "booking_options": […]}.',
         rich_help_panel=_GROUP_OUTPUT,
     ),
     currency: Annotated[
