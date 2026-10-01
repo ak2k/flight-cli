@@ -22,7 +22,14 @@ from flight_cli._cross_check import Answers, CrossCheck, RowCheck, cross_check, 
 from flight_cli._enrich import MergedRow, merge_results
 from flight_cli._gf_errors import GfThrottledError
 from flight_cli.client import MatrixApiError
-from flight_cli.models import Itinerary, ItineraryDetails, ItineraryExt, SearchResult, Slice
+from flight_cli.models import (
+    Itinerary,
+    ItineraryDetails,
+    ItineraryExt,
+    SearchResult,
+    Slice,
+    SliceCarrier,
+)
 from flight_cli.pp.gflight_adapter import fli_results_to_search_result
 from flight_cli.wire import to_wire
 
@@ -172,6 +179,17 @@ def test_a_google_row_on_a_carrier_a_complete_answer_lacks_says_so() -> None:
     _, c = rows["AS21+AS487"]
     assert c.reasons == ("carrier_absent",)
     assert c.reason == "no AS flight in Matrix's answer of 3"
+
+
+def test_a_carrier_matrix_names_on_an_itinerary_is_not_absent() -> None:
+    board = _board()
+    matrix = _matrix_answer(board)
+    first = matrix.solutions[0]
+    assert first.itinerary is not None
+    named = first.itinerary.model_copy(update={"carriers": [SliceCarrier(code="AS")]})
+    matrix.solutions[0] = first.model_copy(update={"itinerary": named})
+    _, rows = _checked(board, matrix)
+    assert rows["AS21+AS487"][1].reasons == ("not_in_matrix",)
 
 
 def test_an_incomplete_answer_shows_no_carrier_absent_and_says_where_its_page_ends() -> None:

@@ -195,8 +195,17 @@ class _Facts:
             for c in (*leg.marketing_carriers, leg.operating_carrier)
             if c
         ]
+        # The carriers Matrix names per itinerary count as listed too, so an
+        # absence is never claimed for one its answer does name.
+        listed = [
+            c.code.upper()
+            for it in a.matrix.solutions
+            if it.itinerary is not None
+            for c in it.itinerary.carriers
+            if c.code
+        ]
         return cls(
-            matrix_carriers=frozenset(_carriers(_slices_of(a.matrix.solutions))),
+            matrix_carriers=frozenset([*_carriers(_slices_of(a.matrix.solutions)), *listed]),
             matrix_fewest=fewest,
             matrix_trips=_trips(a.matrix.solutions),
             google_carriers=frozenset([*_carriers(board), *named]),
