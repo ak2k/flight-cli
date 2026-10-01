@@ -3,8 +3,8 @@
 How `--routing`/`--extension` reach Google Flights, and the carrier-identity
 indices that make it correct. Read before touching `routing_predicates.py`,
 `_gf_postfilter.py`, `fli_bridge.apply_gf_native_filters`,
-`links.build_search_tfs`, or `_gflight_ids._parse_leg_amenities` /
-`_flight_leg`.
+`links.build_search_tfs`, `fli_bridge.fli_airport`, or
+`_gflight_ids._parse_leg_amenities` / `_flight_leg`.
 
 ## Booking carrier: `fl[15]` (marketing) vs `fl[22]` (operating)
 
@@ -96,6 +96,25 @@ ANY — writing a literal 0 pins every search to nonstop. **Carrier codes come
 from the enum NAME, not its value**: fli maps codes to display names
 (`Airline._0B.value == "Blue Air"`) and underscore-prefixes digit-leading ones,
 so `airline.name.removeprefix("_")` is the code.
+
+**Airport codes come from the member's name as well, and fli's enum aliases 48
+of them to another airport.** `Airport` is an enum over a code -> display-name
+table, so a code whose display name repeats an earlier one is an alias of that
+member: `Airport.OKA` is `Airport.NAH` (Naha in Indonesia, not Okinawa), as NTL
+is NCL, TRI is PSC, SVC is PGC and ZFA is FAO. A lookup through the enum asks
+Google for the other airport, and fli's row decoder has no entry for an alias,
+so every row Google serves at one fails. Build airport members only through
+`fli_bridge.fli_airport`, which gives each aliased code a member of its own,
+named that code with the same display name (so the JSON dump shows "Naha
+Airport" for OKA and NAH alike). `tests/test_airport_alias_requests.py` fails
+on any `getattr`/`hasattr` call on the enum or `Airport[...]` subscript under
+`src/`. MLH is the one alias kept: it is EuroAirport's second code, the same
+airport as BSL, and Google serves it only as BSL (JFK-MLH asked for MLH gave an
+empty board, asked for BSL 8 rows). Measured 2026-10-01: `flight search LAX OKA
+--dep 2026-10-20 --backend gflight --fast --format json` through the enum
+printed `[]` with exit 0; through `fli_airport` it printed 27 rows (CI, BR, CX
+via TPE or HKG, from USD577), each landing at OKA by its clock span: departure
+to arrival less elapsed time is +960 minutes from LAX, where NAH gives +900.
 
 **What the page costs us.** Without `tfu=` it serves Google's top ~30 rows per
 leg. `links.google_flights_search_page_url` always sends `tfu=EgQIABABIgA`
@@ -1090,7 +1109,24 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
   The JSON names the user's tokens (`"NYC"`, `"JFK,EWR"`), as the table title
   does. Over `--gf-transport http` a set refuses with the browser note, since
   `date_grid` writes one airport per side; without `--fast` Matrix answers it
-  through its fan-out and the graph over the whole set prints after it.
+  through its fan-out and the graph over the whole set prints after it. That
+  fan-out splits a metro code into its member airports, asks one query per
+  airport pair, and merges the grids in one currency (USD with more than one
+  origin, unless `--currency`); each merged day and trip length names the pair
+  that priced it (`origin`, `destination` in the JSON; in the table a `route`
+  column for the day's minimum, and the pair beside any trip length another
+  pair priced), the two arguments `flight detail` takes. A round trip also runs the
+  user's own combined query beside the pairs, the only source of a return into
+  another airport of the set: it takes a day only when strictly cheaper than
+  every pair, its cells name the user's tokens, and a stderr note says so.
+  Measured 2026-10-01 over 2026-10-20..11-02: `LHR,DUB JFK --one-way` merged
+  DUB's EUR cells with LHR's GBP cells as bare numbers and showed GBP1137 and
+  GBP952 on two days DUB was cheaper; asked in USD, all 14 days came back USD,
+  each cheaper from DUB. `NYC LON -d 7` as one combined query priced 11 of 14
+  days (20 solutions, cheapest USD817); as 18 pairs plus that query it priced
+  14 of 14, cheaper on 7 days (10-27 USD766 EWR→LGW), the combined query was
+  below every pair on none, the 7 pairs into STN, LTN or SEN priced nothing,
+  and the 19 queries took about 110 s.
 - **Admission** (`_gf_calgraph.graph_blocker`). The graph has no itineraries,
   so it is asked only when the page URL writes every constraint exactly AND
   Google was measured applying it there. Admitted, per leg: a stop ceiling of

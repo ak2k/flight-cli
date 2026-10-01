@@ -32,7 +32,15 @@ from rich.markup import escape
 from rich.table import Table
 
 from . import _config
-from ._calendar_split import is_empty_calendar, merge_calendar_results, split_calendar_search
+from ._calendar_split import (
+    Pair,
+    calendar_pair,
+    is_empty_calendar,
+    merge_calendar_results,
+    price_currencies,
+    split_calendar_search,
+    with_fanout_currency,
+)
 
 # The `--gf-transport` vocabulary, from the leaf that costs nothing to import.
 # `_gflight_ids` owns the ladder but costs fli (~95 ms), and EVERY search
@@ -534,6 +542,44 @@ def _refuse_cap_and_bag_conflicts(
         raise typer.Exit(2)
 
 
+def _return_codes(
+    *,
+    routing: str | None,
+    extension: str | None,
+    routing_return: str | None,
+    extension_return: str | None,
+) -> tuple[str | None, str | None]:
+    """A round trip's return (routing, extension): `--routing-ret`/`--ext-ret`
+    when given, `''` meaning none, else the outbound's.
+
+    No extension code is positional, so `--ext` is copied as it is. A routing is
+    copied only when it reads the same both ways: a slice's routing reads from
+    its own origin, so the outbound's `UA LH` on the return asks for UA then LH
+    from the far end. Such a routing without `--routing-ret` is refused before
+    the backend is announced, as `_refuse_cap_and_bag_conflicts` refuses."""
+    from .routing_predicates import direction_dependence, mirrored_routing  # noqa: PLC0415
+
+    if routing_return is None and routing and (why := direction_dependence(routing)):
+        mirror = mirrored_routing(routing)
+        err.print(
+            f"[red]--routing {_quote(routing)} {_safe_text(why)}.[/] Give the return its "
+            "own: "
+            + (
+                f"--routing-ret {_quote(mirror)} to fly it in reverse"
+                if mirror is not None
+                else "--routing-ret with the return's routing in its own order"
+                if "[" in routing or "]" in routing
+                else "--routing-ret with the return flight's number"
+            )
+            + ", or --routing-ret '' for no routing on the return."
+        )
+        raise typer.Exit(2)
+    return (
+        routing if routing_return is None else routing_return or None,
+        extension if extension_return is None else extension_return or None,
+    )
+
+
 def _build_options(
     *,
     cabin: str,
@@ -601,20 +647,18 @@ def _gf_unserveable_reasons(backend: str, origin: str | None, destination: str |
     (`_metro.expand_airports`), so on search a code reported here is neither an
     airport nor a metro code in that table.
 
-    Checked with the same attribute lookup the bridge performs, so this cannot
-    drift from what the bridge will accept, and only where Google Flights is
-    still in the running: a Matrix run pays neither the import nor the check."""
+    Checked against `fli_bridge.fli_airports`, the table the bridge builds every
+    request from, so this cannot drift from what the bridge will accept, and only
+    where Google Flights is still in the running: a Matrix run pays neither the
+    import nor the check."""
     if backend == BACKEND_MATRIX:
         return []
     # PLC0415: paid only when Google Flights would otherwise serve the request;
     # fli's package import is slow enough that a Matrix run should not carry it.
-    # reportMissingTypeStubs: fli ships none, as at every other seam onto it.
-    from fli.models.airport import (  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
-        Airport as FliAirport,
-    )
+    from .fli_bridge import fli_airports  # noqa: PLC0415
 
     toks = (*_parse_iata_list(origin or ""), *_parse_iata_list(destination or ""))
-    bad = [t for t in toks if not hasattr(FliAirport, t) or t in _GF_METRO_COLLISIONS]
+    bad = [t for t in toks if t not in fli_airports() or t in _GF_METRO_COLLISIONS]
     return [f"a city code rather than an airport ({', '.join(bad)})"] if bad else []
 
 
@@ -677,6 +721,7 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
     fare_rules: bool = False,
     adults: int = 1,
     bags: Bags | None = None,
+    return_codes: tuple[str | None, str | None] | None = None,
 ) -> str:
     """Resolve --backend to a concrete backend.
 
@@ -705,6 +750,10 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
     take (`gf_leg_refusal`: more than `MAX_GF_LEG_AIRPORTS` airports, or one
     airport at both ends) and a code that is neither an airport nor a metro code
     in the table.
+
+    The page writes one filter set onto every slice, so a round trip whose
+    return (`return_codes`) carries a different predicate set from the
+    outbound's is Matrix's.
 
     A constraint the page cannot carry has to be a reason here and nowhere
     else. Left out, `auto` serves it on Google with the constraint silently
@@ -770,6 +819,8 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
     predicates = classify(routing, extension).predicates
     reasons.extend(search_page_reasons(predicates, stops))
     reasons.extend(_gf_unmappable_reasons(backend, predicates))
+    if return_codes is not None and set(classify(*return_codes).predicates) != set(predicates):
+        reasons.append("different routing or extension codes on the outbound and the return")
 
     # The same reasons go out two ways, and only one of them is markup. A
     # reason quotes the user's --routing string verbatim, so one square bracket
@@ -1220,12 +1271,17 @@ def _print_matrix_error(e: MatrixApiError) -> None:
 # pressure — even when the result is non-empty (a 3-destination query returned 12
 # solutions where one destination alone returns 155). The only query guaranteed
 # to fully price is a single (origin, destination), so a multi-airport calendar is
-# always run as one sub-search per (origin, destination) pair, in parallel, and
-# merged — the only way to get complete results.
+# always run as one sub-search per airport pair, metro codes split into their
+# member airports, in parallel, and merged — the only way to get complete results.
+# A mirrored pair never prices a round trip back into another airport of the set,
+# so a round trip also runs the user's own combined query beside the pairs, which
+# takes a day only where it is cheaper than every pair. Every query asks one
+# currency when there is more than one origin, since the merge compares numbers.
 #
-# `split_calendar_search` returns the cartesian product of origins x destination
-# GROUPS, so the fan-out is |origins| x ceil(|destinations| / --max-per-query) —
-# which is |destinations| only at the default of one per query, with one origin.
+# `split_calendar_search` returns the cartesian product of the expanded origins x
+# destination GROUPS, less any pair with one airport at both ends, so the fan-out
+# is |origins| x ceil(|destinations| / --max-per-query), plus one on a round trip:
+# NYC-LON is 3 x 6 pairs and the combined query, 19 in all.
 # Matrix tolerates the concurrency (measured: ≥16 in flight, flat latency, no
 # throttling); we hold a touch under that and let larger lists batch into multiple
 # rounds. There is no hard cap — a large fan-out is the user's call; we warn
@@ -1241,7 +1297,8 @@ class _CalendarFanout(NamedTuple):
     "Matrix priced this window and found nothing" — true when the sub-queries
     answered, and the one thing the data cannot support when they did not."""
 
-    results: list[CalendarResult]
+    # Each pair's answer with the pair that asked it, in sub-query order.
+    results: list[tuple[Pair, CalendarResult]]
     # Every failure, in SUB-QUERY order rather than the order they raised:
     # sub-queries are indexed origins-outermost over the (origin, destination-group)
     # product and finish in whatever order the network gives them, so the same
@@ -1255,6 +1312,9 @@ class _CalendarFanout(NamedTuple):
     # for, so the cause alone leaves the reader to guess which destination is
     # missing from a grid whose whole point is comparing them.
     lost: list[str]
+    # The combined query's answer, when it ran beside a round trip's pairs and
+    # answered; its failure is in `failures` like any pair's.
+    floor: tuple[Pair, CalendarResult] | None = None
 
     @property
     def failed(self) -> int:
@@ -1262,15 +1322,43 @@ class _CalendarFanout(NamedTuple):
         return len(self.failures)
 
 
+class _CalendarCurrencyError(Exception):
+    """A sub-query Matrix answered in another currency than the rest of the grid.
+
+    The merge compares fares by number, so such an answer is left out rather
+    than merged, and it is reported as a lost group. The message names the route
+    itself: when every group is lost, the refusal prints the causes alone."""
+
+    def __init__(self, route: str, got: Sequence[str], want: str | None) -> None:
+        theirs = " and ".join(g or "no currency" for g in got)
+        super().__init__(
+            f"{route} came back priced in {theirs}, "
+            + (f"not the grid's {want}" if want else "and no answer was in one currency")
+        )
+
+
 async def _gather_calendar(
-    c: MatrixClient, subs: list[CalendarSearch], *, cache: bool
+    c: MatrixClient,
+    subs: list[CalendarSearch],
+    *,
+    cache: bool,
+    floor: CalendarSearch | None = None,
+    currency: str | None = None,
 ) -> _CalendarFanout:
-    """Run the sub-searches concurrently on one client (its rate-limiter +
-    semaphore bound the in-flight count). Each covers one (origin, destination
-    group); a sub-query that fails just drops its own group from the merge rather
-    than sinking the whole run, and is counted so the caller can say so."""
-    results: list[CalendarResult | None] = [None] * len(subs)
-    errors: list[Exception | None] = [None] * len(subs)
+    """Run the sub-searches, and `floor` after them, concurrently on one client
+    (its rate-limiter + semaphore bound the in-flight count). Each covers one
+    (origin, destination group); a sub-query that fails just drops its own group
+    from the merge rather than sinking the whole run, and is counted so the
+    caller can say so.
+
+    An answer in another currency than the grid's drops the same way. The grid's
+    currency is `currency`, the one every query asked, else that of the first
+    answer, in sub-query order, priced in one currency throughout, so the same
+    answers keep the same groups on every run. An answer in two currencies, or
+    in none, drops without deciding it for the answers after it."""
+    queries = [*subs, floor] if floor is not None else subs
+    results: list[CalendarResult | None] = [None] * len(queries)
+    errors: list[Exception | None] = [None] * len(queries)
 
     async def one(i: int, s: CalendarSearch) -> None:
         try:
@@ -1283,13 +1371,27 @@ async def _gather_calendar(
             errors[i] = e
 
     async with anyio.create_task_group() as tg:
-        for i, s in enumerate(subs):
+        for i, s in enumerate(queries):
             tg.start_soon(one, i, s)
-    return _CalendarFanout(
-        [r for r in results if r is not None],
-        [e for e in errors if e is not None],
-        [_calendar_route_label(s) for s, e in zip(subs, errors, strict=True) if e is not None],
-    )
+    answered: list[tuple[Pair, CalendarResult]] = []
+    failures: list[Exception] = []
+    lost: list[str] = []
+    floor_answer: tuple[Pair, CalendarResult] | None = None
+    priced_in = [price_currencies(res) if res is not None else () for res in results]
+    want = currency or next((got[0] for got in priced_in if len(got) == 1 and got[0]), None)
+    for i, (s, res, error, got) in enumerate(zip(queries, results, errors, priced_in, strict=True)):
+        e = error
+        off = tuple(g for g in got if g != want)
+        if off:
+            e = _CalendarCurrencyError(_calendar_route_label(s), off, want)
+        if e is not None:
+            failures.append(e)
+            lost.append(_calendar_route_label(s))
+        elif res is not None and i == len(subs):
+            floor_answer = (calendar_pair(s), res)
+        elif res is not None:
+            answered.append((calendar_pair(s), res))
+    return _CalendarFanout(answered, failures, lost, floor_answer)
 
 
 def _exception_leaves(e: BaseException) -> list[BaseException]:
@@ -1471,6 +1573,8 @@ def _report_calendar_fanout(fan: _CalendarFanout, total: int, *, merged_empty: b
             )
             if cause.request_id:
                 err.print(f"[dim]  request_id: {_safe_text(cause.request_id)}[/]")
+        elif isinstance(cause, _CalendarCurrencyError):
+            err.print(f"[yellow]  {_failure_text(cause)}[/]")  # it names its route
         else:
             err.print(f"[yellow]  {_safe_text(route)}: {_failure_text(cause)}[/]")
 
@@ -1479,8 +1583,7 @@ def _calendar_route_label(s: CalendarSearch) -> str:
     """`JFK,EWR→LHR` for a sub-query, for failure messages."""
     if not s.legs:
         return "?"
-    leg = s.legs[0]
-    return f"{','.join(leg.origins)}→{','.join(leg.destinations)}"
+    return "→".join(calendar_pair(s))
 
 
 def _run_calendar(
@@ -1491,19 +1594,28 @@ def _run_calendar(
     no_cache: bool,
     max_per_query: int = 1,
     max_concurrency: int = _CALENDAR_FANOUT_CONCURRENCY,
-) -> tuple[CalendarResult, int]:
+) -> tuple[CalendarResult, int, bool]:
     """Execute a calendar search. A multi-airport query is fanned out into
     sub-searches of up to `max_per_query` destinations each, run in parallel
     (≤ `max_concurrency` at a time), and merged — Matrix under-reports a combined
     multi-airport grid, so the default of one destination per query is the only
-    size guaranteed complete.
+    size guaranteed complete. A round trip also runs `search` itself beside them,
+    for the returns into another airport of the set that no mirrored pair asks.
 
-    Returns `(result, n_queries)` where `n_queries > 1` means the fan-out path was
-    used (for a one-line note). A single-airport calendar runs as one query and
-    returns `n_queries == 0`.
+    Returns `(result, n_queries, floor_lost)` where `n_queries > 1` means the
+    fan-out path was used (for a one-line note), counting that combined query, and
+    `floor_lost` that it ran and its answer is not in the merge. A single-airport
+    calendar runs as one query and returns `n_queries == 0`.
     """
     subs = split_calendar_search(search, max_per_query)
-    n = len(subs)
+    floor: CalendarSearch | None = None
+    if subs:
+        # Split again from the pinned search, so every pair and the combined
+        # query ask the one currency the merge can compare fares in.
+        search = with_fanout_currency(search)
+        subs = split_calendar_search(search, max_per_query)
+        floor = search if len(search.legs) == _ROUND_TRIP_LEGS else None
+    n = len(subs) + (1 if floor is not None else 0)
     multi = bool(subs)  # split returns [] when one query already covers the request
     conc = min(n, max(1, max_concurrency)) if multi else 3
     if multi and max_per_query > 1:
@@ -1522,24 +1634,32 @@ def _run_calendar(
             f"--max-per-query to send fewer, larger requests.[/]"
         )
 
-    answer: tuple[CalendarResult, int] | None = None
+    answer: tuple[CalendarResult, int, bool] | None = None
 
-    async def go() -> tuple[CalendarResult, int]:
+    async def go() -> tuple[CalendarResult, int, bool]:
         nonlocal answer
         async with MatrixClient(
             rps=max(rps, float(conc)), impersonate=impersonate, concurrency=conc
         ) as c:
             if not multi:
-                answer = (cast("CalendarResult", await c.execute(search, cache=not no_cache)), 0)
+                result = cast("CalendarResult", await c.execute(search, cache=not no_cache))
+                answer = (result, 0, False)
             else:
-                fan = await _gather_calendar(c, subs, cache=not no_cache)
+                fan = await _gather_calendar(
+                    c,
+                    subs,
+                    cache=not no_cache,
+                    floor=floor,
+                    currency=search.options.currency,
+                )
                 # Merge BEFORE reporting: whether what survived says anything is
                 # what decides between a note and a refusal, and only the merge
                 # knows.
-                merged = merge_calendar_results(fan.results)
+                merged = merge_calendar_results(fan.results, fan.floor)
                 empty = is_empty_calendar(merged)
                 _report_calendar_fanout(fan, n, merged_empty=empty)
-                answer = (merged, 0) if empty else (merged, n)
+                floor_lost = floor is not None and fan.floor is None
+                answer = (merged, 0, False) if empty else (merged, n, floor_lost)
             # Recorded inside the `async with`, because the client's own teardown is
             # one of the things that can fail after Matrix has answered, and the
             # guard below has no other way to tell a query that never ran from one
@@ -1985,11 +2105,12 @@ def _run_matrix_calendar(
     neither `--fast` nor the http weave serves, and the half of the default one
     that Google's price graph is printed after.
 
-    Authoritative, and the only path for Tier-2/3 routing and for JSON. On a
-    multi-airport brownout `_run_calendar` splits into one sub-query per
-    (origin, destination group) and merges."""
+    Authoritative, and the only path for Tier-2/3 routing and for JSON. A
+    multi-airport calendar `_run_calendar` splits into one sub-query per
+    (origin, destination group), beside the combined query on a round trip, and
+    merges."""
     # CalendarSearch → CalendarResult by client._parse_response dispatch.
-    res, n_split = _run_calendar(
+    res, n_split, floor_lost = _run_calendar(
         search,
         rps=rps,
         impersonate=impersonate,
@@ -1997,18 +2118,38 @@ def _run_matrix_calendar(
         max_per_query=max_per_query,
         max_concurrency=max_concurrency,
     )
+    if n_split:
+        # On stderr, beside the coverage note the fan-out prints, in both formats:
+        # it is provenance about the answer rather than part of it, and it is
+        # written BEFORE the delivery below, so on stdout a failure there would
+        # leave it standing alone under exit 1 — a document, to a caller that reads
+        # the stream. On a round trip `n_split` counts the combined query
+        # `_run_calendar` runs beside the pairs; it alone prices a return into
+        # another airport of the set, and Matrix may under-report it, so the note
+        # says the grid answers that part less completely than the rest. When it
+        # failed, the grid holds none of those returns, and the note says that.
+        round_trip = len(search.legs) == _ROUND_TRIP_LEGS
+        pairs = n_split - 1 if round_trip else n_split
+        with_floor = round_trip and not floor_lost
+        err.print(
+            f"[dim]Queried {pairs:d} "
+            + ("origin/destination groups" if max_per_query > 1 else "airport pairs")
+            + (" separately plus the combined query," if with_floor else " separately")
+            + " and merged — Matrix under-reports the combined multi-airport calendar grid.[/]"
+        )
+        if with_floor:
+            err.print(
+                "[dim]Round trips that return to another airport of the set come only "
+                "from the combined query, which Matrix may under-report.[/]"
+            )
+        elif round_trip:
+            err.print(
+                "[dim]Round trips that return to another airport of the set are missing: "
+                "only the combined query prices them, and it failed.[/]"
+            )
     if json_out:
         sys.stdout.write(json.dumps(res.raw, indent=2))
         return
-    if n_split:
-        # On stderr, beside the coverage note the fan-out prints: it is provenance
-        # about the answer rather than part of it, and it is written BEFORE the
-        # delivery below, so on stdout a failure there would leave it standing alone
-        # under exit 1 — a document, to a caller that reads the stream.
-        err.print(
-            f"[dim]Queried {n_split} origin/destination groups separately and merged "
-            f"— Matrix under-reports the combined multi-airport calendar grid.[/]"
-        )
 
     def _write_answer() -> None:
         _render_calendar(
@@ -3072,18 +3213,35 @@ def _render_calendar(
         show_header=True,
         header_style="bold green",
     )
+    # Only a merged grid names the pair behind each day; Matrix's own grid has one
+    # query behind every cell, the one the title names.
+    routed = any(d.origin is not None for d in res.priced_days)
     t.add_column("departure", justify="right")
     t.add_column("min", justify="right")
+    if routed:
+        t.add_column("route")
     if round_trip:
         for dur in range(dmin, dmax + 1):
             t.add_column(f"{dur:d}n", justify="right")
     t.add_column("sols", justify="right")
     for d in sorted(res.priced_days, key=lambda x: x.price_value or 9e9):
         row = [f"{d.date:d}", _amount(d.min_price, ccy)]
+        if routed:
+            row.append(_safe_text(f"{d.origin}→{d.destination}") if d.origin else "—")
         if round_trip:
-            opts = {o.trip_length: o.min_price for o in d.options}
+            opts = {o.trip_length: o for o in d.options}
+            day_pair = (d.origin, d.destination)
             for dur in range(dmin, dmax + 1):
-                row.append(_amount(opts.get(dur), ccy))
+                o = opts.get(dur)
+                if o is None:
+                    row.append(_amount(None, ccy))
+                elif o.origin is not None and (o.origin, o.destination) != day_pair:
+                    # A length another pair priced names it, or the row reads as the route's.
+                    row.append(
+                        f"{_amount(o.min_price, ccy)} {_safe_text(f'{o.origin}→{o.destination}')}"
+                    )
+                else:
+                    row.append(_amount(o.min_price, ccy))
         row.append(f"{d.solution_count:d}")
         t.add_row(*row)
     console.print(t)
@@ -6140,6 +6298,13 @@ _GOOGLE_URL_HELP = (
     "No link line is printed under --format json."
 )
 
+_ROUTING_RET_HELP = (
+    "The return's routing, read from the return's own origin; '' for none. Unset, "
+    "a round trip copies --routing when it reads the same both ways ('AA+', "
+    "'F* X:LHR F*'), and refuses an ordered chain ('UA LH') or a flight number."
+)
+_EXT_RET_HELP = "The return's extension codes; '' for none. Unset, a round trip copies --ext."
+
 
 def _resolve_format(*, fmt: str, json_flag: bool) -> str:
     """Collapse --format + deprecated --json into a single format string.
@@ -6239,7 +6404,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         str | None,
         typer.Option(
             "--routing",
-            help="Routing language ('LH+', 'BA AA', '[F* X F*]').",
+            help="Routing language ('LH+', 'BA AA', 'F* X:LHR F*').",
             rich_help_panel=_GROUP_FILTERING,
         ),
     ] = None,
@@ -6251,6 +6416,14 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             help="Extension codes ('MAXCONNECT 2:00', 'MAXSTOPS 1').",
             rich_help_panel=_GROUP_FILTERING,
         ),
+    ] = None,
+    routing_return: Annotated[
+        str | None,
+        typer.Option("--routing-ret", help=_ROUTING_RET_HELP, rich_help_panel=_GROUP_FILTERING),
+    ] = None,
+    extension_return: Annotated[
+        str | None,
+        typer.Option("--ext-ret", help=_EXT_RET_HELP, rich_help_panel=_GROUP_FILTERING),
     ] = None,
     depart_times: Annotated[
         str | None,
@@ -6504,6 +6677,26 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         bags=bags,
         seated=adults + children,
     )
+    if (routing_return is not None or extension_return is not None) and (slice_specs or not ret):
+        err.print(
+            "[red]--routing-ret and --ext-ret set the return's codes, and need a --return.[/] "
+            + (
+                "A --slice takes its own in its r= and e= fields."
+                if slice_specs
+                else "Drop them, or add --return."
+            )
+        )
+        raise typer.Exit(2)
+    return_codes = (
+        _return_codes(
+            routing=routing,
+            extension=extension,
+            routing_return=routing_return,
+            extension_return=extension_return,
+        )
+        if ret and not slice_specs and origin and destination and dep
+        else None
+    )
     resolved = _pick_backend(
         backend=backend,
         routing=routing,
@@ -6524,6 +6717,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         fare_rules=fare_rules,
         adults=adults,
         bags=bags,
+        return_codes=return_codes,
     )
     if slice_specs:
         legs = tuple(_parse_slice_spec(s) for s in slice_specs)
@@ -6541,14 +6735,14 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                 time_ranges=out_times,
             ),
         )
-        if ret:
+        if ret and return_codes is not None:
             legs += (
                 Leg.of(
                     destinations,
                     origins,
                     _parse_date(ret),
-                    route_language=routing,
-                    extension=extension,
+                    route_language=return_codes[0],
+                    extension=return_codes[1],
                     time_ranges=ret_times,
                 ),
             )
@@ -6987,10 +7181,10 @@ def calendar(
         None, "--extension", "--ext", rich_help_panel=_GROUP_FILTERING
     ),
     routing_return: str | None = typer.Option(
-        None, "--routing-ret", rich_help_panel=_GROUP_FILTERING
+        None, "--routing-ret", help=_ROUTING_RET_HELP, rich_help_panel=_GROUP_FILTERING
     ),
     extension_return: str | None = typer.Option(
-        None, "--ext-ret", rich_help_panel=_GROUP_FILTERING
+        None, "--ext-ret", help=_EXT_RET_HELP, rich_help_panel=_GROUP_FILTERING
     ),
     depart_times: str | None = typer.Option(
         None, "--depart-times", rich_help_panel=_GROUP_FILTERING
@@ -7082,9 +7276,12 @@ def calendar(
         1,
         "--max-per-query",
         help=(
-            "Multi-airport calendar: max destinations per Matrix request. 1 "
-            "(default) queries each destination separately for complete results; "
-            "higher is fewer/faster requests but Matrix may under-report (incomplete)."
+            "Multi-airport calendar: max destinations per Matrix request, metro codes "
+            "counted as their airports. 1 (default) queries each airport pair "
+            "separately, which Matrix prices completely; higher is fewer/faster "
+            "requests but Matrix may under-report (incomplete). A round trip that "
+            "returns to another airport of the set is priced only by one combined "
+            "query run beside them, which Matrix may under-report."
         ),
         rich_help_panel=_GROUP_BACKEND,
     ),
@@ -7125,12 +7322,18 @@ def calendar(
     )
     legs = (out_leg,)
     if not one_way:
+        ret_routing, ret_extension = _return_codes(
+            routing=routing,
+            extension=extension,
+            routing_return=routing_return,
+            extension_return=extension_return,
+        )
         legs += (
             Leg.of(
                 dests,
                 origins,
-                route_language=routing_return or routing,
-                extension=extension_return or extension,
+                route_language=ret_routing,
+                extension=ret_extension,
                 time_ranges=ret_times,
             ),
         )
@@ -7370,17 +7573,41 @@ def detail(
         None, "--extension", "--ext", rich_help_panel=_GROUP_FILTERING
     ),
     routing_return: str | None = typer.Option(
-        None, "--routing-ret", rich_help_panel=_GROUP_FILTERING
+        None, "--routing-ret", help=_ROUTING_RET_HELP, rich_help_panel=_GROUP_FILTERING
     ),
     extension_return: str | None = typer.Option(
-        None, "--ext-ret", rich_help_panel=_GROUP_FILTERING
+        None, "--ext-ret", help=_EXT_RET_HELP, rich_help_panel=_GROUP_FILTERING
     ),
+    depart_times: Annotated[
+        str | None,
+        typer.Option(
+            "--depart-times",
+            help="Outbound times-of-day, as the calendar was asked (comma list: morning,midday).",
+            rich_help_panel=_GROUP_FILTERING,
+        ),
+    ] = None,
+    return_times: Annotated[
+        str | None,
+        typer.Option(
+            "--return-times",
+            help="Return times-of-day, as the calendar was asked.",
+            rich_help_panel=_GROUP_FILTERING,
+        ),
+    ] = None,
     stops: int | None = typer.Option(None, "--stops", rich_help_panel=_GROUP_ITINERARY),
     allow_airport_changes: bool = typer.Option(
         True,
         "--allow-airport-changes/--no-airport-changes",
         rich_help_panel=_GROUP_FILTERING,
     ),
+    only_available: Annotated[
+        bool,
+        typer.Option(
+            "--only-available/--include-unavailable",
+            help="Show only itineraries with seats available for sale, as the calendar was asked.",
+            rich_help_panel=_GROUP_FILTERING,
+        ),
+    ] = True,
     rps: float | None = _RPS_OPT,
     impersonate: str | None = _IMPERSONATE_OPT,
     fmt: str = _FORMAT_OPT,
@@ -7414,15 +7641,31 @@ def detail(
     ed = _parse_date(end) if end else sd + timedelta(days=30)
     dmin, dmax = _resolve_duration(duration, round_trip=ret_d is not None)
 
-    legs = (Leg.of(origins, dests, dep_d, route_language=routing, extension=extension),)
+    legs = (
+        Leg.of(
+            origins,
+            dests,
+            dep_d,
+            route_language=routing,
+            extension=extension,
+            time_ranges=_parse_times(depart_times),
+        ),
+    )
     if ret_d:
+        ret_routing, ret_extension = _return_codes(
+            routing=routing,
+            extension=extension,
+            routing_return=routing_return,
+            extension_return=extension_return,
+        )
         legs += (
             Leg.of(
                 dests,
                 origins,
                 ret_d,
-                route_language=routing_return or routing,
-                extension=extension_return or extension,
+                route_language=ret_routing,
+                extension=ret_extension,
+                time_ranges=_parse_times(return_times),
             ),
         )
 
@@ -7436,7 +7679,7 @@ def detail(
         infants_in_lap=0,
         stops=stops,
         allow_airport_changes=allow_airport_changes,
-        show_only_available=True,
+        show_only_available=only_available,
         currency=ccy,
     )
     window = CalendarWindow(start=sd, end=ed, duration_min=dmin, duration_max=dmax)
