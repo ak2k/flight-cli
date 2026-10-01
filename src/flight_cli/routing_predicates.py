@@ -319,11 +319,9 @@ def parse_routing(routing: str) -> list[Predicate]:
 
 # ─────────────────────────── direction ─────────────────────────────────
 
-# A token's prefix (`~`, `X:`, `O:`, `~l:`) and its trailing quantifier apply to
-# the whole comma group (`~AA,UA,DL+`), so both come off before the alternatives
-# are split.
-_RE_TOKEN_PREFIX = re.compile(r"^~?(?:[A-Z]+:)?")
-# A prefix one comma alternative carries for itself (`F:AA1-3000,F:UA882`).
+# A token's leading `~` and trailing quantifier apply to its whole comma group
+# (`~AA,UA,DL+`), and so does the first alternative's prefix (`X:`, `O:`, `l:`)
+# to each alternative that carries none of its own (`O:AA,UA` is `O:AA,O:UA`).
 _RE_CODE_PREFIX = re.compile(r"^[A-Z]+:")
 # A flight number: an airline designator (`_RE_AIRLINE`'s shape), digits, an
 # optional range and an optional quantifier. Wider than `_RE_FLIGHTNUM`, which
@@ -338,18 +336,24 @@ def _is_one_flight(alternative: str) -> bool:
     return m is not None and (m.group(2) is None or int(m.group(1)) == int(m.group(2)))
 
 
-def _direction_key(tok: str) -> tuple[str, frozenset[str], str]:
+def _direction_key(tok: str) -> tuple[bool, frozenset[str], str]:
     upper = tok.upper()
-    rest = _RE_TOKEN_PREFIX.sub("", upper, count=1)
-    group = rest.rstrip("+*?")
-    return upper[: len(upper) - len(rest)], frozenset(group.split(",")), rest[len(group) :]
+    group = upper.removeprefix("~")
+    body = group.rstrip("+*?")
+    alternatives = body.split(",")
+    lead = m.group() if (m := _RE_CODE_PREFIX.match(alternatives[0])) else ""
+    return (
+        group != upper,
+        frozenset(a if _RE_CODE_PREFIX.match(a) else lead + a for a in alternatives),
+        group[len(body) :],
+    )
 
 
 def _names_one_flight(tok: str) -> bool:
     """Whether `tok` asks for a flight by its number. An excluded one (`~UA882`)
     reads the same both ways: the return flies no flight of that number anyway."""
-    prefix, alternatives, _ = _direction_key(tok)
-    return not prefix.startswith("~") and any(
+    negated, alternatives, _ = _direction_key(tok)
+    return not negated and any(
         _is_one_flight(_RE_CODE_PREFIX.sub("", a, count=1)) for a in alternatives
     )
 
@@ -363,7 +367,8 @@ def direction_dependence(routing: str) -> str | None:
     make an expression depend on direction: a token naming a flight number,
     since a flight flies one way, and a token sequence that differs from its
     reversal. Tokens compare case-insensitively and a comma group as a set
-    under its prefix and quantifier, so `DFW,DEN DEN,DFW` is a palindrome. The
+    of prefixed alternatives under its `~` and quantifier, so `DFW,DEN DEN,DFW`
+    and `O:AA,O:UA O:UA,O:AA` are palindromes. The
     phrase completes "--routing X …"."""
     text = routing.strip()
     if text.startswith("[") and text.endswith("]"):

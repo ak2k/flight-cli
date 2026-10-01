@@ -221,8 +221,9 @@ Unset, `--routing-ret` copies `--routing` only when the expression reads the
 same both ways (`routing_predicates.direction_dependence`): no token names a
 flight number, in any comma alternative and behind any prefix of its own
 (`AA1-3000,F:UA882`), and the token sequence equals its reversal, tokens compared
-case-insensitively and a comma group as a set under its prefix and quantifier
-(`~AA,UA+` equals `~UA,AA+`), after one enclosing `[...]` comes off. `AA+`,
+case-insensitively and a comma group as a set of prefixed alternatives under
+its `~` and quantifier (`~AA,UA+` equals `~UA,AA+`, `O:AA,O:UA` equals
+`O:UA,O:AA`), after one enclosing `[...]` comes off. `AA+`,
 `~BA+`, `N`, `F* X:LHR F*` and `DFW,DEN DEN,DFW` are copied.
 An ordered chain (`UA LH`, `F+ X:LHR F*`) or a flight number (`DL747`) is
 refused on a round trip without `--routing-ret`: copied, the return would ask

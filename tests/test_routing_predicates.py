@@ -520,6 +520,22 @@ def test_a_flight_number_is_found_behind_its_own_prefix(routing: str, dependent:
     assert (direction_dependence(routing) is not None) is dependent
 
 
+@pytest.mark.parametrize(
+    ("routing", "dependent"),
+    [
+        ("O:AA,O:UA O:UA,O:AA", False),
+        ("c:aa,c:ua C:UA,C:AA", False),
+        ("O:AA,O:UA X O:UA,O:AA", False),
+        ("O:AA,C:UA O:UA,C:AA", True),
+        ("O:AA,O:UA C:UA,C:AA", True),
+    ],
+)
+def test_a_prefix_on_every_alternative_compares_with_its_alternative(
+    routing: str, dependent: bool
+) -> None:
+    assert (direction_dependence(routing) is not None) is dependent
+
+
 def test_the_reason_names_the_flight_or_the_order() -> None:
     assert direction_dependence("F+ AA25 F+") == "names flight 'AA25', which flies one way"
     assert direction_dependence("UA LH") == (

@@ -342,6 +342,18 @@ def test_a_routing_that_reads_the_same_both_ways_is_copied_as_before(
     }
 
 
+@pytest.mark.parametrize("command", ["search", "calendar", "detail"])
+def test_a_group_whose_alternatives_repeat_the_prefix_is_copied(
+    ran: list[tuple[str, Any]], command: str
+) -> None:
+    """Both tokens are the set {O:AA, O:UA}, so the expression reads the same
+    both ways and goes onto the return unchanged."""
+    result = _invoke(command, "--routing", "O:AA,O:UA O:UA,O:AA")
+    assert result.exit_code == 0, result.output
+    [(_, search)] = ran
+    assert [s.get("routeLanguage") for s in _slices(search)] == ["O:AA,O:UA O:UA,O:AA"] * 2
+
+
 def test_a_symmetric_routing_on_calendar_and_detail_is_copied_as_before(
     ran: list[tuple[str, Any]],
 ) -> None:
