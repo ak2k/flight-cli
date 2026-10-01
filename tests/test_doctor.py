@@ -570,6 +570,16 @@ def test_matrix_answers_are_classified_by_what_they_say(
     assert said in _fails_as(_run(), "matrix-search", cause).detail
 
 
+def test_a_matrix_answer_its_parser_rejects_is_a_shape_change_naming_the_field(
+    world: World,
+) -> None:
+    body = json.loads(json.dumps(_MATRIX_OK))
+    body["solutionList"]["solutions"][0]["itinerary"]["slices"][0]["flights"] = {"n": "DL1"}
+    world.matrix = lambda _r: httpx.Response(200, json=body)
+    c = _fails_as(_run(), "matrix-search", "shape")
+    assert "solutions.0.itinerary.slices.0.flights" in c.detail
+
+
 @pytest.mark.parametrize("error", [{"code": 13, "message": None}, {"message": "x", "type": 7}])
 def test_a_matrix_error_with_a_null_message_or_a_numeric_kind_is_still_reported(
     world: World, error: dict[str, Any]

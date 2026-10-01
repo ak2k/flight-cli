@@ -33,7 +33,7 @@ import diskcache  # pyright: ignore[reportMissingTypeStubs]  # DIVERGE: no stubs
 import httpx
 import stamina.instrumentation
 import structlog
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from . import _api_key, _config, _gf_browser
 from . import _gflight_ids as gfid
@@ -459,6 +459,18 @@ class _Doctor:
             raise _CheckFailedError(
                 spa or "upstream",
                 f"Matrix refused the key in use, and its page served no new one; {seen}",
+            ) from e
+        except ValidationError as e:
+            # Only the response model's own refusal: one from building the
+            # request is this CLI's bug, not Matrix's shape.
+            if e.title != SearchResult.__name__:
+                raise
+            first = e.errors(include_url=False)[0]
+            where = ".".join(str(p) for p in first["loc"])
+            raise _CheckFailedError(
+                "shape",
+                f"Matrix's answer does not parse at {where}: {first['msg']} "
+                f"({e.error_count()} error(s)); the response shape changed",
             ) from e
         if not isinstance(res, SearchResult):
             raise TypeError(f"a specific-date search answered with {type(res).__name__}")

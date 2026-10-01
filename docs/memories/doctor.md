@@ -37,7 +37,7 @@ fails.
 | `unreachable` | yes | `GfTransportError`, an httpx transport error, `ApiKeyResolutionError` caused by one |
 | `upstream` | yes | `GfUpstreamStatusError`, HTTP 5xx (after Matrix's three attempts) |
 | `brownout` | yes | a Matrix timeout, a `solutionList` with no solution, a `MatrixApiError` of kind `INTERNAL` / `UNAVAILABLE` / `DEADLINE_EXCEEDED` or an internal-error message |
-| `shape` | no | `GfPageShapeError`, `GfPinIgnoredError`, an empty Google board on the probe leg, a Matrix body without `solutionList`, solutions with no price or flight, an SPA page (2xx) without the bundle or the key |
+| `shape` | no | `GfPageShapeError`, `GfPinIgnoredError`, an empty Google board on the probe leg, a Matrix body without `solutionList` or one its parser rejects, solutions with no price or flight, an SPA page (2xx) without the bundle or the key |
 | `rejected` | no | any other `MatrixApiError` |
 | `consent` | no | `GfConsentError` |
 | `auth` | no | Matrix refusing the key twice, `PPAuthError` (a Supabase 429 or 5xx on the token refresh is `throttled` or `upstream`), HTTP 401/403 from a provider |
