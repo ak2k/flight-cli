@@ -4047,10 +4047,13 @@ def _report_pages(asked: _PageAsk) -> None:
         e = asked.failed.get(i)
         if e is not None:
             why = _gf_refusal(e, transport=asked.gf_mode, bags=asked.bags).note.removesuffix(".")
+        elif i in asked.answered:
+            why = (
+                f"its returns were not asked after page {(asked.stopped_at or 0) + 1:d} "
+                "stopped the search"
+            )
         else:
             why = f"not asked after page {(asked.stopped_at or 0) + 1:d} stopped the search"
-            if i in asked.answered:
-                why = f"its returns were {why}"
         err.print(
             f"[yellow]Google Flights page {i + 1:d} of {n:d} "
             f"({_safe_text(','.join(out.origins))}→{_safe_text(','.join(out.destinations))}) "
