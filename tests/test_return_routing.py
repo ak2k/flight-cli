@@ -123,7 +123,7 @@ def _link_slice(search: Any) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize("command", list(_COMMANDS))
-@pytest.mark.parametrize("routing", ["UA LH", "DL747"])
+@pytest.mark.parametrize("routing", ["UA LH", "DL747", "AA882-882"])
 def test_a_direction_dependent_routing_is_refused_without_routing_ret(
     ran: list[tuple[str, Any]], command: str, routing: str
 ) -> None:
@@ -152,7 +152,7 @@ def test_the_refusal_offers_the_mirror_of_a_chain_and_nothing_on_the_return(
     assert ran == []
 
 
-@pytest.mark.parametrize("routing", ["DL747", "AA25 UA814"])
+@pytest.mark.parametrize("routing", ["DL747", "AA25 UA814", "AA882-882"])
 def test_a_flight_number_is_offered_the_return_flight_not_a_mirror(
     ran: list[tuple[str, Any]], routing: str
 ) -> None:

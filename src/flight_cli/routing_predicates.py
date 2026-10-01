@@ -322,10 +322,17 @@ def parse_routing(routing: str) -> list[Predicate]:
 # A token's prefix (`~`, `X:`, `O:`, `~l:`) applies to the whole comma group, so
 # it comes off before the alternatives are split.
 _RE_TOKEN_PREFIX = re.compile(r"^~?(?:[A-Z]+:)?")
-# One flight number: an airline designator (`_RE_AIRLINE`'s shape), digits and an
-# optional quantifier, with no range. Wider than `_RE_FLIGHTNUM`, which decides
-# what Google post-filters and so stays letters-only.
-_RE_ONE_FLIGHT = re.compile(r"^(?!\d\d)[A-Z0-9]{2}\d+[+*?]?$")
+# A flight number: an airline designator (`_RE_AIRLINE`'s shape), digits, an
+# optional range and an optional quantifier. Wider than `_RE_FLIGHTNUM`, which
+# decides what Google post-filters and so stays letters-only.
+_RE_ONE_FLIGHT = re.compile(r"^(?!\d\d)[A-Z0-9]{2}(\d+)(?:-(\d+))?[+*?]?$")
+
+
+def _is_one_flight(alternative: str) -> bool:
+    """A range names one flight only when its ends are equal; a wider one is a
+    set of numbers the return draws from as the outbound does."""
+    m = _RE_ONE_FLIGHT.match(alternative)
+    return m is not None and (m.group(2) is None or int(m.group(1)) == int(m.group(2)))
 
 
 def _direction_key(tok: str) -> tuple[str, frozenset[str]]:
@@ -338,7 +345,7 @@ def _names_one_flight(tok: str) -> bool:
     """Whether `tok` asks for a flight by its number. An excluded one (`~UA882`)
     reads the same both ways: the return flies no flight of that number anyway."""
     prefix, alternatives = _direction_key(tok)
-    return not prefix.startswith("~") and any(_RE_ONE_FLIGHT.match(a) for a in alternatives)
+    return not prefix.startswith("~") and any(_is_one_flight(a) for a in alternatives)
 
 
 def direction_dependence(routing: str) -> str | None:

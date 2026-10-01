@@ -475,6 +475,23 @@ def test_one_enclosing_bracket_and_a_group_prefix_come_off_before_comparing(
     assert (direction_dependence(routing) is not None) is dependent
 
 
+@pytest.mark.parametrize(
+    ("routing", "dependent"),
+    [
+        ("AA882-882", True),
+        ("aa882-0882+", True),
+        ("F+ AA882-882 F+", True),
+        ("~AA882-882", False),
+        ("AA1-3000", False),
+        ("AA25-30", False),
+    ],
+)
+def test_a_range_names_one_flight_only_when_its_ends_are_equal(
+    routing: str, dependent: bool
+) -> None:
+    assert (direction_dependence(routing) is not None) is dependent
+
+
 def test_the_reason_names_the_flight_or_the_order() -> None:
     assert direction_dependence("F+ AA25 F+") == "names flight 'AA25', which flies one way"
     assert direction_dependence("UA LH") == (
@@ -490,6 +507,7 @@ def test_the_reason_names_the_flight_or_the_order() -> None:
         ("F+ X:LHR F*", "F* X:LHR F+"),
         ("AA25 UA814", None),
         ("DL747", None),
+        ("AA882-882 F+", None),
         ("[BA AA]", None),
     ],
 )
