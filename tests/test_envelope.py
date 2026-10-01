@@ -600,8 +600,10 @@ def test_a_document_of_its_own_is_refused_before_any_request(
 
 
 def test_a_usage_error_writes_no_envelope() -> None:
+    """Exit 2 is a command that never ran: its stderr, and no document."""
     r = _search("--cash-only", "JFK", "LAX", "--dep", _DEP.isoformat(), "--cabin", "steerage")
     assert (r.exit_code, r.stdout) == (2, "")
+    assert "steerage" in r.stderr
 
 
 # ─────────────────────────────── schema and history ─────────────────────────
