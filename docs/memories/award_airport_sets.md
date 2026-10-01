@@ -19,11 +19,15 @@ and label, and the label names the typed tokens (`one-way JFK,EWR→LHR
 2026-11-04`), so a one-airport label is what it always was. `run_pp_for_search`
 reads consecutive queries with one `slice_index` as one leg: it concatenates
 their awards, joins and renders them as one leg, and writes one JSON entry per
-leg.
+leg. The matched table keeps one row per first flight, date and pair of
+airports (`_dedupe_per_leg`), so two connections that share a first flight and
+end at different airports each keep their row and award.
 
-A query carries only the cash hints of rows on its own pair. The slice's
-hints are still built once and capped at 50 (`cash_hints_from_search_result`),
-so on a board with more than 50 rows at a slice the pairs share that budget.
+A query carries only the cash hints of rows on its own pair, at most 50
+(`_HINTS_PER_QUERY`). The cap counts the pair's own rows: were it applied to
+the whole slice first, a board with more than 50 rows on one airport would
+send the next airport's pair with no hint, and PointsPath runs a query with
+no hint with Google matching off.
 
 ## What one pair costs
 
