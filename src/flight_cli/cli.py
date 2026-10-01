@@ -6008,9 +6008,9 @@ _PROVIDER_OPT = typer.Option(
 
 def _resolve_rps(flag: float | None) -> float:
     """CLI flag wins; otherwise fall back to env / config / default."""
-    if flag is not None:
-        return flag
     try:
+        if flag is not None:
+            return _config.checked_rps(flag, "--rps")
         return _config.http_rps()
     except ValueError as e:
         err.print(f"[red]Bad rps configuration: {_safe_text(e)}[/]")

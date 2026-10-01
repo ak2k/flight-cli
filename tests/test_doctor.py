@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 import os
 import pathlib
 import time
@@ -26,11 +27,12 @@ import typer
 from typer.testing import CliRunner
 
 from conftest import _ds1, _page
-from flight_cli import _api_key, _doctor, _gf_browser, cli
+from flight_cli import _api_key, _config, _doctor, _gf_browser, _http, cli
 from flight_cli import _gflight_ids as gfid
 from flight_cli._gf_common import PageFetch
 from flight_cli._gf_errors import GfBrowserUnavailableError
 from flight_cli.client import MatrixClient
+from flight_cli.models import SearchResult
 from flight_cli.pp import auth as pp_auth
 from flight_cli.pp import client as pp_client
 from flight_cli.pp.client import PPApiError
@@ -247,6 +249,54 @@ def _table_rows(out: str) -> dict[str, str]:
     return rows
 
 
+def _matrix_behind_the_real_client(
+    monkeypatch: pytest.MonkeyPatch, answer: Callable[[httpx.Request, float], httpx.Response]
+) -> list[float]:
+    """Matrix under `HttpTransport`'s own AsyncClient, for the doctor and a
+    search alike, so each request carries the timeouts its client was built
+    with. Returns the read timeout of every request sent."""
+    reads: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        read = request.extensions["timeout"]["read"]
+        reads.append(read)
+        return answer(request, read)
+
+    def transport(**_kw: object) -> httpx.MockTransport:
+        return httpx.MockTransport(handler)
+
+    monkeypatch.setattr(_http, "AsyncCurlTransport", transport)
+    monkeypatch.setattr(_doctor, "MatrixClient", MatrixClient)
+    return reads
+
+
+def _matrix_ok(_request: httpx.Request, _read: float) -> httpx.Response:
+    return httpx.Response(200, json=_MATRIX_OK)
+
+
+def _matrix_search(*extra: str) -> Result:
+    """The doctor's probe leg as a cash-only search: the stored provider tokens
+    would otherwise send it to PointsPath and seats.aero."""
+    depart = (dt.date.today() + dt.timedelta(days=_doctor._DAYS_OUT)).isoformat()
+    return CliRunner().invoke(
+        cli.app,
+        [
+            "search",
+            "JFK",
+            "LAX",
+            "--dep",
+            depart,
+            "--backend",
+            "matrix",
+            "--cash-only",
+            "--no-cache",
+            "--format",
+            "json",
+            *extra,
+        ],
+    )
+
+
 # ───────────────────────────── the report ─────────────────────────────
 
 
@@ -344,29 +394,92 @@ def test_config_absent_passes_and_a_parse_error_fails_naming_the_path(world: Wor
     assert str(path) in c.detail
 
 
+_NOT_A_RATE = "is not a number greater than 0"
+
+
 @pytest.mark.parametrize(
     ("env", "toml", "said"),
     [
         ("typo", None, "FLIGHT_RPS='typo' is not a number"),
         (None, '[http]\nrps = "typo"\n', "[http].rps='typo' is not a number"),
+        ("0", None, f"FLIGHT_RPS='0' {_NOT_A_RATE}"),
+        ("-0", None, f"FLIGHT_RPS='-0' {_NOT_A_RATE}"),
+        ("-1", None, f"FLIGHT_RPS='-1' {_NOT_A_RATE}"),
+        ("nan", None, f"FLIGHT_RPS='nan' {_NOT_A_RATE}"),
+        (None, "[http]\nrps = false\n", f"[http].rps=False {_NOT_A_RATE}"),
+        (None, "[http]\nrps = true\n", f"[http].rps=True {_NOT_A_RATE}"),
+        (None, "[http]\nrps = 0\n", f"[http].rps=0 {_NOT_A_RATE}"),
+        (None, "[http]\nrps = -2.5\n", f"[http].rps=-2.5 {_NOT_A_RATE}"),
+        (None, "[http]\nrps = nan\n", f"[http].rps=nan {_NOT_A_RATE}"),
+        (None, '[http]\nrps = "0"\n', f"[http].rps='0' {_NOT_A_RATE}"),
     ],
 )
 def test_an_rps_a_search_refuses_to_start_on_fails_config(
     world: World, monkeypatch: pytest.MonkeyPatch, env: str | None, toml: str | None, said: str
 ) -> None:
+    """A rate no limiter can pace by stops the search before it sends anything:
+    two cabins, so a negative rate would otherwise send one request and then
+    wait forever for the second."""
     if env is not None:
         monkeypatch.setenv("FLIGHT_RPS", env)
     if toml is not None:
         (pathlib.Path(os.environ["FLIGHT_CLI_CONFIG_DIR"]) / "config.toml").write_text(toml)
-    depart = (dt.date.today() + dt.timedelta(days=30)).isoformat()
-    search = CliRunner().invoke(
-        cli.app, ["search", "JFK", "LAX", "--dep", depart, "--backend", "matrix", "--cash-only"]
-    )
+    sent = _matrix_behind_the_real_client(monkeypatch, _matrix_ok)
+    search = _matrix_search("--cabin", "economy,business")
     assert search.exit_code == 2, search.output
-    assert said in search.stderr
+    assert f"Bad rps configuration: {said}" in " ".join(search.stderr.split())
+    assert sent == []
     report = _run()
     assert said in _fails_as(report, "config", "config").detail
     assert report.exit_code == 1
+
+
+@pytest.mark.parametrize("flag", ["0", "-1", "nan"])
+def test_an_rps_flag_no_search_can_pace_by_is_refused_by_name(
+    world: World, monkeypatch: pytest.MonkeyPatch, flag: str
+) -> None:
+    sent = _matrix_behind_the_real_client(monkeypatch, _matrix_ok)
+    search = _matrix_search("--rps", flag)
+    assert search.exit_code == 2, search.output
+    line = " ".join(search.stderr.split())
+    assert "Bad rps configuration: --rps=" in line
+    assert _NOT_A_RATE in line
+    assert sent == []
+
+
+@pytest.mark.parametrize("flag", ["inf", "1e-3"])
+def test_an_rps_flag_greater_than_0_runs_the_search(
+    world: World, monkeypatch: pytest.MonkeyPatch, flag: str
+) -> None:
+    sent = _matrix_behind_the_real_client(monkeypatch, _matrix_ok)
+    search = _matrix_search("--rps", flag)
+    assert search.exit_code == 0, search.output
+    assert len(sent) == 1
+
+
+@pytest.mark.parametrize(
+    ("env", "toml", "rps"),
+    [
+        (None, "[http]\nrps = inf\n", math.inf),
+        (None, "[http]\nrps = 1e-3\n", 0.001),
+        (" 2 ", None, 2.0),
+    ],
+)
+def test_any_rps_greater_than_0_passes_config_and_paces_the_doctor(
+    world: World, monkeypatch: pytest.MonkeyPatch, env: str | None, toml: str | None, rps: float
+) -> None:
+    if env is not None:
+        monkeypatch.setenv("FLIGHT_RPS", env)
+    if toml is not None:
+        (pathlib.Path(os.environ["FLIGHT_CLI_CONFIG_DIR"]) / "config.toml").write_text(toml)
+    report = _run()
+    assert _by_id(report)["config"].status == "pass"
+    assert world.matrix_settings[-1]["rps"] == rps
+
+
+def test_an_integer_rps_too_large_for_a_float_is_refused() -> None:
+    with pytest.raises(ValueError, match=_NOT_A_RATE):
+        _config.checked_rps(10**400, "[http].rps")
 
 
 def test_matrix_search_sends_with_the_rps_and_profile_a_search_resolves(
@@ -549,6 +662,7 @@ def _solutions_stripped_of(field: str) -> dict[str, Any]:
     [
         ({"solutionCount": 0, "session": "s"}, "shape", "without a solutionList"),
         ({"solutionList": {"solutions": []}}, "brownout", "holds no solution"),
+        ({"solutionList": {}}, "brownout", "holds no solution"),
         (_solutions_stripped_of("price"), "shape", "has a price and a flight"),
         (_solutions_stripped_of("flights"), "shape", "has a price and a flight"),
         (
@@ -569,6 +683,30 @@ def test_matrix_answers_are_classified_by_what_they_say(
 ) -> None:
     world.matrix = lambda _r: httpx.Response(200, json=body)
     assert said in _fails_as(_run(), "matrix-search", cause).detail
+
+
+@pytest.mark.parametrize("listed", [[{"id": "x"}], [], "x", 1, 0, True, False, None])
+def test_a_solution_list_that_is_not_an_object_is_a_shape_change_and_fails_a_search(
+    world: World, monkeypatch: pytest.MonkeyPatch, listed: object
+) -> None:
+    body = {**_MATRIX_OK, "solutionList": listed}
+    world.matrix = lambda _r: httpx.Response(200, json=body)
+    assert "solutionList" in _fails_as(_run(), "matrix-search", "shape").detail
+    sent = _matrix_behind_the_real_client(
+        monkeypatch, lambda _r, _t: httpx.Response(200, json=body)
+    )
+    search = _matrix_search()
+    assert search.exit_code == 1, search.output
+    assert "Matrix search failed" in search.stderr
+    assert len(sent) == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{"solutionCount": 0}, {"solutionList": {}}, {"solutionList": {"solutions": []}}],
+)
+def test_an_absent_or_empty_solution_list_reads_as_no_solutions(body: dict[str, Any]) -> None:
+    assert SearchResult.from_api(body).solutions == []
 
 
 def test_a_matrix_answer_its_parser_rejects_is_a_shape_change_naming_the_field(
@@ -622,6 +760,9 @@ def test_a_matrix_429_is_a_throttle_and_a_timeout_is_a_brownout(world: World) ->
         _fails_as(_run(), "matrix-search", "unreachable")
 
 
+_TIMED_OUT = "Matrix did not answer within 180 s, the limit a search waits on each attempt"
+
+
 def test_a_matrix_timeout_names_the_limit_on_each_attempt(world: World) -> None:
     def stall(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("timed out", request=request)
@@ -630,7 +771,44 @@ def test_a_matrix_timeout_names_the_limit_on_each_attempt(world: World) -> None:
     with stamina.set_testing(True, attempts=3):
         c = _fails_as(_run(), "matrix-search", "brownout")
     assert len(world.matrix_requests) == 3
-    assert c.detail == "Matrix did not answer within 60 s, the limit on each attempt"
+    assert c.detail == _TIMED_OUT
+
+
+@pytest.mark.parametrize(
+    ("answers_after", "status", "cause", "said", "exit_code"),
+    [
+        (90.0, "pass", None, "first priced GBP618.00", 0),
+        (math.inf, "fail", "brownout", _TIMED_OUT, 1),
+    ],
+)
+def test_the_doctor_waits_for_matrix_as_long_as_a_search_does(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+    answers_after: float,
+    status: str,
+    cause: str | None,
+    said: str,
+    exit_code: int,
+) -> None:
+    """Matrix answers only a request willing to wait `answers_after` seconds.
+    The doctor's verdict is the one a search reaches at that moment."""
+
+    def answer(request: httpx.Request, read: float) -> httpx.Response:
+        if read < answers_after:
+            raise httpx.ReadTimeout(f"no answer within {read} s", request=request)
+        return httpx.Response(200, json=_MATRIX_OK)
+
+    reads = _matrix_behind_the_real_client(monkeypatch, answer)
+    with stamina.set_testing(True, attempts=3):
+        check = _by_id(_run())["matrix-search"]
+        doctor_reads = reads.copy()
+        reads.clear()
+        search = _matrix_search()
+    assert doctor_reads
+    assert doctor_reads == reads
+    assert (check.status, check.cause) == (status, cause), check
+    assert said in check.detail
+    assert search.exit_code == exit_code, search.output
 
 
 def test_a_key_matrix_refuses_twice_is_auth_and_never_exits_75(
