@@ -205,3 +205,43 @@ sees this, and it is indistinguishable from the reading above on stdout alone.
 anything to catch, and under a reader that hangs up the process ends at exit 120
 with a `BrokenPipeError` on stderr that nothing here composed (tracked in
 work-h70kv.29).
+
+## What a black-box caller can read off `flight search --format json`
+
+Stdout carries one JSON document or nothing, never prose: every note, including
+a hand-off from Google to Matrix, goes to stderr. Exit 1 with stdout empty is no
+answer, and stderr says why. Two arms need more than the exit code: when
+`--fare-rules` cannot fetch the rules it still writes its document, with
+`fare_rules: null`, and exits 1; and an award query that fails exits 0 with
+stdout empty and the failure on stderr.
+
+For one `--cabin`, the flags choose the shape:
+
+| Flags | Document |
+|---|---|
+| `--cash-only`, Google answered | a list of rows, each with `flight_id`; a round trip's row is its `[outbound, return]` pair |
+| `--cash-only`, Matrix answered | Matrix's raw response, an object (`solutionCount`, `solutionList`) |
+| awards on (the default once a provider is configured) | `[{leg, slice_index, matches}]` |
+| `--awards-only` | `[{leg, slice_index, awards}]` |
+| `--cash-only --sellers` | `{search, booking_options}`, `search` being Google's list |
+| `--cash-only --fare-rules` | `{search, fare_rules}`, `search` being Matrix's object |
+
+With awards on, the shape does not depend on the backend, and nothing in it
+names one. Cash-only is the case where the shape names the backend: a list is
+Google's, an object Matrix's. An empty Google board is still Google's answer:
+`[]` cash-only, and the award document with awards on, because the award
+providers run whatever Google served. Several cabins, cash-only, write one
+object keyed by cabin name.
+
+On auto, a stderr line that begins `Using Matrix:` says the search was handed
+from Google to Matrix, and why: the row filter emptied Google's board, or the
+Google query failed (a rate limit, the consent page, no browser, an unreachable
+host, or anything else it raised). The document after it is Matrix's. The default
+table survives the same failures by printing Matrix's half of its merged table,
+so JSON answers wherever the table does.
+
+`--fast`, `--backend gflight`, `--bags` and `--sellers` keep exit 1 with stdout
+empty when the Google query fails. `--fast` means Google alone, `--backend
+gflight` names Google, Matrix prices no bags, and a `--sellers` document wraps a
+Google row that Matrix cannot supply. A multi-cabin search exits 1 when every
+Google cabin fails.

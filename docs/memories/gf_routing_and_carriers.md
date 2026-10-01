@@ -215,7 +215,17 @@ check against. Only the strictest-stops rule reached them.
   (2026-09-27). The row keeps its booking identity for the table, the JSON and
   the post-filter.
 - An answer the filter emptied goes to Matrix under `auto` with the reason on
-  stderr, and says why under `--backend gflight` (stdout `[]` in JSON mode).
+  stderr, and says why under `--backend gflight` (stdout `[]` in JSON mode, or
+  the award document when awards run: an empty board still queries the award
+  providers, as Matrix's empty answer does).
+- A Google query that FAILS goes to Matrix the same way under `auto` with
+  `--format json`, unless `--fast`, `--bags` or `--sellers` is set: one
+  `Using Matrix: <reason>.` line on stderr, in the words the merged table
+  prints beside Matrix's answer for the same wall, then Matrix's document. The
+  default table survives the same walls inside its weave, so JSON answers
+  wherever the table does. `--fast` means Google alone, Matrix prices no bags,
+  and a `--sellers` document wraps a Google row, so each keeps exit 1 with
+  stdout empty, as does `--backend gflight`.
   A multi-cabin search goes to Matrix WHOLE under `auto` when the filter
   emptied any cabin (one `Using Matrix:` line names each emptied cabin and its
   count): handing on only that cabin would put Google's rows beside Matrix's

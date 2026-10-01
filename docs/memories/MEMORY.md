@@ -10,6 +10,8 @@ go into detail and are loaded on demand.
   exit code means what, and which stream carries the answer — a CLI contract
   rather than a wire one, and closer to `calendar_two_phase.md`'s subject than
   to the rest of this entry's: read it before touching a calendar exit path too.
+  Its last section does the same for `flight search --format json`: which
+  document shape each flag set writes, and what a `Using Matrix:` line says.
 - [routing_language.md](routing_language.md) — Full grammar of the
   `routeLanguage` field (`LH+`, `BA AA`, `F* X:LHR F*`, alliance codes,
   per-segment carrier/airport filters). What goes into `--routing`.
