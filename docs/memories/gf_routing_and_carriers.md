@@ -489,9 +489,9 @@ not handed to Matrix, and always to stderr so a JSON document stays a document.
 It is passed the user's count, never the multi-cabin bump — a wider pool per
 cabin that nobody asked for — and prints the pin budget that count resolves to,
 which is the number the join will actually see rather than the one being
-corrected. Above the cap the rows shown
-are the `-n` cheapest combinations of the ten cheapest outbounds, not the `-n`
-cheapest round trips on the board, and the note is what says so.
+corrected. Above the cap the rows shown are the `-n` cheapest combinations of
+the ten cheapest outbounds, not the `-n` cheapest round trips on the board, and
+the note is what says so.
 
 **`-n` is one number, applied on the way out.** The page serves Google's whole
 board — around thirty rows; the dated measurement is at the top of this file —
