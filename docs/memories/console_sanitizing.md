@@ -23,9 +23,9 @@ for whatever an undocumented third-party library raised.
 
 **A source that quotes a value into a sentence keeps its `repr`.**
 `routing_predicates.py:284,331,343` build their reasons with `{...!r}`, and
-`_config.py:140,150` build the rps `ValueError` the same way. `repr` is there for
+`_config.checked_rps` builds the rps `ValueError` the same way. `repr` is there for
 the reader — it shows the exact string that was rejected, quotes and all — and it
-happens to neutralise ESC, C1 and DEL on the way. It is not the guard, because it
+happens to neutralize ESC, C1 and DEL on the way. It is not the guard, because it
 does not cover the value that reaches a console any other way.
 
 The two wrappers therefore disagree about control characters inside one sentence,
@@ -51,7 +51,7 @@ everything `escape_scan` in `tests/test_calendar_split.py` covers: anything reac
 a markup sink from user input, a response field or an exception message goes
 through `_quote` (a value the user typed: elide, `repr`, escape) or `_safe_text`
 (anything remote: strip the control characters, then escape). Bare
-`rich.markup.escape` is neither and is never sufficient — it neutralises `[` and
+`rich.markup.escape` is neither and is never sufficient — it neutralizes `[` and
 leaves every ESC, 8-bit CSI, bidi control and lone surrogate in place. Every
 Matrix error that FAILS a command goes through `_print_matrix_error`, so one
 backend error reads the same whichever command asked for it — the calendar
@@ -62,7 +62,7 @@ because its failure is soft and its line names the cabin.
 
 ## `_safe_text` and `_quote`
 
-`escape` is not the whole job for text from somewhere else. It neutralises `[`
+`escape` is not the whole job for text from somewhere else. It neutralizes `[`
 and nothing more, so an ESC or an 8-bit CSI inside a Matrix error message still
 clears the screen or repaints the line above it, a DEL rubs out what precedes it,
 and a bidi override reorders the rest — and a redirected stderr keeps every byte

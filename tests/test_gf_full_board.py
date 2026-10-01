@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import itertools
 import json
+import re
 import sys
 import urllib.parse
 from datetime import date, datetime, timedelta
@@ -163,6 +164,63 @@ def test_n_above_thirty_returns_the_rows_the_full_board_holds(
     assert "tfu=EgQIABABIgA" in fake.gets[0]
 
 
+# ─────────────────────────── -n keeps the cheapest ─────────────────────────
+
+# The LHR capture's five cheapest rows by flight number: its three USD293 rows
+# sit at 6-8 behind Google's five top flights at USD295, and the 295 rows that
+# tie keep the page's order.
+_LHR_CHEAPEST_FIVE = ["104+152", "108+156", "108+158", "9656", "6939"]
+_TABLE_ROW = re.compile(r"^│\s*\d+\s*│")
+
+
+def _numbers(member: dict[str, Any]) -> str:
+    return "+".join(str(leg["flight_number"]) for leg in member["legs"])
+
+
+def test_a_one_way_n_keeps_the_cheapest_rows_in_price_order(
+    gf_session: Callable[..., Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`-n 5` is the five cheapest rows, not the five the page put first: on
+    this capture those are Google's top flights at USD295, with three USD293
+    rows right below them."""
+    gf_session(_served(_LHR))
+    cli._run_gflight_path(
+        legs=(Leg.of("JFK", "LHR", _DEP),),
+        opts=SearchOptions(cabin=Cabin.COACH),
+        top_n=5,
+        json_out=True,
+    )
+    rows: list[Any] = json.loads(capsys.readouterr().out)
+    assert [(_numbers(r), r["price"]) for r in rows] == [
+        ("104+152", 293.0),
+        ("108+156", 293.0),
+        ("108+158", 293.0),
+        ("9656", 295.0),
+        ("6939", 295.0),
+    ]
+
+
+def test_the_table_and_the_document_carry_the_same_rows_in_the_same_order(
+    gf_session: Callable[..., Any],
+) -> None:
+    """One order on both surfaces, so `--pick 2` read off the table names the
+    second row of the document."""
+    args = [*_SEARCH, "JFK", "LHR", "--dep", _DEP.isoformat(), "--backend", "gflight", "--fast"]
+    gf_session(_served(_LHR))
+    table = CliRunner().invoke(cli.app, [*args, "-n", "5"], env={"COLUMNS": "250"})
+    gf_session(_served(_LHR))
+    document = CliRunner().invoke(cli.app, [*args, "-n", "5", "--format", "json"])
+    assert table.exit_code == 0, table.output
+    assert document.exit_code == 0, document.output
+    printed = [
+        "+".join(re.findall(r"[A-Z0-9]{2} (\d+)", line.split("│")[5]))
+        for line in table.stdout.splitlines()
+        if _TABLE_ROW.match(line)
+    ]
+    assert printed == _LHR_CHEAPEST_FIVE, table.stdout
+    assert [_numbers(r) for r in json.loads(document.stdout)] == _LHR_CHEAPEST_FIVE
+
+
 # ─────────────────────────── carrier-exclude meaning ──────────────────────
 
 
@@ -189,19 +247,28 @@ def test_a_carrier_exclude_reads_the_carrier_each_leg_is_booked_under(
     assert len(rows) == 84  # of 101
 
 
-def _lhr_with_first_leg_edited(booked: str, edit: Callable[[list[Any]], None]) -> str:
-    """The LHR capture with `edit` applied to the first leg of the row booked
-    as `booked`."""
+def _lhr_with_row_edited(booked: str, edit: Callable[[list[Any]], None]) -> str:
+    """The LHR capture with `edit` applied to the raw row booked as `booked`."""
     payload: list[Any] = json.loads(_ds1(_LHR))
     for raw in gfid._rows_from_ds1(payload).rows:
         if _booked(gfid._parse_flight_with_id(raw)) == booked:
-            edit(raw[0][2][0])
+            edit(raw)
             break
     else:
         pytest.fail(f"{booked} is not on the capture")
     return _page(
         _answering(json.dumps(payload), origin=None, destination=None, date=_DEP.isoformat())
     )
+
+
+def _lhr_with_first_leg_edited(booked: str, edit: Callable[[list[Any]], None]) -> str:
+    """The LHR capture with `edit` applied to the first leg of the row booked
+    as `booked`."""
+
+    def _first_leg(raw: list[Any]) -> None:
+        edit(raw[0][2][0])
+
+    return _lhr_with_row_edited(booked, _first_leg)
 
 
 def _lhr_without_operating_identity(booked: str) -> str:
@@ -278,8 +345,10 @@ def _round_trip(routing: str | None = None) -> tuple[Leg, ...]:
 
 
 def _lhr_board_with_ba_first() -> str:
-    """The LHR capture with every BA-booked row moved to the top of the board,
-    the order in which the round trip takes its pins."""
+    """The LHR capture with every BA-booked row moved to the top of the board
+    and priced below every other row (USD250, against the capture's cheapest
+    USD293), so BA leads it in page order and in price order alike and a pin
+    taken before the routing filter lands on BA."""
     payload: list[Any] = json.loads(_ds1(_LHR))
     rows = gfid._rows_from_ds1(payload).rows
     parsed = [gfid._parse_flight_with_id(r) for r in rows]
@@ -288,6 +357,8 @@ def _lhr_board_with_ba_first() -> str:
         raw for raw, p in zip(rows, parsed, strict=True) if p.flight.legs[0].airline.name != "BA"
     ]
     assert len(ba) >= 5
+    for raw in ba:
+        raw[1][0][1] = 250  # the price head's amount; see `_with_copy_of_first_row`
     payload[2] = [ba + rest]
     payload[3] = None
     return _page(
@@ -309,9 +380,10 @@ def _return_board() -> str:
 def test_the_outbound_is_filtered_before_the_pins_are_taken(
     gf_session: Callable[..., Any], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The pins are the first rows in board order. Filtering after pinning
-    spends every pin on a BA outbound the filter then drops, and a satisfiable
-    `~BA+` round trip answers "no results" with non-BA outbounds right below."""
+    """The pins are the board's cheapest rows, and here those are BA's.
+    Filtering after pinning spends every pin on a BA outbound the filter then
+    drops, and a satisfiable `~BA+` round trip answers "no results" with
+    non-BA outbounds a few dollars dearer."""
     fake = gf_session(_lhr_board_with_ba_first(), _return_board())
     cli._run_gflight_path(
         legs=_round_trip("~BA+"),
@@ -331,7 +403,69 @@ def test_a_codeshare_booked_pin_names_the_operating_flight(
 ) -> None:
     """Pinned under the codeshare number it is booked as, a leg comes back with
     no return board; pinned as the flight that operates it, the board is served.
-    The row itself keeps the booking identity the table and document show."""
+    The row itself keeps the booking identity the table and document show.
+
+    AF9656 is repriced below the capture's USD293 so it is the one outbound a
+    `-n 1` round trip pins."""
+
+    def _cheapest(raw: list[Any]) -> None:
+        raw[1][0][1] = 290
+
+    fake = gf_session(_lhr_with_row_edited("AF9656", _cheapest), _return_board())
+    cli._run_gflight_path(
+        legs=_round_trip(),
+        opts=SearchOptions(cabin=Cabin.COACH),
+        top_n=1,
+        json_out=True,
+    )
+    rows: list[Any] = json.loads(capsys.readouterr().out)
+    assert _json_booked(rows[0][0]) == "Air France|9656"  # VS26 metal
+    pinned = _tfs(fake.gets[1])
+    assert b"VS" in pinned and b"26" in pinned
+    assert b"9656" not in pinned
+
+
+def _pinned_segments(url: str) -> list[tuple[bytes, bytes]]:
+    """The (carrier, flight number) of each leg a pinned page URL selects."""
+    segments = _decode_slice(_tfs(url)).get(4, [])
+    return [(fields[5][0], fields[6][0]) for fields in map(_decode_fields, segments)]
+
+
+def _lhr_outbounds() -> gfid.Board[gfid.GFlightWithId]:
+    return _board(_page(_ds1(_LHR)))
+
+
+def test_the_pins_are_the_cheapest_outbounds_ties_in_page_order() -> None:
+    """The three USD293 rows sit at 6-8, behind Google's five top flights at
+    USD295; then the 295s, the first two in the page's own order."""
+    board = _lhr_outbounds()
+    by_key = {gfid._itinerary_key(r): r for r in board}
+    assert [_booked(by_key[k]) for k in gfid.pin_keys(board, top_n=5)] == [
+        "EI104+EI152",
+        "EI108+EI156",
+        "EI108+EI158",
+        "AF9656",
+        "AA6939",
+    ]
+
+
+def test_a_preferred_outbound_is_pinned_ahead_of_the_cheapest() -> None:
+    """`prefer` still leads, and only the slots it leaves go to the cheapest."""
+    board = _lhr_outbounds()
+    by_key = {gfid._itinerary_key(r): r for r in board}
+    prefer = [gfid._itinerary_key(board[0])]
+    assert [_booked(by_key[k]) for k in gfid.pin_keys(board, top_n=3, prefer=prefer)] == [
+        "AF9656",
+        "EI104+EI152",
+        "EI108+EI156",
+    ]
+
+
+def test_a_one_trip_round_trip_pins_the_cheapest_outbound(
+    gf_session: Callable[..., Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`-n 1` spends its one return board on the USD293 outbound the page lists
+    sixth, not on the top flight it lists first."""
     fake = gf_session(_served(_LHR), _return_board())
     cli._run_gflight_path(
         legs=_round_trip(),
@@ -340,10 +474,26 @@ def test_a_codeshare_booked_pin_names_the_operating_flight(
         json_out=True,
     )
     rows: list[Any] = json.loads(capsys.readouterr().out)
-    assert _json_booked(rows[0][0]) == "Air France|9656"  # the capture's first row, VS26 metal
-    pinned = _tfs(fake.gets[1])
-    assert b"VS" in pinned and b"26" in pinned
-    assert b"9656" not in pinned
+    assert len(fake.gets) == 2
+    assert _pinned_segments(fake.gets[1]) == [(b"EI", b"104"), (b"EI", b"152")]
+    assert len(rows) == 1
+    assert _json_booked(rows[0][0]) == "Aer Lingus|104+Aer Lingus|152"
+
+
+@pytest.mark.parametrize("top_n", [1, 3, 5, 10, 40])
+def test_a_round_trip_spends_one_board_and_its_pin_budget(
+    top_n: int, gf_session: Callable[..., Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Which outbounds are pinned moves; how many does not."""
+    fake = gf_session(_served(_LHR), _return_board())
+    cli._run_gflight_path(
+        legs=_round_trip(),
+        opts=SearchOptions(cabin=Cabin.COACH),
+        top_n=top_n,
+        json_out=True,
+    )
+    assert json.loads(capsys.readouterr().out)
+    assert len(fake.gets) == 1 + min(top_n, 10)
 
 
 def test_a_return_board_the_routing_empties_is_counted_and_routed_to_matrix(
@@ -727,7 +877,7 @@ def test_under_explicit_gflight_a_round_trip_whose_returns_google_left_empty_say
     assert json.loads(result.stdout) == []
     assert (
         "no round trip matched a carrier exclusion (AA) (17 rows filtered out; "
-        "returns were searched for the first 3 outbound options)"
+        "returns were searched for the 3 cheapest outbound options)"
     ) in " ".join(result.stderr.split())
 
 
@@ -735,7 +885,7 @@ def test_a_round_trip_the_routing_emptied_names_the_outbounds_it_tried(
     gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Every return on the served board is AA, so under `~AA+` both pinned
-    outbounds come back with no return. The outbounds below the pins were never
+    outbounds come back with no return. The outbounds left unpinned were never
     tried, and the line says how many were rather than reading as the answer
     for the whole board."""
     fake = gf_session(_served(_LHR), _return_board())
@@ -754,7 +904,7 @@ def test_a_round_trip_the_routing_emptied_names_the_outbounds_it_tried(
     assert json.loads(result.stdout) == []
     assert (
         "no round trip matched a carrier exclusion (AA) (23 rows filtered out; "
-        "returns were searched for the first 2 outbound options)"
+        "returns were searched for the 2 cheapest outbound options)"
     ) in " ".join(result.stderr.split())
     assert len(fake.gets) == 3  # the outbound, then two pins
 
@@ -1211,9 +1361,9 @@ def test_under_explicit_gflight_an_emptied_cabin_says_so_and_stays_empty(
 
 # ────────────── notes on Google's table, and the hand-off to Matrix ─────────
 
-_PIN_CAP_NOTE = "Google Flights combines returns against up to 10 first-ranked outbounds."
+_PIN_CAP_NOTE = "Google Flights combines returns against up to 10 cheapest outbounds."
 _JOIN_NOTE = (
-    "Google Flights prices every cabin on up to 10 of the Y cabin's first-ranked outbounds; "
+    "Google Flights prices every cabin on up to 10 of the Y cabin's cheapest outbounds; "
     "'—' means that cabin's search returned no fare for the itinerary."
 )
 _CURRENCY_NOTE = (
@@ -1247,7 +1397,8 @@ def _google_serves(
         return business if f.seat_type.name == "BUSINESS" else coach
 
     def _pins(first: gfid.Board[Any], *, top_n: int, **_kw: object) -> list[gfid.ItineraryKey]:
-        return [gfid._itinerary_key(r) for r in first[: gfid.pinned_fanout(top_n)]]
+        cheapest = sorted(first, key=gfid.fare_key)[: gfid.pinned_fanout(top_n)]
+        return [gfid._itinerary_key(r) for r in cheapest]
 
     monkeypatch.setattr(gfid, "outbound_page", _board_for)
     monkeypatch.setattr(gfid, "pin_keys", _pins)

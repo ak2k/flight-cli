@@ -3760,33 +3760,20 @@ def _bags_by_itinerary(
 
 
 def _terminal_fare_key(r: Any) -> tuple[int, float]:
-    """Sort key for one round-trip combination: its terminal member's fare,
-    with a row Google did not price ordered last.
+    """Sort key for one Google row: `fare_key` of a one-way row, or of a
+    round-trip combination's terminal member, whose fare is the one every
+    surface prints for the combination."""
+    from ._gflight_ids import fare_key  # noqa: PLC0415 — fli, ~95 ms
 
-    Google surfaces no shopping-list price for some rows — premium-cabin round
-    trips with several passengers are the routine case — and a row it did not
-    price is still a row the board served. There is no number to rank it on, so
-    it goes last rather than being dropped or read as a zero fare; the leading
-    term is what carries that, and it leaves the priced rows compared on the
-    fare alone.
-
-    Reads `.flight.price` and no other attribute, so the key holds for anything
-    shaped like a result row rather than only for fli's own model."""
-    price: float | None = list(r)[-1].flight.price
-    return (1, 0.0) if price is None else (0, price)
+    return fare_key(cast("tuple[Any, ...]", r)[-1] if isinstance(r, tuple) else r)
 
 
 def _price_ordered(results: list[Any]) -> list[Any]:
-    """Round-trip combinations in price order. A one-way board is returned as
-    it came.
+    """A Google answer in price order, unpriced rows last; the argument is in
+    the memo's `-n` section.
 
-    Two sets, ordered by two different things, and a combination priced from
-    its terminal member; the argument for both is in the memo's `-n` section.
-
-    The sort is stable, so combinations sharing a total stay in the order the
-    pins were fetched."""
-    if any(not isinstance(r, tuple) for r in results):
-        return results
+    The sort is stable, so rows sharing a fare keep the order they arrived in:
+    the page's on a one-way board, the pins' for combinations."""
     return sorted(results, key=_terminal_fare_key)
 
 
@@ -3832,9 +3819,8 @@ def _pick_in_range(
 
     The fallback names ROW ONE rather than "the cheapest", because that is what
     every caller of this does with the None: they pin the first row of the list
-    the table numbered. Only a round trip's rows are in price order, so on a
-    one-way board — which keeps Google's ranking — "the cheapest" describes a
-    different row from the one the link opens.
+    the table numbered. That row is the cheapest only when it is priced: a row
+    with no fare sorts last, so a list of them has a row one and no cheapest.
 
     stderr, because a `--format json` document on stdout stays a document —
     the same rule every other note on this path follows.
@@ -4099,7 +4085,7 @@ def _answer_gf_empty(
     `--format json` stdout is still the one document.
 
     `pinned` is how many outbounds a round trip searched returns for. The
-    reason names it, because outbounds below the pins may have matching
+    reason names it, because the outbounds it did not pin may have matching
     returns that were never searched. `cap` names the price cap the page was
     asked for, if it was, so a board it served empty says no fare is under it.
 
@@ -4110,8 +4096,8 @@ def _answer_gf_empty(
         plural = "" if pinned == 1 else "s"
         err.print(
             f"[yellow]Google Flights: no round trip matched {_safe_text(checks)} "
-            f"({dropped:d} rows filtered out; returns were searched for the first "
-            f"{pinned:d} outbound option{plural}).[/]"
+            f"({dropped:d} rows filtered out; returns were searched for the "
+            f"{pinned:d} cheapest outbound option{plural}).[/]"
         )
     elif dropped:
         err.print(
@@ -4346,10 +4332,10 @@ def _run_gflight_path(  # noqa: PLR0912, PLR0915 — every outcome of one Google
             google_url=google_url,
             result=sr,
             # The pin LABEL names the row it pins. `sr` is built from the rows
-            # the table numbered, so row 1 is the default pin — but a one-way
-            # board keeps Google's own ranking, where row 1 need not be the
-            # cheapest, and the label "cheapest itinerary" over it is simply
-            # false. `1` makes the label say what the link does on every board.
+            # the table numbered, so row 1 is the default pin, and it is the
+            # cheapest only when Google priced it: on a board of unpriced rows
+            # the label "cheapest itinerary" over row 1 is false. `1` makes the
+            # label say what the link does on every board.
             pick=pick or 1,
         )
     if seller_row is not None:
@@ -4873,17 +4859,16 @@ _MULTI_CABIN_QUERY_BUMP_CAP = 100
 def _pin_cap_note(*, legs: tuple[Leg, ...], top_n: int) -> None:
     """Say so when a round trip will search fewer outbounds than were asked for.
 
-    A round trip prices returns against the outbounds Google ranks first, and
-    the number of those is capped however large `-n` is. Without a word the user
-    reads a short table as the market rather than as the budget, so every
-    round-trip path says it: the enriched one, `--fast`, `--format json` and
-    multi-cabin alike. A search handed to Matrix does not, because the table it
+    A round trip prices returns against its cheapest outbounds, and the number
+    of those is capped however large `-n` is. Without a word the user reads a
+    short table as the market rather than as the budget, so every round-trip
+    path says it: the enriched one, `--fast`, `--format json` and multi-cabin
+    alike. A search handed to Matrix does not, because the table it
     prints is Matrix's.
 
-    Ranked first, not cheapest: the pin loop slices the board in the order the
-    page served it. A note claiming otherwise is checkably false on the
-    repository's own capture, whose lowest fare sits in the second block and is
-    never pinned at all below `-n 3`.
+    Cheapest, because the pin loop takes the filtered board's outbounds in
+    price order (`_gflight_ids._pins`), and an outbound row's price is already
+    the cheapest round trip through it.
 
     "Up to", because the cap bounds the count and the board may hold fewer. The
     exact number is known only once the pin loop has run; an empty filtered
@@ -4896,8 +4881,7 @@ def _pin_cap_note(*, legs: tuple[Leg, ...], top_n: int) -> None:
     pins = pinned_fanout(top_n)
     if len(legs) >= _ROUND_TRIP_LEGS and pins < top_n:
         err.print(
-            f"[dim]Google Flights combines returns against up to {pins:d} "
-            f"first-ranked outbounds.[/]"
+            f"[dim]Google Flights combines returns against up to {pins:d} cheapest outbounds.[/]"
         )
 
 
@@ -4917,12 +4901,12 @@ def _multi_cabin_join_note(pins: int, leader: Cabin | None) -> str:
     ours, so there is nothing here to escape."""
     if leader is None:
         return (
-            f"Google Flights joins cabins on up to {pins} of each cabin's first-ranked "
+            f"Google Flights joins cabins on up to {pins} of each cabin's cheapest "
             "outbounds; '—' means no shared itinerary, not no fare."
         )
     return (
         f"Google Flights prices every cabin on up to {pins} of the "
-        f"{_CABIN_TO_LETTER[leader]} cabin's first-ranked outbounds; "
+        f"{_CABIN_TO_LETTER[leader]} cabin's cheapest outbounds; "
         "'—' means that cabin's search returned no fare for the itinerary."
     )
 
@@ -5107,12 +5091,12 @@ class _CabinSearches(NamedTuple):
 
     On a round trip over two or more cabins the sort cabin leads: every cabin
     pins the outbounds the sort cabin pins, wherever its own filtered board
-    lists them, and fills the rest of the same budget with its own rows in page
-    order. A cabin pinning its own first ten may price none of the itineraries
-    the table shows, which are the sort cabin's. The sort cabin's page is
-    fetched ahead of its pins and handed back to its search, so the GETs are
-    the ones each cabin would spend alone. Anything else is each cabin's whole
-    search."""
+    lists them, and fills the rest of the same budget with its own cheapest
+    rows. A cabin pinning its own ten cheapest may price none of the
+    itineraries the table shows, which are the sort cabin's. The sort cabin's
+    page is fetched ahead of its pins and handed back to its search, so the
+    GETs are the ones each cabin would spend alone. Anything else is each
+    cabin's whole search."""
 
     legs: tuple[Leg, ...]
     opts: SearchOptions
@@ -5132,7 +5116,7 @@ class _CabinSearches(NamedTuple):
     def pins(self, lead: _Outbound | None) -> list[ItineraryKey]:
         """The outbounds the sort cabin pins from its page `lead`: the ones it
         would take alone, so its rows are unchanged. Empty with no page, or
-        nothing its filter kept, and then each cabin pins its own first-ranked
+        nothing its filter kept, and then each cabin pins its own cheapest
         rows."""
         if lead is None:
             return []
@@ -6014,9 +5998,9 @@ _PROVIDER_OPT = typer.Option(
 
 def _resolve_rps(flag: float | None) -> float:
     """CLI flag wins; otherwise fall back to env / config / default."""
-    if flag is not None:
-        return flag
     try:
+        if flag is not None:
+            return _config.checked_rps(flag, "--rps")
         return _config.http_rps()
     except ValueError as e:
         err.print(f"[red]Bad rps configuration: {_safe_text(e)}[/]")
@@ -6192,7 +6176,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             "Cabin, or comma list for multi-cabin compare ('economy,business'). "
             "Multi-cabin renders one price column per cabin; '—' means that cabin's "
             "search returned no fare for the itinerary. A Google Flights round trip "
-            "prices every cabin on the --sort cabin's first-ranked outbounds; on "
+            "prices every cabin on the --sort cabin's cheapest outbounds; on "
             "Matrix, bump -n for broader overlap across cabins."
         ),
         rich_help_panel=_GROUP_ITINERARY,
@@ -6314,8 +6298,8 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         min=1,
         help=(
             "Result count (matrix: page size; gflight: top_n). On Google Flights it "
-            "keeps the board in Google's ranking and round-trip combinations in "
-            "price order."
+            "keeps the N cheapest rows in price order, ties in Google's order, "
+            "unpriced last; a round trip pins its cheapest outbounds."
         ),
         rich_help_panel=_GROUP_OUTPUT,
     ),
