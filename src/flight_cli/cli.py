@@ -33,7 +33,7 @@ from rich.table import Table
 
 from . import _config
 from ._calendar_split import is_empty_calendar, merge_calendar_results, split_calendar_search
-from ._cross_check import Answers, cross_check
+from ._cross_check import Answers, cross_check, party_price
 from ._cross_check import document as cross_check_document
 
 # The `--gf-transport` vocabulary, from the leaf that costs nothing to import.
@@ -3140,9 +3140,11 @@ def _page_cap_text(opts: SearchOptions | None) -> str | None:
     return _cap_text(opts)
 
 
-def _price_capped(res: SearchResult, opts: SearchOptions) -> SearchResult:
+def _price_capped(res: SearchResult, opts: SearchOptions, *, passengers: int = 1) -> SearchResult:
     """`res` holding only the solutions priced in the search's currency at or
-    under its price cap, or `res` itself when there is no cap.
+    under its price cap, or `res` itself when there is no cap. The cap reads
+    the price the cross-check prints for a party of `passengers`: the total
+    Matrix states for more than one, its listed price for one.
 
     Matrix has no price input, and it answers in price order, so the cut loses
     no cheaper fare. Where the cap drops a fare of this page, the fares past the
@@ -3157,15 +3159,15 @@ def _price_capped(res: SearchResult, opts: SearchOptions) -> SearchResult:
         return res
     currency = opts.currency or "USD"
 
-    def admitted(price: str | None) -> bool:
-        code, amount = _split_price(price)
+    def admitted(it: Itinerary) -> bool:
+        code, amount = _split_price(party_price(it, passengers))
         try:
             value = float(amount)
         except ValueError:
             return False
         return within_price_cap(value, code, cap=cap, cap_currency=currency)
 
-    kept = [it for it in res.solutions if admitted(it.price)]
+    kept = [it for it in res.solutions if admitted(it)]
     count = {"solutionCount": len(kept)} if len(kept) < len(res.solutions) else {}
     raw = res.raw
     if raw is not None:
@@ -3178,7 +3180,7 @@ def _price_capped(res: SearchResult, opts: SearchOptions) -> SearchResult:
                 "solutions": [
                     sol
                     for sol in cast("list[Any]", served.get("solutions") or [])
-                    if admitted(Itinerary.model_validate(sol).price)
+                    if admitted(Itinerary.model_validate(sol))
                 ],
                 **count,
             }
@@ -4762,7 +4764,9 @@ def _answer_cross_check_document(
         if not google_answered:
             raise typer.Exit(1)
     else:
-        matrix_res = _price_capped(cast("SearchResult", matrix_res), opts)
+        matrix_res = _price_capped(
+            cast("SearchResult", matrix_res), opts, passengers=opts.pax.total
+        )
         _report_weave_aftermath(state)
         board = fli_results_to_search_result(gf)
         shown = merge_results(board, matrix_res, currency=currency)[:top_n]
@@ -4906,7 +4910,7 @@ def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, 
             raise typer.Exit(1)
         return
     # Before the merge and the award overlay, so neither sees a fare over the cap.
-    matrix_res = _price_capped(cast("SearchResult", matrix_res), opts)
+    matrix_res = _price_capped(cast("SearchResult", matrix_res), opts, passengers=opts.pax.total)
     _report_weave_aftermath(state)
 
     # Repaint: reconciled GF + Matrix, prices attributed.

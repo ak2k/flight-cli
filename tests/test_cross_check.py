@@ -550,6 +550,30 @@ def test_a_party_is_compared_on_matrixs_total(
     assert doc["cross_check"]["matrix"]["last_price"] == "USD203.60"
 
 
+def _two_parties_of_two(board: SearchResult) -> SearchResult:
+    """ZZ1 at USD70 a passenger and USD140 for two, then `_party_of_two`'s
+    DL1788 at USD103 a passenger and USD203.60 for two."""
+    zz1 = _its(_slice(["ZZ1"]), price="USD70.00").model_copy(update={"display_total": "USD140.00"})
+    return _answer(zz1, *_party_of_two(board).solutions)
+
+
+def test_a_party_cap_holds_matrix_to_the_total_the_table_prints(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    """`--max-price` is compared with the printed price, which for a party is
+    the total: DL1788 is USD103 a passenger but USD203.60 for two, over 150."""
+    _weave(monkeypatch, gf_rows, matrix=_two_parties_of_two)
+    capped = ["--adults", "2", "--max-price", "150", "-n", "3"]
+    result = _run([*_SEARCH, *_LINKLESS, *capped])
+    assert result.exit_code == 0, result.output
+    _, rows, under = _merged_table(result.stdout)
+    assert [r[2] for r in rows if r[2] != "—"] == ["140.00"]
+    assert under.startswith("Matrix listed 1 of 1 solutions (to USD140.00);")
+    xc = _document(_run([*_SEARCH, *capped, "--enrich", "--format", "json"]))["cross_check"]
+    assert xc["matrix"]["listed"] == 1
+    assert [r["matrix_price"] for r in xc["rows"] if r["matrix_price"]] == ["USD140.00"]
+
+
 def test_a_party_matrix_states_no_total_for_shows_no_delta() -> None:
     """Matrix's price per passenger is not the party's price."""
     board = _board()

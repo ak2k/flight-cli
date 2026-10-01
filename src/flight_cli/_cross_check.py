@@ -276,6 +276,12 @@ def _party_price(listed: str | None, it: Itinerary | None, passengers: int) -> s
     return it.display_total if it is not None else None
 
 
+def party_price(it: Itinerary, passengers: int) -> str | None:
+    """The price the cross-check prints for Matrix's solution `it` and a party
+    of `passengers`, which a price cap on that table must read too."""
+    return _party_price(it.price, it, passengers)
+
+
 def _google_only(
     slices: list[Slice], a: Answers, bnd: Boundary, facts: _Facts
 ) -> list[tuple[str, str]]:
