@@ -4009,6 +4009,7 @@ def _answer_gf_empty(
     pinned: int = 0,
     checks: str = "the routing",
     cap: str | None = None,
+    awards_answer: bool = False,
 ) -> None:
     """Answer a Google Flights search that has no rows and is not handed on.
 
@@ -4019,7 +4020,11 @@ def _answer_gf_empty(
     `pinned` is how many outbounds a round trip searched returns for. The
     reason names it, because outbounds below the pins may have matching
     returns that were never searched. `cap` names the price cap the page was
-    asked for, if it was, so a board it served empty says no fare is under it."""
+    asked for, if it was, so a board it served empty says no fare is under it.
+
+    `awards_answer` says the award renderer writes this run's stdout after
+    this: the document under `--format json`, and the whole answer under
+    `--awards-only`. Only the stderr reason is given here then."""
     if dropped and pinned:
         plural = "" if pinned == 1 else "s"
         err.print(
@@ -4032,6 +4037,8 @@ def _answer_gf_empty(
             f"[yellow]Google Flights: no itinerary matched {_safe_text(checks)} "
             f"({dropped:d} rows filtered out).[/]"
         )
+    if awards_answer:
+        return
     if json_out:
         # No rows is a value, and a document is what was asked for. A sentence
         # is for a person; to a consumer it is a parse error where an empty
@@ -4043,7 +4050,7 @@ def _answer_gf_empty(
         console.print("[yellow]Google Flights: no results.[/]")
 
 
-def _run_gflight_path(
+def _run_gflight_path(  # noqa: PLR0912, PLR0915 — every outcome of one Google answer, read in one place
     *,
     legs: tuple[Leg, ...],
     opts: SearchOptions,
@@ -4058,13 +4065,22 @@ def _run_gflight_path(
     gf_headed: bool = False,
     sellers: bool = False,
     matrix_fallback: bool = False,
+    hand_off_failure: bool = False,
 ) -> int | None:
     """Google Flights path: build fli filter → query → render. Single-leg or round-trip.
 
     Returns None once it has answered. The one answer it does not give itself:
     when the routing filter emptied Google's board and `matrix_fallback` is set,
     it prints nothing and returns how many rows the filter dropped, for the
-    caller to hand the search to Matrix with that reason.
+    caller to hand the search to Matrix with that reason. With
+    `hand_off_failure` set, a query that fails is handed on as well: the reason
+    is said here, on stderr, in the words the enriched table uses for it, and
+    the return is 0 so the caller adds none of its own. A failure that is not
+    handed on exits 1 with stdout empty.
+
+    An empty board that is not handed on still runs the awards when `run_pp`
+    is set, so the document an awards run writes has one shape whatever
+    Google served.
 
     When run_pp=True, fli's results are adapted into a SearchResult shape so
     the existing PP matcher + renderer reuse cleanly. PP runs on the same
@@ -4094,11 +4110,21 @@ def _run_gflight_path(
             results = _gflight_results(legs, opts, top_n, gf_mode, gf_headed)
     except GfBackendError as e:
         refusal = _gf_refusal(e, transport=gf_mode, bags=opts.bags is not None)
+        if hand_off_failure:
+            # `removesuffix`, because a browser refusal's note already ends in
+            # the full stop its remedy carries and every other refusal's does not.
+            note = refusal.note.removesuffix(".")
+            err.print(f"[dim]Using Matrix: {note}.[/]")
+            return 0
         err.print(refusal.message)
         raise typer.Exit(1) from e
     except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
         raise
     except Exception as e:
+        if hand_off_failure:
+            note = f"Google Flights query failed: {_safe_text(e)}".removesuffix(".")
+            err.print(f"[dim]Using Matrix: {note}.[/]")
+            return 0
         err.print(f"[red]Google Flights query failed:[/] {_safe_text(e)}")
         raise typer.Exit(1) from e
 
@@ -4115,6 +4141,23 @@ def _run_gflight_path(
     # table is a usage error, not a pin to fall back from, and an empty board
     # leaves nothing to open.
     seller_row = _pick_for_sellers(pick, min(len(results), top_n)) if sellers else None
+    awards_only = sel.awards_only if sel is not None else False
+
+    def run_awards(rows: list[Any], sr: SearchResult) -> None:
+        run_pp_for_search(
+            sr,
+            legs=_build_pp_legs(legs),
+            num_passengers=_seated_pax(opts.pax),
+            airlines=sel.pp_airlines() if sel is not None else None,
+            cabins=sel.pp_cabins() if sel is not None else None,
+            pp_only=awards_only,
+            json_out=json_out,
+            provider_filter=sel.provider_filter if sel is not None else None,
+            seats_sources=sel.seats_sources() if sel is not None else None,
+            cash_per_cabin=_cash_per_cabin_single(sr, opts.cabin),
+            bags_included=_bags_by_itinerary(rows, sr) if opts.bags is not None else None,
+        )
+
     if not results:
         _answer_gf_empty(
             dropped,
@@ -4122,7 +4165,13 @@ def _run_gflight_path(
             pinned=getattr(results, "pinned", 0),
             checks=_row_checks(legs, opts),
             cap=_page_cap_text(opts),
+            awards_answer=run_pp and (json_out or awards_only),
         )
+        # Award space does not depend on Google's cash board, and the award
+        # renderer is what writes an awards run's document, as it does when
+        # Matrix's answer is empty.
+        if run_pp:
+            run_awards(results, fli_results_to_search_result(results))
         return None
 
     # `-n` is one number for everything the user can act on. Google's page
@@ -4175,7 +4224,6 @@ def _run_gflight_path(
         sys.stdout.write(json.dumps(doc, indent=2, default=str))
         return None
 
-    awards_only = sel.awards_only if sel is not None else False
     # `not json_out` as well as `not awards_only`: the early return above fires
     # only with awards OFF, so with them on the document is written further
     # down by the award renderer and every human surface between here and it
@@ -4206,20 +4254,7 @@ def _run_gflight_path(
     sr = fli_results_to_search_result(results)
 
     if run_pp:
-        p = opts.pax
-        run_pp_for_search(
-            sr,
-            legs=_build_pp_legs(legs),
-            num_passengers=_seated_pax(p),
-            airlines=sel.pp_airlines() if sel is not None else None,
-            cabins=sel.pp_cabins() if sel is not None else None,
-            pp_only=awards_only,
-            json_out=json_out,
-            provider_filter=sel.provider_filter if sel is not None else None,
-            seats_sources=sel.seats_sources() if sel is not None else None,
-            cash_per_cabin=_cash_per_cabin_single(sr, opts.cabin),
-            bags_included=_bags_by_itinerary(results, sr) if opts.bags is not None else None,
-        )
+        run_awards(results, sr)
 
     # The URL lines are prose on stdout, and `_emit_urls` is shared text that
     # cannot know which format asked for it, so the guard belongs here.
@@ -6370,7 +6405,10 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         # GF can serve this query — paint it fast (~1s), then enrich against
         # Matrix (authoritative) and repaint a merged table. `--fast` (or JSON
         # output, which wants a single stable shape) takes the GF-only path, and
-        # so does `--bags`: Matrix would answer it without the bags.
+        # so does `--bags`: Matrix would answer it without the bags. JSON on auto
+        # without `--fast` still answers wherever the merged table would, so a
+        # failed Google query hands it to Matrix whole. `--sellers` is not handed
+        # on: its document wraps a Google row, which Matrix cannot supply.
         if not fast and not json_out and bags is not None:
             err.print("[dim]No Matrix enrichment: Matrix prices no bags.[/]")
         elif not fast and not json_out:
@@ -6405,13 +6443,19 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             gf_headed=gf_headed,
             sellers=sellers,
             matrix_fallback=backend == BACKEND_AUTO and bags is None,
+            hand_off_failure=backend == BACKEND_AUTO
+            and bags is None
+            and json_out
+            and not fast
+            and not sellers,
         )
         if unmatched is None:
             return
-        err.print(
-            f"[dim]Using Matrix: no Google Flights itinerary matched "
-            f"{_safe_text(_row_checks(legs, opts))} ({unmatched:d} rows filtered out).[/]"
-        )
+        if unmatched:
+            err.print(
+                f"[dim]Using Matrix: no Google Flights itinerary matched "
+                f"{_safe_text(_row_checks(legs, opts))} ({unmatched:d} rows filtered out).[/]"
+            )
 
     _run_matrix_path(
         legs=legs,
