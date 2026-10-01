@@ -145,9 +145,9 @@ def test_a_row_google_gives_no_estimate_for_carries_only_the_typical() -> None:
 
 def test_the_label_is_googles_for_the_percent_beside_it() -> None:
     """[11] is a label too, against the board's median rather than the route's
-    typical; it differs from [2] on 35 JFK-LAX and 40 JFK-LHR rows and calls
-    rows at 0 or +1% lower. The label printed beside a percent from the typical
-    is the one that describes it."""
+    typical; it differs from [2] on 35 JFK-LAX and 40 JFK-LHR rows and calls 13
+    rows lower at a percent of 0 to +4. The label printed beside a percent from
+    the typical is the one that describes it."""
     differ: dict[str, int] = {}
     for name in _ROW_CAPTURES:
         for raw in _raw_rows(name):

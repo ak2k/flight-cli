@@ -200,6 +200,25 @@ The date grids do not serve any of the new constraints yet: `page_can_encode`
 and each predicate's `Tier` still answer for them, and they have no rows to
 check against. Only the strictest-stops rule reached them.
 
+**Google's CO2 estimate (`row[22]`).** An 18-slot list on all 208 rows of six
+captures: `[7]` the row's grams (whole kilograms), `[8]` the route's typical
+grams (one value per board), `[3]` the signed integer percent from `[8]`, and
+`[2]` Google's label for that comparison (1 lower, 2 typical, 3 higher, 0 none).
+Each leg's own grams are `fl[31]`; `[7]` is their sum rounded to 1000. fli's
+decoder takes the label from `[11]`, which with `[10]` compares the row with the
+board's median grams instead. Google's help compares each flight with the
+route's typical, `[8]`, so the label is `[2]`: `[11]` differs from it on 35 of 95
+JFK-LAX and 40 of 101 JFK-LHR rows, and labels 13 rows lower at a percent of 0
+to +4. JFK-LAX states grams on 95 of 95 rows and JFK-LHR on 100 of 101 (VS46
+states only the typical). Each direction is its own: the HNL-MIA outbound page
+states 4264000 and its pinned return board 1539000, and no page states a pair
+total. Google says the estimate is for the passengers searched; only one adult
+has been measured. Each Google JSON row fills `co2_emissions_g`,
+`co2_emissions_typical_g`, `co2_emissions_delta_pct` and `emissions_tag`, and
+each leg `co2_emissions_g`, null where the slot is empty. The Google table adds
+`CO2 kg` (kilograms and the percent; green lower, red higher) when a shown row
+has a figure.
+
 **How the full board is served.**
 - Rows are deduped per itinerary (every leg's carrier, flight number and
   departure datetime), keeping the priced and cheaper listing at the first
