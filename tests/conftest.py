@@ -47,6 +47,13 @@ from flight_cli import _gf_browser
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+# Today, for the modules whose searches carry literal travel dates. fli refuses a
+# travel date before today, so those modules pin the clock before every date they
+# search on, the earliest being 2026-10-14. time-machine reads a naive datetime as
+# UTC, and noon UTC keeps the local date before that in any timezone. Naive,
+# because an aware one makes time-machine set TZ=UTC for the test.
+LITERAL_DATES_NOW = datetime.datetime(2026, 9, 30, 12)
+
 
 @pytest.fixture(autouse=True)
 def _no_forced_terminal(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[reportUnusedFunction] - autouse pytest fixture

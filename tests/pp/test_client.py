@@ -81,6 +81,18 @@ def test_enabled_returns_pricing_order():
 # ───────────── unsupported-airline negative cache (400 spam fix) ─────────────
 
 
+def _write_fresh_legacy(cache: pathlib.Path, text: str) -> None:
+    """Write a legacy flat-list cache that counts as learned just now.
+
+    Legacy entries are dated from the file's mtime, which the filesystem takes
+    from the real clock, while the TTL is measured on `time.time()`. The two
+    agree only while nothing moves the process clock, so the mtime is set from
+    `time.time()` itself."""
+    cache.write_text(text)
+    now = time.time()
+    os.utime(cache, (now, now))
+
+
 def test_is_unsupported_airline_response_matches_the_real_body() -> None:
     """The exact shape PP returns for an airline it doesn't serve."""
     assert is_unsupported_airline_response(400, '{"error":"unsupported airline"}') is True
@@ -141,7 +153,7 @@ def test_unsupported_cache_reads_legacy_list_format(
     """The first version wrote a flat list. A freshly-written one is honoured,
     so upgrading doesn't re-query every unsupported airline."""
     cache = tmp_path / "unsupported.json"
-    cache.write_text(json.dumps(["ANA", "Southwest"]))
+    _write_fresh_legacy(cache, json.dumps(["ANA", "Southwest"]))
     monkeypatch.setattr("flight_cli.pp.client.UNSUPPORTED_CACHE", cache)
     assert load_unsupported_airlines() == frozenset({"ANA", "Southwest"})
 
@@ -178,7 +190,7 @@ def test_unsupported_cache_tolerates_corrupt_file(tmp_path: pathlib.Path, monkey
     assert load_unsupported_airlines() == frozenset()
     cache.write_text("[1, 2, 3]")  # right container, wrong element type
     assert load_unsupported_airlines() == frozenset()
-    cache.write_text('["ANA", 42, null]')  # legacy list, mixed types
+    _write_fresh_legacy(cache, '["ANA", 42, null]')  # legacy list, mixed types
     assert load_unsupported_airlines() == frozenset({"ANA"})
     cache.write_text('{"ANA": "yesterday"}')  # non-numeric timestamp
     assert load_unsupported_airlines() == frozenset()
