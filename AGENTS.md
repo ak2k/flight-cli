@@ -224,8 +224,12 @@ Full detail at [`docs/memories/MEMORY.md`](./docs/memories/MEMORY.md).
    `isArrivalDate` always; calendar + followup omit them. Followup omits
    `inputs.filter`. Calendar has `page: {size}`; specific + followup have
    `page: {current, size}`.
-3. **`maxLegsRelativeToMin` defaults to 1**, not 10. Matches the SPA's
-   "No limit" UI default. User override via `--stops N`.
+3. **`--stops N` is `MAXSTOPS N` in each slice's `commandLine`.**
+   `maxLegsRelativeToMin` counts legs beyond the route's own minimum, not
+   stops: alone, 0 still answers one-stop trips on a route with no nonstop.
+   It is sent as N too, or as 1 (the SPA's "No limit" default) when `--stops`
+   is unset. `MAXSTOPS N` goes after the user's own codes unless every
+   MAXSTOPS they typed is already N or fewer.
 4. **`timeRanges` is more flexible than the 6 named buckets.** Matrix
    accepts arbitrary `{min: "HH:MM", max: "HH:MM"}` ranges and multi-range
    arrays. The 6-bucket UI is one interface; the underlying API takes any

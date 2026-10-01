@@ -457,6 +457,13 @@ def award_route_time_key(af: AwardFlight) -> RouteTimeKey | None:
     return (o, d, t)
 
 
+def _same_end(award_code: str, cash_code: str) -> bool:
+    """False only when both sides name an airport and the two differ: a
+    missing code is no evidence. `cash_code` comes uppercased."""
+    a = (award_code or "").upper()
+    return not a or not cash_code or a == cash_code
+
+
 @dataclass
 class MatchedFare:
     """One cash itinerary with zero-or-more award flights attached."""
@@ -504,7 +511,8 @@ def join(
     a flight satisfying multiple keys isn't double-attached. Every attached
     award must also agree with the cash slice on connection count — a 1-stop
     award is cheaper than the nonstop it would be rendered beside, so it wins
-    the renderer's lowest-miles pick and prints under a "nonstop" label.
+    the renderer's lowest-miles pick and prints under a "nonstop" label — and
+    on origin and destination wherever both sides name them.
 
     Cash itineraries with no award match keep an empty `awards` list — caller
     decides whether to render them or filter to inner-join.
@@ -578,11 +586,21 @@ def join(
                     seen_raw.add(id(af))
                     raw.append(af)
 
-        # Connection count is an objective property of the journey, so drop
-        # mismatches BEFORE resolution — otherwise an ineligible candidate can
-        # make the field look ambiguous and suppress a valid codeshare that
-        # would have won on its own.
-        raw = [af for af in raw if af.num_connections == cash_stops]
+        # Connection count and route are objective properties of the journey,
+        # so drop mismatches BEFORE resolution — otherwise an ineligible
+        # candidate can make the field look ambiguous and suppress a valid
+        # codeshare that would have won on its own. The route check binds the
+        # matched-id key alone, the other two key on the route already: an
+        # award from another airport of the searched set can echo this row's id.
+        cash_o = ((s.origin.code if s and s.origin else None) or "").upper()
+        cash_d = ((s.destination.code if s and s.destination else None) or "").upper()
+        raw = [
+            af
+            for af in raw
+            if af.num_connections == cash_stops
+            and _same_end(af.origin, cash_o)
+            and _same_end(af.destination, cash_d)
+        ]
 
         matched = _pick_metal(
             cash_fn,

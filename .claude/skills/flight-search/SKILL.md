@@ -35,14 +35,15 @@ Global flags (every search-printing command):
 - `--bags CHECKED[,CARRY]` — `search` only, Google Flights only: prices fares with CHECKED checked bags and CARRY (0 or 1, default 0) carry-ons, and labels each row with the bags Google says its price includes (`incl.` / `not incl.` / `unknown`; JSON `bags_included`). Refused rather than sent to Matrix (which prices no bags); one traveler, one `--cabin`, no `--sellers`.
 - Google rows carry Google's own CO2 estimate, no flag needed: JSON `co2_emissions_g`, `co2_emissions_typical_g` (the route's typical), `co2_emissions_delta_pct` and `emissions_tag` (`lower` / `typical` / `higher`), plus each leg's `co2_emissions_g`; the table's `CO2 kg` column shows kilograms and the percent (green lower, red higher). Null or blank where Google states none.
 - `--providers pp[,seats]` — restrict to a named subset of award providers (default: all configured)
+- Awards over an airport set or metro code (`JFK,EWR`, `NYC`) are asked pair by pair, at most 8 pairs a search (pairs the cash rows fly first); the pairs left out are named on stderr and in the JSON leg's `pairs_not_asked`, so narrow the set rather than trust a missing award there
 - `--provider-opt KEY=VAL` — per-provider override, repeatable, e.g. `--provider-opt pp.airlines=United,Delta` or `--provider-opt pp.cabins=Economy,Business`. Defaults live in `~/.config/flight-cli/config.toml` under `[providers.<name>]` tables.
 
 ## Intent → flag cheat sheet
 
 | User says… | Reach for… |
 |---|---|
-| "max 1 stop" / "at most one connection" | `--stops 1` |
-| "nonstop only" | `--stops 0` |
+| "max 1 stop" / "at most one connection" | `--stops 1` (per direction) |
+| "nonstop only" | `--stops 0` (per direction) |
 | "Star Alliance only" | `--extension 'ALLIANCE star-alliance'` |
 | "Oneworld" / "SkyTeam" | `--extension 'ALLIANCE oneworld'` / `ALLIANCE skyteam` |
 | "no red-eyes" | `--extension '-REDEYES'` |
