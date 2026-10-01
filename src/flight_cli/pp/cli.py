@@ -12,7 +12,7 @@ import json
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from itertools import groupby
+from itertools import groupby, islice
 from pathlib import Path  # noqa: TC003 - typer evaluates annotations at runtime
 from typing import TYPE_CHECKING, Annotated, Any, Final
 
@@ -283,6 +283,10 @@ def _normalize_cabin(c: str) -> str:
 # 36 pairs) is cut to this many and the output names the pairs left unasked.
 MAX_AWARD_PAIR_QUERIES: Final = 8
 
+# PointsPath rejects a very large `googleFlightDetails` array, so one pair
+# query carries at most this many cash hints.
+_HINTS_PER_QUERY: Final = 50
+
 
 def _pair_query_cap(n_legs: int) -> int:
     """The most pair queries one search asks: never fewer than one a leg."""
@@ -434,16 +438,25 @@ def run_pp_for_search(
     # and the matcher's matched-id key becomes available. Matrix-built
     # SearchResults won't have flight_id populated; hints stays empty. A query
     # carries only the hints of rows on its own pair, so a provider is never
-    # handed an id it could echo onto an award from another airport.
+    # handed an id it could echo onto an award from another airport. The cap
+    # applies after that filter: another airport's rows filling it would send
+    # a pair with no hint, and so with matching off.
     slice_hints = {
-        leg.slice_index: cash_hints_from_search_result(res, slice_index=leg.slice_index)
+        leg.slice_index: cash_hints_from_search_result(
+            res, slice_index=leg.slice_index, max_hints=sys.maxsize
+        )
         for leg in plan
     }
     cash_hints_per_query: list[tuple[CashFlightHint, ...]] = [
         tuple(
-            h
-            for h in slice_hints[q.slice_index]
-            if (h.origin, h.dest) == (q.origin.upper(), q.destination.upper())
+            islice(
+                (
+                    h
+                    for h in slice_hints[q.slice_index]
+                    if (h.origin, h.dest) == (q.origin.upper(), q.destination.upper())
+                ),
+                _HINTS_PER_QUERY,
+            )
         )
         for q in queries
     ]

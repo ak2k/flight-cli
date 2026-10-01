@@ -264,6 +264,51 @@ def test_each_pair_query_carries_only_its_own_rows_hints(
     }
 
 
+def _priced_row(origin: str, flight_id: str, minute: int) -> dict[str, Any]:
+    return {
+        "ext": {"price": "USD179.00"},
+        "itinerary": {
+            "slices": [
+                {
+                    "flights": [f"B6{100 + minute}"],
+                    "departure": f"2026-11-04T06:{minute:02d}",
+                    "arrival": f"2026-11-04T09:{minute:02d}",
+                    "origin": {"code": origin},
+                    "destination": {"code": "LAX"},
+                    "flight_id": flight_id,
+                }
+            ]
+        },
+    }
+
+
+def test_a_pair_gets_its_own_rows_hints_when_another_pair_has_more_than_the_hint_cap(
+    arms: _Arms,
+) -> None:
+    """51 priced JFK rows rank ahead of one EWR row. Each pair query is capped
+    at 50 hints of its own rows, so the EWR query carries the EWR row's id and
+    the provider matches on it; without a hint it would not."""
+    rows = [_priced_row("JFK", f"jfk{i:02d}", i) for i in range(51)]
+    res = SearchResult.from_api(
+        {"solutionList": {"solutions": [*rows, _priced_row("EWR", "ewr", 59)]}}
+    )
+    label = "one-way JFK,EWR→LAX 2026-11-04"
+
+    pp_cli.run_pp_for_search(
+        res,
+        legs=[
+            LegQuery("JFK", "LAX", "2026-11-04", 0, label),
+            LegQuery("EWR", "LAX", "2026-11-04", 0, label),
+        ],
+        json_out=True,
+    )
+
+    assert {c.pair: _hint_ids(c) for c in arms.calls} == {
+        "JFK-LAX": [f"jfk{i:02d}" for i in range(50)],
+        "EWR-LAX": ["ewr"],
+    }
+
+
 def _award(fn: str, origin: str, departure: str, matched_id: str) -> AwardFlight:
     return AwardFlight(
         origin=origin,
