@@ -296,6 +296,12 @@ leg fan-out picks it up — the matcher and renderers stay provider-blind.
 - Domain `InputValidationError`-style errors should never shadow
   `pydantic.ValidationError` — keep our errors named distinctly
   (`MatrixApiError`, `ApiKeyResolutionError`).
+- fli's `Airport` enum makes 48 codes aliases of another airport
+  (`Airport.OKA` is NAH, Naha in Indonesia), so a lookup through it asks Google
+  for the wrong airport. Build airport members only through
+  `fli_bridge.fli_airport`; a test fails on `getattr`/`hasattr`/`Airport[...]`
+  on the enum under `src/`. MLH alone resolves to BSL, the same airport. See
+  [`gf_routing_and_carriers.md`](./docs/memories/gf_routing_and_carriers.md).
 
 ## Agent skill
 

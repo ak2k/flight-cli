@@ -3,8 +3,8 @@
 How `--routing`/`--extension` reach Google Flights, and the carrier-identity
 indices that make it correct. Read before touching `routing_predicates.py`,
 `_gf_postfilter.py`, `fli_bridge.apply_gf_native_filters`,
-`links.build_search_tfs`, or `_gflight_ids._parse_leg_amenities` /
-`_flight_leg`.
+`links.build_search_tfs`, `fli_bridge.fli_airport`, or
+`_gflight_ids._parse_leg_amenities` / `_flight_leg`.
 
 ## Booking carrier: `fl[15]` (marketing) vs `fl[22]` (operating)
 
@@ -96,6 +96,25 @@ ANY — writing a literal 0 pins every search to nonstop. **Carrier codes come
 from the enum NAME, not its value**: fli maps codes to display names
 (`Airline._0B.value == "Blue Air"`) and underscore-prefixes digit-leading ones,
 so `airline.name.removeprefix("_")` is the code.
+
+**Airport codes come from the member's name as well, and fli's enum aliases 48
+of them to another airport.** `Airport` is an enum over a code -> display-name
+table, so a code whose display name repeats an earlier one is an alias of that
+member: `Airport.OKA` is `Airport.NAH` (Naha in Indonesia, not Okinawa), as NTL
+is NCL, TRI is PSC, SVC is PGC and ZFA is FAO. A lookup through the enum asks
+Google for the other airport, and fli's row decoder has no entry for an alias,
+so every row Google serves at one fails. Build airport members only through
+`fli_bridge.fli_airport`, which gives each aliased code a member of its own,
+named that code with the same display name (so the JSON dump shows "Naha
+Airport" for OKA and NAH alike). `tests/test_airport_alias_requests.py` fails
+on any `getattr`/`hasattr` call on the enum or `Airport[...]` subscript under
+`src/`. MLH is the one alias kept: it is EuroAirport's second code, the same
+airport as BSL, and Google serves it only as BSL (JFK-MLH asked for MLH gave an
+empty board, asked for BSL 8 rows). Measured 2026-10-01: `flight search LAX OKA
+--dep 2026-10-20 --backend gflight --fast --format json` through the enum
+printed `[]` with exit 0; through `fli_airport` it printed 27 rows (CI, BR, CX
+via TPE or HKG, from USD577), each landing at OKA by its clock span: departure
+to arrival less elapsed time is +960 minutes from LAX, where NAH gives +900.
 
 **What the page costs us.** Without `tfu=` it serves Google's top ~30 rows per
 leg. `links.google_flights_search_page_url` always sends `tfu=EgQIABABIgA`
