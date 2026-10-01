@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from ..._envelope import narrow
 from ..base import AwardFlight, CabinAward
 from .auth import SeatsAuthError, is_configured
 from .client import SeatsAeroClient, SeatsAeroError
@@ -282,9 +283,11 @@ class SeatsAeroProvider:
         except SeatsAeroError as e:
             # Provider-level failures (auth, network, schema) are non-fatal:
             # log + return [] so the registry can move on to other providers.
+            narrow()
             log.warning("seats_aero_search_failed", error=str(e), status=e.status)
             return []
         except Exception as e:  # noqa: BLE001 — propagate-to-registry pattern
+            narrow()
             log.warning("seats_aero_search_failed", error=str(e))
             return []
 

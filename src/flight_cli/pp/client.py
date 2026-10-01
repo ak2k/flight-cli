@@ -22,6 +22,7 @@ import anyio
 import httpx
 import structlog
 
+from .._envelope import narrow
 from .auth import Tokens, get_valid_tokens
 from .auth import refresh as refresh_tokens
 from .models import AirlineSearchResponse, PricingInfoResponse
@@ -261,6 +262,7 @@ class PPClient:
                 remember_unsupported_airline(airline)
                 log.debug("pp_airline_unsupported", airline=airline)
             else:
+                narrow()
                 log.warning(
                     "pp_airline_search_failed",
                     airline=airline,
@@ -290,6 +292,7 @@ class PPClient:
             try:
                 out[airline] = await self.airline_search(spec, airline)
             except Exception as e:  # noqa: BLE001 - per-airline failures are non-fatal
+                narrow()
                 # Some exceptions, httpx.ReadTimeout among them, have an empty
                 # str(); the type is then the only reason the log carries.
                 log.warning(

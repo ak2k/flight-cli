@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 import anyio
 import structlog
 
+from .._envelope import narrow
 from .pointspath.provider import PointsPathProvider
 from .pointspath.provider import is_configured as pp_is_configured
 from .seats_aero.auth import is_configured as seats_is_configured
@@ -55,12 +56,14 @@ async def _construct_enabled(
         try:
             out.append(await PointsPathProvider.create(explicit_airlines=pp_airlines))
         except Exception as e:  # noqa: BLE001 — per-provider failures are non-fatal
+            narrow()
             log.warning("provider_init_failed", provider="PointsPath", error=str(e))
     allow_seats = provider_filter is None or _matches(provider_filter, "seats-aero")
     if allow_seats and seats_is_configured():
         try:
             out.append(await SeatsAeroProvider.create(explicit_airlines=seats_sources))
         except Exception as e:  # noqa: BLE001 — per-provider failures are non-fatal
+            narrow()
             log.warning("provider_init_failed", provider="Seats.aero", error=str(e))
     return out
 
@@ -100,6 +103,7 @@ async def _gather_one_leg(
                 cash_hints=cash_hints,
             )
         except Exception as e:  # noqa: BLE001 — surface provider failures, keep others
+            narrow()
             log.warning("provider_search_failed", provider=p.name, error=str(e))
 
     async with anyio.create_task_group() as tg:

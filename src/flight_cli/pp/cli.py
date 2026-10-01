@@ -21,6 +21,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from .. import _envelope
 from ..providers.registry import gather_awards
 from .auth import (
     TOKENS_PATH,
@@ -399,23 +400,8 @@ def run_pp_for_search(
     Google says each of its slices is priced with, None where it does not say.
     When given, each cash match in the JSON document carries its slice's.
     """
-    # PP tokens are required only if PP is actually going to run. Skip the
-    # pre-flight check when the filter excludes PP — otherwise a seats-only
-    # invocation errors here before seats even gets a chance to run.
-    pp_in_filter = provider_filter is None or any(
-        p.strip().lower() == "pp" for p in provider_filter
-    )
-    if pp_in_filter:
-        try:
-            get_valid_tokens()  # validate + refresh up-front, surface a clear error
-        except PPAuthError as e:
-            # Soft-warn if PP fails but other providers might still run.
-            # When PP is the only target (filter explicitly == "pp"), it's
-            # a hard error; otherwise log and continue.
-            if provider_filter == ("pp",):
-                err.print(f"[red]--pp: {e}[/]")
-                return
-            err.print(f"[yellow]PointsPath skipped: {e}[/]")
+    if not _pp_preflight(provider_filter):
+        return
 
     cabin_list = tuple(_normalize_cabin(c) for c in _parse_csv(cabins, DEFAULT_CABINS))
     explicit_airlines = _parse_csv(airlines, ()) if airlines else None
@@ -424,6 +410,7 @@ def run_pp_for_search(
     cap = _pair_query_cap(len(plan))
     for leg in plan:
         if leg.not_asked:
+            _envelope.narrow()
             err.print(
                 _not_asked_line(leg, cap),
                 style="yellow",
@@ -486,6 +473,8 @@ def run_pp_for_search(
     try:
         per_query = anyio.run(_go)
     except Exception as e:  # noqa: BLE001 — surface anything to user, don't crash CLI
+        _envelope.narrow()
+        _envelope.explain("awards", "the award query failed")
         err.print(f"[red]--pp: award query failed: {e}[/]")
         return
 
@@ -495,8 +484,68 @@ def run_pp_for_search(
         end = start + len(leg.asked)
         per_leg.append([af for awards in per_query[start:end] for af in awards])
         start = end
+    _deliver_awards(
+        res,
+        plan,
+        per_leg,
+        pp_only=pp_only,
+        json_out=json_out,
+        cabin_list=cabin_list,
+        cash_per_cabin=cash_per_cabin,
+        num_passengers=num_passengers,
+        bags_included=bags_included,
+    )
 
+
+def _pp_preflight(provider_filter: tuple[str, ...] | None) -> bool:
+    """Validate and refresh PointsPath's tokens ahead of the fan-out, so a bad
+    login reads as itself. False when PointsPath was the one provider asked
+    for and could not run, and the award search stops there."""
+    # PP tokens are required only if PP is actually going to run. Skip the
+    # pre-flight check when the filter excludes PP — otherwise a seats-only
+    # invocation errors here before seats even gets a chance to run.
+    pp_in_filter = provider_filter is None or any(
+        p.strip().lower() == "pp" for p in provider_filter
+    )
+    if not pp_in_filter:
+        return True
+    try:
+        get_valid_tokens()  # validate + refresh up-front, surface a clear error
+    except PPAuthError as e:
+        # Soft-warn if PP fails but other providers might still run.
+        # When PP is the only target (filter explicitly == "pp"), it's
+        # a hard error; otherwise log and continue.
+        if provider_filter == ("pp",):
+            _envelope.narrow()
+            _envelope.explain("awards", "PointsPath, the one provider asked for, could not run")
+            err.print(f"[red]--pp: {e}[/]")
+            return False
+        # Narrower only when PointsPath was asked for: by name, or by tokens
+        # that then failed. A user with no tokens never asked it.
+        if provider_filter is not None or load_tokens() is not None:
+            _envelope.narrow()
+        err.print(f"[yellow]PointsPath skipped: {e}[/]")
+    return True
+
+
+def _deliver_awards(
+    res: SearchResult,
+    plan: list[_AwardLeg],
+    per_leg: list[list[AwardFlight]],
+    *,
+    pp_only: bool,
+    json_out: bool,
+    cabin_list: tuple[str, ...],
+    cash_per_cabin: Mapping[int, Mapping[str, float]] | None,
+    num_passengers: int,
+    bags_included: Mapping[int, Sequence[tuple[int | None, int | None]]] | None,
+) -> None:
+    """The award answer: the envelope's `awards` in an envelope run, the JSON
+    document under `--format json`, or one table per leg."""
     if pp_only:
+        if _envelope.active():
+            _envelope.record_awards(json.loads(_serialize_pp_only_per_leg(per_leg, plan)))
+            return
         if json_out:
             sys.stdout.write(_serialize_pp_only_per_leg(per_leg, plan))
             return
@@ -509,6 +558,13 @@ def run_pp_for_search(
         join(res, awards, slice_index=leg.slice_index)
         for leg, awards in zip(plan, per_leg, strict=True)
     ]
+    if _envelope.active():
+        _envelope.record_awards(
+            json.loads(
+                _serialize_matches_per_leg(matches_per_leg, plan, bags_included, every_flight=True)
+            )
+        )
+        return
     if json_out:
         sys.stdout.write(_serialize_matches_per_leg(matches_per_leg, plan, bags_included))
         return
@@ -914,6 +970,8 @@ def _serialize_matches(
     matches: list[MatchedFare],
     slice_index: int = 0,
     bags_included: Mapping[int, Sequence[tuple[int | None, int | None]]] | None = None,
+    *,
+    every_flight: bool = False,
 ) -> str:
     """`slice_index` selects the leg to describe — it MUST match the leg whose
     awards are being serialized. Hardcoding slice 0 made the `--json` return
@@ -921,7 +979,9 @@ def _serialize_matches(
     return leg's awards, while the wrapper labelled it "return".
 
     With `bags_included`, each match also says what bags its slice is priced
-    with; a slice the map does not cover says nothing, as null."""
+    with; a slice the map does not cover says nothing, as null. With
+    `every_flight`, it also carries `flights`, every flight of its slice:
+    `flight` alone names a connection by its first."""
     out: list[dict[str, Any]] = []
     for m in matches:
         itn = m.itinerary.itinerary
@@ -930,8 +990,10 @@ def _serialize_matches(
             if itn and itn.slices and slice_index < len(itn.slices)
             else None
         )
-        row: dict[str, Any] = {
-            "flight": (s.flights[0] if s and s.flights else None),
+        row: dict[str, Any] = {"flight": (s.flights[0] if s and s.flights else None)}
+        if every_flight:
+            row["flights"] = list(s.flights) if s else []
+        row |= {
             "departure": (s.departure if s else None),
             "origin": (s.origin.code if s and s.origin else None),
             "destination": (s.destination.code if s and s.destination else None),
@@ -961,13 +1023,19 @@ def _serialize_matches_per_leg(
     matches_per_leg: list[list[MatchedFare]],
     legs: list[_AwardLeg],
     bags_included: Mapping[int, Sequence[tuple[int | None, int | None]]] | None = None,
+    *,
+    every_flight: bool = False,
 ) -> str:
     return json.dumps(
         [
             _leg_entry(
                 leg,
                 "matches",
-                json.loads(_serialize_matches(matches, leg.slice_index, bags_included)),
+                json.loads(
+                    _serialize_matches(
+                        matches, leg.slice_index, bags_included, every_flight=every_flight
+                    )
+                ),
             )
             for leg, matches in zip(legs, matches_per_leg, strict=True)
         ],

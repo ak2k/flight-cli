@@ -21,7 +21,7 @@ import re
 import sys
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
-from functools import partial
+from functools import partial, wraps
 from typing import TYPE_CHECKING, Annotated, Any, NamedTuple, NoReturn, assert_never, cast
 
 import anyio
@@ -31,7 +31,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
-from . import _config
+from . import _config, _envelope
 from ._calendar_split import (
     Pair,
     calendar_pair,
@@ -60,7 +60,7 @@ from ._gf_errors import (
     GfUpstreamStatusError,
 )
 from ._metro import expand_airports, gf_leg_refusal
-from ._multi_cabin import MultiCabinRow, parse_price
+from ._multi_cabin import MultiCabinRow, parse_price, price_currency
 from ._multi_cabin import merge as _merge_cabins
 from .client import MatrixApiError, MatrixClient
 from .domain import (
@@ -91,6 +91,7 @@ from .links import (
 )
 from .log import configure as configure_logging
 from .models import FareRulesResult, Itinerary
+from .pp import cli as _pp_cli
 from .pp.auth import load_tokens
 from .pp.cli import auth_app, run_pp_for_search
 from .providers.base import LegQuery
@@ -101,7 +102,7 @@ if TYPE_CHECKING:
     from ._gf_booking import BookingOptions
     from ._gf_calgraph import GraphRange, LostLength, PriceGraph
     from ._gf_explore import Destination, ExploreAnswer, TripLength
-    from ._gflight_ids import Board, GfTransport, ItineraryKey, PriceInsight
+    from ._gflight_ids import Board, GfTransport, ItineraryKey, PriceHistory, PriceInsight
     from .models import (
         BookingDetailsResult,
         CalendarResult,
@@ -1055,6 +1056,7 @@ def _should_run_awards(sel: ProviderSelection) -> bool:
     import + one entry in the `known` map.
     """
     if sel.cash_only:
+        _envelope.explain("awards", "--cash-only skips the award search")
         return False
     # Lazy-imported to avoid the registry/CLI import cycle and to keep PP's
     # token-load (which touches disk) out of the cli module top-level.
@@ -1074,6 +1076,7 @@ def _should_run_awards(sel: ProviderSelection) -> bool:
                 "Run `flight auth pp login` or `flight auth seats-aero key <KEY>` first.",
             )
             raise typer.Exit(2)
+        _envelope.explain("awards", "no award provider is configured")
         return False
     # Filter matches at least one configured provider? Values are already
     # canonical (normalized by _resolve_providers), so a direct membership
@@ -1088,6 +1091,7 @@ def _should_run_awards(sel: ProviderSelection) -> bool:
                 "matches no configured provider.[/]",
             )
             raise typer.Exit(2)
+        _envelope.explain("awards", "--providers names no configured provider")
         return False
     return True
 
@@ -1558,6 +1562,7 @@ def _report_calendar_fanout(fan: _CalendarFanout, total: int, *, merged_empty: b
             "priced a day; ",
         )
         raise typer.Exit(1)
+    _envelope.narrow()
     err.print(
         f"[yellow]{fan.failed:d} of {total:d} sub-queries failed; those origin/destination "
         f"groups are missing from the grid below: {_safe_text(', '.join(fan.lost))}.[/]"
@@ -1619,6 +1624,7 @@ def _run_calendar(
     multi = bool(subs)  # split returns [] when one query already covers the request
     conc = min(n, max(1, max_concurrency)) if multi else 3
     if multi and max_per_query > 1:
+        _envelope.narrow()
         err.print(
             "[yellow]--max-per-query > 1: Matrix may under-report a "
             "multi-destination request, so results could be incomplete.[/]"
@@ -1939,6 +1945,16 @@ def _run_fast_browser_grid(
     def _write_answer() -> None:
         if json_out:
             doc = document(priced, origin=",".join(origins), destination=",".join(dests))
+            if _envelope.active():
+                grid: list[dict[str, Any]] = doc["grid"]
+                _envelope.record_calendar(
+                    backend="gflight",
+                    rows=[
+                        _envelope.ResultRow(price=cell["price"], currency=doc["currency"], row=cell)
+                        for cell in grid
+                    ],
+                )
+                return
             sys.stdout.write(json.dumps(doc, indent=2))
             return
         _render_date_grid(
@@ -2147,6 +2163,9 @@ def _run_matrix_calendar(
                 "[dim]Round trips that return to another airport of the set are missing: "
                 "only the combined query prices them, and it failed.[/]"
             )
+    if _envelope.active():
+        _envelope.record_calendar(backend="matrix", rows=_calendar_envelope_rows(res))
+        return
     if json_out:
         sys.stdout.write(json.dumps(res.raw, indent=2))
         return
@@ -3412,7 +3431,13 @@ def _run_matrix_path(
             ),
             fare_rules=True,
         )
-    if json_out and not run_pp:
+    if _envelope.active():
+        _envelope.record_search(
+            backend="matrix", cabin=opts.cabin.value, rows=_matrix_envelope_rows(res)
+        )
+        if not run_pp:
+            return
+    elif json_out and not run_pp:
         if not fare_rules:
             sys.stdout.write(json.dumps(res.raw, indent=2))
             return
@@ -3903,6 +3928,97 @@ def _gflight_json_document(results: list[Any], bags: Bags | None = None) -> list
     return out
 
 
+def _record_google_cabin(
+    cabin: Cabin,
+    results: list[Any],
+    *,
+    insight: PriceInsight | None,
+    history: PriceHistory | None,
+    bags: Bags | None = None,
+) -> None:
+    """Hand one cabin's Google rows to the envelope run, with its page's insight
+    and history. Each row is the object `_gflight_json_document` prints for it,
+    priced by its last member: a round trip's fare is the one every surface
+    prints for the combination."""
+    if not _envelope.active():
+        return
+    printed: list[Any] = json.loads(json.dumps(_gflight_json_document(results, bags), default=str))
+    rows: list[_envelope.ResultRow] = []
+    for r, row in zip(results, printed, strict=True):
+        last = cast("tuple[Any, ...]", r)[-1] if isinstance(r, tuple) else r
+        rows.append(
+            _envelope.ResultRow(
+                price=cast("float | None", last.flight.price),
+                currency=cast("str | None", last.flight.currency),
+                row=row,
+            )
+        )
+    _envelope.record_search(
+        backend="gflight",
+        cabin=cabin.value,
+        rows=rows,
+        insight=None
+        if insight is None
+        else _envelope.Insight(
+            cabin=cabin.value,
+            currency=insight.currency,
+            cheapest=insight.cheapest,
+            typical_low=insight.typical_low,
+            typical_high=insight.typical_high,
+            level=insight.level,
+        ),
+        history=None
+        if history is None
+        else _envelope.PriceHistory(
+            cabin=cabin.value,
+            currency=history.currency,
+            points=[_envelope.PricePoint(date=d, price=v) for d, v in history.points],
+        ),
+    )
+
+
+def _matrix_envelope_rows(res: SearchResult) -> list[_envelope.ResultRow]:
+    """`res`'s solutions as envelope rows: each the solution object of Matrix's own
+    answer, the body `--format json` prints, or its parsed model where that body
+    holds no list matching it."""
+    listed: Any = (res.raw or {}).get("solutionList")
+    raw: Any = cast("dict[str, Any]", listed).get("solutions") if isinstance(listed, dict) else None
+    objs: list[Any] = (
+        cast("list[Any]", raw)
+        if isinstance(raw, list) and len(cast("list[Any]", raw)) == len(res.solutions)
+        else [s.model_dump(mode="json", by_alias=True, exclude_none=True) for s in res.solutions]
+    )
+    return [
+        _envelope.ResultRow(price=parse_price(it.price), currency=price_currency(it.price), row=obj)
+        for it, obj in zip(res.solutions, objs, strict=True)
+    ]
+
+
+def _calendar_envelope_rows(res: CalendarResult) -> list[_envelope.ResultRow]:
+    """Each priced day of a Matrix calendar as envelope rows, the day object as
+    the body `--format json` prints holds it."""
+
+    def items(holder: Any, key: str) -> list[Any]:
+        found: Any = cast("dict[str, Any]", holder).get(key) if isinstance(holder, dict) else None
+        return cast("list[Any]", found) if isinstance(found, list) else []
+
+    rows: list[_envelope.ResultRow] = []
+    for month in items((res.raw or {}).get("calendar"), "months"):
+        for week in items(month, "weeks"):
+            for day in items(week, "days"):
+                if not isinstance(day, dict):
+                    continue
+                fields = cast("dict[str, Any]", day)
+                price: Any = fields.get("minPrice")
+                if isinstance(price, str) and price and not fields.get("disabled"):
+                    rows.append(
+                        _envelope.ResultRow(
+                            price=parse_price(price), currency=price_currency(price), row=fields
+                        )
+                    )
+    return rows
+
+
 def _bags_by_itinerary(
     results: list[Any], sr: SearchResult
 ) -> dict[int, list[tuple[int | None, int | None]]]:
@@ -4249,7 +4365,8 @@ def _answer_gf_empty(
 
     `awards_answer` says the award renderer writes this run's stdout after
     this: the document under `--format json`, and the whole answer under
-    `--awards-only`. Only the stderr reason is given here then."""
+    `--awards-only`. Only the stderr reason is given here then, as it is in
+    an envelope run, whose envelope is the document."""
     if dropped and pinned:
         plural = "" if pinned == 1 else "s"
         err.print(
@@ -4262,7 +4379,7 @@ def _answer_gf_empty(
             f"[yellow]Google Flights: no itinerary matched {_safe_text(checks)} "
             f"({dropped:d} rows filtered out).[/]"
         )
-    if awards_answer:
+    if awards_answer or _envelope.active():
         return
     if json_out:
         # No rows is a value, and a document is what was asked for. A sentence
@@ -4275,7 +4392,7 @@ def _answer_gf_empty(
         console.print("[yellow]Google Flights: no results.[/]")
 
 
-def _run_gflight_path(  # noqa: PLR0912, PLR0915 — every outcome of one Google answer, read in one place
+def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of one Google answer, read in one place
     *,
     legs: tuple[Leg, ...],
     opts: SearchOptions,
@@ -4384,6 +4501,12 @@ def _run_gflight_path(  # noqa: PLR0912, PLR0915 — every outcome of one Google
         )
 
     if not results:
+        _record_google_cabin(
+            opts.cabin,
+            results,
+            insight=getattr(results, "insight", None),
+            history=getattr(results, "history", None),
+        )
         _answer_gf_empty(
             dropped,
             json_out=json_out,
@@ -4409,6 +4532,7 @@ def _run_gflight_path(  # noqa: PLR0912, PLR0915 — every outcome of one Google
     # from — narrowing the query would answer a filtered search with fewer rows
     # than exist, which is the failure this backend is most prone to.
     insight = getattr(results, "insight", None)
+    history = getattr(results, "history", None)
     results = _price_ordered(results)[:top_n]
     # A pinned link follows only where one is asked for, the format has room for
     # it and row one can be pinned: `--format json` emits no link at all, and a
@@ -4433,7 +4557,11 @@ def _run_gflight_path(  # noqa: PLR0912, PLR0915 — every outcome of one Google
     # fli/fast_flights have no type stubs; results are duck-typed pydantic
     # models. Suppressing the noisy unknown-type chatter for this rendering
     # block keeps the boundary localized.
-    if json_out and not run_pp:
+    if _envelope.active():
+        _record_google_cabin(opts.cabin, results, insight=insight, history=history, bags=opts.bags)
+        if not run_pp:
+            return None
+    elif json_out and not run_pp:
         out = _gflight_json_document(results, opts.bags)
         doc = (
             out
@@ -5038,6 +5166,7 @@ def _pin_cap_note(*, legs: tuple[Leg, ...], top_n: int) -> None:
 
     pins = pinned_fanout(top_n)
     if len(legs) >= _ROUND_TRIP_LEGS and pins < top_n:
+        _envelope.narrow()
         err.print(
             f"[dim]Google Flights combines returns against up to {pins:d} cheapest outbounds.[/]"
         )
@@ -5590,6 +5719,7 @@ def _note_google_rows_unshown(cabins: Iterable[Cabin]) -> None:
     output."""
     names = ", ".join(c.value for c in cabins)
     if names:
+        _envelope.narrow()
         err.print(
             f"[yellow]Matrix returned no itinerary for {_safe_text(names)}, where Google "
             "Flights had rows; --backend gflight shows them.[/]"
@@ -5641,7 +5771,15 @@ def _run_matrix_path_multi(
         err.print("[red]All cabin queries failed.[/]")
         raise typer.Exit(1)
 
-    if json_out and not run_pp:
+    if _envelope.active():
+        # Each cabin's whole answer, as the `{cabin: raw}` document carries it.
+        for cab, res in results_by_cabin.items():
+            _envelope.record_search(
+                backend="matrix", cabin=cab.value, rows=_matrix_envelope_rows(res)
+            )
+        if not run_pp:
+            return
+    elif json_out and not run_pp:
         # JSON shape: {cabin: raw} so consumers can re-merge if they want.
         sys.stdout.write(
             json.dumps({c.value: r.raw for c, r in results_by_cabin.items()}, indent=2)
@@ -5695,7 +5833,7 @@ class _MatrixHandOff(NamedTuple):
     answered: tuple[Cabin, ...]  # each cabin Google had rows for, now set aside
 
 
-def _run_gflight_path_multi(
+def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards are written to
     *,
     legs: tuple[Leg, ...],
     opts: SearchOptions,
@@ -5767,7 +5905,17 @@ def _run_gflight_path_multi(
             f"no itinerary matched {_safe_text(_row_checks(legs, opts))}.[/]"
         )
 
-    if json_out and not run_pp:
+    if _envelope.active():
+        for cab, board in fli_by_cabin.items():
+            _record_google_cabin(
+                cab,
+                _price_ordered(board)[:top_n],
+                insight=getattr(board, "insight", None),
+                history=getattr(board, "history", None),
+            )
+        if not run_pp:
+            return None
+    elif json_out and not run_pp:
         out: dict[str, Any] = {}
         for cab, fli_results in fli_by_cabin.items():
             cab_dumped: list[Any] = []
@@ -6223,6 +6371,19 @@ _FORMAT_OPT = typer.Option(
     help=f"Output format: one of {_FORMAT_CHOICES}.",
     rich_help_panel=_GROUP_OUTPUT,
 )
+# `search` and `calendar` also write the envelope (`_envelope`): the same ten
+# keys whatever path answered, for a caller that cannot know the path ahead.
+_ENVELOPE_FORMATS = (*_VALID_FORMATS, "envelope")
+_ENVELOPE_FORMAT_CHOICES = "/".join(_ENVELOPE_FORMATS)
+_ENVELOPE_FORMAT_OPT = typer.Option(
+    "table",
+    "--format",
+    help=f"Output format: one of {_ENVELOPE_FORMAT_CHOICES}. envelope is one versioned "
+    "JSON document on every path: version, command, backend, currency, complete, "
+    "notes, results, awards, insight, price_history. complete is false when the "
+    "answer is narrower than asked, and notes carries what stderr said.",
+    rich_help_panel=_GROUP_OUTPUT,
+)
 _JSON_OPT = typer.Option(
     False,
     "--json",
@@ -6272,11 +6433,12 @@ _ROUTING_RET_HELP = (
 _EXT_RET_HELP = "The return's extension codes; '' for none. Unset, a round trip copies --ext."
 
 
-def _resolve_format(*, fmt: str, json_flag: bool) -> str:
+def _resolve_format(*, fmt: str, json_flag: bool, allowed: tuple[str, ...] = _VALID_FORMATS) -> str:
     """Collapse --format + deprecated --json into a single format string.
 
     `--json` forwards to `--format json` with a deprecation warning. Setting
     both (--json --format X for X != json) is a hard error: ambiguous intent.
+    `allowed` is the caller's: only `search` and `calendar` write the envelope.
     """
     if json_flag:
         err.print("[yellow]--json is deprecated; use --format json.[/]")
@@ -6284,13 +6446,47 @@ def _resolve_format(*, fmt: str, json_flag: bool) -> str:
             err.print(f"[red]--json conflicts with --format {_quote(fmt)}; pick one.[/]")
             raise typer.Exit(2)
         return "json"
-    if fmt not in _VALID_FORMATS:
+    if fmt in allowed:
+        return fmt
+    if fmt == "envelope":
+        err.print(
+            "[red]--format envelope is written by search and calendar only; use --format json.[/]"
+        )
+    elif allowed == _VALID_FORMATS:
         err.print(f"[red]--format must be one of {_FORMAT_CHOICES}; got {_quote(fmt)}[/]")
-        raise typer.Exit(2)
-    return fmt
+    else:
+        err.print(
+            f"[red]--format must be one of {_safe_text(_ENVELOPE_FORMAT_CHOICES)}; "
+            f"got {_quote(fmt)}[/]"
+        )
+    raise typer.Exit(2)
+
+
+def _envelope_command[**P](
+    command: _envelope.Command,
+) -> Callable[[Callable[P, None]], Callable[P, None]]:
+    """Run the command as an envelope run (`_envelope.run`) under `--format envelope`.
+
+    A decorator, so the command body keeps its shape: under the run every path
+    goes as under `--format json`, and each JSON leaf hands its rows to the
+    recorder instead of writing stdout. The consoles are looked up per call,
+    because a test may have replaced them."""
+
+    def wrap(fn: Callable[P, None]) -> Callable[P, None]:
+        @wraps(fn)
+        def run(*args: P.args, **kwargs: P.kwargs) -> None:
+            if kwargs.get("fmt") != "envelope":
+                fn(*args, **kwargs)
+                return
+            _envelope.run(command, partial(fn, *args, **kwargs), consoles=(err, _pp_cli.err))
+
+        return run
+
+    return wrap
 
 
 @app.command()
+@_envelope_command("search")
 def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or reroutes the search
     origin: Annotated[
         str | None,
@@ -6478,7 +6674,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
     ),
     rps: float | None = _RPS_OPT,
     impersonate: str | None = _IMPERSONATE_OPT,
-    fmt: str = _FORMAT_OPT,
+    fmt: str = _ENVELOPE_FORMAT_OPT,
     json_out: bool = _JSON_OPT,
     matrix_url: bool = typer.Option(
         True,
@@ -6613,7 +6809,13 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
     Matrix-only flag is set (routing/extension/multi-city slice/time-of-day/
     extra pax types/PP config). Force with --backend matrix|gflight.
     """
-    json_out = _resolve_format(fmt=fmt, json_flag=json_out) == "json"
+    output = _resolve_format(fmt=fmt, json_flag=json_out, allowed=_ENVELOPE_FORMATS)
+    json_out = output != "table"
+    if output == "envelope" and (sellers or fare_rules):
+        err.print(
+            "[red]--sellers and --fare-rules write a document of their own; use --format json.[/]"
+        )
+        raise typer.Exit(2)
     ccy = _resolve_currency(currency)
     bags = _parse_bags(bags_spec) if bags_spec is not None else None
     # Deprecated-flag warning surfaces at runtime since hidden=True hides the
@@ -6717,6 +6919,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         raise typer.Exit(2)
 
     cabins_tuple = _resolve_cabin_list(cabin)
+    _envelope.ask_cabins(c.value for c in cabins_tuple)
     # _resolve_cabin_list raises typer.Exit on empty input, so cabins_tuple is
     # never empty here. Bind `first_cabin` before any len-narrowing branches so
     # basedpyright keeps the `tuple[Cabin, ...]` → Cabin inference.
@@ -7110,6 +7313,7 @@ def _parse_slice_spec(s: str) -> Leg:
 
 
 @app.command()
+@_envelope_command("calendar")
 def calendar(
     origin: Annotated[
         str,
@@ -7171,7 +7375,7 @@ def calendar(
     ),
     rps: float | None = _RPS_OPT,
     impersonate: str | None = _IMPERSONATE_OPT,
-    fmt: str = _FORMAT_OPT,
+    fmt: str = _ENVELOPE_FORMAT_OPT,
     json_out: bool = _JSON_OPT,
     matrix_url: bool = typer.Option(
         True,
@@ -7259,7 +7463,7 @@ def calendar(
     ),
 ) -> None:
     """Lowest-fare grid across a date window. Default round-trip; --one-way to flip."""
-    json_out = _resolve_format(fmt=fmt, json_flag=json_out) == "json"
+    json_out = _resolve_format(fmt=fmt, json_flag=json_out, allowed=_ENVELOPE_FORMATS) != "table"
     # Said out loud when the graph is then not asked: a flag that asked for
     # Chrome and was quietly dropped reads as though it had been honored.
     asked_for_chrome = gf_transport is not None or gf_headed
