@@ -6903,8 +6903,9 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         False,
         "--split",
         help="On a Google Flights round trip, also price the cheapest one-way ticket each "
-        "way (two more page loads) and show the pair after the round-trip table, as two "
-        "separate tickets. --max-price is not applied to them. With --format json the "
+        "way (two more page loads, two per page on a leg asked as several pages) and show "
+        "the pair after the round-trip table, as two separate tickets. --max-price is not "
+        "applied to them. With --format json the "
         'document becomes {"search": …, "split_ticket": {…}}.',
         rich_help_panel=_GROUP_OUTPUT,
     ),

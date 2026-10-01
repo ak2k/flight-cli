@@ -308,6 +308,25 @@ def test_split_asks_exactly_each_leg_alone_without_the_cap(
         assert (gf_mode, gf_headed) == (rt_mode, rt_headed) == ("http", True)
 
 
+def test_the_help_counts_two_loads_a_page_on_a_leg_asked_as_several() -> None:
+    """Each one-way leg is asked as its own pages, so twelve origins cost four
+    more loads, not the two a one-page leg costs."""
+    import click
+    import typer
+
+    group = typer.main.get_command(cli.app)
+    assert isinstance(group, click.Group)
+    (split,) = [
+        p
+        for p in group.commands["search"].params
+        if isinstance(p, click.Option) and "--split" in p.opts
+    ]
+    help_text = " ".join((split.help or "").split())
+    assert "(two more page loads, two per page on a leg asked as several pages)" in help_text, (
+        help_text
+    )
+
+
 def test_without_the_flag_nothing_more_is_asked(monkeypatch: pytest.MonkeyPatch) -> None:
     google = _google(monkeypatch)
     result = _search("--cash-only", "--fast")
