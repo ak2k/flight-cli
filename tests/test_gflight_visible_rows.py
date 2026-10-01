@@ -717,7 +717,8 @@ def test_a_round_trips_combinations_are_trimmed_by_price(
     gf_answering: Callable[..., str],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A round trip is the other set, and it carries no ranking of its own.
+    """A round trip's combinations arrive in the order they were built, which
+    ranks nothing.
 
     The combinations are built pin-major — every return against outbound one,
     then every return against outbound two — so the first `-n` of them are the

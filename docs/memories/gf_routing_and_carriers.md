@@ -206,8 +206,8 @@ check against. Only the strictest-stops rule reached them.
   listing's place. No true duplicate has been measured; the key keeps dates, so
   the same flight numbers a day apart stay two trips.
 - The routing filter runs inside `search_with_ids` as each board is served: on
-  the outbound BEFORE the pins are taken (pins are the first rows in board
-  order), on each return board after `_unpinned_board`. A pin whose return
+  the outbound BEFORE the pins are taken (pins are the cheapest rows of the
+  board they are taken from), on each return board after `_unpinned_board`. A pin whose return
   board the filter empties is counted in a warning.
 - A pin names each leg's OPERATING flight (`fl[22]`). Pinned under the
   codeshare number it is booked as (AA142 as AY3787), the return board comes
