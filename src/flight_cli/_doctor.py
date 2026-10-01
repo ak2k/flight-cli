@@ -588,7 +588,9 @@ class _Doctor:
 
 def fingerprint(secret: str) -> str:
     """Enough of a secret to tell two apart, and nothing to use one with."""
-    return "sha256:" + hashlib.sha256(secret.encode()).hexdigest()[:8]
+    # A stored credential can hold a lone surrogate: `json.loads` keeps an
+    # escaped one, and the environment decodes a non-UTF-8 byte into one.
+    return "sha256:" + hashlib.sha256(secret.encode(errors="surrogatepass")).hexdigest()[:8]
 
 
 def _stored_secrets() -> set[str]:

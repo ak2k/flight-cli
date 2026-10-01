@@ -958,6 +958,32 @@ def test_an_unknown_key_query_value_is_redacted(world: World) -> None:
     )
 
 
+@pytest.mark.parametrize("fmt", ["table", "json"])
+@pytest.mark.parametrize(("where", "code"), [("pp.json", 0), ("SEATS_AERO_API_KEY", 1)])
+def test_a_credential_utf8_cannot_encode_still_gets_every_check_reported(
+    world: World, monkeypatch: pytest.MonkeyPatch, where: str, code: int, fmt: str
+) -> None:
+    """`json.loads` keeps an escaped lone surrogate, and the environment decodes
+    a byte that is not UTF-8 into one. The fake PointsPath client never sends
+    its token; seats.aero's cannot, and fails."""
+    if where == "pp.json":
+        stored = json.loads(pp_auth.TOKENS_PATH.read_text())
+        stored["access_token"] = _PP_ACCESS + "\ud800"
+        pp_auth.TOKENS_PATH.write_text(json.dumps(stored))
+    else:
+        monkeypatch.setenv("SEATS_AERO_API_KEY", _SEATS_KEY + "\udcff")
+    result = _invoke("--format", fmt)
+    assert result.exception is None or isinstance(result.exception, SystemExit), repr(
+        result.exception
+    )
+    assert result.exit_code == code, result.output
+    assert "Traceback" not in result.output
+    if fmt == "json":
+        assert [c["id"] for c in json.loads(result.stdout)["checks"]] == list(_doctor.CHECK_IDS)
+    else:
+        assert list(_table_rows(result.stdout)) == list(_doctor.CHECK_IDS)
+
+
 # ───────────────────────────────── the command ─────────────────────────────────
 
 
