@@ -601,20 +601,18 @@ def _gf_unserveable_reasons(backend: str, origin: str | None, destination: str |
     (`_metro.expand_airports`), so on search a code reported here is neither an
     airport nor a metro code in that table.
 
-    Checked with the same attribute lookup the bridge performs, so this cannot
-    drift from what the bridge will accept, and only where Google Flights is
-    still in the running: a Matrix run pays neither the import nor the check."""
+    Checked against `fli_bridge.fli_airports`, the table the bridge builds every
+    request from, so this cannot drift from what the bridge will accept, and only
+    where Google Flights is still in the running: a Matrix run pays neither the
+    import nor the check."""
     if backend == BACKEND_MATRIX:
         return []
     # PLC0415: paid only when Google Flights would otherwise serve the request;
     # fli's package import is slow enough that a Matrix run should not carry it.
-    # reportMissingTypeStubs: fli ships none, as at every other seam onto it.
-    from fli.models.airport import (  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
-        Airport as FliAirport,
-    )
+    from .fli_bridge import fli_airports  # noqa: PLC0415
 
     toks = (*_parse_iata_list(origin or ""), *_parse_iata_list(destination or ""))
-    bad = [t for t in toks if not hasattr(FliAirport, t) or t in _GF_METRO_COLLISIONS]
+    bad = [t for t in toks if t not in fli_airports() or t in _GF_METRO_COLLISIONS]
     return [f"a city code rather than an airport ({', '.join(bad)})"] if bad else []
 
 
