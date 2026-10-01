@@ -1213,8 +1213,8 @@ def test_under_explicit_gflight_an_emptied_cabin_says_so_and_stays_empty(
 
 _PIN_CAP_NOTE = "Google Flights combines returns against up to 10 first-ranked outbounds."
 _JOIN_NOTE = (
-    "Google Flights joins cabins on up to 10 of each cabin's first-ranked outbounds; "
-    "'—' means no shared itinerary, not no fare."
+    "Google Flights prices every cabin on up to 10 of the Y cabin's first-ranked outbounds; "
+    "'—' means that cabin's search returned no fare for the itinerary."
 )
 _CURRENCY_NOTE = (
     "Google Flights priced some rows in USD, not the requested EUR; "
@@ -1237,12 +1237,21 @@ def _google_serves(
     monkeypatch: pytest.MonkeyPatch, *, coach: gfid.Board[Any], business: gfid.Board[Any]
 ) -> None:
     """Each cabin's board, served below `_gflight_results`, so every caller of
-    it runs as shipped wherever along the path a note is printed."""
+    it runs as shipped wherever along the path a note is printed.
 
-    def _search(f: Any, **_kw: object) -> gfid.Board[Any]:
+    A multi-cabin round trip fetches each cabin's outbound page first and pins
+    the sort cabin's outbounds from it, so that page is served too, and every
+    row on it is kept, as the board the search returns keeps them all."""
+
+    def _board_for(f: Any, **_kw: object) -> gfid.Board[Any]:
         return business if f.seat_type.name == "BUSINESS" else coach
 
-    monkeypatch.setattr(gfid, "search_with_ids", _search)
+    def _pins(first: gfid.Board[Any], *, top_n: int, **_kw: object) -> list[gfid.ItineraryKey]:
+        return [gfid._itinerary_key(r) for r in first[: gfid.pinned_fanout(top_n)]]
+
+    monkeypatch.setattr(gfid, "outbound_page", _board_for)
+    monkeypatch.setattr(gfid, "pin_keys", _pins)
+    monkeypatch.setattr(gfid, "search_with_ids", _board_for)
 
 
 def _multi_cabin_round_trip(*extra: str) -> list[str]:

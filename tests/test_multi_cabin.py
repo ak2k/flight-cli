@@ -17,6 +17,7 @@ from typing import Any, cast
 import pytest
 import typer
 
+from conftest import LITERAL_DATES_NOW
 from flight_cli._multi_cabin import (
     MultiCabinRow,
     itinerary_key,
@@ -41,6 +42,9 @@ from flight_cli.models import (
     Slice,
     SliceEndpoint,
 )
+
+# The searches built here carry literal travel dates; see `LITERAL_DATES_NOW`.
+pytestmark = pytest.mark.time_machine(LITERAL_DATES_NOW)
 
 # ─────────────────────────── itinerary builders ────────────────────────────
 
@@ -525,8 +529,8 @@ def test_a_multi_cabin_round_trip_says_what_its_join_is_drawn_from(
     row = _one_gflight_row()
     cabins = (_Cabin.COACH, _Cabin.BUSINESS)[:cabins_wanted]
 
-    def _fan_out(**_kw: Any) -> dict[Any, list[Any]]:
-        return {cab: [row] for cab in cabins}
+    def _fan_out(**_kw: Any) -> cli._CabinBoards:
+        return cli._CabinBoards({cab: [row] for cab in cabins})
 
     monkeypatch.setattr(cli, "_run_gflight_multi", _fan_out)
     legs = (_Leg.of("JFK", "LAX", _date(2026, 10, 14)),)
@@ -578,8 +582,9 @@ def test_the_join_note_counts_the_outbounds_that_were_actually_pinned(
     row = _one_gflight_row()
     cabins = (_Cabin.COACH, _Cabin.BUSINESS)
 
-    def _fan_out(**_kw: Any) -> dict[Any, list[Any]]:
-        return {c: [row] for c in cabins}
+    def _fan_out(**_kw: Any) -> cli._CabinBoards:
+        # Every cabin was handed the sort cabin's pins, as a round trip is.
+        return cli._CabinBoards({c: [row] for c in cabins}, leader=_Cabin.COACH)
 
     monkeypatch.setattr(cli, "_run_gflight_multi", _fan_out)
     cli._run_gflight_path_multi(
@@ -599,7 +604,7 @@ def test_the_join_note_counts_the_outbounds_that_were_actually_pinned(
     )
     # "up to", because the cap bounds how many outbounds the join can see and
     # the board may hold fewer. The number is still the pin budget's.
-    assert f"up to {expected} of each cabin's first-ranked" in buf.getvalue(), buf.getvalue()
+    assert f"up to {expected} of the Y cabin's first-ranked" in buf.getvalue(), buf.getvalue()
 
 
 def test_multi_cabin_fan_out_honours_an_encodable_constraint(
@@ -898,8 +903,8 @@ def test_every_round_trip_surface_says_how_many_outbounds_it_combines(
     def _rows(*_a: object, **_kw: object) -> list[Any]:
         return [row]
 
-    def _by_cabin(**kw: Any) -> dict[Any, list[Any]]:
-        return {c: [row] for c in kw["cabins"]}
+    def _by_cabin(**kw: Any) -> cli._CabinBoards:
+        return cli._CabinBoards({c: [row] for c in kw["cabins"]})
 
     monkeypatch.setattr(cli, "_gflight_results", _rows)
     monkeypatch.setattr(cli, "_run_gflight_multi", _by_cabin)

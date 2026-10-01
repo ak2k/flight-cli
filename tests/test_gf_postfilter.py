@@ -50,6 +50,8 @@ from flight_cli.routing_predicates import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from flight_cli.domain import CalendarSearch
+
 
 def _slice(legs: Sequence[tuple[str, str | None, list[str]]], stops: Sequence[str] = ()) -> Slice:
     """legs = [(flight_number, operating_carrier, marketing_carriers)]."""
@@ -148,6 +150,67 @@ def test_specific_flight_number_and_range() -> None:
     assert _filter(res2, SpecificFlightPred("UA", 1000, 2000)) == []
 
 
+def _flies(pred: SpecificFlightPred, *flights: str, legs: int | None = None) -> bool:
+    """Whether a slice of `flights` passes `pred`; `legs` states more legs than
+    flights when the row leaves a flight number out."""
+    slc = _slice([(f, "XX", ["XX"]) for f in flights])
+    if legs is not None:
+        slc = slc.model_copy(update={"legs": [LegInfo(operating_carrier="XX")] * legs})
+    return bool(apply_postfilter(_result(slc), [[pred]]).solutions)
+
+
+def test_one_flight_is_every_leg_under_its_number() -> None:
+    """Matrix's flight is every leg under one number: bare AS21 answered
+    JFK-LAX with no solutions where Google listed AS21 connecting to AS487."""
+    one = SpecificFlightPred("XX", 1, 1)
+    assert _flies(one, "XX1")
+    assert _flies(one, "XX1", "XX1")
+    assert not _flies(one, "XX1", "XX2")
+    assert not _flies(one, "YY9", "XX1")
+    assert not _flies(SpecificFlightPred("XX", 1, 1, quantifier="+"), "XX1", "XX2")
+
+
+def test_a_one_flight_range_is_one_number_in_it() -> None:
+    assert _flies(SpecificFlightPred("XX", 1, 9), "XX5", "XX5")
+    assert not _flies(SpecificFlightPred("XX", 1, 9), "XX1", "XX2")
+    assert _flies(SpecificFlightPred("XX", 1, 9, quantifier="+"), "XX1", "XX2")
+    assert not _flies(SpecificFlightPred("XX", 1, 9, quantifier="+"), "XX1", "XX12")
+
+
+def test_a_leg_with_no_flight_number_fails_a_flight_number() -> None:
+    one = SpecificFlightPred("XX", 1, 1)
+    assert not _flies(one, "XX1", "XX")
+    assert not _flies(one, "XX1", legs=2)
+    assert not _flies(one)
+
+
+def _lax_kept(routing: str) -> list[str]:
+    """The JFK-LAX capture's rows a routing keeps, as booked flight numbers."""
+    payload: list[Any] = json.loads(_ds1("ds1_jfk_lax_tfu.json"))
+    keep = routing_keep([classify(routing, None).predicates])
+    assert keep is not None
+    rows = [gfid._parse_flight_with_id(raw) for raw in gfid._rows_from_ds1(payload).rows]
+    return [
+        "+".join(f"{leg.airline.name}{leg.flight_number}" for leg in row.flight.legs)
+        for row in rows
+        if keep(0, row)
+    ]
+
+
+def test_on_the_lax_board_a_flight_number_keeps_that_flight_alone() -> None:
+    assert sorted(r for r in _lax_kept("AS+") if r.startswith("AS21+")) == [
+        "AS21+AS1793",
+        "AS21+AS487",
+        "AS21+AS600",
+    ]
+    assert _lax_kept("AS21") == []
+    assert _lax_kept("AS21+") == []
+    assert _lax_kept("AA1") == ["AA1"]
+    assert _lax_kept("DL747") == ["DL747"]
+    served = _lax_kept("AA1-3000")
+    assert served and all(r.startswith("AA") and "+" not in r for r in served)
+
+
 # ─────────────────────────── per-slice scoping ─────────────────────────
 
 
@@ -198,9 +261,13 @@ def test_every_other_predicate_keeps_its_own_reason() -> None:
     )
     assert reasons == ["a red-eye exclusion", "an overnight-stop exclusion"]
     assert search_page_reasons(classify("LH+", "F bc=y").predicates)  # include, Tier 3
-    # Evaluable here, but Matrix reads both positionally and the filter does not.
-    assert search_page_reasons(classify("AS21", None).predicates)
+    # Evaluable here, but not with Matrix's meaning: one connection not at DUB,
+    # and a range that may be several flights.
     assert search_page_reasons(classify("F* ~DUB F*", None).predicates)
+    assert search_page_reasons(classify("AA1-3000+", None).predicates) == [
+        "a flight-number range (AA1-3000+)"
+    ]
+    assert search_page_reasons(classify("AS21", None).predicates) == []
 
 
 def test_apply_postfilter_no_predicates_is_noop() -> None:
@@ -459,33 +526,37 @@ def test_a_price_cap_is_named_with_its_currency() -> None:
     assert row_check_names([[]], max_price=250, currency="EUR") == ["a price cap of EUR 250"]
 
 
-# ─────────────────────────── the date grids are unchanged ──────────────────
+# ─────────────────────────── the date grids ────────────────────────────────
+
+_SEARCH_ONLY = [
+    ("AA+", None, (), 0),
+    (None, "ALLIANCE oneworld", (), 0),
+    (None, "MAXDUR 6:20", (), 0),
+    (None, "MINCONNECT 2:00", (), 0),
+    (None, "MAXCONNECT 2:00", (), 0),
+    (None, None, (TimeOfDay.MORNING,), 0),
+    (None, None, (), 1),
+]
+_SEARCH_ONLY_IDS = [
+    "carrier",
+    "alliance",
+    "maxdur",
+    "minconnect",
+    "maxconnect",
+    "morning",
+    "children",
+]
 
 
-@pytest.mark.parametrize(
-    ("routing", "extension", "times", "children"),
-    [
-        ("AA+", None, (), 0),
-        (None, "ALLIANCE oneworld", (), 0),
-        (None, "MAXDUR 6:20", (), 0),
-        (None, "MINCONNECT 2:00", (), 0),
-        (None, "MAXCONNECT 2:00", (), 0),
-        (None, None, (TimeOfDay.MORNING,), 0),
-        (None, None, (), 1),
-    ],
-)
-def test_the_price_graph_still_refuses_what_only_a_search_can_check(
+def _one_way_calendar(
     routing: str | None, extension: str | None, times: tuple[TimeOfDay, ...], children: int
-) -> None:
-    """The search page serves these because it has rows to check them on; the
-    Chrome price graph reads the same page and has none."""
+) -> CalendarSearch:
     from datetime import date
 
-    from flight_cli._gf_calgraph import page_blocker
     from flight_cli.domain import CalendarSearch, CalendarWindow, Leg, Pax, SearchOptions
 
     start = date.today() + timedelta(days=45)
-    search = CalendarSearch(
+    return CalendarSearch(
         legs=(
             Leg.of("JFK", "LAX", route_language=routing, extension=extension, time_ranges=times),
         ),
@@ -494,8 +565,36 @@ def test_the_price_graph_still_refuses_what_only_a_search_can_check(
         ),
         options=SearchOptions(pax=Pax(children=children)),
     )
+
+
+@pytest.mark.parametrize(
+    ("routing", "extension", "times", "children"), _SEARCH_ONLY, ids=_SEARCH_ONLY_IDS
+)
+def test_the_http_grid_gate_still_refuses_what_only_a_search_can_check(
+    routing: str | None, extension: str | None, times: tuple[TimeOfDay, ...], children: int
+) -> None:
+    """The search page serves these because it has rows to check them on;
+    `page_blocker`, the `--fast --gf-transport http` gate, still refuses them."""
+    from flight_cli._gf_calgraph import page_blocker
+
+    search = _one_way_calendar(routing, extension, times, children)
     assert page_blocker(search) is not None
     assert search_page_reasons(classify(routing, extension).predicates) == []
+
+
+@pytest.mark.parametrize(
+    ("routing", "extension", "times", "children"), _SEARCH_ONLY, ids=_SEARCH_ONLY_IDS
+)
+def test_the_price_graph_takes_the_bounds_google_applies_and_not_the_rest(
+    routing: str | None, extension: str | None, times: tuple[TimeOfDay, ...], children: int
+) -> None:
+    """The Chrome price graph has no rows either, but Google was measured
+    applying the includes and the bounds from its URL. A morning window is
+    written to 11:59 and a child is not asked for."""
+    from flight_cli._gf_calgraph import graph_blocker
+
+    blocker = graph_blocker(_one_way_calendar(routing, extension, times, children))
+    assert (blocker is None) == (not times and not children)
 
 
 def test_the_rpc_grid_still_refuses_a_minimum_layover() -> None:

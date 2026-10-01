@@ -251,6 +251,16 @@ be read (no flight number) fails the exclude, as a leg with no operating carrier
 fails `-CODESHARE` and `-OPAIRLINES`. Carrier include still matches the
 booking carrier or any listed seller.
 
+**A carrier list takes space-separated airline codes.** `AIRLINES`,
+`-AIRLINES`, `OPAIRLINES` and `-OPAIRLINES` naming any token that is not a
+two-character code (`-AIRLINES UA,DL`, `-AIRLINES UA, DL`, `OPAIRLINES |`)
+parse to one Matrix-only predicate whose reason quotes the token. Google matches
+no row to such a token, so `-AIRLINES UA,DL` excluded nothing and printed DL742,
+DL747 and DL771 on JFK-LAX, and `-AIRLINES UA, DL` excluded DL alone. Matrix
+refuses the list itself (`SLICE-PROHIBITED-CARRIERS: "UA,DL" is not a carrier`,
+exit 1) and answers `-AIRLINES UA DL`. `-CITIES` names airports and is not held
+to this rule.
+
 The encoder is an enforced allowlist, not a deny-list: every field on fli's
 `FlightSearchFilters` must be named in one of three sets (encoded / refused /
 deliberately ignored), and `build_search_tfs` raises on any remainder. `flights`
@@ -352,7 +362,7 @@ Every one of these is a multi-megabyte page GET, so the count is the cost:
 |---|---|
 | one-way | 1 |
 | round trip | 1 + min(top_n, rows on the board, `_PINNED_FANOUT_CAP` = 10) |
-| multi-cabin | the above, times the cabin count |
+| multi-cabin | the above, times the cabin count; a round trip fetches each cabin's outbound page once, ahead of its pins, and hands it back |
 | a persistently throttled leg | `_THROTTLE_RETRY_ATTEMPTS` + 1 = 5, then it aborts |
 | a transport blip | up to 3 GETs per leg (`_TRANSPORT_RETRY_ATTEMPTS` + 1) |
 | a leg that both throttles and blips | 1 + `_THROTTLE_RETRY_ATTEMPTS` + `_TRANSPORT_RETRY_ATTEMPTS` = 7 |
@@ -382,18 +392,46 @@ mean ~2 x 31 page fetches for a two-cabin round trip. The default `-n 10` is
 unchanged by the cap.
 
 The bump therefore widens the leg-1 rows each cabin keeps and NOT the round-trip
-pins, so **Google Flights joins cabins on up to `<pin budget>` of each cabin's
-first-ranked outbounds; '—' means no shared itinerary, not no fare** — the budget
-being `pinned_fanout` of the bumped page size, which the cap holds at 10 however
-large `-n` is. `cli._multi_cabin_join_note`
+pins. What makes the cabins' pins overlap is that the sort cabin leads
+(`cli._CabinSearches`): every cabin pins, in the sort cabin's order, each
+outbound the sort cabin pins that its own filtered board lists, matched on the
+whole leg sequence `_itinerary_key` uses (`_gflight_ids.pin_keys`), then fills
+the rest of the same budget with its own rows in page order
+(`search_with_ids`' `prefer`). The sort cabin's pins are exactly the ones it
+takes alone, so the rows the table shows lose nothing. The cost is that a
+non-sort cabin's own cheapest outbounds get only the slots the sort cabin's
+leave, and its `--format json` list moves with them. Each page is fetched once
+(`search_with_ids`' `first`), so the GETs are unchanged.
+
+Rung 1 runs that in two parallel rounds: every cabin's outbound page, then
+every cabin's return boards. Rung 2 serves one cabin at a time, so it runs the
+sort cabin's page and pins first and then each other cabin's whole search: the
+order the cabins took before they shared pins when the sort cabin is the first
+`--cabin`. Every cabin's page ahead would load pages that a fallback to rung 1
+loads again, and a Chrome failure on a later cabin's page would print a
+missing-column note for a column that the fallback then serves.
+
+So **Google Flights prices every cabin on up to `<pin budget>` of the `<sort>`
+cabin's first-ranked outbounds; '—' means that cabin's search returned no fare
+for the itinerary** — the budget being `pinned_fanout` of the bumped page size,
+which the cap holds at 10 however large `-n` is. `cli._multi_cabin_join_note`
 builds that sentence from the pin budget rather than a literal, and
 `cli._run_gflight_path_multi` prints it on a multi-cabin round trip it does not
-hand to Matrix, because an
-empty cabin cell otherwise reads as "that fare does not exist". "Up to",
-because the cap bounds how many outbounds the join can see and a board may hold
-fewer — stating the budget as a count is the half of this that had to go. Widening the join means pinning
-on the intersection of the cabins' outbounds rather than raising the cap; that
-is a separate design and is tracked on bd work-h70kv.
+hand to Matrix, because an empty cabin cell otherwise reads as "that fare does
+not exist". "Returned no fare" and not "does not list": a filter such as
+`--max-price` can remove a fare the board lists, a return board can be refused,
+and a row from a follower's own outbounds was never searched in the sort cabin.
+"Up to", because the cap bounds how many outbounds the join can see and a board
+may hold fewer.
+
+When the sort cabin pinned nothing — its page refused, or its filter kept no
+row — every cabin pins its own first-ranked outbounds, and the note says that
+instead: "joins cabins on up to `<pin budget>` of each cabin's first-ranked
+outbounds; '—' means no shared itinerary, not no fare." The fan-out reports
+which cabin led (`cli._CabinBoards.leader`) rather than leaving it to be read
+off a board, because a sort cabin whose pins were handed on and whose every
+return board then failed has no board and still led: its column is empty, its
+refusal is printed beside the table, and the note is the led one.
 
 The two counters are independent, so one leg can spend both budgets: four 429s,
 two transport blips and a final 429 costs 7 GETs. That is the ceiling, and it is
@@ -473,6 +511,19 @@ on the same day both times). Every Google row sharing the match key is tried,
 not only the first; two that qualify but date a flight differently lend nothing.
 A connection no Google row dates gets the unpinned search link, and `--sellers`
 refuses it with the `--fast` remedy.
+
+**Every row of either side is in the merged table once.** The match key fixes
+the flights and the first day, not the trip. Icelandair's FI614 then FI450 out
+of JFK connects in Keflavik the next morning or the one after: the JFK-LHR
+capture lists both (USD617 and USD690), and Matrix priced FI614/FI450 twice on
+2026-10-20 (USD884 and USD1180). Each Matrix row of a key first takes the Google
+row that is its own trip (`_date_lender`); only then does the key's first
+Matrix row, if it found none, take the first Google row left, undated. In the
+other order a USD884 Matrix fare would show the USD1180 trip's Google price.
+Every row left on either side is a row of its own, extra Google rows in board
+order and extra Matrix rows after their key's first, so where no key is shared
+the list is the one-row-per-key merge exactly
+(`test_enrich.test_a_board_with_no_shared_key_merges_as_it_always_did`).
 
 **And it keeps two different orders, because the two sets are ordered by
 different things.** A one-way board arrives ranked by Google — a composite of
@@ -782,7 +833,8 @@ predicate set, each tagged with a tier:
   `-AIRLINES`), `-CODESHARE`, specific flight #/range, `MINCONNECT` (the search
   page also encodes it as 3.17; the grids have no rows to check it on).
 - **Tier 3 — Matrix only**: fare construction (`F bc=y`, `aa.lon.yup`), mileage,
-  `PADCONNECT`, aircraft, and anything the parser can't confidently classify.
+  `PADCONNECT`, aircraft, a carrier list naming a token that is not an airline
+  code (`-AIRLINES UA,DL`), and anything the parser can't confidently classify.
 
 Routing language is **positional**, so it's parsed all-or-nothing: only single
 order-independent forms map (one carrier-with-quantifier, nonstop, one flight #,
@@ -803,13 +855,32 @@ marketing-include + connect-at) is the correctness guarantee.
 predicate passes when the page encodes it (`page_can_encode`'s stop ceiling, or
 `_served_by_page`: carrier include, alliance, `MAXDUR`, `MINCONNECT`/
 `MAXCONNECT` with a positive maximum), or when it is Tier-2, the post-filter
-evaluates it, and it is neither a flight number nor a connection-airport
-exclude. Those two stay on Matrix because Matrix reads them positionally and
-the filter does not: bare `AS21` is one flight ("No solutions" on JFK-LAX, where
-the filter keeps AS21 connections), and `F* ~DUB F*` is one connection not at
-DUB (Matrix drops the nonstops the filter keeps). `page_can_encode` itself was
-left narrow on purpose: the Chrome price graph (`_gf_calgraph.page_blocker`)
-reads it, and a graph cannot check rows.
+evaluates it, and it is neither a connection-airport exclude nor a
+flight-number range with `+` or `*`. `F* ~DUB F*` is one connection not at DUB
+to Matrix, which drops the nonstops the filter keeps.
+
+A lone flight-number token is the whole slice to Matrix, and the filter reads it
+that way: every leg booked under the carrier and numbered in the range, and for
+one flight (bare or `?`) every leg under one number, which is Matrix's flight.
+On JFK-LAX bare `AS21` is "No solutions" (2026-11-04) and `AS21+` 0 solutions
+(2026-10-20), while Google's board holds AS21+AS487 and AS21+AS696, which an
+any-leg filter kept; `DL747`, `AA300` and `AA1` are each one nonstop row. So one
+number with any quantifier, and a bare or `?` range, are served on Google.
+`AA1-3000`, `AA1-3000?`, `AA1-3000+` and `AA1-3000*` all answered with the same
+10 AA nonstops, so what `+`/`*` admits over a range (several flights in it, per
+`routing_language.md`) is unmeasured; those two stay on Matrix with the reason
+`a flight-number range (AA1-3000+)`. Matrix rejects a reversed range
+(`AA3000-1`), `AA0` and `AA10000` as `Bad route specification`, and reads
+`AA00001` as AA1 (2026-09-30), so a range that is not ascending within 1-9999
+stays on Matrix too, which reports the error. So does a number whose carrier
+fli has no code for (`JP627`, `XX1`): the rows' carriers are read through fli's
+table, so the filter would match none, and the reason is the carrier include's,
+`a carrier Google Flights has no code for (JP)`. Multi-token forms (`AS21 F+`),
+`~AS21` and a carrier with a digit (`B6123`) are Tier 3. `page_can_encode` itself stays
+narrow: the `--fast --gf-transport http` gate (`_gf_calgraph.page_blocker`)
+reads it as it is. The Chrome price graph cannot check rows either, and has its
+own gate, `_gf_calgraph.graph_blocker`, which admits the includes and bounds
+Google was measured applying from the URL (Admission, below).
 
 `-REDEYES` and `-OVERNIGHTS` still escalate to Matrix. The raw-row checks in
 `_gf_postfilter._row_passes` read per-leg datetimes, so either could be added
@@ -953,18 +1024,51 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
   does. Over `--gf-transport http` a set refuses with the browser note, since
   `date_grid` writes one airport per side; without `--fast` Matrix answers it
   through its fan-out and the graph over the whole set prints after it.
-- **Admission.** The graph has no itineraries, so it is served only when the
-  page URL carries every constraint: an unknown code, a time window, a non-adult
-  passenger, `--no-airport-changes`, `--include-unavailable`, a stop ceiling
-  above two, any predicate `page_can_encode` refuses (carriers, alliances,
-  layovers, max duration), and round-trip legs with different predicates each
-  refuse by name. The URL takes the LOWEST stop limit from `--stops` and every
-  leg's `StopsPred`, because the bridge reads `--stops` alone and
-  `apply_gf_native_filters` overwrites it with the last predicate it meets.
+- **Admission** (`_gf_calgraph.graph_blocker`). The graph has no itineraries,
+  so it is asked only when the page URL writes every constraint exactly AND
+  Google was measured applying it there. Admitted, per leg: a stop ceiling of
+  two or fewer, ONE marketing-carrier include (`AA+`, `AIRLINES AA DL`) or ONE
+  `ALLIANCE`, a positive `MAXDUR`, a `MINCONNECT`, a positive `MAXCONNECT`, and
+  on a one-way a `--depart-times` window whose buckets adjoin and end at 23:59
+  (`night`, `evening,night`, `afternoon,evening,night`). Measured 2026-09-30,
+  LGA→LAX one-way over 2026-10-20..11-02, one load each, dates priced
+  higher/equal/lower than an unfiltered baseline (a repeat baseline equaled it
+  on 14 of 14): `ALLIANCE skyteam` 13/1/0, `AA+` 14/0/0, `MAXDUR 9:00` 11/3/0,
+  `MINCONNECT 3:00` 9/5/0, `MAXCONNECT 1:00` 9/5/0, `evening,night` 14/0/0.
+  Google's layover bounds keep nonstops, as Matrix's do. Round trip `-d 7`,
+  same route and window: `AA+` 14/0/0, so the carrier, alliance, duration and
+  layover bounds are admitted on round trips too. Only 3.6 was probed on a
+  round-trip page; the others are admitted on the assumption that 3.12, 3.17
+  and 3.18 behave there as 3.6 does. A `--return-times night` round trip priced
+  no date at all, so a time window on either leg of a round trip refuses. Only
+  single codes were measured: a multi-code include is admitted as one 3.6 list,
+  which Google reads as any of its codes, as Matrix reads one include.
+  Refused as WIDER than asked: any other time window (Google reads a latest
+  hour to its 59th minute, so `morning` asks 8:00-11:59, and `midday,night`
+  the hull 11-23), two includes on a leg (one 3.6 list, read as either; named
+  `an alliance filter combined with another carrier or alliance filter` as the
+  search gate names it, or `a carrier filter combined with another carrier
+  filter`), a `MINCONNECT` above the `MAXCONNECT` (the bridge drops the
+  minimum), and two different `MAXDUR` or `MAXCONNECT` on a leg (the bridge
+  writes the last). Everything else refuses in the words and order of the
+  narrower gate `--fast --gf-transport http` keeps (`grid_can_serve`, then
+  `page_blocker`): Tier-2/3 routing and extension codes, a code or bound the URL
+  would leave out, a time window, a non-adult passenger, `--no-airport-changes`,
+  `--include-unavailable`, a predicate the page cannot carry (a connecting
+  airport), then round-trip legs with different predicates. The URL takes the
+  LOWEST stop limit from `--stops` and every leg's `StopsPred`, because the
+  bridge reads `--stops` alone and `apply_gf_native_filters` overwrites it with
+  the last predicate it meets, and it writes the outbound leg's predicates
+  alone: the gate has made them the return's, and both legs' together would
+  list each carrier twice.
 - **Span and paging.** One load covers about five weeks (seven days before the
   opening date to thirty after, on the page measured). The span is read from
-  the response; a longer window re-navigates at the first uncovered date, stops
-  on a graph that covers nothing new, and refuses past eight loads.
+  the response; a longer window re-navigates at the first uncovered date, and
+  stops on a graph that covers nothing new or at eight loads. Only a window
+  that needed all eight with no page loaded again is told to "narrow
+  --start/--end"; loads spent on a reload, or by the trip lengths before it,
+  end it with `GfGraphBudgetError`, "no price-graph load of the 8 was left for
+  the rest of the window", naming the reload when there was one.
 - **Envelope.** `rt=c` chunks, one `wrb.fr` row; cells at `inner[1]` as
   `[dep, ret, [[null, price], token], 1]`. An error row has an empty payload and
   its code at `row[5][0]`. Error 13 there is a refusal of the browser session,
@@ -993,10 +1097,12 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
   keeping a launch or install remedy. A range that loses some lengths prints
   the ones that priced, with no column for a lost length, and that one line
   names each lost length with its cause (`7-night trips: <cause>`). Only a
-  page that drew no graph lets the next length be asked; any other failure
-  loses the lengths after it too (`not asked after 6-night trips failed`). A
-  range that priced no length prints its first failure alone, as a single
-  graph does. Stdout up to Google's table and the exit code are the `http`
+  page that drew no graph, or a length that ran out of loads, lets the next
+  length be asked, and the loads either spent are counted, so the lengths past
+  a spent budget read `no price-graph load of the 8 was left`; any other
+  failure loses the lengths after it too (`not asked after 6-night trips
+  failed`). A range that priced no length prints its first failure alone, as
+  a single graph does. Stdout up to Google's table and the exit code are the `http`
   run's, and a Matrix failure keeps its lines and exit 1 with Google's table
   still printed. The SIGINT guard is armed around both halves, so a Ctrl-C
   stops the driver and exits 130. Measured 2026-09-29, NYC→LON round trip over

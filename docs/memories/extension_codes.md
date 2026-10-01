@@ -78,6 +78,11 @@ Codes are **case-insensitive** for the keyword (`ALLIANCE` ≡ `alliance`).
 | `OPAIRLINES code …` | `OPAIRLINES AA` | Allow only flights operated by these carriers |
 | `-OPAIRLINES code …` | `-OPAIRLINES AA` | Prohibit flights operated by these carriers |
 
+Codes are space-separated. Matrix refuses a comma list (`-AIRLINES UA,DL`:
+`"UA,DL" is not a carrier`), and flight-cli sends any carrier list naming a
+token that is not a two-character airline code to Matrix rather than let
+Google read it as a code no row carries.
+
 ## Airport filters [Google]
 
 | Code | Example | Meaning |
