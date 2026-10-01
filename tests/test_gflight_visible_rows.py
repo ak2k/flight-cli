@@ -778,6 +778,23 @@ def test_a_round_trip_table_prints_its_rows_in_price_order(
     assert f"{dearest.flight.price:.2f}" not in out, out
 
 
+def test_a_one_way_table_handed_the_whole_board_prints_its_cheapest_rows(
+    gf_rows: Callable[[str], list[Any]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The enriched first paint hands the renderer the board as the page listed
+    it, 6590 first and 6072 third; its trim keeps the cheapest."""
+    cli._render_gflight_table(
+        gf_rows("ds1_metadata_blocks_kept.json"),
+        legs=_one_way(),
+        top_n=1,
+        match_carriers=frozenset(),
+    )
+    out = capsys.readouterr().out
+    assert "6072.00" in out, out
+    assert "6590.00" not in out, out
+
+
 _NO_PRICE_CELL = "—"
 _ROW = re.compile(r"^│\s*\d+\s*│")
 
@@ -888,6 +905,34 @@ def test_a_multi_cabin_json_arm_trims_each_cabins_combinations_by_price(
         cheapest.flight.price,
         cheapest.flight.price,
     ], dumped
+
+
+def test_a_multi_cabin_json_arm_trims_a_one_way_board_to_its_cheapest_rows(
+    gf_rows: Callable[[str], list[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The per-cabin arm's one-way rows go through the same order."""
+    board = gf_rows("ds1_metadata_blocks_kept.json")
+
+    def _fan_out(**_kw: object) -> dict[Cabin, list[Any]]:
+        return {Cabin.COACH: board}
+
+    monkeypatch.setattr(cli, "_run_gflight_multi", _fan_out)
+    cli._run_gflight_path_multi(
+        legs=_one_way(),
+        opts=SearchOptions(cabin=Cabin.COACH),
+        cabins=(Cabin.COACH,),
+        sort_by=Cabin.COACH,
+        top_n=2,
+        json_out=True,
+        run_pp=False,
+        sel=cli._resolve_providers(
+            providers=None, cash_only=True, awards_only=False, provider_opt=()
+        ),
+    )
+    dumped: Any = json.loads(capsys.readouterr().out)
+    assert [r["price"] for r in dumped["COACH"]] == [6072.0, 6590.0], dumped
 
 
 def test_an_empty_board_under_json_is_an_empty_document(
