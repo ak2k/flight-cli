@@ -23,7 +23,8 @@ Requires Python 3.11+.
 ```sh
 # specific-date search — auto-picks the backend.
 # Plain cash search → Google Flights (fast, broad coverage).
-# Airport sets and metro codes (JFK,EWR or NYC) stay there too, up to 11 airports a leg.
+# Airport sets and metro codes (JFK,EWR or NYC) stay there too; a leg over
+# Google's 11 airports a page is asked as several pages (up to 8) and merged.
 flight search JFK LHR --dep 2026-08-15 --return 2026-08-22
 
 # A carrier or alliance, a maximum duration, a layover bound, one time-of-day
@@ -89,7 +90,8 @@ Every result-printing command supports:
 - **Multi-airport**: `flight calendar MIA VIE,PAR,FCO,MAD --start ...` — search across N European cities at once.
 - **Time-of-day filters** (`--depart-times`, `--return-times`): `morning`, `morning,midday` etc. Buckets that make one window stay on Google Flights; `morning,evening` goes to Matrix.
 - **Stop limits** (`--stops N`): at most N stops per direction, on every backend. `0` = nonstop only, `1` = up to one stop, …
-- **Calendar-mode duration ranges** (`-d 5-7`): one search returns prices for 5-, 6-, and 7-night trips at every starting day.
+- **Calendar-mode duration ranges** (`-d 5-7`): one search returns prices for 5-, 6-, and 7-night trips at every starting day. `calendar --fast -d 5-7` shows Google's price graph alone, one column per trip length, within 8 page loads.
+- **Split tickets** (`search --split`): on a Google Flights round trip, also prices the cheapest one-way ticket each way and prints their total on one line under the round-trip table.
 - **Sellers and explore** (Chrome, the `browser` extra): `flight search JFK LAX --dep 2026-10-20 --sellers --pick 2` lists every seller of row 2 with its price and fare name, cheapest first; `flight explore JFK --month 2026-11 --days 5-7 --max-price 300` lists where JFK flies that month and the cheapest round trip to each.
 
 ## Checking the setup: `flight doctor`
