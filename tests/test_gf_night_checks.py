@@ -32,9 +32,12 @@ from test_gf_postfilter import _DAY, _h, _row
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-_DEP = date.today() + timedelta(days=45)
 _SEARCH = ["search", "--cash-only", "--no-google-url", "--no-matrix-url"]
 _BOTH = ["-REDEYES", "-OVERNIGHTS"]
+
+
+def _dep() -> date:
+    return date.today() + timedelta(days=45)
 
 
 def _keep(extension: str) -> Callable[[int, Any], bool]:
@@ -191,7 +194,7 @@ def test_auto_answers_on_google_with_no_night_row(
     gf_session(
         _page(
             _answering(
-                _ds1("ds1_jfk_lax_tfu.json"), origin=None, destination=None, date=_DEP.isoformat()
+                _ds1("ds1_jfk_lax_tfu.json"), origin=None, destination=None, date=_dep().isoformat()
             )
         )
     )
@@ -204,7 +207,7 @@ def test_auto_answers_on_google_with_no_night_row(
         cli.app,
         [
             *_SEARCH,
-            *("JFK", "LAX", "--dep", _DEP.isoformat(), "--ext", code),
+            *("JFK", "LAX", "--dep", _dep().isoformat(), "--ext", code),
             *("--fast", "--format", "json", "-n", "100"),
         ],
     )

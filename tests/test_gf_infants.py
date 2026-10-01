@@ -26,8 +26,6 @@ from test_links_search_tfs import _decode
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-_DEP = date.today() + timedelta(days=45)
-_RET = _DEP + timedelta(days=7)
 _SEARCH = ["search", "--cash-only", "--no-google-url", "--no-matrix-url"]
 _MATRIX_BODY: dict[str, Any] = json.loads(
     (
@@ -38,10 +36,18 @@ _EMPTY = "ds1_zero_rows.json"
 _HAND_OFF = "Using Matrix: Google Flights served no rows for a party with an infant."
 
 
+def _dep() -> date:
+    return date.today() + timedelta(days=45)
+
+
+def _ret() -> date:
+    return _dep() + timedelta(days=7)
+
+
 def _served(name: str) -> str:
     if name == _EMPTY:  # no row to re-date
         return _page(_ds1(name))
-    return _page(_answering(_ds1(name), origin=None, destination=None, date=_DEP.isoformat()))
+    return _page(_answering(_ds1(name), origin=None, destination=None, date=_dep().isoformat()))
 
 
 @pytest.fixture
@@ -70,7 +76,9 @@ def matrix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[object]:
 
 
 def _search(*extra: str) -> Any:
-    return CliRunner().invoke(cli.app, [*_SEARCH, "JFK", "LAX", "--dep", _DEP.isoformat(), *extra])
+    return CliRunner().invoke(
+        cli.app, [*_SEARCH, "JFK", "LAX", "--dep", _dep().isoformat(), *extra]
+    )
 
 
 def _flat(text: str) -> str:
@@ -119,9 +127,9 @@ def test_the_default_table_shows_matrixs_rows_when_googles_are_empty(
             "JFK",
             "LHR",
             "--dep",
-            _DEP.isoformat(),
+            _dep().isoformat(),
             "--return",
-            _RET.isoformat(),
+            _ret().isoformat(),
             "--inf-lap",
             "1",
         ],
@@ -190,7 +198,7 @@ def test_a_multi_cabin_compare_with_an_infant_stays_on_matrix(
 def test_bags_beside_an_infant_are_refused_as_a_second_traveler() -> None:
     result = CliRunner().invoke(
         cli.app,
-        [*_SEARCH, "JFK", "LAX", "--dep", _DEP.isoformat(), "--bags", "1", "--inf-lap", "1"],
+        [*_SEARCH, "JFK", "LAX", "--dep", _dep().isoformat(), "--bags", "1", "--inf-lap", "1"],
     )
     assert result.exit_code == 2, result.output
     assert "--bags takes one traveler" in _flat(result.stderr)

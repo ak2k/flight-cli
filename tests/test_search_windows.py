@@ -40,19 +40,25 @@ from test_links_search_tfs import _slices
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-_DEP = date.today() + timedelta(days=45)
-_RET = _DEP + timedelta(days=7)
 _LAX = "ds1_jfk_lax_tfu.json"
 _SEARCH = ["search", "--cash-only", "--no-google-url", "--no-matrix-url"]
 _EVENING = ClockWindow(first=18 * 60, last=21 * 60 + 30)
 
 
+def _dep() -> date:
+    return date.today() + timedelta(days=45)
+
+
+def _ret() -> date:
+    return _dep() + timedelta(days=7)
+
+
 def _served(name: str = _LAX) -> str:
-    return _page(_answering(_ds1(name), origin=None, destination=None, date=_DEP.isoformat()))
+    return _page(_answering(_ds1(name), origin=None, destination=None, date=_dep().isoformat()))
 
 
 def _search(*extra: str) -> list[str]:
-    return [*_SEARCH, "JFK", "LAX", "--dep", _DEP.isoformat(), *extra]
+    return [*_SEARCH, "JFK", "LAX", "--dep", _dep().isoformat(), *extra]
 
 
 def _no_matrix(**_kw: object) -> None:
@@ -141,9 +147,9 @@ def test_a_clock_window_refuses_what_is_not_one(first: int, last: int) -> None:
 
 
 def test_a_leg_built_with_of_carries_its_arrival_window() -> None:
-    leg = Leg.of("JFK", "LAX", _DEP, arrival_ranges=(_EVENING,))
+    leg = Leg.of("JFK", "LAX", _dep(), arrival_ranges=(_EVENING,))
     assert leg.arrival_ranges == (_EVENING,)
-    assert Leg.of("JFK", "LAX", _DEP).arrival_ranges == ()
+    assert Leg.of("JFK", "LAX", _dep()).arrival_ranges == ()
 
 
 # ───────────────────────────── Google: the page ────────────────────────────
@@ -333,7 +339,7 @@ def test_auto_serves_a_minute_departure_window_on_google() -> None:
 
 
 def test_matrix_never_takes_an_arrival_window() -> None:
-    leg = Leg.of("JFK", "LAX", _DEP, arrival_ranges=(_EVENING,))
+    leg = Leg.of("JFK", "LAX", _dep(), arrival_ranges=(_EVENING,))
     with pytest.raises(ValueError, match="arrival"):
         to_wire(SpecificDateSearch(legs=(leg,)))
 
@@ -344,19 +350,19 @@ def test_the_matrix_link_names_the_windows_it_leaves_out() -> None:
             Leg.of(
                 "JFK",
                 "LAX",
-                _DEP,
+                _dep(),
                 time_ranges=(ClockWindow(first=570, last=825),),
                 arrival_ranges=(_EVENING,),
             ),
         )
     )
-    plain = SpecificDateSearch(legs=(Leg.of("JFK", "LAX", _DEP),))
+    plain = SpecificDateSearch(legs=(Leg.of("JFK", "LAX", _dep()),))
     assert matrix_deep_link(windowed) == matrix_deep_link(plain)
     notes = cli._matrix_link_caveats(windowed)
     assert len(notes) == 1
     assert "09:30-13:45, 18:00-21:30" in notes[0]
     bucketed = SpecificDateSearch(
-        legs=(Leg.of("JFK", "LAX", _DEP, time_ranges=(TimeOfDay.MORNING,)),)
+        legs=(Leg.of("JFK", "LAX", _dep(), time_ranges=(TimeOfDay.MORNING,)),)
     )
     assert cli._matrix_link_caveats(bucketed) == []
 
@@ -394,7 +400,12 @@ def test_an_arrival_window_beside_a_matrix_reason_is_exit_2_naming_it() -> None:
 
 def test_a_return_arrival_window_on_matrix_names_its_own_flag() -> None:
     printed = _refused(
-        "--return", _RET.isoformat(), "--return-arrive-times", "18:00-21:30", "--backend", "matrix"
+        "--return",
+        _ret().isoformat(),
+        "--return-arrive-times",
+        "18:00-21:30",
+        "--backend",
+        "matrix",
     )
     assert "--return-arrive-times needs Google Flights" in printed
 
