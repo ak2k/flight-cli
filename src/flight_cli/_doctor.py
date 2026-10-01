@@ -561,7 +561,7 @@ class _Doctor:
             return "skip", "no PointsPath tokens stored; run `flight auth pp login`"
         self._starting("pointspath", "one PointsPath request")
         tokens = pp_auth.get_valid_tokens()
-        self.secrets.update((tokens.access_token, tokens.refresh_token))
+        self._remember(tokens.access_token, tokens.refresh_token)
 
         async def go() -> tuple[int, pp_auth.Tokens]:
             c = PPClient(tokens)
@@ -574,13 +574,18 @@ class _Doctor:
                 await c.aclose()
 
         programs, answered = anyio.run(go)
-        self.secrets.update((answered.access_token, answered.refresh_token))
+        self._remember(answered.access_token, answered.refresh_token)
         expires = dt.datetime.fromtimestamp(answered.expires_at, tz=dt.UTC)
         return (
             "pass",
             f"token valid until {expires:%Y-%m-%d %H:%M} UTC; "
             f"pricing-info lists {programs} programs",
         )
+
+    def _remember(self, *secrets: object) -> None:
+        # `Tokens.from_json` keeps a stored field as it finds it, null included,
+        # and a secret that is not a string would break every later redaction.
+        self.secrets.update(s for s in secrets if isinstance(s, str))
 
     def check_seats_aero(self) -> _Outcome:
         key = seats_auth.load_key()

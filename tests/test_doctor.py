@@ -1032,6 +1032,33 @@ def test_a_credential_utf8_cannot_encode_still_gets_every_check_reported(
         assert list(_table_rows(result.stdout)) == list(_doctor.CHECK_IDS)
 
 
+@pytest.mark.parametrize("fmt", ["table", "json"])
+@pytest.mark.parametrize("field", ["access_token", "refresh_token"])
+def test_a_null_pointspath_token_still_gets_every_check_reported(
+    world: World, field: str, fmt: str
+) -> None:
+    """`Tokens.from_json` takes a stored token field as it finds it, so a null
+    one reaches the doctor as None."""
+    stored = json.loads(pp_auth.TOKENS_PATH.read_text())
+    stored[field] = None
+    pp_auth.TOKENS_PATH.write_text(json.dumps(stored))
+    world.pp = PPApiError("refused", endpoint="/api/pricing-info", status=403)
+    result = _invoke("--format", fmt)
+    assert result.exception is None or isinstance(result.exception, SystemExit), repr(
+        result.exception
+    )
+    assert result.exit_code == 1, result.output
+    assert "Traceback" not in result.output
+    if fmt == "json":
+        statuses = {c["id"]: c["status"] for c in json.loads(result.stdout)["checks"]}
+        failed = "fail"
+    else:
+        statuses = _table_rows(result.stdout)
+        failed = "FAIL"
+    assert list(statuses) == list(_doctor.CHECK_IDS)
+    assert statuses["pointspath"] == failed
+
+
 # ───────────────────────────────── the command ─────────────────────────────────
 
 
