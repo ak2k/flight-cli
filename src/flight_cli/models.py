@@ -229,6 +229,10 @@ class DurationOption(_Loose):
     min_price: str = Field(alias="minPrice")
     solution_count: int = Field(0, alias="solutionCount")
     min_price_in_summary: bool = Field(False, alias="minPriceInSummary")
+    # Set only on a merged grid: the comma-joined airports of the sub-query that
+    # priced this length, the two arguments `flight detail` takes.
+    origin: str | None = None
+    destination: str | None = None
 
     @property
     def price_value(self) -> float:
@@ -248,6 +252,9 @@ class CalendarDay(_Loose):
     min_price: str | None = Field(None, alias="minPrice")
     min_price_in_week: bool = Field(False, alias="minPriceInWeek")
     trip_duration: TripDuration | None = Field(None, alias="tripDuration")
+    # Set only on a merged grid, as on `DurationOption`, for this day's `min_price`.
+    origin: str | None = None
+    destination: str | None = None
 
     @property
     def options(self) -> list[DurationOption]:
