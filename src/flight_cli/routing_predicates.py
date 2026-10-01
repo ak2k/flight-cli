@@ -319,8 +319,9 @@ def parse_routing(routing: str) -> list[Predicate]:
 
 # ─────────────────────────── direction ─────────────────────────────────
 
-# A token's prefix (`~`, `X:`, `O:`, `~l:`) applies to the whole comma group, so
-# it comes off before the alternatives are split.
+# A token's prefix (`~`, `X:`, `O:`, `~l:`) and its trailing quantifier apply to
+# the whole comma group (`~AA,UA,DL+`), so both come off before the alternatives
+# are split.
 _RE_TOKEN_PREFIX = re.compile(r"^~?(?:[A-Z]+:)?")
 # A flight number: an airline designator (`_RE_AIRLINE`'s shape), digits, an
 # optional range and an optional quantifier. Wider than `_RE_FLIGHTNUM`, which
@@ -335,16 +336,17 @@ def _is_one_flight(alternative: str) -> bool:
     return m is not None and (m.group(2) is None or int(m.group(1)) == int(m.group(2)))
 
 
-def _direction_key(tok: str) -> tuple[str, frozenset[str]]:
+def _direction_key(tok: str) -> tuple[str, frozenset[str], str]:
     upper = tok.upper()
     rest = _RE_TOKEN_PREFIX.sub("", upper, count=1)
-    return upper[: len(upper) - len(rest)], frozenset(rest.split(","))
+    group = rest.rstrip("+*?")
+    return upper[: len(upper) - len(rest)], frozenset(group.split(",")), rest[len(group) :]
 
 
 def _names_one_flight(tok: str) -> bool:
     """Whether `tok` asks for a flight by its number. An excluded one (`~UA882`)
     reads the same both ways: the return flies no flight of that number anyway."""
-    prefix, alternatives = _direction_key(tok)
+    prefix, alternatives, _ = _direction_key(tok)
     return not prefix.startswith("~") and any(_is_one_flight(a) for a in alternatives)
 
 
@@ -356,8 +358,9 @@ def direction_dependence(routing: str) -> str | None:
     outbound's `UA LH` asks for UA then LH again, from the far end. Two things
     make an expression depend on direction: a token naming a flight number,
     since a flight flies one way, and a token sequence that differs from its
-    reversal. Tokens compare case-insensitively and a comma group as a set, so
-    `DFW,DEN DEN,DFW` is a palindrome. The phrase completes "--routing X …"."""
+    reversal. Tokens compare case-insensitively and a comma group as a set
+    under its prefix and quantifier, so `DFW,DEN DEN,DFW` is a palindrome. The
+    phrase completes "--routing X …"."""
     text = routing.strip()
     if text.startswith("[") and text.endswith("]"):
         text = text[1:-1]

@@ -478,6 +478,19 @@ def test_one_enclosing_bracket_and_a_group_prefix_come_off_before_comparing(
 @pytest.mark.parametrize(
     ("routing", "dependent"),
     [
+        ("~AA,UA+ ~UA,AA+", False),
+        ("AA,UA+ X UA,AA+", False),
+        ("~AA,UA+ ~UA,AA*", True),
+        ("AA,UA+ X UA,AA", True),
+    ],
+)
+def test_a_quantifier_belongs_to_the_whole_comma_group(routing: str, dependent: bool) -> None:
+    assert (direction_dependence(routing) is not None) is dependent
+
+
+@pytest.mark.parametrize(
+    ("routing", "dependent"),
+    [
         ("AA882-882", True),
         ("aa882-0882+", True),
         ("F+ AA882-882 F+", True),

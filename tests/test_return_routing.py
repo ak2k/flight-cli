@@ -306,6 +306,13 @@ def test_a_one_way_chain_is_sent_as_before(ran: list[tuple[str, Any]]) -> None:
             "_run_matrix_path",
             "Using Matrix: Google Flights can't serve a connecting-airport filter (LHR).",
         ),
+        (
+            ["--routing", "~AA,UA+ ~UA,AA+"],
+            ("~AA,UA+ ~UA,AA+", None),
+            "_run_matrix_path",
+            "Using Matrix: Google Flights can't serve routing '~AA,UA+ ~UA,AA+' not "
+            "GF-expressible.",
+        ),
     ],
 )
 def test_a_routing_that_reads_the_same_both_ways_is_copied_as_before(
