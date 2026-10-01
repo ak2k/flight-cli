@@ -3802,6 +3802,7 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         # in front of every bracket the remote text carried. The exactly-once
         # tests in `tests/test_gf_browser.py` are what hold these.
         ("_run_gflight_path", "refusal.message"),
+        ("_run_gflight_path", "note"),  # a refusal's note, or `_safe_text` of a failure
         ("_report_enriched_gf_failure", "refusal.note"),
         ("_report_enriched_gf_failure", "refusal.message"),
         ("query_cabin", "refusal.note"),
