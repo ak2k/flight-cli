@@ -219,6 +219,25 @@ The date grids do not serve any of the new constraints yet: `page_can_encode`
 and each predicate's `Tier` still answer for them, and they have no rows to
 check against. Only the strictest-stops rule reached them.
 
+**Google's CO2 estimate (`row[22]`).** An 18-slot list on all 208 rows of six
+captures: `[7]` the row's grams (whole kilograms), `[8]` the route's typical
+grams (one value per board), `[3]` the signed integer percent from `[8]`, and
+`[2]` Google's label for that comparison (1 lower, 2 typical, 3 higher, 0 none).
+Each leg's own grams are `fl[31]`; `[7]` is their sum rounded to 1000. fli's
+decoder takes the label from `[11]`, which with `[10]` compares the row with the
+board's median grams instead. Google's help compares each flight with the
+route's typical, `[8]`, so the label is `[2]`: `[11]` differs from it on 35 of 95
+JFK-LAX and 40 of 101 JFK-LHR rows, and labels 13 rows lower at a percent of 0
+to +4. JFK-LAX states grams on 95 of 95 rows and JFK-LHR on 100 of 101 (VS46
+states only the typical). Each direction is its own: the HNL-MIA outbound page
+states 4264000 and its pinned return board 1539000, and no page states a pair
+total. Google says the estimate is for the passengers searched; only one adult
+has been measured. Each Google JSON row fills `co2_emissions_g`,
+`co2_emissions_typical_g`, `co2_emissions_delta_pct` and `emissions_tag`, and
+each leg `co2_emissions_g`, null where the slot is empty. The Google table adds
+`CO2 kg` (kilograms and the percent; green lower, red higher) when a shown row
+has a figure.
+
 **How the full board is served.**
 - Rows are deduped per itinerary (every leg's carrier, flight number and
   departure datetime), keeping the priced and cheaper listing at the first
@@ -1090,7 +1109,24 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
   The JSON names the user's tokens (`"NYC"`, `"JFK,EWR"`), as the table title
   does. Over `--gf-transport http` a set refuses with the browser note, since
   `date_grid` writes one airport per side; without `--fast` Matrix answers it
-  through its fan-out and the graph over the whole set prints after it.
+  through its fan-out and the graph over the whole set prints after it. That
+  fan-out splits a metro code into its member airports, asks one query per
+  airport pair, and merges the grids in one currency (USD with more than one
+  origin, unless `--currency`); each merged day and trip length names the pair
+  that priced it (`origin`, `destination` in the JSON; in the table a `route`
+  column for the day's minimum, and the pair beside any trip length another
+  pair priced), the two arguments `flight detail` takes. A round trip also runs the
+  user's own combined query beside the pairs, the only source of a return into
+  another airport of the set: it takes a day only when strictly cheaper than
+  every pair, its cells name the user's tokens, and a stderr note says so.
+  Measured 2026-10-01 over 2026-10-20..11-02: `LHR,DUB JFK --one-way` merged
+  DUB's EUR cells with LHR's GBP cells as bare numbers and showed GBP1137 and
+  GBP952 on two days DUB was cheaper; asked in USD, all 14 days came back USD,
+  each cheaper from DUB. `NYC LON -d 7` as one combined query priced 11 of 14
+  days (20 solutions, cheapest USD817); as 18 pairs plus that query it priced
+  14 of 14, cheaper on 7 days (10-27 USD766 EWR→LGW), the combined query was
+  below every pair on none, the 7 pairs into STN, LTN or SEN priced nothing,
+  and the 19 queries took about 110 s.
 - **Admission** (`_gf_calgraph.graph_blocker`). The graph has no itineraries,
   so it is asked only when the page URL writes every constraint exactly AND
   Google was measured applying it there. Admitted, per leg: a stop ceiling of

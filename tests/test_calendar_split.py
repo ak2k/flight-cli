@@ -48,6 +48,7 @@ from flight_cli.models import (
     Slice,
     SliceEndpoint,
 )
+from flight_cli.wire import to_wire
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -60,10 +61,12 @@ def _cal(
     origins: tuple[str, ...] = ("MIA",),
     routing: str | None = "LH+",
     ext: str | None = None,
+    *,
+    one_way: bool = False,
 ) -> CalendarSearch:
     out = Leg.of(list(origins), dests, route_language=routing, extension=ext)
-    ret = Leg.of(dests, list(origins))
-    return CalendarSearch(legs=(out, ret), options=SearchOptions(cabin=Cabin.COACH), window=W)
+    legs = (out,) if one_way else (out, Leg.of(dests, list(origins)))
+    return CalendarSearch(legs=legs, options=SearchOptions(cabin=Cabin.COACH), window=W)
 
 
 def _result(
@@ -98,7 +101,7 @@ def _result(
 
 
 def test_split_multi_destination_produces_one_per_dest() -> None:
-    subs = split_calendar_search(_cal(["VIE", "PAR", "FCO"]))
+    subs = split_calendar_search(_cal(["VIE", "CDG", "FCO"]))
     assert len(subs) == 3
     seen: set[str] = set()
     for s in subs:
@@ -110,42 +113,42 @@ def test_split_multi_destination_produces_one_per_dest() -> None:
         seen.add(d)
         assert ret.origins == (d,)  # return leg mirrored
         assert ret.destinations == ("MIA",)
-    assert seen == {"VIE", "PAR", "FCO"}
+    assert seen == {"VIE", "CDG", "FCO"}
 
 
 def test_split_single_airport_returns_empty() -> None:
-    assert split_calendar_search(_cal(["PAR"])) == []
+    assert split_calendar_search(_cal(["CDG"])) == []
 
 
 def test_split_preserves_extension_and_window() -> None:
-    subs = split_calendar_search(_cal(["VIE", "PAR"], ext="MAXCONNECT 2:00"))
+    subs = split_calendar_search(_cal(["VIE", "CDG"], ext="MAXCONNECT 2:00"))
     assert subs
     assert all(s.legs[0].extension == "MAXCONNECT 2:00" for s in subs)
     assert all(s.window == W for s in subs)
 
 
 def test_split_multi_origin_is_cartesian() -> None:
-    subs = split_calendar_search(_cal(["PAR", "FRA"], origins=("JFK", "EWR")))
+    subs = split_calendar_search(_cal(["CDG", "FRA"], origins=("JFK", "EWR")))
     assert len(subs) == 4  # 2 origins x 2 destinations
 
 
 def test_split_groups_destinations_by_max_per_query() -> None:
-    subs = split_calendar_search(_cal(["VIE", "PAR", "FCO", "MAD"]), max_per_query=2)
+    subs = split_calendar_search(_cal(["VIE", "CDG", "FCO", "MAD"]), max_per_query=2)
     assert len(subs) == 2  # 4 destinations / 2 per query
     assert all(len(s.legs[0].destinations) == 2 for s in subs)
     covered = {d for s in subs for d in s.legs[0].destinations}
-    assert covered == {"VIE", "PAR", "FCO", "MAD"}  # union still complete
+    assert covered == {"VIE", "CDG", "FCO", "MAD"}  # union still complete
 
 
 def test_split_max_per_query_uneven_last_group() -> None:
-    subs = split_calendar_search(_cal(["VIE", "PAR", "FCO"]), max_per_query=2)
-    assert len(subs) == 2  # [VIE,PAR] + [FCO]
+    subs = split_calendar_search(_cal(["VIE", "CDG", "FCO"]), max_per_query=2)
+    assert len(subs) == 2  # [VIE,CDG] + [FCO]
     assert sorted(len(s.legs[0].destinations) for s in subs) == [1, 2]
 
 
 def test_split_max_per_query_covering_all_is_noop() -> None:
     # one query already covers it (k >= #destinations, single origin) → no split
-    assert split_calendar_search(_cal(["VIE", "PAR"]), max_per_query=5) == []
+    assert split_calendar_search(_cal(["VIE", "CDG"]), max_per_query=5) == []
 
 
 # ───────────────────────────── is_empty ────────────────────────────────────
@@ -166,7 +169,7 @@ def test_is_empty_calendar_false_when_priced() -> None:
 def test_merge_takes_per_day_and_per_duration_min() -> None:
     a = _result({9: {7: ("USD800.00", 5, {5: "USD800.00", 7: "USD850.00"})}}, cheapest="USD800.00")
     b = _result({9: {7: ("USD600.00", 3, {5: "USD650.00", 7: "USD600.00"})}}, cheapest="USD600.00")
-    merged = merge_calendar_results([a, b])
+    merged = merge_calendar_results([(("MIA", "VIE"), a), (("MIA", "CDG"), b)])
     days = {d.date: d for d in merged.priced_days}
     assert merged.solution_count == 8  # summed across destinations
     assert days[7].min_price == "USD600.00"  # per-day min
@@ -179,14 +182,14 @@ def test_merge_takes_per_day_and_per_duration_min() -> None:
 def test_merge_unions_distinct_days() -> None:
     a = _result({9: {7: ("USD500.00", 1, {5: "USD500.00"})}})
     b = _result({9: {8: ("USD400.00", 2, {5: "USD400.00"})}})
-    merged = merge_calendar_results([a, b])
+    merged = merge_calendar_results([(("MIA", "VIE"), a), (("MIA", "CDG"), b)])
     assert {d.date for d in merged.priced_days} == {7, 8}
 
 
 def test_merge_keeps_same_date_in_different_months_distinct() -> None:
     a = _result({9: {7: ("USD500.00", 1, {5: "USD500.00"})}})
     b = _result({10: {7: ("USD400.00", 1, {5: "USD400.00"})}})
-    merged = merge_calendar_results([a, b])
+    merged = merge_calendar_results([(("MIA", "VIE"), a), (("MIA", "CDG"), b)])
     assert len(merged.priced_days) == 2  # Sep-7 and Oct-7 must not collide
 
 
@@ -203,7 +206,7 @@ class _PricedClient:
 
     _PRICE: ClassVar[dict[str, str]] = {
         "VIE": "USD800.00",
-        "PAR": "USD600.00",
+        "CDG": "USD600.00",
         "FCO": "USD700.00",
         "MAD": "USD900.00",
     }
@@ -232,18 +235,18 @@ class _EmptyClient(_PricedClient):
 
 def test_run_calendar_fans_out_multi_airport_and_merges(monkeypatch: Any) -> None:
     monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
-    res, n = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
-        _cal(["VIE", "PAR", "FCO", "MAD"]), rps=10.0, impersonate="chrome", no_cache=True
+    res, n, _ = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
+        _cal(["VIE", "CDG", "FCO", "MAD"]), rps=10.0, impersonate="chrome", no_cache=True
     )
-    assert n == 4  # one query per destination
+    assert n == 5  # one query per destination, and the combined one beside them
     assert not is_empty_calendar(res)
-    assert res.cheapest_price == "USD600.00"  # PAR is the cheapest destination
+    assert res.cheapest_price == "USD600.00"  # CDG is the cheapest destination
 
 
 def test_run_calendar_single_airport_runs_one_query(monkeypatch: Any) -> None:
     monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
-    res, n = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
-        _cal(["PAR"]), rps=10.0, impersonate="chrome", no_cache=True
+    res, n, _ = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
+        _cal(["CDG"]), rps=10.0, impersonate="chrome", no_cache=True
     )
     assert n == 0  # nothing to fan out
     assert not is_empty_calendar(res)
@@ -251,23 +254,24 @@ def test_run_calendar_single_airport_runs_one_query(monkeypatch: Any) -> None:
 
 def test_run_calendar_all_empty_is_not_masked(monkeypatch: Any) -> None:
     monkeypatch.setattr(cli, "MatrixClient", _EmptyClient)
-    res, n = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
-        _cal(["VIE", "PAR"]), rps=10.0, impersonate="chrome", no_cache=True
+    res, n, _ = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
+        _cal(["VIE", "CDG"]), rps=10.0, impersonate="chrome", no_cache=True
     )
     assert n == 0  # every destination empty → genuinely flight-less
     assert is_empty_calendar(res)
 
 
 def test_run_calendar_large_fanout_proceeds(monkeypatch: Any) -> None:
-    # 7 origins x 6 destinations = 42 (origin,dest) pairs: there is no hard cap —
-    # it warns and proceeds (the user's call), rather than refusing.
+    # 7 origins x 6 destinations = 42 (origin,dest) pairs and the combined query:
+    # there is no hard cap — it warns and proceeds (the user's call), rather than
+    # refusing.
     monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
     origins = ("JFK", "EWR", "LGA", "BOS", "PHL", "IAD", "BWI")
     dests = ["LHR", "CDG", "FRA", "AMS", "MAD", "FCO"]
-    res, n = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
+    res, n, _ = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
         _cal(dests, origins=origins), rps=10.0, impersonate="chrome", no_cache=True
     )
-    assert n == 42  # fanned out, not refused
+    assert n == 43  # fanned out, not refused
     assert not is_empty_calendar(res)
 
 
@@ -282,28 +286,532 @@ class _CapturingClient(_PricedClient):
 
 def test_run_calendar_max_per_query_reduces_queries(monkeypatch: Any) -> None:
     monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
-    res, n = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
-        _cal(["VIE", "PAR", "FCO", "MAD"]),
+    res, n, _ = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
+        _cal(["VIE", "CDG", "FCO", "MAD"]),
         rps=10.0,
         impersonate="chrome",
         no_cache=True,
         max_per_query=2,
     )
-    assert n == 2  # 4 destinations in groups of 2
+    assert n == 3  # 4 destinations in groups of 2, and the combined query
     assert not is_empty_calendar(res)
 
 
 def test_run_calendar_threads_max_concurrency(monkeypatch: Any) -> None:
     monkeypatch.setattr(cli, "MatrixClient", _CapturingClient)
     cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
-        _cal(["VIE", "PAR", "FCO", "MAD"]),
+        _cal(["VIE", "CDG", "FCO", "MAD"]),
         rps=10.0,
         impersonate="chrome",
         no_cache=True,
         max_concurrency=3,
     )
-    # conc = min(n=4, max_concurrency=3) = 3
+    # conc = min(n=5, max_concurrency=3) = 3: four pairs and the combined query
     assert _CapturingClient.last_kwargs.get("concurrency") == 3
+
+
+# ──────── metro split, one currency, a pair on every cell, the combined query ────────
+# A metro code is one combined Matrix query and undercounts as any set does, so
+# the split asks its member airports. Two origins come back in two currencies
+# unless asked one, and the merge compares numbers. Each merged cell names the
+# pair that priced it, the two arguments `flight detail` takes. And a mirrored
+# pair never prices a return into another airport of the set, so a round trip
+# also runs the user's own query beside the pairs.
+
+
+def _asked_pairs(searches: list[CalendarSearch]) -> list[tuple[str, str]]:
+    return [(",".join(s.legs[0].origins), ",".join(s.legs[0].destinations)) for s in searches]
+
+
+def _priced(price: str, *, day: int = 7, sols: int = 3) -> CalendarResult:
+    return _result({9: {day: (price, sols, {5: price})}}, cheapest=price)
+
+
+def _in_currency(search: CalendarSearch, currency: str) -> CalendarSearch:
+    return search.model_copy(
+        update={"options": search.options.model_copy(update={"currency": currency})}
+    )
+
+
+class _PairClient(_PricedClient):
+    """Answers each query from `grids`, keyed by its outbound origins and
+    destinations comma-joined, and records every query it was handed. A key it
+    lacks prices nothing; an exception in its place is raised."""
+
+    grids: ClassVar[dict[tuple[str, str], CalendarResult | Exception]] = {}
+    asked: ClassVar[list[CalendarSearch]] = []
+
+    @override
+    async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
+        _ = cache
+        type(self).asked.append(search)
+        (pair,) = _asked_pairs([search])
+        got = type(self).grids.get(pair)
+        if isinstance(got, Exception):
+            raise got
+        return got if got is not None else CalendarResult.from_api(_EMPTY)
+
+
+def _pair_client(
+    monkeypatch: Any, grids: dict[tuple[str, str], CalendarResult | Exception]
+) -> type[_PairClient]:
+    monkeypatch.setattr(_PairClient, "grids", grids)
+    monkeypatch.setattr(_PairClient, "asked", [])
+    monkeypatch.setattr(cli, "MatrixClient", _PairClient)
+    return _PairClient
+
+
+def _run(search: CalendarSearch, **kwargs: Any) -> tuple[CalendarResult, int]:
+    res, n, _ = cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
+        search, rps=10.0, impersonate="chrome", no_cache=True, **kwargs
+    )
+    return res, n
+
+
+def test_split_asks_each_member_airport_pair_of_two_metro_codes() -> None:
+    subs = split_calendar_search(_cal(["LON"], origins=("NYC",)))
+    assert len(subs) == 18  # 3 New York airports x 6 London airports
+    for s in subs:
+        out, ret = s.legs
+        assert len(out.origins) == len(out.destinations) == 1
+        assert (ret.origins, ret.destinations) == (out.destinations, out.origins)  # mirrored
+    pairs = _asked_pairs(subs)
+    assert {o for o, _ in pairs} == {"JFK", "LGA", "EWR"}
+    assert {d for _, d in pairs} == {"LHR", "LGW", "STN", "LTN", "LCY", "SEN"}
+
+
+def test_split_keeps_a_metro_code_that_is_also_an_airport() -> None:
+    subs = split_calendar_search(_cal(["LAX"], origins=("NYC",)))
+    assert _asked_pairs(subs) == [("JFK", "LAX"), ("LGA", "LAX"), ("EWR", "LAX")]
+
+
+def test_split_never_asks_an_airport_to_itself() -> None:
+    subs = split_calendar_search(_cal(["JFK"], origins=("NYC",)))
+    assert _asked_pairs(subs) == [("LGA", "JFK"), ("EWR", "JFK")]
+
+
+def test_split_drops_an_origin_from_its_own_destination_group() -> None:
+    subs = split_calendar_search(_cal(["JFK", "LHR"], origins=("NYC",)), max_per_query=2)
+    assert _asked_pairs(subs) == [("JFK", "LHR"), ("LGA", "JFK,LHR"), ("EWR", "JFK,LHR")]
+
+
+@pytest.mark.parametrize(
+    ("origins", "dests"), [(("TYO",), ["HND"]), (("LHR", "LGW"), ["LHR"])], ids=["TYO", "LHR,LGW"]
+)
+def test_an_expansion_that_leaves_one_pair_is_the_users_own_query(
+    origins: tuple[str, ...], dests: list[str], monkeypatch: Any
+) -> None:
+    """One pair left is one query: the user's own tokens, as typed, with no
+    currency asked, exactly the body a single-airport calendar sends."""
+    search = _cal(dests, origins=origins)
+    assert split_calendar_search(search) == []
+    client = _pair_client(monkeypatch, {})
+    _run(search)
+    assert client.asked == [search]
+
+
+def test_run_calendar_asks_each_airport_of_a_metro_origin(monkeypatch: Any) -> None:
+    client = _pair_client(monkeypatch, {})
+    _run(_cal(["LHR"], origins=("NYC",)))
+    assert sorted(_asked_pairs(client.asked)) == sorted(
+        [("JFK", "LHR"), ("LGA", "LHR"), ("EWR", "LHR"), ("NYC", "LHR")]
+    )
+
+
+def test_a_metro_pair_warns_of_its_rounds_counting_the_combined_query(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
+    _, n = _run(_cal(["LON"], origins=("NYC",)))
+    assert n == 19  # 18 airport pairs and the combined query
+    assert "Querying 19 origin/destination groups in ~2 rounds" in _flat(capsys.readouterr().err)
+
+
+def test_two_origins_ask_every_query_in_usd(monkeypatch: Any) -> None:
+    """Matrix prices LHR in GBP and DUB in EUR when no currency is asked."""
+    client = _pair_client(monkeypatch, {})
+    _run(_cal(["JFK"], origins=("LHR", "DUB")))
+    assert {s.options.currency for s in client.asked} == {"USD"}
+    assert len(client.asked) == 3  # both pairs and the combined query
+
+
+def test_two_origins_ask_every_query_in_the_currency_asked(monkeypatch: Any) -> None:
+    client = _pair_client(monkeypatch, {})
+    _run(_in_currency(_cal(["JFK"], origins=("LHR", "DUB")), "EUR"))
+    assert len(client.asked) == 3
+    assert {s.options.currency for s in client.asked} == {"EUR"}
+
+
+def test_one_origin_keeps_matrix_default_currency(monkeypatch: Any) -> None:
+    client = _pair_client(monkeypatch, {})
+    _run(_cal(["JFK", "BOS"], origins=("LHR",)))
+    assert len(client.asked) == 3
+    assert {s.options.currency for s in client.asked} == {None}
+
+
+def test_a_single_pair_calendar_sends_no_currency(monkeypatch: Any) -> None:
+    client = _pair_client(monkeypatch, {})
+    search = _cal(["LHR"], origins=("JFK",))
+    _run(search)
+    assert client.asked == [search]
+    assert "currency" not in to_wire(client.asked[0]).as_json()["inputs"]
+
+
+def test_a_pair_priced_in_another_currency_is_left_out_and_named(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Asked USD, Matrix answered two origins in their own currencies anyway.
+    GBP700 is not cheaper than USD900, so neither may sit in the grid as one."""
+    _pair_client(
+        monkeypatch,
+        {
+            ("LHR", "JFK"): _priced("GBP700.00"),
+            ("DUB", "JFK"): _priced("EUR750.00"),
+            ("MAD", "JFK"): _priced("USD900.00"),
+        },
+    )
+    res, n = _run(_cal(["JFK"], origins=("LHR", "DUB", "MAD"), one_way=True))
+    assert n == 3
+    assert [d.min_price for d in res.priced_days] == ["USD900.00"]
+    assert res.cheapest_price == "USD900.00"
+    line = _flat(capsys.readouterr().err)
+    assert "2 of 3 sub-queries failed" in line
+    assert "LHR→JFK came back priced in GBP, not the grid's USD" in line
+    assert "DUB→JFK came back priced in EUR, not the grid's USD" in line
+
+
+def test_a_fanout_priced_only_in_other_currencies_refuses(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _pair_client(
+        monkeypatch, {("LHR", "JFK"): _priced("GBP700.00"), ("DUB", "JFK"): _priced("EUR750.00")}
+    )
+    with pytest.raises(typer.Exit) as excinfo:
+        _run(_cal(["JFK"], origins=("LHR", "DUB"), one_way=True))
+    assert excinfo.value.exit_code == 1
+    cap = capsys.readouterr()
+    assert cap.out == ""
+    line = _flat(cap.err)
+    assert "all 2 sub-queries failed" in line
+    assert "LHR→JFK came back priced in GBP, not the grid's USD" in line
+    assert "DUB→JFK came back priced in EUR, not the grid's USD" in line
+
+
+def test_a_pair_is_judged_by_every_price_it_carries(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The notice and the day can agree while a trip length does not."""
+    mixed = _result({9: {7: ("USD600.00", 3, {5: "GBP500.00"})}}, cheapest="USD600.00")
+    _pair_client(monkeypatch, {("LHR", "JFK"): _priced("USD900.00"), ("DUB", "JFK"): mixed})
+    res, _ = _run(_cal(["JFK"], origins=("LHR", "DUB")))
+    assert {o.min_price for d in res.priced_days for o in d.options} == {"USD900.00"}
+    assert "DUB→JFK came back priced in GBP, not the grid's USD" in _flat(capsys.readouterr().err)
+
+
+def test_one_origin_judges_the_grid_by_its_first_priced_answer(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """With no currency asked, the first answer priced in one currency sets the
+    grid's; one that priced nothing has no currency and is never left out."""
+    _pair_client(
+        monkeypatch, {("LHR", "BOS"): _priced("GBP500.00"), ("LHR", "EWR"): _priced("EUR400.00")}
+    )
+    res, _ = _run(_cal(["JFK", "BOS", "EWR"], origins=("LHR",), one_way=True))
+    assert [d.min_price for d in res.priced_days] == ["GBP500.00"]
+    line = _flat(capsys.readouterr().err)
+    assert "1 of 3 sub-queries failed" in line
+    assert "LHR→EWR came back priced in EUR, not the grid's GBP" in line
+
+
+@pytest.mark.parametrize(
+    ("first", "theirs"),
+    [
+        (_result({9: {7: ("GBP900.00", 3, {5: "GBP900.00"})}}, cheapest="USD900.00"), "USD"),
+        (_priced("900.00"), "no currency"),
+    ],
+    ids=["two-currencies", "no-currency"],
+)
+def test_an_answer_left_out_does_not_set_the_grids_currency(
+    first: CalendarResult, theirs: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An answer the grid cannot use, in two currencies or in none, is left
+    out without deciding the grid's currency for the answers after it."""
+    _pair_client(monkeypatch, {("LHR", "JFK"): first, ("LHR", "BOS"): _priced("GBP300.00")})
+    res, _ = _run(_cal(["JFK", "BOS"], origins=("LHR",), one_way=True))
+    assert [d.min_price for d in res.priced_days] == ["GBP300.00"]
+    line = _flat(capsys.readouterr().err)
+    assert "1 of 2 sub-queries failed" in line
+    assert f"LHR→JFK came back priced in {theirs}, not the grid's GBP" in line
+
+
+def test_a_fanout_with_no_answer_in_one_currency_refuses(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    mixed = _result({9: {7: ("GBP900.00", 3, {5: "GBP900.00"})}}, cheapest="USD900.00")
+    _pair_client(monkeypatch, {("LHR", "JFK"): mixed, ("LHR", "BOS"): mixed})
+    with pytest.raises(typer.Exit) as excinfo:
+        _run(_cal(["JFK", "BOS"], origins=("LHR",), one_way=True))
+    assert excinfo.value.exit_code == 1
+    line = _flat(capsys.readouterr().err)
+    assert "all 2 sub-queries failed" in line
+    for route in ("LHR→JFK", "LHR→BOS"):
+        assert f"{route} came back priced in USD and GBP, and no answer was in one currency" in line
+
+
+def test_merge_names_the_pair_behind_each_day_and_each_length() -> None:
+    a = _result({9: {7: ("USD600.00", 3, {5: "USD650.00", 7: "USD600.00"})}})
+    b = _result({9: {7: ("USD800.00", 5, {5: "USD500.00", 7: "USD850.00"})}})
+    merged = merge_calendar_results([(("JFK", "LHR"), a), (("EWR", "LHR"), b)])
+    (day,) = merged.priced_days
+    assert (day.origin, day.destination) == ("JFK", "LHR")  # the day's min
+    lengths = {o.trip_length: (o.origin, o.destination) for o in day.options}
+    assert lengths == {5: ("EWR", "LHR"), 7: ("JFK", "LHR")}
+
+
+def test_merge_counts_the_combined_query_only_where_the_pairs_counted_nothing() -> None:
+    pair = _result({9: {7: ("USD600.00", 3, {5: "USD600.00"})}})
+    floor = _result({9: {7: ("USD650.00", 9, {5: "USD650.00"}), 8: ("USD700.00", 4, {})}})
+    merged = merge_calendar_results([(("JFK", "LHR"), pair)], (("JFK,EWR", "LHR"), floor))
+    days = {d.date: d for d in merged.priced_days}
+    assert days[7].solution_count == 3  # its solutions overlap the pair's
+    assert days[8].solution_count == 4  # a day no pair priced
+    assert (days[8].origin, days[8].destination) == ("JFK,EWR", "LHR")
+    assert merged.solution_count == 7  # the pair's 3 and the 4 on the day no pair priced
+
+
+@pytest.mark.parametrize(
+    "grids",
+    [
+        {
+            ("JFK", "LHR"): _priced("USD600.00"),
+            ("JFK,EWR", "LHR"): _priced("USD700.00", day=8, sols=4),
+        },
+        {
+            ("JFK", "LHR"): MatrixApiError("JFK UNAVAILABLE", kind="internal"),
+            ("EWR", "LHR"): _priced("USD650.00", sols=5),
+            ("JFK,EWR", "LHR"): _result(
+                {9: {7: ("USD700.00", 9, {5: "USD700.00"}), 8: ("USD720.00", 4, {})}}
+            ),
+        },
+        {
+            ("JFK", "LHR"): _priced("USD600.00"),
+            ("EWR", "LHR"): _priced("USD650.00", sols=5),
+            ("JFK,EWR", "LHR"): _priced("USD500.00", sols=20),
+        },
+    ],
+    ids=["a-day-only-the-combined-query-priced", "a-failed-pair-s-day", "a-cheaper-floor"],
+)
+def test_a_merged_grids_solution_count_is_the_sum_of_its_days(
+    grids: dict[tuple[str, str], CalendarResult | Exception], monkeypatch: Any
+) -> None:
+    """The header's count and the rows' counts are one number read two ways, as
+    in every grid Matrix itself returns."""
+    _pair_client(monkeypatch, grids)
+    res, _ = _run(_cal(["LHR"], origins=("JFK", "EWR")))
+    assert res.solution_count == sum(d.solution_count for d in res.priced_days)
+
+
+def _round_trip_pairs() -> dict[tuple[str, str], CalendarResult | Exception]:
+    return {
+        ("JFK", "LHR"): _result({9: {7: ("USD600.00", 3, {5: "USD600.00"})}}),
+        ("EWR", "LHR"): _result({9: {7: ("USD650.00", 5, {5: "USD650.00"})}}),
+    }
+
+
+def test_a_round_trip_fanout_runs_the_combined_query_beside_the_pairs(monkeypatch: Any) -> None:
+    grids = _round_trip_pairs()
+    grids["JFK,EWR", "LHR"] = _result({9: {7: ("USD500.00", 20, {5: "USD550.00"})}})
+    client = _pair_client(monkeypatch, grids)
+    res, n = _run(_cal(["LHR"], origins=("JFK", "EWR")))
+    assert n == 3  # two pairs and the combined query
+    assert sorted(_asked_pairs(client.asked)) == [
+        ("EWR", "LHR"),
+        ("JFK", "LHR"),
+        ("JFK,EWR", "LHR"),
+    ]
+    (day,) = res.priced_days
+    assert (day.min_price, day.origin, day.destination) == ("USD500.00", "JFK,EWR", "LHR")
+    (five,) = day.options
+    assert (five.min_price, five.origin, five.destination) == ("USD550.00", "JFK,EWR", "LHR")
+    assert day.solution_count == res.solution_count == 8  # the pairs' sum, above 0
+
+
+def test_a_tie_with_the_combined_query_keeps_the_pair(monkeypatch: Any) -> None:
+    grids = _round_trip_pairs()
+    grids["JFK,EWR", "LHR"] = _result({9: {7: ("USD600.00", 20, {5: "USD600.00"})}})
+    _pair_client(monkeypatch, grids)
+    res, _ = _run(_cal(["LHR"], origins=("JFK", "EWR")))
+    (day,) = res.priced_days
+    assert (day.origin, day.destination) == ("JFK", "LHR")
+    assert [(o.origin, o.destination) for o in day.options] == [("JFK", "LHR")]
+
+
+def test_a_one_way_fanout_runs_no_combined_query(monkeypatch: Any) -> None:
+    client = _pair_client(monkeypatch, _round_trip_pairs())
+    _, n = _run(_cal(["LHR"], origins=("JFK", "EWR"), one_way=True))
+    assert n == 2
+    assert sorted(_asked_pairs(client.asked)) == [("EWR", "LHR"), ("JFK", "LHR")]
+
+
+def test_a_grid_only_the_combined_query_priced_is_not_empty(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Every pair failed and the combined query answered: a priced grid under a
+    note, not a refusal saying nothing priced a day."""
+    _pair_client(
+        monkeypatch,
+        {
+            ("JFK", "LHR"): MatrixApiError("JFK UNAVAILABLE", kind="internal"),
+            ("EWR", "LHR"): MatrixApiError("EWR UNAVAILABLE", kind="internal"),
+            ("JFK,EWR", "LHR"): _priced("USD700.00", sols=4),
+        },
+    )
+    res, n = _run(_cal(["LHR"], origins=("JFK", "EWR")))
+    assert n == 3
+    assert res.solution_count == 4
+    (day,) = res.priced_days
+    assert (day.solution_count, day.origin, day.destination) == (4, "JFK,EWR", "LHR")
+    assert "2 of 3 sub-queries failed" in _flat(capsys.readouterr().err)
+
+
+def _all_cells(doc: dict[str, Any]) -> list[dict[str, Any]]:
+    days = [d for m in doc["calendar"]["months"] for w in m["weeks"] for d in w["days"]]
+    return [*days, *(o for d in days for o in d["tripDuration"]["options"])]
+
+
+def test_a_fanout_json_names_a_pair_on_every_day_and_length(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    grids = _round_trip_pairs()
+    grids["EWR", "LHR"] = _result({9: {8: ("USD640.00", 2, {5: "USD640.00", 7: "USD660.00"})}})
+    _pair_client(monkeypatch, grids)
+    _calendar_fast(fast=False, fmt="json", origin="JFK,EWR", destination="LHR", one_way=False)
+    cells = _all_cells(json.loads(capsys.readouterr().out))
+    assert len(cells) == 5  # two days, three lengths
+    assert {(c["origin"], c["destination"]) for c in cells} == {("JFK", "LHR"), ("EWR", "LHR")}
+
+
+def test_a_fanout_table_names_the_route_behind_each_min(monkeypatch: Any) -> None:
+    grids = _round_trip_pairs()
+    grids["EWR", "LHR"] = _priced("USD640.00", day=8)
+    _pair_client(monkeypatch, grids)
+    buffer = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, width=300))
+    _calendar_fast(fast=False, origin="JFK,EWR", destination="LHR", one_way=True)
+    lines = buffer.getvalue().splitlines()
+    header = next(line for line in lines if line.startswith("┃")).split("┃")
+    assert [c.strip() for c in header[1:4]] == ["departure", "min", "route"]
+    rows = [line.split("│") for line in lines if "│" in line]
+    assert {(r[1].strip(), r[3].strip()) for r in rows} == {("7", "JFK→LHR"), ("8", "EWR→LHR")}
+
+
+def test_a_trip_length_another_pair_priced_names_that_pair_in_the_table(monkeypatch: Any) -> None:
+    """The route column names the pair behind the day's min; a length a
+    different pair priced names its own, or the row reads as the route's."""
+    a = _result({9: {7: ("USD600.00", 3, {5: "USD650.00", 7: "USD600.00"})}}, "USD600.00")
+    b = _result({9: {7: ("USD800.00", 5, {5: "USD500.00", 7: "USD850.00"})}}, "USD500.00")
+    merged = merge_calendar_results([(("JFK", "LHR"), a), (("EWR", "LGW"), b)])
+    buffer = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, width=300))
+    cli._render_calendar(  # pyright: ignore[reportPrivateUsage] — the renderer IS the unit
+        merged,
+        dmin=5,
+        dmax=7,
+        origin=("NYC",),
+        destination=("LON",),
+        sd=date(2026, 9, 7),
+        ed=date(2026, 10, 7),
+        round_trip=True,
+    )
+    lines = buffer.getvalue().splitlines()
+    header = [c.strip() for c in next(x for x in lines if x.startswith("┃")).split("┃")[1:-1]]
+    (row,) = [[c.strip() for c in x.split("│")[1:-1]] for x in lines if "│" in x]
+    cell = dict(zip(header, row, strict=True))
+    assert (cell["min"], cell["route"]) == ("600.00", "JFK→LHR")
+    assert cell["5n"] == "500.00 EWR→LGW"
+    assert (cell["6n"], cell["7n"]) == ("—", "600.00")  # the route's own length stays bare
+
+
+@pytest.mark.parametrize("fmt", ["table", "json"])
+def test_a_single_pair_calendar_prints_no_pair_and_no_note(
+    fmt: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One query: Matrix's own document, byte for byte, and the table as it was."""
+    answer = _priced("USD600.00")
+    _pair_client(monkeypatch, {("JFK", "LHR"): answer})
+    buffer = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, width=300))
+    _calendar_fast(fast=False, fmt=fmt, origin="JFK", destination="LHR", one_way=False)
+    cap = capsys.readouterr()
+    if fmt == "json":
+        assert cap.out == json.dumps(answer.raw, indent=2)
+    else:
+        assert "route" not in buffer.getvalue()
+        assert "→LHR" not in buffer.getvalue().split("lowest fare per departure day")[1]
+    assert "Queried" not in cap.err
+
+
+@pytest.mark.parametrize("fmt", ["table", "json"])
+def test_the_fanout_note_names_the_combined_query_on_both_formats(
+    fmt: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The pairs answer a narrower question than a round trip over a set asks,
+    and the note says which query answered the rest, in JSON as in a table."""
+    _pair_client(monkeypatch, _round_trip_pairs())
+    _spy_renderers(monkeypatch)
+    _calendar_fast(fast=False, fmt=fmt, origin="JFK,EWR", destination="LHR", one_way=False)
+    cap = capsys.readouterr()
+    note = _flat(cap.err)
+    assert "Queried 2 airport pairs separately plus the combined query, and merged" in note
+    assert (
+        "Round trips that return to another airport of the set come only from the combined "
+        "query, which Matrix may under-report." in note
+    )
+    assert "Queried" not in cap.out
+
+
+@pytest.mark.parametrize("fmt", ["table", "json"])
+def test_a_one_way_fanout_note_has_no_combined_query(
+    fmt: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _pair_client(monkeypatch, _round_trip_pairs())
+    _spy_renderers(monkeypatch)
+    _calendar_fast(fast=False, fmt=fmt, origin="JFK,EWR", destination="LHR", one_way=True)
+    cap = capsys.readouterr()
+    note = _flat(cap.err)
+    assert "Queried 2 airport pairs separately and merged" in note
+    assert "combined query" not in note
+    assert "Queried" not in cap.out
+
+
+@pytest.mark.parametrize("fmt", ["table", "json"])
+@pytest.mark.parametrize(
+    "floor",
+    [MatrixApiError("COMBINED UNAVAILABLE", kind="internal"), _priced("GBP500.00")],
+    ids=["failed", "off-currency"],
+)
+def test_a_lost_combined_query_is_not_described_as_merged(
+    floor: CalendarResult | Exception,
+    fmt: str,
+    monkeypatch: Any,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The grid holds the pairs alone, so it holds no return into another
+    airport of the set, and the note says so rather than where they came from."""
+    grids = _round_trip_pairs()
+    grids["JFK,EWR", "LHR"] = floor
+    _pair_client(monkeypatch, grids)
+    _spy_renderers(monkeypatch)
+    _calendar_fast(fast=False, fmt=fmt, origin="JFK,EWR", destination="LHR", one_way=False)
+    note = _flat(capsys.readouterr().err)
+    assert "1 of 3 sub-queries failed" in note
+    assert "Queried 2 airport pairs separately and merged" in note
+    assert "plus the combined query" not in note
+    assert "come only from the combined query" not in note
+    assert (
+        "Round trips that return to another airport of the set are missing: only the "
+        "combined query prices them, and it failed." in note
+    )
 
 
 # ──────────── orchestration: _run_calendar_enriched (concurrent weave) ───────
@@ -811,7 +1319,7 @@ def test_the_fanout_provenance_note_is_beside_the_grid_not_in_it(
     where a caller reading the stream finds a document that is only provenance."""
     monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
     _spy_renderers(monkeypatch)
-    _calendar_fast(fast=False, destination="VIE,PAR")
+    _calendar_fast(fast=False, destination="VIE,CDG")
     cap = capsys.readouterr()
     assert "separately and merged" in _flat(cap.err)
     assert "separately and merged" not in _flat(cap.out)
@@ -828,7 +1336,7 @@ def test_the_fanout_provenance_note_counts_the_sub_queries_it_actually_ran(
     _spy_renderers(monkeypatch)
     _calendar_fast(fast=False, origin="JFK,BOS", destination="LHR")
     note = _flat(capsys.readouterr().err)
-    assert "Queried 2 origin/destination groups separately" in note
+    assert "Queried 2 airport pairs separately" in note
     assert "2 destinations" not in note  # one destination was asked for, not two
 
 
@@ -1182,7 +1690,7 @@ def test_fast_over_http_names_the_browser_for_json_and_round_trip(
 
 @pytest.mark.parametrize(
     "overrides",
-    [{"destination": "LHR,CDG"}, {"origin": "NYC"}, {"origin": "QSF", "destination": "JFK"}],
+    [{"destination": "LHR,PAR"}, {"origin": "NYC"}, {"origin": "QSF", "destination": "JFK"}],
     ids=["list", "metro", "qsf"],
 )
 def test_fast_over_http_names_the_browser_for_an_airport_set(
@@ -1432,7 +1940,7 @@ def test_the_matrix_calendar_types_a_client_that_cannot_be_built(
     monkeypatch.setattr(cli, "MatrixClient", _UnbuildableClient)
     with pytest.raises(typer.Exit) as excinfo:
         cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
-            _cal(["PAR"]), rps=10.0, impersonate="chrome", no_cache=True
+            _cal(["CDG"]), rps=10.0, impersonate="chrome", no_cache=True
         )
     assert excinfo.value.exit_code == 1
     cap = capsys.readouterr()
@@ -1443,7 +1951,10 @@ def test_the_matrix_calendar_types_a_client_that_cannot_be_built(
 
 
 class _FanoutFailClient(_PricedClient):
-    """Prices every destination but the ones named, which Matrix refuses."""
+    """Prices every destination but the ones named, which Matrix refuses.
+
+    Keyed on the first destination, which a round trip's combined query shares
+    with the first pair, so the drives counting failures below are one-way."""
 
     fails: ClassVar[frozenset[str]] = frozenset()
 
@@ -1464,11 +1975,11 @@ def test_a_calendar_fanout_that_loses_every_sub_query_refuses(
     the reader Matrix priced the window and found nothing. When every sub-query
     failed it priced nothing at all, so exit 0 under that sentence is a wrong
     answer with nothing on stderr and no exit code to tell it from a right one."""
-    _FanoutFailClient.fails = frozenset({"VIE", "PAR"})
+    _FanoutFailClient.fails = frozenset({"VIE", "CDG"})
     monkeypatch.setattr(cli, "MatrixClient", _FanoutFailClient)
     with pytest.raises(typer.Exit) as excinfo:
         cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
-            _cal(["VIE", "PAR"]), rps=10.0, impersonate="chrome", no_cache=True
+            _cal(["VIE", "CDG"], one_way=True), rps=10.0, impersonate="chrome", no_cache=True
         )
     assert excinfo.value.exit_code == 1
     cap = capsys.readouterr()
@@ -1479,17 +1990,17 @@ def test_a_calendar_fanout_that_loses_every_sub_query_refuses(
     # reasons is two things to fix: a report naming one leaves the count as the
     # only true half of it.
     assert "VIE UNAVAILABLE" in line
-    assert "PAR UNAVAILABLE" in line
+    assert "CDG UNAVAILABLE" in line
     # Lowest-index first, so the same outage reads the same way on every run:
     # sub-queries are indexed in destination order and finish in whatever order the
     # network gives them.
-    assert line.index("VIE UNAVAILABLE") < line.index("PAR UNAVAILABLE")
+    assert line.index("VIE UNAVAILABLE") < line.index("CDG UNAVAILABLE")
     # Each arrives through the shared Matrix reporter, so the kind and the request
     # id survive the fan-out the way they do on a single query — for every cause,
     # not just whichever one led.
     assert "internal" in line
     assert "req-VIE" in line
-    assert "req-PAR" in line
+    assert "req-CDG" in line
 
 
 def test_a_calendar_fanout_that_loses_some_sub_queries_says_how_many(
@@ -1500,8 +2011,8 @@ def test_a_calendar_fanout_that_loses_some_sub_queries_says_how_many(
     destination with no fares, and the count is what tells them apart."""
     _FanoutFailClient.fails = frozenset({"VIE"})
     monkeypatch.setattr(cli, "MatrixClient", _FanoutFailClient)
-    res, n = cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
-        _cal(["VIE", "PAR"]), rps=10.0, impersonate="chrome", no_cache=True
+    res, n, _ = cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
+        _cal(["VIE", "CDG"], one_way=True), rps=10.0, impersonate="chrome", no_cache=True
     )
     assert n == 2  # what answered was merged and is still rendered
     assert not is_empty_calendar(res)
@@ -1517,7 +2028,7 @@ def test_a_partly_lost_fanout_names_each_lost_group_with_its_cause(
     _FanoutFailClient.fails = frozenset({"VIE"})
     monkeypatch.setattr(cli, "MatrixClient", _FanoutFailClient)
     cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
-        _cal(["VIE", "PAR"]), rps=10.0, impersonate="chrome", no_cache=True
+        _cal(["VIE", "CDG"], one_way=True), rps=10.0, impersonate="chrome", no_cache=True
     )
     cap = capsys.readouterr()
     line = _flat(cap.err)
@@ -1557,7 +2068,7 @@ def test_a_partly_lost_fanout_that_priced_nothing_refuses_in_both_arms(
     monkeypatch.setattr(cli, "MatrixClient", _FanoutEmptyRestClient)
     calls = _spy_renderers(monkeypatch)
     with pytest.raises(typer.Exit) as excinfo:
-        _calendar_fast(fast=False, fmt=fmt, destination="VIE,PAR")
+        _calendar_fast(fast=False, fmt=fmt, destination="VIE,CDG")
     assert excinfo.value.exit_code == 1
     cap = capsys.readouterr()
     assert cap.out == ""  # no grid, no brownout advice, and no JSON document
@@ -1584,7 +2095,7 @@ def _exiting_grid(_search: object) -> dict[str, float]:
 def _exit_from_a_fanout_sub_query(monkeypatch: Any, calls: dict[str, int]) -> None:
     monkeypatch.setattr(cli, "MatrixClient", _ExitingClient)
     cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
-        _cal(["VIE", "PAR"]), rps=10.0, impersonate="chrome", no_cache=True
+        _cal(["VIE", "CDG"]), rps=10.0, impersonate="chrome", no_cache=True
     )
 
 
@@ -1632,7 +2143,7 @@ def _exit_beside_a_failure(monkeypatch: Any, code: int) -> None:
     _ExitBesideFailureClient.exit_code = code
     monkeypatch.setattr(cli, "MatrixClient", _ExitBesideFailureClient)
     cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
-        _cal(["PAR"]), rps=10.0, impersonate="chrome", no_cache=True
+        _cal(["CDG"]), rps=10.0, impersonate="chrome", no_cache=True
     )
 
 
@@ -1769,7 +2280,7 @@ def test_a_lone_failure_is_named_without_the_group_around_it(
     monkeypatch.setattr(cli, "MatrixClient", _OneFailureClient)
     with pytest.raises(typer.Exit) as excinfo:
         cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
-            _cal(["PAR"]), rps=10.0, impersonate="chrome", no_cache=True
+            _cal(["CDG"]), rps=10.0, impersonate="chrome", no_cache=True
         )
     assert excinfo.value.exit_code == 1
     cap = capsys.readouterr()
@@ -1791,7 +2302,7 @@ def test_two_concurrent_calendar_failures_are_each_named(
     monkeypatch.setattr(cli, "MatrixClient", _TwoFailureClient)
     with pytest.raises(typer.Exit) as excinfo:
         cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
-            _cal(["PAR"]), rps=10.0, impersonate="chrome", no_cache=True
+            _cal(["CDG"]), rps=10.0, impersonate="chrome", no_cache=True
         )
     assert excinfo.value.exit_code == 1
     cap = capsys.readouterr()
@@ -1851,7 +2362,7 @@ def test_a_single_query_calendar_failure_names_the_command_once(
     monkeypatch.setattr(cli, "MatrixClient", _ErrClient)
     with pytest.raises(typer.Exit) as excinfo:
         cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
-            _cal(["PAR"]), rps=10.0, impersonate="chrome", no_cache=True
+            _cal(["CDG"]), rps=10.0, impersonate="chrome", no_cache=True
         )
     assert excinfo.value.exit_code == 1
     cap = capsys.readouterr()
@@ -1897,7 +2408,7 @@ def test_every_failure_beside_a_deliberate_stop_is_named(
     monkeypatch.setattr(cli, "MatrixClient", _ExitBesideTwoFailuresClient)
     with pytest.raises(typer.Exit) as excinfo:
         cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
-            _cal(["PAR"]), rps=10.0, impersonate="chrome", no_cache=True
+            _cal(["CDG"]), rps=10.0, impersonate="chrome", no_cache=True
         )
     assert excinfo.value.exit_code == 0  # the stop's own code, not 1
     cap = capsys.readouterr()
@@ -1917,8 +2428,8 @@ def test_a_teardown_after_a_calendar_keeps_the_answer_on_the_plain_path(
     stands, and the teardown is a line beside it. Discarding it reports a query that
     succeeded as one that never ran, on the two channels automation reads."""
     monkeypatch.setattr(cli, "MatrixClient", _TeardownFailsClient)
-    res, n = cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
-        _cal(["PAR"]), rps=10.0, impersonate="chrome", no_cache=True
+    res, n, _ = cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
+        _cal(["CDG"]), rps=10.0, impersonate="chrome", no_cache=True
     )
     assert not is_empty_calendar(res)  # the calendar Matrix priced, not discarded
     assert n == 0
@@ -1936,7 +2447,10 @@ class _SubQueryStop(BaseException):
 
 
 class _StoppingSubQueryClient(_PricedClient):
-    """One sub-query ending on something the fan-out's own arm cannot catch."""
+    """One sub-query ending on something the fan-out's own arm cannot catch.
+
+    Keyed on the first destination, as `_FanoutFailClient` is, so it is driven
+    one-way: a round trip's combined query would stop beside the VIE pair."""
 
     @override
     async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
@@ -1956,7 +2470,7 @@ def test_a_base_exception_inside_a_fanout_is_not_a_group(
     monkeypatch.setattr(cli, "MatrixClient", _StoppingSubQueryClient)
     with pytest.raises(_SubQueryStop) as excinfo:
         cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
-            _cal(["VIE", "PAR"]), rps=10.0, impersonate="chrome", no_cache=True
+            _cal(["VIE", "CDG"], one_way=True), rps=10.0, impersonate="chrome", no_cache=True
         )
     assert str(excinfo.value) == "the sub-query stopped"  # the cause, not the wrapper
     assert "ExceptionGroup" not in _flat(capsys.readouterr().err)
@@ -2005,7 +2519,7 @@ def _fanout_emitter_raises(monkeypatch: Any) -> None:
     monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
     _spy_renderers(monkeypatch)
     monkeypatch.setattr(cli, "_emit_urls", _exploding_url_emitter)
-    _calendar_fast(fast=False, destination="VIE,PAR")
+    _calendar_fast(fast=False, destination="VIE,CDG")
 
 
 def _fast_renderer_raises(monkeypatch: Any) -> None:
@@ -2128,7 +2642,7 @@ def test_calendar_one_way_default_duration_is_silent(
     assert "--duration is ignored" not in _flat(capsys.readouterr().err)
 
 
-@pytest.mark.parametrize("destination", ["LHR", "VIE,PAR,FCO,MAD"], ids=["single", "fan-out"])
+@pytest.mark.parametrize("destination", ["LHR", "VIE,CDG,FCO,MAD"], ids=["single", "fan-out"])
 def test_calendar_one_way_note_survives_json_output(
     destination: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -3202,6 +3716,62 @@ def test_gflight_table_survives_a_hostile_flight_number(
     assert re.search(r"\x1b\[[0-9;]*31[;m]", written), "the legroom colour was escaped away"
 
 
+def _fake_gf_with_co2(grams: object, delta: object, label: object) -> SimpleNamespace:
+    fake = _fake_gf("UA117")
+    fake.flight.co2_emissions_g = grams
+    fake.flight.co2_emissions_delta_pct = delta
+    fake.flight.emissions_tag = label
+    return fake
+
+
+@pytest.mark.parametrize("payload", _HOSTILE_FIELD_VALUES)
+def test_gflight_table_survives_a_hostile_co2_label(
+    payload: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`co2_cell` is allowlisted because Google's label only picks the cell's
+    color and never reaches it: the cell is two numbers through `:d` specs inside
+    markup this module wrote. A label that is markup or an escape sequence must
+    leave the cell as it is and print nowhere."""
+    buffer = io.StringIO()
+    monkeypatch.setattr(
+        cli,
+        "console",
+        Console(
+            file=buffer, force_terminal=True, color_system="truecolor", no_color=False, width=400
+        ),
+    )
+    cli._render_gflight_table(  # pyright: ignore[reportPrivateUsage] — the render site IS the unit
+        [_fake_gf_with_co2(261000, -25, payload)],
+        legs=(Leg.of(["JFK"], ["LHR"], date(2026, 10, 1)),),
+        top_n=5,
+    )
+    written = buffer.getvalue()
+    probe = _flat(_SGR.sub("", written))
+    for driver in _DRIVERS:
+        assert driver not in probe, f"{driver!r} reached the console"
+    assert payload.lstrip("\x1b") not in probe, "the label reached the console"
+    assert "261 -25%" in probe
+    _ = capsys.readouterr()
+
+
+@pytest.mark.parametrize(("grams", "delta"), [("[/x]", -25), (261000, "[/x]")])
+def test_a_gflight_co2_figure_refuses_a_string(
+    grams: object, delta: object, monkeypatch: Any
+) -> None:
+    """The other half of what backs `co2_cell`: each figure reaches the cell
+    through a `:d` spec or integer arithmetic, so a string raises before anything
+    is printed."""
+    buffer = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, width=400))
+    with pytest.raises((TypeError, ValueError)):
+        cli._render_gflight_table(  # pyright: ignore[reportPrivateUsage] — the render site IS the unit
+            [_fake_gf_with_co2(grams, delta, "lower")],
+            legs=(Leg.of(["JFK"], ["LHR"], date(2026, 10, 1)),),
+            top_n=5,
+        )
+    assert buffer.getvalue() == ""
+
+
 # The rest of what the Google Flights table interpolates. Two reach a cell as text
 # and must arrive escaped; two reach one under a numeric spec or through integer
 # arithmetic, where the guard reads the spec as a PROOF that no string can be here
@@ -3781,7 +4351,6 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_run_calendar", "n"),  # fan-out counters
         ("_run_calendar", "rounds"),
         ("_run_calendar", "conc"),
-        ("_run_matrix_calendar", "n_split"),  # how many sub-searches were merged
         # A title clause this module wrote, printed only for an airport set.
         ("_render_date_grid", "_ACROSS_SET_TITLE"),
         ("_render_graph_range", "_ACROSS_SET_TITLE"),
@@ -3850,6 +4419,9 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_render_gflight_table", "legroom_str"),
         # Empty, or one of the three literals `_bag_cell` writes.
         ("_render_gflight_table", "bag_cell"),
+        # Empty, or `_co2_cell`'s two numbers through `:d` specs inside literal
+        # markup; the label only picks the color (the hostile-label arm).
+        ("_render_gflight_table", "co2_cell"),
         # The cabin letters are this module's own map, keyed by its own enum.
         ("_render_multi_cabin_search", "cabin_labels"),
         ("_render_multi_cabin_search", "sort_label"),

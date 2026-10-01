@@ -48,15 +48,19 @@ flight search MIA PAR --dep 2026-06-15 --routing "LH UA" --ext "-REDEYES"
 flight search JFK LHR --dep 2026-08-15 --backend matrix
 flight search JFK LHR --dep 2026-08-15 --backend gflight
 
-# lowest-fare calendar across a date window (one Matrix call returns
-# 30 days × N durations of priced options)
+# lowest-fare calendar across a date window (one Matrix call per airport
+# pair, PAR split into CDG, ORY and BVA, returns 30 days × N durations)
 flight calendar MIA PAR --start 2026-06-07 -d 5-7 \
     --routing "LH+" --ext "MAXCONNECT 2:00" --depart-times morning
 
 # phase-2 of the calendar flow: full itineraries for a picked date. Give it
 # the calendar's filters (routing, codes, --depart-times/--return-times,
-# --include-unavailable) so it prices the grid's question.
-flight detail MIA PAR --dep 2026-06-10 --return 2026-06-16 --duration 5-7 \
+# --include-unavailable) so it prices the grid's question, and the airport
+# pair that priced the picked cell: a split calendar shows it in the route
+# column (MIA→CDG) or beside a trip length another pair priced, and as
+# origin/destination in --json. A calendar of one airport pair has no route
+# column; give detail its codes.
+flight detail MIA CDG --dep 2026-06-10 --return 2026-06-16 --duration 5-7 \
     --routing "LH+" --ext "MAXCONNECT 2:00" --depart-times morning
 
 # IATA autocomplete
@@ -87,7 +91,7 @@ Every result-printing command supports:
 
 - **Routing language** (`--routing`): `LH+` (every flight marketed by Lufthansa), `BA AA` (a BA flight, then an AA flight), `F* X:LHR F*` (connects at LHR). Each slice reads its routing from its own origin: `--routing-ret` gives a round trip's return its own (`''` for none), and unset, the return gets `--routing` only when it reads the same both ways. `BA AA` on a round trip without `--routing-ret` is refused, naming the reversed order `AA BA`. [More codes →](https://www.nicethis.com/itamatrix.aspx)
 - **Extension codes** (`--extension`): `MAXCONNECT 5:00`, `MAXSTOPS 1`, `MINMILES 3000`, `-REDEYES`, `-OVERNIGHTS`, `ALLIANCE oneworld`. A round trip copies them onto the return unless `--ext-ret` gives its own.
-- **Multi-airport**: `flight calendar MIA VIE,PAR,FCO,MAD --start ...` — search across N European cities at once.
+- **Multi-airport**: `flight calendar MIA VIE,PAR,FCO,MAD --start ...` — search across N European cities at once, one Matrix query per airport pair, merged into one grid in one currency whose every day names the pair that priced it.
 - **Time-of-day filters** (`--depart-times`, `--return-times`): `morning`, `morning,midday` etc. Buckets that make one window stay on Google Flights; `morning,evening` goes to Matrix.
 - **Stop limits** (`--stops N`): at most N stops per direction, on every backend. `0` = nonstop only, `1` = up to one stop, …
 - **Calendar-mode duration ranges** (`-d 5-7`): one search returns prices for 5-, 6-, and 7-night trips at every starting day.

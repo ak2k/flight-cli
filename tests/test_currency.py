@@ -220,9 +220,9 @@ def test_a_non_usd_calendar_is_priced_by_matrix_in_that_currency(
 ) -> None:
     asked: list[CalendarSearch] = []
 
-    def _matrix(search: CalendarSearch, **_kw: Any) -> tuple[CalendarResult, int]:
+    def _matrix(search: CalendarSearch, **_kw: Any) -> tuple[CalendarResult, int, bool]:
         asked.append(search)
-        return CalendarResult.from_api({"solutionCount": 0}), 0
+        return CalendarResult.from_api({"solutionCount": 0}), 0, False
 
     def _no_grid(*_a: Any, **_kw: Any) -> None:
         raise AssertionError("a non-USD calendar reached the USD date grid")
