@@ -2064,7 +2064,7 @@ def _pins(
 
     Cheapest, because an outbound row's price is already the cheapest round
     trip through it: the outbounds that price lowest are where the cheapest
-    combinations are, wherever the page happened to list them."""
+    combinations are, wherever the page listed them."""
     budget = pinned_fanout(top_n)
     at: dict[ItineraryKey, GFlightWithId] = {}
     for row in board:
@@ -2234,9 +2234,9 @@ def search_with_ids(
     `keep(i, row)` is the routing filter for segment `i`. It runs on the
     outbound board BEFORE the pins are taken, because the pins are the cheapest
     rows of the board they are taken from and a filter applied after them
-    answers from pins it then discards. It runs on each return board after the pin check, so a page
-    that ignored its pin is refused as one rather than read as "no return
-    matches". The result carries the outbound page's price insight, restated
+    answers from pins it then discards. It runs on each return board after the
+    pin check, so a page that ignored its pin is refused as one rather than read
+    as "no return matches". The result carries the outbound page's price insight, restated
     for the rows the filter kept. `checks` names what `keep` holds a row to,
     for the warning that counts the pins it left with no return.
 

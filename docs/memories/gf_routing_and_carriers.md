@@ -482,11 +482,10 @@ the untyped shape of that failure is worse than the failure:
 | the enriched weave's own run | the same, for the loop and the task group themselves | a failure there is not one half of the weave failing, so nothing else in the command is left to report it |
 
 **A round trip says how many outbounds it will combine.** `cli._pin_cap_note`
-prints it — "combines returns against up to `<pin budget>` cheapest
-outbounds" — on every round-trip path — the enriched one, `--fast`,
-`--format json` and multi-cabin — whenever the pin cap is below the `-n` asked
-for and the search is not handed to Matrix, and always
-to stderr so a JSON document stays a document. It is passed the user's count,
+prints "combines returns against up to `<pin budget>` cheapest outbounds" on
+every round-trip path (the enriched one, `--fast`, `--format json` and
+multi-cabin) whenever the pin cap is below the `-n` asked for and the search is
+not handed to Matrix, and always to stderr so a JSON document stays a document. It is passed the user's count,
 never the multi-cabin bump — a wider pool per cabin that nobody asked for — and
 prints the pin budget that count resolves to, which is the number the join will
 actually see rather than the one being corrected. Above the cap the rows shown
@@ -563,12 +562,11 @@ Google's top flights (`ds:1[2]`) ahead of the rest, a composite of price,
 duration and stops: on the JFK-LHR capture `-n 5` kept five USD295 top flights
 and left the board's three USD293 rows, at 6-8, off the table, and NYC-LAX,
 measured live on 2026-10-01, listed a 175 at row 6 under 169, 229, 229, 229 and
-234. A round
-trip's combinations arrive outbound by outbound, so `-n 3` unsorted is three
-trips from one outbound with cheaper trips from the next off the table. The
-trade is that a top-flights row, often a nonstop a few dollars dearer, can fall
-below a small `-n`; a larger `-n` brings it back. The page's order survives as
-the tie-break. The `-n` help string states the rule.
+234. A round trip's combinations arrive outbound by outbound, so `-n 3` unsorted
+is three trips from one outbound with cheaper trips from the next off the
+table. The trade is that a top-flights row, often a nonstop a few dollars
+dearer, can fall below a small `-n`; a larger `-n` brings it back. The page's
+order survives as the tie-break. The `-n` help string states the rule.
 
 Three things still read the whole board, and this is why the trim cannot move
 into the query: the Tier-2 post-filter, because a routing constraint is answered

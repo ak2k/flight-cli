@@ -4846,10 +4846,10 @@ def _pin_cap_note(*, legs: tuple[Leg, ...], top_n: int) -> None:
     """Say so when a round trip will search fewer outbounds than were asked for.
 
     A round trip prices returns against its cheapest outbounds, and the number
-    of those is capped however large `-n` is. Without a word the user
-    reads a short table as the market rather than as the budget, so every
-    round-trip path says it: the enriched one, `--fast`, `--format json` and
-    multi-cabin alike. A search handed to Matrix does not, because the table it
+    of those is capped however large `-n` is. Without a word the user reads a
+    short table as the market rather than as the budget, so every round-trip
+    path says it: the enriched one, `--fast`, `--format json` and multi-cabin
+    alike. A search handed to Matrix does not, because the table it
     prints is Matrix's.
 
     Cheapest, because the pin loop takes the filtered board's outbounds in
@@ -5079,10 +5079,10 @@ class _CabinSearches(NamedTuple):
     pins the outbounds the sort cabin pins, wherever its own filtered board
     lists them, and fills the rest of the same budget with its own cheapest
     rows. A cabin pinning its own ten cheapest may price none of the
-    itineraries the table shows, which are the sort cabin's. The sort cabin's page is
-    fetched ahead of its pins and handed back to its search, so the GETs are
-    the ones each cabin would spend alone. Anything else is each cabin's whole
-    search."""
+    itineraries the table shows, which are the sort cabin's. The sort cabin's
+    page is fetched ahead of its pins and handed back to its search, so the
+    GETs are the ones each cabin would spend alone. Anything else is each
+    cabin's whole search."""
 
     legs: tuple[Leg, ...]
     opts: SearchOptions
