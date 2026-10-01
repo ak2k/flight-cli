@@ -1825,9 +1825,9 @@ def _matrix_answers(monkeypatch: pytest.MonkeyPatch) -> list[CalendarSearch]:
     """Stand in for the Matrix calendar with an empty answer, recording each ask."""
     asked: list[CalendarSearch] = []
 
-    def _matrix(search: CalendarSearch, **_kw: object) -> tuple[CalendarResult, int]:
+    def _matrix(search: CalendarSearch, **_kw: object) -> tuple[CalendarResult, int, bool]:
         asked.append(search)
-        return CalendarResult.from_api({"solutionCount": 0}), 0
+        return CalendarResult.from_api({"solutionCount": 0}), 0, False
 
     def _no_weave(*_a: object, **_k: object) -> object:
         raise AssertionError("the http weave ran on the browser transport")
