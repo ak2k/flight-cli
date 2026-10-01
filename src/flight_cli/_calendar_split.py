@@ -192,9 +192,9 @@ def merge_calendar_results(
     `floor` is the user's own combined query, run beside a round trip's pairs
     because it is the only one that prices a return into another airport of the
     set. It takes a cell only when strictly cheaper than every pair. Its
-    solutions overlap the pairs', so its counts are used only where the pairs
-    counted none — a day no pair priced, or a grid whose pairs all came back
-    empty — which keeps a grid only the floor priced from reading as empty."""
+    solutions overlap the pairs', so its counts are used only on a day the pairs
+    counted none, in that day and in the grid's total alike: the total stays the
+    sum of the days, and a grid only the floor priced never reads as empty."""
     cells: dict[tuple[int, int], _Cell] = {}
     cheapest_pv: float | None = None
     cheapest_notice: dict[str, Any] = {}
@@ -206,9 +206,9 @@ def merge_calendar_results(
             cheapest_pv = cpv
             cheapest_notice = (res.raw or {}).get("currencyNotice") or {}
         _fold(cells, pair, res, floor=i == len(results))
-    total_sols = sum(res.solution_count for _, res in results)
-    if total_sols == 0 and floor is not None:
-        total_sols = floor[1].solution_count
+    total_sols = sum(res.solution_count for _, res in results) + sum(
+        c.floor_sols for c in cells.values() if not c.sols
+    )
     by_month: dict[int, list[dict[str, Any]]] = {}
     for (month, _date), cell in cells.items():
         day: dict[str, Any] = {

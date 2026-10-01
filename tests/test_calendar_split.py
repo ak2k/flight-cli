@@ -575,7 +575,39 @@ def test_merge_counts_the_combined_query_only_where_the_pairs_counted_nothing() 
     assert days[7].solution_count == 3  # its solutions overlap the pair's
     assert days[8].solution_count == 4  # a day no pair priced
     assert (days[8].origin, days[8].destination) == ("JFK,EWR", "LHR")
-    assert merged.solution_count == 3  # the pairs' sum, above 0
+    assert merged.solution_count == 7  # the pair's 3 and the 4 on the day no pair priced
+
+
+@pytest.mark.parametrize(
+    "grids",
+    [
+        {
+            ("JFK", "LHR"): _priced("USD600.00"),
+            ("JFK,EWR", "LHR"): _priced("USD700.00", day=8, sols=4),
+        },
+        {
+            ("JFK", "LHR"): MatrixApiError("JFK UNAVAILABLE", kind="internal"),
+            ("EWR", "LHR"): _priced("USD650.00", sols=5),
+            ("JFK,EWR", "LHR"): _result(
+                {9: {7: ("USD700.00", 9, {5: "USD700.00"}), 8: ("USD720.00", 4, {})}}
+            ),
+        },
+        {
+            ("JFK", "LHR"): _priced("USD600.00"),
+            ("EWR", "LHR"): _priced("USD650.00", sols=5),
+            ("JFK,EWR", "LHR"): _priced("USD500.00", sols=20),
+        },
+    ],
+    ids=["a-day-only-the-combined-query-priced", "a-failed-pair-s-day", "a-cheaper-floor"],
+)
+def test_a_merged_grids_solution_count_is_the_sum_of_its_days(
+    grids: dict[tuple[str, str], CalendarResult | Exception], monkeypatch: Any
+) -> None:
+    """The header's count and the rows' counts are one number read two ways, as
+    in every grid Matrix itself returns."""
+    _pair_client(monkeypatch, grids)
+    res, _ = _run(_cal(["LHR"], origins=("JFK", "EWR")))
+    assert res.solution_count == sum(d.solution_count for d in res.priced_days)
 
 
 def _round_trip_pairs() -> dict[tuple[str, str], CalendarResult | Exception]:
