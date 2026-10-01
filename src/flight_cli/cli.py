@@ -496,6 +496,14 @@ def _google_only(
     ]
 
 
+def _matrix_remedy(google_only: list[tuple[str, str]]) -> str:
+    """How to put a search on Matrix: under a Google-only flag, by dropping it."""
+    if google_only:
+        flag, gap = google_only[0]
+        return f"drop {flag} to search Matrix, which {gap}"
+    return "use --backend matrix"
+
+
 def _resolve_cabin(name: str) -> Cabin:
     norm = name.lower().replace("_", "").replace("-", "").replace(" ", "")
     aliases = {
@@ -807,12 +815,15 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
     ceiling above two, the strictest of `--stops` and every `MAXSTOPS` being the
     one the page is asked for (fli maps a higher one to "any", so the tfs field
     would be omitted and the constraint lost), seniors and youth (Google has no
-    such passenger kind), infants (Google prices them, but answered JFK-LAX with
-    no rows at all for any infant, so its empty answer would not be one), and
-    `--no-airport-changes` / `--include-unavailable`, which the search page's
-    `tfs=` parameter has no field for at all. `--fare-rules` too: fare bases and
-    rules come from Matrix's `/v1/summarize`, which Google has no equivalent of.
-    Children stay on Google beside an adult, in a party of nine or fewer.
+    such passenger kind), and `--no-airport-changes` / `--include-unavailable`,
+    which the search page's `tfs=` parameter has no field for at all.
+    `--fare-rules` too: fare bases and rules come from Matrix's
+    `/v1/summarize`, which Google has no equivalent of. Children and infants
+    stay on Google beside an adult, in a party of nine or fewer. Google has
+    answered a route with flights with no rows for any infant, so that empty
+    board is handed to Matrix afterwards (`_run_gflight_path`); a multi-cabin
+    compare, which hands on only boards its row filter emptied, takes an infant
+    to Matrix here.
     `--depart-times`/`--return-times` stay on Google when a leg's buckets form
     one window, or the leg has one window to the minute: the page takes one
     hour window per leg, and the row filter holds each row to the minute.
@@ -874,11 +885,11 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
             reasons.append(f"{which} times that are not one window ({names})")
     if seniors or youth:
         reasons.append("a senior or youth passenger")
-    if inf_seat or inf_lap:
-        reasons.append("an infant passenger")
+    if (inf_seat or inf_lap) and multi_cabin:
+        reasons.append("an infant passenger on a multi-cabin compare")
     if children and not adults:
         reasons.append("a child passenger with no adult")
-    if adults + children > _GF_MAX_PASSENGERS:
+    if adults + children + inf_seat + inf_lap > _GF_MAX_PASSENGERS:
         reasons.append(f"more than {_GF_MAX_PASSENGERS:d} passengers")
     if not allow_airport_changes:
         # Both of these reach the Matrix REQUEST and the Matrix deep link and
@@ -907,12 +918,7 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
     # The same reasons go out two ways, and only one of them is markup. A
     # reason quotes the user's --routing string verbatim, so one square bracket
     # decides between a MarkupError traceback and a backslash the user can see.
-    # Under a Google-only flag the way out is dropping it.
-    remedy = (
-        f"drop {google_only[0][0]} to search Matrix, which {google_only[0][1]}"
-        if google_only
-        else "use --backend matrix"
-    )
+    remedy = _matrix_remedy(google_only)
     if backend == BACKEND_AUTO:
         if not reasons:
             return BACKEND_GFLIGHT
@@ -4286,13 +4292,18 @@ def _run_gflight_path(  # noqa: PLR0912, PLR0915 — every outcome of one Google
     sellers: bool = False,
     matrix_fallback: bool = False,
     hand_off_failure: bool = False,
+    matrix_remedy: str = "use --backend matrix",
 ) -> int | None:
     """Google Flights path: build fli filter → query → render. Single-leg or round-trip.
 
     Returns None once it has answered. The one answer it does not give itself:
     when the routing filter emptied Google's board and `matrix_fallback` is set,
     it prints nothing and returns how many rows the filter dropped, for the
-    caller to hand the search to Matrix with that reason. With
+    caller to hand the search to Matrix with that reason. A party with an
+    infant that Google served no rows at all is handed on the same way, with
+    its own note and a return of 0: Google has answered a route with flights
+    with an empty board for any infant. Not handed on, that empty answer
+    carries a note saying so and `matrix_remedy`, how to ask Matrix. With
     `hand_off_failure` set, a query that fails is handed on as well: the reason
     is said here, on stderr, in the words the enriched table uses for it, and
     the return is 0 so the caller adds none of its own. A failure that is not
@@ -4352,8 +4363,20 @@ def _run_gflight_path(  # noqa: PLR0912, PLR0915 — every outcome of one Google
     # Handed on before either note, because both describe Google's answer and
     # Matrix gives this one. Never with `--sellers`: an empty board fails that
     # below, as a board with no row to open.
-    if not results and dropped and matrix_fallback and not sellers:
+    infant_board = not (results or dropped) and bool(
+        opts.pax.infants_in_seat or opts.pax.infants_in_lap
+    )
+    if not results and (dropped or infant_board) and matrix_fallback and not sellers:
+        if infant_board:
+            err.print(
+                "[dim]Using Matrix: Google Flights served no rows for a party with an infant.[/]"
+            )
         return dropped
+    if infant_board:
+        err.print(
+            "[yellow]Google Flights served no rows for a party with an infant, as it has "
+            f"on routes with flights. For Matrix's answer, {_safe_text(matrix_remedy)}.[/]"
+        )
     _pin_cap_note(legs=legs, top_n=top_n)
     _note_other_currencies(results, opts.currency or "USD")
 
@@ -6671,7 +6694,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         cabins=_resolve_cabin_list(cabin),
         max_price=max_price,
         bags=bags,
-        seated=adults + children,
+        seated=adults + children + inf_seat + inf_lap,
         arrival_flags=tuple(
             flag
             for flag, windows in (
@@ -6724,6 +6747,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         return_codes=return_codes,
         arrive_times=arrive_times,
         return_arrive_times=return_arrive_times,
+        multi_cabin=len(_resolve_cabin_list(cabin)) > 1,
     )
     if slice_specs:
         legs = tuple(_parse_slice_spec(s) for s in slice_specs)
@@ -6903,6 +6927,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             and json_out
             and not fast
             and not sellers,
+            matrix_remedy=_matrix_remedy(google_only),
         )
         if unmatched is None:
             return

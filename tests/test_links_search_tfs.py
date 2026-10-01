@@ -140,6 +140,20 @@ def test_search_tfs_one_way_and_round_trip_trip_type() -> None:
     assert _decode(build_search_tfs(rt))[19] == [1]
 
 
+@pytest.mark.parametrize(
+    ("pax", "kinds"),
+    [
+        (PassengerInfo(adults=1, infants_on_lap=1), [1, 3]),
+        (PassengerInfo(adults=1, infants_in_seat=1), [1, 4]),
+        (PassengerInfo(adults=2, children=1, infants_in_seat=1, infants_on_lap=1), [1, 1, 2, 4, 3]),
+    ],
+)
+def test_an_infant_is_written_as_its_own_kind(pax: Any, kinds: list[int]) -> None:
+    """Field 8 is one entry per occupant: 3 a lap infant, priced at a tenth of
+    the adult fare, and 4 an infant in a seat, priced at the full fare."""
+    assert _decode(build_search_tfs(_filters(passenger_info=pax)))[8] == kinds
+
+
 def test_search_tfs_carries_cabin_and_one_varint_per_adult() -> None:
     f = _filters(passenger_info=PassengerInfo(adults=3), seat_type=SeatType.BUSINESS)
     fields = _decode(build_search_tfs(f))
@@ -274,8 +288,6 @@ def test_unpinned_segment_carries_no_selected_leg() -> None:
         ("emissions", {"emissions": EmissionsFilter.LESS}),
         ("exclude_basic_economy", {"exclude_basic_economy": True}),
         ("sort_by", {"sort_by": SortBy.CHEAPEST}),
-        ("infants_in_seat", {"passenger_info": PassengerInfo(adults=1, infants_in_seat=1)}),
-        ("infants_on_lap", {"passenger_info": PassengerInfo(adults=1, infants_on_lap=1)}),
         # 3.15 exists, but a connection airport means one position to Matrix.
         (
             "layover_restrictions",
@@ -582,7 +594,6 @@ def test_every_filter_field_is_claimed_by_exactly_one_set() -> None:
         _TFS_ENCODED_PAX,  # pyright: ignore[reportPrivateUsage]
         _TFS_IGNORED_FIELDS,  # pyright: ignore[reportPrivateUsage]
         _TFS_REFUSED_FIELDS,  # pyright: ignore[reportPrivateUsage]
-        _TFS_REFUSED_PAX,  # pyright: ignore[reportPrivateUsage]
     )
 
     refused = {field for field, _ in _TFS_REFUSED_FIELDS}
@@ -593,9 +604,7 @@ def test_every_filter_field_is_claimed_by_exactly_one_set() -> None:
     # The nested models the encoder reaches into carry their own fields, and a
     # new one there is just as silent — `PassengerInfo` gaining a passenger kind
     # would price it as nothing at all.
-    pax_refused = {field for field, _ in _TFS_REFUSED_PAX}
-    assert pax_refused | _TFS_ENCODED_PAX == set(PassengerInfo.model_fields)
-    assert not (pax_refused & _TFS_ENCODED_PAX)
+    assert set(PassengerInfo.model_fields) == _TFS_ENCODED_PAX
     segment_read = {
         "departure_airport",
         "arrival_airport",

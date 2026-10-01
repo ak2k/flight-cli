@@ -628,15 +628,11 @@ _TFS_REFUSED_FIELDS: tuple[tuple[str, str], ...] = (
 # through its own `tfu=` parameter instead (`google_flights_search_page_url`).
 _TFS_IGNORED_FIELDS = frozenset({"show_all_results"})
 
-# Passenger kinds field 8 carries for a search. Google prices both infant kinds
-# correctly, but answered JFK-LAX with an empty board for any infant, so an
-# empty answer would not mean there are no flights: search refuses them and the
-# backend picker sends them to Matrix.
-_TFS_ENCODED_PAX = frozenset({"adults", "children"})
-_TFS_REFUSED_PAX: tuple[tuple[str, str], ...] = (
-    ("infants_in_seat", "an infant-in-seat passenger"),
-    ("infants_on_lap", "an infant-on-lap passenger"),
-)
+# Passenger kinds field 8 carries for a search. Google prices both infant
+# kinds, but has answered a route with flights (JFK-LAX) with an empty board
+# for any infant, so the search hands such an empty board to Matrix
+# (`cli._run_gflight_path`).
+_TFS_ENCODED_PAX = frozenset({"adults", "children", "infants_in_seat", "infants_on_lap"})
 
 _TFS_MULTI_CITY = 3  # fli TripType.MULTI_CITY — the page inlines no rows for it
 
@@ -759,9 +755,6 @@ def build_search_tfs(filters: Any, *, currency: str = "USD") -> bytes:
     for field, description in _TFS_REFUSED_FIELDS:
         if not _tfs_field_is_default(filters, field):
             raise GfTfsUnsupportedError(field, description)
-    for field, description in _TFS_REFUSED_PAX:
-        if getattr(filters.passenger_info, field, 0):
-            raise GfTfsUnsupportedError(field, description)
     layover = filters.layover_restrictions
     if layover is not None and layover.airports:
         raise GfTfsUnsupportedError("layover_restrictions", "a connecting-airport restriction")
@@ -789,8 +782,8 @@ def build_search_tfs(filters: Any, *, currency: str = "USD") -> bytes:
         cabin=filters.seat_type.value,
         adults=filters.passenger_info.adults,
         children=filters.passenger_info.children,
-        infants_in_seat=0,
-        infants_on_lap=0,
+        infants_in_seat=filters.passenger_info.infants_in_seat,
+        infants_on_lap=filters.passenger_info.infants_on_lap,
         pin_max_u64=False,
         max_price=max_price,
         bags=(bags.checked_bags, int(bags.carry_on)) if bags is not None else None,
