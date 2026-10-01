@@ -33,6 +33,8 @@ from rich.table import Table
 
 from . import _config
 from ._calendar_split import is_empty_calendar, merge_calendar_results, split_calendar_search
+from ._cross_check import Answers, cross_check
+from ._cross_check import document as cross_check_document
 
 # The `--gf-transport` vocabulary, from the leaf that costs nothing to import.
 # `_gflight_ids` owns the ladder but costs fli (~95 ms), and EVERY search
@@ -90,6 +92,7 @@ from .providers.base import LegQuery
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Generator, Iterable, Mapping, Sequence
 
+    from ._cross_check import CrossCheck
     from ._gf_booking import BookingOptions
     from ._gf_calgraph import GraphRange, LostLength, PriceGraph
     from ._gf_explore import Destination, ExploreAnswer, TripLength
@@ -4022,17 +4025,38 @@ def _gf_refusal(  # noqa: PLR0911 — one return per refusal type; see the docst
 _MERGE_SOURCE_TAG = {"both": "GF+MX", "matrix": "MX", "gf": "GF"}
 
 
-def _render_merged(rows: list[Any], *, legs: tuple[Leg, ...], top_n: int) -> None:
+def _render_merged(
+    rows: list[Any], *, legs: tuple[Leg, ...], top_n: int, check: CrossCheck | None = None
+) -> None:
     """Render the reconciled GF+Matrix view: one row per itinerary with the GF
-    and Matrix prices attributed side-by-side and a source tag."""
+    and Matrix prices attributed side-by-side and a source tag.
+
+    `check` explains the first `top_n` rows, in order: each one's delta, or why
+    it has none, and a caption saying where Matrix's page ends. Without it the
+    two columns read "—" and there is no caption."""
     origin = ",".join(legs[0].origins) or "?"
     destination = ",".join(legs[0].destinations) or "?"
     has_return = len(legs) >= _ROUND_TRIP_LEGS
     ccy = _title_currency(p for r in rows[:top_n] for p in (r.matrix_price, r.gf_price))
+    b = check.boundary if check is not None else None
     t = Table(
         title=f"Google Flights + Matrix · {_safe_text(origin)}→{_safe_text(destination)}"
         + (" + return" if has_return else "")
         + (f" ({_safe_text(ccy)})" if ccy else ""),
+        caption=(
+            (
+                f"Matrix listed {b.listed:d} of {b.solution_count:d} solutions"
+                + (f" (to {_safe_text(b.last_price)})" if b.last_price else "")
+                + (
+                    f"; Google listed {b.google_listed:d} rows."
+                    if b.google_answered
+                    else "; Google gave no answer."
+                )
+                + " delta = Google - Matrix."
+            )
+            if b is not None
+            else None
+        ),
         show_header=True,
         header_style="bold green",
     )
@@ -4040,13 +4064,19 @@ def _render_merged(rows: list[Any], *, legs: tuple[Leg, ...], top_n: int) -> Non
     t.add_column("src")
     t.add_column("Matrix", justify="right")
     t.add_column("Google", justify="right")
+    t.add_column("delta", justify="right")
+    t.add_column("why")
     t.add_column("outbound")
     t.add_column("return")
+    explained = check.rows if check is not None else ()
     for i, row in enumerate(rows[:top_n], 1):
         itn = row.itinerary.itinerary
         slcs: list[Slice] = itn.slices if itn else []
         out = _fmt_slice_cell(slcs[0]) if slcs else "—"
         ret = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
+        c = explained[i - 1] if i <= len(explained) else None
+        delta = c.delta if c is not None else None
+        why = c.reason if c is not None else None
         t.add_row(
             f"{i:d}",
             # `rows` is duck-typed, and the lookup falls back to the tag it was
@@ -4054,6 +4084,9 @@ def _render_merged(rows: list[Any], *, legs: tuple[Leg, ...], top_n: int) -> Non
             _safe_text(_MERGE_SOURCE_TAG.get(row.source, row.source)),
             _amount(row.matrix_price, ccy),
             _amount(row.gf_price, ccy),
+            f"{delta:+,.2f}" if delta is not None else "—",
+            # Carrier codes and prices in it are remote text.
+            _safe_text(why) if why else "—",
             out,
             ret,
         )
@@ -4562,6 +4595,7 @@ def _report_enriched_gf_failure(
     matrix_answered: bool,
     awards_only: bool,
     transport: GfTransportMode = TRANSPORT_HTTP,
+    json_out: bool = False,
 ) -> None:
     """Say why the Google Flights half of the weave produced nothing.
 
@@ -4594,12 +4628,17 @@ def _report_enriched_gf_failure(
     `transport` is the rung the search actually ran on. Every wording below is
     dispatched with it, or the browser rung's throttle — which has no retry
     ladder to wait for — reaches the default search path telling the user to
-    wait a moment and try again."""
+    wait a moment and try again.
+
+    `json_out` is the cross-check document, where stdout holds the document
+    alone and the rows Matrix answered are all it explains."""
     if not isinstance(e, GfBackendError):
         err.print(f"[yellow]Google Flights query failed:[/] {_safe_text(e)}")
     else:
         refusal = _gf_refusal(e, transport=transport)
-        if matrix_answered and not awards_only:
+        if matrix_answered and json_out:
+            err.print(f"[yellow]{refusal.note}[/] — the cross-check holds Matrix's rows only.")
+        elif matrix_answered and not awards_only:
             console.print(f"[dim]{refusal.note} — showing Matrix only.[/]")
         elif matrix_answered:
             err.print(
@@ -4642,7 +4681,98 @@ def _report_search_matrix_failure(state: dict[str, Any]) -> None:
         err.print("[yellow]Matrix search did not complete.[/]")
 
 
-def _run_enriched_path(  # noqa: PLR0915 — one weave's outcome arms, read in one place
+# Matrix answers in price order, and a deeper page costs no measurable time, so
+# the cross-check's one request asks for a page that holds Matrix's whole answer:
+# a Google row is then compared with every trip Matrix found, not its first `-n`.
+_CROSS_CHECK_PAGE = 500
+
+
+def _cross_check_answers(
+    state: dict[str, Any],
+    board: SearchResult,
+    matrix_res: SearchResult,
+    *,
+    legs: tuple[Leg, ...],
+    opts: SearchOptions,
+    currency: str,
+) -> Answers:
+    """The two answers a weave left, as the cross-check reads them. Google's
+    board is no answer where its half failed or never ran, and a board the row
+    filter cut cannot show a flight absent from what Google served."""
+    stops = opts.max_extra_stops
+    return Answers(
+        matrix=matrix_res,
+        google=board if "gf" in state and "gf_err" not in state else None,
+        google_filtered=bool(getattr(state.get("gf"), "dropped", 0)),
+        stop_limit=stops is not None and stops >= 0,
+        round_trip=len(legs) >= _ROUND_TRIP_LEGS,
+        currency=currency,
+    )
+
+
+def _cross_check_blocker(*, run_awards: bool, awards_only: bool, sellers: bool) -> str | None:
+    """Why `--enrich --format json` cannot write its document, or None. The
+    document is one search's cash rows explained against Matrix's; the award
+    and booking-option documents are each a different one."""
+    if awards_only:
+        return "cross-checks cash fares; drop --awards-only"
+    if run_awards:
+        return "cross-checks cash fares only; add --cash-only"
+    if sellers:
+        return "writes no booking options; drop --sellers"
+    return None
+
+
+def _answer_cross_check_document(
+    state: dict[str, Any],
+    *,
+    legs: tuple[Leg, ...],
+    opts: SearchOptions,
+    top_n: int,
+    currency: str,
+    gf_mode: GfTransportMode,
+) -> None:
+    """Write the weave's answer as `{"search": …, "cross_check": …}`.
+
+    `search` is the document `--format json` writes for this search, from the
+    same `top_n` rows; `cross_check` is the merged table's rows, explained.
+    Each half fails on its own: a failed Google half leaves `search` empty and
+    every Matrix row saying why, a failed Matrix half leaves `cross_check` null
+    with its reason on stderr, and with both failed stdout stays empty and the
+    exit is 1."""
+    from ._enrich import merge_results  # noqa: PLC0415 — as in `_run_enriched_path`
+    from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
+
+    gf: list[Any] = state.get("gf") or []
+    google_answered = "gf" in state and "gf_err" not in state
+    matrix_res = state.get("matrix")
+    if "gf_err" in state:
+        _report_enriched_gf_failure(
+            state["gf_err"],
+            matrix_answered=matrix_res is not None,
+            awards_only=False,
+            transport=gf_mode,
+            json_out=True,
+        )
+    checked: dict[str, Any] | None = None
+    if matrix_res is None:
+        _report_search_matrix_failure(state)
+        if not google_answered:
+            raise typer.Exit(1)
+    else:
+        matrix_res = _price_capped(cast("SearchResult", matrix_res), opts)
+        _report_weave_aftermath(state)
+        board = fli_results_to_search_result(gf)
+        shown = merge_results(board, matrix_res, currency=currency)[:top_n]
+        answers = _cross_check_answers(
+            state, board, matrix_res, legs=legs, opts=opts, currency=currency
+        )
+        checked = cross_check_document(shown, cross_check(shown, answers))
+    search = _gflight_json_document(_price_ordered(gf)[:top_n], opts.bags)
+    sys.stdout.write(json.dumps({"search": search, "cross_check": checked}, indent=2, default=str))
+
+
+def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, read in one place
     *,
     legs: tuple[Leg, ...],
     opts: SearchOptions,
@@ -4658,15 +4788,20 @@ def _run_enriched_path(  # noqa: PLR0915 — one weave's outcome arms, read in o
     gf_mode: GfTransportMode = TRANSPORT_HTTP,
     gf_headed: bool = False,
     sellers: bool = False,
+    json_out: bool = False,
 ) -> None:
     """GF-serveable query, progressive: dispatch Google Flights + Matrix
     concurrently under one event loop, paint GF immediately (~1s), then repaint a
     reconciled GF+Matrix table once Matrix lands (~45s). PP/awards + URLs run on
-    the Matrix (authoritative) result. `--fast` skips this for GF-only speed.
+    Matrix's first `top_n` fares. `--fast` skips this for GF-only speed.
 
     `sellers` opens row `pick` of the merged table, the one the Google link
     pins, or of the Google table when Matrix does not answer, and prints its
-    booking options last."""
+    booking options last.
+
+    `json_out` paints nothing and writes the comparison as one document
+    (`_answer_cross_check_document`); the caller has refused awards and
+    `sellers` beside it."""
     # Imported here rather than deeper in: every enriched run executes these two
     # lines, so a packaging fault in either module fails the same way on every
     # run instead of only on the runs where Matrix happens to land.
@@ -4681,12 +4816,20 @@ def _run_enriched_path(  # noqa: PLR0915 — one weave's outcome arms, read in o
     matrix_search = SpecificDateSearch(
         legs=legs, options=opts.model_copy(update={"currency": requested})
     )
+    # Only the request is deeper: the links and the booking page keep `-n`.
+    asked = matrix_search.model_copy(
+        update={
+            "options": matrix_search.options.model_copy(
+                update={"page_size": max(top_n, _CROSS_CHECK_PAGE)}
+            )
+        }
+    )
     awards_only = sel.awards_only if sel is not None else False
     state: dict[str, Any] = {}
 
     async def _go() -> None:
         async with anyio.create_task_group() as tg:
-            tg.start_soon(_matrix_into, state, matrix_search, rps, impersonate, not no_cache)
+            tg.start_soon(_matrix_into, state, asked, rps, impersonate, not no_cache)
             # Google Flights is sync (curl_cffi) — run it in a worker thread so the
             # Matrix request progresses concurrently on the event loop.
             gf: list[Any]
@@ -4701,12 +4844,19 @@ def _run_enriched_path(  # noqa: PLR0915 — one weave's outcome arms, read in o
                 gf = []
             state["gf"] = gf
             _note_other_currencies(gf, requested)
+            # A document paints no table, as an awards-only run does; the
+            # empty-board note still goes to stderr, where it is true.
             _paint_first_gf_table(
-                state, gf, legs=legs, top_n=top_n, awards_only=awards_only, opts=opts
+                state, gf, legs=legs, top_n=top_n, awards_only=awards_only or json_out, opts=opts
             )
 
     _run_the_weave(_go, state, gf_mode)
 
+    if json_out:
+        _answer_cross_check_document(
+            state, legs=legs, opts=opts, top_n=top_n, currency=requested, gf_mode=gf_mode
+        )
+        return
     gf: list[Any] = state.get("gf") or []
     # What reached the USER, which is not the same question as what was
     # fetched. The paint is gated on `not awards_only` and on the renderer not
@@ -4767,8 +4917,12 @@ def _run_enriched_path(  # noqa: PLR0915 — one weave's outcome arms, read in o
     pinnable: SearchResult | None = None
     booking_row: tuple[SearchResult, int, str | None, str | None] | None = None
     if not awards_only:
-        merged = merge_results(fli_results_to_search_result(gf), matrix_res, currency=requested)
-        _render_merged(merged, legs=legs, top_n=top_n)
+        board = fli_results_to_search_result(gf)
+        merged = merge_results(board, matrix_res, currency=requested)
+        answers = _cross_check_answers(
+            state, board, matrix_res, legs=legs, opts=opts, currency=requested
+        )
+        _render_merged(merged, legs=legs, top_n=top_n, check=cross_check(merged[:top_n], answers))
         shown = [r.itinerary for r in merged[:top_n]]
         seller_row = _pick_for_sellers(pick, len(shown)) if sellers else None
         # The same contract `_run_gflight_path` has: the range a pick is
@@ -4816,7 +4970,9 @@ def _run_enriched_path(  # noqa: PLR0915 — one weave's outcome arms, read in o
         pick = None
 
     if run_pp:
-        _overlay_awards(matrix_res, legs=legs, opts=opts, sel=sel, awards_only=awards_only)
+        # Matrix's page is deeper than `-n` only to explain the table.
+        firsts = matrix_res.model_copy(update={"solutions": matrix_res.solutions[:top_n]})
+        _overlay_awards(firsts, legs=legs, opts=opts, sel=sel, awards_only=awards_only)
 
     # A result built from the rows the table numbered, so `_emit_urls`' label
     # expression is true by construction. A Google-only row carries no
@@ -6367,13 +6523,16 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         ),
     ] = False,
     no_cache: bool = _NO_CACHE_OPT,
-    fast: bool = typer.Option(
-        False,
+    fast: bool | None = typer.Option(
+        None,
         "--fast/--enrich",
         "--no-enrich/--no-fast",
         help="Skip Matrix enrichment: show only the fast Google Flights result "
-        "(~1s) instead of also reconciling against Matrix. Default: enrich when "
-        "Google Flights can serve the query.",
+        "(~1s) instead of also cross-checking it against Matrix. Default: a table "
+        "enriches when Google Flights can serve the query, with a delta (Google - "
+        "Matrix) on each row priced for the same trip in one currency and a reason "
+        "on every other row. --format json cross-checks only with --enrich (and "
+        '--cash-only), writing {"search": …, "cross_check": …}.',
         rich_help_panel=_GROUP_BACKEND,
     ),
     gf_transport: str = typer.Option(
@@ -6631,15 +6790,25 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
 
     if resolved == BACKEND_GFLIGHT:
         # GF can serve this query — paint it fast (~1s), then enrich against
-        # Matrix (authoritative) and repaint a merged table. `--fast` (or JSON
-        # output, which wants a single stable shape) takes the GF-only path, and
-        # so does `--bags`: Matrix would answer it without the bags. JSON on auto
-        # without `--fast` still answers wherever the merged table would, so a
-        # failed Google query hands it to Matrix whole. `--sellers` is not handed
-        # on: its document wraps a Google row, which Matrix cannot supply.
-        if not fast and not json_out and bags is not None:
+        # Matrix (authoritative) and repaint a merged table. `--fast` takes the
+        # GF-only path, and so does `--bags`: Matrix would answer it without the
+        # bags. A document enriches only on an explicit `--enrich` (`fast` is
+        # False rather than unset): the cross-check changes its shape and waits
+        # on Matrix, which a caller of the bare list never asked for. JSON on
+        # auto without `--fast` still answers wherever the merged table would,
+        # so a failed Google query hands it to Matrix whole. `--sellers` is not
+        # handed on: its document wraps a Google row, which Matrix cannot supply.
+        enrich = fast is False or (fast is None and not json_out)
+        if enrich and bags is not None:
             err.print("[dim]No Matrix enrichment: Matrix prices no bags.[/]")
-        elif not fast and not json_out:
+        elif enrich:
+            if json_out and (
+                blocker := _cross_check_blocker(
+                    run_awards=run_awards, awards_only=sel.awards_only, sellers=sellers
+                )
+            ):
+                err.print(f"[red]--enrich --format json {_safe_text(blocker)}.[/]")
+                raise typer.Exit(2)
             _run_enriched_path(
                 legs=legs,
                 opts=opts,
@@ -6655,6 +6824,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                 gf_mode=gf_mode,
                 gf_headed=gf_headed,
                 sellers=sellers,
+                json_out=json_out,
             )
             return
         unmatched = _run_gflight_path(

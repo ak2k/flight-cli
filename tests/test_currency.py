@@ -517,7 +517,7 @@ def test_the_merged_table_asks_matrix_in_the_currency_google_is_asked_in(
     assert [b["inputs"].get("currency") for b in bodies] == [currency]
 
 
-def test_the_merged_tables_matrix_body_differs_from_a_matrix_only_one_by_the_currency(
+def test_the_merged_tables_matrix_body_differs_from_a_matrix_only_one_by_the_currency_and_page(
     monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
 ) -> None:
     bodies = _matrix_bodies(monkeypatch, gf_rows)
@@ -526,6 +526,8 @@ def test_the_merged_tables_matrix_body_differs_from_a_matrix_only_one_by_the_cur
         assert result.exit_code == 0, result.output
     merged, matrix_only = bodies
     assert merged["inputs"].pop("currency") == "USD"
+    assert merged["inputs"].pop("page") == {"current": 1, "size": 500}
+    assert matrix_only["inputs"].pop("page") == {"current": 1, "size": 10}
     assert merged == matrix_only
 
 
@@ -540,7 +542,10 @@ def test_a_matrix_fare_in_another_currency_ranks_after_googles_on_the_merged_tab
     assert result.exit_code == 0, result.output
     merged = result.stdout.split("Google Flights + Matrix", 1)[1]
     assert "(USD)" in merged.splitlines()[0]
-    assert "GBP" not in merged
+    # The caption under the rows names the last fare of Matrix's page, GBP1.00.
+    rows, caption = merged.split("Matrix listed", 1)
+    assert "GBP" not in rows
+    assert "(to GBP1.00)" in caption
 
 
 # ──────────────────────────── the rendered tables ───────────────────────────
