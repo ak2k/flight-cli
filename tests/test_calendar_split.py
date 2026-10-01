@@ -510,7 +510,7 @@ def test_a_pair_is_judged_by_every_price_it_carries(
 def test_one_origin_judges_the_grid_by_its_first_priced_answer(
     monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """With no currency asked, the first answer that priced anything sets the
+    """With no currency asked, the first answer priced in one currency sets the
     grid's; one that priced nothing has no currency and is never left out."""
     _pair_client(
         monkeypatch, {("LHR", "BOS"): _priced("GBP500.00"), ("LHR", "EWR"): _priced("EUR400.00")}
@@ -520,6 +520,41 @@ def test_one_origin_judges_the_grid_by_its_first_priced_answer(
     line = _flat(capsys.readouterr().err)
     assert "1 of 3 sub-queries failed" in line
     assert "LHR→EWR came back priced in EUR, not the grid's GBP" in line
+
+
+@pytest.mark.parametrize(
+    ("first", "theirs"),
+    [
+        (_result({9: {7: ("GBP900.00", 3, {5: "GBP900.00"})}}, cheapest="USD900.00"), "USD"),
+        (_priced("900.00"), "no currency"),
+    ],
+    ids=["two-currencies", "no-currency"],
+)
+def test_an_answer_left_out_does_not_set_the_grids_currency(
+    first: CalendarResult, theirs: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An answer the grid cannot use, in two currencies or in none, is left
+    out without deciding the grid's currency for the answers after it."""
+    _pair_client(monkeypatch, {("LHR", "JFK"): first, ("LHR", "BOS"): _priced("GBP300.00")})
+    res, _ = _run(_cal(["JFK", "BOS"], origins=("LHR",), one_way=True))
+    assert [d.min_price for d in res.priced_days] == ["GBP300.00"]
+    line = _flat(capsys.readouterr().err)
+    assert "1 of 2 sub-queries failed" in line
+    assert f"LHR→JFK came back priced in {theirs}, not the grid's GBP" in line
+
+
+def test_a_fanout_with_no_answer_in_one_currency_refuses(
+    monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    mixed = _result({9: {7: ("GBP900.00", 3, {5: "GBP900.00"})}}, cheapest="USD900.00")
+    _pair_client(monkeypatch, {("LHR", "JFK"): mixed, ("LHR", "BOS"): mixed})
+    with pytest.raises(typer.Exit) as excinfo:
+        _run(_cal(["JFK", "BOS"], origins=("LHR",), one_way=True))
+    assert excinfo.value.exit_code == 1
+    line = _flat(capsys.readouterr().err)
+    assert "all 2 sub-queries failed" in line
+    for route in ("LHR→JFK", "LHR→BOS"):
+        assert f"{route} came back priced in USD and GBP, and no answer was in one currency" in line
 
 
 def test_merge_names_the_pair_behind_each_day_and_each_length() -> None:

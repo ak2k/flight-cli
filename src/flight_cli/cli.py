@@ -1286,10 +1286,11 @@ class _CalendarCurrencyError(Exception):
     than merged, and it is reported as a lost group. The message names the route
     itself: when every group is lost, the refusal prints the causes alone."""
 
-    def __init__(self, route: str, got: str, want: str) -> None:
+    def __init__(self, route: str, got: Sequence[str], want: str | None) -> None:
+        theirs = " and ".join(g or "no currency" for g in got)
         super().__init__(
-            f"{route} came back priced in {got or 'no currency'}, not the grid's "
-            f"{want or 'no currency'}"
+            f"{route} came back priced in {theirs}, "
+            + (f"not the grid's {want}" if want else "and no answer was in one currency")
         )
 
 
@@ -1308,9 +1309,10 @@ async def _gather_calendar(
     caller can say so.
 
     An answer in another currency than the grid's drops the same way. The grid's
-    currency is `currency`, the one every query asked, else the first priced
-    answer's in sub-query order, so the same answers keep the same groups on
-    every run."""
+    currency is `currency`, the one every query asked, else that of the first
+    answer, in sub-query order, priced in one currency throughout, so the same
+    answers keep the same groups on every run. An answer in two currencies, or
+    in none, drops without deciding it for the answers after it."""
     queries = [*subs, floor] if floor is not None else subs
     results: list[CalendarResult | None] = [None] * len(queries)
     errors: list[Exception | None] = [None] * len(queries)
@@ -1332,16 +1334,13 @@ async def _gather_calendar(
     failures: list[Exception] = []
     lost: list[str] = []
     floor_answer: tuple[Pair, CalendarResult] | None = None
-    want = currency
-    for i, (s, res, error) in enumerate(zip(queries, results, errors, strict=True)):
+    priced_in = [price_currencies(res) if res is not None else () for res in results]
+    want = currency or next((got[0] for got in priced_in if len(got) == 1 and got[0]), None)
+    for i, (s, res, error, got) in enumerate(zip(queries, results, errors, priced_in, strict=True)):
         e = error
-        got = price_currencies(res) if res is not None else ()
-        if got:
-            if want is None:
-                want = got[0]
-            off = next((g for g in got if g != want), None)
-            if off is not None:
-                e = _CalendarCurrencyError(_calendar_route_label(s), off, want)
+        off = tuple(g for g in got if g != want)
+        if off:
+            e = _CalendarCurrencyError(_calendar_route_label(s), off, want)
         if e is not None:
             failures.append(e)
             lost.append(_calendar_route_label(s))
