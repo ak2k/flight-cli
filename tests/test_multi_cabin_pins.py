@@ -50,22 +50,25 @@ _SEED = gfid._parse_flight_with_id(gfid._rows_from_ds1(json.loads(_CAPTURE.read_
 _JFK = _SEED.flight.legs[0].departure_airport
 _LAX = _SEED.flight.legs[0].arrival_airport
 
-# Economy's board ranks flights 100-129 in number order. Business's first ten are
-# flights economy ranks 21-30, so on its own it pins none of economy's first ten.
+# Economy's board lists flights 100-129 in number order, and its fares rise with
+# the number. Business's board lists 120-129 first and its fares rise down its
+# own board, so its ten cheapest are economy's dearest ten: on its own it pins
+# none of economy's ten cheapest.
 _ECONOMY = list(range(100, 130))
 _BUSINESS = [*range(120, 130), *range(100, 120)]
 
-# Per seat: the fare of flight 100's first return, what each later outbound adds,
-# and what each later return adds.
+# Per seat: the fare of its cheapest outbound's first return, what each step up
+# the cabin's outbound fares adds, and what each later return adds.
 _FARES = {"ECONOMY": (200, 7, 3), "PREMIUM_ECONOMY": (500, 9, 4), "BUSINESS": (800, 11, 5)}
 
 
 def _fare(seat: str, outbound: int, back: int = 0) -> float:
     base, per_outbound, per_return = _FARES[seat]
-    return base + per_outbound * (outbound - 100) + per_return * back
+    step = _BUSINESS.index(outbound) if seat == "BUSINESS" else outbound - 100
+    return base + per_outbound * step + per_return * back
 
 
-def _row(number: int, day: dt.date, frm: Any, to: Any, price: float) -> gfid.GFlightWithId:
+def _row(number: int, day: dt.date, frm: Any, to: Any, price: float | None) -> gfid.GFlightWithId:
     """One flight, departing at an hour its number fixes: the same flight on two
     cabins' boards is then the same itinerary to `_itinerary_key`."""
     leg = _SEED.flight.legs[0]
@@ -196,14 +199,32 @@ def _keys(board: list[gfid.GFlightWithId]) -> list[gfid.ItineraryKey]:
 
 
 @pytest.mark.parametrize("top_n", [3, 10, 50])
-def test_with_no_preference_the_pins_are_the_first_rows_of_the_board(top_n: int) -> None:
-    board = _outbound_board(*range(100, 130))
-    assert gfid.pin_keys(board, top_n=top_n) == _keys(board[: gfid.pinned_fanout(top_n)])
+@pytest.mark.parametrize(
+    "listed",
+    [list(range(100, 130)), [*range(115, 130), *range(100, 115)]],
+    ids=["listed-cheapest-first", "cheapest-listed-lower-down"],
+)
+def test_with_no_preference_the_pins_are_the_cheapest_rows_of_the_board(
+    top_n: int, listed: list[int]
+) -> None:
+    board = _outbound_board(*listed)
+    by_number = dict(zip(listed, _keys(board), strict=True))
+    cheapest = range(100, 100 + gfid.pinned_fanout(top_n))
+    assert gfid.pin_keys(board, top_n=top_n) == [by_number[n] for n in cheapest]
+
+
+def test_equal_fares_are_pinned_in_page_order_and_unpriced_rows_last() -> None:
+    """The order the one-way trim uses: fare, then the page's order between
+    equal fares, and a row Google did not price after every row it did."""
+    fares: dict[int, float | None] = {105: 300, 101: None, 103: 200, 102: 300, 104: 200}
+    board = gfid.Board([_row(n, _DEP, _JFK, _LAX, fare) for n, fare in fares.items()])
+    by_number = dict(zip(fares, _keys(board), strict=True))
+    assert gfid.pin_keys(board, top_n=5) == [by_number[n] for n in (103, 104, 105, 102, 101)]
 
 
 def test_preferred_outbounds_are_pinned_first_in_their_order_then_the_board_fills() -> None:
     """An outbound the board does not list is skipped, and the slot it would
-    have taken goes to the board's own next row."""
+    have taken goes to the board's own next-cheapest row."""
     board = _outbound_board(*range(100, 115))
     by_number = dict(zip(range(100, 115), _keys(board), strict=True))
     absent = _keys(_outbound_board(199))[0]
@@ -271,9 +292,9 @@ def test_a_page_handed_back_as_first_is_the_search_that_fetches_it(
 def test_every_cabin_is_priced_on_the_sort_cabins_outbounds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Business's board lists every one of economy's first ten outbounds, only
-    lower down: pinning its own first ten, it priced none of the rows the
-    Y-sorted table shows."""
+    """Business's board lists every one of economy's ten cheapest outbounds,
+    among its own dearest: pinning its own ten cheapest, it priced none of the
+    rows the Y-sorted table shows."""
     google = _Google({"ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS})
     result = _search(monkeypatch, google)
     assert result.exit_code == 0, result.output
@@ -299,8 +320,8 @@ def test_a_follower_fills_the_pins_its_board_cannot_take_with_its_own_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Business does not list economy's 103 or 107: it pins the eight it does,
-    then its own first two, and those two economy outbounds are the only rows
-    with no business fare."""
+    then its own two cheapest, and those two economy outbounds are the only
+    rows with no business fare."""
     business = [*range(120, 130), *(n for n in range(100, 120) if n not in (103, 107))]
     google = _Google({"ECONOMY": _ECONOMY, "BUSINESS": business})
     result = _search(monkeypatch, google, n="50")

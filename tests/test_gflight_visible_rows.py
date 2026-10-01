@@ -9,10 +9,11 @@ one thing that needs it — the Tier-2 post-filter, which runs before the trim
 because a routing constraint is answered out of the whole board or answered
 wrong.
 
-WHICH rows survive is under test too, and the answer differs by set. A one-way
-board is trimmed in Google's ranking, which the page decides and nothing here
-reproduces; a round trip's combinations carry no ranking of their own — they
-are built pin-major by the fan-out — so they are trimmed by price.
+WHICH rows survive is under test too: the cheapest, on every Google board. A
+one-way board arrives in the page's order, Google's top flights first, and a
+round trip's combinations in the order the fan-out built them, pin-major; both
+are put in price order before the trim, ties kept in the order they arrived and
+unpriced rows last.
 
 The multi-cabin arms are where only the COUNT agrees: the JSON document carries
 the first `-n` of each cabin's own board and the table carries the top `-n` of
@@ -26,6 +27,7 @@ zero bytes and exit 1. That is how a consumer tells no rows from no answer.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any, cast
@@ -153,8 +155,8 @@ def test_a_pick_past_the_visible_table_warns_and_falls_back_to_the_cheapest(
     assert "--pick 6 is out of range" not in captured.out, captured.out
     # Both halves, because a link IS emitted here: the sentence promises a
     # fallback and the label on stdout is that fallback happening. Both name
-    # ROW ONE — a one-way board keeps Google's ranking, so "the cheapest" would
-    # describe a different row from the one the link opens.
+    # ROW ONE, which is the cheapest only when Google priced it: on a board it
+    # priced no row of, "the cheapest" names a row that does not exist.
     assert "pinning itinerary #1 instead" in captured.err, captured.err
     assert "itinerary #1 pinned" in captured.out, captured.out
     assert "cheapest itinerary" not in captured.out, captured.out
@@ -211,14 +213,12 @@ def test_the_pin_label_names_the_row_it_pinned_on_a_one_way_board(
 ) -> None:
     """A pin is right and its SENTENCE can still be false.
 
-    A one-way board keeps Google's own ranking, so row 1 need not be the
-    cheapest — on this capture `-n 3` prints 6590, 6616 and then 6072. The link
-    goes to row 1, correctly; a label reading "cheapest itinerary" over it names
-    a row the table shows two places further down, and nothing on screen says
-    which of the two the link honoured.
-
-    So the rule is that the label names the row it pins. "Cheapest" is then a
-    word this path cannot print, because it has no way to be true."""
+    The link goes to row 1, and on this capture row 1 is the cheapest: the page
+    lists 6590, 6616 and then 6072, and `-n 3` prints 6072, 6590 and 6616. The
+    label still names the row by its number. Row 1 is the cheapest only when
+    Google priced it, and a board of rows it did not price has a row 1 and no
+    cheapest, so "cheapest itinerary" is a label this path cannot always make
+    true, and the number is one it always can."""
     gf_session(gf_capture("ds1_metadata_blocks_kept.json"))
     cli._run_gflight_path(
         legs=_one_way(),
@@ -231,9 +231,9 @@ def test_the_pin_label_names_the_row_it_pinned_on_a_one_way_board(
 
     assert "itinerary #1 pinned" in captured.out, captured.out
     assert "cheapest itinerary" not in captured.out, captured.out
-    # The row it names is the row the table put first, and it is not the
-    # cheapest of the three — without that the assertion above holds vacuously.
-    where = [captured.out.index(p) for p in ("USD6590.00", "USD6616.00", "USD6072.00")]
+    # The row it names is the row the table put first, which the page listed
+    # third.
+    where = [captured.out.index(p) for p in ("USD6072.00", "USD6590.00", "USD6616.00")]
     assert where == sorted(where), captured.out
 
 
@@ -690,21 +690,17 @@ def _prices(rows: list[Any]) -> list[float]:
     return out
 
 
-def test_a_one_way_board_is_trimmed_in_the_order_google_ranked_it(
+def test_a_one_way_board_is_trimmed_to_its_cheapest_rows(
     gf_session: Callable[..., Any],
     gf_capture: Callable[[str], str],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Which rows survive, not how many.
 
-    The captured board is deliberately not price-ordered — Google's ranking is
-    a composite of price, duration and stops, and the page hands over its "best
-    flights" block followed by the rest. Reproducing that ranking is not
-    possible from here, so the trim keeps it: `-n 2` is the two rows the page
-    put first, which is what the table showed the day the capture was taken.
-
-    A sort by price here would look like an improvement and would answer a
-    one-way query in an order Google did not choose."""
+    The captured board is not price-ordered: the page hands over its top
+    flights block followed by the rest, and its cheapest row is listed third.
+    `-n 2` is the two cheapest rows in price order, the order every other
+    answer this command prints is already in."""
     gf_session(gf_capture("ds1_metadata_blocks_kept.json"))
     cli._run_gflight_path(
         legs=_one_way(),
@@ -712,7 +708,7 @@ def test_a_one_way_board_is_trimmed_in_the_order_google_ranked_it(
         top_n=2,
         json_out=True,
     )
-    assert _prices(_json_rows(capsys)) == [6590.0, 6616.0]
+    assert _prices(_json_rows(capsys)) == [6072.0, 6590.0]
 
 
 def test_a_round_trips_combinations_are_trimmed_by_price(
@@ -750,11 +746,13 @@ def test_a_round_trips_combinations_are_trimmed_by_price(
     # tie at the same total, so a monotonic check passes on a pin-major list and
     # the tie-break alone decides every row on screen — cardinality and ordering
     # are both satisfied by the wrong three. Naming them is what makes the
-    # documented stability of the sort a thing a test can lose.
+    # documented stability of the sort a thing a test can lose. The pins are
+    # the outbounds cheapest first, tfMS2d (6072) then Ulft7e (6590), and the
+    # ties keep that order.
     assert [(r[0]["flight_id"], r[-1]["flight_id"]) for r in rows] == [
+        ("tfMS2d", "iQwZab"),
+        ("tfMS2d", "zIxVxf"),
         ("Ulft7e", "iQwZab"),
-        ("Ulft7e", "zIxVxf"),
-        ("FWXCne", "iQwZab"),
     ], rows
 
 
@@ -781,6 +779,7 @@ def test_a_round_trip_table_prints_its_rows_in_price_order(
 
 
 _NO_PRICE_CELL = "—"
+_ROW = re.compile(r"^│\s*\d+\s*│")
 
 
 def test_a_round_trip_row_google_did_not_price_is_shown_last_and_reads_as_a_dash(
@@ -831,16 +830,15 @@ def test_a_round_trip_row_google_did_not_price_is_shown_last_and_reads_as_a_dash
     assert "USD0.00" not in captured.out, captured.out
 
 
-def test_a_one_way_row_google_did_not_price_is_shown_rather_than_dropped(
+def test_a_one_way_row_google_did_not_price_is_shown_last(
     gf_session: Callable[..., Any],
     gf_unpriced: Callable[..., str],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The one-way board is the arm that never reaches the sort.
-
-    `_price_ordered` returns a non-tuple list as it came, so an unpriced row
-    travels straight into the table's own price cell — a second, independent
-    place the absence has to be answered, and the one whose failure is the
+    """The one-way board is sorted too, and an unpriced row goes after every
+    priced one rather than being dropped: with `-n` covering the whole board it
+    is the last row of the table. Its price cell is a second, independent place
+    the absence has to be answered, and the one whose failure is the
     renderer's own line and exit 1 rather than a traceback."""
     gf_session(gf_unpriced("ds1_metadata_blocks_kept.json", index=1))
     cli._run_gflight_path(
@@ -852,11 +850,10 @@ def test_a_one_way_row_google_did_not_price_is_shown_rather_than_dropped(
     captured = capsys.readouterr()
     assert "unsupported format string" not in captured.out + captured.err, captured
     assert "could not be rendered" not in captured.out + captured.err, captured
-    # All three rows, Google's own ranking kept: the unpriced one is row 2 on
-    # the board and stays row 2 on the table.
-    assert "USD6590.00" in captured.out, captured.out
-    assert "USD6072.00" in captured.out, captured.out
-    assert _NO_PRICE_CELL in captured.out, captured.out
+    # All three rows: the unpriced one is row 2 on the board and row 3 on the
+    # table.
+    prices = [ln.split("│")[2].strip() for ln in captured.out.splitlines() if _ROW.match(ln)]
+    assert prices == ["USD6072.00", "USD6590.00", _NO_PRICE_CELL], captured.out
     assert "USD0.00" not in captured.out, captured.out
 
 

@@ -3752,7 +3752,7 @@ def _terminal_fare_key(r: Any) -> tuple[int, float]:
     surface prints for the combination."""
     from ._gflight_ids import fare_key  # noqa: PLC0415 — fli, ~95 ms
 
-    return fare_key(r[-1] if isinstance(r, tuple) else r)
+    return fare_key(cast("tuple[Any, ...]", r)[-1] if isinstance(r, tuple) else r)
 
 
 def _price_ordered(results: list[Any]) -> list[Any]:
@@ -4867,8 +4867,7 @@ def _pin_cap_note(*, legs: tuple[Leg, ...], top_n: int) -> None:
     pins = pinned_fanout(top_n)
     if len(legs) >= _ROUND_TRIP_LEGS and pins < top_n:
         err.print(
-            f"[dim]Google Flights combines returns against up to {pins:d} "
-            f"cheapest outbounds.[/]"
+            f"[dim]Google Flights combines returns against up to {pins:d} cheapest outbounds.[/]"
         )
 
 
