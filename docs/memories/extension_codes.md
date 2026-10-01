@@ -217,8 +217,10 @@ Order doesn't matter to the server.
 ## Per-direction application
 
 Like `routeLanguage`, `commandLine` is **per-slice**. Outbound and return get
-independent extension strings. The CLI exposes both via `--extension` /
-`--extension-ret` (or `--ext` / `--ext-ret`). Multi-city sets one per slice.
+independent extension strings. The CLI exposes both via `--extension` (or
+`--ext`) and `--ext-ret` on `search`, `calendar` and `detail`; `--ext-ret ''`
+sends none on the return. No code is positional, so unset, `--ext-ret` copies
+`--extension`. Multi-city sets one per slice.
 
 ## Pitfalls
 
