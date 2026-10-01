@@ -6,9 +6,12 @@ concept. The CLI fires N parallel single-cabin queries (one per requested
 cabin), then this module joins them on a stable per-itinerary key and
 produces rows the renderer can iterate.
 
-Join key: per-slice `(normalized first flight number, YYYY-MM-DD)` across
-all slices. Same shape as `pp.match.cash_match_key`, generalized to the
-whole itinerary so round-trips don't collide on outbound alone.
+Join key: the whole itinerary. Per slice, every flight number, each
+flight's date where the answer states one (Google does, Matrix does not), and
+the slice's departure and arrival as stated. Trips behind one first flight
+connect or land differently at different fares, so a shorter key prints one
+trip's fare against another's flights. Nothing cabin-specific is in the key,
+so an itinerary both cabins list is one row with both prices.
 """
 
 from __future__ import annotations
@@ -22,7 +25,8 @@ if TYPE_CHECKING:
     from .models import Itinerary, SearchResult
 
 
-SliceKey = tuple[str, str]  # (FLIGHT_NUMBER_UPPER_NOSPACE, "YYYY-MM-DD")
+# (flight numbers, per-flight dates, departure, arrival)
+SliceKey = tuple[tuple[str, ...], tuple[str, ...], str, str | None]
 ItineraryKey = tuple[SliceKey, ...]
 
 _CASH_NUM_RE = re.compile(r"[\d,]*\d+(?:\.\d+)?")
@@ -33,28 +37,21 @@ def _norm_fn(fn: str | None) -> str:
     return (fn or "").upper().replace(" ", "")
 
 
-def _iso_date(s: str | None) -> str:
-    if not s:
-        return ""
-    return s.replace(" ", "T")[:10]
-
-
 def itinerary_key(itin: Itinerary) -> ItineraryKey | None:
-    """Per-slice (first-flight#, date) tuple across all slices of an
-    itinerary. None if any slice is missing both anchors — such itineraries
-    can't be safely joined and are skipped.
+    """Per slice: every flight number, the flights' dates where the slice
+    states them, and its departure and arrival strings. None when a slice has
+    no flight, a blank one, or no departure, since such an itinerary can't be
+    told apart from another; a missing arrival is keyed as missing.
     """
     details = itin.itinerary
     if not details or not details.slices:
         return None
     slice_keys: list[SliceKey] = []
     for s in details.slices:
-        flights = s.flights or []
-        fn = _norm_fn(flights[0]) if flights else ""
-        dep = _iso_date(s.departure)
-        if not fn or not dep:
+        flights = tuple(_norm_fn(fn) for fn in s.flights)
+        if not flights or not all(flights) or not s.departure:
             return None
-        slice_keys.append((fn, dep))
+        slice_keys.append((flights, tuple(s.segment_dates), s.departure, s.arrival))
     return tuple(slice_keys)
 
 
@@ -103,10 +100,11 @@ def price_rank(price: str | None, amount: float | None, *, currency: str) -> tup
 class MultiCabinRow:
     """One itinerary observed across one or more cabin queries.
 
-    `itinerary` is the first occurrence we saw (used for render: slices,
-    carriers, legroom). `prices` maps each cabin we have a price for to
-    its raw price string (e.g. 'USD623.00'). Cabins with no price are
-    absent from the dict — renderer treats absence as '—'.
+    `itinerary` is the first cabin's listing of it (used for render: slices,
+    carriers, legroom), its cheapest where that cabin listed it more than once,
+    so its own price is the one shown for that cabin. `prices` maps each cabin
+    we have a price for to its raw price string (e.g. 'USD623.00'). Cabins
+    with no price are absent from the dict — renderer treats absence as '—'.
     """
 
     itinerary: Itinerary
@@ -126,26 +124,40 @@ def merge(
     bottom. Truncated to `top_n` rows, so the trim never drops a fare for a
     smaller number in another currency.
 
-    Itineraries that can't be keyed (missing flight# or departure on any
-    slice) are skipped.
+    A cabin that lists one itinerary more than once is priced at the listing
+    that ranks first under `price_rank`, the earlier of two equal ones, since
+    only the cheaper fare is on offer.
+
+    Itineraries that can't be keyed (no flight, a blank flight or no
+    departure on a slice) are skipped.
     """
-    by_key: dict[ItineraryKey, MultiCabinRow] = {}
+
+    def rank(it: Itinerary) -> tuple[int, str, float]:
+        return price_rank(it.price, parse_price(it.price), currency=currency)
+
+    listings: dict[ItineraryKey, dict[Cabin, Itinerary]] = {}
     for cabin, res in results_by_cabin.items():
         for it in res.solutions:
             key = itinerary_key(it)
             if key is None:
                 continue
-            row = by_key.get(key)
-            if row is None:
-                row = MultiCabinRow(itinerary=it)
-                by_key[key] = row
-            price = it.price
-            if price:
-                row.prices[cabin] = price
+            by_cabin = listings.setdefault(key, {})
+            held = by_cabin.get(cabin)
+            if held is None or rank(it) < rank(held):
+                by_cabin[cabin] = it
+    # Replacing a cabin's listing keeps its place in the dict, so the first
+    # value is the first cabin's, and the rows keep the order keys were met.
+    joined = [
+        MultiCabinRow(
+            itinerary=next(iter(by_cabin.values())),
+            prices={cabin: it.price for cabin, it in by_cabin.items() if it.price},
+        )
+        for by_cabin in listings.values()
+    ]
 
     def sort_value(row: MultiCabinRow) -> tuple[int, str, float]:
         price = row.prices.get(sort_by)
         return price_rank(price, parse_price(price), currency=currency)
 
-    rows = sorted(by_key.values(), key=sort_value)
+    rows = sorted(joined, key=sort_value)
     return rows[:top_n]

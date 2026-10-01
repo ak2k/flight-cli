@@ -580,6 +580,20 @@ merged table afterwards in `_render_merged`. The multi-cabin `--format json` arm
 trims per cabin for the same reason, to the user's count and not the bumped one —
 the same count as the table beside it, drawn from a different set.
 
+**The multi-cabin join keys the whole itinerary.** `_multi_cabin.itinerary_key`
+takes, per slice, every flight number, each flight's date where the answer gives
+one (Google's `segment_dates`; Matrix gives none) and the slice's departure and
+arrival strings. Nothing cabin-specific is in it, so an itinerary both cabins
+list is one row with both prices. A cabin that lists one itinerary twice is
+priced at the listing that ranks first under `price_rank`, and the row's
+`itinerary` is that listing, so it carries the price printed. A key of the first
+flight and its date alone joins the full JFK-LAX board (95 itineraries) into 62
+rows, 4 of them printed at another itinerary's fare (AS41+AS2415, USD255 of its
+own, at USD312), and JFK-LHR (101) into 64 rows, 9 of them mispriced. It also
+joins Matrix's FI+ JFK-LHR answer for 2026-10-20 (9 trips through Keflavik) into
+3 rows. The whole key gives 95, 101 and 9 rows, and it partitions both Google
+boards exactly as `_gflight_ids._itinerary_key` does.
+
 **Neither merge ranks two currencies by their numbers.** `_multi_cabin.merge`
 and `_enrich.merge_results` sort through `_multi_cabin.price_rank`: rows priced
 in the requested currency (`--currency`, else USD) first by amount, then each
