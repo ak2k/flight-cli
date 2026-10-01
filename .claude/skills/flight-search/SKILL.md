@@ -24,7 +24,8 @@ intent into the right invocation **on the first try**.
 
 Global flags (every search-printing command):
 - `-v` / `-vv` — verbose logging (cache hits, retries) to stderr
-- `--json` — emit raw response JSON
+- `--format envelope` — `search` and `calendar`: one JSON object with the same keys on every path (`version`, `command`, `backend`, `currency`, `complete`, `notes`, `results`, `awards`, `insight`, `price_history`). Use it whenever the output is read by a program: `complete: false` means the answer is narrower than asked, and `notes` says why
+- `--format json` — the answering path's own shape (Google Flights rows, Matrix's raw response, `{cabin: …}`, or the award document); `--json` is a deprecated alias for it
 - `--no-cache` — bypass the on-disk response cache
 - `--matrix-url` / `--google-url` — toggle deep-link emission
 - `--cash-only` — skip all award providers; show only the cash table
@@ -400,5 +401,5 @@ Pin these for follow-up reading:
 ## When this skill is the wrong tool
 
 - User wants to **add a new search mode** (new `Search` variant in domain.py) → read CLAUDE.md and wire_format_quirks.md first; that's a coding task, not a query task.
-- User wants to **debug a Matrix response** → start from raw `--json` output and `wire_format_quirks.md`, not this skill.
+- User wants to **debug a Matrix response** → start from `--backend matrix --format json` (Matrix's raw response) and `wire_format_quirks.md`, not this skill.
 - User wants to **understand pricing logic** → Matrix's pricing isn't documented anywhere; this skill won't help.
