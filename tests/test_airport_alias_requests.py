@@ -20,7 +20,7 @@ from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
-from fli.models.airport import Airport
+from fli.models.airport import Airport  # pyright: ignore[reportMissingTypeStubs]
 from typer.testing import CliRunner
 
 from conftest import _answering, _ds1, _page

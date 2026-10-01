@@ -13,10 +13,10 @@ from copy import deepcopy
 from datetime import date, datetime, timedelta
 
 import pytest
-from fli.models import FlightLeg
-from fli.models.airline import Airline
-from fli.models.airport import Airport
-from fli.models.google_flights.base import FlightSegment
+from fli.models import FlightLeg  # pyright: ignore[reportMissingTypeStubs]
+from fli.models.airline import Airline  # pyright: ignore[reportMissingTypeStubs]
+from fli.models.airport import Airport  # pyright: ignore[reportMissingTypeStubs]
+from fli.models.google_flights.base import FlightSegment  # pyright: ignore[reportMissingTypeStubs]
 
 from flight_cli.fli_bridge import fli_airport, fli_airports
 
