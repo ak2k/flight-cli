@@ -26,6 +26,8 @@ __all__ = [
 BASE = "https://content-alkalimatrix-pa.googleapis.com"
 SEARCH_URL = f"{BASE}/v1/search"
 SUMMARIZE_URL = f"{BASE}/v1/summarize"
+# How long a search waits on each attempt for Matrix to answer.
+SEARCH_TIMEOUT_S = 180.0
 
 
 class MatrixApiError(Exception):
@@ -79,7 +81,7 @@ class MatrixClient:
         impersonate: str = "chrome",
         rps: float = 1.0,
         concurrency: int = 3,
-        timeout: float = 180.0,
+        timeout: float = SEARCH_TIMEOUT_S,
         cache_dir: str | None = None,
         cache_read: bool = True,
         cache_write: bool = True,

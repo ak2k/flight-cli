@@ -49,7 +49,7 @@ from ._gf_errors import (
     GfUpstreamStatusError,
 )
 from ._http import CACHE_SIZE_LIMIT_BYTES
-from .client import MatrixApiError, MatrixClient
+from .client import SEARCH_TIMEOUT_S, MatrixApiError, MatrixClient
 from .domain import Leg, SearchOptions, SpecificDateSearch
 from .fli_bridge import to_fli_filter
 from .models import SearchResult
@@ -110,7 +110,6 @@ EX_TEMPFAIL = 75
 _ORIGIN, _DESTINATION = "JFK", "LAX"
 _DAYS_OUT = 30
 
-_MATRIX_TIMEOUT_S = 60.0
 _MATRIX_PRICE = re.compile(r"^[A-Z]{3}\d")
 _MATRIX_BROWNOUT_KINDS = frozenset({"INTERNAL", "UNAVAILABLE", "DEADLINE_EXCEEDED"})
 # Matrix answers an overloaded engine with HTTP 200 and this message. It is also
@@ -432,13 +431,10 @@ class _Doctor:
             legs=(Leg.of(_ORIGIN, _DESTINATION, self.depart),), options=SearchOptions(page_size=5)
         )
 
+        # No timeout of its own: one shorter than a search's would fail a slow
+        # Matrix that a search still gets its answer from.
         async def go() -> object:
-            async with MatrixClient(
-                api_key=key,
-                rps=self.rps,
-                impersonate=self.impersonate,
-                timeout=_MATRIX_TIMEOUT_S,
-            ) as c:
+            async with MatrixClient(api_key=key, rps=self.rps, impersonate=self.impersonate) as c:
                 return await c.execute(search, cache=False)
 
         try:
@@ -446,8 +442,8 @@ class _Doctor:
         except httpx.TimeoutException as e:
             raise _CheckFailedError(
                 "brownout",
-                f"Matrix did not answer within {_MATRIX_TIMEOUT_S:.0f} s, "
-                "the limit on each attempt",
+                f"Matrix did not answer within {SEARCH_TIMEOUT_S:.0f} s, "
+                "the limit a search waits on each attempt",
             ) from e
         except ApiKeyResolutionError as e:
             if e.__cause__ is not None:

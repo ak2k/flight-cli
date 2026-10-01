@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 import os
 import pathlib
 import time
@@ -26,7 +27,7 @@ import typer
 from typer.testing import CliRunner
 
 from conftest import _ds1, _page
-from flight_cli import _api_key, _doctor, _gf_browser, cli
+from flight_cli import _api_key, _doctor, _gf_browser, _http, cli
 from flight_cli import _gflight_ids as gfid
 from flight_cli._gf_common import PageFetch
 from flight_cli._gf_errors import GfBrowserUnavailableError
@@ -245,6 +246,50 @@ def _table_rows(out: str) -> dict[str, str]:
         if cells[0]:
             rows[cells[0]] = cells[1]
     return rows
+
+
+def _matrix_behind_the_real_client(
+    monkeypatch: pytest.MonkeyPatch, answer: Callable[[httpx.Request, float], httpx.Response]
+) -> list[float]:
+    """Matrix under `HttpTransport`'s own AsyncClient, for the doctor and a
+    search alike, so each request carries the timeouts its client was built
+    with. Returns the read timeout of every request sent."""
+    reads: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        read = request.extensions["timeout"]["read"]
+        reads.append(read)
+        return answer(request, read)
+
+    def transport(**_kw: object) -> httpx.MockTransport:
+        return httpx.MockTransport(handler)
+
+    monkeypatch.setattr(_http, "AsyncCurlTransport", transport)
+    monkeypatch.setattr(_doctor, "MatrixClient", MatrixClient)
+    return reads
+
+
+def _matrix_search(*extra: str) -> Result:
+    """The doctor's probe leg as a cash-only search: the stored provider tokens
+    would otherwise send it to PointsPath and seats.aero."""
+    depart = (dt.date.today() + dt.timedelta(days=_doctor._DAYS_OUT)).isoformat()
+    return CliRunner().invoke(
+        cli.app,
+        [
+            "search",
+            "JFK",
+            "LAX",
+            "--dep",
+            depart,
+            "--backend",
+            "matrix",
+            "--cash-only",
+            "--no-cache",
+            "--format",
+            "json",
+            *extra,
+        ],
+    )
 
 
 # ───────────────────────────── the report ─────────────────────────────
@@ -622,6 +667,9 @@ def test_a_matrix_429_is_a_throttle_and_a_timeout_is_a_brownout(world: World) ->
         _fails_as(_run(), "matrix-search", "unreachable")
 
 
+_TIMED_OUT = "Matrix did not answer within 180 s, the limit a search waits on each attempt"
+
+
 def test_a_matrix_timeout_names_the_limit_on_each_attempt(world: World) -> None:
     def stall(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("timed out", request=request)
@@ -630,7 +678,44 @@ def test_a_matrix_timeout_names_the_limit_on_each_attempt(world: World) -> None:
     with stamina.set_testing(True, attempts=3):
         c = _fails_as(_run(), "matrix-search", "brownout")
     assert len(world.matrix_requests) == 3
-    assert c.detail == "Matrix did not answer within 60 s, the limit on each attempt"
+    assert c.detail == _TIMED_OUT
+
+
+@pytest.mark.parametrize(
+    ("answers_after", "status", "cause", "said", "exit_code"),
+    [
+        (90.0, "pass", None, "first priced GBP618.00", 0),
+        (math.inf, "fail", "brownout", _TIMED_OUT, 1),
+    ],
+)
+def test_the_doctor_waits_for_matrix_as_long_as_a_search_does(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+    answers_after: float,
+    status: str,
+    cause: str | None,
+    said: str,
+    exit_code: int,
+) -> None:
+    """Matrix answers only a request willing to wait `answers_after` seconds.
+    The doctor's verdict is the one a search reaches at that moment."""
+
+    def answer(request: httpx.Request, read: float) -> httpx.Response:
+        if read < answers_after:
+            raise httpx.ReadTimeout(f"no answer within {read} s", request=request)
+        return httpx.Response(200, json=_MATRIX_OK)
+
+    reads = _matrix_behind_the_real_client(monkeypatch, answer)
+    with stamina.set_testing(True, attempts=3):
+        check = _by_id(_run())["matrix-search"]
+        doctor_reads = reads.copy()
+        reads.clear()
+        search = _matrix_search()
+    assert doctor_reads
+    assert doctor_reads == reads
+    assert (check.status, check.cause) == (status, cause), check
+    assert said in check.detail
+    assert search.exit_code == exit_code, search.output
 
 
 def test_a_key_matrix_refuses_twice_is_auth_and_never_exits_75(
