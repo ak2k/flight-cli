@@ -7792,9 +7792,10 @@ def calendar(
             )
         else:
             err.print(
-                "[yellow]--fast applies only to calendars of at most 8 price-graph loads, "
-                "between airports or metro codes Google Flights can ask for (up to 11 "
-                "airports a leg), whose every filter its search page can carry; "
+                "[yellow]--fast applies only to calendars one-way, of one trip length, or of "
+                "a trip-length range within the price graph's page-load budget, between "
+                "airports or metro codes Google Flights can ask for (up to 11 airports a "
+                "leg), whose every filter its search page can carry; "
                 f"this is {_safe_text(blocker)}. Run without --fast for Matrix.[/]"
             )
         raise typer.Exit(1)

@@ -2139,6 +2139,28 @@ def test_a_range_over_the_load_budget_is_refused_with_its_count(
     ), err
 
 
+def test_the_browser_refusal_bounds_the_loads_of_a_range_alone(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One trip length is never refused for its loads: a window longer than the
+    budget is asked and cut short. A refusal on other grounds must not say it was."""
+    _no_matrix(monkeypatch)
+    seen = _graph_is(monkeypatch, _RT)
+    with pytest.raises(typer.Exit) as e:
+        _calendar(
+            origin="JFK,LGA,EWR,BOS,IAD,DCA,BWI,PHL,ATL,MIA,FLL,CLT", one_way=False, duration="7"
+        )
+    assert e.value.exit_code == 1
+    assert seen == []
+    err = " ".join(capsys.readouterr().err.split())
+    assert (
+        "--fast applies only to calendars one-way, of one trip length, or of a trip-length "
+        "range within the price graph's page-load budget, between airports or metro codes "
+        "Google Flights can ask for (up to 11 airports a leg), whose every filter its "
+        "search page can carry; this is 13 airports on one leg (its limit is 11)." in err
+    ), err
+
+
 def test_fast_over_http_still_refuses_a_range(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
