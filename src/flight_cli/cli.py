@@ -1844,7 +1844,8 @@ def _run_fast_browser_grid(
     A trip-length range is one graph per length (`price_graphs`): a column each
     in the table, and in JSON the range document (`_graph_range_document`). A
     length that was lost is named on stderr and, in JSON, under `lost`; the
-    lengths that priced still answer.
+    lengths that priced still answer. When none priced, each is named ahead of
+    the no-grid line.
 
     The guard is armed and the session scope held here, outside any `anyio.run`:
     the page loads run on this thread, the one a Ctrl-C lands on, and the scope
@@ -1863,7 +1864,7 @@ def _run_fast_browser_grid(
     try:
         with interrupt_guard(), session_scope():
             if len(lengths) > 1:
-                graphs, lost = price_graphs(search, headed=headed)
+                graphs, lost = price_graphs(search, headed=headed, raise_unpriced=False)
             else:
                 graphs = (price_graph(search, headed=headed),)
     except GfThrottledError:
@@ -1880,14 +1881,14 @@ def _run_fast_browser_grid(
         raise  # an orderly exit is not a grid failure; see the weave's arm
     except Exception as e:  # noqa: BLE001 — any other cause is still just "no grid"
         err.print(f"[yellow]{_safe_text(_GF_GRID_NAME)} failed:[/] {_safe_text(e)}")
-    if not graphs:
-        err.print("[yellow]No Google Flights grid; drop --fast for Matrix.[/]")
-        raise typer.Exit(1)
     for nights, cause in lost:
         err.print(
             f"[yellow]Google Flights price graph not shown:[/] "
             f"{_safe_text(f'{nights}-night trips: {_graph_failure_text(cause)}')}"
         )
+    if not graphs:
+        err.print("[yellow]No Google Flights grid; drop --fast for Matrix.[/]")
+        raise typer.Exit(1)
     priced = graphs
 
     def _write_answer() -> None:

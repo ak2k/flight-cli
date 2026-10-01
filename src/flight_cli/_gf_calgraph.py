@@ -532,7 +532,9 @@ def page_budget_blocker(search: CalendarSearch) -> str | None:
     return None
 
 
-def price_graphs(search: CalendarSearch, *, headed: bool) -> GraphRange:
+def price_graphs(
+    search: CalendarSearch, *, headed: bool, raise_unpriced: bool = True
+) -> GraphRange:
     """One graph per trip length, in order, within `_MAX_PAGES` loads in all.
 
     Each length is asked with the loads still left, since a page's span can fall
@@ -549,7 +551,9 @@ def price_graphs(search: CalendarSearch, *, headed: bool) -> GraphRange:
     from those, so after any of them the lengths still to come are lost with it.
 
     When no length priced, the first failure is raised as it came, and the
-    graph's own error is named with its trip length.
+    graph's own error is named with its trip length: beside Matrix the graph is
+    one line. Without `raise_unpriced` every lost length is returned instead,
+    since under `--fast` the lengths are the whole answer and each is named.
 
     The caller arms `interrupt_guard` and holds `session_scope` around this."""
     lengths = graph_lengths(search)
@@ -584,7 +588,7 @@ def price_graphs(search: CalendarSearch, *, headed: bool) -> GraphRange:
             break
         used += graph.loads
         graphs.append(graph)
-    if not graphs:
+    if not graphs and raise_unpriced:
         nights, cause = lost[0]
         if isinstance(cause, GfPriceGraphError) and len(lengths) > 1:
             raise GfPriceGraphError(f"{nights}-night trips: {cause}", code=cause.code) from cause

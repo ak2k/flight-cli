@@ -946,7 +946,8 @@ the calendar beside Matrix does. The table has one column per length.
 (`cli._graph_range_document`): `graphs` holds the single-length document of
 each length that priced, and `lost` each length that did not, with its reason.
 A lost length is also a stderr line, `Google Flights price graph not shown:
-6-night trips: <reason>`. No length priced is the no-grid line and exit 1.
+6-night trips: <reason>`. No length priced names every length that way, then the
+no-grid line, and exits 1.
 `--gf-transport http` still refuses a range, and `-d 7` and a one-way are
 unchanged.
 

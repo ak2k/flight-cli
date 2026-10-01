@@ -558,6 +558,16 @@ def test_a_range_that_priced_no_length_raises_its_first_failure_as_before(
         assert e.value.code == 13
 
 
+def test_a_range_that_priced_no_length_can_return_every_lost_length(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What `--fast` asks for: every length is its answer, so none is dropped."""
+    _lengths_answer(monkeypatch, {5: _missed(2), 6: _missed(2), 7: cg.GfPriceGraphError("e13")})
+    got = cg.price_graphs(_ranged(), headed=False, raise_unpriced=False)
+    assert got.graphs == []
+    assert _lost(got) == [(5, str(_missed(2))), (6, str(_missed(2))), (7, "e13")]
+
+
 def test_a_graph_with_no_fare_in_the_window_is_a_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
     """Priced dates exist, all outside the window: never an empty grid."""
     _serve(monkeypatch, _fixture("ow_jfk_lax.body"))
@@ -2006,8 +2016,10 @@ def _graphs_are(
     """Stand in for the range's page loads, recording the search each was asked."""
     seen: list[CalendarSearch] = []
 
-    def _price_graphs(search: CalendarSearch, *, headed: bool) -> cg.GraphRange:
-        del headed
+    def _price_graphs(
+        search: CalendarSearch, *, headed: bool, raise_unpriced: bool = True
+    ) -> cg.GraphRange:
+        del headed, raise_unpriced
         seen.append(search)
         if isinstance(answer, BaseException):
             raise answer
@@ -2075,21 +2087,37 @@ def test_a_lost_length_is_named_on_stderr_and_in_the_document(
         assert "5n" in cap.out and "7n" in cap.out and "6n" not in cap.out
 
 
-def test_every_length_lost_exits_one_with_the_no_grid_line(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("fmt", ["table", "json"])
+def test_every_length_lost_is_named_by_its_nights_before_the_no_grid_line(
+    fmt: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Red at the base: refused with the range sentence, before any load."""
+    """Red at the base: refused with the range sentence, before any load. A
+    length that spent its loads is named, and so is the one a Chrome failure
+    left unasked: each is a length the user asked for and got nothing back."""
     _no_matrix(monkeypatch)
-    seen = _graphs_are(monkeypatch, cg.GfPriceGraphError("5-night trips: no priced date"))
+    asked = _lengths_answer(
+        monkeypatch,
+        {
+            5: _missed(2),
+            6: GfBrowserUnavailableError("Chrome could not load Google Flights' page: x."),
+            7: _RANGE[2],
+        },
+    )
     with pytest.raises(typer.Exit) as e:
-        _calendar(one_way=False, duration="5-7", fmt="json")
+        _calendar(one_way=False, duration="5-7", fmt=fmt)
     cap = capsys.readouterr()
     assert e.value.exit_code == 1
     assert cap.out == ""
-    assert len(seen) == 1
+    assert [n for n, _ in asked] == [5, 6]
     err = " ".join(cap.err.split())
-    assert "5-night trips: no priced date" in err
-    assert "No Google Flights grid; drop --fast for Matrix." in err
+    named = [
+        f"5-night trips: {_CLICK_TIMEOUT}",
+        "6-night trips: Chrome could not load Google Flights' page: x.",
+        "7-night trips: not asked after 6-night trips failed.",
+        "No Google Flights grid; drop --fast for Matrix.",
+    ]
+    assert all(line in err for line in named), err
+    assert [err.find(line) for line in named] == sorted(err.find(line) for line in named), err
 
 
 def test_a_range_over_the_load_budget_is_refused_with_its_count(
