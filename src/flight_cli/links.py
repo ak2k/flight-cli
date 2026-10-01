@@ -32,11 +32,13 @@ from .domain import (
     Search,
     SearchOptions,
     SpecificDateSearch,
+    TimeOfDay,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from .domain import TimeWindow
     from .models import Slice
 
 # ───────────────────────── Matrix deep-link URL ────────────────────────────
@@ -82,6 +84,12 @@ def _pax_strs(pax: Pax) -> dict[str, str]:
     return d
 
 
+def _preferred_times(windows: Sequence[TimeWindow]) -> list[str]:
+    """The SPA's preferred-times list: it names the six buckets and nothing
+    finer, so a window to the minute is left out of the link."""
+    return [w.value for w in windows if isinstance(w, TimeOfDay)]
+
+
 def _spa_specific_leg(leg: Leg, *, return_leg: Leg | None = None) -> dict[str, Any]:
     """SPA URL-state slice for a specific-date search.
 
@@ -91,7 +99,7 @@ def _spa_specific_leg(leg: Leg, *, return_leg: Leg | None = None) -> dict[str, A
     """
     return_date = return_leg.date.isoformat() if return_leg and return_leg.date else ""
     return_modifier = str(return_leg.date_minus if return_leg else leg.date_plus)
-    return_times = [t.value for t in return_leg.time_ranges] if return_leg else []
+    return_times = _preferred_times(return_leg.time_ranges) if return_leg else []
     return {
         "origin": list(leg.origins),
         "dest": list(leg.destinations),
@@ -102,7 +110,7 @@ def _spa_specific_leg(leg: Leg, *, return_leg: Leg | None = None) -> dict[str, A
             # the URL-state counterpart of the API's `isArrivalDate` bool.
             "departureDateType": "arrive" if leg.is_arrival_date else "depart",
             "departureDateModifier": str(leg.date_minus),
-            "departureDatePreferredTimes": [t.value for t in leg.time_ranges],
+            "departureDatePreferredTimes": _preferred_times(leg.time_ranges),
             "returnDate": return_date,
             "returnDateType": "arrive" if (return_leg and return_leg.is_arrival_date) else "depart",
             "returnDateModifier": return_modifier,
@@ -196,7 +204,7 @@ def _spa_calendar_leg(
         "departureDate": start.isoformat(),
         "departureDateType": "depart",
         "departureDateModifier": "0",
-        "departureDatePreferredTimes": [t.value for t in out.time_ranges],
+        "departureDatePreferredTimes": _preferred_times(out.time_ranges),
     }
     if ret is not None:
         # `duration` is the trip LENGTH — nights between the outbound and the return —
@@ -209,7 +217,7 @@ def _spa_calendar_leg(
         )
     dates["returnDateType"] = "depart"
     dates["returnDateModifier"] = "0"
-    dates["returnDatePreferredTimes"] = [t.value for t in ret.time_ranges] if ret else []
+    dates["returnDatePreferredTimes"] = _preferred_times(ret.time_ranges) if ret else []
     d["dates"] = dates
     return d
 

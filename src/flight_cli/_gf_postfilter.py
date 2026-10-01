@@ -34,7 +34,7 @@ import itertools
 import re
 from typing import TYPE_CHECKING, Any
 
-from .domain import time_bounds, within_price_cap
+from .domain import time_bounds, window_label, within_price_cap
 from .routing_predicates import (
     AlliancePred,
     CarrierPred,
@@ -51,7 +51,7 @@ from .routing_predicates import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
 
-    from .domain import TimeOfDay
+    from .domain import TimeWindow
     from .models import Itinerary, SearchResult, Slice
     from .routing_predicates import Predicate
 
@@ -259,22 +259,32 @@ def _stop_ceiling(predicates: Iterable[Predicate], max_stops: int | None) -> int
     return min(limits, default=None)
 
 
-def _row_passes(row: Any, predicates: Iterable[Predicate], times: Sequence[TimeOfDay]) -> bool:
+def _within(stamp: Any, windows: Sequence[TimeWindow]) -> bool:
+    clock = stamp.hour * 60 + stamp.minute
+    return any(lo <= clock <= hi for lo, hi in map(time_bounds, windows))
+
+
+def _row_passes(
+    row: Any,
+    predicates: Iterable[Predicate],
+    times: Sequence[TimeWindow],
+    arrivals: Sequence[TimeWindow] = (),
+) -> bool:
     """The checks read off the raw row, which `models.Slice` does not carry.
 
     The duration is Google's own total: leg datetimes are local to each leg's
     airport, so the last arrival minus the first departure is off by the zone
-    difference. A departure time must fall inside one of `times`, bounds
-    included, to the minute: Google's own window is in whole hours."""
+    difference. The first departure must fall inside one of `times` and the
+    last arrival inside one of `arrivals`, bounds included, to the minute:
+    Google's own windows are in whole hours."""
     flight = row.flight
     legs: Sequence[Any] = flight.legs
-    if times:
-        if not legs:
-            return False
-        dep = legs[0].departure_datetime
-        clock = dep.hour * 60 + dep.minute
-        if not any(lo <= clock <= hi for lo, hi in map(time_bounds, times)):
-            return False
+    if (times or arrivals) and not (
+        legs
+        and (not times or _within(legs[0].departure_datetime, times))
+        and (not arrivals or _within(legs[-1].arrival_datetime, arrivals))
+    ):
+        return False
     for p in predicates:
         if isinstance(p, MaxDurationPred):
             if flight.duration is None or flight.duration > p.minutes:
@@ -290,8 +300,9 @@ def _row_passes(row: Any, predicates: Iterable[Predicate], times: Sequence[TimeO
 
 def routing_keep(
     per_slice_predicates: Sequence[Sequence[Predicate]],
-    per_slice_times: Sequence[Sequence[TimeOfDay]] = (),
+    per_slice_times: Sequence[Sequence[TimeWindow]] = (),
     *,
+    per_slice_arrivals: Sequence[Sequence[TimeWindow]] = (),
     max_price: int | None = None,
     currency: str = "USD",
     max_stops: int | None = None,
@@ -299,9 +310,9 @@ def routing_keep(
     """The per-leg filter `_gflight_ids.search_with_ids` applies to each board
     it is served: `keep(i, row)` is whether one Google Flights row passes slice
     `i`'s predicates, makes no more stops than `max_stops` or any stop ceiling
-    among them, departs inside its time window and is priced in `currency` at
-    or under `max_price`. None when nothing is asked of a row; a negative
-    `max_stops` asks nothing.
+    among them, departs and lands inside its time windows and is priced in
+    `currency` at or under `max_price`. None when nothing is asked of a row; a
+    negative `max_stops` asks nothing.
 
     The cap and the stop ceiling are checked on every board, a round trip's
     outbound as well as each return: whether or not the page was asked for
@@ -311,6 +322,7 @@ def routing_keep(
     if (
         not any(per_slice_predicates)
         and not any(per_slice_times)
+        and not any(per_slice_arrivals)
         and max_price is None
         and max_stops is None
     ):
@@ -323,10 +335,11 @@ def routing_keep(
             return False
         preds = per_slice_predicates[leg] if leg < len(per_slice_predicates) else ()
         times = per_slice_times[leg] if leg < len(per_slice_times) else ()
+        arrivals = per_slice_arrivals[leg] if leg < len(per_slice_arrivals) else ()
         ceiling = _stop_ceiling(preds, max_stops)
         if ceiling is not None and len(row.flight.legs) - 1 > ceiling:
             return False
-        if not _row_passes(row, preds, times):
+        if not _row_passes(row, preds, times, arrivals):
             return False
         if not preds:
             return True
@@ -356,8 +369,9 @@ def _row_check_name(pred: Predicate) -> str | None:
 
 def row_check_names(
     per_slice_predicates: Sequence[Sequence[Predicate]],
-    per_slice_times: Sequence[Sequence[TimeOfDay]] = (),
+    per_slice_times: Sequence[Sequence[TimeWindow]] = (),
     *,
+    per_slice_arrivals: Sequence[Sequence[TimeWindow]] = (),
     max_price: int | None = None,
     currency: str = "USD",
     max_stops: int | None = None,
@@ -370,7 +384,10 @@ def row_check_names(
         names.append(f"a stop ceiling of {ceiling:d}")
     for label, times in zip(("departure", "return"), per_slice_times, strict=False):
         if times:
-            names.append(f"a {label}-time window ({', '.join(t.value for t in times)})")
+            names.append(f"a {label}-time window ({', '.join(map(window_label, times))})")
+    for label, times in zip(("an arrival", "a return arrival"), per_slice_arrivals, strict=False):
+        if times:
+            names.append(f"{label}-time window ({', '.join(map(window_label, times))})")
     if max_price is not None:
         names.append(f"a price cap of {currency} {max_price:d}")
     return list(dict.fromkeys(names))
