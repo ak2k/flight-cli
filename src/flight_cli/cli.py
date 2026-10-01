@@ -5359,7 +5359,11 @@ def _run_gflight_multi(
             _reraise_if_orderly(e, said="Google Flights search failed")
             err.print(f"[red]Google Flights search failed:[/] {_failure_text(e)}")
             raise typer.Exit(1) from e
-    return results
+    # In the order the cabins were asked for, not the order they finished in,
+    # which `--format json` would otherwise list them in.
+    return _CabinBoards(
+        {cab: results[cab] for cab in cabins if cab in results}, leader=results.leader
+    )
 
 
 def _gflight_to_search_result_per_cabin(
