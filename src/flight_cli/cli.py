@@ -31,7 +31,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
-from . import _config
+from . import _config, _verify
 from ._calendar_split import (
     Pair,
     calendar_pair,
@@ -109,6 +109,7 @@ if TYPE_CHECKING:
         FareRules,
         LegInfo,
         Location,
+        PricedFare,
         SearchResult,
         Slice,
     )
@@ -3514,6 +3515,30 @@ def _refuse_fare_rules_conflicts(
         raise typer.Exit(2)
 
 
+async def _rules_of(
+    c: MatrixClient,
+    fares: list[PricedFare],
+    *,
+    session: str,
+    solution_set: str,
+    solution_id: str,
+) -> list[FareRulesResult]:
+    """The rules of each fare one solution's booking details name, in order."""
+    # A fare named without a key cannot be asked for its rules. It keeps its
+    # place as an empty answer, so the block says so for that fare.
+    return [
+        await c.fare_rules(
+            session=session,
+            solution_set=solution_set,
+            solution_id=solution_id,
+            fare_key=f.key,
+        )
+        if f.key
+        else FareRulesResult(fareRules=None)
+        for f in fares
+    ]
+
+
 def _fetch_fare_rules(
     res: SearchResult, idx: int, *, rps: float, impersonate: str
 ) -> _FareRulesAnswer:
@@ -3536,19 +3561,9 @@ def _fetch_fare_rules(
                 session=session, solution_set=solution_set, solution_id=solution_id
             )
             fares = details.booking_details.fares if details.booking_details else []
-            # A fare named without a key cannot be asked for its rules. It keeps
-            # its place as an empty answer, so the block says so for that fare.
-            rules = [
-                await c.fare_rules(
-                    session=session,
-                    solution_set=solution_set,
-                    solution_id=solution_id,
-                    fare_key=f.key,
-                )
-                if f.key
-                else FareRulesResult(fareRules=None)
-                for f in fares
-            ]
+            rules = await _rules_of(
+                c, fares, session=session, solution_set=solution_set, solution_id=solution_id
+            )
             return _FareRulesAnswer(idx + 1, details, rules)
 
     answer = _run_matrix(go, said="Matrix fare rules failed")
@@ -3688,6 +3703,229 @@ def _render_one_fare(fr: FareRules) -> None:
                 f"    [dim]… {asides:d} lines of NOTE asides not shown; "
                 "--format json carries the full text[/]"
             )
+
+
+# ──────────────────────────────── --verify ─────────────────────────────────
+
+
+def _verify_blocker(  # noqa: PLR0911 — one return per reason the run is refused
+    *,
+    fmt: str,
+    backend: str,
+    slice_specs: list[str] | None,
+    multi_cabin: bool,
+    awards_only: bool,
+    awards_json: bool,
+    sellers: bool,
+    fare_rules: bool,
+    bags: Bags | None,
+    pick: int | None,
+    page_size: int,
+) -> str | None:
+    """Why `--verify` cannot run on this search, or None. Read off the flags
+    alone, so it is decided before the backend is announced and before any
+    request.
+
+    The flag checks one row of one Google table, so a run that prints no such
+    row has nothing to check. `fmt` is the resolved format: one this block
+    cannot write into is refused here rather than ignored."""
+    if fmt not in ("table", "json"):
+        return f"writes into a table or a JSON document, not --format {fmt}"
+    if multi_cabin:
+        return "checks one row of one table; drop the extra --cabin values"
+    if awards_only:
+        return "checks a row of the results table, and --awards-only prints none"
+    if awards_json:
+        return "cannot join the award document --format json writes; add --cash-only"
+    if sellers:
+        return "and --sellers each take the row --pick names; run one at a time"
+    if fare_rules:
+        return "shows the fare rules of the row it checks; drop --fare-rules"
+    if bags is not None:
+        return "asks Matrix, which prices no bags; drop --bags"
+    if backend == BACKEND_MATRIX or slice_specs:
+        return "needs a Google Flights row, and this search runs on Matrix"
+    n = 1 if pick is None else pick
+    if not 1 <= n <= page_size:
+        return f"--pick {n:d} names no row of the {page_size:d} that -n asks for"
+    return None
+
+
+def _pick_for_verify(pick: int | None, rows: int) -> int:
+    """The 1-based row `--verify` checks, or exit. No fallback to row one: the
+    check names row N, and a board with no rows leaves nothing to check."""
+    if rows == 0:
+        err.print("[red]Not verified on Matrix:[/] the search returned no itinerary to check.")
+        raise typer.Exit(1)
+    n = 1 if pick is None else pick
+    if not 1 <= n <= rows:
+        err.print(f"[red]--pick {n:d} is out of range (1-{rows:d}); --verify checks that row.[/]")
+        raise typer.Exit(2)
+    return n
+
+
+class _Checked(NamedTuple):
+    verdict: _verify.Verdict
+    rules: _FareRulesAnswer | None  # the matched solution's, headed by the Google row's number
+
+
+def _same_itinerary(
+    res: SearchResult,
+    idxs: list[int],
+    row: _verify.Row,
+    n: int,
+    *,
+    rps: float,
+    impersonate: str,
+) -> tuple[int, _FareRulesAnswer] | None:
+    """The first of `idxs` whose booking details are row `n` flight by flight,
+    with its fare rules, or None. One booking-details call per candidate, in
+    Matrix's order, so a cheaper candidate that is another trip is passed over."""
+    session, solution_set = res.session, res.solution_set
+    sids = [sid for sid in (res.solutions[i].id for i in idxs) if sid]
+    if not (session and solution_set and len(sids) == len(idxs)):
+        err.print(
+            "[red]Matrix answered without a session for these flights, "
+            "so they cannot be checked flight by flight.[/]"
+        )
+        raise typer.Exit(1)
+    unreadable: list[int] = []
+
+    async def go() -> tuple[int, _FareRulesAnswer] | None:
+        async with MatrixClient(rps=rps, impersonate=impersonate) as c:
+            for i, sid in zip(idxs, sids, strict=True):
+                details = await c.booking_details(
+                    session=session, solution_set=solution_set, solution_id=sid
+                )
+                bd = details.booking_details
+                if bd is None or bd.itinerary is None:
+                    unreadable.append(i)
+                    continue
+                if _verify.same_flights(row, bd.itinerary):
+                    rules = await _rules_of(
+                        c, bd.fares, session=session, solution_set=solution_set, solution_id=sid
+                    )
+                    return i, _FareRulesAnswer(n, details, rules)
+            return None
+
+    found = _run_matrix(go, said="Matrix booking details failed")
+    # A candidate whose flights cannot be read may be the row, so "another
+    # itinerary" would not be known to be true.
+    if found is None and unreadable:
+        err.print(
+            "[red]Matrix returned booking details without their flights, "
+            "so this itinerary cannot be checked flight by flight.[/]"
+        )
+        raise typer.Exit(1)
+    return found
+
+
+def _check_on_matrix(
+    row: _verify.Row, n: int, opts: SearchOptions, *, rps: float | None, impersonate: str | None
+) -> _Checked:
+    """Row `n` asked of Matrix as exactly that itinerary, or exit 1 with the
+    reason on stderr.
+
+    The chain search is uncached, because booking details are asked of its
+    session. When it finds nothing, the same legs are asked again without the
+    chain, to tell a carrier Matrix lists nowhere on the route from a fare it
+    does not have."""
+    rps_, imp = _resolve_rps(rps), _resolve_impersonate(impersonate)
+    chain = cast(
+        "SearchResult",
+        _run(
+            SpecificDateSearch(
+                legs=_verify.matrix_legs(row), options=_verify.matrix_options(row, opts)
+            ),
+            rps_,
+            imp,
+            True,
+        ),
+    )
+    if not chain.solutions:
+        probe = SpecificDateSearch(
+            legs=_verify.matrix_legs(row, routed=False),
+            options=_verify.matrix_options(row, opts, max_stops=_verify.most_stops(row)),
+        )
+        return _Checked(
+            _verify.unpriced(row, cast("SearchResult", _run(probe, rps_, imp, True))), None
+        )
+    found = _same_itinerary(
+        chain, _verify.candidates(row, chain), row, n, rps=rps_, impersonate=imp
+    )
+    if found is None:
+        return _Checked(_verify.other_itinerary(len(chain.solutions)), None)
+    idx, answer = found
+    return _Checked(
+        _verify.Verdict(
+            "match", solution=chain.solutions[idx], details=answer.details.booking_details
+        ),
+        answer,
+    )
+
+
+def _price_gap(google: str | None, matrix: str | None) -> str:
+    """How Matrix's price stands to Google's, from Google minus Matrix; empty
+    where the two cannot be compared."""
+    gap = _verify.delta(google, matrix)
+    if gap is None:
+        return ""
+    if gap == 0:
+        return " · same price"
+    ccy = _split_price(matrix)[0]
+    return f" · Matrix {ccy}{abs(gap):.2f} {'cheaper' if gap > 0 else 'dearer'}"
+
+
+def _print_verified(
+    r: Any, n: int, opts: SearchOptions, *, rps: float | None, impersonate: str | None
+) -> None:
+    """The `--verify` block under the table: Matrix's price beside Google's
+    and the fare rules, or the one line saying why Matrix does not price this
+    itinerary. An exit 1 here leaves the table above it shown."""
+    row = _verify.google_row(r)
+    checked = _check_on_matrix(row, n, opts, rps=rps, impersonate=impersonate)
+    verdict = checked.verdict
+    console.print()
+    if verdict.outcome != "match" or verdict.solution is None:
+        console.print(
+            f"[yellow]Not verified on Matrix · itinerary #{n:d}: "
+            f"{_safe_text(verdict.reason or verdict.outcome)}[/]"
+        )
+        return
+    trip = " · ".join(
+        f"{chain} {legs[0].departure[:10]}"
+        for chain, legs in zip(_verify.routings(row), row.slices, strict=True)
+    )
+    console.print(f"[bold green]Verified on Matrix[/] · itinerary #{n:d} · {_safe_text(trip)}")
+    matrix = verdict.solution.price
+    console.print(
+        f"Matrix {_safe_text(matrix or '—')} · Google {_safe_text(row.price or '—')}"
+        f"{_safe_text(_price_gap(row.price, matrix))}"
+    )
+    if checked.rules is not None:
+        _render_fare_rules(checked.rules)
+
+
+def _write_verified(
+    search_doc: list[Any],
+    r: Any,
+    n: int,
+    opts: SearchOptions,
+    *,
+    rps: float | None,
+    impersonate: str | None,
+) -> None:
+    """The `--verify --format json` document: the search's own document
+    unchanged, beside row `n`'s check. A Matrix failure still writes the
+    search, with `verify` null, and exits 1."""
+    row = _verify.google_row(r)
+    try:
+        checked = _check_on_matrix(row, n, opts, rps=rps, impersonate=impersonate)
+    except typer.Exit:
+        sys.stdout.write(json.dumps({"search": search_doc, "verify": None}, indent=2, default=str))
+        raise
+    doc = _verify.document(n, row, checked.verdict, _fare_rules_document(checked.rules))
+    sys.stdout.write(json.dumps({"search": search_doc, "verify": doc}, indent=2, default=str))
 
 
 class _GfQuery(NamedTuple):
@@ -4275,7 +4513,7 @@ def _answer_gf_empty(
         console.print("[yellow]Google Flights: no results.[/]")
 
 
-def _run_gflight_path(  # noqa: PLR0912, PLR0915 — every outcome of one Google answer, read in one place
+def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of one Google answer, read in one place
     *,
     legs: tuple[Leg, ...],
     opts: SearchOptions,
@@ -4291,6 +4529,9 @@ def _run_gflight_path(  # noqa: PLR0912, PLR0915 — every outcome of one Google
     sellers: bool = False,
     matrix_fallback: bool = False,
     hand_off_failure: bool = False,
+    verify: bool = False,
+    rps: float | None = None,
+    impersonate: str | None = None,
 ) -> int | None:
     """Google Flights path: build fli filter → query → render. Single-leg or round-trip.
 
@@ -4321,6 +4562,8 @@ def _run_gflight_path(  # noqa: PLR0912, PLR0915 — every outcome of one Google
 
     `sellers` adds row `pick`'s booking options after everything else, or
     wraps the JSON document as `{"search": …, "booking_options": …}`.
+    `verify` adds row `pick`'s check on Matrix the same way, as
+    `{"search": …, "verify": …}`; `rps` and `impersonate` are for its client.
     """
     # Deferred like the adapter below: this arm reaches rung 2 only when the
     # transport says so, and the module pulls in nothing patchright at import.
@@ -4366,6 +4609,7 @@ def _run_gflight_path(  # noqa: PLR0912, PLR0915 — every outcome of one Google
     # table is a usage error, not a pin to fall back from, and an empty board
     # leaves nothing to open.
     seller_row = _pick_for_sellers(pick, min(len(results), top_n)) if sellers else None
+    verify_row = _pick_for_verify(pick, min(len(results), top_n)) if verify else None
     awards_only = sel.awards_only if sel is not None else False
 
     def run_awards(rows: list[Any], sr: SearchResult) -> None:
@@ -4414,7 +4658,7 @@ def _run_gflight_path(  # noqa: PLR0912, PLR0915 — every outcome of one Google
     # it and row one can be pinned: `--format json` emits no link at all, and a
     # Google row carries no ids a Matrix link could pin. The range is still
     # reported; the fallback is not claimed.
-    pick = seller_row or _pick_in_range(
+    pick = (seller_row or verify_row) or _pick_in_range(
         pick,
         len(results),
         pin_follows=lambda: (
@@ -4435,6 +4679,16 @@ def _run_gflight_path(  # noqa: PLR0912, PLR0915 — every outcome of one Google
     # block keeps the boundary localized.
     if json_out and not run_pp:
         out = _gflight_json_document(results, opts.bags)
+        if verify_row is not None:
+            _write_verified(
+                out,
+                results[verify_row - 1],
+                verify_row,
+                opts,
+                rps=rps,
+                impersonate=impersonate,
+            )
+            return None
         doc = (
             out
             if seller_row is None
@@ -4504,6 +4758,8 @@ def _run_gflight_path(  # noqa: PLR0912, PLR0915 — every outcome of one Google
             gf_price=sr.solutions[seller_row - 1].price,
             headed=gf_headed,
         )
+    if verify_row is not None:
+        _print_verified(results[verify_row - 1], verify_row, opts, rps=rps, impersonate=impersonate)
     return None
 
 
@@ -6530,12 +6786,12 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         None,
         "--pick",
         help="Itinerary #N (1-based, as shown in the final table) to pin in the "
-        "--matrix-url/--google-url deep links, to describe with --fare-rules and to "
-        "open with --sellers. Default: the first row. A link that cannot pin that row "
-        "pre-fills the search instead; its label says which. A pick outside the table "
-        "falls back to row 1 for the links and --fare-rules and is refused with --sellers. "
-        "--format json emits no link lines, so there it only chooses the --fare-rules "
-        "or --sellers row.",
+        "--matrix-url/--google-url deep links, to describe with --fare-rules, to "
+        "open with --sellers and to check with --verify. Default: the first row. A link "
+        "that cannot pin that row pre-fills the search instead; its label says which. A "
+        "pick outside the table falls back to row 1 for the links and --fare-rules and is "
+        "refused with --sellers and --verify. --format json emits no link lines, so there "
+        "it only chooses the --fare-rules, --sellers or --verify row.",
         rich_help_panel=_GROUP_OUTPUT,
     ),
     sellers: bool = typer.Option(
@@ -6560,6 +6816,22 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             "(penalties, changes, refunds) of the itinerary --pick names (default 1). "
             "Matrix only: sends the search to Matrix. One --cabin; with --format json, "
             "--cash-only.",
+            rich_help_panel=_GROUP_OUTPUT,
+        ),
+    ] = False,
+    verify: Annotated[
+        bool,
+        typer.Option(
+            "--verify",
+            help="After the Google Flights table, ask Matrix for itinerary #N (--pick; "
+            "default 1) as exactly that itinerary: its flights by number, each on its own "
+            "day and minute, between its airports. Prints Matrix's price beside Google's "
+            "and the fare basis, booking code and fare rules of each fare, or why Matrix "
+            "does not price it: those flights only on another itinerary, no fare at all, "
+            "or a carrier it lists nowhere on that route and day. Google Flights only; one "
+            "--cabin, no --bags, --sellers or --fare-rules. With --format json the "
+            'document becomes {"search": …, "verify": …}, where delta is Google\'s price '
+            "minus Matrix's.",
             rich_help_panel=_GROUP_OUTPUT,
         ),
     ] = False,
@@ -6647,7 +6919,8 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
     Matrix-only flag is set (routing/extension/multi-city slice/time-of-day/
     extra pax types/PP config). Force with --backend matrix|gflight.
     """
-    json_out = _resolve_format(fmt=fmt, json_flag=json_out) == "json"
+    resolved_format = _resolve_format(fmt=fmt, json_flag=json_out)
+    json_out = resolved_format == "json"
     ccy = _resolve_currency(currency)
     bags = _parse_bags(bags_spec) if bags_spec is not None else None
     # Deprecated-flag warning surfaces at runtime since hidden=True hides the
@@ -6667,6 +6940,24 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         legacy_pp_airlines=pp_airlines,
         legacy_pp_cabin=pp_cabin,
     )
+    if verify and (
+        blocker := _verify_blocker(
+            fmt=resolved_format,
+            backend=backend,
+            slice_specs=slice_specs,
+            multi_cabin=len(_resolve_cabin_list(cabin)) > 1,
+            awards_only=sel.awards_only,
+            awards_json=json_out and _should_run_awards(sel),
+            sellers=sellers,
+            fare_rules=fare_rules,
+            bags=bags,
+            pick=pick,
+            page_size=page_size,
+        )
+    ):
+        # Before the backend is announced, like the refusals below.
+        err.print(f"[red]--verify {_safe_text(blocker)}.[/]")
+        raise typer.Exit(2)
     if fare_rules:
         # Before the backend is announced: a refusal after "Using Matrix" reads
         # as a search that started and then failed.
@@ -6719,6 +7010,9 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         bags=bags,
         return_codes=return_codes,
     )
+    if verify and resolved == BACKEND_MATRIX:
+        err.print("[red]--verify needs a Google Flights row, and this search runs on Matrix.[/]")
+        raise typer.Exit(2)
     if slice_specs:
         legs = tuple(_parse_slice_spec(s) for s in slice_specs)
     elif origin and destination and dep:
@@ -6857,6 +7151,9 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         # on: its document wraps a Google row, which Matrix cannot supply.
         if not fast and not json_out and bags is not None:
             err.print("[dim]No Matrix enrichment: Matrix prices no bags.[/]")
+        elif not fast and not json_out and verify:
+            # The numbered table has to be Google's, the rows --verify checks.
+            err.print("[dim]No Matrix enrichment: --verify asks Matrix about one row instead.[/]")
         elif not fast and not json_out:
             _run_enriched_path(
                 legs=legs,
@@ -6888,12 +7185,17 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             gf_mode=gf_mode,
             gf_headed=gf_headed,
             sellers=sellers,
-            matrix_fallback=backend == BACKEND_AUTO and bags is None,
+            # A row handed to Matrix is no Google row to check.
+            matrix_fallback=backend == BACKEND_AUTO and bags is None and not verify,
             hand_off_failure=backend == BACKEND_AUTO
             and bags is None
             and json_out
             and not fast
-            and not sellers,
+            and not sellers
+            and not verify,
+            verify=verify,
+            rps=rps,
+            impersonate=impersonate,
         )
         if unmatched is None:
             return
