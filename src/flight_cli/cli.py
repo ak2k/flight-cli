@@ -2085,9 +2085,9 @@ def _run_matrix_calendar(
         pairs = n_split - 1 if round_trip else n_split
         err.print(
             f"[dim]Queried {pairs:d} "
-            f"{'origin/destination groups' if max_per_query > 1 else 'airport pairs'} "
-            f"separately{' plus the combined query,' if round_trip else ''} and merged "
-            "— Matrix under-reports the combined multi-airport calendar grid.[/]"
+            + ("origin/destination groups" if max_per_query > 1 else "airport pairs")
+            + (" separately plus the combined query," if round_trip else " separately")
+            + " and merged — Matrix under-reports the combined multi-airport calendar grid.[/]"
         )
         if round_trip:
             err.print(
