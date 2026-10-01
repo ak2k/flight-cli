@@ -32,6 +32,7 @@ from flight_cli import _gflight_ids as gfid
 from flight_cli._gf_common import PageFetch
 from flight_cli._gf_errors import GfBrowserUnavailableError
 from flight_cli.client import MatrixClient
+from flight_cli.models import SearchResult
 from flight_cli.pp import auth as pp_auth
 from flight_cli.pp import client as pp_client
 from flight_cli.pp.client import PPApiError
@@ -594,6 +595,7 @@ def _solutions_stripped_of(field: str) -> dict[str, Any]:
     [
         ({"solutionCount": 0, "session": "s"}, "shape", "without a solutionList"),
         ({"solutionList": {"solutions": []}}, "brownout", "holds no solution"),
+        ({"solutionList": {}}, "brownout", "holds no solution"),
         (_solutions_stripped_of("price"), "shape", "has a price and a flight"),
         (_solutions_stripped_of("flights"), "shape", "has a price and a flight"),
         (
@@ -614,6 +616,30 @@ def test_matrix_answers_are_classified_by_what_they_say(
 ) -> None:
     world.matrix = lambda _r: httpx.Response(200, json=body)
     assert said in _fails_as(_run(), "matrix-search", cause).detail
+
+
+@pytest.mark.parametrize("listed", [[{"id": "x"}], [], "x", 1, 0, True, False, None])
+def test_a_solution_list_that_is_not_an_object_is_a_shape_change_and_fails_a_search(
+    world: World, monkeypatch: pytest.MonkeyPatch, listed: object
+) -> None:
+    body = {**_MATRIX_OK, "solutionList": listed}
+    world.matrix = lambda _r: httpx.Response(200, json=body)
+    assert "solutionList" in _fails_as(_run(), "matrix-search", "shape").detail
+    sent = _matrix_behind_the_real_client(
+        monkeypatch, lambda _r, _t: httpx.Response(200, json=body)
+    )
+    search = _matrix_search()
+    assert search.exit_code == 1, search.output
+    assert "Matrix search failed" in search.stderr
+    assert len(sent) == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{"solutionCount": 0}, {"solutionList": {}}, {"solutionList": {"solutions": []}}],
+)
+def test_an_absent_or_empty_solution_list_reads_as_no_solutions(body: dict[str, Any]) -> None:
+    assert SearchResult.from_api(body).solutions == []
 
 
 def test_a_matrix_answer_its_parser_rejects_is_a_shape_change_naming_the_field(
