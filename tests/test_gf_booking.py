@@ -12,6 +12,7 @@ session is replaced wherever the path would reach one.
 from __future__ import annotations
 
 import base64
+import io
 import json
 import pathlib
 import signal
@@ -686,6 +687,75 @@ def test_sellers_with_no_link_print_no_link_lines(
     assert "free" in block
     assert "link" not in block
     assert "https://" not in block
+
+
+def _bag_cell(seller: gb.Seller, bag: str, nth: int) -> str:
+    fee = {(b.bag, b.nth): b.fee for b in seller.bags}.get((bag, nth))  # pyright: ignore[reportArgumentType] — a str probes a Literal key
+    return "" if fee is None else "free" if fee == 0 else f"USD{fee:.2f}"
+
+
+@pytest.mark.parametrize("width", [80, 70])
+@pytest.mark.parametrize(
+    ("name", "flights"),
+    [
+        pytest.param("ow_jfk_lax_aa171_full.body", [("AA", "171")], id="aa171"),
+        pytest.param("ow_jfk_lhr_ba178_full.body", [("BA", "178")], id="ba178"),
+        pytest.param("ow_jfk_lax_dl1788.body", [("DL", "1788")], id="dl1788"),
+    ],
+)
+def test_a_narrow_console_folds_a_name_and_never_cuts_a_price_or_fee(
+    monkeypatch: pytest.MonkeyPatch, name: str, flights: list[tuple[str, str]], width: int
+) -> None:
+    """80 columns is what Rich assumes for piped output. A seller or fare name
+    too long for its column folds onto the next line; a number never does, and
+    nothing loses its end to an ellipsis."""
+    sellers = gb.parse_sellers(_fixture(name), flights=flights)
+    buf = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buf, width=width, no_color=True))
+    cli._render_booking_options(
+        gb.BookingOptions("USD", sellers), n=1, table_prices=[], round_trip=False
+    )
+    out = buf.getvalue()
+    assert "…" not in out
+    rows: list[list[str]] = []
+    for line in (line for line in out.splitlines() if line.startswith("│")):
+        cells = _cells(line, "│")
+        if cells[0]:
+            rows.append(cells)
+        else:
+            # A continuation line: the numbers stay on their row's first line.
+            assert [cells[i] for i in (0, 2, 4, 5, 6)] == [""] * 5
+            rows[-1] = [f"{a} {b}" for a, b in zip(rows[-1], cells, strict=True)]
+    assert [[c.replace(" ", "") for c in row] for row in rows] == [
+        [
+            f"{i:d}",
+            s.name.replace(" ", ""),
+            "—" if s.price is None else f"USD{s.price:.2f}",
+            (s.fare or "").replace(" ", ""),
+            _bag_cell(s, "carry-on", 1),
+            _bag_cell(s, "checked", 1),
+            _bag_cell(s, "checked", 2),
+        ]
+        for i, s in enumerate(sellers, 1)
+    ]
+
+
+@pytest.mark.parametrize("width", [64, 60, 50])
+def test_a_console_too_narrow_for_the_numbers_still_shows_every_name(
+    monkeypatch: pytest.MonkeyPatch, width: int
+) -> None:
+    """Once the numbers alone would fill the console, every column gives way,
+    as Rich does by default, rather than the names shrinking to nothing."""
+    sellers = gb.parse_sellers(_fixture("ow_jfk_lax_dl1788.body"), flights=[("DL", "1788")])
+    buf = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buf, width=width, no_color=True))
+    cli._render_booking_options(
+        gb.BookingOptions("USD", sellers), n=1, table_prices=[], round_trip=False
+    )
+    rows = [_cells(line, "│") for line in buf.getvalue().splitlines() if line.startswith("│")]
+    firsts = [row for row in rows if row[0]]
+    assert len(firsts) == len(sellers)
+    assert all(row[1] and row[3] for row in firsts)
 
 
 def _priced_in(monkeypatch: pytest.MonkeyPatch, rows: list[Any], currency: str) -> None:

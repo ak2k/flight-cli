@@ -29,6 +29,7 @@ import anyio.to_thread
 import typer
 from rich.console import Console
 from rich.markup import escape
+from rich.measure import Measurement
 from rich.table import Table
 
 from . import _config
@@ -2556,13 +2557,15 @@ def _render_booking_options(
     """The "Booking options for #N" block: every seller, cheapest first, then
     each seller's booking link on a line of its own beside its number."""
     t = Table(title=f"Booking options for #{n:d}", show_header=True, header_style="bold green")
-    t.add_column("#", justify="right")
-    t.add_column("seller")
-    t.add_column("price", justify="right")
-    t.add_column("fare")
-    t.add_column("carry-on", justify="right")
-    t.add_column("1st checked", justify="right")
-    t.add_column("2nd checked", justify="right")
+    # On a narrow console Rich shrinks only the columns that may wrap, so the
+    # numbers keep their width and the names fold rather than end in "…".
+    t.add_column("#", justify="right", no_wrap=True)
+    t.add_column("seller", overflow="fold")
+    t.add_column("price", justify="right", no_wrap=True)
+    t.add_column("fare", overflow="fold")
+    t.add_column("carry-on", justify="right", no_wrap=True)
+    t.add_column("1st checked", justify="right", no_wrap=True)
+    t.add_column("2nd checked", justify="right", no_wrap=True)
     for i, s in enumerate(options.sellers, 1):
         fees = {(b.bag, b.nth): b.fee for b in s.bags}
         carry_on = fees.get(("carry-on", 1))
@@ -2589,6 +2592,17 @@ def _render_booking_options(
             if second == 0
             else f"{_safe_text(options.currency)}{second:.2f}",
         )
+    # Once the numbers fill the console Rich would shrink the names to nothing;
+    # short of three characters a name, every column shrinks instead. A column
+    # takes its text, two spaces of padding and a rule; the table one more rule.
+    numbers = [c for c in t.columns if c.no_wrap]
+    taken = sum(
+        max(Measurement.get(console, console.options, x).maximum for x in (c.header, *c.cells)) + 3
+        for c in numbers
+    )
+    if taken + 2 * (3 + 3) + 1 > console.width:
+        for c in numbers:
+            c.no_wrap = False
     console.print(t)
     if any(s.link for s in options.sellers):
         console.print(
