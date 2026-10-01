@@ -4508,22 +4508,18 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     # it and row one can be pinned: `--format json` emits no link at all, and a
     # Google row carries no ids a Matrix link could pin. The range is still
     # reported; the fallback is not claimed.
-    pick = (
-        seller_row
-        or verify_row
-        or _pick_in_range(
-            pick,
-            len(results),
-            pin_follows=lambda: (
-                not json_out
-                and _pins_row_one(
-                    SpecificDateSearch(legs=legs, options=opts),
-                    fli_results_to_search_result(results),
-                    matrix_url=matrix_url,
-                    google_url=google_url,
-                )
-            ),
-        )
+    pick = (seller_row or verify_row) or _pick_in_range(
+        pick,
+        len(results),
+        pin_follows=lambda: (
+            not json_out
+            and _pins_row_one(
+                SpecificDateSearch(legs=legs, options=opts),
+                fli_results_to_search_result(results),
+                matrix_url=matrix_url,
+                google_url=google_url,
+            )
+        ),
     )
 
     # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType,
