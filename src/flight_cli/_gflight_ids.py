@@ -59,12 +59,11 @@ from fli.models import (  # pyright: ignore[reportMissingTypeStubs]
 from fli.models.google_flights.base import TripType  # pyright: ignore[reportMissingTypeStubs]
 
 # DIVERGE: fli's API-row decoders live in a private module, with no public
-# equivalent (core.parsers has no datetime parser). Airline and datetime decode
-# through them; an airport decodes through `fli_bridge.fli_airports`, which
-# keeps a code fli aliases, and reaches `_parse_airport` only for a code fli has
-# no entry for, so the row fails with fli's warning and AttributeError.
+# equivalent (core.parsers has no datetime parser). Datetimes decode through
+# them. Airlines and airports decode through `fli_bridge`'s tables, which keep
+# a code fli aliases; an airport reaches `_parse_airport` only for a code fli
+# has no entry for, so the row fails with fli's warning and AttributeError.
 from fli.search._decoders import (  # pyright: ignore[reportMissingTypeStubs]
-    _parse_airline,  # pyright: ignore[reportPrivateUsage]
     _parse_airport,  # pyright: ignore[reportPrivateUsage]
     _parse_datetime,  # pyright: ignore[reportPrivateUsage]
 )
@@ -97,7 +96,7 @@ from ._gf_errors import (
     GfTransportError,
     GfUpstreamStatusError,
 )
-from .fli_bridge import fli_airports
+from .fli_bridge import fli_airline, fli_airports
 from .links import build_search_tfs, google_flights_search_page_url
 
 if TYPE_CHECKING:
@@ -1061,7 +1060,7 @@ def _operating_identity(fl: list[Any]) -> tuple[Airline, str] | None:
     if not code or not number:
         return None
     try:
-        return _parse_airline(code), number
+        return fli_airline(code), number
     except AttributeError:  # a code fli has no member for
         return None
 
@@ -1138,7 +1137,7 @@ def _flight_leg(fl: list[Any]) -> FlightLeg:
         # the prior behaviour of indexing a missing fl[22][0].
         raise ValueError("leg tuple missing carrier identity")
     return FlightLeg(
-        airline=_parse_airline(book_code),
+        airline=fli_airline(book_code),
         flight_number=book_number or "",
         departure_airport=_leg_airport(fl[3]),
         arrival_airport=_leg_airport(fl[6]),

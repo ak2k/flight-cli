@@ -44,32 +44,40 @@ _ROUND_TRIP_LEGS = 2  # 2 legs = round-trip; 1 = one-way
 _SERVED_AS_CANONICAL = frozenset({"MLH"})
 
 
+def _own_member(code: str, canonical: Enum) -> Any:
+    """A member of `canonical`'s enum named `code`, carrying its value.
+
+    fli builds `Airport` and `Airline` as enums over a code -> display-name
+    table, and an enum makes each code whose display name repeats an earlier
+    one an alias of the earlier member. Every request and every decoded row
+    reads a member's name, so an aliased code needs a member of its own.
+
+    Such a member is outside the enum's own tables: it survives `deepcopy`,
+    which returns an enum member itself, but would unpickle as the member it
+    aliases."""
+    member = object.__new__(type(canonical))
+    vars(member).update(vars(canonical))
+    member._name_ = code
+    return member
+
+
 @functools.cache
 def fli_airports() -> dict[str, Any]:
     """Every code in fli's airport table, to the member a request for it carries.
 
-    fli builds `Airport` as an enum over a code -> display-name table, and an
-    enum makes each code whose display name repeats an earlier one an alias of
-    the earlier member: `Airport.OKA` is `Airport.NAH`, Naha in Indonesia
-    rather than Okinawa. Every request and every decoded row reads a member's
-    name, so each aliased code gets a member of its own, named that code and
-    carrying the same display name, except MLH (`_SERVED_AS_CANONICAL`).
-
-    Those members are outside the enum's own tables: one survives `deepcopy`,
-    which returns an enum member itself, but would unpickle as the member it
-    aliases."""
+    `Airport.OKA` is `Airport.NAH`, Naha in Indonesia rather than Okinawa, so
+    each aliased code gets a member of its own (`_own_member`), except MLH
+    (`_SERVED_AS_CANONICAL`)."""
     from fli.models.airport import (  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
         Airport,
     )
 
-    def own(code: str, canonical: Enum) -> Any:
-        member = object.__new__(Airport)
-        vars(member).update(vars(canonical))
-        member._name_ = code
-        return member
-
     return {
-        code: (member if member.name == code or code in _SERVED_AS_CANONICAL else own(code, member))
+        code: (
+            member
+            if member.name == code or code in _SERVED_AS_CANONICAL
+            else _own_member(code, member)
+        )
         for code, member in Airport.__members__.items()
     }
 
@@ -79,6 +87,36 @@ def fli_airport(code: str) -> Any:
     entry for, as `getattr(Airport, code)` raises."""
     try:
         return fli_airports()[code]
+    except KeyError:
+        raise AttributeError(code) from None
+
+
+@functools.cache
+def fli_airlines() -> dict[str, Any]:
+    """Every key in fli's airline table, alliances included, to the member a
+    request or a row for it carries.
+
+    `Airline.W9` is `Airline.W6`: Wizz Air UK and Wizz Air Hungary share a
+    display name, as do Z0 and N0, MT and DK, S0 and P4, 1W and 1S, 5C and X7.
+    Each pair is two carriers, so every aliased code gets a member of its own
+    (`_own_member`)."""
+    from fli.models.airline import (  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
+        Airline,
+    )
+
+    return {
+        code: member if member.name == code else _own_member(code, member)
+        for code, member in Airline.__members__.items()
+    }
+
+
+def fli_airline(code: str) -> Any:
+    """The fli airline member for an IATA code or alliance key, a digit-leading
+    code keyed as fli keys it (`5C` is `_5C`). AttributeError for a code fli
+    has no entry for, as fli's own row decoder raises."""
+    key = f"_{code}" if code[:1].isdigit() else code
+    try:
+        return fli_airlines()[key]
     except KeyError:
         raise AttributeError(code) from None
 
@@ -221,30 +259,20 @@ def _fli_max_stops(max_stops: int) -> Any:
 def _include_list(predicates: Iterable[Predicate]) -> tuple[list[Any], list[str]]:
     """fli's airline include list for the marketing-carrier and alliance
     includes among `predicates`, and the codes it has no member for."""
-    from fli.models.airline import (  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
-        Airline,
-    )
-
-    # DIVERGE: fli's airline row-decoder moved to a private module in 0.9.0;
-    # same AttributeError-on-unknown contract the except below relies on.
-    from fli.search._decoders import (  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
-        _parse_airline,  # pyright: ignore[reportPrivateUsage]
-    )
-
     airlines: list[Any] = []
     unmapped: list[str] = []
     for p in predicates:
         if isinstance(p, CarrierPred) and not (p.operating or p.exclude):
             for code in sorted(p.codes):
                 try:
-                    airlines.append(_parse_airline(code))
+                    airlines.append(fli_airline(code))
                 except AttributeError:
                     unmapped.append(code)
         elif isinstance(p, AlliancePred):
             for token in sorted(p.codes):
                 try:
-                    airlines.append(Airline[token.upper().replace("-", "_")])
-                except KeyError:
+                    airlines.append(fli_airline(token.upper().replace("-", "_")))
+                except AttributeError:
                     unmapped.append(token)
     return airlines, unmapped
 
