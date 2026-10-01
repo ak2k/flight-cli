@@ -47,6 +47,13 @@ from flight_cli import _gf_browser
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+# Today, for the modules whose searches carry literal travel dates. fli refuses a
+# travel date before today, so those modules pin the clock before every date they
+# search on, the earliest being 2026-10-14. time-machine reads a naive datetime as
+# UTC, and noon UTC keeps the local date before that in any timezone. Naive,
+# because an aware one makes time-machine set TZ=UTC for the test.
+LITERAL_DATES_NOW = datetime.datetime(2026, 9, 30, 12)
+
 
 @pytest.fixture(autouse=True)
 def _no_forced_terminal(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[reportUnusedFunction] - autouse pytest fixture
@@ -248,18 +255,25 @@ def distinct_clones(row: list[Any], n: int) -> list[Any]:
     return clones
 
 
-def _board(rows: int, *, distinct_at: int | None = None) -> str:
+def _board(rows: int, *, distinct_at: int | None = None, one_flight: bool = False) -> str:
     """A page carrying `rows` parseable rows, cloned from a live capture.
 
     `distinct_at` swaps in a row carrying different flight numbers at that
     index, which is how a test says "the row this routing constraint keeps is
-    one the table never showed"."""
+    one the table never showed". `one_flight` flies every leg of that row under
+    its first flight number (AS627+AS305 becomes AS627 twice), the one flight a
+    bare flight-number routing keeps."""
     payload: list[Any] = json.loads(_ds1("ds1_metadata_blocks_kept.json"))
     board: list[Any] = cast("list[Any]", payload[2][0]) + cast("list[Any]", payload[3][0])
     filler, odd_one = board[0], board[-1]
     cloned = distinct_clones(filler, rows)
     if distinct_at is not None:
-        cloned[distinct_at] = json.loads(json.dumps(odd_one))
+        odd: Any = json.loads(json.dumps(odd_one))
+        if one_flight:
+            legs = cast("list[Any]", odd[0][2])
+            for leg in legs:
+                leg[22][1] = legs[0][22][1]
+        cloned[distinct_at] = odd
     payload[2] = [cloned]
     payload[3] = None
     return _page(json.dumps(payload))

@@ -17,6 +17,7 @@ from typing import Any, cast
 import pytest
 import typer
 
+from conftest import LITERAL_DATES_NOW
 from flight_cli._multi_cabin import (
     MultiCabinRow,
     itinerary_key,
@@ -41,6 +42,9 @@ from flight_cli.models import (
     Slice,
     SliceEndpoint,
 )
+
+# The searches built here carry literal travel dates; see `LITERAL_DATES_NOW`.
+pytestmark = pytest.mark.time_machine(LITERAL_DATES_NOW)
 
 # ─────────────────────────── itinerary builders ────────────────────────────
 

@@ -16,6 +16,7 @@ WITH ITS REASON."""
 
 from __future__ import annotations
 
+import re
 from datetime import date, timedelta
 
 import pytest
@@ -247,10 +248,10 @@ def test_stop_ceiling_above_two_goes_to_matrix() -> None:
         # 3.6 is one include list: Google would answer either.
         ("extension", "ALLIANCE oneworld; ALLIANCE skyteam"),
         ("extension", "AIRLINES AA; ALLIANCE star-alliance"),
-        # Post-filterable, but Matrix reads both positionally and the filter
-        # does not: bare AS21 is one flight, `F* ~DUB F*` one connection.
-        ("routing", "AS21"),
-        ("routing", "AS21+"),
+        # Post-filterable, but not with Matrix's meaning: `F* ~DUB F*` is one
+        # connection, and `AA1-3000+` may be several flights in the range.
+        ("routing", "AA1-3000+"),
+        ("routing", "AA1-3000*"),
         ("routing", "F* ~DUB F*"),
         ("extension", "-CITIES DUB"),
     ],
@@ -268,8 +269,16 @@ def test_auto_unencodable_constraint_picks_matrix(flag: str, value: object) -> N
         ("extension", "-CODESHARE"),
         ("routing", "~LH+"),  # no LH-booked leg
         ("extension", "-AIRLINES LH"),
+        ("extension", "-AIRLINES UA DL"),
+        ("extension", "-AIRLINES B6 9K"),
         ("extension", "OPAIRLINES LH"),
         ("routing", "~BA+"),
+        # One flight, every leg of the slice: the filter reads it as Matrix does.
+        ("routing", "AS21"),
+        ("routing", "AS21+"),
+        ("routing", "DL747?"),
+        ("routing", "AA1-3000"),
+        ("routing", "AA00001"),  # Matrix's AA1: the bound is the number, not its digits
     ],
 )
 def test_auto_serves_post_filterable_tier2_on_google(flag: str, value: object) -> None:
@@ -277,6 +286,50 @@ def test_auto_serves_post_filterable_tier2_on_google(flag: str, value: object) -
     filter evaluates is served by Google, on either backend spelling."""
     assert _call(**{flag: value}) == BACKEND_GFLIGHT  # pyright: ignore[reportArgumentType]
     assert _call(BACKEND_GFLIGHT, **{flag: value}) == BACKEND_GFLIGHT  # pyright: ignore[reportArgumentType]
+
+
+@pytest.mark.parametrize(
+    ("directive", "token"),
+    [
+        ("-AIRLINES UA,DL", "'UA,DL'"),
+        ("-AIRLINES UA, DL", "'UA,'"),
+        ("-AIRLINES |", "'|'"),
+        ("-OPAIRLINES UA,DL", "'UA,DL'"),
+        ("OPAIRLINES |", "'|'"),
+    ],
+)
+def test_a_carrier_list_naming_no_airline_code_goes_to_matrix_quoting_the_token(
+    directive: str, token: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Google read `-AIRLINES UA,DL` as a code no row carries and answered
+    JFK-LAX with DL742, DL747 and DL771 on the table."""
+    reason = f"a carrier list naming {token}, which is not an airline code ({directive!r})"
+    assert _call(extension=directive) == BACKEND_MATRIX
+    printed = " ".join(capsys.readouterr().err.split())
+    assert f"Using Matrix: Google Flights can't serve {reason}." in printed, printed
+    with pytest.raises(typer.BadParameter, match=re.escape(reason)):
+        _call(BACKEND_GFLIGHT, extension=directive)
+
+
+@pytest.mark.parametrize(
+    ("routing", "reason"),
+    [
+        ("AA3000-1", "a flight-number range (AA3000-1)"),
+        ("AA0", "a specific flight number (AA0)"),
+        ("AA10000", "a specific flight number (AA10000)"),
+    ],
+)
+def test_a_flight_number_matrix_rejects_goes_to_matrix_with_its_reason(
+    routing: str, reason: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Matrix answers `AA3000-1`, `AA0` and `AA10000` with "Bad route
+    specification", where the post-filter keeps no row: Google's empty board
+    would stand in for the error."""
+    assert _call(routing=routing) == BACKEND_MATRIX
+    printed = " ".join(capsys.readouterr().err.split())
+    assert f"Using Matrix: Google Flights can't serve {reason}." in printed, printed
+    with pytest.raises(typer.BadParameter, match=re.escape(reason)):
+        _call(BACKEND_GFLIGHT, routing=routing)
 
 
 def test_a_post_filterable_predicate_beside_one_that_is_not_still_picks_matrix() -> None:
@@ -358,6 +411,7 @@ def test_page_can_encode_names_every_constraint_it_refuses() -> None:
         ({"extension": "MAXCONNECT 0:00"}, "a maximum layover of 0 min"),
         ({"extension": "MAXDUR 0:00"}, "a maximum trip duration (0 min)"),
         ({"routing": "XX+"}, "a carrier Google Flights has no code for (XX)"),
+        ({"routing": "aa1-3000+"}, "a flight-number range (AA1-3000+)"),
         (
             {"routing": "AA+", "extension": "ALLIANCE oneworld"},
             "an alliance filter combined with another carrier or alliance filter",
@@ -466,6 +520,30 @@ def test_explicit_matrix_does_not_look_carriers_up_in_fli() -> None:
     assert _gf_unmappable_reasons(BACKEND_AUTO, preds) == [
         "a carrier Google Flights has no code for (XX)"
     ]
+
+
+@pytest.mark.parametrize("routing", ["JP627", "JP627?", "JP1-100", "XX1", "XX1-100"])
+def test_auto_sends_a_flight_number_fli_cannot_name_to_matrix(
+    routing: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The post-filter keeps rows booked under the flight's carrier, and a row
+    whose carrier fli has no code for never decodes: Google would answer an
+    empty board for flights Matrix can find."""
+    assert _call(routing=routing) == BACKEND_MATRIX
+    printed = " ".join(capsys.readouterr().err.split())
+    assert f"a carrier Google Flights has no code for ({routing[:2]})" in printed, printed
+
+
+@pytest.mark.parametrize(("routing", "code"), [("JP627", "JP"), ("XX1", "XX"), ("JP+", "JP")])
+def test_explicit_gflight_refuses_a_carrier_fli_cannot_name(routing: str, code: str) -> None:
+    with pytest.raises(
+        typer.BadParameter, match=re.escape(f"a carrier Google Flights has no code for ({code})")
+    ):
+        _call(BACKEND_GFLIGHT, routing=routing)
+
+
+def test_a_flight_number_fli_can_name_stays_on_google() -> None:
+    assert _call(routing="AS627") == BACKEND_GFLIGHT
 
 
 @pytest.mark.parametrize("overrides", [{"origin": "JFK,EWR"}, {"origin": "NYC"}])

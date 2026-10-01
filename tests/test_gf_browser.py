@@ -33,7 +33,7 @@ import pytest
 
 # One home for the callback envelope, the re-pointing rule and the stderr
 # capture; each helper's own docstring says why it is shaped as it is.
-from conftest import _answering, _ds1, capture_err
+from conftest import LITERAL_DATES_NOW, _answering, _ds1, capture_err
 from conftest import _page as _page_carrying
 from flight_cli import _gf_booking, _gf_calgraph, _gf_explore, _gf_rpc_shared
 from flight_cli import _gf_browser as gfb
@@ -55,6 +55,9 @@ if TYPE_CHECKING:
 
     from flight_cli._gf_common import GfTransportMode
     from flight_cli._gflight_ids import GFlightWithId
+
+# The searches built here carry literal travel dates; see `LITERAL_DATES_NOW`.
+pytestmark = pytest.mark.time_machine(LITERAL_DATES_NOW)
 
 _PAGE_URL = "https://www.google.com/travel/flights?tfs=abc"
 _SORRY_URL = "https://www.google.com/sorry/index?continue=x"

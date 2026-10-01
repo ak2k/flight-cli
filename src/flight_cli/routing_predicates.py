@@ -17,9 +17,11 @@ We never honor part of a constraint on GF and silently drop the rest — an
 unrecognized token escalates the whole query to Matrix.
 
 `Tier` is the date grid's question ("could GF honor this at all"), and
-`page_can_encode` the Chrome price graph's ("can the page's tfs= carry this
-with no rows to check it on"). The search path asks its own,
-`_gf_postfilter.search_page_reasons`, because it has rows to check.
+`page_can_encode` the `--fast --gf-transport http` gate's ("can the page's tfs=
+carry this with no rows to check it on"). The search path asks its own,
+`_gf_postfilter.search_page_reasons`, because it has rows to check, and the
+Chrome price graph asks `_gf_calgraph.graph_blocker`, which admits what Google
+was measured applying from the page URL.
 
 Routing language is *positional* (`BA AA` = BA then AA), so it's parsed
 all-or-nothing per string: only single order-independent intents (one carrier
@@ -153,13 +155,26 @@ class ExcludeCodesharePred:
 
 @dataclass(frozen=True, slots=True)
 class SpecificFlightPred:
-    """A specific flight number or range must appear — post-filter on flight #.
-    A single number has low == high."""
+    """A lone flight-number token, the whole slice to Matrix — post-filter on
+    flight #. A single number has low == high. `quantifier` is the token's own:
+    bare or `?` is one flight, every leg under one number; `+` or `*` is one or
+    more flights, each numbered in the range."""
 
     carrier: str
     low: int
     high: int
+    quantifier: str = ""
     tier: Tier = field(default=Tier.GF_POSTFILTER, init=False)
+
+    @property
+    def several(self) -> bool:
+        return self.quantifier in {"+", "*"}
+
+    @property
+    def text(self) -> str:
+        """The token, spelled canonically (`aa01+` reads `AA1+`)."""
+        numbers = f"{self.low}" if self.low == self.high else f"{self.low}-{self.high}"
+        return f"{self.carrier}{numbers}{self.quantifier}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,7 +242,7 @@ _ALLIANCES = frozenset({"oneworld", "skyteam", "star-alliance"})
 _RE_PLACEHOLDER = re.compile(r"^F[+*]$", re.IGNORECASE)
 _RE_NONSTOP = re.compile(r"^N(?::([A-Za-z]{2}))?$", re.IGNORECASE)
 _RE_CARRIER = re.compile(r"^(~?)(O:|C:)?([A-Za-z]{2})([+*])$", re.IGNORECASE)
-_RE_FLIGHTNUM = re.compile(r"^(~?)([A-Za-z]{2})(\d+)(?:-(\d+))?[+*?]?$", re.IGNORECASE)
+_RE_FLIGHTNUM = re.compile(r"^(~?)([A-Za-z]{2})(\d+)(?:-(\d+))?([+*?]?)$", re.IGNORECASE)
 _RE_AIRPORT = re.compile(r"^(~?)(?:X:)?([A-Za-z]{3}(?:,[A-Za-z]{3})*)$", re.IGNORECASE)
 
 
@@ -266,7 +281,7 @@ def _parse_single_routing_token(tok: str) -> list[Predicate] | None:
     if (m := _RE_FLIGHTNUM.match(tok)) and m.group(1) != "~":
         low = int(m.group(3))
         high = int(m.group(4)) if m.group(4) else low
-        return [SpecificFlightPred(carrier=m.group(2).upper(), low=low, high=high)]
+        return [SpecificFlightPred(m.group(2).upper(), low, high, quantifier=m.group(5))]
     return None
 
 
@@ -315,6 +330,22 @@ def _carrier_codes(args: list[str]) -> frozenset[str]:
     return frozenset(a.upper() for a in args)
 
 
+_RE_AIRLINE = re.compile(r"^(?!\d\d$)[A-Z0-9]{2}$")
+
+
+def _carrier_list(raw: str, args: list[str], *, exclude: bool, operating: bool) -> Predicate:
+    """A carrier directive's predicate. Matrix takes space-separated airline
+    codes and refuses any other token ("UA,DL" is not a carrier). Google
+    matches no row to such a token, so an exclude naming it drops nothing and
+    an include keeps nothing: a list naming one is Matrix's to answer."""
+    bad = [a for a in args if not _RE_AIRLINE.match(a.upper())]
+    if not bad:
+        return CarrierPred(_carrier_codes(args), exclude=exclude, operating=operating)
+    named = " and ".join(repr(a) for a in bad)
+    what = "which is not an airline code" if len(bad) == 1 else "which are not airline codes"
+    return UnsupportedPred(token=raw, reason=f"a carrier list naming {named}, {what} ({raw!r})")
+
+
 def _parse_extension_code(directive: str) -> Predicate | None:  # noqa: PLR0911, PLR0912 - flat keyword dispatch over the extension grammar
     """Parse one extension directive (already split on ';'). None for an empty
     directive."""
@@ -349,13 +380,13 @@ def _parse_extension_code(directive: str) -> Predicate | None:  # noqa: PLR0911,
                 return AlliancePred(codes=codes)
             return UnsupportedPred(token=raw, reason=f"unknown alliance in {raw!r}")
         case "AIRLINES" if args:
-            return CarrierPred(_carrier_codes(args), exclude=False, operating=False)
+            return _carrier_list(raw, args, exclude=False, operating=False)
         case "-AIRLINES" if args:
-            return CarrierPred(_carrier_codes(args), exclude=True, operating=False)
+            return _carrier_list(raw, args, exclude=True, operating=False)
         case "OPAIRLINES" if args:
-            return CarrierPred(_carrier_codes(args), exclude=False, operating=True)
+            return _carrier_list(raw, args, exclude=False, operating=True)
         case "-OPAIRLINES" if args:
-            return CarrierPred(_carrier_codes(args), exclude=True, operating=True)
+            return _carrier_list(raw, args, exclude=True, operating=True)
         case "-CITIES" if args:
             return ConnectionAirportPred(_carrier_codes(args), exclude=True)
         case _:
@@ -374,16 +405,19 @@ def parse_extension(extension: str) -> list[Predicate]:
 # ───────────────── search-page transport encodability ──────────────────
 #
 # `Tier` above answers "could Google Flights honor this at all" — the date
-# grid's question of its RPC. `page_can_encode` below answers for the Chrome
-# price graph, which reads the public page's tfs= and has no rows to check: yes
-# only for a stop ceiling.
+# grid's question of its RPC. `page_can_encode` below answers what the public
+# page's tfs= carries with no rows to check: yes only for a stop ceiling. The
+# `--fast --gf-transport http` gate asks it as it is.
 #
-# The search gate (`_gf_postfilter.search_page_reasons`) starts from this and
-# admits more, because a search has rows: the carrier and alliance includes,
-# the duration and the layover bounds the page also encodes (3.6 / 3.12 /
-# 3.17 / 3.18), all but the alliance checked on the rows too, and the Tier-2
-# predicates the post-filter evaluates the way Matrix does. Anything else goes
-# to Matrix with the reason printed.
+# Two gates start from this and admit more. The search gate
+# (`_gf_postfilter.search_page_reasons`) has rows: the carrier and alliance
+# includes, the duration and the layover bounds the page also encodes (3.6 /
+# 3.12 / 3.17 / 3.18), all but the alliance checked on the rows too, and the
+# Tier-2 predicates the post-filter evaluates the way Matrix does. The Chrome
+# price graph's gate (`_gf_calgraph.graph_blocker`) has no rows and admits the
+# same includes and bounds, one of each a leg, because Google was measured
+# applying them from the URL. Anything else goes to Matrix with the reason
+# printed.
 
 
 # fli's MaxStops enum stops at TWO_OR_FEWER_STOPS; anything above is ANY, which
@@ -423,8 +457,10 @@ def _page_reason(pred: Predicate) -> str | None:  # noqa: PLR0911, PLR0912 — o
             return "an overnight-stop exclusion"
         case ExcludeCodesharePred():
             return "a codeshare exclusion"
+        case SpecificFlightPred() if pred.low == pred.high:
+            return f"a specific flight number ({pred.text})"
         case SpecificFlightPred():
-            return f"a specific flight number ({pred.carrier}{pred.low})"
+            return f"a flight-number range ({pred.text})"
         case _:
             assert_never(pred)
 

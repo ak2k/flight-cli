@@ -152,48 +152,68 @@ def _with_google_dates(m: Itinerary, g: Itinerary) -> Itinerary:
 def merge_results(gf: SearchResult, matrix: SearchResult, *, currency: str) -> list[MergedRow]:
     """Reconcile GF + Matrix cash results into price-sorted merged rows.
 
+    Every row of either side is in exactly one merged row. The match key fixes
+    only the flights and the first day, so one key can name several trips on
+    either side. Each Matrix row of a key first takes the Google row that is
+    its own trip (`_date_lender`); only then does the key's first Matrix row,
+    if it found none, take the first Google row left, undated. Handing that
+    one out first would price a Matrix trip with another trip's Google fare.
+    Every Google row left over is a row of its own.
+
     Sorted under `price_rank` on each row's `_rank_price`: rows priced in
     `currency` first by amount, any other currency after them, so a caller
     trimming the list never drops a fare for a smaller number in another
     currency."""
-    gf_keyed: dict[object, list[Itinerary]] = {}
+    gf_keyed: dict[object, list[int]] = {}
     gf_unkeyed: list[Itinerary] = []
-    for it in gf.solutions:
+    for i, it in enumerate(gf.solutions):
         k = _itin_key(it)
         if k is None:
             gf_unkeyed.append(it)
         else:
-            gf_keyed.setdefault(k, []).append(it)
+            gf_keyed.setdefault(k, []).append(i)
 
-    matrix_keyed: dict[object, Itinerary] = {}
+    matrix_keyed: dict[object, list[Itinerary]] = {}
     matrix_unkeyed: list[Itinerary] = []
     for it in matrix.solutions:
         k = _itin_key(it)
         if k is None:
             matrix_unkeyed.append(it)
         else:
-            matrix_keyed.setdefault(k, it)
+            matrix_keyed.setdefault(k, []).append(it)
 
+    taken: set[int] = set()
     rows: list[MergedRow] = []
-    # Matrix keys first (authoritative), then GF-only keys.
-    for k, m in matrix_keyed.items():
+    # Matrix keys first (authoritative), then the Google rows none of them took.
+    for k, ms in matrix_keyed.items():
         candidates = gf_keyed.get(k, [])
-        lender = _date_lender(m, candidates)
-        # Only a lender dates the row; without one, Google's first row for the
-        # key still prices it.
-        g = lender or (candidates[0] if candidates else None)
-        rows.append(
-            MergedRow(
-                itinerary=_with_google_dates(m, lender) if lender else m,
-                gf_price=g.price if g else None,
-                matrix_price=m.price,
-                source="both" if g else "matrix",
+        lenders: list[int | None] = []
+        for m in ms:
+            free = [i for i in candidates if i not in taken]
+            lender = _date_lender(m, [gf.solutions[i] for i in free])
+            at = next((i for i in free if gf.solutions[i] is lender), None)
+            if at is not None:
+                taken.add(at)
+            lenders.append(at)
+        priced = list(lenders)
+        if priced[0] is None and (left := [i for i in candidates if i not in taken]):
+            priced[0] = left[0]
+            taken.add(left[0])
+        for m, lender, at in zip(ms, lenders, priced, strict=True):
+            g = gf.solutions[at] if at is not None else None
+            rows.append(
+                MergedRow(
+                    itinerary=m if lender is None else _with_google_dates(m, gf.solutions[lender]),
+                    gf_price=g.price if g else None,
+                    matrix_price=m.price,
+                    source="both" if g else "matrix",
+                )
             )
-        )
-    for k, listed in gf_keyed.items():
-        if k not in matrix_keyed:
-            g = listed[0]
-            rows.append(MergedRow(itinerary=g, gf_price=g.price, matrix_price=None, source="gf"))
+    left = sorted(i for listed in gf_keyed.values() for i in listed if i not in taken)
+    rows.extend(
+        MergedRow(itinerary=g, gf_price=g.price, matrix_price=None, source="gf")
+        for g in (gf.solutions[i] for i in left)
+    )
     rows.extend(
         MergedRow(itinerary=it, gf_price=None, matrix_price=it.price, source="matrix")
         for it in matrix_unkeyed
