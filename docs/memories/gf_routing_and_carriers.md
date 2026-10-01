@@ -1037,8 +1037,9 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
   fan-out splits a metro code into its member airports, asks one query per
   airport pair, and merges the grids in one currency (USD with more than one
   origin, unless `--currency`); each merged day and trip length names the pair
-  that priced it (`origin`, `destination` in the JSON, a `route` column in the
-  table), the two arguments `flight detail` takes. A round trip also runs the
+  that priced it (`origin`, `destination` in the JSON; in the table a `route`
+  column for the day's minimum, and the pair beside any trip length another
+  pair priced), the two arguments `flight detail` takes. A round trip also runs the
   user's own combined query beside the pairs, the only source of a return into
   another airport of the set: it takes a day only when strictly cheaper than
   every pair, its cells name the user's tokens, and a stderr note says so.

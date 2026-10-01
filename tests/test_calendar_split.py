@@ -672,6 +672,33 @@ def test_a_fanout_table_names_the_route_behind_each_min(monkeypatch: Any) -> Non
     assert {(r[1].strip(), r[3].strip()) for r in rows} == {("7", "JFK→LHR"), ("8", "EWR→LHR")}
 
 
+def test_a_trip_length_another_pair_priced_names_that_pair_in_the_table(monkeypatch: Any) -> None:
+    """The route column names the pair behind the day's min; a length a
+    different pair priced names its own, or the row reads as the route's."""
+    a = _result({9: {7: ("USD600.00", 3, {5: "USD650.00", 7: "USD600.00"})}}, "USD600.00")
+    b = _result({9: {7: ("USD800.00", 5, {5: "USD500.00", 7: "USD850.00"})}}, "USD500.00")
+    merged = merge_calendar_results([(("JFK", "LHR"), a), (("EWR", "LGW"), b)])
+    buffer = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, width=300))
+    cli._render_calendar(  # pyright: ignore[reportPrivateUsage] — the renderer IS the unit
+        merged,
+        dmin=5,
+        dmax=7,
+        origin=("NYC",),
+        destination=("LON",),
+        sd=date(2026, 9, 7),
+        ed=date(2026, 10, 7),
+        round_trip=True,
+    )
+    lines = buffer.getvalue().splitlines()
+    header = [c.strip() for c in next(x for x in lines if x.startswith("┃")).split("┃")[1:-1]]
+    (row,) = [[c.strip() for c in x.split("│")[1:-1]] for x in lines if "│" in x]
+    cell = dict(zip(header, row, strict=True))
+    assert (cell["min"], cell["route"]) == ("600.00", "JFK→LHR")
+    assert cell["5n"] == "500.00 EWR→LGW"
+    assert (cell["6n"], cell["7n"]) == ("—", "600.00")  # the route's own length stays bare
+
+
 @pytest.mark.parametrize("fmt", ["table", "json"])
 def test_a_single_pair_calendar_prints_no_pair_and_no_note(
     fmt: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]

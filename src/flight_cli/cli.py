@@ -3176,9 +3176,19 @@ def _render_calendar(
         if routed:
             row.append(_safe_text(f"{d.origin}→{d.destination}") if d.origin else "—")
         if round_trip:
-            opts = {o.trip_length: o.min_price for o in d.options}
+            opts = {o.trip_length: o for o in d.options}
+            day_pair = (d.origin, d.destination)
             for dur in range(dmin, dmax + 1):
-                row.append(_amount(opts.get(dur), ccy))
+                o = opts.get(dur)
+                if o is None:
+                    row.append(_amount(None, ccy))
+                elif o.origin is not None and (o.origin, o.destination) != day_pair:
+                    # A length another pair priced names it, or the row reads as the route's.
+                    row.append(
+                        f"{_amount(o.min_price, ccy)} {_safe_text(f'{o.origin}→{o.destination}')}"
+                    )
+                else:
+                    row.append(_amount(o.min_price, ccy))
         row.append(f"{d.solution_count:d}")
         t.add_row(*row)
     console.print(t)
