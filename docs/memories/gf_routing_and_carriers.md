@@ -372,7 +372,7 @@ Every one of these is a multi-megabyte page GET, so the count is the cost:
 |---|---|
 | one-way | 1 |
 | round trip | 1 + min(top_n, rows on the board, `_PINNED_FANOUT_CAP` = 10) |
-| multi-cabin | the above, times the cabin count |
+| multi-cabin | the above, times the cabin count; a round trip fetches each cabin's outbound page once, ahead of its pins, and hands it back |
 | a persistently throttled leg | `_THROTTLE_RETRY_ATTEMPTS` + 1 = 5, then it aborts |
 | a transport blip | up to 3 GETs per leg (`_TRANSPORT_RETRY_ATTEMPTS` + 1) |
 | a leg that both throttles and blips | 1 + `_THROTTLE_RETRY_ATTEMPTS` + `_TRANSPORT_RETRY_ATTEMPTS` = 7 |
@@ -402,18 +402,46 @@ mean ~2 x 31 page fetches for a two-cabin round trip. The default `-n 10` is
 unchanged by the cap.
 
 The bump therefore widens the leg-1 rows each cabin keeps and NOT the round-trip
-pins, so **Google Flights joins cabins on up to `<pin budget>` of each cabin's
-first-ranked outbounds; '—' means no shared itinerary, not no fare** — the budget
-being `pinned_fanout` of the bumped page size, which the cap holds at 10 however
-large `-n` is. `cli._multi_cabin_join_note`
+pins. What makes the cabins' pins overlap is that the sort cabin leads
+(`cli._CabinSearches`): every cabin pins, in the sort cabin's order, each
+outbound the sort cabin pins that its own filtered board lists, matched on the
+whole leg sequence `_itinerary_key` uses (`_gflight_ids.pin_keys`), then fills
+the rest of the same budget with its own rows in page order
+(`search_with_ids`' `prefer`). The sort cabin's pins are exactly the ones it
+takes alone, so the rows the table shows lose nothing. The cost is that a
+non-sort cabin's own cheapest outbounds get only the slots the sort cabin's
+leave, and its `--format json` list moves with them. Each page is fetched once
+(`search_with_ids`' `first`), so the GETs are unchanged.
+
+Rung 1 runs that in two parallel rounds: every cabin's outbound page, then
+every cabin's return boards. Rung 2 serves one cabin at a time, so it runs the
+sort cabin's page and pins first and then each other cabin's whole search: the
+order the cabins took before they shared pins when the sort cabin is the first
+`--cabin`. Every cabin's page ahead would load pages that a fallback to rung 1
+loads again, and a Chrome failure on a later cabin's page would print a
+missing-column note for a column that the fallback then serves.
+
+So **Google Flights prices every cabin on up to `<pin budget>` of the `<sort>`
+cabin's first-ranked outbounds; '—' means that cabin's search returned no fare
+for the itinerary** — the budget being `pinned_fanout` of the bumped page size,
+which the cap holds at 10 however large `-n` is. `cli._multi_cabin_join_note`
 builds that sentence from the pin budget rather than a literal, and
 `cli._run_gflight_path_multi` prints it on a multi-cabin round trip it does not
-hand to Matrix, because an
-empty cabin cell otherwise reads as "that fare does not exist". "Up to",
-because the cap bounds how many outbounds the join can see and a board may hold
-fewer — stating the budget as a count is the half of this that had to go. Widening the join means pinning
-on the intersection of the cabins' outbounds rather than raising the cap; that
-is a separate design and is tracked on bd work-h70kv.
+hand to Matrix, because an empty cabin cell otherwise reads as "that fare does
+not exist". "Returned no fare" and not "does not list": a filter such as
+`--max-price` can remove a fare the board lists, a return board can be refused,
+and a row from a follower's own outbounds was never searched in the sort cabin.
+"Up to", because the cap bounds how many outbounds the join can see and a board
+may hold fewer.
+
+When the sort cabin pinned nothing — its page refused, or its filter kept no
+row — every cabin pins its own first-ranked outbounds, and the note says that
+instead: "joins cabins on up to `<pin budget>` of each cabin's first-ranked
+outbounds; '—' means no shared itinerary, not no fare." The fan-out reports
+which cabin led (`cli._CabinBoards.leader`) rather than leaving it to be read
+off a board, because a sort cabin whose pins were handed on and whose every
+return board then failed has no board and still led: its column is empty, its
+refusal is printed beside the table, and the note is the led one.
 
 The two counters are independent, so one leg can spend both budgets: four 429s,
 two transport blips and a final 429 costs 7 GETs. That is the ceiling, and it is

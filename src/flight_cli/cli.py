@@ -14,11 +14,13 @@ Commands:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import sys
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, NamedTuple, NoReturn, assert_never, cast
 
 import anyio
@@ -85,12 +87,12 @@ from .pp.cli import auth_app, run_pp_for_search
 from .providers.base import LegQuery
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Iterable, Sequence
+    from collections.abc import Callable, Coroutine, Generator, Iterable, Mapping, Sequence
 
     from ._gf_booking import BookingOptions
     from ._gf_calgraph import GraphRange, LostLength, PriceGraph
     from ._gf_explore import Destination, ExploreAnswer, TripLength
-    from ._gflight_ids import Board, PriceInsight
+    from ._gflight_ids import Board, GfTransport, ItineraryKey, PriceInsight
     from .models import (
         BookingDetailsResult,
         CalendarResult,
@@ -3528,25 +3530,34 @@ def _render_one_fare(fr: FareRules) -> None:
             )
 
 
-def _gflight_results(
-    legs: tuple[Leg, ...],
-    opts: SearchOptions,
-    top_n: int,
-    gf_mode: GfTransportMode = TRANSPORT_HTTP,
-    gf_headed: bool = False,
-) -> Board[Any]:
-    """Query Google Flights for `legs`, honoring routing/extension and time
-    windows: what the page encodes narrows the fli query natively, and the row
-    filter drops violating rows from each board as it is served, re-checking
-    what the page encodes wherever the row shows it. Returns the (filtered) raw
-    fli result list, with the page's price insight and the count of rows the
-    filter dropped.
+class _GfQuery(NamedTuple):
+    """One Google Flights query as `_gflight_results` sends it."""
 
-    `search` applies the same routing/extension to every leg, so the first leg's
-    constraints cover the trip for the native query; the post-filter is per slice.
+    filters: Any  # fli's FlightSearchFilters; fli ships no stubs
+    transport: GfTransport
+    currency: str
+    keep: Callable[[int, Any], bool] | None
+    checks: str
+
+
+@contextlib.contextmanager
+def _gflight_query(
+    legs: tuple[Leg, ...], opts: SearchOptions, gf_mode: GfTransportMode, gf_headed: bool
+) -> Generator[_GfQuery]:
+    """The query for `legs`, and the rung-2 session's end once it has run.
+
+    What the page encodes narrows the fli query natively, and the row filter
+    drops violating rows from each board as it is served, re-checking what the
+    page encodes wherever the row shows it. `search` applies the same
+    routing/extension to every leg, so the first leg's constraints cover the
+    trip for the native query; the post-filter is per slice.
+
+    One builder for `_gflight_results` and `_gflight_outbound`, so the page a
+    multi-cabin round trip fetches ahead of its pins is the page the pins are
+    then taken from.
 
     This is also where a rung-2 browser session dies. It is created lazily on
-    whichever thread runs this call — the enrich path runs it inside
+    whichever thread runs the query — the enrich path runs it inside
     `anyio.to_thread.run_sync` — and a playwright object may only be closed by
     the thread that made it, so the `finally` here is the guarantee. A SIGINT
     landing while that thread sits in `page.goto` escapes it, which is why the
@@ -3556,7 +3567,7 @@ def _gflight_results(
     # backend must not load on a Matrix-only search, and this function is the
     # first point that has committed to Google Flights.
     from ._gf_postfilter import routing_keep  # noqa: PLC0415 — GF-only; see above
-    from ._gflight_ids import Board, GfTransport, search_with_ids  # noqa: PLC0415 — fli, ~95 ms
+    from ._gflight_ids import GfTransport  # noqa: PLC0415 — fli, ~95 ms
     from .fli_bridge import apply_gf_native_filters, to_fli_filter  # noqa: PLC0415 — fli
     from .routing_predicates import classify  # noqa: PLC0415 — pulled in by the two above
 
@@ -3577,9 +3588,8 @@ def _gflight_results(
     per_slice_preds = [list(classify(lg.route_language, lg.extension).predicates) for lg in legs]
     requested = opts.currency or "USD"
     try:
-        results = search_with_ids(
-            fli_filter,
-            top_n=top_n,
+        yield _GfQuery(
+            filters=fli_filter,
             transport=transport,
             currency=requested,
             keep=routing_keep(
@@ -3601,12 +3611,73 @@ def _gflight_results(
             from ._gf_browser import close_thread_session  # noqa: PLC0415 — GF-only; see above
 
             close_thread_session()
+
+
+def _gflight_results(
+    legs: tuple[Leg, ...],
+    opts: SearchOptions,
+    top_n: int,
+    gf_mode: GfTransportMode = TRANSPORT_HTTP,
+    gf_headed: bool = False,
+    *,
+    first: Board[Any] | None = None,
+    prefer: Sequence[ItineraryKey] = (),
+) -> Board[Any]:
+    """Query Google Flights for `legs`, honoring routing/extension and time
+    windows (see `_gflight_query`). Returns the (filtered) raw fli result list,
+    with the page's price insight and the count of rows the filter dropped.
+
+    `first` and `prefer` go to `search_with_ids` as they are: the outbound page
+    `_gflight_outbound` already fetched for the same arguments, and the
+    outbounds to pin ahead of this board's own.
+    """
+    from ._gflight_ids import Board, search_with_ids  # noqa: PLC0415 — fli, ~95 ms
+
+    # Only a multi-cabin round trip sets either, so every other search makes
+    # the one call to `search_with_ids` a single search makes.
+    handed: dict[str, Any] = {}
+    if first is not None:
+        handed["first"] = first
+    if prefer:
+        handed["prefer"] = prefer
+    with _gflight_query(legs, opts, gf_mode, gf_headed) as query:
+        results = search_with_ids(
+            query.filters,
+            top_n=top_n,
+            transport=query.transport,
+            currency=query.currency,
+            keep=query.keep,
+            checks=query.checks,
+            **handed,
+        )
     if results is None:  # nothing served
         results = Board[Any]()
     # Untrimmed on purpose: a round trip's combinations are built pin-major, so
     # the first `top_n` of them are one outbound's returns and nothing else.
     # Every caller trims what it renders, in the order that surface ranks by.
     return results
+
+
+class _Outbound(NamedTuple):
+    """One cabin's outbound page, and the row filter its pins are held to."""
+
+    board: Board[Any]
+    keep: Callable[[int, Any], bool] | None
+
+
+def _gflight_outbound(
+    legs: tuple[Leg, ...],
+    opts: SearchOptions,
+    gf_mode: GfTransportMode = TRANSPORT_HTTP,
+    gf_headed: bool = False,
+) -> _Outbound:
+    """The page `_gflight_results` starts from for the same arguments: one GET,
+    fetched ahead of it so the pins can be chosen across cabins."""
+    from ._gflight_ids import outbound_page  # noqa: PLC0415 — fli, ~95 ms
+
+    with _gflight_query(legs, opts, gf_mode, gf_headed) as query:
+        page = outbound_page(query.filters, transport=query.transport, currency=query.currency)
+    return _Outbound(page, query.keep)
 
 
 def _note_other_currencies(results: list[Any], requested: str) -> None:
@@ -4776,9 +4847,12 @@ def _run_enriched_path(  # noqa: PLR0915 — one weave's outcome arms, read in o
 # (e.g. JFK-LHR: VS in economy, FI in business) — a top-5 query per cabin
 # almost never overlaps, leaving the J column rendered as all "—".
 #
-# What the bump widens is how many LEG-1 rows each cabin keeps. It does NOT
-# widen a round trip's pinned fan-out, which `_gflight_ids._PINNED_FANOUT_CAP`
-# clamps whatever this returns — see that constant for the budget and its cost.
+# On Google Flights the page serves its whole board whatever the page size,
+# and a round trip's pinned fan-out is clamped by
+# `_gflight_ids._PINNED_FANOUT_CAP` whatever this returns — see that constant
+# for the budget and its cost. A Google round trip's cabins overlap because
+# every cabin pins the sort cabin's outbounds (`_CabinSearches`), not because
+# of the bump.
 #
 # Capped to bound response size (each itinerary costs bytes + parse time);
 # Matrix and gflight both tolerate page sizes in this range comfortably.
@@ -4817,16 +4891,29 @@ def _pin_cap_note(*, legs: tuple[Leg, ...], top_n: int) -> None:
         )
 
 
-def _multi_cabin_join_note(pins: int) -> str:
+def _multi_cabin_join_note(pins: int, leader: Cabin | None) -> str:
     """Why a cabin cell can be empty on a multi-cabin round trip.
 
-    The count comes from the pin budget rather than a literal, because the
-    sentence is only true while they agree: the cap is what decides how many
-    outbounds the join can see, and `-n` below it lowers the number further.
-    Every part is ours, so there is nothing here to escape."""
+    `leader` is the cabin whose outbounds every cabin was asked to pin, or None
+    when none led and each cabin pinned its own. The count comes from the pin
+    budget rather than a literal, because the sentence is only true while they
+    agree: the cap is what decides how many outbounds the join can see, and
+    `-n` below it lowers the number further.
+
+    A led '—' is not always a board that lacks the itinerary: a filter such as
+    `--max-price` can remove a fare the board lists, a return board can be
+    refused, and a row from a follower's own outbounds was never searched in
+    the sort cabin. "Returned no fare" is true of all of them. Every part is
+    ours, so there is nothing here to escape."""
+    if leader is None:
+        return (
+            f"Google Flights joins cabins on up to {pins} of each cabin's first-ranked "
+            "outbounds; '—' means no shared itinerary, not no fare."
+        )
     return (
-        f"Google Flights joins cabins on up to {pins} of each cabin's first-ranked "
-        "outbounds; '—' means no shared itinerary, not no fare."
+        f"Google Flights prices every cabin on up to {pins} of the "
+        f"{_CABIN_TO_LETTER[leader]} cabin's first-ranked outbounds; "
+        "'—' means that cabin's search returned no fare for the itinerary."
     )
 
 
@@ -4836,10 +4923,9 @@ def _bumped_query_top_n(top_n: int, cabin_count: int) -> int:
     Single-cabin invocations get `top_n` unchanged. Multi-cabin gets
     `top_n * factor` capped at the bump ceiling. The visible row count
     after merge is still `top_n` (renderer trims by sort cabin) — the
-    bump only widens the search space the join can draw from.
-
-    On the page transport a round trip's pinned fan-out is capped on its own
-    budget, so raising this does not widen the outbounds such a join sees.
+    bump only widens the search space the join can draw from, which is
+    Matrix's page. Google Flights serves its whole board whatever this is, and
+    caps a round trip's pins on their own budget.
     """
     if cabin_count <= 1:
         return top_n
@@ -4991,6 +5077,85 @@ def _run_matrix_multi(
     return results
 
 
+class _CabinBoards(dict[Cabin, list[Any]]):
+    """Each cabin's answer from a Google Flights multi-cabin fan-out.
+
+    `leader` is the cabin whose outbounds every cabin was asked to pin, or None
+    when each pinned its own. The fan-out reports it rather than a board,
+    because a sort cabin whose every return board was refused has no board and
+    still led."""
+
+    def __init__(
+        self, boards: Mapping[Cabin, list[Any]] | None = None, *, leader: Cabin | None = None
+    ) -> None:
+        super().__init__(boards or {})
+        self.leader = leader
+
+
+class _CabinSearches(NamedTuple):
+    """The per-cabin calls of one Google Flights multi-cabin fan-out.
+
+    On a round trip over two or more cabins the sort cabin leads: every cabin
+    pins the outbounds the sort cabin pins, wherever its own filtered board
+    lists them, and fills the rest of the same budget with its own rows in page
+    order. A cabin pinning its own first ten may price none of the itineraries
+    the table shows, which are the sort cabin's. The sort cabin's page is
+    fetched ahead of its pins and handed back to its search, so the GETs are
+    the ones each cabin would spend alone. Anything else is each cabin's whole
+    search."""
+
+    legs: tuple[Leg, ...]
+    opts: SearchOptions
+    cabins: tuple[Cabin, ...]
+    top_n: int
+    gf_mode: GfTransportMode
+    gf_headed: bool
+    leader: Cabin
+
+    @property
+    def shares_pins(self) -> bool:
+        return len(self.legs) >= _ROUND_TRIP_LEGS and len(self.cabins) > 1
+
+    def outbound(self, cab: Cabin) -> Callable[[], _Outbound]:
+        return partial(_gflight_outbound, self.legs, self._opts(cab), self.gf_mode, self.gf_headed)
+
+    def pins(self, lead: _Outbound | None) -> list[ItineraryKey]:
+        """The outbounds the sort cabin pins from its page `lead`: the ones it
+        would take alone, so its rows are unchanged. Empty with no page, or
+        nothing its filter kept, and then each cabin pins its own first-ranked
+        rows."""
+        if lead is None:
+            return []
+        from ._gflight_ids import pin_keys  # noqa: PLC0415 — fli, ~95 ms
+
+        return pin_keys(lead.board, top_n=self.top_n, keep=lead.keep)
+
+    def search(self, cab: Cabin) -> Callable[[], list[Any]]:
+        """`cab`'s whole search."""
+        return partial(
+            _gflight_results, self.legs, self._opts(cab), self.top_n, self.gf_mode, self.gf_headed
+        )
+
+    def led(
+        self, cab: Cabin, pins: Sequence[ItineraryKey], page: _Outbound | None = None
+    ) -> Callable[[], list[Any]]:
+        """`cab`'s search pinning `pins` first, from `page` when that was
+        fetched ahead of it."""
+        return partial(
+            _gflight_results,
+            self.legs,
+            self._opts(cab),
+            self.top_n,
+            self.gf_mode,
+            self.gf_headed,
+            first=None if page is None else page.board,
+            prefer=pins,
+        )
+
+    def _opts(self, cab: Cabin) -> SearchOptions:
+        return self.opts.model_copy(update={"cabin": cab})
+
+
 def _gflight_cabins_in_series(
     *,
     legs: tuple[Leg, ...],
@@ -4998,7 +5163,8 @@ def _gflight_cabins_in_series(
     cabins: tuple[Cabin, ...],
     top_n: int,
     gf_headed: bool,
-) -> dict[Cabin, list[Any]] | None:
+    sort_by: Cabin | None = None,
+) -> _CabinBoards | None:
     """Rung 2's multi-cabin shape: one Chrome, one cabin at a time, on this thread.
 
     The parallel fan-out below cannot run rung 2. A thread per cabin is a
@@ -5006,6 +5172,11 @@ def _gflight_cabins_in_series(
     the second cabin fails on the first one's lock. Serialising here is what
     lets ONE session serve every cabin: the launch is paid once, and every
     navigation runs on the thread that made the session.
+
+    A round trip's sort cabin goes first, its page and then its pins, because
+    every other cabin pins its outbounds (`_CabinSearches`); each other cabin
+    follows as one whole search. Fetching every cabin's page ahead instead
+    would load pages a fallback to rung 1 then loads again.
 
     No task group and no worker thread on this arm, so the loop runs on the
     thread the interrupt is delivered to and a Ctrl-C is honoured where it
@@ -5019,7 +5190,9 @@ def _gflight_cabins_in_series(
     `None` says rung 2 never opened at all, and the caller then runs the whole
     fan-out on rung 1. Only before the first cabin is served: once a cabin has
     rows, re-running the fan-out would discard them, and a table whose columns
-    came from two different rungs is not one answer.
+    came from two different rungs is not one answer. The sort cabin's page is
+    not yet rows, so a Chrome that loads it and dies on its pins still moves
+    the search to rung 1.
     """
     from ._gf_browser import interrupt_guard, session_scope  # noqa: PLC0415 — GF-only
     from ._gflight_ids import shared_throttle_ladder  # noqa: PLC0415 — fli, ~95 ms
@@ -5032,39 +5205,61 @@ def _gflight_cabins_in_series(
         note = _gf_refusal(e, transport=TRANSPORT_BROWSER).note.removesuffix(".")
         err.print(f"[yellow]Google Flights {cab.value}: {note}.[/]")
 
-    results: dict[Cabin, list[Any]] = {}
-    with shared_throttle_ladder(), interrupt_guard(), session_scope():
-        for cab in cabins:
-            try:
-                results[cab] = _gflight_results(
-                    legs,
-                    opts.model_copy(update={"cabin": cab}),
-                    top_n,
-                    TRANSPORT_BROWSER,
-                    gf_headed,
-                )
-            except GfBrowserUnavailableError as e:
-                # Ahead of the `GfBackendError` arm below, which is its base
-                # class and would otherwise report a rung that never opened as
-                # one cabin's missing column.
-                if not results:
-                    # The phrase leads the line so that no console width can
-                    # break it. The remedy follows the reason because the other
-                    # half of it — install Chrome, point the binary — is what a
-                    # user whose http rung is also refused has left to try.
-                    err.print(
-                        f"[dim]multi-cabin is using http: "
-                        f"{_safe_text(e.reason)} {_safe_text(e.remedy)}[/]"
-                    )
-                    return None
-                note_missing_column(cab, e)
-            except GfBackendError as e:
-                note_missing_column(cab, e)
-            except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
+    def serve_cabin[T](cab: Cabin, call: Callable[[], T], *, served: bool) -> T | None:
+        """`call`'s answer, or None once why this cabin's column is missing has
+        been printed. A rung that never opened is raised instead while nothing
+        is `served`, for the whole fan-out to move to rung 1."""
+        try:
+            return call()
+        except GfBrowserUnavailableError as e:
+            # Ahead of the `GfBackendError` arm below, which is its base
+            # class and would otherwise report a rung that never opened as
+            # one cabin's missing column.
+            if not served:
                 raise
-            except Exception as e:  # noqa: BLE001 — fli has no documented exception surface
-                err.print(f"[yellow]Google Flights {cab.value} query failed: {_safe_text(e)}[/]")
-    return results
+            note_missing_column(cab, e)
+        except GfBackendError as e:
+            note_missing_column(cab, e)
+        except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
+            raise
+        except Exception as e:  # noqa: BLE001 — fli has no documented exception surface
+            err.print(f"[yellow]Google Flights {cab.value} query failed: {_safe_text(e)}[/]")
+        return None
+
+    plan = _CabinSearches(
+        legs, opts, cabins, top_n, TRANSPORT_BROWSER, gf_headed, sort_by or cabins[0]
+    )
+    results: dict[Cabin, list[Any]] = {}
+    pins: list[ItineraryKey] = []
+    with shared_throttle_ladder(), interrupt_guard(), session_scope():
+        try:
+            if plan.shares_pins:
+                lead = serve_cabin(plan.leader, plan.outbound(plan.leader), served=False)
+                pins = plan.pins(lead)
+                calls = {cab: plan.led(cab, pins) for cab in cabins if cab != plan.leader}
+                if lead is not None:
+                    calls = {plan.leader: plan.led(plan.leader, pins, lead), **calls}
+            else:
+                calls = {cab: plan.search(cab) for cab in cabins}
+            for cab, call in calls.items():
+                answer = serve_cabin(cab, call, served=bool(results))
+                if answer is not None:
+                    results[cab] = answer
+        except GfBrowserUnavailableError as e:
+            # The phrase leads the line so that no console width can break it.
+            # The remedy follows the reason because the other half of it —
+            # install Chrome, point the binary — is what a user whose http rung
+            # is also refused has left to try.
+            err.print(
+                f"[dim]multi-cabin is using http: {_safe_text(e.reason)} {_safe_text(e.remedy)}[/]"
+            )
+            return None
+    # In the order the cabins were asked for, which the sort cabin going first
+    # would otherwise change for `--format json`.
+    return _CabinBoards(
+        {cab: results[cab] for cab in cabins if cab in results},
+        leader=plan.leader if pins else None,
+    )
 
 
 def _run_gflight_multi(
@@ -5075,7 +5270,8 @@ def _run_gflight_multi(
     top_n: int,
     gf_mode: GfTransportMode = TRANSPORT_HTTP,
     gf_headed: bool = False,
-) -> dict[Cabin, list[Any]]:
+    sort_by: Cabin | None = None,
+) -> _CabinBoards:
     """Fan out N parallel gflight queries (one per cabin). fli is sync, so
     each query runs in a worker thread via `anyio.to_thread.run_sync`.
 
@@ -5083,12 +5279,19 @@ def _run_gflight_multi(
     native filters and the Tier-2 post-filter cannot drift apart. They also
     share ONE throttle ladder: Google's wall is per-IP, so a cabin per thread
     laddering against it separately spends the cabin count times the requests to
-    be told the same thing."""
+    be told the same thing. On a round trip (`_CabinSearches`, led by `sort_by`,
+    default the first cabin) every cabin's outbound page, then every cabin's
+    pins, are two fan-outs inside that one ladder and one event loop."""
     from ._gflight_ids import shared_throttle_ladder  # noqa: PLC0415
 
     if gf_mode == TRANSPORT_BROWSER:
         served = _gflight_cabins_in_series(
-            legs=legs, opts=opts, cabins=cabins, top_n=top_n, gf_headed=gf_headed
+            legs=legs,
+            opts=opts,
+            cabins=cabins,
+            top_n=top_n,
+            gf_headed=gf_headed,
+            sort_by=sort_by,
         )
         if served is not None:
             return served
@@ -5098,16 +5301,12 @@ def _run_gflight_multi(
     # would open a session per worker thread, which is the profile-lock
     # collision the series runner exists to avoid.
     fanout_mode = TRANSPORT_HTTP if gf_mode == TRANSPORT_BROWSER else gf_mode
-    results: dict[Cabin, list[Any]] = {}
+    plan = _CabinSearches(legs, opts, cabins, top_n, fanout_mode, gf_headed, sort_by or cabins[0])
+    results = _CabinBoards()
 
-    def query_sync(cab: Cabin) -> list[Any]:
-        return _gflight_results(
-            legs, opts.model_copy(update={"cabin": cab}), top_n, fanout_mode, gf_headed
-        )
-
-    async def query_cabin(cab: Cabin) -> None:
+    async def query_cabin[T](cab: Cabin, call: Callable[[], T], into: dict[Cabin, T]) -> None:
         try:
-            results[cab] = await anyio.to_thread.run_sync(query_sync, cab)
+            into[cab] = await anyio.to_thread.run_sync(call)
         except GfBackendError as e:
             # A typed refusal is why this cabin's column will be missing; the
             # bare handler below would print it as an unexplained failure.
@@ -5121,10 +5320,24 @@ def _run_gflight_multi(
         except Exception as e:  # noqa: BLE001 — fli has no documented exception surface
             err.print(f"[yellow]Google Flights {cab.value} query failed: {_safe_text(e)}[/]")
 
-    async def go() -> None:
+    async def fan_out[T](calls: dict[Cabin, Callable[[], T]], into: dict[Cabin, T]) -> None:
         async with anyio.create_task_group() as tg:
-            for cab in cabins:
-                tg.start_soon(query_cabin, cab)
+            for cab, call in calls.items():
+                tg.start_soon(query_cabin, cab, call, into)
+
+    async def go() -> None:
+        if not plan.shares_pins:
+            await fan_out({cab: plan.search(cab) for cab in cabins}, results)
+            return
+        # Every cabin's page first, in parallel: a cabin's pins wait on the sort
+        # cabin's page, not on its whole search.
+        pages: dict[Cabin, _Outbound] = {}
+        await fan_out({cab: plan.outbound(cab) for cab in cabins}, pages)
+        pins = plan.pins(pages.get(plan.leader))
+        results.leader = plan.leader if pins else None
+        await fan_out(
+            {cab: plan.led(cab, pins, pages[cab]) for cab in cabins if cab in pages}, results
+        )
 
     with shared_throttle_ladder():
         try:
@@ -5359,6 +5572,7 @@ def _run_gflight_path_multi(
         top_n=query_top_n,
         gf_mode=gf_mode,
         gf_headed=gf_headed,
+        sort_by=sort_by,
     )
     if not fli_by_cabin:
         err.print("[red]All Google Flights cabin queries failed.[/]")
@@ -5386,7 +5600,7 @@ def _run_gflight_path_multi(
     if len(legs) >= _ROUND_TRIP_LEGS and len(cabins) > 1:
         from ._gflight_ids import pinned_fanout  # noqa: PLC0415
 
-        join_note = _multi_cabin_join_note(pinned_fanout(query_top_n))
+        join_note = _multi_cabin_join_note(pinned_fanout(query_top_n), fli_by_cabin.leader)
         err.print(f"[dim]{join_note}[/]")
     for cab in cabins:
         if cab in fli_by_cabin:
@@ -5414,7 +5628,12 @@ def _run_gflight_path_multi(
         sys.stdout.write(json.dumps(out, indent=2, default=str))
         return None
 
-    results_by_cabin = _gflight_to_search_result_per_cabin(fli_by_cabin)
+    # The sort cabin first, then the rest as asked: a row several cabins price
+    # shows the first itinerary `_merge_cabins` meets, so the table sorted on a
+    # cabin shows that cabin's seats whichever search finished first.
+    results_by_cabin = _gflight_to_search_result_per_cabin(
+        {cab: fli_by_cabin[cab] for cab in dict.fromkeys((sort_by, *cabins)) if cab in fli_by_cabin}
+    )
     rows = _merge_cabins(
         results_by_cabin, sort_by=sort_by, top_n=top_n, currency=opts.currency or "USD"
     )
@@ -5820,7 +6039,7 @@ def _resolve_gf_transport(mode: str) -> GfTransportMode:
     A mode string, not a `GfTransport`, because every search validates this while
     only a Google Flights search should pay for `_gflight_ids` — building the
     value here would put fli's import on the Matrix path too, measured at ~95 ms
-    on top of an already-loaded `cli`. `_gflight_results` builds it instead; that
+    on top of an already-loaded `cli`. `_gflight_query` builds it instead; that
     is the first point which has already paid."""
     for known in VALID_TRANSPORT_MODES:
         if mode == known:
@@ -5957,9 +6176,10 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         "--cabin",
         help=(
             "Cabin, or comma list for multi-cabin compare ('economy,business'). "
-            "Multi-cabin renders one price column per cabin; '—' means the itinerary "
-            "wasn't in that cabin's top-N (cabin unavailable OR priced out). "
-            "Bump -n for broader overlap across cabins."
+            "Multi-cabin renders one price column per cabin; '—' means that cabin's "
+            "search returned no fare for the itinerary. A Google Flights round trip "
+            "prices every cabin on the --sort cabin's first-ranked outbounds; on "
+            "Matrix, bump -n for broader overlap across cabins."
         ),
         rich_help_panel=_GROUP_ITINERARY,
     ),

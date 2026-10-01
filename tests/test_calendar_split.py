@@ -3789,7 +3789,7 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_resolve_format", "_FORMAT_CHOICES"),
         ("query_cabin", "cab.value"),  # a member of this module's own enum
         ("note_missing_column", "cab.value"),  # the same enum, on the series runner
-        ("_gflight_cabins_in_series", "cab.value"),
+        ("serve_cabin", "cab.value"),
         # One of two sentences this module wrote, chosen by a flag. Each names
         # what happens next to a link, so neither can be a bare clause the
         # sentence above it carries.
