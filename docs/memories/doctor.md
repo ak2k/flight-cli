@@ -9,7 +9,7 @@ shape change or flakiness?" for a scheduled canary. Code: `src/flight_cli/_docto
 
 | id | kind | passes when |
 |---|---|---|
-| `config` | local | `config.toml` is absent, or parses |
+| `config` | local | `config.toml` is absent, or parses, and the rps a search resolves (`FLIGHT_RPS`, then `[http].rps`) reads as a number |
 | `matrix-key` | local | always, reporting the key a search would send: `FLIGHT_API_KEY`, the cache (with its age of 30 days), or none. Fails (`config`) when `FLIGHT_API_KEY` is not shaped like a Matrix key, or the cached key cannot be read |
 | `cache` | local | the response cache opens and closes as `HttpTransport` opens it |
 | `google-cookies` | local | the NID jar is absent, or parses (age of 14 days, NID count) |
@@ -25,7 +25,9 @@ A provider is checked when its credential is STORED, not when
 into "not configured", which would make a dead token a skip.
 
 `matrix-search` sends the key in use, or `matrix-spa-key`'s key when none is
-in use; with neither it is a skip naming `matrix-spa-key`.
+in use; with neither it is a skip naming `matrix-spa-key`. It sends with the
+rps and impersonation profile a search resolves, the defaults when `config`
+fails.
 
 ## Causes
 
@@ -39,7 +41,7 @@ in use; with neither it is a skip naming `matrix-spa-key`.
 | `rejected` | no | any other `MatrixApiError` |
 | `consent` | no | `GfConsentError` |
 | `auth` | no | Matrix refusing the key twice, `PPAuthError` (a Supabase 429 or 5xx on the token refresh is `throttled` or `upstream`), HTTP 401/403 from a provider |
-| `config` | no | a local setting: unparseable config, malformed `FLIGHT_API_KEY`, an unopenable cache, an unreadable jar, a stored PointsPath or seats.aero credential file that cannot be read, `FLIGHT_CLI_GF_BROWSER_BIN` naming no executable file |
+| `config` | no | a local setting: unparseable config, an rps that is not a number, malformed `FLIGHT_API_KEY`, an unopenable cache, an unreadable jar, a stored PointsPath or seats.aero credential file that cannot be read, `FLIGHT_CLI_GF_BROWSER_BIN` naming no executable file |
 | `browser` | no | `GfBrowserUnavailableError` (reason and remedy) |
 | `error` | no | anything else, as `Type: message` |
 

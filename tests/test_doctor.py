@@ -90,6 +90,7 @@ class World:
             200, json=_MATRIX_OK
         )
         self.matrix_requests: list[httpx.Request] = []
+        self.matrix_settings: list[dict[str, Any]] = []
         self.browser: PageFetch | Exception = PageFetch(_priced_page(), _GF_URL, 200)
         self.browser_urls: list[str] = []
         self.pp: Exception | None = None
@@ -133,7 +134,13 @@ def world(
 ) -> World:
     """Every check configured and passing, and nothing read from or written to
     the developer's own stores."""
-    for var in (*_SECRET_ENV, "FLIGHT_CLI_GF_BROWSER_BIN", "PP_SUPABASE_ANON_KEY"):
+    for var in (
+        *_SECRET_ENV,
+        "FLIGHT_CLI_GF_BROWSER_BIN",
+        "PP_SUPABASE_ANON_KEY",
+        "FLIGHT_RPS",
+        "FLIGHT_IMPERSONATE",
+    ):
         monkeypatch.delenv(var, raising=False)
     gf_session(_priced_page())  # also points MATRIX_CACHE_DIR at tmp_path
     config = tmp_path / "config"
@@ -166,7 +173,10 @@ def world(
         return httpx.Client(transport=httpx.MockTransport(w.spa_handler), follow_redirects=True)
 
     def matrix_client(**kw: Any) -> MatrixClient:
-        c = MatrixClient(**kw, rps=1000.0)
+        w.matrix_settings.append(kw)
+        # Unpaced, so a test that retries never waits on the limiter.
+        unpaced: dict[str, Any] = {**kw, "rps": 1000.0}
+        c = MatrixClient(**unpaced)
         c._http._client = httpx.AsyncClient(transport=httpx.MockTransport(w.matrix_handler))
         return c
 
@@ -331,6 +341,43 @@ def test_config_absent_passes_and_a_parse_error_fails_naming_the_path(world: Wor
     path.write_text("[http\nrps = \n")
     c = _fails_as(_run(), "config", "config")
     assert str(path) in c.detail
+
+
+@pytest.mark.parametrize(
+    ("env", "toml", "said"),
+    [
+        ("typo", None, "FLIGHT_RPS='typo' is not a number"),
+        (None, '[http]\nrps = "typo"\n', "[http].rps='typo' is not a number"),
+    ],
+)
+def test_an_rps_a_search_refuses_to_start_on_fails_config(
+    world: World, monkeypatch: pytest.MonkeyPatch, env: str | None, toml: str | None, said: str
+) -> None:
+    if env is not None:
+        monkeypatch.setenv("FLIGHT_RPS", env)
+    if toml is not None:
+        (pathlib.Path(os.environ["FLIGHT_CLI_CONFIG_DIR"]) / "config.toml").write_text(toml)
+    depart = (dt.date.today() + dt.timedelta(days=30)).isoformat()
+    search = CliRunner().invoke(
+        cli.app, ["search", "JFK", "LAX", "--dep", depart, "--backend", "matrix", "--cash-only"]
+    )
+    assert search.exit_code == 2, search.output
+    assert said in search.stderr
+    report = _run()
+    assert said in _fails_as(report, "config", "config").detail
+    assert report.exit_code == 1
+
+
+def test_matrix_search_sends_with_the_rps_and_profile_a_search_resolves(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FLIGHT_IMPERSONATE", "safari17_0")
+    (pathlib.Path(os.environ["FLIGHT_CLI_CONFIG_DIR"]) / "config.toml").write_text(
+        "[http]\nrps = 2.5\n"
+    )
+    assert _by_id(_run())["matrix-search"].status == "pass"
+    settings = world.matrix_settings[-1]
+    assert (settings.get("rps"), settings.get("impersonate")) == (2.5, "safari17_0")
 
 
 def test_matrix_key_from_the_environment_passes_with_its_fingerprint(

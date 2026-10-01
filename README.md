@@ -97,7 +97,7 @@ credential; `--format json` gives the same checks as a document.
 
 | Check | What it checks |
 |---|---|
-| `config` | `config.toml` parses, if there is one |
+| `config` | `config.toml` parses, if there is one, and the rps setting is a number |
 | `matrix-key` | which Matrix key a search would send (`FLIGHT_API_KEY`, the cache and its age, or none), without fetching one |
 | `cache` | the response cache opens |
 | `google-cookies` | the saved Google session cookie: its age and NID count |

@@ -223,6 +223,9 @@ class _Doctor:
         self.key_in_use: str | None = None
         self.spa_key: str | None = None
         self.secrets: set[str] = set()
+        # A search's transport settings, the defaults until `config` resolves them.
+        self.rps = _config.DEFAULT_RPS
+        self.impersonate = _config.DEFAULT_IMPERSONATE
 
     def report(self) -> Report:
         probes: tuple[tuple[str, Callable[[], _Outcome], bool], ...] = (
@@ -285,12 +288,19 @@ class _Doctor:
 
     def check_config(self) -> _Outcome:
         path = _config.config_path()
-        if not path.exists():
-            return "pass", f"no config file at {path}; the defaults apply"
         try:
-            _config.load()
+            cfg = _config.load()
         except (OSError, ValueError) as e:
             raise _CheckFailedError("config", f"{path} could not be read: {e}") from e
+        # Resolved as a search resolves them: an rps that does not read as a
+        # number stops the search before it sends anything.
+        self.impersonate = _config.http_impersonate(config=cfg)
+        try:
+            self.rps = _config.http_rps(config=cfg)
+        except ValueError as e:
+            raise _CheckFailedError("config", f"bad rps configuration: {e}") from e
+        if not path.exists():
+            return "pass", f"no config file at {path}; the defaults apply"
         return "pass", f"{path} parses"
 
     def check_matrix_key(self) -> _Outcome:
@@ -416,7 +426,12 @@ class _Doctor:
         )
 
         async def go() -> object:
-            async with MatrixClient(api_key=key, timeout=_MATRIX_TIMEOUT_S) as c:
+            async with MatrixClient(
+                api_key=key,
+                rps=self.rps,
+                impersonate=self.impersonate,
+                timeout=_MATRIX_TIMEOUT_S,
+            ) as c:
                 return await c.execute(search, cache=False)
 
         try:
