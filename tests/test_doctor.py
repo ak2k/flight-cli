@@ -647,6 +647,44 @@ def test_a_refused_key_whose_refetch_cannot_connect_is_unreachable(
     assert c.detail == "Network error contacting Matrix"
 
 
+@pytest.mark.parametrize(
+    ("spa", "cause"),
+    [("then-503", "upstream"), ("429", "throttled"), ("503", "upstream"), ("moved", "shape")],
+)
+def test_a_refused_key_whose_refetch_finds_no_key_takes_the_cause_the_page_showed(
+    world: World, monkeypatch: pytest.MonkeyPatch, spa: str, cause: str
+) -> None:
+    """Matrix refuses the cached key, and the client reads Matrix's page again
+    for a new one without reading its status. In `then-503` the page served
+    matrix-spa-key a key a moment before it answered the refetch with a 503."""
+
+    def page(request: httpx.Request) -> httpx.Response:
+        match spa:
+            case "then-503" if len(world.spa_gets) <= 2:
+                return World.spa_ok(request)
+            case "then-503":
+                return httpx.Response(503, text="Service Unavailable")
+            case "moved":
+                return httpx.Response(200, text="<html>restructured</html>")
+            case _:
+                return httpx.Response(int(spa), text="busy")
+
+    def spa_client(**_kw: object) -> httpx.Client:
+        return httpx.Client(transport=httpx.MockTransport(world.spa_handler), follow_redirects=True)
+
+    monkeypatch.setattr(
+        _api_key,
+        "httpx",
+        SimpleNamespace(Client=spa_client, Timeout=httpx.Timeout, HTTPError=httpx.HTTPError),
+    )
+    world.spa = page
+    world.matrix = lambda _r: httpx.Response(403, text="forbidden")
+    report = _run()
+    _fails_as(report, "matrix-search", cause)
+    assert world.spa_gets[-1] == "https://matrix.itasoftware.com/search"  # the refetch ran
+    assert report.exit_code == (1 if cause == "shape" else 75)
+
+
 # ──────────────────────────────── Google ────────────────────────────────
 
 

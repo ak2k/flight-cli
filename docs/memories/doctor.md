@@ -48,6 +48,10 @@ fails.
 The SPA check makes `_bootstrap_from_spa`'s two GETs itself and reads each
 status first. The bootstrap reads the body of whatever answered, so a 503
 homepage would otherwise read as "no bundle in the page", a shape change.
+When Matrix refuses the key in use, the client refetches the page that way,
+by its body alone. A refetch that finds no key therefore takes
+`matrix-spa-key`'s cause. If `matrix-spa-key` passed, it is `upstream`: the
+page served a key moments earlier, so it is failing now, not changed.
 
 ## Exit codes
 

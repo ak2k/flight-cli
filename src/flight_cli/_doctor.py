@@ -214,7 +214,8 @@ class _CheckFailedError(Exception):
 
 class _Doctor:
     """One run. Holds what a later check needs from an earlier one: the key a
-    search would use, the key Matrix's page serves, and every secret met."""
+    search would use, the key Matrix's page serves, the settings a search
+    resolves, the cause of each failure, and every secret met."""
 
     def __init__(self, today: dt.date, on_start: Callable[[str], None]) -> None:
         self.today = today
@@ -223,6 +224,7 @@ class _Doctor:
         self.key_in_use: str | None = None
         self.spa_key: str | None = None
         self.secrets: set[str] = set()
+        self.failed: dict[str, Cause] = {}
         # A search's transport settings, the defaults until `config` resolves them.
         self.rps = _config.DEFAULT_RPS
         self.impersonate = _config.DEFAULT_IMPERSONATE
@@ -253,6 +255,8 @@ class _Doctor:
             status, cause, detail = "fail", f.cause, f.detail
         except Exception as e:  # noqa: BLE001 — a check reports its failure; it never raises
             status, (cause, detail) = "fail", _classify(e)
+        if cause is not None:
+            self.failed[cid] = cause
         elapsed = round(time.monotonic() - started, 2)
         return Check(
             id=cid,
@@ -441,6 +445,20 @@ class _Doctor:
                 "brownout",
                 f"Matrix did not answer within {_MATRIX_TIMEOUT_S:.0f} s, "
                 "the limit on each attempt",
+            ) from e
+        except ApiKeyResolutionError as e:
+            if e.__cause__ is not None:
+                raise
+            # Matrix refused the key, and the client read Matrix's page for a
+            # new one by its body alone, so a 503 there reads as a page with no
+            # key. matrix-spa-key read that page status first moments ago: its
+            # verdict is this one, and a page that served it a key is failing,
+            # not changed.
+            spa = self.failed.get("matrix-spa-key")
+            seen = "matrix-spa-key failed on it too" if spa else "it served matrix-spa-key one"
+            raise _CheckFailedError(
+                spa or "upstream",
+                f"Matrix refused the key in use, and its page served no new one; {seen}",
             ) from e
         if not isinstance(res, SearchResult):
             raise TypeError(f"a specific-date search answered with {type(res).__name__}")
