@@ -3147,28 +3147,37 @@ def _price_capped(res: SearchResult, opts: SearchOptions, *, passengers: int = 1
     Matrix states for more than one, its listed price for one.
 
     Matrix has no price input, and it answers in price order, so the cut loses
-    no cheaper fare. Where the cap drops a fare of this page, the fares past the
-    page are over it too, so `solutionCount`, at the top of the raw document and
-    in its solution list, becomes the count kept. Where it drops none, the fares
-    past the page went unchecked, so Matrix's own total stays. The carrier x
-    stops grid is dropped from the table, because its cells are minima over
-    every fare; in the JSON it and Matrix's other blocks stay as served,
-    describing its whole answer."""
+    no cheaper fare. Where every fare the cap drops from this page is priced in
+    its currency over it, the fares past the page are over it too, so
+    `solutionCount`, at the top of the raw document and in its solution list,
+    becomes the count kept. Where it drops none, or drops a fare it cannot read
+    (another currency, no price), the fares past the page and that fare went
+    unchecked, so Matrix's own total stays. The carrier x stops grid is dropped
+    from the table, because its cells are minima over every fare; in the JSON
+    it and Matrix's other blocks stay as served, describing its whole answer."""
     cap = opts.max_price
     if cap is None:
         return res
     currency = opts.currency or "USD"
 
-    def admitted(it: Itinerary) -> bool:
+    def price(it: Itinerary) -> tuple[str, float | None]:
         code, amount = _split_price(party_price(it, passengers))
         try:
-            value = float(amount)
+            return code, float(amount)
         except ValueError:
-            return False
+            return code, None
+
+    def admitted(it: Itinerary) -> bool:
+        code, value = price(it)
         return within_price_cap(value, code, cap=cap, cap_currency=currency)
 
+    def over(it: Itinerary) -> bool:
+        code, value = price(it)
+        return code == currency and value is not None and value > cap
+
     kept = [it for it in res.solutions if admitted(it)]
-    count = {"solutionCount": len(kept)} if len(kept) < len(res.solutions) else {}
+    dropped = [it for it in res.solutions if not admitted(it)]
+    count = {"solutionCount": len(kept)} if dropped and all(map(over, dropped)) else {}
     raw = res.raw
     if raw is not None:
         raw = {**raw, **count}

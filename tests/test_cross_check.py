@@ -574,6 +574,38 @@ def test_a_party_cap_holds_matrix_to_the_total_the_table_prints(
     assert [r["matrix_price"] for r in xc["rows"] if r["matrix_price"]] == ["USD140.00"]
 
 
+def _unread_by_the_cap(party: int) -> Callable[[SearchResult], SearchResult]:
+    """DL1788 under the cap, then an AS fare the cap cannot read: in pounds for
+    one passenger, with no total for a party. Matrix answered 40."""
+
+    def answer(board: SearchResult) -> SearchResult:
+        if party == 1:
+            dl = _as_matrix(board.solutions[0], "USD199.00")
+            unread = _its(_slice(["AS9"]), price="GBP90.00")
+        else:
+            dl = _party_of_two(board).solutions[0]
+            unread = _its(_slice(["AS9"]), price="USD90.00")
+        return _answer(dl, unread, count=40)
+
+    return answer
+
+
+@pytest.mark.parametrize("party", [1, 2])
+def test_a_fare_the_cap_cannot_read_leaves_matrixs_answer_incomplete(
+    party: int, monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    """Only a fare shown to be over the cap says the fares past the page are
+    too; one the cap cannot read says nothing of them, nor of AS."""
+    _weave(monkeypatch, gf_rows, matrix=_unread_by_the_cap(party))
+    capped = ["--adults", str(party), "--max-price", "400", "-n", "30"]
+    xc = _document(_run([*_SEARCH, *capped, "--enrich", "--format", "json"]))["cross_check"]
+    assert (xc["matrix"]["listed"], xc["matrix"]["solution_count"]) == (1, 40)
+    assert xc["matrix"]["complete"] is False
+    by_flights = {"+".join(r["slices"][0]["flights"]): r for r in xc["rows"]}
+    assert by_flights["AS21+AS487"]["reasons"] == ["past_page"]
+    assert not [r for r in xc["rows"] if "carrier_absent" in r["reasons"]]
+
+
 def test_a_party_matrix_states_no_total_for_shows_no_delta() -> None:
     """Matrix's price per passenger is not the party's price."""
     board = _board()
