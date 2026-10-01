@@ -36,7 +36,6 @@ from datetime import timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Final
 
-from fli.models.airport import Airport  # pyright: ignore[reportMissingTypeStubs]
 from fli.models.google_flights.base import (  # pyright: ignore[reportMissingTypeStubs]
     FlightSegment,
     SeatType,
@@ -62,6 +61,7 @@ from .domain import Cabin
 from .fli_bridge import (
     _fli_max_stops,  # pyright: ignore[reportPrivateUsage]
     apply_gf_native_filters,
+    fli_airport,
 )
 from .routing_predicates import (
     MAX_ENCODABLE_STOPS,
@@ -299,8 +299,8 @@ def _grid_filters(
         ),
         flight_segments=[
             FlightSegment(
-                departure_airport=[[getattr(Airport, leg.origins[0]), 0]],
-                arrival_airport=[[getattr(Airport, leg.destinations[0]), 0]],
+                departure_airport=[[fli_airport(leg.origins[0]), 0]],
+                arrival_airport=[[fli_airport(leg.destinations[0]), 0]],
                 travel_date=from_iso,
             )
         ],
@@ -365,13 +365,12 @@ def date_grid(search: CalendarSearch) -> dict[str, float]:
     retries each, and merges. Raises GfThrottledError if the throttle persists —
     and, while `_GRID_RPC_GATED`, GfGridUnavailableError before anything else."""
     # Ahead of the chunk loop, so no fli model is built for a grid that cannot be
-    # priced. `_grid_filters` resolves airports through fli's `Airport` enum and
-    # dates through `FlightSegment`, both of which reject inputs this command
-    # accepts: a city code (NYC/LON/PAR) is not in that enum, and a window opening
-    # in the past fails travel-date validation. Either one raises, and the callers'
-    # broad `except` reports the standing gate as "date grid failed: type object
-    # 'Airport' has no attribute 'NYC'" — a transport-shaped error for a request no
-    # transport was going to carry.
+    # priced. `_grid_filters` resolves airports through `fli_airport` and dates
+    # through `FlightSegment`, both of which reject inputs this command accepts: a
+    # city code (NYC/LON/PAR) has no entry in fli's airport table, and a window
+    # opening in the past fails travel-date validation. Either one raises, and the
+    # callers' broad `except` reports the standing gate as "date grid failed: NYC"
+    # — a transport-shaped error for a request no transport was going to carry.
     if _GRID_RPC_GATED:
         raise GfGridUnavailableError(_GRID_GATED_MSG)
     leg = search.legs[0]

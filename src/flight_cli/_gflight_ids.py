@@ -58,11 +58,11 @@ from fli.models import (  # pyright: ignore[reportMissingTypeStubs]
 )
 from fli.models.google_flights.base import TripType  # pyright: ignore[reportMissingTypeStubs]
 
-# DIVERGE: fli moved its API-row decoders to a private module in 0.9.0. These
-# three (airline/airport/datetime) are purpose-built for decoding GF response
-# rows — same signatures + AttributeError-on-unknown as the old SearchFlights
-# static methods, with no public equivalent (core.parsers has no datetime
-# parser), so this is a drop-in repoint.
+# DIVERGE: fli's API-row decoders live in a private module, with no public
+# equivalent (core.parsers has no datetime parser). Airline and datetime decode
+# through them; an airport decodes through `fli_bridge.fli_airports`, which
+# keeps a code fli aliases, and reaches `_parse_airport` only for a code fli has
+# no entry for, so the row fails with fli's warning and AttributeError.
 from fli.search._decoders import (  # pyright: ignore[reportMissingTypeStubs]
     _parse_airline,  # pyright: ignore[reportPrivateUsage]
     _parse_airport,  # pyright: ignore[reportPrivateUsage]
@@ -97,6 +97,7 @@ from ._gf_errors import (
     GfTransportError,
     GfUpstreamStatusError,
 )
+from .fli_bridge import fli_airports
 from .links import build_search_tfs, google_flights_search_page_url
 
 if TYPE_CHECKING:
@@ -1139,12 +1140,19 @@ def _flight_leg(fl: list[Any]) -> FlightLeg:
     return FlightLeg(
         airline=_parse_airline(book_code),
         flight_number=book_number or "",
-        departure_airport=_parse_airport(fl[3]),
-        arrival_airport=_parse_airport(fl[6]),
+        departure_airport=_leg_airport(fl[3]),
+        arrival_airport=_leg_airport(fl[6]),
         departure_datetime=_parse_datetime(fl[20], fl[8]),
         arrival_datetime=_parse_datetime(fl[21], fl[10]),
         duration=fl[11],
     )
+
+
+def _leg_airport(code: Any) -> Airport:
+    """The member for a leg's airport code, one fli aliases included. A code fli
+    has no entry for fails the row through fli's own decoder, which logs it."""
+    member = fli_airports().get(code)
+    return member if member is not None else _parse_airport(code)
 
 
 def _cookie_path() -> pathlib.Path:
