@@ -293,6 +293,94 @@ def test_extension_malformed_args_escalate() -> None:
     assert isinstance(p, UnsupportedPred)
 
 
+@pytest.mark.parametrize(
+    ("directive", "keyword"),
+    [
+        ("MAXDUR 9:00 MAXCONNECT 1:00", "MAXDUR"),
+        ("MAXSTOPS 1 MAXDUR 9:00", "MAXSTOPS"),
+        ("MAXSTOPS 1 MAXCONNECT 1:00", "MAXSTOPS"),
+        ("MAXSTOPS 1 9", "MAXSTOPS"),
+        ("MAXCONNECT 1:00 MINCONNECT 3:00", "MAXCONNECT"),
+        ("MAXCONNECT 1:00 2:00", "MAXCONNECT"),
+        ("MINCONNECT 3:00 -CODESHARE", "MINCONNECT"),
+        ("MAXDUR 9:00 -CODESHARE", "MAXDUR"),
+        ("-CODESHARE MAXDUR 9:00", "-CODESHARE"),
+        ("-CODESHARE MAXDUR", "-CODESHARE"),
+        ("-REDEYES MAXDUR 9:00", "-REDEYES"),
+        ("-OVERNIGHTS MAXSTOPS 1", "-OVERNIGHTS"),
+    ],
+)
+def test_a_code_given_more_arguments_than_it_takes_escalates_quoting_it(
+    directive: str, keyword: str
+) -> None:
+    """Two codes missing their `;` read as the first alone would ask Google a
+    wider question than the one typed. Matrix answers `MAXDUR 9:00 MAXCONNECT
+    1:00` with "MAXDUR expects exactly one argument"."""
+    (p,) = parse_extension(directive)
+    reason = f"{keyword} with more arguments than it takes ({directive!r})"
+    assert p == UnsupportedPred(token=directive, reason=reason)
+    assert p.tier is Tier.MATRIX_ONLY
+    assert classify(None, directive).requires_matrix
+
+
+def test_a_run_on_in_lower_case_names_the_code_and_quotes_it_as_typed() -> None:
+    typed = "maxdur 9:00 maxconnect 1:00"
+    assert parse_extension(typed) == [
+        UnsupportedPred(
+            token=typed,
+            reason="MAXDUR with more arguments than it takes ('maxdur 9:00 maxconnect 1:00')",
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("extension", "predicates"),
+    [
+        (
+            "MAXDUR 9:00; MAXCONNECT 1:00",
+            [MaxDurationPred(minutes=540), ConnectTimePred(min_minutes=None, max_minutes=60)],
+        ),
+        ("MAXSTOPS 1; MAXDUR 9:00", [StopsPred(max_stops=1), MaxDurationPred(minutes=540)]),
+        (
+            "MINCONNECT 3:00; -CODESHARE",
+            [ConnectTimePred(min_minutes=180, max_minutes=None), ExcludeCodesharePred()],
+        ),
+        (
+            "ALLIANCE star-alliance; -REDEYES; MAXSTOPS 1",
+            [
+                AlliancePred(codes=frozenset({"star-alliance"})),
+                ExcludeRedeyesPred(),
+                StopsPred(max_stops=1),
+            ],
+        ),
+        ("AIRLINES AA DL", [CarrierPred(frozenset({"AA", "DL"}), exclude=False, operating=False)]),
+        ("ALLIANCE skyteam|oneworld", [AlliancePred(codes=frozenset({"skyteam", "oneworld"}))]),
+        ("-CITIES DFW ORD", [ConnectionAirportPred(frozenset({"DFW", "ORD"}), exclude=True)]),
+    ],
+)
+def test_codes_with_their_separators_parse_whole(extension: str, predicates: list[object]) -> None:
+    assert parse_extension(extension) == predicates
+
+
+@pytest.mark.parametrize(
+    ("directive", "reason"),
+    [
+        ("MAXDUR", "extension 'MAXDUR' not expressible on GF"),
+        ("MAXSTOPS x", "extension 'MAXSTOPS x' not expressible on GF"),
+        ("ALLIANCE skyteam MAXDUR 9:00", "unknown alliance in 'ALLIANCE skyteam MAXDUR 9:00'"),
+        (
+            "AIRLINES AA MAXDUR 9:00",
+            "a carrier list naming 'MAXDUR' and '9:00', which are not airline codes"
+            " ('AIRLINES AA MAXDUR 9:00')",
+        ),
+    ],
+)
+def test_a_missing_or_bad_argument_and_a_variable_length_code_keep_their_reasons(
+    directive: str, reason: str
+) -> None:
+    assert parse_extension(directive) == [UnsupportedPred(token=directive, reason=reason)]
+
+
 # ─────────────────────────── classify + gate ───────────────────────────
 
 
