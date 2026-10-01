@@ -2616,9 +2616,10 @@ def _render_booking_options(
         if s.link:
             # Folded or cropped, a multi-KB link no longer opens when copied.
             # The name prints as its table cell does; emoji off for the link
-            # alone, so a `:name:` in it stays the text it was.
-            console.print(f"{i:d} {_safe_text(s.name)} ", end="", soft_wrap=True)
-            console.print(_safe_text(s.link), soft_wrap=True, emoji=False)
+            # alone, so a `:name:` in it stays the text it was. Unhighlighted, so
+            # a URL inside a name is not styled as if this program marked it.
+            console.print(f"{i:d} {_safe_text(s.name)} ", end="", soft_wrap=True, highlight=False)
+            console.print(_safe_text(s.link), soft_wrap=True, emoji=False, highlight=False)
     table = _undercut(options, table_prices)
     cheapest = options.sellers[0]
     if table is not None and cheapest.price is not None:

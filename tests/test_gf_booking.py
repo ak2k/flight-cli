@@ -15,6 +15,7 @@ import base64
 import io
 import json
 import pathlib
+import re
 import signal
 import urllib.parse
 from datetime import date, datetime, time, timedelta
@@ -349,6 +350,28 @@ def test_a_price_that_is_not_finite_is_no_price() -> None:
     assert [(s.name, s.price) for s in sellers] == [("JetBlue", 179), ("Inf", None)]
     doc = gb.document(gb.BookingOptions("USD", sellers))
     assert json.loads(json.dumps(doc, allow_nan=False))[1]["price"] is None
+
+
+@pytest.mark.parametrize(
+    "gap",
+    [
+        pytest.param("\n", id="LF"),
+        pytest.param("\r\n", id="CRLF"),
+        pytest.param("\u2028", id="LS"),
+        pytest.param("\u2029", id="PS"),
+        pytest.param("\x85", id="NEL"),
+        pytest.param("\x0b", id="VT"),
+        pytest.param("\t", id="tab"),
+        pytest.param("  ", id="spaces"),
+    ],
+)
+def test_a_seller_and_its_fare_name_are_each_one_line(gap: str) -> None:
+    """The name is printed in the table, beside its link and in the verdict,
+    and written to the document: every one of them gets the same one line."""
+    body = _booking_body(_option(f"{gap}Cheap{gap}Air{gap}", 170, fare=f"Main{gap}{gap}Cabin"))
+    (seller,) = gb.parse_sellers(body, flights=[("B6", "1523")])
+    assert (seller.name, seller.fare) == ("Cheap Air", "Main Cabin")
+    assert gb.document(gb.BookingOptions("USD", (seller,)))[0]["seller"] == "Cheap Air"
 
 
 def test_the_document_gives_each_seller_its_link_and_bags() -> None:
@@ -715,6 +738,58 @@ def test_a_link_line_names_its_seller_as_the_table_row_does(
     lines = result.stdout.split("Booking options for #1", 1)[1].splitlines()
     (row,) = [_cells(line, "│") for line in lines if line.startswith("│")]
     assert f"1 {row[1]} {_CLK}/:smile:?u=T" in lines
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param("CheapAir\nhttps://phish.example/book\n", id="newline"),
+        pytest.param("CheapAir\r\nhttps://phish.example/book", id="crlf"),
+    ],
+)
+def test_a_line_break_in_a_seller_name_forges_no_link_line(
+    monkeypatch: pytest.MonkeyPatch, board: list[Any], name: str
+) -> None:
+    """Every line of the link block that carries a URL is one seller's line:
+    its number first and the parsed Google link last."""
+    _wide(monkeypatch)
+    body = _booking_body(_option(name, 170, flights=_B6_1523, five=_five(_CLK, [["u", "TOK"]])))
+    (seller,) = gb.parse_sellers(body, flights=[("B6", "1523")])
+    assert seller.link == f"{_CLK}?u=TOK"
+    _serve(monkeypatch, body)
+    result = _run("--fast", "--sellers", "--no-matrix-url", "--no-google-url")
+    assert result.exit_code == 0, result.output
+    block = result.stdout.split("Booking options for #1", 1)[1]
+    lines = block.splitlines()
+    outside = [line for line in lines if not line.startswith(("│", "┃", "┏", "┡", "└"))]
+    # No line outside the table opens on a URL the name carried.
+    assert not [line for line in outside if line.lstrip().startswith("https://")], outside
+    # The one link line is its seller's: its number first and the parsed link last.
+    link_lines = [line for line in outside if seller.link in line]
+    assert len(link_lines) == 1, link_lines
+    assert link_lines[0].startswith("1 "), link_lines
+    assert link_lines[0].endswith(f" {seller.link}"), link_lines
+    # The verdict stays one line, and the last one.
+    assert re.fullmatch(r"\S.* at USD170\.00 beats the table price, USD179\.00\.", lines[-1]), (
+        lines[-3:]
+    )
+
+
+def test_a_link_line_is_printed_unstyled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A colour console would style a URL or a number inside a seller's name,
+    so the line would show some of it as if this program had marked it."""
+    buf = io.StringIO()
+    monkeypatch.setattr(
+        cli, "console", Console(file=buf, width=250, force_terminal=True, color_system="standard")
+    )
+    body = _booking_body(
+        _option("Cheap 24 https://phish.example", 170, five=_five(_CLK, [["u", "T"]]))
+    )
+    sellers = gb.parse_sellers(body, flights=[("B6", "1523")])
+    cli._render_booking_options(
+        gb.BookingOptions("USD", sellers), n=1, table_prices=[], round_trip=False
+    )
+    assert f"1 Cheap 24 https://phish.example {_CLK}?u=T" in buf.getvalue().splitlines()
 
 
 def test_sellers_with_no_link_print_no_link_lines(

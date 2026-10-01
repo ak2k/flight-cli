@@ -153,18 +153,26 @@ def _bags(option: list[Any]) -> tuple[BagFee, ...]:
     return tuple(fees)
 
 
+def _one_line(value: Any) -> str | None:
+    """`value` with every run of whitespace, line breaks included, made one
+    space; None unless that leaves text. A name prints beside its link and in
+    the verdict, where a break in it would start a line the response wrote."""
+    if not isinstance(value, str):
+        return None
+    return " ".join(value.split()) or None
+
+
 def _seller(option: list[Any]) -> Seller | None:
     """`option[1][0] = [code, name, _, is_airline]`, `[7][0][1]` the price,
     `[21][3]` the fare name, `[5]` the link and `[18]` the bags. None for an
     option without a seller name."""
-    name = dig(option, 1, 0, 1)
-    if not isinstance(name, str) or not name.strip():
+    name = _one_line(dig(option, 1, 0, 1))
+    if name is None:
         return None
-    fare = dig(option, 21, 3)
     return Seller(
         name=name,
         price=_amount(dig(option, 7, 0, 1)),
-        fare=fare if isinstance(fare, str) and fare.strip() else None,
+        fare=_one_line(dig(option, 21, 3)),
         airline=dig(option, 1, 0, 3) is True,
         link=_link(option),
         bags=_bags(option),
