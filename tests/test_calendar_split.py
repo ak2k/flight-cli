@@ -3198,6 +3198,62 @@ def test_gflight_table_survives_a_hostile_flight_number(
     assert re.search(r"\x1b\[[0-9;]*31[;m]", written), "the legroom colour was escaped away"
 
 
+def _fake_gf_with_co2(grams: object, delta: object, label: object) -> SimpleNamespace:
+    fake = _fake_gf("UA117")
+    fake.flight.co2_emissions_g = grams
+    fake.flight.co2_emissions_delta_pct = delta
+    fake.flight.emissions_tag = label
+    return fake
+
+
+@pytest.mark.parametrize("payload", _HOSTILE_FIELD_VALUES)
+def test_gflight_table_survives_a_hostile_co2_label(
+    payload: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`co2_cell` is allowlisted because Google's label only picks the cell's
+    color and never reaches it: the cell is two numbers through `:d` specs inside
+    markup this module wrote. A label that is markup or an escape sequence must
+    leave the cell as it is and print nowhere."""
+    buffer = io.StringIO()
+    monkeypatch.setattr(
+        cli,
+        "console",
+        Console(
+            file=buffer, force_terminal=True, color_system="truecolor", no_color=False, width=400
+        ),
+    )
+    cli._render_gflight_table(  # pyright: ignore[reportPrivateUsage] — the render site IS the unit
+        [_fake_gf_with_co2(261000, -25, payload)],
+        legs=(Leg.of(["JFK"], ["LHR"], date(2026, 10, 1)),),
+        top_n=5,
+    )
+    written = buffer.getvalue()
+    probe = _flat(_SGR.sub("", written))
+    for driver in _DRIVERS:
+        assert driver not in probe, f"{driver!r} reached the console"
+    assert payload.lstrip("\x1b") not in probe, "the label reached the console"
+    assert "261 -25%" in probe
+    _ = capsys.readouterr()
+
+
+@pytest.mark.parametrize(("grams", "delta"), [("[/x]", -25), (261000, "[/x]")])
+def test_a_gflight_co2_figure_refuses_a_string(
+    grams: object, delta: object, monkeypatch: Any
+) -> None:
+    """The other half of what backs `co2_cell`: each figure reaches the cell
+    through a `:d` spec or integer arithmetic, so a string raises before anything
+    is printed."""
+    buffer = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, width=400))
+    with pytest.raises((TypeError, ValueError)):
+        cli._render_gflight_table(  # pyright: ignore[reportPrivateUsage] — the render site IS the unit
+            [_fake_gf_with_co2(grams, delta, "lower")],
+            legs=(Leg.of(["JFK"], ["LHR"], date(2026, 10, 1)),),
+            top_n=5,
+        )
+    assert buffer.getvalue() == ""
+
+
 # The rest of what the Google Flights table interpolates. Two reach a cell as text
 # and must arrive escaped; two reach one under a numeric spec or through integer
 # arithmetic, where the guard reads the spec as a PROOF that no string can be here
