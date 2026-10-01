@@ -82,8 +82,8 @@ minute: curl_cffi 30 rows / first `flight_id` `fuqYmc`; headless Chrome 30 rows
 The CLI runs the query inside `anyio.to_thread.run_sync`, and a playwright
 object touched from a thread other than its creator raises `greenlet.error` and
 strands a live Chrome. So the session is **thread-local**, created lazily by
-`_gf_browser.session(headed=…)`, and closed in `_gflight_results`' `finally` —
-the owning thread, on every path that function returns from. Every leg of one
+`_gf_browser.session(headed=…)`, and closed in `_gflight_query`'s `finally` —
+the owning thread, on every path that leaves the query. Every leg of one
 search runs in that thread, so all of a round trip's navigations share one
 launch (and one "opening Chrome" line).
 
