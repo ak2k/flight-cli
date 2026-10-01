@@ -1,4 +1,7 @@
 # pyright: reportPrivateUsage=false
+# DIVERGE: the Matrix client is given a MockTransport through `_http._client`,
+# the pattern tests/test_fare_rules.py follows; the constructor has no transport
+# injection point.
 """`search --verify`: one Google row priced on Matrix as exactly that itinerary.
 
 The Matrix answers below are the ones measured for JFK-LAX on 2026-10-20 with
@@ -11,20 +14,31 @@ from __future__ import annotations
 
 import json
 import pathlib
-from datetime import date, datetime
-from typing import Any, cast
+from datetime import date, datetime, time, timedelta
+from typing import TYPE_CHECKING, Any, cast
 
+import httpx
+import pytest
 from fli.models import (  # pyright: ignore[reportMissingTypeStubs] — fli ships no stubs
     Airline,
     Airport,
     FlightLeg,
     FlightResult,
 )
+from typer.testing import CliRunner
 
+from conftest import _answering, _ds1, _page
+from flight_cli import _gflight_ids as gfid
 from flight_cli import _verify as v
+from flight_cli import cli
+from flight_cli._gf_common import PageFetch
 from flight_cli._gflight_ids import GFlightWithId
+from flight_cli.client import MatrixClient
 from flight_cli.domain import Cabin, Pax, SearchOptions
 from flight_cli.models import BookingDetailsResult, SearchResult
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 
@@ -501,3 +515,563 @@ def test_the_delta_is_google_minus_matrix_and_none_across_currencies() -> None:
     assert v.delta("USD284.00", "USD300.00") == -16.0
     assert v.delta("EUR284.00", "USD284.00") is None
     assert v.delta(None, "USD284.00") is None
+
+
+# ─────────────────────────────── the command ────────────────────────────────
+#
+# Google serves the captured JFK-LAX board re-dated to `_DEP`; Matrix is a
+# MockTransport behind the real client, answering a routed search with
+# `chain`, an unrouted one with `probe`, and booking details by solution id.
+
+_DEP = date.today() + timedelta(days=45)
+_URL = "https://www.google.com/travel/flights?tfs=abc"
+_SEARCH = [
+    "search",
+    "JFK",
+    "LAX",
+    "--dep",
+    _DEP.isoformat(),
+    "--cash-only",
+    "--no-google-url",
+    "--no-matrix-url",
+]
+
+
+def _served() -> str:
+    return _page(
+        _answering(_ds1("ds1_jfk_lax_tfu.json"), origin=None, destination=None, date=str(_DEP))
+    )
+
+
+def _booked(row: Any) -> str:
+    return "+".join(f"{leg.airline.name}{leg.flight_number}" for leg in row.flight.legs)
+
+
+def _as_row() -> tuple[int, Any]:
+    """The AS21/AS487 row of the served board and its number in the list the
+    table numbers: a one-way board keeps Google's order."""
+    rows = list(gfid._rows_from_page_html(PageFetch(_served(), _URL, 200)))
+    n = next(i for i, r in enumerate(rows, 1) if _booked(r) == "AS21+AS487")
+    return n, rows[n - 1]
+
+
+def _stamp(at: datetime, offset: str) -> str:
+    return f"{at.isoformat(timespec='minutes')}{offset}"
+
+
+def _row_solution(sid: str, price: str, row: Any, *, lands_later: int = 0) -> dict[str, Any]:
+    """A Matrix solution with the row's flights, departing when it does and
+    landing `lands_later` days after it."""
+    legs = row.flight.legs
+    return _solution(
+        sid,
+        price,
+        _stamp(legs[0].departure_datetime, "-05:00"),
+        _stamp(legs[-1].arrival_datetime + timedelta(days=lands_later), "-08:00"),
+        [f"{leg.airline.name}{leg.flight_number}" for leg in legs],
+        [leg.arrival_airport.name for leg in legs[:-1]],
+    )
+
+
+def _chain(*solutions: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "solutionList": {"solutions": list(solutions)},
+        "solutionCount": len(solutions),
+        "session": "S",
+        "solutionSet": "SET",
+    }
+
+
+def _details_of(row: Any, *, later: dict[int, int] | None = None) -> dict[str, Any]:
+    """Booking details for the row's flights in the captured shape, leg `i`
+    flown `later[i]` days after the row flies it."""
+    later = later or {}
+    segments = [
+        _segment(
+            f"{leg.airline.name}{leg.flight_number}",
+            leg.departure_airport.name,
+            leg.arrival_airport.name,
+            _stamp(leg.departure_datetime + timedelta(days=later.get(i, 0)), "-05:00"),
+            _stamp(leg.arrival_datetime + timedelta(days=later.get(i, 0)), "-08:00"),
+        )
+        for i, leg in enumerate(row.flight.legs)
+    ]
+    carrier = row.flight.legs[0].airline.name
+    return {
+        "bookingDetails": {
+            "displayTotal": "USD213.20",
+            "itinerary": {"slices": [{"segments": segments}]},
+            "tickets": [
+                {
+                    "pricings": [
+                        {
+                            "fares": [
+                                {
+                                    "key": "0/0",
+                                    "carrier": carrier,
+                                    "code": "QH7OAVBN",
+                                    "bookingInfos": [
+                                        {
+                                            "segment": {
+                                                "origin": s["origin"]["code"],
+                                                "destination": s["destination"]["code"],
+                                            },
+                                            "bookingCode": "Q",
+                                            "cabin": "COACH",
+                                        }
+                                        for s in segments
+                                    ],
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ],
+        }
+    }
+
+
+class _Matrix:
+    """Matrix over a MockTransport. A search is answered with no more
+    solutions than its page asks for, as Matrix answers it."""
+
+    def __init__(self) -> None:
+        self.bodies: list[dict[str, Any]] = []
+        self.chain: dict[str, Any] = _chain()
+        self.probe: dict[str, Any] = _chain()
+        self.details: dict[str, dict[str, Any]] = {}
+        self.error: dict[str, Any] | None = None
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        body = cast("dict[str, Any]", json.loads(request.content))
+        self.bodies.append(body)
+        if self.error is not None:
+            return httpx.Response(200, json=self.error)
+        if request.url.path == "/v1/search":
+            routed = any(s.get("routeLanguage") for s in body["inputs"]["slices"])
+            answer = json.loads(json.dumps(self.chain if routed else self.probe))
+            sols = answer["solutionList"]["solutions"]
+            answer["solutionList"]["solutions"] = sols[: body["inputs"]["page"]["size"]]
+            return httpx.Response(200, json=answer)
+        if body["summarizerSet"] == "viewDetails":
+            sid = body["inputs"]["solution"].split("/", 1)[1]
+            return httpx.Response(200, json=self.details[sid])
+        return httpx.Response(
+            200,
+            json=json.loads((FIXTURES / "summarize/fare_rules_jfk_lhr_rt_0_0.json").read_text()),
+        )
+
+    def searches(self) -> list[dict[str, Any]]:
+        return [b for b in self.bodies if "name" in b]
+
+    def summarized(self) -> list[tuple[str, str]]:
+        return [
+            (b["summarizerSet"], b["inputs"]["solution"].split("/", 1)[1])
+            for b in self.bodies
+            if "name" not in b
+        ]
+
+
+@pytest.fixture
+def matrix(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> _Matrix:
+    fake = _Matrix()
+
+    def _client(**kw: Any) -> MatrixClient:
+        c = MatrixClient(
+            api_key="test-key",
+            cache_dir=str(tmp_path),
+            rps=1000.0,
+            **{k: val for k, val in kw.items() if k == "impersonate"},
+        )
+        c._http._client = httpx.AsyncClient(transport=httpx.MockTransport(fake.handler))
+        return c
+
+    monkeypatch.setattr(cli, "MatrixClient", _client)
+    return fake
+
+
+def _run(*args: str) -> Any:
+    return CliRunner().invoke(cli.app, [*_SEARCH, *args])
+
+
+def test_the_rows_own_itinerary_verifies_with_its_fares(
+    gf_session: Callable[..., Any], matrix: _Matrix
+) -> None:
+    """Red at the base: exit 2, no such option."""
+    n, row = _as_row()
+    price = f"USD{row.flight.price:.2f}"
+    matrix.chain = _chain(
+        _row_solution("AS-1", price, row), _row_solution("AS-2", "USD542.00", row, lands_later=1)
+    )
+    matrix.details = {"AS-1": _details_of(row)}
+    gf_session(_served())
+    result = _run("-n", "40", "--format", "json", "--verify", "--pick", str(n))
+    assert result.exit_code == 0, result.output
+    doc = json.loads(result.stdout)
+    listed = doc["search"][n - 1]
+    assert [leg["flight_number"] for leg in listed["legs"]] == ["21", "487"]
+    verdict = doc["verify"]
+    assert verdict["row"] == n
+    assert verdict["outcome"] == "match"
+    assert verdict["reason"] is None
+    assert verdict["routing"] == ["AS21 AS487"]
+    google = verdict["google"]["slices"]
+    assert google[0]["flights"] == ["AS21", "AS487"]
+    assert google[0]["dates"] == [leg["departure_datetime"][:10] for leg in listed["legs"]]
+    assert google[0]["airports"] == [["JFK", "SEA"], ["SEA", "LAX"]]
+    assert verdict["google"]["price"] == price
+    assert verdict["matrix"] == {"price": price, "total": "USD213.20", "slices": google}
+    assert verdict["delta"] == 0.0
+    assert verdict["missing_carriers"] == []
+    assert [(f["fare_basis"], f["booking_code"]) for f in verdict["fares"]] == [
+        ("QH7OAVBN", "Q"),
+        ("QH7OAVBN", "Q"),
+    ]
+    assert verdict["fare_rules"]["itinerary"] == n
+    assert verdict["fare_rules"]["rules"]
+    # One search: one slice on the row's day and airports, routed by its
+    # flights alone, in its currency and with the default page.
+    (search,) = matrix.searches()
+    (leg,) = search["inputs"]["slices"]
+    assert (leg["origins"], leg["destinations"], leg["date"]) == (["JFK"], ["LAX"], str(_DEP))
+    assert leg["routeLanguage"] == "AS21 AS487"
+    assert "commandLine" not in leg
+    assert search["inputs"]["page"]["size"] == SearchOptions().page_size
+    assert search["inputs"]["currency"] == "USD"
+    assert matrix.summarized() == [("viewDetails", "AS-1"), ("viewRules", "AS-1")]
+
+
+def test_table_mode_prints_the_check_after_the_google_table(
+    gf_session: Callable[..., Any], matrix: _Matrix, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _no_enrichment(**_kw: Any) -> None:
+        raise AssertionError("the table --verify numbers is Google's")
+
+    monkeypatch.setattr(cli, "_run_enriched_path", _no_enrichment)
+    n, row = _as_row()
+    price = f"USD{row.flight.price:.2f}"
+    matrix.chain = _chain(_row_solution("AS-1", price, row))
+    matrix.details = {"AS-1": _details_of(row)}
+    gf_session(_served())
+    result = _run("-n", "40", "--verify", "--pick", str(n))
+    assert result.exit_code == 0, result.output
+    out = result.stdout
+    assert "No Matrix enrichment: --verify asks Matrix about one row instead." in result.stderr
+    head = f"Verified on Matrix · itinerary #{n:d} · AS21 AS487 {_DEP}"
+    assert (
+        out.index("Google Flights") < out.index(head) < out.index(f"Fare rules · itinerary #{n:d}")
+    )
+    assert f"Matrix {price} · Google {price} · same price" in out
+    assert "JFK→SEA  AS  fare basis QH7OAVBN  booking code Q  COACH" in out
+
+
+def test_another_days_cheaper_price_is_never_shown(
+    gf_session: Callable[..., Any], matrix: _Matrix
+) -> None:
+    """The L2 pair, with the other trip first and cheaper: it shares the row's
+    flights and departure, and lands a day later."""
+    n, row = _as_row()
+    price = f"USD{row.flight.price:.2f}"
+    matrix.chain = _chain(
+        _row_solution("AS-2", "USD150.00", row, lands_later=1), _row_solution("AS-1", price, row)
+    )
+    matrix.details = {"AS-1": _details_of(row)}
+    for fmt in ("table", "json"):
+        gf_session(_served())
+        result = _run("-n", "40", "--fast", "--verify", "--pick", str(n), "--format", fmt)
+        assert result.exit_code == 0, result.output
+        assert "150.00" not in result.output
+    assert ("viewDetails", "AS-2") not in matrix.summarized()
+
+
+def _l4_google_row(day: date) -> GFlightWithId:
+    """L4's trip landing the next day, its middle flight the next day too."""
+    nxt = day + timedelta(days=1)
+
+    def leg(number: str, frm: str, to: str, leaves: datetime, lands: datetime) -> FlightLeg:
+        return FlightLeg(
+            airline=Airline["AA"],
+            flight_number=number,
+            departure_airport=Airport[frm],
+            arrival_airport=Airport[to],
+            departure_datetime=leaves,
+            arrival_datetime=lands,
+            duration=120,
+        )
+
+    flight = FlightResult(
+        price=900.0,
+        currency="USD",
+        duration=3165,
+        stops=2,
+        legs=[
+            leg(
+                "3120",
+                "JFK",
+                "CLT",
+                datetime.combine(day, time(17, 6)),
+                datetime.combine(day, time(19, 15)),
+            ),
+            leg(
+                "1630",
+                "CLT",
+                "DFW",
+                datetime.combine(nxt, time(19, 50)),
+                datetime.combine(nxt, time(21, 45)),
+            ),
+            leg(
+                "2038",
+                "DFW",
+                "LAX",
+                datetime.combine(nxt, time(22, 10)),
+                datetime.combine(nxt, time(23, 51)),
+            ),
+        ],
+    )
+    return GFlightWithId(flight=flight, flight_id="", amenities=[])
+
+
+def test_the_l4_row_verifies_on_its_middle_flights_day_under_n_1(
+    matrix: _Matrix, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two candidates share every slice field; booking details tell them
+    apart. Red before the chain's page was fixed at the default: under `-n 1`
+    Matrix answered only the first solution, and the row read as another
+    itinerary."""
+    row = _l4_google_row(_DEP)
+
+    def _board(*_a: object, **_kw: object) -> list[Any]:
+        return [row]
+
+    monkeypatch.setattr(cli, "_gflight_results", _board)
+    on_time = _l4_google_row(_DEP)
+    on_time.flight.legs[1].departure_datetime -= timedelta(days=1)
+    on_time.flight.legs[1].arrival_datetime -= timedelta(days=1)
+    matrix.chain = _chain(
+        _solution(
+            "L4-1",
+            "USD453.00",
+            _stamp(datetime.combine(_DEP, time(17, 6)), "-04:00"),
+            _stamp(datetime.combine(_DEP, time(23, 51)), "-07:00"),
+            ["AA3120", "AA1630", "AA2038"],
+            ["CLT", "DFW"],
+        ),
+        _row_solution("L4-2", "USD691.00", row),
+        _row_solution("L4-3", "USD913.00", row),
+    )
+    matrix.details = {"L4-2": _details_of(on_time), "L4-3": _details_of(row)}
+    result = _run("-n", "1", "--format", "json", "--verify")
+    assert result.exit_code == 0, result.output
+    verdict = json.loads(result.stdout)["verify"]
+    assert verdict["outcome"] == "match"
+    assert verdict["matrix"]["price"] == "USD913.00"
+    assert verdict["delta"] == -13.0
+    assert verdict["google"]["slices"][0]["dates"] == [
+        str(_DEP),
+        str(_DEP + timedelta(days=1)),
+        str(_DEP + timedelta(days=1)),
+    ]
+    assert "691" not in result.stdout
+    assert matrix.summarized() == [
+        ("viewDetails", "L4-2"),
+        ("viewDetails", "L4-3"),
+        ("viewRules", "L4-3"),
+    ]
+    table = _run("-n", "1", "--fast", "--verify")
+    assert table.exit_code == 0, table.output
+    assert "Matrix USD913.00 · Google USD900.00 · Matrix USD13.00 dearer" in table.stdout
+    assert "691" not in table.output
+
+
+def test_flights_priced_only_on_another_day_show_no_matrix_price(
+    gf_session: Callable[..., Any], matrix: _Matrix
+) -> None:
+    n, row = _as_row()
+    matrix.chain = _chain(_row_solution("AS-2", "USD542.00", row, lands_later=1))
+    gf_session(_served(), _served())
+    table = _run("-n", "40", "--fast", "--verify", "--pick", str(n))
+    assert table.exit_code == 0, table.output
+    assert f"Not verified on Matrix · itinerary #{n:d}: Matrix prices these flights only on 1" in (
+        " ".join(table.stdout.split())
+    )
+    assert "542" not in table.output
+    doc = json.loads(_run("-n", "40", "--verify", "--pick", str(n), "--format", "json").stdout)
+    verdict = doc["verify"]
+    assert verdict["outcome"] == "other-itinerary"
+    assert (verdict["matrix"], verdict["delta"], verdict["fares"]) == (None, None, [])
+    assert verdict["fare_rules"] is None
+    assert matrix.summarized() == []
+
+
+def _listing(*carriers: str) -> dict[str, Any]:
+    return _probe(*carriers).raw or {}
+
+
+def test_a_carrier_matrix_lists_nowhere_is_named(
+    gf_session: Callable[..., Any], matrix: _Matrix
+) -> None:
+    n, _ = _as_row()
+    matrix.probe = _listing("AA", "B6", "DL", "UA")
+    gf_session(_served())
+    result = _run("-n", "40", "--verify", "--pick", str(n), "--format", "json")
+    assert result.exit_code == 0, result.output
+    verdict = json.loads(result.stdout)["verify"]
+    assert verdict["outcome"] == "carrier-absent"
+    assert verdict["missing_carriers"] == ["AS"]
+    assert "AS" in verdict["reason"]
+    assert verdict["matrix"] is None
+    chain, probe = matrix.searches()
+    assert chain["inputs"]["slices"][0]["routeLanguage"] == "AS21 AS487"
+    (leg,) = probe["inputs"]["slices"]
+    assert "routeLanguage" not in leg
+    # The row stops once, so the probe admits a carrier listed only with one stop.
+    assert leg["commandLine"] == "MAXSTOPS 1"
+
+
+def test_a_carrier_matrix_lists_is_no_solution(
+    gf_session: Callable[..., Any], matrix: _Matrix
+) -> None:
+    n, _ = _as_row()
+    matrix.probe = _listing("AA", "AS")
+    gf_session(_served())
+    result = _run("-n", "40", "--fast", "--verify", "--pick", str(n))
+    assert result.exit_code == 0, result.output
+    flat = " ".join(result.stdout.split())
+    assert f"Not verified on Matrix · itinerary #{n:d}: Matrix returned no fare" in flat
+
+
+@pytest.mark.parametrize("fmt", ["table", "json"])
+def test_a_matrix_error_exits_1_after_the_table(
+    gf_session: Callable[..., Any], matrix: _Matrix, fmt: str
+) -> None:
+    n, _ = _as_row()
+    matrix.error = {"error": {"message": "backend [/x] busy", "type": "INTERNAL"}}
+    gf_session(_served())
+    result = _run("-n", "40", "--fast", "--verify", "--pick", str(n), "--format", fmt)
+    assert result.exit_code == 1, result.output
+    assert "Matrix returned an error (INTERNAL): backend [/x] busy" in result.stderr
+    if fmt == "json":
+        doc = json.loads(result.stdout)
+        assert doc["verify"] is None
+        assert len(doc["search"]) == 40
+    else:
+        assert "Google Flights" in result.stdout
+        assert "Verified" not in result.stdout
+
+
+def test_booking_details_without_their_flights_fail_rather_than_claim_another_trip(
+    gf_session: Callable[..., Any], matrix: _Matrix
+) -> None:
+    n, row = _as_row()
+    matrix.chain = _chain(_row_solution("AS-1", f"USD{row.flight.price:.2f}", row))
+    matrix.details = {"AS-1": {"bookingDetails": {}}}
+    gf_session(_served())
+    result = _run("-n", "40", "--verify", "--pick", str(n), "--format", "json")
+    assert result.exit_code == 1, result.output
+    assert json.loads(result.stdout)["verify"] is None
+    assert "cannot be checked flight by flight" in " ".join(result.stderr.split())
+
+
+def _no_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _forbidden(*_a: object, **_kw: object) -> Any:
+        raise AssertionError("refused before any request")
+
+    for name in ("_gflight_results", "_run", "_run_matrix", "MatrixClient", "_run_enriched_path"):
+        monkeypatch.setattr(cli, name, _forbidden)
+
+
+@pytest.mark.parametrize(
+    ("args", "said"),
+    [
+        pytest.param(["--cabin", "y,j"], "--cabin", id="multi-cabin"),
+        pytest.param(["--awards-only"], "--awards-only", id="awards-only"),
+        pytest.param(["--sellers"], "--sellers", id="sellers"),
+        pytest.param(["--fare-rules"], "--fare-rules", id="fare-rules"),
+        pytest.param(["--bags", "1"], "--bags", id="bags"),
+        pytest.param(["--backend", "matrix"], "runs on Matrix", id="backend-matrix"),
+        pytest.param(["--pick", "0"], "--pick 0", id="pick-zero"),
+        pytest.param(["--pick", "11"], "--pick 11", id="pick-past-n"),
+    ],
+)
+def test_a_search_with_no_google_row_to_check_is_refused_before_any_request(
+    monkeypatch: pytest.MonkeyPatch, args: list[str], said: str
+) -> None:
+    _no_request(monkeypatch)
+    result = _run("--verify", *args)
+    assert result.exit_code == 2, result.output
+    assert said in result.stderr
+    assert "Using Matrix" not in result.stderr
+    assert result.stdout == ""
+
+
+def test_awards_json_is_refused_naming_cash_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    _no_request(monkeypatch)
+
+    def _awards_on(_sel: cli.ProviderSelection) -> bool:
+        return True
+
+    monkeypatch.setattr(cli, "_should_run_awards", _awards_on)
+    result = CliRunner().invoke(
+        cli.app,
+        ["search", "JFK", "LAX", "--dep", str(_DEP), "--verify", "--format", "json"],
+    )
+    assert result.exit_code == 2, result.output
+    assert "--cash-only" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param(["--slice", f"JFK-LAX:{_DEP}"], id="slice"),
+        pytest.param(["--include-unavailable"], id="matrix-only-constraint"),
+    ],
+)
+def test_a_search_that_runs_on_matrix_is_refused_before_any_request(
+    monkeypatch: pytest.MonkeyPatch, args: list[str]
+) -> None:
+    _no_request(monkeypatch)
+    result = _run("--verify", *args)
+    assert result.exit_code == 2, result.output
+    assert "--verify needs a Google Flights row, and this search runs on Matrix." in (
+        " ".join(result.stderr.split())
+    )
+    assert result.stdout == ""
+
+
+def test_an_empty_board_exits_1_and_a_pick_past_it_2(
+    matrix: _Matrix, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows: list[Any] = []
+
+    def _board(*_a: object, **_kw: object) -> list[Any]:
+        return list(rows)
+
+    monkeypatch.setattr(cli, "_gflight_results", _board)
+    empty = _run("--fast", "--verify", "--format", "json")
+    assert empty.exit_code == 1, empty.output
+    assert "no itinerary to check" in empty.stderr
+    assert empty.stdout == ""
+    rows.append(_l4_google_row(_DEP))
+    short = _run("--fast", "--verify", "--pick", "3")
+    assert short.exit_code == 2, short.output
+    assert "--pick 3 is out of range (1-1); --verify checks that row." in short.stderr
+    assert matrix.bodies == []
+
+
+def test_without_the_flag_the_search_is_the_base_and_asks_matrix_nothing(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Green at the base."""
+
+    def _forbidden(*_a: object, **_kw: object) -> Any:
+        raise AssertionError("no Matrix request without --verify")
+
+    monkeypatch.setattr(cli, "MatrixClient", _forbidden)
+    gf_session(_served(), _served())
+    doc = json.loads(_run("-n", "40", "--backend", "gflight", "--format", "json").stdout)
+    assert isinstance(doc, list)
+    assert len(cast("list[Any]", doc)) == 40
+    table = _run("-n", "40", "--fast")
+    assert table.exit_code == 0, table.output
+    assert "Verified" not in table.output
+    assert "Matrix" not in table.stderr
