@@ -1502,6 +1502,30 @@ def test_a_round_trips_bag_fees_are_said_to_cover_the_whole_trip(
     assert caption in block.splitlines()
 
 
+def test_a_round_trip_with_no_bag_fee_says_nothing_of_bag_fees(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _wide(monkeypatch)
+    _serve(
+        monkeypatch,
+        _booking_body(
+            _option(
+                "Agency",
+                817,
+                flights=[["B6", "1523"], ["B6", "123"]],
+                five=_five(_CLK, [["u", "T"]]),
+            )
+        ),
+    )
+    result = _round_trip_sellers(monkeypatch)
+    assert result.exit_code == 0, result.output
+    block = result.stdout.split("Booking options for #1", 1)[1]
+    assert "Each link goes through Google to that seller's own page for this fare." in (
+        block.splitlines()
+    )
+    assert "bag fees" not in block.lower()
+
+
 # ───────────────────────────── under a price cap ─────────────────────────────
 
 _CAP = "190"

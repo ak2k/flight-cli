@@ -2604,12 +2604,13 @@ def _render_booking_options(
         for c in numbers:
             c.no_wrap = False
     console.print(t)
+    whole_trip = round_trip and any(s.bags for s in options.sellers)
     if any(s.link for s in options.sellers):
         console.print(
             "[dim]Each link goes through Google to that seller's own page for this fare"
-            + ("; bag fees cover the whole trip.[/]" if round_trip else ".[/]")
+            + ("; bag fees cover the whole trip.[/]" if whole_trip else ".[/]")
         )
-    elif round_trip and any(s.bags for s in options.sellers):
+    elif whole_trip:
         console.print("[dim]Bag fees cover the whole trip.[/]")
     for i, s in enumerate(options.sellers, 1):
         if s.link:
