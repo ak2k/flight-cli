@@ -45,6 +45,13 @@ go into detail and are loaded on demand.
   rides both backends. Decision: `enable_matching=False` + the existing
   matcher keys, not the matched-Google-flight-id path. Empirical evidence
   behind the choice and the upgrade path if it turns out worth it later.
+- [award_airport_sets.md](award_airport_sets.md) — An award search over
+  `JFK,EWR` or a metro code asks the providers one airport pair at a time:
+  per-pair cost (PointsPath cabins × airlines requests, one seats.aero quota
+  unit), the cap of 8 pair queries a search and its order (cash-flown pairs
+  first, a pair per leg per round), the stderr line and `pairs_not_asked`, the
+  matched-id route check in `join`, and seats.aero's documented but unmeasured
+  comma-list form.
 - [pp_matched_id_recipe.md](pp_matched_id_recipe.md) — **Supersedes the
   "dead end" framing in `pp_on_gflight.md`.** The matched-id join *does*
   work; the previous "no" was because we sent synthetic flight_ids and

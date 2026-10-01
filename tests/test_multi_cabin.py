@@ -12,12 +12,20 @@ cabin auto-derivation."""
 
 from __future__ import annotations
 
-from typing import Any, cast
+import threading
+import time
+from dataclasses import replace
+from datetime import date, timedelta
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 import typer
+from typer.testing import CliRunner
 
-from conftest import LITERAL_DATES_NOW
+from conftest import LITERAL_DATES_NOW, _answering, _ds1, _page
+from flight_cli import _gflight_ids as gfid
+from flight_cli import cli
+from flight_cli._gf_common import PageFetch
 from flight_cli._multi_cabin import (
     MultiCabinRow,
     itinerary_key,
@@ -33,7 +41,7 @@ from flight_cli.cli import (
     _derive_pp_cabins,
     _resolve_cabin_list,
 )
-from flight_cli.domain import Cabin
+from flight_cli.domain import Cabin, Leg, SearchOptions
 from flight_cli.models import (
     Itinerary,
     ItineraryDetails,
@@ -42,6 +50,10 @@ from flight_cli.models import (
     Slice,
     SliceEndpoint,
 )
+from flight_cli.pp.gflight_adapter import fli_results_to_search_result
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # The searches built here carry literal travel dates; see `LITERAL_DATES_NOW`.
 pytestmark = pytest.mark.time_machine(LITERAL_DATES_NOW)
@@ -113,7 +125,7 @@ def test_resolve_cabin_list_unknown_token_errors():
 
 def test_itinerary_key_one_way():
     it = _itin(("AA100", "2026-08-15T09:00", "JFK", "LHR"))
-    assert itinerary_key(it) == (("AA100", "2026-08-15"),)
+    assert itinerary_key(it) == ((("AA100",), (), "2026-08-15T09:00", None),)
 
 
 def test_itinerary_key_round_trip_distinct_keys():
@@ -133,7 +145,7 @@ def test_itinerary_key_round_trip_distinct_keys():
 
 def test_itinerary_key_normalizes_flight_numbers():
     it = _itin((" aa 100 ", "2026-08-15T09:00", "JFK", "LHR"))
-    assert itinerary_key(it) == (("AA100", "2026-08-15"),)
+    assert itinerary_key(it) == ((("AA100",), (), "2026-08-15T09:00", None),)
 
 
 def test_itinerary_key_missing_flights_returns_none():
@@ -314,6 +326,210 @@ def test_merge_orders_a_one_currency_list_by_amount_whatever_was_asked_for(curre
         currency=currency,
     )
     assert [r.prices[Cabin.COACH] for r in rows] == ["GBP100.00", "GBP200.00", "GBP300.00"]
+
+
+def _trip(*slices: tuple[str, str, str], price: str) -> Itinerary:
+    """An itinerary with each slice as (flights joined by '+', departure,
+    arrival) and no per-flight dates, as Matrix states one."""
+    return Itinerary(
+        ext=ItineraryExt(price=price),
+        itinerary=ItineraryDetails(
+            slices=[
+                Slice(flights=flights.split("+"), departure=dep, arrival=arr)
+                for flights, dep, arr in slices
+            ],
+            carriers=[],
+        ),
+    )
+
+
+def test_merge_keeps_matrix_trips_behind_one_first_flight_apart():
+    """Matrix's FI+ JFK-LHR answer for 2026-10-20: four trips on one first
+    flight, through Keflavik, landing on two days. Matrix dates no flight but
+    the first, so the arrival is what tells a trip landing a day later apart."""
+    dep = "2026-10-20T20:30-04:00"
+    fi = [
+        ("FI614+FI450", "2026-10-21T11:55+01:00", "USD884.00", "USD2100.00"),
+        ("FI614+FI450", "2026-10-22T11:55+01:00", "USD1180.00", "USD2400.00"),
+        ("FI614+FI454", "2026-10-21T20:20+01:00", "USD1011.00", "USD2200.00"),
+        ("FI614+FI454", "2026-10-22T20:20+01:00", "USD1031.00", "USD2300.00"),
+    ]
+    economy = [_trip((flights, dep, lands), price=y) for flights, lands, y, _ in fi]
+    business = [_trip((flights, dep, lands), price=j) for flights, lands, _, j in reversed(fi)]
+    rows = merge(
+        {Cabin.COACH: _result(*economy), Cabin.BUSINESS: _result(*business)},
+        sort_by=Cabin.COACH,
+        top_n=10,
+        currency="USD",
+    )
+    shown = [
+        (r.itinerary.itinerary.slices[0].flights, r.itinerary.itinerary.slices[0].arrival)
+        for r in rows
+    ]
+    assert shown == [
+        (["FI614", "FI450"], "2026-10-21T11:55+01:00"),
+        (["FI614", "FI454"], "2026-10-21T20:20+01:00"),
+        (["FI614", "FI454"], "2026-10-22T20:20+01:00"),
+        (["FI614", "FI450"], "2026-10-22T11:55+01:00"),
+    ]
+    assert [(r.prices[Cabin.COACH], r.prices[Cabin.BUSINESS]) for r in rows] == [
+        ("USD884.00", "USD2100.00"),
+        ("USD1011.00", "USD2200.00"),
+        ("USD1031.00", "USD2300.00"),
+        ("USD1180.00", "USD2400.00"),
+    ]
+    assert [r.itinerary.price for r in rows] == [
+        "USD884.00",
+        "USD1011.00",
+        "USD1031.00",
+        "USD1180.00",
+    ]
+
+
+@pytest.mark.parametrize("listed", [("USD600.00", "USD450.00"), ("USD450.00", "USD600.00")])
+def test_merge_prices_an_itinerary_listed_twice_at_its_cheaper_listing(
+    listed: tuple[str, str],
+):
+    """Only the cheaper fare is on offer, and the row shows that listing, so
+    its itinerary carries the price printed beside it."""
+    listings = [_trip(("AA100", "2026-08-15T09:00", "2026-08-15T12:00"), price=p) for p in listed]
+    rows = merge({Cabin.COACH: _result(*listings)}, sort_by=Cabin.COACH, top_n=10, currency="USD")
+    assert [(r.prices, r.itinerary.price) for r in rows] == [
+        ({Cabin.COACH: "USD450.00"}, "USD450.00")
+    ]
+
+
+def test_merge_keeps_round_trips_whose_outbounds_share_a_first_flight_apart():
+    def round_trip(outbound: str, price: str) -> Itinerary:
+        return _trip(
+            (outbound, "2026-08-15T06:00", "2026-08-15T14:00"),
+            ("AA9", "2026-08-22T08:00", "2026-08-22T16:00"),
+            price=price,
+        )
+
+    rows = merge(
+        {
+            Cabin.COACH: _result(
+                round_trip("AA1+AA2", "USD300.00"), round_trip("AA1+AA3", "USD500.00")
+            )
+        },
+        sort_by=Cabin.COACH,
+        top_n=10,
+        currency="USD",
+    )
+    assert [(r.itinerary.itinerary.slices[0].flights, r.prices) for r in rows] == [
+        (["AA1", "AA2"], {Cabin.COACH: "USD300.00"}),
+        (["AA1", "AA3"], {Cabin.COACH: "USD500.00"}),
+    ]
+
+
+_LAX = "ds1_jfk_lax_tfu.json"
+_LHR = "ds1_jfk_lhr_tfu.json"
+
+
+@pytest.mark.parametrize(("name", "itineraries"), [(_LAX, 95), (_LHR, 101)])
+def test_merge_prices_every_google_itinerary_on_a_row_of_its_own(name: str, itineraries: int):
+    """Economy is a full served board, business the same itineraries each
+    repriced to a fare of its own. `_gflight_ids._itinerary_key`, the key the
+    served board is deduplicated on, says which itinerary each row is."""
+    page = PageFetch(_page(_ds1(name)), "https://www.google.com/travel/flights?tfs=abc", 200)
+    economy = list(gfid._rows_from_page_html(page))
+    business = [
+        r
+        if r.flight.price is None
+        else replace(r, flight=r.flight.model_copy(update={"price": r.flight.price * 3 + i}))
+        for i, r in enumerate(economy)
+    ]
+    boards = {Cabin.COACH: economy, Cabin.BUSINESS: business}
+    results = {cab: fli_results_to_search_result(board) for cab, board in boards.items()}
+    itinerary_of: dict[int, gfid.ItineraryKey] = {}
+    own: dict[gfid.ItineraryKey, dict[Cabin, str]] = {}
+    for cab, board in boards.items():
+        for row, it in zip(board, results[cab].solutions, strict=True):
+            key = gfid._itinerary_key(row)
+            itinerary_of[id(it)] = key
+            if it.price:
+                own.setdefault(key, {})[cab] = it.price
+    rows = merge(results, sort_by=Cabin.COACH, top_n=1000, currency="USD")
+    keys = [itinerary_of[id(r.itinerary)] for r in rows]
+    assert len(rows) == len(set(keys)) == itineraries
+    assert [r.prices for r in rows] == [own.get(k, {}) for k in keys]
+
+
+@pytest.mark.parametrize(
+    ("destination", "name", "itineraries"), [("LAX", _LAX, 95), ("LHR", _LHR, 101)]
+)
+def test_a_google_multi_cabin_table_shows_each_itinerary_once_at_its_own_price(
+    gf_session: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    destination: str,
+    name: str,
+    itineraries: int,
+):
+    shown: list[MultiCabinRow] = []
+
+    def render(rows: list[MultiCabinRow], **_kw: object) -> None:
+        shown.extend(rows)
+
+    monkeypatch.setattr(cli, "_render_multi_cabin_search", render)
+    day = date.today() + timedelta(days=45)
+    page = _page(_answering(_ds1(name), origin=None, destination=None, date=day.isoformat()))
+    gf_session(page, page)
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            *("search", "--cash-only", "--no-google-url", "--no-matrix-url"),
+            *("JFK", destination, "--dep", day.isoformat()),
+            *("--cabin", "economy,business", "--backend", "gflight", "-n", "200"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    trips = {
+        tuple((tuple(s.flights), tuple(s.segment_dates)) for s in r.itinerary.itinerary.slices)
+        for r in shown
+    }
+    assert len(shown) == len(trips) == itineraries
+    assert all(r.prices.get(Cabin.COACH) == r.itinerary.price for r in shown)
+
+
+@pytest.mark.parametrize("round_trip", [False, True])
+def test_google_cabins_come_back_in_the_order_they_were_asked_for(
+    monkeypatch: pytest.MonkeyPatch, round_trip: bool
+):
+    """Business answers first and economy after it; economy still leads the
+    answer, which is the order `--format json` lists the cabins in. A round
+    trip still names the cabin whose outbounds every cabin pinned."""
+    business_done = threading.Event()
+
+    def results(_legs: object, opts: SearchOptions, *_a: object, **_kw: object) -> list[Any]:
+        if opts.cabin == Cabin.COACH:
+            business_done.wait(5)
+            time.sleep(0.05)
+        else:
+            business_done.set()
+        return []
+
+    def outbound(*_a: object) -> cli._Outbound:
+        return cli._Outbound(gfid.Board([]), None)
+
+    def pin_keys(*_a: object, **_kw: object) -> list[gfid.ItineraryKey]:
+        return [()]
+
+    monkeypatch.setattr(cli, "_gflight_results", results)
+    monkeypatch.setattr(cli, "_gflight_outbound", outbound)
+    monkeypatch.setattr(gfid, "pin_keys", pin_keys)
+    dep = date.today() + timedelta(days=45)
+    legs = (Leg.of("JFK", "LAX", dep),)
+    if round_trip:
+        legs = (*legs, Leg.of("LAX", "JFK", dep + timedelta(days=7)))
+    out = cli._run_gflight_multi(
+        legs=legs,
+        opts=SearchOptions(cabin=Cabin.COACH),
+        cabins=(Cabin.COACH, Cabin.BUSINESS),
+        top_n=10,
+    )
+    assert list(out) == [Cabin.COACH, Cabin.BUSINESS]
+    assert out.leader == (Cabin.COACH if round_trip else None)
 
 
 # ────────────────────────── _derive_pp_cabins ──────────────────────────────
@@ -551,7 +767,7 @@ def test_a_multi_cabin_round_trip_says_what_its_join_is_drawn_from(
     from flight_cli._gflight_ids import pinned_fanout
 
     pins = pinned_fanout(cli._bumped_query_top_n(5, len(cabins)))
-    assert (f"up to {pins} of each cabin's first-ranked" in buf.getvalue()) is shown, buf.getvalue()
+    assert (f"up to {pins} of each cabin's cheapest" in buf.getvalue()) is shown, buf.getvalue()
 
 
 @pytest.mark.parametrize(
@@ -604,7 +820,7 @@ def test_the_join_note_counts_the_outbounds_that_were_actually_pinned(
     )
     # "up to", because the cap bounds how many outbounds the join can see and
     # the board may hold fewer. The number is still the pin budget's.
-    assert f"up to {expected} of the Y cabin's first-ranked" in buf.getvalue(), buf.getvalue()
+    assert f"up to {expected} of the Y cabin's cheapest" in buf.getvalue(), buf.getvalue()
 
 
 def test_multi_cabin_fan_out_honours_an_encodable_constraint(
@@ -862,13 +1078,14 @@ def test_a_round_trip_says_how_many_outbounds_it_will_actually_combine(
     cli._pin_cap_note(legs=legs, top_n=top_n)
 
     printed = buf.getvalue()
-    assert ("first-ranked outbounds" in printed) is expected, printed
+    assert ("cheapest outbounds" in printed) is expected, printed
     if expected:
-        assert f"up to {pinned_fanout(top_n)} first-ranked" in printed, printed
+        assert f"up to {pinned_fanout(top_n)} cheapest" in printed, printed
         assert str(top_n) not in printed, "the note must not quote the number it is correcting"
-        # Ranked, not cheapest: the pins are the board in page order, and the
-        # repository's own capture has its cheapest outbound outside them.
-        assert "cheapest" not in printed, printed
+        # Cheapest, not ranked: the pins are taken in price order, so the note
+        # names the order a user can check against the table.
+        assert "cheapest" in printed, printed
+        assert "ranked" not in printed, printed
 
 
 @pytest.mark.parametrize(
@@ -941,4 +1158,4 @@ def test_every_round_trip_surface_says_how_many_outbounds_it_combines(
     # a document on stdout stays a document.
     if "json" in command:
         _json.loads(result.stdout)  # the assertion is that this does not raise
-        assert "first-ranked outbounds" not in result.stdout, result.stdout
+        assert "cheapest outbounds" not in result.stdout, result.stdout
