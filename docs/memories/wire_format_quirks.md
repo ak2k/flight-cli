@@ -245,3 +245,36 @@ empty when the Google query fails. `--fast` means Google alone, `--backend
 gflight` names Google, Matrix prices no bags, and a `--sellers` document wraps a
 Google row that Matrix cannot supply. A multi-cabin search exits 1 when every
 Google cabin fails.
+
+### `booking_options`: one object per seller
+
+`booking_options` lists the sellers cheapest first, each as `seller`, `price`,
+`currency`, `fare`, `airline`, `booking_url` and `bags`, every value read from
+that seller's own entry in Google's `GetBookingResults` answer.
+
+- `booking_url` comes from `option[5]` = `[display domain, null, [base URL,
+  [[name, value], ...]]]`. In 153 entries over 9 captures (2026-09-27 and
+  2026-10-01) the base was always `https://www.google.com/travel/clk/f` with
+  one pair, `["u", <token of 1.7-9.6 KB>]`. The page POSTs the pairs as a form;
+  a GET with them as the query answers the same 200 meta refresh to the
+  seller's own page for that fare (measured 2026-10-01, also for a 9650-character
+  URL, and for a 4-day-old token, whose seller URL carried the old price for
+  the seller to price again). The URL is the base plus the pairs as its query,
+  and null unless the base is printable ASCII, `https`, with a host and no query
+  or fragment of its own, and every pair is two strings.
+- `bags` comes from `option[18]` = `[1st checked, 2nd checked, carry-on]`. A
+  slot `[2, [[null, amount]], 1]` is a fee of `amount` in the page's currency
+  and `[3]` is free; Google's page says the same ("First checked bag costs 45
+  US dollars", "1 free carry-on", "First checked bag is free"). `[0]` (4 times,
+  once in the carry-on slot) and `[1]` (3 times) also occur, with no meaning
+  known, and a null slot gives no information (agencies, mostly); none of the
+  three adds an entry. An entry is `{bag, nth, fee, currency}`, `bag` being
+  `checked` or `carry-on` and `fee` 0 meaning free.
+- On a round trip a bag fee covers the whole trip: AA on BA178 is 85/100 one
+  way and 170/200 round trip, and the page says "Fare and baggage fees apply to
+  your entire trip". Not measured: party size (every capture is 1 adult) and a
+  page in a currency other than USD.
+
+The table shows the same fields: a `#` column, `carry-on`, `1st checked` and
+`2nd checked` columns, then one line per seller with a link, `<#> <seller>
+<link>`, never folded.

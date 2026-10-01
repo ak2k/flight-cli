@@ -2520,7 +2520,9 @@ def _print_booking_options(
     against the prices that row shows: its Google price, and on the merged
     table its Matrix price."""
     options = _booking_options(search, result, n, gf_price=gf_price, headed=headed)
-    _render_booking_options(options, n=n, table_prices=[gf_price, matrix_price])
+    _render_booking_options(
+        options, n=n, table_prices=[gf_price, matrix_price], round_trip=len(search.legs) > 1
+    )
 
 
 def _undercut(options: BookingOptions, table_prices: list[str | None]) -> float | None:
@@ -2549,20 +2551,59 @@ def _undercut(options: BookingOptions, table_prices: list[str | None]) -> float 
 
 
 def _render_booking_options(
-    options: BookingOptions, *, n: int, table_prices: list[str | None]
+    options: BookingOptions, *, n: int, table_prices: list[str | None], round_trip: bool
 ) -> None:
-    """The "Booking options for #N" block: every seller, cheapest first."""
+    """The "Booking options for #N" block: every seller, cheapest first, then
+    each seller's booking link on a line of its own beside its number."""
     t = Table(title=f"Booking options for #{n:d}", show_header=True, header_style="bold green")
+    t.add_column("#", justify="right")
     t.add_column("seller")
     t.add_column("price", justify="right")
     t.add_column("fare")
-    for s in options.sellers:
+    t.add_column("carry-on", justify="right")
+    t.add_column("1st checked", justify="right")
+    t.add_column("2nd checked", justify="right")
+    for i, s in enumerate(options.sellers, 1):
+        fees = {(b.bag, b.nth): b.fee for b in s.bags}
+        carry_on = fees.get(("carry-on", 1))
+        first = fees.get(("checked", 1))
+        second = fees.get(("checked", 2))
         t.add_row(
+            f"{i:d}",
             _safe_text(s.name),
             "—" if s.price is None else f"{_safe_text(options.currency)}{s.price:.2f}",
             _safe_text(s.fare or ""),
+            ""
+            if carry_on is None
+            else "free"
+            if carry_on == 0
+            else f"{_safe_text(options.currency)}{carry_on:.2f}",
+            ""
+            if first is None
+            else "free"
+            if first == 0
+            else f"{_safe_text(options.currency)}{first:.2f}",
+            ""
+            if second is None
+            else "free"
+            if second == 0
+            else f"{_safe_text(options.currency)}{second:.2f}",
         )
     console.print(t)
+    if any(s.link for s in options.sellers):
+        console.print(
+            "[dim]Each link goes through Google to that seller's own page for this fare"
+            + ("; bag fees cover the whole trip.[/]" if round_trip else ".[/]")
+        )
+    elif round_trip and any(s.bags for s in options.sellers):
+        console.print("[dim]Bag fees cover the whole trip.[/]")
+    for i, s in enumerate(options.sellers, 1):
+        if s.link:
+            # Folded or cropped, a multi-KB link no longer opens when copied;
+            # emoji off so a `:name:` in it stays the text it was.
+            console.print(
+                f"{i:d} {_safe_text(s.name)} {_safe_text(s.link)}", soft_wrap=True, emoji=False
+            )
     table = _undercut(options, table_prices)
     cheapest = options.sellers[0]
     if table is not None and cheapest.price is not None:
@@ -6337,8 +6378,9 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         False,
         "--sellers",
         help="After the Google Flights table, open itinerary #N's booking page "
-        "(--pick; default 1) in Chrome and list every seller with its price and fare "
-        "name, cheapest first. Needs a Google Flights result and the browser extra; "
+        "(--pick; default 1) in Chrome and list every seller with its price, fare name, "
+        "bag fees and booking link, cheapest first. Needs a Google Flights result and the "
+        "browser extra; "
         "refused on multi-cabin and --awards-only searches. With --format json the "
         'document becomes {"search": …, "booking_options": […]}.',
         rich_help_panel=_GROUP_OUTPUT,
