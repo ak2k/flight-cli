@@ -536,7 +536,12 @@ def test_enrich_refuses_a_document_it_cannot_write(
     def _awards(sel: Any) -> bool:
         return not sel.cash_only
 
+    def _no_award_search(*_a: Any, **_kw: Any) -> None:
+        pytest.fail("an award provider was searched")
+
     monkeypatch.setattr(cli, "_should_run_awards", _awards)
+    # A refusal that stopped holding would otherwise search the real provider.
+    monkeypatch.setattr(cli, "run_pp_for_search", _no_award_search)
     result = _run([*args, "--enrich", "--format", "json"])
     assert result.exit_code == 2, result.output
     assert said in " ".join(result.stderr.split())
