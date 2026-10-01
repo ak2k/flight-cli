@@ -201,12 +201,12 @@ def graph_blocker(search: CalendarSearch) -> str | None:  # noqa: PLR0911 — on
     The phrase completes "this is …". The caller has checked the currency, the
     shape and the airports. What is left is every constraint the graph cannot
     both find on the page URL exactly and trust Google to apply there, since it
-    has no rows to check afterwards. Admitted, per leg: a stop
-    ceiling of two or fewer, one marketing-carrier or alliance include, a
-    maximum duration, a minimum layover, a maximum layover, and a departure-time
-    window the page's whole hours bound exactly; each was measured narrowing the
-    graph (one-way LGA-LAX, and a carrier include on a round trip). A round
-    trip's time window drew a graph with no priced date, so it is refused.
+    has no rows to check afterwards. Admitted, per leg: a stop ceiling of two or
+    fewer, one marketing-carrier or alliance include, a maximum duration, a
+    minimum layover, a maximum layover, and a departure-time window the page's
+    whole hours bound exactly; each was measured narrowing the graph (one-way
+    LGA-LAX, and a carrier include on a round trip). A round trip's time window
+    drew a graph with no priced date, so it is refused.
 
     Refusals are tried in the order the narrower gate tries them, so a calendar
     that neither admits is named as that gate names it: routing the grids refuse
