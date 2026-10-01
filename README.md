@@ -48,8 +48,8 @@ flight search MIA PAR --dep 2026-06-15 --routing "LH UA" --ext "-REDEYES"
 flight search JFK LHR --dep 2026-08-15 --backend matrix
 flight search JFK LHR --dep 2026-08-15 --backend gflight
 
-# lowest-fare calendar across a date window (one Matrix call returns
-# 30 days × N durations of priced options)
+# lowest-fare calendar across a date window (one Matrix call per airport
+# pair, PAR split into CDG, ORY and BVA, returns 30 days × N durations)
 flight calendar MIA PAR --start 2026-06-07 -d 5-7 \
     --routing "LH+" --ext "MAXCONNECT 2:00"
 
@@ -84,7 +84,7 @@ Every result-printing command supports:
 
 - **Routing language** (`--routing`): `LH+` (any Lufthansa-group leg), `BA AA` (BA or AA only), `[F* X F*]` (any flight, then X, then any). [More codes →](https://www.nicethis.com/itamatrix.aspx)
 - **Extension codes** (`--extension`): `MAXCONNECT 5:00`, `MAXSTOPS 1`, `MINMILES 3000`, `-REDEYES`, `-OVERNIGHTS`, `ALLIANCE oneworld`.
-- **Multi-airport**: `flight calendar MIA VIE,PAR,FCO,MAD --start ...` — search across N European cities at once.
+- **Multi-airport**: `flight calendar MIA VIE,PAR,FCO,MAD --start ...` — search across N European cities at once, one Matrix query per airport pair, merged into one grid in one currency whose every day names the pair that priced it.
 - **Time-of-day filters** (`--depart-times`, `--return-times`): `morning`, `morning,midday` etc. Buckets that make one window stay on Google Flights; `morning,evening` goes to Matrix.
 - **Stop limits** (`--stops N`): `0` = nonstop only, `1` = up to one stop, … Honored on both backends.
 - **Calendar-mode duration ranges** (`-d 5-7`): one search returns prices for 5-, 6-, and 7-night trips at every starting day.

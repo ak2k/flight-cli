@@ -249,12 +249,15 @@ Full detail at [`docs/memories/MEMORY.md`](./docs/memories/MEMORY.md).
    undercounts the true union). It is *not* our encoding (byte-matches the SPA
    fixture) and *not* transient (retrying doesn't help). So a combined
    multi-airport calendar can't be trusted even when non-empty. `flight calendar`
-   therefore always runs a multi-airport query as one sub-search per
-   (origin, destination), in parallel (Matrix tolerates ≥16 concurrent with flat
-   latency), and merges the grids — the only way to get complete results
-   (`_calendar_split.py` + `cli._run_calendar`). The gflight **date grid** — still
-   an RPC POST — has an analogous empty-failure mode (cold curl_cffi session)
-   handled separately by retry + NID-cookie persistence in `_gflight_ids.py`.
+   therefore always runs a multi-airport query, metro codes split into their
+   member airports, as one sub-search per airport pair, in parallel (Matrix
+   tolerates ≥16 concurrent with flat latency), in one currency, and merges the
+   grids with each cell naming its pair — the only way to get complete results
+   (`_calendar_split.py` + `cli._run_calendar`); a round trip also runs the
+   combined query beside them for returns into another airport of the set. The
+   gflight **date grid** — still an RPC POST — has an analogous empty-failure
+   mode (cold curl_cffi session) handled separately by retry + NID-cookie
+   persistence in `_gflight_ids.py`.
    The gflight **search** path fetches Google's public page instead
    (`GetShoppingResults` has been gated since 2026-08), where an empty board is
    authoritative and every refusal is typed — see
