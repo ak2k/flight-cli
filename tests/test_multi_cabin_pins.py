@@ -282,7 +282,7 @@ def test_every_cabin_is_priced_on_the_sort_cabins_outbounds(
     assert [prices for _, prices in rows if "—" in prices] == []
     assert google.pins["ECONOMY"] == google.pins["BUSINESS"] == list(range(100, 110))
     assert (
-        "Google Flights prices every cabin on up to 10 of the Y cabin's first-ranked "
+        "Google Flights prices every cabin on up to 10 of the Y cabin's cheapest "
         "outbounds; '—' means that cabin's search returned no fare for the itinerary."
     ) in _flat(result.stderr)
 
@@ -326,7 +326,7 @@ def test_the_sort_cabin_leads_whichever_cabin_it_is(monkeypatch: pytest.MonkeyPa
     alone = sorted(_fare("BUSINESS", n, j) for n in range(120, 130) for j in range(5))[:10]
     assert [float(j) for _, (_, j) in rows] == alone
     assert [prices for _, prices in rows if "—" in prices] == []
-    assert "up to 10 of the J cabin's first-ranked outbounds" in _flat(result.stderr)
+    assert "up to 10 of the J cabin's cheapest outbounds" in _flat(result.stderr)
 
 
 def test_with_three_cabins_both_followers_pin_the_leaders_outbounds(
@@ -428,7 +428,7 @@ def test_a_sort_cabin_whose_page_is_refused_leaves_every_cabin_its_own_pins(
     err = _flat(result.stderr)
     assert err.count("Google Flights COACH:") == 1, err
     # Nobody led, so the sentence is the one for cabins that each pinned their own.
-    assert "joins cabins on up to 10 of each cabin's first-ranked outbounds" in err
+    assert "joins cabins on up to 10 of each cabin's cheapest outbounds" in err
     assert "prices every cabin" not in err
 
 
@@ -459,8 +459,8 @@ def test_a_sort_cabin_whose_return_boards_are_all_refused_still_led(
     assert google.pins["BUSINESS"] == list(range(100, 110))
     err = _flat(result.stderr)
     assert err.count("Google Flights COACH:") == 1, err
-    assert "prices every cabin on up to 10 of the Y cabin's first-ranked outbounds" in err
-    assert "each cabin's first-ranked" not in err
+    assert "prices every cabin on up to 10 of the Y cabin's cheapest outbounds" in err
+    assert "each cabin's cheapest" not in err
 
 
 def test_a_cabin_whose_page_is_empty_answers_as_it_does_alone(
