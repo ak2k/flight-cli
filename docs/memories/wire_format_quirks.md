@@ -261,8 +261,9 @@ entry in Google's `GetBookingResults` answer.
   seller's own page for that fare (measured 2026-10-01, also for a 9650-character
   URL, and for a 4-day-old token, whose seller URL carried the old price for
   the seller to price again). The URL is the base plus the pairs as its query,
-  and null unless the base is printable ASCII, `https`, with a host and no query
-  or fragment of its own, and every pair is two strings.
+  and null unless the base is printable ASCII, `https` on `www.google.com` with
+  no user or port (the table's caption says each link goes through Google), with
+  no query or fragment of its own, and every pair is two strings.
 - `bags` comes from `option[18]` = `[1st checked, 2nd checked, carry-on]`. A
   slot `[2, [[null, amount]], 1]` is a fee of `amount` in the page's currency
   and `[3]` is free; Google's page says the same ("First checked bag costs 45

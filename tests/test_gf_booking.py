@@ -256,29 +256,46 @@ def test_an_entry_with_no_link_or_bags_gives_none(
     [
         pytest.param(_five(_CLK, [["u", "T-1"]]), f"{_CLK}?u=T-1", id="captured-shape"),
         pytest.param(
-            _five("https://g.example/c", [["u", "a b"], ["v", "x&y=z"]]),
-            "https://g.example/c?u=a+b&v=x%26y%3Dz",
+            _five("https://www.google.com/c", [["u", "a b"], ["v", "x&y=z"]]),
+            "https://www.google.com/c?u=a+b&v=x%26y%3Dz",
             id="pairs-become-the-query",
         ),
-        pytest.param(_five("https://g.example/c", []), "https://g.example/c", id="no-pairs"),
         pytest.param(
-            ["d", None, ["https://g.example/c"]], "https://g.example/c", id="pairs-absent"
+            _five("https://www.google.com/c", []), "https://www.google.com/c", id="no-pairs"
         ),
-        pytest.param(_five("http://g.example/c", [["u", "T"]]), None, id="http"),
+        pytest.param(
+            ["d", None, ["https://www.google.com/c"]], "https://www.google.com/c", id="pairs-absent"
+        ),
+        pytest.param(_five("http://www.google.com/c", [["u", "T"]]), None, id="http"),
         pytest.param(_five("javascript:alert(1)", [["u", "T"]]), None, id="javascript"),
-        pytest.param(_five("https://g.example/\x1b[2J", [["u", "T"]]), None, id="esc"),
-        pytest.param(_five("https://g.example/a b", [["u", "T"]]), None, id="space"),
-        pytest.param(_five("https://g.example/c?a=1", [["u", "T"]]), None, id="base-query"),
-        pytest.param(_five("https://g.example/c#top", [["u", "T"]]), None, id="base-fragment"),
+        pytest.param(_five("https://www.google.com/\x1b[2J", [["u", "T"]]), None, id="esc"),
+        pytest.param(_five("https://www.google.com/a b", [["u", "T"]]), None, id="space"),
+        pytest.param(_five("https://www.google.com/c?a=1", [["u", "T"]]), None, id="base-query"),
+        pytest.param(_five("https://www.google.com/c#top", [["u", "T"]]), None, id="base-fragment"),
         pytest.param(_five("https:///c", [["u", "T"]]), None, id="no-host"),
+        # The caption says each link goes through Google.
+        pytest.param(_five("https://evil.example/f", [["u", "T"]]), None, id="another-host"),
+        pytest.param(
+            _five("https://www.google.com.evil.example/f", [["u", "T"]]), None, id="lookalike-host"
+        ),
+        pytest.param(
+            _five("https://www.google.com@evil.example/f", [["u", "T"]]),
+            None,
+            id="userinfo-naming-google",
+        ),
+        pytest.param(
+            _five("https://u@www.google.com/f", [["u", "T"]]), None, id="userinfo-on-google"
+        ),
         pytest.param(_five("https://[red]/x", [["u", "T"]]), None, id="bracketed-name"),
         pytest.param(_five("https://[::1/x", [["u", "T"]]), None, id="unclosed-bracket"),
         pytest.param(_five(5, [["u", "T"]]), None, id="base-not-a-string"),
-        pytest.param(_five("https://g.example/c", [["u", 5]]), None, id="value-not-a-string"),
-        pytest.param(_five("https://g.example/c", [["u", "\ud800"]]), None, id="lone-surrogate"),
-        pytest.param(_five("https://g.example/c", [["u", "T", "x"]]), None, id="three-items"),
-        pytest.param(_five("https://g.example/c", ["u=T"]), None, id="pair-not-a-list"),
-        pytest.param(_five("https://g.example/c", "u=T"), None, id="pairs-not-a-list"),
+        pytest.param(_five("https://www.google.com/c", [["u", 5]]), None, id="value-not-a-string"),
+        pytest.param(
+            _five("https://www.google.com/c", [["u", "\ud800"]]), None, id="lone-surrogate"
+        ),
+        pytest.param(_five("https://www.google.com/c", [["u", "T", "x"]]), None, id="three-items"),
+        pytest.param(_five("https://www.google.com/c", ["u=T"]), None, id="pair-not-a-list"),
+        pytest.param(_five("https://www.google.com/c", "u=T"), None, id="pairs-not-a-list"),
         pytest.param(None, None, id="null"),
     ],
 )
@@ -1017,7 +1034,7 @@ def test_remote_seller_text_is_escaped(monkeypatch: pytest.MonkeyPatch, board: l
                 179,
                 fare="[red]Fare",
                 flights=_B6_1523,
-                five=_five("https://g.example/[red]/:smile:/c", [["u", "[bold]T"]]),
+                five=_five("https://www.google.com/[red]/:smile:/c", [["u", "[bold]T"]]),
             )
         ),
     )
@@ -1027,7 +1044,7 @@ def test_remote_seller_text_is_escaped(monkeypatch: pytest.MonkeyPatch, board: l
     assert "\x1b" not in result.stdout
     assert "[red]Fare" in result.stdout
     assert (
-        "1 [bold]Evil[2J[/x] https://g.example/[red]/:smile:/c?u=%5Bbold%5DT"
+        "1 [bold]Evil[2J[/x] https://www.google.com/[red]/:smile:/c?u=%5Bbold%5DT"
         in result.stdout.splitlines()
     )
 

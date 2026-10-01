@@ -109,8 +109,9 @@ def _form(pairs: Any) -> list[tuple[str, str]] | None:
 def _link(option: list[Any]) -> str | None:
     """`option[5][2] = [base URL, [[name, value], ...]]`, the form the page
     posts to reach the seller; Google answers the same pairs sent as a query.
-    None unless the base is a printable https URL with a host and no query or
-    fragment of its own, and every pair is two strings."""
+    None unless the base is a printable https URL on `www.google.com`, as the
+    table's caption says, with no user, port, query or fragment of its own, and
+    every pair is two strings."""
     base, form = dig(option, 5, 2, 0), _form(dig(option, 5, 2, 1))
     if (
         form is None
@@ -124,7 +125,7 @@ def _link(option: list[Any]) -> str | None:
         query = urllib.parse.urlencode(form)
     except ValueError:  # a bracketed host that is no IP address; a lone surrogate
         return None
-    if parts.scheme != "https" or not parts.hostname:
+    if parts.scheme != "https" or parts.netloc != "www.google.com":
         return None
     return f"{base}?{query}" if query else base
 
