@@ -353,12 +353,20 @@ flight search JFK LHR --dep 2026-08-15 --return 2026-08-22 \
 User: "use that 2026-09-15, 6-night cell from the calendar grid I just looked at"
 (the grid was `flight calendar NYC PAR --start 2026-09-01 --end 2026-09-30 -d 5-7
 --routing 'AF+' --depart-times morning`). Repeat the calendar's window and every
-filter it was given:
+filter it was given. NYC and PAR are metro codes, so the calendar asked one
+query per airport pair and each cell names the pair that priced it: the `route`
+column for the day's minimum, the pair printed beside a trip length another pair
+priced, and `origin`/`destination` on each day and trip length in `--json`. Give
+`detail` that pair, not the calendar's codes. Here the 6n price has no pair
+beside it and the row's route is `JFK→CDG`:
 ```bash
-flight detail NYC PAR --dep 2026-09-15 --return 2026-09-21 \
+flight detail JFK CDG --dep 2026-09-15 --return 2026-09-21 \
   --start 2026-09-01 --end 2026-09-30 -d 5-7 \
   --routing 'AF+' --depart-times morning
 ```
+A calendar of one airport pair has no `route` column: give `detail` its codes.
+A cell that a round trip's combined query priced names the calendar's own codes
+(`NYC→PAR`); give `detail` those.
 
 ## When a query returns nothing
 

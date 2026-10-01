@@ -55,8 +55,12 @@ flight calendar MIA PAR --start 2026-06-07 -d 5-7 \
 
 # phase-2 of the calendar flow: full itineraries for a picked date. Give it
 # the calendar's filters (routing, codes, --depart-times/--return-times,
-# --include-unavailable) so it prices the grid's question.
-flight detail MIA PAR --dep 2026-06-10 --return 2026-06-16 --duration 5-7 \
+# --include-unavailable) so it prices the grid's question, and the airport
+# pair that priced the picked cell: a split calendar shows it in the route
+# column (MIA→CDG) or beside a trip length another pair priced, and as
+# origin/destination in --json. A calendar of one airport pair has no route
+# column; give detail its codes.
+flight detail MIA CDG --dep 2026-06-10 --return 2026-06-16 --duration 5-7 \
     --routing "LH+" --ext "MAXCONNECT 2:00" --depart-times morning
 
 # IATA autocomplete
