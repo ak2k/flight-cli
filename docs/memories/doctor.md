@@ -17,7 +17,7 @@ shape change or flakiness?" for a scheduled canary. Code: `src/flight_cli/_docto
 | `matrix-search` | live | one search (JFK-LAX one-way, today + 30 days) returns a solution priced `^[A-Z]{3}\d` whose first slice names a flight |
 | `google-http` | live | the same leg on Google Flights' page over curl_cffi returns a row with a positive `flight.price` |
 | `google-browser` | live | the same, in Chrome. Skipped when patchright is not installed or, with no override, no Chrome is at patchright's `channel="chrome"` path |
-| `pointspath` | live | stored tokens are valid (refreshed if stale) and `/api/pricing-info` answers |
+| `pointspath` | live | stored tokens are valid (refreshed if stale) and `/api/pricing-info` answers with a `pricingInfos` list. The answer is not cached: `pricing_info` writes a body over the catalog before parsing it |
 | `seats-aero` | live | the stored key passes the `whoami` probe. Costs one unit of the 1000-a-day quota |
 
 A provider is checked when its credential is STORED, not when
@@ -37,7 +37,7 @@ fails.
 | `unreachable` | yes | `GfTransportError`, an httpx transport error, `ApiKeyResolutionError` caused by one |
 | `upstream` | yes | `GfUpstreamStatusError`, HTTP 5xx (after Matrix's three attempts) |
 | `brownout` | yes | a Matrix timeout, a `solutionList` with no solution, a `MatrixApiError` of kind `INTERNAL` / `UNAVAILABLE` / `DEADLINE_EXCEEDED` or an internal-error message |
-| `shape` | no | `GfPageShapeError`, `GfPinIgnoredError`, an empty Google board on the probe leg, a Matrix body without `solutionList` or one its parser rejects, solutions with no price or flight, an SPA page (2xx) without the bundle or the key |
+| `shape` | no | `GfPageShapeError`, `GfPinIgnoredError`, an empty Google board on the probe leg, a Matrix body without `solutionList` or one its parser rejects, solutions with no price or flight, an SPA page (2xx) without the bundle or the key, a PointsPath pricing-info answer that does not parse or has no `pricingInfos` |
 | `rejected` | no | any other `MatrixApiError` |
 | `consent` | no | `GfConsentError` |
 | `auth` | no | Matrix refusing the key twice, `PPAuthError` (a Supabase 429 or 5xx on the token refresh is `throttled` or `upstream`), HTTP 401/403 from a provider |
@@ -82,9 +82,9 @@ A dead Matrix key is `auth`, never `unreachable`, so it can never exit 75.
 
 - Writes only what a search writes: `matrix-spa-key` caches no key,
   `matrix-search` neither reads nor writes the response cache. A Matrix 403
-  re-caches the key, `google-http` persists the NID jar, a stale PointsPath
-  token is refreshed to disk, and `/api/pricing-info` is cached, exactly as a
-  search does.
+  re-caches the key, `google-http` persists the NID jar, and a stale
+  PointsPath token is refreshed to disk, exactly as a search does.
+  `pointspath` leaves the cached pricing-info catalog as it found it.
 - Every detail is redacted before it is stored: each stored credential (the
   four env vars, the cached and resolved Matrix key, the PointsPath tokens,
   the seats.aero key) becomes `sha256:` + 8 hex, and any `key=` query value

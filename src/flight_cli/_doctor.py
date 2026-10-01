@@ -54,7 +54,9 @@ from .domain import Leg, SearchOptions, SpecificDateSearch
 from .fli_bridge import to_fli_filter
 from .models import SearchResult
 from .pp import auth as pp_auth
+from .pp import client as pp_client
 from .pp.client import PPApiError, PPClient
+from .pp.models import PricingInfoResponse
 from .providers.seats_aero import auth as seats_auth
 from .providers.seats_aero.client import SeatsAeroClient, SeatsAeroError
 
@@ -125,6 +127,7 @@ _MIN_SECRET_LEN = 8
 _KEY_PARAM = re.compile(r"(?<=[?&]key=)[^&#\s'\"]+")
 
 _BROWSER_BIN_ENV = "FLIGHT_CLI_GF_BROWSER_BIN"
+_PP_PRICING = "/api/pricing-info"
 # patchright's own table for `channel="chrome"`: an absolute path on macOS and
 # Linux, and on Windows a suffix under each install root below.
 _CHROME_CHANNEL = {
@@ -566,10 +569,14 @@ class _Doctor:
         async def go() -> tuple[int, pp_auth.Tokens]:
             c = PPClient(tokens)
             try:
-                programs = len((await c.pricing_info(force_refresh=True)).pricingInfos)
+                # The request `pricing_info` sends, without its cache write: that
+                # writes the answer over the catalog every search reads, before
+                # it parses it.
+                r = await c._request("GET", _PP_PRICING)  # pyright: ignore[reportPrivateUsage]
+                pp_client._raise_for_status(r, _PP_PRICING)  # pyright: ignore[reportPrivateUsage]
                 # The client refreshes and retries on a 401, so the token that
                 # answered can be newer than the one it was handed.
-                return programs, c._tokens  # pyright: ignore[reportPrivateUsage]
+                return _pricing_programs(r), c._tokens  # pyright: ignore[reportPrivateUsage]
             finally:
                 await c.aclose()
 
@@ -652,6 +659,26 @@ def _unreadable_store(path: Path, login: str) -> _CheckFailedError:
     return _CheckFailedError(
         "config", f"{path} holds no credential this CLI can read; run {login} again"
     )
+
+
+def _pricing_programs(r: httpx.Response) -> int:
+    try:
+        body: Any = r.json()
+        info = PricingInfoResponse.model_validate(body)
+    except ValueError as e:  # JSONDecodeError and ValidationError alike
+        raise _CheckFailedError(
+            "shape",
+            f"PointsPath's pricing-info answer does not parse ({type(e).__name__}); "
+            "the response shape changed",
+        ) from e
+    # The model ignores unknown keys and defaults a missing list to empty, so
+    # an error object would read as a catalog of no programs.
+    if not (isinstance(body, dict) and "pricingInfos" in body):
+        raise _CheckFailedError(
+            "shape",
+            "PointsPath's pricing-info answer has no pricingInfos; the response shape changed",
+        )
+    return len(info.pricingInfos)
 
 
 def _cut_head_redacted(text: str, secret: str) -> str:

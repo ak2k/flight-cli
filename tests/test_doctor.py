@@ -34,7 +34,6 @@ from flight_cli.client import MatrixClient
 from flight_cli.pp import auth as pp_auth
 from flight_cli.pp import client as pp_client
 from flight_cli.pp.client import PPApiError
-from flight_cli.pp.models import PricingInfoResponse
 from flight_cli.providers.seats_aero import auth as seats_auth
 from flight_cli.providers.seats_aero import client as seats_client
 
@@ -94,7 +93,7 @@ class World:
         self.browser: PageFetch | Exception = PageFetch(_priced_page(), _GF_URL, 200)
         self.browser_urls: list[str] = []
         self.pp: Exception | None = None
-        self.pp_calls: list[bool] = []
+        self.pp_calls: list[str] = []
         self.seats: Callable[[httpx.Request], httpx.Response] = _seats_ok
         self.seats_requests: list[httpx.Request] = []
 
@@ -188,12 +187,14 @@ def world(
         def __init__(self, tokens: pp_auth.Tokens) -> None:
             self._tokens = tokens
 
-        async def pricing_info(self, *, force_refresh: bool = False) -> PricingInfoResponse:
-            w.pp_calls.append(force_refresh)
+        async def _request(self, method: str, path: str) -> httpx.Response:
+            w.pp_calls.append(f"{method} {path}")
             if w.pp is not None:
                 raise w.pp
-            return PricingInfoResponse.model_validate(
-                {"pricingInfos": [{"airline": "United"}, {"airline": "Delta"}]}
+            return httpx.Response(
+                200,
+                json={"pricingInfos": [{"airline": "United"}, {"airline": "Delta"}]},
+                request=httpx.Request(method, pp_client.API_BASE + path),
             )
 
         async def aclose(self) -> None:
@@ -835,7 +836,7 @@ def test_providers_pass_with_the_expiry_and_the_quota_never_the_email(world: Wor
     assert report["pointspath"].detail.startswith("token valid until ")
     assert "pricing-info lists 2 programs" in report["pointspath"].detail
     assert _PP_EMAIL not in report["pointspath"].detail
-    assert world.pp_calls == [True]
+    assert world.pp_calls == ["GET /api/pricing-info"]
     assert report["seats-aero"].detail == "the key works; 994 of 1000 requests left in the quota"
     assert world.seats_requests[0].url.params["take"] == "1"
 
@@ -859,22 +860,54 @@ def test_the_pointspath_expiry_is_the_token_that_answered_after_a_refresh_on_401
     answers = iter(
         [httpx.Response(401, text="expired"), httpx.Response(200, json={"pricingInfos": []})]
     )
-
-    def real_pp(tokens: pp_auth.Tokens) -> pp_client.PPClient:
-        c = pp_client.PPClient(tokens)
-        c._client = httpx.AsyncClient(
-            transport=httpx.MockTransport(lambda _r: next(answers)), base_url=pp_client.API_BASE
-        )
-        return c
-
     monkeypatch.setattr(pp_client, "refresh_tokens", refresh)
     monkeypatch.setattr(pp_client, "PRICING_CACHE", world.tmp / "pp_pricing.json")
-    monkeypatch.setattr(_doctor, "PPClient", real_pp)
+    monkeypatch.setattr(_doctor, "PPClient", _real_pp(lambda _r: next(answers)))
     c = _by_id(_run())["pointspath"]
     expires = dt.datetime.fromtimestamp(fresh.expires_at, tz=dt.UTC)
     assert c.detail == (
         f"token valid until {expires:%Y-%m-%d %H:%M} UTC; pricing-info lists 0 programs"
     )
+
+
+def _real_pp(
+    answer: Callable[[httpx.Request], httpx.Response],
+) -> Callable[[pp_auth.Tokens], pp_client.PPClient]:
+    def make(tokens: pp_auth.Tokens) -> pp_client.PPClient:
+        c = pp_client.PPClient(tokens)
+        c._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(answer), base_url=pp_client.API_BASE
+        )
+        return c
+
+    return make
+
+
+@pytest.mark.parametrize(
+    ("body", "status"),
+    [
+        ("<html>maintenance</html>", "fail"),
+        ('{"error": "nope"}', "fail"),
+        ('{"pricingInfos": [{"airline": "United"}]}', "pass"),
+    ],
+    ids=["html", "error-object", "a-new-catalog"],
+)
+def test_the_pointspath_probe_leaves_the_catalog_a_search_reads(
+    world: World, monkeypatch: pytest.MonkeyPatch, body: str, status: str
+) -> None:
+    """`pricing_info` writes the answer over the catalog before it parses it,
+    so a probe through it would hand every search what PointsPath sent."""
+    catalog = world.tmp / "pp_pricing.json"
+    good = json.dumps({"pricingInfos": [{"airline": "Delta", "milesToCashRatio": 0.012}]})
+    catalog.write_text(good)
+    monkeypatch.setattr(pp_client, "PRICING_CACHE", catalog)
+    monkeypatch.setattr(_doctor, "PPClient", _real_pp(lambda _r: httpx.Response(200, text=body)))
+    report = _run()
+    assert catalog.read_text() == good
+    if status == "fail":
+        assert "pricing-info" in _fails_as(report, "pointspath", "shape").detail
+    else:
+        assert _by_id(report)["pointspath"].detail.endswith("pricing-info lists 1 programs")
 
 
 @pytest.mark.parametrize("status", [401, 403])
