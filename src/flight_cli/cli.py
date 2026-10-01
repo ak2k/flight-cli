@@ -3583,6 +3583,7 @@ def _gflight_query(
         apply_gf_native_filters(fli_filter, out_constraints.predicates)
     per_slice_preds = [list(classify(lg.route_language, lg.extension).predicates) for lg in legs]
     requested = opts.currency or "USD"
+    stops = opts.max_extra_stops
     try:
         yield _GfQuery(
             filters=fli_filter,
@@ -3593,9 +3594,15 @@ def _gflight_query(
                 [lg.time_ranges for lg in legs],
                 max_price=opts.max_price,
                 currency=requested,
+                max_stops=stops,
             ),
-            # A cap can empty a return board with no routing asked at all.
-            checks=_row_checks(legs, opts) if opts.max_price is not None else "the routing",
+            # A cap or a stop limit can empty a return board with no routing
+            # asked at all.
+            checks=(
+                _row_checks(legs, opts)
+                if opts.max_price is not None or (stops is not None and stops >= 0)
+                else "the routing"
+            ),
         )
     finally:
         # Named positively, because only rung 2 opens anything to close. The
@@ -4055,8 +4062,8 @@ def _render_merged(rows: list[Any], *, legs: tuple[Leg, ...], top_n: int) -> Non
 
 def _row_checks(legs: tuple[Leg, ...], opts: SearchOptions | None = None) -> str:
     """What the row filter holds `legs`' rows to, for the sentence that says it
-    emptied a board, `opts`' price cap among them. Plain text: it quotes the
-    user's own codes."""
+    emptied a board, `opts`' price cap and stop limit among them. Plain text:
+    it quotes the user's own codes."""
     from ._gf_postfilter import row_check_names  # noqa: PLC0415 — GF-only
     from .routing_predicates import classify  # noqa: PLC0415
 
@@ -4065,6 +4072,7 @@ def _row_checks(legs: tuple[Leg, ...], opts: SearchOptions | None = None) -> str
         [lg.time_ranges for lg in legs],
         max_price=opts.max_price if opts is not None else None,
         currency=(opts.currency if opts is not None else None) or "USD",
+        max_stops=opts.max_extra_stops if opts is not None else None,
     )
     return _join_reasons(names) or "the routing"
 
@@ -5608,7 +5616,7 @@ def _run_gflight_path_multi(
     for cab in emptied:
         err.print(
             f"[yellow]Google Flights {_safe_text(cab.value)}: "
-            f"no itinerary matched {_safe_text(_row_checks(legs))}.[/]"
+            f"no itinerary matched {_safe_text(_row_checks(legs, opts))}.[/]"
         )
 
     if json_out and not run_pp:
@@ -6240,7 +6248,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         int | None,
         typer.Option(
             "--stops",
-            help="Max extra stops beyond nonstop (0=nonstop only, 1=up to 1 stop, ...)",
+            help="Max stops per direction (0 = nonstop only), on every backend",
             rich_help_panel=_GROUP_ITINERARY,
         ),
     ] = None,
@@ -6600,7 +6608,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             )
             err.print(
                 f"[dim]Using Matrix: no Google Flights itinerary matched "
-                f"{_safe_text(_row_checks(legs))} in {_safe_text(reasons)}.[/]"
+                f"{_safe_text(_row_checks(legs, opts))} in {_safe_text(reasons)}.[/]"
             )
             google_answered = hand_off.answered
         _run_matrix_path_multi(
@@ -6742,7 +6750,7 @@ def fare(
     stops: Annotated[
         int | None,
         typer.Option(
-            "--stops", help="Max extra stops beyond nonstop (0=nonstop only, 1=up to 1 stop, ...)"
+            "--stops", help="Max stops per direction (0 = nonstop only), on every backend"
         ),
     ] = None,
     allow_airport_changes: bool = typer.Option(
