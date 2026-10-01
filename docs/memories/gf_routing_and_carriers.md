@@ -956,8 +956,8 @@ lists: Matrix prunes its answer, so this says nothing about its inventory (its
 ran to USD389, yet left out B61523 and B6123 at USD229), and
 `itineraryCarrierList` labels a trip by one carrier (UA+LH under LH), so it
 cannot show a carrier absent. `stops_outside` only without a stop limit, when a
-slice has more flights than one beyond the fewest Matrix listed there (its
-`maxLegsRelativeToMin` is 1). `past_page` names N of M and the last price.
+slice has more flights than one beyond the fewest Matrix listed there before
+`--max-price` cut any fare (its `maxLegsRelativeToMin` is 1). `past_page` names N of M and the last price.
 `capped` where `--max-price` cut Matrix's fare for the row's own trip, which
 it names. Otherwise `not_in_matrix`. A Matrix-only row: `no_google_answer`;
 `outbound_not_priced` on a round trip whose outbound leads no Google

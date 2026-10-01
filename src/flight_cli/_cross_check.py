@@ -61,7 +61,8 @@ class Answers:
     fewest a slice needs. `passengers` is the party: Google prices all of it,
     while the price Matrix lists is one passenger's, rounded up. `uncapped` is
     Matrix's page before the cap, or None where it is `matrix`: a trip the cap
-    cut is still one Matrix answered."""
+    cut is still one Matrix answered, and the cap cuts fares, not the flights
+    Matrix searched."""
 
     matrix: SearchResult
     google: SearchResult | None
@@ -179,7 +180,8 @@ class _Facts:
     """What each whole answer holds, read once for every row."""
 
     matrix_carriers: frozenset[str]
-    # Per slice index, the fewest flights any Matrix row has on that slice.
+    # Per slice index, the fewest flights any Matrix row has on that slice,
+    # before the price cap.
     matrix_fewest: dict[int, int]
     matrix_trips: frozenset[tuple[_TripSlice, ...]]
     # The trips the price cap cut from Matrix's page, each with Matrix's price
@@ -191,8 +193,9 @@ class _Facts:
 
     @classmethod
     def of(cls, a: Answers) -> _Facts:
+        page = a.uncapped if a.uncapped is not None else a.matrix
         fewest: dict[int, int] = {}
-        for it in a.matrix.solutions:
+        for it in page.solutions:
             for i, s in enumerate(_slices(it)):
                 if s.flights:
                     fewest[i] = min(fewest.get(i, len(s.flights)), len(s.flights))
@@ -218,7 +221,7 @@ class _Facts:
         ]
         trips = _trips(a.matrix.solutions)
         cut: dict[tuple[_TripSlice, ...], str | None] = {}
-        for it in a.uncapped.solutions if a.uncapped is not None else []:
+        for it in page.solutions:
             if (t := _trip(_slices(it))) is not None and t not in trips:
                 cut.setdefault(t, _party_price(it.price, it, a.passengers))
         return cls(

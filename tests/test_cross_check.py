@@ -7,6 +7,7 @@ ends — on the table and as the `--format json --enrich` document."""
 
 from __future__ import annotations
 
+import copy
 import json
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -632,6 +633,52 @@ def test_a_google_trip_the_cap_cut_from_matrix_names_matrixs_fare(
         None,
         ["capped"],
         cut,
+    )
+
+
+def _three_flights_on_google(gf_rows: Callable[..., list[Any]]) -> Callable[..., list[Any]]:
+    """`gf_rows` and AS21+AS600+AS9, a trip of three flights at USD214."""
+
+    def build(name: str) -> list[Any]:
+        rows = gf_rows(name)
+        three = copy.deepcopy(rows[15])
+        last = three.flight.legs[-1]
+        three.flight.legs.append(
+            last.model_copy(
+                update={
+                    "flight_number": "9",
+                    "departure_datetime": last.arrival_datetime + timedelta(hours=1),
+                    "arrival_datetime": last.arrival_datetime + timedelta(hours=2),
+                }
+            )
+        )
+        three.flight.stops = 2
+        return [*rows, three]
+
+    return build
+
+
+def _nonstop_over_the_cap(board: SearchResult) -> SearchResult:
+    """AS21+AS487, Google's own trip, at USD214, then DL1788, a nonstop, at
+    USD800."""
+    return _answer(
+        _as_matrix(board.solutions[16], "USD214.00"),
+        _as_matrix(board.solutions[0], "USD800.00"),
+    )
+
+
+def test_the_stop_window_is_measured_on_matrixs_page_before_the_cap(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    """Matrix listed a nonstop, so without a stop limit it searched up to two
+    flights; a cap cutting that nonstop does not widen what Matrix searched."""
+    _weave(monkeypatch, _three_flights_on_google(gf_rows), matrix=_nonstop_over_the_cap)
+    capped = ["--max-price", "400", "-n", "30", "--enrich", "--format", "json"]
+    xc = _document(_run([*_SEARCH, *capped]))["cross_check"]
+    row = next(r for r in xc["rows"] if r["slices"][0]["flights"] == ["AS21", "AS600", "AS9"])
+    assert (row["reasons"], row["reason"]) == (
+        ["stops_outside"],
+        "3 flights; Matrix searched up to 2",
     )
 
 
