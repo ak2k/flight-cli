@@ -1132,7 +1132,10 @@ _TWELVE = (_ELEVEN[0], f"{_ELEVEN[1]},FCO")
         ({"extension": "MAXSTOPS 3"}, "a stop ceiling above 2 (3)"),
         ({"children": 1}, "a passenger type other than adults"),
         ({"one_way": False, "duration": "7", "routing_return": "N"}, "different routing"),
-        ({"one_way": False, "duration": "5-7"}, "a trip-length range (5-7 nights)"),
+        (
+            {"one_way": False, "duration": "5-7", "gf_transport": "http"},
+            "a trip-length range (5-7 nights)",
+        ),
     ],
     ids=[
         "unknown-code",
@@ -1150,7 +1153,7 @@ _TWELVE = (_ELEVEN[0], f"{_ELEVEN[1]},FCO")
         "maxstops-3",
         "children",
         "legs-differ",
-        "length-range",
+        "length-range-over-http",
     ],
 )
 def test_a_calendar_the_page_cannot_ask_is_refused_before_any_load(
@@ -1978,3 +1981,177 @@ def test_without_fast_a_headed_window_over_http_is_a_usage_error(
     assert result.exit_code == 2
     assert "--gf-headed" in err
     assert "--gf-transport http opens none" in err
+
+
+# ──────────────────── --fast over a trip-length range ─────────────────────
+
+
+def _graph(nights: int, *prices: float) -> cg.PriceGraph:
+    start = date(2026, 10, 20)
+    return cg.PriceGraph(
+        nights,
+        tuple(
+            cg.GraphCell(start + timedelta(days=i), start + timedelta(days=i + nights), price)
+            for i, price in enumerate(prices)
+        ),
+    )
+
+
+_RANGE = [_graph(5, 301.0, 311.0), _graph(6, 302.0, 312.0), _graph(7, 303.0, 313.0)]
+
+
+def _graphs_are(
+    monkeypatch: pytest.MonkeyPatch, answer: cg.GraphRange | BaseException
+) -> list[CalendarSearch]:
+    """Stand in for the range's page loads, recording the search each was asked."""
+    seen: list[CalendarSearch] = []
+
+    def _price_graphs(search: CalendarSearch, *, headed: bool) -> cg.GraphRange:
+        del headed
+        seen.append(search)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(cg, "price_graphs", _price_graphs)
+    return seen
+
+
+def test_fast_prints_one_column_per_trip_length(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Red at the base: `--fast -d 5-7` was refused before any load."""
+    _no_matrix(monkeypatch)
+    seen = _graphs_are(monkeypatch, cg.GraphRange(_RANGE, []))
+    _calendar(one_way=False, duration="5-7")
+    cap = capsys.readouterr()
+    assert len(seen) == 1
+    for column in ("5n", "6n", "7n"):
+        assert column in cap.out, cap.out
+    assert "5-7-night round trips" in " ".join(cap.out.split())
+    assert "Run without --fast" not in cap.err
+
+
+def test_fast_writes_the_range_document(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Red at the base: refused. The shape follows what was asked: every length,
+    a graph per priced one, and the lost ones by name."""
+    _no_matrix(monkeypatch)
+    _graphs_are(monkeypatch, cg.GraphRange(_RANGE, []))
+    _calendar(one_way=False, duration="5-7", fmt="json")
+    doc = json.loads(capsys.readouterr().out)
+    assert doc == {
+        "origin": "JFK",
+        "destination": "LAX",
+        "currency": "USD",
+        "trip_lengths": [5, 6, 7],
+        "graphs": [cg.document(g, origin="JFK", destination="LAX") for g in _RANGE],
+        "lost": [],
+    }
+
+
+@pytest.mark.parametrize("fmt", ["table", "json"])
+def test_a_lost_length_is_named_on_stderr_and_in_the_document(
+    fmt: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Red at the base: refused."""
+    _no_matrix(monkeypatch)
+    lost = cg.LostLength(6, cg.GfPriceGraphError("Google Flights' price graph priced no date"))
+    _graphs_are(monkeypatch, cg.GraphRange([_RANGE[0], _RANGE[2]], [lost]))
+    _calendar(one_way=False, duration="5-7", fmt=fmt)
+    cap = capsys.readouterr()
+    assert "6-night trips: Google Flights' price graph priced no date." in " ".join(
+        cap.err.split()
+    ), cap.err
+    if fmt == "json":
+        doc = json.loads(cap.out)
+        assert [g["trip_length"] for g in doc["graphs"]] == [5, 7]
+        assert doc["trip_lengths"] == [5, 6, 7]
+        assert doc["lost"] == [
+            {"trip_length": 6, "reason": "Google Flights' price graph priced no date."}
+        ]
+    else:
+        assert "5n" in cap.out and "7n" in cap.out and "6n" not in cap.out
+
+
+def test_every_length_lost_exits_one_with_the_no_grid_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Red at the base: refused with the range sentence, before any load."""
+    _no_matrix(monkeypatch)
+    seen = _graphs_are(monkeypatch, cg.GfPriceGraphError("5-night trips: no priced date"))
+    with pytest.raises(typer.Exit) as e:
+        _calendar(one_way=False, duration="5-7", fmt="json")
+    cap = capsys.readouterr()
+    assert e.value.exit_code == 1
+    assert cap.out == ""
+    assert len(seen) == 1
+    err = " ".join(cap.err.split())
+    assert "5-night trips: no priced date" in err
+    assert "No Google Flights grid; drop --fast for Matrix." in err
+
+
+def test_a_range_over_the_load_budget_is_refused_with_its_count(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Three lengths over 100 days is 3 x 4 = 12 loads, past eight."""
+    _no_matrix(monkeypatch)
+    seen = _graphs_are(monkeypatch, cg.GraphRange(_RANGE, []))
+    end = date(2026, 10, 20) + timedelta(days=99)
+    with pytest.raises(typer.Exit) as e:
+        _calendar(one_way=False, duration="5-7", end=end.isoformat())
+    cap = capsys.readouterr()
+    assert e.value.exit_code == 1
+    assert seen == []
+    err = " ".join(cap.err.split())
+    assert (
+        "this is a window and trip-length range needing 12 price-graph loads (at most 8). "
+        "Run without --fast for Matrix." in err
+    ), err
+
+
+def test_fast_over_http_still_refuses_a_range(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Green at the base: the RPC grid prices one trip length, in the base's words."""
+    _no_matrix(monkeypatch)
+    seen = _graphs_are(monkeypatch, cg.GraphRange(_RANGE, []))
+    with pytest.raises(typer.Exit):
+        _calendar(one_way=False, duration="5-7", gf_transport="http")
+    err = " ".join(capsys.readouterr().err.split())
+    assert (
+        "--fast applies only to calendars one-way or of one trip length, between airports "
+        "or metro codes Google Flights can ask for (up to 11 airports a leg), whose every "
+        "filter its search page can carry; this is a trip-length range (5-7 nights). "
+        "Run without --fast for Matrix." in err
+    ), err
+    assert seen == []
+
+
+@pytest.mark.parametrize(
+    ("overrides", "graph"),
+    [({"one_way": False, "duration": "7"}, _RT), ({}, _OW)],
+    ids=["one-length", "one-way"],
+)
+@pytest.mark.parametrize("fmt", ["table", "json"])
+def test_one_length_and_a_one_way_write_what_they_wrote(
+    overrides: dict[str, Any],
+    graph: cg.PriceGraph,
+    fmt: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Green at the base: one graph, one load path, the single document."""
+    _no_matrix(monkeypatch)
+    ranged = _graphs_are(monkeypatch, AssertionError("one length is never a range"))
+    seen = _graph_is(monkeypatch, graph)
+    _calendar(fmt=fmt, **overrides)
+    cap = capsys.readouterr()
+    assert ranged == []
+    assert len(seen) == 1
+    if fmt == "json":
+        assert json.loads(cap.out) == cg.document(graph, origin="JFK", destination="LAX")
+    else:
+        assert "and trip length" not in cap.out  # the range table's title
+        assert f"{min(c.price for c in graph.cells):.0f}" in cap.out

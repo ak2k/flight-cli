@@ -1841,16 +1841,31 @@ def _run_fast_browser_grid(
     Every no-grid outcome leaves by the one exit at the bottom, on stderr, exactly
     as `_run_fast_calendar_grid`'s do, so stdout carries a grid or nothing.
 
+    A trip-length range is one graph per length (`price_graphs`): a column each
+    in the table, and in JSON the range document (`_graph_range_document`). A
+    length that was lost is named on stderr and, in JSON, under `lost`; the
+    lengths that priced still answer.
+
     The guard is armed and the session scope held here, outside any `anyio.run`:
     the page loads run on this thread, the one a Ctrl-C lands on, and the scope
     closes Chrome once however many loads the window took."""
     from ._gf_browser import interrupt_guard, session_scope  # noqa: PLC0415 — GF-only
-    from ._gf_calgraph import document, price_graph  # noqa: PLC0415 — fli, ~95 ms
+    from ._gf_calgraph import (  # noqa: PLC0415 — fli, ~95 ms
+        document,
+        graph_lengths,
+        price_graph,
+        price_graphs,
+    )
 
-    graph = None
+    lengths = graph_lengths(search)
+    graphs: Sequence[PriceGraph] = ()
+    lost: Sequence[LostLength] = ()
     try:
         with interrupt_guard(), session_scope():
-            graph = price_graph(search, headed=headed)
+            if len(lengths) > 1:
+                graphs, lost = price_graphs(search, headed=headed)
+            else:
+                graphs = (price_graph(search, headed=headed),)
     except GfThrottledError:
         err.print("[dim]Google Flights rate-limited the browser rung; no grid to show.[/]")
     except GfBrowserUnavailableError as e:
@@ -1865,27 +1880,67 @@ def _run_fast_browser_grid(
         raise  # an orderly exit is not a grid failure; see the weave's arm
     except Exception as e:  # noqa: BLE001 — any other cause is still just "no grid"
         err.print(f"[yellow]{_safe_text(_GF_GRID_NAME)} failed:[/] {_safe_text(e)}")
-    if graph is None:
+    if not graphs:
         err.print("[yellow]No Google Flights grid; drop --fast for Matrix.[/]")
         raise typer.Exit(1)
-    priced = graph
+    for nights, cause in lost:
+        err.print(
+            f"[yellow]Google Flights price graph not shown:[/] "
+            f"{_safe_text(f'{nights}-night trips: {_graph_failure_text(cause)}')}"
+        )
+    priced = graphs
 
     def _write_answer() -> None:
         if json_out:
-            doc = document(priced, origin=",".join(origins), destination=",".join(dests))
+            origin, destination = ",".join(origins), ",".join(dests)
+            doc = (
+                _graph_range_document(
+                    priced, lost, lengths=lengths, origin=origin, destination=destination
+                )
+                if len(lengths) > 1
+                else document(priced[0], origin=origin, destination=destination)
+            )
             sys.stdout.write(json.dumps(doc, indent=2))
             return
-        _render_date_grid(
-            {cell.departure.isoformat(): cell.price for cell in priced.cells},
-            origin=origins,
-            destination=dests,
-            sd=sd,
-            ed=ed,
-            trip_length=priced.trip_length,
-        )
+        if len(lengths) > 1:
+            _show_graphs(priced, origins=origins, dests=dests, sd=sd, ed=ed)
+        else:
+            _render_date_grid(
+                {cell.departure.isoformat(): cell.price for cell in priced[0].cells},
+                origin=origins,
+                destination=dests,
+                sd=sd,
+                ed=ed,
+                trip_length=priced[0].trip_length,
+            )
         _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
 
     _deliver_calendar(_write_answer, backend=_GF_GRID_NAME)
+
+
+def _graph_range_document(
+    graphs: Sequence[PriceGraph],
+    lost: Sequence[LostLength],
+    *,
+    lengths: Sequence[int | None],
+    origin: str,
+    destination: str,
+) -> dict[str, Any]:
+    """The `--fast --format json` document of a trip-length range: every length
+    asked, one `document` per length that priced, and every length lost with
+    its reason. Its shape follows what was asked, not what priced."""
+    from ._gf_calgraph import document  # noqa: PLC0415 — fli, ~95 ms
+
+    return {
+        "origin": origin,
+        "destination": destination,
+        "currency": "USD",
+        "trip_lengths": list(lengths),
+        "graphs": [document(g, origin=origin, destination=destination) for g in graphs],
+        "lost": [
+            {"trip_length": nights, "reason": _graph_failure_text(cause)} for nights, cause in lost
+        ],
+    }
 
 
 def _run_calendar_enriched(
@@ -3029,8 +3084,9 @@ def _grid_branch_blocker(  # noqa: PLR0911 — one return per named reason, chea
     `graph` (with `fast`) asks for Chrome's price graph, whose own gate
     (`_gf_calgraph.graph_blocker`) replaces the routing and page checks: it
     admits the carrier, alliance, duration and layover bounds and the time
-    windows Google was measured applying from the page URL. Without it,
-    `--fast --gf-transport http` keeps the narrower checks.
+    windows Google was measured applying from the page URL, and a trip-length
+    range whose graphs fit the page-load budget. Without it, `--fast
+    --gf-transport http` keeps the narrower checks and one trip length.
 
     The page asks for every airport of a set, so under `--fast` the airports are
     checked expanded, against fli's airport table and ONE page's per-leg bound
@@ -3049,7 +3105,8 @@ def _grid_branch_blocker(  # noqa: PLR0911 — one return per named reason, chea
     if not one_way and not fast:
         return "a round-trip window"
     window = search.window
-    if not one_way and window.duration_min != window.duration_max:
+    ranged = not one_way and window.duration_min != window.duration_max
+    if ranged and not (fast and graph):
         return f"a trip-length range ({window.duration_min:d}-{window.duration_max:d} nights)"
     # Before anything builds an fli filter: fli has no member for most city codes
     # and resolves two of them to another city's airport.
@@ -3067,9 +3124,15 @@ def _grid_branch_blocker(  # noqa: PLR0911 — one return per named reason, chea
         if city_codes:
             return city_codes[0]
     if fast and graph:
-        from ._gf_calgraph import graph_blocker  # noqa: PLC0415 — fli, as below
+        from ._gf_calgraph import (  # noqa: PLC0415 — fli, as below
+            graph_blocker,
+            page_budget_blocker,
+        )
 
-        return graph_blocker(search)
+        reason = graph_blocker(search)
+        # A range only: one length's window is cut short by the loads it is
+        # given, and reports that, rather than being refused up front.
+        return page_budget_blocker(search) if reason is None and ranged else reason
     from ._gf_dategrid import grid_can_serve, grid_routing_blocker  # noqa: PLC0415
 
     if not grid_can_serve(search, round_trip=fast, airport_sets=fast):
@@ -7335,7 +7398,9 @@ def calendar(
         "--no-enrich/--no-fast",
         help="Skip the Matrix enrichment: show only the Google Flights price "
         "grid instead of also running the authoritative Matrix calendar. Serves a "
-        "calendar one-way or a round trip of one trip length ('-d 7'), between "
+        "calendar one-way or a round trip, a trip-length range ('-d 5-7') as one "
+        "price graph per length in at most 8 page loads in all (over "
+        "[bold]--gf-transport http[/] one trip length only), between "
         "airports, comma-lists or metro codes (NYC, LON; up to 11 airports a leg, "
         "each date priced at the cheapest of them), whose filters Google Flights' "
         "search page can carry (cabin, adults, stops up to 2, one carrier or alliance "
@@ -7499,12 +7564,20 @@ def calendar(
         # a caller piping to `jq` must get a JSON document or an empty stdout, never
         # prose. The other shapes go the same way so the stream doesn't depend on which
         # condition failed.
-        err.print(
-            "[yellow]--fast applies only to calendars one-way or of one trip length, "
-            "between airports or metro codes Google Flights can ask for (up to 11 "
-            "airports a leg), whose every filter its search page can carry; "
-            f"this is {_safe_text(blocker)}. Run without --fast for Matrix.[/]"
-        )
+        if gf_mode == TRANSPORT_HTTP:
+            err.print(
+                "[yellow]--fast applies only to calendars one-way or of one trip length, "
+                "between airports or metro codes Google Flights can ask for (up to 11 "
+                "airports a leg), whose every filter its search page can carry; "
+                f"this is {_safe_text(blocker)}. Run without --fast for Matrix.[/]"
+            )
+        else:
+            err.print(
+                "[yellow]--fast applies only to calendars of at most 8 price-graph loads, "
+                "between airports or metro codes Google Flights can ask for (up to 11 "
+                "airports a leg), whose every filter its search page can carry; "
+                f"this is {_safe_text(blocker)}. Run without --fast for Matrix.[/]"
+            )
         raise typer.Exit(1)
     if gf_mode == TRANSPORT_HTTP:
         _run_fast_calendar_grid(

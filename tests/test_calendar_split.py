@@ -1134,12 +1134,12 @@ def test_render_calendar_round_trip_keeps_nights_and_columns(
 # `--fast || fallback` read Matrix output as a fast grid. Each shape now refuses.
 
 
-@pytest.mark.parametrize("transport", ["http", "browser"])
+@pytest.mark.parametrize("transport", ["http"])
 def test_fast_refuses_a_trip_length_range(
     transport: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The page's graph prices ONE trip length, so the default `5-7` has no single
-    question to ask it, on either transport."""
+    """The RPC grid prices ONE trip length, so over http the default `5-7` has no
+    single question to ask it. The browser asks one price graph per length."""
     monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
     monkeypatch.setattr("flight_cli._gf_browser.session", _no_browser)
     calls = _spy_renderers(monkeypatch)
