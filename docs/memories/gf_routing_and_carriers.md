@@ -138,18 +138,18 @@ has no member for.
 
 **Encoded constraints are checked on the rows too.** Google has ignored a field
 it was sent (the carrier exclude on JFK-LHR), so `_gf_postfilter.routing_keep`
-holds every row to what the row can show: the carrier include (any seller, the
-marketing reading), Google's own total duration (`FlightResult.duration`, never
-a difference of leg datetimes, which are local to each airport and off by the
-zone offset), every layover's minutes, and the first departure's clock time, to
-the minute. A layover is the page's own figure for that connection
-(`data[0][13]`, elapsed minutes). Where the row states none it is the clock
-difference at the connecting airport, which a daylight-saving change there puts
-an hour out; a negative one is such a change and is not held against the row.
-The stop ceiling and an alliance are not checked: the stops are left to Google's
-own filter, and nothing here says which carrier is in which alliance. Children
-are priced, not checked. When these checks empty a board, the empty-answer line
-names every active check.
+holds every row to what the row can show: the stop count (legs less one, held
+to the strictest of `--stops`, a MAXSTOPS and a routing `N`, on every board),
+the carrier include (any seller, the marketing reading), Google's own total
+duration (`FlightResult.duration`, never a difference of leg datetimes, which
+are local to each airport and off by the zone offset), every layover's minutes,
+and the first departure's clock time, to the minute. A layover is the page's
+own figure for that connection (`data[0][13]`, elapsed minutes). Where the row
+states none it is the clock difference at the connecting airport, which a
+daylight-saving change there puts an hour out; a negative one is such a change
+and is not held against the row. An alliance is not checked: nothing here says
+which carrier is in which alliance. Children are priced, not checked. When
+these checks empty a board, the empty-answer line names every active check.
 
 **A price cap and bags (`search --max-price N`, `--bags CHECKED[,CARRY]`).**
 Both are top-level fields, written after the cabin (9) and before 14.
@@ -225,8 +225,8 @@ check against. Only the strictest-stops rule reached them.
   listing's place. No true duplicate has been measured; the key keeps dates, so
   the same flight numbers a day apart stay two trips.
 - The routing filter runs inside `search_with_ids` as each board is served: on
-  the outbound BEFORE the pins are taken (pins are the first rows in board
-  order), on each return board after `_unpinned_board`. A pin whose return
+  the outbound BEFORE the pins are taken (pins are the cheapest rows of the
+  board they are taken from), on each return board after `_unpinned_board`. A pin whose return
   board the filter empties is counted in a warning.
 - A pin names each leg's OPERATING flight (`fl[22]`). Pinned under the
   codeshare number it is booked as (AA142 as AY3787), the return board comes
@@ -259,8 +259,8 @@ check against. Only the strictest-stops rule reached them.
   follows is Matrix's, where '—' is a cabin with no price.
 - A round trip that took pins answers with a board even when no pair survives,
   its count covering the rows removed on both legs, so it takes the same route.
-  Under `--backend gflight` the line also names how many outbounds were pinned:
-  the ones below the pins were never searched for returns. With nothing
+  Under `--backend gflight` the line also names how many outbounds were pinned,
+  the cheapest ones: the rest were never searched for returns. With nothing
   removed, Google serving no return for any pin stays "no results".
 - `ds:1[5]` is Google's price insight: `[code, [None, cheapest], [None, _],
   [None, _], [None, typical_low], [None, typical_high], ...]`. The level is
@@ -420,12 +420,21 @@ widen the pool it filters, which was free on the old RPC and would otherwise
 mean ~2 x 31 page fetches for a two-cabin round trip. The default `-n 10` is
 unchanged by the cap.
 
+Which outbounds the budget buys is the cheapest ones the filtered board lists
+(`_gflight_ids._pins`, on the same `fare_key` the `-n` trim sorts by: ties in
+page order, unpriced rows last). An outbound row's price is already the cheapest
+round trip through it (see "What a round-trip row's price means" below), so the
+cheapest outbounds are where the cheapest combinations are. On the JFK-LHR
+capture the page lists five USD295 top flights before three USD293 rows; `-n 1`
+pins EI104+EI152, the sixth row, and spends the same two GETs it spent on the
+first.
+
 The bump therefore widens the leg-1 rows each cabin keeps and NOT the round-trip
 pins. What makes the cabins' pins overlap is that the sort cabin leads
 (`cli._CabinSearches`): every cabin pins, in the sort cabin's order, each
 outbound the sort cabin pins that its own filtered board lists, matched on the
 whole leg sequence `_itinerary_key` uses (`_gflight_ids.pin_keys`), then fills
-the rest of the same budget with its own rows in page order
+the rest of the same budget with its own cheapest rows
 (`search_with_ids`' `prefer`). The sort cabin's pins are exactly the ones it
 takes alone, so the rows the table shows lose nothing. The cost is that a
 non-sort cabin's own cheapest outbounds get only the slots the sort cabin's
@@ -441,7 +450,7 @@ loads again, and a Chrome failure on a later cabin's page would print a
 missing-column note for a column that the fallback then serves.
 
 So **Google Flights prices every cabin on up to `<pin budget>` of the `<sort>`
-cabin's first-ranked outbounds; '—' means that cabin's search returned no fare
+cabin's cheapest outbounds; '—' means that cabin's search returned no fare
 for the itinerary** — the budget being `pinned_fanout` of the bumped page size,
 which the cap holds at 10 however large `-n` is. `cli._multi_cabin_join_note`
 builds that sentence from the pin budget rather than a literal, and
@@ -454,8 +463,8 @@ and a row from a follower's own outbounds was never searched in the sort cabin.
 may hold fewer.
 
 When the sort cabin pinned nothing — its page refused, or its filter kept no
-row — every cabin pins its own first-ranked outbounds, and the note says that
-instead: "joins cabins on up to `<pin budget>` of each cabin's first-ranked
+row — every cabin pins its own cheapest outbounds, and the note says that
+instead: "joins cabins on up to `<pin budget>` of each cabin's cheapest
 outbounds; '—' means no shared itinerary, not no fare." The fan-out reports
 which cabin led (`cli._CabinBoards.leader`) rather than leaving it to be read
 off a board, because a sort cabin whose pins were handed on and whose every
@@ -492,18 +501,22 @@ the untyped shape of that failure is worse than the failure:
 | the enriched weave's own run | the same, for the loop and the task group themselves | a failure there is not one half of the weave failing, so nothing else in the command is left to report it |
 
 **A round trip says how many outbounds it will combine.** `cli._pin_cap_note`
-prints it on every round-trip path — the enriched one, `--fast`, `--format json`
-and multi-cabin — whenever the pin cap is below the `-n` asked for and the
-search is not handed to Matrix, and always
-to stderr so a JSON document stays a document. It is passed the user's count,
-never the multi-cabin bump — a wider pool per cabin that nobody asked for — and
-prints the pin budget that count resolves to, which is the number the join will
-actually see rather than the one being corrected.
+prints "combines returns against up to `<pin budget>` cheapest outbounds" on
+every round-trip path (the enriched one, `--fast`, `--format json` and
+multi-cabin) whenever the pin cap is below the `-n` asked for and the search is
+not handed to Matrix, and always to stderr so a JSON document stays a document.
+It is passed the user's count, never the multi-cabin bump — a wider pool per
+cabin that nobody asked for — and prints the pin budget that count resolves to,
+which is the number the join will actually see rather than the one being
+corrected. Above the cap the rows shown are the `-n` cheapest combinations of
+the ten cheapest outbounds, not the `-n` cheapest round trips on the board, and
+the note is what says so.
 
 **`-n` is one number, applied on the way out.** The page serves Google's whole
 board — around thirty rows; the dated measurement is at the top of this file —
 whatever count is asked of it, so the count is a trim rather than a query
-parameter. It bounds everything the user can act on, and all of it from one place
+parameter, and it keeps the cheapest rows (the order is set out below). It
+bounds everything the user can act on, and all of it from one place
 in `cli._run_gflight_path`: the table, the `--format json` document, the range
 `--pick` accepts and the itinerary the `--matrix-url` / `--google-url` lines pin,
 and the itineraries the award providers are fanned out over. All five hold on
@@ -554,17 +567,26 @@ order and extra Matrix rows after their key's first, so where no key is shared
 the list is the one-row-per-key merge exactly
 (`test_enrich.test_a_board_with_no_shared_key_merges_as_it_always_did`).
 
-**And it keeps two different orders, because the two sets are ordered by
-different things.** A one-way board arrives ranked by Google — a composite of
-price, duration and stops that nothing here reproduces — so the trim keeps the
-page's order and `-n` means the rows the page put first. A round trip's
-combinations are ours: the pin loop builds them outbound by outbound, so their
-order is the loop's artifact and carries no ranking at all. Left alone, `-n 3`
-there is three trips from one outbound with cheaper trips from the next outbound
-off the table entirely. `cli._price_ordered` sorts them on their terminal
-member — the pinned leg is what makes the combination that combination, so its
-fare is the one every surface prints — immediately before each of the three
-trims. The `-n` help string says both halves.
+**And it keeps one order: price, ascending.** `cli._price_ordered` sorts every
+Google answer immediately before each trim, on one key
+(`_gflight_ids.fare_key`, which the round-trip pins use too): a priced row by
+its fare, a row Google did not price after every row it did, and a stable sort,
+so equal fares keep the order they arrived in. A one-way row's fare is its own.
+A combination's is its terminal member's — the pinned leg is what makes the
+combination that combination, so its fare is the one every surface prints.
+
+One order, because every other list the CLI prints is already in it — the
+merged and multi-cabin tables, the date grid, explore — and because neither
+arrival order is a ranking a user can act on. A one-way board arrives with
+Google's top flights (`ds:1[2]`) ahead of the rest, a composite of price,
+duration and stops: on the JFK-LHR capture `-n 5` kept five USD295 top flights
+and left the board's three USD293 rows, at 6-8, off the table, and NYC-LAX,
+measured live on 2026-10-01, listed a 175 at row 6 under 169, 229, 229, 229 and
+234. A round trip's combinations arrive outbound by outbound, so `-n 3` unsorted
+is three trips from one outbound with cheaper trips from the next off the
+table. The trade is that a top-flights row, often a nonstop a few dollars
+dearer, can fall below a small `-n`; a larger `-n` brings it back. The page's
+order survives as the tie-break. The `-n` help string states the rule.
 
 Three things still read the whole board, and this is why the trim cannot move
 into the query: the Tier-2 post-filter, because a routing constraint is answered
@@ -619,9 +641,11 @@ therefore reports every one of them but the cheapest under its real fare. The
 human table prints each member's own price on its `Na`/`Nb` rows and
 `--format json` emits both, so both carry the true number; the SearchResult
 the award comparison reads carries one, and it is the total. The cash baseline
-that comparison is made against is therefore the cheapest of the rows SHOWN —
-one-way rows in Google's order, combinations in price order — and not the
-cheapest on the board, which is what `-n` bounding everything means.
+that comparison is made against is therefore the cheapest of the rows SHOWN,
+which with every Google list in price order is row one: a one-way board's
+lowest fare, and on a round trip the cheapest trip through the pinned outbounds.
+A single-cabin round trip pins its cheapest outbound first, so that is the
+board's cheapest round trip unless a return filter removed it.
 
 **Release before park.** A worker that is about to wait on another arm's round
 gives up any round it still owns first. Two workers can otherwise each hold what

@@ -494,7 +494,8 @@ _DS_KEY_RE = re.compile(r"key:\s*'([^']+)'")
 _DS_DATA_RE = re.compile(r"data:\s*(.*)$", re.S)
 _DS_FLIGHTS_KEY = "ds:1"
 # `ds:1[2]` is Google's own top-flights board, `[3]` the rest. Concatenated in
-# that order so the page's ranking survives — we can't reproduce it.
+# that order because page order is what breaks a tie between equal fares once a
+# board is ordered by price (`fare_key`).
 _DS_ROW_BLOCKS = (2, 3)
 _SHAPE_ERROR_SAMPLE_REASONS = 3
 # What "this data is not a decodable flight row" means, in ONE place. The probe
@@ -1681,8 +1682,8 @@ class Board[T](list[T]):
     `dropped` counts the rows a routing filter removed on the way here, which
     is how an empty answer tells "none matched the routing" from "Google has no
     flights". `pinned` counts the outbounds a round trip searched returns for,
-    because an empty answer from those says nothing about the outbounds below
-    them."""
+    because an empty answer from those says nothing about the outbounds it did
+    not pin."""
 
     def __init__(
         self,
@@ -1708,10 +1709,22 @@ def _itinerary_key(row: GFlightWithId) -> ItineraryKey:
     )
 
 
-def _fares_better(row: GFlightWithId, than: GFlightWithId) -> bool:
-    """A priced row beats an unpriced one, and a cheaper one a dearer one."""
-    price, other = row.flight.price, than.flight.price
-    return price is not None and (other is None or price < other)
+def fare_key(row: GFlightWithId) -> tuple[int, float]:
+    """Sort key for a Google row by its fare, a row Google did not price after
+    every row it did.
+
+    Google surfaces no shopping-list price for some rows — premium-cabin round
+    trips with several passengers are the routine case — and a row it did not
+    price is still a row the board served. There is no number to rank it on, so
+    it goes last rather than being dropped or read as a zero fare; the leading
+    term is what carries that, and it leaves the priced rows compared on the
+    fare alone. A sort on it is stable, so rows sharing a fare keep the order
+    they came in.
+
+    Reads `.flight.price` and no other attribute, so the key holds for anything
+    shaped like a result row rather than only for fli's own model."""
+    price = row.flight.price
+    return (1, 0.0) if price is None else (0, price)
 
 
 def _deduped(rows: list[GFlightWithId]) -> list[GFlightWithId]:
@@ -1720,8 +1733,8 @@ def _deduped(rows: list[GFlightWithId]) -> list[GFlightWithId]:
     Google can list one itinerary twice at two prices, and only the cheaper is
     on offer. The key is every leg's carrier, flight number and departure time,
     dates included: the same flight numbers a day apart are a different trip.
-    The first listing keeps its place, because the round-trip pins are taken in
-    board order."""
+    The first listing keeps its place, because page order breaks ties between
+    equal fares in the trim and in the round-trip pins."""
     at: dict[ItineraryKey, int] = {}
     out: list[GFlightWithId] = []
     for row in rows:
@@ -1730,7 +1743,7 @@ def _deduped(rows: list[GFlightWithId]) -> list[GFlightWithId]:
         if seen is None:
             at[key] = len(out)
             out.append(row)
-        elif _fares_better(row, out[seen]):
+        elif fare_key(row) < fare_key(out[seen]):
             out[seen] = row
     return out
 
@@ -2028,12 +2041,11 @@ def _one_call_laddered(
 # on an RPC and is not free here. With the cap, a two-cabin round trip costs
 # 2 x 11 = 22 page fetches; without one, at the bumped top_n=100, it would cost
 # ~2 x 31. The default `-n 10` sits exactly on the cap and is unchanged by it;
-# above it, the round trip returns combinations for the ten first-ranked
-# outbounds rather than for all of them. A multi-cabin round trip spends every
-# cabin's budget on the sort cabin's outbounds first (`prefer`), because a cabin
-# that pins its own first ten may price none of the itineraries the table
-# shows; `cli._multi_cabin_join_note` says so where a user can see the
-# consequence.
+# above it, the round trip returns combinations for the ten cheapest outbounds
+# rather than for all of them. A multi-cabin round trip spends every cabin's
+# budget on the sort cabin's outbounds first (`prefer`), because a cabin that
+# pins its own ten cheapest may price none of the itineraries the table shows;
+# `cli._multi_cabin_join_note` says so where a user can see the consequence.
 #
 # Multi-city never reaches this: `cli._pick_backend` routes a multi-city query
 # to Matrix, so the recursion below only ever runs the two legs of a round trip.
@@ -2055,15 +2067,20 @@ def _pins(
     board: list[GFlightWithId], top_n: int, prefer: Sequence[ItineraryKey]
 ) -> list[GFlightWithId]:
     """Every `prefer` key `board` lists, in `prefer` order, then `board`'s other
-    rows in page order: `pinned_fanout(top_n)` in all, so `prefer` reorders the
-    budget and never grows it."""
+    rows cheapest first (`fare_key`): `pinned_fanout(top_n)` in all, so `prefer`
+    reorders the budget and never grows it.
+
+    Cheapest, because an outbound row's price is already the cheapest round
+    trip through it: the outbounds that price lowest are where the cheapest
+    combinations are, wherever the page listed them."""
     budget = pinned_fanout(top_n)
     at: dict[ItineraryKey, GFlightWithId] = {}
     for row in board:
         at.setdefault(_itinerary_key(row), row)
     chosen = [at[k] for k in dict.fromkeys(prefer) if k in at][:budget]
     taken = {id(r) for r in chosen}
-    return chosen + [r for r in board if id(r) not in taken][: budget - len(chosen)]
+    rest = sorted((r for r in board if id(r) not in taken), key=fare_key)
+    return chosen + rest[: budget - len(chosen)]
 
 
 def pin_keys(
@@ -2223,11 +2240,11 @@ def search_with_ids(
     reason: every board of one trip is asked for in one currency.
 
     `keep(i, row)` is the routing filter for segment `i`. It runs on the
-    outbound board BEFORE the pins are taken, because the pins are the first
-    rows in board order and a filter applied after them answers from pins it
-    then discards. It runs on each return board after the pin check, so a page
-    that ignored its pin is refused as one rather than read as "no return
-    matches". The result carries the outbound page's price insight, restated
+    outbound board BEFORE the pins are taken, because the pins are the cheapest
+    rows of the board they are taken from and a filter applied after them
+    answers from pins it then discards. It runs on each return board after the
+    pin check, so a page that ignored its pin is refused as one rather than read
+    as "no return matches". The result carries the outbound page's price insight, restated
     for the rows the filter kept. `checks` names what `keep` holds a row to,
     for the warning that counts the pins it left with no return.
 

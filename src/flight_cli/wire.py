@@ -12,6 +12,7 @@ produces a typed body. Exhaustiveness is enforced by `typing.assert_never`
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal, assert_never
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -27,6 +28,7 @@ from .domain import (
     SpecificDateSearch,
     time_range_for,
 )
+from .routing_predicates import StopsPred, parse_extension
 
 _ROUND_TRIP_LEGS = 2  # 2 legs = round-trip; 1 = one-way (calendar variants)
 
@@ -91,9 +93,11 @@ class WireInputs(_Wire):
     internalUser: bool = False
     changeOfAirport: bool = True
     checkAvailability: bool = True
-    # SPA's "No limit" UI default = 1 (see CLAUDE.md quirk #3). The wire
-    # adapter (`_base_inputs`) always sets this explicitly, so the value
-    # here is only used if someone constructs WireInputs directly.
+    # Extra legs beyond the route's own minimum, not stops: on a route with no
+    # nonstop, 0 still answers one-stop trips. The SPA's "No limit" UI default
+    # is 1 (see CLAUDE.md quirk #3). The wire adapter (`_base_inputs`) always
+    # sets this explicitly, so the value here is only used if someone
+    # constructs WireInputs directly.
     maxLegsRelativeToMin: int = 1
     slices: list[WireSlice]
     # Calendar / followup add these:
@@ -205,7 +209,29 @@ def _pax_dict(p: Pax) -> dict[str, int]:
     return d
 
 
-def _leg_to_wire(leg: Leg, *, mode: Literal["specific", "calendar", "followup"]) -> WireSlice:
+_TRAILING_SEPARATORS = re.compile(r"[\s;]+\Z")
+
+
+def _command_line(extension: str | None, max_stops: int | None) -> str | None:
+    """The slice's extension codes, held to at most `max_stops` stops.
+
+    `MAXSTOPS N` goes after the user's own codes, because a later, stricter
+    MAXSTOPS was measured to hold beside an earlier, looser one; the reverse
+    order was not measured. So the codes are sent as typed only when every
+    MAXSTOPS in them is N or fewer."""
+    if max_stops is None or max_stops < 0:
+        return extension
+    if extension is not None:
+        limits = [p.max_stops for p in parse_extension(extension) if isinstance(p, StopsPred)]
+        if limits and max(limits) <= max_stops:
+            return extension
+    typed = _TRAILING_SEPARATORS.sub("", extension or "")
+    return f"{typed}; MAXSTOPS {max_stops:d}" if typed else f"MAXSTOPS {max_stops:d}"
+
+
+def _leg_to_wire(
+    leg: Leg, *, mode: Literal["specific", "calendar", "followup"], max_stops: int | None
+) -> WireSlice:
     """Convert domain Leg to wire slice. Captured behaviour per mode:
     specific:  date + dateModifier + isArrivalDate always present
     calendar:  no date, no dateModifier, no isArrivalDate
@@ -218,7 +244,7 @@ def _leg_to_wire(leg: Leg, *, mode: Literal["specific", "calendar", "followup"])
         destinations=list(leg.destinations),
         date=leg.date.isoformat() if (include_date and leg.date) else None,
         routeLanguage=leg.route_language,
-        commandLine=leg.extension,
+        commandLine=_command_line(leg.extension, max_stops),
         dateModifier=(
             WireDateModifier(minus=leg.date_minus, plus=leg.date_plus)
             if include_modifier_fields
@@ -240,8 +266,9 @@ def _base_inputs(opts: SearchOptions, slices: list[WireSlice]) -> WireInputs:
         page=WirePage(size=opts.page_size),
         changeOfAirport=opts.allow_airport_changes,
         checkAvailability=opts.show_only_available,
-        # Matches the SPA's "No limit" / "Up to 1 extra stop" default = 1.
-        # User can override by passing options.max_extra_stops explicitly.
+        # The SPA's "No limit" default of 1 extra leg, or the stop limit itself:
+        # a slice held to N stops has at most N legs beyond the minimum, so N
+        # never cuts below the MAXSTOPS each slice carries.
         maxLegsRelativeToMin=(
             1 if opts.max_extra_stops is None or opts.max_extra_stops < 0 else opts.max_extra_stops
         ),
@@ -265,9 +292,10 @@ def _set_trip_length(inputs: WireInputs, window: CalendarWindow) -> None:
 def to_wire(s: Search) -> WireBody:
     """Map a domain search to its Matrix wire body. The match is exhaustive;
     adding a new Search variant breaks type-check until handled here."""
+    stops = s.options.max_extra_stops
     match s:
         case SpecificDateSearch():
-            slices = [_leg_to_wire(leg, mode="specific") for leg in s.legs]
+            slices = [_leg_to_wire(leg, mode="specific", max_stops=stops) for leg in s.legs]
             inputs = _base_inputs(s.options, slices)
             inputs.filter = {}
             inputs.page = WirePage(current=1, size=s.options.page_size)
@@ -279,7 +307,7 @@ def to_wire(s: Search) -> WireBody:
             )
 
         case CalendarSearch():
-            slices = [_leg_to_wire(leg, mode="calendar") for leg in s.legs]
+            slices = [_leg_to_wire(leg, mode="calendar", max_stops=stops) for leg in s.legs]
             inputs = _base_inputs(s.options, slices)
             inputs.filter = {}
             inputs.startDate = s.window.start.isoformat()
@@ -295,7 +323,7 @@ def to_wire(s: Search) -> WireBody:
             )
 
         case CalendarFollowup():
-            slices = [_leg_to_wire(leg, mode="followup") for leg in s.legs]
+            slices = [_leg_to_wire(leg, mode="followup", max_stops=stops) for leg in s.legs]
             inputs = _base_inputs(s.options, slices)
             # Followup omits inputs.filter but DOES include page.current=1
             # (per SPA capture).
