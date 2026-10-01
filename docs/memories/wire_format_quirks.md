@@ -237,6 +237,7 @@ For one `--cabin`, the flags choose the shape:
 | `--cash-only`, Matrix answered | Matrix's raw response, an object (`solutionCount`, `solutionList`) |
 | awards on (the default once a provider is configured) | `[{leg, slice_index, matches}]` |
 | `--awards-only` | `[{leg, slice_index, awards}]` |
+| either awards shape, a leg the pair cap cut | that leg also has `pairs_not_asked`, `[{origin, destination}]` ([award_airport_sets.md](award_airport_sets.md)) |
 | `--cash-only --sellers` | `{search, booking_options}`, `search` being Google's list |
 | `--cash-only --fare-rules` | `{search, fare_rules}`, `search` being Matrix's object |
 

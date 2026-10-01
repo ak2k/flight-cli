@@ -132,6 +132,18 @@ interface. Two providers ship today:
 Each configured provider auto-enables and fans out per leg; the cash↔award
 matcher and renderers are provider-blind.
 
+The providers take one airport per end, so an airport set (`JFK,EWR`) or a
+metro code (`NYC`, asked as JFK, LGA and EWR) is asked pair by pair, and an
+award attaches only to cash rows on its own airports. Each pair costs a
+PointsPath request per cabin and airline and one seats.aero quota unit, so a
+search asks at most 8 pairs, those its cash rows fly first, and every leg at
+least one. A leg with pairs left out gets one stderr line naming them, in
+every output format, and its JSON entry lists them as `pairs_not_asked`:
+
+```text
+Awards for outbound NYC→LON 2026-11-04: asked 4 of 18 airport pairs (at most 8 a search); not asked: JFK→LTN, ...
+```
+
 ```sh
 # implicit overlay — any search adds the award table when a provider is configured
 flight search JFK LHR --dep 2026-08-15
@@ -204,6 +216,7 @@ Pass `--provider-opt 'pp.airlines=United,Delta,...'` to skip discovery and call 
 
 - ~~Browser-based login~~ (now the default — see Setup above)
 - Award overlay on `calendar` (lowest-fare-calendar) — fan-out is N days × M airlines; deserves its own design
+- Ask more than 8 airport pairs in one search — a set or metro search past that names the pairs it left out (stderr, JSON `pairs_not_asked`), and the cap has no flag
 - Match against airlines we don't yet support (the few in pricing-info but not enabled for your tier are silently skipped)
 
 ## Architecture
