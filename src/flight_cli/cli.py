@@ -1538,7 +1538,7 @@ def _report_calendar_fanout(fan: _CalendarFanout, total: int, *, merged_empty: b
 
 
 def _calendar_route_label(s: CalendarSearch) -> str:
-    """`JFK,EWR→LHR` for a sub-query, for failure messages and the table's route."""
+    """`JFK,EWR→LHR` for a sub-query, for failure messages."""
     if not s.legs:
         return "?"
     return "→".join(calendar_pair(s))
@@ -2078,9 +2078,10 @@ def _run_matrix_calendar(
         # it is provenance about the answer rather than part of it, and it is
         # written BEFORE the delivery below, so on stdout a failure there would
         # leave it standing alone under exit 1 — a document, to a caller that reads
-        # the stream. `_run_calendar` runs the combined query beside a round trip's
-        # pairs, and it is the only source of a return into another airport of the
-        # set, which is the narrower question the pairs alone would answer.
+        # the stream. On a round trip `n_split` counts the combined query
+        # `_run_calendar` runs beside the pairs; it alone prices a return into
+        # another airport of the set, and Matrix may under-report it, so the note
+        # says the grid answers that part less completely than the rest.
         round_trip = len(search.legs) == _ROUND_TRIP_LEGS
         pairs = n_split - 1 if round_trip else n_split
         err.print(
@@ -7144,9 +7145,9 @@ def calendar(
             "Multi-airport calendar: max destinations per Matrix request, metro codes "
             "counted as their airports. 1 (default) queries each airport pair "
             "separately, which Matrix prices completely; higher is fewer/faster "
-            "requests but Matrix may under-report (incomplete). A round trip back "
-            "into another airport of the set comes only from one combined query "
-            "run beside them, which Matrix may under-report either way."
+            "requests but Matrix may under-report (incomplete). A round trip that "
+            "returns to another airport of the set is priced only by one combined "
+            "query run beside them, which Matrix may under-report."
         ),
         rich_help_panel=_GROUP_BACKEND,
     ),

@@ -121,8 +121,8 @@ def _price_value(s: str | None) -> float | None:
 def price_currencies(res: CalendarResult) -> tuple[str, ...]:
     """The currency of every price `res` carries — its cheapest notice, each
     priced day and each of that day's trip lengths — repeats dropped, in that
-    order. A price with no prefix counts as '', which equals no currency code.
-    Empty when `res` priced nothing, which is no currency at all."""
+    order. A price with nothing before its number counts as '', so it never
+    matches a currency code. Empty when `res` priced nothing: no currency at all."""
     prices = [res.cheapest_price]
     for d in res.priced_days:
         prices.append(d.min_price)
