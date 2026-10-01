@@ -119,18 +119,18 @@ has no member for.
 
 **Encoded constraints are checked on the rows too.** Google has ignored a field
 it was sent (the carrier exclude on JFK-LHR), so `_gf_postfilter.routing_keep`
-holds every row to what the row can show: the carrier include (any seller, the
-marketing reading), Google's own total duration (`FlightResult.duration`, never
-a difference of leg datetimes, which are local to each airport and off by the
-zone offset), every layover's minutes, and the first departure's clock time, to
-the minute. A layover is the page's own figure for that connection
-(`data[0][13]`, elapsed minutes). Where the row states none it is the clock
-difference at the connecting airport, which a daylight-saving change there puts
-an hour out; a negative one is such a change and is not held against the row.
-The stop ceiling and an alliance are not checked: the stops are left to Google's
-own filter, and nothing here says which carrier is in which alliance. Children
-are priced, not checked. When these checks empty a board, the empty-answer line
-names every active check.
+holds every row to what the row can show: the stop count (legs less one, held
+to the strictest of `--stops`, a MAXSTOPS and a routing `N`, on every board),
+the carrier include (any seller, the marketing reading), Google's own total
+duration (`FlightResult.duration`, never a difference of leg datetimes, which
+are local to each airport and off by the zone offset), every layover's minutes,
+and the first departure's clock time, to the minute. A layover is the page's
+own figure for that connection (`data[0][13]`, elapsed minutes). Where the row
+states none it is the clock difference at the connecting airport, which a
+daylight-saving change there puts an hour out; a negative one is such a change
+and is not held against the row. An alliance is not checked: nothing here says
+which carrier is in which alliance. Children are priced, not checked. When
+these checks empty a board, the empty-answer line names every active check.
 
 **A price cap and bags (`search --max-price N`, `--bags CHECKED[,CARRY]`).**
 Both are top-level fields, written after the cabin (9) and before 14.
@@ -557,6 +557,20 @@ enriched weave, which hands the untrimmed board to `merge_results` and bounds th
 merged table afterwards in `_render_merged`. The multi-cabin `--format json` arm
 trims per cabin for the same reason, to the user's count and not the bumped one —
 the same count as the table beside it, drawn from a different set.
+
+**The multi-cabin join keys the whole itinerary.** `_multi_cabin.itinerary_key`
+takes, per slice, every flight number, each flight's date where the answer gives
+one (Google's `segment_dates`; Matrix gives none) and the slice's departure and
+arrival strings. Nothing cabin-specific is in it, so an itinerary both cabins
+list is one row with both prices. A cabin that lists one itinerary twice is
+priced at the listing that ranks first under `price_rank`, and the row's
+`itinerary` is that listing, so it carries the price printed. A key of the first
+flight and its date alone joins the full JFK-LAX board (95 itineraries) into 62
+rows, 4 of them printed at another itinerary's fare (AS41+AS2415, USD255 of its
+own, at USD312), and JFK-LHR (101) into 64 rows, 9 of them mispriced. It also
+joins Matrix's FI+ JFK-LHR answer for 2026-10-20 (9 trips through Keflavik) into
+3 rows. The whole key gives 95, 101 and 9 rows, and it partitions both Google
+boards exactly as `_gflight_ids._itinerary_key` does.
 
 **Neither merge ranks two currencies by their numbers.** `_multi_cabin.merge`
 and `_enrich.merge_results` sort through `_multi_cabin.price_rank`: rows priced

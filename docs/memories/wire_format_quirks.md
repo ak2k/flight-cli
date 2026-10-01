@@ -60,12 +60,26 @@ the captured SPA bodies use a specific order:
 If you reorder, golden-file tests break. Either match the order or rebase
 the fixtures.
 
-## `maxLegsRelativeToMin` default = 1
+## `maxLegsRelativeToMin` counts legs; `MAXSTOPS` counts stops
 
 The SPA's "No limit" stops setting maps to `maxLegsRelativeToMin: 1` on
-the wire — i.e., up to 1 connection. Higher values DO work but exceed
-what the consumer UI permits. Don't pass anything > 2 in production
-without checking that Matrix's backend accepts it.
+the wire. The field is relative: legs beyond the route's own minimum, so on
+a route with no nonstop 0 still answers one-stop trips. Values above 2
+exceed what the consumer UI offers. The SPA bundle asks an absolute limit
+as `inputs.maxStopCount: N` with `maxLegsRelativeToMin` omitted. flight-cli
+does not send `maxStopCount`, which is unmeasured on its client; `--stops N`
+goes out as `MAXSTOPS N` in each slice's `commandLine`, beside
+`maxLegsRelativeToMin: N`.
+
+Measured 2026-10-01 on live Matrix, `--backend matrix --cash-only`:
+- JFK-BKK one-way, 2026-11-04, `--ext 'MAXSTOPS 0'`: 0 solutions and an
+  empty `itineraryStopCountList`. With `maxLegsRelativeToMin: 0` alone the
+  same search answered 5 solutions, every slice one stop.
+- JFK-LHR, same date and code: 10 solutions, every one nonstop.
+- LGA-LAX one-way calendar, 2026-10-20 to 2026-11-02, `MAXSTOPS 0`: 0
+  solutions every day (the route has no nonstop).
+- JFK-BKK with `MAXSTOPS 2; MAXSTOPS 0`: accepted, 0 solutions. A later,
+  stricter MAXSTOPS holds beside an earlier, looser one.
 
 ## `timeRanges` accepts arbitrary minute-granular ranges
 

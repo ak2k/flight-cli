@@ -16,6 +16,8 @@ import pathlib
 from datetime import date
 from typing import Any, cast
 
+import pytest
+
 from flight_cli.domain import (
     Cabin,
     CalendarFollowup,
@@ -278,4 +280,102 @@ def test_fare_rules_body_matches_the_sent_one():
         solution_id=solution_id,
         fare_key=captured["inputs"]["fareKeys"],
     ).as_json()
+    assert ours == captured, _diff(captured, ours)
+
+
+# ─────────────────────────────── stop limit ────────────────────────────────
+# `maxLegsRelativeToMin` counts legs beyond the route's own minimum, so on a
+# route with no nonstop `--stops 0` still answers one-stop trips. `MAXSTOPS N`
+# in each slice's commandLine is absolute: JFK-BKK under `MAXSTOPS 0` answered
+# no solution, and beside an earlier `MAXSTOPS 2` a later `MAXSTOPS 0` held.
+
+
+def _stopped(*extensions: str | None, stops: int | None) -> Json:
+    dates = (date(2026, 11, 4), date(2026, 11, 11))
+    legs = tuple(
+        Leg.of(*(("JFK", "BKK") if i == 0 else ("BKK", "JFK")), dates[i], extension=ext)
+        for i, ext in enumerate(extensions)
+    )
+    search = SpecificDateSearch(legs=legs, options=SearchOptions(max_extra_stops=stops))
+    return to_wire(search).as_json()
+
+
+def _command_lines(body: Json) -> list[str | None]:
+    return [s.get("commandLine") for s in body["inputs"]["slices"]]
+
+
+def test_a_stop_limit_rides_every_slice_as_maxstops() -> None:
+    one_way = _stopped(None, stops=0)
+    assert _command_lines(one_way) == ["MAXSTOPS 0"]
+    assert one_way["inputs"]["maxLegsRelativeToMin"] == 0
+    round_trip = _stopped(None, None, stops=0)
+    assert _command_lines(round_trip) == ["MAXSTOPS 0", "MAXSTOPS 0"]
+    assert round_trip["inputs"]["maxLegsRelativeToMin"] == 0
+
+
+def test_the_stop_limit_follows_the_users_own_codes() -> None:
+    assert _command_lines(_stopped("MAXCONNECT 2:00", stops=1)) == ["MAXCONNECT 2:00; MAXSTOPS 1"]
+    assert _command_lines(_stopped("MAXDUR 9:00;", stops=0)) == ["MAXDUR 9:00; MAXSTOPS 0"]
+    assert _command_lines(_stopped("MAXDUR 9:00 ; ", stops=0)) == ["MAXDUR 9:00; MAXSTOPS 0"]
+    assert _command_lines(_stopped("   ", stops=0)) == ["MAXSTOPS 0"]
+
+
+def test_a_looser_maxstops_is_followed_by_the_limit() -> None:
+    assert _command_lines(_stopped("MAXSTOPS 2", stops=0)) == ["MAXSTOPS 2; MAXSTOPS 0"]
+    # Only a later, stricter code was measured to hold beside a looser one.
+    assert _command_lines(_stopped("MAXSTOPS 0; MAXSTOPS 2", stops=1)) == [
+        "MAXSTOPS 0; MAXSTOPS 2; MAXSTOPS 1"
+    ]
+
+
+def test_a_maxstops_within_the_limit_is_sent_as_typed() -> None:
+    assert _command_lines(_stopped("MAXSTOPS 0", stops=1)) == ["MAXSTOPS 0"]
+    assert _command_lines(_stopped("maxstops 1", stops=1)) == ["maxstops 1"]
+    assert _command_lines(_stopped("MAXSTOPS 1 ;", stops=1)) == ["MAXSTOPS 1 ;"]
+
+
+def test_each_slice_is_held_to_the_limit_on_its_own() -> None:
+    assert _command_lines(_stopped("MAXSTOPS 0", None, stops=1)) == ["MAXSTOPS 0", "MAXSTOPS 1"]
+
+
+def test_maxlegs_carries_the_limit_itself() -> None:
+    assert _stopped(None, stops=2)["inputs"]["maxLegsRelativeToMin"] == 2
+
+
+def test_a_calendar_and_its_followup_carry_the_limit() -> None:
+    window = CalendarWindow(
+        start=date(2026, 10, 20), end=date(2026, 11, 2), duration_min=0, duration_max=0
+    )
+    opts = SearchOptions(max_extra_stops=0)
+    calendar = to_wire(CalendarSearch(legs=(Leg.of("LGA", "LAX"),), options=opts, window=window))
+    assert _command_lines(calendar.as_json()) == ["MAXSTOPS 0"]
+    followup = to_wire(
+        CalendarFollowup(
+            legs=(Leg.of("LGA", "LAX", date(2026, 10, 20), extension="-REDEYES"),),
+            options=opts,
+            window=window,
+        )
+    )
+    assert _command_lines(followup.as_json()) == ["-REDEYES; MAXSTOPS 0"]
+
+
+@pytest.mark.parametrize("stops", [None, -1])
+def test_no_stop_limit_sends_the_body_as_typed(stops: int | None) -> None:
+    assert _command_lines(_stopped("MAXDUR 9:00;", None, stops=stops)) == ["MAXDUR 9:00;", None]
+    assert _stopped(None, stops=stops)["inputs"]["maxLegsRelativeToMin"] == 1
+    captured = _strip(_load("calendar_nyc_munich_frankfurt.json"), "bgProgramResponse")
+    search = CalendarSearch(
+        legs=(
+            Leg.of("NYC", ["MUC", "FRA"], route_language="LH+", extension="MAXCONNECT 2:00"),
+            Leg.of(["MUC", "FRA"], "NYC"),
+        ),
+        options=SearchOptions(cabin=Cabin.COACH, pax=Pax(adults=1), max_extra_stops=stops),
+        window=CalendarWindow(
+            start=date.fromisoformat(captured["inputs"]["startDate"]),
+            end=date.fromisoformat(captured["inputs"]["endDate"]),
+            duration_min=captured["inputs"]["layover"]["min"],
+            duration_max=captured["inputs"]["layover"]["max"],
+        ),
+    )
+    ours = to_wire(search).as_json()
     assert ours == captured, _diff(captured, ours)

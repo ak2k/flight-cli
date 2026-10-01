@@ -41,8 +41,8 @@ Global flags (every search-printing command):
 
 | User says… | Reach for… |
 |---|---|
-| "max 1 stop" / "at most one connection" | `--stops 1` |
-| "nonstop only" | `--stops 0` |
+| "max 1 stop" / "at most one connection" | `--stops 1` (per direction) |
+| "nonstop only" | `--stops 0` (per direction) |
 | "Star Alliance only" | `--extension 'ALLIANCE star-alliance'` |
 | "Oneworld" / "SkyTeam" | `--extension 'ALLIANCE oneworld'` / `ALLIANCE skyteam` |
 | "no red-eyes" | `--extension '-REDEYES'` |
