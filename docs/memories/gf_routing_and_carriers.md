@@ -119,18 +119,18 @@ has no member for.
 
 **Encoded constraints are checked on the rows too.** Google has ignored a field
 it was sent (the carrier exclude on JFK-LHR), so `_gf_postfilter.routing_keep`
-holds every row to what the row can show: the carrier include (any seller, the
-marketing reading), Google's own total duration (`FlightResult.duration`, never
-a difference of leg datetimes, which are local to each airport and off by the
-zone offset), every layover's minutes, and the first departure's clock time, to
-the minute. A layover is the page's own figure for that connection
-(`data[0][13]`, elapsed minutes). Where the row states none it is the clock
-difference at the connecting airport, which a daylight-saving change there puts
-an hour out; a negative one is such a change and is not held against the row.
-The stop ceiling and an alliance are not checked: the stops are left to Google's
-own filter, and nothing here says which carrier is in which alliance. Children
-are priced, not checked. When these checks empty a board, the empty-answer line
-names every active check.
+holds every row to what the row can show: the stop count (legs less one, held
+to the strictest of `--stops`, a MAXSTOPS and a routing `N`, on every board),
+the carrier include (any seller, the marketing reading), Google's own total
+duration (`FlightResult.duration`, never a difference of leg datetimes, which
+are local to each airport and off by the zone offset), every layover's minutes,
+and the first departure's clock time, to the minute. A layover is the page's
+own figure for that connection (`data[0][13]`, elapsed minutes). Where the row
+states none it is the clock difference at the connecting airport, which a
+daylight-saving change there puts an hour out; a negative one is such a change
+and is not held against the row. An alliance is not checked: nothing here says
+which carrier is in which alliance. Children are priced, not checked. When
+these checks empty a board, the empty-answer line names every active check.
 
 **A price cap and bags (`search --max-price N`, `--bags CHECKED[,CARRY]`).**
 Both are top-level fields, written after the cabin (9) and before 14.
