@@ -280,6 +280,11 @@ entry in Google's `GetBookingResults` answer.
   where USD gave 45/55 and USD229 (measured 2026-10-01). Not measured: party
   size (every capture is 1 adult).
 
-The table shows the same fields: a `#` column, `carry-on`, `1st checked` and
-`2nd checked` columns, then one line per seller with a link, `<#> <seller>
-<link>`, never folded.
+The console shows the same fields. The table holds each seller's `#`, name,
+price and fare, the columns a narrow console can fold without cutting a number.
+Under it, one line per seller that states a bag fee or has a link: `<#>
+<seller>: carry-on <fee>, 1st checked <fee>, 2nd checked <fee> <link>`, `free`
+for 0, a bag with no stated fee left out, and the line never folded. The parser
+makes each seller and fare name one line, every run of whitespace (line breaks
+included) one space, so the table, these lines, the verdict and `seller` in the
+document all carry the same text.

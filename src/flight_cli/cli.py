@@ -29,7 +29,6 @@ import anyio.to_thread
 import typer
 from rich.console import Console
 from rich.markup import escape
-from rich.measure import Measurement
 from rich.table import Table
 
 from . import _config
@@ -2555,7 +2554,8 @@ def _render_booking_options(
     options: BookingOptions, *, n: int, table_prices: list[str | None], round_trip: bool
 ) -> None:
     """The "Booking options for #N" block: every seller, cheapest first, then
-    each seller's booking link on a line of its own beside its number."""
+    a line per seller beside its number with the bag fees it states and its
+    booking link."""
     t = Table(title=f"Booking options for #{n:d}", show_header=True, header_style="bold green")
     # On a narrow console Rich shrinks only the columns that may wrap, so the
     # numbers keep their width and the names fold rather than end in "…".
@@ -2563,46 +2563,13 @@ def _render_booking_options(
     t.add_column("seller", overflow="fold")
     t.add_column("price", justify="right", no_wrap=True)
     t.add_column("fare", overflow="fold")
-    t.add_column("carry-on", justify="right", no_wrap=True)
-    t.add_column("1st checked", justify="right", no_wrap=True)
-    t.add_column("2nd checked", justify="right", no_wrap=True)
     for i, s in enumerate(options.sellers, 1):
-        fees = {(b.bag, b.nth): b.fee for b in s.bags}
-        carry_on = fees.get(("carry-on", 1))
-        first = fees.get(("checked", 1))
-        second = fees.get(("checked", 2))
         t.add_row(
             f"{i:d}",
             _safe_text(s.name),
             "—" if s.price is None else f"{_safe_text(options.currency)}{s.price:.2f}",
             _safe_text(s.fare or ""),
-            ""
-            if carry_on is None
-            else "free"
-            if carry_on == 0
-            else f"{_safe_text(options.currency)}{carry_on:.2f}",
-            ""
-            if first is None
-            else "free"
-            if first == 0
-            else f"{_safe_text(options.currency)}{first:.2f}",
-            ""
-            if second is None
-            else "free"
-            if second == 0
-            else f"{_safe_text(options.currency)}{second:.2f}",
         )
-    # Once the numbers fill the console Rich would shrink the names to nothing;
-    # short of three characters a name, every column shrinks instead. A column
-    # takes its text, two spaces of padding and a rule; the table one more rule.
-    numbers = [c for c in t.columns if c.no_wrap]
-    taken = sum(
-        max(Measurement.get(console, console.options, x).maximum for x in (c.header, *c.cells)) + 3
-        for c in numbers
-    )
-    if taken + 2 * (3 + 3) + 1 > console.width:
-        for c in numbers:
-            c.no_wrap = False
     console.print(t)
     whole_trip = round_trip and any(s.bags for s in options.sellers)
     if any(s.link for s in options.sellers):
@@ -2613,12 +2580,30 @@ def _render_booking_options(
     elif whole_trip:
         console.print("[dim]Bag fees cover the whole trip.[/]")
     for i, s in enumerate(options.sellers, 1):
+        fees = {(b.bag, b.nth): b.fee for b in s.bags}
+        bags = ", ".join(
+            f"{label} free" if fee == 0 else f"{label} {options.currency}{fee:.2f}"
+            for label, fee in (
+                ("carry-on", fees.get(("carry-on", 1))),
+                ("1st checked", fees.get(("checked", 1))),
+                ("2nd checked", fees.get(("checked", 2))),
+            )
+            if fee is not None
+        )
+        if not (bags or s.link):
+            continue
+        # Off the table, so no fee or link is ever cut to fit a narrow console:
+        # folded or cropped, a multi-KB link no longer opens when copied. The
+        # name prints as its table cell does; emoji off for the link alone, so a
+        # `:name:` in it stays the text it was. Unhighlighted, so a URL inside a
+        # name is not styled as if this program marked it.
+        console.print(
+            f"{i:d} {_safe_text(s.name)}" + (f": {_safe_text(bags)}" if bags else ""),
+            end=" " if s.link else "\n",
+            soft_wrap=True,
+            highlight=False,
+        )
         if s.link:
-            # Folded or cropped, a multi-KB link no longer opens when copied.
-            # The name prints as its table cell does; emoji off for the link
-            # alone, so a `:name:` in it stays the text it was. Unhighlighted, so
-            # a URL inside a name is not styled as if this program marked it.
-            console.print(f"{i:d} {_safe_text(s.name)} ", end="", soft_wrap=True, highlight=False)
             console.print(_safe_text(s.link), soft_wrap=True, emoji=False, highlight=False)
     table = _undercut(options, table_prices)
     cheapest = options.sellers[0]
@@ -6394,10 +6379,11 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         False,
         "--sellers",
         help="After the Google Flights table, open itinerary #N's booking page "
-        "(--pick; default 1) in Chrome and list every seller with its price, fare name, "
-        "bag fees and booking link, cheapest first. Needs a Google Flights result and the "
-        "browser extra; refused on multi-cabin and --awards-only searches. With --format "
-        'json the document becomes {"search": …, "booking_options": […]}.',
+        "(--pick; default 1) in Chrome and list every seller with its price and fare name, "
+        "cheapest first, then each seller's bag fees and booking link on a line of its own. "
+        "Needs a Google Flights result and the browser extra; refused on multi-cabin and "
+        '--awards-only searches. With --format json the document becomes {"search": …, '
+        '"booking_options": […]}.',
         rich_help_panel=_GROUP_OUTPUT,
     ),
     currency: Annotated[

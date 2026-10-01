@@ -650,8 +650,8 @@ def test_a_seller_at_the_table_price_does_not_beat_it(
 
 
 def _wide(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A console wide enough that no seven-column table folds a cell, and
-    still narrower than any link."""
+    """A console wide enough that no table cell folds, and still narrower
+    than any link."""
     monkeypatch.setattr(cli, "console", Console(width=250, no_color=True))
 
 
@@ -693,26 +693,19 @@ def test_fast_sellers_print_each_sellers_bags_and_whole_link(
     block = result.stdout.split("Booking options for #1", 1)[1]
     lines = block.splitlines()
     header = next(line for line in lines if "seller" in line)
-    assert _cells(header, "┃") == [
-        "#",
-        "seller",
-        "price",
-        "fare",
-        "carry-on",
-        "1st checked",
-        "2nd checked",
-    ]
+    assert _cells(header, "┃") == ["#", "seller", "price", "fare"]
     rows = [_cells(line, "│") for line in lines if line.startswith("│")]
     assert rows == [
-        ["1", "Kiwi.com", "USD170.00", "", "free", "", ""],
-        ["2", "JetBlue", "USD179.00", "Blue Basic", "free", "USD35.00", "USD45.00"],
-        ["3", "Agency", "USD185.00", "", "", "", ""],
+        ["1", "Kiwi.com", "USD170.00", ""],
+        ["2", "JetBlue", "USD179.00", "Blue Basic"],
+        ["3", "Agency", "USD185.00", ""],
     ]
     assert "Each link goes through Google to that seller's own page for this fare." in block
     assert "whole trip" not in block
-    assert [line for line in lines if "https://" in line] == [
-        f"1 Kiwi.com {kiwi.link}",
-        f"2 JetBlue {jetblue.link}",
+    # The agency states no fee and has no link, so it has no line.
+    assert [line for line in lines if re.match(r"\d+ ", line)] == [
+        f"1 Kiwi.com: carry-on free {kiwi.link}",
+        f"2 JetBlue: carry-on free, 1st checked USD35.00, 2nd checked USD45.00 {jetblue.link}",
     ]
     # The verdict is the last thing said.
     assert lines[-1] == "Kiwi.com at USD170.00 beats the table price, USD179.00."
@@ -802,7 +795,7 @@ def test_sellers_with_no_link_print_no_link_lines(
     result = _run("--fast", "--sellers", "--no-matrix-url", "--no-google-url")
     assert result.exit_code == 0, result.output
     block = result.stdout.split("Booking options for #1", 1)[1]
-    assert "free" in block
+    assert "1 JetBlue: 1st checked free" in block.splitlines()
     assert "link" not in block
     assert "https://" not in block
 
@@ -812,7 +805,24 @@ def _bag_cell(seller: gb.Seller, bag: str, nth: int) -> str:
     return "" if fee is None else "free" if fee == 0 else f"USD{fee:.2f}"
 
 
-@pytest.mark.parametrize("width", [80, 70])
+def _seller_line(i: int, seller: gb.Seller) -> str | None:
+    """Seller `i`'s line under the table: its bag fees, then its link."""
+    bags = ", ".join(
+        f"{label} {cell}"
+        for label, cell in (
+            ("carry-on", _bag_cell(seller, "carry-on", 1)),
+            ("1st checked", _bag_cell(seller, "checked", 1)),
+            ("2nd checked", _bag_cell(seller, "checked", 2)),
+        )
+        if cell
+    )
+    if not (bags or seller.link):
+        return None
+    link = f" {seller.link}" if seller.link else ""
+    return f"{i:d} {seller.name}" + (f": {bags}" if bags else "") + link
+
+
+@pytest.mark.parametrize("width", [80, 70, 66, 64, 60, 50])
 @pytest.mark.parametrize(
     ("name", "flights"),
     [
@@ -821,12 +831,13 @@ def _bag_cell(seller: gb.Seller, bag: str, nth: int) -> str:
         pytest.param("ow_jfk_lax_dl1788.body", [("DL", "1788")], id="dl1788"),
     ],
 )
-def test_a_narrow_console_folds_a_name_and_never_cuts_a_price_or_fee(
+def test_a_narrow_console_cuts_no_price_fee_name_or_link(
     monkeypatch: pytest.MonkeyPatch, name: str, flights: list[tuple[str, str]], width: int
 ) -> None:
     """80 columns is what Rich assumes for piped output. A seller or fare name
-    too long for its column folds onto the next line; a number never does, and
-    nothing loses its end to an ellipsis."""
+    too long for its column folds onto the next line; a price never does, and
+    nothing loses its end to an ellipsis. The bag fees and the link sit on the
+    seller's own line, which the console never folds."""
     sellers = gb.parse_sellers(_fixture(name), flights=flights)
     buf = io.StringIO()
     monkeypatch.setattr(cli, "console", Console(file=buf, width=width, no_color=True))
@@ -834,15 +845,15 @@ def test_a_narrow_console_folds_a_name_and_never_cuts_a_price_or_fee(
         gb.BookingOptions("USD", sellers), n=1, table_prices=[], round_trip=False
     )
     out = buf.getvalue()
-    assert "…" not in out
+    assert "…" not in out, out
     rows: list[list[str]] = []
     for line in (line for line in out.splitlines() if line.startswith("│")):
         cells = _cells(line, "│")
         if cells[0]:
             rows.append(cells)
         else:
-            # A continuation line: the numbers stay on their row's first line.
-            assert [cells[i] for i in (0, 2, 4, 5, 6)] == [""] * 5
+            # A continuation line: the number and the price stay on their row's first line.
+            assert [cells[0], cells[2]] == ["", ""], line
             rows[-1] = [f"{a} {b}" for a, b in zip(rows[-1], cells, strict=True)]
     assert [[c.replace(" ", "") for c in row] for row in rows] == [
         [
@@ -850,30 +861,12 @@ def test_a_narrow_console_folds_a_name_and_never_cuts_a_price_or_fee(
             s.name.replace(" ", ""),
             "—" if s.price is None else f"USD{s.price:.2f}",
             (s.fare or "").replace(" ", ""),
-            _bag_cell(s, "carry-on", 1),
-            _bag_cell(s, "checked", 1),
-            _bag_cell(s, "checked", 2),
         ]
         for i, s in enumerate(sellers, 1)
     ]
-
-
-@pytest.mark.parametrize("width", [64, 60, 50])
-def test_a_console_too_narrow_for_the_numbers_still_shows_every_name(
-    monkeypatch: pytest.MonkeyPatch, width: int
-) -> None:
-    """Once the numbers alone would fill the console, every column gives way,
-    as Rich does by default, rather than the names shrinking to nothing."""
-    sellers = gb.parse_sellers(_fixture("ow_jfk_lax_dl1788.body"), flights=[("DL", "1788")])
-    buf = io.StringIO()
-    monkeypatch.setattr(cli, "console", Console(file=buf, width=width, no_color=True))
-    cli._render_booking_options(
-        gb.BookingOptions("USD", sellers), n=1, table_prices=[], round_trip=False
-    )
-    rows = [_cells(line, "│") for line in buf.getvalue().splitlines() if line.startswith("│")]
-    firsts = [row for row in rows if row[0]]
-    assert len(firsts) == len(sellers)
-    assert all(row[1] and row[3] for row in firsts)
+    # The trimmed DL1788 capture states no fee and no link, so it has no line.
+    expected = [line for i, s in enumerate(sellers, 1) if (line := _seller_line(i, s))]
+    assert [line for line in out.splitlines() if re.match(r"\d+ ", line)] == expected
 
 
 def _priced_in(monkeypatch: pytest.MonkeyPatch, rows: list[Any], currency: str) -> None:
