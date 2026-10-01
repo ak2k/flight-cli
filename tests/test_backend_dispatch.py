@@ -844,3 +844,40 @@ def test_a_result_count_below_one_is_refused_before_any_backend_runs(
         monkeypatch.setattr(cli, path, _unreached)
     result = CliRunner().invoke(cli.app, [command, "JFK", "MIA", "--dep", _future_dep(), "-n", n])
     assert result.exit_code == 2, result.output
+
+
+# ─────────────────────────── a round trip's legs ───────────────────────────
+
+_LEGS_DIFFER = "different routing or extension codes on the outbound and the return"
+
+
+@pytest.mark.parametrize(
+    "return_codes", [("~BA+", None), (None, None)], ids=["other-carrier", "empty"]
+)
+def test_auto_sends_a_return_with_other_codes_to_matrix_naming_it(
+    return_codes: tuple[str | None, str | None], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """RED at base (no such keyword). Google's page writes one filter set onto
+    every slice, so a return asking something else is Matrix's."""
+    assert _call(routing="AA+", return_codes=return_codes) == BACKEND_MATRIX
+    assert _LEGS_DIFFER in " ".join(capsys.readouterr().err.split())
+
+
+@pytest.mark.parametrize(
+    "return_codes", [("~BA+", None), (None, None)], ids=["other-carrier", "empty"]
+)
+def test_gflight_refuses_a_return_with_other_codes_naming_it(
+    return_codes: tuple[str | None, str | None],
+) -> None:
+    """RED at base (no such keyword)."""
+    with pytest.raises(typer.BadParameter, match=_LEGS_DIFFER):
+        _call(BACKEND_GFLIGHT, routing="AA+", return_codes=return_codes)
+
+
+def test_a_return_with_the_same_predicates_stays_on_gflight_silently(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """RED at base (no such keyword). Case is not a difference: `aa+` is `AA+`."""
+    assert _call(routing="AA+", return_codes=("aa+", None)) == BACKEND_GFLIGHT
+    assert _call(BACKEND_GFLIGHT, routing="AA+", return_codes=("aa+", None)) == BACKEND_GFLIGHT
+    assert capsys.readouterr().err == ""

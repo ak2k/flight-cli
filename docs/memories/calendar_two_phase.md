@@ -119,6 +119,16 @@ flight detail MIA PAR --dep 2026-06-01 --return 2026-06-07 \
 # → 2 LH solutions @ USD2175 for the picked date
 ```
 
+`detail` asks the grid's question only when it is given the calendar's
+filters: the routing and extension codes (with `--routing-ret`/`--ext-ret`),
+`--depart-times`/`--return-times`, `--include-unavailable`, `--stops`, the
+cabin and the passengers. Left out, its itineraries answer a wider question
+than the grid priced. The followup body carries a time window as each slice's
+`timeRanges` and availability as `checkAvailability`, and Matrix applies the
+window: live 2026-10-01, a `calendarFollowup` JFK-LAX 2026-10-20 one-way with
+the morning window (`8:00`-`11:00`) gave 8 of 8 solutions departing 08:00 to
+11:00, both ends inclusive.
+
 The `--duration` flag on `detail` matters: followup needs to know the
 original calendar's duration range to preserve session context. If the
 user just says `--dep` and `--return`, we infer duration from the date
