@@ -1551,7 +1551,7 @@ def _run_calendar(
     no_cache: bool,
     max_per_query: int = 1,
     max_concurrency: int = _CALENDAR_FANOUT_CONCURRENCY,
-) -> tuple[CalendarResult, int]:
+) -> tuple[CalendarResult, int, bool]:
     """Execute a calendar search. A multi-airport query is fanned out into
     sub-searches of up to `max_per_query` destinations each, run in parallel
     (≤ `max_concurrency` at a time), and merged — Matrix under-reports a combined
@@ -1559,8 +1559,9 @@ def _run_calendar(
     size guaranteed complete. A round trip also runs `search` itself beside them,
     for the returns into another airport of the set that no mirrored pair asks.
 
-    Returns `(result, n_queries)` where `n_queries > 1` means the fan-out path was
-    used (for a one-line note), counting that combined query. A single-airport
+    Returns `(result, n_queries, floor_lost)` where `n_queries > 1` means the
+    fan-out path was used (for a one-line note), counting that combined query, and
+    `floor_lost` that it ran and its answer is not in the merge. A single-airport
     calendar runs as one query and returns `n_queries == 0`.
     """
     subs = split_calendar_search(search, max_per_query)
@@ -1590,15 +1591,16 @@ def _run_calendar(
             f"--max-per-query to send fewer, larger requests.[/]"
         )
 
-    answer: tuple[CalendarResult, int] | None = None
+    answer: tuple[CalendarResult, int, bool] | None = None
 
-    async def go() -> tuple[CalendarResult, int]:
+    async def go() -> tuple[CalendarResult, int, bool]:
         nonlocal answer
         async with MatrixClient(
             rps=max(rps, float(conc)), impersonate=impersonate, concurrency=conc
         ) as c:
             if not multi:
-                answer = (cast("CalendarResult", await c.execute(search, cache=not no_cache)), 0)
+                result = cast("CalendarResult", await c.execute(search, cache=not no_cache))
+                answer = (result, 0, False)
             else:
                 fan = await _gather_calendar(
                     c,
@@ -1613,7 +1615,8 @@ def _run_calendar(
                 merged = merge_calendar_results(fan.results, fan.floor)
                 empty = is_empty_calendar(merged)
                 _report_calendar_fanout(fan, n, merged_empty=empty)
-                answer = (merged, 0) if empty else (merged, n)
+                floor_lost = floor is not None and fan.floor is None
+                answer = (merged, 0, False) if empty else (merged, n, floor_lost)
             # Recorded inside the `async with`, because the client's own teardown is
             # one of the things that can fail after Matrix has answered, and the
             # guard below has no other way to tell a query that never ran from one
@@ -2064,7 +2067,7 @@ def _run_matrix_calendar(
     (origin, destination group), beside the combined query on a round trip, and
     merges."""
     # CalendarSearch → CalendarResult by client._parse_response dispatch.
-    res, n_split = _run_calendar(
+    res, n_split, floor_lost = _run_calendar(
         search,
         rps=rps,
         impersonate=impersonate,
@@ -2080,19 +2083,26 @@ def _run_matrix_calendar(
         # the stream. On a round trip `n_split` counts the combined query
         # `_run_calendar` runs beside the pairs; it alone prices a return into
         # another airport of the set, and Matrix may under-report it, so the note
-        # says the grid answers that part less completely than the rest.
+        # says the grid answers that part less completely than the rest. When it
+        # failed, the grid holds none of those returns, and the note says that.
         round_trip = len(search.legs) == _ROUND_TRIP_LEGS
         pairs = n_split - 1 if round_trip else n_split
+        with_floor = round_trip and not floor_lost
         err.print(
             f"[dim]Queried {pairs:d} "
             + ("origin/destination groups" if max_per_query > 1 else "airport pairs")
-            + (" separately plus the combined query," if round_trip else " separately")
+            + (" separately plus the combined query," if with_floor else " separately")
             + " and merged — Matrix under-reports the combined multi-airport calendar grid.[/]"
         )
-        if round_trip:
+        if with_floor:
             err.print(
                 "[dim]Round trips that return to another airport of the set come only "
                 "from the combined query, which Matrix may under-report.[/]"
+            )
+        elif round_trip:
+            err.print(
+                "[dim]Round trips that return to another airport of the set are missing: "
+                "only the combined query prices them, and it failed.[/]"
             )
     if json_out:
         sys.stdout.write(json.dumps(res.raw, indent=2))

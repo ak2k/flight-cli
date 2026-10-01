@@ -235,7 +235,7 @@ class _EmptyClient(_PricedClient):
 
 def test_run_calendar_fans_out_multi_airport_and_merges(monkeypatch: Any) -> None:
     monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
-    res, n = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
+    res, n, _ = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
         _cal(["VIE", "CDG", "FCO", "MAD"]), rps=10.0, impersonate="chrome", no_cache=True
     )
     assert n == 5  # one query per destination, and the combined one beside them
@@ -245,7 +245,7 @@ def test_run_calendar_fans_out_multi_airport_and_merges(monkeypatch: Any) -> Non
 
 def test_run_calendar_single_airport_runs_one_query(monkeypatch: Any) -> None:
     monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
-    res, n = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
+    res, n, _ = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
         _cal(["CDG"]), rps=10.0, impersonate="chrome", no_cache=True
     )
     assert n == 0  # nothing to fan out
@@ -254,7 +254,7 @@ def test_run_calendar_single_airport_runs_one_query(monkeypatch: Any) -> None:
 
 def test_run_calendar_all_empty_is_not_masked(monkeypatch: Any) -> None:
     monkeypatch.setattr(cli, "MatrixClient", _EmptyClient)
-    res, n = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
+    res, n, _ = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
         _cal(["VIE", "CDG"]), rps=10.0, impersonate="chrome", no_cache=True
     )
     assert n == 0  # every destination empty → genuinely flight-less
@@ -268,7 +268,7 @@ def test_run_calendar_large_fanout_proceeds(monkeypatch: Any) -> None:
     monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
     origins = ("JFK", "EWR", "LGA", "BOS", "PHL", "IAD", "BWI")
     dests = ["LHR", "CDG", "FRA", "AMS", "MAD", "FCO"]
-    res, n = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
+    res, n, _ = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
         _cal(dests, origins=origins), rps=10.0, impersonate="chrome", no_cache=True
     )
     assert n == 43  # fanned out, not refused
@@ -286,7 +286,7 @@ class _CapturingClient(_PricedClient):
 
 def test_run_calendar_max_per_query_reduces_queries(monkeypatch: Any) -> None:
     monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
-    res, n = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
+    res, n, _ = cli._run_calendar(  # pyright: ignore[reportPrivateUsage]
         _cal(["VIE", "CDG", "FCO", "MAD"]),
         rps=10.0,
         impersonate="chrome",
@@ -362,9 +362,10 @@ def _pair_client(
 
 
 def _run(search: CalendarSearch, **kwargs: Any) -> tuple[CalendarResult, int]:
-    return cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
+    res, n, _ = cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
         search, rps=10.0, impersonate="chrome", no_cache=True, **kwargs
     )
+    return res, n
 
 
 def test_split_asks_each_member_airport_pair_of_two_metro_codes() -> None:
@@ -781,6 +782,36 @@ def test_a_one_way_fanout_note_has_no_combined_query(
     assert "Queried 2 airport pairs separately and merged" in note
     assert "combined query" not in note
     assert "Queried" not in cap.out
+
+
+@pytest.mark.parametrize("fmt", ["table", "json"])
+@pytest.mark.parametrize(
+    "floor",
+    [MatrixApiError("COMBINED UNAVAILABLE", kind="internal"), _priced("GBP500.00")],
+    ids=["failed", "off-currency"],
+)
+def test_a_lost_combined_query_is_not_described_as_merged(
+    floor: CalendarResult | Exception,
+    fmt: str,
+    monkeypatch: Any,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The grid holds the pairs alone, so it holds no return into another
+    airport of the set, and the note says so rather than where they came from."""
+    grids = _round_trip_pairs()
+    grids["JFK,EWR", "LHR"] = floor
+    _pair_client(monkeypatch, grids)
+    _spy_renderers(monkeypatch)
+    _calendar_fast(fast=False, fmt=fmt, origin="JFK,EWR", destination="LHR", one_way=False)
+    note = _flat(capsys.readouterr().err)
+    assert "1 of 3 sub-queries failed" in note
+    assert "Queried 2 airport pairs separately and merged" in note
+    assert "plus the combined query" not in note
+    assert "come only from the combined query" not in note
+    assert (
+        "Round trips that return to another airport of the set are missing: only the "
+        "combined query prices them, and it failed." in note
+    )
 
 
 # ──────────── orchestration: _run_calendar_enriched (concurrent weave) ───────
@@ -1980,7 +2011,7 @@ def test_a_calendar_fanout_that_loses_some_sub_queries_says_how_many(
     destination with no fares, and the count is what tells them apart."""
     _FanoutFailClient.fails = frozenset({"VIE"})
     monkeypatch.setattr(cli, "MatrixClient", _FanoutFailClient)
-    res, n = cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
+    res, n, _ = cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
         _cal(["VIE", "CDG"], one_way=True), rps=10.0, impersonate="chrome", no_cache=True
     )
     assert n == 2  # what answered was merged and is still rendered
@@ -2397,7 +2428,7 @@ def test_a_teardown_after_a_calendar_keeps_the_answer_on_the_plain_path(
     stands, and the teardown is a line beside it. Discarding it reports a query that
     succeeded as one that never ran, on the two channels automation reads."""
     monkeypatch.setattr(cli, "MatrixClient", _TeardownFailsClient)
-    res, n = cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
+    res, n, _ = cli._run_calendar(  # pyright: ignore[reportPrivateUsage] — the runner IS the unit
         _cal(["CDG"]), rps=10.0, impersonate="chrome", no_cache=True
     )
     assert not is_empty_calendar(res)  # the calendar Matrix priced, not discarded
