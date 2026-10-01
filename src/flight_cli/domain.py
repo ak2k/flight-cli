@@ -131,10 +131,11 @@ class SearchOptions(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     cabin: Cabin = Cabin.COACH
     pax: Pax = Pax()
-    # Maps to Matrix's `maxLegsRelativeToMin` — "up to N extra legs beyond the
-    # nonstop minimum." Effectively "max N connecting stops" for a one-way leg
-    # (1 nonstop leg + N extra = N stops). None = SPA's "No limit" default of 1
-    # extra stop. 0 = nonstop only.
+    # At most N stops per direction, on every backend; 0 = nonstop only.
+    # Matrix is sent `MAXSTOPS N` in each slice's commandLine, because its
+    # `maxLegsRelativeToMin` (also sent as N) counts legs beyond the route's
+    # own minimum and lets one-stop trips through 0 on a route with no
+    # nonstop. None or negative = no limit.
     max_extra_stops: int | None = None
     allow_airport_changes: bool = True
     show_only_available: bool = True

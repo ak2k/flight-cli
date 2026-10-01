@@ -478,6 +478,53 @@ def test_each_leg_is_held_to_its_own_window() -> None:
 
 def test_no_predicate_and_no_window_is_no_filter() -> None:
     assert routing_keep([[], []], [(), ()]) is None
+    assert routing_keep([[], []], [(), ()], max_stops=-1) is None
+
+
+# ─────────────────────────── the stop ceiling ──────────────────────────────
+
+
+def _one_stop() -> GFlightWithId:
+    return _row(
+        ("AA", "JFK", "ORD", _h(7), _h(9)), ("AA", "ORD", "LAX", _h(10), _h(12)), duration=420
+    )
+
+
+def _stop_keep(max_stops: int | None, extension: str | None = None) -> Any:
+    keep = routing_keep([classify(None, extension).predicates] * 2, max_stops=max_stops)
+    assert keep is not None
+    return keep
+
+
+def test_a_row_over_the_stop_limit_is_dropped() -> None:
+    """Google has ignored a field it was sent, so the page's stop filter is
+    checked on the row as well."""
+    assert not _stop_keep(0)(0, _one_stop())
+    assert _stop_keep(1)(0, _one_stop())
+    assert _stop_keep(0)(0, _row(("AA", "JFK", "LAX", _h(8), _h(11)), duration=360))
+
+
+def test_the_extensions_and_routings_own_ceiling_is_checked_on_the_row() -> None:
+    assert not _keeps(_one_stop(), None, "MAXSTOPS 0")
+    assert _keeps(_one_stop(), None, "MAXSTOPS 1")
+    assert not _keeps(_one_stop(), "N", None)
+
+
+def test_the_strictest_ceiling_holds() -> None:
+    assert not _stop_keep(1, "MAXSTOPS 0")(0, _one_stop())
+    assert not _stop_keep(0, "MAXSTOPS 2")(0, _one_stop())
+
+
+def test_a_return_board_is_held_to_the_ceiling() -> None:
+    assert not _stop_keep(0)(1, _one_stop())
+    keep = routing_keep([[], classify(None, "MAXSTOPS 0").predicates])
+    assert keep is not None
+    assert keep(0, _one_stop())
+    assert not keep(1, _one_stop())
+
+
+def test_a_negative_limit_is_no_limit() -> None:
+    assert _stop_keep(-1, "MAXDUR 9:00")(0, _one_stop())
 
 
 def test_the_checks_are_named_in_the_users_words() -> None:
@@ -489,9 +536,18 @@ def test_the_checks_are_named_in_the_users_words() -> None:
         "a carrier filter (AA)",
         "a maximum trip duration (380 min)",
         "a minimum layover (120 min)",
+        "a stop ceiling of 1",
         "a departure-time window (morning)",
         "a return-time window (evening)",
     ]
+
+
+def test_the_strictest_stop_ceiling_is_named_once() -> None:
+    stops = classify(None, "MAXSTOPS 2").predicates
+    assert row_check_names([stops, stops], max_stops=1) == ["a stop ceiling of 1"]
+    assert row_check_names([stops, stops], max_stops=3) == ["a stop ceiling of 2"]
+    assert row_check_names([[], []], max_stops=0) == ["a stop ceiling of 0"]
+    assert row_check_names([[], []], max_stops=-1) == []
 
 
 def _priced(price: float | None, currency: str | None = "USD") -> GFlightWithId:
