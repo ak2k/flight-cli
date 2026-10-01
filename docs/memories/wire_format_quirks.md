@@ -95,9 +95,13 @@ The UI offers 6 fixed buckets, but the API takes any well-formed
 - Field name is **`timeRanges`** on the slice, NOT the SPA URL state's
   `departureDatePreferredTimes` (those are different things)
 
-The `TimeOfDay` enum exposes the 6 named buckets. If we want
-power-user arbitrary-range support, expose a parser that accepts
-`"09:30-13:45"` in addition to the named values.
+`flight search` takes one such window beside the 6 named buckets
+(`--depart-times 9:30-13:45`, a `domain.ClockWindow`), sent as
+`{min:"9:30",max:"13:45"}`; calendar and detail take the buckets only. The
+ranges are departure times (`DEP-TOFD-RANGES-LOCAL`), and Matrix has no
+arrival-time input, so `--arrive-times` is Google-only. The deep link's URL
+state takes the bucket names only, so it leaves a minute window out and the CLI
+says so under the link.
 
 ## `commandLine` order quirk in the SPA-state URL
 

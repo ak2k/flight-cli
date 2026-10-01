@@ -78,6 +78,7 @@ PR #230:
 3.17/3.18 = min/max layover minutes
 12 = price cap, whole units of the page's `curr=` (sent on a USD page only, up to 2**31-1)
 13 = bags {2: carry-on (0 or 1), 3: checked count}, a zero count left out
+25 = 1: economy without basic fares (`--exclude-basic`), after 19
 ```
 
 The hour fields are whole hours and a "latest" hour is the last hour included:
@@ -89,6 +90,20 @@ fast_flights' enum names: BA112 JFK-LHR priced $295 for one adult, $324 beside
 a 3 (a tenth of the fare, a lap) and $589 beside a 4 (a seat). Every writer
 (`build_search_tfs`, the pinned and booking links, `google_flights_url`)
 writes Google's codes.
+
+A minute window (`--depart-times 9:30-13:45`, `--arrive-times 18:00-21:30`) asks
+for its whole hours, first // 60 to last // 60, and the row filter holds the
+first leg's departure, or the last leg's landing, to the minute, both ends
+included (on `ds1_jfk_lax_tfu.json`, 18:00-21:30 keeps 16 rows and drops the
+21:34 and 21:59 landings). Matrix takes a departure window to the minute in
+`timeRanges` and has no arrival input, so an arrival window is Google-only, as
+`--bags` is: refused where the search needs Matrix, and never handed to it.
+
+Field 25 = 1 (`--exclude-basic`) on JFK-LAX 2026-10-20: 93 rows against 95
+without it, 78 repriced up (AA +45 and +110, B6/DL/AS +55), 15 unchanged, 2
+gone, the cheapest USD229 -> USD284. On JFK-LHR it repriced none and still
+served a basic fare (2026-09-27). No row field marks a basic fare, so nothing
+can be checked: every run says so, and the flag is Google-only as `--bags` is.
 
 Two traps in that layout. **`3.5` is zero-based** while fli's `MaxStops` is
 one-based (ANY=0, NON_STOP=1, …), so it's `enum.value - 1` and **omitted** for
@@ -129,9 +144,8 @@ are served by Google too, so the search gate is per predicate
 (`_gf_postfilter.search_page_reasons`), and anything else routes to Matrix with
 its reason printed. Still on Matrix: carrier and alliance excludes as encoded
 fields (they stay post-filters), connection airports (3.15; Matrix's meaning is
-positional), infants (Google answered JFK-LAX with no rows for any infant, so an
-empty answer would not be one), seniors and youth (no Google kind), time
-buckets that do not form one window, an alliance beside another carrier or
+positional), an infant on a multi-cabin compare, seniors and youth (no Google
+kind), time buckets that do not form one window, an alliance beside another carrier or
 alliance include (3.6 is one list, so Google would answer either), a zero
 `MAXCONNECT` or `MAXDUR` (fli's maximums are positive), and a carrier code fli
 has no member for.
@@ -898,7 +912,8 @@ predicate set, each tagged with a tier:
 - **Tier 2 — post-filter on the result** (`_gf_postfilter`): operating carrier
   (`O:`/`OPAIRLINES`), marketing/airport *exclude* (`~UA`, `~DFW`, `-CITIES`,
   `-AIRLINES`), `-CODESHARE`, specific flight #/range, `MINCONNECT` (the search
-  page also encodes it as 3.17; the grids have no rows to check it on).
+  page also encodes it as 3.17; the grids have no rows to check it on),
+  `-REDEYES` and `-OVERNIGHTS` (the search's rows only; the grids refuse both).
 - **Tier 3 — Matrix only**: fare construction (`F bc=y`, `aa.lon.yup`), mileage,
   `PADCONNECT`, aircraft, a carrier list naming a token that is not an airline
   code (`-AIRLINES UA,DL`), and anything the parser can't confidently classify.
@@ -949,9 +964,32 @@ reads it as it is. The Chrome price graph cannot check rows either, and has its
 own gate, `_gf_calgraph.graph_blocker`, which admits the includes and bounds
 Google was measured applying from the URL (Admission, below).
 
-`-REDEYES` and `-OVERNIGHTS` still escalate to Matrix. The raw-row checks in
-`_gf_postfilter._row_passes` read per-leg datetimes, so either could be added
-there.
+`-REDEYES` and `-OVERNIGHTS` are row checks on the search page, read off each
+leg's local clocks (`_gf_postfilter._red_eye`, `_overnight_stop`), in place of
+a Matrix hand-off about 45 times slower. A red-eye leg lands on a later local
+date than it took off, takes off 00:00-04:59, or has clocks and duration twelve
+hours or more apart (it crosses the date line, where a night flight can land on
+its takeoff date). An overnight stop is a connection whose next leg leaves on a
+later local date than the landing there, or whose landing is 00:00-04:59.
+Matrix's `LAX JFK --dep 2026-10-20 --ext -REDEYES` gave 10 solutions, each
+landing the same day by 23:55. Over 74 saved Matrix nonstop slices, "lands on a
+later local date than it took off" reproduced Matrix's overnight flag on 73;
+the 74th (B61024 LAX 16:30 -> JFK 00:52) Matrix keeps and the rule drops. None
+of those slices crosses the date line, so the rule was never measured on one
+that does. Both arms also drop daytime long-haul legs Matrix may keep: HKG
+10:05 -> JFK 12:20 the same day by the twelve-hour arm, LAX 11:00 -> NRT 15:00
+the next day by the date arm; what Matrix does with them is unmeasured. A board
+the checks empty goes to Matrix under auto. The date grids have no rows and
+refuse both.
+
+A party with an infant is asked of the page (field 8, 3 lap and 4 seat). For
+one adult and a lap infant on 2026-10-20, JFK-LHR served 30 rows (BA/AY USD324,
+the adult fare plus a tenth), not the ~100-row board, and JFK-LAX none at all.
+So under auto a board served no rows for a party with an infant goes to Matrix
+with the note `Using Matrix: Google Flights served no rows for a party with an
+infant.`; under `--backend gflight`, or beside a Google-only flag, the empty
+board prints with a note naming how to ask Matrix. A multi-cabin compare with
+an infant stays on Matrix, since its hand-off counts only rows a filter dropped.
 
 ## Progressive enrich (`_run_enriched_path`)
 
