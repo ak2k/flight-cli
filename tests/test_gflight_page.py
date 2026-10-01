@@ -522,9 +522,10 @@ def test_two_empty_blobs_still_read_as_empty(client: Any) -> None:
 
 
 def test_rows_keep_the_top_flights_block_first() -> None:
-    """`ds:1[2]` is Google's own ranking and `[3]` the rest; concatenating in
-    that order is the only way the page's ordering survives — we can't
-    reproduce the blended rank locally."""
+    """`ds:1[2]` is Google's own top flights and `[3]` the rest, read in that
+    order: every Google answer is put in price order before it is shown, and
+    the page's order survives that only as the tie-break between equal
+    fares."""
     payload = json.loads(_ds1("ds1_jfk_lax_3rows.json"))
     rows = gfid._rows_from_ds1(payload).rows
     assert rows[0] is payload[2][0][0]

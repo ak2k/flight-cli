@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from flight_cli.models import (
     Itinerary,
     ItineraryDetails,
@@ -504,6 +506,51 @@ def test_cash_without_flight_id_skips_matched_id_path():
     matches = join(res, awards)
     # Joins via flight#+date heuristic, not matched-id.
     assert len(matches[0].awards) == 1
+
+
+@pytest.mark.parametrize(("origin", "dest"), [("EWR", "LHR"), ("JFK", "LGW")])
+def test_matched_id_does_not_attach_an_award_on_other_airports(origin: str, dest: str):
+    """An airport-set search asks every pair of the set, and an echoed id is a
+    claim rather than proof: an award that flies another pair stays off the
+    row whose id it names. Red at the base, which attached it."""
+    res = SearchResult(
+        solutions=[
+            _itin_with_id("AA6939", "2026-11-04T18:40:00", "JFK", "LHR", flight_id="g1"),
+        ]
+    )
+    awards = [
+        _award(
+            "BA184",
+            "2026-11-04T19:15:00",
+            program="American",
+            origin=origin,
+            dest=dest,
+            matched_id="g1",
+        ),
+    ]
+    assert join(res, awards)[0].awards == []
+
+
+@pytest.mark.parametrize("award_origin", ["EWR", "ewr", ""])
+def test_matched_id_attaches_an_award_on_the_rows_own_airports(award_origin: str):
+    """Control, green at the base: the same award joins the row it flies, the
+    codes compared uppercased, and a missing code is no evidence against it."""
+    res = SearchResult(
+        solutions=[
+            _itin_with_id("AA6939", "2026-11-04T18:40:00", "EWR", "LHR", flight_id="g1"),
+        ]
+    )
+    awards = [
+        _award(
+            "BA184",
+            "2026-11-04T19:15:00",
+            program="American",
+            origin=award_origin,
+            dest="LHR",
+            matched_id="g1",
+        ),
+    ]
+    assert [a.flight_number for a in join(res, awards)[0].awards] == ["BA184"]
 
 
 # ────────────── carrier corroboration on the route+time fallback ──────────────

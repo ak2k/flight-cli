@@ -2,8 +2,10 @@
 
 Matrix's per-slice routing-language string. Lives in `slices[].routeLanguage`
 (NOT `commandLine` — see [wire_format_quirks.md](wire_format_quirks.md) for
-that distinction). The CLI exposes it via `--routing` on `flight fare` and
-`flight calendar`, and the domain field is `Leg.route_language`.
+that distinction). The CLI exposes it via `--routing` on `flight search`,
+`flight calendar` and `flight detail` (and the deprecated `flight fare`), with
+`--routing-ret` for a round trip's return; the domain field is
+`Leg.route_language`.
 
 **This is the grammar for what carriers/airports/segments the itinerary must
 include.** For constraints like "max duration", "no overnights", "min
@@ -229,12 +231,30 @@ row.
 
 ## Per-direction application
 
-Routing language is **per-slice (per direction)** — outbound and return each get
-their own. For round-trip, both `--routing` (outbound) and `--routing-ret`
-(return) are exposed in the CLI. Multi-city sets one per slice.
+Routing language is **per-slice (per direction)**, and each slice's expression
+reads from that slice's own origin. `--routing` is the outbound's and
+`--routing-ret` the return's, on `search`, `calendar` and `detail`; multi-city
+sets one per slice (`--slice ...:r=`).
 
-If you only want a constraint on the outbound, leave the return blank
-(`""` / unset) — `routeLanguage` is optional per slice.
+A slice with no `routeLanguage` is unconstrained (live 2026-10-01: JFK-LHR
+2026-10-20/27 with `F* X:BOS F*` on slice[0] alone gave 25 of 70 solutions,
+every outbound via BOS and every return nonstop). So `--routing-ret ''`
+constrains the outbound only.
+
+Unset, `--routing-ret` copies `--routing` only when the expression reads the
+same both ways (`routing_predicates.direction_dependence`): no token names a
+flight number, in any comma alternative and behind any prefix of its own
+(`AA1-3000,F:UA882`), and the token sequence equals its reversal, tokens compared
+case-insensitively and a comma group as a set of prefixed alternatives under
+its `~` and quantifier (`~AA,UA+` equals `~UA,AA+`, `O:AA,O:UA` equals
+`O:UA,O:AA`), after one enclosing `[...]` comes off. `AA+`,
+`~BA+`, `N`, `F* X:LHR F*` and `DFW,DEN DEN,DFW` are copied.
+An ordered chain (`UA LH`, `F+ X:LHR F*`) or a flight number (`DL747`) is
+refused on a round trip without `--routing-ret`: copied, the return would ask
+for UA then LH from the far end. The return's own reading is the reversed
+chain (live 2026-10-01: AUS-FRA 2026-10-20/27 with `UA LH` out and `LH UA`
+back gave 10 of 80 solutions, every outbound UA then LH and every return LH
+then UA), the return flight's number, or `''`.
 
 ## Pitfalls
 

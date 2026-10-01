@@ -2472,8 +2472,11 @@ def _detail(**overrides: Any) -> None:
         "extension": None,
         "routing_return": None,
         "extension_return": None,
+        "depart_times": None,
+        "return_times": None,
         "stops": None,
         "allow_airport_changes": True,
+        "only_available": True,
         "rps": 10.0,
         "impersonate": "chrome",
         "fmt": "table",
@@ -2625,10 +2628,11 @@ def test_a_backend_error_behind_a_painted_grid_reports_under_the_same_prefix(
 def test_bad_rps_configuration_is_a_typed_error_that_shows_the_value(
     value: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`FLIGHT_RPS` reaches a markup console inside the ValueError `float()` raised,
-    which repr's the setting into its own message. An unbalanced tag there answered
-    a misconfiguration with a MarkupError traceback, and a well-formed one ate the
-    value the message exists to name. Reached from `calendar` and from `detail`."""
+    """`FLIGHT_RPS` reaches a markup console inside the ValueError `checked_rps`
+    raises, which repr's the setting into its own message. An unbalanced tag
+    there answered a misconfiguration with a MarkupError traceback, and a
+    well-formed one ate the value the message exists to name. Reached from
+    `calendar` and from `detail`."""
     _RecordingClient.seen = []
     monkeypatch.setenv("FLIGHT_RPS", value)
     monkeypatch.setattr(cli, "MatrixClient", _RecordingClient)

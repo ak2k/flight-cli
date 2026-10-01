@@ -10,9 +10,9 @@ from __future__ import annotations
 # type hints at validation time and needs the symbol in the module's
 # runtime globals, even with `from __future__ import annotations`.
 from datetime import datetime  # noqa: TC003
-from typing import Any
+from typing import Any, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
 class _Loose(BaseModel):
@@ -207,7 +207,15 @@ class SearchResult(_Loose):
 
     @classmethod
     def from_api(cls, body: dict[str, Any]) -> SearchResult:
-        sol_container: dict[str, Any] = body.get("solutionList") or {}
+        listed: Any = body.get("solutionList", {})
+        # Refused as the model refuses a field of the wrong type, so a caller
+        # reads it as the shape change it is: `or {}` would read a list or a
+        # null as no solutions, and `.get` on anything else fails untyped.
+        if not isinstance(listed, dict):
+            raise ValidationError.from_exception_data(
+                cls.__name__, [{"type": "dict_type", "loc": ("solutionList",), "input": listed}]
+            )
+        sol_container = cast("dict[str, Any]", listed)
         sol_list: list[Any] = sol_container.get("solutions") or []
         return cls(
             solutionCount=body.get("solutionCount", len(sol_list)),

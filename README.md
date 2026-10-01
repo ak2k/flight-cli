@@ -51,11 +51,13 @@ flight search JFK LHR --dep 2026-08-15 --backend gflight
 # lowest-fare calendar across a date window (one Matrix call returns
 # 30 days × N durations of priced options)
 flight calendar MIA PAR --start 2026-06-07 -d 5-7 \
-    --routing "LH+" --ext "MAXCONNECT 2:00"
+    --routing "LH+" --ext "MAXCONNECT 2:00" --depart-times morning
 
-# phase-2 of the calendar flow: full itineraries for a picked date
-flight detail MIA PAR --dep 2026-06-01 --return 2026-06-07 \
-    --routing "LH+" --ext "MAXCONNECT 2:00" --duration 5-7
+# phase-2 of the calendar flow: full itineraries for a picked date. Give it
+# the calendar's filters (routing, codes, --depart-times/--return-times,
+# --include-unavailable) so it prices the grid's question.
+flight detail MIA PAR --dep 2026-06-10 --return 2026-06-16 --duration 5-7 \
+    --routing "LH+" --ext "MAXCONNECT 2:00" --depart-times morning
 
 # IATA autocomplete
 flight airport LON
@@ -83,8 +85,8 @@ Every result-printing command supports:
 
 ### Power-user features
 
-- **Routing language** (`--routing`): `LH+` (any Lufthansa-group leg), `BA AA` (BA or AA only), `[F* X F*]` (any flight, then X, then any). [More codes →](https://www.nicethis.com/itamatrix.aspx)
-- **Extension codes** (`--extension`): `MAXCONNECT 5:00`, `MAXSTOPS 1`, `MINMILES 3000`, `-REDEYES`, `-OVERNIGHTS`, `ALLIANCE oneworld`.
+- **Routing language** (`--routing`): `LH+` (every flight marketed by Lufthansa), `BA AA` (a BA flight, then an AA flight), `F* X:LHR F*` (connects at LHR). Each slice reads its routing from its own origin: `--routing-ret` gives a round trip's return its own (`''` for none), and unset, the return gets `--routing` only when it reads the same both ways. `BA AA` on a round trip without `--routing-ret` is refused, naming the reversed order `AA BA`. [More codes →](https://www.nicethis.com/itamatrix.aspx)
+- **Extension codes** (`--extension`): `MAXCONNECT 5:00`, `MAXSTOPS 1`, `MINMILES 3000`, `-REDEYES`, `-OVERNIGHTS`, `ALLIANCE oneworld`. A round trip copies them onto the return unless `--ext-ret` gives its own.
 - **Multi-airport**: `flight calendar MIA VIE,PAR,FCO,MAD --start ...` — search across N European cities at once.
 - **Time-of-day filters** (`--depart-times`, `--return-times`): `morning`, `morning,midday` etc. Buckets that make one window stay on Google Flights; `morning,evening` goes to Matrix.
 - **Stop limits** (`--stops N`): at most N stops per direction, on every backend. `0` = nonstop only, `1` = up to one stop, …
@@ -98,7 +100,7 @@ credential; `--format json` gives the same checks as a document.
 
 | Check | What it checks |
 |---|---|
-| `config` | `config.toml` parses, if there is one, and the rps setting is a number |
+| `config` | `config.toml` parses, if there is one, and the rps setting is a number greater than 0 |
 | `matrix-key` | which Matrix key a search would send (`FLIGHT_API_KEY`, the cache and its age, or none), without fetching one |
 | `cache` | the response cache opens |
 | `google-cookies` | the saved Google session cookie: its age and NID count |
@@ -132,6 +134,18 @@ interface. Two providers ship today:
 
 Each configured provider auto-enables and fans out per leg; the cash↔award
 matcher and renderers are provider-blind.
+
+The providers take one airport per end, so an airport set (`JFK,EWR`) or a
+metro code (`NYC`, asked as JFK, LGA and EWR) is asked pair by pair, and an
+award attaches only to cash rows on its own airports. Each pair costs a
+PointsPath request per cabin and airline and one seats.aero quota unit, so a
+search asks at most 8 pairs, those its cash rows fly first, and every leg at
+least one. A leg with pairs left out gets one stderr line naming them, in
+every output format, and its JSON entry lists them as `pairs_not_asked`:
+
+```text
+Awards for outbound NYC→LON 2026-11-04: asked 4 of 18 airport pairs (at most 8 a search); not asked: JFK→LTN, ...
+```
 
 ```sh
 # implicit overlay — any search adds the award table when a provider is configured
@@ -205,6 +219,7 @@ Pass `--provider-opt 'pp.airlines=United,Delta,...'` to skip discovery and call 
 
 - ~~Browser-based login~~ (now the default — see Setup above)
 - Award overlay on `calendar` (lowest-fare-calendar) — fan-out is N days × M airlines; deserves its own design
+- Ask more than 8 airport pairs in one search — a set or metro search past that names the pairs it left out (stderr, JSON `pairs_not_asked`), and the cap has no flag
 - Match against airlines we don't yet support (the few in pricing-info but not enabled for your tier are silently skipped)
 
 ## Architecture
