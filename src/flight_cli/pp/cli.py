@@ -710,36 +710,44 @@ def _fmt_funding(award_flights: list[AwardFlight], cabins: tuple[str, ...] = ())
     return ", ".join(banks) if banks else ""
 
 
+def _leg_row_key(m: MatchedFare, slice_index: int) -> tuple[str, str, str, str] | None:
+    """First flight, departure date and airports of the slice. The airports
+    count because a set search's rows can share a first flight and end at
+    different airports, each with its own award."""
+    itn = m.itinerary.itinerary
+    if not itn or len(itn.slices) <= slice_index:
+        return None
+    s = itn.slices[slice_index]
+    if not s.flights or not s.departure:
+        return None
+    return (
+        s.flights[0].upper().replace(" ", ""),
+        s.departure[:10],
+        ((s.origin.code if s.origin else None) or "").upper(),
+        ((s.destination.code if s.destination else None) or "").upper(),
+    )
+
+
 def _dedupe_per_leg(matches: list[MatchedFare], slice_index: int = 0) -> list[MatchedFare]:
     """Matrix returns the cross-product of outbound x return itineraries, so
     the same leg-flight surfaces in many rows. Collapse to one row per
-    (flight_number, departure_date), keeping the row with cheapest cash.
+    `_leg_row_key`, keeping the row with cheapest cash.
     """
-    best: dict[tuple[str, str], MatchedFare] = {}
+    best: dict[tuple[str, str, str, str], MatchedFare] = {}
     for m in matches:
-        itn = m.itinerary.itinerary
-        if not itn or len(itn.slices) <= slice_index:
+        key = _leg_row_key(m, slice_index)
+        if key is None:
             continue
-        s = itn.slices[slice_index]
-        if not s.flights or not s.departure:
-            continue
-        key = (s.flights[0].upper().replace(" ", ""), (s.departure or "")[:10])
         cash = _parse_cash(m.itinerary.price) or float("inf")
         existing = best.get(key)
         if existing is None or (_parse_cash(existing.itinerary.price) or float("inf")) > cash:
             best[key] = m
     # Preserve original order (cheapest cash first, since `solutions` is sorted).
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str, str]] = set()
     out: list[MatchedFare] = []
     for m in matches:
-        itn = m.itinerary.itinerary
-        if not itn or len(itn.slices) <= slice_index:
-            continue
-        s = itn.slices[slice_index]
-        if not s.flights or not s.departure:
-            continue
-        key = (s.flights[0].upper().replace(" ", ""), (s.departure or "")[:10])
-        if key in seen:
+        key = _leg_row_key(m, slice_index)
+        if key is None or key in seen:
             continue
         if best.get(key) is m:
             seen.add(key)

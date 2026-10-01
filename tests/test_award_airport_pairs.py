@@ -303,6 +303,75 @@ def test_an_award_from_the_second_airport_shows_on_that_airports_row(
     }
 
 
+def _via_ord(destination: str, second: str, price: str) -> dict[str, Any]:
+    """A Matrix one-way solution DFW-ORD-`destination` on AA100 then `second`."""
+    return {
+        "ext": {"price": price},
+        "itinerary": {
+            "slices": [
+                {
+                    "flights": ["AA100", second],
+                    "departure": "2026-11-04T09:00",
+                    "arrival": "2026-11-04T17:00",
+                    "origin": {"code": "DFW"},
+                    "destination": {"code": destination},
+                    "stops": [{"code": "ORD"}],
+                }
+            ],
+            "carriers": [{"code": "AA"}],
+        },
+    }
+
+
+def _aa100_to(destination: str, miles: int) -> AwardFlight:
+    return AwardFlight(
+        origin="DFW",
+        destination=destination,
+        departure="2026-11-04T09:00",
+        arrival="",
+        flight_number="AA100",
+        num_connections=1,
+        stop_airports=["ORD"],
+        provider="PointsPath",
+        program="American",
+        cabins=[CabinAward(cabin="Economy", miles=miles, tax_usd=5.6, tax_currency="USD")],
+    )
+
+
+def test_the_table_keeps_each_airports_row_when_two_share_a_first_flight(arms: _Arms) -> None:
+    """Two connections share their first flight, AA100 DFW-ORD, and end at JFK
+    and EWR. Each airport's award shows on its own row of the matched table;
+    a row is one first flight and date on one pair of airports."""
+    arms.matrix_body = {
+        "solutionList": {
+            "solutions": [
+                _via_ord("JFK", "AA101", "USD300.00"),
+                _via_ord("EWR", "AA102", "USD330.00"),
+            ]
+        }
+    }
+    arms.answers = {"DFW-JFK": [_aa100_to("JFK", 11000)], "DFW-EWR": [_aa100_to("EWR", 22000)]}
+
+    r = CliRunner().invoke(
+        cli.app, ["search", "DFW", "JFK,EWR", "--dep", _DEP.isoformat(), "--backend", "matrix"]
+    )
+
+    assert r.exit_code == 0, r.output
+    assert _asked(arms) == [
+        ("DFW-JFK", 0, "one-way DFW→JFK,EWR 2026-11-04"),
+        ("DFW-EWR", 0, "one-way DFW→JFK,EWR 2026-11-04"),
+    ]
+    matched = r.stdout.split("Cash + award", 1)[1].splitlines()
+    rows = {
+        flight: miles
+        for ln in matched
+        for flight in ("AA100/AA101", "AA100/AA102")
+        for miles in ("11.0k", "22.0k")
+        if flight in ln and miles in ln
+    }
+    assert rows == {"AA100/AA101": "11.0k", "AA100/AA102": "22.0k"}, r.stdout
+
+
 # ─────────────────── a one-airport search: the base's calls ──────────────────
 
 _JFK_ROW_HINTS = (
