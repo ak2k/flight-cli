@@ -317,6 +317,62 @@ def parse_routing(routing: str) -> list[Predicate]:
     return [UnsupportedPred(token=routing, reason=f"routing {routing!r} not GF-expressible")]
 
 
+# ─────────────────────────── direction ─────────────────────────────────
+
+# A token's prefix (`~`, `X:`, `O:`, `~l:`) applies to the whole comma group, so
+# it comes off before the alternatives are split.
+_RE_TOKEN_PREFIX = re.compile(r"^~?(?:[A-Z]+:)?")
+# One flight number: an airline designator (`_RE_AIRLINE`'s shape), digits and an
+# optional quantifier, with no range. Wider than `_RE_FLIGHTNUM`, which decides
+# what Google post-filters and so stays letters-only.
+_RE_ONE_FLIGHT = re.compile(r"^(?!\d\d)[A-Z0-9]{2}\d+[+*?]?$")
+
+
+def _direction_key(tok: str) -> tuple[str, frozenset[str]]:
+    upper = tok.upper()
+    rest = _RE_TOKEN_PREFIX.sub("", upper, count=1)
+    return upper[: len(upper) - len(rest)], frozenset(rest.split(","))
+
+
+def _names_one_flight(tok: str) -> bool:
+    """Whether `tok` asks for a flight by its number. An excluded one (`~UA882`)
+    reads the same both ways: the return flies no flight of that number anyway."""
+    prefix, alternatives = _direction_key(tok)
+    return not prefix.startswith("~") and any(_RE_ONE_FLIGHT.match(a) for a in alternatives)
+
+
+def direction_dependence(routing: str) -> str | None:
+    """Why `routing` means something else when the return flies it, or None when
+    it reads the same both ways and is exact to copy onto the return.
+
+    A slice's routing reads from its own origin, so a return given the
+    outbound's `UA LH` asks for UA then LH again, from the far end. Two things
+    make an expression depend on direction: a token naming a flight number,
+    since a flight flies one way, and a token sequence that differs from its
+    reversal. Tokens compare case-insensitively and a comma group as a set, so
+    `DFW,DEN DEN,DFW` is a palindrome. The phrase completes "--routing X …"."""
+    text = routing.strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    tokens = text.split()
+    if flight := next((t for t in tokens if _names_one_flight(t)), None):
+        return f"names flight {flight!r}, which flies one way"
+    keys = [_direction_key(t) for t in tokens]
+    if keys != keys[::-1]:
+        return "is an ordered chain, which the return would fly in the outbound's order"
+    return None
+
+
+def mirrored_routing(routing: str) -> str | None:
+    """`routing`'s tokens in reverse order, the return's reading of an ordered
+    chain, or None when reversing would not give one: a flight number names a
+    flight that does not fly back, and a bracket would land on the wrong side."""
+    tokens = routing.split()
+    if any("[" in t or "]" in t or _names_one_flight(t) for t in tokens):
+        return None
+    return " ".join(reversed(tokens))
+
+
 # ─────────────────────────── extension parser ──────────────────────────
 
 _RE_HHMM = re.compile(r"^(\d{1,2}):([0-5]\d)$")

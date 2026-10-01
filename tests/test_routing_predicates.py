@@ -18,6 +18,8 @@ from flight_cli.routing_predicates import (
     Tier,
     UnsupportedPred,
     classify,
+    direction_dependence,
+    mirrored_routing,
     parse_extension,
     parse_routing,
 )
@@ -407,3 +409,91 @@ def test_classify_empty_is_empty() -> None:
     c = classify(None, None)
     assert c.predicates == ()
     assert not c.requires_matrix
+
+
+# ─────────────────────────── direction ─────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "routing",
+    [
+        "BA AA",
+        "UA LH",
+        "AA+ DL+",
+        "AA25 UA814",
+        "F+ AA",
+        "DFW DEN X?",
+        "F+ X:LHR F*",
+        "DL747",
+        "ua882+",
+        "B6323",
+        "f91234",
+    ],
+)
+def test_an_ordered_chain_or_a_flight_number_depends_on_direction(routing: str) -> None:
+    assert direction_dependence(routing) is not None
+
+
+@pytest.mark.parametrize(
+    "routing",
+    [
+        "~B6323",
+        "AA+",
+        "~BA+",
+        "O:LH+",
+        "N",
+        "N:UA",
+        "AA,UA",
+        "F* X:LHR F*",
+        "f* x:lhr F*",
+        "F+ AA F+",
+        "X? X?",
+        "DL CHI DL",
+        "DFW,DEN DEN,DFW",
+        "~l:nUS+",
+        "~UA882",
+        "UA1000-2000+",
+    ],
+)
+def test_an_expression_that_reads_the_same_both_ways_is_independent(routing: str) -> None:
+    assert direction_dependence(routing) is None
+
+
+@pytest.mark.parametrize(
+    ("routing", "dependent"),
+    [
+        ("[F* X F*]", False),
+        ("[BA AA]", True),
+        ("~DFW,DEN F ~DEN,DFW", False),
+        ("X:DFW,DEN F X:DEN,DFW", False),
+        ("~DFW,DEN F DEN,DFW", True),
+    ],
+)
+def test_one_enclosing_bracket_and_a_group_prefix_come_off_before_comparing(
+    routing: str, dependent: bool
+) -> None:
+    assert (direction_dependence(routing) is not None) is dependent
+
+
+def test_the_reason_names_the_flight_or_the_order() -> None:
+    assert direction_dependence("F+ AA25 F+") == "names flight 'AA25', which flies one way"
+    assert direction_dependence("UA LH") == (
+        "is an ordered chain, which the return would fly in the outbound's order"
+    )
+
+
+@pytest.mark.parametrize(
+    ("routing", "mirror"),
+    [
+        ("UA LH", "LH UA"),
+        ("DFW DEN X?", "X? DEN DFW"),
+        ("F+ X:LHR F*", "F* X:LHR F+"),
+        ("AA25 UA814", None),
+        ("DL747", None),
+        ("[BA AA]", None),
+    ],
+)
+def test_the_mirror_reverses_a_chain_of_no_flight_and_no_bracket(
+    routing: str, mirror: str | None
+) -> None:
+    assert mirrored_routing(routing) == mirror
