@@ -1169,6 +1169,8 @@ def test_stderr_says_why_matrix_is_asked_again_before_the_probe(
 # ───────────────────── an empty board under --verify or --sellers ─────────────────────
 
 _FILTERED = "Google Flights: no itinerary matched a carrier filter (AS) (7 rows filtered out)."
+_NONE_TO_CHECK = "the search returned no itinerary to check."
+_NONE_TO_OPEN = "the search returned no itinerary to open."
 
 
 def _board(monkeypatch: pytest.MonkeyPatch, board: gfid.Board[Any]) -> None:
@@ -1181,14 +1183,10 @@ def _board(monkeypatch: pytest.MonkeyPatch, board: gfid.Board[Any]) -> None:
 @pytest.mark.parametrize(
     ("flag", "fmt", "said"),
     [
-        pytest.param("--verify", "table", "the search returned no itinerary to check.", id="verify"),
-        pytest.param(
-            "--verify", "json", "the search returned no itinerary to check.", id="verify-json"
-        ),
-        pytest.param("--sellers", "table", "the search returned no itinerary to open.", id="sellers"),
-        pytest.param(
-            "--sellers", "json", "the search returned no itinerary to open.", id="sellers-json"
-        ),
+        pytest.param("--verify", "table", _NONE_TO_CHECK, id="verify"),
+        pytest.param("--verify", "json", _NONE_TO_CHECK, id="verify-json"),
+        pytest.param("--sellers", "table", _NONE_TO_OPEN, id="sellers"),
+        pytest.param("--sellers", "json", _NONE_TO_OPEN, id="sellers-json"),
     ],
 )
 def test_a_filtered_board_says_why_before_the_flag_says_it_has_no_row(
@@ -1214,7 +1212,7 @@ def test_a_board_empty_under_the_cap_says_so_before_verify_exits(
     result = _run("--backend", "gflight", "--fast", "--max-price", "1", "--verify")
     assert result.exit_code == 1, result.output
     assert _flat(result.stdout) == "Google Flights: no fare at or under USD 1."
-    assert "the search returned no itinerary to check." in _flat(result.stderr)
+    assert _NONE_TO_CHECK in _flat(result.stderr)
     json_run = _run("--backend", "gflight", "--max-price", "1", "--verify", "--format", "json")
     assert json_run.exit_code == 1, json_run.output
     assert json_run.stdout == ""
@@ -1227,9 +1225,7 @@ def test_a_round_trip_names_its_pinned_outbounds_before_verify_exits(
     """Red at the base: the pinned reason never printed."""
     _board(monkeypatch, gfid.Board(dropped=4, pinned=3))
     ret = (_DEP + timedelta(days=7)).isoformat()
-    result = _run(
-        "--routing", "AS+", "--backend", "gflight", "--fast", "--return", ret, "--verify"
-    )
+    result = _run("--routing", "AS+", "--backend", "gflight", "--fast", "--return", ret, "--verify")
     assert result.exit_code == 1, result.output
     assert (
         "Google Flights: no round trip matched a carrier filter (AS) (4 rows filtered out; "
@@ -1286,9 +1282,7 @@ def test_an_itinerary_the_model_cannot_read_is_absent_and_the_fares_still_parse(
     intact = BookingDetailsResult.from_api(_captured_details()).booking_details
     assert bd is not None and intact is not None
     assert bd.itinerary is None
-    assert bd.fares and [f.model_dump() for f in bd.fares] == [
-        f.model_dump() for f in intact.fares
-    ]
+    assert bd.fares and [f.model_dump() for f in bd.fares] == [f.model_dump() for f in intact.fares]
     assert bd.display_total == intact.display_total
 
 
