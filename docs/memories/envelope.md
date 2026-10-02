@@ -34,16 +34,24 @@ written at exit 0 and 1. Exit 2 is a usage error and writes none.
 ## What makes `complete` false
 
 Each narrowing calls `_envelope.narrow()` where it happens; outside an envelope
-run the call does nothing. The sites: a cabin asked and never recorded (judged
+run the call does nothing. A site that writes no stderr line passes a note,
+which joins `notes` after the stderr lines, so table and JSON output gain no
+line. The sites: a cabin asked and never recorded (judged
 in the recorder, from `ask_cabins` against what the leaves recorded); Matrix
 finding nothing where Google had rows (`_note_google_rows_unshown`); the
 round-trip pin cap note; return boards refused or pinning stopped with a board
 served (`_gflight_ids._report_pin_outcome`); PointsPath skipped when it was
 asked for (named in `--providers`, or tokens present that then failed;
-with no tokens it is a note); the award query failing; a provider failing to
-start or answer (`providers/registry.py`, seats.aero, and a PointsPath airline
-search that is not "unsupported" in `pp/client.py`); a leg with
-`pairs_not_asked`; calendar sub-queries lost; `--max-per-query > 1`. A hand-off
+with no tokens it is a note), both in `_pp_preflight` and at the award gate
+(`cli._explain_no_awards`), where failed tokens read as no provider at all;
+the award query failing; a provider failing to start or answer
+(`providers/registry.py`, seats.aero, and a PointsPath airline search that is
+not "unsupported" in `pp/client.py`, an error status with an empty body
+included); a leg with `pairs_not_asked`; calendar sub-queries lost;
+`--max-per-query > 1` over a split, and over the one unsplit query when a
+group holds every destination; Google rows on a
+search page the parser could not read (not the calendar graph's wall check,
+which answers nothing). A hand-off
 to Matrix, rows in another currency and a filter that empties a board are
 notes, not narrowings: each is a complete answer to what was asked.
 
