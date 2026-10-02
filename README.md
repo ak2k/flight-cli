@@ -84,6 +84,7 @@ Every result-printing command supports:
 - `--currency EUR` — price in that currency on both backends (`search`, `calendar`, `detail`); a non-USD calendar is Matrix's alone, without the USD-only Google Flights price graph
 - `--fare-rules` (`search`) — after the table, print itinerary `--pick N`'s fare basis, booking codes and fare rules (penalties, changes, refunds) from Matrix
 - `--verify` (`search`, Google Flights) — after the table, ask Matrix for itinerary `--pick N` as exactly that itinerary (its flights by number, each on its own day and minute, between its airports) and print Matrix's price beside Google's with the fare basis, booking codes and fare rules; or say why Matrix does not price it: those flights only on another itinerary, no fare, or a carrier it lists nowhere on that route and day. With `--format json` the document is `{"search": [...], "verify": {...}}`; `verify.delta` is Google's price minus Matrix's
+- `--no-separate-tickets` (`search`, Google Flights) — hide the itineraries Google sells as separate tickets, which a Google Flights table or `--format json` with no award search (`--fast --cash-only`) otherwise adds from Google's Cheapest tab, marked `†` (`‡` for a self transfer, where bags are rechecked between flights) or `separate_tickets: true`, a round trip as its outbound alone at Google's round-trip total
 - `--json` — machine-readable output
 - `--no-cache` — bypass the on-disk response cache (`~/.cache/flight-cli/`)
 

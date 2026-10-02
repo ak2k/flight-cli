@@ -420,6 +420,7 @@ Every one of these is a multi-megabyte page GET, so the count is the cost:
 | a round trip whose every pin blips and recovers | 1 + 3 x pins = 31 at the default `-n 10` |
 | a round trip whose return boards all refuse (5xx, consent, layout) | 1 + pins, the same as a successful search |
 | a round trip on a wall that keeps lifting and closing | 55 for one cabin, 220 for four, against 44 healthy — `cabins x calls x (_THROTTLE_RETRY_ATTEMPTS + 1)` |
+| a Google table or `--format json` that runs no awards, `--sellers` or `--verify` | the above + 1: the Cheapest tab, fetched last and not at all once the pins stopped on a wall, an outage or a dead browser |
 
 The flapping row is the worst case and the one that needs its bound named. Any
 sibling's success refills the wall — correctly, it is per-IP — so the shared
@@ -904,6 +905,63 @@ flight rows sitting elsewhere is far likelier a relocation than a coincidence �
 and the two outcomes are not symmetric, since refusing degrades to Matrix while
 reading it as an empty tells the user the route has no flights. A zero-row board
 with nothing misplaced is still an authoritative empty.
+
+## Separate tickets and self transfers: the Cheapest tab's `row[7]`
+
+Google lists the itineraries it sells as more than one booking on its Cheapest
+tab only. Measured live 2026-10-02 on FLL-LGA, round trip 2026-10-20/27, `gl=US`
+(the committed `ds1_fll_lga_rt_best.json` and `ds1_fll_lga_rt_cheapest.json`):
+
+- The default board (`tfu=EgQIABABIgA`) served 58 rows, none labeled. The
+  Cheapest tab served 86, and its page labeled 28 "Self transfer" (Frontier via
+  ATL, layovers of 9 to 20 hours) and 5 "Separate tickets booked together"
+  (JetBlue nonstops).
+- Matched row by row to the page's own data: "Self transfer" is `row[7] == [1]`
+  (28 of 28; those rows also carry `row[0][26] == [1]`), "Separate tickets booked
+  together" is `row[7] == [2]` (5 of 5), and an unlabeled row is `row[7] == []`
+  (53 of 53). `row[0][12]`, which fli reads as `self_transfer`, is 0 on all 86,
+  so it is not this flag. `_gflight_ids._ticketing` decodes `row[7]`; a slot
+  that is absent or not a list states nothing.
+- The request is the same `tfs=` with `tfu=EggIABABIAIoASIA`
+  (`{2: {1: 0, 2: 1, 4: 2, 5: 1}, 4: {}}`). Over rung 1 it returned the same 86
+  rows with the same marks; tfs field 16 is not needed. One GET, about 2 s.
+
+**Merged, not swapped.** By flight id the Cheapest board holds all 58 default
+rows plus the 28 self transfers, but it prices 7 shared rows lower: the 5
+JetBlue rows at USD247 instead of 307, marked `[2]`, and 2 unmarked Frontier
+rows at 226 and 220 instead of 234. Swapping boards would change the price of
+rows sold as one ticket, so the default board stays and only the marked rows of
+the Cheapest board are added (`_gflight_ids._with_separate_tickets`). A marked
+row is added even when its flights are on the default board, because it is a
+different booking. The two cheaper unmarked fares keep the default board's
+price; who sells them is not settled.
+
+**Field 17 is not the default board either.** tfs field 17 = 1 on the Cheapest
+URL returns the 58 default ids, unmarked, at the Cheapest tab's prices (JetBlue
+297, Frontier 226 and 220). So `--no-separate-tickets` drops the marked rows
+from the page it read rather than asking for another board, which is also how
+it counts what it hid.
+
+**No return for a marked round trip.** The pinned return page for the cheapest
+self-transfer outbound (F9 3013 + F9 3454) served 0 rows with either `tfu`, and
+Chrome's own click on a `[2]` outbound served 5 one-ticket returns at USD307,
+not the USD247 trip. A marked round-trip itinerary is therefore its outbound
+alone at Google's round-trip total: a one-member row, `[outbound]` in JSON. A
+link never pins one, since the page it would open lists neither the trip's
+returns nor its price.
+
+**One-way: none seen from a US IP.** One-way Cheapest boards carried no mark on
+FLL-LGA (114 rows), LAX-BKK (95), JFK-ATH (127), CMN-DXB or LAX-OKA. The decode
+is the same; the one-way test marks a captured row by hand.
+
+**Where it is read.** Only `_run_gflight_path` asks for the Cheapest tab, and
+only when no awards, `--sellers` or `--verify` run, because the Google table
+and its document are the renderers that mark a row (`†` separate tickets, `‡`
+self transfer; JSON `separate_tickets`, and fli's `self_transfer` for the
+subset on which bags are rechecked). The enriched table, the multi-cabin table,
+the award overlay and the deprecated `gflight` command read no Cheapest page, so
+no separate-ticket row reaches a renderer that would print it as one ticket. A
+refused Cheapest page leaves the base answer and one stderr line naming why.
 
 ## Tier model: who honors each constraint
 
