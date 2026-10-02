@@ -120,6 +120,7 @@ class _Recorder:
         self.lock = threading.Lock()
         self.backend: Backend | None = None
         self.narrowed = False
+        self.narrowings: list[str] = []
         self.asked: list[str] = []
         self.by_cabin: dict[str, list[ResultRow]] = {}
         self.days: list[ResultRow] = []
@@ -141,10 +142,16 @@ def active() -> bool:
     return _slot.recorder is not None
 
 
-def narrow() -> None:
-    """The answer is narrower than what was asked: said where the narrowing is."""
+def narrow(note: str | None = None) -> None:
+    """The answer is narrower than what was asked: said where the narrowing is.
+
+    `note` joins the envelope's notes, for a site with no stderr line of its
+    own: the table and JSON outputs print nothing there."""
     if (rec := _slot.recorder) is not None:
-        rec.narrowed = True
+        with rec.lock:
+            rec.narrowed = True
+            if note is not None:
+                rec.narrowings.append(note)
 
 
 def explain(key: str, reason: str) -> None:
@@ -288,7 +295,11 @@ def _document(rec: _Recorder, *, code: int, stderr: str, stray: str) -> str:
     priced = {r.currency for r in rows if r.price is not None}
     currency = next(iter(priced)) if len(priced) == 1 else None
     complete = code == 0 and not rec.narrowed and not unanswered
-    notes = [*_note_lines(stderr), *_key_notes(rec, code, rows=rows, priced=priced)]
+    notes = [
+        *_note_lines(stderr),
+        *rec.narrowings,
+        *_key_notes(rec, code, rows=rows, priced=priced),
+    ]
     if stray.strip():
         notes.append(f"stdout: {len(stray)} characters written outside the envelope were dropped")
     common: dict[str, Any] = {

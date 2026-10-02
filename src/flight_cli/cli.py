@@ -1644,6 +1644,13 @@ def _run_calendar(
             "[yellow]--max-per-query > 1: Matrix may under-report a "
             "multi-destination request, so results could be incomplete.[/]"
         )
+    elif max_per_query > 1 and len(expand_airports(search.legs[0].destinations)) > 1:
+        # One group held every destination, so nothing split and the one query
+        # asks them all: the request Matrix may under-report.
+        _envelope.narrow(
+            "--max-per-query > 1: one query asked every destination, and Matrix may "
+            "under-report a multi-destination request, so results could be incomplete."
+        )
     if multi and n > conc:
         # No hard cap — a big fan-out is the user's call. The concurrency limit
         # keeps it a Ctrl-C-able drip rather than a burst; warn loudly so the

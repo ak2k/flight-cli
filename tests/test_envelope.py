@@ -617,6 +617,21 @@ def test_a_split_calendar_with_every_pair_lost_exits_1_with_its_envelope(
     assert _notes(env, "backend") == ["backend: the run failed before an answer"]
 
 
+def test_one_group_holding_every_destination_narrows_the_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A group as large as the destination list leaves nothing to split, so the
+    one query asks every destination at once: the request Matrix may
+    under-report, as it may a split's groups."""
+    client = _pair_client(monkeypatch, {("JFK", "LAX,SFO"): _priced_grid("USD204.00")})
+    r = _run(*_CALENDAR[:1], "JFK", "LAX,SFO", *_CALENDAR[1:], "--max-per-query", "2")
+    env = _envelope_of(r, command="calendar")
+    assert [",".join(q.legs[0].destinations) for q in client.asked] == ["LAX,SFO"]
+    assert (env["backend"], env["complete"]) == ("matrix", False)
+    assert len(env["results"]) == 1
+    assert any("may under-report" in n for n in env["notes"]), env["notes"]
+
+
 def test_the_fast_graph_is_a_google_calendar(monkeypatch: pytest.MonkeyPatch) -> None:
     from flight_cli import _gf_calgraph as cg
 
