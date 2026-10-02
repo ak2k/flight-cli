@@ -1165,3 +1165,93 @@ def test_stderr_says_why_matrix_is_asked_again_before_the_probe(
         "Matrix has no fare on those flights; asking which carriers it lists…"
     )
 
+
+# ───────────────────── an empty board under --verify or --sellers ─────────────────────
+
+_FILTERED = "Google Flights: no itinerary matched a carrier filter (AS) (7 rows filtered out)."
+
+
+def _board(monkeypatch: pytest.MonkeyPatch, board: gfid.Board[Any]) -> None:
+    def _served_board(*_a: object, **_kw: object) -> gfid.Board[Any]:
+        return board
+
+    monkeypatch.setattr(cli, "_gflight_results", _served_board)
+
+
+@pytest.mark.parametrize(
+    ("flag", "fmt", "said"),
+    [
+        pytest.param("--verify", "table", "the search returned no itinerary to check.", id="verify"),
+        pytest.param(
+            "--verify", "json", "the search returned no itinerary to check.", id="verify-json"
+        ),
+        pytest.param("--sellers", "table", "the search returned no itinerary to open.", id="sellers"),
+        pytest.param(
+            "--sellers", "json", "the search returned no itinerary to open.", id="sellers-json"
+        ),
+    ],
+)
+def test_a_filtered_board_says_why_before_the_flag_says_it_has_no_row(
+    matrix: _Matrix, monkeypatch: pytest.MonkeyPatch, flag: str, fmt: str, said: str
+) -> None:
+    """Red at the base: the flag exited first and the filter's reason never
+    printed."""
+    _board(monkeypatch, gfid.Board(dropped=7))
+    result = _run("--routing", "AS+", "--backend", "gflight", "--fast", flag, "--format", fmt)
+    assert result.exit_code == 1, result.output
+    err = _flat(result.stderr)
+    assert _FILTERED in err
+    assert err.index(_FILTERED) < err.index(said)
+    assert result.stdout == ""
+    assert matrix.bodies == []
+
+
+def test_a_board_empty_under_the_cap_says_so_before_verify_exits(
+    matrix: _Matrix, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red at the base: the cap line never printed."""
+    _board(monkeypatch, gfid.Board())
+    result = _run("--backend", "gflight", "--fast", "--max-price", "1", "--verify")
+    assert result.exit_code == 1, result.output
+    assert _flat(result.stdout) == "Google Flights: no fare at or under USD 1."
+    assert "the search returned no itinerary to check." in _flat(result.stderr)
+    json_run = _run("--backend", "gflight", "--max-price", "1", "--verify", "--format", "json")
+    assert json_run.exit_code == 1, json_run.output
+    assert json_run.stdout == ""
+    assert matrix.bodies == []
+
+
+def test_a_round_trip_names_its_pinned_outbounds_before_verify_exits(
+    matrix: _Matrix, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red at the base: the pinned reason never printed."""
+    _board(monkeypatch, gfid.Board(dropped=4, pinned=3))
+    ret = (_DEP + timedelta(days=7)).isoformat()
+    result = _run(
+        "--routing", "AS+", "--backend", "gflight", "--fast", "--return", ret, "--verify"
+    )
+    assert result.exit_code == 1, result.output
+    assert (
+        "Google Flights: no round trip matched a carrier filter (AS) (4 rows filtered out; "
+        "returns were searched for the 3 cheapest outbound options)."
+    ) in _flat(result.stderr)
+    assert matrix.bodies == []
+
+
+def test_without_either_flag_an_empty_board_answers_as_before(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Green at the base."""
+    _board(monkeypatch, gfid.Board(dropped=7))
+    table = _run("--routing", "AS+", "--backend", "gflight", "--fast")
+    assert (table.exit_code, table.stdout, _flat(table.stderr)) == (0, "", _FILTERED)
+    doc = _run("--routing", "AS+", "--backend", "gflight", "--format", "json")
+    assert (doc.exit_code, json.loads(doc.stdout), _flat(doc.stderr)) == (0, [], _FILTERED)
+    _board(monkeypatch, gfid.Board())
+    capped = _run("--backend", "gflight", "--fast", "--max-price", "1")
+    assert (capped.exit_code, _flat(capped.stdout), capped.stderr) == (
+        0,
+        "Google Flights: no fare at or under USD 1.",
+        "",
+    )
+

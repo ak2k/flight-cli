@@ -4660,6 +4660,18 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     _pin_cap_note(legs=legs, top_n=top_n)
     _note_other_currencies(results, opts.currency or "USD")
 
+    if not results and (sellers or verify):
+        # Why the board is empty is the search's answer; the flag's own exit
+        # below says only that there is no row to take. That exit leaves a
+        # `--format json` stdout empty, so no document is written here.
+        _answer_gf_empty(
+            dropped,
+            json_out=json_out,
+            pinned=getattr(results, "pinned", 0),
+            checks=_row_checks(legs, opts),
+            cap=_page_cap_text(opts),
+            awards_answer=json_out,
+        )
     # Checked before the answer is printed: a `--sellers` pick outside the
     # table is a usage error, not a pin to fall back from, and an empty board
     # leaves nothing to open.
