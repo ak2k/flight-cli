@@ -2506,7 +2506,7 @@ def _two_lows_note(
 
     Both sides were asked one question, and each answers it differently: Matrix
     lists fares it priced, under its default limit of one leg more than the
-    fewest on a route, and Google's graph is one price per date pair with no
+    fewest on a route in each direction, and Google's graph is one price per date pair with no
     itinerary behind it. So two lows can differ with neither table wrong, and
     the line names both, what both asked, how they differ, and the search on
     each date pair that shows what is bookable. Google's table prints whole
@@ -2568,9 +2568,11 @@ def _two_lows_note(
             f"{_trip_lengths_text(graph_lengths)} trips only"
         )
     if not _stops_reach_the_page(search):
+        # Matrix's limit holds each slice, so a round trip may carry an extra stop
+        # each way.
         both += (
-            "; Matrix held each trip to one stop more than the fewest on its route, "
-            "Google allowed any number of stops"
+            f"; Matrix held each {'direction' if round_trip else 'trip'} to one stop "
+            "more than the fewest on its route, Google allowed any number of stops"
         )
     detail = ["flight", "detail", matrix.origin, matrix.destination]
     detail += ["--dep", matrix.departure.isoformat()]

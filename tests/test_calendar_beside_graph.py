@@ -721,9 +721,10 @@ def test_a_matrix_failure_keeps_its_lines_and_exit_code_under_googles_table(
 
 _DIFFER = "Matrix and Google Flights differ on the lowest fare:"
 _STOP_CLAUSE = (
-    "; Matrix held each trip to one stop more than the fewest on its route, "
+    "; Matrix held each direction to one stop more than the fewest on its route, "
     "Google allowed any number of stops."
 )
+_ONE_WAY_STOP_CLAUSE = _STOP_CLAUSE.replace("each direction", "each trip")
 _HOW = (
     "Matrix's grid is fares Matrix priced; Google's graph is one price per date pair "
     "with no itinerary behind it; either can leave out a fare the other lists."
@@ -858,7 +859,7 @@ def test_a_one_way_names_one_date_and_no_nights(monkeypatch: pytest.MonkeyPatch)
         f"{_DIFFER} Matrix USD500.00 ({_iso(2)}, one-way, JFK→LHR), "
         f"Google Flights USD300 ({_iso(0)}, one-way, JFK→LHR). "
         "Both asked economy, 1 adult, one-way, in USD, between the same airports"
-        f"{_STOP_CLAUSE[:-1]}. {_HOW} A search on the date shows what is bookable: "
+        f"{_ONE_WAY_STOP_CLAUSE[:-1]}. {_HOW} A search on the date shows what is bookable: "
         f"flight detail JFK LHR --dep {_iso(2)} (Matrix), "
         f"flight search JFK LHR --dep {_iso(0)} --backend gflight (Google)."
     )

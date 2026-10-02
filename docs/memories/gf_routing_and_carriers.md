@@ -1273,38 +1273,38 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
   stops the driver and exits 130. Measured 2026-09-29, NYC→LON round trip over
   2026-10-20..11-02: each of 5, 6 and 7 nights priced 14 of 14 dates in one
   load of about 12 s.
-- **Two lows.** Where Matrix's grid and the graph show lows a dollar or more
-  apart (Google's read as the whole dollars its table prints), one yellow
-  stderr line follows Google's table and any lost-length line
-  (`cli._two_lows_note`). It names each low as its table's first row shows
-  it: date pair, nights (or one-way) and airports, Matrix's pair from the
-  merged cell, Google's "cheapest across" a set. It says what both asked
-  (cabin, adults, the trip lengths, USD, the same airports; after a lost
-  length, Matrix's range and the lengths Google priced), the stop rule only
-  when no stop limit reached Google's page (Matrix one stop more than the
-  fewest on a route, Google any number), and two searches that show what is
-  bookable: `flight detail` on Matrix's pair and `flight search
-  ... --backend gflight` on the set, each repeating the calendar's own flags
+- **Two lows.** Where Matrix's grid and the graph show lows a dollar or more apart
+  (Google's read as the whole dollars its table prints), one yellow stderr line
+  follows Google's table and any lost-length line (`cli._two_lows_note`). It names
+  each low as its table's first row shows it: date pair, nights (or one-way) and
+  airports, Matrix's pair from the merged cell, Google's "cheapest across" a set.
+  It says what both asked (cabin, adults, the trip lengths, USD, the same airports;
+  after a lost length, Matrix's range and the lengths Google priced), the stop rule
+  only when no stop limit reached Google's page (Matrix one stop more than the
+  fewest on a route in each direction, Google any number), and two searches that
+  show what is bookable: `flight detail` on Matrix's pair and `flight search ...
+  --backend gflight` on the set, each repeating the calendar's own flags
   (`--cabin`, `--adults`, `--stops`, routing and extension codes as typed,
-  `--depart-times`, `--currency`, and `-d` for `detail` when it is not
-  5-7). `detail` also carries `--currency USD` when several origins and no
-  `--currency` asked the grid in USD: one pair asked alone answers in its
-  origin's currency (LHR CDG in GBP, measured 2026-10-02). A Matrix grid in
-  another currency is named and not compared. JSON,
-  `--fast`, `--gf-transport http`, a failed or empty side and agreeing lows
-  print no line, and stdout and the exit code are unchanged. Two lows that
-  differ need not mean either table is wrong. Measured 2026-10-01, `calendar
-  NYC PAR --start 2026-10-20 --end 2026-11-19 -d 5-7` (9 pairs plus the
-  combined query, 295 solutions) had Matrix's low at USD698.00 (10-26,
-  EWR→ORY, 5 and 6 nights) and the graph's at 429 (11-10, 7 nights).
-  Google's board for NYC PAR 11-10/11-17 had that 429 as TAP TP214+TP454
-  EWR-OPO-ORY and TP453+TP211 back, one stop each way. Matrix's NYC PAR
-  search for the same dates returned 60 solutions, all nonstop, low
-  USD715.89 (AA/DL/UA/AF); asked EWR ORY with `--routing TP+` it priced the
-  same TAP flights at USD428.19, and without the routing it returned 12
-  solutions, low USD526.59 (TAP, another return). Both sides had asked the
-  same airports, trip lengths, cabin and currency, so the fix is a note, not
-  a change to either request.
+  `--depart-times`, `--currency`, and `-d` for `detail` when it is not 5-7).
+  `detail` also carries `--currency USD` when several origins and no `--currency`
+  asked the grid in USD: one pair asked alone answers in its origin's currency (LHR
+  CDG in GBP, measured 2026-10-02). A Matrix grid in another currency is named and
+  not compared. JSON, `--fast`, `--gf-transport http`, a failed or empty side and
+  agreeing lows print no line, and stdout and the exit code are unchanged. Two lows
+  that differ need not mean either table is wrong. Measured 2026-10-01, `calendar
+  NYC PAR --start 2026-10-20 --end 2026-11-19 -d 5-7` (9 pairs plus the combined
+  query, 295 solutions) had Matrix's low at USD698.00 (10-26, EWR→ORY, 5 and 6
+  nights) and the graph's at 429 (11-10, 7 nights). Google's board for NYC PAR
+  11-10/11-17 had that 429 as TAP TP214+TP454 EWR-OPO-ORY and TP453+TP211 back, one
+  stop each way. Matrix's NYC PAR search for the same dates returned 60 solutions,
+  all nonstop, low USD715.89 (AA/DL/UA/AF); asked EWR ORY with `--routing TP+` it
+  priced the same TAP flights at USD428.19, and without the routing it returned 12
+  solutions, low USD526.59 (TAP, another return). Both sides had asked the same
+  airports, trip lengths, cabin and currency, so the fix is a note, not a change to
+  either request. Matrix's limit holds each direction, not the trip: EWR ORY
+  11-10/11-17 `--routing TP+` (the fewest is one stop each way) under the default
+  limit, measured 2026-10-02, returned 100 solutions, 2 of them with two stops each
+  way.
 - **A page that draws no graph.** About one load in fourteen (2 of 27-29 live
   loads, 2026-09-28/29) passes the wall check and then times out on the
   "Price graph" click. One of the two was the first load of a fresh Chrome, so
