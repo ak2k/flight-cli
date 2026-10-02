@@ -6396,7 +6396,10 @@ def _render_gflight_table(
     `bags`, the `--bags` asked for, adds a column saying whether each row's
     price includes them (`_bag_cell`). A `CO2 kg` column (`_co2_cell`) shows
     only when a shown row carries Google's estimate, so a board without one
-    keeps its width.
+    keeps its width. A table wider than the console prints each leg on its own
+    line, and if it is still wider, leaves the CO2 column out with a note that
+    `--format json` carries it: Rich wraps a cell at its spaces, which would
+    split a designator such as "EI 152" across two lines.
 
     A round-trip combination can print two DIFFERENT prices, on its `Na` and
     `Nb` rows, and that reads as a bug until you know what each is: the `a` row
@@ -6426,15 +6429,16 @@ def _render_gflight_table(
         g for r in shown for g in (cast("tuple[Any, ...]", r) if isinstance(r, tuple) else (r,))
     ]
     has_co2 = any(getattr(g.flight, "co2_emissions_g", None) is not None for g in members)
-    # Stacked, the legs column is never narrower than its longest line, so Rich
-    # wraps the other columns before it splits a designator.
-    legs_min = max(
+    # Stacked, the legs column is as wide as its longest line and fixed there:
+    # Rich narrows a column with no fixed width first, so a table wider than
+    # the console wraps the other columns rather than split a designator.
+    legs_width = max(
         (
             cell_len(line)
             for g in members
             for line in _gflight_legs_lines(g, match_carriers, route=per_row_route)
         ),
-        default=0,
+        default=None,
     )
     # The first layout whose natural width fits the console, else the last:
     # the legs go one per line before the CO2 column goes.
@@ -6451,7 +6455,7 @@ def _render_gflight_table(
         t.add_column("price", justify="right")
         t.add_column("stops", justify="right")
         t.add_column("duration")
-        t.add_column("legs", min_width=legs_min if stacked else None)
+        t.add_column("legs", width=legs_width if stacked else None)
         t.add_column("legroom")
         if show_co2:
             t.add_column("CO2 kg", justify="right")
