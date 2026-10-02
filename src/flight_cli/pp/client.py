@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import anyio
+import anyio.to_thread
 import httpx
 import structlog
 
@@ -193,6 +194,7 @@ class PPClient:
     ) -> None:
         self._tokens = tokens
         self._sem = anyio.Semaphore(concurrency)
+        self._refresh_lock = anyio.Lock()
         # Pair queries fan out at once, so without this each would ask an
         # airline PointsPath has just turned away as unsupported before the
         # first refusal lands: an airline's first request goes out alone.
@@ -248,7 +250,13 @@ class PPClient:
             )
         if r.status_code == HTTPStatus.UNAUTHORIZED:
             log.info("pp_token_refresh", reason="401_retry_once")
-            self._tokens = refresh_tokens(self._tokens)
+            # The refresh is a blocking call. On the loop no deadline could cut
+            # it; in a thread the award deadline stops waiting on it. The lock
+            # keeps refreshes one at a time, each on the token the last returned.
+            async with self._refresh_lock:
+                self._tokens = await anyio.to_thread.run_sync(
+                    refresh_tokens, self._tokens, abandon_on_cancel=True
+                )
             async with self._sem:
                 r = await self._client.request(
                     method,

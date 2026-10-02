@@ -334,3 +334,38 @@ def test_the_award_phase_ends_at_its_deadline_and_keeps_what_answered(
         "(not answered within 0.2 s, 3 queries)."
     ], captured.err
     assert _flight_numbers(captured.out) == ["UA100", "UA200", "UA300"]
+
+
+def test_a_token_refresh_ends_at_the_award_deadline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A 401 refreshed the token with a blocking call on the event loop, where no
+    deadline could cut it: a refresh that did not return held the award phase."""
+    release = threading.Event()
+
+    def stuck_refresh(tokens: Tokens) -> Tokens:
+        _ = release.wait()
+        return tokens
+
+    def unauthorized(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401)
+
+    _use_providers(monkeypatch, tmp_path, unauthorized, _empty_seats)
+    monkeypatch.setattr("flight_cli.pp.client.refresh_tokens", stuck_refresh)
+    monkeypatch.setattr(pp_cli, "AWARD_DEADLINE_SECS", 0.2)
+    log.configure("warning")
+    search = threading.Thread(target=_run, daemon=True)
+    try:
+        search.start()
+        search.join(10)
+        assert not search.is_alive(), "a token refresh held the award phase past its deadline"
+    finally:
+        release.set()
+        search.join(10)
+    captured = capsys.readouterr()
+
+    assert _summaries(captured.err) == [
+        "Awards incomplete: PointsPath did not answer for "
+        + ", ".join(f"{a} (not answered within 0.2 s, 3 queries)" for a in sorted(_AIRLINES))
+        + "."
+    ], captured.err
