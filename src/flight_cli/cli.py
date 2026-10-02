@@ -2512,6 +2512,7 @@ def _sellers_blocker(  # noqa: PLR0911 — one return per reason the run is refu
     pick: int | None,
     page_size: int,
     bags: Bags | None = None,
+    exclude_basic: bool = False,
 ) -> str | None:
     """Why `--sellers` cannot run on this search, or None. Decided before any
     request, so a refusal costs the user nothing but the reading.
@@ -2527,6 +2528,11 @@ def _sellers_blocker(  # noqa: PLR0911 — one return per reason the run is refu
     if bags is not None:
         return (
             "lists fares from a booking page that is not asked for bags; drop --bags or --sellers"
+        )
+    if exclude_basic:
+        return (
+            "lists fares from a booking page that is not asked to leave out basic economy; "
+            "drop --exclude-basic or --sellers"
         )
     if backend == BACKEND_MATRIX:
         return "needs a Google Flights result, and this search runs on Matrix"
@@ -6872,6 +6878,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             pick=pick,
             page_size=page_size,
             bags=bags,
+            exclude_basic=exclude_basic,
         )
     ):
         err.print(f"[red]--sellers {_safe_text(blocker)}.[/]")

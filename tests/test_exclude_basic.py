@@ -171,6 +171,26 @@ def test_beside_a_matrix_reason_it_is_exit_2_naming_it() -> None:
     assert "Using Matrix" not in printed
 
 
+@pytest.mark.parametrize("fast", [[], ["--fast"]], ids=["table", "fast"])
+def test_sellers_beside_it_is_exit_2_before_any_request(
+    monkeypatch: pytest.MonkeyPatch, fast: list[str]
+) -> None:
+    # The booking page is not asked to leave out basic economy, so a basic
+    # fare there would read as undercutting the row's nonbasic price.
+    def _no_search(**_kw: object) -> None:
+        pytest.fail("the search ran")
+
+    monkeypatch.setattr(cli, "_run_gflight_path", _no_search)
+    monkeypatch.setattr(cli, "_run_enriched_path", _no_search)
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    printed = _refused("--exclude-basic", "--sellers", *fast)
+    assert (
+        "--sellers lists fares from a booking page that is not asked to leave out basic "
+        "economy; drop --exclude-basic or --sellers." in printed
+    )
+    assert "Using Matrix" not in printed
+
+
 @pytest.mark.parametrize("cabins", ["business", "premium", "economy,business"])
 def test_any_cabin_but_economy_alone_is_exit_2(cabins: str) -> None:
     printed = _refused("--exclude-basic", "--cabin", cabins)
