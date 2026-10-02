@@ -252,6 +252,10 @@ class PPClient:
         r = await self._request("POST", "/api/airline-search", json_body=_payload(spec, airline))
         # 204 = airline has nothing for this route+date; return empty model.
         if r.status_code == HTTPStatus.NO_CONTENT or not r.content:
+            if r.status_code >= HTTPStatus.BAD_REQUEST:
+                # An outage, not an empty answer. A note rather than the
+                # warning below, which would add a stderr line to table and JSON.
+                narrow(f"PointsPath: {airline} answered HTTP {r.status_code:d} with no body")
             return AirlineSearchResponse()
         if r.status_code >= HTTPStatus.BAD_REQUEST:
             if is_unsupported_airline_response(r.status_code, r.text):

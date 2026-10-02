@@ -523,6 +523,23 @@ def test_a_failed_award_query_leaves_awards_null_and_narrows(
     assert _notes(env, "awards") == ["awards: the award query failed"]
 
 
+def _pp_airlines_asked(
+    answer: Callable[[httpx.Request], httpx.Response], airlines: tuple[str, ...]
+) -> None:
+    """PointsPath's airline searches for `airlines`, each answered by `answer`."""
+    client = pp_client.PPClient(Tokens("access", "refresh", 0))
+    client._client = httpx.AsyncClient(
+        base_url=pp_client.API_BASE, transport=httpx.MockTransport(answer)
+    )
+    spec = pp_client.SearchSpec(origin="JFK", destination="LAX", date=_DEP.isoformat())
+
+    async def go() -> None:
+        async with client:
+            await client.airline_search_many(spec, airlines)
+
+    anyio.run(go)
+
+
 def test_a_pointspath_airline_that_answered_500_narrows_the_answer(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -534,22 +551,29 @@ def test_a_pointspath_airline_that_answered_500_narrows_the_answer(
         airline = json.loads(request.content)["airline"]
         return httpx.Response(500 if airline == "Delta" else 204, text="upstream failed")
 
-    def _asked(airlines: tuple[str, ...]) -> None:
-        client = pp_client.PPClient(Tokens("access", "refresh", 0))
-        client._client = httpx.AsyncClient(
-            base_url=pp_client.API_BASE, transport=httpx.MockTransport(_answer)
-        )
-        spec = pp_client.SearchSpec(origin="JFK", destination="LAX", date=_DEP.isoformat())
+    for airlines, complete in ((("United",), True), (("Delta", "United"), False)):
+        _envelope.run("search", partial(_pp_airlines_asked, _answer, airlines), consoles=())
+        assert json.loads(capsys.readouterr().out)["complete"] is complete
 
-        async def go() -> None:
-            async with client:
-                await client.airline_search_many(spec, airlines)
 
-        anyio.run(go)
+def test_a_pointspath_airline_that_failed_with_no_body_narrows_the_answer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An error status with an empty body is a failure like any other, not the
+    204 that says the airline has nothing on the route, and the envelope says
+    which airline it lost."""
+    monkeypatch.setattr(pp_client, "UNSUPPORTED_CACHE", tmp_path / "unsupported.json")
+
+    def _answer(request: httpx.Request) -> httpx.Response:
+        airline = json.loads(request.content)["airline"]
+        return httpx.Response(503 if airline == "Delta" else 204)
 
     for airlines, complete in ((("United",), True), (("Delta", "United"), False)):
-        _envelope.run("search", partial(_asked, airlines), consoles=())
-        assert json.loads(capsys.readouterr().out)["complete"] is complete
+        _envelope.run("search", partial(_pp_airlines_asked, _answer, airlines), consoles=())
+        env = json.loads(capsys.readouterr().out)
+        assert env["complete"] is complete
+        lost = [n for n in env["notes"] if "Delta" in n and "503" in n]
+        assert len(lost) == (not complete), env["notes"]
 
 
 # ─────────────────────────────────── calendar ───────────────────────────────
