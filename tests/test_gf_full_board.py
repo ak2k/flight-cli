@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, override
 import pytest
 from typer.testing import CliRunner
 
-from conftest import _answering, _ds1, _page, _unpriced
+from conftest import _answering, _ds1, _page, _unpriced, _unreadable, dl_beside_unreadable_as
 from flight_cli import _gflight_ids as gfid
 from flight_cli import cli
 from flight_cli._gf_common import PageFetch
@@ -87,6 +87,69 @@ def test_a_full_board_parses_every_row(name: str, rows: int, unpriced: int) -> N
     assert sum(r.flight.price is None for r in board) == unpriced
     keys = {gfid._itinerary_key(r) for r in board}
     assert len(keys) == rows  # no two rows on either capture are one itinerary
+
+
+# ──────────────────────────────── unread rows ───────────────────────────────
+
+
+def test_a_row_read_and_not_parsed_is_counted_unread() -> None:
+    """The board counts the rows Google served that the parser could not read,
+    so a flight on one of them is never called absent from Google."""
+    cut = _board(_page(dl_beside_unreadable_as()))
+    assert ([_booked(r) for r in cut], cut.unread) == (["DL1788"], 1)
+    assert _board(_page(_ds1(_LAX))).unread == 0
+
+
+def _one_way_filters() -> Any:
+    from flight_cli.fli_bridge import to_fli_filter
+
+    return to_fli_filter(
+        cli.SpecificDateSearch(
+            legs=(Leg.of("JFK", "LAX", _DEP),), options=SearchOptions(cabin=Cabin.COACH)
+        )
+    )
+
+
+def _unreadable_at(
+    name: str,
+    index: int,
+    *,
+    origin: str | None = None,
+    destination: str | None = None,
+    day: date = _DEP,
+) -> str:
+    """Capture `name` answering the leg asked for on `day`, its row `index`
+    unreadable."""
+    ds1 = _answering(_ds1(name), origin=origin, destination=destination, date=day.isoformat())
+    return _page(_unreadable(ds1, index=index))
+
+
+def test_a_one_way_answer_carries_its_pages_unread_count(
+    gf_session: Callable[..., Any],
+) -> None:
+    gf_session(_unreadable_at(_LAX, 16))
+    board = gfid.search_with_ids(_one_way_filters(), top_n=1)
+    assert board is not None
+    assert (len(board), board.unread) == (94, 1)
+
+
+@pytest.mark.parametrize("returns_kept", [True, False])
+def test_a_round_trip_counts_the_unread_rows_of_every_page_it_read(
+    returns_kept: bool, gf_session: Callable[..., Any]
+) -> None:
+    """The outbound page and both pinned return pages each held one row the
+    parser could not read; a return page the routing emptied was still read."""
+    gf_session(
+        _unreadable_at(_LHR, 100),
+        _unreadable_at("ds1_return_leg_pinned.json", 0, origin="LHR", destination="JFK", day=_RET),
+    )
+
+    def keep(segment: int, _row: Any) -> bool:
+        return returns_kept or segment == 0
+
+    board = gfid.search_with_ids(_round_trip_filters(), top_n=2, keep=keep)
+    assert board is not None
+    assert (bool(board), board.pinned, board.unread) == (returns_kept, 2, 3)
 
 
 # ───────────────────────────────── dedupe ─────────────────────────────────

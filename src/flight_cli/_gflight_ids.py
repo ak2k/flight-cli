@@ -1722,7 +1722,9 @@ class Board[T](list[T]):
     is how an empty answer tells "none matched the routing" from "Google has no
     flights". `pinned` counts the outbounds a round trip searched returns for,
     because an empty answer from those says nothing about the outbounds it did
-    not pin."""
+    not pin. `unread` counts the rows the pages served that the parser could
+    not read: a flight on one of them is on Google's board though no row here
+    names it."""
 
     def __init__(
         self,
@@ -1731,11 +1733,13 @@ class Board[T](list[T]):
         insight: PriceInsight | None = None,
         dropped: int = 0,
         pinned: int = 0,
+        unread: int = 0,
     ) -> None:
         super().__init__(rows)
         self.insight = insight
         self.dropped = dropped
         self.pinned = pinned
+        self.unread = unread
 
 
 # One itinerary, as `_deduped` and the round-trip pins tell them apart.
@@ -1799,7 +1803,8 @@ def _rows_from_page_html(page: PageFetch) -> Board[GFlightWithId]:
 
     Refusals are typed and raised (`GfThrottledError` / `GfUpstreamStatusError`
     / `GfConsentError` / `GfPageShapeError`); a page that decodes with zero rows
-    returns an empty board, which is Google's authoritative answer and not retried."""
+    returns an empty board, which is Google's authoritative answer and not retried.
+    A row that does not parse is skipped and counted in the board's `unread`."""
     html, final_url, status_code = page
     # Both rungs arrive here carrying the status they were served: rung 1 reads
     # it off the response, rung 2 off the navigation, and neither rules on it.
@@ -1884,7 +1889,7 @@ def _rows_from_page_html(page: PageFetch) -> Board[GFlightWithId]:
             f"none of {len(rows)} Google Flights rows parsed; "
             f"the row shape changed (sample reasons: {sample})"
         )
-    return Board(_deduped(out), insight=_price_insight(payload, out))
+    return Board(_deduped(out), insight=_price_insight(payload, out), unread=len(reasons))
 
 
 def _one_call(filters: FlightSearchFilters, *, currency: str = "USD") -> Board[GFlightWithId]:
@@ -2226,6 +2231,7 @@ def _with_board_currency(board: Board[GFlightWithId], requested: str) -> Board[G
         insight=board.insight,
         dropped=board.dropped,
         pinned=board.pinned,
+        unread=board.unread,
     )
 
 
@@ -2304,7 +2310,12 @@ def search_with_ids(
     dropped = len(first) - len(board)
     # One-way, or the last leg already — no further iteration.
     if filters.trip_type == TripType.ONE_WAY or selected_count >= num_segments - 1 or not board:
-        return Board(board, insight=_kept_insight(first.insight, board, dropped), dropped=dropped)
+        return Board(
+            board,
+            insight=_kept_insight(first.insight, board, dropped),
+            dropped=dropped,
+            unread=first.unread,
+        )
 
     combos: list[GFlightWithId | tuple[GFlightWithId, ...]] = []
     pins = _pins(board, top_n, prefer)
@@ -2313,6 +2324,7 @@ def search_with_ids(
     skipped = 0
     unmatched = 0  # pins whose whole return board the routing filter removed
     dropped_returns = 0
+    unread = first.unread
     # The segment the recursion below is asked to FILL, which is the one after
     # the pin it is given — checking the pinned segment instead would compare a
     # return board against the outbound and accept a page that ignored the pin,
@@ -2365,6 +2377,7 @@ def search_with_ids(
             if keep is None or keep(selected_count + 1, nx[0] if isinstance(nx, tuple) else nx)
         ]
         dropped_returns += len(nxt) - len(kept)
+        unread += nxt.unread
         if not kept:
             unmatched += 1
             continue
@@ -2392,6 +2405,7 @@ def search_with_ids(
         insight=_kept_insight(first.insight, combos, dropped),
         dropped=dropped,
         pinned=len(pins),
+        unread=unread,
     )
 
 

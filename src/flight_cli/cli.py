@@ -41,8 +41,9 @@ from ._calendar_split import (
     split_calendar_search,
     with_fanout_currency,
 )
-from ._cross_check import Answers, cross_check, party_price
+from ._cross_check import Answers, cross_check
 from ._cross_check import document as cross_check_document
+from ._enrich import party_price
 
 # The `--gf-transport` vocabulary, from the leaf that costs nothing to import.
 # `_gflight_ids` owns the ladder but costs fli (~95 ms), and EVERY search
@@ -4489,7 +4490,9 @@ def _render_merged(
                 f"Matrix listed {b.listed:d} of {b.solution_count:d} solutions"
                 + (f" (to {_safe_text(b.last_price)})" if b.last_price else "")
                 + (
-                    f"; Google listed {b.google_listed:d} rows."
+                    f"; Google listed {b.google_listed:d} rows"
+                    + (f", {b.google_unread:d} unread" if b.google_unread else "")
+                    + "."
                     if b.google_answered
                     else "; Google gave no answer."
                 )
@@ -4523,8 +4526,7 @@ def _render_merged(
             # `rows` is duck-typed, and the lookup falls back to the tag it was
             # handed when it is not one of the three this module writes.
             _safe_text(_MERGE_SOURCE_TAG.get(row.source, row.source)),
-            # Explained, the column is Matrix's price for the party, as Google's is.
-            _amount(c.matrix_price if c is not None else row.matrix_price, ccy),
+            _amount(row.matrix_price, ccy),
             _amount(row.gf_price, ccy),
             f"{delta:+,.2f}" if delta is not None else "—",
             # Carrier codes and prices in it are remote text.
@@ -5160,7 +5162,8 @@ def _cross_check_answers(
     """The two answers a weave left, as the cross-check reads them, with
     Matrix's page before the price cap as `uncapped`. Google's board is no
     answer where its half failed or never ran, and a board the row filter cut
-    cannot show a flight absent from what Google served."""
+    cannot show a flight absent from what Google served. The rows Google served
+    that the parser could not read ride on the board as `unread`."""
     stops = opts.max_extra_stops
     return Answers(
         matrix=matrix_res,
@@ -5171,6 +5174,7 @@ def _cross_check_answers(
         round_trip=len(legs) >= _ROUND_TRIP_LEGS,
         currency=currency,
         passengers=opts.pax.total,
+        google_unread=getattr(state.get("gf"), "unread", 0),
     )
 
 
@@ -5228,7 +5232,9 @@ def _answer_cross_check_document(
         matrix_res = _price_capped(page, opts, passengers=opts.pax.total)
         _report_weave_aftermath(state)
         board = fli_results_to_search_result(gf)
-        shown = merge_results(board, matrix_res, currency=currency)[:top_n]
+        shown = merge_results(board, matrix_res, currency=currency, passengers=opts.pax.total)[
+            :top_n
+        ]
         answers = _cross_check_answers(
             state, board, matrix_res, uncapped=page, legs=legs, opts=opts, currency=currency
         )
@@ -5384,7 +5390,7 @@ def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, 
     booking_row: tuple[SearchResult, int, str | None, str | None] | None = None
     if not awards_only:
         board = fli_results_to_search_result(gf)
-        merged = merge_results(board, matrix_res, currency=requested)
+        merged = merge_results(board, matrix_res, currency=requested, passengers=opts.pax.total)
         answers = _cross_check_answers(
             state, board, matrix_res, uncapped=page, legs=legs, opts=opts, currency=requested
         )

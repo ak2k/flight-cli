@@ -17,13 +17,15 @@ import pytest
 from rich.console import Console
 from typer.testing import CliRunner
 
-from conftest import _ds1
+from conftest import _ds1, _page, dl_beside_unreadable_as
 from flight_cli import _gflight_ids as gfid
 from flight_cli import cli
 from flight_cli._cross_check import Answers, CrossCheck, RowCheck, cross_check, document
 from flight_cli._enrich import MergedRow, merge_results
+from flight_cli._gf_common import PageFetch
 from flight_cli._gf_errors import GfThrottledError
 from flight_cli.client import MatrixApiError
+from flight_cli.domain import Leg, SearchOptions
 from flight_cli.models import (
     Itinerary,
     ItineraryDetails,
@@ -304,6 +306,44 @@ def test_a_board_the_row_filter_cut_shows_no_carrier_absent() -> None:
     assert rows["ZZ1"][1].reasons == ("not_on_google",)
 
 
+def test_with_google_rows_unread_no_matrix_row_is_called_absent_from_its_board() -> None:
+    """A row Google served and the parser could not read may be any of these
+    trips, so neither a carrier's absence nor a trip's is decided."""
+    board = _board()
+    matrix = _matrix_answer(
+        board, _its(_slice(["ZZ1"]), price="USD150.00"), _its(_slice(["DL9"]), price="USD150.00")
+    )
+    rows = merge_results(board, matrix, currency="USD")
+    xc = cross_check(rows, Answers(matrix, board, False, False, False, "USD", google_unread=2))
+    checks = {_flights(r): c for r, c in zip(rows, xc.rows, strict=True)}
+    assert [(checks[k].reasons, checks[k].reason) for k in ("ZZ1", "DL9")] == [
+        (("google_unread",), "2 of Google's rows could not be read")
+    ] * 2
+
+
+def test_a_carrier_only_an_unread_google_row_names_is_not_called_absent() -> None:
+    """Google served DL1788 and an AS21+AS487 row the parser could not read,
+    and Matrix priced AS21+AS487: the board names no AS flight because of the
+    parser, not because Google lacks one."""
+    page = PageFetch(_page(dl_beside_unreadable_as()), "https://www.google.com/travel/flights", 200)
+    served = gfid._rows_from_page_html(page)
+    google = fli_results_to_search_result(served)
+    matrix = _answer(_as_matrix(_board().solutions[16], "USD100.00"))
+    answers = cli._cross_check_answers(
+        {"gf": served},
+        google,
+        matrix,
+        uncapped=matrix,
+        legs=(Leg.of("JFK", "LAX"),),
+        opts=SearchOptions(),
+        currency="USD",
+    )
+    rows = merge_results(google, matrix, currency="USD")
+    c = cross_check(rows, answers).rows[0]
+    assert (_flights(rows[0]), rows[0].source) == ("AS21+AS487", "matrix")
+    assert (c.reasons, c.reason) == (("google_unread",), "1 of Google's rows could not be read")
+
+
 def _round_trip(board: SearchResult) -> SearchResult:
     """Two pinned outbounds of the board, DL1788 and B61023, each with two
     returns, DL747 and DL742 on the 11th."""
@@ -393,7 +433,7 @@ def test_the_document_is_the_rows_in_order_with_numbers_for_deltas() -> None:
         "complete": True,
         "last_price": "USD199.00",
     }
-    assert doc["google"] == {"listed": 95, "answered": True}
+    assert doc["google"] == {"listed": 95, "answered": True, "unread": 0}
     first, *_, last = doc["rows"]
     assert first == {
         "source": "both",
@@ -551,6 +591,65 @@ def test_a_party_is_compared_on_matrixs_total(
     assert doc["cross_check"]["matrix"]["last_price"] == "USD203.60"
 
 
+def _zz_then_party_of_two(board: SearchResult) -> SearchResult:
+    """ZZ1 at USD150 a passenger and USD300 for two, then `_party_of_two`'s
+    DL1788 at USD103 a passenger and USD203.60 for two."""
+    zz1 = _its(_slice(["ZZ1"]), price="USD150.00").model_copy(update={"display_total": "USD300.00"})
+    return _answer(zz1, *_party_of_two(board).solutions)
+
+
+def test_a_party_ranks_every_row_on_the_price_it_prints(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    """ZZ1 is USD150 a passenger but USD300 for two, dearer than Google's
+    USD204 rows for two, so `-n 3` prints those and not ZZ1; the document
+    lists the table's rows in the table's order."""
+    _weave(monkeypatch, gf_rows, matrix=_zz_then_party_of_two)
+    party = ["--adults", "2", "-n", "3"]
+    result = _run([*_SEARCH, *_LINKLESS, *party])
+    assert result.exit_code == 0, result.output
+    _, rows, _ = _merged_table(result.stdout)
+    assert [(r[6].split()[1], r[1], r[2], r[3]) for r in rows] == [
+        ("DL1788", "GF+MX", "203.60", "204.00"),
+        ("B61023", "GF", "—", "204.00"),
+        ("DL747", "GF", "—", "204.00"),
+    ]
+    xc = _document(_run([*_SEARCH, *party, "--enrich", "--format", "json"]))["cross_check"]
+    assert [
+        ("+".join(r["slices"][0]["flights"]), r["matrix_price"], r["google_price"])
+        for r in xc["rows"]
+    ] == [
+        ("DL1788", "USD203.60", "USD204.00"),
+        ("B61023", None, "USD204.00"),
+        ("DL747", None, "USD204.00"),
+    ]
+
+
+def _unread(gf_rows: Callable[..., list[Any]], count: int) -> Callable[..., list[Any]]:
+    """`gf_rows` as a board that read `count` more rows than it parsed."""
+
+    def build(name: str) -> list[Any]:
+        return gfid.Board(gf_rows(name), unread=count)
+
+    return build
+
+
+def test_rows_google_served_unread_are_counted_and_no_carrier_is_called_absent(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    _weave(monkeypatch, _unread(gf_rows, 2))
+    result = _run([*_SEARCH, *_LINKLESS, "-n", "8"])
+    assert result.exit_code == 0, result.output
+    _, rows, under = _merged_table(result.stdout)
+    assert [(r[6].split()[1], r[5]) for r in rows if r[1] == "MX"] == [
+        ("ZZ1", "2 of Google's rows could not be read")
+    ]
+    assert "; Google listed 95 rows, 2 unread. delta = Google - Matrix." in under
+    xc = _document(_run([*_SEARCH, "-n", "5", "--enrich", "--format", "json"]))["cross_check"]
+    assert xc["google"] == {"listed": 95, "answered": True, "unread": 2}
+    assert [r["reasons"] for r in xc["rows"] if r["source"] == "matrix"] == [["google_unread"]]
+
+
 def _two_parties_of_two(board: SearchResult) -> SearchResult:
     """ZZ1 at USD70 a passenger and USD140 for two, then `_party_of_two`'s
     DL1788 at USD103 a passenger and USD203.60 for two."""
@@ -686,7 +785,9 @@ def test_a_party_matrix_states_no_total_for_shows_no_delta() -> None:
     """Matrix's price per passenger is not the party's price."""
     board = _board()
     matrix = _answer(_as_matrix(board.solutions[0], "USD103.00"))
-    rows = [r for r in merge_results(board, matrix, currency="USD") if r.source == "both"]
+    rows = [
+        r for r in merge_results(board, matrix, currency="USD", passengers=2) if r.source == "both"
+    ]
     c = cross_check(rows, Answers(matrix, board, False, False, False, "USD", passengers=2)).rows[0]
     assert (rows[0].same_trip, c.delta, c.reasons, c.matrix_price) == (
         True,
@@ -719,7 +820,7 @@ def test_enrich_writes_the_base_document_beside_the_cross_check(
         "complete": True,
         "last_price": "USD199.00",
     }
-    assert xc["google"] == {"listed": 95, "answered": True}
+    assert xc["google"] == {"listed": 95, "answered": True, "unread": 0}
     assert [(r["source"], r["delta"], r["reasons"]) for r in xc["rows"]] == [
         ("matrix", None, ["carrier_absent_google"]),
         ("both", 5.0, []),
@@ -811,7 +912,7 @@ def test_a_failed_google_leaves_the_search_empty_and_says_why_on_each_matrix_row
     result = _run([*_SEARCH, "-n", "5", "--enrich", "--format", "json"])
     doc = _document(result)
     assert doc["search"] == []
-    assert doc["cross_check"]["google"] == {"listed": 0, "answered": False}
+    assert doc["cross_check"]["google"] == {"listed": 0, "answered": False, "unread": 0}
     assert {tuple(r["reasons"]) for r in doc["cross_check"]["rows"]} == {("no_google_answer",)}
     assert "Matrix's rows only" in result.stderr
 
