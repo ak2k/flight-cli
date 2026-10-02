@@ -9,6 +9,7 @@ so a multi-airport calendar is queried one destination at a time (groupable via
 from __future__ import annotations
 
 import ast
+import base64
 import importlib.util
 import io
 import json
@@ -42,12 +43,17 @@ from flight_cli.domain import Cabin, CalendarSearch, CalendarWindow, Leg, Search
 from flight_cli.models import (
     CalendarResult,
     Itinerary,
+    ItineraryDetails,
     LegInfo,
     Location,
     SearchResult,
     Slice,
     SliceEndpoint,
 )
+from flight_cli.pp import cli as pp_cli
+from flight_cli.pp.auth import PPAuthError, Tokens
+from flight_cli.pp.match import MatchedFare
+from flight_cli.providers.base import AwardFlight, CabinAward, LegQuery
 from flight_cli.wire import to_wire
 
 if TYPE_CHECKING:
@@ -4303,6 +4309,175 @@ def test_detail_round_trip_bad_duration_is_a_typed_error(
     assert seen == []  # refused before any Matrix work
 
 
+# ─────────── pp/cli.py prints a hostile provider field literally ───────────
+# PointsPath, seats.aero, the token store and an exception's `str()` all choose
+# text `pp/cli.py` prints through its own markup consoles. One payload per field,
+# driven through the renderer that reads it: an unbalanced tag that would raise
+# MarkupError, an ESC that would clear the screen, and a well-formed tag that
+# would eat the text after it.
+_HOSTILE = "[/x]\x1b[2J[bold]AA"
+_HOSTILE_SHOWN = "[/x][2J[bold]AA"  # the ESC dropped, every bracket printed
+
+
+def _pp_console(monkeypatch: pytest.MonkeyPatch, name: str) -> io.StringIO:
+    """`pp_cli.console` or `pp_cli.err` over a wide, colorless buffer, so a cell
+    is never folded mid-payload and no style code puts an ESC of its own there."""
+    buf = io.StringIO()
+    monkeypatch.setattr(
+        pp_cli, name, Console(file=buf, width=1000, force_terminal=False, no_color=True)
+    )
+    return buf
+
+
+def _assert_literal(out: str) -> None:
+    assert _HOSTILE_SHOWN in out, out
+    assert "\x1b" not in out, repr(out)
+
+
+def _hostile_match(field: str) -> MatchedFare:
+    def pick(name: str, default: str) -> str:
+        return _HOSTILE if field == name else default
+
+    cabin = pick("cabin", "Business")
+    award = AwardFlight(
+        origin="JFK",
+        destination="LHR",
+        departure="2026-10-20T18:00:00",
+        arrival="2026-10-21T06:00:00",
+        flight_number="BA178",
+        provider="PointsPath",
+        program=pick("program", "BritishAirways"),
+        funding_banks=[pick("bank", "Amex")],
+        cabins=[
+            CabinAward(
+                cabin=cabin,
+                miles=60_000,
+                tax_usd=5.6,
+                tax_currency=pick("tax currency", "USD"),
+                remaining_seats=1,
+            )
+        ],
+    )
+    cash = Itinerary(
+        displayTotal=pick("price", "USD900.00"),
+        itinerary=ItineraryDetails(
+            slices=[
+                Slice(
+                    flights=[pick("flight", "BA178")],
+                    departure="2026-10-20T18:00:00",
+                    origin=SliceEndpoint(code="JFK"),
+                    destination=SliceEndpoint(code="LHR"),
+                )
+            ]
+        ),
+    )
+    return MatchedFare(itinerary=cash, awards=[award])
+
+
+@pytest.mark.parametrize("field", ["program", "flight", "bank", "price", "tax currency", "cabin"])
+def test_a_matched_award_table_prints_a_hostile_field_literally(
+    monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    """The arms behind `("_render_matches", "cells")`: every remote leaf of a cell
+    is wrapped where it is read, and the markup `_fmt_award_cell` writes on purpose
+    still styles rather than printing as text."""
+    out = _pp_console(monkeypatch, "console")
+    fare = _hostile_match(field)
+    cabin = fare.awards[0].cabins[0].cabin
+    pp_cli._render_matches(  # pyright: ignore[reportPrivateUsage] — the renderer IS the unit
+        [fare],
+        (cabin,),
+        cash_per_cabin={id(fare.itinerary): {cabin: 900.0}},
+        num_passengers=2,
+    )
+    text = out.getvalue()
+    _assert_literal(text)
+    assert "(1 seat)" in text  # `[yellow]` styled the shortfall
+    assert "[dim]" not in text and "[yellow]" not in text and "[/]" not in text
+
+
+@pytest.mark.parametrize(
+    "field", ["provider", "program", "flight", "origin", "departure", "cabin", "bank"]
+)
+def test_an_award_only_table_prints_a_hostile_field_literally(
+    monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    def pick(name: str, default: str) -> str:
+        return _HOSTILE if field == name else default
+
+    out = _pp_console(monkeypatch, "console")
+    award = AwardFlight(
+        origin=pick("origin", "JFK"),
+        destination="LHR",
+        departure=pick("departure", "2026-10-20T18:00:00"),
+        arrival="2026-10-21T06:00:00",
+        flight_number=pick("flight", "BA178"),
+        provider=pick("provider", "PointsPath"),
+        program=pick("program", "BritishAirways"),
+        funding_banks=[pick("bank", "Amex")],
+        cabins=[
+            CabinAward(
+                cabin=pick("cabin", "Business"), miles=60_000, tax_usd=5.6, tax_currency="USD"
+            )
+        ],
+    )
+    pp_cli._render_pp_only([award])  # pyright: ignore[reportPrivateUsage] — the renderer IS the unit
+    _assert_literal(out.getvalue())
+
+
+@pytest.mark.parametrize("where", ["award query", "token check"])
+def test_an_award_failure_prints_a_hostile_exception_literally(
+    monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    """The award phase prints the exception that ended it; its `str()` is text a
+    provider or a library chose."""
+    out = _pp_console(monkeypatch, "err")
+
+    def tokens() -> None:
+        if where == "token check":
+            raise PPAuthError(_HOSTILE)
+
+    async def gather(*_a: object, **_kw: object) -> NoReturn:
+        raise RuntimeError(_HOSTILE)
+
+    monkeypatch.setattr(pp_cli, "get_valid_tokens", tokens)
+    monkeypatch.setattr(pp_cli, "gather_awards", gather)
+    pp_cli.run_pp_for_search(
+        SearchResult.from_api({}),
+        legs=[LegQuery("JFK", "LHR", "2026-10-20", 0, "outbound JFK→LHR 2026-10-20")],
+        provider_filter=("pp",),
+    )
+    _assert_literal(out.getvalue())
+
+
+def _jwt(claims: dict[str, str]) -> str:
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    return f"e30.{payload}.sig"
+
+
+@pytest.mark.parametrize("field", ["stored email", "claimed email", "sub", "role"])
+def test_pp_whoami_prints_a_hostile_token_field_literally(
+    monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    """The token store is a file the browser login wrote from a remote session,
+    and the claims are the remote JWT's."""
+    out = _pp_console(monkeypatch, "console")
+    claims = {
+        "email": _HOSTILE if field == "claimed email" else "a@example.com",
+        "sub": _HOSTILE if field == "sub" else "uid-1",
+        "role": _HOSTILE if field == "role" else "authenticated",
+    }
+    tokens = Tokens(
+        access_token=_jwt(claims),
+        refresh_token="REFRESH",  # noqa: S106 — dummy test value
+        expires_at=9999999999,
+        user_email=_HOSTILE if field == "stored email" else None,
+    )
+    monkeypatch.setattr(pp_cli, "load_tokens", lambda: tokens)
+    pp_cli.pp_whoami()
+    _assert_literal(out.getvalue())
+
+
 # ──────────── every value these paths print is escaped (work-h70kv.9) ───────
 # `err` and `console` are markup-enabled, so any user string or exception message
 # reaching them is markup until escaped: an unbalanced `[/x]` raises MarkupError
@@ -4310,9 +4485,9 @@ def test_detail_round_trip_bad_duration_is_a_typed_error(
 # needs. The cases above cover the values that carry user text today; this reads
 # the source, so a NEW print cannot be added without one.
 #
-# It reads ONE file, `src/flight_cli/cli.py`, and says nothing about any other.
-# `src/flight_cli/pp/cli.py` builds a second markup console of its own and is not
-# scanned here (work-h70kv.19).
+# It reads TWO files, `src/flight_cli/cli.py` and `src/flight_cli/pp/cli.py`, the
+# two modules that build a markup console of their own, and says nothing about any
+# other. `_PRINTABLE_IDENTIFIERS` is keyed by function name across both.
 #
 # Every function is scanned. There is no per-function escape hatch: one exempts
 # every FUTURE print in a function rather than one value, and every MarkupError
@@ -4424,6 +4599,11 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_render_multi_cabin_search", "cabin_labels"),
         ("_render_multi_cabin_search", "sort_label"),
         ("_render_multi_cabin_search", "letter"),
+        # `pp/cli.py`: cells composed from leaves each wrapped where they were read,
+        # and not wrapped again whole, because `_fmt_award_cell` writes its `[dim]`
+        # and `[yellow]` on purpose. The arms of
+        # `test_a_matched_award_table_prints_a_hostile_field_literally` hold it.
+        ("_render_matches", "cells"),
     }
 )
 # A table printed whole needs no entry: `_renderables_built_in` reads the
@@ -4881,8 +5061,20 @@ def escape_scan(src: str) -> list[str]:
     return faults
 
 
+def _scanned_sources() -> dict[str, str]:
+    """The two modules that print through markup consoles of their own."""
+    return {
+        "cli.py": Path(cli.__file__).read_text(encoding="utf-8"),
+        "pp/cli.py": Path(pp_cli.__file__).read_text(encoding="utf-8"),
+    }
+
+
 def test_calendar_paths_escape_every_printed_value() -> None:
-    faults = escape_scan(Path(cli.__file__).read_text(encoding="utf-8"))
+    faults = [
+        f"{module} {fault}"
+        for module, src in _scanned_sources().items()
+        for fault in escape_scan(src)
+    ]
     assert not faults, (
         "wrap these in _quote (a value the user typed), _safe_text (anything "
         "remote) or a formatter that calls one; add the name to "
@@ -4899,7 +5091,7 @@ def test_printable_identifiers_are_all_load_bearing() -> None:
     It is also what speaks when an allowlisted function is DELETED — its entries
     go inert — where a rename is caught by the scan itself, with the faults at
     the prints rather than a set difference."""
-    src = Path(cli.__file__).read_text(encoding="utf-8")
+    sources = list(_scanned_sources().values())
     inert: list[tuple[str, str]] = []
     for entry in sorted(_PRINTABLE_IDENTIFIERS):
         with pytest.MonkeyPatch.context() as mp:
@@ -4908,7 +5100,7 @@ def test_printable_identifiers_are_all_load_bearing() -> None:
                 "_PRINTABLE_IDENTIFIERS",
                 _PRINTABLE_IDENTIFIERS - {entry},
             )
-            if not escape_scan(src):
+            if not any(escape_scan(src) for src in sources):
                 inert.append(entry)
     assert not inert, f"these entries allow nothing; delete them: {inert}"
 
@@ -4927,10 +5119,10 @@ def test_every_set_the_scan_consults_is_load_bearing(label: str) -> None:
     """A member that changes nothing reads like a decision and is not one, and it
     pre-approves whatever later carries its name. Measured over every source the
     scan reads, because the directions look opposite: dropping a member that
-    ALLOWS makes `cli.py` speak where it was silent, dropping one that READS makes
-    a corpus case go silent where it spoke, and no change at all is what inert
-    means either way. One of these sets grew eleven dead members."""
-    sources = [Path(cli.__file__).read_text(encoding="utf-8"), *_KNOWN_BYPASSES.values()]
+    ALLOWS makes a scanned module speak where it was silent, dropping one that
+    READS makes a corpus case go silent where it spoke, and no change at all is
+    what inert means either way. One of these sets grew eleven dead members."""
+    sources = [*_scanned_sources().values(), *_KNOWN_BYPASSES.values()]
     before = [escape_scan(source) for source in sources]
     members: frozenset[str] = getattr(sys.modules[__name__], label)
     inert: list[str] = []

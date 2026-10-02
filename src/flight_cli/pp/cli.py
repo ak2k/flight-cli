@@ -21,6 +21,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from .._console_text import safe_text as _safe_text
 from ..providers.registry import gather_awards
 from .auth import (
     TOKENS_PATH,
@@ -88,7 +89,7 @@ def seats_key(api_key: Annotated[str, typer.Argument(help="Partner API key (pro_
     over the on-disk value at runtime.
     """
     _seats_auth.save_key(api_key)
-    console.print(f"[green]Saved Seats.aero key to {_seats_auth.KEY_PATH}.[/]")
+    console.print(f"[green]Saved Seats.aero key to {_safe_text(_seats_auth.KEY_PATH)}.[/]")
 
 
 @seats_auth_app.command("whoami")
@@ -101,12 +102,14 @@ def seats_whoami() -> None:
     key = _seats_auth.load_key()
     if key is None:
         err.print("[yellow]No Seats.aero key configured.[/]")
-        err.print(f"Run `flight auth seats-aero key <KEY>` or set {_seats_auth.API_KEY_ENV}.")
+        err.print(
+            f"Run `flight auth seats-aero key <KEY>` or set {_safe_text(_seats_auth.API_KEY_ENV)}."
+        )
         raise typer.Exit(1)
     source = (
         "env" if _seats_auth.os.environ.get(_seats_auth.API_KEY_ENV) else str(_seats_auth.KEY_PATH)
     )
-    console.print(f"[green]Seats.aero key configured[/] (source: {source})")
+    console.print(f"[green]Seats.aero key configured[/] (source: {_safe_text(source)})")
 
     # Probe the quota. We import lazily to avoid pulling httpx unless asked.
     from ..providers.seats_aero.client import SeatsAeroClient, SeatsAeroError  # noqa: PLC0415
@@ -124,14 +127,15 @@ def seats_whoami() -> None:
                     take=1,
                 )
             except SeatsAeroError as e:
-                err.print(f"[red]Probe failed: HTTP {e.status}[/]")
+                err.print(f"[red]Probe failed: HTTP {e.status:d}[/]")
                 raise typer.Exit(1) from e
             rl = c.last_rate_limit
             if rl is None:
                 console.print("[yellow]No rate-limit headers returned.[/]")
             else:
                 console.print(
-                    f"Quota: {rl.remaining}/{rl.limit} remaining (resets in {rl.reset_seconds}s)"
+                    f"Quota: {rl.remaining:d}/{rl.limit:d} remaining "
+                    f"(resets in {rl.reset_seconds:d}s)"
                 )
 
     anyio.run(_probe)
@@ -146,7 +150,7 @@ def seats_logout() -> None:
     False and `flight search --providers seats` will error.
     """
     if _seats_auth.clear_key():
-        console.print(f"[green]Deleted {_seats_auth.KEY_PATH}.[/]")
+        console.print(f"[green]Deleted {_safe_text(_seats_auth.KEY_PATH)}.[/]")
     else:
         console.print("[yellow]No on-disk Seats.aero key to delete.[/]")
 
@@ -214,13 +218,14 @@ def pp_login(
             t = login_via_browser()
             source = "headed browser login"
     except (PPAuthError, OSError, json.JSONDecodeError, KeyError) as e:
-        err.print(f"[red]Login failed ({type(e).__name__}): {e}[/]")
+        err.print(f"[red]Login failed ({_safe_text(type(e).__name__)}): {_safe_text(e)}[/]")
         raise typer.Exit(1) from e
 
     when = datetime.fromtimestamp(t.expires_at).isoformat() if t.expires_at else "?"
     console.print(
-        f"[green]Saved[/] tokens for [bold]{t.user_email or '?'}[/] "
-        f"to {TOKENS_PATH}\n  source: {source}\n  access_token expires: {when}"
+        f"[green]Saved[/] tokens for [bold]{_safe_text(t.user_email or '?')}[/] "
+        f"to {_safe_text(TOKENS_PATH)}\n  source: {_safe_text(source)}\n"
+        f"  access_token expires: {_safe_text(when)}"
     )
 
 
@@ -233,20 +238,21 @@ def pp_whoami() -> None:
         raise typer.Exit(1)
     claims = t.jwt_claims()
     when = datetime.fromtimestamp(t.expires_at).isoformat() if t.expires_at else "?"
-    console.print(f"email:   [bold]{t.user_email or claims.get('email') or '?'}[/]")
-    console.print(f"sub:     {claims.get('sub', '?')}")
-    console.print(f"role:    {claims.get('role', '?')}")
-    console.print(f"expires: {when}")
-    console.print(f"store:   {TOKENS_PATH}")
+    email = t.user_email or claims.get("email") or "?"
+    console.print(f"email:   [bold]{_safe_text(email)}[/]")
+    console.print(f"sub:     {_safe_text(claims.get('sub', '?'))}")
+    console.print(f"role:    {_safe_text(claims.get('role', '?'))}")
+    console.print(f"expires: {_safe_text(when)}")
+    console.print(f"store:   {_safe_text(TOKENS_PATH)}")
 
 
 @pp_auth_app.command("logout")
 def pp_logout() -> None:
     """Delete the on-disk PointsPath token store."""
     if clear_tokens():
-        console.print(f"[green]Deleted[/] {TOKENS_PATH}")
+        console.print(f"[green]Deleted[/] {_safe_text(TOKENS_PATH)}")
     else:
-        console.print(f"Nothing to delete ({TOKENS_PATH} doesn't exist).")
+        console.print(f"Nothing to delete ({_safe_text(TOKENS_PATH)} doesn't exist).")
 
 
 # ───────────────────── augmentation entry point for `fare` ──────────────────
@@ -413,9 +419,9 @@ def run_pp_for_search(
             # When PP is the only target (filter explicitly == "pp"), it's
             # a hard error; otherwise log and continue.
             if provider_filter == ("pp",):
-                err.print(f"[red]--pp: {e}[/]")
+                err.print(f"[red]--pp: {_safe_text(e)}[/]")
                 return
-            err.print(f"[yellow]PointsPath skipped: {e}[/]")
+            err.print(f"[yellow]PointsPath skipped: {_safe_text(e)}[/]")
 
     cabin_list = tuple(_normalize_cabin(c) for c in _parse_csv(cabins, DEFAULT_CABINS))
     explicit_airlines = _parse_csv(airlines, ()) if airlines else None
@@ -425,9 +431,8 @@ def run_pp_for_search(
     for leg in plan:
         if leg.not_asked:
             err.print(
-                _not_asked_line(leg, cap),
+                _safe_text(_not_asked_line(leg, cap)),
                 style="yellow",
-                markup=False,
                 highlight=False,
                 soft_wrap=True,
             )
@@ -486,7 +491,7 @@ def run_pp_for_search(
     try:
         per_query = anyio.run(_go)
     except Exception as e:  # noqa: BLE001 — surface anything to user, don't crash CLI
-        err.print(f"[red]--pp: award query failed: {e}[/]")
+        err.print(f"[red]--pp: award query failed: {_safe_text(e)}[/]")
         return
 
     per_leg: list[list[AwardFlight]] = []
@@ -501,7 +506,7 @@ def run_pp_for_search(
             sys.stdout.write(_serialize_pp_only_per_leg(per_leg, plan))
             return
         for leg, awards in zip(plan, per_leg, strict=True):
-            console.print(f"\n[bold]Leg: {leg.label}[/]")
+            console.print(f"\n[bold]Leg: {_safe_text(leg.label)}[/]")
             _render_pp_only(awards)
         return
 
@@ -513,7 +518,7 @@ def run_pp_for_search(
         sys.stdout.write(_serialize_matches_per_leg(matches_per_leg, plan, bags_included))
         return
     for leg, matches in zip(plan, matches_per_leg, strict=True):
-        console.print(f"\n[bold]Leg: {leg.label}[/]")
+        console.print(f"\n[bold]Leg: {_safe_text(leg.label)}[/]")
         _render_matches(
             matches,
             cabin_list,
@@ -668,7 +673,7 @@ def _fmt_award_cell(
     # Print the tax in the currency it is actually denominated in. Formatting a
     # EUR amount as "$" both misstates it and invites the reader to add it to a
     # USD fare.
-    tax_str = f"${tax:.0f}" if tax_ccy in ("", "USD") else f"{tax:.0f} {tax_ccy}"
+    tax_str = f"${tax:.0f}" if tax_ccy in ("", "USD") else f"{tax:.0f} {_safe_text(tax_ccy)}"
     # An award with fewer seats than the party cannot be booked for it. The
     # provider reports this; we were discarding it, so a 1-seat fare rendered
     # as available for a party of four. `None` means "not reported" (PointsPath
@@ -678,7 +683,7 @@ def _fmt_award_cell(
         if (seats is not None and pax > 0 and seats < pax)
         else ""
     )
-    head = f"{_fmt_miles(miles)} {program} + {tax_str}{label}{short}"
+    head = f"{_fmt_miles(miles)} {_safe_text(program)} + {tax_str}{label}{short}"
     if cash_usd is None:
         return head
     # ¢/mi nets the tax off a USD cash fare, so a non-USD tax would silently
@@ -796,7 +801,7 @@ def _render_matches(
     t.add_column("stops")
     t.add_column("price", justify="right")
     for cab in cabin_list:
-        t.add_column(cab, justify="right")
+        t.add_column(_safe_text(cab), justify="right")
     if show_funding:
         t.add_column("funded by", overflow="fold")
 
@@ -813,7 +818,7 @@ def _render_matches(
         empty: Mapping[str, float] = {}
         per_cabin_cash = cash_per_cabin.get(id(m.itinerary), empty) if cash_per_cabin else empty
 
-        cells = [flight, _fmt_stops(stops_n), cash_str]
+        cells = [_safe_text(flight), _fmt_stops(stops_n), _safe_text(cash_str)]
         for cab in cabin_list:
             # CPM is shown only when we have cash for THIS cabin specifically
             # — otherwise the value would mix cabins (e.g. business miles vs
@@ -821,7 +826,7 @@ def _render_matches(
             # the award without a ¢/mi line.
             cells.append(_fmt_award_cell(m.awards, cab, per_cabin_cash.get(cab), num_passengers))
         if show_funding:
-            cells.append(_fmt_funding(m.awards, tuple(cabin_list)))
+            cells.append(_safe_text(_fmt_funding(m.awards, tuple(cabin_list))))
         t.add_row(*cells)
     console.print(t)
 
@@ -871,16 +876,16 @@ def _render_pp_only(awards: list[AwardFlight]) -> None:
     t.add_column("funded by", overflow="fold")
     for r in rows:
         t.add_row(
-            r[0],
-            r[1],
-            r[2],
-            r[3],
-            _fmt_stops(r[4]),
-            _fmt_iso_compact(r[5]),
-            r[6],
-            _fmt_miles(r[7]),
+            _safe_text(r[0]),
+            _safe_text(r[1]),
+            _safe_text(r[2]),
+            _safe_text(r[3]),
+            _safe_text(_fmt_stops(r[4])),
+            _safe_text(_fmt_iso_compact(r[5])),
+            _safe_text(r[6]),
+            _safe_text(_fmt_miles(r[7])),
             f"${r[8]:.0f}",
-            r[9],
+            _safe_text(r[9]),
         )
     console.print(t)
 
