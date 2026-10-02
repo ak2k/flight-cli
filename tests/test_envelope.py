@@ -270,6 +270,52 @@ def test_an_empty_google_board_is_a_complete_answer(
     ]
 
 
+def test_a_google_row_that_could_not_be_read_narrows_the_answer(
+    gf_session: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The parser keeps the rows it can read and drops the rest, so the
+    narrowing is said where it drops them. A page read only to check it for a
+    wall, as the calendar's graph does, answers nothing and narrows nothing."""
+    page = PageFetch(_served(_LAX), _URL, 200)
+    lost = gfid._rows_from_page_html(page)[0].flight_id
+    real = gfid._parse_flight_with_id
+
+    def _parse(fd: Any) -> Any:
+        row = real(fd)
+        if row.flight_id == lost:
+            raise ValueError("unreadable departure time")
+        return row
+
+    monkeypatch.setattr(gfid, "_parse_flight_with_id", _parse)
+    gf_session(_served(_LAX))
+    env = _envelope_of(
+        _search(
+            "--cash-only",
+            "JFK",
+            "LAX",
+            "--dep",
+            _DEP.isoformat(),
+            "--backend",
+            "gflight",
+            "--fast",
+            "-n",
+            "100",
+        )
+    )
+    assert (env["backend"], env["complete"]) == ("gflight", False)
+    assert _rows(env) and lost not in {r["row"]["flight_id"] for r in _rows(env)}
+    assert any("could not be read" in n for n in env["notes"]), env["notes"]
+
+    def _wall_check() -> None:
+        gfid._rows_from_page_html(page)
+
+    capsys.readouterr()
+    _envelope.run("calendar", _wall_check, consoles=())
+    assert json.loads(capsys.readouterr().out)["complete"] is True
+
+
 def test_a_board_a_filter_emptied_is_a_note_not_a_narrowing(
     gf_session: Callable[..., Any],
 ) -> None:
