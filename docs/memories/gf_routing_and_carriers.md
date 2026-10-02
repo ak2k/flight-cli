@@ -957,19 +957,20 @@ unchanged.
 **`search --split` prices two one-way tickets beside a round trip.** On a Google
 Flights round trip, after the answer, it asks the one-ways each way: 2 more page
 loads, 2 per page on a leg asked as several pages, with `--max-price` not
-applied to them. The pair is the cheapest whose return leaves after the outbound
-lands; each board is asked alone, so on a same-day or overnight trip the
-cheapest each way can be a pair no one can fly. The table gets one line after
-the round-trip table, starting `Two one-way tickets:`, with each one-way's price
-and flights and the total, labeled as two separate tickets; the round-trip rows
-are unchanged. `--format json` writes `{"search": <the usual document>,
-"split_ticket": {"outbound": row, "return": row, "total": n, "currency": c}}`,
-or `"split_ticket": {"error": text}` when the one-ways could not be priced or no
-return leaves after an outbound lands. A one-way, `--slice`, several cabins,
-`--backend matrix`, `--sellers`, `--awards-only` and an award JSON document are
-usage errors; under `auto`, when Matrix answers, one stderr line says the split
-was not priced. Measured 2026-10-01, JFK-LAX 10-20/10-27: round trip from
-USD412, one-ways 229 + 184 = 413.
+applied to them. The pair is the cheapest whose return leaves the airport the
+outbound lands at, after it lands; each board is asked alone, so on a same-day
+or overnight trip, or a leg of several destinations, the cheapest each way can
+be a pair no one can fly. The table gets one line after the round-trip table,
+starting `Two one-way tickets:`, with each one-way's price and flights and the
+total, labeled as two separate tickets; the round-trip rows are unchanged.
+`--format json` writes `{"search": <the usual document>, "split_ticket":
+{"outbound": row, "return": row, "total": n, "currency": c}}`, or
+`"split_ticket": {"error": text}` when the one-ways could not be priced or no
+return leaves where an outbound lands, after it lands. A one-way, `--slice`,
+several cabins, `--backend matrix`, `--sellers`, `--awards-only` and an award
+JSON document are usage errors; under `auto`, when Matrix answers, one stderr
+line says the split was not priced. Measured 2026-10-01, JFK-LAX 10-20/10-27:
+round trip from USD412, one-ways 229 + 184 = 413.
 
 ## Tier model: who honors each constraint
 

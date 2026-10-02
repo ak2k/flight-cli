@@ -163,11 +163,11 @@ async def _no_matrix(*_a: object, **_kw: object) -> None:
     return None
 
 
-def _search(*extra: str, ret: bool = True, back_day: dt.date = _RET) -> Result:
+def _search(*extra: str, ret: bool = True, back_day: dt.date = _RET, to: str = "LAX") -> Result:
     args = [
         "search",
         "JFK",
-        "LAX",
+        to,
         "--dep",
         _DEP.isoformat(),
         *(["--return", back_day.isoformat()] if ret else []),
@@ -447,25 +447,73 @@ def test_json_carries_the_pair_one_traveler_flies(monkeypatch: pytest.MonkeyPatc
     }
 
 
-_NO_RETURN_AFTER = (
-    "Google Flights priced no return one-way that leaves after an outbound one-way lands"
+def _into_lax() -> list[Any]:
+    return [_row("DL747", "JFK", "LAX", _DEP, 100.0, at=dt.time(6, 0))]
+
+
+def _two_airports_back() -> list[Any]:
+    """In price order: one leaving NRT at 09:00, an hour after the outbound
+    lands by LAX's clock and sixteen hours before it by one clock, and one
+    leaving LAX at 12:00."""
+    return [
+        _row("AA10", "NRT", "JFK", _DEP, 100.0, at=dt.time(9, 0)),
+        _row("DL4", "LAX", "JFK", _DEP, 300.0, at=dt.time(12, 0)),
+    ]
+
+
+_FROM_WHERE_IT_LANDS = (
+    "Two one-way tickets: USD100.00 (DL747) out + USD300.00 (DL4) back = USD400.00, "
+    "booked as two separate tickets."
 )
 
 
 @pytest.mark.parametrize(
+    ("mode", "matrix"),
+    [
+        pytest.param(["--fast"], None, id="fast"),
+        pytest.param([], _matrix_answers(), id="enriched"),
+    ],
+)
+def test_the_return_leaves_the_airport_the_outbound_lands_at(
+    monkeypatch: pytest.MonkeyPatch, mode: list[str], matrix: Callable[..., Any] | None
+) -> None:
+    """JFK to LAX or NRT: the cheapest return leaves NRT, not LAX where the
+    outbound lands, so its clock says nothing about whether it leaves after."""
+    if matrix is not None:
+        monkeypatch.setattr(cli, "_matrix_into", matrix)
+    _google(monkeypatch, _into_lax(), _two_airports_back())
+    result = _search("--cash-only", "--split", *mode, back_day=_DEP, to="LAX,NRT")
+    assert result.exit_code == 0, result.output
+    assert _split_lines(result.stdout) == [_FROM_WHERE_IT_LANDS]
+
+
+_NO_FLOWN_RETURN = (
+    "Google Flights priced no return one-way that leaves the airport an outbound one-way "
+    "lands at, after it lands"
+)
+
+
+@pytest.mark.parametrize(
+    ("out", "back", "to"),
+    [
+        pytest.param(_same_day_out()[:1], _same_day_back(), "LAX", id="leaves-before-it-lands"),
+        pytest.param(_into_lax(), _two_airports_back()[:1], "LAX,NRT", id="leaves-elsewhere"),
+    ],
+)
+@pytest.mark.parametrize(
     "json_doc", [pytest.param(True, id="json"), pytest.param(False, id="table")]
 )
-def test_no_return_leaving_after_any_outbound_lands_is_named(
-    monkeypatch: pytest.MonkeyPatch, json_doc: bool
+def test_no_return_one_traveler_can_fly_is_named(
+    monkeypatch: pytest.MonkeyPatch, out: list[Any], back: list[Any], to: str, json_doc: bool
 ) -> None:
-    _google(monkeypatch, _same_day_out()[:1], _same_day_back())
+    _google(monkeypatch, out, back)
     fmt = ["--format", "json"] if json_doc else []
-    result = _search("--cash-only", "--fast", "--split", *fmt, back_day=_DEP)
+    result = _search("--cash-only", "--fast", "--split", *fmt, back_day=_DEP, to=to)
     assert result.exit_code == 0, result.output
     assert _split_lines(result.stdout) == []
-    assert result.stderr.count(f"No split tickets: {_NO_RETURN_AFTER}.") == 1
+    assert result.stderr.count(f"No split tickets: {_NO_FLOWN_RETURN}.") == 1
     if json_doc:
-        assert json.loads(result.stdout)["split_ticket"] == {"error": _NO_RETURN_AFTER}
+        assert json.loads(result.stdout)["split_ticket"] == {"error": _NO_FLOWN_RETURN}
 
 
 # ──────────────────────────────── no pair ─────────────────────────────────
