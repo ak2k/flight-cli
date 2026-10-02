@@ -1255,3 +1255,60 @@ def test_without_either_flag_an_empty_board_answers_as_before(
         "",
     )
 
+
+# ─────────────────── booked flights in a shape the model does not know ───────────────────
+
+_SHAPES = [
+    pytest.param(["slices", 0, "segments", 0, "legs"], None, id="legs-null"),
+    pytest.param(["slices", 0, "segments"], None, id="segments-null"),
+    pytest.param(["slices"], None, id="slices-null"),
+    pytest.param(["slices", 0, "segments", 0, "origin"], "JFK", id="origin-scalar"),
+    pytest.param(["slices", 0, "segments", 0, "legs", 0, "origin"], "JFK", id="leg-origin-scalar"),
+    pytest.param(["slices", 0, "segments", 0, "flight"], 142, id="flight-scalar"),
+]
+
+
+def _captured_details() -> dict[str, Any]:
+    return json.loads((FIXTURES / "summarize/booking_details_jfk_lhr_rt_gbp.json").read_text())
+
+
+@pytest.mark.parametrize(("path", "value"), _SHAPES)
+def test_an_itinerary_the_model_cannot_read_is_absent_and_the_fares_still_parse(
+    path: list[str | int], value: object
+) -> None:
+    """Red at the base: the itinerary's validation error failed the whole body."""
+    body = _captured_details()
+    node: Any = body["bookingDetails"]["itinerary"]
+    for key in path[:-1]:
+        node = node[key]
+    node[path[-1]] = value
+    bd = BookingDetailsResult.from_api(body).booking_details
+    intact = BookingDetailsResult.from_api(_captured_details()).booking_details
+    assert bd is not None and intact is not None
+    assert bd.itinerary is None
+    assert bd.fares and [f.model_dump() for f in bd.fares] == [
+        f.model_dump() for f in intact.fares
+    ]
+    assert bd.display_total == intact.display_total
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [pytest.param("legs", None, id="legs-null"), pytest.param("origin", "JFK", id="origin-scalar")],
+)
+def test_a_booking_the_model_cannot_read_is_not_checked_flight_by_flight(
+    gf_session: Callable[..., Any], matrix: _Matrix, key: str, value: object
+) -> None:
+    """Red at the base: pydantic's validation error on stderr."""
+    n, row = _as_row()
+    matrix.chain = _chain(_row_solution("AS-1", f"USD{row.flight.price:.2f}", row))
+    details = _details_of(row)
+    details["bookingDetails"]["itinerary"]["slices"][0]["segments"][0][key] = value
+    matrix.details = {"AS-1": details}
+    gf_session(_served())
+    result = _run("-n", "40", "--verify", "--pick", str(n), "--format", "json")
+    assert result.exit_code == 1, result.output
+    assert json.loads(result.stdout)["verify"] is None
+    err = _flat(result.stderr)
+    assert "this itinerary cannot be checked flight by flight." in err
+    assert "validation error" not in err
