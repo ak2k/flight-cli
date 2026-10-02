@@ -2380,7 +2380,10 @@ def _asked_flags(
     """The calendar's own constraints as the flags `flight search` and `flight
     detail` take, so a search on one of its date pairs asks the same question.
     The codes go as typed: each command derives the return's from them as the
-    calendar did."""
+    calendar did, except that each whitespace character goes as a space: every
+    parser of them splits on any whitespace, but `_safe_text` drops a carriage
+    return from the note, joining a code to its argument, and a newline would
+    break the note's one line."""
     flags: list[str] = []
     if opts.cabin is not Cabin.COACH:
         flags += ["--cabin", _CABIN_NAMES[opts.cabin]]
@@ -2393,7 +2396,7 @@ def _asked_flags(
         typed += [("--routing-ret", routing_return), ("--ext-ret", extension_return)]
     for flag, value in typed:
         if value is not None:
-            flags += [flag, value]
+            flags += [flag, "".join(" " if c.isspace() else c for c in value)]
     if opts.currency is not None:
         flags += ["--currency", opts.currency]
     return tuple(flags)

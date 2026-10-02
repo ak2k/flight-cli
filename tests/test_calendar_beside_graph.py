@@ -26,16 +26,18 @@ from flight_cli import cli
 from flight_cli._gf_errors import GfBrowserUnavailableError, GfConsentError, GfThrottledError
 from flight_cli.client import MatrixApiError
 from flight_cli.domain import CalendarSearch, CalendarWindow, Leg
+from flight_cli.routing_predicates import MaxDurationPred, classify
 from test_calendar_split import _result
 
 if TYPE_CHECKING:
     import pathlib
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Sequence
 
     from click.testing import Result
 
     from flight_cli.domain import CalendarFollowup
     from flight_cli.models import CalendarResult
+    from flight_cli.routing_predicates import Predicate
 
 # Far enough out that fli's travel-date validation never sees the past.
 _START = date.today() + timedelta(days=60)
@@ -984,6 +986,48 @@ def test_the_note_is_one_line_so_a_narrow_terminal_breaks_no_command(
         f"flight detail JFK LHR --dep {_iso(2)} --return {_iso(7)} (Matrix), "
         f"flight search JFK LHR --dep {_iso(0)} --return {_iso(7)} --backend gflight (Google)."
     )
+
+
+@pytest.mark.parametrize("sep", ["\r", "\n", "\u2028"], ids=["cr", "lf", "line-separator"])
+def test_a_code_typed_across_any_whitespace_is_asked_again_on_the_notes_one_line(
+    monkeypatch: pytest.MonkeyPatch, sep: str
+) -> None:
+    """The codes' parsers split on any whitespace; the console drops some of it,
+    which joins a code to its argument, and breaks the line on the rest."""
+    asked = _matrix_prices(monkeypatch, _JFK_LHR_DAY, {})
+    _graphs_are(monkeypatch, _JFK_LHR_GRAPHS)
+    result = _run("JFK", "LHR", "-d", "5-7", "--ext", f"MAXDUR{sep}9:00")
+    assert result.exit_code == 0, result.output
+    (line,) = [ln for ln in result.stderr.splitlines() if "Matrix and Google Flights" in ln]
+    assert line.endswith(
+        f"flight detail JFK LHR --dep {_iso(2)} --return {_iso(7)} --ext 'MAXDUR 9:00' "
+        f"(Matrix), flight search JFK LHR --dep {_iso(0)} --return {_iso(7)} "
+        "--ext 'MAXDUR 9:00' --backend gflight (Google)."
+    )
+    replayed: list[tuple[Leg, ...]] = []
+
+    def _detail(search: CalendarFollowup, *_a: object) -> NoReturn:
+        replayed.append(search.legs)
+        raise typer.Exit(0)
+
+    def _search(*, legs: tuple[Leg, ...], **_kw: object) -> NoReturn:
+        replayed.append(legs)
+        raise typer.Exit(0)
+
+    monkeypatch.setattr(cli, "_run", _detail)
+    for path in ("_run_enriched_path", "_run_gflight_path", "_run_matrix_path"):
+        monkeypatch.setattr(cli, path, _search)
+    for start, end in (("flight detail ", " (Matrix)"), ("flight search ", " (Google)")):
+        command = shlex.split(line[line.index(start) : line.index(end)])
+        ran = CliRunner().invoke(cli.app, command[1:])
+        assert ran.exit_code == 0, ran.output
+
+    def _codes(legs: Sequence[Leg]) -> list[tuple[Predicate, ...]]:
+        return [classify(leg.route_language, leg.extension).predicates for leg in legs]
+
+    assert len(replayed) == 2
+    assert _codes(replayed[0]) == _codes(replayed[1]) == _codes(asked[0].legs)
+    assert _codes(asked[0].legs)[0] == (MaxDurationPred(minutes=540),)
 
 
 def test_a_price_matrix_wrote_is_printed_as_text(monkeypatch: pytest.MonkeyPatch) -> None:
