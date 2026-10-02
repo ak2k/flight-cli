@@ -4,9 +4,9 @@ One PPClient is reused across legs (open one HTTP client, share the
 semaphore-bounded fan-out). Pricing-info is fetched once per
 `enabled_airlines`-aware run and reused across legs/cabins.
 
-Failure model: any per-leg/per-airline error is swallowed and logged via the
-existing structlog channels (PPClient already does this). The provider
-returns `[]` on whole-provider failure so the registry can move on.
+Failure model: any per-leg/per-airline error is swallowed, logged at debug
+and recorded for the search's summary line (PPClient already does this). The
+provider returns `[]` on whole-provider failure so the registry can move on.
 """
 
 from __future__ import annotations

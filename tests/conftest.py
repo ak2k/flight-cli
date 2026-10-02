@@ -29,11 +29,13 @@ import io
 import json
 import os
 import pathlib
+import sys
 import threading
 import time
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+import structlog
 from typer import rich_utils
 
 # Rich settles whether a console styles its output when the console is built, and
@@ -45,7 +47,7 @@ os.environ["TTY_COMPATIBLE"] = "0"
 from flight_cli import _gf_browser
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
 # Today, for the modules whose searches carry literal travel dates. fli refuses a
 # travel date before today, so those modules pin the clock before every date they
@@ -101,6 +103,29 @@ def _no_browser_launch(  # pyright: ignore[reportUnusedFunction] - autouse pytes
         pytest.fail("this test reached rung 2's real browser launcher")
 
     monkeypatch.setattr(_gf_browser, "_playwright_factory", _forbidden)
+
+
+@pytest.fixture(autouse=True)
+def _structlog_defaults() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction] - autouse pytest fixture
+    """Every test starts on structlog's defaults.
+
+    The CLI's callback configures structlog for the whole process, at the
+    warning level and with each logger cached on first use. Left in place, one
+    CLI test decides the level every later test's module loggers emit at, and
+    `structlog.testing.capture_logs` swaps the processors, never that level: a
+    debug event it is waiting for is dropped before it arrives. Resetting the
+    configuration is half of it; a module logger first used under it keeps the
+    logger it cached, as an instance attribute over its class's `bind`."""
+    yield
+    if not structlog.is_configured():
+        return
+    structlog.reset_defaults()
+    proxy: type[object] = type(cast("object", structlog.get_logger()))
+    for name, module in list(sys.modules.items()):
+        if name == "flight_cli" or name.startswith("flight_cli."):
+            for value in list(vars(module).values()):
+                if isinstance(value, proxy):
+                    vars(value).pop("bind", None)
 
 
 def capture_err(monkeypatch: pytest.MonkeyPatch) -> io.StringIO:

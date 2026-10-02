@@ -13,14 +13,24 @@ and the registry skips it silently.
 
 `LegQuery` is the per-query input: one airport pair of one leg, since the
 providers take one airport per end. It is provider-agnostic by construction.
+
+`award_run` holds one search's award phase: every failure a provider swallows is
+recorded into it with `record_failure`, so the search can name them all in one
+line rather than one log line each.
 """
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from .._console_text import CTRL
+
 if TYPE_CHECKING:
+    from collections.abc import Generator
+
     from ..pp.client import CashFlightHint
 
 
@@ -149,7 +159,70 @@ class AwardProvider(Protocol):
         back a precise match identifier. Today only PointsPath uses them
         (via its `enableGoogleFlightMatching`); other providers may ignore.
 
-        Errors are the provider's to log; should return `[]` on failure
-        rather than raising, so one provider's outage doesn't sink the
-        augmented render."""
+        Errors are the provider's to log at debug and to `record_failure`;
+        should return `[]` on failure rather than raising, so one provider's
+        outage doesn't sink the augmented render."""
         ...
+
+
+@dataclass(frozen=True)
+class ProviderFailure:
+    """One request a provider gave up on. `airline` names the part of the
+    provider that failed, when it fans out per airline; `reason` is one line."""
+
+    provider: str
+    reason: str
+    airline: str | None = None
+
+
+@dataclass
+class AwardRun:
+    """One search's award phase, as its providers report into it."""
+
+    failures: list[ProviderFailure] = field(default_factory=list[ProviderFailure])
+
+
+# A context variable rather than a parameter, so `search_leg` and every provider
+# keep their signatures. anyio's tasks copy the context they start in, and the
+# copy still points at the one `AwardRun`.
+_RUN: ContextVar[AwardRun | None] = ContextVar("award_run", default=None)
+
+
+@contextmanager
+def award_run() -> Generator[AwardRun]:
+    """Collect the failures of the award lookups made inside this block."""
+    run = AwardRun()
+    token = _RUN.set(run)
+    try:
+        yield run
+    finally:
+        _RUN.reset(token)
+
+
+def record_failure(provider: str, reason: str, *, airline: str | None = None) -> None:
+    """Note a failure the caller is about to swallow. Outside `award_run`, a no-op."""
+    run = _RUN.get()
+    if run is not None:
+        run.failures.append(ProviderFailure(provider, reason, airline))
+
+
+# Enough of an error body to say what went wrong; past it is usually a page of HTML.
+_MAX_BODY = 200
+
+
+def _one_line(text: str) -> str:
+    """Whitespace runs as one space and control characters gone, so a reason is
+    one line, and one made of nothing but ESCs reads as blank."""
+    return " ".join(text.translate(CTRL).split())
+
+
+def exception_reason(e: BaseException) -> str:
+    """`str(e)`, or the class name when that is blank: `httpx.ReadTimeout("")`
+    carries nothing else."""
+    return _one_line(str(e)) or type(e).__name__
+
+
+def http_reason(status: int, body: str = "") -> str:
+    """`HTTP 503: <body>`, or `HTTP 503` when the body says nothing."""
+    shown = _one_line(body)[:_MAX_BODY]
+    return f"HTTP {status:d}: {shown}" if shown else f"HTTP {status:d}"

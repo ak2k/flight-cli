@@ -22,6 +22,7 @@ import anyio
 import httpx
 import structlog
 
+from ..providers.base import exception_reason, http_reason, record_failure
 from .auth import Tokens, get_valid_tokens
 from .auth import refresh as refresh_tokens
 from .models import AirlineSearchResponse, PricingInfoResponse
@@ -251,6 +252,10 @@ class PPClient:
         r = await self._request("POST", "/api/airline-search", json_body=_payload(spec, airline))
         # 204 = airline has nothing for this route+date; return empty model.
         if r.status_code == HTTPStatus.NO_CONTENT or not r.content:
+            if r.status_code >= HTTPStatus.BAD_REQUEST:
+                # An outage with nothing to say, not an empty answer.
+                log.debug("pp_airline_search_failed", airline=airline, status=r.status_code)
+                record_failure("PointsPath", http_reason(r.status_code), airline=airline)
             return AirlineSearchResponse()
         if r.status_code >= HTTPStatus.BAD_REQUEST:
             if is_unsupported_airline_response(r.status_code, r.text):
@@ -261,12 +266,13 @@ class PPClient:
                 remember_unsupported_airline(airline)
                 log.debug("pp_airline_unsupported", airline=airline)
             else:
-                log.warning(
+                log.debug(
                     "pp_airline_search_failed",
                     airline=airline,
                     status=r.status_code,
                     body=r.text[:200],
                 )
+                record_failure("PointsPath", http_reason(r.status_code, r.text), airline=airline)
             return AirlineSearchResponse()
         return AirlineSearchResponse.model_validate(r.json())
 
@@ -292,12 +298,13 @@ class PPClient:
             except Exception as e:  # noqa: BLE001 - per-airline failures are non-fatal
                 # Some exceptions, httpx.ReadTimeout among them, have an empty
                 # str(); the type is then the only reason the log carries.
-                log.warning(
+                log.debug(
                     "pp_airline_search_exception",
                     airline=airline,
                     error=str(e),
                     error_type=type(e).__name__,
                 )
+                record_failure("PointsPath", exception_reason(e), airline=airline)
 
         async with anyio.create_task_group() as tg:
             for a in to_call:

@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from ..base import AwardFlight, CabinAward
+from ..base import AwardFlight, CabinAward, exception_reason, http_reason, record_failure
 from .auth import SeatsAuthError, is_configured
 from .client import SeatsAeroClient, SeatsAeroError
 
@@ -281,11 +281,13 @@ class SeatsAeroProvider:
             )
         except SeatsAeroError as e:
             # Provider-level failures (auth, network, schema) are non-fatal:
-            # log + return [] so the registry can move on to other providers.
-            log.warning("seats_aero_search_failed", error=str(e), status=e.status)
+            # record + return [] so the registry can move on to other providers.
+            log.debug("seats_aero_search_failed", error=str(e), status=e.status)
+            record_failure(self.name, http_reason(e.status, e.body))
             return []
         except Exception as e:  # noqa: BLE001 — propagate-to-registry pattern
-            log.warning("seats_aero_search_failed", error=str(e))
+            log.debug("seats_aero_search_failed", error=str(e))
+            record_failure(self.name, exception_reason(e))
             return []
 
         # Collect all trips across all (program, date) availability items

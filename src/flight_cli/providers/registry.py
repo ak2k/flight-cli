@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 import anyio
 import structlog
 
+from .base import exception_reason, record_failure
 from .pointspath.provider import PointsPathProvider
 from .pointspath.provider import is_configured as pp_is_configured
 from .seats_aero.auth import is_configured as seats_is_configured
@@ -40,7 +41,7 @@ async def _construct_enabled(
 
     Each provider's auto-enable check (`is_configured`) runs first; only
     configured providers get instantiated (which is when network/auth
-    actually happens). Failures during construction are logged and swallowed
+    actually happens). Failures during construction are recorded and swallowed
     so one provider's outage can't take down the others.
 
     `provider_filter` (when non-None) restricts to a named subset. Matching
@@ -55,13 +56,15 @@ async def _construct_enabled(
         try:
             out.append(await PointsPathProvider.create(explicit_airlines=pp_airlines))
         except Exception as e:  # noqa: BLE001 — per-provider failures are non-fatal
-            log.warning("provider_init_failed", provider="PointsPath", error=str(e))
+            log.debug("provider_init_failed", provider="PointsPath", error=str(e))
+            record_failure("PointsPath", exception_reason(e))
     allow_seats = provider_filter is None or _matches(provider_filter, "seats-aero")
     if allow_seats and seats_is_configured():
         try:
             out.append(await SeatsAeroProvider.create(explicit_airlines=seats_sources))
         except Exception as e:  # noqa: BLE001 — per-provider failures are non-fatal
-            log.warning("provider_init_failed", provider="Seats.aero", error=str(e))
+            log.debug("provider_init_failed", provider="Seats.aero", error=str(e))
+            record_failure("Seats.aero", exception_reason(e))
     return out
 
 
@@ -100,7 +103,8 @@ async def _gather_one_leg(
                 cash_hints=cash_hints,
             )
         except Exception as e:  # noqa: BLE001 — surface provider failures, keep others
-            log.warning("provider_search_failed", provider=p.name, error=str(e))
+            log.debug("provider_search_failed", provider=p.name, error=str(e))
+            record_failure(p.name, exception_reason(e))
 
     async with anyio.create_task_group() as tg:
         for i, p in enumerate(providers):

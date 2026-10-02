@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from itertools import groupby, islice
@@ -22,6 +23,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .._console_text import safe_text as _safe_text
+from ..providers.base import award_run
 from ..providers.registry import gather_awards
 from .auth import (
     TOKENS_PATH,
@@ -42,7 +44,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from ..models import SearchResult
-    from ..providers.base import AwardFlight, LegQuery
+    from ..providers.base import AwardFlight, LegQuery, ProviderFailure
 
 
 console = Console()
@@ -363,6 +365,47 @@ def _not_asked_line(leg: _AwardLeg, cap: int) -> str:
     )
 
 
+def _counted(reasons: Sequence[str]) -> str:
+    """Each reason once, the most frequent first, with a count when repeated:
+    `ReadTimeout, 3 queries; HTTP 500`."""
+    tally = sorted(Counter(reasons).items(), key=lambda kv: (-kv[1], kv[0]))
+    return "; ".join(f"{reason}, {n} queries" if n > 1 else reason for reason, n in tally)
+
+
+def _awards_incomplete_line(failures: Sequence[ProviderFailure]) -> str | None:
+    """Every failure the providers swallowed in one search, as one line, or None
+    when there was none. Each provider and each airline is named once.
+
+    Plain text with remote parts in it: the caller wraps it before printing."""
+    if not failures:
+        return None
+    clauses: list[str] = []
+    for provider in sorted({f.provider for f in failures}):
+        own = [f for f in failures if f.provider == provider]
+        whole = [f.reason for f in own if f.airline is None]
+        per_airline: dict[str, list[str]] = {}
+        for f in own:
+            if f.airline is not None:
+                per_airline.setdefault(f.airline, []).append(f.reason)
+        said: list[str] = []
+        if whole:
+            said.append(f"failed ({_counted(whole)})")
+        if per_airline:
+            airlines = sorted(per_airline.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+            said.append(
+                "did not answer for "
+                + ", ".join(f"{airline} ({_counted(rs)})" for airline, rs in airlines)
+            )
+        clauses.append(f"{provider} {' and '.join(said)}")
+    return f"Awards incomplete: {'; '.join(clauses)}."
+
+
+def _print_awards_incomplete(failures: Sequence[ProviderFailure]) -> None:
+    line = _awards_incomplete_line(failures)
+    if line is not None:
+        err.print(_safe_text(line), style="yellow", highlight=False, soft_wrap=True)
+
+
 def run_pp_for_search(
     res: SearchResult,
     *,
@@ -388,7 +431,9 @@ def run_pp_for_search(
     leg's answers are joined, rendered and serialized as one entry.
 
     Errors are non-fatal — print and continue so the user still sees their
-    cash results.
+    cash results. Every failure a provider swallowed during the fan-out is
+    named in one `Awards incomplete:` line on stderr, in table and JSON runs
+    alike, and none at all when there was none.
 
     The `pp_only` arg is named for historical reasons; today it means
     "render in awards-only mode" — applies to whatever providers were
@@ -466,7 +511,7 @@ def run_pp_for_search(
         for q in queries
     ]
 
-    async def _go() -> list[list[AwardFlight]]:
+    async def _go() -> tuple[list[list[AwardFlight]], list[ProviderFailure]]:
         # Construct, query, AND close providers all within this single event
         # loop. Providers hold async HTTP transports (curl_cffi/httpx) whose
         # sockets are bound to the running loop; closing them in a *second*
@@ -474,25 +519,27 @@ def run_pp_for_search(
         # `loop.call_soon` on a dead loop ("RuntimeError: Event loop is
         # closed", a full traceback + exit 1 on every otherwise-successful
         # run). `per_query` is plain data, safe to return after close.
-        per_query, providers = await gather_awards(
-            legs=queries,
-            num_passengers=num_passengers,
-            cabins=cabin_list,
-            pp_airlines=explicit_airlines,
-            seats_sources=seats_sources,
-            cash_hints_per_leg=cash_hints_per_query,
-            provider_filter=provider_filter,
-        )
-        try:
-            return per_query
-        finally:
-            await _aclose_all(providers)
+        with award_run() as run:
+            per_query, providers = await gather_awards(
+                legs=queries,
+                num_passengers=num_passengers,
+                cabins=cabin_list,
+                pp_airlines=explicit_airlines,
+                seats_sources=seats_sources,
+                cash_hints_per_leg=cash_hints_per_query,
+                provider_filter=provider_filter,
+            )
+            try:
+                return per_query, run.failures
+            finally:
+                await _aclose_all(providers)
 
     try:
-        per_query = anyio.run(_go)
+        per_query, failures = anyio.run(_go)
     except Exception as e:  # noqa: BLE001 — surface anything to user, don't crash CLI
         err.print(f"[red]--pp: award query failed: {_safe_text(e)}[/]")
         return
+    _print_awards_incomplete(failures)
 
     per_leg: list[list[AwardFlight]] = []
     start = 0
