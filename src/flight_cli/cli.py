@@ -2190,6 +2190,7 @@ def _run_matrix_calendar(
             + " and merged — Matrix under-reports the combined multi-airport calendar grid.[/]"
         )
         if with_floor:
+            _envelope.narrow()
             err.print(
                 "[dim]Round trips that return to another airport of the set come only "
                 "from the combined query, which Matrix may under-report.[/]"

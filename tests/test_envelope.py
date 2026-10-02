@@ -762,6 +762,33 @@ def test_one_group_holding_every_destination_narrows_the_answer(
     assert any("may under-report" in n for n in env["notes"]), env["notes"]
 
 
+@pytest.mark.parametrize(
+    ("trip", "complete"),
+    [
+        pytest.param(("--duration", "7"), False, id="round-trip"),
+        pytest.param(("--one-way",), True, id="one-way"),
+    ],
+)
+def test_returns_only_the_combined_query_priced_narrow_the_answer(
+    trip: tuple[str, ...], complete: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A round trip over a set asks for returns into another airport of it, and
+    only the combined query prices those: the request Matrix may under-report.
+    A one-way split asks no such return, and every pair answered."""
+    client = _pair_client(
+        monkeypatch,
+        {pair: _priced_grid("USD204.00") for pair in (("JFK", "LAX"), ("EWR", "LAX"))}
+        | {("JFK,EWR", "LAX"): _priced_grid("USD199.00")},
+    )
+    window = [a for a in _CALENDAR[1:] if a != "--one-way"]
+    env = _envelope_of(_run(*_CALENDAR[:1], "JFK,EWR", "LAX", *window, *trip), command="calendar")
+    assert len(client.asked) == (2 if complete else 3)
+    assert (env["backend"], env["complete"]) == ("matrix", complete)
+    assert env["results"]
+    said = any("come only from the combined query" in n for n in env["notes"])
+    assert said is not complete, env["notes"]
+
+
 def test_the_fast_graph_is_a_google_calendar(monkeypatch: pytest.MonkeyPatch) -> None:
     from flight_cli import _gf_calgraph as cg
 

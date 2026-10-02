@@ -51,7 +51,8 @@ the award query failing; a provider failing to start or answer
 not "unsupported" in `pp/client.py`, an error status with an empty body
 included); a leg with `pairs_not_asked`; calendar sub-queries lost;
 `--max-per-query > 1` over a split, and over the one unsplit query when a
-group holds every destination; Google rows on a
+group holds every destination; a round trip over a split set, whose returns
+into another airport of the set come only from the combined query; Google rows on a
 search page the parser could not read (not the calendar graph's wall check,
 which answers nothing). A hand-off
 to Matrix, rows in another currency and a filter that empties a board are
