@@ -514,3 +514,33 @@ _BASE_LAX_MERGE: list[_Compact] = [
     ("gf", "USD1012.00", None, "DL2293+DL575", True),
     ("both", "USD1012.00", "USD1017.00", "DL2286+DL827", False),
 ]
+
+
+# ───────── the Google row a merged row holds ─────────
+
+
+def test_a_pair_landing_at_the_same_minute_is_the_same_trip_and_holds_googles_row() -> None:
+    gf = _sr(_nz_row("USD500.00", _ua("2026-11-02T13:30:00", ["2026-11-01", "2026-11-01"])))
+    matrix = _sr(_nz_row("USD480.00", _ua("2026-11-02T13:30-05:00")))
+    (row,) = merge_results(gf, matrix, currency="USD")
+    assert (row.source, row.same_trip) == ("both", True)
+    assert row.google is gf.solutions[0]
+
+
+def test_a_matrix_row_priced_by_a_google_row_left_over_is_not_the_same_trip() -> None:
+    """The key's first Matrix row lands the 21st and takes the only Google row,
+    which lands the 23rd: one key, two trips."""
+    google = _sr(_fi("USD900.00", "2026-10-23T11:55:00", ["2026-10-20", "2026-10-23"]))
+    matrix = _sr(
+        _fi("USD884.00", "2026-10-21T11:55+00:00"), _fi("USD1180.00", "2026-10-22T11:55+00:00")
+    )
+    first, second = merge_results(google, matrix, currency="USD")
+    assert (first.source, first.same_trip) == ("both", False)
+    assert first.google is google.solutions[0]
+    assert (second.source, second.same_trip, second.google) == ("matrix", False, None)
+
+
+def test_a_google_only_row_holds_its_own_row() -> None:
+    gf = _sr(_it("USD380.00", ["UA58"]), _it("USD100.00", []))
+    rows = merge_results(gf, _sr(), currency="USD")
+    assert [(r.google is r.itinerary, r.same_trip) for r in rows] == [(True, False)] * 2

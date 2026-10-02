@@ -6,11 +6,12 @@ match itineraries across the two cash results and attribute each side's price.
 
 Matching is by flight number + departure date per slice — which works now that
 the gflight adapter emits marketing flight numbers (work-fjibi.1), the same
-identity Matrix uses. Matched rows carry both prices (they should agree; we show
-both, attributed); Matrix-only rows are added (its fare coverage is broader),
-GF-only rows are kept and flagged (ULCC / codeshare inventory Matrix misses).
-The Matrix itinerary is authoritative for a matched row's structure; the Google
-slice adds the per-flight dates Matrix does not state.
+identity Matrix uses. Matched rows carry both prices, attributed; rows of either
+side alone are kept and tagged with their source. A Google-only row is often a
+trip on a carrier Matrix does price that Matrix's pruned answer left out, so the
+tag alone says nothing about why: `_cross_check` states the reason where the two
+answers decide one. The Matrix itinerary is authoritative for a matched row's
+structure; the Google slice adds the per-flight dates Matrix does not state.
 """
 
 from __future__ import annotations
@@ -37,12 +38,19 @@ class MergedRow:
     `itinerary` is the structure to display (Matrix-authoritative when matched).
     `gf_price` / `matrix_price` are the attributed price strings from each side
     (None when that side didn't have this itinerary). `source` records which
-    backend(s) produced it."""
+    backend(s) produced it.
+
+    `google` is the Google row whose price is `gf_price`, the board's own
+    object. `same_trip` holds only where that row is the Matrix row's own trip
+    (`_date_lender`); a key's first Matrix row priced by a Google row left over
+    shares its flights and first day, not necessarily its trip."""
 
     itinerary: Itinerary
     gf_price: str | None
     matrix_price: str | None
     source: Source
+    google: Itinerary | None = None
+    same_trip: bool = False
 
 
 def _price_int(price: str | None) -> int | None:
@@ -207,11 +215,13 @@ def merge_results(gf: SearchResult, matrix: SearchResult, *, currency: str) -> l
                     gf_price=g.price if g else None,
                     matrix_price=m.price,
                     source="both" if g else "matrix",
+                    google=g,
+                    same_trip=lender is not None,
                 )
             )
     left = sorted(i for listed in gf_keyed.values() for i in listed if i not in taken)
     rows.extend(
-        MergedRow(itinerary=g, gf_price=g.price, matrix_price=None, source="gf")
+        MergedRow(itinerary=g, gf_price=g.price, matrix_price=None, source="gf", google=g)
         for g in (gf.solutions[i] for i in left)
     )
     rows.extend(
@@ -219,7 +229,7 @@ def merge_results(gf: SearchResult, matrix: SearchResult, *, currency: str) -> l
         for it in matrix_unkeyed
     )
     rows.extend(
-        MergedRow(itinerary=it, gf_price=it.price, matrix_price=None, source="gf")
+        MergedRow(itinerary=it, gf_price=it.price, matrix_price=None, source="gf", google=it)
         for it in gf_unkeyed
     )
 
