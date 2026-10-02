@@ -7042,7 +7042,8 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             "--no-separate-tickets",
             help=(
                 "Hide the itineraries Google Flights sells as separate tickets or as a "
-                "self transfer, which its table and --format json otherwise show (marked "
+                "self transfer, which a Google Flights table (--fast) or --format json "
+                "with no award search otherwise shows from Google's Cheapest tab (marked "
                 "† and ‡, or separate_tickets: true), and say how many were hidden. Matrix "
                 "sells every itinerary as one ticket, so there it changes nothing."
             ),
