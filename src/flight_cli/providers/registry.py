@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import anyio
+import anyio.to_thread
 import structlog
 
 from .base import answer_deadline, deadline_reason, exception_reason, record_failure
@@ -52,11 +53,15 @@ async def _construct_enabled(
     """
     out: list[AwardProvider] = []
     allow_pp = provider_filter is None or _matches(provider_filter, "pp")
-    if allow_pp and pp_is_configured():
-        # Building one asks PointsPath for its catalog, so the deadline holds here too.
+    if allow_pp:
+        # Checking the tokens can refresh them and building one asks PointsPath
+        # for its catalog, so the deadline holds over both.
         with anyio.CancelScope(deadline=answer_deadline()) as scope:
             try:
-                out.append(await PointsPathProvider.create(explicit_airlines=pp_airlines))
+                # A refresh is a blocking request: on the event loop no deadline
+                # could cut it; in a thread the deadline stops waiting on it.
+                if await anyio.to_thread.run_sync(pp_is_configured, abandon_on_cancel=True):
+                    out.append(await PointsPathProvider.create(explicit_airlines=pp_airlines))
             except Exception as e:  # noqa: BLE001 — per-provider failures are non-fatal
                 log.debug("provider_init_failed", provider="PointsPath", error=str(e))
                 record_failure("PointsPath", exception_reason(e))

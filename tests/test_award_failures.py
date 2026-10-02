@@ -16,23 +16,23 @@ from typing import TYPE_CHECKING, Any
 
 import anyio
 import httpx
+import pytest
 
 from flight_cli import log
 from flight_cli.models import SearchResult
 from flight_cli.pp import cli as pp_cli
-from flight_cli.pp.auth import Tokens
+from flight_cli.pp.auth import PPAuthError, Tokens
 from flight_cli.pp.client import API_BASE, PPClient
 from flight_cli.pp.models import PricingInfoResponse
 from flight_cli.providers import registry
 from flight_cli.providers.base import LegQuery
+from flight_cli.providers.pointspath import provider as pp_provider
 from flight_cli.providers.pointspath.provider import PointsPathProvider
 from flight_cli.providers.seats_aero import client as seats_client
 from flight_cli.providers.seats_aero.provider import SeatsAeroProvider
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
     from flight_cli.providers.base import AwardFlight
 
@@ -369,3 +369,41 @@ def test_a_token_refresh_ends_at_the_award_deadline(
         + ", ".join(f"{a} (not answered within 0.2 s, 3 queries)" for a in sorted(_AIRLINES))
         + "."
     ], captured.err
+
+
+@pytest.mark.parametrize("stuck", ["checking it is configured", "building it"])
+def test_a_token_check_ends_at_the_award_deadline(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], stuck: str
+) -> None:
+    """Checking PointsPath's tokens refreshes stale ones with a blocking request.
+    The registry's check and the provider's own made it on the event loop, where
+    no deadline could cut it: a refresh that did not return held the award phase."""
+    release = threading.Event()
+
+    def stuck_tokens() -> Tokens:
+        _ = release.wait()
+        # Once released, PointsPath has no tokens, so nothing reaches it.
+        msg = "released"
+        raise PPAuthError(msg)
+
+    monkeypatch.setattr(pp_provider, "get_valid_tokens", stuck_tokens)
+    if stuck == "building it":
+        monkeypatch.setattr(registry, "pp_is_configured", lambda: True)
+    monkeypatch.setattr(registry, "seats_is_configured", lambda: False)
+    monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
+    monkeypatch.setattr(pp_cli, "AWARD_DEADLINE_SECS", 0.5)
+    log.configure("warning")
+    search = threading.Thread(target=_run, daemon=True)
+    try:
+        search.start()
+        search.join(10)
+        assert not search.is_alive(), "a token check held the award phase past its deadline"
+    finally:
+        release.set()
+        search.join(10)
+    captured = capsys.readouterr()
+
+    assert _summaries(captured.err) == [
+        "Awards incomplete: PointsPath failed (not answered within 0.5 s)."
+    ], captured.err
+    assert _flight_numbers(captured.out) == []

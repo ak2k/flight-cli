@@ -106,8 +106,9 @@ a six-pair search); nothing has measured how it takes that.
 
 The award phase ends `AWARD_DEADLINE_SECS` = 180 s after it starts
 (`pp/cli.py`). Every request carries the deadline, its wait for a slot included
-(`answer_deadline`), and so does building a provider. The token refresh a 401
-triggers is a blocking call, so it runs in a worker thread the deadline stops
+(`answer_deadline`), and so does building a provider. A token refresh is a
+blocking call, whether a 401 triggers it or checking the tokens before building
+PointsPath finds them stale, so it runs in a worker thread the deadline stops
 waiting on; an abandoned refresh can still hold the process's exit for its own
 20 s timeout once the results have printed. A request still
 unanswered then is cut and named in the line (`not answered within 180 s`, with
