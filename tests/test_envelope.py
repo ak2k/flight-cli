@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast, override
 import anyio
 import httpx
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from flight_cli import _envelope, cli
@@ -853,6 +854,23 @@ def test_a_usage_error_writes_no_envelope() -> None:
     r = _search("--cash-only", "JFK", "LAX", "--dep", _DEP.isoformat(), "--cabin", "steerage")
     assert (r.exit_code, r.stdout) == (2, "")
     assert "steerage" in r.stderr
+
+
+def test_an_abort_is_said_inside_the_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
+    """click says "Aborted." once the command has returned, which is after the
+    envelope run has stopped hearing stderr. The exit code stays JSON's."""
+
+    def _abort(*_a: object, **_kw: object) -> Any:
+        raise typer.Abort
+
+    monkeypatch.setattr(cli, "_gflight_results", _abort)
+    args = ("--cash-only", "JFK", "LAX", "--dep", _DEP.isoformat(), "--backend", "gflight")
+    as_json = _run(*_SEARCH, *args, "--format", "json")
+    assert (as_json.exit_code, as_json.stdout, as_json.stderr.strip()) == (1, "", "Aborted.")
+    r = _search(*args)
+    env = _envelope_of(r, code=1)
+    assert r.stderr.strip() == "Aborted."
+    assert (env["complete"], env["notes"][0]) == (False, "Aborted.")
 
 
 def test_notes_keep_the_order_stderr_took_the_lines_in(

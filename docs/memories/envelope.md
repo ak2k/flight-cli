@@ -68,6 +68,8 @@ and a `stdout:` note says so, which the tests treat as a failure. Stderr goes
 through a tee that keeps a copy for `notes`. `cli.err` and `pp.cli.err` run
 with `soft_wrap` on, so one message is one note. The recorder is module state,
 not a context variable, because the cabin fan-outs record from worker threads.
+A `typer.Abort` is said inside the run (`cli._said_abort`) and ends as exit 1:
+click would print "Aborted." only after the run stopped hearing stderr.
 
 Every path runs as under `--format json`, and each JSON leaf calls the recorder
 in place of its `sys.stdout.write`. With awards on, the leaf records its cash

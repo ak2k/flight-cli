@@ -6515,11 +6515,25 @@ def _envelope_command[**P](
             if kwargs.get("fmt") != "envelope":
                 fn(*args, **kwargs)
                 return
-            _envelope.run(command, partial(fn, *args, **kwargs), consoles=(err, _pp_cli.err))
+            _envelope.run(
+                command, partial(_said_abort, fn, *args, **kwargs), consoles=(err, _pp_cli.err)
+            )
 
         return run
 
     return wrap
+
+
+def _said_abort[**P](fn: Callable[P, None], *args: P.args, **kwargs: P.kwargs) -> None:
+    """`fn`, saying an abort the way click does and ending with click's exit 1.
+
+    click says it once the command has returned, after the envelope run has
+    stopped hearing stderr, so its one line would be missing from the notes."""
+    try:
+        fn(*args, **kwargs)
+    except typer.Abort:
+        err.print("Aborted.", style="red")
+        raise typer.Exit(1) from None
 
 
 @app.command()
