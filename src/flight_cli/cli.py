@@ -1076,7 +1076,7 @@ def _should_run_awards(sel: ProviderSelection) -> bool:
                 "Run `flight auth pp login` or `flight auth seats-aero key <KEY>` first.",
             )
             raise typer.Exit(2)
-        _envelope.explain("awards", "no award provider is configured")
+        _explain_no_awards(sel, "no award provider is configured")
         return False
     # Filter matches at least one configured provider? Values are already
     # canonical (normalized by _resolve_providers), so a direct membership
@@ -1091,9 +1091,24 @@ def _should_run_awards(sel: ProviderSelection) -> bool:
                 "matches no configured provider.[/]",
             )
             raise typer.Exit(2)
-        _envelope.explain("awards", "--providers names no configured provider")
+        _explain_no_awards(sel, "--providers names no configured provider")
         return False
     return True
+
+
+def _explain_no_awards(sel: ProviderSelection, reason: str) -> None:
+    """Say why no award search runs, and narrow the answer when PointsPath was
+    asked for: named in `--providers`, or holding saved tokens that no filter
+    leaves out. Here such tokens failed to validate or refresh, which
+    `is_configured` reads as none, so no later step can say the provider was
+    lost. A machine with no tokens never asked PointsPath."""
+    if not _envelope.active():
+        return
+    named = sel.provider_filter is not None and "pp" in sel.provider_filter
+    if named or (sel.provider_filter is None and load_tokens() is not None):
+        _envelope.narrow()
+        reason = "PointsPath was asked for, and its tokens are missing or failed to refresh"
+    _envelope.explain("awards", reason)
 
 
 # ─────────────────────────── shared execution ──────────────────────────────

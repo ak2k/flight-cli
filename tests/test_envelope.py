@@ -30,10 +30,12 @@ from flight_cli._gf_errors import GfThrottledError
 from flight_cli.client import MatrixApiError
 from flight_cli.domain import Cabin, CalendarSearch, SpecificDateSearch
 from flight_cli.models import SearchResult
+from flight_cli.pp import auth as pp_auth
 from flight_cli.pp import cli as pp_cli
 from flight_cli.pp import client as pp_client
 from flight_cli.pp.auth import PPAuthError, Tokens
 from flight_cli.providers.base import AwardFlight, LegQuery
+from flight_cli.providers.seats_aero import auth as seats_auth
 from test_calendar_split import _pair_client, _result
 from test_gf_full_board import _DEP, _LAX, _LHR, _RET, _URL, _return_board, _served
 from test_json_document import _one_document
@@ -64,6 +66,8 @@ _MATRIX_BODY: dict[str, Any] = json.loads(
 )
 _SCHEMA = Path(__file__).parent.parent / "docs" / "envelope.schema.json"
 _ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+# The award gate before `_hermetic` stands in for it, for the states it decides.
+_SHOULD_RUN_AWARDS = cli._should_run_awards
 
 
 class _Matrix:
@@ -431,6 +435,76 @@ def test_pointspath_skipped_with_no_tokens_is_a_note(
     assert env["complete"] is True
     assert any(n.startswith("PointsPath skipped: No PointsPath tokens") for n in env["notes"])
     assert env["awards"] is not None
+
+
+@pytest.mark.parametrize(
+    ("tokens", "seats", "providers", "complete", "awards_note"),
+    [
+        pytest.param(
+            True, False, (), False, "awards: PointsPath was asked for", id="tokens-failed-alone"
+        ),
+        pytest.param(
+            True,
+            True,
+            ("--providers", "pp"),
+            False,
+            "awards: PointsPath was asked for",
+            id="named-beside-seats",
+        ),
+        pytest.param(
+            False, False, (), True, "awards: no award provider is configured", id="no-tokens"
+        ),
+    ],
+)
+def test_pointspath_lost_at_the_award_gate_narrows_the_answer(
+    tokens: bool,
+    seats: bool,
+    providers: tuple[str, ...],
+    complete: bool,
+    awards_note: str,
+    gf_session: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The award gate reads PointsPath tokens that fail to refresh as no
+    provider at all, so no award search runs and the provider's loss is said at
+    the gate. Through the real gate: a machine that never saved tokens asked
+    nothing of PointsPath."""
+
+    def _refused(_t: Tokens) -> Tokens:
+        raise PPAuthError("Supabase refresh failed: HTTP 400 refresh token expired")
+
+    monkeypatch.setattr(cli, "_should_run_awards", _SHOULD_RUN_AWARDS)
+    monkeypatch.setattr(pp_auth, "TOKENS_PATH", tmp_path / "pp.json")
+    monkeypatch.setattr(pp_auth, "refresh", _refused)
+    monkeypatch.setattr(seats_auth, "KEY_PATH", tmp_path / "seats.json")
+    monkeypatch.delenv("PP_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("PP_REFRESH_TOKEN", raising=False)
+    monkeypatch.delenv(seats_auth.API_KEY_ENV, raising=False)
+    if tokens:
+        monkeypatch.setenv("PP_ACCESS_TOKEN", "access")
+        monkeypatch.setenv("PP_REFRESH_TOKEN", "refresh")
+    if seats:
+        monkeypatch.setenv(seats_auth.API_KEY_ENV, "key")
+    gf_session(_served(_LAX))
+    env = _envelope_of(
+        _search(
+            "JFK",
+            "LAX",
+            "--dep",
+            _DEP.isoformat(),
+            "--backend",
+            "gflight",
+            "--fast",
+            "-n",
+            "5",
+            *providers,
+        )
+    )
+    assert (env["complete"], env["awards"]) == (complete, None)
+    assert len(_rows(env)) == 5
+    (note,) = _notes(env, "awards")
+    assert note.startswith(awards_note), note
 
 
 def test_a_failed_award_query_leaves_awards_null_and_narrows(
