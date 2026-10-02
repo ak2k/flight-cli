@@ -778,8 +778,12 @@ def test_two_lows_that_differ_get_one_note_naming_both_on_stderr_alone(
     same 300 at 6 nights a day later."""
     _matrix_prices(monkeypatch, _JFK_LHR_DAY, {})
     _graphs_are(monkeypatch, _JFK_LHR_GRAPHS)
+
+    def _no_note(*_a: object, **_k: object) -> None:
+        return None
+
     with monkeypatch.context() as m:
-        m.setattr(cli, "_two_lows_note", lambda *_a, **_k: None, raising=False)
+        m.setattr(cli, "_two_lows_note", _no_note, raising=False)
         quiet = _run("JFK", "LHR", "-d", "5-7")
     result = _run("JFK", "LHR", "-d", "5-7")
     note = (
