@@ -299,33 +299,45 @@ def test_a_digit_leading_carrier_prints_as_its_code(gf_session: Callable[..., An
 
 
 def _enum_lookups(tree: ast.AST) -> list[int]:
-    names = {"Airline", "FliAirline"}
-    members = set(Airline.__members__)
-    lines: list[int] = []
-    for node in ast.walk(tree):
-        on_enum = isinstance(node, ast.Attribute | ast.Subscript) and (
-            isinstance(node.value, ast.Name) and node.value.id in names
+    nodes = list(ast.walk(tree))
+    names = {"Airline", "FliAirline"} | {
+        alias.asname
+        for node in nodes
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+        if alias.name == "Airline" and alias.asname
+    }
+
+    def is_enum(node: ast.expr) -> bool:
+        return (isinstance(node, ast.Name) and node.id in names) or (
+            isinstance(node, ast.Attribute) and node.attr == "Airline"
         )
+
+    members = set(Airline.__members__)
+    # Iterating the whole table is how `fli_bridge` builds its own.
+    iterated = {
+        id(node.value) for node in nodes if isinstance(node, ast.Attribute) and node.attr == "items"
+    }
+    lines: list[int] = []
+    for node in nodes:
         if (
             (isinstance(node, ast.Name) and node.id == "_parse_airline")
             or (isinstance(node, ast.Attribute) and node.attr == "_parse_airline")
             or (isinstance(node, ast.alias) and node.name == "_parse_airline")
-            or (isinstance(node, ast.Subscript) and on_enum)
-            or (isinstance(node, ast.Attribute) and on_enum and node.attr in members)
+            or (isinstance(node, ast.Subscript) and is_enum(node.value))
+            or (isinstance(node, ast.Attribute) and is_enum(node.value) and node.attr in members)
             or (
-                isinstance(node, ast.Subscript)
-                and isinstance(node.value, ast.Attribute)
-                and node.value.attr == "__members__"
-                and isinstance(node.value.value, ast.Name)
-                and node.value.value.id in names
+                isinstance(node, ast.Attribute)
+                and node.attr == "__members__"
+                and is_enum(node.value)
+                and id(node) not in iterated
             )
             or (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Name)
                 and node.func.id in {"getattr", "hasattr"}
                 and node.args
-                and isinstance(node.args[0], ast.Name)
-                and node.args[0].id in names
+                and is_enum(node.args[0])
             )
         ):
             lines.append(node.lineno)
@@ -343,3 +355,18 @@ def test_no_code_resolves_an_airline_through_flis_enum() -> None:
         for line in _enum_lookups(ast.parse(path.read_text(), filename=str(path)))
     ]
     assert not found, f"airline lookups through fli's enum or decoder: {found}"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from fli.models.airline import Airline as Carrier\nCarrier['W9']",
+        "from fli.models import airline as carriers\ncarriers.Airline['W9']",
+        "import fli.models\nfli.models.Airline.W9",
+        "from fli.models import Airline\nAirline.__members__.get('W9')",
+        "from fli.models import Airline as Carrier\ngetattr(Carrier, 'W9')",
+    ],
+)
+def test_the_guard_sees_the_enum_under_any_name(source: str) -> None:
+    """Each of these hands W9 the W6 member."""
+    assert _enum_lookups(ast.parse(source)) == [2]
