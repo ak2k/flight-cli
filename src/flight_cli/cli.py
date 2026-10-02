@@ -2465,8 +2465,11 @@ def _graph_low(
     back = cell.return_date
     if back is None and nights is not None:
         back = cell.departure + timedelta(days=nights)
+    # Compared as the table prints it, in whole dollars, so the note agrees or
+    # differs with what the reader sees.
+    shown = f"{cell.price:.0f}"
     return _Low(
-        f"USD{cell.price:.0f}", cell.price, cell.departure, back, ",".join(origins), ",".join(dests)
+        f"USD{shown}", float(shown), cell.departure, back, ",".join(origins), ",".join(dests)
     )
 
 
@@ -2503,9 +2506,9 @@ def _two_lows_note(
     fewest on a route, and Google's graph is one price per date pair with no
     itinerary behind it. So two lows can differ with neither table wrong, and
     the line names both, what both asked, how they differ, and the search on
-    each date pair that shows what is bookable. The graph prices whole dollars,
-    so two USD lows less than a dollar apart agree. A Matrix grid in another
-    currency is named in it and not compared."""
+    each date pair that shows what is bookable. Google's table prints whole
+    dollars, so two USD lows less than a dollar apart agree. A Matrix grid in
+    another currency is named in it and not compared."""
     round_trip = len(search.legs) == _ROUND_TRIP_LEGS
     matrix = _matrix_low(res, origins=origins, dests=dests, sd=sd, ed=ed, round_trip=round_trip)
     google = _graph_low(graphs, origins=origins, dests=dests)
