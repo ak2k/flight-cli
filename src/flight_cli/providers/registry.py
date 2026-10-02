@@ -4,13 +4,15 @@ Today: hardcoded PointsPath entry. When seats.aero lands (work-2eoa) it
 joins via the same `_discover` list. The auto-enable rule is: provider's
 configuration check passes → instance constructed → leg fan-out includes it.
 
-The fan-out asks every pair query at once, and all enabled providers in
-parallel for each, then concatenates each query's awards. The matcher is
-provider-blind: a flat `list[AwardFlight]` is exactly what it consumes.
+Each enabled provider is built and then asks every pair query at once, apart
+from the others, and each query's awards are concatenated in provider order.
+The matcher is provider-blind: a flat `list[AwardFlight]` is exactly what it
+consumes.
 """
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING
 
 import anyio
@@ -24,6 +26,8 @@ from .seats_aero.auth import is_configured as seats_is_configured
 from .seats_aero.provider import SeatsAeroProvider
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from structlog.stdlib import BoundLogger
 
     from ..pp.client import CashFlightHint
@@ -31,14 +35,19 @@ if TYPE_CHECKING:
 
 log: BoundLogger = structlog.get_logger(__name__)  # pyright: ignore[reportAny]
 
+# Builds one provider: None when it is not configured, or when building it
+# failed, the failure recorded.
+type _Build = Callable[[], Awaitable[AwardProvider | None]]
 
-async def _construct_enabled(
+
+def _enabled_builders(
     *,
     pp_airlines: tuple[str, ...] | None = None,
     seats_sources: tuple[str, ...] | None = None,
     provider_filter: tuple[str, ...] | None = None,
-) -> list[AwardProvider]:
-    """Build the list of enabled provider instances.
+) -> list[_Build]:
+    """A builder for each provider the filter allows, in the order their
+    awards are listed.
 
     Each provider's auto-enable check (`is_configured`) runs first; only
     configured providers get instantiated (which is when network/auth
@@ -47,37 +56,47 @@ async def _construct_enabled(
 
     `provider_filter` (when non-None) restricts to a named subset. Matching
     is case-insensitive against the provider's short name (e.g. "pp",
-    "seats"). A filter that names no configured providers yields an empty
-    list — the caller decides whether that's a hard error (--awards-only)
-    or silent skip (cash-only path).
+    "seats"). A filter that names no configured providers builds none — the
+    caller decides whether that's a hard error (--awards-only) or silent skip
+    (cash-only path).
     """
-    out: list[AwardProvider] = []
-    allow_pp = provider_filter is None or _matches(provider_filter, "pp")
-    if allow_pp:
-        # Checking the tokens can refresh them and building one asks PointsPath
-        # for its catalog, so the deadline holds over both.
-        with anyio.CancelScope(deadline=answer_deadline()) as scope:
-            try:
-                # A refresh is a blocking request: on the event loop no deadline
-                # could cut it; in a thread the deadline stops waiting on it.
-                if await anyio.to_thread.run_sync(pp_is_configured, abandon_on_cancel=True):
-                    out.append(await PointsPathProvider.create(explicit_airlines=pp_airlines))
-            except Exception as e:  # noqa: BLE001 — per-provider failures are non-fatal
-                log.debug("provider_init_failed", provider="PointsPath", error=str(e))
-                record_failure("PointsPath", exception_reason(e))
-        if scope.cancelled_caught:
-            record_failure("PointsPath", deadline_reason())
-    allow_seats = provider_filter is None or _matches(provider_filter, "seats-aero")
-    if allow_seats and seats_is_configured():
-        with anyio.CancelScope(deadline=answer_deadline()) as scope:
-            try:
-                out.append(await SeatsAeroProvider.create(explicit_airlines=seats_sources))
-            except Exception as e:  # noqa: BLE001 — per-provider failures are non-fatal
-                log.debug("provider_init_failed", provider="Seats.aero", error=str(e))
-                record_failure("Seats.aero", exception_reason(e))
-        if scope.cancelled_caught:
-            record_failure("Seats.aero", deadline_reason())
-    return out
+    builders: list[_Build] = []
+    if provider_filter is None or _matches(provider_filter, "pp"):
+        builders.append(partial(_build_pointspath, pp_airlines))
+    if provider_filter is None or _matches(provider_filter, "seats-aero"):
+        builders.append(partial(_build_seats_aero, seats_sources))
+    return builders
+
+
+async def _build_pointspath(airlines: tuple[str, ...] | None) -> AwardProvider | None:
+    # Checking the tokens can refresh them and building one asks PointsPath
+    # for its catalog, so the deadline holds over both.
+    with anyio.CancelScope(deadline=answer_deadline()) as scope:
+        try:
+            # A refresh is a blocking request: on the event loop no deadline
+            # could cut it; in a thread the deadline stops waiting on it.
+            if await anyio.to_thread.run_sync(pp_is_configured, abandon_on_cancel=True):
+                return await PointsPathProvider.create(explicit_airlines=airlines)
+        except Exception as e:  # noqa: BLE001 — per-provider failures are non-fatal
+            log.debug("provider_init_failed", provider="PointsPath", error=str(e))
+            record_failure("PointsPath", exception_reason(e))
+    if scope.cancelled_caught:
+        record_failure("PointsPath", deadline_reason())
+    return None
+
+
+async def _build_seats_aero(sources: tuple[str, ...] | None) -> AwardProvider | None:
+    if not seats_is_configured():
+        return None
+    with anyio.CancelScope(deadline=answer_deadline()) as scope:
+        try:
+            return await SeatsAeroProvider.create(explicit_airlines=sources)
+        except Exception as e:  # noqa: BLE001 — per-provider failures are non-fatal
+            log.debug("provider_init_failed", provider="Seats.aero", error=str(e))
+            record_failure("Seats.aero", exception_reason(e))
+    if scope.cancelled_caught:
+        record_failure("Seats.aero", deadline_reason())
+    return None
 
 
 def _matches(filter_: tuple[str, ...], canonical: str) -> bool:
@@ -92,40 +111,29 @@ def _matches(filter_: tuple[str, ...], canonical: str) -> bool:
     return any(canonical_provider(p) == canonical for p in filter_)
 
 
-async def _gather_one_leg(
-    providers: list[AwardProvider],
+async def _ask(
+    provider: AwardProvider,
     leg: LegQuery,
     *,
     cabins: tuple[str, ...],
-    num_passengers: int = 1,
-    cash_hints: tuple[CashFlightHint, ...] = (),
+    num_passengers: int,
+    cash_hints: tuple[CashFlightHint, ...],
 ) -> list[AwardFlight]:
-    """Run all providers concurrently for one leg, concatenate results."""
-    results: list[list[AwardFlight]] = [[] for _ in providers]
-
-    async def runner(idx: int, p: AwardProvider) -> None:
-        try:
-            # cash_hints is provider-optional — providers that don't take it
-            # via Protocol can be called without the kwarg by Python's
-            # liberal **kwargs forwarding. PointsPathProvider accepts it.
-            results[idx] = await p.search_leg(  # type: ignore[call-arg]
-                leg,
-                cabins=cabins,
-                num_passengers=num_passengers,
-                cash_hints=cash_hints,
-            )
-        except Exception as e:  # noqa: BLE001 — surface provider failures, keep others
-            log.debug("provider_search_failed", provider=p.name, error=str(e))
-            record_failure(p.name, exception_reason(e))
-
-    async with anyio.create_task_group() as tg:
-        for i, p in enumerate(providers):
-            tg.start_soon(runner, i, p)
-
-    out: list[AwardFlight] = []
-    for r in results:
-        out.extend(r)
-    return out
+    """One provider's awards for one query; none when it raised."""
+    try:
+        # cash_hints is provider-optional — providers that don't take it
+        # via Protocol can be called without the kwarg by Python's
+        # liberal **kwargs forwarding. PointsPathProvider accepts it.
+        return await provider.search_leg(  # type: ignore[call-arg]
+            leg,
+            cabins=cabins,
+            num_passengers=num_passengers,
+            cash_hints=cash_hints,
+        )
+    except Exception as e:  # noqa: BLE001 — surface provider failures, keep others
+        log.debug("provider_search_failed", provider=provider.name, error=str(e))
+        record_failure(provider.name, exception_reason(e))
+        return []
 
 
 async def gather_awards(
@@ -138,7 +146,7 @@ async def gather_awards(
     cash_hints_per_leg: list[tuple[CashFlightHint, ...]] | None = None,
     provider_filter: tuple[str, ...] | None = None,
 ) -> tuple[list[list[AwardFlight]], list[AwardProvider]]:
-    """End-to-end registry call: construct enabled providers, fan out per leg.
+    """End-to-end registry call: build each enabled provider, ask it every leg.
 
     `cash_hints_per_leg[i]` (when supplied) carries the gflight backend's
     captured Google Flights opaque IDs for legs[i]. The PointsPath provider
@@ -153,32 +161,47 @@ async def gather_awards(
         providers is the constructed provider instances — the caller is
             responsible for closing them (PointsPath uses HTTP keepalive).
     """
-    providers = await _construct_enabled(
+    builders = _enabled_builders(
         pp_airlines=pp_airlines,
         seats_sources=seats_sources,
         provider_filter=provider_filter,
     )
-    per_leg: list[list[AwardFlight]] = [[] for _ in legs]
+    hints: list[tuple[CashFlightHint, ...]] = [
+        cash_hints_per_leg[i] if cash_hints_per_leg and i < len(cash_hints_per_leg) else ()
+        for i in range(len(legs))
+    ]
+    built: list[AwardProvider | None] = [None] * len(builders)
+    # answers[k][i]: the awards builder k's provider gave for legs[i].
+    answers: list[list[list[AwardFlight]]] = [[[] for _ in legs] for _ in builders]
 
-    async def ask(i: int, leg: LegQuery, hints: tuple[CashFlightHint, ...]) -> None:
-        per_leg[i] = await _gather_one_leg(
-            providers,
-            leg,
-            cabins=cabins,
-            num_passengers=num_passengers,
-            cash_hints=hints,
-        )
+    async def build_and_ask(k: int, build: _Build) -> None:
+        provider = built[k] = await build()
+        if provider is None:
+            return
 
-    # Every query at once, started in order: their requests then queue for
-    # PointsPath's slots in that order, and an airline that stalls holds one
-    # slot rather than every query behind it.
+        async def ask(i: int) -> None:
+            answers[k][i] = await _ask(
+                provider,
+                legs[i],
+                cabins=cabins,
+                num_passengers=num_passengers,
+                cash_hints=hints[i],
+            )
+
+        # Every query at once, started in order: their requests then queue for
+        # PointsPath's slots in that order, and an airline that stalls holds one
+        # slot rather than every query behind it.
+        async with anyio.create_task_group() as tg:
+            for i in range(len(legs)):
+                tg.start_soon(ask, i)
+
+    # Each provider asks as soon as it is built, not once all are: a provider
+    # whose building stalls to the deadline would leave the others none of it.
     async with anyio.create_task_group() as tg:
-        for i, leg in enumerate(legs):
-            hints: tuple[CashFlightHint, ...] = ()
-            if cash_hints_per_leg and i < len(cash_hints_per_leg):
-                hints = cash_hints_per_leg[i]
-            tg.start_soon(ask, i, leg, hints)
-    return per_leg, providers
+        for k, build in enumerate(builders):
+            tg.start_soon(build_and_ask, k, build)
+    per_leg = [[af for own in answers for af in own[i]] for i in range(len(legs))]
+    return per_leg, [p for p in built if p is not None]
 
 
 def has_any_configured() -> bool:

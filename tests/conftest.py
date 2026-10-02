@@ -25,6 +25,7 @@ stub above all of it would pin none of it.
 from __future__ import annotations
 
 import datetime
+import functools
 import io
 import json
 import os
@@ -47,7 +48,7 @@ os.environ["TTY_COMPATIBLE"] = "0"
 from flight_cli import _gf_browser
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Awaitable, Callable, Iterator
 
 # Today, for the modules whose searches carry literal travel dates. fli refuses a
 # travel date before today, so those modules pin the clock before every date they
@@ -145,6 +146,20 @@ def capture_err(monkeypatch: pytest.MonkeyPatch) -> io.StringIO:
         cli, "err", Console(file=buf, width=1000, force_terminal=False, no_color=True)
     )
     return buf
+
+
+def hand_out_providers(monkeypatch: pytest.MonkeyPatch, *providers: object) -> None:
+    """Every award search the registry runs is handed `providers`, already
+    built, in this order, in place of the real ones."""
+    from flight_cli.providers import registry
+
+    async def handed(provider: object) -> object:
+        return provider
+
+    def builders(**_kw: object) -> list[Callable[[], Awaitable[object]]]:
+        return [functools.partial(handed, p) for p in providers]
+
+    monkeypatch.setattr(registry, "_enabled_builders", builders)
 
 
 FIXTURE_DIR = pathlib.Path(__file__).parent / "fixtures"

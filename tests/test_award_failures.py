@@ -18,6 +18,7 @@ import anyio
 import httpx
 import pytest
 
+from conftest import hand_out_providers
 from flight_cli import log
 from flight_cli.models import SearchResult
 from flight_cli.pp import cli as pp_cli
@@ -117,12 +118,9 @@ def _use_providers(
     sa._client = httpx.AsyncClient(
         base_url=seats_client.API_BASE, transport=httpx.MockTransport(seats)
     )
-    built = [PointsPathProvider(pp, PricingInfoResponse(), _AIRLINES), SeatsAeroProvider(sa)]
-
-    async def construct(**_kw: object) -> list[Any]:
-        return built
-
-    monkeypatch.setattr(registry, "_construct_enabled", construct)
+    hand_out_providers(
+        monkeypatch, PointsPathProvider(pp, PricingInfoResponse(), _AIRLINES), SeatsAeroProvider(sa)
+    )
     monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
     monkeypatch.setattr("flight_cli.pp.client.UNSUPPORTED_CACHE", tmp_path / "unsupported.json")
 
@@ -255,10 +253,7 @@ def test_pair_queries_are_asked_at_once(monkeypatch: pytest.MonkeyPatch) -> None
             async def aclose(self) -> None:
                 return None
 
-        async def construct(**_kw: object) -> list[Any]:
-            return [_Waits()]
-
-        monkeypatch.setattr(registry, "_construct_enabled", construct)
+        hand_out_providers(monkeypatch, _Waits())
         with anyio.fail_after(5):
             per_query, _ = await registry.gather_awards(_legs()[:2], cabins=("Economy",))
         return per_query

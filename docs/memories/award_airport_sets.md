@@ -106,7 +106,10 @@ a six-pair search); nothing has measured how it takes that.
 
 The award phase ends `AWARD_DEADLINE_SECS` = 180 s after it starts
 (`pp/cli.py`). Every request carries the deadline, its wait for a slot included
-(`answer_deadline`), and so does building a provider. A token refresh is a
+(`answer_deadline`), and so does building a provider. Each provider asks its
+pair queries as soon as it is built, without waiting for the others, so a
+PointsPath catalog that stalls to the deadline still leaves Seats.aero the
+whole of it. A token refresh is a
 blocking call, whether a 401 triggers it or checking the tokens before building
 PointsPath finds them stale, so it runs in a worker thread the deadline stops
 waiting on; an abandoned refresh can still hold the process's exit for its own
