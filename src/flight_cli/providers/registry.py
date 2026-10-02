@@ -4,9 +4,9 @@ Today: hardcoded PointsPath entry. When seats.aero lands (work-2eoa) it
 joins via the same `_discover` list. The auto-enable rule is: provider's
 configuration check passes → instance constructed → leg fan-out includes it.
 
-The fan-out gathers awards from all enabled providers in parallel for each
-leg, then concatenates them. The matcher is provider-blind: a flat
-`list[AwardFlight]` is exactly what it consumes.
+The fan-out asks every pair query at once, and all enabled providers in
+parallel for each, then concatenates each query's awards. The matcher is
+provider-blind: a flat `list[AwardFlight]` is exactly what it consumes.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 import anyio
 import structlog
 
-from .base import exception_reason, record_failure
+from .base import answer_deadline, deadline_reason, exception_reason, record_failure
 from .pointspath.provider import PointsPathProvider
 from .pointspath.provider import is_configured as pp_is_configured
 from .seats_aero.auth import is_configured as seats_is_configured
@@ -53,18 +53,25 @@ async def _construct_enabled(
     out: list[AwardProvider] = []
     allow_pp = provider_filter is None or _matches(provider_filter, "pp")
     if allow_pp and pp_is_configured():
-        try:
-            out.append(await PointsPathProvider.create(explicit_airlines=pp_airlines))
-        except Exception as e:  # noqa: BLE001 — per-provider failures are non-fatal
-            log.debug("provider_init_failed", provider="PointsPath", error=str(e))
-            record_failure("PointsPath", exception_reason(e))
+        # Building one asks PointsPath for its catalog, so the deadline holds here too.
+        with anyio.CancelScope(deadline=answer_deadline()) as scope:
+            try:
+                out.append(await PointsPathProvider.create(explicit_airlines=pp_airlines))
+            except Exception as e:  # noqa: BLE001 — per-provider failures are non-fatal
+                log.debug("provider_init_failed", provider="PointsPath", error=str(e))
+                record_failure("PointsPath", exception_reason(e))
+        if scope.cancelled_caught:
+            record_failure("PointsPath", deadline_reason())
     allow_seats = provider_filter is None or _matches(provider_filter, "seats-aero")
     if allow_seats and seats_is_configured():
-        try:
-            out.append(await SeatsAeroProvider.create(explicit_airlines=seats_sources))
-        except Exception as e:  # noqa: BLE001 — per-provider failures are non-fatal
-            log.debug("provider_init_failed", provider="Seats.aero", error=str(e))
-            record_failure("Seats.aero", exception_reason(e))
+        with anyio.CancelScope(deadline=answer_deadline()) as scope:
+            try:
+                out.append(await SeatsAeroProvider.create(explicit_airlines=seats_sources))
+            except Exception as e:  # noqa: BLE001 — per-provider failures are non-fatal
+                log.debug("provider_init_failed", provider="Seats.aero", error=str(e))
+                record_failure("Seats.aero", exception_reason(e))
+        if scope.cancelled_caught:
+            record_failure("Seats.aero", deadline_reason())
     return out
 
 
@@ -146,20 +153,26 @@ async def gather_awards(
         seats_sources=seats_sources,
         provider_filter=provider_filter,
     )
-    per_leg: list[list[AwardFlight]] = []
-    for i, leg in enumerate(legs):
-        hints: tuple[CashFlightHint, ...] = ()
-        if cash_hints_per_leg and i < len(cash_hints_per_leg):
-            hints = cash_hints_per_leg[i]
-        per_leg.append(
-            await _gather_one_leg(
-                providers,
-                leg,
-                cabins=cabins,
-                num_passengers=num_passengers,
-                cash_hints=hints,
-            ),
+    per_leg: list[list[AwardFlight]] = [[] for _ in legs]
+
+    async def ask(i: int, leg: LegQuery, hints: tuple[CashFlightHint, ...]) -> None:
+        per_leg[i] = await _gather_one_leg(
+            providers,
+            leg,
+            cabins=cabins,
+            num_passengers=num_passengers,
+            cash_hints=hints,
         )
+
+    # Every query at once, started in order: their requests then queue for
+    # PointsPath's slots in that order, and an airline that stalls holds one
+    # slot rather than every query behind it.
+    async with anyio.create_task_group() as tg:
+        for i, leg in enumerate(legs):
+            hints: tuple[CashFlightHint, ...] = ()
+            if cash_hints_per_leg and i < len(cash_hints_per_leg):
+                hints = cash_hints_per_leg[i]
+            tg.start_soon(ask, i, leg, hints)
     return per_leg, providers
 
 

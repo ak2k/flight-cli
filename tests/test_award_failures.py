@@ -4,14 +4,17 @@
 PointsPath answers per airline and seats.aero per pair, each through
 `httpx.MockTransport`, so every swallow site between an HTTP response and
 `run_pp_for_search` runs. Each test configures logging as the CLI does by
-default, so a raw provider log line would land on the stderr it reads. No test
-here reaches a provider."""
+default, so a raw provider log line would land on the stderr it reads. The award
+phase asks its pair queries at once and ends at a deadline, keeping what
+answered. No test here reaches a provider."""
 
 from __future__ import annotations
 
 import json
+import threading
 from typing import TYPE_CHECKING, Any
 
+import anyio
 import httpx
 
 from flight_cli import log
@@ -97,24 +100,27 @@ def _use_providers(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pointspath: Any, seats: Any
 ) -> None:
     """The registry hands out a real PointsPath and seats.aero provider whose
-    HTTP clients answer from `pointspath` and `seats`."""
+    HTTP clients answer from `pointspath` and `seats`. Built before the award
+    phase starts, so a deadline times the requests and not the setup of a
+    client, whose TLS context alone takes tens of milliseconds."""
+    pp = PPClient(
+        Tokens(
+            access_token="TOKEN",  # noqa: S106 — dummy test value
+            refresh_token="REFRESH",  # noqa: S106 — dummy test value
+            expires_at=9999999999,
+        )
+    )
+    anyio.run(pp._client.aclose)
+    pp._client = httpx.AsyncClient(base_url=API_BASE, transport=httpx.MockTransport(pointspath))
+    sa = seats_client.SeatsAeroClient(api_key="KEY")
+    anyio.run(sa._client.aclose)
+    sa._client = httpx.AsyncClient(
+        base_url=seats_client.API_BASE, transport=httpx.MockTransport(seats)
+    )
+    built = [PointsPathProvider(pp, PricingInfoResponse(), _AIRLINES), SeatsAeroProvider(sa)]
 
     async def construct(**_kw: object) -> list[Any]:
-        pp = PPClient(
-            Tokens(
-                access_token="TOKEN",  # noqa: S106 — dummy test value
-                refresh_token="REFRESH",  # noqa: S106 — dummy test value
-                expires_at=9999999999,
-            )
-        )
-        await pp._client.aclose()
-        pp._client = httpx.AsyncClient(base_url=API_BASE, transport=httpx.MockTransport(pointspath))
-        sa = seats_client.SeatsAeroClient(api_key="KEY")
-        await sa._client.aclose()
-        sa._client = httpx.AsyncClient(
-            base_url=seats_client.API_BASE, transport=httpx.MockTransport(seats)
-        )
-        return [PointsPathProvider(pp, PricingInfoResponse(), _AIRLINES), SeatsAeroProvider(sa)]
+        return built
 
     monkeypatch.setattr(registry, "_construct_enabled", construct)
     monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
@@ -224,3 +230,76 @@ def test_dash_vv_still_shows_each_failure_as_its_own_event(
         "seats_aero_search_failed",
     ):
         assert event in err, err
+
+
+def test_pair_queries_are_asked_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pair queries ran one after another, each waiting for its slowest airline,
+    so one stalled airline on the first pair held every pair behind it."""
+    started: list[str] = []
+
+    async def go() -> list[list[AwardFlight]]:
+        second_pair_asked = anyio.Event()
+
+        class _Waits:
+            name = "Waits"
+            enabled = True
+
+            async def search_leg(self, leg: LegQuery, **_kw: object) -> list[AwardFlight]:
+                started.append(leg.origin)
+                if leg.origin == "JFK":
+                    await second_pair_asked.wait()
+                else:
+                    second_pair_asked.set()
+                return []
+
+            async def aclose(self) -> None:
+                return None
+
+        async def construct(**_kw: object) -> list[Any]:
+            return [_Waits()]
+
+        monkeypatch.setattr(registry, "_construct_enabled", construct)
+        with anyio.fail_after(5):
+            per_query, _ = await registry.gather_awards(_legs()[:2], cabins=("Economy",))
+        return per_query
+
+    assert anyio.run(go) == [[], []]
+    assert started == ["JFK", "EWR"]  # started in the order they were planned
+
+
+def test_the_award_phase_ends_at_its_deadline_and_keeps_what_answered(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An airline that never answers held the whole search: the award phase
+    waited on it however long it took. At the deadline its requests are cut and
+    named, and every answer already in is joined and rendered."""
+    release = threading.Event()
+
+    async def stalling(request: httpx.Request) -> httpx.Response:
+        if json.loads(request.content)["airline"] == "TapAirPortugal":
+            # Set from the test's own thread, where an anyio.Event cannot be.
+            while not release.is_set():  # noqa: ASYNC110
+                await anyio.sleep(0.05)
+        return _answer(request)
+
+    _use_providers(monkeypatch, tmp_path, stalling, _empty_seats)
+    # Not raising: where the constant does not exist, the search hangs instead.
+    monkeypatch.setattr(pp_cli, "AWARD_DEADLINE_SECS", 0.2, raising=False)
+    log.configure("warning")
+    # A thread the test can abandon, so a search that never ends fails the test
+    # rather than hanging the suite.
+    search = threading.Thread(target=_run, daemon=True)
+    try:
+        search.start()
+        search.join(10)
+        assert not search.is_alive(), "the award phase did not end at its deadline"
+    finally:
+        release.set()
+        search.join(10)
+    captured = capsys.readouterr()
+
+    assert _summaries(captured.err) == [
+        "Awards incomplete: PointsPath did not answer for TapAirPortugal "
+        "(not answered within 0.2 s, 3 queries)."
+    ], captured.err
+    assert _flight_numbers(captured.out) == ["UA100", "UA200", "UA300"]

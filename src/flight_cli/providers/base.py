@@ -16,15 +16,19 @@ providers take one airport per end. It is provider-agnostic by construction.
 
 `award_run` holds one search's award phase: every failure a provider swallows is
 recorded into it with `record_failure`, so the search can name them all in one
-line rather than one log line each.
+line rather than one log line each, and every wait on the network ends by its
+deadline (`answer_deadline`).
 """
 
 from __future__ import annotations
 
+import math
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+import anyio
 
 from .._console_text import CTRL
 
@@ -161,7 +165,8 @@ class AwardProvider(Protocol):
 
         Errors are the provider's to log at debug and to `record_failure`;
         should return `[]` on failure rather than raising, so one provider's
-        outage doesn't sink the augmented render."""
+        outage doesn't sink the augmented render. Every wait on the network
+        sits under `answer_deadline`, and a request it cuts is a failure too."""
         ...
 
 
@@ -177,8 +182,11 @@ class ProviderFailure:
 
 @dataclass
 class AwardRun:
-    """One search's award phase, as its providers report into it."""
+    """One search's award phase, as its providers report into it. `deadline` is
+    on anyio's clock, `budget_secs` after the phase began."""
 
+    deadline: float = math.inf
+    budget_secs: float = math.inf
     failures: list[ProviderFailure] = field(default_factory=list[ProviderFailure])
 
 
@@ -189,14 +197,34 @@ _RUN: ContextVar[AwardRun | None] = ContextVar("award_run", default=None)
 
 
 @contextmanager
-def award_run() -> Generator[AwardRun]:
-    """Collect the failures of the award lookups made inside this block."""
-    run = AwardRun()
+def award_run(budget_secs: float = math.inf) -> Generator[AwardRun]:
+    """Collect the failures of the award lookups made inside this block, and
+    stop waiting on any of them `budget_secs` from now. Entered inside the
+    event loop, whose clock the deadline is on."""
+    run = AwardRun(anyio.current_time() + budget_secs, budget_secs)
     token = _RUN.set(run)
     try:
         yield run
     finally:
         _RUN.reset(token)
+
+
+def answer_deadline() -> float:
+    """When the award lookup in progress stops waiting: a `CancelScope` deadline,
+    never outside `award_run`.
+
+    Each provider applies it to every request it makes, and to nothing wider: a
+    scope around a whole `search_leg` would also cancel the merge of the answers
+    that did arrive, and lose them."""
+    run = _RUN.get()
+    return math.inf if run is None else run.deadline
+
+
+def deadline_reason() -> str:
+    """The reason a request `answer_deadline` cut is recorded with."""
+    run = _RUN.get()
+    budget = math.inf if run is None else run.budget_secs
+    return f"not answered within {budget:g} s"
 
 
 def record_failure(provider: str, reason: str, *, airline: str | None = None) -> None:

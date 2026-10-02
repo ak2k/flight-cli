@@ -22,7 +22,13 @@ import anyio
 import httpx
 import structlog
 
-from ..providers.base import exception_reason, http_reason, record_failure
+from ..providers.base import (
+    answer_deadline,
+    deadline_reason,
+    exception_reason,
+    http_reason,
+    record_failure,
+)
 from .auth import Tokens, get_valid_tokens
 from .auth import refresh as refresh_tokens
 from .models import AirlineSearchResponse, PricingInfoResponse
@@ -293,18 +299,24 @@ class PPClient:
             log.debug("pp_airline_search_skipped_unsupported", airlines=skipped)
 
         async def runner(airline: str) -> None:
-            try:
-                out[airline] = await self.airline_search(spec, airline)
-            except Exception as e:  # noqa: BLE001 - per-airline failures are non-fatal
-                # Some exceptions, httpx.ReadTimeout among them, have an empty
-                # str(); the type is then the only reason the log carries.
-                log.debug(
-                    "pp_airline_search_exception",
-                    airline=airline,
-                    error=str(e),
-                    error_type=type(e).__name__,
-                )
-                record_failure("PointsPath", exception_reason(e), airline=airline)
+            # The deadline counts the wait for a slot of the semaphore too, so a
+            # stalled airline holding a slot costs the search one slot, not more.
+            with anyio.CancelScope(deadline=answer_deadline()) as scope:
+                try:
+                    out[airline] = await self.airline_search(spec, airline)
+                except Exception as e:  # noqa: BLE001 - per-airline failures are non-fatal
+                    # Some exceptions, httpx.ReadTimeout among them, have an empty
+                    # str(); the type is then the only reason the log carries.
+                    log.debug(
+                        "pp_airline_search_exception",
+                        airline=airline,
+                        error=str(e),
+                        error_type=type(e).__name__,
+                    )
+                    record_failure("PointsPath", exception_reason(e), airline=airline)
+            if scope.cancelled_caught:
+                log.debug("pp_airline_search_cut", airline=airline)
+                record_failure("PointsPath", deadline_reason(), airline=airline)
 
         async with anyio.create_task_group() as tg:
             for a in to_call:

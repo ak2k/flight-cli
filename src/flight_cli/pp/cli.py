@@ -295,6 +295,14 @@ MAX_AWARD_PAIR_QUERIES: Final = 8
 # query carries at most this many cash hints.
 _HINTS_PER_QUERY: Final = 50
 
+# How long a search waits on award answers, from the start of the fan-out and
+# counting each request's wait for one of PointsPath's five slots. Then every
+# unanswered request is cut and named, and every answer already in is kept.
+# Above the healthy shared-queue time measured on a six-pair business search
+# (204 requests): at least 147 s of service through five slots, 158 s replayed
+# with each pair asking its cabins in turn.
+AWARD_DEADLINE_SECS: Final = 180
+
 
 def _pair_query_cap(n_legs: int) -> int:
     """The most pair queries one search asks: never fewer than one a leg."""
@@ -433,7 +441,10 @@ def run_pp_for_search(
     Errors are non-fatal — print and continue so the user still sees their
     cash results. Every failure a provider swallowed during the fan-out is
     named in one `Awards incomplete:` line on stderr, in table and JSON runs
-    alike, and none at all when there was none.
+    alike, and none at all when there was none. The fan-out asks every pair
+    query at once and ends `AWARD_DEADLINE_SECS` after it starts: a request
+    still unanswered then is cut and named in that line, and every answer
+    already in is kept.
 
     The `pp_only` arg is named for historical reasons; today it means
     "render in awards-only mode" — applies to whatever providers were
@@ -519,7 +530,7 @@ def run_pp_for_search(
         # `loop.call_soon` on a dead loop ("RuntimeError: Event loop is
         # closed", a full traceback + exit 1 on every otherwise-successful
         # run). `per_query` is plain data, safe to return after close.
-        with award_run() as run:
+        with award_run(AWARD_DEADLINE_SECS) as run:
             per_query, providers = await gather_awards(
                 legs=queries,
                 num_passengers=num_passengers,
