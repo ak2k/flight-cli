@@ -2,8 +2,10 @@
 
 Matrix's per-slice routing-language string. Lives in `slices[].routeLanguage`
 (NOT `commandLine` — see [wire_format_quirks.md](wire_format_quirks.md) for
-that distinction). The CLI exposes it via `--routing` on `flight fare` and
-`flight calendar`, and the domain field is `Leg.route_language`.
+that distinction). The CLI exposes it via `--routing` on `flight search`,
+`flight calendar` and `flight detail` (and the deprecated `flight fare`), with
+`--routing-ret` for a round trip's return; the domain field is
+`Leg.route_language`.
 
 **This is the grammar for what carriers/airports/segments the itinerary must
 include.** For constraints like "max duration", "no overnights", "min
@@ -194,6 +196,30 @@ Same caveat — documented in Google's help but rejected by the API:
 | `~UA882+` | Any flights except UA882 |
 | `UA882 F+` | UA882 followed by any |
 | `UA1000-2000+` | One or more UA flights with numbers 1000–2000 |
+| `AS21 AS487` | Exactly AS21, then AS487: one token per flight |
+
+A chain of flight-number tokens names an itinerary's flights, one token per
+flight. One token is an itinerary of that flight alone: JFK-LAX, `AS21` answers
+"No solutions", because AS21 ends in Seattle. A through flight (one number over
+two legs) is one token.
+
+A chain fixes the flights and the first flight's day, NOT the itinerary.
+Measured JFK-LAX on 2026-10-20 (asked 2026-10-01, default stop limit):
+
+- `DL747`: 1 solution, 15:35-18:39, USD229.00, Google's price.
+- `AS21 AS487`: 2 solutions with the same flights and departure: landing 10-20
+  14:34 at USD284.00 (Google's price), and AS487 a day later, landing 10-21 14:34
+  at USD542.00.
+- `AA3120 AA1630 AA2038`: 3 solutions: 10-20 at USD453.00 (Google's price), and
+  two landing 10-21 23:51 at USD691.00 and USD913.00 whose slices are identical
+  field for field. The middle flight's day differs, and only booking details
+  (`/v1/summarize` `viewDetails`) state it.
+
+`ext.price` equalled Google's whole-unit price in all three; `displayTotal` is
+the exact total (USD228.40 for DL747). Each chain search took 29-43 s.
+`flight search --verify` sends this form and then checks each candidate's booking
+details flight by flight, so a cheaper trip on other days is never taken for the
+row.
 
 ### Combined
 | Expression | Meaning |
@@ -205,12 +231,30 @@ Same caveat — documented in Google's help but rejected by the API:
 
 ## Per-direction application
 
-Routing language is **per-slice (per direction)** — outbound and return each get
-their own. For round-trip, both `--routing` (outbound) and `--routing-ret`
-(return) are exposed in the CLI. Multi-city sets one per slice.
+Routing language is **per-slice (per direction)**, and each slice's expression
+reads from that slice's own origin. `--routing` is the outbound's and
+`--routing-ret` the return's, on `search`, `calendar` and `detail`; multi-city
+sets one per slice (`--slice ...:r=`).
 
-If you only want a constraint on the outbound, leave the return blank
-(`""` / unset) — `routeLanguage` is optional per slice.
+A slice with no `routeLanguage` is unconstrained (live 2026-10-01: JFK-LHR
+2026-10-20/27 with `F* X:BOS F*` on slice[0] alone gave 25 of 70 solutions,
+every outbound via BOS and every return nonstop). So `--routing-ret ''`
+constrains the outbound only.
+
+Unset, `--routing-ret` copies `--routing` only when the expression reads the
+same both ways (`routing_predicates.direction_dependence`): no token names a
+flight number, in any comma alternative and behind any prefix of its own
+(`AA1-3000,F:UA882`), and the token sequence equals its reversal, tokens compared
+case-insensitively and a comma group as a set of prefixed alternatives under
+its `~` and quantifier (`~AA,UA+` equals `~UA,AA+`, `O:AA,O:UA` equals
+`O:UA,O:AA`), after one enclosing `[...]` comes off. `AA+`,
+`~BA+`, `N`, `F* X:LHR F*` and `DFW,DEN DEN,DFW` are copied.
+An ordered chain (`UA LH`, `F+ X:LHR F*`) or a flight number (`DL747`) is
+refused on a round trip without `--routing-ret`: copied, the return would ask
+for UA then LH from the far end. The return's own reading is the reversed
+chain (live 2026-10-01: AUS-FRA 2026-10-20/27 with `UA LH` out and `LH UA`
+back gave 10 of 80 solutions, every outbound UA then LH and every return LH
+then UA), the return flight's number, or `''`.
 
 ## Pitfalls
 

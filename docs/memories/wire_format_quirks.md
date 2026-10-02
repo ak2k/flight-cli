@@ -60,12 +60,26 @@ the captured SPA bodies use a specific order:
 If you reorder, golden-file tests break. Either match the order or rebase
 the fixtures.
 
-## `maxLegsRelativeToMin` default = 1
+## `maxLegsRelativeToMin` counts legs; `MAXSTOPS` counts stops
 
 The SPA's "No limit" stops setting maps to `maxLegsRelativeToMin: 1` on
-the wire — i.e., up to 1 connection. Higher values DO work but exceed
-what the consumer UI permits. Don't pass anything > 2 in production
-without checking that Matrix's backend accepts it.
+the wire. The field is relative: legs beyond the route's own minimum, so on
+a route with no nonstop 0 still answers one-stop trips. Values above 2
+exceed what the consumer UI offers. The SPA bundle asks an absolute limit
+as `inputs.maxStopCount: N` with `maxLegsRelativeToMin` omitted. flight-cli
+does not send `maxStopCount`, which is unmeasured on its client; `--stops N`
+goes out as `MAXSTOPS N` in each slice's `commandLine`, beside
+`maxLegsRelativeToMin: N`.
+
+Measured 2026-10-01 on live Matrix, `--backend matrix --cash-only`:
+- JFK-BKK one-way, 2026-11-04, `--ext 'MAXSTOPS 0'`: 0 solutions and an
+  empty `itineraryStopCountList`. With `maxLegsRelativeToMin: 0` alone the
+  same search answered 5 solutions, every slice one stop.
+- JFK-LHR, same date and code: 10 solutions, every one nonstop.
+- LGA-LAX one-way calendar, 2026-10-20 to 2026-11-02, `MAXSTOPS 0`: 0
+  solutions every day (the route has no nonstop).
+- JFK-BKK with `MAXSTOPS 2; MAXSTOPS 0`: accepted, 0 solutions. A later,
+  stricter MAXSTOPS holds beside an earlier, looser one.
 
 ## `timeRanges` accepts arbitrary minute-granular ranges
 
@@ -95,14 +109,16 @@ has its own `routeLanguage/commandLine`.
 `links.matrix_deep_link()` collapses; `wire.to_wire()` expands. Don't
 confuse the two shapes.
 
-## SPA-side `slices[1].commandLine` is always None
+## A return slice without routing is unconstrained
 
-Even when the SPA's URL state has a non-empty `routingRet`/`extRet`, the
-API request only sets `routeLanguage`/`commandLine` on `slice[0]` (the
-outbound). The return slice's routing is **inferred** by the server from
-slice[0]. We mirror that: `wire._leg_to_wire()` sets fields per leg
-faithfully, but when reconstructing from captured fixtures, expect
-slice[1] to lack routing.
+The captured SPA bodies (`calendar_nyc_munich_frankfurt.json`,
+`followup_nyc_munich_frankfurt.json`) carry `routeLanguage`/`commandLine` on
+`slice[0]` only, so a reconstruction from them expects slice[1] to lack
+routing. Matrix does not infer the return's routing from slice[0]: live
+2026-10-01, JFK-LHR 2026-10-20/27 with `F* X:BOS F*` on slice[0] and nothing
+on slice[1] gave 25 of 70 solutions, every outbound via BOS and every return
+nonstop (AA107, AA141, BA179). `wire._leg_to_wire()` writes each slice from
+its own leg, so the return carries exactly the codes the CLI gave it.
 
 ## Field-validation comes back as HTTP 200 (not 4xx)
 
@@ -223,6 +239,7 @@ For one `--cabin`, the flags choose the shape:
 | `--cash-only`, Matrix answered | Matrix's raw response, an object (`solutionCount`, `solutionList`) |
 | awards on (the default once a provider is configured) | `[{leg, slice_index, matches}]` |
 | `--awards-only` | `[{leg, slice_index, awards}]` |
+| either awards shape, a leg the pair cap cut | that leg also has `pairs_not_asked`, `[{origin, destination}]` ([award_airport_sets.md](award_airport_sets.md)) |
 | `--cash-only --sellers` | `{search, booking_options}`, `search` being Google's list |
 | `--cash-only --fare-rules` | `{search, fare_rules}`, `search` being Matrix's object |
 

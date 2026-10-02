@@ -58,11 +58,11 @@ from fli.models import (  # pyright: ignore[reportMissingTypeStubs]
 )
 from fli.models.google_flights.base import TripType  # pyright: ignore[reportMissingTypeStubs]
 
-# DIVERGE: fli moved its API-row decoders to a private module in 0.9.0. These
-# three (airline/airport/datetime) are purpose-built for decoding GF response
-# rows — same signatures + AttributeError-on-unknown as the old SearchFlights
-# static methods, with no public equivalent (core.parsers has no datetime
-# parser), so this is a drop-in repoint.
+# DIVERGE: fli's API-row decoders live in a private module, with no public
+# equivalent (core.parsers has no datetime parser). Airline and datetime decode
+# through them; an airport decodes through `fli_bridge.fli_airports`, which
+# keeps a code fli aliases, and reaches `_parse_airport` only for a code fli has
+# no entry for, so the row fails with fli's warning and AttributeError.
 from fli.search._decoders import (  # pyright: ignore[reportMissingTypeStubs]
     _parse_airline,  # pyright: ignore[reportPrivateUsage]
     _parse_airport,  # pyright: ignore[reportPrivateUsage]
@@ -97,6 +97,7 @@ from ._gf_errors import (
     GfTransportError,
     GfUpstreamStatusError,
 )
+from .fli_bridge import fli_airports
 from .links import build_search_tfs, google_flights_search_page_url
 
 if TYPE_CHECKING:
@@ -493,7 +494,8 @@ _DS_KEY_RE = re.compile(r"key:\s*'([^']+)'")
 _DS_DATA_RE = re.compile(r"data:\s*(.*)$", re.S)
 _DS_FLIGHTS_KEY = "ds:1"
 # `ds:1[2]` is Google's own top-flights board, `[3]` the rest. Concatenated in
-# that order so the page's ranking survives — we can't reproduce it.
+# that order because page order is what breaks a tie between equal fares once a
+# board is ordered by price (`fare_key`).
 _DS_ROW_BLOCKS = (2, 3)
 _SHAPE_ERROR_SAMPLE_REASONS = 3
 # What "this data is not a decodable flight row" means, in ONE place. The probe
@@ -796,6 +798,19 @@ _LAYOVERS_IDX = 13
 _ROW_FARE_IDX = 4
 _FARE_BAGS_IDX = 6
 
+# `row[22]` is Google's CO2 estimate for the row's own flights: grams at [7], the
+# route's typical grams at [8], the row's signed percent from that typical at [3],
+# and at [2] Google's label for that same comparison. [10]/[11] compare with the
+# board's median instead, so [11]'s label differs from [2]'s on over a third of a
+# board's rows and is not the one Google's help describes.
+_ROW_CO2_IDX = 22
+_CO2_LABEL_IDX = 2
+_CO2_DELTA_IDX = 3
+_CO2_GRAMS_IDX = 7
+_CO2_TYPICAL_IDX = 8
+_CO2_LABEL: dict[int, str] = {1: "lower", 2: "typical", 3: "higher"}
+_LEG_CO2_IDX = 31  # the leg's own grams; the row's [7] is their sum, rounded
+
 # Per-leg field indices in `data[0][2][i]`. Mirrors the Legrooms+ extension's
 # parser (load_flight_data.js function `u`). See docs/memories/legroom_recipe.md.
 _LEG_AMENITIES_IDX = 12  # array — bit positions decoded into wifi/power/video
@@ -1081,6 +1096,30 @@ def _bags_included(data: list[Any]) -> tuple[int | None, int | None]:
     return _bag_count(counts[0]), _bag_count(counts[1])
 
 
+def _int_slot(block: Any, idx: int, *, signed: bool = False) -> int | None:
+    """`block[idx]` when it is an int, and not below 0 unless `signed`. Anything
+    else, or a block too short or not a list, says nothing."""
+    if not isinstance(block, list) or len(cast("list[Any]", block)) <= idx:
+        return None
+    value = cast("list[Any]", block)[idx]
+    if not isinstance(value, int) or isinstance(value, bool):
+        return None
+    return value if signed or value >= 0 else None
+
+
+def _row_co2(data: list[Any]) -> dict[str, Any]:
+    """The row's CO2 figures as Google states them, keyed as fli's FlightResult
+    names them; a slot Google leaves empty stays None."""
+    block = data[0][_ROW_CO2_IDX] if len(data[0]) > _ROW_CO2_IDX else None
+    label = _int_slot(block, _CO2_LABEL_IDX)
+    return {
+        "co2_emissions_g": _int_slot(block, _CO2_GRAMS_IDX),
+        "co2_emissions_typical_g": _int_slot(block, _CO2_TYPICAL_IDX),
+        "co2_emissions_delta_pct": _int_slot(block, _CO2_DELTA_IDX, signed=True),
+        "emissions_tag": None if label is None else _CO2_LABEL.get(label),
+    }
+
+
 def _layover_minutes(data: list[Any], leg_tuples: list[list[Any]]) -> tuple[int | None, ...]:
     """The page's own minutes for each connection. Those are elapsed time; the
     leg datetimes are clock readings, an hour out across a daylight-saving
@@ -1112,6 +1151,7 @@ def _parse_flight_with_id(data: list[Any]) -> GFlightWithId:
         duration=data[0][9],
         stops=len(leg_tuples) - 1,
         legs=[_flight_leg(fl) for fl in leg_tuples],
+        **_row_co2(data),
     )
     amenities = [_parse_leg_amenities(fl) for fl in leg_tuples]
     return GFlightWithId(
@@ -1138,12 +1178,20 @@ def _flight_leg(fl: list[Any]) -> FlightLeg:
     return FlightLeg(
         airline=_parse_airline(book_code),
         flight_number=book_number or "",
-        departure_airport=_parse_airport(fl[3]),
-        arrival_airport=_parse_airport(fl[6]),
+        departure_airport=_leg_airport(fl[3]),
+        arrival_airport=_leg_airport(fl[6]),
         departure_datetime=_parse_datetime(fl[20], fl[8]),
         arrival_datetime=_parse_datetime(fl[21], fl[10]),
         duration=fl[11],
+        co2_emissions_g=_int_slot(fl, _LEG_CO2_IDX),
     )
+
+
+def _leg_airport(code: Any) -> Airport:
+    """The member for a leg's airport code, one fli aliases included. A code fli
+    has no entry for fails the row through fli's own decoder, which logs it."""
+    member = fli_airports().get(code)
+    return member if member is not None else _parse_airport(code)
 
 
 def _cookie_path() -> pathlib.Path:
@@ -1673,8 +1721,8 @@ class Board[T](list[T]):
     `dropped` counts the rows a routing filter removed on the way here, which
     is how an empty answer tells "none matched the routing" from "Google has no
     flights". `pinned` counts the outbounds a round trip searched returns for,
-    because an empty answer from those says nothing about the outbounds below
-    them."""
+    because an empty answer from those says nothing about the outbounds it did
+    not pin."""
 
     def __init__(
         self,
@@ -1700,10 +1748,22 @@ def _itinerary_key(row: GFlightWithId) -> ItineraryKey:
     )
 
 
-def _fares_better(row: GFlightWithId, than: GFlightWithId) -> bool:
-    """A priced row beats an unpriced one, and a cheaper one a dearer one."""
-    price, other = row.flight.price, than.flight.price
-    return price is not None and (other is None or price < other)
+def fare_key(row: GFlightWithId) -> tuple[int, float]:
+    """Sort key for a Google row by its fare, a row Google did not price after
+    every row it did.
+
+    Google surfaces no shopping-list price for some rows — premium-cabin round
+    trips with several passengers are the routine case — and a row it did not
+    price is still a row the board served. There is no number to rank it on, so
+    it goes last rather than being dropped or read as a zero fare; the leading
+    term is what carries that, and it leaves the priced rows compared on the
+    fare alone. A sort on it is stable, so rows sharing a fare keep the order
+    they came in.
+
+    Reads `.flight.price` and no other attribute, so the key holds for anything
+    shaped like a result row rather than only for fli's own model."""
+    price = row.flight.price
+    return (1, 0.0) if price is None else (0, price)
 
 
 def _deduped(rows: list[GFlightWithId]) -> list[GFlightWithId]:
@@ -1712,8 +1772,8 @@ def _deduped(rows: list[GFlightWithId]) -> list[GFlightWithId]:
     Google can list one itinerary twice at two prices, and only the cheaper is
     on offer. The key is every leg's carrier, flight number and departure time,
     dates included: the same flight numbers a day apart are a different trip.
-    The first listing keeps its place, because the round-trip pins are taken in
-    board order."""
+    The first listing keeps its place, because page order breaks ties between
+    equal fares in the trim and in the round-trip pins."""
     at: dict[ItineraryKey, int] = {}
     out: list[GFlightWithId] = []
     for row in rows:
@@ -1722,7 +1782,7 @@ def _deduped(rows: list[GFlightWithId]) -> list[GFlightWithId]:
         if seen is None:
             at[key] = len(out)
             out.append(row)
-        elif _fares_better(row, out[seen]):
+        elif fare_key(row) < fare_key(out[seen]):
             out[seen] = row
     return out
 
@@ -2020,12 +2080,11 @@ def _one_call_laddered(
 # on an RPC and is not free here. With the cap, a two-cabin round trip costs
 # 2 x 11 = 22 page fetches; without one, at the bumped top_n=100, it would cost
 # ~2 x 31. The default `-n 10` sits exactly on the cap and is unchanged by it;
-# above it, the round trip returns combinations for the ten first-ranked
-# outbounds rather than for all of them. A multi-cabin round trip spends every
-# cabin's budget on the sort cabin's outbounds first (`prefer`), because a cabin
-# that pins its own first ten may price none of the itineraries the table
-# shows; `cli._multi_cabin_join_note` says so where a user can see the
-# consequence.
+# above it, the round trip returns combinations for the ten cheapest outbounds
+# rather than for all of them. A multi-cabin round trip spends every cabin's
+# budget on the sort cabin's outbounds first (`prefer`), because a cabin that
+# pins its own ten cheapest may price none of the itineraries the table shows;
+# `cli._multi_cabin_join_note` says so where a user can see the consequence.
 #
 # Multi-city never reaches this: `cli._pick_backend` routes a multi-city query
 # to Matrix, so the recursion below only ever runs the two legs of a round trip.
@@ -2047,15 +2106,20 @@ def _pins(
     board: list[GFlightWithId], top_n: int, prefer: Sequence[ItineraryKey]
 ) -> list[GFlightWithId]:
     """Every `prefer` key `board` lists, in `prefer` order, then `board`'s other
-    rows in page order: `pinned_fanout(top_n)` in all, so `prefer` reorders the
-    budget and never grows it."""
+    rows cheapest first (`fare_key`): `pinned_fanout(top_n)` in all, so `prefer`
+    reorders the budget and never grows it.
+
+    Cheapest, because an outbound row's price is already the cheapest round
+    trip through it: the outbounds that price lowest are where the cheapest
+    combinations are, wherever the page listed them."""
     budget = pinned_fanout(top_n)
     at: dict[ItineraryKey, GFlightWithId] = {}
     for row in board:
         at.setdefault(_itinerary_key(row), row)
     chosen = [at[k] for k in dict.fromkeys(prefer) if k in at][:budget]
     taken = {id(r) for r in chosen}
-    return chosen + [r for r in board if id(r) not in taken][: budget - len(chosen)]
+    rest = sorted((r for r in board if id(r) not in taken), key=fare_key)
+    return chosen + rest[: budget - len(chosen)]
 
 
 def pin_keys(
@@ -2215,11 +2279,11 @@ def search_with_ids(
     reason: every board of one trip is asked for in one currency.
 
     `keep(i, row)` is the routing filter for segment `i`. It runs on the
-    outbound board BEFORE the pins are taken, because the pins are the first
-    rows in board order and a filter applied after them answers from pins it
-    then discards. It runs on each return board after the pin check, so a page
-    that ignored its pin is refused as one rather than read as "no return
-    matches". The result carries the outbound page's price insight, restated
+    outbound board BEFORE the pins are taken, because the pins are the cheapest
+    rows of the board they are taken from and a filter applied after them
+    answers from pins it then discards. It runs on each return board after the
+    pin check, so a page that ignored its pin is refused as one rather than read
+    as "no return matches". The result carries the outbound page's price insight, restated
     for the rows the filter kept. `checks` names what `keep` holds a row to,
     for the warning that counts the pins it left with no return.
 

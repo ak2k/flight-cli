@@ -7,6 +7,7 @@ the window start as departure + mean(duration) as return."""
 
 from __future__ import annotations
 
+import functools
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, assert_never
 
@@ -30,11 +31,56 @@ from .routing_predicates import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
+    from enum import Enum
 
     from .domain import TimeOfDay
     from .routing_predicates import Predicate
 
 _ROUND_TRIP_LEGS = 2  # 2 legs = round-trip; 1 = one-way
+
+# Codes fli aliases that name the same airport as the code they alias. Google
+# serves EuroAirport only as BSL: JFK-MLH asked for MLH came back an empty
+# board, asked for BSL eight rows (2026-10-01).
+_SERVED_AS_CANONICAL = frozenset({"MLH"})
+
+
+@functools.cache
+def fli_airports() -> dict[str, Any]:
+    """Every code in fli's airport table, to the member a request for it carries.
+
+    fli builds `Airport` as an enum over a code -> display-name table, and an
+    enum makes each code whose display name repeats an earlier one an alias of
+    the earlier member: `Airport.OKA` is `Airport.NAH`, Naha in Indonesia
+    rather than Okinawa. Every request and every decoded row reads a member's
+    name, so each aliased code gets a member of its own, named that code and
+    carrying the same display name, except MLH (`_SERVED_AS_CANONICAL`).
+
+    Those members are outside the enum's own tables: one survives `deepcopy`,
+    which returns an enum member itself, but would unpickle as the member it
+    aliases."""
+    from fli.models.airport import (  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
+        Airport,
+    )
+
+    def own(code: str, canonical: Enum) -> Any:
+        member = object.__new__(Airport)
+        vars(member).update(vars(canonical))
+        member._name_ = code
+        return member
+
+    return {
+        code: (member if member.name == code or code in _SERVED_AS_CANONICAL else own(code, member))
+        for code, member in Airport.__members__.items()
+    }
+
+
+def fli_airport(code: str) -> Any:
+    """The fli airport member for `code`. AttributeError for a code fli has no
+    entry for, as `getattr(Airport, code)` raises."""
+    try:
+        return fli_airports()[code]
+    except KeyError:
+        raise AttributeError(code) from None
 
 
 def to_fli_filter(s: Search) -> Any:
@@ -42,9 +88,6 @@ def to_fli_filter(s: Search) -> Any:
     rest of flight_cli doesn't pay the fli import cost when not used."""
 
     # selectolax, etc.); the rest of the CLI shouldn't pay that startup cost.
-    from fli.models.airport import (  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
-        Airport as FliAirport,
-    )
     from fli.models.google_flights.base import (  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
         BagsFilter,
         MaxStops,
@@ -82,8 +125,8 @@ def to_fli_filter(s: Search) -> Any:
         origins: Sequence[str], dests: Sequence[str], dt: str, buckets: Sequence[TimeOfDay]
     ) -> FlightSegment:
         return FlightSegment(
-            departure_airport=[[getattr(FliAirport, a), 0] for a in expand_airports(origins)],
-            arrival_airport=[[getattr(FliAirport, a), 0] for a in expand_airports(dests)],
+            departure_airport=[[fli_airport(a), 0] for a in expand_airports(origins)],
+            arrival_airport=[[fli_airport(a), 0] for a in expand_airports(dests)],
             travel_date=dt,
             time_restrictions=_window(buckets),
         )
@@ -122,9 +165,9 @@ def to_fli_filter(s: Search) -> Any:
 
     trip_map = {1: TripType.ONE_WAY, 2: TripType.ROUND_TRIP}
 
-    # Honor --stops on the gflight backend. `max_extra_stops` is "extra legs
-    # beyond nonstop" == stop count: 0 nonstop, 1 one-stop, ... fli's enum tops
-    # out at "2 or fewer", so 3+ (and None = no limit) fall through to ANY.
+    # Honor --stops on the gflight backend. `max_extra_stops` is the most stops
+    # per direction: 0 nonstop, 1 one-stop, ... fli's enum tops out at "2 or
+    # fewer", so 3+ (and None = no limit) fall through to ANY.
     stops_map = {
         0: MaxStops.NON_STOP,
         1: MaxStops.ONE_STOP_OR_FEWER,
@@ -228,9 +271,6 @@ def apply_gf_native_filters(filters: Any, predicates: Iterable[Predicate]) -> bo
     check it on. The price graph takes one, which Google was measured applying
     from the URL, and refuses a minimum above the maximum, which this drops,
     and a second maximum, which replaces the first."""
-    from fli.models.airport import (  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
-        Airport,
-    )
     from fli.models.google_flights.base import (  # noqa: PLC0415  # pyright: ignore[reportMissingTypeStubs]
         LayoverRestrictions,
     )
@@ -249,7 +289,7 @@ def apply_gf_native_filters(filters: Any, predicates: Iterable[Predicate]) -> bo
                 continue  # Tier-2
             for code in sorted(p.codes):
                 try:
-                    layover_airports.append(getattr(Airport, code))
+                    layover_airports.append(fli_airport(code))
                 except AttributeError:
                     airports_ok = False
         elif isinstance(p, StopsPred):

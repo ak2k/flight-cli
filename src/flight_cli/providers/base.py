@@ -11,8 +11,8 @@ Planned: seats.aero (work-2eoa). The `enabled` flag gates whether a provider
 runs without raising — a provider with missing tokens reports `enabled=False`
 and the registry skips it silently.
 
-`LegQuery` is the per-leg input. It carried over unchanged from `pp/cli.py`
-and is provider-agnostic by construction.
+`LegQuery` is the per-query input: one airport pair of one leg, since the
+providers take one airport per end. It is provider-agnostic by construction.
 """
 
 from __future__ import annotations
@@ -26,9 +26,11 @@ if TYPE_CHECKING:
 
 @dataclass
 class LegQuery:
-    """One leg's award query. `slice_index` points at the corresponding Slice
-    in each cash Itinerary; `label` is the user-facing leg name (e.g.
-    "outbound JFK→LHR")."""
+    """One award query: one airport pair of one leg. `slice_index` points at
+    the corresponding Slice in each cash Itinerary; `label` is the
+    user-facing leg name (e.g. "outbound JFK,EWR→LHR 2026-11-04"). A leg
+    over an airport set is several queries sharing its slice_index and
+    label."""
 
     origin: str
     destination: str

@@ -84,6 +84,15 @@ Codes are **case-insensitive** for the keyword (`ALLIANCE` ≡ `alliance`).
 | `-CODESHARE` | `-CODESHARE` | Disallow codeshare flights | [Google] |
 | `-NOFIRSTCLASS` | `-NOFIRSTCLASS` | Require flights that have a first-class cabin (book in any cabin) | [Google] |
 
+`--stops N` joins each slice's extension as `MAXSTOPS N`, after the user's
+own codes and a `; ` (a trailing `;` or space is dropped first):
+`--ext 'MAXDUR 9:00;' --stops 0` sends `MAXDUR 9:00; MAXSTOPS 0`. Codes whose
+every MAXSTOPS is already N or fewer are sent as typed. Two MAXSTOPS in one
+slice are accepted, and the later, stricter one holds: JFK-BKK with
+`MAXSTOPS 2; MAXSTOPS 0` answered no solutions on 2026-10-01, as
+`MAXSTOPS 0` alone did. The reverse order was not measured, so an earlier,
+stricter code is not relied on to hold beside a later, looser one.
+
 ## Carrier filters [Google]
 
 | Code | Example | Meaning |
@@ -217,8 +226,10 @@ Order doesn't matter to the server.
 ## Per-direction application
 
 Like `routeLanguage`, `commandLine` is **per-slice**. Outbound and return get
-independent extension strings. The CLI exposes both via `--extension` /
-`--extension-ret` (or `--ext` / `--ext-ret`). Multi-city sets one per slice.
+independent extension strings. The CLI exposes both via `--extension` (or
+`--ext`) and `--ext-ret` on `search`, `calendar` and `detail`; `--ext-ret ''`
+sends none on the return. No code is positional, so unset, `--ext-ret` copies
+`--extension`. Multi-city sets one per slice.
 
 ## Pitfalls
 

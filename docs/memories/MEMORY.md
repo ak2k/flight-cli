@@ -45,6 +45,13 @@ go into detail and are loaded on demand.
   rides both backends. Decision: `enable_matching=False` + the existing
   matcher keys, not the matched-Google-flight-id path. Empirical evidence
   behind the choice and the upgrade path if it turns out worth it later.
+- [award_airport_sets.md](award_airport_sets.md) — An award search over
+  `JFK,EWR` or a metro code asks the providers one airport pair at a time:
+  per-pair cost (PointsPath cabins × airlines requests, one seats.aero quota
+  unit), the cap of 8 pair queries a search and its order (cash-flown pairs
+  first, a pair per leg per round), the stderr line and `pairs_not_asked`, the
+  matched-id route check in `join`, and seats.aero's documented but unmeasured
+  comma-list form.
 - [pp_matched_id_recipe.md](pp_matched_id_recipe.md) — **Supersedes the
   "dead end" framing in `pp_on_gflight.md`.** The matched-id join *does*
   work; the previous "no" was because we sent synthetic flight_ids and
@@ -56,7 +63,8 @@ go into detail and are loaded on demand.
   transport that replaced the gated `GetShoppingResults` RPC (field layout:
   carrier/alliance include, hour windows, duration, layover minutes, passenger
   kinds with infant 3 = lap and 4 = seat; the zero-based stop ceiling, typed
-  refusals), the price cap (12) and bags (13) behind `search --max-price` and
+  refusals; fli's 48 aliased airport codes and `fli_bridge.fli_airport`), the
+  price cap (12) and bags (13) behind `search --max-price` and
   `--bags`, with each row's bag statement `row[4][6]` and where Matrix stands on
   both, the `fl[15]`/`fl[18]`/`fl[22]`
   booking-carrier rule (marketing vs operating), the Tier-1/2/3 classification
