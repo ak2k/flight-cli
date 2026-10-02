@@ -1,6 +1,7 @@
 # Console sanitizing: what reaches a markup console, and how it is wrapped
 
-Read before adding any print to `src/flight_cli/cli.py`. `console` and `err` are
+Read before adding any print to `src/flight_cli/cli.py` or
+`src/flight_cli/pp/cli.py`. Each builds its own `console` and `err`, which are
 markup-enabled Rich consoles, and `rich.table.Table` parses markup in its title
 and caption, in every column header and footer, and in every cell, so any string
 that is not this module's own is markup until it is wrapped. An unbalanced
@@ -44,7 +45,9 @@ rule someone will forget. Wrapping leaves inside `_fmt_slice_route`,
 `_fmt_gflight_legroom` is the same move one level down — and it has to be the
 LEAVES, not the composed cell: `_fmt_legroom_one` writes a real `[red]` around a
 below-average pitch, and one wrap around the finished cell would print that tag
-instead of colouring the number.
+instead of coloring the number. `pp/cli.py`'s `_fmt_award_cell` is the same
+move: it wraps the program and the tax currency and keeps its own `[dim]` and
+`[yellow]` live, so `_render_matches` prints its cells under one allowlist entry.
 
 **The render site is the guard, and it wraps exactly once.** The rule, for
 everything `escape_scan` in `tests/test_calendar_split.py` covers: anything reaching
@@ -61,6 +64,10 @@ a single query keeps. The per-cabin fan-out is the one deliberate exception,
 because its failure is soft and its line names the cabin.
 
 ## `_safe_text` and `_quote`
+
+Both live in `src/flight_cli/_console_text.py`, as `safe_text` and `quote`: a
+leaf both modules import under the underscore names the scan matches, since
+`cli.py` imports `pp/cli.py` and the reverse would be a cycle.
 
 `escape` is not the whole job for text from somewhere else. It neutralizes `[`
 and nothing more, so an ESC or an 8-bit CSI inside a Matrix error message still
@@ -88,10 +95,11 @@ backslash `escape` prepends and hands the tag straight back to the parser.
 
 ## The guard: `escape_scan` in `tests/test_calendar_split.py`
 
-It parses ONE file — `src/flight_cli/cli.py` — and walks its AST, so a new print
-in a covered function fails the suite. It says nothing about any other module:
-`src/flight_cli/pp/cli.py` builds a second markup console and is not scanned
-(work-h70kv.19).
+It parses TWO files — `src/flight_cli/cli.py` and `src/flight_cli/pp/cli.py`, the
+two modules that build a markup console — and walks each one's AST, so a new
+print in either fails the suite. It says nothing about any other module.
+`_PRINTABLE_IDENTIFIERS` is keyed by function name across both, so a name the two
+modules shared would share its entries.
 
 Its polarity is inverted — everything is scanned unless excluded by name —
 because an opt-in list goes stale the moment a print moves into a new helper. A
@@ -120,7 +128,7 @@ allowlisting a name off a duck-typed object. The `%` clause is what keeps
 `{when:%Y-%m-%d}` out: `date.__format__` is `strftime`, so a date survives every
 presentation type and comes back a string. An object with its own `__format__`
 survives them too, so for such a value this is not a proof; none reaches a
-numeric spec in `cli.py` today.
+numeric spec in either module today.
 
 There is no per-function exemption. One would pre-approve every FUTURE print in a
 function rather than one value, and every MarkupError this guard has caught
@@ -135,8 +143,8 @@ Every list the scan consults is checked by a test that breaks it.
 scan speaks, so an entry that allows nothing cannot sit there pre-approving
 whatever later takes its name. What an entry does NOT get is a check on the
 value behind it. The scan reads a name's binding only when it is a top-level
-f-string over a bare name, which no binding in `cli.py` is, so an entry is a
-claim its author has to back, and the file's forty entries are backed four ways:
+f-string over a bare name, which no binding in either module is, so an entry is
+a claim its author has to back, and the entries are backed four ways:
 a hostile-field arm that fails when the value stops being this module's own; a
 type at the response or enum boundary, which is what stands behind
 `res.solution_count` and the `Cabin` members; a number this module computed, like
@@ -150,8 +158,8 @@ entry, because a parameter's value belongs to callers the scan never reads.
 
 `_SAFE_WRAPPERS`, `_NUMERIC_PRESENTATION`, `_RENDERABLE_SINKS`,
 `_TEXT_SINK_METHODS` and `_HELP_SINKS` share one delete-one test — measured over
-the bypass corpus as well as `cli.py`, since dropping a member that ALLOWS makes
-`cli.py` speak where it was silent while dropping one that READS makes a corpus
+the bypass corpus as well as both modules, since dropping a member that ALLOWS
+makes a module speak where it was silent while dropping one that READS makes a corpus
 case go quiet, and no change either way is what inert means. A regression corpus
 of one synthetic source per known bypass keeps the scan itself honest, and is
 where every sink member has its witness. A printed table needs no entry at all:
@@ -160,7 +168,7 @@ which is a claim about the binding rather than about the name.
 
 The scan reads CALLS, so a markup slot filled by assignment (`t.title = x`,
 `t.caption = x`, `t.columns[0].header = x`) or by an API it does not name is not
-read; none is live in `cli.py` today, and `Panel` and `Text` both sit in
+read; none is live in either module today, and `Panel` and `Text` both sit in
 `_RENDERABLE_SINKS` unimported, so an aliased import of either would have
 coverage that looks present and is not. `Text` is the one that bites: an
 allowlisted local assigned `Tx(<remote>)` and handed to a sink is silent, where
@@ -174,10 +182,10 @@ on the closure that prints it. The hostile-field tests — one payload per
 response field, driven one field at a time through each renderer — are what pin
 the values a type at the boundary cannot, and an entry backed by none of the
 four is the claim nothing checks named above. The boundary in one line: a value
-can reach a Rich console from `cli.py` outside any call this scan reads —
-through one of those assignment slots, an API it does not name, a help string
-whose only f-string field is a bare name, or `pp/cli.py`'s second console — so a
-green scan is a claim about the calls it reads and nothing wider.
+can reach a Rich console from either module outside any call this scan reads —
+through one of those assignment slots, an API it does not name, or a help string
+whose only f-string field is a bare name — so a green scan is a claim about the
+calls it reads and nothing wider.
 
 A Typer `help=` / `epilog=` string is a markup sink as surely as a table cell:
 the app sets `rich_markup_mode="rich"`, so Typer renders every help string
