@@ -2720,8 +2720,9 @@ def _render_booking_options(
 
 
 class _SplitTicket(NamedTuple):
-    """The cheapest priced one-way each way of a round trip: the Google rows,
-    their fares and the one currency both are priced in."""
+    """The cheapest pair of priced one-ways of a round trip whose return
+    leaves after its outbound lands: the Google rows, their fares and the one
+    currency both are priced in."""
 
     outbound: Any
     outbound_price: float
@@ -2757,25 +2758,50 @@ def _split_ticket(
 
     one_way = opts.model_copy(update={"max_price": None})
     requested = opts.currency or "USD"
-    picked: list[tuple[Any, float, str]] = []
+    boards: list[list[Any]] = []
     with interrupt_guard(), _browser_scope(gf_mode):
         for leg, which in ((legs[0], "outbound"), (legs[1], "return")):
             try:
                 board = _gflight_results((leg,), one_way, top_n, gf_mode, gf_headed)
-                row = next((r for r in _price_ordered(board) if r.flight.price is not None), None)
-                if row is None:
+                priced = [r for r in _price_ordered(board) if r.flight.price is not None]
+                if not priced:
                     return f"Google Flights priced no {which} one-way"
-                picked.append((row, float(row.flight.price), row.flight.currency or requested))
+                boards.append(priced)
             except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
                 raise
             except Exception as e:  # noqa: BLE001 — see the docstring
                 return f"the {which} one-way failed ({str(e) or type(e).__name__})"
-    (out, out_price, out_ccy), (back, back_price, back_ccy) = picked
+    pair = _cheapest_flown_pair(*boards)
+    if pair is None:
+        return "Google Flights priced no return one-way that leaves after an outbound one-way lands"
+    out, back = pair
+    out_ccy = out.flight.currency or requested
+    back_ccy = back.flight.currency or requested
     if out_ccy != back_ccy:
         return (
             f"Google Flights priced the outbound one-way in {out_ccy} and the return in {back_ccy}"
         )
-    return _SplitTicket(out, out_price, back, back_price, out_ccy)
+    return _SplitTicket(out, float(out.flight.price), back, float(back.flight.price), out_ccy)
+
+
+def _cheapest_flown_pair(outbounds: list[Any], backs: list[Any]) -> tuple[Any, Any] | None:
+    """The cheapest outbound and return whose return leaves after the outbound
+    lands, from two priced boards in price order; a tie keeps the earlier row.
+
+    Each one-way is asked alone, so nothing orders the two: the cheapest each
+    way can be a return that leaves before the outbound lands, which no one
+    can fly. Both times are local clocks where the outbound lands and the
+    return leaves, so they compare as they are."""
+    best: tuple[Any, Any] | None = None
+    best_total = 0.0
+    for out in outbounds:
+        if best is not None and out.flight.price + backs[0].flight.price >= best_total:
+            break
+        lands = out.flight.legs[-1].arrival_datetime
+        back = next((b for b in backs if b.flight.legs[0].departure_datetime > lands), None)
+        if back is not None and (best is None or out.flight.price + back.flight.price < best_total):
+            best, best_total = (out, back), out.flight.price + back.flight.price
+    return best
 
 
 def _flight_numbers(row: Any) -> str:
@@ -6905,10 +6931,10 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
     split: bool = typer.Option(
         False,
         "--split",
-        help="On a Google Flights round trip, also price the cheapest one-way ticket each "
-        "way (two more page loads, two per page on a leg asked as several pages) and show "
-        "the pair after the round-trip table, as two separate tickets. --max-price is not "
-        "applied to them. With --format json the "
+        help="On a Google Flights round trip, also price one-way tickets each way (two more "
+        "page loads, two per page on a leg asked as several pages) and show, under the "
+        "round-trip table, the cheapest pair whose return leaves after the outbound lands, "
+        "as two separate tickets. --max-price is not applied to them. With --format json the "
         'document becomes {"search": …, "split_ticket": {…}}.',
         rich_help_panel=_GROUP_OUTPUT,
     ),
