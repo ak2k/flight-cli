@@ -380,9 +380,52 @@ class Ticket(_Loose):
     pricings: list[TicketPricing] = Field(default_factory=list[TicketPricing])
 
 
+class BookedFlight(_Loose):
+    # Booking details send the number as an int, where a search's slice
+    # writes it inside a string ("AA142").
+    model_config = ConfigDict(extra="ignore", populate_by_name=True, coerce_numbers_to_str=True)
+
+    number: str | None = None
+
+
+class BookedLeg(_Loose):
+    """One takeoff and landing of a booked segment. Times keep Matrix's UTC
+    offset, so the first sixteen characters are the airport's wall clock."""
+
+    origin: SliceEndpoint | None = None
+    destination: SliceEndpoint | None = None
+    departure: str | None = None
+    arrival: str | None = None
+
+
+class BookedSegment(_Loose):
+    """One flight number of a booked slice: a through flight is one segment
+    with several legs. Every field is optional because `--fare-rules` reads
+    the same body and must not fail on a field Matrix leaves out."""
+
+    carrier: SliceCarrier | None = None
+    flight: BookedFlight | None = None
+    origin: SliceEndpoint | None = None
+    destination: SliceEndpoint | None = None
+    departure: str | None = None
+    arrival: str | None = None
+    legs: list[BookedLeg] = Field(default_factory=list[BookedLeg])
+
+
+class BookedSlice(_Loose):
+    segments: list[BookedSegment] = Field(default_factory=list[BookedSegment])
+
+
+class BookedItinerary(_Loose):
+    slices: list[BookedSlice] = Field(default_factory=list[BookedSlice])
+
+
 class BookingDetails(_Loose):
     tickets: list[Ticket] = Field(default_factory=list[Ticket])
     display_total: str | None = Field(None, alias="displayTotal")
+    # The only place Matrix dates each flight of a connection: a search's
+    # slice gives the day of its two ends alone.
+    itinerary: BookedItinerary | None = None
 
     @property
     def pricings(self) -> list[TicketPricing]:

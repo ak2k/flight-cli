@@ -12,9 +12,10 @@ the point of asking.
 
 from __future__ import annotations
 
+import math
 import urllib.parse
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from ._gf_rpc_shared import GfPageRpcError, capture, dig, result_payloads, url_currency
 
@@ -25,15 +26,27 @@ _BOOKING_RPC = "/GetBookingResults"
 _WHAT = "Google Flights' booking page response"
 
 
+class BagFee(NamedTuple):
+    """What one bag costs with one seller, in the page's currency; `fee` 0 is
+    free. On a round trip the fee covers the whole trip."""
+
+    bag: Literal["carry-on", "checked"]
+    nth: int
+    fee: float
+
+
 class Seller(NamedTuple):
     """One seller's offer. `price` is in whole units of the page's currency;
     `fare` is the airline's fare-family name, which agencies and some airlines
-    leave out."""
+    leave out. `link` is Google's redirect to the seller's own page for this
+    fare; `bags` holds only the bags the seller states a fee for or calls free."""
 
     name: str
     price: float | None
     fare: str | None
     airline: bool
+    link: str | None = None
+    bags: tuple[BagFee, ...] = ()
 
 
 class BookingOptions(NamedTuple):
@@ -64,21 +77,105 @@ def _option_flights(option: list[Any]) -> tuple[str, ...]:
     )
 
 
+def _amount(value: Any) -> float | None:
+    """`value` if it is a positive finite number, else None. `json.loads` reads
+    `Infinity`, and an integer too long for a float raises when formatted."""
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return None
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:
+        return None
+    return value if finite and value > 0 else None
+
+
+def _form(pairs: Any) -> list[tuple[str, str]] | None:
+    """`[[name, value], ...]` as `urlencode` takes it; None unless every pair
+    is two strings."""
+    if pairs is None:
+        return []
+    if not isinstance(pairs, list):
+        return None
+    form: list[tuple[str, str]] = []
+    for pair in cast("list[Any]", pairs):
+        match pair:
+            case [str(name), str(value)]:
+                form.append((name, value))
+            case _:
+                return None
+    return form
+
+
+def _link(option: list[Any]) -> str | None:
+    """`option[5][2] = [base URL, [[name, value], ...]]`, the form the page
+    posts to reach the seller; Google answers the same pairs sent as a query.
+    None unless the base is a printable https URL on `www.google.com`, as the
+    table's caption says, with no user, port, query or fragment of its own and
+    no space or backslash, and every pair is two strings. A browser reads a
+    backslash as "/", and `escape` doubles one that ends a printed line."""
+    base, form = dig(option, 5, 2, 0), _form(dig(option, 5, 2, 1))
+    if (
+        form is None
+        or not isinstance(base, str)
+        or not (base.isascii() and base.isprintable())
+        or any(c in base for c in " ?#\\")
+    ):
+        return None
+    try:
+        parts = urllib.parse.urlsplit(base)
+        query = urllib.parse.urlencode(form)
+    except ValueError:  # a bracketed host that is no IP address; a lone surrogate
+        return None
+    if parts.scheme != "https" or parts.netloc != "www.google.com":
+        return None
+    return f"{base}?{query}" if query else base
+
+
+# The slots of `option[18]`, each `[2, [[None, amount]], 1]` for a fee or `[3]`
+# for free. `[0]` and `[1]` occur too, with no meaning known, so they add nothing.
+_BAG_SLOTS: tuple[tuple[Literal["carry-on", "checked"], int], ...] = (
+    ("checked", 1),
+    ("checked", 2),
+    ("carry-on", 1),
+)
+_BAG_FEE = 2
+_BAG_FREE = 3
+
+
+def _bags(option: list[Any]) -> tuple[BagFee, ...]:
+    fees: list[BagFee] = []
+    for slot, (bag, nth) in enumerate(_BAG_SLOTS):
+        code = dig(option, 18, slot, 0)
+        if code == _BAG_FREE:
+            fees.append(BagFee(bag, nth, 0))
+        elif code == _BAG_FEE and (fee := _amount(dig(option, 18, slot, 1, 0, 1))) is not None:
+            fees.append(BagFee(bag, nth, fee))
+    return tuple(fees)
+
+
+def _one_line(value: Any) -> str | None:
+    """`value` with every run of whitespace, line breaks included, made one
+    space; None unless that leaves text. A name prints beside its link and in
+    the verdict, where a break in it would start a line the response wrote."""
+    if not isinstance(value, str):
+        return None
+    return " ".join(value.split()) or None
+
+
 def _seller(option: list[Any]) -> Seller | None:
     """`option[1][0] = [code, name, _, is_airline]`, `[7][0][1]` the price,
-    `[21][3]` the fare name. None for an option without a seller name."""
-    name = dig(option, 1, 0, 1)
-    if not isinstance(name, str) or not name.strip():
+    `[21][3]` the fare name, `[5]` the link and `[18]` the bags. None for an
+    option without a seller name."""
+    name = _one_line(dig(option, 1, 0, 1))
+    if name is None:
         return None
-    price = dig(option, 7, 0, 1)
-    fare = dig(option, 21, 3)
     return Seller(
         name=name,
-        price=price
-        if isinstance(price, int | float) and not isinstance(price, bool) and price > 0
-        else None,
-        fare=fare if isinstance(fare, str) and fare.strip() else None,
+        price=_amount(dig(option, 7, 0, 1)),
+        fare=_one_line(dig(option, 21, 3)),
         airline=dig(option, 1, 0, 3) is True,
+        link=_link(option),
+        bags=_bags(option),
     )
 
 
@@ -134,6 +231,11 @@ def document(options: BookingOptions) -> list[dict[str, Any]]:
             "currency": options.currency,
             "fare": s.fare,
             "airline": s.airline,
+            "booking_url": s.link,
+            "bags": [
+                {"bag": b.bag, "nth": b.nth, "fee": b.fee, "currency": options.currency}
+                for b in s.bags
+            ],
         }
         for s in options.sellers
     ]
