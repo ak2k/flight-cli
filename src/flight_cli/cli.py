@@ -2573,6 +2573,13 @@ def _two_lows_note(
         detail += ["--return", matrix.return_date.isoformat()]
         if span != _DEFAULT_CALENDAR_DURATION:
             detail += ["-d", span]
+    # Several origins with no `--currency` asked the grid in USD; `detail` on the
+    # one pair it names would answer in that origin's currency.
+    fanout = with_fanout_currency(search).options.currency
+    if search.options.currency is None and fanout is not None:
+        asked_detail = [*asked, "--currency", fanout]
+    else:
+        asked_detail = [*asked]
     gsearch = ["flight", "search", google.origin, google.destination]
     gsearch += ["--dep", google.departure.isoformat()]
     if google.return_date is not None:
@@ -2581,7 +2588,7 @@ def _two_lows_note(
         f"{opening} {both}. Matrix's grid is fares Matrix priced; Google's graph is "
         "one price per date pair with no itinerary behind it; either can leave out a "
         f"fare the other lists. A search on the date {'pair ' if round_trip else ''}"
-        f"shows what is bookable: {shlex.join([*detail, *asked])} (Matrix), "
+        f"shows what is bookable: {shlex.join([*detail, *asked_detail])} (Matrix), "
         f"{shlex.join([*gsearch, *asked, '--backend', 'gflight'])} (Google)."
     )
 

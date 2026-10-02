@@ -9,12 +9,14 @@ launcher seam is pointed at a fake, and the conftest guard stays on.
 from __future__ import annotations
 
 import io
+import shlex
 import signal
 import threading
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any, NoReturn, override
 
 import pytest
+import typer
 from rich.console import Console
 from typer.testing import CliRunner
 
@@ -32,6 +34,7 @@ if TYPE_CHECKING:
 
     from click.testing import Result
 
+    from flight_cli.domain import CalendarFollowup
     from flight_cli.models import CalendarResult
 
 # Far enough out that fli's travel-date validation never sees the past.
@@ -735,15 +738,17 @@ def _iso(offset: int) -> str:
 
 def _matrix_prices(
     monkeypatch: pytest.MonkeyPatch, days: dict[int, _Day], pairs: dict[str, dict[int, _Day]]
-) -> None:
+) -> list[CalendarSearch]:
     """Matrix prices `_START + offset` for each offset of `days`, filed by month as
     Matrix files it; a query between the airports a key of `pairs` names
-    ("EWR-LGW") prices that key's days instead."""
+    ("EWR-LGW") prices that key's days instead. Returns the queries it is asked."""
+    asked: list[CalendarSearch] = []
 
     class _Priced(_Matrix):
         @override
         async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
             del cache
+            asked.append(search)
             leg = search.legs[0]
             answer = pairs.get(f"{','.join(leg.origins)}-{','.join(leg.destinations)}", days)
             by_month: dict[int, dict[int, tuple[str, int, dict[int, str]]]] = {}
@@ -753,6 +758,7 @@ def _matrix_prices(
             return _result(by_month)
 
     monkeypatch.setattr(cli, "MatrixClient", _Priced)
+    return asked
 
 
 def _note(result: Result) -> str:
@@ -838,7 +844,7 @@ def test_a_metro_low_names_matrixs_pair_and_googles_cheapest_across_the_set(
         f"Google Flights USD305 ({_iso(0)} to {_iso(5)}, 5 nights, cheapest across NYC→LON). "
     )
     assert note.endswith(
-        f"flight detail EWR LGW --dep {_iso(2)} --return {_iso(7)} (Matrix), "
+        f"flight detail EWR LGW --dep {_iso(2)} --return {_iso(7)} --currency USD (Matrix), "
         f"flight search NYC LON --dep {_iso(0)} --return {_iso(5)} --backend gflight (Google)."
     )
 
@@ -935,6 +941,30 @@ def test_both_commands_ask_the_calendars_own_question(monkeypatch: pytest.Monkey
         f"flight search JFK LHR --dep {_iso(1)} --return {_iso(4)} --cabin business --adults 2 "
         "--stops 1 --routing AA+ --backend gflight (Google)."
     )
+
+
+def test_the_detail_it_names_asks_matrix_in_the_currency_its_grid_was_asked_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two origins and no `--currency` ask Matrix's grid in USD; one London pair
+    asked alone would answer in pounds."""
+    asked = _matrix_prices(monkeypatch, {2: ("USD500.00", {5: "USD500.00"})}, {})
+    _graphs_are(monkeypatch, {n: _graph(n, (0, 300.0)) for n in (5, 6, 7)})
+    result = _run("LON", "PAR", "-d", "5-7")
+    note = _note(result)
+    assert result.exit_code == 0, result.output
+    detail: list[CalendarFollowup] = []
+
+    def _sent(search: CalendarFollowup, *_a: object) -> NoReturn:
+        detail.append(search)
+        raise typer.Exit(0)
+
+    monkeypatch.setattr(cli, "_run", _sent)
+    command = shlex.split(note[note.index("flight detail ") : note.index(" (Matrix)")])
+    ran = CliRunner().invoke(cli.app, command[1:])
+    assert ran.exit_code == 0, ran.output
+    assert {s.options.currency for s in asked} == {"USD"}
+    assert [s.options.currency for s in detail] == ["USD"]
 
 
 def test_a_price_matrix_wrote_is_printed_as_text(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1287,7 +1287,10 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
   ... --backend gflight` on the set, each repeating the calendar's own flags
   (`--cabin`, `--adults`, `--stops`, routing and extension codes as typed,
   `--depart-times`, `--currency`, and `-d` for `detail` when it is not
-  5-7). A Matrix grid in another currency is named and not compared. JSON,
+  5-7). `detail` also carries `--currency USD` when several origins and no
+  `--currency` asked the grid in USD: one pair asked alone answers in its
+  origin's currency (LHR CDG in GBP, measured 2026-10-02). A Matrix grid in
+  another currency is named and not compared. JSON,
   `--fast`, `--gf-transport http`, a failed or empty side and agreeing lows
   print no line, and stdout and the exit code are unchanged. Two lows that
   differ need not mean either table is wrong. Measured 2026-10-01, `calendar
