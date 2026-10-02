@@ -875,6 +875,16 @@ def test_a_lost_length_names_the_lengths_google_priced_after_its_line(
     assert f"Google Flights USD300 ({_iso(0)} to {_iso(5)}, 5 nights, JFK→LHR)" in note
 
 
+def test_a_range_left_with_one_length_names_that_length(monkeypatch: pytest.MonkeyPatch) -> None:
+    _matrix_prices(monkeypatch, _JFK_LHR_DAY, {})
+    _graphs_are(monkeypatch, {5: _graph(5, (0, 300.0)), 6: _missed(), 7: _missed()})
+    result = _run("JFK", "LHR", "-d", "5-7")
+    note = _note(result)
+    assert result.exit_code == 0, result.output
+    assert "5-night trips only" in note
+    assert "5-5-night" not in note
+
+
 @pytest.mark.parametrize("low", ["GBP400.00", "GBP300.00"], ids=["apart", "same-number"])
 def test_a_matrix_grid_in_another_currency_is_named_and_not_compared(
     low: str, monkeypatch: pytest.MonkeyPatch

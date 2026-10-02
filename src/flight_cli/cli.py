@@ -3329,9 +3329,12 @@ def _render_graph_range(
 
 def _trip_lengths_text(lengths: Sequence[int]) -> str:
     """The trip lengths a range table shows: "5-7-night" with no gap between
-    them, "5- and 7-night" with one. A lost length leaves a gap, and a span
-    across it would name a length the table has no column for."""
+    them, "5- and 7-night" with one, "5-night" when one is left. A lost length
+    leaves a gap, and a span across it would name a length the table has no
+    column for."""
     first, last = lengths[0], lengths[-1]
+    if first == last:
+        return f"{first:d}-night"
     if list(lengths) == list(range(first, last + 1)):
         return f"{first:d}-{last:d}-night"
     return _join_reasons([*(f"{n:d}-" for n in lengths[:-1]), f"{last:d}-night"])
