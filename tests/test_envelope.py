@@ -553,6 +553,66 @@ def test_pointspath_lost_at_the_award_gate_narrows_the_answer(
     assert note.startswith(awards_note), note
 
 
+@pytest.mark.parametrize(
+    ("pp", "seats", "providers", "complete", "awards_ran"),
+    [
+        pytest.param(False, False, "seats-aero", False, False, id="named-alone-none-configured"),
+        pytest.param(True, False, "seats-aero", False, False, id="named-beside-pointspath"),
+        pytest.param(True, False, "pp,seats-aero", False, True, id="one-of-two-named-missing"),
+        pytest.param(False, True, "seats-aero", True, True, id="named-and-configured"),
+    ],
+)
+def test_a_named_provider_that_cannot_run_narrows_the_answer(
+    pp: bool,
+    seats: bool,
+    providers: str,
+    complete: bool,
+    awards_ran: bool,
+    gf_session: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """`--providers` asks for each provider it names, so one with no credentials
+    leaves the answer narrower than asked, whether or not another provider runs.
+    Through the real gate."""
+
+    def _refreshed(t: Tokens) -> Tokens:
+        return t
+
+    monkeypatch.setattr(cli, "_should_run_awards", _SHOULD_RUN_AWARDS)
+    monkeypatch.setattr(pp_auth, "TOKENS_PATH", tmp_path / "pp.json")
+    monkeypatch.setattr(pp_auth, "refresh", _refreshed)
+    monkeypatch.setattr(seats_auth, "KEY_PATH", tmp_path / "seats.json")
+    monkeypatch.delenv("PP_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("PP_REFRESH_TOKEN", raising=False)
+    monkeypatch.delenv(seats_auth.API_KEY_ENV, raising=False)
+    if pp:
+        monkeypatch.setenv("PP_ACCESS_TOKEN", "access")
+        monkeypatch.setenv("PP_REFRESH_TOKEN", "refresh")
+    if seats:
+        monkeypatch.setenv(seats_auth.API_KEY_ENV, "key")
+    gf_session(_served(_LAX))
+    env = _envelope_of(
+        _search(
+            "JFK",
+            "LAX",
+            "--dep",
+            _DEP.isoformat(),
+            "--backend",
+            "gflight",
+            "--fast",
+            "-n",
+            "5",
+            "--providers",
+            providers,
+        )
+    )
+    assert (env["complete"], env["awards"] is not None) == (complete, awards_ran)
+    assert len(_rows(env)) == 5
+    missing = [n for n in env["notes"] if "seats-aero" in n and "not configured" in n]
+    assert len(missing) == (not complete), env["notes"]
+
+
 def test_a_failed_award_query_leaves_awards_null_and_narrows(
     gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1093,21 +1093,35 @@ def _should_run_awards(sel: ProviderSelection) -> bool:
             raise typer.Exit(2)
         _explain_no_awards(sel, "--providers names no configured provider")
         return False
+    # The search runs without the named providers that have no credentials, and
+    # nothing downstream sees them: the registry builds configured ones only.
+    if missing := [n for n in sel.provider_filter or () if not known.get(n, False)]:
+        _envelope.narrow(_named_not_configured(missing))
     return True
 
 
+def _named_not_configured(names: list[str]) -> str:
+    verb = "is" if len(names) == 1 else "are"
+    return f"--providers names {', '.join(names)}, which {verb} not configured"
+
+
 def _explain_no_awards(sel: ProviderSelection, reason: str) -> None:
-    """Say why no award search runs, and narrow the answer when PointsPath was
-    asked for: named in `--providers`, or holding saved tokens that no filter
-    leaves out. Here such tokens failed to validate or refresh, which
+    """Say why no award search runs, and narrow the answer when a provider was
+    asked for: named in `--providers`, or PointsPath holding saved tokens that
+    no filter leaves out. Here such tokens failed to validate or refresh, which
     `is_configured` reads as none, so no later step can say the provider was
     lost. A machine with no tokens never asked PointsPath."""
     if not _envelope.active():
         return
-    named = sel.provider_filter is not None and "pp" in sel.provider_filter
-    if named or (sel.provider_filter is None and load_tokens() is not None):
+    named = sel.provider_filter
+    lost: list[str] = []
+    if ("pp" in named) if named is not None else (load_tokens() is not None):
+        lost.append("PointsPath was asked for, and its tokens are missing or failed to refresh")
+    if others := [n for n in named or () if n != "pp"]:
+        lost.append(_named_not_configured(others))
+    if lost:
         _envelope.narrow()
-        reason = "PointsPath was asked for, and its tokens are missing or failed to refresh"
+        reason = "; ".join(lost)
     _envelope.explain("awards", reason)
 
 

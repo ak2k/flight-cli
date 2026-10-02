@@ -44,6 +44,8 @@ served (`_gflight_ids._report_pin_outcome`); PointsPath skipped when it was
 asked for (named in `--providers`, or tokens present that then failed;
 with no tokens it is a note), both in `_pp_preflight` and at the award gate
 (`cli._explain_no_awards`), where failed tokens read as no provider at all;
+any other provider `--providers` names that has no credentials, at the award
+gate (`cli._should_run_awards`), whether or not another provider runs;
 the award query failing; a provider failing to start or answer
 (`providers/registry.py`, seats.aero, and a PointsPath airline search that is
 not "unsupported" in `pp/client.py`, an error status with an empty body
