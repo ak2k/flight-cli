@@ -9,13 +9,16 @@ exactly when the answer is narrower than what was asked, and the keys' values.
 
 from __future__ import annotations
 
+import io
 import itertools
 import json
 import re
+import sys
+import threading
 from datetime import date, timedelta
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast, override
 
 import anyio
 import httpx
@@ -850,6 +853,44 @@ def test_a_usage_error_writes_no_envelope() -> None:
     r = _search("--cash-only", "JFK", "LAX", "--dep", _DEP.isoformat(), "--cabin", "steerage")
     assert (r.exit_code, r.stdout) == (2, "")
     assert "steerage" in r.stderr
+
+
+def test_notes_keep_the_order_stderr_took_the_lines_in(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two threads write stderr at once, the first held inside the stream's own
+    write until the second has written: the notes list the lines in the order
+    stderr took them."""
+    taken: list[str] = []
+    first_in, second_out = threading.Event(), threading.Event()
+
+    class _Stream(io.StringIO):
+        @override
+        def write(self, s: str, /) -> int:
+            taken.append(s.strip())
+            if s.startswith("Google"):
+                first_in.set()
+                second_out.wait(0.5)
+            return len(s)
+
+    def _second() -> None:
+        sys.stderr.write("Matrix: cabin query failed\n")
+        second_out.set()
+
+    def _two_writers() -> None:
+        first = threading.Thread(target=sys.stderr.write, args=("Google: board unavailable\n",))
+        first.start()
+        assert first_in.wait(5)
+        second = threading.Thread(target=_second)
+        second.start()
+        first.join()
+        second.join()
+
+    capsys.readouterr()
+    monkeypatch.setattr(sys, "stderr", _Stream())
+    _envelope.run("search", _two_writers, consoles=())
+    assert taken == ["Google: board unavailable", "Matrix: cabin query failed"]
+    assert json.loads(capsys.readouterr().out)["notes"][:2] == taken
 
 
 # ─────────────────────────────── schema and history ─────────────────────────

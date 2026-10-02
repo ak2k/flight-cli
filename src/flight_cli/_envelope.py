@@ -212,11 +212,14 @@ class _Tee:
     def __init__(self, stream: TextIO) -> None:
         self._stream = stream
         self._seen = io.StringIO()
-        self._lock = threading.Lock()
+        # Reentrant: a SIGINT handler that logs runs on the thread already
+        # inside `write`.
+        self._lock = threading.RLock()
 
     def write(self, s: str) -> int:
-        n = self._stream.write(s)
+        # One lock round both writes, so the notes keep the order stderr took.
         with self._lock:
+            n = self._stream.write(s)
             self._seen.write(s)
         return n
 
