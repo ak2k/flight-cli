@@ -1001,13 +1001,26 @@ Google row whose price the row shows, and `same_trip` holds only where
 over shares the flights and the first day, not the trip (the FI614/FI450 rows
 above land on different days), so it shows no delta and the reason
 `trip_unconfirmed` names both landings; a pair in two currencies is
-`other_currency`. Google prices the whole party, while the price Matrix lists
-is one passenger's, rounded up (2 adults, 2026-10-01: `ext.price` USD229.00,
-`displayTotal` USD456.80, Google USD457), so for more than one passenger the
-Matrix column, the delta, the caption and the document read Matrix's
-`displayTotal`; where Matrix states none the row is `unpriced`. The merge's pairing and ranking are unchanged: a matched row
-still ranks on Matrix's price, so with the deeper page a Google fare that
-Matrix prices higher can rank below where it ranked on a page of `-n`.
+`other_currency`. Google prices the whole party, on its search page and its
+booking page alike, while the price Matrix lists is one passenger's, rounded
+up (2 adults, 2026-10-01: `ext.price` USD229.00, `displayTotal` USD456.80,
+Google USD457.00; Google's AS21/AS487 is USD437.00 for two and USD219.00 for
+one). So `merge_results(..., passengers=)` puts Matrix's price for the party
+on the row (`_enrich.party_price`: the listed price for one, `displayTotal`
+for more), and the Matrix column, the rank, the delta, the `--sellers`
+comparison, the caption and the document all read that one price; where
+Matrix states no total the row is `unpriced`.
+
+**A row ranks on the lowest price it prints** (`_enrich._rank_price`): the
+lowest in the requested currency, by exact amount, or where it prints none in
+it the lowest in the currency of Matrix's price, else Google's; rows tied on it
+keep the merge's order, a matched row ahead of a Google row alone. Ranked on
+Matrix's listed price, a party's Matrix rows sorted on one passenger's fare
+against Google's party totals: the live JFK-LAX `--adults 2 -n 10` table
+(2026-10-01) printed ten GF+MX rows from USD456.80 to USD796.80 and cut
+Google's AS21/AS487 and AS21/AS696 at USD437.00 and five rows at USD457.00. And
+a matched row Matrix prices above Google left the first `-n` on the deeper
+page: DL1788 at Google USD204, Matrix USD999, gave way to B61023.
 
 **A reason is stated only where the two answers decide it**
 (`_cross_check.py`). Matrix's answer is complete when `solutionCount` is at
@@ -1026,6 +1039,14 @@ it names. Otherwise `not_in_matrix`. A Matrix-only row: `no_google_answer`;
 combination (Google pins at most `pinned_fanout(-n)` outbounds);
 `carrier_absent_google` only on a one-way or beside an outbound Google priced;
 neither of those two on a board the row filter cut; otherwise `not_on_google`.
+While the board counts rows Google served that the parser could not read
+(`Board.unread`, a round trip's summed over its outbound page and every return
+page it read), a Matrix-only row that would say `carrier_absent_google` or
+`not_on_google` says `google_unread` ("2 of Google's rows could not be read")
+instead: its trip may be one of them. On the JFK-LAX board cut to DL1788 and
+an unreadable AS21/AS487 row, one row parses, and without the count Matrix's
+AS21/AS487 row reads `carrier_absent_google`. The caption reads `Google listed
+95 rows, 2 unread.` where any are.
 Either side: `paired_elsewhere` where the other side lists the same flights,
 first day and landing minutes on another row, because a middle flight's day is
 then unstated; `unmatched` where a row leaves a flight number, day or landing
@@ -1036,7 +1057,7 @@ Matrix is sent no sales city, and no row says where it was priced.
 **`--format json --enrich`** writes `{"search": <the plain --format json
 document, the same -n rows>, "cross_check": {"currency", "delta":
 "google_minus_matrix", "matrix": {"listed", "solution_count", "complete",
-"last_price"}, "google": {"listed", "answered"}, "rows": [...]}}`, the rows
+"last_price"}, "google": {"listed", "answered", "unread"}, "rows": [...]}}`, the rows
 being the table's, from the pure `_cross_check.document`. Plain `--format json`
 does not cross-check; on auto a failed Google query is still handed to Matrix,
 as before, and `--fast` asks Matrix nothing. It needs no awards (`--cash-only`)

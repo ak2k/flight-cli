@@ -28,7 +28,7 @@ Global flags (every search-printing command):
 - `--no-cache` — bypass the on-disk response cache
 - `--matrix-url` / `--google-url` — toggle deep-link emission
 - `--cash-only` — skip all award providers; show only the cash table
-- `--format json --enrich --cash-only` — `search` on Google Flights: the default table's Google-vs-Matrix cross-check as `{"search": <the plain document>, "cross_check": {…}}` (`delta` = Google − Matrix only for the same trip in one currency, `reasons` on every other row, Matrix's `listed` of `solution_count`); plain `--format json` does not cross-check, though on auto a failed Google query is still handed to Matrix
+- `--format json --enrich --cash-only` — `search` on Google Flights: the default table's Google-vs-Matrix cross-check as `{"search": <the plain document>, "cross_check": {…}}` (`delta` = Google − Matrix only for the same trip in one currency, `reasons` on every other row, Matrix's `listed` of `solution_count`, `google.unread` the rows Google served that could not be read); plain `--format json` does not cross-check, though on auto a failed Google query is still handed to Matrix
 - `--awards-only` — skip the cash table; show only the award provider output
 - `--currency EUR` — price in that ISO 4217 currency on both backends (`search`, `calendar`, `detail`)
 - `--fare-rules [--pick N]` — `search` only, routes to Matrix: fare basis, booking codes and refund/change penalties for itinerary N (default 1)
