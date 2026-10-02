@@ -26,7 +26,7 @@ import typer
 from rich.console import Console
 from typer.testing import CliRunner
 
-from flight_cli import _config, cli
+from flight_cli import _config, _console_text, cli
 from flight_cli._api_key import ApiKeyResolutionError
 from flight_cli._calendar_split import (
     is_empty_calendar,
@@ -2847,14 +2847,12 @@ def test_parse_errors_truncate_an_oversized_value(
     # whole value and appended "…" satisfies the line above and nothing else here.
     # Measured against the constant, not against `_quote`, whose own output would
     # grow with the mutant and move the bound out of the mutant's way.
-    assert (
-        len(message) < cli._MAX_ECHOED_VALUE + 200  # pyright: ignore[reportPrivateUsage] — the cap IS the unit
-    )
+    assert len(message) < _console_text.MAX_ECHOED_VALUE + 200
     # What the cap actually governs: the value the user typed, measured where the
     # cap applies — before `repr`, which is where one code point stops being one
     # character. Plus one for the ellipsis.
-    shown = cli._elide(value)  # pyright: ignore[reportPrivateUsage] — the cap IS the unit
-    assert len(shown) <= cli._MAX_ECHOED_VALUE + 1  # pyright: ignore[reportPrivateUsage] — as above
+    shown = _console_text.elide(value)
+    assert len(shown) <= _console_text.MAX_ECHOED_VALUE + 1
 
 
 # Text from somewhere else — a Matrix message, an exception — is not just markup.
@@ -4248,8 +4246,8 @@ def test_quote_keeps_a_normal_value_whole() -> None:
     """Truncation is for the pathological case; an ordinary mistyped value is
     short, and cutting it would hide the typo the message exists to show."""
     quote = cli._quote  # pyright: ignore[reportPrivateUsage] — the helper IS the unit
-    elide = cli._elide  # pyright: ignore[reportPrivateUsage] — as above
-    cap = cli._MAX_ECHOED_VALUE  # pyright: ignore[reportPrivateUsage] — as above
+    elide = _console_text.elide
+    cap = _console_text.MAX_ECHOED_VALUE
     assert quote("5-7") == "'5-7'"
     assert elide("9" * cap) == "9" * cap  # exactly the cap is not cut
     assert elide("9" * (cap + 1)) == "9" * cap + "…"  # one over is
