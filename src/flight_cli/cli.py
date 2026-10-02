@@ -2430,7 +2430,10 @@ def _matrix_low(
 
     A day's cell holds no year, so a day that is no single date of the window is
     passed over. A round-trip day with no trip length has no return date to
-    name, so it gives no low rather than a wrong one."""
+    name, so it gives no low rather than a wrong one. A grid the table prints as
+    empty has no low either."""
+    if is_empty_calendar(res):
+        return None
     best: tuple[float, date, str, CalendarDay] | None = None
     for month in res.months:
         for day in month.days:

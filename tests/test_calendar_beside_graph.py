@@ -1001,6 +1001,24 @@ def test_lows_that_agree_or_a_side_that_priced_nothing_get_no_note(
     assert err.count(_NOT_SHOWN) == not_shown
 
 
+def test_a_grid_matrixs_table_calls_empty_gets_no_note(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A priced day under no solutions is still a grid Matrix's table reports as empty."""
+
+    class _NoSolutions(_Matrix):
+        @override
+        async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
+            del search, cache
+            when = _START + timedelta(days=2)
+            return _result({when.month: {when.day: ("USD500.00", 0, {5: "USD500.00"})}})
+
+    monkeypatch.setattr(cli, "MatrixClient", _NoSolutions)
+    _graphs_are(monkeypatch, _JFK_LHR_GRAPHS)
+    result = _run("JFK", "LHR", "-d", "5-7")
+    assert result.exit_code == 0, result.output
+    assert "Calendar empty." in result.stdout
+    assert "Matrix and Google Flights" not in _flat(result.stderr)
+
+
 def test_a_failed_matrix_gets_no_note_and_keeps_its_exit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "MatrixClient", _DeadMatrix)
     _graphs_are(monkeypatch, _JFK_LHR_GRAPHS)
