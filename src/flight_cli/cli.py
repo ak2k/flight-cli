@@ -3834,6 +3834,14 @@ def _same_itinerary(
     return found
 
 
+def _trip_text(row: _verify.Row) -> str:
+    """Each slice's chain of flights and its day, as a check names the row."""
+    return " · ".join(
+        f"{chain} {legs[0].departure[:10]}"
+        for chain, legs in zip(_verify.routings(row), row.slices, strict=True)
+    )
+
+
 def _check_on_matrix(
     row: _verify.Row, n: int, opts: SearchOptions, *, rps: float | None, impersonate: str | None
 ) -> _Checked:
@@ -3845,6 +3853,9 @@ def _check_on_matrix(
     chain, to tell a carrier Matrix lists nowhere on the route from a fare it
     does not have."""
     rps_, imp = _resolve_rps(rps), _resolve_impersonate(impersonate)
+    # Each search below can take tens of seconds; the booking details and
+    # fare rules after a match take a second or two and say nothing.
+    err.print(f"[dim]Asking Matrix for itinerary #{n:d}: {_safe_text(_trip_text(row))}…[/]")
     chain = cast(
         "SearchResult",
         _run(
@@ -3857,6 +3868,7 @@ def _check_on_matrix(
         ),
     )
     if not chain.solutions:
+        err.print("[dim]Matrix has no fare on those flights; asking which carriers it lists…[/]")
         probe = SpecificDateSearch(
             legs=_verify.matrix_legs(row, routed=False),
             options=_verify.matrix_options(row, opts, max_stops=_verify.most_stops(row)),
@@ -3906,11 +3918,9 @@ def _print_verified(
             f"{_safe_text(verdict.reason or verdict.outcome)}[/]"
         )
         return
-    trip = " · ".join(
-        f"{chain} {legs[0].departure[:10]}"
-        for chain, legs in zip(_verify.routings(row), row.slices, strict=True)
+    console.print(
+        f"[bold green]Verified on Matrix[/] · itinerary #{n:d} · {_safe_text(_trip_text(row))}"
     )
-    console.print(f"[bold green]Verified on Matrix[/] · itinerary #{n:d} · {_safe_text(trip)}")
     matrix = verdict.solution.price
     console.print(
         f"Matrix {_safe_text(matrix or '—')} · Google {_safe_text(row.price or '—')}"

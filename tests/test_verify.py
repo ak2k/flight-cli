@@ -12,6 +12,7 @@ field for field, where only booking details tell the middle flight's day."""
 
 from __future__ import annotations
 
+import io
 import json
 import pathlib
 from datetime import date, datetime, time, timedelta
@@ -25,6 +26,7 @@ from fli.models import (  # pyright: ignore[reportMissingTypeStubs] — fli ship
     FlightLeg,
     FlightResult,
 )
+from rich.console import Console
 from typer.testing import CliRunner
 
 from conftest import _answering, _ds1, _page
@@ -1094,3 +1096,72 @@ def test_without_the_flag_the_search_is_the_base_and_asks_matrix_nothing(
     assert table.exit_code == 0, table.output
     assert "Verified" not in table.output
     assert "Matrix" not in table.stderr
+
+
+# ─────────────────────────── what a run says as it waits ───────────────────────────
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _stderr_at_each_search(
+    matrix: _Matrix, monkeypatch: pytest.MonkeyPatch
+) -> tuple[io.StringIO, list[tuple[bool, str]]]:
+    """Stderr, and per Matrix search as it arrives: whether it is routed, and
+    what stderr held when it was sent."""
+    buf = io.StringIO()
+    monkeypatch.setattr(cli, "err", Console(file=buf, width=200, no_color=True))
+    seen: list[tuple[bool, str]] = []
+    real = matrix.handler
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/search":
+            body = json.loads(request.content)
+            routed = any(s.get("routeLanguage") for s in body["inputs"]["slices"])
+            seen.append((routed, buf.getvalue()))
+        return real(request)
+
+    monkeypatch.setattr(matrix, "handler", _handler)
+    return buf, seen
+
+
+@pytest.mark.parametrize("fmt", ["table", "json"])
+def test_stderr_names_the_row_before_matrix_is_asked_for_it(
+    gf_session: Callable[..., Any], matrix: _Matrix, monkeypatch: pytest.MonkeyPatch, fmt: str
+) -> None:
+    """Red at the base: stderr is empty when the chain search is sent."""
+    buf, seen = _stderr_at_each_search(matrix, monkeypatch)
+    n, row = _as_row()
+    matrix.chain = _chain(_row_solution("AS-1", f"USD{row.flight.price:.2f}", row))
+    matrix.details = {"AS-1": _details_of(row)}
+    gf_session(_served())
+    result = _run("-n", "40", "--fast", "--verify", "--pick", str(n), "--format", fmt)
+    assert result.exit_code == 0, result.output
+    ((routed, before),) = seen
+    assert routed
+    asking = f"Asking Matrix for itinerary #{n:d}: AS21 AS487 {_DEP}…"
+    assert _flat(before) == asking
+    # Booking details and fare rules take a second or two and say nothing.
+    assert _flat(buf.getvalue()) == asking
+
+
+@pytest.mark.parametrize("fmt", ["table", "json"])
+def test_stderr_says_why_matrix_is_asked_again_before_the_probe(
+    gf_session: Callable[..., Any], matrix: _Matrix, monkeypatch: pytest.MonkeyPatch, fmt: str
+) -> None:
+    """Red at the base: stderr is empty when each search is sent."""
+    _, seen = _stderr_at_each_search(matrix, monkeypatch)
+    n, _ = _as_row()
+    matrix.probe = _listing("AA", "B6", "DL", "UA")
+    gf_session(_served())
+    result = _run("-n", "40", "--fast", "--verify", "--pick", str(n), "--format", fmt)
+    assert result.exit_code == 0, result.output
+    (chain, before_chain), (probe, before_probe) = seen
+    assert (chain, probe) == (True, False)
+    assert f"itinerary #{n:d}: AS21 AS487" in before_chain
+    assert before_probe.startswith(before_chain)
+    assert _flat(before_probe[len(before_chain) :]) == (
+        "Matrix has no fare on those flights; asking which carriers it lists…"
+    )
+
