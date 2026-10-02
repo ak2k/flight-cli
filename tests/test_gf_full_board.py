@@ -152,6 +152,30 @@ def test_a_round_trip_counts_the_unread_rows_of_every_page_it_read(
     assert (bool(board), board.pinned, board.unread) == (returns_kept, 2, 3)
 
 
+def _return_page_none_of_whose_rows_parse(rows: int) -> str:
+    ds1 = _answering(
+        _ds1("ds1_return_leg_pinned.json"), origin="LHR", destination="JFK", date=_RET.isoformat()
+    )
+    for index in range(rows):
+        ds1 = _unreadable(ds1, index=index)
+    payload: list[Any] = json.loads(ds1)
+    payload[2] = [gfid._rows_from_ds1(payload).rows[:rows]]
+    payload[3] = None
+    return _page(json.dumps(payload))
+
+
+def test_a_return_page_none_of_whose_rows_parse_still_counts_them(
+    gf_session: Callable[..., Any],
+) -> None:
+    """The first pin's return page held two rows and the parser read neither,
+    so that pin is refused and the second pin's page is served. Both rows were
+    on Google's board all the same."""
+    gf_session(_unreadable_at(_LHR, 100), _return_page_none_of_whose_rows_parse(2), _return_board())
+    board = gfid.search_with_ids(_round_trip_filters(), top_n=2)
+    assert board is not None
+    assert (bool(board), board.pinned, board.unread) == (True, 2, 1 + 2)
+
+
 # ───────────────────────────────── dedupe ─────────────────────────────────
 
 

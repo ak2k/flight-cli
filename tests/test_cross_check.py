@@ -17,7 +17,7 @@ import pytest
 from rich.console import Console
 from typer.testing import CliRunner
 
-from conftest import _ds1, _page, dl_beside_unreadable_as
+from conftest import _answering, _ds1, _page, _unreadable, dl_beside_unreadable_as
 from flight_cli import _gflight_ids as gfid
 from flight_cli import cli
 from flight_cli._cross_check import Answers, CrossCheck, RowCheck, cross_check, document
@@ -25,7 +25,8 @@ from flight_cli._enrich import MergedRow, merge_results
 from flight_cli._gf_common import PageFetch
 from flight_cli._gf_errors import GfThrottledError
 from flight_cli.client import MatrixApiError
-from flight_cli.domain import Leg, SearchOptions
+from flight_cli.domain import Cabin, Leg, SearchOptions
+from flight_cli.fli_bridge import to_fli_filter
 from flight_cli.models import (
     Itinerary,
     ItineraryDetails,
@@ -41,6 +42,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 _BOARD = "ds1_jfk_lax_tfu.json"
+_LHR = "ds1_jfk_lhr_tfu.json"
 
 
 def _board() -> SearchResult:
@@ -342,6 +344,86 @@ def test_a_carrier_only_an_unread_google_row_names_is_not_called_absent() -> Non
     c = cross_check(rows, answers).rows[0]
     assert (_flights(rows[0]), rows[0].source) == ("AS21+AS487", "matrix")
     assert (c.reasons, c.reason) == (("google_unread",), "1 of Google's rows could not be read")
+
+
+def _lhr_page(
+    origin: str,
+    destination: str,
+    day: date,
+    keep: Callable[[gfid.GFlightWithId], bool],
+    *,
+    rows: int | None = None,
+) -> str:
+    """The JFK-LHR capture answering `origin`-`destination` on `day`, cut to
+    the first `rows` rows `keep` passes."""
+    payload: list[Any] = json.loads(
+        _answering(_ds1(_LHR), origin=origin, destination=destination, date=day.isoformat())
+    )
+    kept = [r for r in gfid._rows_from_ds1(payload).rows if keep(gfid._parse_flight_with_id(r))]
+    payload[2] = [kept[:rows]]
+    payload[3] = None
+    return json.dumps(payload)
+
+
+def _booked(row: gfid.GFlightWithId) -> str:
+    return "+".join(f"{leg.airline.name}{leg.flight_number}" for leg in row.flight.legs)
+
+
+def test_a_carrier_only_a_wholly_unread_return_page_names_is_not_called_absent(
+    gf_session: Callable[..., Any],
+) -> None:
+    """Two outbounds fly FI614+FI450 and land on different days. The first
+    pin's return page held one BA row the parser could not read, so that pin
+    is refused; the second pin's page is served with no BA flight on it.
+    Matrix priced an FI614+FI450 outbound home on BA: the BA row Google served
+    was unread, not absent."""
+    dep, ret = date.today() + timedelta(days=45), date.today() + timedelta(days=52)
+    out = _lhr_page("JFK", "LHR", dep, lambda r: _booked(r) == "FI614+FI450")
+    back = _lhr_page("LHR", "JFK", ret, lambda r: r.flight.legs[0].airline.name == "BA", rows=1)
+    pinned_return = _answering(
+        _ds1("ds1_return_leg_pinned.json"), origin="LHR", destination="JFK", date=ret.isoformat()
+    )
+    gf_session(_page(out), _page(_unreadable(back, index=0)), _page(pinned_return))
+    served = gfid.search_with_ids(
+        to_fli_filter(
+            cli.SpecificDateSearch(
+                legs=(Leg.of("JFK", "LHR", dep), Leg.of("LHR", "JFK", ret)),
+                options=SearchOptions(cabin=Cabin.COACH),
+            )
+        ),
+        top_n=2,
+    )
+    assert served is not None
+    first, ba = (
+        gfid._rows_from_page_html(
+            PageFetch(_page(p), "https://www.google.com/travel/flights", 200)
+        )[0]
+        for p in (out, back)
+    )
+    trip = fli_results_to_search_result([(first, ba)]).solutions[0]
+    google = fli_results_to_search_result(served)
+    matrix = _answer(_as_matrix(trip, "USD100.00"))
+    answers = cli._cross_check_answers(
+        {"gf": served},
+        google,
+        matrix,
+        uncapped=matrix,
+        legs=(Leg.of("JFK", "LHR"), Leg.of("LHR", "JFK")),
+        opts=SearchOptions(),
+        currency="USD",
+    )
+    rows = merge_results(google, matrix, currency="USD")
+    (c,) = (
+        c
+        for r, c in zip(rows, cross_check(rows, answers).rows, strict=True)
+        if r.source == "matrix"
+    )
+    assert (served.pinned, served.unread, c.reasons, c.reason) == (
+        2,
+        1,
+        ("google_unread",),
+        "1 of Google's rows could not be read",
+    )
 
 
 def _round_trip(board: SearchResult) -> SearchResult:

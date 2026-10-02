@@ -1742,6 +1742,16 @@ class Board[T](list[T]):
         self.unread = unread
 
 
+class _PageUnreadError(GfPageShapeError):
+    """Rows were served and not one of them parsed. `unread` counts them, so a
+    round trip that goes on without this return page still has them in its
+    board's `unread`."""
+
+    def __init__(self, message: str, *, unread: int) -> None:
+        super().__init__(message)
+        self.unread = unread
+
+
 # One itinerary, as `_deduped` and the round-trip pins tell them apart.
 type ItineraryKey = tuple[tuple[Airline, str, datetime.datetime], ...]
 
@@ -1885,9 +1895,10 @@ def _rows_from_page_html(page: PageFetch) -> Board[GFlightWithId]:
         # is a different fact from "this route has no flights". Sampled reasons
         # give the next reader something to re-derive the indices from.
         sample = "; ".join(reasons[:_SHAPE_ERROR_SAMPLE_REASONS])
-        raise GfPageShapeError(
+        raise _PageUnreadError(
             f"none of {len(rows)} Google Flights rows parsed; "
-            f"the row shape changed (sample reasons: {sample})"
+            f"the row shape changed (sample reasons: {sample})",
+            unread=len(reasons),
         )
     return Board(_deduped(out), insight=_price_insight(payload, out), unread=len(reasons))
 
@@ -2358,6 +2369,7 @@ def search_with_ids(
             # a 5xx comes back as `GfUpstreamStatusError` — so ten pins
             # meeting ten 503s cost ten GETs, not ten ladders.
             refused.append(e)
+            unread += e.unread if isinstance(e, _PageUnreadError) else 0
             continue
         if nxt is None:
             continue

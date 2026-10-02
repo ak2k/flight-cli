@@ -1041,7 +1041,8 @@ combination (Google pins at most `pinned_fanout(-n)` outbounds);
 neither of those two on a board the row filter cut; otherwise `not_on_google`.
 While the board counts rows Google served that the parser could not read
 (`Board.unread`, a round trip's summed over its outbound page and every return
-page it read), a Matrix-only row that would say `carrier_absent_google` or
+page it read, a return page none of whose rows parsed included though it
+refuses its pin), a Matrix-only row that would say `carrier_absent_google` or
 `not_on_google` says `google_unread` ("2 of Google's rows could not be read")
 instead: its trip may be one of them. On the JFK-LAX board cut to DL1788 and
 an unreadable AS21/AS487 row, one row parses, and without the count Matrix's
