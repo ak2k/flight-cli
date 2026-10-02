@@ -262,3 +262,46 @@ empty when the Google query fails. `--fast` means Google alone, `--backend
 gflight` names Google, Matrix prices no bags, and a `--sellers` document wraps a
 Google row that Matrix cannot supply. A multi-cabin search exits 1 when every
 Google cabin fails.
+
+### `booking_options`: one object per seller
+
+`booking_options` lists the sellers cheapest first, each as `seller`, `price`,
+`currency`, `fare`, `airline`, `booking_url` and `bags`. `currency` is the one
+the booking page was asked in; every other value is read from that seller's own
+entry in Google's `GetBookingResults` answer.
+
+- `booking_url` comes from `option[5]` = `[display domain, null, [base URL,
+  [[name, value], ...]]]`. In 153 entries over 9 captures (2026-09-27 and
+  2026-10-01) the base was always `https://www.google.com/travel/clk/f` with
+  one pair, `["u", <token of 1.7-9.6 KB>]`. The page POSTs the pairs as a form;
+  a GET with them as the query answers the same 200 meta refresh to the
+  seller's own page for that fare (measured 2026-10-01, also for a 9650-character
+  URL, and for a 4-day-old token, whose seller URL carried the old price for
+  the seller to price again). The URL is the base plus the pairs as its query,
+  and null unless the base is printable ASCII, `https` on `www.google.com` with
+  no user or port (the table's caption says each link goes through Google), with
+  no query or fragment of its own and no space or backslash (a browser reads a
+  backslash as `/`), and every pair is two strings.
+- `bags` comes from `option[18]` = `[1st checked, 2nd checked, carry-on]`. A
+  slot `[2, [[null, amount]], 1]` is a fee of `amount` in the page's currency
+  and `[3]` is free; Google's page says the same ("First checked bag costs 45
+  US dollars", "1 free carry-on", "First checked bag is free"). `[0]` (4 times,
+  once in the carry-on slot) and `[1]` (3 times) also occur, with no meaning
+  known, and a null slot gives no information (agencies, mostly); none of the
+  three adds an entry. An entry is `{bag, nth, fee, currency}`, `bag` being
+  `checked` or `carry-on` and `fee` 0 meaning free.
+- On a round trip a bag fee covers the whole trip: AA on BA178 is 85/100 one
+  way and 170/200 round trip, and the page says "Fare and baggage fees apply to
+  your entire trip". A page asked in another currency gives the fees in it:
+  DL747 JFK-LAX asked in EUR gave fees of EUR40/EUR49 and fares from EUR203,
+  where USD gave 45/55 and USD229 (measured 2026-10-01). Not measured: party
+  size (every capture is 1 adult).
+
+The console shows the same fields. The table holds each seller's `#`, name,
+price and fare, the columns a narrow console can fold without cutting a number.
+Under it, one line per seller that states a bag fee or has a link: `<#>
+<seller>: carry-on <fee>, 1st checked <fee>, 2nd checked <fee> <link>`, `free`
+for 0, a bag with no stated fee left out, and the line never folded. The parser
+makes each seller and fare name one line, every run of whitespace (line breaks
+included) one space, so the table, these lines, the verdict and `seller` in the
+document all carry the same text.

@@ -2,16 +2,20 @@
 """`--sellers`: the booking options Google's booking page lists for one row.
 
 The envelopes under `fixtures/gf_booking/` are `GetBookingResults` responses the
-page received in a real Chrome, trimmed to the fields the parser reads (the
-redirect links, price tokens and bag details are dropped). No test here loads a
-page: the browser session is replaced wherever the path would reach one.
+page received in a real Chrome, trimmed to the fields the parser reads, price
+tokens dropped. The two `*_full` ones keep each seller's redirect link (`[5]`)
+and bag fees (`[18]`), Google's signed `u` token replaced by `TOKEN-<the
+option's index>`; the others drop both. No test here loads a page: the browser
+session is replaced wherever the path would reach one.
 """
 
 from __future__ import annotations
 
 import base64
+import io
 import json
 import pathlib
+import re
 import signal
 import urllib.parse
 from datetime import date, datetime, time, timedelta
@@ -24,6 +28,7 @@ from fli.models import (  # pyright: ignore[reportMissingTypeStubs] — fli ship
     FlightLeg,
     FlightResult,
 )
+from rich.console import Console
 from typer.testing import CliRunner
 
 from flight_cli import _gf_booking as gb
@@ -114,26 +119,38 @@ def test_a_page_answering_for_other_flights_is_refused(flights: list[tuple[str, 
 
 def _option(
     name: str,
-    price: int | None,
+    price: float | None,
     *,
     fare: str | None = None,
     airline: bool = False,
     flights: list[list[str]] | None = None,
+    five: Any = None,
+    bags: Any = None,
 ) -> list[Any]:
     """One seller in the captured option shape: `[1][0]` the seller, `[3]` the
-    flights, `[7][0][1]` the price, `[21][3]` the fare name."""
+    flights, `[5]` the link, `[7][0][1]` the price, `[18]` the bags, `[21][3]`
+    the fare name."""
     return [
         0,
         [[name.upper(), name, None, airline]],
         None,
         flights if flights is not None else [["B6", "1523"]],
         None,
-        None,
+        five,
         None,
         None if price is None else [[None, price], None],
-        *([None] * 13),
+        *([None] * 10),
+        bags,
+        None,
+        None,
         [None, None, None, fare],
     ]
+
+
+def _five(base: Any, pairs: Any) -> list[Any]:
+    """`option[5]` as captured: the display domain, then the redirect's base
+    URL and the pairs the page posts to it."""
+    return ["www.example.com/...", None, [base, pairs]]
 
 
 def _booking_body(*options: list[Any]) -> str:
@@ -166,6 +183,213 @@ def test_the_error_13_body_is_a_typed_refusal() -> None:
     with pytest.raises(GfPageRpcError) as caught:
         gb.parse_sellers(body, flights=[("DL", "1788")])
     assert caught.value.code == 13
+
+
+# ───────────────────────────── links and bags ────────────────────────────────
+
+_CLK = "https://www.google.com/travel/clk/f"
+
+
+def test_each_fare_carries_its_own_link_and_bag_fees() -> None:
+    """AA171's four fares as Google's page states them: Main Plus alone has
+    its first checked bag free."""
+    sellers = gb.parse_sellers(_fixture("ow_jfk_lax_aa171_full.body"), flights=[("AA", "171")])
+    free_carry_on = gb.BagFee("carry-on", 1, 0)
+    assert [(s.fare, s.link, s.bags) for s in sellers] == [
+        (
+            "Basic Economy",
+            f"{_CLK}?u=TOKEN-0",
+            (gb.BagFee("checked", 1, 55), gb.BagFee("checked", 2, 65), free_carry_on),
+        ),
+        (
+            "Main Cabin",
+            f"{_CLK}?u=TOKEN-1",
+            (gb.BagFee("checked", 1, 50), gb.BagFee("checked", 2, 60), free_carry_on),
+        ),
+        (
+            "Main Plus",
+            f"{_CLK}?u=TOKEN-2",
+            (gb.BagFee("checked", 1, 0), gb.BagFee("checked", 2, 60), free_carry_on),
+        ),
+        (
+            "Main Select",
+            f"{_CLK}?u=TOKEN-3",
+            (gb.BagFee("checked", 1, 50), gb.BagFee("checked", 2, 60), free_carry_on),
+        ),
+    ]
+
+
+def test_a_bag_code_that_is_neither_a_fee_nor_free_adds_nothing() -> None:
+    """BA178's agencies: CheapOair's `[[3], [0], [3]]` says nothing of the
+    second bag, and Booking.com's `[null, null, [3]]` speaks of the carry-on
+    alone."""
+    sellers = gb.parse_sellers(_fixture("ow_jfk_lhr_ba178_full.body"), flights=[("BA", "178")])
+    by_name = {s.name: s for s in sellers}
+    assert by_name["CheapOair"].bags == (gb.BagFee("checked", 1, 0), gb.BagFee("carry-on", 1, 0))
+    assert by_name["Globehunters"].bags == (gb.BagFee("checked", 1, 0), gb.BagFee("carry-on", 1, 0))
+    assert by_name["Booking.com"].bags == (gb.BagFee("carry-on", 1, 0),)
+    assert by_name["Justfly.com"].bags[:2] == (
+        gb.BagFee("checked", 1, 90),
+        gb.BagFee("checked", 2, 110),
+    )
+    links = [s.link or "" for s in sellers]
+    assert len(set(links)) == len(sellers) == 35
+    assert all(link.startswith(f"{_CLK}?u=TOKEN-") for link in links)
+
+
+@pytest.mark.parametrize(
+    ("name", "flights"),
+    [
+        pytest.param("ow_jfk_lax_dl1788.body", [("DL", "1788")], id="dl1788"),
+        pytest.param("ow_jfk_lhr_ba178.body", [("BA", "178")], id="ba178"),
+        pytest.param("rt_jfk_lhr_ba178_ba115.body", [("BA", "178"), ("BA", "115")], id="rt"),
+    ],
+)
+def test_an_entry_with_no_link_or_bags_gives_none(
+    name: str, flights: list[tuple[str, str]]
+) -> None:
+    sellers = gb.parse_sellers(_fixture(name), flights=flights)
+    assert {(s.link, s.bags) for s in sellers} == {(None, ())}
+
+
+@pytest.mark.parametrize(
+    ("five", "link"),
+    [
+        pytest.param(_five(_CLK, [["u", "T-1"]]), f"{_CLK}?u=T-1", id="captured-shape"),
+        pytest.param(
+            _five("https://www.google.com/c", [["u", "a b"], ["v", "x&y=z"]]),
+            "https://www.google.com/c?u=a+b&v=x%26y%3Dz",
+            id="pairs-become-the-query",
+        ),
+        pytest.param(
+            _five("https://www.google.com/c", []), "https://www.google.com/c", id="no-pairs"
+        ),
+        pytest.param(
+            ["d", None, ["https://www.google.com/c"]], "https://www.google.com/c", id="pairs-absent"
+        ),
+        pytest.param(_five("http://www.google.com/c", [["u", "T"]]), None, id="http"),
+        pytest.param(_five("javascript:alert(1)", [["u", "T"]]), None, id="javascript"),
+        pytest.param(_five("https://www.google.com/\x1b[2J", [["u", "T"]]), None, id="esc"),
+        pytest.param(_five("https://www.google.com/a b", [["u", "T"]]), None, id="space"),
+        # No URL character; a browser reads it as "/", and `escape` doubles one
+        # that ends the printed line.
+        pytest.param(_five("https://www.google.com/a\\b", [["u", "T"]]), None, id="backslash"),
+        pytest.param(_five("https://www.google.com/x\\", []), None, id="trailing-backslash"),
+        pytest.param(_five("https://www.google.com/c?a=1", [["u", "T"]]), None, id="base-query"),
+        pytest.param(_five("https://www.google.com/c#top", [["u", "T"]]), None, id="base-fragment"),
+        pytest.param(_five("https:///c", [["u", "T"]]), None, id="no-host"),
+        # The caption says each link goes through Google.
+        pytest.param(_five("https://evil.example/f", [["u", "T"]]), None, id="another-host"),
+        pytest.param(
+            _five("https://www.google.com.evil.example/f", [["u", "T"]]), None, id="lookalike-host"
+        ),
+        pytest.param(
+            _five("https://www.google.com@evil.example/f", [["u", "T"]]),
+            None,
+            id="userinfo-naming-google",
+        ),
+        pytest.param(
+            _five("https://u@www.google.com/f", [["u", "T"]]), None, id="userinfo-on-google"
+        ),
+        pytest.param(_five("https://[red]/x", [["u", "T"]]), None, id="bracketed-name"),
+        pytest.param(_five("https://[::1/x", [["u", "T"]]), None, id="unclosed-bracket"),
+        pytest.param(_five(5, [["u", "T"]]), None, id="base-not-a-string"),
+        pytest.param(_five("https://www.google.com/c", [["u", 5]]), None, id="value-not-a-string"),
+        pytest.param(
+            _five("https://www.google.com/c", [["u", "\ud800"]]), None, id="lone-surrogate"
+        ),
+        pytest.param(_five("https://www.google.com/c", [["u", "T", "x"]]), None, id="three-items"),
+        pytest.param(_five("https://www.google.com/c", ["u=T"]), None, id="pair-not-a-list"),
+        pytest.param(_five("https://www.google.com/c", "u=T"), None, id="pairs-not-a-list"),
+        pytest.param(None, None, id="null"),
+    ],
+)
+def test_a_link_is_read_only_from_a_well_formed_https_entry(five: Any, link: str | None) -> None:
+    body = _booking_body(_option("Kiwi.com", 179, fare="Basic", five=five))
+    (seller,) = gb.parse_sellers(body, flights=[("B6", "1523")])
+    assert seller.link == link
+    assert (seller.name, seller.price, seller.fare) == ("Kiwi.com", 179, "Basic")
+
+
+@pytest.mark.parametrize(
+    ("bags", "fees"),
+    [
+        pytest.param(
+            [[2, [[None, 45]], 1], [2, [[None, 55.5]], 1], [3]],
+            (("checked", 1, 45), ("checked", 2, 55.5), ("carry-on", 1, 0)),
+            id="fees-and-free",
+        ),
+        pytest.param([[3]], (("checked", 1, 0),), id="first-slot-only"),
+        pytest.param([[0], [1], [7]], (), id="unknown-codes"),
+        pytest.param([None, None, None], (), id="nulls"),
+        pytest.param([[2, [[None, 0]], 1]], (), id="zero-fee"),
+        pytest.param([[2, [[None, -5]], 1]], (), id="negative-fee"),
+        pytest.param([[2, [[None, True]], 1]], (), id="bool-fee"),
+        pytest.param([[2, [[None, "45"]], 1]], (), id="string-fee"),
+        pytest.param([[2, [[None, float("inf")]], 1]], (), id="infinite-fee"),
+        pytest.param([[2, [[None, 10**400]], 1]], (), id="fee-past-a-float"),
+        pytest.param([[2]], (), id="fee-missing"),
+        pytest.param([3, "3", {"0": 2}], (), id="slots-not-lists"),
+        pytest.param("3", (), id="not-a-list"),
+        pytest.param(None, (), id="null"),
+    ],
+)
+def test_a_bag_fee_is_read_only_from_a_known_code(
+    bags: Any, fees: tuple[tuple[str, int, float], ...]
+) -> None:
+    body = _booking_body(_option("Kiwi.com", 179, fare="Basic", bags=bags))
+    (seller,) = gb.parse_sellers(body, flights=[("B6", "1523")])
+    assert [tuple(b) for b in seller.bags] == list(fees)
+    assert (seller.name, seller.price, seller.fare) == ("Kiwi.com", 179, "Basic")
+
+
+def test_a_price_that_is_not_finite_is_no_price() -> None:
+    """`json.loads` reads `Infinity`; written back out it is no JSON at all."""
+    body = _booking_body(_option("Inf", float("inf")), _option("JetBlue", 179, airline=True))
+    sellers = gb.parse_sellers(body, flights=[("B6", "1523")])
+    assert [(s.name, s.price) for s in sellers] == [("JetBlue", 179), ("Inf", None)]
+    doc = gb.document(gb.BookingOptions("USD", sellers))
+    assert json.loads(json.dumps(doc, allow_nan=False))[1]["price"] is None
+
+
+@pytest.mark.parametrize(
+    "gap",
+    [
+        pytest.param("\n", id="LF"),
+        pytest.param("\r\n", id="CRLF"),
+        pytest.param("\u2028", id="LS"),
+        pytest.param("\u2029", id="PS"),
+        pytest.param("\x85", id="NEL"),
+        pytest.param("\x0b", id="VT"),
+        pytest.param("\t", id="tab"),
+        pytest.param("  ", id="spaces"),
+    ],
+)
+def test_a_seller_and_its_fare_name_are_each_one_line(gap: str) -> None:
+    """The name is printed in the table, beside its link and in the verdict,
+    and written to the document: every one of them gets the same one line."""
+    body = _booking_body(_option(f"{gap}Cheap{gap}Air{gap}", 170, fare=f"Main{gap}{gap}Cabin"))
+    (seller,) = gb.parse_sellers(body, flights=[("B6", "1523")])
+    assert (seller.name, seller.fare) == ("Cheap Air", "Main Cabin")
+    assert gb.document(gb.BookingOptions("USD", (seller,)))[0]["seller"] == "Cheap Air"
+
+
+def test_the_document_gives_each_seller_its_link_and_bags() -> None:
+    sellers = gb.parse_sellers(_fixture("ow_jfk_lax_aa171_full.body"), flights=[("AA", "171")])
+    doc = gb.document(gb.BookingOptions("USD", sellers))
+    assert doc[2] == {
+        "seller": "American",
+        "price": 415,
+        "currency": "USD",
+        "fare": "Main Plus",
+        "airline": True,
+        "booking_url": f"{_CLK}?u=TOKEN-2",
+        "bags": [
+            {"bag": "checked", "nth": 1, "fee": 0, "currency": "USD"},
+            {"bag": "checked", "nth": 2, "fee": 60, "currency": "USD"},
+            {"bag": "carry-on", "nth": 1, "fee": 0, "currency": "USD"},
+        ],
+    }
 
 
 def test_the_currency_is_the_one_the_url_asks_for() -> None:
@@ -425,6 +649,226 @@ def test_a_seller_at_the_table_price_does_not_beat_it(
     assert "beats" not in result.stdout
 
 
+def _wide(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A console wide enough that no table cell folds, and still narrower
+    than any link."""
+    monkeypatch.setattr(cli, "console", Console(width=250, no_color=True))
+
+
+def _cells(line: str, bar: str) -> list[str]:
+    return [c.strip() for c in line.strip().strip(bar).split(bar)]
+
+
+# Wider than any console, as each of Google's tokens is.
+_TOKEN = "T" * 3000
+
+
+def test_fast_sellers_print_each_sellers_bags_and_whole_link(
+    monkeypatch: pytest.MonkeyPatch, board: list[Any]
+) -> None:
+    _wide(monkeypatch)
+    body = _booking_body(
+        _option(
+            "JetBlue",
+            179,
+            fare="Blue Basic",
+            airline=True,
+            flights=_B6_1523,
+            five=_five(_CLK, [["u", f"J{_TOKEN}"]]),
+            bags=[[2, [[None, 35]], 1], [2, [[None, 45]], 1], [3]],
+        ),
+        _option(
+            "Kiwi.com",
+            170,
+            flights=_B6_1523,
+            five=_five(_CLK, [["u", f"K{_TOKEN}"]]),
+            bags=[None, None, [3]],
+        ),
+        _option("Agency", 185, flights=_B6_1523),
+    )
+    kiwi, jetblue, _ = gb.parse_sellers(body, flights=[("B6", "1523")])
+    _serve(monkeypatch, body)
+    result = _run("--fast", "--sellers", "--no-matrix-url", "--no-google-url")
+    assert result.exit_code == 0, result.output
+    block = result.stdout.split("Booking options for #1", 1)[1]
+    lines = block.splitlines()
+    header = next(line for line in lines if "seller" in line)
+    assert _cells(header, "┃") == ["#", "seller", "price", "fare"]
+    rows = [_cells(line, "│") for line in lines if line.startswith("│")]
+    assert rows == [
+        ["1", "Kiwi.com", "USD170.00", ""],
+        ["2", "JetBlue", "USD179.00", "Blue Basic"],
+        ["3", "Agency", "USD185.00", ""],
+    ]
+    assert "Each link goes through Google to that seller's own page for this fare." in block
+    assert "whole trip" not in block
+    # The agency states no fee and has no link, so it has no line.
+    assert [line for line in lines if re.match(r"\d+ ", line)] == [
+        f"1 Kiwi.com: carry-on free {kiwi.link}",
+        f"2 JetBlue: carry-on free, 1st checked USD35.00, 2nd checked USD45.00 {jetblue.link}",
+    ]
+    # The verdict is the last thing said.
+    assert lines[-1] == "Kiwi.com at USD170.00 beats the table price, USD179.00."
+
+
+def test_a_link_line_names_its_seller_as_the_table_row_does(
+    monkeypatch: pytest.MonkeyPatch, board: list[Any]
+) -> None:
+    """The console reads `:smile:` in a name as an emoji, and in a link it must
+    stay the text it was."""
+    _wide(monkeypatch)
+    body = _booking_body(
+        _option(
+            "Fly :smile: Co",
+            179,
+            flights=_B6_1523,
+            five=_five(f"{_CLK}/:smile:", [["u", "T"]]),
+        )
+    )
+    _serve(monkeypatch, body)
+    result = _run("--fast", "--sellers", "--no-matrix-url", "--no-google-url")
+    assert result.exit_code == 0, result.output
+    lines = result.stdout.split("Booking options for #1", 1)[1].splitlines()
+    (row,) = [_cells(line, "│") for line in lines if line.startswith("│")]
+    assert f"1 {row[1]} {_CLK}/:smile:?u=T" in lines
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param("CheapAir\nhttps://phish.example/book\n", id="newline"),
+        pytest.param("CheapAir\r\nhttps://phish.example/book", id="crlf"),
+    ],
+)
+def test_a_line_break_in_a_seller_name_forges_no_link_line(
+    monkeypatch: pytest.MonkeyPatch, board: list[Any], name: str
+) -> None:
+    """Every line of the link block that carries a URL is one seller's line:
+    its number first and the parsed Google link last."""
+    _wide(monkeypatch)
+    body = _booking_body(_option(name, 170, flights=_B6_1523, five=_five(_CLK, [["u", "TOK"]])))
+    (seller,) = gb.parse_sellers(body, flights=[("B6", "1523")])
+    assert seller.link == f"{_CLK}?u=TOK"
+    _serve(monkeypatch, body)
+    result = _run("--fast", "--sellers", "--no-matrix-url", "--no-google-url")
+    assert result.exit_code == 0, result.output
+    block = result.stdout.split("Booking options for #1", 1)[1]
+    lines = block.splitlines()
+    outside = [line for line in lines if not line.startswith(("│", "┃", "┏", "┡", "└"))]
+    # No line outside the table opens on a URL the name carried.
+    assert not [line for line in outside if line.lstrip().startswith("https://")], outside
+    # The one link line is its seller's: its number first and the parsed link last.
+    link_lines = [line for line in outside if seller.link in line]
+    assert len(link_lines) == 1, link_lines
+    assert link_lines[0].startswith("1 "), link_lines
+    assert link_lines[0].endswith(f" {seller.link}"), link_lines
+    # The verdict stays one line, and the last one.
+    assert re.fullmatch(r"\S.* at USD170\.00 beats the table price, USD179\.00\.", lines[-1]), (
+        lines[-3:]
+    )
+
+
+def test_a_link_line_is_printed_unstyled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A colour console would style a URL or a number inside a seller's name,
+    so the line would show some of it as if this program had marked it."""
+    buf = io.StringIO()
+    monkeypatch.setattr(
+        cli, "console", Console(file=buf, width=250, force_terminal=True, color_system="standard")
+    )
+    body = _booking_body(
+        _option("Cheap 24 https://phish.example", 170, five=_five(_CLK, [["u", "T"]]))
+    )
+    sellers = gb.parse_sellers(body, flights=[("B6", "1523")])
+    cli._render_booking_options(
+        gb.BookingOptions("USD", sellers), n=1, table_prices=[], round_trip=False
+    )
+    assert f"1 Cheap 24 https://phish.example {_CLK}?u=T" in buf.getvalue().splitlines()
+
+
+def test_sellers_with_no_link_print_no_link_lines(
+    monkeypatch: pytest.MonkeyPatch, board: list[Any]
+) -> None:
+    _serve(
+        monkeypatch,
+        _booking_body(_option("JetBlue", 179, airline=True, flights=_B6_1523, bags=[[3]])),
+    )
+    result = _run("--fast", "--sellers", "--no-matrix-url", "--no-google-url")
+    assert result.exit_code == 0, result.output
+    block = result.stdout.split("Booking options for #1", 1)[1]
+    assert "1 JetBlue: 1st checked free" in block.splitlines()
+    assert "link" not in block
+    assert "https://" not in block
+
+
+def _bag_cell(seller: gb.Seller, bag: str, nth: int) -> str:
+    fee = {(b.bag, b.nth): b.fee for b in seller.bags}.get((bag, nth))  # pyright: ignore[reportArgumentType] — a str probes a Literal key
+    return "" if fee is None else "free" if fee == 0 else f"USD{fee:.2f}"
+
+
+def _seller_line(i: int, seller: gb.Seller) -> str | None:
+    """Seller `i`'s line under the table: its bag fees, then its link."""
+    bags = ", ".join(
+        f"{label} {cell}"
+        for label, cell in (
+            ("carry-on", _bag_cell(seller, "carry-on", 1)),
+            ("1st checked", _bag_cell(seller, "checked", 1)),
+            ("2nd checked", _bag_cell(seller, "checked", 2)),
+        )
+        if cell
+    )
+    if not (bags or seller.link):
+        return None
+    link = f" {seller.link}" if seller.link else ""
+    return f"{i:d} {seller.name}" + (f": {bags}" if bags else "") + link
+
+
+@pytest.mark.parametrize("width", [80, 70, 66, 64, 60, 50])
+@pytest.mark.parametrize(
+    ("name", "flights"),
+    [
+        pytest.param("ow_jfk_lax_aa171_full.body", [("AA", "171")], id="aa171"),
+        pytest.param("ow_jfk_lhr_ba178_full.body", [("BA", "178")], id="ba178"),
+        pytest.param("ow_jfk_lax_dl1788.body", [("DL", "1788")], id="dl1788"),
+    ],
+)
+def test_a_narrow_console_cuts_no_price_fee_name_or_link(
+    monkeypatch: pytest.MonkeyPatch, name: str, flights: list[tuple[str, str]], width: int
+) -> None:
+    """80 columns is what Rich assumes for piped output. A seller or fare name
+    too long for its column folds onto the next line; a price never does, and
+    nothing loses its end to an ellipsis. The bag fees and the link sit on the
+    seller's own line, which the console never folds."""
+    sellers = gb.parse_sellers(_fixture(name), flights=flights)
+    buf = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buf, width=width, no_color=True))
+    cli._render_booking_options(
+        gb.BookingOptions("USD", sellers), n=1, table_prices=[], round_trip=False
+    )
+    out = buf.getvalue()
+    assert "…" not in out, out
+    rows: list[list[str]] = []
+    for line in (line for line in out.splitlines() if line.startswith("│")):
+        cells = _cells(line, "│")
+        if cells[0]:
+            rows.append(cells)
+        else:
+            # A continuation line: the number and the price stay on their row's first line.
+            assert [cells[0], cells[2]] == ["", ""], line
+            rows[-1] = [f"{a} {b}" for a, b in zip(rows[-1], cells, strict=True)]
+    assert [[c.replace(" ", "") for c in row] for row in rows] == [
+        [
+            f"{i:d}",
+            s.name.replace(" ", ""),
+            "—" if s.price is None else f"USD{s.price:.2f}",
+            (s.fare or "").replace(" ", ""),
+        ]
+        for i, s in enumerate(sellers, 1)
+    ]
+    # The trimmed DL1788 capture states no fee and no link, so it has no line.
+    expected = [line for i, s in enumerate(sellers, 1) if (line := _seller_line(i, s))]
+    assert [line for line in out.splitlines() if re.match(r"\d+ ", line)] == expected
+
+
 def _priced_in(monkeypatch: pytest.MonkeyPatch, rows: list[Any], currency: str) -> None:
     """Google answers with `rows` priced in `currency`, whatever was asked of it."""
     relabeled = [
@@ -518,7 +962,15 @@ def test_json_wraps_the_unchanged_search_document(
     assert set(doc) == {"search", "booking_options"}
     assert doc["search"] == json.loads(plain.stdout)
     assert doc["booking_options"] == [
-        {"seller": "JetBlue", "price": 179, "currency": "USD", "fare": "Blue", "airline": True}
+        {
+            "seller": "JetBlue",
+            "price": 179,
+            "currency": "USD",
+            "fare": "Blue",
+            "airline": True,
+            "booking_url": None,
+            "bags": [],
+        }
     ]
 
 
@@ -667,15 +1119,28 @@ def test_a_missing_chrome_keeps_its_remedy_and_drops_the_transports_that_cannot_
 
 
 def test_remote_seller_text_is_escaped(monkeypatch: pytest.MonkeyPatch, board: list[Any]) -> None:
+    _wide(monkeypatch)
     _serve(
         monkeypatch,
-        _booking_body(_option("[bold]Evil\x1b[2J[/x]", 179, fare="[red]Fare", flights=_B6_1523)),
+        _booking_body(
+            _option(
+                "[bold]Evil\x1b[2J[/x]",
+                179,
+                fare="[red]Fare",
+                flights=_B6_1523,
+                five=_five("https://www.google.com/[red]/:smile:/c", [["u", "[bold]T"]]),
+            )
+        ),
     )
     result = _run("--fast", "--sellers", "--no-matrix-url", "--no-google-url")
     assert result.exit_code == 0, result.output
     assert "[bold]Evil" in result.stdout
     assert "\x1b" not in result.stdout
     assert "[red]Fare" in result.stdout
+    assert (
+        "1 [bold]Evil[2J[/x] https://www.google.com/[red]/:smile:/c?u=%5Bbold%5DT"
+        in result.stdout.splitlines()
+    )
 
 
 # ───────────────────────────── the enriched path ─────────────────────────────
@@ -1046,22 +1511,15 @@ def test_enriched_sellers_with_no_table_at_all_fail_rather_than_go_quiet(
     assert result.stdout == ""
 
 
-def test_a_round_trip_opens_the_booking_page_for_both_legs(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A round-trip row is an outbound and a return; the page is asked for the
-    pair and must list sellers of the pair, not of the outbound alone."""
+def _round_trip_sellers(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """`--sellers` on a round trip whose row 1 is B6 1523 out, B6 123 back."""
     outbound, returning, _ = _gf_rows()
 
     def _pairs(*_a: object, **_kw: object) -> list[Any]:
         return [(outbound, returning)]
 
     monkeypatch.setattr(cli, "_gflight_results", _pairs)
-    fake = _serve(
-        monkeypatch,
-        _booking_body(
-            _option("JetBlue", 350, airline=True, flights=[["B6", "1523"], ["B6", "123"]])
-        ),
-    )
-    result = CliRunner().invoke(
+    return CliRunner().invoke(
         cli.app,
         [
             "search",
@@ -1078,13 +1536,88 @@ def test_a_round_trip_opens_the_booking_page_for_both_legs(monkeypatch: pytest.M
             "--no-google-url",
         ],
     )
+
+
+def test_a_round_trip_opens_the_booking_page_for_both_legs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A round-trip row is an outbound and a return; the page is asked for the
+    pair and must list sellers of the pair, not of the outbound alone."""
+    fake = _serve(
+        monkeypatch,
+        _booking_body(
+            _option("JetBlue", 350, airline=True, flights=[["B6", "1523"], ["B6", "123"]])
+        ),
+    )
+    result = _round_trip_sellers(monkeypatch)
     assert result.exit_code == 0, result.output
-    assert "USD350.00" in result.stdout.split("Booking options for #1", 1)[1]
+    block = result.stdout.split("Booking options for #1", 1)[1]
+    assert "USD350.00" in block
+    assert "whole trip" not in block
     raw = base64.urlsafe_b64decode(
         urllib.parse.parse_qs(urllib.parse.urlsplit(fake.urls[0]).query)["tfs"][0] + "=="
     )
     assert b"1523" in raw
     assert b"123" in raw.split(b"1523", 1)[1]
+
+
+@pytest.mark.parametrize(
+    ("five", "caption"),
+    [
+        pytest.param(
+            _five(_CLK, [["u", "T"]]),
+            "Each link goes through Google to that seller's own page for this fare; "
+            "bag fees cover the whole trip.",
+            id="with-links",
+        ),
+        pytest.param(None, "Bag fees cover the whole trip.", id="no-links"),
+    ],
+)
+def test_a_round_trips_bag_fees_are_said_to_cover_the_whole_trip(
+    monkeypatch: pytest.MonkeyPatch, five: Any, caption: str
+) -> None:
+    """AA's fees on BA178 are 85/100 one way and 170/200 round trip."""
+    _wide(monkeypatch)
+    _serve(
+        monkeypatch,
+        _booking_body(
+            _option(
+                "American",
+                817,
+                airline=True,
+                flights=[["B6", "1523"], ["B6", "123"]],
+                five=five,
+                bags=[[2, [[None, 170]], 1], [2, [[None, 200]], 1], [3]],
+            )
+        ),
+    )
+    result = _round_trip_sellers(monkeypatch)
+    assert result.exit_code == 0, result.output
+    block = result.stdout.split("Booking options for #1", 1)[1]
+    assert "USD170.00" in block
+    assert caption in block.splitlines()
+
+
+def test_a_round_trip_with_no_bag_fee_says_nothing_of_bag_fees(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _wide(monkeypatch)
+    _serve(
+        monkeypatch,
+        _booking_body(
+            _option(
+                "Agency",
+                817,
+                flights=[["B6", "1523"], ["B6", "123"]],
+                five=_five(_CLK, [["u", "T"]]),
+            )
+        ),
+    )
+    result = _round_trip_sellers(monkeypatch)
+    assert result.exit_code == 0, result.output
+    block = result.stdout.split("Booking options for #1", 1)[1]
+    assert "Each link goes through Google to that seller's own page for this fare." in (
+        block.splitlines()
+    )
+    assert "bag fees" not in block.lower()
 
 
 # ───────────────────────────── under a price cap ─────────────────────────────
