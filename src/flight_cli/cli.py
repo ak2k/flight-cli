@@ -104,7 +104,7 @@ if TYPE_CHECKING:
     from ._gf_booking import BookingOptions
     from ._gf_calgraph import GraphRange, LostLength, PriceGraph
     from ._gf_explore import Destination, ExploreAnswer, TripLength
-    from ._gflight_ids import Board, GfTransport, ItineraryKey, PriceInsight
+    from ._gflight_ids import Board, GfTransport, ItineraryKey, PriceInsight, SeparateTickets
     from .models import (
         BookingDetailsResult,
         CalendarResult,
@@ -4083,6 +4083,7 @@ def _gflight_results(
     *,
     first: Board[Any] | None = None,
     prefer: Sequence[ItineraryKey] = (),
+    separate_tickets: SeparateTickets = "off",
 ) -> Board[Any]:
     """Query Google Flights for `legs`, honoring routing/extension and time
     windows (see `_gflight_query`). Returns the (filtered) raw fli result list,
@@ -4090,17 +4091,21 @@ def _gflight_results(
 
     `first` and `prefer` go to `search_with_ids` as they are: the outbound page
     `_gflight_outbound` already fetched for the same arguments, and the
-    outbounds to pin ahead of this board's own.
+    outbounds to pin ahead of this board's own. So does `separate_tickets`,
+    which only a caller whose renderer marks a separate-ticket row may set.
     """
     from ._gflight_ids import Board, search_with_ids  # noqa: PLC0415 — fli, ~95 ms
 
-    # Only a multi-cabin round trip sets either, so every other search makes
-    # the one call to `search_with_ids` a single search makes.
+    # Only a multi-cabin round trip sets the first two and only the Google
+    # table the third, so every other search makes the one call to
+    # `search_with_ids` a single search makes.
     handed: dict[str, Any] = {}
     if first is not None:
         handed["first"] = first
     if prefer:
         handed["prefer"] = prefer
+    if separate_tickets != "off":
+        handed["separate_tickets"] = separate_tickets
     with _gflight_query(legs, opts, gf_mode, gf_headed) as query:
         results = search_with_ids(
             query.filters,
@@ -4169,8 +4174,16 @@ def _gflight_json_row(g: Any, bags: Bags | None = None) -> dict[str, Any]:
     alone doesn't carry.
 
     Under `--bags`, also `bags_included`: the checked and carry-on bags Google
-    says this row's price covers, null where it does not say."""
+    says this row's price covers, null where it does not say.
+
+    `separate_tickets` is true for a row Google sells as more than one booking,
+    a self transfer included, and null where the page does not say; fli's
+    `self_transfer` is the subset on which bags are rechecked."""
     row: dict[str, Any] = {**g.flight.model_dump(mode="json"), "flight_id": g.flight_id}
+    if getattr(g, "ticketing", None) is not None:
+        row["separate_tickets"] = True
+    else:
+        row["separate_tickets"] = None if g.flight.self_transfer is None else False
     legs: list[Any] = row.get("legs") or []
     amenities: list[Any] = list(g.amenities)
     # A misaligned extract leaves the surplus legs as fli dumped them.
@@ -4188,7 +4201,8 @@ def _gflight_json_row(g: Any, bags: Bags | None = None) -> dict[str, Any]:
 
 def _gflight_json_document(results: list[Any], bags: Bags | None = None) -> list[Any]:
     """The `--format json` document of a Google board: one row per itinerary,
-    a round trip's as its `[outbound, return]` pair."""
+    a round trip's as its `[outbound, return]` pair, or as `[outbound]` alone
+    for a trip on separate tickets whose return Google does not list."""
     out: list[Any] = []
     for r in results:
         items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
@@ -4218,6 +4232,12 @@ def _terminal_fare_key(r: Any) -> tuple[int, float]:
     from ._gflight_ids import fare_key  # noqa: PLC0415 — fli, ~95 ms
 
     return fare_key(cast("tuple[Any, ...]", r)[-1] if isinstance(r, tuple) else r)
+
+
+def _separately_ticketed(r: Any) -> bool:
+    """Whether Google sells a member of row `r` as separate tickets."""
+    members = cast("tuple[Any, ...]", r) if isinstance(r, tuple) else (r,)
+    return any(getattr(m, "ticketing", None) is not None for m in members)
 
 
 def _price_ordered(results: list[Any]) -> list[Any]:
@@ -4619,6 +4639,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     verify: bool = False,
     rps: float | None = None,
     impersonate: str | None = None,
+    separate_tickets: SeparateTickets = "off",
 ) -> int | None:
     """Google Flights path: build fli filter → query → render. Single-leg or round-trip.
 
@@ -4651,6 +4672,11 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     wraps the JSON document as `{"search": …, "booking_options": …}`.
     `verify` adds row `pick`'s check on Matrix the same way, as
     `{"search": …, "verify": …}`; `rps` and `impersonate` are for its client.
+
+    `separate_tickets` adds ("show") or counts ("hide") the itineraries Google
+    sells as separate tickets. Only the Google table and its document mark
+    them, so awards, `--sellers` and `--verify`, which render through the
+    adapter, read the base board alone.
     """
     # Deferred like the adapter below: this arm reaches rung 2 only when the
     # transport says so, and the module pulls in nothing patchright at import.
@@ -4662,7 +4688,14 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
         # answerable while the process still holds the driver, and on this arm
         # the navigation runs on the thread the signal is delivered to.
         with interrupt_guard():
-            results = _gflight_results(legs, opts, top_n, gf_mode, gf_headed)
+            results = _gflight_results(
+                legs,
+                opts,
+                top_n,
+                gf_mode,
+                gf_headed,
+                separate_tickets="off" if run_pp or sellers or verify else separate_tickets,
+            )
     except GfBackendError as e:
         refusal = _gf_refusal(e, transport=gf_mode, bags=opts.bags is not None)
         if hand_off_failure:
@@ -4691,6 +4724,19 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
         return dropped
     _pin_cap_note(legs=legs, top_n=top_n)
     _note_other_currencies(results, opts.currency or "USD")
+    unread: GfBackendError | None = getattr(results, "separate_failed", None)
+    if unread is not None:
+        # `removesuffix`: a browser refusal's note ends in its remedy's full stop.
+        note = _gf_refusal(unread, transport=gf_mode, bags=opts.bags is not None).note
+        note = note.removesuffix(".")
+        err.print(f"[dim]Itineraries on separate tickets not read: {note}.[/]")
+    hidden: int = getattr(results, "separate_hidden", 0)
+    if hidden:
+        err.print(
+            f"[dim]Google Flights: {hidden:d} "
+            + ("itinerary" if hidden == 1 else "itineraries")
+            + " on separate tickets hidden (--no-separate-tickets).[/]"
+        )
 
     # Checked before the answer is printed: a `--sellers` pick outside the
     # table is a usage error, not a pin to fall back from, and an empty board
@@ -4750,6 +4796,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
         len(results),
         pin_follows=lambda: (
             not json_out
+            and not _separately_ticketed(results[0])
             and _pins_row_one(
                 SpecificDateSearch(legs=legs, options=opts),
                 fli_results_to_search_result(results),
@@ -4829,7 +4876,9 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
             SpecificDateSearch(legs=legs, options=opts),
             matrix_url=matrix_url,
             google_url=google_url,
-            result=sr,
+            # A link pinned to a separate-ticket row opens a one-ticket page,
+            # which lists none of that trip's returns and not its price.
+            result=None if _separately_ticketed(results[(pick or 1) - 1]) else sr,
             # The pin LABEL names the row it pins. `sr` is built from the rows
             # the table numbered, so row 1 is the default pin, and it is the
             # cheapest only when Google priced it: on a board of unpriced rows
@@ -6381,7 +6430,9 @@ def _render_gflight_table(
     `bags`, the `--bags` asked for, adds a column saying whether each row's
     price includes them (`_bag_cell`). A `CO2 kg` column (`_co2_cell`) shows
     only when a shown row carries Google's estimate, so a board without one
-    keeps its width.
+    keeps its width. A row Google sells as separate tickets ends its price in
+    `†`, or `‡` for a self transfer, and a key line follows only when one is
+    shown.
 
     A round-trip combination can print two DIFFERENT prices, on its `Na` and
     `Nb` rows, and that reads as a bug until you know what each is: the `a` row
@@ -6448,13 +6499,15 @@ def _render_gflight_table(
                 any_legroom = True
             co2_cell = (_co2_cell(fr),) if show_co2 else ()
             bag_cell = () if bags is None else (_bag_cell(g.bags_included, bags),)
+            ticketing = getattr(g, "ticketing", None)
             # A row Google did not price is SHOWN, with the placeholder every
             # other absent amount in this CLI uses. Dropping it would shorten a
             # board the user asked `-n` rows of and make the count a lie, and a
             # currency prefix over nothing would read as a fare of zero.
             t.add_row(
                 label,
-                ("—" if fr.price is None else f"{_safe_text(fr.currency or 'USD')}{fr.price:.2f}"),
+                ("—" if fr.price is None else f"{_safe_text(fr.currency or 'USD')}{fr.price:.2f}")
+                + (" ‡" if ticketing == "self_transfer" else " †" if ticketing else ""),
                 _safe_text(fr.stops),
                 dur,
                 legs_str,
@@ -6469,6 +6522,19 @@ def _render_gflight_table(
         console.print(
             "[dim]CO2 kg: Google's estimate for the row's flights and its difference "
             "from the route's typical ([green]green[/] lower, [red]red[/] higher).[/]"
+        )
+    if any(_separately_ticketed(r) for r in shown):
+        console.print(
+            "[dim]† separate tickets: Google sells this trip as more than one booking. "
+            "‡ self transfer: separate tickets, and you collect and recheck bags between "
+            "flights."
+            + (
+                " A round trip on separate tickets lists its outbound only: Google prices "
+                "the whole trip but serves no return for it."
+                if any(isinstance(r, tuple) and len(cast("tuple[Any, ...]", r)) == 1 for r in shown)
+                else ""
+            )
+            + "[/]"
         )
     if insight is not None:
         console.print(
@@ -6970,6 +7036,19 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             rich_help_panel=_GROUP_FILTERING,
         ),
     ] = None,
+    no_separate_tickets: Annotated[
+        bool,
+        typer.Option(
+            "--no-separate-tickets",
+            help=(
+                "Hide the itineraries Google Flights sells as separate tickets or as a "
+                "self transfer, which its table and --format json otherwise show (marked "
+                "† and ‡, or separate_tickets: true), and say how many were hidden. Matrix "
+                "sells every itinerary as one ticket, so there it changes nothing."
+            ),
+            rich_help_panel=_GROUP_FILTERING,
+        ),
+    ] = False,
     page_size: int = typer.Option(
         10,
         "--n",
@@ -7428,6 +7507,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             verify=verify,
             rps=rps,
             impersonate=impersonate,
+            separate_tickets="hide" if no_separate_tickets else "show",
         )
         if unmatched is None:
             return

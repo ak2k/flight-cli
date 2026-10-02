@@ -160,7 +160,7 @@ def test_n_above_thirty_returns_the_rows_the_full_board_holds(
     rows: list[Any] = json.loads(result.stdout)
     assert len(rows) == 60
     assert len({_json_booked(r) + str(r["legs"][0]["departure_datetime"]) for r in rows}) == 60
-    assert len(fake.gets) == 1
+    assert len(fake.gets) == 2  # the board, then its Cheapest tab
     assert "tfu=EgQIABABIgA" in fake.gets[0]
 
 
@@ -906,7 +906,7 @@ def test_a_round_trip_the_routing_emptied_names_the_outbounds_it_tried(
         "no round trip matched a carrier exclusion (AA) (23 rows filtered out; "
         "returns were searched for the 2 cheapest outbound options)"
     ) in " ".join(result.stderr.split())
-    assert len(fake.gets) == 3  # the outbound, then two pins
+    assert len(fake.gets) == 4  # the outbound, two pins, then the Cheapest tab
 
 
 @pytest.mark.parametrize("outbound_served", [False, True])

@@ -443,7 +443,7 @@ def _weave(
     )
     bodies: list[dict[str, Any]] = []
 
-    def _gf(*_a: Any) -> list[Any]:
+    def _gf(*_a: Any, **_kw: Any) -> list[Any]:
         if google_fails:
             raise GfThrottledError("rate-limited")
         return rows

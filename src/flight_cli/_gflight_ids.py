@@ -798,6 +798,13 @@ _LAYOVERS_IDX = 13
 _ROW_FARE_IDX = 4
 _FARE_BAGS_IDX = 6
 
+# `row[7]` is how Google sells the itinerary, matched to the Cheapest tab's own
+# labels row by row: `[1]` "Self transfer", `[2]` "Separate tickets booked
+# together", `[]` one ticket. fli's `row[0][12]` reads False on all three.
+_ROW_TICKETING_IDX = 7
+_TICKETING_SELF_TRANSFER = 1
+_TICKETING_SEPARATE = 2
+
 # `row[22]` is Google's CO2 estimate for the row's own flights: grams at [7], the
 # route's typical grams at [8], the row's signed percent from that typical at [3],
 # and at [2] Google's label for that same comparison. [10]/[11] compare with the
@@ -1044,6 +1051,11 @@ def _parse_leg_amenities(fl: list[Any]) -> LegAmenities:
     )
 
 
+# A self transfer is separate tickets on which the traveler also collects and
+# rechecks bags between flights.
+type Ticketing = Literal["self_transfer", "separate_tickets"]
+
+
 @dataclass
 class GFlightWithId:
     """fli's FlightResult plus Google's opaque flight_id and per-leg amenities.
@@ -1065,6 +1077,23 @@ class GFlightWithId:
     # Per connection, the layover in minutes as the page states it, or None
     # where it states none for that connection (`_layover_minutes`).
     layovers: tuple[int | None, ...] = ()
+    # Set when Google sells the itinerary as more than one booking; None for one
+    # ticket and for a row that does not say (`_ticketing`).
+    ticketing: Ticketing | None = None
+
+
+def _ticketing(data: list[Any]) -> tuple[Ticketing | None, bool | None]:
+    """The row's ticketing and fli's `self_transfer`. A slot that is absent or
+    not a list states nothing, so `self_transfer` stays None."""
+    slot = data[_ROW_TICKETING_IDX] if len(data) > _ROW_TICKETING_IDX else None
+    if not isinstance(slot, list):
+        return None, None
+    codes = cast("list[Any]", slot)
+    if _TICKETING_SELF_TRANSFER in codes:
+        return "self_transfer", True
+    if _TICKETING_SEPARATE in codes:
+        return "separate_tickets", False
+    return None, False
 
 
 def _operating_identity(fl: list[Any]) -> tuple[Airline, str] | None:
@@ -1145,12 +1174,14 @@ def _parse_flight_with_id(data: list[Any]) -> GFlightWithId:
     price, currency = SearchFlights._parse_price_info(data)  # pyright: ignore[reportPrivateUsage, reportUnknownMemberType]
     flight_id = data[0][_FLIGHT_ID_IDX] if len(data[0]) > _FLIGHT_ID_IDX else ""
     leg_tuples: list[list[Any]] = data[0][2]
+    ticketing, self_transfer = _ticketing(data)
     flight = FlightResult(
         price=price,
         currency=currency,
         duration=data[0][9],
         stops=len(leg_tuples) - 1,
         legs=[_flight_leg(fl) for fl in leg_tuples],
+        self_transfer=self_transfer,
         **_row_co2(data),
     )
     amenities = [_parse_leg_amenities(fl) for fl in leg_tuples]
@@ -1161,6 +1192,7 @@ def _parse_flight_with_id(data: list[Any]) -> GFlightWithId:
         operating=tuple(_operating_identity(fl) for fl in leg_tuples),
         bags_included=_bags_included(data),
         layovers=_layover_minutes(data, leg_tuples),
+        ticketing=ticketing,
     )
 
 
@@ -1445,11 +1477,14 @@ def _rows_from_ds1(payload: list[Any]) -> _Ds1Board:
     return _Ds1Board(rows, blocks_seen, tuple(misplaced))
 
 
-def search_page_url(filters: FlightSearchFilters, *, currency: str = "USD") -> str:
+def search_page_url(
+    filters: FlightSearchFilters, *, currency: str = "USD", cheapest: bool = False
+) -> str:
     """The public search-page URL for `filters` — the one address both rungs
-    fetch, so neither can drift into asking Google a different question."""
+    fetch, so neither can drift into asking Google a different question.
+    `cheapest` is the same question asked of the Cheapest tab."""
     return google_flights_search_page_url(
-        build_search_tfs(filters, currency=currency), currency=currency
+        build_search_tfs(filters, currency=currency), currency=currency, cheapest=cheapest
     )
 
 
@@ -1604,7 +1639,9 @@ def _get_search_page(client: Any, url: str) -> Any:
         raise
 
 
-def _fetch_page(filters: FlightSearchFilters, *, currency: str = "USD") -> PageFetch:
+def _fetch_page(
+    filters: FlightSearchFilters, *, currency: str = "USD", cheapest: bool = False
+) -> PageFetch:
     """One GET of the public search page.
 
     Everything visible in the bytes themselves is left to
@@ -1619,7 +1656,7 @@ def _fetch_page(filters: FlightSearchFilters, *, currency: str = "USD") -> PageF
     backs off on."""
     client = get_client()
     _seed_cookies_once(client)
-    resp = _get_search_page(client, search_page_url(filters, currency=currency))
+    resp = _get_search_page(client, search_page_url(filters, currency=currency, cheapest=cheapest))
     return PageFetch(
         html=resp.text,  # pyright: ignore[reportAny]  # fli/curl_cffi untyped
         final_url=str(resp.url),  # pyright: ignore[reportAny]  # fli/curl_cffi untyped
@@ -1713,6 +1750,11 @@ def _kept_insight(
     return replace(insight, cheapest=min(fares)) if fares else None
 
 
+# Whether a search also reads the Cheapest tab for the itineraries Google sells
+# as separate tickets: "show" adds them to the answer, "hide" only counts them.
+type SeparateTickets = Literal["off", "show", "hide"]
+
+
 class Board[T](list[T]):
     """Rows as a search served them, plus what the page said beside them.
 
@@ -1722,7 +1764,9 @@ class Board[T](list[T]):
     is how an empty answer tells "none matched the routing" from "Google has no
     flights". `pinned` counts the outbounds a round trip searched returns for,
     because an empty answer from those says nothing about the outbounds it did
-    not pin."""
+    not pin. `separate_hidden` counts the separate-ticket itineraries a search
+    asked to hide, and `separate_failed` is why the Cheapest tab, where those
+    are listed, went unread."""
 
     def __init__(
         self,
@@ -1731,11 +1775,15 @@ class Board[T](list[T]):
         insight: PriceInsight | None = None,
         dropped: int = 0,
         pinned: int = 0,
+        separate_hidden: int = 0,
+        separate_failed: GfBackendError | None = None,
     ) -> None:
         super().__init__(rows)
         self.insight = insight
         self.dropped = dropped
         self.pinned = pinned
+        self.separate_hidden = separate_hidden
+        self.separate_failed = separate_failed
 
 
 # One itinerary, as `_deduped` and the round-trip pins tell them apart.
@@ -1887,9 +1935,11 @@ def _rows_from_page_html(page: PageFetch) -> Board[GFlightWithId]:
     return Board(_deduped(out), insight=_price_insight(payload, out))
 
 
-def _one_call(filters: FlightSearchFilters, *, currency: str = "USD") -> Board[GFlightWithId]:
+def _one_call(
+    filters: FlightSearchFilters, *, currency: str = "USD", cheapest: bool = False
+) -> Board[GFlightWithId]:
     """Rung 1: fetch the search page over curl_cffi and read its rows."""
-    rows = _rows_from_page_html(_fetch_page(filters, currency=currency))
+    rows = _rows_from_page_html(_fetch_page(filters, currency=currency, cheapest=cheapest))
     # A page we could READ means Google answered a warm session — save its
     # cookies (NID) so the next one-shot CLI process starts warm instead of
     # cold. Rung-1 only: rung 2 keeps its own Chrome profile, and its cookies
@@ -1996,11 +2046,13 @@ def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
 
 
 def _one_call_with_retry(
-    filters: FlightSearchFilters, *, currency: str = "USD"
+    filters: FlightSearchFilters, *, currency: str = "USD", cheapest: bool = False
 ) -> Board[GFlightWithId]:
     """`_one_call` under the throttle retry only — a parsed-empty page is an
     answer, so it costs exactly one GET and no sleep."""
-    return retry_throttled(lambda: _one_call(filters, currency=currency), retry_empty=False)
+    return retry_throttled(
+        lambda: _one_call(filters, currency=currency, cheapest=cheapest), retry_empty=False
+    )
 
 
 @dataclass(frozen=True)
@@ -2029,7 +2081,7 @@ HTTP_TRANSPORT = GfTransport()
 
 
 def _one_call_browser(
-    filters: FlightSearchFilters, *, headed: bool, currency: str = "USD"
+    filters: FlightSearchFilters, *, headed: bool, currency: str = "USD", cheapest: bool = False
 ) -> Board[GFlightWithId]:
     """Rung 2: one real-Chrome navigation of the same URL, read by the same parser.
 
@@ -2041,12 +2093,18 @@ def _one_call_browser(
     a test can substitute the session without a browser anywhere in the
     process."""
     return _rows_from_page_html(
-        _gf_browser.session(headed=headed).get_html(search_page_url(filters, currency=currency))
+        _gf_browser.session(headed=headed).get_html(
+            search_page_url(filters, currency=currency, cheapest=cheapest)
+        )
     )
 
 
 def _one_call_laddered(
-    filters: FlightSearchFilters, transport: GfTransport, *, currency: str = "USD"
+    filters: FlightSearchFilters,
+    transport: GfTransport,
+    *,
+    currency: str = "USD",
+    cheapest: bool = False,
 ) -> Board[GFlightWithId]:
     """One leg on the rung `transport` asks for.
 
@@ -2065,9 +2123,11 @@ def _one_call_laddered(
     mode and match all of them."""
     match transport.mode:
         case "browser":
-            return _one_call_browser(filters, headed=transport.headed, currency=currency)
+            return _one_call_browser(
+                filters, headed=transport.headed, currency=currency, cheapest=cheapest
+            )
         case "http" | "auto":
-            return _one_call_with_retry(filters, currency=currency)
+            return _one_call_with_retry(filters, currency=currency, cheapest=cheapest)
         case _:
             assert_never(transport.mode)
 
@@ -2251,6 +2311,7 @@ def search_with_ids(
     checks: str = "the routing",
     first: Board[GFlightWithId] | None = None,
     prefer: Sequence[ItineraryKey] = (),
+    separate_tickets: SeparateTickets = "off",
 ) -> Board[GFlightWithId | tuple[GFlightWithId, ...]] | None:
     """Drop-in for fli's `SearchFlights().search()` but each result carries
     its Google Flights opaque flight_id.
@@ -2291,20 +2352,40 @@ def search_with_ids(
     `outbound_page`, so it is not fetched twice. `prefer` puts those outbounds
     first among the pins when the page lists them and `keep` passes them, which
     is how one cabin prices another cabin's outbounds; the pin count is
-    unchanged by it."""
+    unchanged by it.
+
+    `separate_tickets` other than "off" reads the Cheapest tab once more, after
+    every other fetch, for the itineraries Google sells as separate tickets
+    (`_with_separate_tickets`). Only the search itself does; a pinned leg never
+    does."""
     if first is None:
         first = outbound_page(filters, transport=transport, currency=currency)
-    if not first:
-        return None
 
     num_segments = len(filters.flight_segments)
     selected_count = sum(1 for s in filters.flight_segments if s.selected_flight is not None)
+    separate = (
+        functools.partial(
+            _with_separate_tickets,
+            filters,
+            mode=separate_tickets,
+            transport=transport,
+            currency=currency,
+            keep=keep,
+        )
+        if separate_tickets != "off" and not selected_count
+        else None
+    )
+    if not first:
+        return None if separate is None else separate(Board())
     # A pinned board is filtered by the caller, after its pin check.
     board = first if selected_count else _kept_outbounds(first, keep)
     dropped = len(first) - len(board)
     # One-way, or the last leg already — no further iteration.
     if filters.trip_type == TripType.ONE_WAY or selected_count >= num_segments - 1 or not board:
-        return Board(board, insight=_kept_insight(first.insight, board, dropped), dropped=dropped)
+        answer: Board[GFlightWithId | tuple[GFlightWithId, ...]] = Board(
+            board, insight=_kept_insight(first.insight, board, dropped), dropped=dropped
+        )
+        return answer if separate is None else separate(answer)
 
     combos: list[GFlightWithId | tuple[GFlightWithId, ...]] = []
     pins = _pins(board, top_n, prefer)
@@ -2387,12 +2468,69 @@ def search_with_ids(
     # served, so the rows the filter removed on either leg are why it is empty,
     # and None would read as Google serving nothing.
     dropped += dropped_returns
-    return Board(
+    answer = Board(
         combos,
         insight=_kept_insight(first.insight, combos, dropped),
         dropped=dropped,
         pinned=len(pins),
     )
+    return answer if separate is None else separate(answer, stopped=stopped)
+
+
+def _with_separate_tickets(
+    filters: FlightSearchFilters,
+    answer: Board[GFlightWithId | tuple[GFlightWithId, ...]],
+    *,
+    mode: SeparateTickets,
+    transport: GfTransport,
+    currency: str,
+    keep: Callable[[int, GFlightWithId], bool] | None,
+    stopped: GfBackendError | None = None,
+) -> Board[GFlightWithId | tuple[GFlightWithId, ...]]:
+    """`answer` with the Cheapest tab's separate-ticket itineraries added
+    ("show") or counted ("hide").
+
+    Added beside the base rows, never in their place: the Cheapest board also
+    reprices some one-ticket rows, so swapping boards would change rows the
+    base prints. A marked row is added even when its flights are on the base
+    board, because it is a different booking at a different price.
+
+    On a round trip each is a one-member row, its outbound alone at Google's
+    round-trip total: Google serves no return board for it, pinned or not.
+
+    The page is not fetched when pinning stopped on a wall, the network or the
+    browser, because it would meet the same one. A refusal of this page leaves
+    `answer` as it is and says why on `separate_failed`."""
+
+    def with_notes(
+        rows: Iterable[GFlightWithId | tuple[GFlightWithId, ...]],
+        *,
+        hidden: int = 0,
+        failed: GfBackendError | None = None,
+    ) -> Board[GFlightWithId | tuple[GFlightWithId, ...]]:
+        return Board(
+            rows,
+            insight=answer.insight,
+            dropped=answer.dropped,
+            pinned=answer.pinned,
+            separate_hidden=hidden,
+            separate_failed=failed,
+        )
+
+    if stopped is not None:
+        return with_notes(answer, failed=stopped)
+    try:
+        page = _with_board_currency(
+            _one_call_laddered(filters, transport, currency=currency, cheapest=True), currency
+        )
+    except GfBackendError as e:
+        return with_notes(answer, failed=e)
+    marked = [r for r in page if r.ticketing is not None and (keep is None or keep(0, r))]
+    if mode == "hide":
+        return with_notes(answer, hidden=len(marked))
+    if filters.trip_type == TripType.ONE_WAY:
+        return with_notes([*answer, *marked])
+    return with_notes([*answer, *((r,) for r in marked)])
 
 
 def _report_pin_outcome(

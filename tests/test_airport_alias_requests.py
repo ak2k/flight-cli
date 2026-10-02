@@ -243,12 +243,13 @@ def test_a_row_at_an_unknown_airport_fails_with_flis_warning(
 def test_a_search_asks_for_and_prints_the_typed_airport(
     gf_session: Callable[..., Any], code: str
 ) -> None:
-    """One GET, for the code typed rather than NAH, NCL or PSC, and every row
-    Google serves there printed."""
+    """One GET of the board and one of its Cheapest tab, both for the code
+    typed rather than NAH, NCL or PSC, and every row Google serves there
+    printed."""
     fake = gf_session(_page_at(_OUTBOUND, "LAX", code, _DEP))
     args = [*_SEARCH, "LAX", code, "--dep", _DEP.isoformat(), *_GOOGLE, *_JSON, "-n", "100"]
     result = CliRunner().invoke(cli.app, args)
-    assert [_ends(url) for url in fake.gets] == [[(["LAX"], [code], [])]]
+    assert [_ends(url) for url in fake.gets] == [[(["LAX"], [code], [])]] * 2
     assert result.exit_code == 0, result.output
     assert len(json.loads(result.stdout)) == 95
 
@@ -266,8 +267,8 @@ def test_the_table_routes_to_the_typed_airport(gf_session: Callable[..., Any]) -
 def test_a_round_trip_pins_and_pairs_at_the_typed_airport(
     gf_session: Callable[..., Any],
 ) -> None:
-    """The first GET asks for both slices at OKA, and each return board pins an
-    outbound landing there."""
+    """The first GET asks for both slices at OKA, each return board pins an
+    outbound landing there, and the Cheapest tab is asked the first question."""
     fake = gf_session(
         _page_at(_OUTBOUND, "LAX", "OKA", _DEP), _page_at(_RETURN, "OKA", "LAX", _RET)
     )
@@ -276,8 +277,9 @@ def test_a_round_trip_pins_and_pairs_at_the_typed_airport(
     result = CliRunner().invoke(cli.app, args)
     asked = [_ends(url) for url in fake.gets]
     assert asked[0] == [(["LAX"], ["OKA"], []), (["OKA"], ["LAX"], [])]
-    assert len(asked) > 1
-    for out_slice, ret_slice in asked[1:]:
+    assert len(asked) > 2
+    assert asked[-1] == asked[0]
+    for out_slice, ret_slice in asked[1:-1]:
         assert out_slice[:2] == (["LAX"], ["OKA"])
         assert out_slice[2]
         assert out_slice[2][-1][1] == "OKA"
