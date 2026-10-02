@@ -193,6 +193,11 @@ class PPClient:
     ) -> None:
         self._tokens = tokens
         self._sem = anyio.Semaphore(concurrency)
+        # Pair queries fan out at once, so without this each would ask an
+        # airline PointsPath has just turned away as unsupported before the
+        # first refusal lands: an airline's first request goes out alone.
+        self._first_answered: dict[str, anyio.Event] = {}
+        self._unsupported: set[str] = set()
         self._client = httpx.AsyncClient(
             base_url=API_BASE,
             timeout=timeout,
@@ -270,6 +275,7 @@ class PPClient:
                 # Logged at debug: it's an expected steady state, not a problem
                 # the user can act on.
                 remember_unsupported_airline(airline)
+                self._unsupported.add(airline)
                 log.debug("pp_airline_unsupported", airline=airline)
             else:
                 log.debug(
@@ -281,6 +287,23 @@ class PPClient:
                 record_failure("PointsPath", http_reason(r.status_code, r.text), airline=airline)
             return AirlineSearchResponse()
         return AirlineSearchResponse.model_validate(r.json())
+
+    async def _ask_airline(self, spec: SearchSpec, airline: str) -> AirlineSearchResponse | None:
+        """`airline_search`, or None for an airline this client has since
+        learned is unsupported. Until the airline's first request has answered,
+        later ones wait for it outside the semaphore."""
+        first = self._first_answered.get(airline)
+        if first is None:
+            self._first_answered[airline] = first = anyio.Event()
+            try:
+                return await self.airline_search(spec, airline)
+            finally:
+                first.set()
+        await first.wait()
+        if airline in self._unsupported:
+            log.debug("pp_airline_search_skipped_unsupported", airlines=(airline,))
+            return None
+        return await self.airline_search(spec, airline)
 
     async def airline_search_many(
         self,
@@ -303,7 +326,8 @@ class PPClient:
             # stalled airline holding a slot costs the search one slot, not more.
             with anyio.CancelScope(deadline=answer_deadline()) as scope:
                 try:
-                    out[airline] = await self.airline_search(spec, airline)
+                    if (resp := await self._ask_airline(spec, airline)) is not None:
+                        out[airline] = resp
                 except Exception as e:  # noqa: BLE001 - per-airline failures are non-fatal
                     # Some exceptions, httpx.ReadTimeout among them, have an empty
                     # str(); the type is then the only reason the log carries.

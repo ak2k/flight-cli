@@ -267,6 +267,37 @@ def test_pair_queries_are_asked_at_once(monkeypatch: pytest.MonkeyPatch) -> None
     assert started == ["JFK", "EWR"]  # started in the order they were planned
 
 
+def test_an_airline_turned_away_as_unsupported_is_asked_once_a_search(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One pair query after another, each knew what the one before it learned.
+    Asked at once, every pair asked an airline PointsPath turns away as
+    unsupported before the first refusal landed."""
+    asked: list[str] = []
+
+    def refusing(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body["airline"] == "Emirates":
+            asked.append(f"{body['originAirport']} {body['cabinClass']}")
+            return httpx.Response(400, text='{"error":"Unsupported airline"}')
+        return _answer(request)
+
+    _use_providers(monkeypatch, tmp_path, refusing, _empty_seats)
+    log.configure("warning")
+    pp_cli.run_pp_for_search(
+        SearchResult.from_api({}),
+        legs=_legs(),
+        cabins="Economy,Business",
+        pp_only=True,
+        json_out=True,
+    )
+    captured = capsys.readouterr()
+
+    assert asked == ["JFK Economy"]
+    assert captured.err == ""
+    assert sorted(set(_flight_numbers(captured.out))) == ["UA100", "UA200", "UA300"]
+
+
 def test_the_award_phase_ends_at_its_deadline_and_keeps_what_answered(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
