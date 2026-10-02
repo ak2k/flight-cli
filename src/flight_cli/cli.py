@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Annotated, Any, NamedTuple, NoReturn, assert_n
 import anyio
 import anyio.to_thread
 import typer
+from rich.cells import cell_len
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
@@ -6362,6 +6363,20 @@ def _gflight_route(legs: Any) -> str:
     return "→".join(codes)
 
 
+def _gflight_legs_lines(g: Any, match_carriers: frozenset[str], *, route: bool) -> list[str]:
+    """One row's legs cell, a line per part: its airports first when `route`,
+    then each leg's label, every one but the last ending in " →". Joined with
+    spaces the lines are the one-line cell."""
+    fr = g.flight
+    amenities = getattr(g, "amenities", []) or []
+    labels = [
+        _leg_display(leg, amenities[k] if k < len(amenities) else None, match_carriers)
+        for k, leg in enumerate(fr.legs)
+    ]
+    head = _gflight_route(fr.legs) if route else ""
+    return ([head] if head else []) + [f"{label} →" for label in labels[:-1]] + labels[-1:]
+
+
 def _render_gflight_table(
     results: list[Any],
     *,
@@ -6406,62 +6421,82 @@ def _render_gflight_table(
         len(expand_airports(lg.origins)) > 1 or len(expand_airports(lg.destinations)) > 1
         for lg in legs
     )
-    t = Table(
-        title=f"Google Flights · {_safe_text(origin)}→{_safe_text(destination)}"
-        + (" + return" if has_return else ""),
-        show_header=True,
-        header_style="bold green",
-    )
     shown = _price_ordered(results)[:top_n]
-    show_co2 = any(
-        getattr(m.flight, "co2_emissions_g", None) is not None
-        for r in shown
-        for m in (cast("tuple[Any, ...]", r) if isinstance(r, tuple) else (r,))
+    members = [
+        g for r in shown for g in (cast("tuple[Any, ...]", r) if isinstance(r, tuple) else (r,))
+    ]
+    has_co2 = any(getattr(g.flight, "co2_emissions_g", None) is not None for g in members)
+    # Stacked, the legs column is never narrower than its longest line, so Rich
+    # wraps the other columns before it splits a designator.
+    legs_min = max(
+        (
+            cell_len(line)
+            for g in members
+            for line in _gflight_legs_lines(g, match_carriers, route=per_row_route)
+        ),
+        default=0,
     )
-    t.add_column("#", justify="right")
-    t.add_column("price", justify="right")
-    t.add_column("stops", justify="right")
-    t.add_column("duration")
-    t.add_column("legs")
-    t.add_column("legroom")
-    if show_co2:
-        t.add_column("CO2 kg", justify="right")
-    if bags is not None:
-        t.add_column("bags")
-    any_legroom = False
-    for i, r in enumerate(shown, 1):
-        items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
-        for j, g in enumerate(items):
-            fr = g.flight  # unwrap GFlightWithId → fli FlightResult
-            amenities = getattr(g, "amenities", []) or []
-            label = f"{i}{'a' if j == 0 else 'b'}" if len(items) > 1 else str(i)
-            flights = " → ".join(
-                _leg_display(leg, amenities[k] if k < len(amenities) else None, match_carriers)
-                for k, leg in enumerate(fr.legs)
-            )
-            route = _gflight_route(fr.legs) if per_row_route else ""
-            legs_str = " ".join(p for p in (route, flights) if p)
-            mins = fr.duration
-            dur = f"{mins // 60}h{mins % 60:02d}m"
-            legroom_str = _fmt_gflight_legroom(fr.legs, amenities)
-            if legroom_str:
-                any_legroom = True
-            co2_cell = (_co2_cell(fr),) if show_co2 else ()
-            bag_cell = () if bags is None else (_bag_cell(g.bags_included, bags),)
-            # A row Google did not price is SHOWN, with the placeholder every
-            # other absent amount in this CLI uses. Dropping it would shorten a
-            # board the user asked `-n` rows of and make the count a lie, and a
-            # currency prefix over nothing would read as a fare of zero.
-            t.add_row(
-                label,
-                ("—" if fr.price is None else f"{_safe_text(fr.currency or 'USD')}{fr.price:.2f}"),
-                _safe_text(fr.stops),
-                dur,
-                legs_str,
-                legroom_str,
-                *co2_cell,
-                *bag_cell,
-            )
+    # The first layout whose natural width fits the console, else the last:
+    # the legs go one per line before the CO2 column goes.
+    layouts = [(False, has_co2), (True, has_co2)] + ([(True, False)] if has_co2 else [])
+    while True:
+        stacked, show_co2 = layouts.pop(0)
+        t = Table(
+            title=f"Google Flights · {_safe_text(origin)}→{_safe_text(destination)}"
+            + (" + return" if has_return else ""),
+            show_header=True,
+            header_style="bold green",
+        )
+        t.add_column("#", justify="right")
+        t.add_column("price", justify="right")
+        t.add_column("stops", justify="right")
+        t.add_column("duration")
+        t.add_column("legs", min_width=legs_min if stacked else None)
+        t.add_column("legroom")
+        if show_co2:
+            t.add_column("CO2 kg", justify="right")
+        if bags is not None:
+            t.add_column("bags")
+        any_legroom = False
+        for i, r in enumerate(shown, 1):
+            items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
+            for j, g in enumerate(items):
+                fr = g.flight  # unwrap GFlightWithId → fli FlightResult
+                amenities = getattr(g, "amenities", []) or []
+                label = f"{i}{'a' if j == 0 else 'b'}" if len(items) > 1 else str(i)
+                legs_str = ("\n" if stacked else " ").join(
+                    _gflight_legs_lines(g, match_carriers, route=per_row_route)
+                )
+                mins = fr.duration
+                dur = f"{mins // 60}h{mins % 60:02d}m"
+                legroom_str = _fmt_gflight_legroom(fr.legs, amenities)
+                if legroom_str:
+                    any_legroom = True
+                co2_cell = (_co2_cell(fr),) if show_co2 else ()
+                bag_cell = () if bags is None else (_bag_cell(g.bags_included, bags),)
+                # A row Google did not price is SHOWN, with the placeholder every
+                # other absent amount in this CLI uses. Dropping it would shorten a
+                # board the user asked `-n` rows of and make the count a lie, and a
+                # currency prefix over nothing would read as a fare of zero.
+                t.add_row(
+                    label,
+                    (
+                        "—"
+                        if fr.price is None
+                        else f"{_safe_text(fr.currency or 'USD')}{fr.price:.2f}"
+                    ),
+                    _safe_text(fr.stops),
+                    dur,
+                    legs_str,
+                    legroom_str,
+                    *co2_cell,
+                    *bag_cell,
+                )
+        # `console.measure` caps the answer at the console's width, so only an
+        # unbounded measure says whether the table is wider.
+        unbounded = console.options.update_width(10_000)
+        if not layouts or console.measure(t, options=unbounded).maximum <= console.width:
+            break
     console.print(t)
     if any_legroom:
         console.print(_LEGROOM_KEY)
@@ -6469,6 +6504,11 @@ def _render_gflight_table(
         console.print(
             "[dim]CO2 kg: Google's estimate for the row's flights and its difference "
             "from the route's typical ([green]green[/] lower, [red]red[/] higher).[/]"
+        )
+    elif has_co2:
+        console.print(
+            "[dim]CO2 kg not shown: the table does not fit the output width; "
+            "--format json carries it.[/]"
         )
     if insight is not None:
         console.print(
