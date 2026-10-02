@@ -968,6 +968,24 @@ def test_the_detail_it_names_asks_matrix_in_the_currency_its_grid_was_asked_in(
     assert [s.options.currency for s in detail] == ["USD"]
 
 
+def test_the_note_is_one_line_so_a_narrow_terminal_breaks_no_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A newline inside a command would cut it short when pasted."""
+    _matrix_prices(monkeypatch, _JFK_LHR_DAY, {})
+    _graphs_are(monkeypatch, _JFK_LHR_GRAPHS)
+    monkeypatch.setenv("COLUMNS", "80")
+    monkeypatch.setattr(cli, "err", Console(stderr=True))
+    result = _run("JFK", "LHR", "-d", "5-7")
+    assert result.exit_code == 0, result.output
+    (line,) = [ln for ln in result.stderr.splitlines() if "Matrix and Google Flights" in ln]
+    assert line.startswith("Matrix and Google Flights differ on the lowest fare:")
+    assert line.endswith(
+        f"flight detail JFK LHR --dep {_iso(2)} --return {_iso(7)} (Matrix), "
+        f"flight search JFK LHR --dep {_iso(0)} --return {_iso(7)} --backend gflight (Google)."
+    )
+
+
 def test_a_price_matrix_wrote_is_printed_as_text(monkeypatch: pytest.MonkeyPatch) -> None:
     _matrix_prices(monkeypatch, {2: ("USD[/x]500.00", {5: "USD[/x]500.00"})}, {})
     _graphs_are(monkeypatch, {n: _graph(n, (0, 300.0)) for n in (5, 6, 7)})

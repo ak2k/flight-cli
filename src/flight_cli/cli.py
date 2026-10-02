@@ -2298,7 +2298,9 @@ def _run_calendar_beside_graph(
                 answer, graphs, search, origins=origins, dests=dests, sd=sd, ed=ed, asked=asked
             )
         if note is not None:
-            err.print(f"[yellow]{_safe_text(note)}[/]")
+            # Left for the terminal to wrap: a newline inside one of its commands
+            # would cut the command short when pasted.
+            err.print(f"[yellow]{_safe_text(note)}[/]", soft_wrap=True)
     if matrix_exit is not None:
         raise matrix_exit
 
