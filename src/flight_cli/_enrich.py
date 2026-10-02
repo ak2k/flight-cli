@@ -64,8 +64,8 @@ def party_price(it: Itinerary, passengers: int) -> str | None:
 def _rank_price(row: MergedRow, currency: str) -> str | None:
     """The price a row ranks on: the lowest it prints in `currency`, or where
     it prints none in it, the lowest in the currency of Matrix's price, else
-    Google's. A row then never sorts below a dearer one, or past `-n`, for a
-    price it prints beside a cheaper one."""
+    Google's. So the dearer of a row's two prices never sorts it below a
+    dearer row, or out of the first `-n`."""
     printed = [p for p in (row.matrix_price, row.gf_price) if p]
     if not printed:
         return None

@@ -5162,8 +5162,9 @@ def _cross_check_answers(
     """The two answers a weave left, as the cross-check reads them, with
     Matrix's page before the price cap as `uncapped`. Google's board is no
     answer where its half failed or never ran, and a board the row filter cut
-    cannot show a flight absent from what Google served. The rows Google served
-    that the parser could not read ride on the board as `unread`."""
+    cannot show a flight absent from what Google served. The board's `unread`,
+    the rows Google served that the parser could not read, is read as
+    `dropped` is."""
     stops = opts.max_extra_stops
     return Answers(
         matrix=matrix_res,
@@ -5232,9 +5233,8 @@ def _answer_cross_check_document(
         matrix_res = _price_capped(page, opts, passengers=opts.pax.total)
         _report_weave_aftermath(state)
         board = fli_results_to_search_result(gf)
-        shown = merge_results(board, matrix_res, currency=currency, passengers=opts.pax.total)[
-            :top_n
-        ]
+        merged = merge_results(board, matrix_res, currency=currency, passengers=opts.pax.total)
+        shown = merged[:top_n]
         answers = _cross_check_answers(
             state, board, matrix_res, uncapped=page, legs=legs, opts=opts, currency=currency
         )

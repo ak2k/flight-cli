@@ -25,7 +25,7 @@ from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
 # The merge's own reading of a landing time, so a pair and a reason compare
-# trips the same way.
+# trips the same way, and its own price for the party.
 from ._enrich import (
     _wall_clock,  # pyright: ignore[reportPrivateUsage] — see above
     party_price,
