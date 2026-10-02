@@ -876,7 +876,7 @@ def test_a_lost_length_names_the_lengths_google_priced_after_its_line(
     assert err.index(f"{_NOT_SHOWN} 7-night trips:") < err.index(_DIFFER)
     assert (
         "Both asked economy, 1 adult, in USD, between the same airports, Matrix for "
-        f"5-7 nights and Google for 5-6-night trips only{_STOP_CLAUSE}"
+        f"5-7 nights; Google's graph priced 5-6-night trips only{_STOP_CLAUSE}"
     ) in note
     assert f"Google Flights USD300 ({_iso(0)} to {_iso(5)}, 5 nights, JFK→LHR)" in note
 

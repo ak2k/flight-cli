@@ -2561,8 +2561,10 @@ def _two_lows_note(
     shared.append("between the same airports")
     both = "Both asked " + ", ".join(shared)
     if lost:
+        # A length the graph lacks may never have been loaded, so it is named as
+        # what Google priced, not as what Google was asked.
         both += (
-            f", Matrix for {span} nights and Google for "
+            f", Matrix for {span} nights; Google's graph priced "
             f"{_trip_lengths_text(graph_lengths)} trips only"
         )
     if not _stops_reach_the_page(search):
