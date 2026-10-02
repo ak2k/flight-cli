@@ -230,6 +230,18 @@ def test_at_80_columns_a_stacked_table_as_wide_as_the_console_keeps_co2(
     assert _LEGEND not in at_78
 
 
+@pytest.mark.parametrize("width", [20, 40, 60])
+def test_a_console_narrower_than_every_layout_still_prints_the_table(
+    monkeypatch: pytest.MonkeyPatch, width: int
+) -> None:
+    """The last layout prints even when it does not fit, and Rich narrows it
+    to the console rather than fail."""
+    results, legs, _ = _BOARDS["jfk-ewr-lhr"]
+    text = _render(monkeypatch, results, legs, width, bags=Bags(checked=1))
+    assert max(len(ln) for ln in text.splitlines()) <= width
+    assert " ".join(text.split()).count(_NOTE) == 1
+
+
 def test_a_board_without_co2_stacks_its_legs_and_prints_no_note(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
