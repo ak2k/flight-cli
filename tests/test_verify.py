@@ -765,6 +765,25 @@ def test_table_mode_prints_the_check_after_the_google_table(
     assert "JFK→SEA  AS  fare basis QH7OAVBN  booking code Q  COACH" in out
 
 
+def test_enrich_json_writes_the_verify_document_not_the_cross_check(
+    gf_session: Callable[..., Any], matrix: _Matrix, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _no_enrichment(**_kw: Any) -> None:
+        raise AssertionError("the document --verify writes holds no cross-check")
+
+    monkeypatch.setattr(cli, "_run_enriched_path", _no_enrichment)
+    n, row = _as_row()
+    matrix.chain = _chain(_row_solution("AS-1", f"USD{row.flight.price:.2f}", row))
+    matrix.details = {"AS-1": _details_of(row)}
+    gf_session(_served())
+    result = _run("-n", "40", "--enrich", "--format", "json", "--verify", "--pick", str(n))
+    assert result.exit_code == 0, result.output
+    doc = json.loads(result.stdout)
+    assert set(doc) == {"search", "verify"}
+    assert doc["verify"]["outcome"] == "match"
+    assert "No Matrix enrichment: --verify asks Matrix about one row instead." in result.stderr
+
+
 def test_another_days_cheaper_price_is_never_shown(
     gf_session: Callable[..., Any], matrix: _Matrix
 ) -> None:
