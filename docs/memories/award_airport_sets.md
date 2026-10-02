@@ -97,13 +97,19 @@ event name, so `-vv` still shows each one.
 The pair queries of a search start together, in the order `_plan_pair_queries`
 gives them, and each pair still asks its cabins in turn. Their PointsPath
 requests share the client's one semaphore of 5 first come, first served, so an
-airline that stalls holds one slot rather than every pair behind it. Seats.aero
+airline that stalls holds one slot rather than every pair behind it. An
+airline's first request goes out alone and the other pairs' requests for it wait
+for that answer, without a slot, so an airline PointsPath refuses as unsupported
+is asked once a search, as when the pairs ran in turn. Seats.aero
 has no semaphore, so a search now sends it all its pair requests at once (6 on
 a six-pair search); nothing has measured how it takes that.
 
 The award phase ends `AWARD_DEADLINE_SECS` = 180 s after it starts
 (`pp/cli.py`). Every request carries the deadline, its wait for a slot included
-(`answer_deadline`), and so does building a provider. A request still
+(`answer_deadline`), and so does building a provider. The token refresh a 401
+triggers is a blocking call, so it runs in a worker thread the deadline stops
+waiting on; an abandoned refresh can still hold the process's exit for its own
+20 s timeout once the results have printed. A request still
 unanswered then is cut and named in the line (`not answered within 180 s`, with
 a count), and every answer already in is kept, joined and rendered. The
 deadline sits on each request and not around a provider's whole search, which
