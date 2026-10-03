@@ -5823,18 +5823,6 @@ def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, 
             state, board, matrix_res, uncapped=page, legs=legs, opts=opts, currency=requested
         )
         _render_merged(merged, legs=legs, top_n=top_n, check=cross_check(merged[:top_n], answers))
-        low = _low_check(
-            merged,
-            board,
-            gf,
-            top_n=top_n,
-            opts=opts,
-            currency=requested,
-            rps=rps,
-            impersonate=impersonate,
-        )
-        if low is not None:
-            _print_low_check(low)
         shown = [r.itinerary for r in merged[:top_n]]
         seller_row = _pick_for_sellers(pick, len(shown)) if sellers else None
         # The same contract `_run_gflight_path` has: the range a pick is
@@ -5861,6 +5849,20 @@ def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, 
         if seller_row is not None:
             chosen = merged[seller_row - 1]
             booking_row = (pinnable, seller_row, chosen.gf_price, chosen.matrix_price)
+        # After the picks are checked, so a pick that exits does not wait on
+        # Matrix first; their notes go to stderr, and the line stays under the table.
+        low = _low_check(
+            merged,
+            board,
+            gf,
+            top_n=top_n,
+            opts=opts,
+            currency=requested,
+            rps=rps,
+            impersonate=impersonate,
+        )
+        if low is not None:
+            _print_low_check(low)
     else:
         # Nothing this arm prints carries a row number: the award renderer is
         # the only surface it has and its columns hold no `#`. So a pick names
