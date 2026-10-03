@@ -136,6 +136,36 @@ def test_specific_with_time_ranges():
     assert ours == captured, _diff(captured, ours)
 
 
+def test_specific_with_flexible_dates():
+    """JFK → LHR round trip, the outbound "+/- 2 days" and the return "Or day
+    after" in the SPA's form."""
+    captured = _strip(_load("specific_jfk_lhr_rt_flex.json"))
+    out_slice, ret_slice = captured["inputs"]["slices"]
+    search = SpecificDateSearch(
+        legs=(
+            Leg.of(
+                "JFK", "LHR", date.fromisoformat(out_slice["date"]), date_minus=2, date_plus=2
+            ),
+            Leg.of("LHR", "JFK", date.fromisoformat(ret_slice["date"]), date_plus=1),
+        ),
+        options=SearchOptions(cabin=Cabin.COACH, pax=Pax(adults=1)),
+    )
+    ours = to_wire(search).as_json()
+    assert ours == captured, _diff(captured, ours)
+
+
+def test_specific_with_an_arrival_date():
+    """JFK → LHR one-way, the date "Arrival" in the SPA's form."""
+    captured = _strip(_load("specific_jfk_lhr_ow_arrive.json"))
+    (only,) = captured["inputs"]["slices"]
+    search = SpecificDateSearch(
+        legs=(Leg.of("JFK", "LHR", date.fromisoformat(only["date"]), is_arrival_date=True),),
+        options=SearchOptions(cabin=Cabin.COACH, pax=Pax(adults=1)),
+    )
+    ours = to_wire(search).as_json()
+    assert ours == captured, _diff(captured, ours)
+
+
 # ─────────────────────────────── helpers ───────────────────────────────────
 
 

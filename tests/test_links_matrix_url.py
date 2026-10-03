@@ -439,6 +439,36 @@ def test_the_pinned_link_carries_the_date_options() -> None:
     assert _decode_search(url)["slices"] == _decoded(s)["slices"]
 
 
+def _captured_state(name: str) -> dict[str, Any]:
+    """A fixture holding the SPA's URL state as decoded JSON under its header."""
+    text = (FIXTURE_DIR / name).read_text()
+    body = "\n".join(ln for ln in text.splitlines() if not ln.startswith("#"))
+    return cast("dict[str, Any]", json.loads(body))
+
+
+def test_the_flexible_round_trip_link_is_the_spas_own_state() -> None:
+    s = SpecificDateSearch(
+        legs=(
+            Leg.of("JFK", "LHR", date(2026, 10, 20), date_minus=2, date_plus=2),
+            Leg.of("LHR", "JFK", date(2026, 10, 27), date_plus=1),
+        ),
+        options=SearchOptions(cabin=Cabin.COACH, pax=Pax(adults=1)),
+    )
+    assert _decoded(s) == _captured_state("spa_rt_flex_jfk_lhr.txt")
+
+
+def test_the_arrival_date_link_is_the_spas_own_state() -> None:
+    s = SpecificDateSearch(
+        legs=(Leg.of("JFK", "LHR", date(2026, 10, 21), is_arrival_date=True),),
+        options=SearchOptions(cabin=Cabin.COACH, pax=Pax(adults=1)),
+    )
+    ours = _decoded(s)
+    # The SPA leaves a one-way's returnDate out, where every one-way link here
+    # writes "": both open the same form.
+    assert ours["slices"][0]["dates"].pop("returnDate") == ""
+    assert ours == _captured_state("spa_ow_arrive_jfk_lhr.txt")
+
+
 # ─────────── calendar URLs: trip length is round-trip-only state ────────────
 # `dates.duration` is the nights between outbound and return. On a one-way link it
 # made two identical searches produce different URLs, and opening one handed the SPA
