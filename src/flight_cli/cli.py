@@ -22,7 +22,16 @@ import sys
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from functools import partial
-from typing import TYPE_CHECKING, Annotated, Any, NamedTuple, NoReturn, assert_never, cast
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    Literal,
+    NamedTuple,
+    NoReturn,
+    assert_never,
+    cast,
+)
 
 import anyio
 import anyio.to_thread
@@ -41,7 +50,13 @@ from ._calendar_split import (
     split_calendar_search,
     with_fanout_currency,
 )
-from ._cross_check import Answers, cross_check
+from ._cross_check import (
+    Answers,
+    cross_check,
+    every_matrix_price_in,
+    low_row,
+    lowest_matrix_price,
+)
 from ._cross_check import document as cross_check_document
 from ._enrich import party_price
 
@@ -5066,7 +5081,7 @@ def _paint_first_gf_table(
         except Exception as e:  # noqa: BLE001 — see the docstring
             state["paint_err"] = e
         else:
-            err.print("[dim]…refining with Matrix (authoritative fares)…[/]")
+            err.print("[dim]…comparing with Matrix's fares…[/]")
     elif not gf and "gf_err" not in state:
         cap = _page_cap_text(opts)
         if getattr(gf, "dropped", 0):
@@ -5318,6 +5333,10 @@ def _report_search_matrix_failure(state: dict[str, Any]) -> None:
 # a Google row is then compared with every trip Matrix found, not its first `-n`.
 _CROSS_CHECK_PAGE = 500
 
+# How long the cross-check waits on Matrix for Google's low row. The merged
+# table is printed before it starts, so the wait delays only the line under it.
+_LOW_CHECK_SECONDS: float = 60
+
 
 def _cross_check_answers(
     state: dict[str, Any],
@@ -5370,6 +5389,8 @@ def _answer_cross_check_document(
     top_n: int,
     currency: str,
     gf_mode: GfTransportMode,
+    rps: float,
+    impersonate: str,
 ) -> None:
     """Write the weave's answer as `{"search": …, "cross_check": …}`.
 
@@ -5409,8 +5430,234 @@ def _answer_cross_check_document(
             state, board, matrix_res, uncapped=page, legs=legs, opts=opts, currency=currency
         )
         checked = cross_check_document(shown, cross_check(shown, answers))
+        low = _low_check(
+            merged,
+            board,
+            gf,
+            top_n=top_n,
+            opts=opts,
+            currency=currency,
+            rps=rps,
+            impersonate=impersonate,
+        )
+        checked["low_check"] = _low_check_document(low)
     search = _gflight_json_document(_price_ordered(gf)[:top_n], opts.bags)
     sys.stdout.write(json.dumps({"search": search, "cross_check": checked}, indent=2, default=str))
+
+
+class _LowCheck(NamedTuple):
+    """Matrix asked for row `n`'s exact flights, which Google prices at
+    `google` under `matrix_low`, Matrix's cheapest fare in its own answer.
+    `matrix_price` is Matrix's price for the party on a match; `reason`
+    says why there is none."""
+
+    n: int
+    row: _verify.Row
+    google: str
+    matrix_low: str | None
+    outcome: Literal["match", "other-itinerary", "no-solution", "no-answer"]
+    matrix_price: str | None = None
+    reason: str | None = None
+
+
+class _UncheckableAnswerError(Exception):
+    """Matrix answered the chain in a shape that cannot be read flight by flight."""
+
+
+async def _exact_flights_on(
+    c: MatrixClient, row: _verify.Row, opts: SearchOptions
+) -> _verify.Verdict:
+    """`row` asked of Matrix as exactly its flights: the chain search, uncached
+    because booking details are asked of its session, then one booking-details
+    call per candidate in Matrix's order. No fare rules and no unrouted second
+    search: this answers only whether Matrix prices these flights."""
+    chain = cast(
+        "SearchResult",
+        await c.execute(
+            SpecificDateSearch(
+                legs=_verify.matrix_legs(row), options=_verify.matrix_options(row, opts)
+            ),
+            cache=False,
+        ),
+    )
+    if not chain.solutions:
+        return _verify.Verdict("no-solution", "Matrix returned no fare on these exact flights")
+    idxs = _verify.candidates(row, chain)
+    if not idxs:
+        return _verify.other_itinerary(len(chain.solutions))
+    session, solution_set = chain.session, chain.solution_set
+    sids = [sid for sid in (chain.solutions[i].id for i in idxs) if sid]
+    if not (session and solution_set and len(sids) == len(idxs)):
+        raise _UncheckableAnswerError(
+            "Matrix answered without a session for these flights, "
+            "so they cannot be checked flight by flight."
+        )
+    unreadable = False
+    for i, sid in zip(idxs, sids, strict=True):
+        answer = await c.booking_details(
+            session=session, solution_set=solution_set, solution_id=sid
+        )
+        details = answer.booking_details
+        if details is None or details.itinerary is None:
+            unreadable = True
+        elif _verify.same_flights(row, details.itinerary):
+            return _verify.Verdict("match", solution=chain.solutions[i], details=details)
+    if unreadable:
+        # A candidate whose flights cannot be read may be the row, so "another
+        # itinerary" would not be known to be true.
+        raise _UncheckableAnswerError(
+            "Matrix returned booking details without their flights, "
+            "so this itinerary cannot be checked flight by flight."
+        )
+    return _verify.other_itinerary(len(chain.solutions))
+
+
+def _low_check_failure(e: Exception) -> str:
+    """Each failure inside `e` by its kind and message."""
+    parts: list[str] = []
+    for f in _failures_inside(e) or [e]:
+        if isinstance(f, MatrixApiError):
+            parts.append(f"Matrix returned an error ({f.kind}): {f.message}")
+        else:
+            parts.append(f"{type(f).__name__}: {f}" if str(f) else type(f).__name__)
+    return "; ".join(parts)
+
+
+def _ask_low_row(
+    n: int,
+    google: str,
+    fli_row: Any,
+    opts: SearchOptions,
+    *,
+    matrix_low: str | None,
+    rps: float,
+    impersonate: str,
+) -> _LowCheck:
+    """Row `n` asked of Matrix as exactly its flights, within
+    `_LOW_CHECK_SECONDS`. One event loop holds the whole conversation, so the
+    bound cancels whichever request is in flight. Every failure is the outcome
+    "no-answer": the table is already printed, and the exit code stays the
+    search's."""
+    row = _verify.google_row(fli_row)
+    bound = f"{_LOW_CHECK_SECONDS:g}"
+    err.print(
+        f"[dim]Asking Matrix for row {n:d}'s exact flights (at most {_safe_text(bound)} s)…[/]"
+    )
+
+    async def go() -> _verify.Verdict | None:
+        async with MatrixClient(rps=rps, impersonate=impersonate) as c:
+            with anyio.move_on_after(_LOW_CHECK_SECONDS):
+                return await _exact_flights_on(c, row, opts)
+        return None
+
+    def unanswered(reason: str) -> _LowCheck:
+        return _LowCheck(n, row, google, matrix_low, "no-answer", reason=reason)
+
+    try:
+        verdict = anyio.run(go)
+    except (typer.Exit, typer.Abort):
+        raise
+    except _UncheckableAnswerError as e:
+        return unanswered(str(e))
+    except Exception as e:  # noqa: BLE001 — no failure of the check may change the search's outcome
+        return unanswered(_low_check_failure(e))
+    if verdict is None:
+        return unanswered(f"Matrix did not answer within {bound} s")
+    if verdict.outcome == "match" and verdict.solution is not None:
+        return _LowCheck(
+            n,
+            row,
+            google,
+            matrix_low,
+            "match",
+            matrix_price=party_price(verdict.solution, opts.pax.total),
+        )
+    outcome = "other-itinerary" if verdict.outcome == "other-itinerary" else "no-solution"
+    return _LowCheck(n, row, google, matrix_low, outcome, reason=verdict.reason)
+
+
+def _low_check(
+    merged: list[Any],
+    board: SearchResult,
+    gf: list[Any],
+    *,
+    top_n: int,
+    opts: SearchOptions,
+    currency: str,
+    rps: float,
+    impersonate: str,
+) -> _LowCheck | None:
+    """Matrix asked for the exact flights of the first Google-only row the
+    table shows under every fare in Matrix's own answer, or None where no row
+    is, which asks Matrix nothing more. A Matrix fare with no price for the
+    party in `currency` cannot be compared, so it leaves no row under every
+    fare."""
+    if not every_matrix_price_in(merged, currency):
+        return None
+    matrix_low = lowest_matrix_price(merged, currency)
+    n = low_row(merged[:top_n], matrix_low, currency)
+    if n is None:
+        return None
+    chosen = merged[n - 1]
+    # `board` holds one itinerary per fli result, in order, less an empty
+    # round trip, so the row's own result is found by the itinerary's identity.
+    results = cast("list[Any]", [r for r in gf if not (isinstance(r, tuple) and not r)])
+    if len(results) != len(board.solutions) or chosen.gf_price is None:
+        return None
+    fli_row = next(
+        (r for it, r in zip(board.solutions, results, strict=True) if it is chosen.google), None
+    )
+    if fli_row is None:
+        return None
+    return _ask_low_row(
+        n,
+        chosen.gf_price,
+        fli_row,
+        opts,
+        matrix_low=matrix_low,
+        rps=rps,
+        impersonate=impersonate,
+    )
+
+
+def _print_low_check(lc: _LowCheck) -> None:
+    """The one line under the merged table: Matrix's price for row N's exact
+    flights beside Google's, both for the party, or why Matrix does not price
+    them as those flights, or that it gave no answer."""
+    trip = "; ".join(
+        f"{chain} {legs[0].departure[:10]}"
+        for chain, legs in zip(_verify.routings(lc.row), lc.row.slices, strict=True)
+    )
+    if lc.outcome == "match":
+        answer = (
+            f"Matrix {lc.matrix_price or '—'} · Google {lc.google}"
+            f"{_price_gap(lc.google, lc.matrix_price)}"
+        )
+    elif lc.outcome == "no-answer":
+        answer = f"no answer: {lc.reason}"
+    else:
+        answer = f"not priced as these flights: {lc.reason}"
+    console.print(
+        f"Matrix asked for row {lc.n:d}'s flights ({_safe_text(trip)}): {_safe_text(answer)}",
+        style="yellow" if lc.outcome == "no-answer" else None,
+    )
+
+
+def _low_check_document(lc: _LowCheck | None) -> dict[str, Any] | None:
+    """`cross_check.low_check`, null where no row was checked. Prices are for
+    the party and `delta` is Google's minus Matrix's, on a match only."""
+    if lc is None:
+        return None
+    return {
+        "row": lc.n,
+        "google_low": lc.google,
+        "matrix_low": lc.matrix_low,
+        "outcome": lc.outcome,
+        "matrix_price": lc.matrix_price,
+        "delta": _verify.delta(lc.google, lc.matrix_price),
+        "reason": lc.reason,
+        "routing": _verify.routings(lc.row),
+    }
 
 
 def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, read in one place
@@ -5435,6 +5682,10 @@ def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, 
     concurrently under one event loop, paint GF immediately (~1s), then repaint a
     reconciled GF+Matrix table once Matrix lands (~45s). PP/awards + URLs run on
     Matrix's first `top_n` fares. `--fast` skips this for GF-only speed.
+
+    Where a Google-only row is under every fare in Matrix's own answer,
+    `_low_check` asks Matrix for the first such row's exact flights, and the
+    answer is the line under the table (or `cross_check.low_check`).
 
     `sellers` opens row `pick` of the merged table, the one the Google link
     pins, or of the Google table when Matrix does not answer, and prints its
@@ -5495,7 +5746,14 @@ def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, 
 
     if json_out:
         _answer_cross_check_document(
-            state, legs=legs, opts=opts, top_n=top_n, currency=requested, gf_mode=gf_mode
+            state,
+            legs=legs,
+            opts=opts,
+            top_n=top_n,
+            currency=requested,
+            gf_mode=gf_mode,
+            rps=rps,
+            impersonate=impersonate,
         )
         return
     gf: list[Any] = state.get("gf") or []
@@ -5565,6 +5823,18 @@ def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, 
             state, board, matrix_res, uncapped=page, legs=legs, opts=opts, currency=requested
         )
         _render_merged(merged, legs=legs, top_n=top_n, check=cross_check(merged[:top_n], answers))
+        low = _low_check(
+            merged,
+            board,
+            gf,
+            top_n=top_n,
+            opts=opts,
+            currency=requested,
+            rps=rps,
+            impersonate=impersonate,
+        )
+        if low is not None:
+            _print_low_check(low)
         shown = [r.itinerary for r in merged[:top_n]]
         seller_row = _pick_for_sellers(pick, len(shown)) if sellers else None
         # The same contract `_run_gflight_path` has: the range a pick is
@@ -7610,7 +7880,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
 
     if resolved == BACKEND_GFLIGHT:
         # GF can serve this query — paint it fast (~1s), then enrich against
-        # Matrix (authoritative) and repaint a merged table. `--fast` takes the
+        # Matrix and repaint a merged table. `--fast` takes the
         # GF-only path, and so does a Google-only flag: Matrix would answer
         # without it. A document enriches only on an explicit `--enrich` (`fast` is
         # False rather than unset): the cross-check changes its shape and waits
