@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from collections.abc import Collection, Sequence
 
     from ._gf_common import PageFetch
-    from .domain import CalendarSearch, SearchOptions, TimeOfDay
+    from .domain import CalendarSearch, SearchOptions, TimeWindow
     from .routing_predicates import Predicate
 
 _PRICE_GRAPH = Control("button", "Price graph")
@@ -252,13 +252,18 @@ def _graph_takes(p: Predicate) -> bool:
             return False
 
 
-def _hours_bound_exactly(buckets: Sequence[TimeOfDay]) -> bool:
+def _hours_bound_exactly(buckets: Sequence[TimeWindow]) -> bool:
     """Whether the page's whole departure hours ask for exactly these buckets.
 
     The page writes one earliest and one latest hour for the leg, so the
-    buckets have to adjoin, and every bucket starts on the hour, so only the
-    end can be widened: Google reads 11 as up to 11:59."""
-    return covers_one_window(buckets) and max(time_bounds(b)[1] for b in buckets) == _DAY_END
+    buckets have to adjoin and start on the hour, and the end can only be
+    widened: Google reads 11 as up to 11:59."""
+    spans = [time_bounds(b) for b in buckets]
+    return (
+        covers_one_window(buckets)
+        and min(lo for lo, _ in spans) % 60 == 0
+        and max(hi for _, hi in spans) == _DAY_END
+    )
 
 
 def _wider_url(predicates: Collection[Predicate]) -> str | None:

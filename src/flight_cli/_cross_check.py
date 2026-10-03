@@ -25,8 +25,11 @@ from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
 # The merge's own reading of a landing time, so a pair and a reason compare
-# trips the same way.
-from ._enrich import _wall_clock  # pyright: ignore[reportPrivateUsage] — see above
+# trips the same way, and its own price for the party.
+from ._enrich import (
+    _wall_clock,  # pyright: ignore[reportPrivateUsage] — see above
+    party_price,
+)
 from ._multi_cabin import price_currency
 
 if TYPE_CHECKING:
@@ -65,7 +68,9 @@ class Answers:
     while the price Matrix lists is one passenger's, rounded up. `uncapped` is
     Matrix's page before the cap, or None where it is `matrix`: a trip the cap
     cut is still one Matrix answered, and the cap cuts fares, not the flights
-    Matrix searched."""
+    Matrix searched. `google_unread` counts the rows Google served that the
+    parser could not read: any trip may be one of them, so while it is non-zero
+    the board shows no flight absent from Google."""
 
     matrix: SearchResult
     google: SearchResult | None
@@ -76,17 +81,19 @@ class Answers:
     passengers: int = 1
     uncapped: SearchResult | None = None
     google_partial: bool = False
+    google_unread: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class Boundary:
-    """Where Matrix's page ends, and how much Google listed."""
+    """Where Matrix's page ends, and how much Google listed and left unread."""
 
     listed: int
     solution_count: int
     last_price: str | None
     google_listed: int
     google_answered: bool
+    google_unread: int = 0
 
     @property
     def complete(self) -> bool:
@@ -98,8 +105,8 @@ class RowCheck:
     """One row: Google's price minus Matrix's, or the reasons there is none.
 
     `reasons` are codes and `reason` their text, joined; both are empty where
-    there is a delta. `matrix_price` is Matrix's price for the party, the one
-    `delta` subtracts, or None where Matrix states none."""
+    there is a delta. `matrix_price` is the row's own, Matrix's price for the
+    party, the one `delta` subtracts, or None where Matrix states none."""
 
     delta: float | None
     reasons: tuple[str, ...]
@@ -143,7 +150,11 @@ def document(rows: Sequence[Any], xc: CrossCheck) -> dict[str, Any]:
             "complete": b.complete,
             "last_price": b.last_price,
         },
-        "google": {"listed": b.google_listed, "answered": b.google_answered},
+        "google": {
+            "listed": b.google_listed,
+            "answered": b.google_answered,
+            "unread": b.google_unread,
+        },
         "rows": [_row_document(r, c) for r, c in zip(rows, xc.rows, strict=True)],
     }
 
@@ -173,9 +184,10 @@ def _boundary(a: Answers) -> Boundary:
     return Boundary(
         listed=len(sols),
         solution_count=a.matrix.solution_count,
-        last_price=_party_price(sols[-1].price, sols[-1], a.passengers) if sols else None,
+        last_price=party_price(sols[-1], a.passengers) if sols else None,
         google_listed=len(a.google.solutions) if a.google is not None else 0,
         google_answered=a.google is not None,
+        google_unread=a.google_unread,
     )
 
 
@@ -227,7 +239,7 @@ class _Facts:
         cut: dict[tuple[_TripSlice, ...], str | None] = {}
         for it in page.solutions:
             if (t := _trip(_slices(it))) is not None and t not in trips:
-                cut.setdefault(t, _party_price(it.price, it, a.passengers))
+                cut.setdefault(t, party_price(it, a.passengers))
         return cls(
             matrix_carriers=frozenset([*_carriers(_slices_of(a.matrix.solutions)), *listed]),
             matrix_fewest=fewest,
@@ -243,7 +255,7 @@ class _Facts:
 
 def _check_row(row: Any, a: Answers, bnd: Boundary, facts: _Facts) -> RowCheck:
     slices = _slices(row.itinerary)
-    mp = _party_price(row.matrix_price, row.itinerary, a.passengers)
+    mp = row.matrix_price
     found: list[tuple[str, str]]
     match row.source:
         case "both":
@@ -287,20 +299,6 @@ def _priced_by_both(row: Any, mp: str | None, slices: list[Slice], round_trip: b
     )
 
 
-def _party_price(listed: str | None, it: Itinerary | None, passengers: int) -> str | None:
-    """Matrix's price for the party: `listed`, its price for one passenger,
-    or for more than one the total it states for `it`."""
-    if listed is None or passengers <= 1:
-        return listed
-    return it.display_total if it is not None else None
-
-
-def party_price(it: Itinerary, passengers: int) -> str | None:
-    """The price the cross-check prints for Matrix's solution `it` and a party
-    of `passengers`, which a price cap on that table must read too."""
-    return _party_price(it.price, it, passengers)
-
-
 def _google_only(
     slices: list[Slice], a: Answers, bnd: Boundary, facts: _Facts
 ) -> list[tuple[str, str]]:
@@ -342,6 +340,11 @@ def _matrix_only(
     if trip is not None and trip in facts.google_trips:
         return [("paired_elsewhere", "Google prices these flights on another row")]
     found: list[tuple[str, str]] = []
+    unread = (
+        ("google_unread", f"{a.google_unread} of Google's rows could not be read")
+        if a.google_unread
+        else None
+    )
     # A round trip's board holds combinations only for the outbounds Google
     # pinned, so a carrier is absent from it only beside an outbound it priced.
     # An outbound with no flights or day may be one of those, or not.
@@ -353,11 +356,12 @@ def _matrix_only(
             absent := [c for c in _carriers(slices) if c not in facts.google_carriers]
         ):
             found.append(
-                ("carrier_absent_google", f"no {_either(absent)} flight on Google's board")
+                unread
+                or ("carrier_absent_google", f"no {_either(absent)} flight on Google's board")
             )
     if trip is None:
         return found or [_UNMATCHED]
-    return found or [("not_on_google", f"not among Google's {bnd.google_listed} rows")]
+    return found or [unread or ("not_on_google", f"not among Google's {bnd.google_listed} rows")]
 
 
 def _past_the_stop_window(slices: list[Slice], facts: _Facts, round_trip: bool) -> str | None:
