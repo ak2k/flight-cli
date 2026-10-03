@@ -539,7 +539,8 @@ parameter, and it keeps the cheapest rows (the order is set out below). It
 bounds everything the user can act on, and all of it from one place
 in `cli._run_gflight_path`: the table, the `--format json` document, the range
 `--pick` accepts and the itinerary the `--matrix-url` / `--google-url` lines pin,
-and the itineraries the award providers are fanned out over. All five hold on
+and the itineraries the award providers are fanned out over (the first `-n`
+one-ticket rows, when a row on separate tickets is among them). All five hold on
 `--fast` and on `--format json`, which are the same function — and under
 `--format json` the count still bounds the document, while no link line is
 printed at all. Multi-cabin keeps three of them — the table, the document and
@@ -987,8 +988,9 @@ count one-ticket rows too; where Google listed any on separate tickets, the
 caption adds "and N on separate tickets" and the document `google.separate: N`.
 
 **Every surface that acts on a row skips one.** The award matcher reads the
-one-ticket rows, and stderr says once how many shown rows on separate tickets
-are not in the award table. An award search on `_run_gflight_path` whose row
+first `-n` one-ticket rows of the whole board, so a separate-ticket row that
+takes a table row takes none from the award table, and stderr says once how
+many shown rows on separate tickets are not in it. An award search on `_run_gflight_path` whose row
 filter leaves separate-ticket rows alone is handed to Matrix, as one it leaves
 with no row is, and stderr counts them; `--cash-only` lists them. `--sellers` refuses the row before Chrome opens
 ("Google sells #N as separate tickets; --sellers reads one-ticket booking pages

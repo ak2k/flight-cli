@@ -4724,7 +4724,8 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     This is where `top_n` becomes the answer's size. The query cannot ask for a
     count, so everything below the trim — the table, the JSON document, the
     pinned link and the awards — is drawn from the same `top_n` rows, and
-    everything above it reads the whole board.
+    everything above it reads the whole board. The awards take the first
+    `top_n` one-ticket rows instead when a separate-ticket row is among them.
 
     `gf_mode` defaults to rung 1 — the deprecated `gflight` command has no
     transport flag, so it never asks for another.
@@ -4846,13 +4847,15 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     # serves its whole board whatever count is asked of it, so the
     # count is a trim rather than a query parameter, and everything below this
     # line is drawn from the same rows: the table, the JSON document, the range
-    # `--pick` accepts, the itineraries the award matcher is fanned out over.
+    # `--pick` accepts, the itineraries the award matcher is fanned out over
+    # (its one-ticket rows, counted again from the whole board).
     # The trim is HERE rather than in the query because the wide board is what
     # the Tier-2 post-filter above and the multi-cabin join elsewhere are drawn
     # from — narrowing the query would answer a filtered search with fewer rows
     # than exist, which is the failure this backend is most prone to.
     insight = getattr(results, "insight", None)
-    results = _price_ordered(results)[:top_n]
+    ordered = _price_ordered(results)
+    results = ordered[:top_n]
     # A pinned link follows only where one is asked for, the format has room for
     # it and row one can be pinned: `--format json` emits no link at all, and a
     # Google row carries no ids a Matrix link could pin. The range is still
@@ -4932,8 +4935,10 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     sr = fli_results_to_search_result(results)
 
     if run_pp:
-        one_ticket = [r for r in results if not _separately_ticketed(r)]
-        if separate := len(results) - len(one_ticket):
+        # The first `-n` one-ticket rows of the whole board, so a separate-ticket
+        # row that takes a table row takes none from the award table.
+        one_ticket = [r for r in ordered if not _separately_ticketed(r)][:top_n]
+        if separate := sum(_separately_ticketed(r) for r in results):
             err.print(
                 f"[dim]Awards are matched to one-ticket rows; {separate:d} "
                 + (

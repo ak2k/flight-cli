@@ -980,6 +980,85 @@ def test_a_cash_search_left_only_separate_ticket_rows_by_its_filter_shows_them(
     assert "Using Matrix" not in result.stderr
 
 
+def test_separate_ticket_rows_take_no_row_from_the_award_table(
+    gf_session: Callable[..., Any],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ten cheapest FLL-LGA rows are all on separate tickets: they fill the
+    cash table, and the award table still matches the ten cheapest one-ticket
+    rows, as it does when the Cheapest tab is not read."""
+    monkeypatch.setenv("COLUMNS", "200")
+
+    def _award_input(mode: gfid.SeparateTickets) -> list[Any]:
+        matched: list[Any] = []
+
+        def _awards(sr: Any, **_kw: object) -> None:
+            matched.append(sr)
+
+        monkeypatch.setattr(cli, "run_pp_for_search", _awards)
+        gf_session(*_fll_lga_pages())
+        cli._run_gflight_path(
+            legs=_round_trip(),
+            opts=SearchOptions(cabin=Cabin.COACH),
+            top_n=10,
+            json_out=False,
+            run_pp=True,
+            separate_tickets=mode,
+        )
+        (sr,) = matched
+        return [it.model_dump() for it in sr.solutions]
+
+    base = _award_input("off")
+    capsys.readouterr()
+    shown = _award_input("show")
+    out, err = capsys.readouterr()
+    cells = _price_cells(out)
+    assert len(cells) == 10
+    assert all(cell.endswith(("†", "‡")) for cell in cells.values())
+    assert len(base) == 10
+    assert shown == base
+    said = " ".join(err.split())
+    assert said.count("Awards are matched to one-ticket rows") == 1
+    assert (
+        "Awards are matched to one-ticket rows; 10 rows on separate tickets are not in "
+        "the award table." in said
+    )
+
+
+def test_an_award_document_whose_cheapest_row_is_on_separate_tickets_lists_one_ticket_rows(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With `-n 1` and the self-transfer twin cheapest, the award document still
+    holds the cheapest one-ticket row, as it does when the Cheapest tab is not
+    read."""
+    from flight_cli.pp import cli as pp_cli
+
+    async def _gather(*, legs: list[Any], **_kw: Any) -> tuple[list[list[Any]], list[Any]]:
+        return ([[] for _ in legs], [])
+
+    def _configured(_sel: cli.ProviderSelection) -> bool:
+        return True
+
+    monkeypatch.setattr(cli, "_should_run_awards", _configured)
+    monkeypatch.setattr(pp_cli, "gather_awards", _gather)
+    monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
+    args = [*_CAPPED, "--format", "json", "-n", "1"]
+    pages = (_served(_LAX), _lax_with_marked_twin(5, price=100))
+    base = _as_the_base(gf_session, args, *pages)
+    gf_session(*pages)
+    result = _invoke(args)
+    assert base.exit_code == 0, base.output
+    assert result.exit_code == 0, result.output
+    [leg] = json.loads(result.stdout)
+    assert len(leg["matches"]) == 1
+    assert json.loads(result.stdout) == json.loads(base.stdout)
+    assert (
+        "Awards are matched to one-ticket rows; 1 row on separate tickets is not in the "
+        "award table." in " ".join(result.stderr.split())
+    )
+
+
 def _slices_of(it: Itinerary) -> list[Slice]:
     return it.itinerary.slices if it.itinerary is not None else []
 
