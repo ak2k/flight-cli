@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, cast
 import anyio
 import httpx
 import pytest
+import stamina
 from typer.testing import CliRunner
 
 from flight_cli import _gflight_ids as gfid
@@ -86,6 +87,21 @@ class _ChainError(_Matrix):
         if any(s.get("routeLanguage") for s in body.get("inputs", {}).get("slices", [])):
             self.bodies.append(body)
             return httpx.Response(200, json={"error": {"message": "boom", "type": "internal"}})
+        return self.handler(request)
+
+
+class _ChainStatus(_Matrix):
+    """Matrix that answers the default search and the chain search with HTTP `status`."""
+
+    def __init__(self, status: int) -> None:
+        super().__init__()
+        self.status = status
+
+    def refuse(self, request: httpx.Request) -> httpx.Response:
+        body = cast("dict[str, Any]", json.loads(request.content))
+        if any(s.get("routeLanguage") for s in body.get("inputs", {}).get("slices", [])):
+            self.bodies.append(body)
+            return httpx.Response(self.status, json={})
         return self.handler(request)
 
 
@@ -288,6 +304,38 @@ def test_a_chain_error_is_no_answer_with_the_error(
         "Matrix returned an error (internal): boom"
     ) in under, under
     assert len(_routed(fake)) == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "phrase"), [(429, "Too Many Requests"), (503, "Service Unavailable")]
+)
+def test_a_chain_http_error_is_no_answer_without_the_api_key(
+    gf_session: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+    status: int,
+    phrase: str,
+) -> None:
+    """The error's own text quotes the request URL, `key=` and all; neither
+    the line nor the document repeats it."""
+    fake = _ChainStatus(status)
+    _install(monkeypatch, tmp_path, fake, fake.refuse)
+    low = _low()
+    fake.probe = _chain(_b6("USD999.00"))
+    reason = f"Matrix answered HTTP {status:d} {phrase}"
+    with stamina.set_testing(True, attempts=1):
+        gf_session(_served())
+        table = _run("-n", "10")
+        gf_session(_served())
+        document = _run("-n", "10", "--enrich", "--format", "json")
+    assert table.exit_code == 0, table.output
+    under = _under(table.stdout)
+    assert f"{_LINE}1's flights ({_chain_text(low)}): no answer: {reason}" in under, under
+    assert "test-key" not in table.stdout
+    assert document.exit_code == 0, document.output
+    low_check = json.loads(document.stdout)["cross_check"]["low_check"]
+    assert (low_check["outcome"], low_check["reason"]) == ("no-answer", reason)
+    assert "test-key" not in document.stdout
 
 
 def test_the_document_carries_the_check(gf_session: Callable[..., Any], matrix: _Matrix) -> None:

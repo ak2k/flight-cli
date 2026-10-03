@@ -35,6 +35,7 @@ from typing import (
 
 import anyio
 import anyio.to_thread
+import httpx
 import typer
 from rich.console import Console
 from rich.markup import escape
@@ -5513,11 +5514,16 @@ async def _exact_flights_on(
 
 
 def _low_check_failure(e: Exception) -> str:
-    """Each failure inside `e` by its kind and message."""
+    """Each failure inside `e` by its kind and message. An HTTP status error
+    is named by its status line alone: its own text quotes the request URL,
+    which carries the API key."""
     parts: list[str] = []
     for f in _failures_inside(e) or [e]:
         if isinstance(f, MatrixApiError):
             parts.append(f"Matrix returned an error ({f.kind}): {f.message}")
+        elif isinstance(f, httpx.HTTPStatusError):
+            status = f"HTTP {f.response.status_code:d} {f.response.reason_phrase}".strip()
+            parts.append(f"Matrix answered {status}")
         else:
             parts.append(f"{type(f).__name__}: {f}" if str(f) else type(f).__name__)
     return "; ".join(parts)
