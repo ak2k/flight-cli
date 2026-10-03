@@ -4266,9 +4266,17 @@ def _separately_ticketed(r: Any) -> bool:
     return any(getattr(m, "ticketing", None) is not None for m in members)
 
 
-def _note_separate_tickets(results: Any, *, gf_mode: GfTransportMode, bags: bool) -> None:
+def _note_separate_tickets(
+    results: Any, *, gf_mode: GfTransportMode, bags: bool, unchecked: str | None = None
+) -> None:
     """Say on stderr why the Cheapest tab went unread, or how many of its
-    separate-ticket itineraries `--no-separate-tickets` hid."""
+    separate-ticket itineraries `--no-separate-tickets` hid. `unchecked` is the
+    return check (`_return_checks_google_skips`) it was left unread for."""
+    if unchecked is not None:
+        err.print(
+            "[dim]Itineraries on separate tickets not read: Google lists no return for "
+            f"them to check against {_safe_text(unchecked)}.[/]"
+        )
     unread: GfBackendError | None = getattr(results, "separate_failed", None)
     if unread is not None:
         # `removesuffix`: a browser refusal's note ends in its remedy's full stop.
@@ -4632,6 +4640,29 @@ def _row_checks(legs: tuple[Leg, ...], opts: SearchOptions | None = None) -> str
     return _join_reasons(names) or "the routing"
 
 
+def _return_checks_google_skips(legs: tuple[Leg, ...]) -> str | None:
+    """What the row filter holds the later slices of `legs` to that Google's
+    query does not: a post-filter predicate, or a time window, which Google
+    widens to whole hours. None when there is none, as on a one-way.
+
+    A round trip on separate tickets comes without its return, so it could not
+    be held to these."""
+    from ._gf_postfilter import row_check_names  # noqa: PLC0415 — GF-only
+    from .routing_predicates import Tier, classify  # noqa: PLC0415
+
+    later = legs[1:]
+    preds = [
+        [p for p in classify(lg.route_language, lg.extension).predicates if p.tier > Tier.GF_NATIVE]
+        for lg in later
+    ]
+    times = [lg.time_ranges for lg in later]
+    if not any(preds) and not any(times):
+        return None
+    # The empty first slice keeps `row_check_names` calling a window the return's.
+    names = row_check_names([[], *preds], [(), *times])
+    return _join_reasons(names) or "the routing"
+
+
 def _answer_gf_empty(
     dropped: int,
     *,
@@ -4739,13 +4770,15 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     sells as separate tickets. Every surface that acts on a row skips one with
     its reason: the award matcher reads the one-ticket rows, `--sellers`
     refuses it, `--verify` answers without asking Matrix, and a link does not
-    pin it.
+    pin it. A round trip whose return the row filter alone checks reads no
+    Cheapest tab (`_return_checks_google_skips`).
     """
     # Deferred like the adapter below: this arm reaches rung 2 only when the
     # transport says so, and the module pulls in nothing patchright at import.
     from ._gf_browser import interrupt_guard  # noqa: PLC0415 — GF-only; see above
     from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
 
+    unchecked = _return_checks_google_skips(legs) if separate_tickets != "off" else None
     try:
         # Armed around the whole search, not around the browser: a Ctrl-C is only
         # answerable while the process still holds the driver, and on this arm
@@ -4757,7 +4790,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
                 top_n,
                 gf_mode,
                 gf_headed,
-                separate_tickets=separate_tickets,
+                separate_tickets="off" if unchecked else separate_tickets,
             )
     except GfBackendError as e:
         refusal = _gf_refusal(e, transport=gf_mode, bags=opts.bags is not None)
@@ -4803,7 +4836,12 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
             return 0
     _pin_cap_note(legs=legs, top_n=top_n)
     _note_other_currencies(results, opts.currency or "USD")
-    _note_separate_tickets(results, gf_mode=gf_mode, bags=opts.bags is not None)
+    _note_separate_tickets(
+        results,
+        gf_mode=gf_mode,
+        bags=opts.bags is not None,
+        unchecked=unchecked if separate_tickets == "show" else None,
+    )
 
     # Checked before the answer is printed: a `--sellers` pick outside the
     # table is a usage error, not a pin to fall back from, and an empty board
@@ -5400,13 +5438,15 @@ def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, 
     `separate_tickets` is `_run_gflight_path`'s: the Google half also reads
     the Cheapest tab, in the worker that already runs beside Matrix, and its
     separate-ticket rows are marked on both tables and never priced against
-    Matrix."""
+    Matrix. As there, a round trip whose return the row filter alone checks
+    reads no Cheapest tab."""
     # Imported here rather than deeper in: every enriched run executes these two
     # lines, so a packaging fault in either module fails the same way on every
     # run instead of only on the runs where Matrix happens to land.
     from ._enrich import merge_results  # noqa: PLC0415
     from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
 
+    unchecked = _return_checks_google_skips(legs) if separate_tickets != "off" else None
     _pin_cap_note(legs=legs, top_n=top_n)
     # Matrix is asked in the currency Google is asked in, so the merged table
     # ranks like with like: left unset, Matrix prices in its own default (GBP
@@ -5441,7 +5481,7 @@ def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, 
                         top_n,
                         gf_mode,
                         gf_headed,
-                        separate_tickets=separate_tickets,
+                        separate_tickets="off" if unchecked else separate_tickets,
                     )
                 )
             except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
@@ -5451,7 +5491,16 @@ def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, 
                 gf = []
             state["gf"] = gf
             _note_other_currencies(gf, requested)
-            _note_separate_tickets(gf, gf_mode=gf_mode, bags=opts.bags is not None)
+            _note_separate_tickets(
+                gf,
+                gf_mode=gf_mode,
+                bags=opts.bags is not None,
+                # A failed query is reported on its own, and its note says why
+                # nothing of Google's was read.
+                unchecked=(
+                    unchecked if separate_tickets == "show" and "gf_err" not in state else None
+                ),
+            )
             # A document paints no table, as an awards-only run does; the
             # empty-board note still goes to stderr, where it is true.
             _paint_first_gf_table(

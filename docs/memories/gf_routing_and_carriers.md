@@ -951,6 +951,13 @@ alone at Google's round-trip total: a one-member row, `[outbound]` in JSON. A
 link never pins one, since the page it would open lists neither the trip's
 returns nor its price.
 
+The row filter can check that outbound and the round-trip total, never the
+return. So when the return carries a check Google's query does not apply, a
+Tier-2 predicate (`-AIRLINES AA`) or a time window, which Google widens to whole
+hours, the Cheapest tab is not read and one stderr line names the check. An
+empty answer then hands off to Matrix as it does without the tab. Both paths
+that read the tab make this check (`cli._return_checks_google_skips`).
+
 **One-way: none seen from a US IP.** One-way Cheapest boards carried no mark on
 FLL-LGA (114 rows), LAX-BKK (95), JFK-ATH (127), CMN-DXB or LAX-OKA. The decode
 is the same; the one-way test marks a captured row by hand.

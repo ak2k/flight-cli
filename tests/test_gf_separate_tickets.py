@@ -256,6 +256,51 @@ def test_pinning_that_stopped_on_a_wall_skips_the_cheapest_tab(
     )
 
 
+_RETURN_CHECKS = [
+    (["--ext", "-AIRLINES AA"], "a carrier exclusion (AA)"),
+    (["--return-times", "morning"], "a return-time window (morning)"),
+]
+
+
+@pytest.mark.parametrize(("asked", "checks"), _RETURN_CHECKS)
+def test_a_return_only_the_row_filter_checks_keeps_separate_tickets_unread(
+    gf_session: Callable[..., Any], asked: list[str], checks: str
+) -> None:
+    """A separate-ticket round trip comes without its return, so a check that
+    only the row filter makes, never Google's query, could not be made on it."""
+    fake = gf_session(*_fll_lga_pages())
+    result = CliRunner().invoke(cli.app, [*_SEARCH, *_FLL_LGA, "--format", "json", *asked])
+    assert result.exit_code == 0, result.output
+    assert len(fake.gets) == 11
+    assert not any(_CHEAPEST_TFU in url for url in fake.gets)
+    assert all(len(r) == 2 for r in json.loads(result.stdout))
+    said = " ".join(result.stderr.split())
+    assert said.count("Itineraries on separate tickets") == 1
+    assert (
+        f"Itineraries on separate tickets not read: Google lists no return for them "
+        f"to check against {checks}." in said
+    )
+    gf_session(*_fll_lga_pages())
+    hidden = CliRunner().invoke(
+        cli.app, [*_SEARCH, *_FLL_LGA, "--format", "json", *asked, "--no-separate-tickets"]
+    )
+    assert hidden.exit_code == 0, hidden.output
+    assert "separate tickets" not in hidden.stderr
+
+
+def test_an_outbound_window_still_reads_the_cheapest_tab(
+    gf_session: Callable[..., Any],
+) -> None:
+    """The outbound is the row the filter sees, so its window is checked."""
+    fake = gf_session(*_fll_lga_pages())
+    result = CliRunner().invoke(
+        cli.app, [*_SEARCH, *_FLL_LGA, "--format", "json", "--depart-times", "morning,midday"]
+    )
+    assert result.exit_code == 0, result.output
+    assert _CHEAPEST_TFU in fake.gets[-1]
+    assert "not read" not in result.stderr
+
+
 @pytest.mark.parametrize("flag", ["run_pp", "sellers", "verify"])
 def test_a_path_that_acts_on_a_row_still_reads_the_cheapest_tab(
     flag: str, monkeypatch: pytest.MonkeyPatch
@@ -696,6 +741,37 @@ def test_a_default_search_whose_cheapest_tab_marks_nothing_prints_what_the_base_
     assert len(fake.gets) == 12
     assert (result.stdout, result.stderr) == (base.stdout, base.stderr)
     assert "Google Flights + Matrix" in result.stdout
+
+
+@pytest.mark.parametrize(("asked", "checks"), _RETURN_CHECKS)
+def test_a_default_search_whose_return_only_the_row_filter_checks_reads_no_cheapest_tab(
+    gf_session: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    asked: list[str],
+    checks: str,
+) -> None:
+    """Both tables are the base's, with one stderr line naming the check."""
+    answer, _ = _fll_lga_matrix(gf_session)
+    _matrix_answers(monkeypatch, answer)
+    args = [*_DEFAULT, *asked]
+    base = _as_the_base(gf_session, args, *_fll_lga_pages()[:-1])
+    fake = gf_session(*_fll_lga_pages())
+    result = _invoke(args)
+    assert result.exit_code == 0, result.output
+    assert not any(_CHEAPEST_TFU in url for url in fake.gets)
+    assert result.stdout == base.stdout
+    assert "Google Flights + Matrix" in result.stdout
+    said = " ".join(result.stderr.split())
+    assert said.count("Itineraries on separate tickets") == 1
+    assert (
+        f"Itineraries on separate tickets not read: Google lists no return for them "
+        f"to check against {checks}." in said
+    )
+    gf_session(*_fll_lga_pages())
+    hidden = _invoke([*args, "--no-separate-tickets"])
+    assert hidden.exit_code == 0, hidden.output
+    assert hidden.stdout == base.stdout
+    assert "separate tickets" not in hidden.stderr
 
 
 # ──────────────────────────── the merged table ────────────────────────────
