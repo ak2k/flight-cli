@@ -95,7 +95,9 @@ one-based (ANY=0, NON_STOP=1, …), so it's `enum.value - 1` and **omitted** for
 ANY — writing a literal 0 pins every search to nonstop. **Carrier codes come
 from the enum NAME, not its value**: fli maps codes to display names
 (`Airline._0B.value == "Blue Air"`) and underscore-prefixes digit-leading ones,
-so `airline.name.removeprefix("_")` is the code.
+so `airline.name.removeprefix("_")` is the code. That holds for a member
+`fli_bridge.fli_airline` built: the enum's own member for six codes is named
+for another carrier (below).
 
 **Airport codes come from the member's name as well, and fli's enum aliases 48
 of them to another airport.** `Airport` is an enum over a code -> display-name
@@ -115,6 +117,27 @@ empty board, asked for BSL 8 rows). Measured 2026-10-01: `flight search LAX OKA
 printed `[]` with exit 0; through `fli_airport` it printed 27 rows (CI, BR, CX
 via TPE or HKG, from USD577), each landing at OKA by its clock span: departure
 to arrival less elapsed time is +960 minutes from LAX, where NAH gives +900.
+
+**Airline codes alias the same way: fli's `Airline` enum files six codes
+under another carrier's member, and every pair is two carriers.** W9 (Wizz Air
+UK) is W6 (Wizz Air Hungary); Z0 is N0 (Norse Atlantic UK and Norway); MT is DK
+(Thomas Cook UK, ceased 2019, and Sunclass); S0 is P4 (Aerolineas Sosa and Air
+Peace); 5C is X7 (Challenge Airlines IL and BE); 1W is 1S (two
+reservation-system codes). A lookup through the enum asks Google for the other
+carrier, and fli's row decoder (`_parse_airline`) has no entry for an alias, so
+a row sold or flown under one fails to decode, and an include naming one reads
+as "a carrier Google Flights has no code for" and goes to Matrix. No airline
+alias is kept the way MLH is. Build airline members only through
+`fli_bridge.fli_airline`, which gives each aliased code a member of its own by
+the same helper as the airport table (`_own_member`) and keys a digit-leading
+code as fli does (`5C` is `_5C`). The JSON dump shows fli's display name,
+"Wizz Air" for W9 and W6 alike; each leg's `amenities` carry Google's own
+operating and marketing codes. `tests/test_airline_alias_requests.py` fails on
+`_parse_airline` anywhere under `src/`, an `Airline[...]` subscript, a member
+read off the enum, or `getattr`/`hasattr` on it. Measured 2026-10-01: one
+LTN-TIA page for 2026-10-20 held 11 rows, 5 of them W9 nonstops from USD44;
+through fli's decoder only the 6 others were printed (El Al connections from
+USD1087), and `--ext 'AIRLINES W9' --backend gflight` exited 2.
 
 **What the page costs us.** Without `tfu=` it serves Google's top ~30 rows per
 leg. `links.google_flights_search_page_url` always sends `tfu=EgQIABABIgA`

@@ -309,6 +309,12 @@ leg fan-out picks it up — the matcher and renderers stay provider-blind.
   `fli_bridge.fli_airport`; a test fails on `getattr`/`hasattr`/`Airport[...]`
   on the enum under `src/`. MLH alone resolves to BSL, the same airport. See
   [`gf_routing_and_carriers.md`](./docs/memories/gf_routing_and_carriers.md).
+- fli's `Airline` enum makes 6 codes aliases of another carrier (`Airline.W9`
+  is W6, Wizz Air Hungary rather than Wizz Air UK), and fli's row decoder has
+  no entry for them. Build airline members only through
+  `fli_bridge.fli_airline`; a test fails on `_parse_airline`, `Airline[...]`, a
+  member read off the enum, or `getattr`/`hasattr` on it under `src/`. Every
+  pair is two carriers, so none resolves to the other. Same memory as above.
 
 ## Agent skill
 
