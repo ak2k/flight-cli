@@ -220,9 +220,9 @@ def test_a_non_usd_calendar_is_priced_by_matrix_in_that_currency(
 ) -> None:
     asked: list[CalendarSearch] = []
 
-    def _matrix(search: CalendarSearch, **_kw: Any) -> tuple[CalendarResult, int]:
+    def _matrix(search: CalendarSearch, **_kw: Any) -> tuple[CalendarResult, int, bool]:
         asked.append(search)
-        return CalendarResult.from_api({"solutionCount": 0}), 0
+        return CalendarResult.from_api({"solutionCount": 0}), 0, False
 
     def _no_grid(*_a: Any, **_kw: Any) -> None:
         raise AssertionError("a non-USD calendar reached the USD date grid")
@@ -464,9 +464,10 @@ def _matrix_bodies(
     gf_rows: Callable[..., list[Any]],
     *,
     matrix_price: str = "GBP321.00",
+    fares: int = 1,
 ) -> list[dict[str, Any]]:
-    """Google answers with two USD rows and Matrix with one `matrix_price` fare;
-    every Matrix request body a run sends is recorded."""
+    """Google answers with two USD rows and Matrix with `fares` fares of
+    `matrix_price`; every Matrix request body a run sends is recorded."""
     bodies: list[dict[str, Any]] = []
     rows = _rows(gf_rows, "USD", "USD")
 
@@ -486,7 +487,9 @@ def _matrix_bodies(
         async def execute(self, search: Any, *, cache: bool) -> SearchResult:
             _ = cache
             bodies.append(to_wire(search).as_json())
-            return SearchResult.model_validate({"solutions": [{"ext": {"price": matrix_price}}]})
+            return SearchResult.model_validate(
+                {"solutions": [{"ext": {"price": matrix_price}}] * fares}
+            )
 
     monkeypatch.setattr(cli, "_gflight_results", _gf)
     monkeypatch.setattr(cli, "MatrixClient", _Client)
@@ -517,7 +520,7 @@ def test_the_merged_table_asks_matrix_in_the_currency_google_is_asked_in(
     assert [b["inputs"].get("currency") for b in bodies] == [currency]
 
 
-def test_the_merged_tables_matrix_body_differs_from_a_matrix_only_one_by_the_currency(
+def test_the_merged_tables_matrix_body_differs_from_a_matrix_only_one_by_the_currency_and_page(
     monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
 ) -> None:
     bodies = _matrix_bodies(monkeypatch, gf_rows)
@@ -526,7 +529,51 @@ def test_the_merged_tables_matrix_body_differs_from_a_matrix_only_one_by_the_cur
         assert result.exit_code == 0, result.output
     merged, matrix_only = bodies
     assert merged["inputs"].pop("currency") == "USD"
+    assert merged["inputs"].pop("page") == {"current": 1, "size": 500}
+    assert matrix_only["inputs"].pop("page") == {"current": 1, "size": 10}
     assert merged == matrix_only
+
+
+@pytest.mark.parametrize(("n", "page"), [(10, 500), (600, 600)])
+def test_the_merged_table_asks_matrix_for_a_page_that_holds_its_whole_answer(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]], n: int, page: int
+) -> None:
+    """Matrix answers in price order, so a page of `-n` compares Google's whole
+    board with Matrix's first `-n` fares. Still one request, of max(-n, 500)."""
+    bodies = _matrix_bodies(monkeypatch, gf_rows)
+    result = _run([*_MERGED_SEARCH, "-n", str(n)])
+    assert result.exit_code == 0, result.output
+    assert [b["inputs"]["page"]["size"] for b in bodies] == [page]
+
+
+def test_a_matrix_only_search_still_asks_for_n_rows(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    bodies = _matrix_bodies(monkeypatch, gf_rows)
+    result = _run([*_MERGED_SEARCH, "--backend", "matrix", "-n", "7"])
+    assert result.exit_code == 0, result.output
+    assert [b["inputs"]["page"]["size"] for b in bodies] == [7]
+
+
+def test_the_awards_are_fanned_out_over_matrixs_first_n_fares(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    """The deeper page explains the table; the award fan-out stays at `-n`."""
+    _matrix_bodies(monkeypatch, gf_rows, matrix_price="USD321.00", fares=30)
+    seen: list[int] = []
+
+    def _overlay(res: SearchResult, **_kw: Any) -> None:
+        seen.append(len(res.solutions))
+
+    def _awards(_sel: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(cli, "_should_run_awards", _awards)
+    monkeypatch.setattr(cli, "_overlay_awards", _overlay)
+    args = ["search", "JFK", "LAX", "--dep", _DEP.isoformat(), "-n", "5"]
+    result = _run([*args, "--no-matrix-url", "--no-google-url"])
+    assert result.exit_code == 0, result.output
+    assert seen == [5]
 
 
 def test_a_matrix_fare_in_another_currency_ranks_after_googles_on_the_merged_table(
@@ -540,7 +587,10 @@ def test_a_matrix_fare_in_another_currency_ranks_after_googles_on_the_merged_tab
     assert result.exit_code == 0, result.output
     merged = result.stdout.split("Google Flights + Matrix", 1)[1]
     assert "(USD)" in merged.splitlines()[0]
-    assert "GBP" not in merged
+    # The caption under the rows names the last fare of Matrix's page, GBP1.00.
+    rows, caption = merged.split("Matrix listed", 1)
+    assert "GBP" not in rows
+    assert "(to GBP1.00)" in caption
 
 
 # ──────────────────────────── the rendered tables ───────────────────────────

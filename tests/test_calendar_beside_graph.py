@@ -125,7 +125,7 @@ def _matrix_calls(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
     calls = {"calendar": 0, "weave": 0}
     real_calendar, real_weave = cli._run_calendar, cli._run_calendar_enriched
 
-    def _calendar(*a: Any, **kw: Any) -> tuple[CalendarResult, int]:
+    def _calendar(*a: Any, **kw: Any) -> tuple[CalendarResult, int, bool]:
         calls["calendar"] += 1
         return real_calendar(*a, **kw)
 
