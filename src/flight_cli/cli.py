@@ -508,6 +508,35 @@ def _google_only(
     ]
 
 
+# Matrix's date options beside "This day only", as (days before, days after) the
+# date: the value `--flex` and a slice's `f=` take, and the label the SPA's form
+# shows for it.
+_FLEX_DAYS = {"before": (1, 0), "after": (0, 1), "1": (1, 1), "2": (2, 2)}
+_FLEX_LABELS = {
+    (1, 0): "or day before",
+    (0, 1): "or day after",
+    (1, 1): "+/- 1 day",
+    (2, 2): "+/- 2 days",
+}
+
+
+def _date_option_reasons(
+    *, flex: tuple[int, int], return_flex: tuple[int, int], arrive: bool, return_arrive: bool
+) -> list[str]:
+    """One reason per date option a direction carries, each Matrix's: Google's
+    page takes one departure date a slice."""
+    reasons: list[str] = []
+    if flex != (0, 0):
+        reasons.append(f"a flexible outbound date ({_FLEX_LABELS[flex]})")
+    if arrive:
+        reasons.append("an outbound arrival date")
+    if return_flex != (0, 0):
+        reasons.append(f"a flexible return date ({_FLEX_LABELS[return_flex]})")
+    if return_arrive:
+        reasons.append("a return arrival date")
+    return reasons
+
+
 def _matrix_remedy(google_only: list[tuple[str, str]]) -> str:
     """How to put a search on Matrix: under a Google-only flag, by dropping it."""
     if google_only:
@@ -824,6 +853,10 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
     return_arrive_times: str | None = None,
     exclude_basic: bool = False,
     multi_cabin: bool = False,
+    flex: tuple[int, int] = (0, 0),
+    return_flex: tuple[int, int] = (0, 0),
+    arrive: bool = False,
+    return_arrive: bool = False,
 ) -> str:
     """Resolve --backend to a concrete backend.
 
@@ -841,7 +874,9 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
     such passenger kind), and `--no-airport-changes` / `--include-unavailable`,
     which the search page's `tfs=` parameter has no field for at all.
     `--fare-rules` too: fare bases and rules come from Matrix's
-    `/v1/summarize`, which Google has no equivalent of. Children and infants
+    `/v1/summarize`, which Google has no equivalent of. So does a flexible or
+    an arrival date (`flex`, `arrive` and the return's): the page searches one
+    departure date a slice. Children and infants
     stay on Google beside an adult, in a party of nine or fewer. Google has
     answered a route with flights with no rows for any infant, so that empty
     board is handed to Matrix afterwards (`_run_gflight_path`); a multi-cabin
@@ -898,6 +933,11 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
         reasons.append("fare rules")
     if slice_specs:
         reasons.append("a multi-city itinerary")
+    reasons.extend(
+        _date_option_reasons(
+            flex=flex, return_flex=return_flex, arrive=arrive, return_arrive=return_arrive
+        )
+    )
     for which, option, flag in (
         ("departure", "--depart-times", depart_times),
         ("return", "--return-times", return_times),

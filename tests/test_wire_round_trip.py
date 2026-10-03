@@ -143,9 +143,7 @@ def test_specific_with_flexible_dates():
     out_slice, ret_slice = captured["inputs"]["slices"]
     search = SpecificDateSearch(
         legs=(
-            Leg.of(
-                "JFK", "LHR", date.fromisoformat(out_slice["date"]), date_minus=2, date_plus=2
-            ),
+            Leg.of("JFK", "LHR", date.fromisoformat(out_slice["date"]), date_minus=2, date_plus=2),
             Leg.of("LHR", "JFK", date.fromisoformat(ret_slice["date"]), date_plus=1),
         ),
         options=SearchOptions(cabin=Cabin.COACH, pax=Pax(adults=1)),
