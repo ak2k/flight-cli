@@ -10,6 +10,6 @@ Auth: Partner-Authorization header. Key sources, in order:
   - SEATS_AERO_API_KEY env var (highest priority — useful for one-off shells)
   - ~/.config/flight-cli/seats.json (persistent, set via `flight auth seats key`)
 
-Registry integration goes through providers/registry.py:_construct_enabled.
+Registry integration goes through providers/registry.py:_enabled_builders.
 See providers/base.py for the AwardProvider Protocol contract.
 """
