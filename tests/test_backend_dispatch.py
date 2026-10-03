@@ -71,8 +71,6 @@ def test_auto_plain_search_picks_gflight() -> None:
         ("return_times", "early,afternoon"),
         ("seniors", 1),
         ("youth", 1),
-        ("inf_seat", 1),
-        ("inf_lap", 1),
         # Neither reaches the search page at all: `fli_bridge`, which the `tfs=`
         # parameter is encoded from, has no field for either, so a query served
         # on Google is served with the constraint simply gone.
@@ -83,6 +81,15 @@ def test_auto_plain_search_picks_gflight() -> None:
 def test_auto_hard_matrix_flag_picks_matrix(flag: str, value: object) -> None:
     """Flags the GF bridge can't map at all always force Matrix."""
     assert _call(**{flag: value}) == BACKEND_MATRIX  # pyright: ignore[reportArgumentType]
+
+
+@pytest.mark.parametrize("flag", ["inf_seat", "inf_lap"])
+def test_an_infant_stays_on_google_unless_cabins_are_compared(flag: str) -> None:
+    """The page carries both infant kinds; an empty board for one is handed to
+    Matrix afterwards, which a multi-cabin compare does not do."""
+    assert _call(**{flag: 1}) == BACKEND_GFLIGHT  # pyright: ignore[reportArgumentType]
+    assert _call(multi_cabin=True, **{flag: 1}) == BACKEND_MATRIX  # pyright: ignore[reportArgumentType]
+    assert _call(adults=8, **{flag: 2}) == BACKEND_MATRIX  # pyright: ignore[reportArgumentType]
 
 
 @pytest.mark.parametrize(
@@ -241,7 +248,6 @@ def test_stop_ceiling_above_two_goes_to_matrix() -> None:
         ("extension", "MAXMILES 8000"),  # mileage (Tier 3)
         ("routing", "BA AA"),  # ordered carrier chain
         ("routing", "~BA"),  # direct, not BA (Tier 3)
-        ("extension", "-REDEYES"),
         ("extension", "MAXCONNECT 0:00"),  # fli's layover maximum is positive
         ("extension", "MAXDUR 0:00"),  # and so is its duration maximum
         ("routing", "XX+"),  # no fli member, so no row would come back
@@ -279,6 +285,9 @@ def test_auto_unencodable_constraint_picks_matrix(flag: str, value: object) -> N
         ("routing", "DL747?"),
         ("routing", "AA1-3000"),
         ("routing", "AA00001"),  # Matrix's AA1: the bound is the number, not its digits
+        # Read off each leg's local clocks.
+        ("extension", "-REDEYES"),
+        ("extension", "-OVERNIGHTS"),
     ],
 )
 def test_auto_serves_post_filterable_tier2_on_google(flag: str, value: object) -> None:
@@ -367,12 +376,14 @@ def test_a_flight_number_matrix_rejects_goes_to_matrix_with_its_reason(
 
 
 def test_a_post_filterable_predicate_beside_one_that_is_not_still_picks_matrix() -> None:
-    assert _call(routing="~BA+", extension="-REDEYES") == BACKEND_MATRIX
+    assert _call(routing="~BA+", extension="-CITIES DUB") == BACKEND_MATRIX
+    assert _call(routing="~BA+", extension="-REDEYES") == BACKEND_GFLIGHT
 
 
 def test_auto_mixed_encodable_and_not_still_picks_matrix() -> None:
     """A partially-encodable set is not partially honored."""
-    assert _call(extension="ALLIANCE star-alliance; MAXSTOPS 1; -REDEYES") == BACKEND_MATRIX
+    assert _call(extension="ALLIANCE star-alliance; MAXSTOPS 1; -CITIES DUB") == BACKEND_MATRIX
+    assert _call(extension="ALLIANCE star-alliance; MAXSTOPS 1; -REDEYES") == BACKEND_GFLIGHT
 
 
 @pytest.mark.parametrize(
@@ -437,8 +448,9 @@ def test_page_can_encode_names_every_constraint_it_refuses() -> None:
     "overrides,expected",
     [
         ({"routing": "BA AA"}, "routing 'BA AA' not GF-expressible"),
-        ({"inf_lap": 1}, "an infant passenger"),
-        ({"inf_seat": 1}, "an infant passenger"),
+        ({"inf_lap": 1, "multi_cabin": True}, "an infant passenger on a multi-cabin compare"),
+        ({"inf_seat": 1, "multi_cabin": True}, "an infant passenger on a multi-cabin compare"),
+        ({"adults": 8, "inf_lap": 2}, "more than 9 passengers"),
         ({"seniors": 1}, "a senior or youth passenger"),
         ({"adults": 0, "children": 1}, "a child passenger with no adult"),
         ({"adults": 9, "children": 1}, "more than 9 passengers"),
@@ -521,18 +533,22 @@ def test_explicit_gflight_rejects_unserveable_request() -> None:
 
 
 def test_explicit_gflight_error_names_the_constraint() -> None:
-    with pytest.raises(typer.BadParameter, match="a red-eye exclusion"):
-        _call(BACKEND_GFLIGHT, extension="-REDEYES")
+    with pytest.raises(typer.BadParameter, match=re.escape("a connecting-airport exclusion (DUB)")):
+        _call(BACKEND_GFLIGHT, extension="-CITIES DUB")
+    assert _call(BACKEND_GFLIGHT, extension="-REDEYES") == BACKEND_GFLIGHT
 
 
 def test_explicit_gflight_error_names_the_pax_type() -> None:
-    with pytest.raises(typer.BadParameter, match="an infant passenger"):
-        _call(BACKEND_GFLIGHT, inf_seat=1)
+    with pytest.raises(typer.BadParameter, match="an infant passenger on a multi-cabin compare"):
+        _call(BACKEND_GFLIGHT, inf_seat=1, multi_cabin=True)
 
 
 def test_explicit_gflight_error_lists_every_reason() -> None:
-    with pytest.raises(typer.BadParameter, match="an infant passenger and a red-eye exclusion"):
-        _call(BACKEND_GFLIGHT, inf_seat=1, extension="-REDEYES")
+    with pytest.raises(
+        typer.BadParameter,
+        match="a senior or youth passenger and an infant passenger on a multi-cabin compare",
+    ):
+        _call(BACKEND_GFLIGHT, inf_seat=1, multi_cabin=True, seniors=1)
 
 
 def test_an_unknown_time_of_day_is_refused_before_any_backend_is_named(
@@ -633,7 +649,7 @@ def test_explicit_matrix_refuses_bags() -> None:
     "flag,value,reason",
     [
         ("slice_specs", ["JFK-LHR:2026-08-15"], "a multi-city itinerary"),
-        ("inf_lap", 1, "an infant passenger"),
+        ("youth", 1, "a senior or youth passenger"),
         ("fare_rules", True, "fare rules"),
     ],
 )
@@ -651,7 +667,7 @@ def test_auto_refuses_bags_with_whatever_would_have_sent_it_to_matrix(
 
 def test_explicit_gflight_under_bags_points_at_the_bags_not_at_matrix() -> None:
     with pytest.raises(typer.BadParameter) as excinfo:
-        _call(BACKEND_GFLIGHT, inf_lap=1, bags=_ONE_BAG)
+        _call(BACKEND_GFLIGHT, seniors=1, bags=_ONE_BAG)
     assert "drop --bags" in str(excinfo.value)
     assert "use --backend matrix" not in str(excinfo.value)
 

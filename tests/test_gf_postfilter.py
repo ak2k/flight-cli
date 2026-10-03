@@ -245,7 +245,7 @@ def test_can_postfilter_supported_vs_unsupported() -> None:
     assert can_postfilter(CarrierPred(frozenset({"LH"}), exclude=False, operating=True))
     assert can_postfilter(ExcludeCodesharePred())
     assert not can_postfilter(ConnectTimePred(min_minutes=60, max_minutes=None))  # min layover
-    assert not can_postfilter(ExcludeRedeyesPred())
+    assert can_postfilter(ExcludeRedeyesPred())
 
 
 def test_the_search_page_serves_encodable_and_post_filterable_predicates() -> None:
@@ -256,10 +256,14 @@ def test_the_search_page_serves_encodable_and_post_filterable_predicates() -> No
 def test_every_other_predicate_keeps_its_own_reason() -> None:
     """One reason per predicate the page can't serve, and none for the ones it
     can: the user reads which constraint sent the search to Matrix."""
+    # Each row's legs carry their own local clocks, so the night checks ride.
     reasons = search_page_reasons(
         classify("~BA+", "MINCONNECT 1:00; -REDEYES; -OVERNIGHTS").predicates
     )
-    assert reasons == ["a red-eye exclusion", "an overnight-stop exclusion"]
+    assert reasons == []
+    assert search_page_reasons(classify("~BA+", "-REDEYES; F bc=y").predicates) == [
+        "extension 'F bc=y' not expressible on GF"
+    ]
     assert search_page_reasons(classify("LH+", "F bc=y").predicates)  # include, Tier 3
     # Evaluable here, but not with Matrix's meaning: one connection not at DUB,
     # and a range that may be several flights.
