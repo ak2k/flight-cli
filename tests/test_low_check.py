@@ -465,6 +465,33 @@ def test_a_party_is_priced_on_both_sides_for_the_party(
     assert low_check["delta"] == round(low.flight.price - 220.0, 2)
 
 
+@pytest.mark.parametrize("fare", ["no total for the party", "a total over the cap"])
+def test_a_matrix_fare_the_price_cap_drops_is_still_compared(
+    gf_session: Callable[..., Any], matrix: _Matrix, fare: str
+) -> None:
+    """Matrix's one trip is cut from the table by `--max-price`. With no total
+    for two it cannot be shown dearer than Google's low, so nothing more is
+    asked; a total over the cap is dearer, so the low row is checked."""
+    b6 = _b6("USD999.00")
+    if fare == "no total for the party":
+        b6 = _b6("USD100.00")
+        del b6["displayTotal"]
+    matrix.probe = _chain(b6)
+    gf_session(_served())
+    result = _run("-n", "10", "--adults", "2", "--max-price", "300")
+    assert result.exit_code == 0, result.output
+    checked = fare == "a total over the cap"
+    assert (_LINE in result.stdout) is checked, result.stdout
+    assert ("Asking Matrix for row" in result.stderr) is checked
+    assert len(matrix.searches()) == 1 + checked
+
+    gf_session(_served())
+    result = _run("-n", "10", "--adults", "2", "--max-price", "300", "--enrich", "--format", "json")
+    assert result.exit_code == 0, result.output
+    low_check = json.loads(result.stdout)["cross_check"]["low_check"]
+    assert (low_check is not None) is checked, low_check
+
+
 @pytest.mark.parametrize("flag", ["--fast", "--verify"])
 def test_fast_and_verify_runs_ask_matrix_nothing_more(
     gf_session: Callable[..., Any], matrix: _Matrix, flag: str

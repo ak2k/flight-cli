@@ -5436,6 +5436,7 @@ def _answer_cross_check_document(
             merged,
             board,
             gf,
+            uncapped=page,
             top_n=top_n,
             opts=opts,
             currency=currency,
@@ -5618,6 +5619,7 @@ def _low_check(
     board: SearchResult,
     gf: list[Any],
     *,
+    uncapped: SearchResult,
     top_n: int,
     opts: SearchOptions,
     currency: str,
@@ -5628,8 +5630,12 @@ def _low_check(
     table shows under every fare in Matrix's own answer, or None where no row
     is, which asks Matrix nothing more. A Matrix fare with no price for the
     party in `currency` cannot be compared, so it leaves no row under every
-    fare."""
-    if not every_matrix_price_in(merged, currency):
+    fare. It is looked for in `uncapped`, Matrix's page before the price cap,
+    because the cap drops such a fare from `merged`."""
+    from ._enrich import merge_results  # noqa: PLC0415 — as in `_run_enriched_path`
+
+    whole = merge_results(board, uncapped, currency=currency, passengers=opts.pax.total)
+    if not every_matrix_price_in(whole, currency):
         return None
     matrix_low = lowest_matrix_price(merged, currency)
     n = low_row(merged[:top_n], matrix_low, currency)
@@ -5892,6 +5898,7 @@ def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, 
             merged,
             board,
             gf,
+            uncapped=page,
             top_n=top_n,
             opts=opts,
             currency=requested,
