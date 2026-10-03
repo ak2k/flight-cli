@@ -932,6 +932,56 @@ def test_awards_are_matched_to_one_ticket_rows_and_say_how_many_were_left_out(
     assert all(it.ticketing is None for it in sr.solutions)
 
 
+# Every one-ticket row of the JFK-LAX board is over the cap; its self-transfer
+# twin at USD100 is under it.
+_CAPPED = ["search", "--no-google-url", "--no-matrix-url", "JFK", "LAX", "--dep", _DEP.isoformat()]
+
+
+@pytest.mark.parametrize("fmt", [["--fast"], ["--format", "json"]], ids=["fast", "json"])
+def test_an_award_search_left_only_separate_ticket_rows_by_its_filter_is_handed_to_matrix(
+    fmt: list[str], gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The award table matches one-ticket rows, and the filter left none, so
+    Matrix answers as when it leaves no row at all."""
+    asked = _matrix_answers(monkeypatch, _answer(_its("ZZ1", price="USD90.00")))
+    matched: list[Any] = []
+
+    def _awards(sr: Any, **_kw: object) -> None:
+        matched.append(sr)
+
+    monkeypatch.setattr(cli, "run_pp_for_search", _awards)
+    gf_session(_served(_LAX), _lax_with_marked_twin(5, price=100))
+    result = _invoke([*_CAPPED, *fmt, "--max-price", "120"])
+    assert result.exit_code == 0, result.output
+    assert len(asked) == 1
+    assert [s.flights for sr in matched for it in sr.solutions for s in _slices_of(it)] == [["ZZ1"]]
+    assert "‡" not in result.stdout
+    said = " ".join(result.stderr.split())
+    assert "not in the award table" not in said
+    assert said.count("Using Matrix:") == 1
+    assert (
+        "Using Matrix: no one-ticket Google Flights itinerary matched a price cap of USD 120 "
+        "(95 rows filtered out). Awards are matched to one-ticket rows; 1 itinerary on "
+        "separate tickets did match, and --cash-only lists it." in said
+    )
+
+
+def test_a_cash_search_left_only_separate_ticket_rows_by_its_filter_shows_them(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked = _matrix_answers(monkeypatch, _answer(_its("ZZ1", price="USD90.00")))
+    gf_session(_served(_LAX), _lax_with_marked_twin(5, price=100))
+    result = _invoke([*_CAPPED, "--cash-only", "--fast", "--max-price", "120"])
+    assert result.exit_code == 0, result.output
+    assert asked == []
+    assert _price_cells(result.stdout) == {"1": "USD100.00 ‡"}
+    assert "Using Matrix" not in result.stderr
+
+
+def _slices_of(it: Itinerary) -> list[Slice]:
+    return it.itinerary.slices if it.itinerary is not None else []
+
+
 @pytest.mark.parametrize("path", [["--backend", "gflight", "--fast"], []], ids=["fast", "default"])
 def test_sellers_refuses_a_separate_ticket_row_before_chrome(
     path: list[str], gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch

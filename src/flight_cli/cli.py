@@ -4702,8 +4702,9 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     caller to hand the search to Matrix with that reason. With
     `hand_off_failure` set, a query that fails is handed on as well: the reason
     is said here, on stderr, in the words the enriched table uses for it, and
-    the return is 0 so the caller adds none of its own. A failure that is not
-    handed on exits 1 with stdout empty.
+    the return is 0 so the caller adds none of its own. An award search the
+    filter left with separate-ticket rows alone is handed on the same way. A
+    failure that is not handed on exits 1 with stdout empty.
 
     An empty board that is not handed on still runs the awards when `run_pp`
     is set, so the document an awards run writes has one shape whatever
@@ -4774,8 +4775,24 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     # Handed on before either note, because both describe Google's answer and
     # Matrix gives this one. Never with `--sellers`: an empty board fails that
     # below, as a board with no row to open.
-    if not results and dropped and matrix_fallback and not sellers:
-        return dropped
+    if dropped and matrix_fallback and not sellers:
+        if not results:
+            return dropped
+        # The award table matches one-ticket rows, so a board of separate-ticket
+        # rows alone answers an award search no better than an empty one.
+        if run_pp and all(_separately_ticketed(r) for r in results):
+            err.print(
+                "[dim]Using Matrix: no one-ticket Google Flights itinerary matched "
+                f"{_safe_text(_row_checks(legs, opts))} ({dropped:d} rows filtered out). "
+                f"Awards are matched to one-ticket rows; {len(results):d} "
+                + (
+                    "itinerary on separate tickets did match, and --cash-only lists it."
+                    if len(results) == 1
+                    else "itineraries on separate tickets did match, and --cash-only lists them."
+                )
+                + "[/]"
+            )
+            return 0
     _pin_cap_note(legs=legs, top_n=top_n)
     _note_other_currencies(results, opts.currency or "USD")
     _note_separate_tickets(results, gf_mode=gf_mode, bags=opts.bags is not None)

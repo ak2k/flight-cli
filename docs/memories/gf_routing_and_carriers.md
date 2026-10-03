@@ -987,7 +987,9 @@ count one-ticket rows too; the caption adds "and N on separate tickets".
 
 **Every surface that acts on a row skips one.** The award matcher reads the
 one-ticket rows, and stderr says once how many shown rows on separate tickets
-are not in the award table. `--sellers` refuses the row before Chrome opens
+are not in the award table. An award search on `_run_gflight_path` whose row
+filter leaves separate-ticket rows alone is handed to Matrix, as one it leaves
+with no row is, and stderr counts them; `--cash-only` lists them. `--sellers` refuses the row before Chrome opens
 ("Google sells #N as separate tickets; --sellers reads one-ticket booking pages
 only.", exit 1). `--verify` answers `separate-tickets` without asking Matrix
 (exit 0). `cli._pin_segments` returns None for it, so every Google link and the
