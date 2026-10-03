@@ -1063,6 +1063,32 @@ def test_no_link_pins_a_separate_ticket_row_on_either_path(
     assert "pinning" not in past.stderr
 
 
+@pytest.mark.parametrize("path", [["--backend", "gflight", "--fast"], []], ids=["fast", "default"])
+def test_a_link_a_separate_ticket_row_leaves_unpinned_says_why(
+    path: list[str], gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Row 1 is the marked twin, picked or pinned by default; row 2 is sold as
+    one ticket."""
+    _matrix_answers(monkeypatch, _answer(_its("ZZ1", price="USD300.00")))
+    args = [
+        *("search", "--cash-only", "--no-matrix-url", "JFK", "LAX", "--dep", _DEP.isoformat()),
+        *("-n", "5", *path),
+    ]
+    note = (
+        "note: Google sells #1 as separate tickets, so this link opens the search, not that trip."
+    )
+    for pick in (["--pick", "1"], []):
+        gf_session(_served(_LAX), _lax_with_marked_twin(5, price=100))
+        result = _invoke([*args, *pick])
+        assert result.exit_code == 0, result.output
+        assert " ".join(result.stdout.split()).count(note) == 1
+    gf_session(_served(_LAX), _lax_with_marked_twin(5, price=100))
+    one_ticket = _invoke([*args, "--pick", "2"])
+    assert one_ticket.exit_code == 0, one_ticket.output
+    assert "Google Flights (itinerary #2 pinned):" in one_ticket.stdout
+    assert "separate tickets, so this link" not in one_ticket.stdout
+
+
 def test_an_awards_only_search_reads_no_cheapest_tab(monkeypatch: pytest.MonkeyPatch) -> None:
     """It prints no Google row, and its award table takes one-ticket rows."""
     modes: list[str] = []

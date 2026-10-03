@@ -2497,6 +2497,13 @@ def _emit_urls(
                 console.print(f"  [link]{_safe_text(google_flights_url(search))}[/]")
                 for note in _gflight_url_caveats(search):
                     console.print(f"  [yellow]note: {_safe_text(note)}[/]")
+                # Said, unlike a pin refused for missing data: this refusal is
+                # about the trip itself, and another `--pick` avoids it.
+                if idx is not None and result is not None and result.solutions[idx].ticketing:
+                    console.print(
+                        f"  [yellow]note: Google sells #{idx + 1:d} as separate tickets, so this "
+                        "link opens the search, not that trip.[/]"
+                    )
         except Exception as e:  # noqa: BLE001 - third-party undocumented errors; non-fatal fallback
             console.print(f"[dim]Google Flights link: {_safe_text(e)}[/]")
 

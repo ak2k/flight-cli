@@ -993,7 +993,8 @@ with no row is, and stderr counts them; `--cash-only` lists them. `--sellers` re
 ("Google sells #N as separate tickets; --sellers reads one-ticket booking pages
 only.", exit 1). `--verify` answers `separate-tickets` without asking Matrix
 (exit 0). `cli._pin_segments` returns None for it, so every Google link and the
-pin-clamp sentence fall back as when a pin fails, on both paths.
+pin-clamp sentence fall back as when a pin fails, on both paths, and a note
+under the unpinned Google link names the row and why.
 
 **The supply flickers.** On FLL-LGA 2026-10-20/27, the Cheapest URL this code
 fetches served 66 rows, 5 `[2]` (JetBlue nonstops at USD246) and 12 `[1]` (self
