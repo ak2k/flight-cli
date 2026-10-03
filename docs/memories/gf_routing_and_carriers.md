@@ -997,7 +997,9 @@ caption adds "and N on separate tickets" and the document `google.separate: N`.
 **Every surface that acts on a row skips one.** The award matcher reads the
 first `-n` one-ticket rows of the whole board, so a separate-ticket row that
 takes a table row takes none from the award table, and stderr says once how
-many shown rows on separate tickets are not in it. An award search on `_run_gflight_path` whose row
+many shown rows on separate tickets are not in it. The default search's award
+table matches Matrix's fares, and the same line counts the merged table's
+separate-ticket rows (`cli._note_award_skips`). An award search on `_run_gflight_path` whose row
 filter leaves separate-ticket rows alone is handed to Matrix, as one it leaves
 with no row is, and stderr counts them; `--cash-only` lists them. `--sellers` refuses the row before Chrome opens
 ("Google sells #N as separate tickets; --sellers reads one-ticket booking pages

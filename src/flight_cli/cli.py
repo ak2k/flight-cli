@@ -4291,6 +4291,17 @@ def _note_separate_tickets(
         )
 
 
+def _note_award_skips(separate: int) -> None:
+    """Say on stderr how many shown rows on separate tickets the award table,
+    which matches one-ticket rows only, leaves out."""
+    if separate:
+        err.print(
+            f"[dim]Awards are matched to one-ticket rows; {separate:d} "
+            + ("row on separate tickets is" if separate == 1 else "rows on separate tickets are")
+            + " not in the award table.[/]"
+        )
+
+
 def _price_ordered(results: list[Any]) -> list[Any]:
     """A Google answer in price order, unpriced rows last; the argument is in
     the memo's `-n` section.
@@ -4976,16 +4987,8 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
         # The first `-n` one-ticket rows of the whole board, so a separate-ticket
         # row that takes a table row takes none from the award table.
         one_ticket = [r for r in ordered if not _separately_ticketed(r)][:top_n]
-        if separate := sum(_separately_ticketed(r) for r in results):
-            err.print(
-                f"[dim]Awards are matched to one-ticket rows; {separate:d} "
-                + (
-                    "row on separate tickets is"
-                    if separate == 1
-                    else "rows on separate tickets are"
-                )
-                + " not in the award table.[/]"
-            )
+        separate = sum(_separately_ticketed(r) for r in results)
+        _note_award_skips(separate)
         run_awards(one_ticket, fli_results_to_search_result(one_ticket) if separate else sr)
 
     # The URL lines are prose on stdout, and `_emit_urls` is shared text that
@@ -5628,6 +5631,9 @@ def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, 
         pick = None
 
     if run_pp:
+        # `pinnable` holds the rows the merged table numbered.
+        if pinnable is not None:
+            _note_award_skips(sum(it.ticketing is not None for it in pinnable.solutions))
         # Matrix's page is deeper than `-n` only to explain the table.
         firsts = matrix_res.model_copy(update={"solutions": matrix_res.solutions[:top_n]})
         _overlay_awards(firsts, legs=legs, opts=opts, sel=sel, awards_only=awards_only)

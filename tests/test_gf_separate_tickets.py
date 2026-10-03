@@ -1010,6 +1010,41 @@ def test_awards_are_matched_to_one_ticket_rows_and_say_how_many_were_left_out(
     assert all(it.ticketing is None for it in sr.solutions)
 
 
+def test_default_awards_say_how_many_merged_rows_on_separate_tickets_they_leave_out(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default search's award table matches Matrix's one-ticket fares, so
+    the merged table's separate-ticket rows are counted out of it."""
+    answer, _ = _fll_lga_matrix(gf_session)
+    _matrix_answers(monkeypatch, answer)
+    matched: list[Any] = []
+
+    def _awards(sr: Any, **_kw: object) -> None:
+        matched.append([it.model_dump() for it in sr.solutions])
+
+    def _configured(_sel: cli.ProviderSelection) -> bool:
+        return True
+
+    monkeypatch.setattr(cli, "run_pp_for_search", _awards)
+    monkeypatch.setattr(cli, "_should_run_awards", _configured)
+    args = [a for a in _DEFAULT if a != "--cash-only"]
+    base = _as_the_base(gf_session, args, *_fll_lga_pages()[:-1])
+    gf_session(*_fll_lga_pages())
+    result = _invoke(args)
+    assert base.exit_code == 0, base.output
+    assert result.exit_code == 0, result.output
+    assert len(matched) == 2
+    assert matched[1] == matched[0]
+    assert "not in the award table" not in base.stderr
+    assert sum(r[3].endswith(("†", "‡")) for r in _merged_rows(result.stdout)) == 33
+    said = " ".join(result.stderr.split())
+    assert said.count("Awards are matched to one-ticket rows") == 1
+    assert (
+        "Awards are matched to one-ticket rows; 33 rows on separate tickets are not in "
+        "the award table." in said
+    )
+
+
 # Every one-ticket row of the JFK-LAX board is over the cap; its self-transfer
 # twin at USD100 is under it.
 _CAPPED = ["search", "--no-google-url", "--no-matrix-url", "JFK", "LAX", "--dep", _DEP.isoformat()]
