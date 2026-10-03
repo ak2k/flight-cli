@@ -497,6 +497,22 @@ def test_a_round_trip_spends_one_board_and_its_pin_budget(
     assert len(fake.gets) == 1 + min(top_n, 10)
 
 
+@pytest.mark.parametrize("extra", [("--format", "json"), ("--fast",)], ids=["json", "table"])
+def test_a_round_trip_that_loses_no_pin_adds_nothing_to_stderr(
+    extra: tuple[str, ...], gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Green at the base and the tip: every pin is served a return, so no line
+    names one and stderr stays empty."""
+    fake = gf_session(_served(_LHR), _return_board())
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    argv = [*_SEARCH, "JFK", "LHR", "--dep", _DEP.isoformat(), "--return", _RET.isoformat()]
+    result = CliRunner().invoke(cli.app, [*argv, "--backend", "gflight", *extra])
+    assert result.exit_code == 0, result.output
+    assert result.stdout
+    assert result.stderr == ""
+    assert len(fake.gets) == 11
+
+
 def test_a_return_board_the_routing_empties_is_counted_and_routed_to_matrix(
     gf_session: Callable[..., Any],
     monkeypatch: pytest.MonkeyPatch,

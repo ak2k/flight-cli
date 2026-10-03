@@ -2245,7 +2245,19 @@ def _pinned_flight(picked: GFlightWithId) -> FlightResult:
     return picked.flight.model_copy(update={"legs": legs})
 
 
-def search_with_ids(
+def _lost_pin(picked: GFlightWithId, why: str, currency: str) -> str:
+    """The line naming a pin that has no return: the flights it is booked as,
+    which the table shows, and its fare."""
+    # fli writes a digit-leading code with a leading `_` (`_0B`).
+    flights = "/".join(
+        f"{leg.airline.name.removeprefix('_')}{leg.flight_number}" for leg in picked.flight.legs
+    )
+    price = picked.flight.price
+    fare = "" if price is None else f" ({picked.flight.currency or currency}{price:.2f})"
+    return f"pinned outbound {flights}{fare} lost: {why}"
+
+
+def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accounting for it
     filters: FlightSearchFilters,
     *,
     top_n: int = 5,
@@ -2270,12 +2282,14 @@ def search_with_ids(
     asked for is `cli._run_gflight_path`'s, on the way out.
 
     A pin whose return board refuses for its own reasons is dropped with a
-    warning and the rest are still fetched. A throttle, an exhausted transport
-    ladder or a dead browser session stops the pinning instead, because none of
-    the three says anything about the pin: the wall is per-IP and the network is
-    one network, and every remaining pin would navigate on that same dead
-    session. Either way the combinations already fetched are returned, and the
-    error is raised only when nothing at all was served.
+    warning and the rest are still fetched. Every pin dropped that way, served
+    no return or left none by `keep` is named on a line of its own, after the
+    counts. A throttle, an exhausted transport ladder or a dead browser session
+    stops the pinning instead, because none of the three says anything about
+    the pin: the wall is per-IP and the network is one network, and every
+    remaining pin would navigate on that same dead session. Either way the
+    combinations already fetched are returned, and the error is raised only
+    when nothing at all was served.
 
     `transport` rides the recursion so every leg of one trip runs on the same
     rung — a round trip that opened Chrome for its outbound must not silently
@@ -2316,6 +2330,8 @@ def search_with_ids(
     stopped: GfBackendError | None = None
     skipped = 0
     unmatched = 0  # pins whose whole return board the routing filter removed
+    empty = 0  # pins Google served no return board for
+    lost: list[str] = []
     dropped_returns = 0
     # The segment the recursion below is asked to FILL, which is the one after
     # the pin it is given — checking the pinned segment instead would compare a
@@ -2350,8 +2366,11 @@ def search_with_ids(
             # a 5xx comes back as `GfUpstreamStatusError` — so ten pins
             # meeting ten 503s cost ten GETs, not ten ladders.
             refused.append(e)
+            lost.append(_lost_pin(picked, str(e), currency))
             continue
         if nxt is None:
+            empty += 1
+            lost.append(_lost_pin(picked, "Google served no return for it", currency))
             continue
         ignored = _unpinned_board(nxt, wanted)
         if ignored is not None:
@@ -2362,6 +2381,7 @@ def search_with_ids(
             # board takes: this pin is dropped, the others are still fetched,
             # and nothing served at all still raises.
             refused.append(GfPinIgnoredError(ignored))
+            lost.append(_lost_pin(picked, str(refused[-1]), currency))
             continue
         kept = [
             nx
@@ -2371,6 +2391,9 @@ def search_with_ids(
         dropped_returns += len(nxt) - len(kept)
         if not kept:
             unmatched += 1
+            returns = f"{len(nxt):d} return{'' if len(nxt) == 1 else 's'}"
+            why = f"Google served {returns} for it, none matching {checks}"
+            lost.append(_lost_pin(picked, why, currency))
             continue
         for nx in kept:
             if isinstance(nx, tuple):
@@ -2386,6 +2409,8 @@ def search_with_ids(
         unmatched=unmatched,
         bags=filters.bags is not None,
         checks=checks,
+        empty=empty,
+        lost=lost,
     )
     # A Board even with no pair in it: the pins were taken from rows Google
     # served, so the rows the filter removed on either leg are why it is empty,
@@ -2409,12 +2434,17 @@ def _report_pin_outcome(
     unmatched: int = 0,
     bags: bool = False,
     checks: str = "the routing",
+    empty: int = 0,
+    lost: Sequence[str] = (),
 ) -> None:
     """Account for what the pin loop met: a counted warning, or a raise.
 
     `unmatched` pins had return boards the row filter emptied, holding rows to
     `checks`. They are counted, not raised: that board was served, and "no
-    return matches `checks`" is its answer.
+    return matches `checks`" is its answer. So is an `empty` one, a pin Google
+    served no return for. `lost` names each pin dropped, after every count and
+    before any raise: a count says the table is short, and only the names say
+    which outbounds a user can look up elsewhere.
 
     Raising is for the case where nothing at all was served — then the refusal
     IS the outcome, and swallowing it reports a round trip with no return legs
@@ -2435,9 +2465,9 @@ def _report_pin_outcome(
         )
     if refused:
         log.warning("%d of %d return boards unavailable: %s", len(refused), pins, refused[-1])
-    if stopped is not None:
-        if not served:
-            raise stopped
+    if empty:
+        log.warning("%d of %d pinned outbounds have no return flight on Google", empty, pins)
+    if stopped is not None and served:
         # A partial round trip is a success BY CONTRACT: exit 0, `--format
         # json` in the ordinary shape, and this counted warning as the whole
         # account of what is missing. What that costs a machine consumer, and
@@ -2456,6 +2486,11 @@ def _report_pin_outcome(
             pins,
             _why_pinning_stopped(stopped, bags=bags),
         )
+    for line in lost:
+        log.warning("%s", line)
+    if stopped is not None:
+        if not served:
+            raise stopped
     elif refused and not served:
         # "Nothing was served", rather than "every pin refused": one pin
         # returning a genuinely empty board is not a served pin, and suppressing
