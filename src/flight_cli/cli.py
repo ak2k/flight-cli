@@ -4246,7 +4246,7 @@ def _gflight_results(
     *,
     first: Board[Any] | None = None,
     prefer: Sequence[ItineraryKey] = (),
-) -> Board[Any]:
+) -> list[Any]:
     """Query Google Flights for `legs`, honoring routing/extension and time
     windows (see `_gflight_query`). Returns the (filtered) raw fli result list,
     with the page's price insight and the count of rows the filter dropped.
@@ -4265,7 +4265,7 @@ def _gflight_results(
     if prefer:
         handed["prefer"] = prefer
     with _gflight_query(legs, opts, gf_mode, gf_headed) as query:
-        results = search_with_ids(
+        served = search_with_ids(
             query.filters,
             top_n=top_n,
             transport=query.transport,
@@ -4274,9 +4274,12 @@ def _gflight_results(
             checks=query.checks,
             **handed,
         )
-    if results is None:  # nothing served
-        results = Board[Any]()
-    results.stop_drops = query.stop_drops
+    # Widened: the callers read any list, `dropped` and this tally by
+    # `getattr`. A Board carries the tally to whichever path shows it
+    # (`_note_stop_drops`).
+    results = cast("list[Any]", Board[Any]() if served is None else served)  # None: nothing served
+    if isinstance(results, Board):
+        results.stop_drops = query.stop_drops
     # Untrimmed on purpose: a round trip's combinations are built pin-major, so
     # the first `top_n` of them are one outbound's returns and nothing else.
     # Every caller trims what it renders, in the order that surface ranks by.
