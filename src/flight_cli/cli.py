@@ -734,14 +734,14 @@ def _refuse_date_option_conflicts(
         raise typer.Exit(2)
     if arrive and depart_times:
         err.print(
-            "[red]--depart-times holds when the outbound leaves, and --arrive dates when it "
+            "[red]--depart-times sets when the outbound leaves, and --arrive dates when it "
             "lands:[/] Matrix holds an arrival-date slice's times to its arrival. Give them "
             "as --arrive-times, or date the departure with --dep."
         )
         raise typer.Exit(2)
     if return_arrive and return_times:
         err.print(
-            "[red]--return-times holds when the return leaves, and --return-arrive dates "
+            "[red]--return-times sets when the return leaves, and --return-arrive dates "
             "when it lands:[/] Matrix holds an arrival-date slice's times to its arrival. "
             "Give them as --return-arrive-times, or date the departure with --return."
         )

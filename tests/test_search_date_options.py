@@ -285,7 +285,7 @@ def test_a_departure_window_beside_arrive_is_exit_2_naming_the_arrival_option(
         monkeypatch, "JFK", "LHR", "--arrive", _dep().isoformat(), "--depart-times", "morning"
     )
     assert (
-        "--depart-times holds when the outbound leaves, and --arrive dates when it lands: "
+        "--depart-times sets when the outbound leaves, and --arrive dates when it lands: "
         "Matrix holds an arrival-date slice's times to its arrival. Give them as "
         "--arrive-times, or date the departure with --dep." in printed
     ), printed
@@ -305,7 +305,7 @@ def test_a_return_window_beside_return_arrive_is_exit_2_naming_the_arrival_optio
         "--return-times",
         "morning",
     )
-    assert "--return-times holds when the return leaves, and --return-arrive dates" in printed
+    assert "--return-times sets when the return leaves, and --return-arrive dates" in printed
     assert "Give them as --return-arrive-times, or date the departure with --return." in printed
 
 
