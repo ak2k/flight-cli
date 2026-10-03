@@ -2507,10 +2507,11 @@ def _with_separate_tickets(
         *,
         hidden: int = 0,
         failed: GfBackendError | None = None,
+        insight: PriceInsight | None = answer.insight,
     ) -> Board[GFlightWithId | tuple[GFlightWithId, ...]]:
         return Board(
             rows,
-            insight=answer.insight,
+            insight=insight,
             dropped=answer.dropped,
             pinned=answer.pinned,
             separate_hidden=hidden,
@@ -2528,9 +2529,15 @@ def _with_separate_tickets(
     marked = [r for r in page if r.ticketing is not None and (keep is None or keep(0, r))]
     if mode == "hide":
         return with_notes(answer, hidden=len(marked))
+    # The insight's level is read off the cheapest fare the answer holds, and a
+    # separate-ticket fare can undercut every one-ticket fare on the base board.
+    insight = answer.insight
+    fares = [r.flight.price for r in marked if r.flight.price is not None]
+    if insight is not None and fares:
+        insight = replace(insight, cheapest=min(insight.cheapest, *fares))
     if filters.trip_type == TripType.ONE_WAY:
-        return with_notes([*answer, *marked])
-    return with_notes([*answer, *((r,) for r in marked)])
+        return with_notes([*answer, *marked], insight=insight)
+    return with_notes([*answer, *((r,) for r in marked)], insight=insight)
 
 
 def _report_pin_outcome(

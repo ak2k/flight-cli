@@ -519,6 +519,47 @@ def test_a_link_never_pins_a_separate_ticket_row(gf_session: Callable[..., Any])
     assert "Google Flights (itinerary #1 pinned):" in hidden.stdout
 
 
+def test_the_price_insight_counts_the_separate_ticket_fares_a_filtered_board_shows(
+    gf_session: Callable[..., Any],
+) -> None:
+    """JetBlue sells this trip at USD307 on one ticket, above Google's usual
+    USD120-260, and at USD247 on separate tickets, inside it."""
+    ret = _served(_BEST, origin="LGA", destination="FLL")
+    pages = [_served(_BEST), *[ret] * 5, _served(_CHEAPEST)]
+    asked = [*_SEARCH, *_FLL_LGA, "--ext", "AIRLINES B6"]
+    fake = gf_session(*pages)
+    shown = CliRunner().invoke(cli.app, asked, env={"COLUMNS": "200"})
+    assert shown.exit_code == 0, shown.output
+    assert len(fake.gets) == 7
+    assert _CHEAPEST_TFU in fake.gets[-1]
+    assert any(cell.endswith(" †") for cell in _price_cells(shown.stdout).values())
+    assert "Price insight: prices are typical for this trip" in " ".join(shown.stdout.split())
+    gf_session(*pages)
+    hidden = CliRunner().invoke(cli.app, [*asked, "--no-separate-tickets"], env={"COLUMNS": "200"})
+    assert hidden.exit_code == 0, hidden.output
+    assert "Price insight: prices are high for this trip" in " ".join(hidden.stdout.split())
+
+
+def test_the_price_insight_counts_a_separate_ticket_fare_below_googles_cheapest(
+    gf_session: Callable[..., Any],
+) -> None:
+    """Google's own cheapest, USD204, is inside its usual USD85-225; the
+    self transfer the table shows at USD80 is below it."""
+    args = [
+        *("search", "--cash-only", "--no-matrix-url", "JFK", "LAX", "--dep", _DEP.isoformat()),
+        *("--backend", "gflight", "--fast", "-n", "5"),
+    ]
+    gf_session(_served(_LAX), _lax_with_marked_twin(5, price=80))
+    shown = CliRunner().invoke(cli.app, args, env={"COLUMNS": "200"})
+    assert shown.exit_code == 0, shown.output
+    assert _price_cells(shown.stdout)["1"].endswith(" ‡")
+    assert "Price insight: prices are low for this trip" in " ".join(shown.stdout.split())
+    gf_session(_served(_LAX), _lax_with_marked_twin(5, price=80))
+    hidden = CliRunner().invoke(cli.app, [*args, "--no-separate-tickets"], env={"COLUMNS": "200"})
+    assert hidden.exit_code == 0, hidden.output
+    assert "Price insight: prices are typical for this trip" in " ".join(hidden.stdout.split())
+
+
 # ──────────────────────────────── the JSON ────────────────────────────────
 
 
