@@ -143,7 +143,12 @@ def document(rows: Sequence[Any], xc: CrossCheck) -> dict[str, Any]:
             "complete": b.complete,
             "last_price": b.last_price,
         },
-        "google": {"listed": b.google_listed, "answered": b.google_answered},
+        "google": {
+            "listed": b.google_listed,
+            "answered": b.google_answered,
+            # Only where Google listed any, as the table's caption says it.
+            **({"separate": b.google_separate} if b.google_separate else {}),
+        },
         "rows": [_row_document(r, c) for r, c in zip(rows, xc.rows, strict=True)],
     }
 

@@ -867,6 +867,8 @@ def test_a_hand_marked_row_beside_a_matrix_row_reads_separate_tickets(
     }
     sold = [m["separate_tickets"] for m in doc["search"]]
     assert sold.count(True) == 1
+    assert base["cross_check"]["google"] == {"listed": 95, "answered": True}
+    assert doc["cross_check"]["google"] == {"listed": 94, "answered": True, "separate": 1}
 
 
 def test_the_fll_lga_document_states_each_separate_ticket_row_and_its_reason(
@@ -886,7 +888,7 @@ def test_the_fll_lga_document_states_each_separate_ticket_row_and_its_reason(
     assert all(r["source"] == "google" and r["matrix_price"] is None for r in tagged)
     assert all(len(r["slices"]) == 1 for r in tagged)
     assert not [r for r in rows if "separate_tickets" in r["reasons"] and r not in tagged]
-    assert doc["cross_check"]["google"] == {"listed": 30, "answered": True}
+    assert doc["cross_check"]["google"] == {"listed": 30, "answered": True, "separate": 33}
 
 
 # ─────────────────────── the surfaces that act on a row ───────────────────

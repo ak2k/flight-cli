@@ -983,7 +983,8 @@ carriers, trips and priced outbounds) reads one-ticket rows only, so a marked
 row never makes a Matrix row read `paired_elsewhere`, never hides
 `carrier_absent_google`, and an outbound Google prices only on separate tickets
 keeps `outbound_not_priced`. The caption's and the document's `google.listed`
-count one-ticket rows too; the caption adds "and N on separate tickets".
+count one-ticket rows too; where Google listed any on separate tickets, the
+caption adds "and N on separate tickets" and the document `google.separate: N`.
 
 **Every surface that acts on a row skips one.** The award matcher reads the
 one-ticket rows, and stderr says once how many shown rows on separate tickets
@@ -1136,7 +1137,7 @@ Matrix is sent no sales city, and no row says where it was priced.
 **`--format json --enrich`** writes `{"search": <the plain --format json
 document, the same -n rows>, "cross_check": {"currency", "delta":
 "google_minus_matrix", "matrix": {"listed", "solution_count", "complete",
-"last_price"}, "google": {"listed", "answered"}, "rows": [...]}}`, the rows
+"last_price"}, "google": {"listed", "answered"[, "separate"]}, "rows": [...]}}`, the rows
 being the table's, from the pure `_cross_check.document`. Plain `--format json`
 does not cross-check; on auto a failed Google query is still handed to Matrix,
 as before, and `--fast` asks Matrix nothing. It needs no awards (`--cash-only`)
