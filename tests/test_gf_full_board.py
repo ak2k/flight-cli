@@ -874,11 +874,16 @@ def test_a_return_board_the_cabin_requirement_empties_names_it_not_the_routing(
     cabin requirement. Every return on the served board is booked in first."""
     fake = gf_session(_served(_LHR), _return_board_booked_in(4))
     monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    enriched: list[object] = []
+
+    async def _matrix_into(*args: object) -> None:
+        enriched.append(args)
+
+    monkeypatch.setattr(cli, "_matrix_into", _matrix_into)
     argv = [*_SEARCH, "JFK", "LHR", "--dep", _DEP.isoformat(), "--return", _RET.isoformat()]
-    result = CliRunner().invoke(
-        cli.app,
-        [*argv, "--backend", "gflight", "--cabin", "economy", "--ext", "+CABIN 3", "-n", "1"],
-    )
+    asked = ["--backend", "gflight", "--fast", "--cabin", "economy", "--ext", "+CABIN 3", "-n", "1"]
+    result = CliRunner().invoke(cli.app, [*argv, *asked])
+    assert not enriched, "the search went to Matrix"
     assert result.exit_code == 0, result.output
     assert len(fake.gets) == 2
     checks = "a cabin requirement ('+CABIN 3')"
