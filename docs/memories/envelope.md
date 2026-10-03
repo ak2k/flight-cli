@@ -5,7 +5,7 @@ raw body, `{cabin: …}` over several cabins, the award document when awards run
 or nothing at exit 0 when the award query fails. A caller has to know the path
 before it can parse the answer, and what the path lost (a cabin, a calendar
 sub-query, an award provider) is said on stderr only. The envelope has the same
-ten keys whatever answered. It is built in `src/flight_cli/_envelope.py`, and
+keys whatever answered. It is built in `src/flight_cli/_envelope.py`, and
 its schema is `docs/envelope.schema.json`, generated from the models
 (`schema_text()`; a test fails when the two differ).
 
@@ -23,6 +23,7 @@ its schema is `docs/envelope.schema.json`, generated from the models
 | `awards` | list / null | the award document's per-leg entries; each match also carries `flights`, every flight of its slice. Null when no award search ran or it failed |
 | `insight` | `[{cabin, currency, cheapest, typical_low, typical_high, level}]` | one per Google page that carried one |
 | `price_history` | `[{cabin, currency, points: [{date, price}]}]` | one per Google page that carried one |
+| `verify` | object / null | `--verify`'s check of row `--pick`, the `verify` object `--format json` prints; null when not asked, on a calendar, or when the check failed (exit 1) |
 
 `price` is the trip's: a Google round trip's is its return member's, the fare
 every surface prints for the pair; Matrix's is the solution's price string read
@@ -73,10 +74,12 @@ click would print "Aborted." only after the run stopped hearing stderr.
 
 Every path runs as under `--format json`, and each JSON leaf calls the recorder
 in place of its `sys.stdout.write`. With awards on, the leaf records its cash
-rows and `run_pp_for_search` records the awards. `--sellers` and
-`--fare-rules` write a document of their own and are refused with the envelope
-(exit 2, before any request); a new document-writing flag has to go inside the
-envelope under its own key, never beside it.
+rows and `run_pp_for_search` records the awards. `--verify` records its check
+under `verify` (`_envelope.record_verify`), with the same refusals as under
+`--format json`. `--sellers` and `--fare-rules` write a document of their own
+and are refused with the envelope (exit 2, before any request); a new
+document-writing flag has to go inside the envelope under its own key, never
+beside it.
 
 ## Price history
 

@@ -108,7 +108,7 @@ go into detail and are loaded on demand.
   battle-tested SPA-driving gotchas. Read before doing any new RE or
   recapture work.
 - [envelope.md](envelope.md) — `search` / `calendar --format envelope`: the
-  ten keys and their types, what makes `complete` false and where each
+  keys and their types, what makes `complete` false and where each
   narrowing is said, how the run holds stdout and stderr, Google's daily price
   history (`ds:1[5][10]`, the +12h date rule), and what is out of scope. Read
   before adding a path that writes a JSON document or a stderr line that

@@ -109,6 +109,18 @@
           },
           "title": "Price History",
           "type": "array"
+        },
+        "verify": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Verify"
         }
       },
       "required": [
@@ -121,7 +133,8 @@
         "results",
         "awards",
         "insight",
-        "price_history"
+        "price_history",
+        "verify"
       ],
       "title": "CalendarEnvelope",
       "type": "object"
@@ -344,6 +357,18 @@
           },
           "title": "Price History",
           "type": "array"
+        },
+        "verify": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Verify"
         }
       },
       "required": [
@@ -356,7 +381,8 @@
         "results",
         "awards",
         "insight",
-        "price_history"
+        "price_history",
+        "verify"
       ],
       "title": "SearchEnvelope",
       "type": "object"

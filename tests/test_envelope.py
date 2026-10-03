@@ -1,8 +1,8 @@
 # pyright: reportPrivateUsage=false
-"""`--format envelope`: one document of ten keys for `search` and `calendar`.
+"""`--format envelope`: one document of the same keys for `search` and `calendar`.
 
-Every state below reads stdout as ONE JSON object with exactly the ten keys, each
-of its declared type, the schema's own validation over it, and stderr's lines as
+Every state below reads stdout as ONE JSON object with exactly the keys of `_KEYS`,
+each of its declared type, the schema's own validation over it, and stderr's lines as
 the head of `notes`. What changes between states is `complete`, which is false
 exactly when the answer is narrower than what was asked, and the keys' values.
 """
@@ -60,6 +60,7 @@ _KEYS = [
     "awards",
     "insight",
     "price_history",
+    "verify",
 ]
 _SEARCH = ["search", "--no-google-url", "--no-matrix-url"]
 _ENVELOPE = ["--format", "envelope"]
@@ -172,6 +173,7 @@ def _envelope_of(r: Result, *, command: str = "search", code: int = 0) -> dict[s
     assert env["awards"] is None or isinstance(env["awards"], list)
     assert isinstance(env["insight"], list)
     assert isinstance(env["price_history"], list)
+    assert env["verify"] is None or isinstance(env["verify"], dict)
     said = [_ANSI.sub("", ln).rstrip() for ln in r.stderr.split("\n") if ln.strip()]
     assert env["notes"][: len(said)] == said
     assert not any(n.startswith("stdout:") for n in cast("list[str]", env["notes"]))
@@ -224,6 +226,8 @@ def test_a_google_one_way_carries_its_rows_insight_and_history(
     assert points[-1] == {"date": "2026-09-27", "price": 204.0}
     assert env["awards"] is None
     assert _notes(env, "awards") == ["awards: --cash-only skips the award search"]
+    assert env["verify"] is None
+    assert _notes(env, "verify") == ["verify: --verify was not asked"]
 
 
 def test_the_rows_are_the_json_documents_rows(gf_session: Callable[..., Any]) -> None:
@@ -737,6 +741,7 @@ def test_a_matrix_calendar_carries_each_priced_day(monkeypatch: pytest.MonkeyPat
     assert env["awards"] is None
     assert _notes(env, "awards") == ["awards: calendar runs no award search"]
     assert _notes(env, "insight") == ["insight: a calendar carries none"]
+    assert _notes(env, "verify") == ["verify: a calendar checks no row on Matrix"]
 
 
 def test_a_split_calendar_missing_a_pair_narrows_the_answer(

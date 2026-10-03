@@ -3,8 +3,8 @@
 `--format json` writes whatever its path answers with (a Matrix body, Google
 rows, `{cabin: ...}`, the award document, or nothing when the award query
 fails), and what the path lost goes to stderr alone. The envelope has the same
-ten keys on every path: `notes` carries the stderr lines, and `complete` is
-false whenever the answer is narrower than what was asked.
+keys on every path: `notes` carries the stderr lines, and `complete` is false
+whenever the answer is narrower than what was asked.
 
 `run` swaps the process streams for the command. Stdout goes to a buffer, so a
 path that writes past the recorder cannot put a second document beside the
@@ -89,6 +89,7 @@ class SearchEnvelope(_Frozen):
     awards: list[dict[str, Any]] | None
     insight: list[Insight]
     price_history: list[PriceHistory]
+    verify: dict[str, Any] | None
 
 
 class CalendarEnvelope(_Frozen):
@@ -102,6 +103,7 @@ class CalendarEnvelope(_Frozen):
     awards: list[dict[str, Any]] | None
     insight: list[Insight]
     price_history: list[PriceHistory]
+    verify: dict[str, Any] | None
 
 
 ENVELOPE: TypeAdapter[SearchEnvelope | CalendarEnvelope] = TypeAdapter(
@@ -127,6 +129,7 @@ class _Recorder:
         self.awards: list[dict[str, Any]] | None = None
         self.insight: list[Insight] = []
         self.history: list[PriceHistory] = []
+        self.verify: dict[str, Any] | None = None
         self.reasons: dict[str, str] = {}
 
 
@@ -197,6 +200,13 @@ def record_awards(entries: list[dict[str, Any]]) -> None:
     if (rec := _slot.recorder) is not None:
         with rec.lock:
             rec.awards = entries
+
+
+def record_verify(check: dict[str, Any]) -> None:
+    """Row `--pick`'s check on Matrix: the `verify` object `--format json` prints."""
+    if (rec := _slot.recorder) is not None:
+        with rec.lock:
+            rec.verify = check
 
 
 class _SoftWrapping(Protocol):
@@ -314,6 +324,7 @@ def _document(rec: _Recorder, *, code: int, stderr: str, stray: str) -> str:
         "awards": rec.awards,
         "insight": rec.insight,
         "price_history": rec.history,
+        "verify": rec.verify,
     }
     doc = (
         SearchEnvelope(command="search", results=groups, **common)
@@ -358,4 +369,20 @@ def _key_notes(
         else:
             reason = failed
         notes.append(f"{key}: {reason}")
+    return [*notes, *_check_notes(rec, calendar=calendar)]
+
+
+def _check_notes(rec: _Recorder, *, calendar: bool) -> list[str]:
+    """The note for each check of a search's rows on Matrix that the run did not record."""
+    notes: list[str] = []
+    if rec.verify is None:
+        # A search that asked for no check says so where it starts, so the
+        # fallback is a check that was asked for and never finished.
+        unchecked = "the run ended before the row was checked"
+        reason = (
+            "a calendar checks no row on Matrix"
+            if calendar
+            else rec.reasons.get("verify", unchecked)
+        )
+        notes.append(f"verify: {reason}")
     return notes

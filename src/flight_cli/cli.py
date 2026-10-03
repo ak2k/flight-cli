@@ -3847,7 +3847,7 @@ def _verify_blocker(  # noqa: PLR0911 — one return per reason the run is refus
     The flag checks one row of one Google table, so a run that prints no such
     row has nothing to check. `fmt` is the resolved format: one this block
     cannot write into is refused here rather than ignored."""
-    if fmt not in ("table", "json"):
+    if fmt not in ("table", "json", "envelope"):
         return f"writes into a table or a JSON document, not --format {fmt}"
     if multi_cabin:
         return "checks one row of one table; drop the extra --cabin values"
@@ -4036,14 +4036,21 @@ def _write_verified(
     """The `--verify --format json` document: the search's own document
     unchanged, beside row `n`'s check. A Matrix failure still writes the
     search, with `verify` null, and exits 1."""
-    row = _verify.google_row(r)
     try:
-        checked = _check_on_matrix(row, n, opts, rps=rps, impersonate=impersonate)
+        doc = _verify_document(r, n, opts, rps=rps, impersonate=impersonate)
     except typer.Exit:
         sys.stdout.write(json.dumps({"search": search_doc, "verify": None}, indent=2, default=str))
         raise
-    doc = _verify.document(n, row, checked.verdict, _fare_rules_document(checked.rules))
     sys.stdout.write(json.dumps({"search": search_doc, "verify": doc}, indent=2, default=str))
+
+
+def _verify_document(
+    r: Any, n: int, opts: SearchOptions, *, rps: float | None, impersonate: str | None
+) -> dict[str, Any]:
+    """Row `n`'s `verify` object, or exit 1 with the reason on stderr."""
+    row = _verify.google_row(r)
+    checked = _check_on_matrix(row, n, opts, rps=rps, impersonate=impersonate)
+    return _verify.document(n, row, checked.verdict, _fare_rules_document(checked.rules))
 
 
 class _GfQuery(NamedTuple):
@@ -4927,6 +4934,11 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     # block keeps the boundary localized.
     if _envelope.active():
         _record_google_cabin(opts.cabin, results, insight=insight, history=history, bags=opts.bags)
+        if verify_row is not None:
+            check = _verify_document(
+                results[verify_row - 1], verify_row, opts, rps=rps, impersonate=impersonate
+            )
+            _envelope.record_verify(json.loads(json.dumps(check, default=str)))
         if not run_pp:
             return None
     elif json_out and not run_pp:
@@ -6923,8 +6935,8 @@ _ENVELOPE_FORMAT_OPT = typer.Option(
     "--format",
     help=f"Output format: one of {_ENVELOPE_FORMAT_CHOICES}. envelope is one versioned "
     "JSON document on every path: version, command, backend, currency, complete, "
-    "notes, results, awards, insight, price_history. complete is false when the "
-    "answer is narrower than asked, and notes carries what stderr said.",
+    "notes, results, awards, insight, price_history, verify. complete is false when "
+    "the answer is narrower than asked, and notes carries what stderr said.",
     rich_help_panel=_GROUP_OUTPUT,
 )
 _JSON_OPT = typer.Option(
@@ -7393,6 +7405,8 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             "[red]--sellers and --fare-rules write a document of their own; use --format json.[/]"
         )
         raise typer.Exit(2)
+    if not verify:
+        _envelope.explain("verify", "--verify was not asked")
     ccy = _resolve_currency(currency)
     bags = _parse_bags(bags_spec) if bags_spec is not None else None
     # Deprecated-flag warning surfaces at runtime since hidden=True hides the
