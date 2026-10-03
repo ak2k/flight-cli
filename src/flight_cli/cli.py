@@ -2605,6 +2605,7 @@ def _split_blocker(  # noqa: PLR0911 — one return per reason the run is refuse
     multi_cabin: bool,
     backend: str,
     sellers: bool,
+    verify: bool,
     awards_only: bool,
     awards_json: bool,
 ) -> str | None:
@@ -2613,7 +2614,8 @@ def _split_blocker(  # noqa: PLR0911 — one return per reason the run is refuse
     costs no request.
 
     The pair is priced on Google Flights beside a one-cabin round-trip table,
-    and the JSON document it joins is the cash one."""
+    and the JSON document it joins is the cash one, not the one `--sellers` or
+    `--verify` writes."""
     if multi_city:
         return "prices a round trip as two one-ways, and --slice is a multi-city search"
     if one_way:
@@ -2624,6 +2626,8 @@ def _split_blocker(  # noqa: PLR0911 — one return per reason the run is refuse
         return "needs Google Flights, and --backend matrix searches Matrix"
     if sellers:
         return "cannot run beside --sellers; drop one of them"
+    if verify:
+        return "cannot run beside --verify; drop one of them"
     if awards_only:
         return "prints beside the results table, and --awards-only prints none"
     if awards_json:
@@ -5707,16 +5711,20 @@ def _cross_check_answers(
     )
 
 
-def _cross_check_blocker(*, run_awards: bool, awards_only: bool, sellers: bool) -> str | None:
+def _cross_check_blocker(
+    *, run_awards: bool, awards_only: bool, sellers: bool, split: bool
+) -> str | None:
     """Why `--enrich --format json` cannot write its document, or None. The
-    document is one search's cash rows explained against Matrix's; the award
-    and booking-option documents are each a different one."""
+    document is one search's cash rows explained against Matrix's; the award,
+    booking-option and split-ticket documents are each a different one."""
     if awards_only:
         return "cross-checks cash fares; drop --awards-only"
     if run_awards:
         return "cross-checks cash fares only; add --cash-only"
     if sellers:
         return "writes no booking options; drop --sellers"
+    if split:
+        return "writes no split ticket; drop --split"
     return None
 
 
@@ -7763,6 +7771,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             multi_cabin=len(_resolve_cabin_list(cabin)) > 1,
             backend=backend,
             sellers=sellers,
+            verify=verify,
             awards_only=sel.awards_only,
             awards_json=json_out and not sel.awards_only and _should_run_awards(sel),
         )
@@ -7953,7 +7962,10 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         elif enrich:
             if json_out and (
                 blocker := _cross_check_blocker(
-                    run_awards=run_awards, awards_only=sel.awards_only, sellers=sellers
+                    run_awards=run_awards,
+                    awards_only=sel.awards_only,
+                    sellers=sellers,
+                    split=split,
                 )
             ):
                 err.print(f"[red]--enrich --format json {_safe_text(blocker)}.[/]")

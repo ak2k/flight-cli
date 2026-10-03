@@ -1009,10 +1009,11 @@ total, labeled as two separate tickets; the round-trip rows are unchanged.
 {"outbound": row, "return": row, "total": n, "currency": c}}`, or
 `"split_ticket": {"error": text}` when the one-ways could not be priced or no
 return leaves where an outbound lands, after it lands. A one-way, `--slice`,
-several cabins, `--backend matrix`, `--sellers`, `--awards-only` and an award
-JSON document are usage errors; under `auto`, when Matrix answers, one stderr
-line says the split was not priced. Measured 2026-10-01, JFK-LAX 10-20/10-27:
-round trip from USD412, one-ways 229 + 184 = 413.
+several cabins, `--backend matrix`, `--sellers`, `--verify`, `--awards-only`,
+an award JSON document and the `--enrich --format json` cross-check are usage
+errors; under `auto`, when Matrix answers, one stderr line says the split was
+not priced. Measured 2026-10-01, JFK-LAX 10-20/10-27: round trip from USD412,
+one-ways 229 + 184 = 413.
 
 ## Tier model: who honors each constraint
 
@@ -1151,7 +1152,7 @@ document, the same -n rows>, "cross_check": {"currency", "delta":
 being the table's, from the pure `_cross_check.document`. Plain `--format json`
 does not cross-check; on auto a failed Google query is still handed to Matrix,
 as before, and `--fast` asks Matrix nothing. It needs no awards (`--cash-only`)
-and no `--sellers` (exit 2 otherwise); `--bags` prints the table's "No Matrix
+and no `--sellers` or `--split` (exit 2 otherwise); `--bags` prints the table's "No Matrix
 enrichment" note and the plain document, and `--verify` prints its own such note
 and writes `{"search", "verify"}` instead. Matrix failing leaves `cross_check`
 null (exit 0), Google failing leaves `search` empty with every Matrix row

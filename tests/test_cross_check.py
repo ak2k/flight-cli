@@ -768,6 +768,11 @@ def test_a_document_hands_a_failed_google_query_to_matrix_as_the_docs_say(
             id="awards",
         ),
         pytest.param([*_SEARCH, "--sellers"], "writes no booking options", id="sellers"),
+        pytest.param(
+            [*_SEARCH, "--return", (_DEP + timedelta(days=7)).isoformat(), "--split"],
+            "writes no split ticket",
+            id="split",
+        ),
     ],
 )
 def test_enrich_refuses_a_document_it_cannot_write(

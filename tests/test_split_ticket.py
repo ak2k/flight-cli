@@ -624,6 +624,13 @@ def test_a_table_names_why_there_is_no_pair_on_stderr_only(
             id="sellers",
         ),
         pytest.param(
+            ["--cash-only", "--verify"],
+            True,
+            False,
+            "cannot run beside --verify; drop one of them",
+            id="verify",
+        ),
+        pytest.param(
             ["--awards-only"],
             True,
             True,
