@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import re
 import urllib.parse
 from datetime import date, timedelta
@@ -46,6 +47,7 @@ _FLL_LGA = [
     *("--backend", "gflight", "--fast", "-n", "1000"),
 ]
 _THROTTLE_PAGE = "<html>Our systems have detected unusual traffic</html>"
+_SHAPELESS_PAGE = "<html><body>no flight data here</body></html>"
 _KEY = (
     "† separate tickets: Google sells this trip as more than one booking. "
     "‡ self transfer: separate tickets, and you collect and recheck bags between flights."
@@ -250,6 +252,29 @@ def test_pinning_that_stopped_on_a_wall_skips_the_cheapest_tab(
     assert "Itineraries on separate tickets not read: Google Flights rate-limited." in " ".join(
         err.split()
     )
+
+
+def test_a_round_trip_whose_every_return_board_refused_still_shows_its_separate_tickets(
+    gf_session: Callable[..., Any],
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No pin's return board parses, so no one-ticket trip was served; a
+    separate-ticket outbound needs no return board and is served all the same."""
+    pins = gfid.pinned_fanout(1000)
+    pages = [_served(_BEST), *[_SHAPELESS_PAGE] * pins, _served(_CHEAPEST)]
+    fake = gf_session(*pages)
+    with caplog.at_level(logging.WARNING, logger="flight_cli._gflight_ids"):
+        doc = _document(capsys, legs=_round_trip(), separate_tickets="show")
+    assert len(fake.gets) == pins + 2
+    assert _CHEAPEST_TFU in fake.gets[-1]
+    assert len(doc) == 33
+    assert all(len(r) == 1 and r[0]["separate_tickets"] is True for r in doc)
+    assert f"{pins} of {pins} return boards unavailable" in caplog.text
+    gf_session(*pages)
+    with pytest.raises(typer.Exit) as hidden:
+        _document(capsys, legs=_round_trip(), separate_tickets="hide")
+    assert hidden.value.exit_code == 1
 
 
 @pytest.mark.parametrize(

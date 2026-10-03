@@ -2454,8 +2454,22 @@ def search_with_ids(
                 combos.append((picked, *nx))
             else:
                 combos.append((picked, nx))
+    # A Board even with no pair in it: the pins were taken from rows Google
+    # served, so the rows the filter removed on either leg are why it is empty,
+    # and None would read as Google serving nothing.
+    dropped += dropped_returns
+    paired = Board(
+        combos,
+        insight=_kept_insight(first.insight, combos, dropped),
+        dropped=dropped,
+        pinned=len(pins),
+    )
+    # Before the pin outcome is judged: a separate-ticket itinerary needs no
+    # return board, so one that is shown is served even when every return
+    # board refused.
+    answer = paired if separate is None else separate(paired, stopped=stopped)
     _report_pin_outcome(
-        served=bool(combos),
+        served=bool(answer),
         pins=len(pins),
         refused=refused,
         stopped=stopped,
@@ -2464,17 +2478,7 @@ def search_with_ids(
         bags=filters.bags is not None,
         checks=checks,
     )
-    # A Board even with no pair in it: the pins were taken from rows Google
-    # served, so the rows the filter removed on either leg are why it is empty,
-    # and None would read as Google serving nothing.
-    dropped += dropped_returns
-    answer = Board(
-        combos,
-        insight=_kept_insight(first.insight, combos, dropped),
-        dropped=dropped,
-        pinned=len(pins),
-    )
-    return answer if separate is None else separate(answer, stopped=stopped)
+    return answer
 
 
 def _with_separate_tickets(
