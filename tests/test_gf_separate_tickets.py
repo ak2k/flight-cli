@@ -1,4 +1,6 @@
-# pyright: reportPrivateUsage=false
+# pyright: reportPrivateUsage=false, reportCallIssue=false
+# DIVERGE: pydantic Field(alias=...) on _Loose models trips basedpyright into
+# treating alias names as required kwargs. Same posture as tests/test_enrich.py.
 """Itineraries Google sells as separate tickets, read off its Cheapest tab.
 
 The two FLL-LGA captures are the same round-trip query's outbound boards:
@@ -21,11 +23,15 @@ import typer
 from typer.testing import CliRunner
 
 from conftest import _answering, _ds1, _page
+from flight_cli import _gf_booking, cli
 from flight_cli import _gflight_ids as gfid
-from flight_cli import cli
+from flight_cli._cross_check import Answers, RowCheck, cross_check
+from flight_cli._enrich import MergedRow, merge_results
 from flight_cli._gf_common import PageFetch
 from flight_cli.domain import Cabin, Leg, SearchOptions
 from flight_cli.links import build_search_tfs, google_flights_search_page_url
+from flight_cli.models import Itinerary, ItineraryDetails, ItineraryExt, SearchResult, Slice
+from flight_cli.pp.gflight_adapter import fli_results_to_search_result
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -490,3 +496,535 @@ def test_the_opt_out_says_nothing_when_it_hid_nothing(gf_session: Callable[..., 
     )
     assert result.exit_code == 0, result.output
     assert "separate tickets" not in result.stderr
+
+
+# ─────────────────────────── the default search ───────────────────────────
+# Google's table is painted first, then the merged table once Matrix answers.
+
+_DEFAULT = [
+    *_SEARCH,
+    *("FLL", "LGA", "--dep", _DEP.isoformat(), "--return", _RET.isoformat(), "-n", "1000"),
+]
+_SELF_TRANSFER_REASON = (
+    "Google sells this trip as a self transfer on separate tickets; Matrix prices one ticket"
+)
+_SEPARATE_REASON = "Google sells this trip as separate tickets; Matrix prices one ticket"
+
+
+def _as_matrix(it: Itinerary, price: str) -> Itinerary:
+    """Google row `it` as Matrix states it: its own price, a UTC offset on each
+    landing, no per-flight dates and no leg detail."""
+    assert it.itinerary is not None
+    slices = [
+        s.model_copy(update={"arrival": f"{s.arrival}+00:00", "segment_dates": [], "legs": []})
+        for s in it.itinerary.slices
+    ]
+    return Itinerary(ext=ItineraryExt(price=price), itinerary=ItineraryDetails(slices=slices))
+
+
+def _its(*flights: str, day: date = _DEP, lands: str = "12:00", price: str) -> Itinerary:
+    """One itinerary of one-flight slices, the first leaving on `day`."""
+    slices = [
+        Slice(
+            flights=[f],
+            departure=f"{day + timedelta(days=7 * i)}T09:00:00",
+            arrival=f"{day + timedelta(days=7 * i)}T{lands}:00",
+        )
+        for i, f in enumerate(flights)
+    ]
+    return Itinerary(ext=ItineraryExt(price=price), itinerary=ItineraryDetails(slices=slices))
+
+
+def _marked(it: Itinerary, ticketing: str = "self_transfer") -> Itinerary:
+    return it.model_copy(update={"ticketing": ticketing})
+
+
+def _answer(*its: Itinerary) -> SearchResult:
+    return SearchResult(solutionCount=len(its), solutions=list(its))
+
+
+def _matrix_answers(monkeypatch: pytest.MonkeyPatch, answer: SearchResult) -> list[Any]:
+    """Matrix answers every search with `answer`; the searches are recorded."""
+    asked: list[Any] = []
+
+    class _Client:
+        def __init__(self, **_kw: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _Client:
+            return self
+
+        async def __aexit__(self, *_a: object) -> None:
+            return None
+
+        async def execute(self, search: Any, *, cache: bool) -> SearchResult:
+            _ = cache
+            asked.append(search)
+            return answer
+
+    monkeypatch.setattr(cli, "MatrixClient", _Client)
+    return asked
+
+
+def _fll_lga_matrix(gf_session: Callable[..., Any]) -> tuple[SearchResult, list[str]]:
+    """Matrix's answer to the FLL-LGA round trip, ZZ1/ZZ2 at USD150 and two of
+    Google's own trips at USD199, and the GETs the default search made before
+    it read the Cheapest tab."""
+    base = gf_session(*_fll_lga_pages()[:-1])
+    board = fli_results_to_search_result(
+        cli._gflight_results(_round_trip(), SearchOptions(cabin=Cabin.COACH), 1000)
+    )
+    answer = _answer(
+        _its("ZZ1", "ZZ2", price="USD150.00"),
+        _as_matrix(board.solutions[0], "USD199.00"),
+        _as_matrix(board.solutions[1], "USD199.00"),
+    )
+    return answer, base.gets
+
+
+def _invoke(args: list[str]) -> Any:
+    return CliRunner().invoke(cli.app, args, env={"COLUMNS": "200"})
+
+
+def _as_the_base(gf_session: Callable[..., Any], args: list[str], *pages: str) -> Any:
+    """`args` run as the default search ran before it read the Cheapest tab."""
+    real = cli._gflight_results
+
+    def _off(*a: Any, **kw: Any) -> Any:
+        return real(*a, **{**kw, "separate_tickets": "off"})
+
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(cli, "_gflight_results", _off)
+        gf_session(*pages)
+        return _invoke(args)
+
+
+def _merged_rows(stdout: str) -> list[list[str]]:
+    """The merged table's numbered rows, cells stripped, each `why` cell
+    joined across the lines it wraps onto."""
+    _, after = stdout.split("Google Flights + Matrix", 1)
+    rows: list[list[str]] = []
+    for line in after.splitlines():
+        if not line.startswith("│"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("│").split("│")]
+        if cells[0].isdigit():
+            rows.append(cells)
+        elif rows and not cells[0]:
+            rows[-1][5] = f"{rows[-1][5]} {cells[5]}".strip()
+    return rows
+
+
+def _under_merged(stdout: str) -> str:
+    _, after = stdout.split("Google Flights + Matrix", 1)
+    return " ".join(after.split())
+
+
+def test_the_adapted_board_carries_how_google_sells_each_row() -> None:
+    for name, kinds in ((_CHEAPEST, (28, 5, 53)), (_BEST, (0, 0, 58))):
+        sold = [it.ticketing for it in fli_results_to_search_result(_parsed(name)).solutions]
+        assert (
+            sold.count("self_transfer"),
+            sold.count("separate_tickets"),
+            sold.count(None),
+        ) == kinds, name
+
+
+def test_the_default_search_marks_the_google_table_for_one_get_more(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answer, base_gets = _fll_lga_matrix(gf_session)
+    asked = _matrix_answers(monkeypatch, answer)
+    fake = gf_session(*_fll_lga_pages())
+    result = _invoke(_DEFAULT)
+    assert result.exit_code == 0, result.output
+    assert fake.gets[:-1] == base_gets
+    assert len(fake.gets) == len(base_gets) + 1 == 12
+    assert _CHEAPEST_TFU in fake.gets[-1]
+    assert len(asked) == 1
+    google, _ = result.stdout.split("Google Flights + Matrix", 1)
+    cells = _price_cells(google)
+    assert sum(cell.endswith(" ‡") for cell in cells.values()) == 28
+    assert sum(cell.endswith(" †") for cell in cells.values()) == 5
+    assert " ".join(google.split()).count(_KEY) == 1
+
+
+def test_the_default_search_opted_out_counts_what_it_hid_once_and_marks_nothing(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answer, _ = _fll_lga_matrix(gf_session)
+    _matrix_answers(monkeypatch, answer)
+    base = _as_the_base(gf_session, _DEFAULT, *_fll_lga_pages()[:-1])
+    fake = gf_session(*_fll_lga_pages())
+    result = _invoke([*_DEFAULT, "--no-separate-tickets"])
+    assert result.exit_code == 0, result.output
+    assert len(fake.gets) == 12
+    assert result.stdout == base.stdout
+    said = " ".join(result.stderr.split())
+    assert said.count("on separate tickets hidden") == 1
+    assert (
+        "Google Flights: 33 itineraries on separate tickets hidden (--no-separate-tickets)." in said
+    )
+
+
+def test_a_throttled_cheapest_tab_leaves_the_default_search_as_it_was_and_says_so_once(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answer, _ = _fll_lga_matrix(gf_session)
+    _matrix_answers(monkeypatch, answer)
+    base = _as_the_base(gf_session, _DEFAULT, *_fll_lga_pages()[:-1])
+    gf_session(*_fll_lga_pages()[:-1], _THROTTLE_PAGE)
+    result = _invoke(_DEFAULT)
+    assert result.exit_code == 0, result.output
+    assert result.stdout == base.stdout
+    said = " ".join(result.stderr.split())
+    assert said.count("Itineraries on separate tickets not read") == 1
+    assert "Itineraries on separate tickets not read: Google Flights rate-limited." in said
+
+
+def test_a_default_search_whose_cheapest_tab_marks_nothing_prints_what_the_base_prints(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The base board served as the Cheapest tab: it is fetched, and adds
+    nothing to either table or to stderr."""
+    answer, _ = _fll_lga_matrix(gf_session)
+    _matrix_answers(monkeypatch, answer)
+    base = _as_the_base(gf_session, _DEFAULT, *_fll_lga_pages()[:-1])
+    fake = gf_session(*_fll_lga_pages()[:-1], _served(_BEST))
+    result = _invoke(_DEFAULT)
+    assert result.exit_code == 0, result.output
+    assert len(fake.gets) == 12
+    assert (result.stdout, result.stderr) == (base.stdout, base.stderr)
+    assert "Google Flights + Matrix" in result.stdout
+
+
+# ──────────────────────────── the merged table ────────────────────────────
+
+
+def test_a_one_way_separate_ticket_row_never_pairs_with_matrix_on_its_flights() -> None:
+    """The board's row 5 sold as a self transfer, and Matrix pricing the same
+    flights as one ticket: two rows, neither priced against the other."""
+    board = fli_results_to_search_result(_parsed(_LAX))
+    twin = _marked(board.solutions[5])
+    google = _answer(*board.solutions[:5], twin, *board.solutions[6:])
+    one_ticket = _as_matrix(board.solutions[5], "USD199.00")
+    rows = merge_results(google, _answer(one_ticket), currency="USD")
+    assert len(rows) == len(google.solutions) + 1
+    assert [r for r in rows if r.google is twin] == [
+        MergedRow(itinerary=twin, gf_price=twin.price, matrix_price=None, source="gf", google=twin)
+    ]
+    assert [r for r in rows if r.itinerary is one_ticket] == [
+        MergedRow(itinerary=one_ticket, gf_price=None, matrix_price="USD199.00", source="matrix")
+    ]
+
+
+def test_the_merged_table_marks_exactly_the_separate_ticket_rows_and_keys_them_once(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answer, _ = _fll_lga_matrix(gf_session)
+    _matrix_answers(monkeypatch, answer)
+    gf_session(*_fll_lga_pages())
+    result = _invoke(_DEFAULT)
+    assert result.exit_code == 0, result.output
+    rows = _merged_rows(result.stdout)
+    marked = [r for r in rows if r[3].endswith(("†", "‡"))]
+    assert sum(r[3].endswith(" ‡") for r in marked) == 28
+    assert sum(r[3].endswith(" †") for r in marked) == 5
+    assert all((r[1], r[2], r[4]) == ("GF", "—", "—") for r in marked)
+    assert {r[5] for r in marked if r[3].endswith("‡")} == {_SELF_TRANSFER_REASON}
+    assert {r[5] for r in marked if r[3].endswith("†")} == {_SEPARATE_REASON}
+    assert all(r[7] == "—" for r in marked)  # the outbound alone
+    assert not any("separate tickets" in r[5] for r in rows if r not in marked)
+    assert sorted(r[1] for r in rows if r not in marked).count("GF+MX") == 2
+    under = _under_merged(result.stdout)
+    assert under.count(_KEY) == 1
+    assert under.count(_OUTBOUND_ONLY) == 1
+    assert "Google listed 30 rows and 33 on separate tickets." in under
+
+
+def test_a_one_way_merged_table_marks_the_row_and_keys_it_without_the_round_trip_sentence(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Row 5's flights sold as a self transfer beside the same flights as one
+    ticket, which Matrix prices too."""
+    served = gfid._rows_from_page_html(PageFetch(_served(_LAX), _URL, 200))
+    board = fli_results_to_search_result(served)
+    _matrix_answers(monkeypatch, _answer(_as_matrix(board.solutions[5], "USD199.00")))
+    gf_session(_served(_LAX), _lax_with_marked_twin(5))
+    result = _invoke([*_SEARCH, "JFK", "LAX", "--dep", _DEP.isoformat(), "-n", "200"])
+    assert result.exit_code == 0, result.output
+    rows = _merged_rows(result.stdout)
+    (marked,) = [r for r in rows if r[3].endswith(("†", "‡"))]
+    assert (marked[1], marked[2], marked[4], marked[5]) == ("GF", "—", "—", _SELF_TRANSFER_REASON)
+    flights = marked[6]
+    (paired,) = [r for r in rows if r[1] == "GF+MX"]
+    assert paired[6] == flights
+    under = _under_merged(result.stdout)
+    assert under.count(_KEY) == 1
+    assert _OUTBOUND_ONLY not in under
+
+
+# ──────────────────────────── the cross-check ─────────────────────────────
+
+
+def _checks(
+    google: SearchResult, matrix: SearchResult, *, round_trip: bool = False
+) -> dict[str, RowCheck]:
+    """Each merged row's check, by the first flight of its first slice."""
+    rows = merge_results(google, matrix, currency="USD")
+    xc = cross_check(rows, Answers(matrix, google, False, False, round_trip, "USD"))
+    out: dict[str, RowCheck] = {}
+    for r, c in zip(rows, xc.rows, strict=True):
+        itn = r.itinerary.itinerary
+        assert itn is not None
+        out[itn.slices[0].flights[0]] = c
+    return out
+
+
+def test_a_separate_ticket_row_is_explained_as_one_and_nothing_else() -> None:
+    google = _answer(
+        _marked(_its("AA1", price="USD90.00")),
+        _marked(_its("AA2", price="USD95.00"), "separate_tickets"),
+    )
+    by_flight = _checks(google, _answer(_its("ZZ1", price="USD300.00")))
+    assert (by_flight["AA1"].reasons, by_flight["AA1"].reason) == (
+        ("separate_tickets",),
+        _SELF_TRANSFER_REASON,
+    )
+    assert (by_flight["AA2"].reasons, by_flight["AA2"].reason) == (
+        ("separate_tickets",),
+        _SEPARATE_REASON,
+    )
+    assert by_flight["AA1"].delta is None
+
+
+def test_an_outbound_google_prices_only_on_separate_tickets_is_not_priced() -> None:
+    """Google's AA1 outbound is a self transfer alone; its one-ticket round
+    trip is AA2/AA3."""
+    google = _answer(_marked(_its("AA1", price="USD90.00")), _its("AA2", "AA3", price="USD200.00"))
+    matrix = _answer(_its("AA1", "AA4", price="USD300.00"))
+    c = _checks(google, matrix, round_trip=True)["AA1"]
+    assert c.reasons == ("outbound_not_priced",)
+
+
+def test_a_matrix_trip_google_sells_only_on_separate_tickets_is_not_paired_elsewhere() -> None:
+    google = _answer(_marked(_its("AA1", price="USD90.00")), _its("AA2", price="USD95.00"))
+    matrix = _answer(_its("AA1", price="USD300.00"))
+    rows = merge_results(google, matrix, currency="USD")
+    xc = cross_check(rows, Answers(matrix, google, False, False, False, "USD"))
+    (c,) = [c for r, c in zip(rows, xc.rows, strict=True) if r.source == "matrix"]
+    assert (c.reasons, c.reason) == (("not_on_google",), "not among Google's 1 rows")
+
+
+def test_a_carrier_google_sells_only_on_separate_tickets_is_absent_from_its_board() -> None:
+    google = _answer(_marked(_its("ZZ5", price="USD90.00")), _its("AA2", price="USD95.00"))
+    c = _checks(google, _answer(_its("ZZ6", price="USD300.00")))["ZZ6"]
+    assert (c.reasons, c.reason) == (("carrier_absent_google",), "no ZZ flight on Google's board")
+
+
+def _enriched_document(monkeypatch: pytest.MonkeyPatch, rows: list[Any], *args: str) -> Any:
+    """`--enrich --format json` on JFK-LAX, Google answering `rows` and Matrix
+    DL1 at USD300."""
+
+    def _gf(*_a: Any, **_kw: Any) -> list[Any]:
+        return rows
+
+    monkeypatch.setattr(cli, "_gflight_results", _gf)
+    _matrix_answers(monkeypatch, _answer(_its("DL1", price="USD300.00")))
+    result = _invoke(
+        [*_SEARCH, "JFK", "LAX", "--dep", _DEP.isoformat(), "--enrich", "--format", "json", *args]
+    )
+    assert result.exit_code == 0, result.output
+    return json.loads(result.stdout)
+
+
+def test_a_hand_marked_row_beside_a_matrix_row_reads_separate_tickets(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    """AS21+AS600 marked by hand; every other row reads as it did unmarked."""
+    plain = gf_rows(_LAX)
+    rows = gf_rows(_LAX)
+    rows[15].ticketing = "separate_tickets"
+    base = _enriched_document(monkeypatch, plain, "-n", "100")
+    doc = _enriched_document(monkeypatch, rows, "-n", "100")
+
+    def by_trip(d: Any) -> dict[str, Any]:
+        return {
+            " / ".join("+".join(s["flights"]) for s in r["slices"]): r
+            for r in d["cross_check"]["rows"]
+        }
+
+    marked, unmarked = by_trip(doc), by_trip(base)
+    assert (marked["AS21+AS600"]["reasons"], marked["AS21+AS600"]["reason"]) == (
+        ["separate_tickets"],
+        _SEPARATE_REASON,
+    )
+    assert marked["AS21+AS600"]["source"] == "google"
+    assert unmarked["AS21+AS600"]["reasons"] != ["separate_tickets"]
+    assert set(marked) == set(unmarked)
+    assert {k: r["reasons"] for k, r in marked.items() if k != "AS21+AS600"} == {
+        k: r["reasons"] for k, r in unmarked.items() if k != "AS21+AS600"
+    }
+    sold = [m["separate_tickets"] for m in doc["search"]]
+    assert sold.count(True) == 1
+
+
+def test_the_fll_lga_document_states_each_separate_ticket_row_and_its_reason(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answer, _ = _fll_lga_matrix(gf_session)
+    _matrix_answers(monkeypatch, answer)
+    gf_session(*_fll_lga_pages())
+    result = _invoke([*_DEFAULT, "--enrich", "--format", "json"])
+    assert result.exit_code == 0, result.output
+    doc = json.loads(result.stdout)
+    members = _members(doc["search"])
+    assert sum(m["separate_tickets"] is True for m in members) == 33
+    rows = doc["cross_check"]["rows"]
+    tagged = [r for r in rows if r["reasons"] == ["separate_tickets"]]
+    assert len(tagged) == 33
+    assert all(r["source"] == "google" and r["matrix_price"] is None for r in tagged)
+    assert all(len(r["slices"]) == 1 for r in tagged)
+    assert not [r for r in rows if "separate_tickets" in r["reasons"] and r not in tagged]
+    assert doc["cross_check"]["google"] == {"listed": 30, "answered": True}
+
+
+# ─────────────────────── the surfaces that act on a row ───────────────────
+
+_FAST = [*_SEARCH, *_FLL_LGA]
+
+
+def _first_marked(labels: dict[str, str]) -> int:
+    return next(int(k) for k, cell in labels.items() if cell.endswith(("†", "‡")))
+
+
+def test_awards_are_matched_to_one_ticket_rows_and_say_how_many_were_left_out(
+    gf_session: Callable[..., Any],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    matched: list[Any] = []
+
+    def _awards(sr: Any, **_kw: object) -> None:
+        matched.append(sr)
+
+    monkeypatch.setattr(cli, "run_pp_for_search", _awards)
+    monkeypatch.setenv("COLUMNS", "200")
+    gf_session(*_fll_lga_pages())
+    cli._run_gflight_path(
+        legs=_round_trip(),
+        opts=SearchOptions(cabin=Cabin.COACH),
+        top_n=1000,
+        json_out=False,
+        run_pp=True,
+        separate_tickets="show",
+    )
+    out, err = capsys.readouterr()
+    said = " ".join(err.split())
+    assert said.count("Awards are matched to one-ticket rows") == 1
+    assert (
+        "Awards are matched to one-ticket rows; 33 rows on separate tickets are not in "
+        "the award table." in said
+    )
+    assert len(_price_cells(out)) == 60 + 33
+    (sr,) = matched
+    assert len(sr.solutions) == 30
+    assert all(it.ticketing is None for it in sr.solutions)
+
+
+@pytest.mark.parametrize("path", [["--backend", "gflight", "--fast"], []], ids=["fast", "default"])
+def test_sellers_refuses_a_separate_ticket_row_before_chrome(
+    path: list[str], gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answer, _ = _fll_lga_matrix(gf_session)
+    _matrix_answers(monkeypatch, answer)
+    opened: list[str] = []
+
+    def _booking(url: str, **_kw: object) -> Any:
+        opened.append(url)
+        raise AssertionError("a separate-ticket row reached Chrome")
+
+    monkeypatch.setattr(_gf_booking, "booking_options", _booking)
+    gf_session(*_fll_lga_pages())
+    args = [*_DEFAULT, *path]
+    shown = _invoke(args)
+    assert shown.exit_code == 0, shown.output
+    if path:
+        n = _first_marked(_price_cells(shown.stdout))
+    else:
+        n = next(int(r[0]) for r in _merged_rows(shown.stdout) if r[3].endswith(("†", "‡")))
+    gf_session(*_fll_lga_pages())
+    result = _invoke([*args, "--sellers", "--pick", str(n)])
+    assert result.exit_code == 1, result.output
+    assert opened == []
+    assert " ".join(result.stderr.split()).endswith(
+        f"No booking options for #{n}: Google sells #{n} as separate tickets; --sellers "
+        "reads one-ticket booking pages only."
+    )
+
+
+@pytest.mark.parametrize("fmt", ["table", "json"])
+def test_verify_answers_a_separate_ticket_row_without_asking_matrix(
+    fmt: str, gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _no_matrix(*_a: object, **_kw: object) -> Any:
+        raise AssertionError("a separate-ticket row was asked of Matrix")
+
+    monkeypatch.setattr(cli, "_run", _no_matrix)
+    monkeypatch.setattr(cli, "MatrixClient", _no_matrix)
+    gf_session(*_fll_lga_pages())
+    shown = _invoke(_FAST)
+    labels = _price_cells(shown.stdout)
+    n = _first_marked(labels)
+    reason = _SELF_TRANSFER_REASON if labels[str(n)].endswith("‡") else _SEPARATE_REASON
+    gf_session(*_fll_lga_pages())
+    result = _invoke([*_FAST, "--verify", "--pick", str(n), "--format", fmt])
+    assert result.exit_code == 0, result.output
+    if fmt == "table":
+        said = " ".join(result.stdout.split())
+        assert f"Not verified on Matrix · itinerary #{n}: {reason}" in said
+        return
+    verify = json.loads(result.stdout)["verify"]
+    assert (verify["row"], verify["outcome"], verify["reason"]) == (n, "separate-tickets", reason)
+    assert (verify["matrix"], verify["delta"], verify["fares"]) == (None, None, [])
+
+
+@pytest.mark.parametrize("path", [["--backend", "gflight", "--fast"], []], ids=["fast", "default"])
+def test_no_link_pins_a_separate_ticket_row_on_either_path(
+    path: list[str], gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Row 1 is the marked twin, priced below everything else; a pick past the
+    table falls back to it and so pins nothing."""
+    _matrix_answers(monkeypatch, _answer(_its("ZZ1", price="USD300.00")))
+    args = [
+        *("search", "--cash-only", "--no-matrix-url", "JFK", "LAX", "--dep", _DEP.isoformat()),
+        *("-n", "5", *path),
+    ]
+    gf_session(_served(_LAX), _lax_with_marked_twin(5, price=100))
+    picked = _invoke([*args, "--pick", "1"])
+    assert picked.exit_code == 0, picked.output
+    assert "Google Flights (tfs= structured):" in picked.stdout
+    assert "pinned" not in picked.stdout
+    gf_session(_served(_LAX), _lax_with_marked_twin(5, price=100))
+    past = _invoke([*args, "--pick", "6"])
+    assert past.exit_code == 0, past.output
+    assert "Google Flights (tfs= structured):" in past.stdout
+    assert "--pick 6 is out of range (1-5)." in " ".join(past.stderr.split())
+    assert "pinning" not in past.stderr
+
+
+def test_an_awards_only_search_reads_no_cheapest_tab(monkeypatch: pytest.MonkeyPatch) -> None:
+    """It prints no Google row, and its award table takes one-ticket rows."""
+    modes: list[str] = []
+
+    def _path(**kw: Any) -> None:
+        modes.append(kw.get("separate_tickets", "off"))
+
+    monkeypatch.setattr(cli, "_run_enriched_path", _path)
+    monkeypatch.setattr(cli, "_run_gflight_path", _path)
+    base = ["search", "JFK", "LAX", "--dep", _DEP.isoformat(), "--backend", "gflight"]
+    for extra in ([], ["--fast"]):
+        for awards in (["--awards-only"], ["--cash-only"]):
+            result = _invoke([*base, *extra, *awards])
+            assert result.exit_code == 0, result.output
+    assert modes == ["off", "show", "off", "show"]
