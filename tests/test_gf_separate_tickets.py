@@ -14,6 +14,7 @@ import json
 import re
 import urllib.parse
 from datetime import date, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -30,6 +31,7 @@ from flight_cli.links import build_search_tfs, google_flights_search_page_url
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+_ROOT = Path(__file__).resolve().parents[1]
 _DEP = date.today() + timedelta(days=45)
 _RET = date.today() + timedelta(days=52)
 _BEST = "ds1_fll_lga_rt_best.json"
@@ -406,6 +408,33 @@ def test_a_matrix_search_takes_the_opt_out_and_changes_nothing(
     )
     assert result.exit_code == 0, result.output
     assert ran == [True]
+
+
+@pytest.mark.parametrize("asked", [["--fast"], ["--format", "json"]])
+def test_the_skill_and_the_help_name_the_searches_that_read_the_cheapest_tab(
+    gf_session: Callable[..., Any], asked: list[str]
+) -> None:
+    """Each search the skill names reads the tab. A `--backend gflight` table
+    without `--fast` is the enriched one, which does not."""
+    import click
+
+    fake = gf_session(*_fll_lga_pages())
+    args = [a for a in _FLL_LGA if a != "--fast"]
+    result = CliRunner().invoke(cli.app, [*_SEARCH, *args, *asked], env={"COLUMNS": "200"})
+    assert result.exit_code == 0, result.output
+    assert _CHEAPEST_TFU in fake.gets[-1]
+    skill = _ROOT / ".claude" / "skills" / "flight-search" / "SKILL.md"
+    (line,) = [ln for ln in skill.read_text().splitlines() if "come from its Cheapest tab" in ln]
+    assert f"`{' '.join([*asked, '--cash-only'])}`" in line
+    assert "--backend gflight" not in line
+    group = typer.main.get_command(cli.app)
+    assert isinstance(group, click.Group)
+    (flag,) = [
+        p
+        for p in group.commands["search"].params
+        if isinstance(p, click.Option) and "--no-separate-tickets" in p.opts
+    ]
+    assert "--cash-only" in (flag.help or "")
 
 
 def test_the_deprecated_command_reads_no_cheapest_tab(gf_session: Callable[..., Any]) -> None:
