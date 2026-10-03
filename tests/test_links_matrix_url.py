@@ -23,6 +23,8 @@ import urllib.parse
 from datetime import date
 from typing import Any, cast
 
+import pytest
+
 from flight_cli.domain import (
     Cabin,
     CalendarSearch,
@@ -367,6 +369,74 @@ def test_arrival_date_intent_survives_into_the_link() -> None:
 
     assert date_type(True) == "arrive"
     assert date_type(False) == "depart"
+
+
+# ──────────── date options: the value the SPA's own select writes ────────────
+# The form offers 0 "This day only", 10 "Or day before", 1 "Or day after",
+# 11 "+/- 1 day" and 22 "+/- 2 days" per direction, and its bundle sends value m
+# as `dateModifier {minus: m // 10, plus: m % 10}`.
+
+_DATE_OPTIONS = [((0, 0), "0"), ((1, 0), "10"), ((0, 1), "1"), ((1, 1), "11"), ((2, 2), "22")]
+
+
+def _flexed(orig: str, dest: str, day: date, days: tuple[int, int], *, arrive: bool = False) -> Leg:
+    return Leg.of(orig, dest, day, date_minus=days[0], date_plus=days[1], is_arrival_date=arrive)
+
+
+@pytest.mark.parametrize(("days", "value"), _DATE_OPTIONS)
+def test_a_one_way_link_writes_the_spa_date_option(days: tuple[int, int], value: str) -> None:
+    s = SpecificDateSearch(legs=(_flexed("JFK", "LHR", date(2026, 10, 20), days),))
+    dates = _decoded(s)["slices"][0]["dates"]
+    assert (dates["departureDateModifier"], dates["returnDateModifier"]) == (value, "0")
+
+
+@pytest.mark.parametrize(("out_days", "out_value"), _DATE_OPTIONS)
+@pytest.mark.parametrize(("ret_days", "ret_value"), _DATE_OPTIONS)
+def test_a_round_trip_link_writes_each_directions_own_date_option(
+    out_days: tuple[int, int], out_value: str, ret_days: tuple[int, int], ret_value: str
+) -> None:
+    s = SpecificDateSearch(
+        legs=(
+            _flexed("JFK", "LHR", date(2026, 10, 20), out_days),
+            _flexed("LHR", "JFK", date(2026, 10, 27), ret_days),
+        )
+    )
+    dates = _decoded(s)["slices"][0]["dates"]
+    assert (dates["departureDateModifier"], dates["returnDateModifier"]) == (out_value, ret_value)
+
+
+def test_a_multi_city_link_writes_each_slices_own_date_option() -> None:
+    s = SpecificDateSearch(
+        legs=(
+            _flexed("SFO", "JFK", date(2026, 10, 20), (1, 0)),
+            _flexed("JFK", "LHR", date(2026, 10, 24), (2, 2), arrive=True),
+        )
+    )
+    payload = _decoded(s)
+    assert payload["type"] == "multi-city"
+    assert [
+        (sl["dates"]["departureDateModifier"], sl["dates"]["departureDateType"])
+        for sl in payload["slices"]
+    ] == [("10", "depart"), ("22", "arrive")]
+    assert {sl["dates"]["returnDateModifier"] for sl in payload["slices"]} == {"0"}
+
+
+def test_the_pinned_link_carries_the_date_options() -> None:
+    s = SpecificDateSearch(
+        legs=(
+            _flexed("JFK", "LHR", date(2026, 10, 20), (1, 1), arrive=True),
+            _flexed("LHR", "JFK", date(2026, 10, 27), (0, 1)),
+        )
+    )
+    url = matrix_itinerary_url(s, solution_id="si", session="sess", solution_set="rh")
+    dates = _decode_search(url)["slices"][0]["dates"]
+    assert (
+        dates["departureDateModifier"],
+        dates["departureDateType"],
+        dates["returnDateModifier"],
+        dates["returnDateType"],
+    ) == ("11", "arrive", "1", "depart")
+    assert _decode_search(url)["slices"] == _decoded(s)["slices"]
 
 
 # ─────────── calendar URLs: trip length is round-trip-only state ────────────
