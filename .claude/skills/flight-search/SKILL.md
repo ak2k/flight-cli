@@ -24,12 +24,12 @@ intent into the right invocation **on the first try**.
 
 Global flags (every search-printing command):
 - `-v` / `-vv` — verbose logging (cache hits, retries) to stderr
-- `--format envelope` — `search` and `calendar`: one JSON object with the same keys on every path (`version`, `command`, `backend`, `currency`, `complete`, `notes`, `results`, `awards`, `insight`, `price_history`, `verify`). Use it whenever the output is read by a program: `complete: false` means the answer is narrower than asked, and `notes` says why
+- `--format envelope` — `search` and `calendar`: one JSON object with the same keys on every path (`version`, `command`, `backend`, `currency`, `complete`, `notes`, `results`, `awards`, `insight`, `price_history`, `verify`, `cross_check`). Use it whenever the output is read by a program: `complete: false` means the answer is narrower than asked, and `notes` says why
 - `--format json` — the answering path's own shape (Google Flights rows, Matrix's raw response, `{cabin: …}`, or the award document); `--json` is a deprecated alias for it
 - `--no-cache` — bypass the on-disk response cache
 - `--matrix-url` / `--google-url` — toggle deep-link emission
 - `--cash-only` — skip all award providers; show only the cash table
-- `--format json --enrich --cash-only` — `search` on Google Flights: the default table's Google-vs-Matrix cross-check as `{"search": <the plain document>, "cross_check": {…}}` (`delta` = Google − Matrix only for the same trip in one currency, `reasons` on every other row, Matrix's `listed` of `solution_count`); plain `--format json` does not cross-check, though on auto a failed Google query is still handed to Matrix
+- `--format json --enrich --cash-only` — `search` on Google Flights: the default table's Google-vs-Matrix cross-check as `{"search": <the plain document>, "cross_check": {…}}` (`delta` = Google − Matrix only for the same trip in one currency, `reasons` on every other row, Matrix's `listed` of `solution_count`); `--format envelope --enrich --cash-only` carries the same object under `cross_check`; plain `--format json` does not cross-check, though on auto a failed Google query is still handed to Matrix
 - `--awards-only` — skip the cash table; show only the award provider output
 - `--currency EUR` — price in that ISO 4217 currency on both backends (`search`, `calendar`, `detail`)
 - `--fare-rules [--pick N]` — `search` only, routes to Matrix: fare basis, booking codes and refund/change penalties for itinerary N (default 1)

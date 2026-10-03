@@ -121,6 +121,18 @@
             }
           ],
           "title": "Verify"
+        },
+        "cross_check": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Cross Check"
         }
       },
       "required": [
@@ -134,7 +146,8 @@
         "awards",
         "insight",
         "price_history",
-        "verify"
+        "verify",
+        "cross_check"
       ],
       "title": "CalendarEnvelope",
       "type": "object"
@@ -369,6 +382,18 @@
             }
           ],
           "title": "Verify"
+        },
+        "cross_check": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Cross Check"
         }
       },
       "required": [
@@ -382,7 +407,8 @@
         "awards",
         "insight",
         "price_history",
-        "verify"
+        "verify",
+        "cross_check"
       ],
       "title": "SearchEnvelope",
       "type": "object"

@@ -34,6 +34,7 @@ from flight_cli.models import (
 )
 from flight_cli.pp.gflight_adapter import fli_results_to_search_result
 from flight_cli.wire import to_wire
+from test_envelope import _envelope_of, _notes, _rows
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -834,4 +835,73 @@ def test_bags_keep_the_document_off_matrix_and_say_so(
     doc = _document(result)
     assert isinstance(doc, list)
     assert "No Matrix enrichment: Matrix prices no bags." in result.stderr
+    assert bodies == []
+
+
+# ─────────────────────────────── the envelope ───────────────────────────────
+
+
+def test_the_envelope_carries_googles_rows_and_the_cross_check(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    _weave(monkeypatch, gf_rows)
+    doc = _document(_run([*_SEARCH, "-n", "5", "--enrich", "--format", "json"]))
+    env = _envelope_of(_run([*_SEARCH, "-n", "5", "--enrich", "--format", "envelope"]))
+    assert (env["backend"], env["complete"]) == ("gflight", True)
+    assert [r["row"] for r in _rows(env)] == doc["search"]
+    assert env["cross_check"] == doc["cross_check"]
+    assert not _notes(env, "cross_check")
+
+
+def test_a_failed_matrix_leaves_the_envelopes_cross_check_null_and_narrows(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    _weave(monkeypatch, gf_rows, matrix_fails=True)
+    env = _envelope_of(_run([*_SEARCH, "-n", "5", "--enrich", "--format", "envelope"]))
+    assert (env["backend"], env["complete"], env["cross_check"]) == ("gflight", False, None)
+    assert len(_rows(env)) == 5
+    assert _notes(env, "cross_check") == ["cross_check: the Matrix search failed"]
+
+
+def test_a_failed_google_leaves_the_envelope_matrixs_cross_check_alone(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    _weave(monkeypatch, gf_rows, google_fails=True)
+    env = _envelope_of(_run([*_SEARCH, "-n", "5", "--enrich", "--format", "envelope"]))
+    assert (env["backend"], env["complete"]) == (None, False)
+    assert _rows(env) == []
+    assert env["cross_check"]["google"] == {"listed": 0, "answered": False}
+    alone = "Google Flights failed, and cross_check holds Matrix's rows alone"
+    assert _notes(env, "backend") == [f"backend: {alone}"]
+    assert _notes(env, "results") == [f"results: {alone}"]
+
+
+def test_with_both_failed_the_envelope_exits_1_with_neither(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    _weave(monkeypatch, gf_rows, google_fails=True, matrix_fails=True)
+    result = _run([*_SEARCH, "-n", "5", "--enrich", "--format", "envelope"])
+    env = _envelope_of(result, code=1)
+    assert (env["backend"], env["complete"], env["cross_check"]) == (None, False, None)
+
+
+def test_the_awards_refusal_names_the_format_asked(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    bodies = _weave(monkeypatch, gf_rows)
+
+    def _awards(sel: Any) -> bool:
+        return not sel.cash_only
+
+    def _no_award_search(*_a: Any, **_kw: Any) -> None:
+        pytest.fail("an award provider was searched")
+
+    monkeypatch.setattr(cli, "_should_run_awards", _awards)
+    monkeypatch.setattr(cli, "run_pp_for_search", _no_award_search)
+    args = ["search", "JFK", "LAX", "--dep", _DEP.isoformat(), "--enrich", "--format", "envelope"]
+    result = _run(args)
+    assert result.exit_code == 2, result.output
+    said = " ".join(result.stderr.split())
+    assert "--enrich --format envelope cross-checks cash fares only; add --cash-only" in said
+    assert result.stdout == ""
     assert bodies == []

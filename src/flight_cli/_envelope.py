@@ -90,6 +90,7 @@ class SearchEnvelope(_Frozen):
     insight: list[Insight]
     price_history: list[PriceHistory]
     verify: dict[str, Any] | None
+    cross_check: dict[str, Any] | None
 
 
 class CalendarEnvelope(_Frozen):
@@ -104,6 +105,7 @@ class CalendarEnvelope(_Frozen):
     insight: list[Insight]
     price_history: list[PriceHistory]
     verify: dict[str, Any] | None
+    cross_check: dict[str, Any] | None
 
 
 ENVELOPE: TypeAdapter[SearchEnvelope | CalendarEnvelope] = TypeAdapter(
@@ -130,6 +132,7 @@ class _Recorder:
         self.insight: list[Insight] = []
         self.history: list[PriceHistory] = []
         self.verify: dict[str, Any] | None = None
+        self.cross_check: dict[str, Any] | None = None
         self.reasons: dict[str, str] = {}
 
 
@@ -207,6 +210,13 @@ def record_verify(check: dict[str, Any]) -> None:
     if (rec := _slot.recorder) is not None:
         with rec.lock:
             rec.verify = check
+
+
+def record_cross_check(check: dict[str, Any]) -> None:
+    """The `--enrich` cross-check: the `cross_check` object `--format json` prints."""
+    if (rec := _slot.recorder) is not None:
+        with rec.lock:
+            rec.cross_check = check
 
 
 class _SoftWrapping(Protocol):
@@ -325,6 +335,7 @@ def _document(rec: _Recorder, *, code: int, stderr: str, stray: str) -> str:
         "insight": rec.insight,
         "price_history": rec.history,
         "verify": rec.verify,
+        "cross_check": rec.cross_check,
     }
     doc = (
         SearchEnvelope(command="search", results=groups, **common)
@@ -343,7 +354,7 @@ def _key_notes(
     failed = "the run failed before an answer" if code else "nothing answered"
     notes: list[str] = []
     if rec.backend is None:
-        notes.append(f"backend: {failed}")
+        notes.append(f"backend: {why.get('backend', failed)}")
     if not priced:
         notes.append("currency: no row is priced")
     elif len(priced) > 1:
@@ -385,4 +396,11 @@ def _check_notes(rec: _Recorder, *, calendar: bool) -> list[str]:
             else rec.reasons.get("verify", unchecked)
         )
         notes.append(f"verify: {reason}")
+    if rec.cross_check is None:
+        reason = (
+            "a calendar runs no cross-check"
+            if calendar
+            else rec.reasons.get("cross_check", "no cross-check ran")
+        )
+        notes.append(f"cross_check: {reason}")
     return notes

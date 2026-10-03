@@ -5380,7 +5380,7 @@ def _answer_cross_check_document(
     Each half fails on its own: a failed Google half leaves `search` empty and
     every Matrix row saying why, a failed Matrix half leaves `cross_check` null
     with its reason on stderr, and with both failed stdout stays empty and the
-    exit is 1."""
+    exit is 1. An envelope run records the two halves in place of the write."""
     from ._enrich import merge_results  # noqa: PLC0415 — as in `_run_enriched_path`
     from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
 
@@ -5395,9 +5395,16 @@ def _answer_cross_check_document(
             transport=gf_mode,
             json_out=True,
         )
+        if matrix_res is not None:
+            # `results` holds Google's rows alone, so no backend answered it.
+            alone = "Google Flights failed, and cross_check holds Matrix's rows alone"
+            _envelope.explain("backend", alone)
+            _envelope.explain("results", alone)
     checked: dict[str, Any] | None = None
     if matrix_res is None:
         _report_search_matrix_failure(state)
+        _envelope.narrow()
+        _envelope.explain("cross_check", "the Matrix search failed")
         if not google_answered:
             raise typer.Exit(1)
     else:
@@ -5410,7 +5417,21 @@ def _answer_cross_check_document(
             state, board, matrix_res, uncapped=page, legs=legs, opts=opts, currency=currency
         )
         checked = cross_check_document(shown, cross_check(shown, answers))
-    search = _gflight_json_document(_price_ordered(gf)[:top_n], opts.bags)
+    rows = _price_ordered(gf)[:top_n]
+    if _envelope.active():
+        if google_answered:
+            served = state.get("gf")
+            _record_google_cabin(
+                opts.cabin,
+                rows,
+                insight=getattr(served, "insight", None),
+                history=getattr(served, "history", None),
+                bags=opts.bags,
+            )
+        if checked is not None:
+            _envelope.record_cross_check(json.loads(json.dumps(checked, default=str)))
+        return
+    search = _gflight_json_document(rows, opts.bags)
     sys.stdout.write(json.dumps({"search": search, "cross_check": checked}, indent=2, default=str))
 
 
@@ -6935,8 +6956,8 @@ _ENVELOPE_FORMAT_OPT = typer.Option(
     "--format",
     help=f"Output format: one of {_ENVELOPE_FORMAT_CHOICES}. envelope is one versioned "
     "JSON document on every path: version, command, backend, currency, complete, "
-    "notes, results, awards, insight, price_history, verify. complete is false when "
-    "the answer is narrower than asked, and notes carries what stderr said.",
+    "notes, results, awards, insight, price_history, verify, cross_check. complete is "
+    "false when the answer is narrower than asked, and notes carries what stderr said.",
     rich_help_panel=_GROUP_OUTPUT,
 )
 _JSON_OPT = typer.Option(
@@ -7407,6 +7428,8 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         raise typer.Exit(2)
     if not verify:
         _envelope.explain("verify", "--verify was not asked")
+    if fast is not False:
+        _envelope.explain("cross_check", "--enrich was not asked")
     ccy = _resolve_currency(currency)
     bags = _parse_bags(bags_spec) if bags_spec is not None else None
     # Deprecated-flag warning surfaces at runtime since hidden=True hides the
@@ -7651,7 +7674,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                     run_awards=run_awards, awards_only=sel.awards_only, sellers=sellers
                 )
             ):
-                err.print(f"[red]--enrich --format json {_safe_text(blocker)}.[/]")
+                err.print(f"[red]--enrich --format {_safe_text(output)} {_safe_text(blocker)}.[/]")
                 raise typer.Exit(2)
             _run_enriched_path(
                 legs=legs,

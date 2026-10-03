@@ -24,6 +24,7 @@ its schema is `docs/envelope.schema.json`, generated from the models
 | `insight` | `[{cabin, currency, cheapest, typical_low, typical_high, level}]` | one per Google page that carried one |
 | `price_history` | `[{cabin, currency, points: [{date, price}]}]` | one per Google page that carried one |
 | `verify` | object / null | `--verify`'s check of row `--pick`, the `verify` object `--format json` prints; null when not asked, on a calendar, or when the check failed (exit 1) |
+| `cross_check` | object / null | `--enrich`'s Google-vs-Matrix comparison, the `cross_check` object `--format json --enrich` prints; null when not asked, skipped, on a calendar, or when Matrix's half failed |
 
 `price` is the trip's: a Google round trip's is its return member's, the fare
 every surface prints for the pair; Matrix's is the solution's price string read
@@ -47,7 +48,8 @@ with no tokens it is a note), both in `_pp_preflight` and at the award gate
 (`cli._explain_no_awards`), where failed tokens read as no provider at all;
 any other provider `--providers` names that has no credentials, at the award
 gate (`cli._should_run_awards`), whether or not another provider runs;
-the award query failing; a provider failing to start or answer
+the award query failing; the Matrix half of an `--enrich` cross-check
+failing; a provider failing to start or answer
 (`providers/registry.py`, seats.aero, and a PointsPath airline search that is
 not "unsupported" in `pp/client.py`, an error status with an empty body
 included); a leg with `pairs_not_asked`; calendar sub-queries lost;
@@ -75,8 +77,12 @@ click would print "Aborted." only after the run stopped hearing stderr.
 Every path runs as under `--format json`, and each JSON leaf calls the recorder
 in place of its `sys.stdout.write`. With awards on, the leaf records its cash
 rows and `run_pp_for_search` records the awards. `--verify` records its check
-under `verify` (`_envelope.record_verify`), with the same refusals as under
-`--format json`. `--sellers` and `--fare-rules` write a document of their own
+under `verify` (`_envelope.record_verify`), and `--enrich` records Google's rows
+under `results` and its comparison under `cross_check`
+(`cli._answer_cross_check_document`), each with the same refusals as under
+`--format json`. Where Google's half failed, `results` and `backend` stay empty,
+since the rows are Google's, and their notes say `cross_check` holds Matrix's
+rows alone. `--sellers` and `--fare-rules` write a document of their own
 and are refused with the envelope (exit 2, before any request); a new
 document-writing flag has to go inside the envelope under its own key, never
 beside it.
