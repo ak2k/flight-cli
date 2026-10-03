@@ -5467,16 +5467,37 @@ class _UncheckableAnswerError(Exception):
     """Matrix answered the chain in a shape that cannot be read flight by flight."""
 
 
+def _states_every_slice(solution: Itinerary) -> bool:
+    """Whether Matrix's summary of `solution` states each slice's flights,
+    stops, end airports and times. A slice missing any of them compares
+    unequal to every row, so it is no candidate whatever its flights are."""
+    slices = solution.itinerary.slices if solution.itinerary else []
+    return bool(slices) and all(
+        s.flights
+        and all(s.flights)
+        and all(p is not None and p.code for p in (s.origin, s.destination, *s.stops))
+        and _verify.wall_clock(s.departure)
+        and _verify.wall_clock(s.arrival)
+        for s in slices
+    )
+
+
 def _other_itinerary(chain: SearchResult) -> _verify.Verdict:
     """No solution `chain` lists is the row. That says Matrix prices these
-    flights only as other itineraries when the page holds its whole answer;
-    past the page the row's own itinerary may be listed, unread, so this
-    raises `_UncheckableAnswerError` instead."""
+    flights only as other itineraries when the page holds its whole answer
+    and every summary on it can be compared with the row; otherwise the row's
+    own itinerary may be on it or past it, so this raises
+    `_UncheckableAnswerError` instead."""
     listed = len(chain.solutions)
     if chain.solution_count > listed:
         raise _UncheckableAnswerError(
             f"Matrix listed only {listed:d} of its {chain.solution_count:d} itineraries "
             "on these flights, and none listed is these exact flights."
+        )
+    if not all(_states_every_slice(s) for s in chain.solutions):
+        raise _UncheckableAnswerError(
+            "Matrix listed an itinerary that does not state every slice's flights, "
+            "airports and times, so it cannot be checked flight by flight."
         )
     return _verify.other_itinerary(listed)
 

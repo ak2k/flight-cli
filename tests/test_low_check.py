@@ -318,6 +318,63 @@ def test_booking_details_silent_on_a_flights_departure_are_no_answer(
     assert matrix.summarized() == [("viewDetails", "DL-1")]
 
 
+_SUMMARY_SILENT = (
+    "Matrix listed an itinerary that does not state every slice's flights, airports and "
+    "times, so it cannot be checked flight by flight."
+)
+
+
+@pytest.mark.parametrize(
+    "silent_on", ["flights", "origin", "destination", "departure", "arrival", "itinerary"]
+)
+def test_a_summary_silent_on_a_slices_field_is_no_answer_rather_than_another_itinerary(
+    gf_session: Callable[..., Any], matrix: _Matrix, silent_on: str
+) -> None:
+    """The chain's one solution is the row, its booking details say so, but
+    its summary leaves out a field the row is compared on."""
+    low = _low()
+    sol = _row_solution("DL-1", _price(low), low)
+    if silent_on == "itinerary":
+        del sol["itinerary"]
+    else:
+        del sol["itinerary"]["slices"][0][silent_on]
+    matrix.probe = _chain(_b6("USD999.00"))
+    matrix.chain = _chain(sol)
+    matrix.details = {"DL-1": _details_of(low)}
+    gf_session(_served())
+    table = _run("-n", "10")
+    gf_session(_served())
+    document = _run("-n", "10", "--enrich", "--format", "json")
+    assert table.exit_code == 0, table.output
+    under = _under(table.stdout)
+    assert f"{_LINE}1's flights ({_chain_text(low)}): no answer: {_SUMMARY_SILENT}" in under, under
+    assert "other itinerar" not in under
+    assert "Matrix listed 1 of 1 solutions (to USD999.00)" in under
+    assert document.exit_code == 0, document.output
+    low_check = json.loads(document.stdout)["cross_check"]["low_check"]
+    assert (low_check["outcome"], low_check["reason"]) == ("no-answer", _SUMMARY_SILENT)
+
+
+def test_a_silent_summary_beside_a_candidate_flown_a_day_later_is_no_answer(
+    gf_session: Callable[..., Any], matrix: _Matrix
+) -> None:
+    """The one candidate's booking details show it flown a day later; the
+    other solution, silent on its arrival, may still be the row."""
+    low = _low()
+    silent = _row_solution("DL-1", _price(low), low)
+    del silent["itinerary"]["slices"][0]["arrival"]
+    matrix.probe = _chain(_b6("USD999.00"))
+    matrix.chain = _chain(_row_solution("DL-0", "USD100.00", low), silent)
+    matrix.details = {"DL-0": _details_of(low, later={0: 1})}
+    gf_session(_served())
+    result = _run("-n", "10")
+    assert result.exit_code == 0, result.output
+    under = _under(result.stdout)
+    assert f"{_LINE}1's flights ({_chain_text(low)}): no answer: {_SUMMARY_SILENT}" in under, under
+    assert "other itinerar" not in under
+    assert matrix.summarized() == [("viewDetails", "DL-0")]
+
+
 def test_a_chain_past_the_bound_is_no_answer_and_leaves_the_table(
     gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
