@@ -656,6 +656,43 @@ def test_a_paged_board_counts_the_rows_every_page_left_unread(
     assert board.unread == len(google.calls)
 
 
+def _unreadable(rows: int) -> gfid._PageUnreadError:
+    """A page that served `rows` rows and the parser read none of them."""
+    return gfid._PageUnreadError(f"none of {rows:d} Google Flights rows parsed", unread=rows)
+
+
+@pytest.mark.parametrize("fails", ["one-way", "outbound", "return"])
+def test_a_paged_board_counts_the_rows_of_a_page_none_of_whose_rows_parsed(
+    monkeypatch: pytest.MonkeyPatch, fails: str
+) -> None:
+    """12 origins to LAX is two pages, and page 2 serves 3 rows the parser
+    reads none of: its one-way board, its round trip's outbounds, or the
+    return board of the one outbound the round trip pins there (BWI, beside
+    page 1's JFK and LGA). The page is missing and the board partial, as for
+    any refusal of one page, and its 3 rows are counted all the same, as one
+    page counts a return board that refuses its pin."""
+    second: Page = (_EAST[6:], ("LAX",))
+    google = _Google(
+        [(o, "LAX") for o in _EAST], fare=lambda i: 100.0 + i if i in {0, 1, 6} else 300.0 + i
+    )
+
+    def refuse(page: Page) -> Exception | None:
+        pinned = google.calls[-1][1] is not None
+        return _unreadable(3) if page == second and pinned == (fails == "return") else None
+
+    google.refuse = refuse
+    monkeypatch.setattr(gfid, "_one_call", google)
+    buf = capture_err(monkeypatch)
+    legs: tuple[Leg, ...] = (Leg.of(_EAST, "LAX", _DEP),)
+    if fails != "one-way":
+        legs += (Leg.of("LAX", _EAST, _RET),)
+    board = cli._gflight_results(legs, SearchOptions(page_size=3), 3)
+    assert len(google.calls) == (2 if fails == "one-way" else 2 + 3)
+    assert (board.unread, board.partial) == (3, True)
+    missing = f"page 2 of 2 ({','.join(_EAST[6:])}→LAX) is missing: Google Flights' page shape"
+    assert missing in _flat(buf.getvalue()), buf.getvalue()
+
+
 # ──────────────────────────────── one page ────────────────────────────────
 
 
@@ -760,6 +797,31 @@ def test_the_cross_check_calls_no_carrier_absent_from_a_board_missing_a_page(
     assert len(google.calls) == 4
     assert _matrix_only_reasons(result) == [reasons]
     assert json.loads(result.stdout)["cross_check"]["google"]["unread"] == unread * (4 - refused)
+
+
+def test_the_cross_check_calls_no_trip_absent_while_a_missing_page_left_rows_unread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Page 2, the only page that asks BOS-FCO, served 2 rows and the parser
+    read neither. ZZ1's trip may be one of them, so its Matrix-only row says
+    google_unread, not the not_on_google a missing page alone leaves."""
+    second: Page = (_EX6_FROM[:4], _EX6_TO[7:])
+    google = _Google(_EX6_PAIRS, refuse=lambda page: _unreadable(2) if page == second else None)
+    monkeypatch.setattr(cli, "_matrix_into", _matrix_lists(("ZZ1", _DEP, "BOS", "FCO")))
+    result = _search(
+        monkeypatch,
+        google,
+        ",".join(_EX6_FROM),
+        ",".join(_EX6_TO),
+        "--enrich",
+        "--format",
+        "json",
+        "-n",
+        "200",
+    )
+    assert len(google.calls) == 4
+    assert _matrix_only_reasons(result) == [["google_unread"]]
+    assert json.loads(result.stdout)["cross_check"]["google"]["unread"] == 2
 
 
 @pytest.mark.parametrize(

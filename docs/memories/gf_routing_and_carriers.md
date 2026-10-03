@@ -1014,7 +1014,8 @@ cross-check (`--enrich`) then names no carrier absent from Google: a missing
 page's flights are not on the board, and a return into another page's airports
 was never asked. `unread`, the rows a page served that the parser could not
 read, is summed as `dropped` is, an outbound page that holds no pin included.
-Where a board is partial and counts unread rows, a Matrix-only row says
+So are the rows of a page missing because none of them parsed: Google served
+them. Where a board is partial and counts unread rows, a Matrix-only row says
 `google_unread`, not the `not_on_google` the partial board alone leaves, as it
 would on one page: its trip may be one of the unread rows.
 Under `--gf-transport browser` one Chrome serves every page
@@ -1219,7 +1220,8 @@ those two on a board the row filter cut; otherwise `not_on_google`.
 While the board counts rows Google served that the parser could not read
 (`Board.unread`, a round trip's summed over its outbound page and every return
 page it read, a return page none of whose rows parsed included though it
-refuses its pin, and a board asked as several pages summed over every page), a
+refuses its pin, and a board asked as several pages summed over every page, a
+page missing because none of its rows parsed included), a
 Matrix-only row that would say `carrier_absent_google` or
 `not_on_google` says `google_unread` ("2 of Google's rows could not be read")
 instead: its trip may be one of them. On the JFK-LAX board cut to DL1788 and

@@ -4733,12 +4733,16 @@ def _gflight_pages(
 
     `dropped` sums what every page's filter removed, its outbounds whether
     pinned or not and its returns, because an empty board is handed to Matrix
-    on it. `unread` sums the rows the parser could not read the same way,
-    because the cross-check calls no flight absent from Google while any are.
+    on it. `unread` sums the rows the parser could not read the same way, a
+    page missing because none of its rows parsed included, because the
+    cross-check calls no flight absent from Google while any are.
     A page's price insight describes its own airports, so the merged
     board carries none. The board is `partial` where a page is missing or the
     trip is round: its rows then stop short of what one search would list."""
-    from ._gflight_ids import Board  # noqa: PLC0415 — fli, ~95 ms
+    from ._gflight_ids import (  # noqa: PLC0415 — fli, ~95 ms
+        Board,
+        _PageUnreadError,  # pyright: ignore[reportPrivateUsage] — the refusal that counts rows
+    )
 
     asked = _PageAsk(pages, gf_mode=gf_mode, bags=opts.bags is not None)
     boards: list[Board[Any]] = []
@@ -4788,6 +4792,9 @@ def _gflight_pages(
                     dropped += board.dropped
                     pinned += board.pinned
                     unread += board.unread
+    # Google served the rows of a page none of whose rows parsed, so a flight
+    # on one of them is on its board though the page is missing.
+    unread += sum(e.unread for e in asked.failed.values() if isinstance(e, _PageUnreadError))
     asked.report()
     rows = _merged_boards(boards)
     asked.raise_if_empty(rows)
