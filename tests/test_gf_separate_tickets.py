@@ -675,6 +675,35 @@ def test_a_search_handed_to_matrix_still_says_what_became_of_separate_tickets(
     assert "Using Matrix: no Google Flights itinerary matched" in said
 
 
+@pytest.mark.parametrize("asked", [[], ["--no-separate-tickets"]], ids=["shown", "hidden"])
+def test_a_separate_ticket_row_the_filter_removed_hands_an_empty_answer_to_matrix(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch, asked: list[str]
+) -> None:
+    """Google lists no one-ticket flight and one self transfer, on JetBlue, so
+    excluding JetBlue empties the answer: auto hands it to Matrix rather than
+    answer that Google has no flights."""
+    ran: list[bool] = []
+
+    def _matrix(**_kw: object) -> None:
+        ran.append(True)
+
+    monkeypatch.setattr(cli, "_run_matrix_path", _matrix)
+    fake = gf_session(_page(_ds1("ds1_flightless_board.json")), _lax_with_marked_twin(5))
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            *(*_SEARCH, "JFK", "LAX", "--dep", _DEP.isoformat(), "--fast", "--format", "json"),
+            *("--ext", "-AIRLINES B6", *asked),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert _CHEAPEST_TFU in fake.gets[-1]
+    assert ran == [True]
+    assert "Using Matrix: no Google Flights itinerary matched a carrier exclusion (B6)" in (
+        " ".join(result.stderr.split())
+    )
+
+
 def test_the_opt_out_says_nothing_when_it_hid_nothing(gf_session: Callable[..., Any]) -> None:
     gf_session(_served(_LAX))
     result = CliRunner().invoke(
