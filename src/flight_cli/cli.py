@@ -5465,6 +5465,20 @@ class _UncheckableAnswerError(Exception):
     """Matrix answered the chain in a shape that cannot be read flight by flight."""
 
 
+def _other_itinerary(chain: SearchResult) -> _verify.Verdict:
+    """No solution `chain` lists is the row. That says Matrix prices these
+    flights only as other itineraries when the page holds its whole answer;
+    past the page the row's own itinerary may be listed, unread, so this
+    raises `_UncheckableAnswerError` instead."""
+    listed = len(chain.solutions)
+    if chain.solution_count > listed:
+        raise _UncheckableAnswerError(
+            f"Matrix listed only {listed:d} of its {chain.solution_count:d} itineraries "
+            "on these flights, and none listed is these exact flights."
+        )
+    return _verify.other_itinerary(listed)
+
+
 async def _exact_flights_on(
     c: MatrixClient, row: _verify.Row, opts: SearchOptions
 ) -> _verify.Verdict:
@@ -5485,7 +5499,7 @@ async def _exact_flights_on(
         return _verify.Verdict("no-solution", "Matrix returned no fare on these exact flights")
     idxs = _verify.candidates(row, chain)
     if not idxs:
-        return _verify.other_itinerary(len(chain.solutions))
+        return _other_itinerary(chain)
     session, solution_set = chain.session, chain.solution_set
     sids = [sid for sid in (chain.solutions[i].id for i in idxs) if sid]
     if not (session and solution_set and len(sids) == len(idxs)):
@@ -5510,7 +5524,7 @@ async def _exact_flights_on(
             "Matrix returned booking details without their flights, "
             "so this itinerary cannot be checked flight by flight."
         )
-    return _verify.other_itinerary(len(chain.solutions))
+    return _other_itinerary(chain)
 
 
 def _low_check_failure(e: Exception) -> str:

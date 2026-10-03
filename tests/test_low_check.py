@@ -262,6 +262,37 @@ def test_the_same_flights_landing_a_day_later_are_another_itinerary(
     assert matrix.summarized() == []
 
 
+@pytest.mark.parametrize("listed", ["no candidate", "a candidate flown a day later"])
+def test_an_answer_longer_than_its_page_is_no_answer_rather_than_another_itinerary(
+    gf_session: Callable[..., Any], matrix: _Matrix, listed: str
+) -> None:
+    """Matrix found the row's own itinerary, but past the chain's page, under
+    trips on the same flights landing a day later."""
+    low = _low()
+    page = SearchOptions().page_size
+    later = [_row_solution(f"DL-{i}", "USD100.00", low, lands_later=1) for i in range(page)]
+    if listed == "a candidate flown a day later":
+        later[0] = _row_solution("DL-0", "USD100.00", low)
+        matrix.details = {"DL-0": _details_of(low, later={0: 1})}
+    matrix.probe = _chain(_b6("USD999.00"))
+    matrix.chain = _chain(*later, _row_solution("DL-exact", _price(low), low))
+    reason = (
+        f"Matrix listed only {page:d} of its {page + 1:d} itineraries on these flights, "
+        "and none listed is these exact flights."
+    )
+    gf_session(_served())
+    table = _run("-n", "10")
+    gf_session(_served())
+    document = _run("-n", "10", "--enrich", "--format", "json")
+    assert table.exit_code == 0, table.output
+    under = _under(table.stdout)
+    assert f"{_LINE}1's flights ({_chain_text(low)}): no answer: {reason}" in under, under
+    assert "other itinerar" not in under
+    assert document.exit_code == 0, document.output
+    low_check = json.loads(document.stdout)["cross_check"]["low_check"]
+    assert (low_check["outcome"], low_check["reason"]) == ("no-answer", reason)
+
+
 def test_a_chain_past_the_bound_is_no_answer_and_leaves_the_table(
     gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
