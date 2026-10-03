@@ -855,6 +855,42 @@ def test_a_row_with_a_leg_outside_the_required_cabin_is_dropped(
         assert (len(booked), edited in booked) == (rows, kept)
 
 
+def _return_board_booked_in(cabin: int) -> str:
+    payload: list[Any] = json.loads(_ds1("ds1_return_leg_pinned.json"))
+    for raw in gfid._rows_from_ds1(payload).rows:
+        for leg in raw[0][2]:
+            leg[gfid._LEG_CABIN_IDX] = cabin
+    return _page(
+        _answering(json.dumps(payload), origin="LHR", destination="JFK", date=_RET.isoformat())
+    )
+
+
+def test_a_return_board_the_cabin_requirement_empties_names_it_not_the_routing(
+    gf_session: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No routing was asked, so the lines that account for the pin name the
+    cabin requirement. Every return on the served board is booked in first."""
+    fake = gf_session(_served(_LHR), _return_board_booked_in(4))
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    argv = [*_SEARCH, "JFK", "LHR", "--dep", _DEP.isoformat(), "--return", _RET.isoformat()]
+    result = CliRunner().invoke(
+        cli.app,
+        [*argv, "--backend", "gflight", "--cabin", "economy", "--ext", "+CABIN 3", "-n", "1"],
+    )
+    assert result.exit_code == 0, result.output
+    assert len(fake.gets) == 2
+    checks = "a cabin requirement ('+CABIN 3')"
+    lines = [r.getMessage() for r in caplog.records if r.name == "flight_cli._gflight_ids"]
+    assert f"1 of 1 pinned outbounds have no return flight matching {checks}" in lines
+    assert (
+        "pinned outbound EI104/EI152 (USD293.00) lost: "
+        f"Google served 3 returns for it, none matching {checks}"
+    ) in lines
+    assert not any("the routing" in ln for ln in lines)
+
+
 # ─────────────── rows over the stop ceiling, counted on stderr ───────────────
 
 _OVER_ONE_STOP = (

@@ -4169,6 +4169,7 @@ def _gflight_query(
     from ._gflight_ids import GfTransport  # noqa: PLC0415 — fli, ~95 ms
     from .fli_bridge import apply_gf_native_filters, to_fli_filter  # noqa: PLC0415 — fli
     from .routing_predicates import (  # noqa: PLC0415 — pulled in by the two above
+        CabinPred,
         ExcludeOvernightsPred,
         ExcludeRedeyesPred,
         classify,
@@ -4206,8 +4207,8 @@ def _gflight_query(
                 max_stops=stops,
                 stop_drops=stop_drops,
             ),
-            # A cap, a stop limit, a window or a night-flight check can empty a
-            # return board with no routing asked at all.
+            # A cap, a stop limit, a window, a night-flight check or a cabin
+            # requirement can empty a return board with no routing asked at all.
             checks=(
                 _row_checks(legs, opts)
                 if opts.max_price is not None
@@ -4217,7 +4218,7 @@ def _gflight_query(
                     for lg in legs
                 )
                 or any(
-                    isinstance(p, ExcludeRedeyesPred | ExcludeOvernightsPred)
+                    isinstance(p, ExcludeRedeyesPred | ExcludeOvernightsPred | CabinPred)
                     for preds in per_slice_preds
                     for p in preds
                 )
