@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
     from enum import Enum
 
-    from .domain import TimeOfDay
+    from .domain import Leg, TimeWindow
     from .routing_predicates import Predicate
 
 _ROUND_TRIP_LEGS = 2  # 2 legs = round-trip; 1 = one-way
@@ -147,26 +147,34 @@ def to_fli_filter(s: Search) -> Any:
         Cabin.FIRST: SeatType.FIRST,
     }
 
-    def _window(buckets: Sequence[TimeOfDay]) -> TimeRestrictions | None:
+    def _hours(windows: Sequence[TimeWindow]) -> tuple[int | None, int | None]:
         # Google takes whole hours and a latest hour includes its every minute
-        # (11 answers up to 11:59), so this window can only be wider than the
-        # buckets; the row filter holds the rows to the buckets' own minutes.
-        if not buckets:
+        # (11 answers up to 11:59), so these hours can only be wider than the
+        # windows; the row filter holds the rows to the windows' own minutes.
+        # fli refuses a latest hour of 0, and leaving it open is wider still.
+        if not windows:
+            return None, None
+        spans = [time_bounds(w) for w in windows]
+        return min(lo for lo, _ in spans) // 60, max(hi for _, hi in spans) // 60 or None
+
+    def _window(leg: Leg) -> TimeRestrictions | None:
+        if not (leg.time_ranges or leg.arrival_ranges):
             return None
-        spans = [time_bounds(b) for b in buckets]
+        earliest_departure, latest_departure = _hours(leg.time_ranges)
+        earliest_arrival, latest_arrival = _hours(leg.arrival_ranges)
         return TimeRestrictions(
-            earliest_departure=min(lo for lo, _ in spans) // 60,
-            latest_departure=max(hi for _, hi in spans) // 60,
+            earliest_departure=earliest_departure,
+            latest_departure=latest_departure,
+            earliest_arrival=earliest_arrival,
+            latest_arrival=latest_arrival,
         )
 
-    def _seg(
-        origins: Sequence[str], dests: Sequence[str], dt: str, buckets: Sequence[TimeOfDay]
-    ) -> FlightSegment:
+    def _seg(leg: Leg, dt: str) -> FlightSegment:
         return FlightSegment(
-            departure_airport=[[fli_airport(a), 0] for a in expand_airports(origins)],
-            arrival_airport=[[fli_airport(a), 0] for a in expand_airports(dests)],
+            departure_airport=[[fli_airport(a), 0] for a in expand_airports(leg.origins)],
+            arrival_airport=[[fli_airport(a), 0] for a in expand_airports(leg.destinations)],
             travel_date=dt,
-            time_restrictions=_window(buckets),
+            time_restrictions=_window(leg),
         )
 
     segs: list[Any] = []
@@ -179,25 +187,14 @@ def to_fli_filter(s: Search) -> Any:
                     raise AssertionError(
                         f"{type(s).__name__}.leg.date should be set after validation",
                     )
-                segs.append(
-                    _seg(leg.origins, leg.destinations, leg.date.isoformat(), leg.time_ranges)
-                )
+                segs.append(_seg(leg, leg.date.isoformat()))
         case CalendarSearch():
             mean_dur = (s.window.duration_min + s.window.duration_max) // 2
             out = s.legs[0]
             ret = s.legs[1] if len(s.legs) == _ROUND_TRIP_LEGS else None
-            segs.append(
-                _seg(out.origins, out.destinations, s.window.start.isoformat(), out.time_ranges)
-            )
+            segs.append(_seg(out, s.window.start.isoformat()))
             if ret:
-                segs.append(
-                    _seg(
-                        ret.origins,
-                        ret.destinations,
-                        (s.window.start + timedelta(days=mean_dur)).isoformat(),
-                        ret.time_ranges,
-                    )
-                )
+                segs.append(_seg(ret, (s.window.start + timedelta(days=mean_dur)).isoformat()))
         case _:
             assert_never(s)
 
@@ -240,6 +237,7 @@ def to_fli_filter(s: Search) -> Any:
             if bags is not None
             else None
         ),
+        exclude_basic_economy=s.options.exclude_basic,
     )
 
 
