@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import itertools
 import re
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .domain import Cabin, time_bounds, window_label, within_price_cap
@@ -388,6 +389,16 @@ def _overnight_stop(arrived: Any, leaves: Any) -> bool:
     return leaves.departure_datetime.date() > lands.date() or lands.hour < _NIGHT_ENDS_HOUR
 
 
+@dataclass
+class StopDrops:
+    """The rows `routing_keep` dropped for making more stops than the ceiling
+    the page was asked for, and that ceiling. One per query: the page is asked
+    for one ceiling, and every slice holds the same codes."""
+
+    rows: int = 0
+    ceiling: int | None = None
+
+
 def routing_keep(
     per_slice_predicates: Sequence[Sequence[Predicate]],
     per_slice_times: Sequence[Sequence[TimeWindow]] = (),
@@ -396,6 +407,7 @@ def routing_keep(
     max_price: int | None = None,
     currency: str = "USD",
     max_stops: int | None = None,
+    stop_drops: StopDrops | None = None,
 ) -> Callable[[int, Any], bool] | None:
     """The per-leg filter `_gflight_ids.search_with_ids` applies to each board
     it is served: `keep(i, row)` is whether one Google Flights row passes slice
@@ -406,7 +418,9 @@ def routing_keep(
 
     The cap and the stop ceiling are checked on every board, a round trip's
     outbound as well as each return: whether or not the page was asked for
-    them, every row is held to them."""
+    them, every row is held to them. Each row over the ceiling is counted in
+    `stop_drops`, before any other check, so the count is every such row
+    Google served."""
     if max_stops is not None and max_stops < 0:
         max_stops = None
     if (
@@ -419,16 +433,19 @@ def routing_keep(
         return None
 
     def keep(leg: int, row: Any) -> bool:
+        preds = per_slice_predicates[leg] if leg < len(per_slice_predicates) else ()
+        ceiling = _stop_ceiling(preds, max_stops)
+        if ceiling is not None and len(row.flight.legs) - 1 > ceiling:
+            if stop_drops is not None:
+                stop_drops.rows += 1
+                stop_drops.ceiling = ceiling
+            return False
         if max_price is not None and not within_price_cap(
             row.flight.price, row.flight.currency, cap=max_price, cap_currency=currency
         ):
             return False
-        preds = per_slice_predicates[leg] if leg < len(per_slice_predicates) else ()
         times = per_slice_times[leg] if leg < len(per_slice_times) else ()
         arrivals = per_slice_arrivals[leg] if leg < len(per_slice_arrivals) else ()
-        ceiling = _stop_ceiling(preds, max_stops)
-        if ceiling is not None and len(row.flight.legs) - 1 > ceiling:
-            return False
         if not _row_passes(row, preds, times, arrivals):
             return False
         if not preds:

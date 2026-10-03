@@ -17,6 +17,7 @@ import re
 import sys
 import urllib.parse
 from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, override
 
 import pytest
@@ -838,6 +839,68 @@ def test_a_row_with_a_leg_outside_the_required_cabin_is_dropped(
         assert (len(booked), edited in booked) == (rows, kept)
 
 
+# ─────────────── rows over the stop ceiling, counted on stderr ───────────────
+
+_OVER_ONE_STOP = (
+    "Google Flights returned 3 rows over the stop ceiling it was asked for (1); they are not shown."
+)
+
+
+@pytest.mark.parametrize(
+    "fmt", [("--format", "json"), ("--fast", "--format", "table")], ids=["json", "table"]
+)
+@pytest.mark.parametrize(
+    "limit", [("--stops", "1"), ("--ext", "MAXSTOPS 1")], ids=["stops", "maxstops"]
+)
+def test_rows_over_the_stop_ceiling_are_counted_once_on_stderr(
+    limit: tuple[str, ...],
+    fmt: tuple[str, ...],
+    gf_session: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red at the base, which dropped the capture's three two-stop rows
+    without a word. The document keeps its shape."""
+    gf_session(_served(_LHR))
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    argv = [*_SEARCH, "JFK", "LHR", "--dep", _DEP.isoformat(), "--backend", "gflight"]
+    result = CliRunner().invoke(cli.app, [*argv, *fmt, "-n", "200", *limit], env={"COLUMNS": "250"})
+    assert result.exit_code == 0, result.output
+    assert " ".join(result.stderr.split()).count(_OVER_ONE_STOP) == 1
+    if fmt[-1] == "json":
+        rows: list[dict[str, Any]] = json.loads(result.stdout)
+        assert len(rows) == 98
+        assert all(len(_legs(m)) <= 2 for m in rows)
+
+
+@pytest.mark.parametrize("extra", [(), ("--ext", "-AIRLINES BA")], ids=["plain", "carrier-out"])
+def test_a_search_with_no_stop_ceiling_counts_nothing(
+    extra: tuple[str, ...], gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Green at the base and the tip."""
+    gf_session(_served(_LHR))
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    result = CliRunner().invoke(cli.app, _lhr_json(*extra))
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)
+    assert "stop ceiling" not in result.stderr
+
+
+def test_a_board_the_stop_ceiling_helped_empty_keeps_its_own_line_alone(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Green at the base and the tip: no LH-operated nonstop flies JFK-LHR, so
+    the board empties and its line names every check."""
+    gf_session(_served(_LHR))
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    result = CliRunner().invoke(cli.app, _lhr_json("--stops", "0", "--routing", "O:LH+"))
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == []
+    err = " ".join(result.stderr.split())
+    assert "no itinerary matched" in err
+    assert "a stop ceiling of 0" in err
+    assert "rows over the stop ceiling" not in err
+
+
 def _decode_fields(buf: bytes) -> dict[int, list[Any]]:
     out: dict[int, list[Any]] = {}
     i = 0
@@ -1535,6 +1598,33 @@ def test_a_multi_cabin_google_answer_prints_its_notes_before_the_document(
         assert shown.count(note) == count, result.stderr
         assert shown.index(note) < document, result.output
     assert shown.index(_PIN_CAP_NOTE) < shown.index(_JOIN_NOTE) < shown.index(_CURRENCY_NOTE)
+
+
+@pytest.mark.parametrize(("backend", "shown"), [("auto", False), ("gflight", True)])
+def test_a_multi_cabin_stop_count_prints_only_when_googles_boards_answer(
+    monkeypatch: pytest.MonkeyPatch, backend: str, shown: bool
+) -> None:
+    """Red at the base under `--backend gflight`, which counted nothing; green
+    at both under auto, whose hand-off shows Matrix's table and no Google note.
+    Each cabin's search drops one two-stop row."""
+    coach, business = gfid.Board(_usd_rows()), gfid.Board(dropped=7)
+    _google_serves(monkeypatch, coach=coach, business=business)
+
+    def _search(f: Any, *, keep: Callable[[int, Any], bool], **_kw: object) -> gfid.Board[Any]:
+        assert not keep(0, SimpleNamespace(flight=SimpleNamespace(legs=[None] * 3)))
+        return business if f.seat_type.name == "BUSINESS" else coach
+
+    monkeypatch.setattr(gfid, "search_with_ids", _search)
+    _matrix_multi(monkeypatch)
+    argv = _multi_cabin_round_trip("--backend", backend, "--stops", "1")
+    result = CliRunner().invoke(cli.app, argv)
+    assert result.exit_code == 0, result.output
+    note = (
+        "Google Flights COACH returned 1 row over the stop ceiling it was asked for (1); "
+        "it is not shown."
+    )
+    err = " ".join(result.stderr.split())
+    assert (note in err, "BUSINESS returned" in err) == (shown, False), err
 
 
 @pytest.mark.parametrize(("backend", "handed_off"), [("auto", True), ("gflight", False)])

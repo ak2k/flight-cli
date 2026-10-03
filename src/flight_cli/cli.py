@@ -107,6 +107,7 @@ if TYPE_CHECKING:
     from ._gf_booking import BookingOptions
     from ._gf_calgraph import GraphRange, LostLength, PriceGraph
     from ._gf_explore import Destination, ExploreAnswer, TripLength
+    from ._gf_postfilter import StopDrops
     from ._gflight_ids import Board, GfTransport, ItineraryKey, PriceInsight
     from .models import (
         BookingDetailsResult,
@@ -4135,6 +4136,7 @@ class _GfQuery(NamedTuple):
     currency: str
     keep: Callable[[int, Any], bool] | None
     checks: str
+    stop_drops: StopDrops
 
 
 @contextlib.contextmanager
@@ -4163,7 +4165,7 @@ def _gflight_query(
     # Every import in this block is deferred for one reason: the Google Flights
     # backend must not load on a Matrix-only search, and this function is the
     # first point that has committed to Google Flights.
-    from ._gf_postfilter import routing_keep  # noqa: PLC0415 — GF-only; see above
+    from ._gf_postfilter import StopDrops, routing_keep  # noqa: PLC0415 — GF-only; see above
     from ._gflight_ids import GfTransport  # noqa: PLC0415 — fli, ~95 ms
     from .fli_bridge import apply_gf_native_filters, to_fli_filter  # noqa: PLC0415 — fli
     from .routing_predicates import (  # noqa: PLC0415 — pulled in by the two above
@@ -4189,6 +4191,7 @@ def _gflight_query(
     per_slice_preds = [list(classify(lg.route_language, lg.extension).predicates) for lg in legs]
     requested = opts.currency or "USD"
     stops = opts.max_extra_stops
+    stop_drops = StopDrops()
     try:
         yield _GfQuery(
             filters=fli_filter,
@@ -4201,6 +4204,7 @@ def _gflight_query(
                 max_price=opts.max_price,
                 currency=requested,
                 max_stops=stops,
+                stop_drops=stop_drops,
             ),
             # A cap, a stop limit, a window or a night-flight check can empty a
             # return board with no routing asked at all.
@@ -4219,6 +4223,7 @@ def _gflight_query(
                 )
                 else "the routing"
             ),
+            stop_drops=stop_drops,
         )
     finally:
         # Named positively, because only rung 2 opens anything to close. The
@@ -4271,10 +4276,30 @@ def _gflight_results(
         )
     if results is None:  # nothing served
         results = Board[Any]()
+    results.stop_drops = query.stop_drops
     # Untrimmed on purpose: a round trip's combinations are built pin-major, so
     # the first `top_n` of them are one outbound's returns and nothing else.
     # Every caller trims what it renders, in the order that surface ranks by.
     return results
+
+
+def _note_stop_drops(results: list[Any], cabin: Cabin | None = None) -> None:
+    """One stderr line counting the rows Google served over the stop ceiling it
+    was asked for, from `_gflight_results`' tally. Called, like
+    `_note_other_currencies`, by each path that answers with the board: a board
+    the filter emptied says so in its own line, and one handed to Matrix is not
+    shown at all."""
+    drops: StopDrops | None = getattr(results, "stop_drops", None)
+    if not results or drops is None or not drops.rows or drops.ceiling is None:
+        return
+    rows = f"{drops.rows:d} row{'' if drops.rows == 1 else 's'}"
+    shown = "it is" if drops.rows == 1 else "they are"
+    google = "Google Flights" if cabin is None else f"Google Flights {cabin.value}"
+    note = (
+        f"{google} returned {rows} over the stop ceiling it was asked for "
+        f"({drops.ceiling:d}); {shown} not shown."
+    )
+    err.print(f"[dim]{_safe_text(note)}[/]")
 
 
 class _Outbound(NamedTuple):
@@ -4867,6 +4892,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
         )
     _pin_cap_note(legs=legs, top_n=top_n)
     _note_other_currencies(results, opts.currency or "USD")
+    _note_stop_drops(results)
 
     # Checked before the answer is printed: a `--sellers` pick outside the
     # table is a usage error, not a pin to fall back from, and an empty board
@@ -5485,6 +5511,7 @@ def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, 
                 gf = []
             state["gf"] = gf
             _note_other_currencies(gf, requested)
+            _note_stop_drops(gf)
             # A document paints no table, as an awards-only run does; the
             # empty-board note still goes to stderr, where it is true.
             _paint_first_gf_table(
@@ -6409,6 +6436,7 @@ def _run_gflight_path_multi(
     for cab in cabins:
         if cab in fli_by_cabin:
             _note_other_currencies(fli_by_cabin[cab], opts.currency or "USD")
+            _note_stop_drops(fli_by_cabin[cab], cab)
     for cab in emptied:
         err.print(
             f"[yellow]Google Flights {_safe_text(cab.value)}: "

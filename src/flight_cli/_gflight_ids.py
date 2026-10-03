@@ -109,6 +109,8 @@ if TYPE_CHECKING:
         FlightSegment,
     )
 
+    from ._gf_postfilter import StopDrops
+
 # DIVERGE: stdlib logging, where the rest of the package uses structlog (see
 # AGENTS.md's stack table and `_http.py`). The refusal classification here is
 # exercised almost entirely through fixtures, and `caplog` — pytest's own
@@ -1721,7 +1723,9 @@ class Board[T](list[T]):
     is how an empty answer tells "none matched the routing" from "Google has no
     flights". `pinned` counts the outbounds a round trip searched returns for,
     because an empty answer from those says nothing about the outbounds it did
-    not pin."""
+    not pin. `stop_drops` is set by the caller that built the row filter: the
+    rows it dropped for the stop ceiling, for whichever path shows the board to
+    say so."""
 
     def __init__(
         self,
@@ -1735,6 +1739,7 @@ class Board[T](list[T]):
         self.insight = insight
         self.dropped = dropped
         self.pinned = pinned
+        self.stop_drops: StopDrops | None = None
 
 
 # One itinerary, as `_deduped` and the round-trip pins tell them apart.
