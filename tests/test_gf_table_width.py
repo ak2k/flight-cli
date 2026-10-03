@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from rich.console import Console
+from rich.text import Text
 from typer.testing import CliRunner
 
 from conftest import _answering, _ds1, _page
@@ -113,6 +114,22 @@ def _legs_cells(text: str) -> list[list[str]]:
     return rows
 
 
+def _legs_beside_legroom(text: str) -> list[list[tuple[str, str]]]:
+    """Each table row's printed lines as (legs, legroom) pairs. A row starts at
+    the line whose `#` cell is filled."""
+    head = _header(text)
+    at_legs, at_room = head.index("legs"), head.index("legroom")
+    rows: list[list[tuple[str, str]]] = []
+    for ln in text.splitlines():
+        if not ln.startswith("│"):
+            continue
+        cells = [c.strip() for c in ln.strip("│").split("│")]
+        if cells[0]:
+            rows.append([])
+        rows[-1].append((cells[at_legs], cells[at_room]))
+    return rows
+
+
 def _members(results: list[Any]) -> list[Any]:
     """Every row the table prints, in its order: price order, a round trip's
     outbound before its return."""
@@ -153,6 +170,24 @@ def _split(text: str, results: list[Any], legs: tuple[Leg, ...]) -> list[str]:
     return split
 
 
+def _misplaced(text: str, results: list[Any], legs: tuple[Leg, ...]) -> list[str]:
+    """Every designator not printed on the line where its own leg's legroom
+    starts, and every multi-airport route printed beside any legroom."""
+    misplaced: list[str] = []
+    for lines, g in zip(_legs_beside_legroom(text), _members(results), strict=True):
+        amenities: list[Any] = g.amenities or []
+        for k, (leg, shown) in enumerate(zip(g.flight.legs, _designators(g), strict=True)):
+            own = Text.from_markup(cli._fmt_gflight_legroom([leg], amenities[k : k + 1])).plain
+            beside = [room for line, room in lines if line.removesuffix(" →") == shown]
+            if len(beside) != 1 or bool(beside[0]) != bool(own) or not own.startswith(beside[0]):
+                misplaced.append(shown)
+        if len(legs[0].origins) > 1:
+            route = cli._gflight_route(g.flight.legs)
+            if [room for line, room in lines if line == route] != [""]:
+                misplaced.append(route)
+    return misplaced
+
+
 def _is_stacked(text: str, results: list[Any], legs: tuple[Leg, ...]) -> bool:
     return _legs_cells(text) == [_stacked(g, legs) for g in _members(results)]
 
@@ -176,6 +211,28 @@ def test_no_designator_is_printed_across_two_lines_at_80_columns_or_more(
         # A table wider than the console would be cropped at its right edge.
         assert all(ln.endswith("┓") for ln in text.splitlines() if ln.startswith("┏"))
         assert ("bags" in _header(text)) == (bags is not None)
+    assert not failures
+
+
+@pytest.mark.parametrize("bags", [None, Bags(checked=1)], ids=["no-bags", "bags"])
+@pytest.mark.parametrize("board", list(_BOARDS))
+def test_a_stacked_leg_prints_beside_its_own_legroom(
+    monkeypatch: pytest.MonkeyPatch, board: str, bags: Bags | None
+) -> None:
+    """Stacked, a reader takes the legroom beside a designator as that flight's.
+    A legroom line Rich wraps, or a route line above the first leg, must not
+    move the next leg's designator beside another leg's legroom."""
+    results, legs, _ = _BOARDS[board]
+    failures: dict[int, list[str]] = {}
+    stacked = 0
+    for width in range(80, 121, 2):
+        text = _render(monkeypatch, results, legs, width, bags=bags)
+        if not _is_stacked(text, results, legs):
+            continue
+        stacked += 1
+        if misplaced := _misplaced(text, results, legs):
+            failures[width] = misplaced
+    assert stacked
     assert not failures
 
 

@@ -6363,18 +6363,42 @@ def _gflight_route(legs: Any) -> str:
     return "→".join(codes)
 
 
-def _gflight_legs_lines(g: Any, match_carriers: frozenset[str], *, route: bool) -> list[str]:
-    """One row's legs cell, a line per part: its airports first when `route`,
-    then each leg's label, every one but the last ending in " →". Joined with
-    spaces the lines are the one-line cell."""
+def _gflight_legs_lines(
+    g: Any, match_carriers: frozenset[str], *, route: bool
+) -> list[tuple[str, str]]:
+    """One row's legs cell, a line per part, each with the legroom printed
+    beside it when the legs stack: its airports first when `route`, beside
+    none, then each leg's label beside that leg's own, every label but the last
+    ending in " →". Joined with spaces the lines are the one-line cell."""
     fr = g.flight
     amenities = getattr(g, "amenities", []) or []
-    labels = [
-        _leg_display(leg, amenities[k] if k < len(amenities) else None, match_carriers)
+    parts = [
+        (
+            _leg_display(leg, amenities[k] if k < len(amenities) else None, match_carriers),
+            _fmt_gflight_legroom([leg], amenities[k : k + 1]),
+        )
         for k, leg in enumerate(fr.legs)
     ]
     head = _gflight_route(fr.legs) if route else ""
-    return ([head] if head else []) + [f"{label} →" for label in labels[:-1]] + labels[-1:]
+    return (
+        ([(head, "")] if head else [])
+        + [(f"{label} →", room) for label, room in parts[:-1]]
+        + parts[-1:]
+    )
+
+
+def _gflight_leg_rows(
+    g: Any, match_carriers: frozenset[str], *, route: bool, stacked: bool
+) -> list[tuple[str, str]]:
+    """The legs and legroom cells of one itinerary's table rows. Stacked, a row
+    per part of `_gflight_legs_lines`, beside its own legroom or none: in one
+    cell the legroom lines would start beside the route line, and slip a line
+    further at each one Rich wraps. Else one row, the legs joined with spaces
+    and the legroom a line per leg that has one."""
+    parts = _gflight_legs_lines(g, match_carriers, route=route)
+    if stacked and parts:
+        return parts
+    return [(" ".join(line for line, _ in parts), "\n".join(room for _, room in parts if room))]
 
 
 def _render_gflight_table(
@@ -6436,9 +6460,12 @@ def _render_gflight_table(
         (
             cell_len(line)
             for g in members
-            for line in _gflight_legs_lines(g, match_carriers, route=per_row_route)
+            for line, _ in _gflight_legs_lines(g, match_carriers, route=per_row_route)
         ),
         default=None,
+    )
+    any_legroom = any(
+        _fmt_gflight_legroom(g.flight.legs, getattr(g, "amenities", []) or []) for g in members
     )
     # The first layout whose natural width fits the console, else the last:
     # the legs go one per line before the CO2 column goes.
@@ -6461,21 +6488,16 @@ def _render_gflight_table(
             t.add_column("CO2 kg", justify="right")
         if bags is not None:
             t.add_column("bags")
-        any_legroom = False
         for i, r in enumerate(shown, 1):
             items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
             for j, g in enumerate(items):
                 fr = g.flight  # unwrap GFlightWithId → fli FlightResult
-                amenities = getattr(g, "amenities", []) or []
                 label = f"{i}{'a' if j == 0 else 'b'}" if len(items) > 1 else str(i)
-                legs_str = ("\n" if stacked else " ").join(
-                    _gflight_legs_lines(g, match_carriers, route=per_row_route)
+                (legs_str, legroom_str), *more = _gflight_leg_rows(
+                    g, match_carriers, route=per_row_route, stacked=stacked
                 )
                 mins = fr.duration
                 dur = f"{mins // 60}h{mins % 60:02d}m"
-                legroom_str = _fmt_gflight_legroom(fr.legs, amenities)
-                if legroom_str:
-                    any_legroom = True
                 co2_cell = (_co2_cell(fr),) if show_co2 else ()
                 bag_cell = () if bags is None else (_bag_cell(g.bags_included, bags),)
                 # A row Google did not price is SHOWN, with the placeholder every
@@ -6496,6 +6518,8 @@ def _render_gflight_table(
                     *co2_cell,
                     *bag_cell,
                 )
+                for legs_str, legroom_str in more:
+                    t.add_row("", "", "", "", legs_str, legroom_str)
         # `console.measure` caps the answer at the console's width, so only an
         # unbounded measure says whether the table is wider.
         unbounded = console.options.update_width(10_000)
