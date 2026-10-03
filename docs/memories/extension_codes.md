@@ -58,6 +58,13 @@ is Matrix-only, so Google never serves a code it read only in part: auto search
 goes to Matrix, `--backend gflight` and `--fast` refuse it, and the default
 calendar runs Matrix alone.
 
+On `flight search`, Google Flights serves `-REDEYES` and `-OVERNIGHTS` as checks
+on its rows, read off each leg's local clocks: a red-eye leg lands on a later
+date than it took off, takes off 00:00-04:59, or crosses the date line; an
+overnight stop is a connection whose next leg leaves on a later date than the
+landing, or whose landing is 00:00-04:59. Calendars still send both to Matrix.
+The rules and their measurements are in `gf_routing_and_carriers.md`.
+
 Codes are **case-insensitive** for the keyword (`ALLIANCE` ≡ `alliance`).
 
 ## Units

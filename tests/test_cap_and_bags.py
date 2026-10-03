@@ -215,7 +215,7 @@ def test_bags_skip_the_matrix_enrichment_and_say_why(
         ([], "_run_enriched_path"),
         (["--fast"], "_run_gflight_path"),
         (["--backend", "matrix"], "_run_matrix_path"),
-        (["--inf-lap", "1"], "_run_matrix_path"),
+        (["--seniors", "1"], "_run_matrix_path"),
     ],
     ids=["enriched", "fast", "matrix", "matrix-only-passenger"],
 )
@@ -237,10 +237,11 @@ def test_a_price_cap_alone_never_changes_the_backend(
     "args,reason",
     [
         (["--backend", "matrix"], "Matrix prices no bags"),
-        (["--inf-lap", "1"], "an infant passenger"),
+        # An infant is served on Google, but as a second traveler.
+        (["--inf-lap", "1"], "--bags takes one traveler"),
         (["--seniors", "1"], "a senior or youth passenger"),
         (["--no-airport-changes"], "a ban on changing airports"),
-        (["--backend", "gflight", "--inf-lap", "1"], "an infant passenger"),
+        (["--backend", "gflight", "--inf-seat", "1"], "--bags takes one traveler"),
     ],
     ids=["backend-matrix", "infant", "senior", "airport-changes", "gflight-infant"],
 )

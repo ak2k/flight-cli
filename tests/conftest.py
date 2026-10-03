@@ -385,6 +385,29 @@ def _unpriced(ds1_json: str, *, index: int, name: str = "ds:1 payload") -> str:
     return json.dumps(payload)
 
 
+def _unreadable(ds1_json: str, *, index: int) -> str:
+    """The same payload with the row at `index` read and not parsed: its first
+    leg states no departure day, which every served row carries."""
+    from flight_cli import _gflight_ids as gfid
+
+    payload: list[Any] = json.loads(ds1_json)
+    rows = gfid._rows_from_ds1(payload).rows
+    rows[index][0][2][0][20] = None
+    return json.dumps(payload)
+
+
+def dl_beside_unreadable_as() -> str:
+    """The JFK-LAX capture cut to two rows, DL1788 and AS21+AS487, the AS row
+    unreadable: parsed, the board names no AS flight."""
+    from flight_cli import _gflight_ids as gfid
+
+    payload: list[Any] = json.loads(_unreadable(_ds1("ds1_jfk_lax_tfu.json"), index=16))
+    rows = gfid._rows_from_ds1(payload).rows
+    payload[2] = [[rows[0], rows[16]]]
+    payload[3] = None
+    return json.dumps(payload)
+
+
 @pytest.fixture
 def gf_unpriced() -> Callable[..., str]:
     """A page whose row `index` carries no price, optionally re-pointed at a
