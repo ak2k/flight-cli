@@ -3909,6 +3909,7 @@ def _verify_blocker(  # noqa: PLR0911 — one return per reason the run is refus
     sellers: bool,
     fare_rules: bool,
     bags: Bags | None,
+    exclude_basic: bool,
     pick: int | None,
     page_size: int,
 ) -> str | None:
@@ -3933,6 +3934,8 @@ def _verify_blocker(  # noqa: PLR0911 — one return per reason the run is refus
         return "shows the fare rules of the row it checks; drop --fare-rules"
     if bags is not None:
         return "asks Matrix, which prices no bags; drop --bags"
+    if exclude_basic:
+        return "asks Matrix, which is not asked to leave out basic economy; drop --exclude-basic"
     if backend == BACKEND_MATRIX or slice_specs:
         return "needs a Google Flights row, and this search runs on Matrix"
     n = 1 if pick is None else pick
@@ -7389,6 +7392,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             sellers=sellers,
             fare_rules=fare_rules,
             bags=bags,
+            exclude_basic=exclude_basic,
             pick=pick,
             page_size=page_size,
         )
