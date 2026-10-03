@@ -6,7 +6,8 @@ honor each one:
                            connecting airports, stops, max duration, max layover).
   - Tier 2 (GF_POSTFILTER): not a GF query knob, but evaluable on the base
                            response payload (operating carrier, -CODESHARE,
-                           min layover, redeyes/overnights, specific flight #).
+                           min layover, redeyes/overnights, specific flight #,
+                           +CABIN).
   - Tier 3 (MATRIX_ONLY):  fare-construction (fare basis, booking class),
                            anything GF can neither request nor reconstruct, and
                            any token this parser doesn't confidently recognize.
@@ -542,12 +543,13 @@ def parse_extension(extension: str) -> list[Predicate]:
 # Two gates start from this and admit more. The search gate
 # (`_gf_postfilter.search_page_reasons`) has rows: the carrier and alliance
 # includes, the duration and the layover bounds the page also encodes (3.6 /
-# 3.12 / 3.17 / 3.18), all but the alliance checked on the rows too, and the
-# Tier-2 predicates the post-filter evaluates the way Matrix does. The Chrome
-# price graph's gate (`_gf_calgraph.graph_blocker`) has no rows and admits the
-# same includes and bounds, one of each a leg, because Google was measured
-# applying them from the URL. Anything else goes to Matrix with the reason
-# printed.
+# 3.12 / 3.17 / 3.18), all but the alliance checked on the rows too, the
+# Tier-2 predicates the post-filter evaluates the way Matrix does, and a
+# `+CABIN` naming the one cabin the page is asked for, held on every leg. The
+# Chrome price graph's gate (`_gf_calgraph.graph_blocker`) has no rows and
+# admits the same includes and bounds, one of each a leg, because Google was
+# measured applying them from the URL. Anything else goes to Matrix with the
+# reason printed.
 
 
 # fli's MaxStops enum stops at TWO_OR_FEWER_STOPS; anything above is ANY, which

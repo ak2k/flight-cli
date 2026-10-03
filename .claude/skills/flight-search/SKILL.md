@@ -15,7 +15,7 @@ intent into the right invocation **on the first try**.
 
 | Command | Purpose |
 |---|---|
-| `flight search ORIGIN DEST --dep YYYY-MM-DD [--return YYYY-MM-DD]` | Specific-date search. Auto-picks Google Flights for plain cash queries and ITA Matrix when a constraint Google can't serve is set (ordered or positional routing, fare construction, multi-city slice, time-of-day buckets with a gap like `morning,evening`, seniors, youth, an infant on a multi-cabin compare); a stop cap, a carrier include (`XX+`, `AIRLINES`) or one `ALLIANCE` (not both), `MAXDUR`, `MINCONNECT`/`MAXCONNECT`, one time-of-day window per leg or one window to the minute (`--depart-times 9:30-13:45`), an arrival window (`--arrive-times 18:00-21:30`), `-REDEYES`/`-OVERNIGHTS`, `--children`, infants (`--inf-lap`, `--inf-seat`), carrier excludes (`~XX+`, `-AIRLINES`), operating carrier (`O:XX+`, `OPAIRLINES`), `-CODESHARE` and a lone flight number (`DL747`, `AS21+`, `AA1-3000`: the slice is that one flight) stay on Google, which serves its full board (`-n` above 30 works) and checks every row against them except the stop cap, `ALLIANCE`, `--children` and infants, where Google's answer is taken as given. Google has served a party with an infant no rows on a route with flights (JFK-LAX), so under auto that empty board goes to Matrix with a note. `--bags`, the arrival windows and `--exclude-basic` are Google-only: refused where the search needs Matrix, and never handed to it afterwards. Carrier lists take space-separated codes (`-AIRLINES UA DL`); a comma list goes to Matrix, which refuses it. Force with `--backend matrix\|gflight`. PointsPath award overlay runs on both backends when tokens are present. |
+| `flight search ORIGIN DEST --dep YYYY-MM-DD [--return YYYY-MM-DD]` | Specific-date search. Auto-picks Google Flights for plain cash queries and ITA Matrix when a constraint Google can't serve is set (ordered or positional routing, fare construction, multi-city slice, time-of-day buckets with a gap like `morning,evening`, seniors, youth, an infant on a multi-cabin compare); a stop cap, a carrier include (`XX+`, `AIRLINES`) or one `ALLIANCE` (not both), `MAXDUR`, `MINCONNECT`/`MAXCONNECT`, one time-of-day window per leg or one window to the minute (`--depart-times 9:30-13:45`), an arrival window (`--arrive-times 18:00-21:30`), `-REDEYES`/`-OVERNIGHTS`, `--children`, infants (`--inf-lap`, `--inf-seat`), carrier excludes (`~XX+`, `-AIRLINES`), operating carrier (`O:XX+`, `OPAIRLINES`), `-CODESHARE` a lone flight number (`DL747`, `AS21+`, `AA1-3000`: the slice is that one flight) and a `+CABIN` naming the one `--cabin` asked stay on Google, which serves its full board (`-n` above 30 works) and checks every row against them except `ALLIANCE`, `--children` and infants, where Google's answer is taken as given; rows over the stop cap are dropped and counted on stderr. Google has served a party with an infant no rows on a route with flights (JFK-LAX), so under auto that empty board goes to Matrix with a note. `--bags`, the arrival windows and `--exclude-basic` are Google-only: refused where the search needs Matrix, and never handed to it afterwards. Carrier lists take space-separated codes (`-AIRLINES UA DL`); a comma list goes to Matrix, which refuses it. Force with `--backend matrix\|gflight`. PointsPath award overlay runs on both backends when tokens are present. |
 | `flight calendar ORIGIN DEST --start YYYY-MM-DD [--end ...] [-d 5-7]` | Lowest-fare grid across a date window. Default round-trip; `--one-way` flips. Matrix answers first; a multi-airport grid names the airport pair behind each cell (`origin`/`destination` in JSON, a `route` column in the table), the two arguments `detail` takes; a table calendar then prints Google Flights' price graph for the same window, read through a headless Chrome while Matrix runs (one column per trip length of a range, each date priced at the set's cheapest for comma-lists or metro codes; at most 8 page loads). The graph takes a stop cap, cabin, adults, ONE carrier include (`XX+`, `AIRLINES`) or ONE `ALLIANCE`, `MAXDUR`, `MINCONNECT`/`MAXCONNECT`, and on a one-way a `--depart-times` window that ends at 23:59 (`night`, `evening,night`). A calendar Google can't ask gets a "not asked" line, a Google failure a "not shown" line, and neither changes Matrix's output or exit code; calendars run in parallel contend for one Chrome profile, and one that cannot open it prints "not shown" and still gets Matrix's answer. `--gf-transport http` skips Chrome. `--fast` shows the graph alone (one-way or one trip length like `-d 7`) and exits 1 rather than fall back. |
 | `flight detail ORIGIN DEST --dep YYYY-MM-DD [--return YYYY-MM-DD] --start ... --end ... [-d 5-7]` | Phase-2 of the calendar flow: full itineraries for a date picked from the grid. Matrix only. Pass every filter the calendar was given — `--routing`/`--ext` (and `--routing-ret`/`--ext-ret`), `--depart-times`/`--return-times`, `--include-unavailable`, `--stops`, cabin, passengers — or its itineraries answer a wider question than the grid priced. |
 | `flight explore ORIGIN [--month YYYY-MM] [--days A-B] [--max-price P]` | "Where can I fly from here, under this price?": Google Flights' explore page (Chrome), priced destinations cheapest first; `--days` must overlap exactly one of weekend (1-4), one week (6-9), two weeks (13-16) nights, and the trips listed span that whole length (5-7 lists 6-9 nights); `--month` must be in the next six months. For "who sells this itinerary cheapest", with each seller's bag fees and booking link, add `--sellers [--pick N]` to `flight search`. |
@@ -54,7 +54,7 @@ Global flags (every search-printing command):
 | "no red-eyes" | `--extension '-REDEYES'` (Google's rows are checked: a leg landing on a later date, taking off 00:00-04:59 or crossing the date line is dropped) |
 | "no overnight layovers" | `--extension '-OVERNIGHTS'` (Google checks every connection: the next leg leaves the same date, and the landing is not 00:00-04:59) |
 | "no propeller planes" | `--extension '-PROPS'` |
-| "business class" / "premium economy" / "first class" | `--cabin business` / `premium-coach` / `first` (or `--extension '+CABIN N'` to enforce; see Cabin filters below) |
+| "business class" / "premium economy" / "first class" | `--cabin business` / `premium-coach` / `first`; add `--extension '+CABIN N'` naming the same cabin to hold every leg to it (Google serves that; another `+CABIN` goes to Matrix; see Cabin filters below) |
 | "max 18 hours total" | `--extension 'MAXDUR 18:00'` |
 | "min 90 minute connections" | `--extension 'MINCONNECT 1:30'` |
 | "max 2 hour layovers" | `--extension 'MAXCONNECT 2:00'` |
@@ -190,7 +190,12 @@ Multiple codes joined by **semicolon** (`;`). Args within a code by **space**. T
 | `+CABIN n …` | `+CABIN 1 2` | Require booking in first or business cabin |
 | `-CABIN n …` | `-CABIN 3` | Prohibit booking in economy |
 
-Cabin values: `1`=first, `2`=business, `premium-coach`=premium economy, `3`=economy.
+Cabin values: `1`=first, `2`=business, `premium-coach` or `pe`=premium economy, `3`=economy.
+
+Google Flights serves a `+CABIN` naming exactly the one cabin `--cabin` asks
+for, and drops any row with a leg booked in another cabin or in none it states.
+Any other `+CABIN`, or one beside several `--cabin` values, goes to Matrix with
+the reason printed; `-CABIN` is Matrix's.
 
 **Fare-basis filters:**
 
@@ -292,6 +297,10 @@ flight search NYC MUC --dep 2026-09-05 --return 2026-09-12 \
   --cabin business \
   --extension 'ALLIANCE star-alliance; MAXDUR 14:00; +CABIN 2'
 ```
+Google Flights serves this: `+CABIN 2` names the cabin `--cabin business` asks
+for. The alliance and `MAXDUR` are asked of the page; `MAXDUR` and `+CABIN 2`
+are also checked on every row, and the alliance is not (Google's own filter
+decides it).
 
 ### Example 3: lowest fare across a date window
 User: "what's the cheapest week to fly NYC to Paris in October for a 5-7 night trip"
@@ -313,6 +322,9 @@ User: "I hate red-eyes and don't want to overnight in a connecting city, and ple
 flight search LAX BOS --dep 2026-07-04 \
   --extension '-REDEYES; -OVERNIGHTS; -PROPS'
 ```
+Matrix serves this, because of `-PROPS`: the Google Flights path neither asks
+for it nor checks rows against it. Without `-PROPS`, Google Flights serves
+`-REDEYES; -OVERNIGHTS` and checks every row against both.
 
 ### Example 6: regional search
 User: "find me a cheap flight from anywhere on the east coast to anywhere in Europe in September"
@@ -329,6 +341,9 @@ flight search JFK LHR --dep 2026-08-15 --return 2026-08-22 \
   --routing 'O:LH+' \
   --extension 'MINCONNECT 1:30'
 ```
+`O:LH+` keeps a codeshare LH flies (UA8885 is LH metal), and on Google Flights
+a round trip names on stderr each pinned outbound it found no matching return
+for.
 
 ### Example 8: morning departure preference
 User: "I want a morning departure from JFK to LHR"

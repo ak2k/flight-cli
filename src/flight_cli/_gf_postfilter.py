@@ -14,8 +14,9 @@ whole query to Matrix rather than being silently dropped.
 Google has ignored a field it was sent (a carrier exclude on JFK-LHR), so what
 the page encodes is checked here too wherever the row shows it: the stop
 ceiling, the carrier include, the maximum duration, the layover minutes, the
-departure time and a price cap. An alliance is left to Google's own filter, for
-want of a membership table.
+departure time and a price cap. Each row over the stop ceiling is counted, for
+the line that says Google served it. An alliance is left to Google's own
+filter, for want of a membership table that would stay current.
 
 Supported Tier-2 predicates:
   - operating carrier include/exclude (`O:LH+`, `OPAIRLINES`, `-OPAIRLINES`)
@@ -27,6 +28,8 @@ Supported Tier-2 predicates:
   - minimum layover (`MINCONNECT`), on the raw row and encoded as well
   - no red-eye flight (`-REDEYES`) and no overnight stop (`-OVERNIGHTS`), on
     the raw row's local clocks
+  - a cabin (`+CABIN`), every leg booked in it, served only when it is the
+    one cabin the page is asked for
 """
 
 from __future__ import annotations
