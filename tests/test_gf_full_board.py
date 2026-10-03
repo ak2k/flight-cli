@@ -906,7 +906,7 @@ def test_a_round_trip_the_routing_emptied_names_the_outbounds_it_tried(
         "no round trip matched a carrier exclusion (AA) (23 rows filtered out; "
         "returns were searched for the 2 cheapest outbound options)"
     ) in " ".join(result.stderr.split())
-    assert len(fake.gets) == 4  # the outbound, two pins, then the Cheapest tab
+    assert len(fake.gets) == 3  # the outbound, then two pins
 
 
 @pytest.mark.parametrize("outbound_served", [False, True])
