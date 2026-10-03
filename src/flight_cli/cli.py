@@ -4744,30 +4744,32 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
         raise typer.Exit(1) from e
 
     dropped: int = getattr(results, "dropped", 0)
-    # Handed on before either note, because both describe Google's answer and
-    # Matrix gives this one. Never with `--sellers`: an empty board fails that
-    # below, as a board with no row to open.
-    if not results and dropped and matrix_fallback and not sellers:
-        return dropped
-    _pin_cap_note(legs=legs, top_n=top_n)
-    _note_other_currencies(results, opts.currency or "USD")
+    # Said before the hand-off below: shown or read, these itineraries could
+    # have answered a search that now goes to Matrix.
     unread: GfBackendError | None = getattr(results, "separate_failed", None)
     if unread is not None:
         # `removesuffix`: a browser refusal's note ends in its remedy's full stop.
         note = _gf_refusal(unread, transport=gf_mode, bags=opts.bags is not None).note
         note = note.removesuffix(".")
         err.print(f"[dim]Itineraries on separate tickets not read: {note}.[/]")
-    if unchecked and separate_tickets == "show":
-        err.print(
-            "[dim]Itineraries on separate tickets not read: Google lists no return for "
-            f"them to check against {_safe_text(unchecked)}.[/]"
-        )
     hidden: int = getattr(results, "separate_hidden", 0)
     if hidden:
         err.print(
             f"[dim]Google Flights: {hidden:d} "
             + ("itinerary" if hidden == 1 else "itineraries")
             + " on separate tickets hidden (--no-separate-tickets).[/]"
+        )
+    # Handed on before the pin-cap and currency notes, because both describe
+    # Google's answer and Matrix gives this one. Never with `--sellers`: an
+    # empty board fails that below, as a board with no row to open.
+    if not results and dropped and matrix_fallback and not sellers:
+        return dropped
+    _pin_cap_note(legs=legs, top_n=top_n)
+    _note_other_currencies(results, opts.currency or "USD")
+    if unchecked and separate_tickets == "show":
+        err.print(
+            "[dim]Itineraries on separate tickets not read: Google lists no return for "
+            f"them to check against {_safe_text(unchecked)}.[/]"
         )
 
     # Checked before the answer is printed: a `--sellers` pick outside the

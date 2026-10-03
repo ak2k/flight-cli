@@ -605,6 +605,51 @@ def test_the_opt_out_prints_the_base_rows_and_counts_what_it_hid(
     )
 
 
+@pytest.mark.parametrize(
+    ("cheapest", "asked", "note"),
+    [
+        (
+            _served(_CHEAPEST),
+            ["--no-separate-tickets"],
+            "Google Flights: 4 itineraries on separate tickets hidden (--no-separate-tickets).",
+        ),
+        (
+            _THROTTLE_PAGE,
+            [],
+            "Itineraries on separate tickets not read: Google Flights rate-limited.",
+        ),
+    ],
+    ids=["hidden", "unread"],
+)
+def test_a_search_handed_to_matrix_still_says_what_became_of_separate_tickets(
+    gf_session: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    cheapest: str,
+    asked: list[str],
+    note: str,
+) -> None:
+    """No one-ticket JetBlue trip is under USD250, so Google's answer is empty
+    and auto hands the search to Matrix; its four separate-ticket trips at
+    USD247 would have answered it, had they been shown or read."""
+    ran: list[bool] = []
+
+    def _matrix(**_kw: object) -> None:
+        ran.append(True)
+
+    monkeypatch.setattr(cli, "_run_matrix_path", _matrix)
+    gf_session(_served(_BEST), cheapest)
+    args = ["auto" if a == "gflight" else a for a in _FLL_LGA]
+    result = CliRunner().invoke(
+        cli.app, [*_SEARCH, *args, "--ext", "AIRLINES B6", "--max-price", "250", *asked]
+    )
+    assert result.exit_code == 0, result.output
+    assert ran == [True]
+    said = " ".join(result.stderr.split())
+    assert said.count("separate tickets") == 1
+    assert note in said
+    assert "Using Matrix: no Google Flights itinerary matched" in said
+
+
 def test_the_opt_out_says_nothing_when_it_hid_nothing(gf_session: Callable[..., Any]) -> None:
     gf_session(_served(_LAX))
     result = CliRunner().invoke(
