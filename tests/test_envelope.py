@@ -244,6 +244,27 @@ def test_the_rows_are_the_json_documents_rows(gf_session: Callable[..., Any]) ->
     assert [r["row"] for r in _rows(env)] == json.loads(document.stdout)
 
 
+def test_each_google_row_carries_googles_co2_figures(gf_session: Callable[..., Any]) -> None:
+    gf_session(_served(_LAX))
+    env = _envelope_of(
+        _search(
+            *("--cash-only", "JFK", "LAX", "--dep", _DEP.isoformat()),
+            *("--backend", "gflight", "--fast", "-n", "95"),
+        )
+    )
+    rows = [r["row"] for r in _rows(env)]
+    assert len(rows) == 95
+    assert all(type(r["co2_emissions_g"]) is int for r in rows)
+    assert all(type(leg["co2_emissions_g"]) is int for r in rows for leg in r["legs"])
+    first = rows[0]
+    assert (
+        first["co2_emissions_g"],
+        first["co2_emissions_typical_g"],
+        first["co2_emissions_delta_pct"],
+        first["emissions_tag"],
+    ) == (261000, 347000, -25, "lower")
+
+
 def test_a_google_round_trip_is_priced_by_its_return(gf_session: Callable[..., Any]) -> None:
     gf_session(_served(_LHR), _return_board())
     trip = ["JFK", "LHR", "--dep", _DEP.isoformat(), "--return", _RET.isoformat()]
