@@ -126,6 +126,7 @@ if TYPE_CHECKING:
     from ._gf_explore import Destination, ExploreAnswer, TripLength
     from ._gflight_ids import Board, GfTransport, ItineraryKey, PriceInsight
     from .models import (
+        BookedItinerary,
         BookingDetailsResult,
         CalendarResult,
         FareRule,
@@ -5479,6 +5480,15 @@ def _other_itinerary(chain: SearchResult) -> _verify.Verdict:
     return _verify.other_itinerary(listed)
 
 
+def _states_every_flight(itinerary: BookedItinerary) -> bool:
+    """Whether booking details state each flight's carrier, number, airports
+    and times. A flight missing any of them compares unequal to every flight,
+    so an itinerary that does not match the row is another only when this
+    holds."""
+    booked = _verify.booked_flights(itinerary)
+    return bool(booked) and all(s and all(all(f) for f in s) for s in booked)
+
+
 async def _exact_flights_on(
     c: MatrixClient, row: _verify.Row, opts: SearchOptions
 ) -> _verify.Verdict:
@@ -5507,23 +5517,30 @@ async def _exact_flights_on(
             "Matrix answered without a session for these flights, "
             "so they cannot be checked flight by flight."
         )
-    unreadable = False
+    unreadable: str | None = None
     for i, sid in zip(idxs, sids, strict=True):
         answer = await c.booking_details(
             session=session, solution_set=solution_set, solution_id=sid
         )
         details = answer.booking_details
-        if details is None or details.itinerary is None:
-            unreadable = True
-        elif _verify.same_flights(row, details.itinerary):
+        itinerary = details.itinerary if details is not None else None
+        if itinerary is None:
+            unreadable = unreadable or (
+                "Matrix returned booking details without their flights, "
+                "so this itinerary cannot be checked flight by flight."
+            )
+        elif _verify.same_flights(row, itinerary):
             return _verify.Verdict("match", solution=chain.solutions[i], details=details)
+        elif not _states_every_flight(itinerary):
+            unreadable = unreadable or (
+                "Matrix returned booking details that do not state every flight's "
+                "number, airports and times, so this itinerary cannot be checked "
+                "flight by flight."
+            )
     if unreadable:
         # A candidate whose flights cannot be read may be the row, so "another
         # itinerary" would not be known to be true.
-        raise _UncheckableAnswerError(
-            "Matrix returned booking details without their flights, "
-            "so this itinerary cannot be checked flight by flight."
-        )
+        raise _UncheckableAnswerError(unreadable)
     return _other_itinerary(chain)
 
 

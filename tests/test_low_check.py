@@ -293,6 +293,31 @@ def test_an_answer_longer_than_its_page_is_no_answer_rather_than_another_itinera
     assert (low_check["outcome"], low_check["reason"]) == ("no-answer", reason)
 
 
+def test_booking_details_silent_on_a_flights_departure_are_no_answer(
+    gf_session: Callable[..., Any], matrix: _Matrix
+) -> None:
+    """The chain's one candidate is the row; its booking details leave out the
+    flight's departure, so they cannot show it is another itinerary."""
+    low = _low()
+    details = _details_of(low)
+    (segment,) = details["bookingDetails"]["itinerary"]["slices"][0]["segments"]
+    del segment["departure"], segment["legs"][0]["departure"]
+    matrix.probe = _chain(_b6("USD999.00"))
+    matrix.chain = _chain(_row_solution("DL-1", _price(low), low))
+    matrix.details = {"DL-1": details}
+    gf_session(_served())
+    result = _run("-n", "10")
+    assert result.exit_code == 0, result.output
+    under = _under(result.stdout)
+    assert (
+        f"{_LINE}1's flights ({_chain_text(low)}): no answer: Matrix returned booking details "
+        "that do not state every flight's number, airports and times, so this itinerary "
+        "cannot be checked flight by flight."
+    ) in under, under
+    assert "other itinerar" not in under
+    assert matrix.summarized() == [("viewDetails", "DL-1")]
+
+
 def test_a_chain_past_the_bound_is_no_answer_and_leaves_the_table(
     gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
