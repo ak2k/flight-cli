@@ -855,6 +855,99 @@ def test_a_row_with_a_leg_outside_the_required_cabin_is_dropped(
         assert (len(booked), edited in booked) == (rows, kept)
 
 
+def _relisted(payload: list[Any], pick: Callable[[Any], bool]) -> list[Any]:
+    """`payload` with every raw row `pick` takes listed a second time, $50
+    cheaper and its last leg booked in first."""
+    for index in gfid._DS_ROW_BLOCKS:
+        block: Any = payload[index]
+        if not block:
+            continue
+        copies: list[Any] = []
+        for raw in block[0]:
+            if pick(gfid._parse_flight_with_id(raw)):
+                copy: Any = json.loads(json.dumps(raw))
+                copy[1][0][1] -= 50
+                copy[0][2][-1][gfid._LEG_CABIN_IDX] = 4
+                copies.append(copy)
+        block[0].extend(copies)
+    return payload
+
+
+def test_a_dearer_listing_in_the_required_cabin_stands_in_for_a_cheaper_one_outside_it(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red at the tip, which kept only the cheaper listing and then dropped it
+    under `+CABIN 3`. Google lists EI104+EI152 a second time, $50 cheaper with
+    its connection in first: the economy listing is the fare a `+CABIN 3`
+    search is offered, and without `+CABIN` the cheaper one still is."""
+    payload = _relisted(json.loads(_ds1(_LHR)), lambda r: _booked(r) == "EI104+EI152")
+    page = _page(
+        _answering(json.dumps(payload), origin=None, destination=None, date=_DEP.isoformat())
+    )
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    edited = "Aer Lingus|104+Aer Lingus|152"
+    for extra, fare in (((), 243), (("--ext", "+CABIN 3"), 293)):
+        gf_session(page)
+        result = CliRunner().invoke(cli.app, _lhr_json("--cabin", "economy", *extra))
+        assert result.exit_code == 0, result.output
+        rows: list[dict[str, Any]] = json.loads(result.stdout)
+        assert len(rows) == 101
+        assert [m["price"] for m in rows if _json_booked(m) == edited] == [fare]
+
+
+def test_a_cheaper_listing_outside_the_required_cabin_is_not_counted_twice(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Green at the tip and after: each of the three two-stop rows, listed a
+    second time in another cabin, is one row over the stop ceiling."""
+    payload = _relisted(json.loads(_ds1(_LHR)), lambda r: len(r.flight.legs) > 2)
+    gf_session(
+        _page(_answering(json.dumps(payload), origin=None, destination=None, date=_DEP.isoformat()))
+    )
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    result = CliRunner().invoke(
+        cli.app, _lhr_json("--cabin", "economy", "--ext", "+CABIN 3", "--stops", "1")
+    )
+    assert result.exit_code == 0, result.output
+    assert len(json.loads(result.stdout)) == 98
+    assert " ".join(result.stderr.split()).count(_OVER_ONE_STOP) == 1
+
+
+def test_a_return_listed_again_cheaper_outside_the_required_cabin_still_pairs(
+    gf_session: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Red at the tip, which kept the cheaper listing of each return, dropped
+    them all under `+CABIN 3` and lost the pin. Every return on the served
+    board, booked in economy, is listed again $50 cheaper with its last leg in
+    first."""
+    payload: list[Any] = json.loads(_ds1("ds1_return_leg_pinned.json"))
+    for raw in gfid._rows_from_ds1(payload).rows:
+        for leg in raw[0][2]:
+            leg[gfid._LEG_CABIN_IDX] = 1
+    returns = _page(
+        _answering(
+            json.dumps(_relisted(payload, lambda _r: True)),
+            origin="LHR",
+            destination="JFK",
+            date=_RET.isoformat(),
+        )
+    )
+    fake = gf_session(_served(_LHR), returns)
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    argv = [*_SEARCH, "JFK", "LHR", "--dep", _DEP.isoformat(), "--return", _RET.isoformat()]
+    asked = ["--backend", "gflight", "--fast", "--format", "json", "-n", "1"]
+    result = CliRunner().invoke(cli.app, [*argv, *asked, "--cabin", "economy", "--ext", "+CABIN 3"])
+    assert result.exit_code == 0, result.output
+    assert len(fake.gets) == 2
+    cheapest = min(r.flight.price for r in _board(_return_board()) if r.flight.price is not None)
+    [(_, back)] = json.loads(result.stdout)
+    assert back["price"] == cheapest
+    assert {leg["amenities"]["cabin"] for leg in _legs(back)} == {"ECONOMY"}
+    assert not any(" lost: " in r.getMessage() for r in caplog.records)
+
+
 def _return_board_booked_in(cabin: int) -> str:
     payload: list[Any] = json.loads(_ds1("ds1_return_leg_pinned.json"))
     for raw in gfid._rows_from_ds1(payload).rows:

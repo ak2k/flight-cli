@@ -392,6 +392,24 @@ def _overnight_stop(arrived: Any, leaves: Any) -> bool:
     return leaves.departure_datetime.date() > lands.date() or lands.hour < _NIGHT_ENDS_HOUR
 
 
+def listing_fits(
+    per_slice_predicates: Sequence[Sequence[Predicate]],
+) -> Callable[[int, Any], bool] | None:
+    """`fits(i, row)`: whether one listing is booked in slice `i`'s `+CABIN`,
+    which `_gflight_ids.search_with_ids` asks to choose among the listings of
+    one itinerary before `routing_keep`'s filter sees it. None when no slice
+    asks for a cabin."""
+    cabins = [[p for p in preds if isinstance(p, CabinPred)] for preds in per_slice_predicates]
+    if not any(cabins):
+        return None
+
+    def fits(leg: int, row: Any) -> bool:
+        preds = cabins[leg] if leg < len(cabins) else ()
+        return not any(_row_fails(row, p) for p in preds)
+
+    return fits
+
+
 @dataclass
 class StopDrops:
     """The rows `routing_keep` dropped for making more stops than the ceiling

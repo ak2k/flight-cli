@@ -4137,6 +4137,7 @@ class _GfQuery(NamedTuple):
     keep: Callable[[int, Any], bool] | None
     checks: str
     stop_drops: StopDrops
+    fits: Callable[[int, Any], bool] | None
 
 
 @contextlib.contextmanager
@@ -4165,7 +4166,11 @@ def _gflight_query(
     # Every import in this block is deferred for one reason: the Google Flights
     # backend must not load on a Matrix-only search, and this function is the
     # first point that has committed to Google Flights.
-    from ._gf_postfilter import StopDrops, routing_keep  # noqa: PLC0415 — GF-only; see above
+    from ._gf_postfilter import (  # noqa: PLC0415 — GF-only; see above
+        StopDrops,
+        listing_fits,
+        routing_keep,
+    )
     from ._gflight_ids import GfTransport  # noqa: PLC0415 — fli, ~95 ms
     from .fli_bridge import apply_gf_native_filters, to_fli_filter  # noqa: PLC0415 — fli
     from .routing_predicates import (  # noqa: PLC0415 — pulled in by the two above
@@ -4225,6 +4230,7 @@ def _gflight_query(
                 else "the routing"
             ),
             stop_drops=stop_drops,
+            fits=listing_fits(per_slice_preds),
         )
     finally:
         # Named positively, because only rung 2 opens anything to close. The
@@ -4258,14 +4264,17 @@ def _gflight_results(
     """
     from ._gflight_ids import Board, search_with_ids  # noqa: PLC0415 — fli, ~95 ms
 
-    # Only a multi-cabin round trip sets either, so every other search makes
-    # the one call to `search_with_ids` a single search makes.
+    # Only a multi-cabin round trip sets `first` or `prefer`, and only a
+    # `+CABIN` search `fits`, so every other search makes the one call to
+    # `search_with_ids` a single search makes.
     handed: dict[str, Any] = {}
     if first is not None:
         handed["first"] = first
     if prefer:
         handed["prefer"] = prefer
     with _gflight_query(legs, opts, gf_mode, gf_headed) as query:
+        if query.fits is not None:
+            handed["fits"] = query.fits
         served = search_with_ids(
             query.filters,
             top_n=top_n,

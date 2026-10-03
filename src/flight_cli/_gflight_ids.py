@@ -1066,6 +1066,10 @@ class GFlightWithId:
     # Per connection, the layover in minutes as the page states it, or None
     # where it states none for that connection (`_layover_minutes`).
     layovers: tuple[int | None, ...] = ()
+    # The dearer listings of this itinerary that `_deduped` folded into this
+    # one, one per other cabin mix, cheapest first: a cabin requirement this
+    # listing fails can still be met by one of them (`_listing`).
+    others: tuple[GFlightWithId, ...] = ()
 
 
 def _operating_identity(fl: list[Any]) -> tuple[Airline, str] | None:
@@ -1777,18 +1781,26 @@ def _deduped(rows: list[GFlightWithId]) -> list[GFlightWithId]:
     on offer. The key is every leg's carrier, flight number and departure time,
     dates included: the same flight numbers a day apart are a different trip.
     The first listing keeps its place, because page order breaks ties between
-    equal fares in the trim and in the round-trip pins."""
-    at: dict[ItineraryKey, int] = {}
-    out: list[GFlightWithId] = []
+    equal fares in the trim and in the round-trip pins. A listing booked in
+    another cabin mix is kept on the row as one of its `others`."""
+    listed: dict[ItineraryKey, list[GFlightWithId]] = {}
     for row in rows:
-        key = _itinerary_key(row)
-        seen = at.get(key)
-        if seen is None:
-            at[key] = len(out)
-            out.append(row)
-        elif fare_key(row) < fare_key(out[seen]):
-            out[seen] = row
+        listed.setdefault(_itinerary_key(row), []).append(row)
+    out: list[GFlightWithId] = []
+    for listings in listed.values():
+        best = min(listings, key=fare_key)
+        mixes = {_cabins(best)}
+        others: list[GFlightWithId] = []
+        for row in sorted(listings, key=fare_key):
+            if _cabins(row) not in mixes:
+                mixes.add(_cabins(row))
+                others.append(row)
+        out.append(replace(best, others=tuple(others)) if others else best)
     return out
+
+
+def _cabins(row: GFlightWithId) -> tuple[str | None, ...]:
+    return tuple(a.cabin for a in row.amenities)
 
 
 def _rows_from_page_html(page: PageFetch) -> Board[GFlightWithId]:
@@ -2100,10 +2112,26 @@ def pinned_fanout(top_n: int) -> int:
     return min(top_n, _PINNED_FANOUT_CAP)
 
 
+def _listing(
+    leg: int, row: GFlightWithId, fits: Callable[[int, GFlightWithId], bool] | None
+) -> GFlightWithId:
+    """The listing of `row`'s itinerary that `keep` is handed for segment `leg`:
+    `row`, unless `fits` refuses it and accepts one of its `others`, cheapest
+    first. Chosen before `keep` and not by it, so each itinerary meets `keep`
+    once and a row over the stop ceiling is counted once."""
+    if fits is None or fits(leg, row):
+        return row
+    return next((o for o in row.others if fits(leg, o)), row)
+
+
 def _kept_outbounds(
-    first: Board[GFlightWithId], keep: Callable[[int, GFlightWithId], bool] | None
+    first: Board[GFlightWithId],
+    keep: Callable[[int, GFlightWithId], bool] | None,
+    fits: Callable[[int, GFlightWithId], bool] | None = None,
 ) -> list[GFlightWithId]:
-    return first if keep is None else [r for r in first if keep(0, r)]
+    if keep is None:
+        return first
+    return [r for r in (_listing(0, r, fits) for r in first) if keep(0, r)]
 
 
 def _pins(
@@ -2220,13 +2248,14 @@ def _with_board_currency(board: Board[GFlightWithId], requested: str) -> Board[G
     none did. The page's price insight rides along."""
     decoded = Counter(r.flight.currency for r in board if r.flight.currency)
     fill = decoded.most_common(1)[0][0] if decoded else requested
+
+    def filled(r: GFlightWithId) -> GFlightWithId:
+        if not r.flight.currency:
+            r = replace(r, flight=r.flight.model_copy(update={"currency": fill}))
+        return replace(r, others=tuple(map(filled, r.others))) if r.others else r
+
     return Board(
-        (
-            r
-            if r.flight.currency
-            else replace(r, flight=r.flight.model_copy(update={"currency": fill}))
-            for r in board
-        ),
+        map(filled, board),
         insight=board.insight,
         dropped=board.dropped,
         pinned=board.pinned,
@@ -2267,6 +2296,7 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
     checks: str = "the routing",
     first: Board[GFlightWithId] | None = None,
     prefer: Sequence[ItineraryKey] = (),
+    fits: Callable[[int, GFlightWithId], bool] | None = None,
 ) -> Board[GFlightWithId | tuple[GFlightWithId, ...]] | None:
     """Drop-in for fli's `SearchFlights().search()` but each result carries
     its Google Flights opaque flight_id.
@@ -2309,7 +2339,12 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
     `outbound_page`, so it is not fetched twice. `prefer` puts those outbounds
     first among the pins when the page lists them and `keep` passes them, which
     is how one cabin prices another cabin's outbounds; the pin count is
-    unchanged by it."""
+    unchanged by it.
+
+    `fits(i, row)` is whether a listing's own cabins meet segment `i`'s cabin
+    requirement. Google can list one itinerary at several cabin mixes and the
+    board shows the cheapest, so `fits` picks which of them `keep` is handed
+    (`_listing`)."""
     if first is None:
         first = outbound_page(filters, transport=transport, currency=currency)
     if not first:
@@ -2318,7 +2353,7 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
     num_segments = len(filters.flight_segments)
     selected_count = sum(1 for s in filters.flight_segments if s.selected_flight is not None)
     # A pinned board is filtered by the caller, after its pin check.
-    board = first if selected_count else _kept_outbounds(first, keep)
+    board = first if selected_count else _kept_outbounds(first, keep, fits)
     dropped = len(first) - len(board)
     # One-way, or the last leg already — no further iteration.
     if filters.trip_type == TripType.ONE_WAY or selected_count >= num_segments - 1 or not board:
@@ -2383,10 +2418,10 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
             refused.append(GfPinIgnoredError(ignored))
             lost.append(_lost_pin(picked, str(refused[-1]), currency))
             continue
+        leg = selected_count + 1
+        listed = [nx if isinstance(nx, tuple) else _listing(leg, nx, fits) for nx in nxt]
         kept = [
-            nx
-            for nx in nxt
-            if keep is None or keep(selected_count + 1, nx[0] if isinstance(nx, tuple) else nx)
+            nx for nx in listed if keep is None or keep(leg, nx[0] if isinstance(nx, tuple) else nx)
         ]
         dropped_returns += len(nxt) - len(kept)
         if not kept:

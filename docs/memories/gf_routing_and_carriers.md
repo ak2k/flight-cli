@@ -294,7 +294,11 @@ has a figure.
 - Rows are deduped per itinerary (every leg's carrier, flight number and
   departure datetime), keeping the priced and cheaper listing at the first
   listing's place. No true duplicate has been measured; the key keeps dates, so
-  the same flight numbers a day apart stay two trips.
+  the same flight numbers a day apart stay two trips. The dearer listing in
+  another cabin mix stays on the row (`others`), and a `+CABIN` search filters
+  the cheapest listing booked in its cabin, so a cheaper listing with a leg
+  outside it does not hide that fare. Each itinerary still meets the row
+  filter once, so the stop-ceiling count is unchanged.
 - The routing filter runs inside `search_with_ids` as each board is served: on
   the outbound BEFORE the pins are taken (pins are the cheapest rows of the
   board they are taken from), on each return board after `_unpinned_board`. A pin whose return
