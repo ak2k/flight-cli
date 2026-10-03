@@ -6504,8 +6504,9 @@ def _leg_display(leg: Any, amenity: Any, match_carriers: frozenset[str]) -> str:
     carrier filter but the leg is sold under a codeshare that IS (e.g. UA58 sold as
     LH9407 under `--routing LH+`), show the matched identity: 'LH9407 (op UA58)'."""
     # The filter is compared against the code Google Flights sent; escaping first
-    # would test a string the user's `--routing` could never have named.
-    raw_code = getattr(leg.airline, "name", "") or ""
+    # would test a string the user's `--routing` could never have named. fli
+    # names a digit-leading code with a leading underscore (`_2K`).
+    raw_code = (getattr(leg.airline, "name", "") or "").removeprefix("_")
     code = _safe_text(raw_code)
     number = _safe_text(getattr(leg, "flight_number", "?"))
     booking = f"{code} {number}"
@@ -6769,7 +6770,8 @@ def _fmt_gflight_legroom(fli_legs: list[Any], amenities: list[Any]) -> str:
         # `_fmt_legroom_one`'s does; padded before escaping for the same reason,
         # and carrying the same tab exception.
         leg_label = (
-            f"{getattr(leg.airline, 'name', leg.airline)}{getattr(leg, 'flight_number', '?')}"
+            f"{str(getattr(leg.airline, 'name', leg.airline)).removeprefix('_')}"
+            f"{getattr(leg, 'flight_number', '?')}"
         )
         shown = leg_label.translate(_CTRL)
         lines.append(f"{escape(f'{shown:<6}')} " + " ".join(parts))
