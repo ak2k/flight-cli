@@ -897,7 +897,7 @@ def _pinned_tfs_b64(
     out_origins, out_dests = _pinned_slice_airports(out, outbound_segments)
     slices: list[dict[str, Any]] = [
         {
-            "date": out.date.isoformat(),
+            "date": _pinned_slice_date(out.date, outbound_segments),
             "origin": out_origins,
             "destination": out_dests,
             "segments": outbound_segments,
@@ -916,7 +916,7 @@ def _pinned_tfs_b64(
         ret_origins, ret_dests = _pinned_slice_airports(ret, return_segments)
         slices.append(
             {
-                "date": ret.date.isoformat(),
+                "date": _pinned_slice_date(ret.date, return_segments),
                 "origin": ret_origins,
                 "destination": ret_dests,
                 "segments": return_segments,
@@ -988,6 +988,12 @@ def google_flights_explore_url(
         f"https://www.google.com/travel/explore?tfs={urllib.parse.quote(b64)}"
         f"&tfu=GgA&hl={language}&gl={country}&curr={currency}"
     )
+
+
+def _pinned_slice_date(leg_date: date, segments: list[dict[str, str]]) -> str:
+    """A pinned slice's date: its first flight's own day, which a flexible or
+    arrival-date search finds off the leg's date."""
+    return segments[0]["date"] if segments else leg_date.isoformat()
 
 
 def _pinned_slice_airports(

@@ -3026,7 +3026,23 @@ def _gflight_url_caveats(search: Search) -> list[str]:
             break
     if any(lg.route_language or lg.extension for lg in legs):
         notes.append("routing/extension codes are not expressible in a Google link")
+    if moved := _flexed_or_arrival_dates(legs):
+        notes.append(
+            f"the link searches {_join_reasons(moved)} as departure "
+            f"{'date' if len(moved) == 1 else 'dates'} only: Google's link takes no flexible "
+            "or arrival date"
+        )
     return notes + _google_option_link_caveats(search)
+
+
+def _flexed_or_arrival_dates(legs: Sequence[Leg]) -> list[str]:
+    """The typed date of each leg with a flexible or arrival date, which only
+    Matrix searches as asked."""
+    return [
+        lg.date.isoformat()
+        for lg in legs
+        if lg.date is not None and (lg.date_minus or lg.date_plus or lg.is_arrival_date)
+    ]
 
 
 def _pinned_gflight_url_caveats(search: Search) -> list[str]:
@@ -3566,7 +3582,16 @@ def _build_pp_legs(legs: tuple[Leg, ...]) -> list[LegQuery]:
     typed tokens: slice_index lets the matcher join award results to the
     correct Itinerary slice, and `run_pp_for_search` reads consecutive queries
     with one slice_index as one leg. A pair with one airport at both ends is
-    skipped, unless it is the only one a leg has."""
+    skipped, unless it is the only one a leg has.
+
+    The providers take one departure day a leg, so a leg with a flexible or
+    arrival date is asked for departures on its typed date, and a dim line on
+    stderr says so."""
+    if moved := _flexed_or_arrival_dates(legs):
+        err.print(
+            f"[dim]Award providers were asked for departures on {_safe_text(_join_reasons(moved))} "
+            "only: they take no flexible or arrival date.[/]"
+        )
     out: list[LegQuery] = []
     for i, leg in enumerate(legs):
         if not leg.date or not leg.origins or not leg.destinations:

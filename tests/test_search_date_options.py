@@ -15,6 +15,7 @@ from typer.testing import CliRunner
 
 from flight_cli import cli
 from flight_cli.domain import Bags, ClockWindow, Leg, SpecificDateSearch, TimeOfDay
+from flight_cli.links import google_flights_pinned_url
 from flight_cli.models import SearchResult
 from flight_cli.wire import to_wire
 from test_backend_dispatch import _call
@@ -442,3 +443,71 @@ def test_the_matrix_link_names_an_arrival_window_it_leaves_out_as_an_arrival() -
     assert cli._matrix_link_caveats(windowed) == [
         "Matrix's page takes only times-of-day for an arrival, so the link leaves out 18:00-21:30"
     ]
+
+
+# ──────────────────────────── the Google surfaces ───────────────────────────
+
+
+def _nonstop_on(day: date, origin: str, dest: str) -> list[dict[str, str]]:
+    return [
+        {
+            "origin": origin,
+            "date": day.isoformat(),
+            "destination": dest,
+            "carrier": "BA",
+            "flight": "112",
+        }
+    ]
+
+
+def test_the_google_search_link_says_it_drops_the_date_options(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    flexed = SpecificDateSearch(
+        legs=(
+            Leg.of("JFK", "LHR", _dep(), date_minus=1, date_plus=1),
+            Leg.of("LHR", "JFK", _ret(), is_arrival_date=True),
+        )
+    )
+    cli._emit_urls(flexed, matrix_url=False, google_url=True)
+    printed = " ".join(capsys.readouterr().out.split())
+    assert (
+        f"note: the link searches {_dep().isoformat()} and {_ret().isoformat()} as departure "
+        "dates only: Google's link takes no flexible or arrival date" in printed
+    ), printed
+    plain = SpecificDateSearch(legs=(Leg.of("JFK", "LHR", _dep()),))
+    assert cli._gflight_url_caveats(plain) == []
+
+
+def test_a_pinned_google_link_opens_on_the_pinned_flights_own_day() -> None:
+    """Under +/- 1 day the cheapest row can leave the day before the date
+    typed, and the pinned link opens that row's own day."""
+    flexed = SpecificDateSearch(
+        legs=(
+            Leg.of("JFK", "LHR", _dep(), date_minus=1, date_plus=1),
+            Leg.of("LHR", "JFK", _ret(), date_minus=1, date_plus=1),
+        )
+    )
+    day_before, day_after = _dep() - timedelta(days=1), _ret() + timedelta(days=1)
+    on_their_days = SpecificDateSearch(
+        legs=(Leg.of("JFK", "LHR", day_before), Leg.of("LHR", "JFK", day_after))
+    )
+    out, ret = _nonstop_on(day_before, "JFK", "LHR"), _nonstop_on(day_after, "LHR", "JFK")
+    assert google_flights_pinned_url(
+        flexed, outbound_segments=out, return_segments=ret
+    ) == google_flights_pinned_url(on_their_days, outbound_segments=out, return_segments=ret)
+
+
+def test_awards_on_a_moved_date_say_which_day_they_were_asked(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    flexed = (Leg.of("JFK", "LHR", _dep(), is_arrival_date=True),)
+    (query,) = cli._build_pp_legs(flexed)
+    assert query.date == _dep().isoformat()
+    printed = " ".join(capsys.readouterr().err.split())
+    assert (
+        f"Award providers were asked for departures on {_dep().isoformat()} only: they take no "
+        "flexible or arrival date." in printed
+    ), printed
+    cli._build_pp_legs((Leg.of("JFK", "LHR", _dep()),))
+    assert capsys.readouterr().err == ""
