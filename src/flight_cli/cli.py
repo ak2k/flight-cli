@@ -4572,6 +4572,29 @@ def _row_checks(legs: tuple[Leg, ...], opts: SearchOptions | None = None) -> str
     return _join_reasons(names) or "the routing"
 
 
+def _return_checks_google_skips(legs: tuple[Leg, ...]) -> str | None:
+    """What the row filter holds the later slices of `legs` to that Google's
+    query does not: a post-filter predicate, or a time window, which Google
+    widens to whole hours. None when there is none, as on a one-way.
+
+    A round trip on separate tickets comes without its return, so it could not
+    be held to these."""
+    from ._gf_postfilter import row_check_names  # noqa: PLC0415 — GF-only
+    from .routing_predicates import Tier, classify  # noqa: PLC0415
+
+    later = legs[1:]
+    preds = [
+        [p for p in classify(lg.route_language, lg.extension).predicates if p.tier > Tier.GF_NATIVE]
+        for lg in later
+    ]
+    times = [lg.time_ranges for lg in later]
+    if not any(preds) and not any(times):
+        return None
+    # The empty first slice keeps `row_check_names` calling a window the return's.
+    names = row_check_names([[], *preds], [(), *times])
+    return _join_reasons(names) or "the routing"
+
+
 def _answer_gf_empty(
     dropped: int,
     *,
@@ -4676,13 +4699,17 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     `separate_tickets` adds ("show") or counts ("hide") the itineraries Google
     sells as separate tickets. Only the Google table and its document mark
     them, so awards, `--sellers` and `--verify`, which render through the
-    adapter, read the base board alone.
+    adapter, read the base board alone. So does a round trip whose return the
+    row filter alone checks (`_return_checks_google_skips`).
     """
     # Deferred like the adapter below: this arm reaches rung 2 only when the
     # transport says so, and the module pulls in nothing patchright at import.
     from ._gf_browser import interrupt_guard  # noqa: PLC0415 — GF-only; see above
     from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
 
+    if run_pp or sellers or verify:
+        separate_tickets = "off"
+    unchecked = _return_checks_google_skips(legs) if separate_tickets != "off" else None
     try:
         # Armed around the whole search, not around the browser: a Ctrl-C is only
         # answerable while the process still holds the driver, and on this arm
@@ -4694,7 +4721,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
                 top_n,
                 gf_mode,
                 gf_headed,
-                separate_tickets="off" if run_pp or sellers or verify else separate_tickets,
+                separate_tickets="off" if unchecked else separate_tickets,
             )
     except GfBackendError as e:
         refusal = _gf_refusal(e, transport=gf_mode, bags=opts.bags is not None)
@@ -4730,6 +4757,11 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
         note = _gf_refusal(unread, transport=gf_mode, bags=opts.bags is not None).note
         note = note.removesuffix(".")
         err.print(f"[dim]Itineraries on separate tickets not read: {note}.[/]")
+    if unchecked and separate_tickets == "show":
+        err.print(
+            "[dim]Itineraries on separate tickets not read: Google lists no return for "
+            f"them to check against {_safe_text(unchecked)}.[/]"
+        )
     hidden: int = getattr(results, "separate_hidden", 0)
     if hidden:
         err.print(

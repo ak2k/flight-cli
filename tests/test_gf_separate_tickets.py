@@ -250,6 +250,75 @@ def test_pinning_that_stopped_on_a_wall_skips_the_cheapest_tab(
     )
 
 
+@pytest.mark.parametrize(
+    ("asked", "checks"),
+    [
+        (["--ext", "-AIRLINES AA"], "a carrier exclusion (AA)"),
+        (["--return-times", "morning"], "a return-time window (morning)"),
+    ],
+)
+def test_a_return_only_the_row_filter_checks_keeps_separate_tickets_unread(
+    gf_session: Callable[..., Any], asked: list[str], checks: str
+) -> None:
+    """A separate-ticket round trip comes without its return, so a check that
+    only the row filter makes, never Google's query, could not be made on it."""
+    fake = gf_session(*_fll_lga_pages())
+    result = CliRunner().invoke(cli.app, [*_SEARCH, *_FLL_LGA, "--format", "json", *asked])
+    assert result.exit_code == 0, result.output
+    assert len(fake.gets) == 11
+    assert not any(_CHEAPEST_TFU in url for url in fake.gets)
+    assert all(len(r) == 2 for r in json.loads(result.stdout))
+    said = " ".join(result.stderr.split())
+    assert said.count("Itineraries on separate tickets") == 1
+    assert (
+        f"Itineraries on separate tickets not read: Google lists no return for them "
+        f"to check against {checks}." in said
+    )
+    gf_session(*_fll_lga_pages())
+    hidden = CliRunner().invoke(
+        cli.app, [*_SEARCH, *_FLL_LGA, "--format", "json", *asked, "--no-separate-tickets"]
+    )
+    assert hidden.exit_code == 0, hidden.output
+    assert "separate tickets" not in hidden.stderr
+
+
+def test_an_excluded_carrier_hands_a_round_trip_to_matrix_as_at_the_base(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every pinned return flies the excluded carrier, so Google's answer is
+    empty and auto hands the search to Matrix."""
+    ran: list[bool] = []
+
+    def _matrix(**_kw: object) -> None:
+        ran.append(True)
+
+    monkeypatch.setattr(cli, "_run_matrix_path", _matrix)
+    fake = gf_session(*_fll_lga_pages())
+    args = ["auto" if a == "gflight" else a for a in _FLL_LGA]
+    result = CliRunner().invoke(
+        cli.app, [*_SEARCH, *args, "--format", "json", "--ext", "-AIRLINES AA"]
+    )
+    assert result.exit_code == 0, result.output
+    assert ran == [True]
+    assert len(fake.gets) == 11
+    assert "Using Matrix: no Google Flights itinerary matched a carrier exclusion (AA)" in (
+        " ".join(result.stderr.split())
+    )
+
+
+def test_an_outbound_window_still_reads_the_cheapest_tab(
+    gf_session: Callable[..., Any],
+) -> None:
+    """The outbound is the row the filter sees, so its window is checked."""
+    fake = gf_session(*_fll_lga_pages())
+    result = CliRunner().invoke(
+        cli.app, [*_SEARCH, *_FLL_LGA, "--format", "json", "--depart-times", "morning,midday"]
+    )
+    assert result.exit_code == 0, result.output
+    assert _CHEAPEST_TFU in fake.gets[-1]
+    assert "not read" not in result.stderr
+
+
 @pytest.mark.parametrize("flag", ["run_pp", "sellers", "verify"])
 def test_a_path_that_renders_through_the_adapter_reads_no_cheapest_tab(
     flag: str, monkeypatch: pytest.MonkeyPatch
