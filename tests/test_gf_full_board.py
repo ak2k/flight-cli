@@ -785,6 +785,59 @@ def test_under_auto_every_check_that_emptied_the_board_is_named(
     ) in printed, printed
 
 
+# ──────────────────────── +CABIN, held on every leg ─────────────────────────
+
+
+def _lhr_json(*extra: str) -> list[str]:
+    return [
+        *_SEARCH,
+        "JFK",
+        "LHR",
+        "--dep",
+        _DEP.isoformat(),
+        "--backend",
+        "gflight",
+        "--format",
+        "json",
+        "-n",
+        "200",
+        *extra,
+    ]
+
+
+def test_a_cabin_requirement_naming_the_asked_cabin_keeps_a_board_booked_in_it(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red at the base, where `--backend gflight` refused `+CABIN`. Every leg
+    on the capture is booked in economy."""
+    gf_session(_served(_LHR))
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    result = CliRunner().invoke(cli.app, _lhr_json("--cabin", "economy", "--ext", "+CABIN 3"))
+    assert result.exit_code == 0, result.output
+    assert len(json.loads(result.stdout)) == 101
+
+
+@pytest.mark.parametrize("cabin", [4, None], ids=["first", "none-stated"])
+def test_a_row_with_a_leg_outside_the_required_cabin_is_dropped(
+    cabin: int | None, gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red at the base. EI104+EI152 with its connection booked in first, or in
+    no cabin Google states: the other 100 rows stay, and without `+CABIN` so
+    does this one."""
+
+    def _connection_in(raw: list[Any]) -> None:
+        raw[0][2][1][gfid._LEG_CABIN_IDX] = cabin
+
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    edited = "Aer Lingus|104+Aer Lingus|152"
+    for extra, rows, kept in (((), 101, True), (("--ext", "+CABIN 3"), 100, False)):
+        gf_session(_lhr_with_row_edited("EI104+EI152", _connection_in))
+        result = CliRunner().invoke(cli.app, _lhr_json("--cabin", "economy", *extra))
+        assert result.exit_code == 0, result.output
+        booked = [_json_booked(m) for m in json.loads(result.stdout)]
+        assert (len(booked), edited in booked) == (rows, kept)
+
+
 def _decode_fields(buf: bytes) -> dict[int, list[Any]]:
     out: dict[int, list[Any]] = {}
     i = 0

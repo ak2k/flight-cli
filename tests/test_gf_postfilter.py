@@ -531,6 +531,21 @@ def test_a_negative_limit_is_no_limit() -> None:
     assert _stop_keep(-1, "MAXDUR 9:00")(0, _one_stop())
 
 
+def test_a_cabin_requirement_holds_every_leg() -> None:
+    """Red at the base, which refused `+CABIN`. A leg in another cabin, a leg
+    Google states no cabin for and a leg with no amenities each fail."""
+    keep = routing_keep([classify(None, "+CABIN 2").predicates])
+    assert keep is not None
+    row = _one_stop()
+    business = replace(row, amenities=[replace(a, cabin="BUSINESS") for a in row.amenities])
+    mixed = replace(
+        business, amenities=[business.amenities[0], replace(row.amenities[1], cabin="FIRST")]
+    )
+    unstated = replace(business, amenities=[business.amenities[0], row.amenities[1]])
+    short = replace(business, amenities=business.amenities[:1])
+    assert [keep(0, r) for r in (business, mixed, unstated, short)] == [True, False, False, False]
+
+
 def test_the_checks_are_named_in_the_users_words() -> None:
     preds = classify("AA+", "MAXDUR 6:20; MINCONNECT 2:00; ALLIANCE oneworld; MAXSTOPS 1")
     names = row_check_names(

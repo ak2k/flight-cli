@@ -824,6 +824,7 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
     return_arrive_times: str | None = None,
     exclude_basic: bool = False,
     multi_cabin: bool = False,
+    cabins: tuple[Cabin, ...] = (),
 ) -> str:
     """Resolve --backend to a concrete backend.
 
@@ -860,6 +861,11 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
     The page writes one filter set onto every slice, so a round trip whose
     return (`return_codes`) carries a different predicate set from the
     outbound's is Matrix's.
+
+    `cabins` are the cabins `--cabin` asked for. A `+CABIN` naming exactly the
+    one of them stays on Google, which is asked for that cabin and holds every
+    leg of every row to it; any other `+CABIN`, or one beside several cabins or
+    none, is Matrix's.
 
     A constraint the page cannot carry has to be a reason here and nowhere
     else. Left out, `auto` serves it on Google with the constraint silently
@@ -933,7 +939,7 @@ def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Ma
         )
     )
     predicates = classify(routing, extension).predicates
-    reasons.extend(search_page_reasons(predicates, stops))
+    reasons.extend(search_page_reasons(predicates, stops, cabins[0] if len(cabins) == 1 else None))
     reasons.extend(_gf_unmappable_reasons(backend, predicates))
     if return_codes is not None and set(classify(*return_codes).predicates) != set(predicates):
         reasons.append("different routing or extension codes on the outbound and the return")
@@ -7466,6 +7472,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         return_arrive_times=return_arrive_times,
         exclude_basic=exclude_basic,
         multi_cabin=len(_resolve_cabin_list(cabin)) > 1,
+        cabins=_resolve_cabin_list(cabin),
     )
     if verify and resolved == BACKEND_MATRIX:
         err.print("[red]--verify needs a Google Flights row, and this search runs on Matrix.[/]")
