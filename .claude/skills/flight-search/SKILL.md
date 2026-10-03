@@ -319,9 +319,10 @@ flight calendar 'JFK,LGA,EWR,BOS,IAD,DCA,BWI,PHL' \
                 'LHR,CDG,FRA,AMS,IST,MAD,BCN,FCO,MUC,ZRH,VIE,CPH,DUB' \
                 --start 2026-09-01 --end 2026-09-30 -d 7-10
 ```
-A calendar over 11 airports still runs on Matrix (one sub-search per origin and
-destination, 104 here), without Google's price graph. For one date, `flight
-search` over the same 21 airports is answered by Google Flights as 4 pages:
+A calendar over 11 airports still runs on Matrix (one sub-search per airport
+pair, 104 here, and on this round trip the combined query beside them), without
+Google's price graph. For one date, `flight search` over the same 21 airports
+is answered by Google Flights as 4 pages:
 ```bash
 flight search 'JFK,LGA,EWR,BOS,IAD,DCA,BWI,PHL' \
               'LHR,CDG,FRA,AMS,IST,MAD,BCN,FCO,MUC,ZRH,VIE,CPH,DUB' \
