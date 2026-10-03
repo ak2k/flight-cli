@@ -420,7 +420,7 @@ Every one of these is a multi-megabyte page GET, so the count is the cost:
 | a round trip whose every pin blips and recovers | 1 + 3 x pins = 31 at the default `-n 10` |
 | a round trip whose return boards all refuse (5xx, consent, layout) | 1 + pins, the same as a successful search |
 | a round trip on a wall that keeps lifting and closing | 55 for one cabin, 220 for four, against 44 healthy — `cabins x calls x (_THROTTLE_RETRY_ATTEMPTS + 1)` |
-| a Google table or `--format json` that runs no awards, `--sellers` or `--verify` | the above + 1: the Cheapest tab, fetched last and not at all once the pins stopped on a wall, an outage or a dead browser |
+| a one-cabin `search` that is not `--awards-only` (the default merged table, `--fast`, either `--format json`) | the above + 1: the Cheapest tab, fetched last and not at all once the pins stopped on a wall, an outage or a dead browser |
 
 The flapping row is the worst case and the one that needs its bound named. Any
 sibling's success refills the wall — correctly, it is per-IP — so the shared
@@ -954,14 +954,52 @@ returns nor its price.
 FLL-LGA (114 rows), LAX-BKK (95), JFK-ATH (127), CMN-DXB or LAX-OKA. The decode
 is the same; the one-way test marks a captured row by hand.
 
-**Where it is read.** Only `_run_gflight_path` asks for the Cheapest tab, and
-only when no awards, `--sellers` or `--verify` run, because the Google table
-and its document are the renderers that mark a row (`†` separate tickets, `‡`
-self transfer; JSON `separate_tickets`, and fli's `self_transfer` for the
-subset on which bags are rechecked). The enriched table, the multi-cabin table,
-the award overlay and the deprecated `gflight` command read no Cheapest page, so
-no separate-ticket row reaches a renderer that would print it as one ticket. A
-refused Cheapest page leaves the base answer and one stderr line naming why.
+**Where it is read.** Every one-cabin `search` asks for the Cheapest tab:
+`_run_gflight_path` (`--fast`, `--format json`, `--verify`, `--bags`) and the
+default `_run_enriched_path` (the merged table and `--enrich --format json`),
+which reads it in the Google worker that already runs beside Matrix. The
+renderers mark a row (`†` separate tickets, `‡` self transfer, on the Google and
+the merged table, each with its key line; JSON `separate_tickets`, and fli's
+`self_transfer` for the subset on which bags are rechecked). `--awards-only`,
+the multi-cabin search and the deprecated `gflight` command read no Cheapest
+page: the first prints no Google row, the other two pass no mode. A refused
+Cheapest page leaves the base answer and one stderr line naming why, and
+`--no-separate-tickets` one line counting what it hid, once per search on every
+path (`cli._note_separate_tickets`).
+
+**Cost on the default path.** One GET, inside the Google worker, so it delays
+the first (Google) table and not the merged one while Matrix is the long pole.
+FLL-LGA 2026-10-20/27, `-n 100`, one run each at 2026-10-03 01:16-01:17 EDT:
+the Google table painted at 7.0 s before this change and 9.0 s after; the merged
+table landed at 46.2 s before it.
+
+**Never priced against Matrix.** Matrix sells one ticket, so a separate-ticket
+row and a Matrix row on the same flights are two bookings: `_enrich.merge_results`
+never pairs a marked row, which stays a `GF` row with no Matrix price and no
+delta. Its cross-check reason is `separate_tickets` alone ("Google sells this
+trip as separate tickets; Matrix prices one ticket", or "as a self transfer on
+separate tickets"). Every Google-side fact a Matrix row is explained by (its
+carriers, trips and priced outbounds) reads one-ticket rows only, so a marked
+row never makes a Matrix row read `paired_elsewhere`, never hides
+`carrier_absent_google`, and an outbound Google prices only on separate tickets
+keeps `outbound_not_priced`. The caption's and the document's `google.listed`
+count one-ticket rows too; the caption adds "and N on separate tickets".
+
+**Every surface that acts on a row skips one.** The award matcher reads the
+one-ticket rows, and stderr says once how many shown rows on separate tickets
+are not in the award table. `--sellers` refuses the row before Chrome opens
+("Google sells #N as separate tickets; --sellers reads one-ticket booking pages
+only.", exit 1). `--verify` answers `separate-tickets` without asking Matrix
+(exit 0). `cli._pin_segments` returns None for it, so every Google link and the
+pin-clamp sentence fall back as when a pin fails, on both paths.
+
+**The supply flickers.** On FLL-LGA 2026-10-20/27, the Cheapest URL this code
+fetches served 66 rows, 5 `[2]` (JetBlue nonstops at USD246) and 12 `[1]` (self
+transfers, USD282-1449), at 2026-10-03 00:01:30-00:02 EDT, then 54 rows, none
+marked, at 00:06:29 and 00:07 on the same client and URL. None were seen on 37
+routes or in Chrome at 23:49-23:59 the evening before, and the 01:17 run above
+printed no mark. So an unmarked live board says nothing about the code path; the
+tests prove the behavior on the committed FLL-LGA captures.
 
 ## Tier model: who honors each constraint
 
@@ -1084,7 +1122,8 @@ it names. Otherwise `not_in_matrix`. A Matrix-only row: `no_google_answer`;
 combination (Google pins at most `pinned_fanout(-n)` outbounds);
 `carrier_absent_google` only on a one-way or beside an outbound Google priced;
 neither of those two on a board the row filter cut; otherwise `not_on_google`.
-Either side: `paired_elsewhere` where the other side lists the same flights,
+A Google row sold as separate tickets: `separate_tickets` alone (see the
+Cheapest-tab section). Either side: `paired_elsewhere` where the other side lists the same flights,
 first day and landing minutes on another row, because a middle flight's day is
 then unstated; `unmatched` where a row leaves a flight number, day or landing
 unstated, so neither absence and no unpriced outbound is decided for it (no
