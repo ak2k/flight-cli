@@ -1251,6 +1251,22 @@ def test_no_seller_beats_a_row_priced_in_two_currencies(
     assert "beats" not in result.stdout
 
 
+def test_a_party_sets_the_sellers_against_the_partys_price_on_both_sides(
+    monkeypatch: pytest.MonkeyPatch, board: list[Any]
+) -> None:
+    """For two adults Google prices B6 1523 at USD179.00 for the party, and
+    Matrix at USD90.00 a passenger and USD180.00 for two. The row is set
+    against the party's prices, so Kiwi.com's USD170 for the party beats it."""
+    _priced_in(monkeypatch, board[:1], "USD")
+    flies = board[0].flight.legs[0].departure_datetime.date()
+    priced = {**_matrix_solution("B61523", "USD180.00", flies), "ext": {"price": "USD90.00"}}
+    monkeypatch.setattr(cli, "_matrix_into", _matrix_answers([priced]))
+    _serve(monkeypatch, _booking_body(_option("Kiwi.com", 170, flights=_B6_1523)))
+    result = _run("--adults", "2", "--sellers", "--no-matrix-url", "--no-google-url")
+    assert result.exit_code == 0, result.output
+    assert "Kiwi.com at USD170.00 beats the table price, USD179.00." in result.stdout
+
+
 def _matrix_connection(arrival: str) -> dict[str, Any]:
     """AA100 JFK-ORD then AA200 ORD-LAX, leaving in the evening. Matrix dates
     the slice's two ends and neither flight."""

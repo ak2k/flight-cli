@@ -78,6 +78,7 @@ PR #230:
 3.17/3.18 = min/max layover minutes
 12 = price cap, whole units of the page's `curr=` (sent on a USD page only, up to 2**31-1)
 13 = bags {2: carry-on (0 or 1), 3: checked count}, a zero count left out
+25 = 1: economy without basic fares (`--exclude-basic`), after 19
 ```
 
 The hour fields are whole hours and a "latest" hour is the last hour included:
@@ -90,12 +91,28 @@ a 3 (a tenth of the fare, a lap) and $589 beside a 4 (a seat). Every writer
 (`build_search_tfs`, the pinned and booking links, `google_flights_url`)
 writes Google's codes.
 
+A minute window (`--depart-times 9:30-13:45`, `--arrive-times 18:00-21:30`) asks
+for its whole hours, first // 60 to last // 60, and the row filter holds the
+first leg's departure, or the last leg's landing, to the minute, both ends
+included (on `ds1_jfk_lax_tfu.json`, 18:00-21:30 keeps 16 rows and drops the
+21:34 and 21:59 landings). Matrix takes a departure window to the minute in
+`timeRanges` and has no arrival input, so an arrival window is Google-only, as
+`--bags` is: refused where the search needs Matrix, and never handed to it.
+
+Field 25 = 1 (`--exclude-basic`) on JFK-LAX 2026-10-20: 93 rows against 95
+without it, 78 repriced up (AA +45 and +110, B6/DL/AS +55), 15 unchanged, 2
+gone, the cheapest USD229 -> USD284. On JFK-LHR it repriced none and still
+served a basic fare (2026-09-27). No row field marks a basic fare, so nothing
+can be checked: every run says so, and the flag is Google-only as `--bags` is.
+
 Two traps in that layout. **`3.5` is zero-based** while fli's `MaxStops` is
 one-based (ANY=0, NON_STOP=1, …), so it's `enum.value - 1` and **omitted** for
 ANY — writing a literal 0 pins every search to nonstop. **Carrier codes come
 from the enum NAME, not its value**: fli maps codes to display names
 (`Airline._0B.value == "Blue Air"`) and underscore-prefixes digit-leading ones,
-so `airline.name.removeprefix("_")` is the code.
+so `airline.name.removeprefix("_")` is the code. That holds for a member
+`fli_bridge.fli_airline` built: the enum's own member for six codes is named
+for another carrier (below).
 
 **Airport codes come from the member's name as well, and fli's enum aliases 48
 of them to another airport.** `Airport` is an enum over a code -> display-name
@@ -116,6 +133,27 @@ printed `[]` with exit 0; through `fli_airport` it printed 27 rows (CI, BR, CX
 via TPE or HKG, from USD577), each landing at OKA by its clock span: departure
 to arrival less elapsed time is +960 minutes from LAX, where NAH gives +900.
 
+**Airline codes alias the same way: fli's `Airline` enum files six codes
+under another carrier's member, and every pair is two carriers.** W9 (Wizz Air
+UK) is W6 (Wizz Air Hungary); Z0 is N0 (Norse Atlantic UK and Norway); MT is DK
+(Thomas Cook UK, ceased 2019, and Sunclass); S0 is P4 (Aerolineas Sosa and Air
+Peace); 5C is X7 (Challenge Airlines IL and BE); 1W is 1S (two
+reservation-system codes). A lookup through the enum asks Google for the other
+carrier, and fli's row decoder (`_parse_airline`) has no entry for an alias, so
+a row sold or flown under one fails to decode, and an include naming one reads
+as "a carrier Google Flights has no code for" and goes to Matrix. No airline
+alias is kept the way MLH is. Build airline members only through
+`fli_bridge.fli_airline`, which gives each aliased code a member of its own by
+the same helper as the airport table (`_own_member`) and keys a digit-leading
+code as fli does (`5C` is `_5C`). The JSON dump shows fli's display name,
+"Wizz Air" for W9 and W6 alike; each leg's `amenities` carry Google's own
+operating and marketing codes. `tests/test_airline_alias_requests.py` fails on
+`_parse_airline` anywhere under `src/`, an `Airline[...]` subscript, a member
+read off the enum, or `getattr`/`hasattr` on it. Measured 2026-10-01: one
+LTN-TIA page for 2026-10-20 held 11 rows, 5 of them W9 nonstops from USD44;
+through fli's decoder only the 6 others were printed (El Al connections from
+USD1087), and `--ext 'AIRLINES W9' --backend gflight` exited 2.
+
 **What the page costs us.** Without `tfu=` it serves Google's top ~30 rows per
 leg. `links.google_flights_search_page_url` always sends `tfu=EgQIABABIgA`
 (`{2: {1: 0, 2: 1}, 4: {}}`, the "show all" bit), which serves the full board:
@@ -129,9 +167,8 @@ are served by Google too, so the search gate is per predicate
 (`_gf_postfilter.search_page_reasons`), and anything else routes to Matrix with
 its reason printed. Still on Matrix: carrier and alliance excludes as encoded
 fields (they stay post-filters), connection airports (3.15; Matrix's meaning is
-positional), infants (Google answered JFK-LAX with no rows for any infant, so an
-empty answer would not be one), seniors and youth (no Google kind), time
-buckets that do not form one window, an alliance beside another carrier or
+positional), an infant on a multi-cabin compare, seniors and youth (no Google
+kind), time buckets that do not form one window, an alliance beside another carrier or
 alliance include (3.6 is one list, so Google would answer either), a zero
 `MAXCONNECT` or `MAXDUR` (fli's maximums are positive), and a carrier code fli
 has no member for.
@@ -932,7 +969,8 @@ predicate set, each tagged with a tier:
 - **Tier 2 — post-filter on the result** (`_gf_postfilter`): operating carrier
   (`O:`/`OPAIRLINES`), marketing/airport *exclude* (`~UA`, `~DFW`, `-CITIES`,
   `-AIRLINES`), `-CODESHARE`, specific flight #/range, `MINCONNECT` (the search
-  page also encodes it as 3.17; the grids have no rows to check it on).
+  page also encodes it as 3.17; the grids have no rows to check it on),
+  `-REDEYES` and `-OVERNIGHTS` (the search's rows only; the grids refuse both).
 - **Tier 3 — Matrix only**: fare construction (`F bc=y`, `aa.lon.yup`), mileage,
   `PADCONNECT`, aircraft, a carrier list naming a token that is not an airline
   code (`-AIRLINES UA,DL`), and anything the parser can't confidently classify.
@@ -983,9 +1021,32 @@ reads it as it is. The Chrome price graph cannot check rows either, and has its
 own gate, `_gf_calgraph.graph_blocker`, which admits the includes and bounds
 Google was measured applying from the URL (Admission, below).
 
-`-REDEYES` and `-OVERNIGHTS` still escalate to Matrix. The raw-row checks in
-`_gf_postfilter._row_passes` read per-leg datetimes, so either could be added
-there.
+`-REDEYES` and `-OVERNIGHTS` are row checks on the search page, read off each
+leg's local clocks (`_gf_postfilter._red_eye`, `_overnight_stop`), in place of
+a Matrix hand-off about 45 times slower. A red-eye leg lands on a later local
+date than it took off, takes off 00:00-04:59, or has clocks and duration twelve
+hours or more apart (it crosses the date line, where a night flight can land on
+its takeoff date). An overnight stop is a connection whose next leg leaves on a
+later local date than the landing there, or whose landing is 00:00-04:59.
+Matrix's `LAX JFK --dep 2026-10-20 --ext -REDEYES` gave 10 solutions, each
+landing the same day by 23:55. Over 74 saved Matrix nonstop slices, "lands on a
+later local date than it took off" reproduced Matrix's overnight flag on 73;
+the 74th (B61024 LAX 16:30 -> JFK 00:52) Matrix keeps and the rule drops. None
+of those slices crosses the date line, so the rule was never measured on one
+that does. Both arms also drop daytime long-haul legs Matrix may keep: HKG
+10:05 -> JFK 12:20 the same day by the twelve-hour arm, LAX 11:00 -> NRT 15:00
+the next day by the date arm; what Matrix does with them is unmeasured. A board
+the checks empty goes to Matrix under auto. The date grids have no rows and
+refuse both.
+
+A party with an infant is asked of the page (field 8, 3 lap and 4 seat). For
+one adult and a lap infant on 2026-10-20, JFK-LHR served 30 rows (BA/AY USD324,
+the adult fare plus a tenth), not the ~100-row board, and JFK-LAX none at all.
+So under auto a board served no rows for a party with an infant goes to Matrix
+with the note `Using Matrix: Google Flights served no rows for a party with an
+infant.`; under `--backend gflight`, or beside a Google-only flag, the empty
+board prints with a note naming how to ask Matrix. A multi-cabin compare with
+an infant stays on Matrix, since its hand-off counts only rows a filter dropped.
 
 ## Progressive enrich (`_run_enriched_path`)
 
@@ -1016,13 +1077,26 @@ Google row whose price the row shows, and `same_trip` holds only where
 over shares the flights and the first day, not the trip (the FI614/FI450 rows
 above land on different days), so it shows no delta and the reason
 `trip_unconfirmed` names both landings; a pair in two currencies is
-`other_currency`. Google prices the whole party, while the price Matrix lists
-is one passenger's, rounded up (2 adults, 2026-10-01: `ext.price` USD229.00,
-`displayTotal` USD456.80, Google USD457), so for more than one passenger the
-Matrix column, the delta, the caption and the document read Matrix's
-`displayTotal`; where Matrix states none the row is `unpriced`. The merge's pairing and ranking are unchanged: a matched row
-still ranks on Matrix's price, so with the deeper page a Google fare that
-Matrix prices higher can rank below where it ranked on a page of `-n`.
+`other_currency`. Google prices the whole party, on its search page and its
+booking page alike, while the price Matrix lists is one passenger's, rounded
+up (2 adults, 2026-10-01: `ext.price` USD229.00, `displayTotal` USD456.80,
+Google USD457.00; Google's AS21/AS487 is USD437.00 for two and USD219.00 for
+one). So `merge_results(..., passengers=)` puts Matrix's price for the party
+on the row (`_enrich.party_price`: the listed price for one, `displayTotal`
+for more), and the Matrix column, the rank, the delta, the `--sellers`
+comparison, the caption and the document all read that one price; where
+Matrix states no total the row is `unpriced`.
+
+**A row ranks on the lowest price it prints** (`_enrich._rank_price`): the
+lowest in the requested currency, by exact amount, or where it prints none in
+it the lowest in the currency of Matrix's price, else Google's; rows tied on it
+keep the merge's order, a matched row ahead of a Google row alone. Ranked on
+Matrix's listed price, a party's Matrix rows sorted on one passenger's fare
+against Google's party totals: the live JFK-LAX `--adults 2 -n 10` table
+(2026-10-01) printed ten GF+MX rows from USD456.80 to USD796.80 and cut
+Google's AS21/AS487 and AS21/AS696 at USD437.00 and five rows at USD457.00. And
+a matched row Matrix prices above Google left the first `-n` on the deeper
+page: DL1788 at Google USD204, Matrix USD999, gave way to B61023.
 
 **A reason is stated only where the two answers decide it**
 (`_cross_check.py`). Matrix's answer is complete when `solutionCount` is at
@@ -1041,6 +1115,15 @@ it names. Otherwise `not_in_matrix`. A Matrix-only row: `no_google_answer`;
 combination (Google pins at most `pinned_fanout(-n)` outbounds);
 `carrier_absent_google` only on a one-way or beside an outbound Google priced;
 neither of those two on a board the row filter cut; otherwise `not_on_google`.
+While the board counts rows Google served that the parser could not read
+(`Board.unread`, a round trip's summed over its outbound page and every return
+page it read, a return page none of whose rows parsed included though it
+refuses its pin), a Matrix-only row that would say `carrier_absent_google` or
+`not_on_google` says `google_unread` ("2 of Google's rows could not be read")
+instead: its trip may be one of them. On the JFK-LAX board cut to DL1788 and
+an unreadable AS21/AS487 row, one row parses, and without the count Matrix's
+AS21/AS487 row reads `carrier_absent_google`. The caption reads `Google listed
+95 rows, 2 unread.` where any are.
 Either side: `paired_elsewhere` where the other side lists the same flights,
 first day and landing minutes on another row, because a middle flight's day is
 then unstated; `unmatched` where a row leaves a flight number, day or landing
@@ -1051,12 +1134,13 @@ Matrix is sent no sales city, and no row says where it was priced.
 **`--format json --enrich`** writes `{"search": <the plain --format json
 document, the same -n rows>, "cross_check": {"currency", "delta":
 "google_minus_matrix", "matrix": {"listed", "solution_count", "complete",
-"last_price"}, "google": {"listed", "answered"}, "rows": [...]}}`, the rows
+"last_price"}, "google": {"listed", "answered", "unread"}, "rows": [...]}}`, the rows
 being the table's, from the pure `_cross_check.document`. Plain `--format json`
 does not cross-check; on auto a failed Google query is still handed to Matrix,
 as before, and `--fast` asks Matrix nothing. It needs no awards (`--cash-only`)
-and no `--sellers` (exit 2 otherwise); `--bags` prints the table's "No Matrix
-enrichment" note and the plain document, and `--verify` prints its own such note
+and no `--sellers` (exit 2 otherwise); a Google-only flag (`--bags`, an arrival
+window, `--exclude-basic`) prints the table's "No Matrix enrichment" note and the
+plain document, and `--verify` prints its own such note
 and writes `{"search", "verify"}` instead. Matrix failing leaves `cross_check`
 null (exit 0), Google failing leaves `search` empty with every Matrix row
 `no_google_answer`, both failing is exit 1 with stdout empty.
@@ -1288,6 +1372,38 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
   stops the driver and exits 130. Measured 2026-09-29, NYC→LON round trip over
   2026-10-20..11-02: each of 5, 6 and 7 nights priced 14 of 14 dates in one
   load of about 12 s.
+- **Two lows.** Where Matrix's grid and the graph show lows a dollar or more apart
+  (Google's read as the whole dollars its table prints), one yellow stderr line
+  follows Google's table and any lost-length line (`cli._two_lows_note`). It names
+  each low as its table's first row shows it: date pair, nights (or one-way) and
+  airports, Matrix's pair from the merged cell, Google's "cheapest across" a set.
+  It says what both asked (cabin, adults, the trip lengths, USD, the same airports;
+  after a lost length, Matrix's range and the lengths Google priced), the stop rule
+  only when no stop limit reached Google's page (Matrix one stop more than the
+  fewest on a route in each direction, Google any number), and two searches that
+  show what is bookable: `flight detail` on Matrix's pair and `flight search ...
+  --backend gflight` on the set, each repeating the calendar's own flags
+  (`--cabin`, `--adults`, `--stops`, routing and extension codes as typed,
+  `--depart-times`, `--currency`, and `-d` for `detail` when it is not 5-7).
+  `detail` also carries `--currency USD` when several origins and no `--currency`
+  asked the grid in USD: one pair asked alone answers in its origin's currency (LHR
+  CDG in GBP, measured 2026-10-02). A Matrix grid in another currency is named and
+  not compared. JSON, `--fast`, `--gf-transport http`, a failed or empty side and
+  agreeing lows print no line, and stdout and the exit code are unchanged. Two lows
+  that differ need not mean either table is wrong. Measured 2026-10-01, `calendar
+  NYC PAR --start 2026-10-20 --end 2026-11-19 -d 5-7` (9 pairs plus the combined
+  query, 295 solutions) had Matrix's low at USD698.00 (10-26, EWR→ORY, 5 and 6
+  nights) and the graph's at 429 (11-10, 7 nights). Google's board for NYC PAR
+  11-10/11-17 had that 429 as TAP TP214+TP454 EWR-OPO-ORY and TP453+TP211 back, one
+  stop each way. Matrix's NYC PAR search for the same dates returned 60 solutions,
+  all nonstop, low USD715.89 (AA/DL/UA/AF); asked EWR ORY with `--routing TP+` it
+  priced the same TAP flights at USD428.19, and without the routing it returned 12
+  solutions, low USD526.59 (TAP, another return). Both sides had asked the same
+  airports, trip lengths, cabin and currency, so the fix is a note, not a change to
+  either request. Matrix's limit holds each direction, not the trip: EWR ORY
+  11-10/11-17 `--routing TP+` (the fewest is one stop each way) under the default
+  limit, measured 2026-10-02, returned 100 solutions, 2 of them with two stops each
+  way.
 - **A page that draws no graph.** About one load in fourteen (2 of 27-29 live
   loads, 2026-09-28/29) passes the wall check and then times out on the
   "Price graph" click. One of the two was the first load of a fresh Chrome, so

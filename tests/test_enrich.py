@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import itertools
 import json
+from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -400,10 +402,17 @@ def _compact(rows: list[MergedRow]) -> list[_Compact]:
     ]
 
 
+def _lowest(row: _Compact) -> float:
+    return min(float(p[3:]) for p in row[1:3] if p is not None)
+
+
 def test_a_board_with_no_shared_key_merges_as_it_always_did() -> None:
-    """The list and its order are what the merge gave before a key could hold
-    several trips (`_BASE_LAX_MERGE`, computed once by that code): `both` rows
-    dated and undated, rows of either side alone and a Matrix row with no key."""
+    """The rows are what the merge gave before a key could hold several trips
+    (`_BASE_LAX_MERGE`, computed once by that code, which ranked a matched row
+    on Matrix's price): `both` rows dated and undated, rows of either side
+    alone and a Matrix row with no key. Each matched row's Matrix price is
+    Google's plus USD5, so it ranks on Google's, first among the rows at that
+    price; the matched rows and the others each keep their own order."""
     board = _lax_board()
     matrix = _lax_matrix(board)
     google_keys = [_itin_key(it) for it in board.solutions]
@@ -411,7 +420,23 @@ def test_a_board_with_no_shared_key_merges_as_it_always_did() -> None:
     assert len(set(google_keys)) == len(google_keys) == 95
     assert len(set(matrix_keys)) == len(matrix_keys) == 34
     assert len(set(google_keys) & set(matrix_keys)) == 32
-    assert _compact(merge_results(board, matrix, currency="USD")) == _BASE_LAX_MERGE
+    merged = _compact(merge_results(board, matrix, currency="USD"))
+    assert Counter(merged) == Counter(_BASE_LAX_MERGE)
+    for matched in (True, False):
+        assert [r for r in merged if (r[0] == "both") is matched] == [
+            r for r in _BASE_LAX_MERGE if (r[0] == "both") is matched
+        ]
+    assert [_lowest(r) for r in merged] == sorted(map(_lowest, merged))
+    assert not [
+        (a, b)
+        for a, b in itertools.pairwise(merged)
+        if _lowest(a) == _lowest(b) and a[0] != "both" and b[0] == "both"
+    ]
+    assert merged[:3] == [
+        ("matrix", None, "USD150.00", "ZZ1", False),
+        ("both", "USD204.00", "USD209.00", "DL1788", True),
+        ("both", "USD204.00", "USD209.00", "B6123", False),
+    ]
 
 
 _BASE_LAX_MERGE: list[_Compact] = [
@@ -514,6 +539,53 @@ _BASE_LAX_MERGE: list[_Compact] = [
     ("gf", "USD1012.00", None, "DL2293+DL575", True),
     ("both", "USD1012.00", "USD1017.00", "DL2286+DL827", False),
 ]
+
+
+# ───────── the price a row carries and ranks on ─────────
+
+
+def test_a_party_ranks_every_row_on_the_partys_price() -> None:
+    """Google prices the whole party and Matrix lists one passenger's fare,
+    so for two a Matrix row carries the total Matrix states: ZZ1 at USD180 a
+    passenger is USD360 for two, dearer than Google's USD300 for XX9."""
+    google = _sr(_it("USD457.00", ["DL1"]), _it("USD300.00", ["XX9"]))
+    zz1 = _it("USD180.00", ["ZZ1"]).model_copy(update={"display_total": "USD360.00"})
+    dl1 = _it("USD229.00", ["DL1"]).model_copy(update={"display_total": "USD456.80"})
+    rows = merge_results(google, _sr(zz1, dl1), currency="USD", passengers=2)
+    assert [(r.source, _first_flight(r.itinerary), r.gf_price, r.matrix_price) for r in rows] == [
+        ("gf", "XX9", "USD300.00", None),
+        ("matrix", "ZZ1", None, "USD360.00"),
+        ("both", "DL1", "USD457.00", "USD456.80"),
+    ]
+
+
+def test_a_matched_row_ranks_on_the_lowest_price_it_prints() -> None:
+    """Matrix's whole answer adds DL1788, Google's first USD204 row, at
+    USD999. Matched, it ranks on Google's USD204, so the deeper page keeps
+    the first three trips the page of `-n` gave rather than pushing DL1788
+    out for the next USD204 row."""
+    board = _lax_board()
+    day = f"{_lax_departure(board)}T09:00"
+    cheaper = [_it("USD100.00", ["ZZ1"], dep=day), _it("USD101.00", ["ZZ2"], dep=day)]
+    page = SearchResult(solutionCount=3, solutions=cheaper)
+    whole = _sr(*cheaper, _as_matrix(board.solutions[0], "USD999.00"))
+    first = merge_results(board, page, currency="USD")[:3]
+    deep = merge_results(board, whole, currency="USD")[:3]
+    assert [_flights(r.itinerary) for r in first] == [_flights(r.itinerary) for r in deep]
+    assert [(r.source, _flights(r.itinerary), r.gf_price, r.matrix_price) for r in deep] == [
+        ("matrix", ("ZZ1",), None, "USD100.00"),
+        ("matrix", ("ZZ2",), None, "USD101.00"),
+        ("both", ("DL1788",), "USD204.00", "USD999.00"),
+    ]
+
+
+def test_a_row_ranks_on_its_exact_amount() -> None:
+    """Google's USD456.00 is under Matrix's USD456.80, though both are 456
+    whole dollars."""
+    rows = merge_results(
+        _sr(_it("USD456.00", ["XX9"])), _sr(_it("USD456.80", ["ZZ1"])), currency="USD"
+    )
+    assert [_first_flight(r.itinerary) for r in rows] == ["XX9", "ZZ1"]
 
 
 # ───────── the Google row a merged row holds ─────────
