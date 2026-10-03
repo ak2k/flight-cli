@@ -12,6 +12,7 @@ field for field, where only booking details tell the middle flight's day."""
 
 from __future__ import annotations
 
+import io
 import json
 import pathlib
 from datetime import date, datetime, time, timedelta
@@ -25,6 +26,7 @@ from fli.models import (  # pyright: ignore[reportMissingTypeStubs] — fli ship
     FlightLeg,
     FlightResult,
 )
+from rich.console import Console
 from typer.testing import CliRunner
 
 from conftest import _answering, _ds1, _page
@@ -1094,3 +1096,213 @@ def test_without_the_flag_the_search_is_the_base_and_asks_matrix_nothing(
     assert table.exit_code == 0, table.output
     assert "Verified" not in table.output
     assert "Matrix" not in table.stderr
+
+
+# ─────────────────────────── what a run says as it waits ───────────────────────────
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _stderr_at_each_search(
+    matrix: _Matrix, monkeypatch: pytest.MonkeyPatch
+) -> tuple[io.StringIO, list[tuple[bool, str]]]:
+    """Stderr, and per Matrix search as it arrives: whether it is routed, and
+    what stderr held when it was sent."""
+    buf = io.StringIO()
+    monkeypatch.setattr(cli, "err", Console(file=buf, width=200, no_color=True))
+    seen: list[tuple[bool, str]] = []
+    real = matrix.handler
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/search":
+            body = json.loads(request.content)
+            routed = any(s.get("routeLanguage") for s in body["inputs"]["slices"])
+            seen.append((routed, buf.getvalue()))
+        return real(request)
+
+    monkeypatch.setattr(matrix, "handler", _handler)
+    return buf, seen
+
+
+@pytest.mark.parametrize("fmt", ["table", "json"])
+def test_stderr_names_the_row_before_matrix_is_asked_for_it(
+    gf_session: Callable[..., Any], matrix: _Matrix, monkeypatch: pytest.MonkeyPatch, fmt: str
+) -> None:
+    """Red at the base: stderr is empty when the chain search is sent."""
+    buf, seen = _stderr_at_each_search(matrix, monkeypatch)
+    n, row = _as_row()
+    matrix.chain = _chain(_row_solution("AS-1", f"USD{row.flight.price:.2f}", row))
+    matrix.details = {"AS-1": _details_of(row)}
+    gf_session(_served())
+    result = _run("-n", "40", "--fast", "--verify", "--pick", str(n), "--format", fmt)
+    assert result.exit_code == 0, result.output
+    ((routed, before),) = seen
+    assert routed
+    asking = f"Asking Matrix for itinerary #{n:d}: AS21 AS487 {_DEP}…"
+    assert _flat(before) == asking
+    # Booking details and fare rules take a second or two and say nothing.
+    assert _flat(buf.getvalue()) == asking
+
+
+@pytest.mark.parametrize("fmt", ["table", "json"])
+def test_stderr_says_why_matrix_is_asked_again_before_the_probe(
+    gf_session: Callable[..., Any], matrix: _Matrix, monkeypatch: pytest.MonkeyPatch, fmt: str
+) -> None:
+    """Red at the base: stderr is empty when each search is sent."""
+    _, seen = _stderr_at_each_search(matrix, monkeypatch)
+    n, _ = _as_row()
+    matrix.probe = _listing("AA", "B6", "DL", "UA")
+    gf_session(_served())
+    result = _run("-n", "40", "--fast", "--verify", "--pick", str(n), "--format", fmt)
+    assert result.exit_code == 0, result.output
+    (chain, before_chain), (probe, before_probe) = seen
+    assert (chain, probe) == (True, False)
+    assert f"itinerary #{n:d}: AS21 AS487" in before_chain
+    assert before_probe.startswith(before_chain)
+    assert _flat(before_probe[len(before_chain) :]) == (
+        "Matrix has no fare on those flights; asking which carriers it lists…"
+    )
+
+
+# ───────────────────── an empty board under --verify or --sellers ─────────────────────
+
+_FILTERED = "Google Flights: no itinerary matched a carrier filter (AS) (7 rows filtered out)."
+_NONE_TO_CHECK = "the search returned no itinerary to check."
+_NONE_TO_OPEN = "the search returned no itinerary to open."
+
+
+def _board(monkeypatch: pytest.MonkeyPatch, board: gfid.Board[Any]) -> None:
+    def _served_board(*_a: object, **_kw: object) -> gfid.Board[Any]:
+        return board
+
+    monkeypatch.setattr(cli, "_gflight_results", _served_board)
+
+
+@pytest.mark.parametrize(
+    ("flag", "fmt", "said"),
+    [
+        pytest.param("--verify", "table", _NONE_TO_CHECK, id="verify"),
+        pytest.param("--verify", "json", _NONE_TO_CHECK, id="verify-json"),
+        pytest.param("--sellers", "table", _NONE_TO_OPEN, id="sellers"),
+        pytest.param("--sellers", "json", _NONE_TO_OPEN, id="sellers-json"),
+    ],
+)
+def test_a_filtered_board_says_why_before_the_flag_says_it_has_no_row(
+    matrix: _Matrix, monkeypatch: pytest.MonkeyPatch, flag: str, fmt: str, said: str
+) -> None:
+    """Red at the base: the flag exited first and the filter's reason never
+    printed."""
+    _board(monkeypatch, gfid.Board(dropped=7))
+    result = _run("--routing", "AS+", "--backend", "gflight", "--fast", flag, "--format", fmt)
+    assert result.exit_code == 1, result.output
+    err = _flat(result.stderr)
+    assert _FILTERED in err
+    assert err.index(_FILTERED) < err.index(said)
+    assert result.stdout == ""
+    assert matrix.bodies == []
+
+
+def test_a_board_empty_under_the_cap_says_so_before_verify_exits(
+    matrix: _Matrix, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red at the base: the cap line never printed."""
+    _board(monkeypatch, gfid.Board())
+    result = _run("--backend", "gflight", "--fast", "--max-price", "1", "--verify")
+    assert result.exit_code == 1, result.output
+    assert _flat(result.stdout) == "Google Flights: no fare at or under USD 1."
+    assert _NONE_TO_CHECK in _flat(result.stderr)
+    json_run = _run("--backend", "gflight", "--max-price", "1", "--verify", "--format", "json")
+    assert json_run.exit_code == 1, json_run.output
+    assert json_run.stdout == ""
+    assert matrix.bodies == []
+
+
+def test_a_round_trip_names_its_pinned_outbounds_before_verify_exits(
+    matrix: _Matrix, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red at the base: the pinned reason never printed."""
+    _board(monkeypatch, gfid.Board(dropped=4, pinned=3))
+    ret = (_DEP + timedelta(days=7)).isoformat()
+    result = _run("--routing", "AS+", "--backend", "gflight", "--fast", "--return", ret, "--verify")
+    assert result.exit_code == 1, result.output
+    assert (
+        "Google Flights: no round trip matched a carrier filter (AS) (4 rows filtered out; "
+        "returns were searched for the 3 cheapest outbound options)."
+    ) in _flat(result.stderr)
+    assert matrix.bodies == []
+
+
+def test_without_either_flag_an_empty_board_answers_as_before(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Green at the base."""
+    _board(monkeypatch, gfid.Board(dropped=7))
+    table = _run("--routing", "AS+", "--backend", "gflight", "--fast")
+    assert (table.exit_code, table.stdout, _flat(table.stderr)) == (0, "", _FILTERED)
+    doc = _run("--routing", "AS+", "--backend", "gflight", "--format", "json")
+    assert (doc.exit_code, json.loads(doc.stdout), _flat(doc.stderr)) == (0, [], _FILTERED)
+    _board(monkeypatch, gfid.Board())
+    capped = _run("--backend", "gflight", "--fast", "--max-price", "1")
+    assert (capped.exit_code, _flat(capped.stdout), capped.stderr) == (
+        0,
+        "Google Flights: no fare at or under USD 1.",
+        "",
+    )
+
+
+# ─────────────────── booked flights in a shape the model does not know ───────────────────
+
+_SHAPES = [
+    pytest.param(["slices", 0, "segments", 0, "legs"], None, id="legs-null"),
+    pytest.param(["slices", 0, "segments"], None, id="segments-null"),
+    pytest.param(["slices"], None, id="slices-null"),
+    pytest.param(["slices", 0, "segments", 0, "origin"], "JFK", id="origin-scalar"),
+    pytest.param(["slices", 0, "segments", 0, "legs", 0, "origin"], "JFK", id="leg-origin-scalar"),
+    pytest.param(["slices", 0, "segments", 0, "flight"], 142, id="flight-scalar"),
+]
+
+
+def _captured_details() -> dict[str, Any]:
+    return json.loads((FIXTURES / "summarize/booking_details_jfk_lhr_rt_gbp.json").read_text())
+
+
+@pytest.mark.parametrize(("path", "value"), _SHAPES)
+def test_an_itinerary_the_model_cannot_read_is_absent_and_the_fares_still_parse(
+    path: list[str | int], value: object
+) -> None:
+    """Red at the base: the itinerary's validation error failed the whole body."""
+    body = _captured_details()
+    node: Any = body["bookingDetails"]["itinerary"]
+    for key in path[:-1]:
+        node = node[key]
+    node[path[-1]] = value
+    bd = BookingDetailsResult.from_api(body).booking_details
+    intact = BookingDetailsResult.from_api(_captured_details()).booking_details
+    assert bd is not None and intact is not None
+    assert bd.itinerary is None
+    assert bd.fares and [f.model_dump() for f in bd.fares] == [f.model_dump() for f in intact.fares]
+    assert bd.display_total == intact.display_total
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [pytest.param("legs", None, id="legs-null"), pytest.param("origin", "JFK", id="origin-scalar")],
+)
+def test_a_booking_the_model_cannot_read_is_not_checked_flight_by_flight(
+    gf_session: Callable[..., Any], matrix: _Matrix, key: str, value: object
+) -> None:
+    """Red at the base: pydantic's validation error on stderr."""
+    n, row = _as_row()
+    matrix.chain = _chain(_row_solution("AS-1", f"USD{row.flight.price:.2f}", row))
+    details = _details_of(row)
+    details["bookingDetails"]["itinerary"]["slices"][0]["segments"][0][key] = value
+    matrix.details = {"AS-1": details}
+    gf_session(_served())
+    result = _run("-n", "40", "--verify", "--pick", str(n), "--format", "json")
+    assert result.exit_code == 1, result.output
+    assert json.loads(result.stdout)["verify"] is None
+    err = _flat(result.stderr)
+    assert "this itinerary cannot be checked flight by flight." in err
+    assert "validation error" not in err
