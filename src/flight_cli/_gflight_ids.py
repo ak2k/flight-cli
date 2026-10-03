@@ -58,11 +58,11 @@ from fli.models import (  # pyright: ignore[reportMissingTypeStubs]
 )
 from fli.models.google_flights.base import TripType  # pyright: ignore[reportMissingTypeStubs]
 
-# DIVERGE: fli moved its API-row decoders to a private module in 0.9.0. These
-# three (airline/airport/datetime) are purpose-built for decoding GF response
-# rows — same signatures + AttributeError-on-unknown as the old SearchFlights
-# static methods, with no public equivalent (core.parsers has no datetime
-# parser), so this is a drop-in repoint.
+# DIVERGE: fli's API-row decoders live in a private module, with no public
+# equivalent (core.parsers has no datetime parser). Airline and datetime decode
+# through them; an airport decodes through `fli_bridge.fli_airports`, which
+# keeps a code fli aliases, and reaches `_parse_airport` only for a code fli has
+# no entry for, so the row fails with fli's warning and AttributeError.
 from fli.search._decoders import (  # pyright: ignore[reportMissingTypeStubs]
     _parse_airline,  # pyright: ignore[reportPrivateUsage]
     _parse_airport,  # pyright: ignore[reportPrivateUsage]
@@ -97,6 +97,7 @@ from ._gf_errors import (
     GfTransportError,
     GfUpstreamStatusError,
 )
+from .fli_bridge import fli_airports
 from .links import build_search_tfs, google_flights_search_page_url
 
 if TYPE_CHECKING:
@@ -797,6 +798,19 @@ _LAYOVERS_IDX = 13
 _ROW_FARE_IDX = 4
 _FARE_BAGS_IDX = 6
 
+# `row[22]` is Google's CO2 estimate for the row's own flights: grams at [7], the
+# route's typical grams at [8], the row's signed percent from that typical at [3],
+# and at [2] Google's label for that same comparison. [10]/[11] compare with the
+# board's median instead, so [11]'s label differs from [2]'s on over a third of a
+# board's rows and is not the one Google's help describes.
+_ROW_CO2_IDX = 22
+_CO2_LABEL_IDX = 2
+_CO2_DELTA_IDX = 3
+_CO2_GRAMS_IDX = 7
+_CO2_TYPICAL_IDX = 8
+_CO2_LABEL: dict[int, str] = {1: "lower", 2: "typical", 3: "higher"}
+_LEG_CO2_IDX = 31  # the leg's own grams; the row's [7] is their sum, rounded
+
 # Per-leg field indices in `data[0][2][i]`. Mirrors the Legrooms+ extension's
 # parser (load_flight_data.js function `u`). See docs/memories/legroom_recipe.md.
 _LEG_AMENITIES_IDX = 12  # array — bit positions decoded into wifi/power/video
@@ -1082,6 +1096,30 @@ def _bags_included(data: list[Any]) -> tuple[int | None, int | None]:
     return _bag_count(counts[0]), _bag_count(counts[1])
 
 
+def _int_slot(block: Any, idx: int, *, signed: bool = False) -> int | None:
+    """`block[idx]` when it is an int, and not below 0 unless `signed`. Anything
+    else, or a block too short or not a list, says nothing."""
+    if not isinstance(block, list) or len(cast("list[Any]", block)) <= idx:
+        return None
+    value = cast("list[Any]", block)[idx]
+    if not isinstance(value, int) or isinstance(value, bool):
+        return None
+    return value if signed or value >= 0 else None
+
+
+def _row_co2(data: list[Any]) -> dict[str, Any]:
+    """The row's CO2 figures as Google states them, keyed as fli's FlightResult
+    names them; a slot Google leaves empty stays None."""
+    block = data[0][_ROW_CO2_IDX] if len(data[0]) > _ROW_CO2_IDX else None
+    label = _int_slot(block, _CO2_LABEL_IDX)
+    return {
+        "co2_emissions_g": _int_slot(block, _CO2_GRAMS_IDX),
+        "co2_emissions_typical_g": _int_slot(block, _CO2_TYPICAL_IDX),
+        "co2_emissions_delta_pct": _int_slot(block, _CO2_DELTA_IDX, signed=True),
+        "emissions_tag": None if label is None else _CO2_LABEL.get(label),
+    }
+
+
 def _layover_minutes(data: list[Any], leg_tuples: list[list[Any]]) -> tuple[int | None, ...]:
     """The page's own minutes for each connection. Those are elapsed time; the
     leg datetimes are clock readings, an hour out across a daylight-saving
@@ -1113,6 +1151,7 @@ def _parse_flight_with_id(data: list[Any]) -> GFlightWithId:
         duration=data[0][9],
         stops=len(leg_tuples) - 1,
         legs=[_flight_leg(fl) for fl in leg_tuples],
+        **_row_co2(data),
     )
     amenities = [_parse_leg_amenities(fl) for fl in leg_tuples]
     return GFlightWithId(
@@ -1139,12 +1178,20 @@ def _flight_leg(fl: list[Any]) -> FlightLeg:
     return FlightLeg(
         airline=_parse_airline(book_code),
         flight_number=book_number or "",
-        departure_airport=_parse_airport(fl[3]),
-        arrival_airport=_parse_airport(fl[6]),
+        departure_airport=_leg_airport(fl[3]),
+        arrival_airport=_leg_airport(fl[6]),
         departure_datetime=_parse_datetime(fl[20], fl[8]),
         arrival_datetime=_parse_datetime(fl[21], fl[10]),
         duration=fl[11],
+        co2_emissions_g=_int_slot(fl, _LEG_CO2_IDX),
     )
+
+
+def _leg_airport(code: Any) -> Airport:
+    """The member for a leg's airport code, one fli aliases included. A code fli
+    has no entry for fails the row through fli's own decoder, which logs it."""
+    member = fli_airports().get(code)
+    return member if member is not None else _parse_airport(code)
 
 
 def _cookie_path() -> pathlib.Path:

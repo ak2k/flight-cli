@@ -33,8 +33,10 @@ multi-cabin search over 11, and a leg with an airport at both ends go to Matrix
 table, and `tests/test_metro.py` fails when the two differ. `flight calendar`
 expands them the same way, under the one-page bound of 11: Google's price graph
 over a set prices each date at its cheapest member airport, alone under `--fast` and
-printed after Matrix's calendar without it. Matrix answers a set with one query
-per origin and destination (see `gf_routing_and_carriers.md`).
+printed after Matrix's calendar without it. Matrix answers a set, metro codes
+split into the airports below, with one query per airport pair, merged in one
+currency with each day naming its pair, and on a round trip with the combined
+query beside them (see `gf_routing_and_carriers.md`).
 
 | Metro | IATA metro | Constituent airports |
 |---|---|---|
