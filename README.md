@@ -27,8 +27,9 @@ Requires Python 3.11+.
 flight search JFK LHR --dep 2026-08-15 --return 2026-08-22
 
 # A carrier or alliance, a maximum duration, a layover bound, one time-of-day
-# window or a child stays on Google Flights, which is asked for it. Every row
-# is also checked against the carrier, duration, layover and time window.
+# window, -REDEYES/-OVERNIGHTS, a child or an infant stays on Google Flights.
+# Every row is also checked against the carrier, duration, layover, time window
+# and night flights. An infant's empty Google board goes to Matrix.
 flight search MIA PAR --dep 2026-06-15 \
     --routing "LH+" --ext "MAXCONNECT 2:00"
 
@@ -39,9 +40,15 @@ flight search MIA PAR --dep 2026-06-15 \
 flight search JFK LAX --dep 2026-10-20 --max-price 250
 flight search JFK LAX --dep 2026-10-20 --bags 1
 
+# Arrival windows and economy without basic fares are Google-only too. Every
+# row lands inside the window, to the minute; no row shows whether its fare is
+# basic, so every --exclude-basic run says the rows cannot be checked.
+flight search JFK LAX --dep 2026-10-20 --arrive-times 18:00-21:30
+flight search JFK LAX --dep 2026-10-20 --exclude-basic
+
 # What Google can't serve auto-flips to ITA Matrix, naming why on stderr:
-# ordered routing, fare construction, multi-city slices, infants, time-of-day
-# buckets with a gap between them.
+# ordered routing, fare construction, multi-city slices, time-of-day buckets
+# with a gap between them.
 flight search MIA PAR --dep 2026-06-15 --routing "LH UA" --ext "-REDEYES"
 
 # Force a backend explicitly:
@@ -92,10 +99,11 @@ Every result-printing command supports:
 - **Routing language** (`--routing`): `LH+` (every flight marketed by Lufthansa), `BA AA` (a BA flight, then an AA flight), `F* X:LHR F*` (connects at LHR). Each slice reads its routing from its own origin: `--routing-ret` gives a round trip's return its own (`''` for none), and unset, the return gets `--routing` only when it reads the same both ways. `BA AA` on a round trip without `--routing-ret` is refused, naming the reversed order `AA BA`. [More codes →](https://www.nicethis.com/itamatrix.aspx)
 - **Extension codes** (`--extension`): `MAXCONNECT 5:00`, `MAXSTOPS 1`, `MINMILES 3000`, `-REDEYES`, `-OVERNIGHTS`, `ALLIANCE oneworld`. A round trip copies them onto the return unless `--ext-ret` gives its own.
 - **Multi-airport**: `flight calendar MIA VIE,PAR,FCO,MAD --start ...` — search across N European cities at once, one Matrix query per airport pair, merged into one grid in one currency whose every day names the pair that priced it.
-- **Time-of-day filters** (`--depart-times`, `--return-times`): `morning`, `morning,midday` etc. Buckets that make one window stay on Google Flights; `morning,evening` goes to Matrix.
+- **Time-of-day filters** (`--depart-times`, `--return-times`): `morning`, `morning,midday` etc. Buckets that make one window stay on Google Flights; `morning,evening` goes to Matrix. `search` also takes one window to the minute (`--depart-times 9:30-13:45`): Google is asked for its whole hours and every row is checked to the minute, and Matrix takes it as it is. `--arrive-times 18:00-21:30` and `--return-arrive-times` hold when each direction lands, on Google Flights only (Matrix takes no arrival time).
+- **Economy without basic fares** (`--exclude-basic`): Google Flights only, economy only. Google is asked to leave basic fares out, but no row says whether its fare is basic, and Google served basic fares on JFK-LHR anyway, so every run says the rows cannot be checked. `--sellers` and `--verify` are refused beside it: neither the booking page nor Matrix is asked to leave basic fares out.
 - **Stop limits** (`--stops N`): at most N stops per direction, on every backend. `0` = nonstop only, `1` = up to one stop, …
 - **Calendar-mode duration ranges** (`-d 5-7`): one search returns prices for 5-, 6-, and 7-night trips at every starting day.
-- **Google vs Matrix cross-check** (the default table): a row both sides price for the same trip shows `delta` (Google − Matrix), every other row says `why` it has none, and the caption says how much of Matrix's answer was read. `flight search JFK LAX --dep 2026-10-20 --format json --enrich --cash-only` writes the same comparison as `{"search": …, "cross_check": …}`.
+- **Google vs Matrix cross-check** (the default table): every price is for the whole party and a row ranks on the lowest one it prints; a row both sides price for the same trip shows `delta` (Google − Matrix), every other row says `why` it has none, and the caption says how much of Matrix's answer was read. `flight search JFK LAX --dep 2026-10-20 --format json --enrich --cash-only` writes the same comparison as `{"search": …, "cross_check": …}`.
 - **Sellers and explore** (Chrome, the `browser` extra): `flight search JFK LAX --dep 2026-10-20 --sellers --pick 2` lists every seller of row 2 with its price and fare name, cheapest first, then each seller's bag fees and booking link on a line of its own; `flight explore JFK --month 2026-11 --days 5-7 --max-price 300` lists where JFK flies that month and the cheapest round trip to each.
 
 ## Checking the setup: `flight doctor`
