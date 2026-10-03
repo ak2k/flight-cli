@@ -31,6 +31,7 @@ from flight_cli._gf_errors import (
 )
 from flight_cli.domain import Leg, SearchOptions, SpecificDateSearch
 from flight_cli.fli_bridge import to_fli_filter
+from flight_cli.models import SearchResult
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -661,3 +662,99 @@ def test_a_one_page_refusal_is_raised_unchanged(monkeypatch: pytest.MonkeyPatch)
         cli._gflight_results((Leg.of("JFK", "LAX", _DEP),), SearchOptions(), 10)
     assert isinstance(caught.value, GfUpstreamStatusError)
     assert len(google.calls) == 1
+
+
+# ─────────────────────────────── the cross-check ──────────────────────────
+
+
+def _matrix_lists(*slices: tuple[str, dt.date, str, str]) -> Callable[..., Any]:
+    """The weave's Matrix half answering one itinerary of `slices`, each a
+    flight, its day and its two airports."""
+    solution = {
+        "displayTotal": "USD90.00",
+        "itinerary": {
+            "slices": [
+                {
+                    "flights": [flight],
+                    "departure": f"{day}T08:00",
+                    "arrival": f"{day}T15:00",
+                    "origin": {"code": frm},
+                    "destination": {"code": to},
+                }
+                for flight, day, frm, to in slices
+            ]
+        },
+    }
+
+    async def _answer(state: dict[str, Any], *_a: object, **_kw: object) -> None:
+        state["matrix"] = SearchResult.model_validate({"solutions": [solution], "solutionCount": 1})
+
+    return _answer
+
+
+def _matrix_only_reasons(result: Result) -> list[list[str]]:
+    assert result.exit_code == 0, result.output
+    rows = json.loads(result.stdout)["cross_check"]["rows"]
+    return [r["reasons"] for r in rows if r["source"] == "matrix"]
+
+
+@pytest.mark.parametrize(
+    ("refused", "reasons"),
+    [
+        pytest.param(False, ["carrier_absent_google"], id="every-page"),
+        pytest.param(True, ["not_on_google"], id="a-page-missing"),
+    ],
+)
+def test_the_cross_check_calls_no_carrier_absent_from_a_board_missing_a_page(
+    monkeypatch: pytest.MonkeyPatch, refused: bool, reasons: list[str]
+) -> None:
+    """Red at the merge: ZZ1 flies BOS-FCO, a pair only page 2 asks, so with
+    that page refused Google's board cannot show ZZ absent, as one the row
+    filter cut cannot."""
+    second: Page = (_EX6_FROM[:4], _EX6_TO[7:])
+    google = _Google(
+        _EX6_PAIRS,
+        refuse=lambda page: GfUpstreamStatusError(503) if refused and page == second else None,
+    )
+    monkeypatch.setattr(cli, "_matrix_into", _matrix_lists(("ZZ1", _DEP, "BOS", "FCO")))
+    result = _search(
+        monkeypatch,
+        google,
+        ",".join(_EX6_FROM),
+        ",".join(_EX6_TO),
+        "--enrich",
+        "--format",
+        "json",
+        "-n",
+        "200",
+    )
+    assert len(google.calls) == 4
+    assert _matrix_only_reasons(result) == [reasons]
+
+
+def test_the_cross_check_calls_no_return_carrier_absent_from_a_paged_round_trip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red at the merge: Google priced returns for B60 out of JFK, but each
+    page prices returns only into its own origins, and IAD is another page's,
+    so the board cannot show ZZ absent on LHR-IAD."""
+    google = _Google(_EX6_PAIRS)
+    monkeypatch.setattr(
+        cli,
+        "_matrix_into",
+        _matrix_lists(("B60", _DEP, "JFK", "LHR"), ("ZZ1", _RET, "LHR", "IAD")),
+    )
+    result = _search(
+        monkeypatch,
+        google,
+        ",".join(_EX6_FROM),
+        ",".join(_EX6_TO),
+        "--enrich",
+        "--format",
+        "json",
+        "-n",
+        "200",
+        ret=True,
+    )
+    assert 0 in [n for _, n in google.calls]  # B60 was pinned
+    assert _matrix_only_reasons(result) == [["not_on_google"]]

@@ -972,6 +972,10 @@ its shape, as "A partial round trip is a success, deliberately" sets out: the
 account of the missing pages is stderr. `dropped`, the rows the filter removed,
 is summed over every page, its outbounds pinned or not and its returns, so a
 board that every page's filter emptied is still handed to Matrix under `auto`.
+The board is `partial` when a page is missing or the trip is round, and the
+cross-check (`--enrich`) then names no carrier absent from Google: a missing
+page's flights are not on the board, and a return into another page's airports
+was never asked.
 Under `--gf-transport browser` one Chrome serves every page
 (`cli._browser_scope`).
 
@@ -1129,8 +1133,10 @@ slice has more flights than one beyond the fewest Matrix listed there before
 it names. Otherwise `not_in_matrix`. A Matrix-only row: `no_google_answer`;
 `outbound_not_priced` on a round trip whose outbound leads no Google
 combination (Google pins at most `pinned_fanout(-n)` outbounds);
-`carrier_absent_google` only on a one-way or beside an outbound Google priced;
-neither of those two on a board the row filter cut; otherwise `not_on_google`.
+`carrier_absent_google` only on a one-way or beside an outbound Google priced,
+and not on a board asked as several pages that misses a page or is a round
+trip (each page prices returns only between its own airports); neither of
+those two on a board the row filter cut; otherwise `not_on_google`.
 Either side: `paired_elsewhere` where the other side lists the same flights,
 first day and landing minutes on another row, because a middle flight's day is
 then unstated; `unmatched` where a row leaves a flight number, day or landing

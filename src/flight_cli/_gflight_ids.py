@@ -1722,7 +1722,10 @@ class Board[T](list[T]):
     is how an empty answer tells "none matched the routing" from "Google has no
     flights". `pinned` counts the outbounds a round trip searched returns for,
     because an empty answer from those says nothing about the outbounds it did
-    not pin."""
+    not pin. `partial` says the rows stop short of what one search of the same
+    legs would list: a page of a search asked as several did not answer, or a
+    round trip asked as several pages priced each return only between its own
+    page's airports."""
 
     def __init__(
         self,
@@ -1731,11 +1734,13 @@ class Board[T](list[T]):
         insight: PriceInsight | None = None,
         dropped: int = 0,
         pinned: int = 0,
+        partial: bool = False,
     ) -> None:
         super().__init__(rows)
         self.insight = insight
         self.dropped = dropped
         self.pinned = pinned
+        self.partial = partial
 
 
 # One itinerary, as `_deduped` and the round-trip pins tell them apart.

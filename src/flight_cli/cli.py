@@ -4578,7 +4578,8 @@ def _gflight_pages(
     `dropped` sums what every page's filter removed, its outbounds whether
     pinned or not and its returns, because an empty board is handed to Matrix
     on it. A page's price insight describes its own airports, so the merged
-    board carries none."""
+    board carries none. The board is `partial` where a page is missing or the
+    trip is round: its rows then stop short of what one search would list."""
     from ._gflight_ids import Board  # noqa: PLC0415 — fli, ~95 ms
 
     asked = _PageAsk(pages, gf_mode=gf_mode, bags=opts.bags is not None)
@@ -4635,7 +4636,12 @@ def _gflight_pages(
             f"{MAX_GF_LEG_AIRPORTS:d} airports; each return is priced within its own "
             "page's airports.[/]"
         )
-    return Board(rows, dropped=dropped, pinned=pinned)
+    return Board(
+        rows,
+        dropped=dropped,
+        pinned=pinned,
+        partial=bool(asked.failed or asked.unasked) or len(pages[0]) >= _ROUND_TRIP_LEGS,
+    )
 
 
 def _browser_scope(gf_mode: GfTransportMode) -> contextlib.AbstractContextManager[None]:
@@ -5684,13 +5690,16 @@ def _cross_check_answers(
     """The two answers a weave left, as the cross-check reads them, with
     Matrix's page before the price cap as `uncapped`. Google's board is no
     answer where its half failed or never ran, and a board the row filter cut
-    cannot show a flight absent from what Google served."""
+    cannot show a flight absent from what Google served. A board asked as
+    several pages is `partial` where a page is missing or the trip is round
+    (`_gflight_pages`)."""
     stops = opts.max_extra_stops
     return Answers(
         matrix=matrix_res,
         uncapped=uncapped,
         google=board if "gf" in state and "gf_err" not in state else None,
         google_filtered=bool(getattr(state.get("gf"), "dropped", 0)),
+        google_partial=bool(getattr(state.get("gf"), "partial", False)),
         stop_limit=stops is not None and stops >= 0,
         round_trip=len(legs) >= _ROUND_TRIP_LEGS,
         currency=currency,
