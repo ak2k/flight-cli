@@ -54,7 +54,9 @@ class Answers:
     """The two answers a table compares.
 
     `matrix` is Matrix's whole page after the price cap. `google` is Google's
-    board as the merge read it, or None when Google gave no answer.
+    board as the merge read it, or None when Google gave no answer. Only its
+    one-ticket rows are compared with Matrix, which sells one ticket: a trip
+    Google sells as separate tickets is not that trip's one-ticket price.
     `google_filtered` says the row filter removed rows from that board, which
     then cannot show a flight to be absent from Google. `stop_limit` says a
     stop limit was sent; without one Matrix searches one flight beyond the
@@ -76,13 +78,15 @@ class Answers:
 
 @dataclass(frozen=True, slots=True)
 class Boundary:
-    """Where Matrix's page ends, and how much Google listed."""
+    """Where Matrix's page ends, and how much Google listed: `google_listed`
+    one-ticket rows and `google_separate` rows on separate tickets."""
 
     listed: int
     solution_count: int
     last_price: str | None
     google_listed: int
     google_answered: bool
+    google_separate: int = 0
 
     @property
     def complete(self) -> bool:
@@ -166,13 +170,26 @@ def _row_document(row: Any, c: RowCheck) -> dict[str, Any]:
 
 def _boundary(a: Answers) -> Boundary:
     sols = a.matrix.solutions
+    google = a.google.solutions if a.google is not None else []
+    one_ticket = len(_one_ticket(google))
     return Boundary(
         listed=len(sols),
         solution_count=a.matrix.solution_count,
         last_price=_party_price(sols[-1].price, sols[-1], a.passengers) if sols else None,
-        google_listed=len(a.google.solutions) if a.google is not None else 0,
+        google_listed=one_ticket,
         google_answered=a.google is not None,
+        google_separate=len(google) - one_ticket,
     )
+
+
+def _one_ticket(its: Iterable[Itinerary]) -> list[Itinerary]:
+    return [it for it in its if it.ticketing is None]
+
+
+def separate_tickets_reason(ticketing: str) -> str:
+    """Why a row Google sells as separate tickets has no Matrix price."""
+    sold = "a self transfer on separate tickets" if ticketing == "self_transfer" else None
+    return f"Google sells this trip as {sold or 'separate tickets'}; Matrix prices one ticket"
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,7 +216,7 @@ class _Facts:
             for i, s in enumerate(_slices(it)):
                 if s.flights:
                     fewest[i] = min(fewest.get(i, len(s.flights)), len(s.flights))
-        google = a.google.solutions if a.google is not None else []
+        google = _one_ticket(a.google.solutions) if a.google is not None else []
         board = _slices_of(google)
         # Every carrier Google names on a flight, as seller and as metal: a
         # carrier is absent from the board only where no flight names it.
@@ -241,9 +258,12 @@ def _check_row(row: Any, a: Answers, bnd: Boundary, facts: _Facts) -> RowCheck:
     slices = _slices(row.itinerary)
     mp = _party_price(row.matrix_price, row.itinerary, a.passengers)
     found: list[tuple[str, str]]
+    sold: str | None = getattr(row.itinerary, "ticketing", None)
     match row.source:
         case "both":
             return _priced_by_both(row, mp, slices, a.round_trip)
+        case "gf" if sold is not None:
+            found = [("separate_tickets", separate_tickets_reason(sold))]
         case "gf":
             found = _google_only(slices, a, bnd, facts)
         case "matrix":

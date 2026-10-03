@@ -251,11 +251,11 @@ def test_pinning_that_stopped_on_a_wall_skips_the_cheapest_tab(
 
 
 @pytest.mark.parametrize("flag", ["run_pp", "sellers", "verify"])
-def test_a_path_that_renders_through_the_adapter_reads_no_cheapest_tab(
+def test_a_path_that_acts_on_a_row_still_reads_the_cheapest_tab(
     flag: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Awards, `--sellers` and `--verify` print rows the adapter built, which
-    carries no mark, so no separate-ticket row may reach them."""
+    """Awards, `--sellers` and `--verify` each skip a separate-ticket row with
+    a reason, so the table beside them still shows it."""
     asked: list[Any] = []
 
     def _gf(*_a: Any, separate_tickets: str = "off", **_kw: Any) -> gfid.Board[Any]:
@@ -280,14 +280,14 @@ def test_a_path_that_renders_through_the_adapter_reads_no_cheapest_tab(
             sellers=flag == "sellers",
             verify=flag == "verify",
         )
-    assert asked == ["off"]
+    assert asked == ["show"]
 
 
-def test_the_enriched_table_reads_no_cheapest_tab_and_takes_the_opt_out(
+def test_the_enriched_table_reads_the_cheapest_tab_and_takes_the_opt_out(
     gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The merged table cannot mark a row, so the default search makes the
-    GET it always made, and `--no-separate-tickets` has nothing to hide."""
+    """The default search makes one GET more than it did, and
+    `--no-separate-tickets` counts the row it hid there, once."""
 
     async def _no_matrix(state: dict[str, Any], *_a: object, **_kw: object) -> None:
         state["matrix"] = None
@@ -309,8 +309,12 @@ def test_the_enriched_table_reads_no_cheapest_tab_and_takes_the_opt_out(
         env={"COLUMNS": "200"},
     )
     assert result.exit_code == 0, result.output
-    assert len(fake.gets) == 1
-    assert "hidden" not in result.stderr
+    assert len(fake.gets) == 2
+    assert _CHEAPEST_TFU in fake.gets[-1]
+    said = " ".join(result.stderr.split())
+    assert said.count("on separate tickets hidden") == 1
+    assert "Google Flights: 1 itinerary on separate tickets hidden (--no-separate-tickets)." in said
+    assert "‡" not in result.stdout
 
 
 def test_a_matrix_search_takes_the_opt_out_and_changes_nothing(

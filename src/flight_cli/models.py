@@ -10,7 +10,7 @@ from __future__ import annotations
 # type hints at validation time and needs the symbol in the module's
 # runtime globals, even with `from __future__ import annotations`.
 from datetime import datetime  # noqa: TC003
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -155,6 +155,9 @@ class Itinerary(_Loose):
     display_total: str | None = Field(None, alias="displayTotal")
     ext: ItineraryExt | None = None
     itinerary: ItineraryDetails | None = None
+    # Set on a Google row Google sells as more than one booking. Matrix sells
+    # one ticket, so its rows leave it None.
+    ticketing: Literal["self_transfer", "separate_tickets"] | None = None
 
     @property
     def price(self) -> str | None:

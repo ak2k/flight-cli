@@ -405,7 +405,7 @@ def test_the_enriched_table_asks_both_backends_and_titles_the_currency(
     matrix_asked: list[str | None] = []
     rows = _rows(gf_rows, "EUR")
 
-    def _gf(_legs: Any, opts: SearchOptions, *_a: Any) -> list[Any]:
+    def _gf(_legs: Any, opts: SearchOptions, *_a: Any, **_kw: Any) -> list[Any]:
         gf_asked.append(opts.currency)
         return rows
 
@@ -471,7 +471,7 @@ def _matrix_bodies(
     bodies: list[dict[str, Any]] = []
     rows = _rows(gf_rows, "USD", "USD")
 
-    def _gf(*_a: Any) -> list[Any]:
+    def _gf(*_a: Any, **_kw: Any) -> list[Any]:
         return rows
 
     class _Client:
