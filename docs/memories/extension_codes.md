@@ -202,9 +202,10 @@ Multiple cabin codes space-separated: `+CABIN 1 2` requires first OR business.
 `flight search` serves `+CABIN` on Google Flights when it names exactly the
 one cabin `--cabin` asks for (`--cabin business --ext '+CABIN 2'`): the page is
 asked for that cabin and every leg of every row is held to it, a leg Google
-states no cabin for failing. A different cabin, several cabins, several
-`--cabin` values or a value not listed above goes to Matrix, the reason naming
-the code and the `--cabin`. The date grid and the price graph refuse `+CABIN`.
+states no cabin for failing. A different cabin, several cabins or several
+`--cabin` values go to Matrix, the reason naming the code and the `--cabin`; so
+does a value not listed above, the reason naming that value. The date grid and
+the price graph refuse `+CABIN`.
 `-CABIN` is Matrix's.
 
 ## Fare-basis codes [Google]
