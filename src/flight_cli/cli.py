@@ -6534,9 +6534,12 @@ def _render_gflight_table(
             "from the route's typical ([green]green[/] lower, [red]red[/] higher).[/]"
         )
     elif has_co2:
+        # One line even where it is wider than the output, so output captured
+        # at 80 columns carries the sentence whole.
         console.print(
             "[dim]CO2 kg not shown: the table does not fit the output width; "
-            "--format json carries it.[/]"
+            "--format json carries it.[/]",
+            soft_wrap=True,
         )
     if insight is not None:
         console.print(

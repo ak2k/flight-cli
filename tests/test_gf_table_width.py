@@ -207,7 +207,7 @@ def test_no_designator_is_printed_across_two_lines_at_80_columns_or_more(
         text = _render(monkeypatch, results, legs, width, bags=bags)
         if split := _split(text, results, legs):
             failures[width] = split
-        assert max(len(ln) for ln in text.splitlines()) <= width
+        assert max(len(ln) for ln in _table(text)) <= width
         # A table wider than the console would be cropped at its right edge.
         assert all(ln.endswith("┓") for ln in text.splitlines() if ln.startswith("┏"))
         assert ("bags" in _header(text)) == (bags is not None)
@@ -264,7 +264,7 @@ def test_at_80_columns_a_table_too_wide_with_co2_drops_it_with_a_note(
     text = _render(monkeypatch, _LHR_ROWS, _ONE_WAY_LHR, 80)
     assert "CO2 kg" not in _header(text)
     assert _is_stacked(text, _LHR_ROWS, _ONE_WAY_LHR)
-    assert " ".join(text.split()).count(_NOTE) == 1
+    assert text.splitlines().count(_NOTE) == 1
     assert _LEGEND not in text
 
 
@@ -283,7 +283,7 @@ def test_at_80_columns_a_stacked_table_as_wide_as_the_console_keeps_co2(
     at_78 = _render(monkeypatch, rows, _ONE_WAY_LHR, 78)
     assert "CO2 kg" not in _header(at_78)
     assert _is_stacked(at_78, rows, _ONE_WAY_LHR)
-    assert " ".join(at_78.split()).count(_NOTE) == 1
+    assert at_78.splitlines().count(_NOTE) == 1
     assert _LEGEND not in at_78
 
 
@@ -295,8 +295,8 @@ def test_a_console_narrower_than_every_layout_still_prints_the_table(
     to the console rather than fail."""
     results, legs, _ = _BOARDS["jfk-ewr-lhr"]
     text = _render(monkeypatch, results, legs, width, bags=Bags(checked=1))
-    assert max(len(ln) for ln in text.splitlines()) <= width
-    assert " ".join(text.split()).count(_NOTE) == 1
+    assert max(len(ln) for ln in _table(text)) <= width
+    assert text.splitlines().count(_NOTE) == 1
 
 
 def test_a_board_without_co2_stacks_its_legs_and_prints_no_note(
@@ -331,8 +331,8 @@ def test_at_80_columns_the_json_carries_the_co2_the_table_leaves_out(
 
     table = run(columns=80)
     assert "CO2 kg" not in _header(table)
-    assert max(len(ln) for ln in table.splitlines()) <= 80
-    assert " ".join(table.split()).count(_NOTE) == 1
+    assert max(len(ln) for ln in _table(table)) <= 80
+    assert table.splitlines().count(_NOTE) == 1
     narrow = json.loads(run("--format", "json", columns=80))
     assert narrow == json.loads(run("--format", "json", columns=200))
     assert len(narrow) == 101
