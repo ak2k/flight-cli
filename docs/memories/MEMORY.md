@@ -84,7 +84,8 @@ go into detail and are loaded on demand.
   sanitize-inside-the-formatter rule and the orderings that make each work, and
   the `escape_scan` AST guard: what it reads (every `console.print` / `err.print`
   and `.log` / `.rule` / `.status`, bare `print`, table titles and captions, column
-  headers and footers, every cell, and Typer `help=` / `epilog=` strings), what
+  headers and footers, every cell, assignments to a table or panel title, caption,
+  header, footer or subtitle, and Typer `help=` / `epilog=` strings), what
   its allowlist claims and what holds the values behind it, and what it does not
   model.
 - [gf_browser_rung.md](gf_browser_rung.md) — The second search transport:

@@ -4629,6 +4629,10 @@ _TEXT_SINK_METHODS = frozenset(
 # `Text(<literal-or-wrapped>)`, which the wrapper already there settles.
 # `Text.from_markup` is a sink above, and that one does parse markup.
 _RENDERABLE_SINKS = frozenset({"Table", "Panel", "Text"})
+# Attributes Rich parses as markup when the object renders: `Table.title` and
+# `.caption`, `Column.header` and `.footer`, `Panel.title` and `.subtitle`. Matched
+# by attribute NAME, because the scan cannot type the object assigned into.
+_MARKUP_SLOTS = frozenset({"title", "caption", "header", "footer", "subtitle"})
 
 # Presentation types only a number survives: `format("x", "d")` raises, so a field
 # carrying one cannot be a string and cannot carry markup. The alternative is
@@ -4915,6 +4919,39 @@ def _help_faults(src: str, node: ast.Call, names: _Names) -> list[str]:
     ]
 
 
+def _slot_faults(src: str, node: ast.AST, chain: list[str], names: _Names) -> list[str]:
+    """Unescaped text assigned into a markup slot, or nothing.
+
+    Only the attribute ASSIGNED counts: `t.columns[0].header` is a slot and
+    `self.title.text` is not. The value is judged as a print argument would be, so
+    a tuple unpacked into slots faults whatever it holds."""
+    targets: list[ast.expr]
+    if isinstance(node, ast.Assign):
+        targets, value = node.targets, node.value
+    elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and node.value is not None:
+        targets = [node.target]
+        value = node.value
+    else:
+        return []
+    slots: list[str] = []
+    pending = targets[::-1]
+    while pending:
+        target = pending.pop()
+        if isinstance(target, (ast.Tuple, ast.List)):
+            pending += target.elts[::-1]
+        elif isinstance(target, ast.Starred):
+            pending.append(target.value)
+        elif isinstance(target, ast.Attribute) and target.attr in _MARKUP_SLOTS:
+            slots.append(target.attr)
+    if not slots:
+        return []
+    where = chain[0] if chain else "<module>"
+    faults = _argument_faults(src, value, chain, names)
+    return [
+        f"{where}:{node.lineno} .{slot} assigned: {fault}" for slot in slots for fault in faults
+    ]
+
+
 def _spec_has_field(spec: ast.expr | None) -> bool:
     """Whether a format spec interpolates anything. `f"{escape(a):{e}}"` makes `e`
     the padding character, which reaches rich without passing the wrapper."""
@@ -5015,10 +5052,10 @@ def escape_scan(src: str) -> list[str]:
     `.format()`, a `%`, or a concatenation of one is none of those, and neither is
     a field whose conversion or format spec runs after the wrapper.
 
-    It reads CALLS. A markup slot filled by assignment (`t.title = x`,
-    `t.caption = x`, `t.columns[0].header = x`), or by an API this file does not
-    name, is not read — none is live in `cli.py` today, and `Panel` and `Text` sit
-    in `_RENDERABLE_SINKS` unimported, so an aliased import of either would have
+    It reads CALLS, and assignments to a markup slot attribute (`_MARKUP_SLOTS`),
+    by attribute name; a slot filled by an API this file does not name
+    (`setattr(t, "title", x)`) is still not read. `Panel` and `Text` sit in
+    `_RENDERABLE_SINKS` unimported, so an aliased import of either would have
     coverage that looks present and is not. A typer `help=` / `epilog=` f-string is read
     too, for the runtime values in it — Typer renders those through the same markup
     parser, a console away from any print.
@@ -5042,6 +5079,8 @@ def escape_scan(src: str) -> list[str]:
     names = _read_names(tree)
     faults: list[str] = []
     for node in ast.walk(tree):
+        chain = chains.get(node, [])
+        faults += _slot_faults(src, node, chain, names)
         if not isinstance(node, ast.Call):
             continue
         faults += _help_faults(src, node, names)
@@ -5049,7 +5088,6 @@ def escape_scan(src: str) -> list[str]:
             continue
         if _prints_a_renderable(node, names.renderables.get(node, frozenset())):
             continue
-        chain = chains.get(node, [])
         where = chain[0] if chain else "<module>"
         args = list(node.args)
         args += [k.value for k in node.keywords]
@@ -5113,6 +5151,7 @@ def test_printable_identifiers_are_all_load_bearing() -> None:
         "_RENDERABLE_SINKS",
         "_TEXT_SINK_METHODS",
         "_HELP_SINKS",
+        "_MARKUP_SLOTS",
     ],
 )
 def test_every_set_the_scan_consults_is_load_bearing(label: str) -> None:
@@ -5276,6 +5315,26 @@ _KNOWN_BYPASSES = {
     ),
     "a runtime value in a command-group help string": (
         'app = typer.Typer(help=f"reads {_config.config_path()}")\n'
+    ),
+    # Rich parses these slots as markup when the table or panel renders, so an
+    # assignment into one is a print with no call near it. All five names sit in
+    # one source so dropping any of them from `_MARKUP_SLOTS` changes its faults.
+    "a markup slot filled by assignment": (
+        "def _render_search():\n"
+        '    t.title = f"{res.price}"\n'
+        '    t.caption = f"{res.price}"\n'
+        '    t.subtitle = f"{res.price}"\n'
+        '    col.header = f"{res.price}"\n'
+        '    col.footer = f"{res.price}"\n'
+    ),
+    "a markup slot on a subscripted column": (
+        'def _render_search():\n    t.columns[0].header = f"{res.price}"\n'
+    ),
+    "an annotated assignment into a markup slot": (
+        'def _render_search():\n    t.title: str = f"{res.price}"\n'
+    ),
+    "an augmented assignment into a markup slot": (
+        'def _render_search():\n    t.title += f"{res.price}"\n'
     ),
 }
 
