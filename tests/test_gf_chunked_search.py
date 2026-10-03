@@ -100,12 +100,15 @@ class _Google:
     `pairs` numbers every (origin, destination) the search can ask, which is
     the flight number its row carries; `fare` prices it. `refuse(page)` is
     raised for every GET on that page; `added(page)` adds rows to its outbound
-    board. `calls` records each GET as (page, pinned flight number or None)."""
+    board. Every board served, outbound or return, also counts `unread` rows the
+    parser could not read. `calls` records each GET as (page, pinned flight
+    number or None)."""
 
     pairs: list[tuple[str, str]]
     fare: Callable[[int], float] = lambda i: 100.0 + i
     refuse: Callable[[Page], Exception | None] = lambda _page: None
     added: Callable[[Page], list[gfid.GFlightWithId]] = lambda _page: []
+    unread: int = 0
     calls: list[tuple[Page, int | None]] = field(default_factory=list[tuple[Page, int | None]])
     urls: list[str] = field(default_factory=list[str])
 
@@ -124,7 +127,7 @@ class _Google:
                 for i, (o, d) in enumerate(self.pairs)
                 if o in page[0] and d in page[1]
             ]
-            return gfid.Board([*rows, *self.added(page)])
+            return gfid.Board([*rows, *self.added(page)], unread=self.unread)
         flown = picked.legs[0]
         number = int(flown.flight_number)
         back_from, back_to = flown.arrival_airport.name, flown.departure_airport.name
@@ -132,7 +135,8 @@ class _Google:
             [
                 _row(5000 + 10 * number + j, _RET, back_from, back_to, self.fare(number) + 50 + j)
                 for j in range(2)
-            ]
+            ],
+            unread=self.unread,
         )
 
     def pages(self) -> list[Page]:
@@ -631,6 +635,27 @@ def test_every_page_filtered_empty_hands_the_round_trip_to_matrix(
     assert "(12 rows filtered out)" in printed[1], printed[1]
 
 
+@pytest.mark.parametrize("ret", [False, True], ids=["one-way", "round-trip"])
+def test_a_paged_board_counts_the_rows_every_page_left_unread(
+    monkeypatch: pytest.MonkeyPatch, ret: bool
+) -> None:
+    """12 origins to LAX is two pages, and every board Google serves holds one
+    row the parser could not read. Page 2 holds the three cheapest outbounds,
+    so a round trip at `-n 3` pins nothing on page 1, whose outbound page was
+    still served and still counts. Red at the merge: the paged board counted
+    no unread row."""
+    pairs = [(o, "LAX") for o in _EAST]
+    google = _Google(pairs, fare=lambda i: 100.0 + i if i >= 6 else 300.0 + i, unread=1)
+    monkeypatch.setattr(gfid, "_one_call", google)
+    legs: tuple[Leg, ...] = (Leg.of(_EAST, "LAX", _DEP),)
+    if ret:
+        legs += (Leg.of("LAX", _EAST, _RET),)
+    board = cli._gflight_results(legs, SearchOptions(page_size=3), 3)
+    assert len(google.calls) == (2 + 3 if ret else 2)
+    assert {page for page, pin in google.calls if pin is not None} <= {(_EAST[6:], ("LAX",))}
+    assert board.unread == len(google.calls)
+
+
 # ──────────────────────────────── one page ────────────────────────────────
 
 
@@ -699,22 +724,26 @@ def _matrix_only_reasons(result: Result) -> list[list[str]]:
 
 
 @pytest.mark.parametrize(
-    ("refused", "reasons"),
+    ("refused", "unread", "reasons"),
     [
-        pytest.param(False, ["carrier_absent_google"], id="every-page"),
-        pytest.param(True, ["not_on_google"], id="a-page-missing"),
+        pytest.param(False, 0, ["carrier_absent_google"], id="every-page"),
+        pytest.param(True, 0, ["not_on_google"], id="a-page-missing"),
+        pytest.param(False, 1, ["google_unread"], id="every-page-unread"),
+        pytest.param(True, 1, ["google_unread"], id="a-page-missing-unread"),
     ],
 )
 def test_the_cross_check_calls_no_carrier_absent_from_a_board_missing_a_page(
-    monkeypatch: pytest.MonkeyPatch, refused: bool, reasons: list[str]
+    monkeypatch: pytest.MonkeyPatch, refused: bool, unread: int, reasons: list[str]
 ) -> None:
-    """Red at the merge: ZZ1 flies BOS-FCO, a pair only page 2 asks, so with
-    that page refused Google's board cannot show ZZ absent, as one the row
-    filter cut cannot."""
+    """ZZ1 flies BOS-FCO, a pair only page 2 asks, so with that page refused
+    Google's board cannot show ZZ absent, as one the row filter cut cannot.
+    Rows the answering pages served unread win over both, as they do on one
+    page: the trip may be one of them."""
     second: Page = (_EX6_FROM[:4], _EX6_TO[7:])
     google = _Google(
         _EX6_PAIRS,
         refuse=lambda page: GfUpstreamStatusError(503) if refused and page == second else None,
+        unread=unread,
     )
     monkeypatch.setattr(cli, "_matrix_into", _matrix_lists(("ZZ1", _DEP, "BOS", "FCO")))
     result = _search(
@@ -730,15 +759,23 @@ def test_the_cross_check_calls_no_carrier_absent_from_a_board_missing_a_page(
     )
     assert len(google.calls) == 4
     assert _matrix_only_reasons(result) == [reasons]
+    assert json.loads(result.stdout)["cross_check"]["google"]["unread"] == unread * (4 - refused)
 
 
+@pytest.mark.parametrize(
+    ("unread", "reasons"),
+    [
+        pytest.param(0, ["not_on_google"], id="all-read"),
+        pytest.param(1, ["google_unread"], id="unread"),
+    ],
+)
 def test_the_cross_check_calls_no_return_carrier_absent_from_a_paged_round_trip(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, unread: int, reasons: list[str]
 ) -> None:
-    """Red at the merge: Google priced returns for B60 out of JFK, but each
-    page prices returns only into its own origins, and IAD is another page's,
-    so the board cannot show ZZ absent on LHR-IAD."""
-    google = _Google(_EX6_PAIRS)
+    """Google priced returns for B60 out of JFK, but each page prices returns
+    only into its own origins, and IAD is another page's, so the board cannot
+    show ZZ absent on LHR-IAD. Rows a page served unread win, as on one page."""
+    google = _Google(_EX6_PAIRS, unread=unread)
     monkeypatch.setattr(
         cli,
         "_matrix_into",
@@ -757,4 +794,7 @@ def test_the_cross_check_calls_no_return_carrier_absent_from_a_paged_round_trip(
         ret=True,
     )
     assert 0 in [n for _, n in google.calls]  # B60 was pinned
-    assert _matrix_only_reasons(result) == [["not_on_google"]]
+    assert _matrix_only_reasons(result) == [reasons]
+    assert json.loads(result.stdout)["cross_check"]["google"]["unread"] == unread * len(
+        google.calls
+    )
