@@ -43,6 +43,7 @@ from flight_cli.providers.seats_aero import auth as seats_auth
 from test_calendar_split import _pair_client, _result
 from test_gf_full_board import _DEP, _LAX, _LHR, _RET, _URL, _return_board, _served
 from test_json_document import _one_document
+from test_party_price_basis import _body as _party_body
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -445,6 +446,24 @@ def test_a_matrix_search_carries_each_solution_of_the_body() -> None:
     assert _notes(env, "price_history") == [
         "price_history: Matrix answered, and only a Google Flights page carries one"
     ]
+
+
+def test_a_matrix_partys_rows_are_priced_at_its_total(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A party's Matrix row is priced at the total its table prints and its cap
+    reads, as a Google row is, in one cabin and in several; null where Matrix
+    states no total for the party, since one passenger's price is not the trip's."""
+    trip = ["--cash-only", "JFK", "LAX", "--dep", _DEP.isoformat(), "--backend", "matrix"]
+    monkeypatch.setattr(_Matrix, "body", _party_body(total="USD203.60"))
+    party = _envelope_of(_search(*trip, "--adults", "2"))
+    assert [(r["price"], r["currency"]) for r in _rows(party)] == [(203.6, "USD")]
+    assert party["currency"] == "USD"
+    cabins = _envelope_of(_search(*trip, "--adults", "2", "--cabin", "economy,business"))
+    assert [r["price"] for g in cabins["results"] for r in g["rows"]] == [203.6, 203.6]
+    assert [r["price"] for r in _rows(_envelope_of(_search(*trip)))] == [103.0]
+    monkeypatch.setattr(_Matrix, "body", _party_body(total=None))
+    untotaled = _envelope_of(_search(*trip, "--adults", "2"))
+    assert [(r["price"], r["currency"]) for r in _rows(untotaled)] == [(None, None)]
+    assert untotaled["complete"] is True
 
 
 def test_a_matrix_cabin_that_failed_narrows_the_answer(monkeypatch: pytest.MonkeyPatch) -> None:

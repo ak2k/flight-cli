@@ -4036,7 +4036,9 @@ def _run_matrix_path(
         )
     if _envelope.active():
         _envelope.record_search(
-            backend="matrix", cabin=opts.cabin.value, rows=_matrix_envelope_rows(res)
+            backend="matrix",
+            cabin=opts.cabin.value,
+            rows=_matrix_envelope_rows(res, opts.pax.total),
         )
         if not run_pp:
             return
@@ -4863,10 +4865,11 @@ def _record_google_cabin(
     )
 
 
-def _matrix_envelope_rows(res: SearchResult) -> list[_envelope.ResultRow]:
+def _matrix_envelope_rows(res: SearchResult, passengers: int) -> list[_envelope.ResultRow]:
     """`res`'s solutions as envelope rows: each the solution object of Matrix's own
     answer, the body `--format json` prints, or its parsed model where that body
-    holds no list matching it."""
+    holds no list matching it. Priced at `party_price`, the total a Google row
+    is priced at for a party, so a row with no total Matrix states has none."""
     listed: Any = (res.raw or {}).get("solutionList")
     raw: Any = cast("dict[str, Any]", listed).get("solutions") if isinstance(listed, dict) else None
     objs: list[Any] = (
@@ -4874,10 +4877,13 @@ def _matrix_envelope_rows(res: SearchResult) -> list[_envelope.ResultRow]:
         if isinstance(raw, list) and len(cast("list[Any]", raw)) == len(res.solutions)
         else [s.model_dump(mode="json", by_alias=True, exclude_none=True) for s in res.solutions]
     )
-    return [
-        _envelope.ResultRow(price=parse_price(it.price), currency=price_currency(it.price), row=obj)
-        for it, obj in zip(res.solutions, objs, strict=True)
-    ]
+    rows: list[_envelope.ResultRow] = []
+    for it, obj in zip(res.solutions, objs, strict=True):
+        price = party_price(it, passengers)
+        rows.append(
+            _envelope.ResultRow(price=parse_price(price), currency=price_currency(price), row=obj)
+        )
+    return rows
 
 
 def _calendar_envelope_rows(res: CalendarResult) -> list[_envelope.ResultRow]:
@@ -7228,7 +7234,7 @@ def _run_matrix_path_multi(
         # Each cabin's whole answer, as the `{cabin: raw}` document carries it.
         for cab, res in results_by_cabin.items():
             _envelope.record_search(
-                backend="matrix", cabin=cab.value, rows=_matrix_envelope_rows(res)
+                backend="matrix", cabin=cab.value, rows=_matrix_envelope_rows(res, opts.pax.total)
             )
         if not run_pp:
             return

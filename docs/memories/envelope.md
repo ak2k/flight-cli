@@ -28,7 +28,10 @@ its schema is `docs/envelope.schema.json`, generated from the models
 
 `price` is the trip's: a Google round trip's is its return member's, the fare
 every surface prints for the pair; Matrix's is the solution's price string read
-as a number.
+as a number, for a party the total Matrix states (`party_price`), the number its
+itinerary table prints and `--max-price` reads, as Google's row prices the whole
+party. A party's solution Matrix states no total for has a null `price`: one
+passenger's price is not the trip's, and its `row` still carries it.
 
 Exit codes are those of `--format json` in the same state, and an envelope is
 written at exit 0 and 1. Exit 2 is a usage error and writes none.
