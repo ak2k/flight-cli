@@ -1581,8 +1581,12 @@ def test_a_re_pointed_board_still_reports_the_row_that_was_captured() -> None:
     assert any("+1d" in c for c in cells), cells
 
 
-def _round_trip_filters() -> Any:
-    """Two unselected segments, which is what drives the pinning recursion."""
+def _round_trip_filters(dep: datetime.date | None = None, ret: datetime.date | None = None) -> Any:
+    """Two unselected segments, which is what drives the pinning recursion.
+
+    A caller whose boards carry dates it read before this call passes those
+    dates: a run that crosses midnight in between would otherwise ask for the
+    next day's legs and refuse every board it is served."""
     from fli.models import (  # pyright: ignore[reportMissingTypeStubs]
         # fli ships no stubs; these are fixture builders, not typed API use.
         Airport,
@@ -1598,20 +1602,21 @@ def _round_trip_filters() -> Any:
         FlightSearchFilters,  # fli ships no stubs
     )
 
-    dep = (datetime.date.today() + datetime.timedelta(days=45)).isoformat()
-    ret = (datetime.date.today() + datetime.timedelta(days=52)).isoformat()
+    today = datetime.date.today()
+    dep = dep or today + datetime.timedelta(days=45)
+    ret = ret or today + datetime.timedelta(days=52)
     return FlightSearchFilters(
         passenger_info=PassengerInfo(adults=1),
         flight_segments=[
             FlightSegment(
                 departure_airport=[[Airport["JFK"], 0]],
                 arrival_airport=[[Airport["LAX"], 0]],
-                travel_date=dep,
+                travel_date=dep.isoformat(),
             ),
             FlightSegment(
                 departure_airport=[[Airport["LAX"], 0]],
                 arrival_airport=[[Airport["JFK"], 0]],
-                travel_date=ret,
+                travel_date=ret.isoformat(),
             ),
         ],
         stops=MaxStops.ANY,
