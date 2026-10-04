@@ -294,20 +294,61 @@ def test_a_round_trip_pins_and_pairs_at_the_typed_airport(
 
 
 def _enum_lookups(tree: ast.AST) -> list[int]:
-    names = {"Airport", "FliAirport"}
+    nodes = list(ast.walk(tree))
+
+    def imported_as(name: str) -> set[str]:
+        return {
+            alias.asname
+            for node in nodes
+            if isinstance(node, ast.ImportFrom)
+            for alias in node.names
+            if alias.name == name and alias.asname
+        }
+
+    names = {"Airport", "FliAirport"} | imported_as("Airport")
+    parsers = {"_parse_airport"} | imported_as("_parse_airport")
+
+    def is_enum(node: ast.expr) -> bool:
+        return (isinstance(node, ast.Name) and node.id in names) or (
+            isinstance(node, ast.Attribute) and node.attr == "Airport"
+        )
+
+    def is_parser(node: ast.expr) -> bool:
+        return (isinstance(node, ast.Name) and node.id in parsers) or (
+            isinstance(node, ast.Attribute) and node.attr == "_parse_airport"
+        )
+
+    members = set(Airport.__members__)
+    # Iterating the whole table is how `fli_bridge` builds its own.
+    iterated = {
+        id(node.value) for node in nodes if isinstance(node, ast.Attribute) and node.attr == "items"
+    }
+    # `_leg_airport` decodes only a code missing from fli's table, which cannot alias.
+    unaliased = {
+        id(inner)
+        for node in nodes
+        if isinstance(node, ast.FunctionDef) and node.name == "_leg_airport"
+        for inner in ast.walk(node)
+    }
     lines: list[int] = []
-    for node in ast.walk(tree):
+    for node in nodes:
         if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id in {"getattr", "hasattr"}
-            and node.args
-            and isinstance(node.args[0], ast.Name)
-            and node.args[0].id in names
-        ) or (
-            isinstance(node, ast.Subscript)
-            and isinstance(node.value, ast.Name)
-            and node.value.id in names
+            (isinstance(node, ast.Subscript) and is_enum(node.value))
+            or (isinstance(node, ast.Attribute) and is_enum(node.value) and node.attr in members)
+            or (
+                isinstance(node, ast.Attribute)
+                and node.attr == "__members__"
+                and is_enum(node.value)
+                and id(node) not in iterated
+            )
+            or (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in {"getattr", "hasattr"}
+                and node.args
+                and is_enum(node.args[0])
+            )
+            or (isinstance(node, ast.Call) and is_parser(node.func) and id(node) not in unaliased)
         ):
             lines.append(node.lineno)
     return lines
@@ -315,8 +356,10 @@ def _enum_lookups(tree: ast.AST) -> list[int]:
 
 def test_no_code_resolves_an_airport_through_flis_enum() -> None:
     """The enum hands an aliased code another airport's member, so every
-    lookup goes through `fli_bridge.fli_airport`. Read from the syntax tree, so
-    prose naming the enum does not match."""
+    lookup goes through `fli_bridge.fli_airport`: a subscript, a member read,
+    `__members__` outside `.items()`, `getattr`/`hasattr`, or a
+    `_parse_airport` call outside `_leg_airport`, under any import name. Read
+    from the syntax tree, so prose naming the enum does not match."""
     found = [
         f"{path.relative_to(_SRC).as_posix()}:{line}"
         for path in sorted(_SRC.rglob("*.py"))

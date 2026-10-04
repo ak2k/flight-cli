@@ -19,6 +19,7 @@ from fli.models.airport import Airport  # pyright: ignore[reportMissingTypeStubs
 from conftest import _ds1
 from flight_cli import _gflight_ids as gfid
 from flight_cli._gf_postfilter import (
+    StopDrops,
     apply_postfilter,
     can_postfilter,
     routing_keep,
@@ -245,7 +246,7 @@ def test_can_postfilter_supported_vs_unsupported() -> None:
     assert can_postfilter(CarrierPred(frozenset({"LH"}), exclude=False, operating=True))
     assert can_postfilter(ExcludeCodesharePred())
     assert not can_postfilter(ConnectTimePred(min_minutes=60, max_minutes=None))  # min layover
-    assert not can_postfilter(ExcludeRedeyesPred())
+    assert can_postfilter(ExcludeRedeyesPred())
 
 
 def test_the_search_page_serves_encodable_and_post_filterable_predicates() -> None:
@@ -256,10 +257,14 @@ def test_the_search_page_serves_encodable_and_post_filterable_predicates() -> No
 def test_every_other_predicate_keeps_its_own_reason() -> None:
     """One reason per predicate the page can't serve, and none for the ones it
     can: the user reads which constraint sent the search to Matrix."""
+    # Each row's legs carry their own local clocks, so the night checks ride.
     reasons = search_page_reasons(
         classify("~BA+", "MINCONNECT 1:00; -REDEYES; -OVERNIGHTS").predicates
     )
-    assert reasons == ["a red-eye exclusion", "an overnight-stop exclusion"]
+    assert reasons == []
+    assert search_page_reasons(classify("~BA+", "-REDEYES; F bc=y").predicates) == [
+        "extension 'F bc=y' not expressible on GF"
+    ]
     assert search_page_reasons(classify("LH+", "F bc=y").predicates)  # include, Tier 3
     # Evaluable here, but not with Matrix's meaning: one connection not at DUB,
     # and a range that may be several flights.
@@ -525,6 +530,38 @@ def test_a_return_board_is_held_to_the_ceiling() -> None:
 
 def test_a_negative_limit_is_no_limit() -> None:
     assert _stop_keep(-1, "MAXDUR 9:00")(0, _one_stop())
+
+
+def test_each_row_over_the_ceiling_is_counted_and_no_other_drop() -> None:
+    """Red at the base, which counted none. Only the one-stop row on the return
+    board, whose codes ask for nonstops, is counted: the same row within the
+    outbound's ceiling and the nonstop are dropped for the cap alone."""
+    drops = StopDrops()
+    keep = routing_keep(
+        [[], classify(None, "MAXSTOPS 0").predicates],
+        max_price=250,
+        max_stops=1,
+        stop_drops=drops,
+    )
+    assert keep is not None
+    rows = [(0, _one_stop()), (1, _one_stop()), (1, _priced(300.0)), (1, _priced(200.0))]
+    assert [keep(leg, row) for leg, row in rows] == [False, False, False, True]
+    assert drops == StopDrops(rows=1, ceiling=0)
+
+
+def test_a_cabin_requirement_holds_every_leg() -> None:
+    """Red at the base, which refused `+CABIN`. A leg in another cabin, a leg
+    Google states no cabin for and a leg with no amenities each fail."""
+    keep = routing_keep([classify(None, "+CABIN 2").predicates])
+    assert keep is not None
+    row = _one_stop()
+    business = replace(row, amenities=[replace(a, cabin="BUSINESS") for a in row.amenities])
+    mixed = replace(
+        business, amenities=[business.amenities[0], replace(row.amenities[1], cabin="FIRST")]
+    )
+    unstated = replace(business, amenities=[business.amenities[0], row.amenities[1]])
+    short = replace(business, amenities=business.amenities[:1])
+    assert [keep(0, r) for r in (business, mixed, unstated, short)] == [True, False, False, False]
 
 
 def test_the_checks_are_named_in_the_users_words() -> None:

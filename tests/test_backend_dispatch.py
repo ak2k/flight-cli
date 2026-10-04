@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, timedelta
+from typing import TYPE_CHECKING
 
 import pytest
 import typer
@@ -31,6 +32,9 @@ from flight_cli.cli import (
 )
 from flight_cli.domain import Bags
 from flight_cli.routing_predicates import classify, page_can_encode
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def _call(backend: str = BACKEND_AUTO, **overrides: object) -> str:
@@ -71,8 +75,6 @@ def test_auto_plain_search_picks_gflight() -> None:
         ("return_times", "early,afternoon"),
         ("seniors", 1),
         ("youth", 1),
-        ("inf_seat", 1),
-        ("inf_lap", 1),
         # Neither reaches the search page at all: `fli_bridge`, which the `tfs=`
         # parameter is encoded from, has no field for either, so a query served
         # on Google is served with the constraint simply gone.
@@ -83,6 +85,15 @@ def test_auto_plain_search_picks_gflight() -> None:
 def test_auto_hard_matrix_flag_picks_matrix(flag: str, value: object) -> None:
     """Flags the GF bridge can't map at all always force Matrix."""
     assert _call(**{flag: value}) == BACKEND_MATRIX  # pyright: ignore[reportArgumentType]
+
+
+@pytest.mark.parametrize("flag", ["inf_seat", "inf_lap"])
+def test_an_infant_stays_on_google_unless_cabins_are_compared(flag: str) -> None:
+    """The page carries both infant kinds; an empty board for one is handed to
+    Matrix afterwards, which a multi-cabin compare does not do."""
+    assert _call(**{flag: 1}) == BACKEND_GFLIGHT  # pyright: ignore[reportArgumentType]
+    assert _call(multi_cabin=True, **{flag: 1}) == BACKEND_MATRIX  # pyright: ignore[reportArgumentType]
+    assert _call(adults=8, **{flag: 2}) == BACKEND_MATRIX  # pyright: ignore[reportArgumentType]
 
 
 @pytest.mark.parametrize(
@@ -241,7 +252,6 @@ def test_stop_ceiling_above_two_goes_to_matrix() -> None:
         ("extension", "MAXMILES 8000"),  # mileage (Tier 3)
         ("routing", "BA AA"),  # ordered carrier chain
         ("routing", "~BA"),  # direct, not BA (Tier 3)
-        ("extension", "-REDEYES"),
         ("extension", "MAXCONNECT 0:00"),  # fli's layover maximum is positive
         ("extension", "MAXDUR 0:00"),  # and so is its duration maximum
         ("routing", "XX+"),  # no fli member, so no row would come back
@@ -279,6 +289,9 @@ def test_auto_unencodable_constraint_picks_matrix(flag: str, value: object) -> N
         ("routing", "DL747?"),
         ("routing", "AA1-3000"),
         ("routing", "AA00001"),  # Matrix's AA1: the bound is the number, not its digits
+        # Read off each leg's local clocks.
+        ("extension", "-REDEYES"),
+        ("extension", "-OVERNIGHTS"),
     ],
 )
 def test_auto_serves_post_filterable_tier2_on_google(flag: str, value: object) -> None:
@@ -367,12 +380,14 @@ def test_a_flight_number_matrix_rejects_goes_to_matrix_with_its_reason(
 
 
 def test_a_post_filterable_predicate_beside_one_that_is_not_still_picks_matrix() -> None:
-    assert _call(routing="~BA+", extension="-REDEYES") == BACKEND_MATRIX
+    assert _call(routing="~BA+", extension="-CITIES DUB") == BACKEND_MATRIX
+    assert _call(routing="~BA+", extension="-REDEYES") == BACKEND_GFLIGHT
 
 
 def test_auto_mixed_encodable_and_not_still_picks_matrix() -> None:
     """A partially-encodable set is not partially honored."""
-    assert _call(extension="ALLIANCE star-alliance; MAXSTOPS 1; -REDEYES") == BACKEND_MATRIX
+    assert _call(extension="ALLIANCE star-alliance; MAXSTOPS 1; -CITIES DUB") == BACKEND_MATRIX
+    assert _call(extension="ALLIANCE star-alliance; MAXSTOPS 1; -REDEYES") == BACKEND_GFLIGHT
 
 
 @pytest.mark.parametrize(
@@ -437,8 +452,9 @@ def test_page_can_encode_names_every_constraint_it_refuses() -> None:
     "overrides,expected",
     [
         ({"routing": "BA AA"}, "routing 'BA AA' not GF-expressible"),
-        ({"inf_lap": 1}, "an infant passenger"),
-        ({"inf_seat": 1}, "an infant passenger"),
+        ({"inf_lap": 1, "multi_cabin": True}, "an infant passenger on a multi-cabin compare"),
+        ({"inf_seat": 1, "multi_cabin": True}, "an infant passenger on a multi-cabin compare"),
+        ({"adults": 8, "inf_lap": 2}, "more than 9 passengers"),
         ({"seniors": 1}, "a senior or youth passenger"),
         ({"adults": 0, "children": 1}, "a child passenger with no adult"),
         ({"adults": 9, "children": 1}, "more than 9 passengers"),
@@ -496,6 +512,116 @@ def test_auto_says_nothing_when_gflight_serves_the_query(
     assert capsys.readouterr().err == ""
 
 
+# ──────────────────────────────── +CABIN ───────────────────────────────────
+
+# Skill Example 2's codes.
+_STAR_BUSINESS = "ALLIANCE star-alliance; MAXDUR 14:00; +CABIN 2"
+
+
+@pytest.mark.parametrize(
+    ("cabin", "extension"),
+    [
+        ("business", _STAR_BUSINESS),
+        ("premium-coach", "+CABIN pe"),
+        ("premium", "+cabin PREMIUM-COACH"),
+        ("first", "+CABIN 1"),
+        ("economy", "+CABIN 3"),
+    ],
+)
+@pytest.mark.parametrize("backend", ["auto", "gflight"])
+def test_a_cabin_requirement_naming_the_asked_cabin_stays_on_google(
+    monkeypatch: pytest.MonkeyPatch, backend: str, cabin: str, extension: str
+) -> None:
+    """Red at the base, which sent every `+CABIN` to Matrix and refused it
+    under `--backend gflight`. The page is asked for that cabin and each leg of
+    each row is held to it."""
+    called, err = _search_backend(
+        monkeypatch, "--backend", backend, "--cabin", cabin, "--ext", extension
+    )
+    assert called == ["_run_enriched_path"]
+    assert "Using Matrix" not in err
+
+
+@pytest.mark.parametrize(
+    ("args", "reason"),
+    [
+        (("--ext", "+CABIN 2"), "a cabin requirement ('+CABIN 2') other than --cabin economy"),
+        (
+            ("--cabin", "business", "--ext", "+CABIN 1 2"),
+            "a cabin requirement ('+CABIN 1 2') other than --cabin business",
+        ),
+        (
+            ("--cabin", "economy,business", "--ext", "+CABIN 2"),
+            "a cabin requirement ('+CABIN 2') beside more than one --cabin",
+        ),
+    ],
+    ids=["no-cabin", "two-for-one", "two-cabins"],
+)
+def test_a_cabin_requirement_that_is_not_the_one_asked_names_both(
+    monkeypatch: pytest.MonkeyPatch, args: tuple[str, ...], reason: str
+) -> None:
+    """Red at the base, whose reason quoted the code alone."""
+    _, err = _search_backend(monkeypatch, *args)
+    assert f"Using Matrix: Google Flights can't serve {reason}." in err, err
+
+
+def test_a_cabin_requirement_with_no_cabin_given_to_the_picker_is_matrix_s() -> None:
+    """The picker serves `+CABIN` only beside the one cabin it is told of."""
+    assert _call(extension="+CABIN 2") == BACKEND_MATRIX
+    with pytest.raises(typer.BadParameter, match=re.escape("'+CABIN 2') beside more than one")):
+        _call(BACKEND_GFLIGHT, extension="+CABIN 2")
+
+
+def _search_backend(monkeypatch: pytest.MonkeyPatch, *args: str) -> tuple[list[str], str]:
+    """Run `flight search` on auto with every backend path stubbed, reporting
+    which ran and stderr."""
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    called: list[str] = []
+
+    def _stub(name: str) -> Callable[..., None]:
+        def _path(**_kw: object) -> None:
+            called.append(name)
+
+        return _path
+
+    for name in (
+        "_run_gflight_path",
+        "_run_enriched_path",
+        "_run_matrix_path",
+        "_run_gflight_path_multi",
+        "_run_matrix_path_multi",
+    ):
+        monkeypatch.setattr(cli, name, _stub(name))
+    result = CliRunner().invoke(
+        cli.app,
+        ["search", "--cash-only", "JFK", "LHR", "--dep", _future_dep(), *args],
+        env={"COLUMNS": "250"},
+    )
+    assert result.exit_code == 0, result.output
+    return called, " ".join(result.stderr.split())
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("--ext", "+CABIN 2"),
+        ("--cabin", "business", "--ext", "+CABIN 1 2"),
+        ("--cabin", "economy,business", "--ext", "+CABIN 2"),
+    ],
+    ids=["no-cabin", "two-for-one", "two-cabins"],
+)
+def test_a_cabin_requirement_google_cannot_hold_stays_on_matrix_quoting_it(
+    monkeypatch: pytest.MonkeyPatch, args: tuple[str, ...]
+) -> None:
+    """Green at the base and the tip: Matrix answers it, and says why."""
+    called, err = _search_backend(monkeypatch, *args)
+    assert called in (["_run_matrix_path"], ["_run_matrix_path_multi"])
+    assert re.search(r"Using Matrix: Google Flights can't serve .*'\+CABIN [12 ]+'", err), err
+
+
 # ──────────────────────────────── explicit ─────────────────────────────────
 
 
@@ -521,18 +647,22 @@ def test_explicit_gflight_rejects_unserveable_request() -> None:
 
 
 def test_explicit_gflight_error_names_the_constraint() -> None:
-    with pytest.raises(typer.BadParameter, match="a red-eye exclusion"):
-        _call(BACKEND_GFLIGHT, extension="-REDEYES")
+    with pytest.raises(typer.BadParameter, match=re.escape("a connecting-airport exclusion (DUB)")):
+        _call(BACKEND_GFLIGHT, extension="-CITIES DUB")
+    assert _call(BACKEND_GFLIGHT, extension="-REDEYES") == BACKEND_GFLIGHT
 
 
 def test_explicit_gflight_error_names_the_pax_type() -> None:
-    with pytest.raises(typer.BadParameter, match="an infant passenger"):
-        _call(BACKEND_GFLIGHT, inf_seat=1)
+    with pytest.raises(typer.BadParameter, match="an infant passenger on a multi-cabin compare"):
+        _call(BACKEND_GFLIGHT, inf_seat=1, multi_cabin=True)
 
 
 def test_explicit_gflight_error_lists_every_reason() -> None:
-    with pytest.raises(typer.BadParameter, match="an infant passenger and a red-eye exclusion"):
-        _call(BACKEND_GFLIGHT, inf_seat=1, extension="-REDEYES")
+    with pytest.raises(
+        typer.BadParameter,
+        match="a senior or youth passenger and an infant passenger on a multi-cabin compare",
+    ):
+        _call(BACKEND_GFLIGHT, inf_seat=1, multi_cabin=True, seniors=1)
 
 
 def test_an_unknown_time_of_day_is_refused_before_any_backend_is_named(
@@ -633,7 +763,7 @@ def test_explicit_matrix_refuses_bags() -> None:
     "flag,value,reason",
     [
         ("slice_specs", ["JFK-LHR:2026-08-15"], "a multi-city itinerary"),
-        ("inf_lap", 1, "an infant passenger"),
+        ("youth", 1, "a senior or youth passenger"),
         ("fare_rules", True, "fare rules"),
     ],
 )
@@ -651,7 +781,7 @@ def test_auto_refuses_bags_with_whatever_would_have_sent_it_to_matrix(
 
 def test_explicit_gflight_under_bags_points_at_the_bags_not_at_matrix() -> None:
     with pytest.raises(typer.BadParameter) as excinfo:
-        _call(BACKEND_GFLIGHT, inf_lap=1, bags=_ONE_BAG)
+        _call(BACKEND_GFLIGHT, seniors=1, bags=_ONE_BAG)
     assert "drop --bags" in str(excinfo.value)
     assert "use --backend matrix" not in str(excinfo.value)
 

@@ -95,9 +95,28 @@ The UI offers 6 fixed buckets, but the API takes any well-formed
 - Field name is **`timeRanges`** on the slice, NOT the SPA URL state's
   `departureDatePreferredTimes` (those are different things)
 
-The `TimeOfDay` enum exposes the 6 named buckets. If we want
-power-user arbitrary-range support, expose a parser that accepts
-`"09:30-13:45"` in addition to the named values.
+`flight search` takes one such window beside the 6 named buckets
+(`--depart-times 9:30-13:45`, a `domain.ClockWindow`), sent as
+`{min:"9:30",max:"13:45"}`; calendar and detail take the buckets only. The
+ranges bound one time a slice: the departure (`DEP-TOFD-RANGES-LOCAL`), or the
+arrival on a slice with `isArrivalDate: true`. Measured live 2026-10-01: JFK-LHR
+arriving 2026-10-21 with the evening range (17:00-21:00) answered 9 solutions,
+every one landing 19:45-20:45 and leaving 07:50-08:45. So beside `--dep`,
+Matrix has no arrival-time input and `--arrive-times` is Google-only; beside
+`--arrive` it goes out as that slice's `timeRanges`, and `--depart-times` is
+refused there. The deep link's URL state takes the bucket names only, so it
+leaves a minute window out and the CLI says so under the link.
+
+## `dateModifier` and `isArrivalDate` carry Matrix's date options
+
+On a specific-date slice `dateModifier {minus, plus}` widens the date to the
+days before and after it, and `isArrivalDate` makes the date the day the slice
+lands. The SPA sends only five `dateModifier` values: `{0,0}`, `{1,0}`,
+`{0,1}`, `{1,1}`, `{2,2}` (`matrix_spa_url_state.md`), and `--flex` /
+`--return-flex` send only those. Measured live 2026-10-01: JFK-LHR 2026-10-20
+with `{1,1}` answered 10 solutions leaving Oct 19 (4), Oct 20 (3) and Oct 21
+(3). Google Flights takes neither option, so either sends a search to Matrix;
+award providers are asked for departures on the typed date.
 
 ## `commandLine` order quirk in the SPA-state URL
 

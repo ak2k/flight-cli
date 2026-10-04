@@ -35,15 +35,16 @@ from flight_cli._gf_errors import (
     GfUpstreamStatusError,
 )
 from flight_cli.domain import Cabin, Leg, SearchOptions
-from test_gflight_page import _board_of, _return_board_of, _round_trip_filters
+from test_gflight_page import _TODAY, _board_of, _return_board_of, _round_trip_filters
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
 
     from click.testing import Result
+    from time_machine import TimeMachineFixture
 
-_DEP = dt.date.today() + dt.timedelta(days=45)
-_RET = dt.date.today() + dt.timedelta(days=52)
+_DEP = _TODAY + dt.timedelta(days=45)
+_RET = _TODAY + dt.timedelta(days=52)
 _ROUND_TRIP = (Leg.of("JFK", "LAX", _DEP), Leg.of("LAX", "JFK", _RET))
 _CAPTURE = pathlib.Path(__file__).parent / "fixtures" / "gflight_page" / "ds1_jfk_lax_3rows.json"
 _SEED = gfid._parse_flight_with_id(gfid._rows_from_ds1(json.loads(_CAPTURE.read_text())).rows[1])
@@ -247,12 +248,23 @@ def test_a_preferred_outbound_the_filter_removes_is_never_pinned() -> None:
     ]
 
 
+@pytest.mark.parametrize("days_late", [0, 1], ids=["same-day", "past-midnight"])
 @pytest.mark.parametrize(("top_n", "pins"), [(3, 3), (10, 10), (50, 10)])
 def test_a_longer_preference_never_buys_more_return_boards(
-    monkeypatch: pytest.MonkeyPatch, top_n: int, pins: int
+    monkeypatch: pytest.MonkeyPatch,
+    time_machine: TimeMachineFixture,
+    top_n: int,
+    pins: int,
+    days_late: int,
 ) -> None:
     """`prefer` reorders the pin budget and never grows it: every outbound on
-    the board is preferred, and the GETs are still one board and the budget."""
+    the board is preferred, and the GETs are still one board and the budget.
+
+    The boards carry the dates read at import, and a suite that crosses
+    midnight reaches this test on the next day."""
+    # A timestamp, because time-machine reads a naive datetime as UTC.
+    noon = dt.datetime.combine(_TODAY + dt.timedelta(days=days_late), dt.time(12))
+    time_machine.move_to(noon.timestamp())
     google = _Google({"ECONOMY": _ECONOMY})
     monkeypatch.setattr(gfid, "_one_call_laddered", google)
     filters = _round_trip_filters()

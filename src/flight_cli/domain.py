@@ -60,10 +60,45 @@ _TIME_RANGE_FOR: dict[TimeOfDay, tuple[str, str]] = {
 }
 
 
-def time_range_for(t: TimeOfDay) -> dict[str, str]:
-    """Return the wire-format {min,max} dict for a TimeOfDay."""
+_LAST_MINUTE = 23 * 60 + 59
+
+
+class ClockWindow(BaseModel):
+    """A time window to the minute: its first and last minute after midnight,
+    both included."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    first: int = Field(ge=0, le=_LAST_MINUTE)
+    last: int = Field(ge=0, le=_LAST_MINUTE)
+
+    @model_validator(mode="after")
+    def _first_before_last(self) -> ClockWindow:
+        if self.first >= self.last:
+            raise ValueError("a clock window's first minute must come before its last")
+        return self
+
+
+TimeWindow = TimeOfDay | ClockWindow
+
+
+def _clock_text(minute: int, *, pad: bool) -> str:
+    hours, minutes = divmod(minute, 60)
+    return f"{hours:02d}:{minutes:02d}" if pad else f"{hours:d}:{minutes:02d}"
+
+
+def time_range_for(t: TimeWindow) -> dict[str, str]:
+    """Return the wire-format {min,max} dict for a TimeOfDay or a ClockWindow."""
+    if isinstance(t, ClockWindow):
+        return {"min": _clock_text(t.first, pad=False), "max": _clock_text(t.last, pad=False)}
     lo, hi = _TIME_RANGE_FOR[t]
     return {"min": lo, "max": hi}
+
+
+def window_label(t: TimeWindow) -> str:
+    """How a window reads to the user: a bucket's name, or `09:30-13:45`."""
+    if isinstance(t, ClockWindow):
+        return f"{_clock_text(t.first, pad=True)}-{_clock_text(t.last, pad=True)}"
+    return t.value
 
 
 def _clock_minutes(hhmm: str) -> int:
@@ -71,13 +106,15 @@ def _clock_minutes(hhmm: str) -> int:
     return int(hours) * 60 + int(minutes)
 
 
-def time_bounds(t: TimeOfDay) -> tuple[int, int]:
-    """A TimeOfDay's first and last minute after midnight, both included."""
+def time_bounds(t: TimeWindow) -> tuple[int, int]:
+    """A window's first and last minute after midnight, both included."""
+    if isinstance(t, ClockWindow):
+        return t.first, t.last
     lo, hi = _TIME_RANGE_FOR[t]
     return _clock_minutes(lo), _clock_minutes(hi)
 
 
-def covers_one_window(buckets: Iterable[TimeOfDay]) -> bool:
+def covers_one_window(buckets: Iterable[TimeWindow]) -> bool:
     """Whether `buckets` together cover one unbroken clock window. Neighbors
     share a bound ("11:00" ends morning and starts midday), so they join."""
     spans = sorted(time_bounds(b) for b in set(buckets))
@@ -154,6 +191,8 @@ class SearchOptions(BaseModel):
     # for bags: a cap is applied to its answer, and bags keep a search off it.
     max_price: int | None = Field(default=None, ge=1)
     bags: Bags | None = None
+    # Google Flights only, and unchecked: no row marks a basic fare.
+    exclude_basic: bool = False
 
     @field_validator("currency")
     @classmethod
@@ -198,7 +237,13 @@ class Leg(BaseModel):
     date_plus: int = Field(default=0, ge=0, le=3)
     route_language: str | None = None  # 'LH+', 'BA AA', '[F* X F*]'
     extension: str | None = None  # 'MAXCONNECT 5:00', etc.
-    time_ranges: tuple[TimeOfDay, ...] = ()  # empty = no preference
+    # Empty = no preference. Matrix holds these to the departure, or to the
+    # arrival on a leg with `is_arrival_date`.
+    time_ranges: tuple[TimeWindow, ...] = ()
+    # When the leg's last flight lands, local to its airport, beside a
+    # departure date. Google Flights only: Matrix bounds one time a slice, so
+    # an arrival-date leg carries its arrival window in `time_ranges` instead.
+    arrival_ranges: tuple[TimeWindow, ...] = ()
 
     @field_validator("origins", "destinations")
     @classmethod
@@ -212,9 +257,13 @@ class Leg(BaseModel):
         destination: str | list[str] | tuple[str, ...],
         dt: _date | None = None,
         *,
+        is_arrival_date: bool = False,
+        date_minus: int = 0,
+        date_plus: int = 0,
         route_language: str | None = None,
         extension: str | None = None,
-        time_ranges: tuple[TimeOfDay, ...] = (),
+        time_ranges: tuple[TimeWindow, ...] = (),
+        arrival_ranges: tuple[TimeWindow, ...] = (),
     ) -> Leg:
         """Convenience constructor — accepts a single IATA or list/tuple."""
         os = (origin,) if isinstance(origin, str) else tuple(origin)
@@ -223,9 +272,13 @@ class Leg(BaseModel):
             origins=os,
             destinations=ds,
             date=dt,
+            is_arrival_date=is_arrival_date,
+            date_minus=date_minus,
+            date_plus=date_plus,
             route_language=route_language,
             extension=extension,
             time_ranges=time_ranges,
+            arrival_ranges=arrival_ranges,
         )
 
 

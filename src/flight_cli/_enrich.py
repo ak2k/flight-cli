@@ -16,17 +16,14 @@ structure; the Google slice adds the per-flight dates Matrix does not state.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from ._multi_cabin import price_currency, price_rank
+from ._multi_cabin import parse_price, price_currency, price_rank
 
 if TYPE_CHECKING:
     from .models import Itinerary, SearchResult, Slice
-
-_PRICE_DIGITS = re.compile(r"[\d,]*\d+")
 
 Source = str  # "both" | "matrix" | "gf"
 
@@ -37,7 +34,8 @@ class MergedRow:
 
     `itinerary` is the structure to display (Matrix-authoritative when matched).
     `gf_price` / `matrix_price` are the attributed price strings from each side
-    (None when that side didn't have this itinerary). `source` records which
+    (None when that side didn't have this itinerary), each for the whole party,
+    as Google prices it: `matrix_price` is `party_price`. `source` records which
     backend(s) produced it.
 
     `google` is the Google row whose price is `gf_price`, the board's own
@@ -53,29 +51,33 @@ class MergedRow:
     same_trip: bool = False
 
 
-def _price_int(price: str | None) -> int | None:
-    """Leading integer units from 'USD877.00' / '$877' / '877 USD'; None when
-    absent (`price_rank` sorts such rows last)."""
-    if not price:
-        return None
-    m = _PRICE_DIGITS.search(price)
-    if not m:
-        return None
-    try:
-        return int(m.group(0).replace(",", "").split(".")[0])
-    except ValueError:
-        return None
+def party_price(it: Itinerary, passengers: int) -> str | None:
+    """Matrix's price for its solution `it` and a party of `passengers`, the
+    one the merged table prints and a price cap on that table reads: the
+    listed price, one passenger's rounded up, for one; for more, the total
+    Matrix states, or None where it states none."""
+    if it.price is None or passengers <= 1:
+        return it.price
+    return it.display_total
 
 
 def _rank_price(row: MergedRow, currency: str) -> str | None:
-    """The price a row ranks on: its price in `currency`, Matrix's when both
-    sides are, else Matrix's or Google's. A matched row priced in two
-    currencies then ranks among the requested ones by the price it shows in
-    that currency."""
-    both = (row.matrix_price, row.gf_price)
-    return next((p for p in both if price_currency(p) == currency), None) or (
-        row.matrix_price or row.gf_price
-    )
+    """The price a row ranks on: the lowest it prints in `currency`, or where
+    it prints none in it, the lowest in the currency of Matrix's price, else
+    Google's. So the dearer of a row's two prices never sorts it below a
+    dearer row, or out of the first `-n`."""
+    printed = [p for p in (row.matrix_price, row.gf_price) if p]
+    if not printed:
+        return None
+    codes = [price_currency(p) for p in printed]
+    code = currency if currency in codes else codes[0]
+    return min((p for p, c in zip(printed, codes, strict=True) if c == code), key=_exact_amount)
+
+
+def _exact_amount(price: str) -> tuple[bool, float]:
+    """Sort key on a price's amount, a price with none after every one with one."""
+    amount = parse_price(price)
+    return (amount is None, amount or 0.0)
 
 
 def _itin_key(it: Itinerary) -> tuple[tuple[tuple[str, ...], str], ...] | None:
@@ -157,8 +159,11 @@ def _with_google_dates(m: Itinerary, g: Itinerary) -> Itinerary:
     return m.model_copy(update={"itinerary": mi.model_copy(update={"slices": slices})})
 
 
-def merge_results(gf: SearchResult, matrix: SearchResult, *, currency: str) -> list[MergedRow]:
-    """Reconcile GF + Matrix cash results into price-sorted merged rows.
+def merge_results(
+    gf: SearchResult, matrix: SearchResult, *, currency: str, passengers: int = 1
+) -> list[MergedRow]:
+    """Reconcile GF + Matrix cash results into price-sorted merged rows, every
+    price for the party of `passengers`, as Google's already is.
 
     Every row of either side is in exactly one merged row. The match key fixes
     only the flights and the first day, so one key can name several trips on
@@ -170,10 +175,11 @@ def merge_results(gf: SearchResult, matrix: SearchResult, *, currency: str) -> l
     sells as separate tickets: it is another booking than Matrix's one ticket
     on the same flights, so the two prices are not one trip's.
 
-    Sorted under `price_rank` on each row's `_rank_price`: rows priced in
-    `currency` first by amount, any other currency after them, so a caller
-    trimming the list never drops a fare for a smaller number in another
-    currency."""
+    Sorted under `price_rank` on each row's `_rank_price`, the lowest price it
+    prints: rows priced in `currency` first by amount, any other currency after
+    them, so a caller trimming the list never drops a fare for a smaller number
+    in another currency. Rows tied on it keep the order above, a matched row
+    ahead of a Google row alone."""
     gf_keyed: dict[object, list[int]] = {}
     gf_unkeyed: list[Itinerary] = []
     for i, it in enumerate(gf.solutions):
@@ -215,7 +221,7 @@ def merge_results(gf: SearchResult, matrix: SearchResult, *, currency: str) -> l
                 MergedRow(
                     itinerary=m if lender is None else _with_google_dates(m, gf.solutions[lender]),
                     gf_price=g.price if g else None,
-                    matrix_price=m.price,
+                    matrix_price=party_price(m, passengers),
                     source="both" if g else "matrix",
                     google=g,
                     same_trip=lender is not None,
@@ -227,7 +233,9 @@ def merge_results(gf: SearchResult, matrix: SearchResult, *, currency: str) -> l
         for g in (gf.solutions[i] for i in left)
     )
     rows.extend(
-        MergedRow(itinerary=it, gf_price=None, matrix_price=it.price, source="matrix")
+        MergedRow(
+            itinerary=it, gf_price=None, matrix_price=party_price(it, passengers), source="matrix"
+        )
         for it in matrix_unkeyed
     )
     rows.extend(
@@ -237,7 +245,7 @@ def merge_results(gf: SearchResult, matrix: SearchResult, *, currency: str) -> l
 
     def rank(row: MergedRow) -> tuple[int, str, float]:
         price = _rank_price(row, currency)
-        return price_rank(price, _price_int(price), currency=currency)
+        return price_rank(price, parse_price(price), currency=currency)
 
     rows.sort(key=rank)
     return rows

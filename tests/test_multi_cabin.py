@@ -981,11 +981,32 @@ def test_multi_cabin_unencodable_constraint_goes_to_matrix(
         "--cabin",
         "coach,business",
         "--ext",
-        "-REDEYES",
+        "-CITIES DFW",
         "--cash-only",
     )
     assert called == ["matrix"]
-    assert "a red-eye exclusion" in output
+    assert "a connecting-airport exclusion (DFW)" in output
+
+
+def test_multi_cabin_red_eye_exclusion_is_served_on_google(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Checked on each cabin's rows; a cabin it empties hands the whole
+    compare to Matrix, which takes -REDEYES."""
+    called, output = _dispatch(
+        monkeypatch,
+        "JFK",
+        "LAX",
+        "--dep",
+        "2026-10-14",
+        "--cabin",
+        "coach,business",
+        "--ext",
+        "-REDEYES",
+        "--cash-only",
+    )
+    assert called == ["gflight"]
+    assert "a red-eye exclusion" not in output
 
 
 def test_a_browser_refusal_fits_every_capture_console_in_this_module(
@@ -1125,6 +1146,23 @@ def test_every_round_trip_surface_says_how_many_outbounds_it_combines(
 
     monkeypatch.setattr(cli, "_gflight_results", _rows)
     monkeypatch.setattr(cli, "_run_gflight_multi", _by_cabin)
+
+    class _NoFares:
+        """Matrix in process, answering every search with no solution."""
+
+        def __init__(self, **_kw: object) -> None:
+            pass
+
+        async def __aenter__(self) -> _NoFares:
+            return self
+
+        async def __aexit__(self, *_a: object) -> None:
+            return None
+
+        async def execute(self, *_a: object, **_kw: object) -> SearchResult:
+            return SearchResult.model_validate({"solutions": [], "solutionCount": 0})
+
+    monkeypatch.setattr(cli, "MatrixClient", _NoFares)
 
     def _gflight_backend(**_kw: object) -> str:
         return cast("str", cli.BACKEND_GFLIGHT)

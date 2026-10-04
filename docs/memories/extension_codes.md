@@ -58,6 +58,13 @@ is Matrix-only, so Google never serves a code it read only in part: auto search
 goes to Matrix, `--backend gflight` and `--fast` refuse it, and the default
 calendar runs Matrix alone.
 
+On `flight search`, Google Flights serves `-REDEYES` and `-OVERNIGHTS` as checks
+on its rows, read off each leg's local clocks: a red-eye leg lands on a later
+date than it took off, takes off 00:00-04:59, or crosses the date line; an
+overnight stop is a connection whose next leg leaves on a later date than the
+landing, or whose landing is 00:00-04:59. Calendars still send both to Matrix.
+The rules and their measurements are in `gf_routing_and_carriers.md`.
+
 Codes are **case-insensitive** for the keyword (`ALLIANCE` ≡ `alliance`).
 
 ## Units
@@ -191,6 +198,15 @@ Cabin code values:
 - `3` — economy
 
 Multiple cabin codes space-separated: `+CABIN 1 2` requires first OR business.
+
+`flight search` serves `+CABIN` on Google Flights when it names exactly the
+one cabin `--cabin` asks for (`--cabin business --ext '+CABIN 2'`): the page is
+asked for that cabin and every leg of every row is held to it, a leg Google
+states no cabin for failing. A different cabin, several cabins or several
+`--cabin` values go to Matrix, the reason naming the code and the `--cabin`; so
+does a value not listed above, the reason naming that value. The date grid and
+the price graph refuse `+CABIN`.
+`-CABIN` is Matrix's.
 
 ## Fare-basis codes [Google]
 

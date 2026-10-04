@@ -236,7 +236,14 @@ def _leg_to_wire(
     specific:  date + dateModifier + isArrivalDate always present
     calendar:  no date, no dateModifier, no isArrivalDate
     followup:  date present; dateModifier / isArrivalDate omitted
+
+    Matrix's `timeRanges` bound one time a slice: the departure, or the arrival
+    on an arrival-date leg, which carries its arrival window there. So a leg
+    with an arrival window beside a departure date raises rather than reach
+    Matrix without it.
     """
+    if leg.arrival_ranges:
+        raise ValueError("Matrix has no input for an arrival-time window")
     include_date = mode in ("specific", "followup")
     include_modifier_fields = mode == "specific"
     return WireSlice(

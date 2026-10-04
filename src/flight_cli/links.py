@@ -32,11 +32,13 @@ from .domain import (
     Search,
     SearchOptions,
     SpecificDateSearch,
+    TimeOfDay,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from .domain import TimeWindow
     from .models import Slice
 
 # ───────────────────────── Matrix deep-link URL ────────────────────────────
@@ -82,6 +84,18 @@ def _pax_strs(pax: Pax) -> dict[str, str]:
     return d
 
 
+def _preferred_times(windows: Sequence[TimeWindow]) -> list[str]:
+    """The SPA's preferred-times list: it names the six buckets and nothing
+    finer, so a window to the minute is left out of the link."""
+    return [w.value for w in windows if isinstance(w, TimeOfDay)]
+
+
+def _spa_date_modifier(leg: Leg) -> str:
+    """The SPA's date-option value, `minus*10 + plus`: its bundle splits it back
+    into the body's `dateModifier` as `{minus: m // 10, plus: m % 10}`."""
+    return str(leg.date_minus * 10 + leg.date_plus)
+
+
 def _spa_specific_leg(leg: Leg, *, return_leg: Leg | None = None) -> dict[str, Any]:
     """SPA URL-state slice for a specific-date search.
 
@@ -90,8 +104,8 @@ def _spa_specific_leg(leg: Leg, *, return_leg: Leg | None = None) -> dict[str, A
     For one-way / multi-city, omit `return_leg`.
     """
     return_date = return_leg.date.isoformat() if return_leg and return_leg.date else ""
-    return_modifier = str(return_leg.date_minus if return_leg else leg.date_plus)
-    return_times = [t.value for t in return_leg.time_ranges] if return_leg else []
+    return_modifier = _spa_date_modifier(return_leg) if return_leg else "0"
+    return_times = _preferred_times(return_leg.time_ranges) if return_leg else []
     return {
         "origin": list(leg.origins),
         "dest": list(leg.destinations),
@@ -101,8 +115,8 @@ def _spa_specific_leg(leg: Leg, *, return_leg: Leg | None = None) -> dict[str, A
             # "depart" | "arrive" — the SPA's encoding of arrival-date intent,
             # the URL-state counterpart of the API's `isArrivalDate` bool.
             "departureDateType": "arrive" if leg.is_arrival_date else "depart",
-            "departureDateModifier": str(leg.date_minus),
-            "departureDatePreferredTimes": [t.value for t in leg.time_ranges],
+            "departureDateModifier": _spa_date_modifier(leg),
+            "departureDatePreferredTimes": _preferred_times(leg.time_ranges),
             "returnDate": return_date,
             "returnDateType": "arrive" if (return_leg and return_leg.is_arrival_date) else "depart",
             "returnDateModifier": return_modifier,
@@ -196,7 +210,7 @@ def _spa_calendar_leg(
         "departureDate": start.isoformat(),
         "departureDateType": "depart",
         "departureDateModifier": "0",
-        "departureDatePreferredTimes": [t.value for t in out.time_ranges],
+        "departureDatePreferredTimes": _preferred_times(out.time_ranges),
     }
     if ret is not None:
         # `duration` is the trip LENGTH — nights between the outbound and the return —
@@ -209,7 +223,7 @@ def _spa_calendar_leg(
         )
     dates["returnDateType"] = "depart"
     dates["returnDateModifier"] = "0"
-    dates["returnDatePreferredTimes"] = [t.value for t in ret.time_ranges] if ret else []
+    dates["returnDatePreferredTimes"] = _preferred_times(ret.time_ranges) if ret else []
     d["dates"] = dates
     return d
 
@@ -483,6 +497,7 @@ def _encode_gflight_pinned_tfs(
     pin_max_u64: bool = True,
     max_price: int | None = None,
     bags: tuple[int, int] | None = None,
+    exclude_basic: bool = False,
 ) -> bytes:
     """Encode the tfs= protobuf for a Google Flights URL.
 
@@ -493,6 +508,8 @@ def _encode_gflight_pinned_tfs(
     `max_price` is top-level field 12, whole units of the page's `curr=`.
     `bags` is (checked, carry-on), top-level field 13 as `{2: carry-on,
     3: checked}`; a zero count is left out, the form Google honored live.
+    `exclude_basic` is top-level field 25 = 1, after the trip type, as the
+    UI's own URL carries it.
 
     `slices`: list of dicts shaped:
         {
@@ -564,6 +581,8 @@ def _encode_gflight_pinned_tfs(
     else:
         trip_type = _GF_TRIP_MULTI_CITY
     w.varint(19, trip_type)
+    if exclude_basic:
+        w.varint(25, 1)
 
     return bytes(w.buf)
 
@@ -599,20 +618,20 @@ _TFS_ENCODED_FIELDS = frozenset(
         "layover_restrictions",
         "price_limit",
         "bags",
+        "exclude_basic_economy",
     }
 )
 
 # Filters this encoder refuses, checked against fli's own model default rather
-# than truthiness: fli populates sort_by, emissions, exclude_basic_economy and
-# show_all_results on EVERY filter, so `if filters.sort_by` would refuse every
-# search. Each entry is (field name, how to describe it to a user).
+# than truthiness: fli populates sort_by, emissions and show_all_results on
+# EVERY filter, so `if filters.sort_by` would refuse every search. Each entry
+# is (field name, how to describe it to a user).
 # The exclude lists do have a field (3.7), but Google ignored it on JFK-LHR.
 _TFS_REFUSED_FIELDS: tuple[tuple[str, str], ...] = (
     ("airlines_exclude", "a carrier exclude list"),
     ("alliances", "an alliance filter"),
     ("alliances_exclude", "an alliance exclude filter"),
     ("emissions", "an emissions filter"),
-    ("exclude_basic_economy", "a basic-economy exclusion"),
     ("sort_by", "a server-side sort order"),
 )
 # Read and deliberately not acted on. `show_all_results` defaults to True and there is
@@ -620,15 +639,11 @@ _TFS_REFUSED_FIELDS: tuple[tuple[str, str], ...] = (
 # through its own `tfu=` parameter instead (`google_flights_search_page_url`).
 _TFS_IGNORED_FIELDS = frozenset({"show_all_results"})
 
-# Passenger kinds field 8 carries for a search. Google prices both infant kinds
-# correctly, but answered JFK-LAX with an empty board for any infant, so an
-# empty answer would not mean there are no flights: search refuses them and the
-# backend picker sends them to Matrix.
-_TFS_ENCODED_PAX = frozenset({"adults", "children"})
-_TFS_REFUSED_PAX: tuple[tuple[str, str], ...] = (
-    ("infants_in_seat", "an infant-in-seat passenger"),
-    ("infants_on_lap", "an infant-on-lap passenger"),
-)
+# Passenger kinds field 8 carries for a search. Google prices both infant
+# kinds, but has answered a route with flights (JFK-LAX) with an empty board
+# for any infant, so the search hands such an empty board to Matrix
+# (`cli._run_gflight_path`).
+_TFS_ENCODED_PAX = frozenset({"adults", "children", "infants_in_seat", "infants_on_lap"})
 
 _TFS_MULTI_CITY = 3  # fli TripType.MULTI_CITY — the page inlines no rows for it
 
@@ -754,9 +769,6 @@ def build_search_tfs(filters: Any, *, currency: str = "USD") -> bytes:
     for field, description in _TFS_REFUSED_FIELDS:
         if not _tfs_field_is_default(filters, field):
             raise GfTfsUnsupportedError(field, description)
-    for field, description in _TFS_REFUSED_PAX:
-        if getattr(filters.passenger_info, field, 0):
-            raise GfTfsUnsupportedError(field, description)
     layover = filters.layover_restrictions
     if layover is not None and layover.airports:
         raise GfTfsUnsupportedError("layover_restrictions", "a connecting-airport restriction")
@@ -784,11 +796,12 @@ def build_search_tfs(filters: Any, *, currency: str = "USD") -> bytes:
         cabin=filters.seat_type.value,
         adults=filters.passenger_info.adults,
         children=filters.passenger_info.children,
-        infants_in_seat=0,
-        infants_on_lap=0,
+        infants_in_seat=filters.passenger_info.infants_in_seat,
+        infants_on_lap=filters.passenger_info.infants_on_lap,
         pin_max_u64=False,
         max_price=max_price,
         bags=(bags.checked_bags, int(bags.carry_on)) if bags is not None else None,
+        exclude_basic=filters.exclude_basic_economy,
     )
 
 
@@ -894,7 +907,7 @@ def _pinned_tfs_b64(
     out_origins, out_dests = _pinned_slice_airports(out, outbound_segments)
     slices: list[dict[str, Any]] = [
         {
-            "date": out.date.isoformat(),
+            "date": _pinned_slice_date(out.date, outbound_segments),
             "origin": out_origins,
             "destination": out_dests,
             "segments": outbound_segments,
@@ -913,7 +926,7 @@ def _pinned_tfs_b64(
         ret_origins, ret_dests = _pinned_slice_airports(ret, return_segments)
         slices.append(
             {
-                "date": ret.date.isoformat(),
+                "date": _pinned_slice_date(ret.date, return_segments),
                 "origin": ret_origins,
                 "destination": ret_dests,
                 "segments": return_segments,
@@ -985,6 +998,12 @@ def google_flights_explore_url(
         f"https://www.google.com/travel/explore?tfs={urllib.parse.quote(b64)}"
         f"&tfu=GgA&hl={language}&gl={country}&curr={currency}"
     )
+
+
+def _pinned_slice_date(leg_date: date, segments: list[dict[str, str]]) -> str:
+    """A pinned slice's date: its first flight's own day, which a flexible or
+    arrival-date search finds off the leg's date."""
+    return segments[0]["date"] if segments else leg_date.isoformat()
 
 
 def _pinned_slice_airports(
