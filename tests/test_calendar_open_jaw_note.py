@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=false
 """The fan-out note and the `--max-per-query` help name the round trips only the
 combined query prices (work-h70kv.108)."""
 
@@ -10,8 +11,10 @@ from typing import Any
 import pytest
 
 from flight_cli import cli
+from flight_cli.client import MatrixApiError
 from flight_cli.domain import Cabin, CalendarSearch, CalendarWindow, Leg, SearchOptions
 from flight_cli.models import CalendarResult
+from test_calendar_split import _calendar_fast, _pair_client, _priced, _spy_renderers
 
 _WINDOW = CalendarWindow(
     start=date(2026, 9, 7), end=date(2026, 10, 7), duration_min=5, duration_max=7
@@ -20,6 +23,7 @@ _EMPTY: dict[str, Any] = {"solutionCount": 0, "calendar": {"months": []}}
 
 _ORIGIN_SIDE = "return to a different origin airport"
 _DESTINATION_SIDE = "come back from a different destination airport"
+_ACROSS_GROUPS = "come back from a destination airport in another group"
 
 
 def _deliver(
@@ -43,7 +47,7 @@ def _deliver(
         return answer, n_split, floor_lost
 
     monkeypatch.setattr(cli, "_run_calendar", _stub)
-    cli._run_matrix_calendar(  # pyright: ignore[reportPrivateUsage] — the delivery IS the unit
+    cli._run_matrix_calendar(
         search,
         origins=origins,
         dests=dests,
@@ -98,4 +102,68 @@ def test_the_max_per_query_help_names_both_sides() -> None:
     option = inspect.signature(cli.calendar).parameters["max_per_query"].default
     help_text = " ".join(str(option.help).split())
     assert "another airport of the set" not in help_text
-    assert f"{_ORIGIN_SIDE}, or {_DESTINATION_SIDE}," in help_text
+    assert (
+        f"{_ORIGIN_SIDE}, or come back from a destination airport in another request," in help_text
+    )
+    assert _DESTINATION_SIDE not in help_text
+
+
+@pytest.mark.parametrize(
+    ("combined", "verb"),
+    [
+        pytest.param(_priced("USD500.00"), "come only from the combined query", id="merged"),
+        pytest.param(
+            MatrixApiError("COMBINED UNAVAILABLE", kind="internal"),
+            "are missing: only the combined query",
+            id="lost",
+        ),
+    ],
+)
+def test_a_grouped_fanout_names_only_the_returns_across_groups(
+    combined: CalendarResult | Exception,
+    verb: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A group's query asks a return from every airport of the group, so out to
+    LHR and back from LGW is in the grid whether or not the combined query ran."""
+    _pair_client(
+        monkeypatch,
+        {
+            ("JFK", "LHR,LGW"): _priced("USD600.00"),
+            ("JFK", "STN,LTN"): _priced("USD650.00"),
+            ("JFK", "LHR,LGW,STN,LTN"): combined,
+        },
+    )
+    _spy_renderers(monkeypatch)
+    _calendar_fast(
+        fast=False, fmt="json", destination="LHR,LGW,STN,LTN", one_way=False, max_per_query=2
+    )
+    note = " ".join(capsys.readouterr().err.split())
+    assert f"Round trips that {_ACROSS_GROUPS} {verb}" in note
+    assert _DESTINATION_SIDE not in note
+
+
+def test_one_destination_group_leaves_only_the_origin_side(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _pair_client(
+        monkeypatch,
+        {
+            ("JFK", "LHR,LGW"): _priced("USD600.00"),
+            ("EWR", "LHR,LGW"): _priced("USD650.00"),
+            ("JFK,EWR", "LHR,LGW"): _priced("USD500.00"),
+        },
+    )
+    _spy_renderers(monkeypatch)
+    _calendar_fast(
+        fast=False,
+        fmt="json",
+        origin="JFK,EWR",
+        destination="LHR,LGW",
+        one_way=False,
+        max_per_query=2,
+    )
+    note = " ".join(capsys.readouterr().err.split())
+    assert f"Round trips that {_ORIGIN_SIDE} come only from the combined query" in note
+    assert "come back from" not in note
