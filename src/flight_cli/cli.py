@@ -3383,10 +3383,19 @@ _DEFAULT_RENDER_LIMIT = 10  # matches the `-n/--page-size` default
 
 
 def _render_search(
-    res: SearchResult, limit: int = _DEFAULT_RENDER_LIMIT, cap: str | None = None
+    res: SearchResult,
+    limit: int = _DEFAULT_RENDER_LIMIT,
+    cap: str | None = None,
+    *,
+    passengers: int = 1,
 ) -> None:
     """Render the itinerary table, showing at most `limit` rows. `cap` names a
     price cap `res` was cut to, for the sentence an empty answer prints.
+
+    For a party of `passengers`, each row prints `party_price`, the total Google
+    prints and a cap reads; a row Matrix states no total for prints one
+    passenger's price marked as such. The cheapest line and the grid are
+    Matrix's per-passenger minima, which have no party total, so they say so.
 
     `limit` MUST be the same bound `--pick` is validated against. It was
     hardcoded to 10 while `--pick` checked against `len(res.solutions)`, so
@@ -3408,15 +3417,17 @@ def _render_search(
     # query that succeeded.
     ccy, cheapest = _split_price(res.cheapest_price)
     ccy_tag = f" ({_safe_text(ccy)})" if ccy else ""
+    party = passengers > 1
     console.print(
         f"[bold]{res.solution_count} solutions[/]  · "
-        f"cheapest: [bold cyan]{_safe_text(cheapest or '—')}{ccy_tag}[/]"
+        + ("cheapest per traveler" if party else "cheapest")
+        + f": [bold cyan]{_safe_text(cheapest or '—')}{ccy_tag}[/]"
     )
 
     cm = res.carrier_stop_matrix
     if cm and cm.columns and cm.rows:
         t = Table(
-            title=f"Carrier x stops grid{ccy_tag}",
+            title=f"Carrier x stops grid{ccy_tag}" + (" per traveler" if party else ""),
             show_header=True,
             header_style="bold magenta",
         )
@@ -3436,7 +3447,7 @@ def _render_search(
 
     st = Table(title=f"Itineraries{ccy_tag}", show_header=True, header_style="bold green")
     st.add_column("#", justify="right")
-    st.add_column("price", justify="right")
+    st.add_column(f"total ({passengers:d} travelers)" if party else "price", justify="right")
     st.add_column("carriers")
     st.add_column("outbound")
     st.add_column("return")
@@ -3447,7 +3458,16 @@ def _render_search(
 
         out = _fmt_slice_cell(slcs[0]) if slcs else "—"
         ret = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
-        st.add_row(f"{i:d}", _amount(it.price, ccy), it_carriers or "?", out, ret)
+        total = party_price(it, passengers)
+        st.add_row(
+            f"{i:d}",
+            _amount(total, ccy)
+            if total or not it.price
+            else f"{_amount(it.price, ccy)} per traveler",
+            it_carriers or "?",
+            out,
+            ret,
+        )
     console.print(st)
 
 
@@ -3837,7 +3857,7 @@ def _page_cap_text(opts: SearchOptions | None) -> str | None:
 def _price_capped(res: SearchResult, opts: SearchOptions, *, passengers: int = 1) -> SearchResult:
     """`res` holding only the solutions priced in the search's currency at or
     under its price cap, or `res` itself when there is no cap. The cap reads
-    the price the cross-check prints for a party of `passengers`: the total
+    the price a Matrix row prints for a party of `passengers`: the total
     Matrix states for more than one, its listed price for one.
 
     Matrix has no price input, and it answers in price order, so the cut loses
@@ -3935,7 +3955,7 @@ def _run_matrix_path(
     )
     # Before anything reads it, so the pick, the fare rules, the awards and the
     # links all draw from the fares under the cap.
-    res = _price_capped(res, opts)
+    res = _price_capped(res, opts, passengers=opts.pax.total)
     shown = res.solutions[: opts.page_size]
 
     def _rules() -> _FareRulesAnswer | None:
@@ -3974,7 +3994,7 @@ def _run_matrix_path(
     # `not json_out` for the reason given at the same gate in
     # `_run_gflight_path`: with awards on, the document is written below this.
     if not sel.awards_only and not json_out:
-        _render_search(res, opts.page_size, cap=_cap_text(opts))
+        _render_search(res, opts.page_size, cap=_cap_text(opts), passengers=opts.pax.total)
     # After the table, so a failure fetching the rules leaves the fares shown.
     rules = _rules() if fare_rules else None
     if rules is not None:
@@ -5351,6 +5371,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
                 match_carriers=_match_carriers(legs),
                 insight=insight,
                 bags=opts.bags,
+                passengers=opts.pax.total,
             )
         except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
             raise
@@ -5435,6 +5456,7 @@ def _paint_first_gf_table(
                 top_n=top_n,
                 match_carriers=_match_carriers(legs),
                 insight=getattr(gf, "insight", None),
+                passengers=opts.pax.total if opts else 1,
             )
         except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
             raise
@@ -7280,6 +7302,7 @@ def _render_gflight_table(
     match_carriers: frozenset[str] = frozenset(),
     insight: PriceInsight | None = None,
     bags: Bags | None = None,
+    passengers: int = 1,
 ) -> None:
     """Render fli results as a rich table. Duck-typed: fli has no type stubs.
 
@@ -7294,7 +7317,8 @@ def _render_gflight_table(
     keeps its width. A table wider than the console prints each leg on its own
     line, and if it is still wider, leaves the CO2 column out with a note that
     `--format json` carries it: Rich wraps a cell at its spaces, which would
-    split a designator such as "EI 152" across two lines.
+    split a designator such as "EI 152" across two lines. Google prices the
+    whole party, so for `passengers` above one the price header names the party.
 
     A round-trip combination can print two DIFFERENT prices, on its `Na` and
     `Nb` rows, and that reads as a bug until you know what each is: the `a` row
@@ -7350,7 +7374,9 @@ def _render_gflight_table(
             header_style="bold green",
         )
         t.add_column("#", justify="right")
-        t.add_column("price", justify="right")
+        t.add_column(
+            f"total ({passengers:d} travelers)" if passengers > 1 else "price", justify="right"
+        )
         t.add_column("stops", justify="right")
         t.add_column("duration")
         t.add_column("legs", width=legs_width if stacked else None)
@@ -9441,7 +9467,7 @@ def detail(
     if json_out:
         sys.stdout.write(json.dumps(res.raw, indent=2))
         return
-    _render_search(res)
+    _render_search(res, passengers=opts.pax.total)
     _emit_urls(search, matrix_url=matrix_url, google_url=google_url, result=res)
 
 
