@@ -111,6 +111,12 @@ go into detail and are loaded on demand.
   `sessionId`/`rh`/`Si`), session-scoped lifetime caveat, and the
   battle-tested SPA-driving gotchas. Read before doing any new RE or
   recapture work.
+- [envelope.md](envelope.md) — `search` / `calendar --format envelope`: the
+  keys and their types, what makes `complete` false and where each
+  narrowing is said, how the run holds stdout and stderr, Google's daily price
+  history (`ds:1[5][10]`, the +12h date rule), and what is out of scope. Read
+  before adding a path that writes a JSON document or a stderr line that
+  reports a loss.
 - [doctor.md](doctor.md) — `flight doctor`: the ten checks, the cause
   each failure is filed under and which are retryable, exit codes 0/75/1, and
   the canary contract (a persistent matrix-search `brownout` is a shape
