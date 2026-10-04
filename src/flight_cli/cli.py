@@ -10812,6 +10812,23 @@ def detail(
     dests = _parse_iata_list(destination)
     dep_d = _parse_date(dep)
     ret_d = _parse_date(ret) if ret else None
+    if ret_d is None:
+        # `--routing-ret ''` asks for no codes on the return, so an empty value counts.
+        names = [
+            name
+            for name, value in (
+                ("--return-times", return_times),
+                ("--routing-ret", routing_return),
+                ("--ext-ret", extension_return),
+            )
+            if value is not None
+        ]
+        if names:
+            err.print(
+                f"[red]{_safe_text(', '.join(names))} set the return's filters, and need a "
+                "--return.[/] Drop them, or add --return."
+            )
+            raise typer.Exit(2)
     sd = _parse_date(start) if start else dep_d
     ed = _parse_date(end) if end else sd + timedelta(days=30)
     dmin, dmax = _resolve_duration(duration, round_trip=ret_d is not None)
