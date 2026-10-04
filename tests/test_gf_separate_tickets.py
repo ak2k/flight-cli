@@ -24,13 +24,14 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from conftest import _answering, _ds1, _page
+from conftest import _answering, _ds1, _page, _unreadable, dl_beside_unreadable_as
 from flight_cli import _gf_booking, cli
 from flight_cli import _gflight_ids as gfid
 from flight_cli._cross_check import Answers, RowCheck, cross_check
 from flight_cli._enrich import MergedRow, merge_results
 from flight_cli._gf_common import PageFetch
 from flight_cli.domain import Cabin, Leg, SearchOptions
+from flight_cli.fli_bridge import to_fli_filter
 from flight_cli.links import build_search_tfs, google_flights_search_page_url
 from flight_cli.models import Itinerary, ItineraryDetails, ItineraryExt, SearchResult, Slice
 from flight_cli.pp.gflight_adapter import fli_results_to_search_result
@@ -216,6 +217,37 @@ def test_a_one_way_adds_the_marked_row_of_the_cheapest_tab(
     assert [(r["flight_id"], r["self_transfer"]) for r in marked] == [("aR5Sef", True)]
     assert [r for r in doc if not r["separate_tickets"]] == base
     assert len(doc) == len(base) + 1
+
+
+def _lax_page(ds1: str, *, unreadable: int) -> str:
+    """`ds1` answering the JFK-LAX one-way, its row `unreadable` read and not parsed."""
+    asked = _answering(ds1, origin=None, destination=None, date=_DEP.isoformat())
+    return _page(_unreadable(asked, index=unreadable))
+
+
+@pytest.mark.parametrize("mode", ["show", "hide"])
+def test_a_board_with_separate_tickets_counts_the_unread_rows_of_both_pages(
+    gf_session: Callable[..., Any], mode: gfid.SeparateTickets
+) -> None:
+    """The base board's unread row and the Cheapest tab's are both counted, and
+    a Cheapest tab none of whose rows parsed counts its own, as a return board
+    that refuses its pin does."""
+    filters = to_fli_filter(
+        cli.SpecificDateSearch(
+            legs=(Leg.of("JFK", "LAX", _DEP),), options=SearchOptions(cabin=Cabin.COACH)
+        )
+    )
+    payload: list[Any] = json.loads(_ds1(_LAX))
+    gfid._rows_from_ds1(payload).rows[5][7] = [1]
+    gf_session(_lax_page(_ds1(_LAX), unreadable=16), _lax_page(json.dumps(payload), unreadable=20))
+    board = gfid.search_with_ids(filters, top_n=1, separate_tickets=mode)
+    assert board is not None
+    assert board.unread == 2
+    unparsed = _page(_unreadable(dl_beside_unreadable_as(), index=0))
+    gf_session(_lax_page(_ds1(_LAX), unreadable=16), unparsed)
+    board = gfid.search_with_ids(filters, top_n=1, separate_tickets=mode)
+    assert board is not None
+    assert (board.separate_failed is not None, board.unread) == (True, 1 + 2)
 
 
 def test_a_refused_cheapest_tab_leaves_the_base_answer_and_says_why(

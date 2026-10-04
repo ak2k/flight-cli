@@ -2592,7 +2592,10 @@ def _with_separate_tickets(
 
     The page is not fetched when pinning stopped on a wall, the network or the
     browser, because it would meet the same one. A refusal of this page leaves
-    `answer` as it is and says why on `separate_failed`."""
+    `answer` as it is and says why on `separate_failed`.
+
+    The page's unread rows are added to `answer`'s, as its filtered marked rows
+    are to its dropped ones: a flight on one of them is on Google's board."""
 
     def with_notes(
         rows: Iterable[GFlightWithId | tuple[GFlightWithId, ...]],
@@ -2601,12 +2604,14 @@ def _with_separate_tickets(
         failed: GfBackendError | None = None,
         insight: PriceInsight | None = answer.insight,
         filtered: int = 0,
+        unread: int = 0,
     ) -> Board[GFlightWithId | tuple[GFlightWithId, ...]]:
         return Board(
             rows,
             insight=insight,
             dropped=answer.dropped + filtered,
             pinned=answer.pinned,
+            unread=answer.unread + unread,
             separate_hidden=hidden,
             separate_failed=failed,
         )
@@ -2618,23 +2623,27 @@ def _with_separate_tickets(
             _one_call_laddered(filters, transport, currency=currency, cheapest=True), currency
         )
     except GfBackendError as e:
-        return with_notes(answer, failed=e)
+        unparsed = e.unread if isinstance(e, _PageUnreadError) else 0
+        return with_notes(answer, failed=e, unread=unparsed)
     listed = [r for r in page if r.ticketing is not None]
     marked = [r for r in listed if keep is None or keep(0, r)]
     # Counted with the base's, so an answer they would have filled reads as
     # none matching the routing, not as Google having no flights.
     filtered = len(listed) - len(marked)
     if mode == "hide":
-        return with_notes(answer, hidden=len(marked), filtered=filtered)
+        return with_notes(answer, hidden=len(marked), filtered=filtered, unread=page.unread)
     # The insight's level is read off the cheapest fare the answer holds, and a
     # separate-ticket fare can undercut every one-ticket fare on the base board.
     insight = answer.insight
     fares = [r.flight.price for r in marked if r.flight.price is not None]
     if insight is not None and fares:
         insight = replace(insight, cheapest=min(insight.cheapest, *fares))
+    unread = page.unread
     if filters.trip_type == TripType.ONE_WAY:
-        return with_notes([*answer, *marked], insight=insight, filtered=filtered)
-    return with_notes([*answer, *((r,) for r in marked)], insight=insight, filtered=filtered)
+        return with_notes([*answer, *marked], insight=insight, filtered=filtered, unread=unread)
+    return with_notes(
+        [*answer, *((r,) for r in marked)], insight=insight, filtered=filtered, unread=unread
+    )
 
 
 def _report_pin_outcome(
