@@ -145,7 +145,9 @@ def test_the_enriched_search_sends_matrix_the_ceiling(
     result = _cli("search", "JFK", "LAX", "--dep", _D, "--cash-only", *_QUIET, "--stops", "0")
     assert result.exit_code == 0, result.output
     assert "Google Flights + Matrix" in result.stdout
-    assert _command_lines(sent) == [["MAXSTOPS 0"]]
+    # Then the chain search on Google's row under Matrix's USD321, which names
+    # that row's flights and so carries no ceiling.
+    assert _command_lines(sent) == [["MAXSTOPS 0"], [None]]
 
 
 def test_a_ceiling_google_cannot_be_asked_for_is_sent_to_matrix(
