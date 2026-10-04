@@ -35,9 +35,11 @@ Tab then offers the values of `--cabin`, `--sort`, `--backend`, `--format`,
 flight search JFK LHR --dep 2026-08-15 --return 2026-08-22
 
 # A carrier or alliance, a maximum duration, a layover bound, one time-of-day
-# window, -REDEYES/-OVERNIGHTS, a child or an infant stays on Google Flights.
-# Every row is also checked against the carrier, duration, layover, time window
-# and night flights. An infant's empty Google board goes to Matrix.
+# window, -REDEYES/-OVERNIGHTS, a +CABIN naming the --cabin asked, a child or an
+# infant stays on Google Flights. Every row is also checked against the carrier,
+# duration, layover, time window, night flights and cabin; rows over the stop
+# ceiling are dropped and counted on stderr. An infant's empty Google board goes
+# to Matrix.
 flight search MIA PAR --dep 2026-06-15 \
     --routing "LH+" --ext "MAXCONNECT 2:00"
 
