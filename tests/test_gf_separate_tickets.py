@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import re
 import urllib.parse
 from datetime import date, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -36,6 +38,7 @@ from flight_cli.pp.gflight_adapter import fli_results_to_search_result
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+_ROOT = Path(__file__).resolve().parents[1]
 _DEP = date.today() + timedelta(days=45)
 _RET = date.today() + timedelta(days=52)
 _BEST = "ds1_fll_lga_rt_best.json"
@@ -50,6 +53,7 @@ _FLL_LGA = [
     *("--backend", "gflight", "--fast", "-n", "1000"),
 ]
 _THROTTLE_PAGE = "<html>Our systems have detected unusual traffic</html>"
+_SHAPELESS_PAGE = "<html><body>no flight data here</body></html>"
 _KEY = (
     "† separate tickets: Google sells this trip as more than one booking. "
     "‡ self transfer: separate tickets, and you collect and recheck bags between flights."
@@ -262,6 +266,29 @@ _RETURN_CHECKS = [
 ]
 
 
+def test_a_round_trip_whose_every_return_board_refused_still_shows_its_separate_tickets(
+    gf_session: Callable[..., Any],
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No pin's return board parses, so no one-ticket trip was served; a
+    separate-ticket outbound needs no return board and is served all the same."""
+    pins = gfid.pinned_fanout(1000)
+    pages = [_served(_BEST), *[_SHAPELESS_PAGE] * pins, _served(_CHEAPEST)]
+    fake = gf_session(*pages)
+    with caplog.at_level(logging.WARNING, logger="flight_cli._gflight_ids"):
+        doc = _document(capsys, legs=_round_trip(), separate_tickets="show")
+    assert len(fake.gets) == pins + 2
+    assert _CHEAPEST_TFU in fake.gets[-1]
+    assert len(doc) == 33
+    assert all(len(r) == 1 and r[0]["separate_tickets"] is True for r in doc)
+    assert f"{pins} of {pins} return boards unavailable" in caplog.text
+    gf_session(*pages)
+    with pytest.raises(typer.Exit) as hidden:
+        _document(capsys, legs=_round_trip(), separate_tickets="hide")
+    assert hidden.value.exit_code == 1
+
+
 @pytest.mark.parametrize(("asked", "checks"), _RETURN_CHECKS)
 def test_a_return_only_the_row_filter_checks_keeps_separate_tickets_unread(
     gf_session: Callable[..., Any], asked: list[str], checks: str
@@ -286,6 +313,30 @@ def test_a_return_only_the_row_filter_checks_keeps_separate_tickets_unread(
     )
     assert hidden.exit_code == 0, hidden.output
     assert "separate tickets" not in hidden.stderr
+
+
+def test_an_excluded_carrier_hands_a_round_trip_to_matrix_as_at_the_base(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every pinned return flies the excluded carrier, so Google's answer is
+    empty and auto hands the search to Matrix."""
+    ran: list[bool] = []
+
+    def _matrix(**_kw: object) -> None:
+        ran.append(True)
+
+    monkeypatch.setattr(cli, "_run_matrix_path", _matrix)
+    fake = gf_session(*_fll_lga_pages())
+    args = ["auto" if a == "gflight" else a for a in _FLL_LGA]
+    result = CliRunner().invoke(
+        cli.app, [*_SEARCH, *args, "--format", "json", "--ext", "-AIRLINES AA"]
+    )
+    assert result.exit_code == 0, result.output
+    assert ran == [True]
+    assert len(fake.gets) == 11
+    assert "Using Matrix: no Google Flights itinerary matched a carrier exclusion (AA)" in (
+        " ".join(result.stderr.split())
+    )
 
 
 def test_an_outbound_window_still_reads_the_cheapest_tab(
@@ -394,6 +445,31 @@ def test_a_matrix_search_takes_the_opt_out_and_changes_nothing(
     assert ran == [True]
 
 
+@pytest.mark.parametrize("asked", [["--fast"], ["--format", "json"]])
+def test_the_skill_and_the_help_name_the_searches_that_read_the_cheapest_tab(
+    gf_session: Callable[..., Any], asked: list[str]
+) -> None:
+    """Each search the skill names reads the tab."""
+    import click
+
+    fake = gf_session(*_fll_lga_pages())
+    args = [a for a in _FLL_LGA if a != "--fast"]
+    result = CliRunner().invoke(cli.app, [*_SEARCH, *args, *asked], env={"COLUMNS": "200"})
+    assert result.exit_code == 0, result.output
+    assert _CHEAPEST_TFU in fake.gets[-1]
+    skill = _ROOT / ".claude" / "skills" / "flight-search" / "SKILL.md"
+    (line,) = [ln for ln in skill.read_text().splitlines() if "come from its Cheapest tab" in ln]
+    assert f"`{' '.join(asked)}`" in line
+    group = typer.main.get_command(cli.app)
+    assert isinstance(group, click.Group)
+    (flag,) = [
+        p
+        for p in group.commands["search"].params
+        if isinstance(p, click.Option) and "--no-separate-tickets" in p.opts
+    ]
+    assert "one-cabin search" in (flag.help or "")
+
+
 def test_the_deprecated_command_reads_no_cheapest_tab(gf_session: Callable[..., Any]) -> None:
     fake = gf_session(_served(_LAX), _lax_with_marked_twin(5))
     result = CliRunner().invoke(cli.app, ["gflight", "JFK", "LAX", "--dep", _DEP.isoformat()])
@@ -476,6 +552,47 @@ def test_a_link_never_pins_a_separate_ticket_row(gf_session: Callable[..., Any])
     assert "Google Flights (itinerary #1 pinned):" in hidden.stdout
 
 
+def test_the_price_insight_counts_the_separate_ticket_fares_a_filtered_board_shows(
+    gf_session: Callable[..., Any],
+) -> None:
+    """JetBlue sells this trip at USD307 on one ticket, above Google's usual
+    USD120-260, and at USD247 on separate tickets, inside it."""
+    ret = _served(_BEST, origin="LGA", destination="FLL")
+    pages = [_served(_BEST), *[ret] * 5, _served(_CHEAPEST)]
+    asked = [*_SEARCH, *_FLL_LGA, "--ext", "AIRLINES B6"]
+    fake = gf_session(*pages)
+    shown = CliRunner().invoke(cli.app, asked, env={"COLUMNS": "200"})
+    assert shown.exit_code == 0, shown.output
+    assert len(fake.gets) == 7
+    assert _CHEAPEST_TFU in fake.gets[-1]
+    assert any(cell.endswith(" †") for cell in _price_cells(shown.stdout).values())
+    assert "Price insight: prices are typical for this trip" in " ".join(shown.stdout.split())
+    gf_session(*pages)
+    hidden = CliRunner().invoke(cli.app, [*asked, "--no-separate-tickets"], env={"COLUMNS": "200"})
+    assert hidden.exit_code == 0, hidden.output
+    assert "Price insight: prices are high for this trip" in " ".join(hidden.stdout.split())
+
+
+def test_the_price_insight_counts_a_separate_ticket_fare_below_googles_cheapest(
+    gf_session: Callable[..., Any],
+) -> None:
+    """Google's own cheapest, USD204, is inside its usual USD85-225; the
+    self transfer the table shows at USD80 is below it."""
+    args = [
+        *("search", "--cash-only", "--no-matrix-url", "JFK", "LAX", "--dep", _DEP.isoformat()),
+        *("--backend", "gflight", "--fast", "-n", "5"),
+    ]
+    gf_session(_served(_LAX), _lax_with_marked_twin(5, price=80))
+    shown = CliRunner().invoke(cli.app, args, env={"COLUMNS": "200"})
+    assert shown.exit_code == 0, shown.output
+    assert _price_cells(shown.stdout)["1"].endswith(" ‡")
+    assert "Price insight: prices are low for this trip" in " ".join(shown.stdout.split())
+    gf_session(_served(_LAX), _lax_with_marked_twin(5, price=80))
+    hidden = CliRunner().invoke(cli.app, [*args, "--no-separate-tickets"], env={"COLUMNS": "200"})
+    assert hidden.exit_code == 0, hidden.output
+    assert "Price insight: prices are typical for this trip" in " ".join(hidden.stdout.split())
+
+
 # ──────────────────────────────── the JSON ────────────────────────────────
 
 
@@ -518,6 +635,80 @@ def test_the_opt_out_prints_the_base_rows_and_counts_what_it_hid(
     said = " ".join(result.stderr.split())
     assert (
         "Google Flights: 33 itineraries on separate tickets hidden (--no-separate-tickets)." in said
+    )
+
+
+@pytest.mark.parametrize(
+    ("cheapest", "asked", "note"),
+    [
+        (
+            _served(_CHEAPEST),
+            ["--no-separate-tickets"],
+            "Google Flights: 4 itineraries on separate tickets hidden (--no-separate-tickets).",
+        ),
+        (
+            _THROTTLE_PAGE,
+            [],
+            "Itineraries on separate tickets not read: Google Flights rate-limited.",
+        ),
+    ],
+    ids=["hidden", "unread"],
+)
+def test_a_search_handed_to_matrix_still_says_what_became_of_separate_tickets(
+    gf_session: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    cheapest: str,
+    asked: list[str],
+    note: str,
+) -> None:
+    """No one-ticket JetBlue trip is under USD250, so Google's answer is empty
+    and auto hands the search to Matrix; its four separate-ticket trips at
+    USD247 would have answered it, had they been shown or read."""
+    ran: list[bool] = []
+
+    def _matrix(**_kw: object) -> None:
+        ran.append(True)
+
+    monkeypatch.setattr(cli, "_run_matrix_path", _matrix)
+    gf_session(_served(_BEST), cheapest)
+    args = ["auto" if a == "gflight" else a for a in _FLL_LGA]
+    result = CliRunner().invoke(
+        cli.app, [*_SEARCH, *args, "--ext", "AIRLINES B6", "--max-price", "250", *asked]
+    )
+    assert result.exit_code == 0, result.output
+    assert ran == [True]
+    said = " ".join(result.stderr.split())
+    assert said.count("separate tickets") == 1
+    assert note in said
+    assert "Using Matrix: no Google Flights itinerary matched" in said
+
+
+@pytest.mark.parametrize("asked", [[], ["--no-separate-tickets"]], ids=["shown", "hidden"])
+def test_a_separate_ticket_row_the_filter_removed_hands_an_empty_answer_to_matrix(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch, asked: list[str]
+) -> None:
+    """Google lists no one-ticket flight and one self transfer, on JetBlue, so
+    excluding JetBlue empties the answer: auto hands it to Matrix rather than
+    answer that Google has no flights."""
+    ran: list[bool] = []
+
+    def _matrix(**_kw: object) -> None:
+        ran.append(True)
+
+    monkeypatch.setattr(cli, "_run_matrix_path", _matrix)
+    fake = gf_session(_page(_ds1("ds1_flightless_board.json")), _lax_with_marked_twin(5))
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            *(*_SEARCH, "JFK", "LAX", "--dep", _DEP.isoformat(), "--fast", "--format", "json"),
+            *("--ext", "-AIRLINES B6", *asked),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert _CHEAPEST_TFU in fake.gets[-1]
+    assert ran == [True]
+    assert "Using Matrix: no Google Flights itinerary matched a carrier exclusion (B6)" in (
+        " ".join(result.stderr.split())
     )
 
 

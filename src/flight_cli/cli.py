@@ -4266,6 +4266,15 @@ def _separately_ticketed(r: Any) -> bool:
     return any(getattr(m, "ticketing", None) is not None for m in members)
 
 
+def _note_unchecked_return(unchecked: str) -> None:
+    """Say on stderr that the Cheapest tab went unread for `unchecked`, the
+    return check (`_return_checks_google_skips`) its rows could not be held to."""
+    err.print(
+        "[dim]Itineraries on separate tickets not read: Google lists no return for "
+        f"them to check against {_safe_text(unchecked)}.[/]"
+    )
+
+
 def _note_separate_tickets(
     results: Any, *, gf_mode: GfTransportMode, bags: bool, unchecked: str | None = None
 ) -> None:
@@ -4273,10 +4282,7 @@ def _note_separate_tickets(
     separate-ticket itineraries `--no-separate-tickets` hid. `unchecked` is the
     return check (`_return_checks_google_skips`) it was left unread for."""
     if unchecked is not None:
-        err.print(
-            "[dim]Itineraries on separate tickets not read: Google lists no return for "
-            f"them to check against {_safe_text(unchecked)}.[/]"
-        )
+        _note_unchecked_return(unchecked)
     unread: GfBackendError | None = getattr(results, "separate_failed", None)
     if unread is not None:
         # `removesuffix`: a browser refusal's note ends in its remedy's full stop.
@@ -4824,9 +4830,12 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
         raise typer.Exit(1) from e
 
     dropped: int = getattr(results, "dropped", 0)
-    # Handed on before either note, because both describe Google's answer and
-    # Matrix gives this one. Never with `--sellers`: an empty board fails that
-    # below, as a board with no row to open.
+    # Said before the hand-off below: shown or read, these itineraries could
+    # have answered a search that now goes to Matrix.
+    _note_separate_tickets(results, gf_mode=gf_mode, bags=opts.bags is not None)
+    # Handed on before the pin-cap and currency notes, because both describe
+    # Google's answer and Matrix gives this one. Never with `--sellers`: an
+    # empty board fails that below, as a board with no row to open.
     if dropped and matrix_fallback and not sellers:
         if not results:
             return dropped
@@ -4847,12 +4856,8 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
             return 0
     _pin_cap_note(legs=legs, top_n=top_n)
     _note_other_currencies(results, opts.currency or "USD")
-    _note_separate_tickets(
-        results,
-        gf_mode=gf_mode,
-        bags=opts.bags is not None,
-        unchecked=unchecked if separate_tickets == "show" else None,
-    )
+    if unchecked and separate_tickets == "show":
+        _note_unchecked_return(unchecked)
 
     # Checked before the answer is printed: a `--sellers` pick outside the
     # table is a usage error, not a pin to fall back from, and an empty board
