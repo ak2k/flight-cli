@@ -189,22 +189,14 @@ def _spa_calendar_leg(
     out: Leg, ret: Leg | None, start: date, end: date, duration_min: int, duration_max: int
 ) -> dict[str, Any]:
     """SPA URL-state slice for calendar mode. Round-trip is folded into ONE
-    slice with `routingRet`/`extRet` carrying return-direction routing."""
+    slice, and `routingRet`/`extRet` state the return's own codes as the
+    specific-date slice does: a return copying the outbound's codes and one
+    with none search differently, so `""` must mean only "none"."""
     d: dict[str, Any] = {
         "origin": list(out.origins),
         "dest": list(out.destinations),
+        **_spa_routing_fields(out, ret),
     }
-    if out.route_language or out.extension:
-        d["routing"] = out.route_language or ""
-        d["ext"] = out.extension or ""
-        if ret is None or (
-            ret.route_language == out.route_language and ret.extension == out.extension
-        ):
-            d["routingRet"] = ""
-            d["extRet"] = ""
-        else:
-            d["routingRet"] = ret.route_language or ""
-            d["extRet"] = ret.extension or ""
     dates: dict[str, Any] = {
         "searchDateType": "calendar",
         "departureDate": start.isoformat(),
