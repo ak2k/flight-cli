@@ -3,9 +3,9 @@
 
 Google is faked at `cli._gflight_results`, which answers a round trip's two legs
 with (outbound, return) combinations and a one-way's leg with one-way rows, keyed
-on the leg's origin. Matrix is faked at `_matrix_into` on the enriched path and
-at `_run_matrix_path` where Matrix answers the search instead. No test reaches
-Google, Matrix or Chrome."""
+on the leg's origin. Matrix is faked at `_matrix_into` on the enriched path, its
+low-row check at `_low_check`, and at `_run_matrix_path` where Matrix answers
+the search instead. No test reaches Google, Matrix or Chrome."""
 
 from __future__ import annotations
 
@@ -161,6 +161,18 @@ def _matrix_answers() -> Callable[..., Any]:
 
 async def _no_matrix(*_a: object, **_kw: object) -> None:
     return None
+
+
+@pytest.fixture(autouse=True)
+def _no_low_check(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[reportUnusedFunction] - autouse pytest fixture
+    """The enriched path asks the live Matrix for a Google-only row priced
+    under every Matrix fare, which the fakes here leave; these tests are about
+    the split line, so that check finds no row."""
+
+    def _none(*_a: object, **_kw: object) -> None:
+        return None
+
+    monkeypatch.setattr(cli, "_low_check", _none)
 
 
 def _search(*extra: str, ret: bool = True, back_day: dt.date = _RET, to: str = "LAX") -> Result:
