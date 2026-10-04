@@ -5721,11 +5721,16 @@ def _note_separate_tickets(
 ) -> None:
     """Say on stderr why the Cheapest tab went unread, or how many of its
     separate-ticket itineraries `--no-separate-tickets` hid. `unchecked` is the
-    return check (`_return_checks_google_skips`) it was left unread for."""
+    return check (`_return_checks_google_skips`) it was left unread for.
+
+    A tab that failed narrows the answer: it may hold rows the user did not opt
+    out of. Hidden rows were opted out of, and a tab left unread for a return
+    check holds no row that check can be held to, so both are notes alone."""
     if unchecked is not None:
         _note_unchecked_return(unchecked)
     unread: GfBackendError | None = getattr(results, "separate_failed", None)
     if unread is not None:
+        _envelope.narrow()
         # `removesuffix`: a browser refusal's note ends in its remedy's full stop.
         note = _gf_refusal(unread, transport=gf_mode, bags=bags).note.removesuffix(".")
         err.print(f"[dim]Itineraries on separate tickets not read: {note}.[/]")
