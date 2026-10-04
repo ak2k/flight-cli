@@ -123,15 +123,18 @@ Google for the other airport, and fli's row decoder has no entry for an alias,
 so every row Google serves at one fails. Build airport members only through
 `fli_bridge.fli_airport`, which gives each aliased code a member of its own,
 named that code with the same display name (so the JSON dump shows "Naha
-Airport" for OKA and NAH alike). `tests/test_airport_alias_requests.py` fails
-on any `getattr`/`hasattr` call on the enum or `Airport[...]` subscript under
-`src/`. MLH is the one alias kept: it is EuroAirport's second code, the same
-airport as BSL, and Google serves it only as BSL (JFK-MLH asked for MLH gave an
-empty board, asked for BSL 8 rows). Measured 2026-10-01: `flight search LAX OKA
---dep 2026-10-20 --backend gflight --fast --format json` through the enum
-printed `[]` with exit 0; through `fli_airport` it printed 27 rows (CI, BR, CX
-via TPE or HKG, from USD577), each landing at OKA by its clock span: departure
-to arrival less elapsed time is +960 minutes from LAX, where NAH gives +900.
+Airport" for OKA and NAH alike). `tests/test_airport_alias_requests.py` fails on
+an `Airport[...]` subscript, a member read off the enum, `__members__` outside
+an `.items()` loop, or `getattr`/`hasattr` on it, under any import name or
+dotted path, and on a `_parse_airport` call outside `_leg_airport`, all under
+`src/`; `tests/test_airport_enum_gate.py` holds each form it is proven on. MLH
+is the one alias kept: it is EuroAirport's second code, the same airport as BSL,
+and Google serves it only as BSL (JFK-MLH asked for MLH gave an empty board,
+asked for BSL 8 rows). Measured 2026-10-01: `flight search LAX OKA --dep
+2026-10-20 --backend gflight --fast --format json` through the enum printed `[]`
+with exit 0; through `fli_airport` it printed 27 rows (CI, BR, CX via TPE or
+HKG, from USD577), each landing at OKA by its clock span: departure to arrival
+less elapsed time is +960 minutes from LAX, where NAH gives +900.
 
 **Airline codes alias the same way: fli's `Airline` enum files six codes
 under another carrier's member, and every pair is two carriers.** W9 (Wizz Air
