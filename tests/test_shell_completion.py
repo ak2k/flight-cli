@@ -63,6 +63,8 @@ _OTHER_BUCKETS = ["early", "midday", "afternoon", "evening", "night"]
         ("flight calendar --depart-times morning,", [f"morning,{b}" for b in _OTHER_BUCKETS]),
         ("flight detail --return-times morning,", [f"morning,{b}" for b in _OTHER_BUCKETS]),
         ("flight search --depart-times 9:30-1", []),
+        ("flight search --depart-times bogus,", []),
+        ("flight search --depart-times 9:30-13:45,", []),
         ("flight search --arrive-times ev", ["evening"]),
         ("flight search --return-arrive-times morning,", []),
     ],

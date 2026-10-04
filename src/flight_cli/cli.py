@@ -7006,13 +7006,16 @@ _TIME_OF_DAY_CHOICES = ("early", "morning", "midday", "afternoon", "evening", "n
 def _completer(names: tuple[str, ...], *, comma_list: bool = False) -> Callable[[str], list[str]]:
     """A Typer `autocompletion` callback offering `names`; Typer keeps the
     ones that start with what was typed. With `comma_list`, it offers the
-    next item of a comma list, skipping the items already given."""
+    next item of a comma list, skipping the items already given, and nothing
+    after an item not among `names`, which the parser may refuse."""
 
     def complete(incomplete: str) -> list[str]:
         if not comma_list or "," not in incomplete:
             return list(names)
         head = incomplete.rsplit(",", 1)[0]
         given = {item.strip() for item in head.split(",")}
+        if not given <= set(names):
+            return []
         return [f"{head},{name}" for name in names if name not in given]
 
     return complete
