@@ -1,0 +1,40 @@
+# Captured 2026-10-01 from Matrix's SPA in a real Chrome: /search opened on
+# flight-cli's deep link for JFK-LHR one-way, 2026-10-21, and the form showed
+# the date as "Arrival", "This day only". After Search, the SPA's own URL
+# state, decoded from the page URL's search= parameter (the capture kept the
+# decoded JSON, not the URL text). The SPA omits a one-way's returnDate, which
+# flight-cli writes as "". Its /v1/search body is
+# specific_jfk_lhr_ow_arrive.json.
+{
+ "type": "one-way",
+ "slices": [
+  {
+   "origin": [
+    "JFK"
+   ],
+   "dest": [
+    "LHR"
+   ],
+   "dates": {
+    "searchDateType": "specific",
+    "departureDate": "2026-10-21",
+    "departureDateType": "arrive",
+    "departureDateModifier": "0",
+    "departureDatePreferredTimes": [],
+    "returnDateType": "depart",
+    "returnDateModifier": "0",
+    "returnDatePreferredTimes": []
+   }
+  }
+ ],
+ "options": {
+  "cabin": "COACH",
+  "stops": "-1",
+  "extraStops": "1",
+  "allowAirportChanges": "true",
+  "showOnlyAvailable": "true"
+ },
+ "pax": {
+  "adults": "1"
+ }
+}

@@ -275,6 +275,21 @@ each leg `co2_emissions_g`, null where the slot is empty. The Google table adds
 `CO2 kg` (kilograms and the percent; green lower, red higher) when a shown row
 has a figure.
 
+**The table at the output's width.** Rich takes the width from the first of
+stdin, stdout and stderr that is a terminal; `COLUMNS` overrides it; with no
+terminal and no `COLUMNS` it is 80. So `flight … | less` from a terminal prints
+at the terminal's width, and an agent's captured stdout at 80. Rich wraps a
+cell at its spaces, so the one-line legs cell "EI 104 → EI 152" printed as
+"EI 104 → EI" / "152": at 80 columns that split 3 designators on the first 12
+JFK-LHR rows, 84 on all 101, 100 on JFK,EWR-LHR, 66 on JFK-LAX's 95 and 18 on
+the HNL-MIA round trip's 3x3. `_render_gflight_table` prints the first layout
+whose natural width is at most the console's (a table exactly as wide fits):
+legs on one line with CO2, legs one per line with CO2, legs one per line
+without CO2. The last prints even when it is still wider; a board with no CO2
+grams has only the first two. A dropped column prints a dim note that
+`--format json` carries it, and the JSON is the same at every width. The width
+is measured unbounded, because `console.measure` caps it at the console's.
+
 **How the full board is served.**
 - Rows are deduped per itinerary (every leg's carrier, flight number and
   departure datetime), keeping the priced and cheaper listing at the first
