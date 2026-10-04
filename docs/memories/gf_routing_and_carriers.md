@@ -1322,9 +1322,11 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
   GBP952 on two days DUB was cheaper; asked in USD, all 14 days came back USD,
   each cheaper from DUB. `NYC LON -d 7` as one combined query priced 11 of 14
   days (20 solutions, cheapest USD817); as 18 pairs plus that query it priced
-  14 of 14, cheaper on 7 days (10-27 USD766 EWR→LGW), the combined query was
-  below every pair on none, the 7 pairs into STN, LTN or SEN priced nothing,
-  and the 19 queries took about 110 s.
+  14 of 14: the 3 days the combined query alone left unpriced (10-25 to 10-27,
+  the last at USD766 EWR→LGW) and 6 of the 11 it did price, cheaper on 10-28
+  to 11-02; the combined query was below every pair on none; 8 of the 18 pairs
+  priced nothing (JFK, LGA and EWR into LTN and SEN, JFK and EWR into STN) and
+  LGA→STN priced 1 day; and the 19 queries took about 110 s.
 - **Admission** (`_gf_calgraph.graph_blocker`). The graph has no itineraries,
   so it is asked only when the page URL writes every constraint exactly AND
   Google was measured applying it there. Admitted, per leg: a stop ceiling of
