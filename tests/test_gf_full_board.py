@@ -17,6 +17,7 @@ import re
 import sys
 import urllib.parse
 from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, override
 
 import pytest
@@ -247,7 +248,7 @@ def test_n_above_thirty_returns_the_rows_the_full_board_holds(
     rows: list[Any] = json.loads(result.stdout)
     assert len(rows) == 60
     assert len({_json_booked(r) + str(r["legs"][0]["departure_datetime"]) for r in rows}) == 60
-    assert len(fake.gets) == 1
+    assert len(fake.gets) == 2  # the board, then its Cheapest tab
     assert "tfu=EgQIABABIgA" in fake.gets[0]
 
 
@@ -583,6 +584,22 @@ def test_a_round_trip_spends_one_board_and_its_pin_budget(
     assert len(fake.gets) == 1 + min(top_n, 10)
 
 
+@pytest.mark.parametrize("extra", [("--format", "json"), ("--fast",)], ids=["json", "table"])
+def test_a_round_trip_that_loses_no_pin_adds_nothing_to_stderr(
+    extra: tuple[str, ...], gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Green at the base and the tip: every pin is served a return, so no line
+    names one and stderr stays empty."""
+    fake = gf_session(_served(_LHR), _return_board())
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    argv = [*_SEARCH, "JFK", "LHR", "--dep", _DEP.isoformat(), "--return", _RET.isoformat()]
+    result = CliRunner().invoke(cli.app, [*argv, "--backend", "gflight", *extra])
+    assert result.exit_code == 0, result.output
+    assert result.stdout
+    assert result.stderr == ""
+    assert len(fake.gets) == 12  # the outbound, ten pins, then the Cheapest tab
+
+
 def test_a_return_board_the_routing_empties_is_counted_and_routed_to_matrix(
     gf_session: Callable[..., Any],
     monkeypatch: pytest.MonkeyPatch,
@@ -870,6 +887,281 @@ def test_under_auto_every_check_that_emptied_the_board_is_named(
         "Using Matrix: no Google Flights itinerary matched a carrier filter (AA) and a maximum "
         "trip duration (60 min) (95 rows filtered out)"
     ) in printed, printed
+
+
+# ──────────────────────── +CABIN, held on every leg ─────────────────────────
+
+
+def _lhr_json(*extra: str) -> list[str]:
+    return [
+        *_SEARCH,
+        "JFK",
+        "LHR",
+        "--dep",
+        _DEP.isoformat(),
+        "--backend",
+        "gflight",
+        "--format",
+        "json",
+        "-n",
+        "200",
+        *extra,
+    ]
+
+
+def test_a_cabin_requirement_naming_the_asked_cabin_keeps_a_board_booked_in_it(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red at the base, where `--backend gflight` refused `+CABIN`. Every leg
+    on the capture is booked in economy."""
+    gf_session(_served(_LHR))
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    result = CliRunner().invoke(cli.app, _lhr_json("--cabin", "economy", "--ext", "+CABIN 3"))
+    assert result.exit_code == 0, result.output
+    assert len(json.loads(result.stdout)) == 101
+
+
+@pytest.mark.parametrize("cabin", [4, None], ids=["first", "none-stated"])
+def test_a_row_with_a_leg_outside_the_required_cabin_is_dropped(
+    cabin: int | None, gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red at the base. EI104+EI152 with its connection booked in first, or in
+    no cabin Google states: the other 100 rows stay, and without `+CABIN` so
+    does this one."""
+
+    def _connection_in(raw: list[Any]) -> None:
+        raw[0][2][1][gfid._LEG_CABIN_IDX] = cabin
+
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    edited = "Aer Lingus|104+Aer Lingus|152"
+    for extra, rows, kept in (((), 101, True), (("--ext", "+CABIN 3"), 100, False)):
+        gf_session(_lhr_with_row_edited("EI104+EI152", _connection_in))
+        result = CliRunner().invoke(cli.app, _lhr_json("--cabin", "economy", *extra))
+        assert result.exit_code == 0, result.output
+        booked = [_json_booked(m) for m in json.loads(result.stdout)]
+        assert (len(booked), edited in booked) == (rows, kept)
+
+
+def _relisted(
+    payload: list[Any], pick: Callable[[Any], bool], *listings: tuple[int, int | None]
+) -> list[Any]:
+    """`payload` with every raw row `pick` takes listed again at the end of its
+    block, once per (fare change, cabin of its last leg) in `listings`, a None
+    cabin left as booked. With no `listings`, once, $50 cheaper and its last
+    leg booked in first."""
+    for index in gfid._DS_ROW_BLOCKS:
+        block: Any = payload[index]
+        if not block:
+            continue
+        copies: list[Any] = []
+        for raw in block[0]:
+            if pick(gfid._parse_flight_with_id(raw)):
+                for change, cabin in listings or ((-50, 4),):
+                    copy: Any = json.loads(json.dumps(raw))
+                    copy[1][0][1] += change
+                    if cabin is not None:
+                        copy[0][2][-1][gfid._LEG_CABIN_IDX] = cabin
+                    copies.append(copy)
+        block[0].extend(copies)
+    return payload
+
+
+def test_a_dearer_listing_in_the_required_cabin_stands_in_for_a_cheaper_one_outside_it(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red at the tip, which kept only the cheaper listing and then dropped it
+    under `+CABIN 3`. Google lists EI104+EI152 a second time, $50 cheaper with
+    its connection in first: the economy listing is the fare a `+CABIN 3`
+    search is offered, and without `+CABIN` the cheaper one still is."""
+    payload = _relisted(json.loads(_ds1(_LHR)), lambda r: _booked(r) == "EI104+EI152")
+    page = _page(
+        _answering(json.dumps(payload), origin=None, destination=None, date=_DEP.isoformat())
+    )
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    edited = "Aer Lingus|104+Aer Lingus|152"
+    for extra, fare in (((), 243), (("--ext", "+CABIN 3"), 293)):
+        gf_session(page)
+        result = CliRunner().invoke(cli.app, _lhr_json("--cabin", "economy", *extra))
+        assert result.exit_code == 0, result.output
+        rows: list[dict[str, Any]] = json.loads(result.stdout)
+        assert len(rows) == 101
+        assert [m["price"] for m in rows if _json_booked(m) == edited] == [fare]
+
+
+def test_the_cheapest_listing_in_the_required_cabin_is_the_one_offered(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Google lists EI104+EI152 twice more, after its $293 economy listing: at
+    $243 with its connection in first, and at $273 in economy. A `+CABIN 3`
+    search is offered $273, the cheapest economy listing, not the first one on
+    the page."""
+    payload = _relisted(
+        json.loads(_ds1(_LHR)), lambda r: _booked(r) == "EI104+EI152", (-50, 4), (-20, None)
+    )
+    gf_session(
+        _page(_answering(json.dumps(payload), origin=None, destination=None, date=_DEP.isoformat()))
+    )
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    result = CliRunner().invoke(cli.app, _lhr_json("--cabin", "economy", "--ext", "+CABIN 3"))
+    assert result.exit_code == 0, result.output
+    edited = "Aer Lingus|104+Aer Lingus|152"
+    assert [m["price"] for m in json.loads(result.stdout) if _json_booked(m) == edited] == [273]
+
+
+def test_a_cheaper_listing_outside_the_required_cabin_is_not_counted_twice(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Green at the tip and after: each of the three two-stop rows, listed a
+    second time in another cabin, is one row over the stop ceiling."""
+    payload = _relisted(json.loads(_ds1(_LHR)), lambda r: len(r.flight.legs) > 2)
+    gf_session(
+        _page(_answering(json.dumps(payload), origin=None, destination=None, date=_DEP.isoformat()))
+    )
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    result = CliRunner().invoke(
+        cli.app, _lhr_json("--cabin", "economy", "--ext", "+CABIN 3", "--stops", "1")
+    )
+    assert result.exit_code == 0, result.output
+    assert len(json.loads(result.stdout)) == 98
+    assert " ".join(result.stderr.split()).count(_OVER_ONE_STOP) == 1
+
+
+def test_a_return_listed_again_cheaper_outside_the_required_cabin_still_pairs(
+    gf_session: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Red at the tip, which kept the cheaper listing of each return, dropped
+    them all under `+CABIN 3` and lost the pin. Every return on the served
+    board, booked in economy, is listed again $50 cheaper with its last leg in
+    first."""
+    payload: list[Any] = json.loads(_ds1("ds1_return_leg_pinned.json"))
+    for raw in gfid._rows_from_ds1(payload).rows:
+        for leg in raw[0][2]:
+            leg[gfid._LEG_CABIN_IDX] = 1
+    returns = _page(
+        _answering(
+            json.dumps(_relisted(payload, lambda _r: True)),
+            origin="LHR",
+            destination="JFK",
+            date=_RET.isoformat(),
+        )
+    )
+    fake = gf_session(_served(_LHR), returns)
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    argv = [*_SEARCH, "JFK", "LHR", "--dep", _DEP.isoformat(), "--return", _RET.isoformat()]
+    asked = ["--backend", "gflight", "--fast", "--format", "json", "-n", "1"]
+    result = CliRunner().invoke(cli.app, [*argv, *asked, "--cabin", "economy", "--ext", "+CABIN 3"])
+    assert result.exit_code == 0, result.output
+    assert len(fake.gets) == 2
+    cheapest = min(r.flight.price for r in _board(_return_board()) if r.flight.price is not None)
+    [(_, back)] = json.loads(result.stdout)
+    assert back["price"] == cheapest
+    assert {leg["amenities"]["cabin"] for leg in _legs(back)} == {"ECONOMY"}
+    assert not any(" lost: " in r.getMessage() for r in caplog.records)
+
+
+def _return_board_booked_in(cabin: int) -> str:
+    payload: list[Any] = json.loads(_ds1("ds1_return_leg_pinned.json"))
+    for raw in gfid._rows_from_ds1(payload).rows:
+        for leg in raw[0][2]:
+            leg[gfid._LEG_CABIN_IDX] = cabin
+    return _page(
+        _answering(json.dumps(payload), origin="LHR", destination="JFK", date=_RET.isoformat())
+    )
+
+
+def test_a_return_board_the_cabin_requirement_empties_names_it_not_the_routing(
+    gf_session: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No routing was asked, so the lines that account for the pin name the
+    cabin requirement. Every return on the served board is booked in first."""
+    fake = gf_session(_served(_LHR), _return_board_booked_in(4))
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    enriched: list[object] = []
+
+    async def _matrix_into(*args: object) -> None:
+        enriched.append(args)
+
+    monkeypatch.setattr(cli, "_matrix_into", _matrix_into)
+    argv = [*_SEARCH, "JFK", "LHR", "--dep", _DEP.isoformat(), "--return", _RET.isoformat()]
+    asked = ["--backend", "gflight", "--fast", "--cabin", "economy", "--ext", "+CABIN 3", "-n", "1"]
+    result = CliRunner().invoke(cli.app, [*argv, *asked])
+    assert not enriched, "the search went to Matrix"
+    assert result.exit_code == 0, result.output
+    assert len(fake.gets) == 2
+    checks = "a cabin requirement ('+CABIN 3')"
+    lines = [r.getMessage() for r in caplog.records if r.name == "flight_cli._gflight_ids"]
+    assert f"1 of 1 pinned outbounds have no return flight matching {checks}" in lines
+    assert (
+        "pinned outbound EI104/EI152 (USD293.00) lost: "
+        f"Google served 3 returns for it, none matching {checks}"
+    ) in lines
+    assert not any("the routing" in ln for ln in lines)
+
+
+# ─────────────── rows over the stop ceiling, counted on stderr ───────────────
+
+_OVER_ONE_STOP = (
+    "Google Flights returned 3 rows over the stop ceiling it was asked for (1); they are not shown."
+)
+
+
+@pytest.mark.parametrize(
+    "fmt", [("--format", "json"), ("--fast", "--format", "table")], ids=["json", "table"]
+)
+@pytest.mark.parametrize(
+    "limit", [("--stops", "1"), ("--ext", "MAXSTOPS 1")], ids=["stops", "maxstops"]
+)
+def test_rows_over_the_stop_ceiling_are_counted_once_on_stderr(
+    limit: tuple[str, ...],
+    fmt: tuple[str, ...],
+    gf_session: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red at the base, which dropped the capture's three two-stop rows
+    without a word. The document keeps its shape."""
+    gf_session(_served(_LHR))
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    argv = [*_SEARCH, "JFK", "LHR", "--dep", _DEP.isoformat(), "--backend", "gflight"]
+    result = CliRunner().invoke(cli.app, [*argv, *fmt, "-n", "200", *limit], env={"COLUMNS": "250"})
+    assert result.exit_code == 0, result.output
+    assert " ".join(result.stderr.split()).count(_OVER_ONE_STOP) == 1
+    if fmt[-1] == "json":
+        rows: list[dict[str, Any]] = json.loads(result.stdout)
+        assert len(rows) == 98
+        assert all(len(_legs(m)) <= 2 for m in rows)
+
+
+@pytest.mark.parametrize("extra", [(), ("--ext", "-AIRLINES BA")], ids=["plain", "carrier-out"])
+def test_a_search_with_no_stop_ceiling_counts_nothing(
+    extra: tuple[str, ...], gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Green at the base and the tip."""
+    gf_session(_served(_LHR))
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    result = CliRunner().invoke(cli.app, _lhr_json(*extra))
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)
+    assert "stop ceiling" not in result.stderr
+
+
+def test_a_board_the_stop_ceiling_helped_empty_keeps_its_own_line_alone(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Green at the base and the tip: no LH-operated nonstop flies JFK-LHR, so
+    the board empties and its line names every check."""
+    gf_session(_served(_LHR))
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    result = CliRunner().invoke(cli.app, _lhr_json("--stops", "0", "--routing", "O:LH+"))
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == []
+    err = " ".join(result.stderr.split())
+    assert "no itinerary matched" in err
+    assert "a stop ceiling of 0" in err
+    assert "rows over the stop ceiling" not in err
 
 
 def _decode_fields(buf: bytes) -> dict[int, list[Any]]:
@@ -1569,6 +1861,33 @@ def test_a_multi_cabin_google_answer_prints_its_notes_before_the_document(
         assert shown.count(note) == count, result.stderr
         assert shown.index(note) < document, result.output
     assert shown.index(_PIN_CAP_NOTE) < shown.index(_JOIN_NOTE) < shown.index(_CURRENCY_NOTE)
+
+
+@pytest.mark.parametrize(("backend", "shown"), [("auto", False), ("gflight", True)])
+def test_a_multi_cabin_stop_count_prints_only_when_googles_boards_answer(
+    monkeypatch: pytest.MonkeyPatch, backend: str, shown: bool
+) -> None:
+    """Red at the base under `--backend gflight`, which counted nothing; green
+    at both under auto, whose hand-off shows Matrix's table and no Google note.
+    Each cabin's search drops one two-stop row."""
+    coach, business = gfid.Board(_usd_rows()), gfid.Board(dropped=7)
+    _google_serves(monkeypatch, coach=coach, business=business)
+
+    def _search(f: Any, *, keep: Callable[[int, Any], bool], **_kw: object) -> gfid.Board[Any]:
+        assert not keep(0, SimpleNamespace(flight=SimpleNamespace(legs=[None] * 3)))
+        return business if f.seat_type.name == "BUSINESS" else coach
+
+    monkeypatch.setattr(gfid, "search_with_ids", _search)
+    _matrix_multi(monkeypatch)
+    argv = _multi_cabin_round_trip("--backend", backend, "--stops", "1")
+    result = CliRunner().invoke(cli.app, argv)
+    assert result.exit_code == 0, result.output
+    note = (
+        "Google Flights COACH returned 1 row over the stop ceiling it was asked for (1); "
+        "it is not shown."
+    )
+    err = " ".join(result.stderr.split())
+    assert (note in err, "BUSINESS returned" in err) == (shown, False), err
 
 
 @pytest.mark.parametrize(("backend", "handed_off"), [("auto", True), ("gflight", False)])

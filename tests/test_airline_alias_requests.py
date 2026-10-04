@@ -245,12 +245,13 @@ def test_a_code_fli_has_no_entry_for_still_fails_its_row() -> None:
 def test_an_aliased_include_runs_on_google_and_prints_its_rows(
     gf_session: Callable[..., Any],
 ) -> None:
-    """One GET, asking for W9, and every row Google sells under it printed.
-    The base refused the include for Google and exited 2 before any request."""
+    """A GET for the board and one for its Cheapest tab, each asking for W9,
+    and every row Google sells under it printed. The base refused the include
+    for Google and exited 2 before any request."""
     fake = gf_session(_page(json.dumps(_board("W9", every_row=True))))
     args = [*_SEARCH, "LTN", "TIA", "--dep", _DEP.isoformat(), "--ext", "AIRLINES W9"]
     result = CliRunner().invoke(cli.app, [*args, *_GOOGLE, "--format", "json", "-n", "100"])
-    assert [_carriers(url) for url in fake.gets] == [[["W9"]]]
+    assert [_carriers(url) for url in fake.gets] == [[["W9"]], [["W9"]]]
     assert result.exit_code == 0, result.output
     assert len(json.loads(result.stdout)) == 95
 
@@ -266,7 +267,8 @@ def test_the_table_shows_an_aliased_carrier(gf_session: Callable[..., Any]) -> N
 
 
 def test_a_round_trip_pins_an_aliased_carrier(gf_session: Callable[..., Any]) -> None:
-    """Every return board is asked for with the outbound pinned under W9."""
+    """Every return board is asked for with the outbound pinned under W9; the
+    Cheapest tab, read last, pins nothing."""
     fake = gf_session(
         _page(json.dumps(_board("W9", every_row=True))),
         _page(_answering(_ds1(_RETURN), origin="TIA", destination="LTN", date=_RET.isoformat())),
@@ -274,9 +276,10 @@ def test_a_round_trip_pins_an_aliased_carrier(gf_session: Callable[..., Any]) ->
     dates = ["--dep", _DEP.isoformat(), "--return", _RET.isoformat()]
     args = [*_SEARCH, "LTN", "TIA", *dates, *_GOOGLE, "--fast", "--format", "json", "-n", "2"]
     result = CliRunner().invoke(cli.app, args)
-    assert len(fake.gets) > 1, result.output
+    assert len(fake.gets) > 2, result.output
     assert _pinned_carriers(fake.gets[0]) == [[], []]
-    for url in fake.gets[1:]:
+    assert _pinned_carriers(fake.gets[-1]) == [[], []]
+    for url in fake.gets[1:-1]:
         outbound, ret = _pinned_carriers(url)
         assert outbound
         assert set(outbound) == {"W9"}

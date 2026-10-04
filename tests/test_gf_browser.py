@@ -2179,7 +2179,7 @@ def _transport_seen(
 
     calls: list[tuple[Any, ...]] = []
 
-    def _record(_legs: Any, _opts: Any, _top_n: Any, *rest: Any) -> list[Any]:
+    def _record(_legs: Any, _opts: Any, _top_n: Any, *rest: Any, **_kw: Any) -> list[Any]:
         calls.append(rest)
         return []
 
@@ -2570,7 +2570,8 @@ def test_the_headed_flag_reaches_the_launch_call_itself(
     launch call rather than off anything that reports it. Nothing is stubbed
     between the option and that call; rung 1 is blocked, so a transport that
     failed to arrive shows up as no launch at all rather than as a quiet
-    fallback to curl_cffi."""
+    fallback to curl_cffi. The Cheapest tab is the second navigation, on the
+    same browser."""
     from typer.testing import CliRunner
 
     from flight_cli import cli
@@ -2599,7 +2600,9 @@ def test_the_headed_flag_reaches_the_launch_call_itself(
     assert pw.chromium.launches == 1
     assert pw.chromium.launch_kwargs["headless"] is False
     assert pw.chromium.launch_kwargs["channel"] == "chrome"
-    assert len(_page_of(pw).gotos) == 1
+    gotos = [url for url, _, _ in _page_of(pw).gotos]
+    assert len(gotos) == 2
+    assert "tfu=EggIABABIAIoASIA" in gotos[1]
 
 
 def test_a_matrix_multi_cabin_search_opens_no_browser_session(

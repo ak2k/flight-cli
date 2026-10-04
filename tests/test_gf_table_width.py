@@ -214,6 +214,56 @@ def test_no_designator_is_printed_across_two_lines_at_80_columns_or_more(
     assert not failures
 
 
+def _ticketed(results: list[Any]) -> list[Any]:
+    """`results` with rows sold as separate tickets: every third one-way row,
+    the two marks in turn, or on a round trip three outbounds as rows of their
+    own, as Google lists them."""
+    if all(isinstance(r, tuple) for r in results):
+        outbounds = [cast("tuple[Any, ...]", r)[0] for r in results[::3]]
+        return [*results, *((replace(o, ticketing="self_transfer"),) for o in outbounds)]
+    return [
+        replace(g, ticketing="self_transfer" if k % 2 else "separate_tickets") if k % 3 == 0 else g
+        for k, g in enumerate(results)
+    ]
+
+
+def _price_cells(text: str) -> list[tuple[str, str]]:
+    """(label, price) of every table line, the label blank on a row's later
+    lines."""
+    return [
+        (cells[1].strip(), cells[2].strip())
+        for ln in _table(text)
+        if ln.startswith("│") and len(cells := ln.split("│")) > 2
+    ]
+
+
+@pytest.mark.parametrize("bags", [None, Bags(checked=1)], ids=["no-bags", "bags"])
+@pytest.mark.parametrize("board", list(_BOARDS))
+def test_a_separate_ticket_mark_stays_beside_its_price_at_80_columns_or_more(
+    monkeypatch: pytest.MonkeyPatch, board: str, bags: Bags | None
+) -> None:
+    """The mark widens the price column the layouts measure, and no layout
+    wraps it off its price or crops it."""
+    results, legs, _ = _BOARDS[board]
+    results = _ticketed(results)
+    want: list[tuple[str, str]] = []
+    for i, r in enumerate(cli._price_ordered(results), 1):
+        items = cast("tuple[Any, ...]", r) if isinstance(r, tuple) else (r,)
+        for j, g in enumerate(items):
+            label = f"{i}{'a' if j == 0 else 'b'}" if len(items) > 1 else str(i)
+            price = "—" if g.flight.price is None else f"{g.flight.currency}{g.flight.price:.2f}"
+            mark = {"self_transfer": " ‡", "separate_tickets": " †"}.get(g.ticketing or "", "")
+            want.append((label, price + mark))
+    assert any(p.endswith("‡") for _, p in want)
+    for width in range(80, 121, 2):
+        text = _render(monkeypatch, results, legs, width, bags=bags)
+        assert max(len(ln) for ln in _table(text)) <= width
+        assert all(ln.endswith("┓") for ln in text.splitlines() if ln.startswith("┏"))
+        cells = _price_cells(text)
+        assert [c for c in cells if c[0]] == want, width
+        assert not [p for label, p in cells if not label and p], width
+
+
 @pytest.mark.parametrize("bags", [None, Bags(checked=1)], ids=["no-bags", "bags"])
 @pytest.mark.parametrize("board", list(_BOARDS))
 def test_a_stacked_leg_prints_beside_its_own_legroom(
