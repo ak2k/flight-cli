@@ -8,7 +8,7 @@ leaves unasked is named on stderr and in the JSON document. Each query carries
 only the cash hints of rows on its own pair, and one leg's answers render as
 one entry. A one-airport search asks exactly what it always asked.
 
-No test here reaches a provider: the registry builds a recording provider in
+No test here reaches a provider: the registry hands out a recording provider in
 place of the real ones, so `gather_awards` and the fan-out under it run."""
 
 from __future__ import annotations
@@ -23,12 +23,11 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 from typer.testing import CliRunner
 
-from conftest import LITERAL_DATES_NOW
+from conftest import LITERAL_DATES_NOW, hand_out_providers
 from flight_cli import cli
 from flight_cli._gflight_ids import Board
 from flight_cli.models import SearchResult
 from flight_cli.pp import cli as pp_cli
-from flight_cli.providers import registry
 from flight_cli.providers.base import AwardFlight, CabinAward, LegQuery
 from test_gf_airport_sets import _board_from_jfk_and_ewr
 
@@ -108,9 +107,6 @@ class _Recorder:
 def arms(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _Arms:
     state = _Arms()
 
-    async def _construct(**_kw: object) -> list[Any]:
-        return [_Recorder(state)]
-
     class _Matrix:
         def __init__(self, **_kw: object) -> None:
             pass
@@ -127,7 +123,7 @@ def arms(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _Arms:
     def _awards_run(sel: Any) -> bool:
         return not cast("bool", sel.cash_only)
 
-    monkeypatch.setattr(registry, "_construct_enabled", _construct)
+    hand_out_providers(monkeypatch, _Recorder(state))
     monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
     monkeypatch.setattr(cli, "_should_run_awards", _awards_run)
     monkeypatch.setattr(cli, "MatrixClient", _Matrix)

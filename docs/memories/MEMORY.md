@@ -50,8 +50,10 @@ go into detail and are loaded on demand.
   per-pair cost (PointsPath cabins × airlines requests, one seats.aero quota
   unit), the cap of 8 pair queries a search and its order (cash-flown pairs
   first, a pair per leg per round), the stderr line and `pairs_not_asked`, the
-  matched-id route check in `join`, and seats.aero's documented but unmeasured
-  comma-list form.
+  matched-id route check in `join`, seats.aero's documented but unmeasured
+  comma-list form, and the award phase: one `Awards incomplete:` line naming
+  every provider failure, pair queries sharing PointsPath's queue, and the 180 s
+  deadline with the measurements behind it.
 - [pp_matched_id_recipe.md](pp_matched_id_recipe.md) — **Supersedes the
   "dead end" framing in `pp_on_gflight.md`.** The matched-id join *does*
   work; the previous "no" was because we sent synthetic flight_ids and
@@ -77,12 +79,13 @@ go into detail and are loaded on demand.
   `routing_predicates.py`, `_gf_postfilter.py`, `links.build_search_tfs`, or
   `_gflight_ids` carrier parsing.
 - [console_sanitizing.md](console_sanitizing.md) — **Read before adding any
-  print to `cli.py`.** Which values are markup on a Rich console (user flags,
+  print to `cli.py` or `pp/cli.py`.** Which values are markup on a Rich console (user flags,
   Matrix fields, third-party exceptions), the `_quote` / `_safe_text` /
   sanitize-inside-the-formatter rule and the orderings that make each work, and
   the `escape_scan` AST guard: what it reads (every `console.print` / `err.print`
   and `.log` / `.rule` / `.status`, bare `print`, table titles and captions, column
-  headers and footers, every cell, and Typer `help=` / `epilog=` strings), what
+  headers and footers, every cell, assignments to a table or panel title, caption,
+  header, footer or subtitle, and Typer `help=` / `epilog=` strings), what
   its allowlist claims and what holds the values behind it, and what it does not
   model.
 - [gf_browser_rung.md](gf_browser_rung.md) — The second search transport:
