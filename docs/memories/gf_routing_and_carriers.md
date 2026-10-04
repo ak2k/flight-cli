@@ -188,8 +188,23 @@ own figure for that connection (`data[0][13]`, elapsed minutes). Where the row
 states none it is the clock difference at the connecting airport, which a
 daylight-saving change there puts an hour out; a negative one is such a change
 and is not held against the row. An alliance is not checked: nothing here says
-which carrier is in which alliance. Children are priced, not checked. When
-these checks empty a board, the empty-answer line names every active check.
+which carrier is in which alliance, and a membership table kept here would go
+stale (Asiana leaves Star Alliance by 2026-12-17). Google's own filter held it
+when measured on 2026-10-01: a live NYC-MUC business board asked for
+`ALLIANCE star-alliance; MAXDUR 14:00; MAXSTOPS 1` served 20 rows, every one
+sold by a Star carrier, within one stop and 840 minutes, and skill Example 2
+without `+CABIN 2` answered on auto with 5 Google round trips, all Star,
+business and within 14 hours. A `+CABIN` naming the one cabin `--cabin` asked
+is checked per leg: every leg's cabin (`fl[16]`) must be that cabin, and a leg
+Google states none for fails. Two of those 20 business rows carried a
+first-class leg (UA2301 and UA3585, then UA108), which `+CABIN 2` drops. Any
+other `+CABIN` goes to Matrix, naming the code and the `--cabin`. Children are
+priced, not checked. Rows over the stop ceiling are counted on stderr from a
+board that is shown, once each, in every format: `Google Flights returned 3
+rows over the stop ceiling it was asked for (1); they are not shown.` (JFK-LHR's
+101 rows under `--stops 1` keep 98). A board they help empty keeps its own line
+alone, and a multi-cabin search handed to Matrix prints none. When these checks
+empty a board, the empty-answer line names every active check.
 
 **A price cap and bags (`search --max-price N`, `--bags CHECKED[,CARRY]`).**
 Both are top-level fields, written after the cabin (9) and before 14.
@@ -297,11 +312,27 @@ is measured unbounded, because `console.measure` caps it at the console's.
 - Rows are deduped per itinerary (every leg's carrier, flight number and
   departure datetime), keeping the priced and cheaper listing at the first
   listing's place. No true duplicate has been measured; the key keeps dates, so
-  the same flight numbers a day apart stay two trips.
+  the same flight numbers a day apart stay two trips. The dearer listing in
+  another cabin mix stays on the row (`others`), and a `+CABIN` search filters
+  the cheapest listing booked in its cabin, so a cheaper listing with a leg
+  outside it does not hide that fare. Each itinerary still meets the row
+  filter once, so the stop-ceiling count is unchanged.
 - The routing filter runs inside `search_with_ids` as each board is served: on
   the outbound BEFORE the pins are taken (pins are the cheapest rows of the
   board they are taken from), on each return board after `_unpinned_board`. A pin whose return
-  board the filter empties is counted in a warning.
+  board the filter empties is counted in a warning, and so is one Google
+  served no return for (`k of M pinned outbounds have no return flight on
+  Google`). After the counts, and before any raise, each pin lost to either or
+  to a refused board is named on a line of its own: `pinned outbound
+  LH405/LH914 (USD943.00) lost: Google served 2 returns for it, none matching
+  the routing`, `... lost: Google served no return for it`, or the refusal's
+  own words. A stop (a throttle, the network, a dead browser) names no skipped
+  pin. On 2026-10-01 skill Example 7 on Google (JFK-LHR, `O:LH+`,
+  `MINCONNECT 1:30`) lost 2 of 5 pins: LH405/LH914 (2 returns served, none
+  LH-operated on every leg) and LH411/UA9440 (1); the six boards are the
+  `ds1_*_oplh_*` fixtures. The outbound board gets no check like
+  `_unpinned_board`: none of 27 saved live boards carried a row off the asked
+  route.
 - A pin names each leg's OPERATING flight (`fl[22]`). Pinned under the
   codeshare number it is booked as (AA142 as AY3787), the return board comes
   back empty; pinned as AA142 it serves 20 rows at the same $799 combo price
@@ -719,7 +750,11 @@ that comparison is made against is therefore the cheapest of the rows SHOWN,
 which with every Google list in price order is row one: a one-way board's
 lowest fare, and on a round trip the cheapest trip through the pinned outbounds.
 A single-cabin round trip pins its cheapest outbound first, so that is the
-board's cheapest round trip unless a return filter removed it.
+board's cheapest round trip unless a return filter removed it, Google served its
+return board empty, or its return board was refused (refused outright, or
+answered for a different segment than the pin; `_report_pin_outcome` counts both
+refusals in its stderr warning and no line counts an empty board). Then row 1 is
+the cheapest trip through the pins whose return boards kept a row.
 
 **Release before park.** A worker that is about to wait on another arm's round
 gives up any round it still owns first. Two workers can otherwise each hold what
@@ -1134,11 +1169,44 @@ unstated, so neither absence and no unpriced outbound is decided for it (no
 live or fixture row has done so). Point of sale is never a reason: Google is always `gl=US`,
 Matrix is sent no sales city, and no row says where it was priced.
 
+**Google's low row is asked of Matrix.** A Google-only row's reason says what
+Matrix's answer holds, not whether Matrix prices the row, because Matrix prunes
+its answer. So where the first Google-only row the table shows is under every
+fare in Matrix's answer, in the requested currency and for the party
+(`_cross_check.low_row`), the search asks Matrix for that row's exact flights
+once the table is printed: `--verify`'s chain search, uncached, and booking
+details per candidate, with no fare rules and no unrouted second search, in one
+`anyio.run` under `anyio.move_on_after(cli._LOW_CHECK_SECONDS)` (60 s), so the
+bound cancels the request in flight. One line under the table answers it:
+`Matrix asked for row N's flights (CHAIN DATE; CHAIN DATE): Matrix P · Google P`
+with the gap, both prices for the party; `…: not priced as these flights: R`,
+R being "Matrix returned no fare on these exact flights" or the other-itinerary
+sentence; or, in yellow, `…: no answer: R`, R the 60 s or the error's kind and
+message. The table, the row's reason and the exit code stay as they were. A
+row both sides price, a Matrix fare in another currency or with no party
+total, and Matrix's low at or under Google's ask nothing more. Measured
+2026-10-02 at `-n 10`, Google's low was under Matrix's whole answer on all four
+routes tried, and the chain priced Google's exact flights on three: EWR-ORY
+11-10/11-17, TAP USD429 against Matrix's 12 trips from USD527, Matrix
+USD429.00 (26.7 s); MIA-LAX, F9 USD165 against 8 AA and DL trips from USD454,
+Matrix USD170.00 (47.3 s); NYC-CHI, F9 USD139 against 10 trips at USD173,
+Matrix USD144.00 (20.5 s). On JFK-LHR, AF9656 with DL9603/KL6149 at USD810
+against 88 trips from USD818, the chain was empty (19.0 s); `--verify`'s
+unrouted second search then listed only AA, BA and IB though the 88 trips name
+DL and VS, so a carrier read off it would be wrong, and this check never asks
+it. The bound does not cover building the client, which reads the API key from
+its disk cache, nor the re-bootstrap `MatrixClient` runs synchronously on a
+403; the search has just used the same key.
+
 **`--format json --enrich`** writes `{"search": <the plain --format json
 document, the same -n rows>, "cross_check": {"currency", "delta":
 "google_minus_matrix", "matrix": {"listed", "solution_count", "complete",
-"last_price"}, "google": {"listed", "answered", "unread"}, "rows": [...]}}`, the rows
-being the table's, from the pure `_cross_check.document`. Plain `--format json`
+"last_price"}, "google": {"listed", "answered", "unread"}, "rows": [...],
+"low_check"}}`, the rows being the table's, from the pure `_cross_check.document`.
+`low_check` is null where no row was asked of Matrix, else `{"row",
+"google_low", "matrix_low", "outcome"` (`match`, `other-itinerary`,
+`no-solution` or `no-answer`), `"matrix_price", "delta", "reason", "routing"}`,
+the prices for the party and `delta` Google minus Matrix on a match. Plain `--format json`
 does not cross-check; on auto a failed Google query is still handed to Matrix,
 as before, and `--fast` asks Matrix nothing. It needs no awards (`--cash-only`)
 and no `--sellers` (exit 2 otherwise); a Google-only flag (`--bags`, an arrival
@@ -1288,9 +1356,11 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
   GBP952 on two days DUB was cheaper; asked in USD, all 14 days came back USD,
   each cheaper from DUB. `NYC LON -d 7` as one combined query priced 11 of 14
   days (20 solutions, cheapest USD817); as 18 pairs plus that query it priced
-  14 of 14, cheaper on 7 days (10-27 USD766 EWR→LGW), the combined query was
-  below every pair on none, the 7 pairs into STN, LTN or SEN priced nothing,
-  and the 19 queries took about 110 s.
+  14 of 14: the 3 days the combined query alone left unpriced (10-25 to 10-27,
+  the last at USD766 EWR→LGW) and 6 of the 11 it did price, cheaper on 10-28
+  to 11-02; the combined query was below every pair on none; 8 of the 18 pairs
+  priced nothing (JFK, LGA and EWR into LTN and SEN, JFK and EWR into STN) and
+  LGA→STN priced 1 day; and the 19 queries took about 110 s.
 - **Admission** (`_gf_calgraph.graph_blocker`). The graph has no itineraries,
   so it is asked only when the page URL writes every constraint exactly AND
   Google was measured applying it there. Admitted, per leg: a stop ceiling of

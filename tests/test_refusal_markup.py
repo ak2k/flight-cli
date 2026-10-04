@@ -2204,18 +2204,23 @@ def test_an_empty_matrix_result_reports_no_range_at_all(
 # fourth only if someone adds it here, which is what
 # `test_every_console_sentence_naming_matrix_is_accounted_for` exists to stop
 # depending on — that one derives the set instead.
-_PROMISES = ("refining with Matrix", "awaiting Matrix", "showing Matrix only")
+_PROMISES = ("comparing with Matrix's fares", "awaiting Matrix", "showing Matrix only")
 
 # Every `console.print` in `_run_enriched_path`'s call graph whose literal names
 # Matrix, and why each may stand on stdout. Two are link labels printed with the
 # URL they label; the third is the only forward-looking sentence, and it is
-# printed only where a Matrix table is certain to follow it.
+# printed only where a Matrix table is certain to follow it; the fourth reports
+# a request that has already ended.
 _MATRIX_ON_STDOUT = {
     "[dim]Matrix (": "a link label, printed above the URL it labels",
     "[dim]Matrix deep-link:[/]": "a link label, printed above the URL it labels",
     " — showing Matrix only.[/]": (
         "gated on `matrix_answered` AND `not awards_only`, which together mean "
         "a Matrix table is printed under it"
+    ),
+    "Matrix asked for row ": (
+        "printed after Matrix answered the chain search, or failed, or ran out its "
+        "bound, and it states which"
     ),
 }
 
@@ -2452,7 +2457,7 @@ def test_no_stdout_sentence_promises_a_matrix_half_that_never_arrives(
         # The table itself is a result and belongs on stdout — without it the
         # assertion below would hold on a run that printed nothing at all.
         assert "USD6590.00" in captured.out, captured.out
-        assert "refining with Matrix" in captured.err, captured.err
+        assert "comparing with Matrix's fares" in captured.err, captured.err
     for promise in _PROMISES:
         assert promise not in captured.out, (promise, captured.out)
     assert "stale key" in captured.err, captured.err

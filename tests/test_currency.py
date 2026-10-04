@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import pathlib
 import urllib.parse
+from dataclasses import replace
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
@@ -148,6 +149,17 @@ def test_a_row_with_no_decoded_currency_takes_its_boards(
     assert [r.flight.currency for r in board] == ["EUR", "EUR", "EUR"]
     board = gfid._with_board_currency(gfid.Board(_rows(gf_rows, None, None)), "GBP")
     assert [r.flight.currency for r in board] == ["GBP", "GBP"]
+
+
+def test_a_dearer_listing_with_no_decoded_currency_takes_its_boards(
+    gf_rows: Callable[..., list[Any]],
+) -> None:
+    """A `+CABIN` search can be offered one of a row's `others` in place of
+    the row, so each of them is filled from the board as the row is."""
+    best, side = _rows(gf_rows, "EUR", "EUR")
+    [other] = _rows(gf_rows, None)
+    board = gfid._with_board_currency(gfid.Board([replace(best, others=(other,)), side]), "GBP")
+    assert [o.flight.currency for o in board[0].others] == ["EUR"]
 
 
 def test_a_row_in_another_currency_keeps_it_and_the_run_says_so(
@@ -442,7 +454,9 @@ def test_the_enriched_table_asks_both_backends_and_titles_the_currency(
     )
     assert result.exit_code == 0, result.output
     assert gf_asked == ["EUR"]
-    assert matrix_asked == ["EUR"]
+    # The merged search, then the chain search on Google's row under Matrix's
+    # EUR321, in the row's currency.
+    assert matrix_asked == ["EUR", "EUR"]
     assert "(EUR)" in result.stdout
     assert "USD" not in result.stdout
 
