@@ -61,6 +61,13 @@ flight search JFK LHR --dep 2026-08-15 --backend gflight
 flight calendar MIA PAR --start 2026-06-07 -d 5-7 \
     --routing "LH+" --ext "MAXCONNECT 2:00" --depart-times morning
 
+# Without --fast, a table calendar prints Google Flights' price graph under
+# Matrix's grid. Matrix lists fares it priced; Google gives one price per date
+# pair with no itinerary behind it, so their lows can differ. When they do, one
+# stderr line names both lows with their date pairs, says what both asked, and
+# gives the search on each date pair that shows which fare is bookable.
+flight calendar NYC PAR --start 2026-10-20 --end 2026-11-19 -d 5-7
+
 # phase-2 of the calendar flow: full itineraries for a picked date. Give it
 # the calendar's filters (routing, codes, --depart-times/--return-times,
 # --include-unavailable) so it prices the grid's question, and the airport
