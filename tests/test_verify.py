@@ -993,6 +993,72 @@ def test_booking_details_without_their_flights_fail_rather_than_claim_another_tr
     assert "cannot be checked flight by flight" in " ".join(result.stderr.split())
 
 
+def _gives_no_verdict(result: Any, fmt: str, why: str) -> None:
+    """Exit 1 with `why` on stderr after the search's own output, and no
+    verdict in either format."""
+    assert result.exit_code == 1, result.output
+    assert why in _flat(result.stderr)
+    assert "other itinerar" not in _flat(result.output)
+    if fmt == "json":
+        doc = json.loads(result.stdout)
+        assert doc["verify"] is None
+        assert len(doc["search"]) == 40
+    else:
+        assert "Google Flights" in result.stdout
+        assert "Not verified" not in result.stdout
+
+
+@pytest.mark.parametrize("fmt", ["table", "json"])
+@pytest.mark.parametrize("listed", ["no-candidate", "a-candidate-flown-a-day-later"])
+def test_a_page_short_of_matrixs_answer_gives_no_verdict(
+    gf_session: Callable[..., Any], matrix: _Matrix, fmt: str, listed: str
+) -> None:
+    """Matrix answers one more solution than the chain's page holds, and the
+    row's own itinerary is the one past it."""
+    n, row = _as_row()
+    page = SearchOptions().page_size
+    later = [_row_solution(f"AS-{i}", "USD100.00", row, lands_later=1) for i in range(page)]
+    if listed == "a-candidate-flown-a-day-later":
+        later[0] = _row_solution("AS-0", "USD100.00", row)
+        matrix.details = {"AS-0": _details_of(row, later={0: 1})}
+    matrix.chain = _chain(*later, _row_solution("AS-1", f"USD{row.flight.price:.2f}", row))
+    gf_session(_served())
+    result = _run("-n", "40", "--fast", "--verify", "--pick", str(n), "--format", fmt)
+    _gives_no_verdict(
+        result,
+        fmt,
+        f"Matrix listed only {page:d} of its {page + 1:d} itineraries on these flights, "
+        "and none listed is these exact flights.",
+    )
+
+
+@pytest.mark.parametrize(
+    "silent_on", ["flights", "origin", "destination", "departure", "arrival", "itinerary"]
+)
+def test_a_summary_short_of_a_slice_field_gives_no_verdict(
+    gf_session: Callable[..., Any], matrix: _Matrix, silent_on: str
+) -> None:
+    """The row's own itinerary, its summary silent on one field, so it is no
+    candidate and booking details are never asked of it."""
+    n, row = _as_row()
+    sol = _row_solution("AS-1", f"USD{row.flight.price:.2f}", row)
+    if silent_on == "itinerary":
+        del sol["itinerary"]
+    else:
+        del sol["itinerary"]["slices"][0][silent_on]
+    matrix.chain = _chain(sol)
+    matrix.details = {"AS-1": _details_of(row)}
+    gf_session(_served())
+    result = _run("-n", "40", "--fast", "--verify", "--pick", str(n))
+    _gives_no_verdict(
+        result,
+        "table",
+        "Matrix listed an itinerary that does not state every slice's flights, airports and "
+        "times, so it cannot be checked flight by flight.",
+    )
+    assert matrix.summarized() == []
+
+
 def _no_request(monkeypatch: pytest.MonkeyPatch) -> None:
     def _forbidden(*_a: object, **_kw: object) -> Any:
         raise AssertionError("refused before any request")

@@ -4440,7 +4440,11 @@ def _check_on_matrix(
         chain, _verify.candidates(row, chain), row, n, rps=rps_, impersonate=imp
     )
     if found is None:
-        return _Checked(_verify.other_itinerary(len(chain.solutions)), None)
+        try:
+            return _Checked(_other_itinerary(chain), None)
+        except _UncheckableAnswerError as e:
+            err.print(f"[red]{_safe_text(str(e))}[/]")
+            raise typer.Exit(1) from None
     idx, answer = found
     return _Checked(
         _verify.Verdict(
