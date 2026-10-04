@@ -1,0 +1,40 @@
+# Captured 2026-10-01 from Matrix's SPA in a real Chrome: /search opened on
+# flight-cli's deep link for JFK-LHR round trip, 2026-10-20 / 2026-10-27, and
+# the form showed the outbound's date option as "+/- 2 days" and the return's
+# as "Or day after". After Search, the SPA's own URL state, decoded from the
+# page URL's search= parameter (the capture kept the decoded JSON, not the URL
+# text). Its /v1/search body is specific_jfk_lhr_rt_flex.json.
+{
+ "type": "round-trip",
+ "slices": [
+  {
+   "origin": [
+    "JFK"
+   ],
+   "dest": [
+    "LHR"
+   ],
+   "dates": {
+    "searchDateType": "specific",
+    "departureDate": "2026-10-20",
+    "departureDateType": "depart",
+    "departureDateModifier": "22",
+    "departureDatePreferredTimes": [],
+    "returnDate": "2026-10-27",
+    "returnDateType": "depart",
+    "returnDateModifier": "1",
+    "returnDatePreferredTimes": []
+   }
+  }
+ ],
+ "options": {
+  "cabin": "COACH",
+  "stops": "-1",
+  "extraStops": "1",
+  "allowAirportChanges": "true",
+  "showOnlyAvailable": "true"
+ },
+ "pax": {
+  "adults": "1"
+ }
+}

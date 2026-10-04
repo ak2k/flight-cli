@@ -15,9 +15,43 @@ values**. Guessing from the API side gets you a link the app ignores.
 | Return-leg routing | (own slice) | `routingRet` |
 | Return-leg extension | (own slice) | `extRet` |
 | Arrival-date intent | `isArrivalDate: bool` | `departureDateType: "depart"｜"arrive"` |
+| Flexible date | `dateModifier: {minus, plus}` | `departureDateModifier: "<minus*10 + plus>"` |
 
 Round trip folds into ONE slice, which is why the inbound leg needs the
 separate `*Ret` keys rather than a second slice.
+
+## Date options: one string per direction, two numbers on the wire
+
+The form's date-option select, beside "Departure | Arrival", offers exactly
+five values for the outbound and five for the return, and no 3-day choice:
+
+| URL state | Form label | `dateModifier` | `flight search` |
+|---|---|---|---|
+| `"0"` | This day only | `{minus: 0, plus: 0}` | (none) |
+| `"10"` | Or day before | `{minus: 1, plus: 0}` | `--flex before` |
+| `"1"` | Or day after | `{minus: 0, plus: 1}` | `--flex after` |
+| `"11"` | +/- 1 day | `{minus: 1, plus: 1}` | `--flex 1` |
+| `"22"` | +/- 2 days | `{minus: 2, plus: 2}` | `--flex 2` |
+
+The SPA bundle (May 2026) reads `departureDateModifier` m as
+`{minus: Math.floor(m/10), plus: m%10}`, and a round trip's return slice reads
+`returnDateModifier` the same way; `isArrivalDate` is `departureDateType ===
+"arrive"`. `links._spa_date_modifier` writes `minus*10 + plus`, and a one-way
+writes `returnDateModifier: "0"`, as the form does. Calendar slices carry
+neither field.
+
+Checked in real Chrome on 2026-10-01 (fixtures `spa_rt_flex_jfk_lhr.txt` and
+`spa_ow_arrive_jfk_lhr.txt` in `tests/fixtures/matrix_url/`, bodies
+`specific_jfk_lhr_{rt_flex,ow_arrive}.json`): `/search` opened on our link showed
+"+/- 2 days" / "Or day after" and "Arrival"; after Search the SPA posted
+`to_wire()`'s body key for key except `bgProgramResponse`, and its own URL state
+was our link's. The one difference: the SPA omits a one-way's `returnDate`,
+which our one-way links write as `""`; both open the same form.
+
+An arrival-date slice's `departureDatePreferredTimes` are arrival times: the
+SPA builds `timeRanges` from them whatever `departureDateType` is, and Matrix
+holds an arrival-date slice's `timeRanges` to the arrival (see
+`wire_format_quirks.md`).
 
 ## Presence is conditional
 
