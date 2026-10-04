@@ -695,6 +695,57 @@ def test_a_paged_board_counts_the_rows_of_a_page_none_of_whose_rows_parsed(
     assert missing in _flat(buf.getvalue()), buf.getvalue()
 
 
+# ───────────────────── what a page's row checks drop ──────────────────────
+
+
+def _one_stop(number: int, frm: str, to: str) -> gfid.GFlightWithId:
+    """A one-stop row through ORD, cheaper than every nonstop."""
+    first = _row(number, _DEP, frm, "ORD", 50.0)
+    second = _row(number + 1, _DEP, "ORD", to, 50.0).flight.legs[0]
+    legs = [*first.flight.legs, second]
+    return replace(first, flight=first.flight.model_copy(update={"legs": legs}))
+
+
+@pytest.mark.parametrize("ret", [False, True], ids=["one-way", "round-trip"])
+def test_a_paged_board_counts_every_pages_rows_over_the_stop_ceiling(
+    monkeypatch: pytest.MonkeyPatch, ret: bool
+) -> None:
+    """12 origins to LAX is two pages, and each page's outbounds hold one
+    one-stop row. Under `--stops 0` the one line counts both, a round trip's
+    included though `-n 3` pins nothing on page 1. Red at the merge: the paged
+    board carried no count, so no line printed."""
+    google = _Google(
+        [(o, "LAX") for o in _EAST],
+        fare=lambda i: 100.0 + i if i >= 6 else 300.0 + i,
+        added=lambda page: [_one_stop(900 + _EAST.index(page[0][0]), page[0][0], "LAX")],
+    )
+    buf = capture_err(monkeypatch)
+    result = _search(
+        monkeypatch,
+        google,
+        ",".join(_EAST),
+        "LAX",
+        "--backend",
+        "gflight",
+        "--fast",
+        "--format",
+        "json",
+        "-n",
+        "3",
+        "--stops",
+        "0",
+        ret=ret,
+    )
+    assert result.exit_code == 0, result.output
+    assert len(google.calls) == (2 + 3 if ret else 2)
+    assert {page for page, pin in google.calls if pin is not None} <= {(_EAST[6:], ("LAX",))}
+    over = (
+        "Google Flights returned 2 rows over the stop ceiling it was asked for (0); "
+        "they are not shown."
+    )
+    assert _flat(buf.getvalue()).count(over) == 1, buf.getvalue()
+
+
 # ──────────────────────────────── one page ────────────────────────────────
 
 

@@ -1068,6 +1068,8 @@ So are the rows of a page missing because none of them parsed: Google served
 them. Where a board is partial and counts unread rows, a Matrix-only row says
 `google_unread`, not the `not_on_google` the partial board alone leaves, as it
 would on one page: its trip may be one of the unread rows.
+The rows over the stop ceiling are summed as `dropped` is, each counted once,
+for the one stderr line the merged board prints.
 Under `--gf-transport browser` one Chrome serves every page
 (`cli._browser_scope`).
 

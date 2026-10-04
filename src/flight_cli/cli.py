@@ -4969,10 +4969,12 @@ def _note_stop_drops(results: list[Any], cabin: Cabin | None = None) -> None:
 
 
 class _Outbound(NamedTuple):
-    """One cabin's outbound page, and the row filter its pins are held to."""
+    """One cabin's outbound page, the row filter its pins are held to, and that
+    filter's count of the rows over the stop ceiling."""
 
     board: Board[Any]
     keep: Callable[[int, Any], bool] | None
+    stop_drops: StopDrops | None = None
 
 
 def _gflight_outbound(
@@ -4987,7 +4989,7 @@ def _gflight_outbound(
 
     with _gflight_query(legs, opts, gf_mode, gf_headed) as query:
         page = outbound_page(query.filters, transport=query.transport, currency=query.currency)
-    return _Outbound(page, query.keep)
+    return _Outbound(page, query.keep, query.stop_drops)
 
 
 def _gf_pages(legs: tuple[Leg, ...]) -> list[tuple[Leg, ...]]:
@@ -5114,11 +5116,9 @@ def _kept(outbound: _Outbound) -> list[Any]:
     return [r for r in outbound.board if keep is None or keep(0, r)]
 
 
-def _union_pins(
-    outbounds: list[tuple[int, _Outbound]], top_n: int
-) -> dict[int, list[ItineraryKey]]:
+def _union_pins(kept: dict[int, list[Any]], top_n: int) -> dict[int, list[ItineraryKey]]:
     """Each page's share of the `pinned_fanout(top_n)` cheapest outbounds kept
-    across every page, as the keys that page pins.
+    across every page (`kept`, by page), as the keys that page pins.
 
     An outbound two pages list is pinned once, on the page that priced it
     lower, so no return board is fetched twice for one flight."""
@@ -5127,8 +5127,8 @@ def _union_pins(
     owner: dict[ItineraryKey, int] = {}
     union: list[Any] = []
     at: dict[ItineraryKey, int] = {}
-    for i, outbound in outbounds:
-        for r in _kept(outbound):
+    for i, rows in kept.items():
+        for r in rows:
             (key,) = row_key(r)
             seen = at.get(key)
             if seen is None:
@@ -5164,9 +5164,12 @@ def _gflight_pages(
     on it. `unread` sums the rows the parser could not read the same way, a
     page missing because none of its rows parsed included, because the
     cross-check calls no flight absent from Google while any are.
+    `stop_drops` sums the rows over the stop ceiling the same way, for the
+    one line that counts them.
     A page's price insight describes its own airports, so the merged
     board carries none. The board is `partial` where a page is missing or the
     trip is round: its rows then stop short of what one search would list."""
+    from ._gf_postfilter import StopDrops  # noqa: PLC0415 — GF-only
     from ._gflight_ids import (  # noqa: PLC0415 — fli, ~95 ms
         Board,
         _PageUnreadError,  # pyright: ignore[reportPrivateUsage] — the refusal that counts rows
@@ -5175,6 +5178,7 @@ def _gflight_pages(
     asked = _PageAsk(pages, gf_mode=gf_mode, bags=opts.bags is not None)
     boards: list[Board[Any]] = []
     dropped = pinned = unread = 0
+    stop_drops = StopDrops()
     with _browser_scope(gf_mode):
         if len(pages[0]) < _ROUND_TRIP_LEGS:
             for i, page in enumerate(pages):
@@ -5183,6 +5187,7 @@ def _gflight_pages(
                     boards.append(board)
                     dropped += board.dropped
                     unread += board.unread
+                    _add_stop_drops(stop_drops, board.stop_drops)
         else:
             outbounds = [
                 (i, ob)
@@ -5190,7 +5195,9 @@ def _gflight_pages(
                 if (ob := asked.ask(i, partial(_gflight_outbound, page, opts, gf_mode, gf_headed)))
                 is not None
             ]
-            shares = _union_pins(outbounds, top_n)
+            # Once a page, so its filter counts each row over the stop ceiling once.
+            kept = {i: _kept(ob) for i, ob in outbounds}
+            shares = _union_pins(kept, top_n)
             for i, ob in outbounds:
                 keys = shares.get(i, [])
                 board = (
@@ -5211,13 +5218,15 @@ def _gflight_pages(
                     else None
                 )
                 if board is None:
-                    dropped += len(ob.board) - len(_kept(ob))
+                    dropped += len(ob.board) - len(kept[i])
                     unread += ob.board.unread
+                    _add_stop_drops(stop_drops, ob.stop_drops)
                 else:
                     boards.append(board)
                     dropped += board.dropped
                     pinned += board.pinned
                     unread += board.unread
+                    _add_stop_drops(stop_drops, board.stop_drops)
     # Google served the rows of a page none of whose rows parsed, so a flight
     # on one of them is on its board though the page is missing.
     unread += sum(e.unread for e in asked.failed.values() if isinstance(e, _PageUnreadError))
@@ -5230,13 +5239,23 @@ def _gflight_pages(
             f"{MAX_GF_LEG_AIRPORTS:d} airports; each return is priced within its own "
             "page's airports.[/]"
         )
-    return Board(
+    merged = Board(
         rows,
         dropped=dropped,
         pinned=pinned,
         partial=bool(asked.failed or asked.unasked) or len(pages[0]) >= _ROUND_TRIP_LEGS,
         unread=unread,
     )
+    merged.stop_drops = stop_drops
+    return merged
+
+
+def _add_stop_drops(total: StopDrops, page: StopDrops | None) -> None:
+    """Add one page's stop-ceiling count to `total`. Every page is asked for
+    the one ceiling the search names."""
+    if page is not None and page.rows:
+        total.rows += page.rows
+        total.ceiling = page.ceiling
 
 
 def _page_board(
