@@ -24,7 +24,7 @@ its schema is `docs/envelope.schema.json`, generated from the models
 | `insight` | `[{cabin, currency, cheapest, typical_low, typical_high, level}]` | one per Google page that carried one |
 | `price_history` | `[{cabin, currency, points: [{date, price}]}]` | one per Google page that carried one |
 | `verify` | object / null | `--verify`'s check of row `--pick`, the `verify` object `--format json` prints; null when not asked, on a calendar, or when the check failed (exit 1) |
-| `cross_check` | object / null | `--enrich`'s Google-vs-Matrix comparison, the `cross_check` object `--format json --enrich` prints; null when not asked, skipped, on a calendar, or when Matrix's half failed |
+| `cross_check` | object / null | `--enrich`'s Google-vs-Matrix comparison, the `cross_check` object `--format json --enrich` prints, `low_check` included; null when not asked, skipped, on a calendar, or when Matrix's half failed |
 
 `price` is the trip's: a Google round trip's is its return member's, the fare
 every surface prints for the pair; Matrix's is the solution's price string read
@@ -65,7 +65,13 @@ board and narrows nothing); a Google board served with no rows for a party
 with an infant and not handed to Matrix (`cli._run_gflight_path`), since Google
 has served such a board on a route with flights. A hand-off
 to Matrix, rows in another currency and a filter that empties a board are
-notes, not narrowings: each is a complete answer to what was asked.
+notes, not narrowings: each is a complete answer to what was asked. So is
+`cross_check.low_check` in any outcome, `no-answer` included: no flag asks for
+that check of Google's low row, every key asked for is whole without it, and
+its `outcome` and `reason` say whether and how Matrix answered. Its stderr
+line ("Asking Matrix for row N's exact flights") is a note; the line it prints
+under the table is never printed in an envelope run, which takes the document
+path.
 
 ## How the run is held
 
