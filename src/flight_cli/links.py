@@ -189,22 +189,14 @@ def _spa_calendar_leg(
     out: Leg, ret: Leg | None, start: date, end: date, duration_min: int, duration_max: int
 ) -> dict[str, Any]:
     """SPA URL-state slice for calendar mode. Round-trip is folded into ONE
-    slice with `routingRet`/`extRet` carrying return-direction routing."""
+    slice, and `routingRet`/`extRet` state the return's own codes as the
+    specific-date slice does: a return copying the outbound's codes and one
+    with none search differently, so `""` must mean only "none"."""
     d: dict[str, Any] = {
         "origin": list(out.origins),
         "dest": list(out.destinations),
+        **_spa_routing_fields(out, ret),
     }
-    if out.route_language or out.extension:
-        d["routing"] = out.route_language or ""
-        d["ext"] = out.extension or ""
-        if ret is None or (
-            ret.route_language == out.route_language and ret.extension == out.extension
-        ):
-            d["routingRet"] = ""
-            d["extRet"] = ""
-        else:
-            d["routingRet"] = ret.route_language or ""
-            d["extRet"] = ret.extension or ""
     dates: dict[str, Any] = {
         "searchDateType": "calendar",
         "departureDate": start.isoformat(),
@@ -649,6 +641,9 @@ _TFS_MULTI_CITY = 3  # fli TripType.MULTI_CITY — the page inlines no rows for 
 
 # `{2: {1: 0, 2: 1}, 4: {}}`: field 2.2 is the page's "show all flights" bit.
 _GF_SHOW_ALL_TFU = "EgQIABABIgA"
+# `{2: {1: 0, 2: 1, 4: 2, 5: 1}, 4: {}}`: the same bit on the Cheapest tab, the
+# only board that lists itineraries Google sells as separate tickets.
+_GF_CHEAPEST_TFU = "EggIABABIAIoASIA"
 
 
 def _tfs_iata(value: Any) -> str:
@@ -808,6 +803,7 @@ def google_flights_search_page_url(
     currency: str = "USD",
     language: str = "en",
     country: str = "US",
+    cheapest: bool = False,
 ) -> str:
     """The public search-page URL `_gflight_ids` GETs for a tfs= payload.
 
@@ -818,11 +814,17 @@ def google_flights_search_page_url(
     `tfu=` sets the "show all" bit. Without it the page inlines only Google's
     top ~30 rows (JFK-LAX 30 of 95, JFK-LHR 22 of 101), so a larger `-n` comes
     back short and a post-filter answers from a partial board. The cost: the
-    page roughly doubles (JFK-LAX 3.6 MB to 7.5 MB, about 0.7 s more)."""
+    page roughly doubles (JFK-LAX 3.6 MB to 7.5 MB, about 0.7 s more).
+
+    `cheapest` asks for the Cheapest tab's board instead. It holds every row of
+    the default board plus the itineraries sold as separate tickets, but prices
+    some shared rows differently, so it is read beside the default board and
+    never in place of it."""
     b64 = base64.urlsafe_b64encode(tfs).rstrip(b"=").decode()
+    tfu = _GF_CHEAPEST_TFU if cheapest else _GF_SHOW_ALL_TFU
     return (
         f"https://www.google.com/travel/flights?tfs={urllib.parse.quote(b64)}"
-        f"&hl={language}&gl={country}&curr={currency}&tfu={_GF_SHOW_ALL_TFU}"
+        f"&hl={language}&gl={country}&curr={currency}&tfu={tfu}"
     )
 
 

@@ -171,7 +171,9 @@ def merge_results(
     its own trip (`_date_lender`); only then does the key's first Matrix row,
     if it found none, take the first Google row left, undated. Handing that
     one out first would price a Matrix trip with another trip's Google fare.
-    Every Google row left over is a row of its own.
+    Every Google row left over is a row of its own, and so is every row Google
+    sells as separate tickets: it is another booking than Matrix's one ticket
+    on the same flights, so the two prices are not one trip's.
 
     Sorted under `price_rank` on each row's `_rank_price`, the lowest price it
     prints: rows priced in `currency` first by amount, any other currency after
@@ -182,7 +184,7 @@ def merge_results(
     gf_unkeyed: list[Itinerary] = []
     for i, it in enumerate(gf.solutions):
         k = _itin_key(it)
-        if k is None:
+        if k is None or it.ticketing is not None:
             gf_unkeyed.append(it)
         else:
             gf_keyed.setdefault(k, []).append(i)

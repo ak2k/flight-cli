@@ -43,6 +43,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import textwrap
@@ -297,6 +298,12 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> Any:
 
 
 # ─────────────────────────── ds:1 extraction ───────────────────────────
+
+
+@pytest.mark.parametrize("path", sorted(FIXTURE_DIR.glob("ds1_*.json")), ids=lambda p: p.name)
+def test_every_page_fixture_has_its_session_id_scrubbed(path: pathlib.Path) -> None:
+    """The FIXTURE POLICY above: `[0][4]` is the one value naming the capture."""
+    assert json.loads(path.read_text())[0][4] == "SCRUBBED-SESSION-ID"
 
 
 def test_extract_ds1_reads_the_flights_blob_past_other_keys() -> None:
@@ -1707,6 +1714,33 @@ def test_one_refused_return_board_does_not_discard_the_pins_already_fetched(
     assert len(out) == 2
     assert len(fake.gets) == 4
     assert "1 of 3 return boards unavailable" in caplog.text
+
+
+def test_a_refused_return_board_names_its_pin_with_the_refusal(
+    client: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Red at the base, whose count line quoted the last refusal and named no
+    pin. The line follows the count and carries the refusal's own words."""
+    client(
+        _FakeResponse(text=_board_of(3)),
+        _FakeResponse(text=_return_board_of(1)),
+        _FakeResponse(text=_moved_row_page()),
+        _FakeResponse(text=_return_board_of(1)),
+    )
+    with caplog.at_level(logging.WARNING, logger="flight_cli._gflight_ids"):
+        out = gfid.search_with_ids(_round_trip_filters(), top_n=3)
+    assert out is not None
+    assert len(out) == 2
+    lines = [r.getMessage() for r in caplog.records]
+    [count] = [
+        i for i, ln in enumerate(lines) if ln.startswith("1 of 3 return boards unavailable: ")
+    ]
+    refusal = lines[count].split(": ", 1)[1]
+    named = re.compile(
+        r"pinned outbound [A-Z0-9]{2}\d+(?:/[A-Z0-9]{2}\d+)* \(USD\d+\.\d{2}\) lost: "
+        + re.escape(refusal)
+    )
+    assert [i for i, ln in enumerate(lines) if named.fullmatch(ln)] == [count + 1]
 
 
 def test_a_return_board_that_ignored_the_pin_never_becomes_a_combination(

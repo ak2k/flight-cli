@@ -74,6 +74,11 @@ def test_grid_declines_tier2_and_tier3() -> None:
     assert not grid_can_serve(_cal(ext="F bc=y"))  # fare basis -> Tier-3
 
 
+def test_grid_declines_a_cabin_requirement() -> None:
+    """Green at the base and the tip: a grid has no rows to hold it to."""
+    assert not grid_can_serve(_cal(ext="+CABIN 2"))
+
+
 def test_grid_declines_multi_airport_and_round_trip() -> None:
     round_trip = (Leg.of(["SFO"], ["FRA"]), Leg.of(["FRA"], ["SFO"]))
     assert not grid_can_serve(_cal(legs=(Leg.of(["SFO", "OAK"], ["FRA"]),)))  # multi-airport

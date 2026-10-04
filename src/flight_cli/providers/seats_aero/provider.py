@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 import anyio
 import structlog
 
+from ..._envelope import narrow
 from ..base import (
     AwardFlight,
     CabinAward,
@@ -293,14 +294,17 @@ class SeatsAeroProvider:
             except SeatsAeroError as e:
                 # Provider-level failures (auth, network, schema) are non-fatal:
                 # record + return [] so the registry can move on to other providers.
+                narrow()
                 log.debug("seats_aero_search_failed", error=str(e), status=e.status)
                 record_failure(self.name, http_reason(e.status, e.body))
                 return []
             except Exception as e:  # noqa: BLE001 — propagate-to-registry pattern
+                narrow()
                 log.debug("seats_aero_search_failed", error=str(e))
                 record_failure(self.name, exception_reason(e))
                 return []
         if page is None:  # the deadline cut the request
+            narrow()
             log.debug("seats_aero_search_cut")
             record_failure(self.name, deadline_reason())
             return []
