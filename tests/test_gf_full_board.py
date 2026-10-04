@@ -855,9 +855,13 @@ def test_a_row_with_a_leg_outside_the_required_cabin_is_dropped(
         assert (len(booked), edited in booked) == (rows, kept)
 
 
-def _relisted(payload: list[Any], pick: Callable[[Any], bool]) -> list[Any]:
-    """`payload` with every raw row `pick` takes listed a second time, $50
-    cheaper and its last leg booked in first."""
+def _relisted(
+    payload: list[Any], pick: Callable[[Any], bool], *listings: tuple[int, int | None]
+) -> list[Any]:
+    """`payload` with every raw row `pick` takes listed again at the end of its
+    block, once per (fare change, cabin of its last leg) in `listings`, a None
+    cabin left as booked. With no `listings`, once, $50 cheaper and its last
+    leg booked in first."""
     for index in gfid._DS_ROW_BLOCKS:
         block: Any = payload[index]
         if not block:
@@ -865,10 +869,12 @@ def _relisted(payload: list[Any], pick: Callable[[Any], bool]) -> list[Any]:
         copies: list[Any] = []
         for raw in block[0]:
             if pick(gfid._parse_flight_with_id(raw)):
-                copy: Any = json.loads(json.dumps(raw))
-                copy[1][0][1] -= 50
-                copy[0][2][-1][gfid._LEG_CABIN_IDX] = 4
-                copies.append(copy)
+                for change, cabin in listings or ((-50, 4),):
+                    copy: Any = json.loads(json.dumps(raw))
+                    copy[1][0][1] += change
+                    if cabin is not None:
+                        copy[0][2][-1][gfid._LEG_CABIN_IDX] = cabin
+                    copies.append(copy)
         block[0].extend(copies)
     return payload
 
@@ -893,6 +899,26 @@ def test_a_dearer_listing_in_the_required_cabin_stands_in_for_a_cheaper_one_outs
         rows: list[dict[str, Any]] = json.loads(result.stdout)
         assert len(rows) == 101
         assert [m["price"] for m in rows if _json_booked(m) == edited] == [fare]
+
+
+def test_the_cheapest_listing_in_the_required_cabin_is_the_one_offered(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Google lists EI104+EI152 twice more, after its $293 economy listing: at
+    $243 with its connection in first, and at $273 in economy. A `+CABIN 3`
+    search is offered $273, the cheapest economy listing, not the first one on
+    the page."""
+    payload = _relisted(
+        json.loads(_ds1(_LHR)), lambda r: _booked(r) == "EI104+EI152", (-50, 4), (-20, None)
+    )
+    gf_session(
+        _page(_answering(json.dumps(payload), origin=None, destination=None, date=_DEP.isoformat()))
+    )
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    result = CliRunner().invoke(cli.app, _lhr_json("--cabin", "economy", "--ext", "+CABIN 3"))
+    assert result.exit_code == 0, result.output
+    edited = "Aer Lingus|104+Aer Lingus|152"
+    assert [m["price"] for m in json.loads(result.stdout) if _json_booked(m) == edited] == [273]
 
 
 def test_a_cheaper_listing_outside_the_required_cabin_is_not_counted_twice(
