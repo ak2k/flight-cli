@@ -4,15 +4,17 @@ One PPClient is reused across legs (open one HTTP client, share the
 semaphore-bounded fan-out). Pricing-info is fetched once per
 `enabled_airlines`-aware run and reused across legs/cabins.
 
-Failure model: any per-leg/per-airline error is swallowed and logged via the
-existing structlog channels (PPClient already does this). The provider
-returns `[]` on whole-provider failure so the registry can move on.
+Failure model: any per-leg/per-airline error is swallowed, logged at debug
+and recorded for the search's summary line (PPClient already does this). The
+provider returns `[]` on whole-provider failure so the registry can move on.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import anyio
+import anyio.to_thread
 import structlog
 
 from ...pp.auth import PPAuthError, get_valid_tokens
@@ -123,8 +125,10 @@ class PointsPathProvider:
     ) -> PointsPathProvider:
         """Build a configured provider. Raises PPAuthError if tokens are
         missing/expired — caller (registry) is expected to catch and skip."""
-        get_valid_tokens()  # surface auth errors up-front
-        client = await PPClient.create()
+        # Surfaces auth errors up front. A stale token is refreshed by a
+        # blocking request, which in a thread the award deadline can cut.
+        tokens = await anyio.to_thread.run_sync(get_valid_tokens, abandon_on_cancel=True)
+        client = PPClient(tokens)
         pricing = await client.pricing_info()
         if explicit_airlines:
             airlines = explicit_airlines
