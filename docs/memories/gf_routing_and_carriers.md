@@ -275,6 +275,21 @@ each leg `co2_emissions_g`, null where the slot is empty. The Google table adds
 `CO2 kg` (kilograms and the percent; green lower, red higher) when a shown row
 has a figure.
 
+**The table at the output's width.** Rich takes the width from the first of
+stdin, stdout and stderr that is a terminal; `COLUMNS` overrides it; with no
+terminal and no `COLUMNS` it is 80. So `flight … | less` from a terminal prints
+at the terminal's width, and an agent's captured stdout at 80. Rich wraps a
+cell at its spaces, so the one-line legs cell "EI 104 → EI 152" printed as
+"EI 104 → EI" / "152": at 80 columns that split 3 designators on the first 12
+JFK-LHR rows, 84 on all 101, 100 on JFK,EWR-LHR, 66 on JFK-LAX's 95 and 18 on
+the HNL-MIA round trip's 3x3. `_render_gflight_table` prints the first layout
+whose natural width is at most the console's (a table exactly as wide fits):
+legs on one line with CO2, legs one per line with CO2, legs one per line
+without CO2. The last prints even when it is still wider; a board with no CO2
+grams has only the first two. A dropped column prints a dim note that
+`--format json` carries it, and the JSON is the same at every width. The width
+is measured unbounded, because `console.measure` caps it at the console's.
+
 **How the full board is served.**
 - Rows are deduped per itinerary (every leg's carrier, flight number and
   departure datetime), keeping the priced and cheaper listing at the first
@@ -701,7 +716,11 @@ that comparison is made against is therefore the cheapest of the rows SHOWN,
 which with every Google list in price order is row one: a one-way board's
 lowest fare, and on a round trip the cheapest trip through the pinned outbounds.
 A single-cabin round trip pins its cheapest outbound first, so that is the
-board's cheapest round trip unless a return filter removed it.
+board's cheapest round trip unless a return filter removed it, Google served its
+return board empty, or its return board was refused (refused outright, or
+answered for a different segment than the pin; `_report_pin_outcome` counts both
+refusals in its stderr warning and no line counts an empty board). Then row 1 is
+the cheapest trip through the pins whose return boards kept a row.
 
 **Release before park.** A worker that is about to wait on another arm's round
 gives up any round it still owns first. Two workers can otherwise each hold what
@@ -1116,11 +1135,44 @@ unstated, so neither absence and no unpriced outbound is decided for it (no
 live or fixture row has done so). Point of sale is never a reason: Google is always `gl=US`,
 Matrix is sent no sales city, and no row says where it was priced.
 
+**Google's low row is asked of Matrix.** A Google-only row's reason says what
+Matrix's answer holds, not whether Matrix prices the row, because Matrix prunes
+its answer. So where the first Google-only row the table shows is under every
+fare in Matrix's answer, in the requested currency and for the party
+(`_cross_check.low_row`), the search asks Matrix for that row's exact flights
+once the table is printed: `--verify`'s chain search, uncached, and booking
+details per candidate, with no fare rules and no unrouted second search, in one
+`anyio.run` under `anyio.move_on_after(cli._LOW_CHECK_SECONDS)` (60 s), so the
+bound cancels the request in flight. One line under the table answers it:
+`Matrix asked for row N's flights (CHAIN DATE; CHAIN DATE): Matrix P · Google P`
+with the gap, both prices for the party; `…: not priced as these flights: R`,
+R being "Matrix returned no fare on these exact flights" or the other-itinerary
+sentence; or, in yellow, `…: no answer: R`, R the 60 s or the error's kind and
+message. The table, the row's reason and the exit code stay as they were. A
+row both sides price, a Matrix fare in another currency or with no party
+total, and Matrix's low at or under Google's ask nothing more. Measured
+2026-10-02 at `-n 10`, Google's low was under Matrix's whole answer on all four
+routes tried, and the chain priced Google's exact flights on three: EWR-ORY
+11-10/11-17, TAP USD429 against Matrix's 12 trips from USD527, Matrix
+USD429.00 (26.7 s); MIA-LAX, F9 USD165 against 8 AA and DL trips from USD454,
+Matrix USD170.00 (47.3 s); NYC-CHI, F9 USD139 against 10 trips at USD173,
+Matrix USD144.00 (20.5 s). On JFK-LHR, AF9656 with DL9603/KL6149 at USD810
+against 88 trips from USD818, the chain was empty (19.0 s); `--verify`'s
+unrouted second search then listed only AA, BA and IB though the 88 trips name
+DL and VS, so a carrier read off it would be wrong, and this check never asks
+it. The bound does not cover building the client, which reads the API key from
+its disk cache, nor the re-bootstrap `MatrixClient` runs synchronously on a
+403; the search has just used the same key.
+
 **`--format json --enrich`** writes `{"search": <the plain --format json
 document, the same -n rows>, "cross_check": {"currency", "delta":
 "google_minus_matrix", "matrix": {"listed", "solution_count", "complete",
-"last_price"}, "google": {"listed", "answered", "unread"}, "rows": [...]}}`, the rows
-being the table's, from the pure `_cross_check.document`. Plain `--format json`
+"last_price"}, "google": {"listed", "answered", "unread"}, "rows": [...],
+"low_check"}}`, the rows being the table's, from the pure `_cross_check.document`.
+`low_check` is null where no row was asked of Matrix, else `{"row",
+"google_low", "matrix_low", "outcome"` (`match`, `other-itinerary`,
+`no-solution` or `no-answer`), `"matrix_price", "delta", "reason", "routing"}`,
+the prices for the party and `delta` Google minus Matrix on a match. Plain `--format json`
 does not cross-check; on auto a failed Google query is still handed to Matrix,
 as before, and `--fast` asks Matrix nothing. It needs no awards (`--cash-only`)
 and no `--sellers` (exit 2 otherwise); a Google-only flag (`--bags`, an arrival

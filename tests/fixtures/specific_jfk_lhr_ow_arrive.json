@@ -1,0 +1,58 @@
+{
+  "summarizers": [
+    "carrierStopMatrix",
+    "currencyNotice",
+    "solutionList",
+    "itineraryPriceSlider",
+    "itineraryCarrierList",
+    "itineraryDepartureTimeRanges",
+    "itineraryArrivalTimeRanges",
+    "durationSliderItinerary",
+    "itineraryOrigins",
+    "itineraryDestinations",
+    "itineraryStopCountList",
+    "warningsItinerary"
+  ],
+  "inputs": {
+    "filter": {},
+    "page": {
+      "current": 1,
+      "size": 25
+    },
+    "pax": {
+      "adults": 1
+    },
+    "slices": [
+      {
+        "origins": [
+          "JFK"
+        ],
+        "destinations": [
+          "LHR"
+        ],
+        "date": "2026-10-21",
+        "dateModifier": {
+          "minus": 0,
+          "plus": 0
+        },
+        "isArrivalDate": true,
+        "filter": {
+          "warnings": {
+            "values": []
+          }
+        },
+        "selected": false
+      }
+    ],
+    "firstDayOfWeek": "SUNDAY",
+    "internalUser": false,
+    "sliceIndex": 0,
+    "sorts": "default",
+    "cabin": "COACH",
+    "maxLegsRelativeToMin": 1,
+    "changeOfAirport": true,
+    "checkAvailability": true
+  },
+  "summarizerSet": "wholeTrip",
+  "name": "specificDatesSlice"
+}
