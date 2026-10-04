@@ -61,7 +61,9 @@ into another airport of the set come only from the combined query; Google rows t
 parser could not read, counted once from the board's `unread` where its rows
 are recorded (`cli._record_google_cabin`), so the note gives the number
 `cross_check.google.unread` does (the calendar graph's wall check records no
-board and narrows nothing). A hand-off
+board and narrows nothing); a Google board served with no rows for a party
+with an infant and not handed to Matrix (`cli._run_gflight_path`), since Google
+has served such a board on a route with flights. A hand-off
 to Matrix, rows in another currency and a filter that empties a board are
 notes, not narrowings: each is a complete answer to what was asked.
 

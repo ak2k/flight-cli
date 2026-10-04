@@ -303,6 +303,45 @@ def test_an_empty_google_board_is_a_complete_answer(
     ]
 
 
+@pytest.mark.parametrize("flag", ["--inf-lap", "--inf-seat"])
+def test_an_empty_board_for_a_party_with_an_infant_narrows_the_answer(
+    gf_capture: Callable[[str], str], gf_session: Callable[..., Any], flag: str
+) -> None:
+    """Google has served no rows for an infant on a route with flights, so its
+    empty board is not the route's answer, as an adult's is."""
+    gf_session(gf_capture("ds1_zero_rows.json"))
+    env = _envelope_of(
+        _search(
+            "--cash-only",
+            "JFK",
+            "LAX",
+            "--dep",
+            _DEP.isoformat(),
+            flag,
+            "1",
+            "--backend",
+            "gflight",
+            "--fast",
+        )
+    )
+    assert (env["backend"], env["complete"], _rows(env)) == ("gflight", False, [])
+    assert [n for n in env["notes"] if "infant" in n] == [
+        "Google Flights served no rows for a party with an infant, as it has on routes "
+        "with flights. For Matrix's answer, use --backend matrix."
+    ]
+
+
+def test_an_empty_infant_board_handed_to_matrix_is_matrixs_answer(
+    gf_capture: Callable[[str], str], gf_session: Callable[..., Any]
+) -> None:
+    gf_session(gf_capture("ds1_zero_rows.json"))
+    env = _envelope_of(
+        _search("--cash-only", "JFK", "LHR", "--dep", _DEP.isoformat(), "--inf-lap", "1")
+    )
+    assert (env["backend"], env["complete"]) == ("matrix", True)
+    assert "Using Matrix: Google Flights served no rows for a party with an infant." in env["notes"]
+
+
 def test_a_google_row_that_could_not_be_read_narrows_the_answer(
     gf_session: Callable[..., Any],
     monkeypatch: pytest.MonkeyPatch,
