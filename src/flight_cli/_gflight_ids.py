@@ -2200,6 +2200,18 @@ def _listing(
     return next((o for o in row.others if fits(leg, o)), row)
 
 
+def _marked_listing(
+    row: GFlightWithId, fits: Callable[[int, GFlightWithId], bool] | None
+) -> GFlightWithId | None:
+    """The listing of a Cheapest-tab row's itinerary sold as separate tickets
+    that `keep` is handed: `_listing`'s choice among the marked listings alone,
+    or None where that is a one-ticket listing. A one-ticket listing is the base
+    board's to show, so it never stands in for a marked one."""
+    if fits is not None and not fits(0, row):
+        row = next((o for o in row.others if o.ticketing is not None and fits(0, o)), row)
+    return row if row.ticketing is not None else None
+
+
 def _kept_outbounds(
     first: Board[GFlightWithId],
     keep: Callable[[int, GFlightWithId], bool] | None,
@@ -2441,6 +2453,7 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
             transport=transport,
             currency=currency,
             keep=keep,
+            fits=fits,
         )
         if separate_tickets != "off" and not selected_count
         else None
@@ -2577,6 +2590,7 @@ def _with_separate_tickets(
     transport: GfTransport,
     currency: str,
     keep: Callable[[int, GFlightWithId], bool] | None,
+    fits: Callable[[int, GFlightWithId], bool] | None = None,
     stopped: GfBackendError | None = None,
 ) -> Board[GFlightWithId | tuple[GFlightWithId, ...]]:
     """`answer` with the Cheapest tab's separate-ticket itineraries added
@@ -2589,6 +2603,9 @@ def _with_separate_tickets(
 
     On a round trip each is a one-member row, its outbound alone at Google's
     round-trip total: Google serves no return board for it, pinned or not.
+
+    `fits` picks each marked itinerary's listing, among its marked listings, as
+    it picks a base row's (`_marked_listing`).
 
     The page is not fetched when pinning stopped on a wall, the network or the
     browser, because it would meet the same one. A refusal of this page leaves
@@ -2625,7 +2642,7 @@ def _with_separate_tickets(
     except GfBackendError as e:
         unparsed = e.unread if isinstance(e, _PageUnreadError) else 0
         return with_notes(answer, failed=e, unread=unparsed)
-    listed = [r for r in page if r.ticketing is not None]
+    listed = [m for r in page if (m := _marked_listing(r, fits)) is not None]
     marked = [r for r in listed if keep is None or keep(0, r)]
     # Counted with the base's, so an answer they would have filled reads as
     # none matching the routing, not as Google having no flights.

@@ -250,6 +250,70 @@ def test_a_board_with_separate_tickets_counts_the_unread_rows_of_both_pages(
     assert (board.separate_failed is not None, board.unread) == (True, 1 + 2)
 
 
+_EI = "EI104+EI152"
+
+
+def _lhr_relisted(marked: tuple[bool, bool]) -> str:
+    """The JFK-LHR capture with EI104+EI152 listed a second time, $50 cheaper
+    with its connection booked in first; `marked` says which of the economy
+    listing and that cheaper one Google sells as separate tickets."""
+    payload: list[Any] = json.loads(_ds1("ds1_jfk_lhr_tfu.json"))
+    for index in gfid._DS_ROW_BLOCKS:
+        block: Any = payload[index]
+        if not block:
+            continue
+        copies: list[Any] = []
+        for raw in block[0]:
+            legs = gfid._parse_flight_with_id(raw).flight.legs
+            if "+".join(f"{lg.airline.name}{lg.flight_number}" for lg in legs) != _EI:
+                continue
+            copy: Any = json.loads(json.dumps(raw))
+            copy[1][0][1] -= 50
+            copy[0][2][-1][gfid._LEG_CABIN_IDX] = 4
+            for row, sold in ((raw, marked[0]), (copy, marked[1])):
+                if sold:
+                    row[gfid._ROW_TICKETING_IDX] = [gfid._TICKETING_SEPARATE]
+            copies.append(copy)
+        block[0].extend(copies)
+    asked = _answering(json.dumps(payload), origin=None, destination=None, date=_DEP.isoformat())
+    return _page(asked)
+
+
+@pytest.mark.parametrize(
+    ("marked", "plain", "required"),
+    [
+        pytest.param((True, True), [243], [293], id="both-listings-marked"),
+        pytest.param((True, False), [], [293], id="the-economy-listing-alone-marked"),
+        pytest.param((False, True), [243], [], id="the-first-cabin-listing-alone-marked"),
+    ],
+)
+def test_a_cabin_requirement_takes_the_marked_listing_booked_in_its_cabin(
+    gf_session: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    marked: tuple[bool, bool],
+    plain: list[int],
+    required: list[int],
+) -> None:
+    """Google lists EI104+EI152 on its Cheapest tab twice, the cheaper with its
+    connection in first. A `+CABIN 3` search adds the economy listing when that
+    one is sold as separate tickets, and never a one-ticket listing in place of
+    a marked one; without `+CABIN` the cheaper listing stands for the itinerary,
+    as on the base board."""
+
+    def _no_matrix(**_kw: object) -> None:
+        raise AssertionError("handed to Matrix")
+
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    argv = [*_SEARCH, "JFK", "LHR", "--dep", _DEP.isoformat(), "--backend", "gflight"]
+    argv += ["--format", "json", "-n", "200", "--cabin", "economy"]
+    for extra, want in (((), plain), (("--ext", "+CABIN 3"), required)):
+        gf_session(_served("ds1_jfk_lhr_tfu.json"), _lhr_relisted(marked))
+        result = CliRunner().invoke(cli.app, [*argv, *extra])
+        assert result.exit_code == 0, result.output
+        doc: list[dict[str, Any]] = json.loads(result.stdout)
+        assert [m["price"] for m in doc if m["separate_tickets"]] == want, extra
+
+
 def test_a_refused_cheapest_tab_leaves_the_base_answer_and_says_why(
     gf_session: Callable[..., Any], capsys: pytest.CaptureFixture[str]
 ) -> None:
