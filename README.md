@@ -68,6 +68,13 @@ flight search JFK LHR --dep 2026-08-15 --backend gflight
 flight calendar MIA PAR --start 2026-06-07 -d 5-7 \
     --routing "LH+" --ext "MAXCONNECT 2:00" --depart-times morning
 
+# Without --fast, a table calendar prints Google Flights' price graph under
+# Matrix's grid. Matrix lists fares it priced; Google gives one price per date
+# pair with no itinerary behind it, so their lows can differ. When they do, one
+# stderr line names both lows with their date pairs, says what both asked, and
+# gives the search on each date pair that shows which fare is bookable.
+flight calendar NYC PAR --start 2026-10-20 --end 2026-11-19 -d 5-7
+
 # phase-2 of the calendar flow: full itineraries for a picked date. Give it
 # the calendar's filters (routing, codes, --depart-times/--return-times,
 # --include-unavailable) so it prices the grid's question, and the airport
@@ -112,7 +119,7 @@ Every result-printing command supports:
 - **Economy without basic fares** (`--exclude-basic`): Google Flights only, economy only. Google is asked to leave basic fares out, but no row says whether its fare is basic, and Google served basic fares on JFK-LHR anyway, so every run says the rows cannot be checked. `--sellers` and `--verify` are refused beside it: neither the booking page nor Matrix is asked to leave basic fares out.
 - **Stop limits** (`--stops N`): at most N stops per direction, on every backend. `0` = nonstop only, `1` = up to one stop, …
 - **Calendar-mode duration ranges** (`-d 5-7`): one search returns prices for 5-, 6-, and 7-night trips at every starting day.
-- **Google vs Matrix cross-check** (the default table): a row both sides price for the same trip shows `delta` (Google − Matrix), every other row says `why` it has none, and the caption says how much of Matrix's answer was read. `flight search JFK LAX --dep 2026-10-20 --format json --enrich --cash-only` writes the same comparison as `{"search": …, "cross_check": …}`.
+- **Google vs Matrix cross-check** (the default table): every price is for the whole party and a row ranks on the lowest one it prints; a row both sides price for the same trip shows `delta` (Google − Matrix), every other row says `why` it has none, and the caption says how much of Matrix's answer was read. `flight search JFK LAX --dep 2026-10-20 --format json --enrich --cash-only` writes the same comparison as `{"search": …, "cross_check": …}`.
 - **Sellers and explore** (Chrome, the `browser` extra): `flight search JFK LAX --dep 2026-10-20 --sellers --pick 2` lists every seller of row 2 with its price and fare name, cheapest first, then each seller's bag fees and booking link on a line of its own; `flight explore JFK --month 2026-11 --days 5-7 --max-price 300` lists where JFK flies that month and the cheapest round trip to each.
 
 ## Checking the setup: `flight doctor`

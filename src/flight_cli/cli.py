@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import json
 import re
+import shlex
 import sys
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
@@ -41,8 +42,12 @@ from ._calendar_split import (
     split_calendar_search,
     with_fanout_currency,
 )
-from ._cross_check import Answers, cross_check, party_price
+from ._console_text import CTRL as _CTRL
+from ._console_text import quote as _quote
+from ._console_text import safe_text as _safe_text
+from ._cross_check import Answers, cross_check
 from ._cross_check import document as cross_check_document
+from ._enrich import party_price
 
 # The `--gf-transport` vocabulary, from the leaf that costs nothing to import.
 # `_gflight_ids` owns the ladder but costs fli (~95 ms), and EVERY search
@@ -110,6 +115,7 @@ if TYPE_CHECKING:
     from ._gflight_ids import Board, GfTransport, ItineraryKey, PriceInsight
     from .models import (
         BookingDetailsResult,
+        CalendarDay,
         CalendarResult,
         FareRule,
         FareRules,
@@ -206,96 +212,6 @@ def main(
 
 
 # ─────────────────────────── argument parsers ──────────────────────────────
-
-
-_MAX_ECHOED_VALUE = 60  # characters of a rejected value worth showing back
-
-
-# Characters that drive a terminal rather than appear in it, hide inside what does
-# appear, or cannot be written out at all. `escape` neutralises `[` and nothing
-# else, so an ESC or CSI inside remote text still clears the screen, repositions
-# the cursor, or repaints what came before it — and a redirected stderr keeps
-# every byte for whatever reads the file next.
-_CTRL = {
-    **{c: None for c in range(0x20) if c not in (0x09, 0x0A)},  # C0, keeping tab and newline
-    0x7F: None,  # DEL
-    **{c: None for c in range(0x80, 0xA0)},  # C1, including the 8-bit CSI
-    # `str.splitlines` breaks on these two as it does on `\n`, so one message
-    # carrying one arrives at a log reader or a `readlines` caller as two records.
-    0x2028: None,  # LINE SEPARATOR
-    0x2029: None,  # PARAGRAPH SEPARATOR
-    # Bidi. The marks reorder the run they sit in and the embeddings, overrides
-    # and isolates reorder everything up to their terminator, so any of them can
-    # make a sentence read back as something it does not say.
-    0x061C: None,  # ARABIC LETTER MARK
-    0x200E: None,  # LEFT-TO-RIGHT MARK
-    0x200F: None,  # RIGHT-TO-LEFT MARK
-    **{c: None for c in range(0x202A, 0x202F)},  # embeddings and overrides
-    **{c: None for c in range(0x2066, 0x206A)},  # isolates
-    # Invisible and not whitespace, so they survive `strip()` and `split()` and
-    # sit unseen inside a carrier code or a price: two values that read as equal
-    # compare unequal, and nothing on the screen says why.
-    0x00AD: None,  # SOFT HYPHEN
-    **{c: None for c in range(0x200B, 0x200E)},  # zero-width space, non-joiner, joiner
-    0x2060: None,  # WORD JOINER
-    0xFEFF: None,  # ZERO WIDTH NO-BREAK SPACE
-    **{c: None for c in range(0xE0000, 0xE0080)},  # tag block
-    # A lone surrogate has no utf-8 encoding at all, so one in a Matrix price
-    # reaches a real stdout as UnicodeEncodeError: the render of a query that
-    # succeeded dies on the way out, where a console file object hides it.
-    **{c: None for c in range(0xD800, 0xE000)},
-}
-
-
-def _safe_text(value: object) -> str:
-    """Remote sentence-shaped text, ready for a console: control characters
-    dropped, then markup escaped.
-
-    For text we did not write and the user did not type — a Matrix error message,
-    an exception's `str()`. Neither quoted nor truncated, unlike `_quote`: this is
-    a sentence someone needs to read whole, and the part that explains the failure
-    is as often at the end as the start.
-
-    Strip before escape, never after. `escape` only sees a tag where `[` is
-    followed by `[a-z#/@]`, so a control character between the brackets hides the
-    tag from it, and stripping afterwards uncovers a live one: `"[\x00red]x"`
-    comes out of the other order as `"[red]x"`, styled."""
-    text = escape(str(value).translate(_CTRL))
-    if not text.strip() and isinstance(value, BaseException):
-        # `httpx.ConnectTimeout("")` stringifies to nothing, which would leave a
-        # reporter saying "Matrix calendar failed:" and stopping. The class name is
-        # the only thing such an exception carries, and it takes the same two steps
-        # as the message would: a class built from a remote payload can be named
-        # anything. A blank from anywhere else is a value someone chose, and stays
-        # blank.
-        return escape(type(value).__name__.translate(_CTRL))
-    return text
-
-
-def _elide(value: str) -> str:
-    """A value cut to `_MAX_ECHOED_VALUE` code points, with an ellipsis if cut.
-
-    Separate from `_quote` because the cap governs the value the user typed, not
-    the message around it: `repr` can double the length of a backslash-heavy
-    string, so a bound on the finished message would say nothing about the input
-    it is supposed to limit."""
-    if len(value) <= _MAX_ECHOED_VALUE:
-        return value
-    return value[:_MAX_ECHOED_VALUE] + "…"
-
-
-def _quote(value: str) -> str:
-    """A rejected user value, ready to interpolate into a markup console message.
-
-    The message exists to show WHICH value was rejected, so an oversized one is
-    cut: a 4301-digit `--duration` echoed whole buries its own point, and the
-    parsers accept any string a shell can pass.
-
-    Two orderings matter. `_elide` before `repr`, so the cap counts characters the
-    user typed rather than the quotes and escapes `repr` adds. `repr` before
-    `escape`, because `repr` doubles the backslash `escape` prepends and hands the
-    tag straight back to the markup parser."""
-    return escape(repr(_elide(value)))
 
 
 def _parse_date(s: str) -> date:
@@ -2332,10 +2248,11 @@ def _run_matrix_calendar(
     json_out: bool,
     matrix_url: bool,
     google_url: bool,
-) -> None:
+) -> CalendarResult | None:
     """The Matrix calendar, delivered: the whole answer for every calendar that
     neither `--fast` nor the http weave serves, and the half of the default one
-    that Google's price graph is printed after.
+    that Google's price graph is printed after. Returns the grid its table
+    shows, None after a JSON document.
 
     Authoritative, and the only path for Tier-2/3 routing and for JSON. A
     multi-airport calendar `_run_calendar` splits into one sub-query per
@@ -2381,7 +2298,7 @@ def _run_matrix_calendar(
             )
     if json_out:
         sys.stdout.write(json.dumps(res.raw, indent=2))
-        return
+        return None
 
     def _write_answer() -> None:
         _render_calendar(
@@ -2397,6 +2314,7 @@ def _run_matrix_calendar(
         _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
 
     _deliver_calendar(_write_answer)
+    return res
 
 
 def _default_graph_blocker(
@@ -2438,13 +2356,14 @@ def _default_graph_blocker(
 
 def _run_calendar_beside_graph(
     search: CalendarSearch,
-    matrix: Callable[[], None],
+    matrix: Callable[[], CalendarResult | None],
     *,
     headed: bool,
     origins: tuple[str, ...],
     dests: tuple[str, ...],
     sd: date,
     ed: date,
+    asked: Sequence[str],
 ) -> None:
     """Matrix's calendar, then Google's price graph read while Matrix ran.
 
@@ -2452,7 +2371,9 @@ def _run_calendar_beside_graph(
     read on a worker started before it and is waited for only once Matrix's
     answer is out, so nothing of Google's holds that answer back or changes it:
     Google's table follows it, any Google failure is one stderr line, and the
-    exit code is Matrix's.
+    exit code is Matrix's. Two lows that differ get one stderr line after
+    Google's table (`_two_lows_note`); `asked` is the calendar's own flags,
+    which the searches that line suggests repeat.
 
     A plain worker, not a second event loop: the graph is sync, and the pool's
     exit waits for the worker on every path out, which is what keeps its Chrome
@@ -2472,6 +2393,7 @@ def _run_calendar_beside_graph(
             return price_graphs(search, headed=headed)
 
     matrix_exit: typer.Exit | None = None
+    answer: CalendarResult | None = None
     graphs: Sequence[PriceGraph] = ()
     lost: Sequence[LostLength] = ()
     failure: Exception | None = None
@@ -2479,7 +2401,7 @@ def _run_calendar_beside_graph(
         with interrupt_guard(), ThreadPoolExecutor(max_workers=1) as pool:
             job = pool.submit(_read_graphs)
             try:
-                matrix()
+                answer = matrix()
             except typer.Exit as e:
                 # Matrix failed and has said so. Its exit code is kept for the end,
                 # so a graph that priced still prints above it.
@@ -2509,6 +2431,18 @@ def _run_calendar_beside_graph(
     elif lost:
         named = (f"{nights}-night trips: {_graph_failure_text(cause)}" for nights, cause in lost)
         _report_graph_failure(" ".join(named))
+    if failure is None and answer is not None:
+        note: str | None = None
+        # The note explains two answers that are already out; failing to compose
+        # it must not turn them into a traceback and a failed exit.
+        with contextlib.suppress(Exception):
+            note = _two_lows_note(
+                answer, graphs, search, origins=origins, dests=dests, sd=sd, ed=ed, asked=asked
+            )
+        if note is not None:
+            # Left for the terminal to wrap: a newline inside one of its commands
+            # would cut the command short when pasted.
+            err.print(f"[yellow]{_safe_text(note)}[/]", soft_wrap=True)
     if matrix_exit is not None:
         raise matrix_exit
 
@@ -2563,6 +2497,253 @@ def _report_graph_failure(text: str) -> None:
     err.print(
         f"[yellow]Google Flights price graph not shown:[/] {_safe_text(text)} "
         "[dim]--gf-transport http skips Chrome.[/]"
+    )
+
+
+# Each cabin's `--cabin` name, which the note also calls it by.
+_CABIN_NAMES: dict[Cabin, str] = {
+    Cabin.COACH: "economy",
+    Cabin.PREMIUM_COACH: "premium economy",
+    Cabin.BUSINESS: "business",
+    Cabin.FIRST: "first",
+}
+
+
+def _asked_flags(
+    opts: SearchOptions,
+    *,
+    one_way: bool,
+    routing: str | None,
+    extension: str | None,
+    routing_return: str | None,
+    extension_return: str | None,
+    depart_times: str | None,
+) -> tuple[str, ...]:
+    """The calendar's own constraints as the flags `flight search` and `flight
+    detail` take, so a search on one of its date pairs asks the same question.
+    The codes go as typed: each command derives the return's from them as the
+    calendar did, except that each whitespace character goes as a space: every
+    parser of them splits on any whitespace, but `_safe_text` drops a carriage
+    return from the note, joining a code to its argument, and a newline would
+    break the note's one line."""
+    flags: list[str] = []
+    if opts.cabin is not Cabin.COACH:
+        flags += ["--cabin", _CABIN_NAMES[opts.cabin]]
+    if opts.pax.adults != 1:
+        flags += ["--adults", f"{opts.pax.adults:d}"]
+    if opts.max_extra_stops is not None:
+        flags += ["--stops", f"{opts.max_extra_stops:d}"]
+    typed = [("--routing", routing), ("--ext", extension), ("--depart-times", depart_times)]
+    if not one_way:
+        typed += [("--routing-ret", routing_return), ("--ext-ret", extension_return)]
+    for flag, value in typed:
+        if value is not None:
+            flags += [flag, "".join(" " if c.isspace() else c for c in value)]
+    if opts.currency is not None:
+        flags += ["--currency", opts.currency]
+    return tuple(flags)
+
+
+class _Low(NamedTuple):
+    """One side's lowest fare, as its own table shows it."""
+
+    price: str  # with the currency code the side priced in
+    amount: float
+    departure: date
+    return_date: date | None  # None on a one-way
+    origin: str
+    destination: str
+
+
+def _window_date(month: int | None, day: int, sd: date, ed: date) -> date | None:
+    """The one date of the window with this day of the month, in this month when
+    the grid names one; None when no date of the window or more than one is."""
+    days = (sd + timedelta(days=i) for i in range((ed - sd).days + 1))
+    hits = [d for d in days if d.day == day and (not month or d.month == month)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _matrix_low(
+    res: CalendarResult,
+    *,
+    origins: tuple[str, ...],
+    dests: tuple[str, ...],
+    sd: date,
+    ed: date,
+    round_trip: bool,
+) -> _Low | None:
+    """The row Matrix's table lists first: its cheapest priced day, the earliest
+    of a tie, at that day's cheapest trip length, the shortest of a tie.
+
+    A day's cell holds no year, so a day that is no single date of the window is
+    passed over. A round-trip day with no trip length has no return date to
+    name, so it gives no low rather than a wrong one. A grid the table prints as
+    empty has no low either."""
+    if is_empty_calendar(res):
+        return None
+    best: tuple[float, date, str, CalendarDay] | None = None
+    for month in res.months:
+        for day in month.days:
+            price, amount = day.min_price, day.price_value
+            if day.disabled or not price or amount is None:
+                continue
+            when = _window_date(month.month, day.date, sd, ed)
+            if when is not None and (best is None or (amount, when) < best[:2]):
+                best = (amount, when, price, day)
+    if best is None:
+        return None
+    amount, when, price, day = best
+    option = min(day.options, key=lambda o: (o.price_value, o.trip_length), default=None)
+    if round_trip and option is None:
+        return None
+    back = when + timedelta(days=option.trip_length) if round_trip and option else None
+    # A merged grid names the pair that priced each length and each day.
+    holder = option if option is not None and option.origin is not None else day
+    origin, destination = holder.origin or ",".join(origins), holder.destination or ",".join(dests)
+    return _Low(price, amount, when, back, origin, destination)
+
+
+def _graph_low(
+    graphs: Sequence[PriceGraph], *, origins: tuple[str, ...], dests: tuple[str, ...]
+) -> _Low | None:
+    """Google's cheapest cell over every trip length, the earliest departure of
+    a tie, then the shortest length, which is its table's first row."""
+    cells = [(cell, graph.trip_length) for graph in graphs for cell in graph.cells]
+    if not cells:
+        return None
+    cell, nights = min(cells, key=lambda c: (c[0].price, c[0].departure, c[1] or 0))
+    back = cell.return_date
+    if back is None and nights is not None:
+        back = cell.departure + timedelta(days=nights)
+    # Compared as the table prints it, in whole dollars, so the note agrees or
+    # differs with what the reader sees.
+    shown = f"{cell.price:.0f}"
+    return _Low(
+        f"USD{shown}", float(shown), cell.departure, back, ",".join(origins), ",".join(dests)
+    )
+
+
+def _stops_reach_the_page(search: CalendarSearch) -> bool:
+    """Whether Google's page was asked a stop limit: `--stops`, or a stop code
+    on a leg, as `_gf_calgraph.page_url` writes one."""
+    from .routing_predicates import StopsPred, classify  # noqa: PLC0415 — loaded by the gate
+
+    if search.options.max_extra_stops is not None:
+        return True
+    return any(
+        isinstance(p, StopsPred)
+        for leg in search.legs
+        for p in classify(leg.route_language, leg.extension).predicates
+    )
+
+
+def _two_lows_note(
+    res: CalendarResult,
+    graphs: Sequence[PriceGraph],
+    search: CalendarSearch,
+    *,
+    origins: tuple[str, ...],
+    dests: tuple[str, ...],
+    sd: date,
+    ed: date,
+    asked: Sequence[str],
+) -> str | None:
+    """The line for a default calendar whose two tables show different lows, or
+    None when both priced and agree, or either priced nothing.
+
+    Both sides were asked one question, and each answers it differently: Matrix
+    lists fares it priced, under its default limit of one leg more than the
+    fewest on a route in each direction, and Google's graph is one price per date pair with no
+    itinerary behind it. So two lows can differ with neither table wrong, and
+    the line names both, what both asked, how they differ, and the search on
+    each date pair that shows what is bookable. Google's table prints whole
+    dollars, so two USD lows less than a dollar apart agree. A Matrix grid in
+    another currency is named in it and not compared."""
+    round_trip = len(search.legs) == _ROUND_TRIP_LEGS
+    matrix = _matrix_low(res, origins=origins, dests=dests, sd=sd, ed=ed, round_trip=round_trip)
+    google = _graph_low(graphs, origins=origins, dests=dests)
+    if matrix is None or google is None:
+        return None
+    ccy = _split_price(matrix.price)[0]
+    usd = ccy == "USD"
+    if usd and abs(matrix.amount - google.amount) < 1:
+        return None
+
+    def trip(low: _Low) -> str:
+        if low.return_date is None:
+            return f"{low.departure.isoformat()}, one-way"
+        nights = (low.return_date - low.departure).days
+        return (
+            f"{low.departure.isoformat()} to {low.return_date.isoformat()}, "
+            f"{nights:d} night{'' if nights == 1 else 's'}"
+        )
+
+    # As Google's table title says: a set's cell is the cheapest of its pairs.
+    across = len(expand_airports(origins)) > 1 or len(expand_airports(dests)) > 1
+    lows = (
+        f"Matrix {matrix.price} ({trip(matrix)}, {matrix.origin}→{matrix.destination}), "
+        f"Google Flights {google.price} ({trip(google)}, "
+        f"{'cheapest across ' if across else ''}{google.origin}→{google.destination})"
+    )
+    opening = (
+        f"Matrix and Google Flights differ on the lowest fare: {lows}."
+        if usd
+        else "Matrix and Google Flights priced in different currencies, so their "
+        f"lowest fares are not compared: {lows}; --currency USD asks Matrix in USD."
+    )
+    window = search.window
+    span = (
+        f"{window.duration_min:d}"
+        if window.duration_min == window.duration_max
+        else f"{window.duration_min:d}-{window.duration_max:d}"
+    )
+    graph_lengths = [g.trip_length for g in graphs if g.trip_length is not None]
+    lost = round_trip and graph_lengths != list(range(window.duration_min, window.duration_max + 1))
+    adults = search.options.pax.adults
+    shared = [_CABIN_NAMES[search.options.cabin], f"{adults:d} adult{'' if adults == 1 else 's'}"]
+    if not lost:
+        shared.append(f"{span} nights" if round_trip else "one-way")
+    if usd:
+        shared.append("in USD")
+    shared.append("between the same airports")
+    both = "Both asked " + ", ".join(shared)
+    if lost:
+        # A length the graph lacks may never have been loaded, so it is named as
+        # what Google priced, not as what Google was asked.
+        both += (
+            f", Matrix for {span} nights; Google's graph priced "
+            f"{_trip_lengths_text(graph_lengths)} trips only"
+        )
+    if not _stops_reach_the_page(search):
+        # Matrix's limit holds each slice, so a round trip may carry an extra stop
+        # each way.
+        both += (
+            f"; Matrix held each {'direction' if round_trip else 'trip'} to one stop "
+            "more than the fewest on its route, Google allowed any number of stops"
+        )
+    detail = ["flight", "detail", matrix.origin, matrix.destination]
+    detail += ["--dep", matrix.departure.isoformat()]
+    if matrix.return_date is not None:
+        detail += ["--return", matrix.return_date.isoformat()]
+        if span != _DEFAULT_CALENDAR_DURATION:
+            detail += ["-d", span]
+    # Several origins with no `--currency` asked the grid in USD; `detail` on the
+    # one pair it names would answer in that origin's currency.
+    fanout = with_fanout_currency(search).options.currency
+    if search.options.currency is None and fanout is not None:
+        asked_detail = [*asked, "--currency", fanout]
+    else:
+        asked_detail = [*asked]
+    gsearch = ["flight", "search", google.origin, google.destination]
+    gsearch += ["--dep", google.departure.isoformat()]
+    if google.return_date is not None:
+        gsearch += ["--return", google.return_date.isoformat()]
+    return (
+        f"{opening} {both}. Matrix's grid is fares Matrix priced; Google's graph is "
+        "one price per date pair with no itinerary behind it; either can leave out a "
+        f"fare the other lists. A search on the date {'pair ' if round_trip else ''}"
+        f"shows what is bookable: {shlex.join([*detail, *asked_detail])} (Matrix), "
+        f"{shlex.join([*gsearch, *asked, '--backend', 'gflight'])} (Google)."
     )
 
 
@@ -3401,9 +3582,12 @@ def _render_graph_range(
 
 def _trip_lengths_text(lengths: Sequence[int]) -> str:
     """The trip lengths a range table shows: "5-7-night" with no gap between
-    them, "5- and 7-night" with one. A lost length leaves a gap, and a span
-    across it would name a length the table has no column for."""
+    them, "5- and 7-night" with one, "5-night" when one is left. A lost length
+    leaves a gap, and a span across it would name a length the table has no
+    column for."""
     first, last = lengths[0], lengths[-1]
+    if first == last:
+        return f"{first:d}-night"
     if list(lengths) == list(range(first, last + 1)):
         return f"{first:d}-{last:d}-night"
     return _join_reasons([*(f"{n:d}-" for n in lengths[:-1]), f"{last:d}-night"])
@@ -4167,6 +4351,14 @@ def _same_itinerary(
     return found
 
 
+def _trip_text(row: _verify.Row) -> str:
+    """Each slice's chain of flights and its day, as a check names the row."""
+    return " · ".join(
+        f"{chain} {legs[0].departure[:10]}"
+        for chain, legs in zip(_verify.routings(row), row.slices, strict=True)
+    )
+
+
 def _check_on_matrix(
     row: _verify.Row, n: int, opts: SearchOptions, *, rps: float | None, impersonate: str | None
 ) -> _Checked:
@@ -4178,6 +4370,9 @@ def _check_on_matrix(
     chain, to tell a carrier Matrix lists nowhere on the route from a fare it
     does not have."""
     rps_, imp = _resolve_rps(rps), _resolve_impersonate(impersonate)
+    # Each search below can take tens of seconds; the booking details and
+    # fare rules after a match take a second or two and say nothing.
+    err.print(f"[dim]Asking Matrix for itinerary #{n:d}: {_safe_text(_trip_text(row))}…[/]")
     chain = cast(
         "SearchResult",
         _run(
@@ -4190,6 +4385,7 @@ def _check_on_matrix(
         ),
     )
     if not chain.solutions:
+        err.print("[dim]Matrix has no fare on those flights; asking which carriers it lists…[/]")
         probe = SpecificDateSearch(
             legs=_verify.matrix_legs(row, routed=False),
             options=_verify.matrix_options(row, opts, max_stops=_verify.most_stops(row)),
@@ -4239,11 +4435,9 @@ def _print_verified(
             f"{_safe_text(verdict.reason or verdict.outcome)}[/]"
         )
         return
-    trip = " · ".join(
-        f"{chain} {legs[0].departure[:10]}"
-        for chain, legs in zip(_verify.routings(row), row.slices, strict=True)
+    console.print(
+        f"[bold green]Verified on Matrix[/] · itinerary #{n:d} · {_safe_text(_trip_text(row))}"
     )
-    console.print(f"[bold green]Verified on Matrix[/] · itinerary #{n:d} · {_safe_text(trip)}")
     matrix = verdict.solution.price
     console.print(
         f"Matrix {_safe_text(matrix or '—')} · Google {_safe_text(row.price or '—')}"
@@ -4795,7 +4989,9 @@ def _render_merged(
                 f"Matrix listed {b.listed:d} of {b.solution_count:d} solutions"
                 + (f" (to {_safe_text(b.last_price)})" if b.last_price else "")
                 + (
-                    f"; Google listed {b.google_listed:d} rows."
+                    f"; Google listed {b.google_listed:d} rows"
+                    + (f", {b.google_unread:d} unread" if b.google_unread else "")
+                    + "."
                     if b.google_answered
                     else "; Google gave no answer."
                 )
@@ -4829,8 +5025,7 @@ def _render_merged(
             # `rows` is duck-typed, and the lookup falls back to the tag it was
             # handed when it is not one of the three this module writes.
             _safe_text(_MERGE_SOURCE_TAG.get(row.source, row.source)),
-            # Explained, the column is Matrix's price for the party, as Google's is.
-            _amount(c.matrix_price if c is not None else row.matrix_price, ccy),
+            _amount(row.matrix_price, ccy),
             _amount(row.gf_price, ccy),
             f"{delta:+,.2f}" if delta is not None else "—",
             # Carrier codes and prices in it are remote text.
@@ -5016,6 +5211,18 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     _pin_cap_note(legs=legs, top_n=top_n)
     _note_other_currencies(results, opts.currency or "USD")
 
+    if not results and (sellers or verify):
+        # Why the board is empty is the search's answer; the flag's own exit
+        # below says only that there is no row to take. That exit leaves a
+        # `--format json` stdout empty, so no document is written here.
+        _answer_gf_empty(
+            dropped,
+            json_out=json_out,
+            pinned=getattr(results, "pinned", 0),
+            checks=_row_checks(legs, opts),
+            cap=_page_cap_text(opts),
+            awards_answer=json_out,
+        )
     # Checked before the answer is printed: a `--sellers` pick outside the
     # table is a usage error, not a pin to fall back from, and an empty board
     # leaves nothing to open.
@@ -5484,7 +5691,9 @@ def _cross_check_answers(
     """The two answers a weave left, as the cross-check reads them, with
     Matrix's page before the price cap as `uncapped`. Google's board is no
     answer where its half failed or never ran, and a board the row filter cut
-    cannot show a flight absent from what Google served."""
+    cannot show a flight absent from what Google served. The board's `unread`,
+    the rows Google served that the parser could not read, is read as
+    `dropped` is."""
     stops = opts.max_extra_stops
     return Answers(
         matrix=matrix_res,
@@ -5495,6 +5704,7 @@ def _cross_check_answers(
         round_trip=len(legs) >= _ROUND_TRIP_LEGS,
         currency=currency,
         passengers=opts.pax.total,
+        google_unread=getattr(state.get("gf"), "unread", 0),
     )
 
 
@@ -5552,7 +5762,8 @@ def _answer_cross_check_document(
         matrix_res = _price_capped(page, opts, passengers=opts.pax.total)
         _report_weave_aftermath(state)
         board = fli_results_to_search_result(gf)
-        shown = merge_results(board, matrix_res, currency=currency)[:top_n]
+        merged = merge_results(board, matrix_res, currency=currency, passengers=opts.pax.total)
+        shown = merged[:top_n]
         answers = _cross_check_answers(
             state, board, matrix_res, uncapped=page, legs=legs, opts=opts, currency=currency
         )
@@ -5708,7 +5919,7 @@ def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, 
     booking_row: tuple[SearchResult, int, str | None, str | None] | None = None
     if not awards_only:
         board = fli_results_to_search_result(gf)
-        merged = merge_results(board, matrix_res, currency=requested)
+        merged = merge_results(board, matrix_res, currency=requested, passengers=opts.pax.total)
         answers = _cross_check_answers(
             state, board, matrix_res, uncapped=page, legs=legs, opts=opts, currency=requested
         )
@@ -8449,6 +8660,15 @@ def calendar(
             max_concurrency=max_concurrency,
             matrix_url=matrix_url,
             google_url=google_url,
+            asked=_asked_flags(
+                opts,
+                one_way=one_way,
+                routing=routing,
+                extension=extension,
+                routing_return=routing_return,
+                extension_return=extension_return,
+                depart_times=depart_times,
+            ),
         )
         return
     blocker = _grid_branch_blocker(
@@ -8526,6 +8746,7 @@ def _calendar_without_fast(
     max_concurrency: int,
     matrix_url: bool,
     google_url: bool,
+    asked: tuple[str, ...],
 ) -> None:
     """The calendar Matrix answers: alone, beside Google's price graph, or under
     `--gf-transport http` behind the RPC grid's weave.
@@ -8568,8 +8789,8 @@ def _calendar_without_fast(
         )
         return
 
-    def _matrix() -> None:
-        _run_matrix_calendar(
+    def _matrix() -> CalendarResult | None:
+        return _run_matrix_calendar(
             search,
             origins=origins,
             dests=dests,
@@ -8591,7 +8812,7 @@ def _calendar_without_fast(
         _matrix()
         return
     _run_calendar_beside_graph(
-        search, _matrix, headed=headed, origins=origins, dests=dests, sd=sd, ed=ed
+        search, _matrix, headed=headed, origins=origins, dests=dests, sd=sd, ed=ed, asked=asked
     )
 
 

@@ -76,10 +76,11 @@ choice that fits the rest of the stack — don't substitute.
   golden-file tests at `tests/fixtures/` catch field-name and ordering
   regressions in <100ms — exactly the class of bugs that hit us during the
   initial build.
-- **Run pytest after any change to `cli.py` too**, and read
+- **Run pytest after any change to `cli.py` or `pp/cli.py` too**, and read
   [`docs/memories/console_sanitizing.md`](./docs/memories/console_sanitizing.md)
-  before adding a print or a table cell there. `cli.py` is the one file with a
-  whole-file AST gate over it — the `escape_scan` helper in
+  before adding a print or a table cell in either. `src/flight_cli/cli.py` and
+  `src/flight_cli/pp/cli.py` are the only two files with a whole-file AST gate
+  over them — the `escape_scan` helper in
   `tests/test_calendar_split.py`, run as
   `tests/test_calendar_split.py::test_calendar_paths_escape_every_printed_value`.
   A value reaches a Rich console or table one of four ways: through `_quote` or
