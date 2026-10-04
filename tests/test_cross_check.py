@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -46,6 +47,7 @@ from flight_cli.models import (
 )
 from flight_cli.pp.gflight_adapter import fli_results_to_search_result
 from flight_cli.wire import to_wire
+from test_envelope import _envelope_of, _notes, _rows
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -557,6 +559,11 @@ def _priced(source: str, gf: str | None = None, mx: str | None = None) -> Merged
     )
 
 
+def _sold_separately(gf: str, ticketing: str = "separate_tickets") -> MergedRow:
+    it = _its(_slice(["ZZ1"]), price=gf).model_copy(update={"ticketing": ticketing})
+    return MergedRow(itinerary=it, gf_price=gf, matrix_price=None, source="gf", google=it)
+
+
 @pytest.mark.parametrize(
     ("rows", "matrix_low", "want"),
     [
@@ -608,6 +615,18 @@ def _priced(source: str, gf: str | None = None, mx: str | None = None) -> Merged
             "USD120.00",
             None,
             id="matrix-under-googles-low",
+        ),
+        pytest.param(
+            [_sold_separately("USD100.00"), _priced("gf", gf="USD150.00")],
+            "USD200.00",
+            2,
+            id="a-row-on-separate-tickets-is-passed-over",
+        ),
+        pytest.param(
+            [_sold_separately("USD100.00", "self_transfer")],
+            None,
+            None,
+            id="a-self-transfer-is-passed-over-beside-an-empty-matrix-answer",
         ),
     ],
 )
@@ -680,7 +699,7 @@ def _weave(
     )
     bodies: list[dict[str, Any]] = []
 
-    def _gf(*_a: Any) -> list[Any]:
+    def _gf(*_a: Any, **_kw: Any) -> list[Any]:
         if google_fails:
             raise GfThrottledError("rate-limited")
         return rows
@@ -1066,6 +1085,11 @@ def test_a_document_hands_a_failed_google_query_to_matrix_as_the_docs_say(
             id="awards",
         ),
         pytest.param([*_SEARCH, "--sellers"], "writes no booking options", id="sellers"),
+        pytest.param(
+            [*_SEARCH, "--return", (_DEP + timedelta(days=7)).isoformat(), "--split"],
+            "writes no split ticket",
+            id="split",
+        ),
     ],
 )
 def test_enrich_refuses_a_document_it_cannot_write(
@@ -1133,3 +1157,99 @@ def test_bags_keep_the_document_off_matrix_and_say_so(
     assert isinstance(doc, list)
     assert "No Matrix enrichment: Matrix prices no bags." in result.stderr
     assert bodies == []
+
+
+# ─────────────────────────────── the envelope ───────────────────────────────
+
+
+def test_the_envelope_carries_googles_rows_and_the_cross_check(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    _weave(monkeypatch, gf_rows)
+    doc = _document(_run([*_SEARCH, "-n", "5", "--enrich", "--format", "json"]))
+    env = _envelope_of(_run([*_SEARCH, "-n", "5", "--enrich", "--format", "envelope"]))
+    assert (env["backend"], env["complete"]) == ("gflight", True)
+    assert [r["row"] for r in _rows(env)] == doc["search"]
+    assert env["cross_check"] == doc["cross_check"]
+    assert not _notes(env, "cross_check")
+
+
+def test_a_failed_matrix_leaves_the_envelopes_cross_check_null_and_narrows(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    _weave(monkeypatch, gf_rows, matrix_fails=True)
+    env = _envelope_of(_run([*_SEARCH, "-n", "5", "--enrich", "--format", "envelope"]))
+    assert (env["backend"], env["complete"], env["cross_check"]) == ("gflight", False, None)
+    assert len(_rows(env)) == 5
+    assert _notes(env, "cross_check") == ["cross_check: the Matrix search failed"]
+
+
+def test_a_failed_google_leaves_the_envelope_matrixs_cross_check_alone(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    _weave(monkeypatch, gf_rows, google_fails=True)
+    env = _envelope_of(_run([*_SEARCH, "-n", "5", "--enrich", "--format", "envelope"]))
+    assert (env["backend"], env["complete"]) == (None, False)
+    assert _rows(env) == []
+    assert env["cross_check"]["google"] == {"listed": 0, "answered": False, "unread": 0}
+    alone = "Google Flights failed, and cross_check holds Matrix's rows alone"
+    assert _notes(env, "backend") == [f"backend: {alone}"]
+    assert _notes(env, "results") == [f"results: {alone}"]
+
+
+def test_with_both_failed_the_envelope_exits_1_with_neither(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    _weave(monkeypatch, gf_rows, google_fails=True, matrix_fails=True)
+    result = _run([*_SEARCH, "-n", "5", "--enrich", "--format", "envelope"])
+    env = _envelope_of(result, code=1)
+    assert (env["backend"], env["complete"], env["cross_check"]) == (None, False, None)
+
+
+def test_the_awards_refusal_names_the_format_asked(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    bodies = _weave(monkeypatch, gf_rows)
+
+    def _awards(sel: Any) -> bool:
+        return not sel.cash_only
+
+    def _no_award_search(*_a: Any, **_kw: Any) -> None:
+        pytest.fail("an award provider was searched")
+
+    monkeypatch.setattr(cli, "_should_run_awards", _awards)
+    monkeypatch.setattr(cli, "run_pp_for_search", _no_award_search)
+    args = ["search", "JFK", "LAX", "--dep", _DEP.isoformat(), "--enrich", "--format", "envelope"]
+    result = _run(args)
+    assert result.exit_code == 2, result.output
+    said = " ".join(result.stderr.split())
+    assert "--enrich --format envelope cross-checks cash fares only; add --cash-only" in said
+    assert result.stdout == ""
+    assert bodies == []
+
+
+def test_the_envelopes_unread_note_counts_what_its_cross_check_counts(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    """One count, the board's `unread`: the rows Google served that could not be
+    read narrow the answer, and the note says the number `google.unread` does."""
+    _weave(monkeypatch, _unread(gf_rows, 2))
+    env = _envelope_of(_run([*_SEARCH, "-n", "5", "--enrich", "--format", "envelope"]))
+    counted = env["cross_check"]["google"]["unread"]
+    said = [re.findall(r"\d+", n) for n in env["notes"] if "could not be read" in n]
+    assert (env["complete"], counted, said) == (False, 2, [[str(counted)]])
+
+
+def test_the_envelopes_cross_check_carries_the_unread_count_and_the_partys_prices(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    """The cross-check document gained `google.unread` and prices for the whole
+    party; the envelope carries the document `--format json` prints, so both."""
+    _weave(monkeypatch, _unread(gf_rows, 2), matrix=_party_of_two)
+    args = [*_SEARCH, "--adults", "2", "-n", "3", "--enrich", "--format"]
+    doc = _document(_run([*args, "json"]))
+    env = _envelope_of(_run([*args, "envelope"]))
+    assert env["cross_check"] == doc["cross_check"]
+    assert env["cross_check"]["google"]["unread"] == 2
+    assert env["cross_check"]["rows"][0]["matrix_price"] == "USD203.60"
+    assert [r["row"] for r in _rows(env)] == doc["search"]
