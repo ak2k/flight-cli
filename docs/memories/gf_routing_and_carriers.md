@@ -306,7 +306,10 @@ legs on one line with CO2, legs one per line with CO2, legs one per line
 without CO2. The last prints even when it is still wider; a board with no CO2
 grams has only the first two. A dropped column prints a dim note that
 `--format json` carries it, and the JSON is the same at every width. The width
-is measured unbounded, because `console.measure` caps it at the console's.
+is measured unbounded, because `console.measure` caps it at the console's. The
+price column is never wrapped: at 80 columns with `--bags` over JFK,EWR-LHR,
+Rich wrapped "USD293.00 †" at its space and left the separate-ticket mark on a
+line of its own.
 
 **How the full board is served.**
 - Rows are deduped per itinerary (every leg's carrier, flight number and
