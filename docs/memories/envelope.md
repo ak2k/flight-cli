@@ -21,8 +21,8 @@ its schema is `docs/envelope.schema.json`, generated from the models
 | `notes` | list of strings | every non-blank stderr line of the run (ANSI removed, in order), then one line per null or empty key, `key: why` |
 | `results` | search: `[{cabin, rows}]`, one per `--cabin` in order; calendar: `rows` | `{price, currency, row}`, where `row` is the object `--format json` prints, unchanged |
 | `awards` | list / null | the award document's per-leg entries; each match also carries `flights`, every flight of its slice. Null when no award search ran or it failed |
-| `insight` | `[{cabin, currency, cheapest, typical_low, typical_high, level}]` | one per Google page that carried one |
-| `price_history` | `[{cabin, currency, points: [{date, price}]}]` | one per Google page that carried one |
+| `insight` | `[{cabin, currency, cheapest, typical_low, typical_high, level}]` | one per Google page that carried one; a leg asked as several pages gives one per page, in page order |
+| `price_history` | `[{cabin, currency, points: [{date, price}]}]` | one per Google page that carried one, as `insight` |
 | `verify` | object / null | `--verify`'s check of row `--pick`, the `verify` object `--format json` prints; null when not asked, on a calendar, or when the check failed (exit 1) |
 | `cross_check` | object / null | `--enrich`'s Google-vs-Matrix comparison, the `cross_check` object `--format json --enrich` prints, `low_check` included; null when not asked, skipped, on a calendar, or when Matrix's half failed |
 | `split_ticket` | object / null | `--split`'s pair, the `split_ticket` object `--format json --split` prints (`{outbound, return, total, currency}`, or `{error}` naming why there is no pair); null when not asked, on a calendar, or when Matrix answered the search |
@@ -76,7 +76,10 @@ are recorded (`cli._record_google_cabin`), so the note gives the number
 `cross_check.google.unread` does (the calendar graph's wall check records no
 board and narrows nothing); a Google board served with no rows for a party
 with an infant and not handed to Matrix (`cli._run_gflight_path`), since Google
-has served such a board on a route with flights. A hand-off
+has served such a board on a route with flights; a Google board with rows
+asked as several pages that is `partial` (`cli._gflight_pages`): a page did not
+answer, or the trip is round and each return flies back between its own
+page's airports. A hand-off
 to Matrix, rows in another currency, a filter that empties a board, rows
 Google served over the stop ceiling asked for (`cli._note_stop_drops` counts
 them) and a pin whose return board the row filter emptied are notes, not

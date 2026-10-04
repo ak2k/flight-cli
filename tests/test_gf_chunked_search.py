@@ -33,6 +33,7 @@ from flight_cli._gf_errors import (
 from flight_cli.domain import Leg, SearchOptions, SpecificDateSearch
 from flight_cli.fli_bridge import to_fli_filter
 from flight_cli.models import SearchResult
+from test_envelope import _envelope_of, _rows
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1051,3 +1052,75 @@ def test_the_cross_check_calls_no_return_carrier_absent_from_a_paged_round_trip(
     assert json.loads(result.stdout)["cross_check"]["google"]["unread"] == unread * len(
         google.calls
     )
+
+
+# ──────────────────────────────── the envelope ────────────────────────────
+
+
+@dataclass
+class _Priced(_Google):
+    """`_Google` whose every outbound page also carries a price insight and a
+    daily history of its own, numbered by the order the pages were asked in."""
+
+    @override
+    def __call__(self, filters: Any, *, currency: str = "USD") -> gfid.Board[gfid.GFlightWithId]:
+        board = super().__call__(filters, currency=currency)
+        if filters.flight_segments[0].selected_flight is not None:
+            return board
+        n = len(self.pages())
+        return gfid.Board(
+            board,
+            insight=gfid.PriceInsight(
+                cheapest=100.0 + n, typical_low=200.0 + n, typical_high=300.0 + n, currency="USD"
+            ),
+            history=gfid.PriceHistory(points=((_DEP, 400.0 + n),), currency="USD"),
+            unread=board.unread,
+        )
+
+
+_EX6_PAGE_2: Page = (_EX6_FROM[:4], _EX6_TO[7:])
+
+
+@pytest.mark.parametrize(
+    ("refuse", "ret", "pages", "complete"),
+    [
+        pytest.param(None, False, [1, 2, 3, 4], True, id="every-page"),
+        pytest.param(_EX6_PAGE_2, False, [1, 3, 4], False, id="a-page-refused"),
+        pytest.param(None, True, [1, 2, 3, 4], False, id="round-trip"),
+    ],
+)
+def test_the_envelope_carries_every_pages_rows_insight_and_history(
+    monkeypatch: pytest.MonkeyPatch,
+    refuse: Page | None,
+    ret: bool,
+    pages: list[int],
+    complete: bool,
+) -> None:
+    """A leg asked as several pages reaches the envelope as one page does: the
+    merged rows in `results`, and each page's insight and history, in page
+    order. A page that did not answer narrows the answer, and so does a round
+    trip, whose returns fly back between their own page's airports."""
+
+    def _refused(page: Page) -> Exception | None:
+        return GfUpstreamStatusError(503) if page == refuse else None
+
+    args = (",".join(_EX6_FROM), ",".join(_EX6_TO), "--backend", "gflight", "--fast", "-n", "200")
+    doc = json.loads(
+        _search(
+            monkeypatch, _Priced(_EX6_PAIRS, refuse=_refused), *args, "--format", "json", ret=ret
+        ).stdout
+    )
+    env = _envelope_of(
+        _search(
+            monkeypatch,
+            _Priced(_EX6_PAIRS, refuse=_refused),
+            *args,
+            "--format",
+            "envelope",
+            ret=ret,
+        )
+    )
+    assert (env["backend"], env["complete"]) == ("gflight", complete)
+    assert [r["row"] for r in _rows(env)] == doc
+    assert [i["typical_low"] for i in env["insight"]] == [200.0 + n for n in pages]
+    assert [h["points"][0]["price"] for h in env["price_history"]] == [400.0 + n for n in pages]

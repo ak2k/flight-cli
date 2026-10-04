@@ -5264,12 +5264,15 @@ def _gflight_pages(
     cross-check calls no flight absent from Google while any are.
     `stop_drops` sums the rows over the stop ceiling the same way, for the
     one line that counts them.
-    A page's price insight describes its own airports, so the merged
-    board carries none. The board is `partial` where a page is missing or the
-    trip is round: its rows then stop short of what one search would list."""
+    A page's price insight and history describe its own airports, so the
+    merged board's `insight` and `history` are None and each answered page's
+    ride in `page_insights` and `page_histories`, in page order. The board is
+    `partial` where a page is missing or the trip is round: its rows then stop
+    short of what one search would list."""
     from ._gf_postfilter import StopDrops  # noqa: PLC0415 — GF-only
     from ._gflight_ids import (  # noqa: PLC0415 — fli, ~95 ms
         Board,
+        _kept_insight,  # pyright: ignore[reportPrivateUsage] — a page's insight past its filter
         _PageUnreadError,  # pyright: ignore[reportPrivateUsage] — the refusal that counts rows
     )
 
@@ -5277,12 +5280,14 @@ def _gflight_pages(
     boards: list[Board[Any]] = []
     dropped = pinned = unread = 0
     stop_drops = StopDrops()
+    extras: dict[int, tuple[PriceInsight | None, PriceHistory | None]] = {}
     with _browser_scope(gf_mode):
         if len(pages[0]) < _ROUND_TRIP_LEGS:
             for i, page in enumerate(pages):
                 board = asked.ask(i, partial(_page_board, page, opts, top_n, gf_mode, gf_headed))
                 if board is not None:
                     boards.append(board)
+                    extras[i] = (board.insight, board.history)
                     dropped += board.dropped
                     unread += board.unread
                     _add_stop_drops(stop_drops, board.stop_drops)
@@ -5316,11 +5321,18 @@ def _gflight_pages(
                     else None
                 )
                 if board is None:
-                    dropped += len(ob.board) - len(kept[i])
+                    left = len(ob.board) - len(kept[i])
+                    if not keys:
+                        # Answered with nothing to pin: its insight, past its
+                        # filter, is still this page's.
+                        insight = _kept_insight(ob.board.insight, kept[i], left)
+                        extras[i] = (insight, ob.board.history)
+                    dropped += left
                     unread += ob.board.unread
                     _add_stop_drops(stop_drops, ob.stop_drops)
                 else:
                     boards.append(board)
+                    extras[i] = (board.insight, board.history)
                     dropped += board.dropped
                     pinned += board.pinned
                     unread += board.unread
@@ -5345,6 +5357,9 @@ def _gflight_pages(
         unread=unread,
     )
     merged.stop_drops = stop_drops
+    answered = [extras[i] for i in sorted(extras)]
+    merged.page_insights = tuple(ins for ins, _ in answered if ins is not None)
+    merged.page_histories = tuple(h for _, h in answered if h is not None)
     return merged
 
 
@@ -5440,24 +5455,25 @@ def _gflight_json_document(results: list[Any], bags: Bags | None = None) -> list
 
 
 def _record_google_cabin(
-    cabin: Cabin,
-    results: list[Any],
-    *,
-    insight: PriceInsight | None,
-    history: PriceHistory | None,
-    unread: int,
-    bags: Bags | None = None,
+    cabin: Cabin, results: list[Any], served: Any, *, bags: Bags | None = None
 ) -> None:
-    """Hand one cabin's Google rows to the envelope run, with its page's insight
-    and history. Each row is the object `_gflight_json_document` prints for it,
+    """Hand one cabin's Google rows to the envelope run, with the insight and
+    history of each page that answered `served`, the board as the search
+    returned it. Each row is the object `_gflight_json_document` prints for it,
     priced by its last member: a round trip's fare is the one every surface
     prints for the combination.
 
-    `unread` is the board's: the rows its pages served that the parser could not
-    read, so the answer is narrower by them. Counted on the board and not per
-    page, the note gives the number the cross-check's `google.unread` does."""
+    `served.unread` is the board's: the rows its pages served that the parser
+    could not read, so the answer is narrower by them. Counted on the board and
+    not per page, the note gives the number the cross-check's `google.unread`
+    does. A board asked as several pages is `partial` where a page is missing
+    or the trip is round, so rows it holds stop short of what was asked; the
+    stderr lines that say so are the notes."""
     if not _envelope.active():
         return
+    if served and getattr(served, "partial", False):
+        _envelope.narrow()
+    unread: int = getattr(served, "unread", 0)
     if unread:
         _envelope.narrow(
             f"Google Flights: {unread:d} {_CABIN_NAMES[cabin]} rows its pages served "
@@ -5474,27 +5490,37 @@ def _record_google_cabin(
                 row=row,
             )
         )
+    insight: PriceInsight | None = getattr(served, "insight", None)
+    history: PriceHistory | None = getattr(served, "history", None)
+    insights: Sequence[PriceInsight] = (
+        (insight,) if insight is not None else getattr(served, "page_insights", ())
+    )
+    histories: Sequence[PriceHistory] = (
+        (history,) if history is not None else getattr(served, "page_histories", ())
+    )
     _envelope.record_search(
         backend="gflight",
         cabin=cabin.value,
         rows=rows,
-        insight=None
-        if insight is None
-        else _envelope.Insight(
-            cabin=cabin.value,
-            currency=insight.currency,
-            cheapest=insight.cheapest,
-            typical_low=insight.typical_low,
-            typical_high=insight.typical_high,
-            level=insight.level,
-        ),
-        history=None
-        if history is None
-        else _envelope.PriceHistory(
-            cabin=cabin.value,
-            currency=history.currency,
-            points=[_envelope.PricePoint(date=d, price=v) for d, v in history.points],
-        ),
+        insights=[
+            _envelope.Insight(
+                cabin=cabin.value,
+                currency=i.currency,
+                cheapest=i.cheapest,
+                typical_low=i.typical_low,
+                typical_high=i.typical_high,
+                level=i.level,
+            )
+            for i in insights
+        ],
+        histories=[
+            _envelope.PriceHistory(
+                cabin=cabin.value,
+                currency=h.currency,
+                points=[_envelope.PricePoint(date=d, price=v) for d, v in h.points],
+            )
+            for h in histories
+        ],
     )
 
 
@@ -6102,13 +6128,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
         )
 
     if not results:
-        _record_google_cabin(
-            opts.cabin,
-            results,
-            insight=getattr(results, "insight", None),
-            history=getattr(results, "history", None),
-            unread=getattr(results, "unread", 0),
-        )
+        _record_google_cabin(opts.cabin, results, results)
         _answer_gf_empty(
             dropped,
             json_out=json_out,
@@ -6143,8 +6163,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     # from — narrowing the query would answer a filtered search with fewer rows
     # than exist, which is the failure this backend is most prone to.
     insight = getattr(results, "insight", None)
-    history = getattr(results, "history", None)
-    unread: int = getattr(results, "unread", 0)
+    served = results
     results = _price_ordered(results)[:top_n]
     # A pinned link follows only where one is asked for, the format has room for
     # it and row one can be pinned: `--format json` emits no link at all, and a
@@ -6170,9 +6189,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     # models. Suppressing the noisy unknown-type chatter for this rendering
     # block keeps the boundary localized.
     if _envelope.active():
-        _record_google_cabin(
-            opts.cabin, results, insight=insight, history=history, unread=unread, bags=opts.bags
-        )
+        _record_google_cabin(opts.cabin, results, served, bags=opts.bags)
         if verify_row is not None:
             check = _verify_document(
                 results[verify_row - 1], verify_row, opts, rps=rps, impersonate=impersonate
@@ -6697,14 +6714,7 @@ def _answer_cross_check_document(
     if _envelope.active():
         if google_answered:
             served = state.get("gf")
-            _record_google_cabin(
-                opts.cabin,
-                rows,
-                insight=getattr(served, "insight", None),
-                history=getattr(served, "history", None),
-                unread=getattr(served, "unread", 0),
-                bags=opts.bags,
-            )
+            _record_google_cabin(opts.cabin, rows, served, bags=opts.bags)
         if checked is not None:
             _envelope.record_cross_check(json.loads(json.dumps(checked, default=str)))
         return
@@ -8045,13 +8055,7 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
 
     if _envelope.active():
         for cab, board in fli_by_cabin.items():
-            _record_google_cabin(
-                cab,
-                _price_ordered(board)[:top_n],
-                insight=getattr(board, "insight", None),
-                history=getattr(board, "history", None),
-                unread=getattr(board, "unread", 0),
-            )
+            _record_google_cabin(cab, _price_ordered(board)[:top_n], board)
         if not run_pp:
             return None
     elif json_out and not run_pp:

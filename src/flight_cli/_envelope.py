@@ -182,17 +182,17 @@ def record_search(
     backend: Backend,
     cabin: str,
     rows: Sequence[ResultRow],
-    insight: Insight | None = None,
-    history: PriceHistory | None = None,
+    insights: Sequence[Insight] = (),
+    histories: Sequence[PriceHistory] = (),
 ) -> None:
+    """One cabin's rows, with the insight and history of each page that
+    answered it: one page, or several where a leg was asked as several."""
     if (rec := _slot.recorder) is not None:
         with rec.lock:
             rec.backend = backend
             rec.by_cabin[cabin] = list(rows)
-            if insight is not None:
-                rec.insight.append(insight)
-            if history is not None:
-                rec.history.append(history)
+            rec.insight.extend(insights)
+            rec.history.extend(histories)
 
 
 def record_calendar(*, backend: Backend, rows: Sequence[ResultRow]) -> None:

@@ -1794,7 +1794,10 @@ class Board[T](list[T]):
     here names it. `history` is the route's, so a filter that restates the
     insight leaves it as the page gave it. `stop_drops` is set by the caller
     that built the row filter: the rows it dropped for the stop ceiling, for
-    whichever path shows the board to say so."""
+    whichever path shows the board to say so. `page_insights` and
+    `page_histories` are set on a board merged from several pages, one per
+    page that carried one, in page order: each describes its page's airports
+    alone, so the merged board's `insight` and `history` are None."""
 
     def __init__(
         self,
@@ -1815,6 +1818,8 @@ class Board[T](list[T]):
         self.partial = partial
         self.unread = unread
         self.stop_drops: StopDrops | None = None
+        self.page_insights: tuple[PriceInsight, ...] = ()
+        self.page_histories: tuple[PriceHistory, ...] = ()
 
 
 class _PageUnreadError(GfPageShapeError):
