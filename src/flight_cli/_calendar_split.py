@@ -122,7 +122,10 @@ def price_currencies(res: CalendarResult) -> tuple[str, ...]:
     """The currency of every price `res` carries — its cheapest notice, each
     priced day and each of that day's trip lengths — repeats dropped, in that
     order. A price with nothing before its number counts as '', so it never
-    matches a currency code. Empty when `res` priced nothing: no currency at all."""
+    matches a currency code. Empty when `res` priced nothing, whatever its notice
+    says: no currency at all."""
+    if not res.priced_days:
+        return ()
     prices = [res.cheapest_price]
     for d in res.priced_days:
         prices.append(d.min_price)
@@ -202,7 +205,7 @@ def merge_calendar_results(
     sources = [*results, *([floor] if floor is not None else [])]
     for i, (pair, res) in enumerate(sources):
         cpv = _price_value(res.cheapest_price)
-        if cpv is not None and (cheapest_pv is None or cpv < cheapest_pv):
+        if cpv is not None and res.priced_days and (cheapest_pv is None or cpv < cheapest_pv):
             cheapest_pv = cpv
             cheapest_notice = (res.raw or {}).get("currencyNotice") or {}
         _fold(cells, pair, res, floor=i == len(results))
