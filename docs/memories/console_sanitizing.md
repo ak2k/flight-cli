@@ -157,20 +157,28 @@ entry at all. `title_prefix` is wrapped where it is interpolated and has no
 entry, because a parameter's value belongs to callers the scan never reads.
 
 `_SAFE_WRAPPERS`, `_NUMERIC_PRESENTATION`, `_RENDERABLE_SINKS`,
-`_TEXT_SINK_METHODS` and `_HELP_SINKS` share one delete-one test — measured over
-the bypass corpus as well as both modules, since dropping a member that ALLOWS
-makes a module speak where it was silent while dropping one that READS makes a corpus
-case go quiet, and no change either way is what inert means. A regression corpus
-of one synthetic source per known bypass keeps the scan itself honest, and is
-where every sink member has its witness. A printed table needs no entry at all:
+`_TEXT_SINK_METHODS`, `_HELP_SINKS` and `_MARKUP_SLOTS` share one delete-one
+test — measured over the bypass corpus as well as both modules, since dropping a
+member that ALLOWS makes a module speak where it was silent while dropping one
+that READS makes a corpus case go quiet, and no change either way is what inert
+means. A regression corpus of one synthetic source per known bypass keeps the
+scan itself honest, and is where every sink member and every `_MARKUP_SLOTS`
+name has its witness. A printed table needs no entry at all:
 the scan reads the assignment and asks whether this scope built a renderable,
 which is a claim about the binding rather than about the name.
 
-The scan reads CALLS, so a markup slot filled by assignment (`t.title = x`,
-`t.caption = x`, `t.columns[0].header = x`) or by an API it does not name is not
-read; none is live in either module today, and `Panel` and `Text` both sit in
-`_RENDERABLE_SINKS` unimported, so an aliased import of either would have
-coverage that looks present and is not. `Text` is the one that bites: an
+The scan reads CALLS, and assignments to a markup slot attribute by name: a
+table or panel title, caption, header, footer or subtitle (`_MARKUP_SLOTS`)
+filled as `t.title = x`, `t.caption = x` or `t.columns[0].header = x`, or in the
+annotated or augmented form, is judged as a print argument would be. Matching is
+by attribute name because the scan cannot type the object, so a non-Rich
+`.title` assigned unwrapped text is flagged too, and gets a wrapper rather than
+an allowlist entry. What it still does not read is a slot filled through an API
+it does not name (`setattr`, a `__dict__` write, a method alias such as
+`emit = err.print`), an aliased `Text` or `Panel` import, and a help string whose
+only field is a bare name. `Panel` and `Text` both sit in `_RENDERABLE_SINKS`
+unimported, so an aliased import of either would have coverage that looks
+present and is not. `Text` is the one that bites: an
 allowlisted local assigned `Tx(<remote>)` and handed to a sink is silent, where
 the same line under the plain name speaks. It models scope only as far as the
 INNERMOST function: an allowlisted identifier is a claim about a NAME in one
@@ -182,10 +190,10 @@ on the closure that prints it. The hostile-field tests — one payload per
 response field, driven one field at a time through each renderer — are what pin
 the values a type at the boundary cannot, and an entry backed by none of the
 four is the claim nothing checks named above. The boundary in one line: a value
-can reach a Rich console from either module outside any call this scan reads —
-through one of those assignment slots, an API it does not name, or a help string
-whose only f-string field is a bare name — so a green scan is a claim about the
-calls it reads and nothing wider.
+can reach a Rich console from either module outside anything this scan reads —
+through an API it does not name, an aliased `Text` or `Panel` import, or a help
+string whose only f-string field is a bare name — so a green scan is a claim
+about the calls and slot assignments it reads and nothing wider.
 
 A Typer `help=` / `epilog=` string is a markup sink as surely as a table cell:
 the app sets `rich_markup_mode="rich"`, so Typer renders every help string
