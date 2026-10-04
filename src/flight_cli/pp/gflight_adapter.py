@@ -34,7 +34,7 @@ from .client import CashFlightHint
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from .._gflight_ids import LegAmenities
+    from .._gflight_ids import LegAmenities, Ticketing
 
 
 def _airport_code(a: Any) -> str:
@@ -108,6 +108,15 @@ def _price_string(fr: Any) -> str | None:
     return f"{currency}{fr.price:.2f}"
 
 
+def _ticketing(items: Sequence[Any]) -> Ticketing | None:
+    """How Google sells the itinerary of `items`: a self transfer when any
+    member is one, else separate tickets when any member is sold so."""
+    kinds = {getattr(it, "ticketing", None) for it in items}
+    if "self_transfer" in kinds:
+        return "self_transfer"
+    return "separate_tickets" if "separate_tickets" in kinds else None
+
+
 def _unwrap(item: Any) -> tuple[Any, str | None, list[LegAmenities] | None]:
     """Accept either a raw fli `FlightResult` (no flight_id / amenities) or
     a `GFlightWithId` carrying the captured opaque ID + per-leg amenities."""
@@ -160,6 +169,7 @@ def fli_results_to_search_result(results: Sequence[Any]) -> SearchResult:
             Itinerary(
                 ext=ItineraryExt(price=price_str),
                 itinerary=ItineraryDetails(slices=slices, carriers=[]),
+                ticketing=_ticketing(items_raw),
             ),
         )
         # The same member the itineraries are priced from: a cheapest quoted

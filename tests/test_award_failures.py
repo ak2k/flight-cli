@@ -11,6 +11,7 @@ answered. No test here reaches a provider."""
 from __future__ import annotations
 
 import json
+import re
 import threading
 from typing import TYPE_CHECKING, Any
 
@@ -19,7 +20,7 @@ import httpx
 import pytest
 
 from conftest import hand_out_providers
-from flight_cli import log
+from flight_cli import _envelope, log
 from flight_cli.models import SearchResult
 from flight_cli.pp import cli as pp_cli
 from flight_cli.pp.auth import PPAuthError, Tokens
@@ -33,6 +34,7 @@ from flight_cli.providers.seats_aero import client as seats_client
 from flight_cli.providers.seats_aero.provider import SeatsAeroProvider
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from flight_cli.providers.base import AwardFlight
@@ -402,3 +404,135 @@ def test_a_token_check_ends_at_the_award_deadline(
         "Awards incomplete: PointsPath failed (not answered within 0.5 s)."
     ], captured.err
     assert _flight_numbers(captured.out) == []
+
+
+# ─────────────────────────────── the envelope ───────────────────────────────
+
+# A note naming a key of the envelope; every other note is a stderr line.
+_KEY_NOTE = re.compile(r"^[a-z_]+: ")
+
+
+async def _stalls(request: httpx.Request) -> httpx.Response:
+    """Answers long after any deadline a test sets, so the deadline cuts it."""
+    await anyio.sleep(10)
+    return _answer(request)
+
+
+def _pointspath_answering(
+    pointspath: Any,
+) -> Callable[[pytest.MonkeyPatch, Path], None]:
+    def use(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        _use_providers(monkeypatch, tmp_path, pointspath, _empty_seats)
+
+    return use
+
+
+def _seats_answering(seats: Any) -> Callable[[pytest.MonkeyPatch, Path], None]:
+    def use(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        _use_providers(monkeypatch, tmp_path, _answer, seats)
+
+    return use
+
+
+def _united(answer: Any) -> Any:
+    """PointsPath answering United's searches with `answer`, and the rest as `_answer`."""
+
+    def pointspath(request: httpx.Request) -> Any:
+        return (answer if json.loads(request.content)["airline"] == "United" else _answer)(request)
+
+    return pointspath
+
+
+def _timed_out(request: httpx.Request) -> httpx.Response:
+    raise httpx.ReadTimeout("", request=request)
+
+
+def _error(_request: httpx.Request) -> httpx.Response:
+    return httpx.Response(500, text="upstream failed")
+
+
+def _error_with_no_body(_request: httpx.Request) -> httpx.Response:
+    return httpx.Response(500)
+
+
+def _refused(request: httpx.Request) -> httpx.Response:
+    raise httpx.ConnectError("refused", request=request)
+
+
+def _built_as(provider: str, create: Any) -> Callable[[pytest.MonkeyPatch, Path], None]:
+    """Only `provider` is configured, and building it runs `create`."""
+
+    def use(monkeypatch: pytest.MonkeyPatch, _tmp_path: Path) -> None:
+        class _Provider:
+            @classmethod
+            async def create(cls, **_kw: object) -> Any:
+                return await create()
+
+        pp = provider == "PointsPath"
+        monkeypatch.setattr(registry, "pp_is_configured", lambda: pp)
+        monkeypatch.setattr(registry, "seats_is_configured", lambda: not pp)
+        monkeypatch.setattr(
+            registry, "PointsPathProvider" if pp else "SeatsAeroProvider", _Provider
+        )
+        monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
+
+    return use
+
+
+async def _raises() -> Any:
+    raise httpx.ConnectTimeout("")
+
+
+async def _never_built() -> Any:
+    await anyio.sleep(10)
+
+
+def _searching_raises(monkeypatch: pytest.MonkeyPatch, _tmp_path: Path) -> None:
+    class _Raising:
+        name = "Seats.aero"
+        enabled = True
+
+        async def search_leg(self, *_a: object, **_kw: object) -> list[AwardFlight]:
+            msg = "boom"
+            raise RuntimeError(msg)
+
+        async def aclose(self) -> None:
+            return None
+
+    hand_out_providers(monkeypatch, _Raising())
+    monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
+
+
+@pytest.mark.parametrize(
+    "failing",
+    [
+        pytest.param(_pointspath_answering(_united(_timed_out)), id="pp-raised"),
+        pytest.param(_pointspath_answering(_united(_error)), id="pp-error"),
+        pytest.param(_pointspath_answering(_united(_error_with_no_body)), id="pp-error-no-body"),
+        pytest.param(_pointspath_answering(_united(_stalls)), id="pp-cut"),
+        pytest.param(_seats_answering(_failing_seats), id="seats-error"),
+        pytest.param(_seats_answering(_refused), id="seats-raised"),
+        pytest.param(_seats_answering(_stalls), id="seats-cut"),
+        pytest.param(_built_as("PointsPath", _raises), id="pp-not-built"),
+        pytest.param(_built_as("PointsPath", _never_built), id="pp-build-cut"),
+        pytest.param(_built_as("Seats.aero", _raises), id="seats-not-built"),
+        pytest.param(_built_as("Seats.aero", _never_built), id="seats-build-cut"),
+        pytest.param(_searching_raises, id="provider-raised"),
+    ],
+)
+def test_the_envelope_says_what_the_awards_incomplete_line_says(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    failing: Callable[[pytest.MonkeyPatch, Path], None],
+) -> None:
+    """Each site that records a failure for that line narrows the envelope, and
+    the line is the one thing its notes say about it."""
+    failing(monkeypatch, tmp_path)
+    monkeypatch.setattr(pp_cli, "AWARD_DEADLINE_SECS", 0.2)
+    log.configure("warning")
+    _envelope.run("search", _run, consoles=(pp_cli.err,))
+    env = json.loads(capsys.readouterr().out)
+    said = [n for n in env["notes"] if not _KEY_NOTE.match(n)]
+    assert len(_summaries("\n".join(said))) == 1, env["notes"]
+    assert (env["complete"], len(said)) == (False, 1), env["notes"]

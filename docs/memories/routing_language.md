@@ -247,8 +247,11 @@ flight number, in any comma alternative and behind any prefix of its own
 (`AA1-3000,F:UA882`), and the token sequence equals its reversal, tokens compared
 case-insensitively and a comma group as a set of prefixed alternatives under
 its `~` and quantifier (`~AA,UA+` equals `~UA,AA+`, `O:AA,O:UA` equals
-`O:UA,O:AA`), after one enclosing `[...]` comes off. `AA+`,
-`~BA+`, `N`, `F* X:LHR F*` and `DFW,DEN DEN,DFW` are copied.
+`O:UA,O:AA`), brackets read as separators. A bare two-character code reads as
+`C:` and a bare three-letter one as `X:`, the two documented defaults; no other
+prefix is folded, so `AA O:AA` stays an ordered chain. `AA+`, `~BA+`, `N`,
+`F* X:LHR F*`, `DFW,DEN DEN,DFW`, `AA C:AA`, `DFW X:DFW` and `[AA] [AA]` are
+copied.
 An ordered chain (`UA LH`, `F+ X:LHR F*`) or a flight number (`DL747`) is
 refused on a round trip without `--routing-ret`: copied, the return would ask
 for UA then LH from the far end. The return's own reading is the reversed

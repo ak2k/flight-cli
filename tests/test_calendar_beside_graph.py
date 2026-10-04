@@ -1014,7 +1014,12 @@ def test_a_code_typed_across_any_whitespace_is_asked_again_on_the_notes_one_line
         replayed.append(legs)
         raise typer.Exit(0)
 
+    # No provider is configured, whatever credentials this machine holds.
+    def _no_awards(_sel: cli.ProviderSelection) -> bool:
+        return False
+
     monkeypatch.setattr(cli, "_run", _detail)
+    monkeypatch.setattr(cli, "_should_run_awards", _no_awards)
     for path in ("_run_enriched_path", "_run_gflight_path", "_run_matrix_path"):
         monkeypatch.setattr(cli, path, _search)
     for start, end in (("flight detail ", " (Matrix)"), ("flight search ", " (Google)")):
