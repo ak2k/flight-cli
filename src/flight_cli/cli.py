@@ -202,9 +202,7 @@ def _usd_amount(price: str | None) -> float | None:
     return parse_price(price) if usd else None
 
 
-app = typer.Typer(
-    add_completion=False, rich_markup_mode="rich", help="CLI for ITA Matrix's Alkali backend."
-)
+app = typer.Typer(rich_markup_mode="rich", help="CLI for ITA Matrix's Alkali backend.")
 app.add_typer(auth_app, name="auth")
 console = Console()
 err = Console(stderr=True)
@@ -7587,6 +7585,38 @@ _GROUP_FILTERING = "Filtering"
 _GROUP_OUTPUT = "Output"
 _GROUP_BACKEND = "Backend & providers"
 
+# The canonical names `_resolve_cabin` and `_parse_times` accept, the ones
+# their refusals list; tab offers these and none of the aliases.
+_CABIN_CHOICES = ("economy", "premium", "business", "first")
+_TIME_OF_DAY_CHOICES = ("early", "morning", "midday", "afternoon", "evening", "night")
+
+
+def _completer(names: tuple[str, ...], *, comma_list: bool = False) -> Callable[[str], list[str]]:
+    """A Typer `autocompletion` callback offering `names`; Typer keeps the
+    ones that start with what was typed. With `comma_list`, it offers the
+    next item of a comma list, skipping the items already given, and nothing
+    after an item not among `names`, which the parser may refuse."""
+
+    def complete(incomplete: str) -> list[str]:
+        if not comma_list or "," not in incomplete:
+            return list(names)
+        head = incomplete.rsplit(",", 1)[0]
+        given = {item.strip() for item in head.split(",")}
+        if not given <= set(names):
+            return []
+        return [f"{head},{name}" for name in names if name not in given]
+
+    return complete
+
+
+_complete_cabin = _completer(_CABIN_CHOICES)
+_complete_cabins = _completer(_CABIN_CHOICES, comma_list=True)
+# One bucket, not a list: an arrival flag takes one window, and buckets that do
+# not adjoin are refused.
+_complete_time = _completer(_TIME_OF_DAY_CHOICES)
+_complete_times = _completer(_TIME_OF_DAY_CHOICES, comma_list=True)
+_complete_transport = _completer(VALID_TRANSPORT_MODES)
+
 # Common-args helpers — these reduce repetition across commands.
 # These flags are hidden because almost nobody touches them in normal use;
 # defaults live in config.toml ([http] section) and can be overridden via
@@ -7698,6 +7728,7 @@ _FORMAT_OPT = typer.Option(
     "table",
     "--format",
     help=f"Output format: one of {_FORMAT_CHOICES}.",
+    autocompletion=_completer(_VALID_FORMATS),
     rich_help_panel=_GROUP_OUTPUT,
 )
 _JSON_OPT = typer.Option(
@@ -7854,6 +7885,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                 "matrix when Matrix-only flags are set (routing/extension/slice/"
                 "time-of-day/extra pax types/PP config)."
             ),
+            autocompletion=_completer(_VALID_BACKENDS),
             rich_help_panel=_GROUP_BACKEND,
         ),
     ] = BACKEND_AUTO,
@@ -7867,6 +7899,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             "prices every cabin on the --sort cabin's cheapest outbounds; on "
             "Matrix, bump -n for broader overlap across cabins."
         ),
+        autocompletion=_complete_cabins,
         rich_help_panel=_GROUP_ITINERARY,
     ),
     sort_cabin: Annotated[
@@ -7874,6 +7907,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         typer.Option(
             "--sort",
             help="Cabin to sort multi-cabin results by. Default: first in --cabin.",
+            autocompletion=_complete_cabin,
             rich_help_panel=_GROUP_ITINERARY,
         ),
     ] = None,
@@ -7923,6 +7957,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                 "departure window to the minute (9:30-13:45). Beside --arrive, give "
                 "--arrive-times instead."
             ),
+            autocompletion=_complete_times,
             rich_help_panel=_GROUP_FILTERING,
         ),
     ] = None,
@@ -7934,6 +7969,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                 "Preferred return times-of-day, or one window to the minute. Beside "
                 "--return-arrive, give --return-arrive-times instead."
             ),
+            autocompletion=_complete_times,
             rich_help_panel=_GROUP_FILTERING,
         ),
     ] = None,
@@ -7949,6 +7985,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                 "--arrive, Matrix holds the arrival to it, and takes a list of "
                 "times-of-day too."
             ),
+            autocompletion=_complete_time,
             rich_help_panel=_GROUP_FILTERING,
         ),
     ] = None,
@@ -7960,6 +7997,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                 "When the return lands, as --arrive-times, beside --return or "
                 "--return-arrive. Needs one of them."
             ),
+            autocompletion=_complete_time,
             rich_help_panel=_GROUP_FILTERING,
         ),
     ] = None,
@@ -8144,6 +8182,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             # printed an install command that silently omits the extra.
             "[bold]uv pip install 'flight-cli\\[browser]'[/] for browser."
         ),
+        autocompletion=_complete_transport,
         rich_help_panel=_GROUP_BACKEND,
     ),
     gf_headed: bool = typer.Option(
@@ -8885,7 +8924,9 @@ def calendar(
         ),
     ] = _DEFAULT_CALENDAR_DURATION,
     one_way: bool = typer.Option(False, "--one-way", rich_help_panel=_GROUP_ITINERARY),
-    cabin: str = typer.Option("economy", "--cabin", rich_help_panel=_GROUP_ITINERARY),
+    cabin: str = typer.Option(
+        "economy", "--cabin", autocompletion=_complete_cabin, rich_help_panel=_GROUP_ITINERARY
+    ),
     adults: int = typer.Option(1, "--adults", rich_help_panel=_GROUP_ITINERARY),
     children: int = typer.Option(0, "--children", rich_help_panel=_GROUP_ITINERARY),
     seniors: int = typer.Option(0, "--seniors", rich_help_panel=_GROUP_ITINERARY),
@@ -8901,10 +8942,10 @@ def calendar(
         None, "--ext-ret", help=_EXT_RET_HELP, rich_help_panel=_GROUP_FILTERING
     ),
     depart_times: str | None = typer.Option(
-        None, "--depart-times", rich_help_panel=_GROUP_FILTERING
+        None, "--depart-times", autocompletion=_complete_times, rich_help_panel=_GROUP_FILTERING
     ),
     return_times: str | None = typer.Option(
-        None, "--return-times", rich_help_panel=_GROUP_FILTERING
+        None, "--return-times", autocompletion=_complete_times, rich_help_panel=_GROUP_FILTERING
     ),
     stops: int | None = typer.Option(None, "--stops", rich_help_panel=_GROUP_ITINERARY),
     allow_airport_changes: bool = typer.Option(
@@ -8978,6 +9019,7 @@ def calendar(
             # Escaped: rich reads `[browser]` as a style tag and deletes it.
             "'flight-cli\\[browser]'[/] and an installed Chrome."
         ),
+        autocompletion=_complete_transport,
         rich_help_panel=_GROUP_BACKEND,
     ),
     gf_headed: bool = typer.Option(
@@ -9287,7 +9329,9 @@ def detail(
             rich_help_panel=_GROUP_ITINERARY,
         ),
     ] = _DEFAULT_CALENDAR_DURATION,
-    cabin: str = typer.Option("economy", "--cabin", rich_help_panel=_GROUP_ITINERARY),
+    cabin: str = typer.Option(
+        "economy", "--cabin", autocompletion=_complete_cabin, rich_help_panel=_GROUP_ITINERARY
+    ),
     adults: int = typer.Option(1, "--adults", rich_help_panel=_GROUP_ITINERARY),
     children: int = typer.Option(0, "--children", rich_help_panel=_GROUP_ITINERARY),
     seniors: int = typer.Option(0, "--seniors", rich_help_panel=_GROUP_ITINERARY),
@@ -9307,6 +9351,7 @@ def detail(
         typer.Option(
             "--depart-times",
             help="Outbound times-of-day, as the calendar was asked (comma list: morning,midday).",
+            autocompletion=_complete_times,
             rich_help_panel=_GROUP_FILTERING,
         ),
     ] = None,
@@ -9315,6 +9360,7 @@ def detail(
         typer.Option(
             "--return-times",
             help="Return times-of-day, as the calendar was asked.",
+            autocompletion=_complete_times,
             rich_help_panel=_GROUP_FILTERING,
         ),
     ] = None,

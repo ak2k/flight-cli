@@ -18,6 +18,14 @@ uv venv && uv pip install -e .
 
 Requires Python 3.11+.
 
+### Shell completion
+
+`flight --install-completion` adds tab completion to the current shell (bash,
+zsh, fish or PowerShell); `flight --show-completion` prints the script instead.
+Tab then offers the values of `--cabin`, `--sort`, `--backend`, `--format`,
+`--gf-transport` and the time-of-day flags. Airport codes, `--routing` and
+`--extension` are free text and do not complete.
+
 ## What it does
 
 ```sh
