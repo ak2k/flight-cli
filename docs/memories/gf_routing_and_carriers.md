@@ -722,7 +722,11 @@ that comparison is made against is therefore the cheapest of the rows SHOWN,
 which with every Google list in price order is row one: a one-way board's
 lowest fare, and on a round trip the cheapest trip through the pinned outbounds.
 A single-cabin round trip pins its cheapest outbound first, so that is the
-board's cheapest round trip unless a return filter removed it.
+board's cheapest round trip unless a return filter removed it, Google served its
+return board empty, or its return board was refused (refused outright, or
+answered for a different segment than the pin; `_report_pin_outcome` counts both
+refusals in its stderr warning and no line counts an empty board). Then row 1 is
+the cheapest trip through the pins whose return boards kept a row.
 
 **Release before park.** A worker that is about to wait on another arm's round
 gives up any round it still owns first. Two workers can otherwise each hold what
