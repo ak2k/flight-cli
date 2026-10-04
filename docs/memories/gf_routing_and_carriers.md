@@ -1036,9 +1036,10 @@ its own airports.
 every page's outbound page first, then pins the min(n, 10) cheapest outbounds
 kept across ALL pages (`cli._union_pins`), each on its own page: an outbound
 two pages list is pinned once, on the page that priced it lower, and a page
-that holds no pin costs nothing more. So a paged round trip is pages + min(n,
-kept outbounds, 10) GETs, at most 14 for the four east-coast-to-Europe pages at
-the default `-n 10`. Each return is priced within its own page's airports: out
+that holds no pin costs nothing more. Under a `+CABIN` an outbound is ranked by
+its cheapest listing booked in that cabin (`others`), the one a page pins. So a
+paged round trip is pages + min(n, kept outbounds, 10) GETs, at most 14 for the
+four east-coast-to-Europe pages at the default `-n 10`. Each return is priced within its own page's airports: out
 of JFK and back into IAD, an origin of another page, is not asked. A paged
 round trip that answers prints one dim stderr line saying so.
 

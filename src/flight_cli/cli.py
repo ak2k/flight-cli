@@ -4969,12 +4969,14 @@ def _note_stop_drops(results: list[Any], cabin: Cabin | None = None) -> None:
 
 
 class _Outbound(NamedTuple):
-    """One cabin's outbound page, the row filter its pins are held to, and that
-    filter's count of the rows over the stop ceiling."""
+    """One cabin's outbound page, the row filter its pins are held to, that
+    filter's count of the rows over the stop ceiling, and the cabin check that
+    picks which listing of a row the filter is handed."""
 
     board: Board[Any]
     keep: Callable[[int, Any], bool] | None
     stop_drops: StopDrops | None = None
+    fits: Callable[[int, Any], bool] | None = None
 
 
 def _gflight_outbound(
@@ -4989,7 +4991,7 @@ def _gflight_outbound(
 
     with _gflight_query(legs, opts, gf_mode, gf_headed) as query:
         page = outbound_page(query.filters, transport=query.transport, currency=query.currency)
-    return _Outbound(page, query.keep, query.stop_drops)
+    return _Outbound(page, query.keep, query.stop_drops, query.fits)
 
 
 def _gf_pages(legs: tuple[Leg, ...]) -> list[tuple[Leg, ...]]:
@@ -5112,8 +5114,13 @@ def _merged_boards(boards: Sequence[Board[Any]]) -> list[Any]:
 
 
 def _kept(outbound: _Outbound) -> list[Any]:
-    keep = outbound.keep
-    return [r for r in outbound.board if keep is None or keep(0, r)]
+    """The rows `outbound`'s filter keeps, each the listing `search_with_ids`
+    hands that filter, so the pins across pages are the ones a page takes."""
+    from ._gflight_ids import (  # noqa: PLC0415 — fli, ~95 ms
+        _kept_outbounds,  # pyright: ignore[reportPrivateUsage] — the listing a cabin picks
+    )
+
+    return _kept_outbounds(outbound.board, outbound.keep, outbound.fits)
 
 
 def _union_pins(kept: dict[int, list[Any]], top_n: int) -> dict[int, list[ItineraryKey]]:

@@ -13,7 +13,7 @@ import datetime as dt
 import json
 import pathlib
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, override
 
 import pytest
 from fli.models.airport import Airport
@@ -744,6 +744,67 @@ def test_a_paged_board_counts_every_pages_rows_over_the_stop_ceiling(
         "they are not shown."
     )
     assert _flat(buf.getvalue()).count(over) == 1, buf.getvalue()
+
+
+def _booked_in(row: gfid.GFlightWithId, cabin: str) -> gfid.GFlightWithId:
+    return replace(row, amenities=tuple(replace(a, cabin=cabin) for a in row.amenities))
+
+
+@dataclass
+class _Relisted(_Google):
+    """`_Google`, which lists outbound flight `relisted` with its leg booked in
+    first and again, $20 dearer, in economy: Google can list one itinerary at
+    two cabin mixes, and the board keeps the dearer listing among its
+    `others`."""
+
+    relisted: int = -1
+
+    @override
+    def __call__(self, filters: Any, *, currency: str = "USD") -> gfid.Board[gfid.GFlightWithId]:
+        board = super().__call__(filters, currency=currency)
+        return gfid.Board(map(self._listed, board), unread=board.unread)
+
+    def _listed(self, row: gfid.GFlightWithId) -> gfid.GFlightWithId:
+        if row.flight.legs[0].flight_number != str(self.relisted) or row.flight.price is None:
+            return row
+        dearer = row.flight.model_copy(update={"price": row.flight.price + 20})
+        return replace(_booked_in(row, "FIRST"), others=(replace(row, flight=dearer),))
+
+
+def test_a_paged_round_trip_pins_an_outbound_by_its_listing_in_the_required_cabin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """12 origins to LAX is two pages. BWI's flight 6 is the cheapest outbound,
+    listed at $100 with its leg in first and again at $120 in economy, the
+    listing one page pins under `+CABIN 3`. Red at the merge: the pins across
+    the pages were chosen from the first-class listing, which the cabin
+    requirement drops, so JFK's flight 0 was pinned instead."""
+    google = _Relisted(
+        [(o, "LAX") for o in _EAST], fare=lambda i: 100.0 if i == 6 else 300.0 + i, relisted=6
+    )
+    result = _search(
+        monkeypatch,
+        google,
+        ",".join(_EAST),
+        "LAX",
+        "--backend",
+        "gflight",
+        "--fast",
+        "--format",
+        "json",
+        "-n",
+        "1",
+        "--cabin",
+        "economy",
+        "--ext",
+        "+CABIN 3",
+        ret=True,
+    )
+    assert result.exit_code == 0, result.output
+    assert [pin for _, pin in google.calls if pin is not None] == [6]
+    [(out, _back)] = json.loads(result.stdout)
+    assert (out["legs"][0]["flight_number"], out["price"]) == ("6", 120)
+    assert out["legs"][0]["amenities"]["cabin"] == "ECONOMY"
 
 
 # ──────────────────────────────── one page ────────────────────────────────
