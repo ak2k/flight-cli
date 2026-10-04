@@ -33,6 +33,9 @@ as a number, for a party the total Matrix states (`party_price`), the number its
 itinerary table prints and `--max-price` reads, as Google's row prices the whole
 party. A party's solution Matrix states no total for has a null `price`: one
 passenger's price is not the trip's, and its `row` still carries it.
+A `calendar --fast` trip-length range writes every priced length's cells to
+`results` as one list, each the object the range document's `graphs[].grid`
+prints; its `return` date names its length.
 
 Exit codes are those of `--format json` in the same state, and an envelope is
 written at exit 0 and 1. Exit 2 is a usage error and writes none.
@@ -60,7 +63,8 @@ line, which is then the note: each `record_failure` call has a `narrow()`
 beside it (`providers/registry.py`, seats.aero, and a PointsPath airline search
 that is not "unsupported" in `pp/client.py`, an error status with an empty
 body and a request the award deadline cut included); a leg with
-`pairs_not_asked`; calendar sub-queries lost;
+`pairs_not_asked`; calendar sub-queries lost; a length of a `calendar --fast`
+range whose graph was lost;
 a `--split` one-way search that failed, or a `--split` search Matrix answered,
 since the pair was asked for and is not priced (no priced one-way, no pair one
 traveler can fly, or two currencies are the boards' answer, a note);

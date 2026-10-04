@@ -2169,6 +2169,8 @@ def _run_fast_browser_grid(
     except Exception as e:  # noqa: BLE001 — any other cause is still just "no grid"
         err.print(f"[yellow]{_safe_text(_GF_GRID_NAME)} failed:[/] {_safe_text(e)}")
     for nights, cause in lost:
+        # The range asked for this length's graph, so the answer is narrower.
+        _envelope.narrow()
         err.print(
             f"[yellow]Google Flights price graph not shown:[/] "
             f"{_safe_text(f'{nights}-night trips: {_graph_failure_text(cause)}')}"
@@ -2185,20 +2187,24 @@ def _run_fast_browser_grid(
                 doc = _graph_range_document(
                     priced, lost, lengths=lengths, origin=origin, destination=destination
                 )
+                graphs: list[dict[str, Any]] = doc["graphs"]
             else:
                 doc = document(priced[0], origin=origin, destination=destination)
-                if _envelope.active():
-                    grid: list[dict[str, Any]] = doc["grid"]
-                    _envelope.record_calendar(
-                        backend="gflight",
-                        rows=[
-                            _envelope.ResultRow(
-                                price=cell["price"], currency=doc["currency"], row=cell
-                            )
-                            for cell in grid
-                        ],
-                    )
-                    return
+                graphs = [doc]
+            if _envelope.active():
+                # A range's cells each carry their return date, so one list of
+                # every length's cells still names each cell's length.
+                _envelope.record_calendar(
+                    backend="gflight",
+                    rows=[
+                        _envelope.ResultRow(
+                            price=cell["price"], currency=graph["currency"], row=cell
+                        )
+                        for graph in graphs
+                        for cell in cast("list[dict[str, Any]]", graph["grid"])
+                    ],
+                )
+                return
             sys.stdout.write(json.dumps(doc, indent=2))
             return
         if len(lengths) > 1:

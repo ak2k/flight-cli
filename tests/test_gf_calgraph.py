@@ -21,9 +21,9 @@ import typer
 from rich.console import Console
 from typer.testing import CliRunner
 
+from flight_cli import _envelope, cli
 from flight_cli import _gf_browser as gfb
 from flight_cli import _gf_calgraph as cg
-from flight_cli import cli
 from flight_cli._gf_browser import CapturedResponse
 from flight_cli._gf_common import PageFetch
 from flight_cli._gf_errors import GfBrowserUnavailableError, GfConsentError, GfThrottledError
@@ -2091,6 +2091,56 @@ def test_a_lost_length_is_named_on_stderr_and_in_the_document(
         ]
     else:
         assert "5n" in cap.out and "7n" in cap.out and "6n" not in cap.out
+
+
+@pytest.mark.parametrize(
+    ("answer", "complete"),
+    [
+        pytest.param(cg.GraphRange(_RANGE, []), True, id="every-length"),
+        pytest.param(
+            cg.GraphRange(
+                [_RANGE[0], _RANGE[2]],
+                [
+                    cg.LostLength(
+                        6, cg.GfPriceGraphError("Google Flights' price graph priced no date")
+                    )
+                ],
+            ),
+            False,
+            id="a-length-lost",
+        ),
+    ],
+)
+def test_the_envelope_carries_every_lengths_cells_and_narrows_on_a_lost_one(
+    answer: cg.GraphRange,
+    complete: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Every cell of every length that priced is a row, the object the range
+    document's `graphs` print it as; each carries its return date, so a row
+    names its length. A length lost is a narrower answer than the range asked."""
+    _no_matrix(monkeypatch)
+    _graphs_are(monkeypatch, answer)
+    _calendar(one_way=False, duration="5-7", fmt="json")
+    doc = json.loads(capsys.readouterr().out)
+    _graphs_are(monkeypatch, answer)
+    _calendar(one_way=False, duration="5-7", fmt="envelope")
+    cap = capsys.readouterr()
+    env = json.loads(cap.out)
+    _envelope.ENVELOPE.validate_python(env)
+    assert (env["command"], env["backend"], env["currency"]) == ("calendar", "gflight", "USD")
+    assert env["complete"] is complete
+    cells = [cell for graph in doc["graphs"] for cell in graph["grid"]]
+    assert [r["row"] for r in env["results"]] == cells
+    assert [(r["price"], r["currency"]) for r in env["results"]] == [
+        (cell["price"], "USD") for cell in cells
+    ]
+    assert not [n for n in env["notes"] if n.startswith("stdout:")], env["notes"]
+    said = [" ".join(ln.split()) for ln in cap.err.splitlines() if ln.strip()]
+    assert env["notes"][: len(said)] == said
+    lost = [n for n in env["notes"] if "6-night trips" in n]
+    assert len(lost) == (0 if complete else 1), env["notes"]
 
 
 @pytest.mark.parametrize("fmt", ["table", "json"])
