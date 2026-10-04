@@ -1,0 +1,432 @@
+{
+  "$defs": {
+    "Backend": {
+      "enum": [
+        "gflight",
+        "matrix"
+      ],
+      "type": "string"
+    },
+    "CabinRows": {
+      "additionalProperties": false,
+      "properties": {
+        "cabin": {
+          "title": "Cabin",
+          "type": "string"
+        },
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/ResultRow"
+          },
+          "title": "Rows",
+          "type": "array"
+        }
+      },
+      "required": [
+        "cabin",
+        "rows"
+      ],
+      "title": "CabinRows",
+      "type": "object"
+    },
+    "CalendarEnvelope": {
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1,
+          "title": "Version",
+          "type": "integer"
+        },
+        "command": {
+          "const": "calendar",
+          "title": "Command",
+          "type": "string"
+        },
+        "backend": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Backend"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "currency": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Currency"
+        },
+        "complete": {
+          "title": "Complete",
+          "type": "boolean"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Notes",
+          "type": "array"
+        },
+        "results": {
+          "items": {
+            "$ref": "#/$defs/ResultRow"
+          },
+          "title": "Results",
+          "type": "array"
+        },
+        "awards": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Awards"
+        },
+        "insight": {
+          "items": {
+            "$ref": "#/$defs/Insight"
+          },
+          "title": "Insight",
+          "type": "array"
+        },
+        "price_history": {
+          "items": {
+            "$ref": "#/$defs/PriceHistory"
+          },
+          "title": "Price History",
+          "type": "array"
+        },
+        "verify": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Verify"
+        },
+        "cross_check": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Cross Check"
+        }
+      },
+      "required": [
+        "version",
+        "command",
+        "backend",
+        "currency",
+        "complete",
+        "notes",
+        "results",
+        "awards",
+        "insight",
+        "price_history",
+        "verify",
+        "cross_check"
+      ],
+      "title": "CalendarEnvelope",
+      "type": "object"
+    },
+    "Insight": {
+      "additionalProperties": false,
+      "description": "Google's price insight for one cabin's page.",
+      "properties": {
+        "cabin": {
+          "title": "Cabin",
+          "type": "string"
+        },
+        "currency": {
+          "title": "Currency",
+          "type": "string"
+        },
+        "cheapest": {
+          "title": "Cheapest",
+          "type": "number"
+        },
+        "typical_low": {
+          "title": "Typical Low",
+          "type": "number"
+        },
+        "typical_high": {
+          "title": "Typical High",
+          "type": "number"
+        },
+        "level": {
+          "enum": [
+            "low",
+            "typical",
+            "high"
+          ],
+          "title": "Level",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cabin",
+        "currency",
+        "cheapest",
+        "typical_low",
+        "typical_high",
+        "level"
+      ],
+      "title": "Insight",
+      "type": "object"
+    },
+    "PriceHistory": {
+      "additionalProperties": false,
+      "description": "Google's daily price history for one cabin's page.",
+      "properties": {
+        "cabin": {
+          "title": "Cabin",
+          "type": "string"
+        },
+        "currency": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Currency"
+        },
+        "points": {
+          "items": {
+            "$ref": "#/$defs/PricePoint"
+          },
+          "title": "Points",
+          "type": "array"
+        }
+      },
+      "required": [
+        "cabin",
+        "currency",
+        "points"
+      ],
+      "title": "PriceHistory",
+      "type": "object"
+    },
+    "PricePoint": {
+      "additionalProperties": false,
+      "properties": {
+        "date": {
+          "format": "date",
+          "title": "Date",
+          "type": "string"
+        },
+        "price": {
+          "title": "Price",
+          "type": "number"
+        }
+      },
+      "required": [
+        "date",
+        "price"
+      ],
+      "title": "PricePoint",
+      "type": "object"
+    },
+    "ResultRow": {
+      "additionalProperties": false,
+      "description": "One itinerary, priced day or graph cell. `row` is the object `--format\njson` prints for it, unchanged; `price` is the trip's price, a round trip's\nbeing its last member's.",
+      "properties": {
+        "price": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Price"
+        },
+        "currency": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Currency"
+        },
+        "row": {
+          "title": "Row"
+        }
+      },
+      "required": [
+        "price",
+        "currency",
+        "row"
+      ],
+      "title": "ResultRow",
+      "type": "object"
+    },
+    "SearchEnvelope": {
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1,
+          "title": "Version",
+          "type": "integer"
+        },
+        "command": {
+          "const": "search",
+          "title": "Command",
+          "type": "string"
+        },
+        "backend": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Backend"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "currency": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Currency"
+        },
+        "complete": {
+          "title": "Complete",
+          "type": "boolean"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Notes",
+          "type": "array"
+        },
+        "results": {
+          "items": {
+            "$ref": "#/$defs/CabinRows"
+          },
+          "title": "Results",
+          "type": "array"
+        },
+        "awards": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Awards"
+        },
+        "insight": {
+          "items": {
+            "$ref": "#/$defs/Insight"
+          },
+          "title": "Insight",
+          "type": "array"
+        },
+        "price_history": {
+          "items": {
+            "$ref": "#/$defs/PriceHistory"
+          },
+          "title": "Price History",
+          "type": "array"
+        },
+        "verify": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Verify"
+        },
+        "cross_check": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Cross Check"
+        }
+      },
+      "required": [
+        "version",
+        "command",
+        "backend",
+        "currency",
+        "complete",
+        "notes",
+        "results",
+        "awards",
+        "insight",
+        "price_history",
+        "verify",
+        "cross_check"
+      ],
+      "title": "SearchEnvelope",
+      "type": "object"
+    }
+  },
+  "discriminator": {
+    "mapping": {
+      "calendar": "#/$defs/CalendarEnvelope",
+      "search": "#/$defs/SearchEnvelope"
+    },
+    "propertyName": "command"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/SearchEnvelope"
+    },
+    {
+      "$ref": "#/$defs/CalendarEnvelope"
+    }
+  ]
+}

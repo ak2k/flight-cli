@@ -123,15 +123,18 @@ Google for the other airport, and fli's row decoder has no entry for an alias,
 so every row Google serves at one fails. Build airport members only through
 `fli_bridge.fli_airport`, which gives each aliased code a member of its own,
 named that code with the same display name (so the JSON dump shows "Naha
-Airport" for OKA and NAH alike). `tests/test_airport_alias_requests.py` fails
-on any `getattr`/`hasattr` call on the enum or `Airport[...]` subscript under
-`src/`. MLH is the one alias kept: it is EuroAirport's second code, the same
-airport as BSL, and Google serves it only as BSL (JFK-MLH asked for MLH gave an
-empty board, asked for BSL 8 rows). Measured 2026-10-01: `flight search LAX OKA
---dep 2026-10-20 --backend gflight --fast --format json` through the enum
-printed `[]` with exit 0; through `fli_airport` it printed 27 rows (CI, BR, CX
-via TPE or HKG, from USD577), each landing at OKA by its clock span: departure
-to arrival less elapsed time is +960 minutes from LAX, where NAH gives +900.
+Airport" for OKA and NAH alike). `tests/test_airport_alias_requests.py` fails on
+an `Airport[...]` subscript, a member read off the enum, `__members__` outside
+an `.items()` loop, or `getattr`/`hasattr` on it, under any import name or
+dotted path, and on a `_parse_airport` call outside `_leg_airport`, all under
+`src/`; `tests/test_airport_enum_gate.py` holds each form it is proven on. MLH
+is the one alias kept: it is EuroAirport's second code, the same airport as BSL,
+and Google serves it only as BSL (JFK-MLH asked for MLH gave an empty board,
+asked for BSL 8 rows). Measured 2026-10-01: `flight search LAX OKA --dep
+2026-10-20 --backend gflight --fast --format json` through the enum printed `[]`
+with exit 0; through `fli_airport` it printed 27 rows (CI, BR, CX via TPE or
+HKG, from USD577), each landing at OKA by its clock span: departure to arrival
+less elapsed time is +960 minutes from LAX, where NAH gives +900.
 
 **Airline codes alias the same way: fli's `Airline` enum files six codes
 under another carrier's member, and every pair is two carriers.** W9 (Wizz Air
@@ -185,8 +188,23 @@ own figure for that connection (`data[0][13]`, elapsed minutes). Where the row
 states none it is the clock difference at the connecting airport, which a
 daylight-saving change there puts an hour out; a negative one is such a change
 and is not held against the row. An alliance is not checked: nothing here says
-which carrier is in which alliance. Children are priced, not checked. When
-these checks empty a board, the empty-answer line names every active check.
+which carrier is in which alliance, and a membership table kept here would go
+stale (Asiana leaves Star Alliance by 2026-12-17). Google's own filter held it
+when measured on 2026-10-01: a live NYC-MUC business board asked for
+`ALLIANCE star-alliance; MAXDUR 14:00; MAXSTOPS 1` served 20 rows, every one
+sold by a Star carrier, within one stop and 840 minutes, and skill Example 2
+without `+CABIN 2` answered on auto with 5 Google round trips, all Star,
+business and within 14 hours. A `+CABIN` naming the one cabin `--cabin` asked
+is checked per leg: every leg's cabin (`fl[16]`) must be that cabin, and a leg
+Google states none for fails. Two of those 20 business rows carried a
+first-class leg (UA2301 and UA3585, then UA108), which `+CABIN 2` drops. Any
+other `+CABIN` goes to Matrix, naming the code and the `--cabin`. Children are
+priced, not checked. Rows over the stop ceiling are counted on stderr from a
+board that is shown, once each, in every format: `Google Flights returned 3
+rows over the stop ceiling it was asked for (1); they are not shown.` (JFK-LHR's
+101 rows under `--stops 1` keep 98). A board they help empty keeps its own line
+alone, and a multi-cabin search handed to Matrix prints none. When these checks
+empty a board, the empty-answer line names every active check.
 
 **A price cap and bags (`search --max-price N`, `--bags CHECKED[,CARRY]`).**
 Both are top-level fields, written after the cabin (9) and before 14.
@@ -294,11 +312,27 @@ is measured unbounded, because `console.measure` caps it at the console's.
 - Rows are deduped per itinerary (every leg's carrier, flight number and
   departure datetime), keeping the priced and cheaper listing at the first
   listing's place. No true duplicate has been measured; the key keeps dates, so
-  the same flight numbers a day apart stay two trips.
+  the same flight numbers a day apart stay two trips. The dearer listing in
+  another cabin mix stays on the row (`others`), and a `+CABIN` search filters
+  the cheapest listing booked in its cabin, so a cheaper listing with a leg
+  outside it does not hide that fare. Each itinerary still meets the row
+  filter once, so the stop-ceiling count is unchanged.
 - The routing filter runs inside `search_with_ids` as each board is served: on
   the outbound BEFORE the pins are taken (pins are the cheapest rows of the
   board they are taken from), on each return board after `_unpinned_board`. A pin whose return
-  board the filter empties is counted in a warning.
+  board the filter empties is counted in a warning, and so is one Google
+  served no return for (`k of M pinned outbounds have no return flight on
+  Google`). After the counts, and before any raise, each pin lost to either or
+  to a refused board is named on a line of its own: `pinned outbound
+  LH405/LH914 (USD943.00) lost: Google served 2 returns for it, none matching
+  the routing`, `... lost: Google served no return for it`, or the refusal's
+  own words. A stop (a throttle, the network, a dead browser) names no skipped
+  pin. On 2026-10-01 skill Example 7 on Google (JFK-LHR, `O:LH+`,
+  `MINCONNECT 1:30`) lost 2 of 5 pins: LH405/LH914 (2 returns served, none
+  LH-operated on every leg) and LH411/UA9440 (1); the six boards are the
+  `ds1_*_oplh_*` fixtures. The outbound board gets no check like
+  `_unpinned_board`: none of 27 saved live boards carried a row off the asked
+  route.
 - A pin names each leg's OPERATING flight (`fl[22]`). Pinned under the
   codeshare number it is booked as (AA142 as AY3787), the return board comes
   back empty; pinned as AA142 it serves 20 rows at the same $799 combo price
@@ -1322,9 +1356,11 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
   GBP952 on two days DUB was cheaper; asked in USD, all 14 days came back USD,
   each cheaper from DUB. `NYC LON -d 7` as one combined query priced 11 of 14
   days (20 solutions, cheapest USD817); as 18 pairs plus that query it priced
-  14 of 14, cheaper on 7 days (10-27 USD766 EWR→LGW), the combined query was
-  below every pair on none, the 7 pairs into STN, LTN or SEN priced nothing,
-  and the 19 queries took about 110 s.
+  14 of 14: the 3 days the combined query alone left unpriced (10-25 to 10-27,
+  the last at USD766 EWR→LGW) and 6 of the 11 it did price, cheaper on 10-28
+  to 11-02; the combined query was below every pair on none; 8 of the 18 pairs
+  priced nothing (JFK, LGA and EWR into LTN and SEN, JFK and EWR into STN) and
+  LGA→STN priced 1 day; and the 19 queries took about 110 s.
 - **Admission** (`_gf_calgraph.graph_blocker`). The graph has no itineraries,
   so it is asked only when the page URL writes every constraint exactly AND
   Google was measured applying it there. Admitted, per leg: a stop ceiling of

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import datetime
 import functools
 import itertools
 import json
@@ -84,6 +85,7 @@ from fli.search.flights import SearchFlights  # pyright: ignore[reportMissingTyp
 # `_one_call_browser` looks the attribute up per call and a test can substitute
 # the session without a browser anywhere in the process.
 from . import _gf_browser
+from ._envelope import narrow
 from ._gf_common import TRANSPORT_HTTP, GfTransportMode, PageFetch, cache_dir
 from ._gf_errors import (
     BROWSER_DEFAULT_REMEDY,
@@ -100,7 +102,6 @@ from .fli_bridge import fli_airline, fli_airports
 from .links import build_search_tfs, google_flights_search_page_url
 
 if TYPE_CHECKING:
-    import datetime
     import pathlib
     from collections.abc import Callable, Generator, Iterable, Sequence
 
@@ -108,6 +109,8 @@ if TYPE_CHECKING:
         FlightSearchFilters,
         FlightSegment,
     )
+
+    from ._gf_postfilter import StopDrops
 
 # DIVERGE: stdlib logging, where the rest of the package uses structlog (see
 # AGENTS.md's stack table and `_http.py`). The refusal classification here is
@@ -1064,6 +1067,10 @@ class GFlightWithId:
     # Per connection, the layover in minutes as the page states it, or None
     # where it states none for that connection (`_layover_minutes`).
     layovers: tuple[int | None, ...] = ()
+    # The dearer listings of this itinerary that `_deduped` folded into this
+    # one, one per other cabin mix, cheapest first: a cabin requirement this
+    # listing fails can still be met by one of them (`_listing`).
+    others: tuple[GFlightWithId, ...] = ()
 
 
 def _operating_identity(fl: list[Any]) -> tuple[Airline, str] | None:
@@ -1691,6 +1698,64 @@ def _price_insight(payload: list[Any], rows: list[GFlightWithId]) -> PriceInsigh
     return PriceInsight(cheapest=cheapest, typical_low=low, typical_high=high, currency=currency)
 
 
+@dataclass(frozen=True)
+class PriceHistory:
+    """Google's daily price history for a search: `(date, price)` per day, oldest
+    first, in the page's currency (None when no priced row names it).
+
+    From `ds:1[5][10][0]`, measured as `[[epoch_ms, price], ...]`, one point a day.
+    Each stamp is 04:00 UTC on the captures, which is the client's local midnight,
+    so the day is the UTC date twelve hours after the stamp."""
+
+    points: tuple[tuple[datetime.date, float], ...]
+    currency: str | None
+
+
+_HISTORY_IDX = 10
+_HISTORY_DAY_OFFSET = datetime.timedelta(hours=12)
+
+
+def _history_point(point: Any) -> tuple[datetime.date, float] | None:
+    """One `[epoch_ms, price]` pair as `(date, price)`, or None for any other shape."""
+    if not isinstance(point, list) or len(cast("list[Any]", point)) != 2:  # noqa: PLR2004 — a pair
+        return None
+    stamp, price = cast("list[Any]", point)
+    if any(isinstance(v, bool) or not isinstance(v, int | float) for v in (stamp, price)):
+        return None
+    try:
+        when = datetime.datetime.fromtimestamp(stamp / 1000, tz=datetime.UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return (when + _HISTORY_DAY_OFFSET).date(), float(price)
+
+
+def _price_history(payload: list[Any], rows: list[GFlightWithId]) -> PriceHistory | None:
+    """The page's daily price history, or None when it carries none.
+
+    The currency is read off a priced row, as `_price_insight` reads the
+    insight's: the page writes none beside either. A series with any point of
+    another shape is refused whole, since a skipped day would read as a gap
+    in the history rather than as a layout change."""
+    block = payload[_INSIGHT_IDX] if len(payload) > _INSIGHT_IDX else None
+    if not isinstance(block, list) or len(cast("list[Any]", block)) <= _HISTORY_IDX:
+        return None
+    holder = cast("list[Any]", block)[_HISTORY_IDX]
+    if not isinstance(holder, list) or not holder:
+        return None
+    series = cast("list[Any]", holder)[0]
+    if not isinstance(series, list) or not series:
+        return None
+    points = [_history_point(p) for p in cast("list[Any]", series)]
+    kept = [p for p in points if p is not None]
+    if len(kept) != len(points):
+        return None
+    currency = next(
+        (r.flight.currency for r in rows if r.flight.price is not None and r.flight.currency),
+        None,
+    )
+    return PriceHistory(points=tuple(kept), currency=currency)
+
+
 def _kept_insight(
     insight: PriceInsight | None,
     rows: Iterable[GFlightWithId | tuple[GFlightWithId, ...]],
@@ -1723,22 +1788,28 @@ class Board[T](list[T]):
     because an empty answer from those says nothing about the outbounds it did
     not pin. `unread` counts the rows the pages served that the parser could
     not read: a flight on one of them is on Google's board though no row here
-    names it."""
+    names it. `history` is the route's, so a filter that restates the insight
+    leaves it as the page gave it. `stop_drops` is set by the caller that built
+    the row filter: the rows it dropped for the stop ceiling, for whichever path
+    shows the board to say so."""
 
     def __init__(
         self,
         rows: Iterable[T] = (),
         *,
         insight: PriceInsight | None = None,
+        history: PriceHistory | None = None,
         dropped: int = 0,
         pinned: int = 0,
         unread: int = 0,
     ) -> None:
         super().__init__(rows)
         self.insight = insight
+        self.history = history
         self.dropped = dropped
         self.pinned = pinned
         self.unread = unread
+        self.stop_drops: StopDrops | None = None
 
 
 class _PageUnreadError(GfPageShapeError):
@@ -1786,18 +1857,26 @@ def _deduped(rows: list[GFlightWithId]) -> list[GFlightWithId]:
     on offer. The key is every leg's carrier, flight number and departure time,
     dates included: the same flight numbers a day apart are a different trip.
     The first listing keeps its place, because page order breaks ties between
-    equal fares in the trim and in the round-trip pins."""
-    at: dict[ItineraryKey, int] = {}
-    out: list[GFlightWithId] = []
+    equal fares in the trim and in the round-trip pins. A listing booked in
+    another cabin mix is kept on the row as one of its `others`."""
+    listed: dict[ItineraryKey, list[GFlightWithId]] = {}
     for row in rows:
-        key = _itinerary_key(row)
-        seen = at.get(key)
-        if seen is None:
-            at[key] = len(out)
-            out.append(row)
-        elif fare_key(row) < fare_key(out[seen]):
-            out[seen] = row
+        listed.setdefault(_itinerary_key(row), []).append(row)
+    out: list[GFlightWithId] = []
+    for listings in listed.values():
+        best = min(listings, key=fare_key)
+        mixes = {_cabins(best)}
+        others: list[GFlightWithId] = []
+        for row in sorted(listings, key=fare_key):
+            if _cabins(row) not in mixes:
+                mixes.add(_cabins(row))
+                others.append(row)
+        out.append(replace(best, others=tuple(others)) if others else best)
     return out
+
+
+def _cabins(row: GFlightWithId) -> tuple[str | None, ...]:
+    return tuple(a.cabin for a in row.amenities)
 
 
 def _rows_from_page_html(page: PageFetch) -> Board[GFlightWithId]:
@@ -1899,7 +1978,12 @@ def _rows_from_page_html(page: PageFetch) -> Board[GFlightWithId]:
             f"the row shape changed (sample reasons: {sample})",
             unread=len(reasons),
         )
-    return Board(_deduped(out), insight=_price_insight(payload, out), unread=len(reasons))
+    return Board(
+        _deduped(out),
+        insight=_price_insight(payload, out),
+        history=_price_history(payload, out),
+        unread=len(reasons),
+    )
 
 
 def _one_call(filters: FlightSearchFilters, *, currency: str = "USD") -> Board[GFlightWithId]:
@@ -2111,10 +2195,26 @@ def pinned_fanout(top_n: int) -> int:
     return min(top_n, _PINNED_FANOUT_CAP)
 
 
+def _listing(
+    leg: int, row: GFlightWithId, fits: Callable[[int, GFlightWithId], bool] | None
+) -> GFlightWithId:
+    """The listing of `row`'s itinerary that `keep` is handed for segment `leg`:
+    `row`, unless `fits` refuses it and accepts one of its `others`, cheapest
+    first. Chosen before `keep` and not by it, so each itinerary meets `keep`
+    once and a row over the stop ceiling is counted once."""
+    if fits is None or fits(leg, row):
+        return row
+    return next((o for o in row.others if fits(leg, o)), row)
+
+
 def _kept_outbounds(
-    first: Board[GFlightWithId], keep: Callable[[int, GFlightWithId], bool] | None
+    first: Board[GFlightWithId],
+    keep: Callable[[int, GFlightWithId], bool] | None,
+    fits: Callable[[int, GFlightWithId], bool] | None = None,
 ) -> list[GFlightWithId]:
-    return first if keep is None else [r for r in first if keep(0, r)]
+    if keep is None:
+        return first
+    return [r for r in (_listing(0, r, fits) for r in first) if keep(0, r)]
 
 
 def _pins(
@@ -2231,14 +2331,16 @@ def _with_board_currency(board: Board[GFlightWithId], requested: str) -> Board[G
     none did. The page's price insight rides along."""
     decoded = Counter(r.flight.currency for r in board if r.flight.currency)
     fill = decoded.most_common(1)[0][0] if decoded else requested
+
+    def filled(r: GFlightWithId) -> GFlightWithId:
+        if not r.flight.currency:
+            r = replace(r, flight=r.flight.model_copy(update={"currency": fill}))
+        return replace(r, others=tuple(map(filled, r.others))) if r.others else r
+
     return Board(
-        (
-            r
-            if r.flight.currency
-            else replace(r, flight=r.flight.model_copy(update={"currency": fill}))
-            for r in board
-        ),
+        map(filled, board),
         insight=board.insight,
+        history=board.history,
         dropped=board.dropped,
         pinned=board.pinned,
         unread=board.unread,
@@ -2257,7 +2359,19 @@ def _pinned_flight(picked: GFlightWithId) -> FlightResult:
     return picked.flight.model_copy(update={"legs": legs})
 
 
-def search_with_ids(
+def _lost_pin(picked: GFlightWithId, why: str, currency: str) -> str:
+    """The line naming a pin that has no return: the flights it is booked as,
+    which the table shows, and its fare."""
+    # fli writes a digit-leading code with a leading `_` (`_0B`).
+    flights = "/".join(
+        f"{leg.airline.name.removeprefix('_')}{leg.flight_number}" for leg in picked.flight.legs
+    )
+    price = picked.flight.price
+    fare = "" if price is None else f" ({picked.flight.currency or currency}{price:.2f})"
+    return f"pinned outbound {flights}{fare} lost: {why}"
+
+
+def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accounting for it
     filters: FlightSearchFilters,
     *,
     top_n: int = 5,
@@ -2267,6 +2381,7 @@ def search_with_ids(
     checks: str = "the routing",
     first: Board[GFlightWithId] | None = None,
     prefer: Sequence[ItineraryKey] = (),
+    fits: Callable[[int, GFlightWithId], bool] | None = None,
 ) -> Board[GFlightWithId | tuple[GFlightWithId, ...]] | None:
     """Drop-in for fli's `SearchFlights().search()` but each result carries
     its Google Flights opaque flight_id.
@@ -2282,12 +2397,14 @@ def search_with_ids(
     asked for is `cli._run_gflight_path`'s, on the way out.
 
     A pin whose return board refuses for its own reasons is dropped with a
-    warning and the rest are still fetched. A throttle, an exhausted transport
-    ladder or a dead browser session stops the pinning instead, because none of
-    the three says anything about the pin: the wall is per-IP and the network is
-    one network, and every remaining pin would navigate on that same dead
-    session. Either way the combinations already fetched are returned, and the
-    error is raised only when nothing at all was served.
+    warning and the rest are still fetched. Every pin dropped that way, served
+    no return or left none by `keep` is named on a line of its own, after the
+    counts. A throttle, an exhausted transport ladder or a dead browser session
+    stops the pinning instead, because none of the three says anything about
+    the pin: the wall is per-IP and the network is one network, and every
+    remaining pin would navigate on that same dead session. Either way the
+    combinations already fetched are returned, and the error is raised only
+    when nothing at all was served.
 
     `transport` rides the recursion so every leg of one trip runs on the same
     rung — a round trip that opened Chrome for its outbound must not silently
@@ -2307,7 +2424,12 @@ def search_with_ids(
     `outbound_page`, so it is not fetched twice. `prefer` puts those outbounds
     first among the pins when the page lists them and `keep` passes them, which
     is how one cabin prices another cabin's outbounds; the pin count is
-    unchanged by it."""
+    unchanged by it.
+
+    `fits(i, row)` is whether a listing's own cabins meet segment `i`'s cabin
+    requirement. Google can list one itinerary at several cabin mixes and the
+    board shows the cheapest, so `fits` picks which of them `keep` is handed
+    (`_listing`)."""
     if first is None:
         first = outbound_page(filters, transport=transport, currency=currency)
     if not first:
@@ -2316,13 +2438,14 @@ def search_with_ids(
     num_segments = len(filters.flight_segments)
     selected_count = sum(1 for s in filters.flight_segments if s.selected_flight is not None)
     # A pinned board is filtered by the caller, after its pin check.
-    board = first if selected_count else _kept_outbounds(first, keep)
+    board = first if selected_count else _kept_outbounds(first, keep, fits)
     dropped = len(first) - len(board)
     # One-way, or the last leg already — no further iteration.
     if filters.trip_type == TripType.ONE_WAY or selected_count >= num_segments - 1 or not board:
         return Board(
             board,
             insight=_kept_insight(first.insight, board, dropped),
+            history=first.history,
             dropped=dropped,
             unread=first.unread,
         )
@@ -2333,6 +2456,8 @@ def search_with_ids(
     stopped: GfBackendError | None = None
     skipped = 0
     unmatched = 0  # pins whose whole return board the routing filter removed
+    empty = 0  # pins Google served no return board for
+    lost: list[str] = []
     dropped_returns = 0
     unread = first.unread
     # The segment the recursion below is asked to FILL, which is the one after
@@ -2368,9 +2493,12 @@ def search_with_ids(
             # a 5xx comes back as `GfUpstreamStatusError` — so ten pins
             # meeting ten 503s cost ten GETs, not ten ladders.
             refused.append(e)
+            lost.append(_lost_pin(picked, str(e), currency))
             unread += e.unread if isinstance(e, _PageUnreadError) else 0
             continue
         if nxt is None:
+            empty += 1
+            lost.append(_lost_pin(picked, "Google served no return for it", currency))
             continue
         ignored = _unpinned_board(nxt, wanted)
         if ignored is not None:
@@ -2381,16 +2509,20 @@ def search_with_ids(
             # board takes: this pin is dropped, the others are still fetched,
             # and nothing served at all still raises.
             refused.append(GfPinIgnoredError(ignored))
+            lost.append(_lost_pin(picked, str(refused[-1]), currency))
             continue
+        leg = selected_count + 1
+        listed = [nx if isinstance(nx, tuple) else _listing(leg, nx, fits) for nx in nxt]
         kept = [
-            nx
-            for nx in nxt
-            if keep is None or keep(selected_count + 1, nx[0] if isinstance(nx, tuple) else nx)
+            nx for nx in listed if keep is None or keep(leg, nx[0] if isinstance(nx, tuple) else nx)
         ]
         dropped_returns += len(nxt) - len(kept)
         unread += nxt.unread
         if not kept:
             unmatched += 1
+            returns = f"{len(nxt):d} return{'' if len(nxt) == 1 else 's'}"
+            why = f"Google served {returns} for it, none matching {checks}"
+            lost.append(_lost_pin(picked, why, currency))
             continue
         for nx in kept:
             if isinstance(nx, tuple):
@@ -2406,6 +2538,8 @@ def search_with_ids(
         unmatched=unmatched,
         bags=filters.bags is not None,
         checks=checks,
+        empty=empty,
+        lost=lost,
     )
     # A Board even with no pair in it: the pins were taken from rows Google
     # served, so the rows the filter removed on either leg are why it is empty,
@@ -2414,6 +2548,7 @@ def search_with_ids(
     return Board(
         combos,
         insight=_kept_insight(first.insight, combos, dropped),
+        history=first.history,
         dropped=dropped,
         pinned=len(pins),
         unread=unread,
@@ -2430,18 +2565,28 @@ def _report_pin_outcome(
     unmatched: int = 0,
     bags: bool = False,
     checks: str = "the routing",
+    empty: int = 0,
+    lost: Sequence[str] = (),
 ) -> None:
     """Account for what the pin loop met: a counted warning, or a raise.
 
     `unmatched` pins had return boards the row filter emptied, holding rows to
     `checks`. They are counted, not raised: that board was served, and "no
-    return matches `checks`" is its answer.
+    return matches `checks`" is its answer. So is an `empty` one, a pin Google
+    served no return for. `lost` names each pin dropped, after every count and
+    before any raise: a count says the table is short, and only the names say
+    which outbounds a user can look up elsewhere.
 
     Raising is for the case where nothing at all was served — then the refusal
     IS the outcome, and swallowing it reports a round trip with no return legs
     as a route with no return flights. Anything served makes every refusal a
     footnote to a real answer, and the counts are what tell the user their
     table is short."""
+    # A short table is narrower than what was asked, and so is one without the
+    # round trips the outbound board priced through an `empty` pin; a pin the
+    # row filter emptied is an answer, so `unmatched` does not count.
+    if served and (refused or empty or stopped is not None):
+        narrow()
     # First, because two of the exits below leave by `raise` and nothing after
     # them runs. A stop rule that fires with nothing served would otherwise take
     # the per-URL refusals with it, and "rate-limited, wait and retry" is the
@@ -2456,9 +2601,9 @@ def _report_pin_outcome(
         )
     if refused:
         log.warning("%d of %d return boards unavailable: %s", len(refused), pins, refused[-1])
-    if stopped is not None:
-        if not served:
-            raise stopped
+    if empty:
+        log.warning("%d of %d pinned outbounds have no return flight on Google", empty, pins)
+    if stopped is not None and served:
         # A partial round trip is a success BY CONTRACT: exit 0, `--format
         # json` in the ordinary shape, and this counted warning as the whole
         # account of what is missing. What that costs a machine consumer, and
@@ -2477,6 +2622,11 @@ def _report_pin_outcome(
             pins,
             _why_pinning_stopped(stopped, bags=bags),
         )
+    for line in lost:
+        log.warning("%s", line)
+    if stopped is not None:
+        if not served:
+            raise stopped
     elif refused and not served:
         # "Nothing was served", rather than "every pin refused": one pin
         # returning a genuinely empty board is not a served pin, and suppressing
