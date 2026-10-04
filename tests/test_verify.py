@@ -1223,6 +1223,56 @@ def test_a_summary_states_its_stops_whichever_way_it_writes_a_through_flight() -
     assert not cli._states_every_slice(short.solutions[0])
 
 
+@pytest.mark.parametrize("fmt", ["table", "json"])
+def test_details_without_one_of_the_rows_flights_give_no_verdict(
+    gf_session: Callable[..., Any], matrix: _Matrix, fmt: str
+) -> None:
+    """The one candidate's details state AS21 alone, so they may be the row's
+    AS21 AS487 with a flight left out."""
+    n, row = _as_row()
+    matrix.chain = _chain(_row_solution("AS-1", f"USD{row.flight.price:.2f}", row))
+    details = _details_of(row)
+    details["bookingDetails"]["itinerary"]["slices"][0]["segments"].pop()
+    matrix.details = {"AS-1": details}
+    gf_session(_served())
+    result = _run("-n", "40", "--fast", "--verify", "--pick", str(n), "--format", fmt)
+    _gives_no_verdict(result, fmt, _DETAILS_SHORT_OF_A_FLIGHT)
+    assert matrix.summarized() == [("viewDetails", "AS-1")]
+
+
+def test_details_that_split_a_through_flight_state_every_flight() -> None:
+    """Google writes XX1 as one leg and Matrix books it as two a day later: the
+    details state every flight and are another itinerary."""
+    whole = _row((_flight("XX1", "JFK", "LAX", "2026-10-20T08:00", "2026-10-20T13:00"),))
+    seg = _segment("XX1", "JFK", "LAX", "2026-10-21T08:00-04:00", "2026-10-21T13:00-07:00")
+    seg["legs"] = [
+        {
+            "origin": {"code": "JFK"},
+            "destination": {"code": "DEN"},
+            "departure": "2026-10-21T08:00-04:00",
+            "arrival": "2026-10-21T10:00-06:00",
+        },
+        {
+            "origin": {"code": "DEN"},
+            "destination": {"code": "LAX"},
+            "departure": "2026-10-21T11:00-06:00",
+            "arrival": "2026-10-21T13:00-07:00",
+        },
+    ]
+    details = BookingDetailsResult.from_api(
+        {"bookingDetails": {"itinerary": {"slices": [{"segments": [seg]}]}}}
+    ).booking_details
+    assert details is not None and details.itinerary is not None
+    assert not v.same_flights(whole, details.itinerary)
+    assert cli._states_every_flight(details.itinerary, whole)
+    two = _l4_row("2026-10-21")
+    l4 = _l4_details("2026-10-21").booking_details
+    assert l4 is not None and l4.itinerary is not None
+    assert cli._states_every_flight(l4.itinerary, two)
+    l4.itinerary.slices[0].segments.pop()
+    assert not cli._states_every_flight(l4.itinerary, two)
+
+
 def _no_request(monkeypatch: pytest.MonkeyPatch) -> None:
     def _forbidden(*_a: object, **_kw: object) -> Any:
         raise AssertionError("refused before any request")

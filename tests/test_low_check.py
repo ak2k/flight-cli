@@ -376,18 +376,25 @@ def test_a_silent_summary_beside_a_candidate_flown_a_day_later_is_no_answer(
     assert matrix.summarized() == [("viewDetails", "DL-0")]
 
 
-@pytest.mark.parametrize("left_out", ["the summary's stop"])
+@pytest.mark.parametrize("left_out", ["the summary's stop", "a booked flight"])
 def test_a_connection_the_answer_leaves_out_is_no_answer_rather_than_another_itinerary(
     tmp_path: pathlib.Path, left_out: str
 ) -> None:
     """The AS21 AS487 row asked as its exact flights: the one solution is the
-    row, its summary silent on the connection."""
+    row, its summary silent on the connection or its details on AS487."""
     _n, row = _as_row()
     fake = _Matrix()
     sol = _row_solution("AS-1", _price(row), row)
     details = _details_of(row)
-    del sol["itinerary"]["slices"][0]["stops"]
-    why = _SUMMARY_SILENT
+    if left_out == "the summary's stop":
+        del sol["itinerary"]["slices"][0]["stops"]
+        why = _SUMMARY_SILENT
+    else:
+        details["bookingDetails"]["itinerary"]["slices"][0]["segments"].pop()
+        why = (
+            "Matrix returned booking details that do not state every flight's number, "
+            "airports and times, so this itinerary cannot be checked flight by flight."
+        )
     fake.chain = _chain(sol)
     fake.details = {"AS-1": details}
 

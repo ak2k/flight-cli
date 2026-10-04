@@ -4381,7 +4381,7 @@ def _same_itinerary(
                         c, bd.fares, session=session, solution_set=solution_set, solution_id=sid
                     )
                     return i, _FareRulesAnswer(n, details, rules)
-                if not _states_every_flight(bd.itinerary):
+                if not _states_every_flight(bd.itinerary, row):
                     unreadable.append(_DETAILS_SHORT_OF_A_FLIGHT)
             return None
 
@@ -5954,13 +5954,19 @@ def _other_itinerary(chain: SearchResult) -> _verify.Verdict:
     return _verify.other_itinerary(listed)
 
 
-def _states_every_flight(itinerary: BookedItinerary) -> bool:
-    """Whether booking details state each flight's carrier, number, airports
-    and times. A flight missing any of them compares unequal to every flight,
-    so an itinerary that does not match the row is another only when this
-    holds."""
+def _states_every_flight(itinerary: BookedItinerary, row: _verify.Row) -> bool:
+    """Whether booking details state, slice by slice, at least as many flights
+    as `row` has, and each flight's carrier, number, airports and times. A
+    candidate's summary has the row's flights, so details naming fewer leave
+    one out. A flight left out or short of a field compares unequal to every
+    flight, so an itinerary that does not match the row is another only when
+    this holds."""
     booked = _verify.booked_flights(itinerary)
-    return bool(booked) and all(s and all(all(f) for f in s) for s in booked)
+    return len(booked) == len(row.slices) and all(
+        _flight_count(f.code for f in b) >= _flight_count(f.code for f in g)
+        and all(all(f) for f in b)
+        for b, g in zip(booked, row.slices, strict=True)
+    )
 
 
 async def _exact_flights_on(
@@ -6002,7 +6008,7 @@ async def _exact_flights_on(
             unreadable = unreadable or _DETAILS_WITHOUT_FLIGHTS
         elif _verify.same_flights(row, itinerary):
             return _verify.Verdict("match", solution=chain.solutions[i], details=details)
-        elif not _states_every_flight(itinerary):
+        elif not _states_every_flight(itinerary, row):
             unreadable = unreadable or _DETAILS_SHORT_OF_A_FLIGHT
     if unreadable:
         # A candidate whose flights cannot be read may be the row, so "another
