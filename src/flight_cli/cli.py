@@ -7627,8 +7627,12 @@ def _render_gflight_table(
             header_style="bold green",
         )
         t.add_column("#", justify="right")
+        # Never wrapped: Rich narrows the columns it may wrap, and a price
+        # wrapped at its space would put a separate-ticket mark on a line alone.
         t.add_column(
-            f"total ({passengers:d} travelers)" if passengers > 1 else "price", justify="right"
+            f"total ({passengers:d} travelers)" if passengers > 1 else "price",
+            justify="right",
+            no_wrap=True,
         )
         t.add_column("stops", justify="right")
         t.add_column("duration")
