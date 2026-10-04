@@ -159,6 +159,51 @@ def document(rows: Sequence[Any], xc: CrossCheck) -> dict[str, Any]:
     }
 
 
+def every_matrix_price_in(rows: Sequence[Any], currency: str) -> bool:
+    """Whether every row Matrix is on states its price for the party in
+    `currency`, so that a price under the lowest of them is under every fare
+    in Matrix's answer."""
+    return all(
+        (m := _money(r.matrix_price)) is not None and m[0] == currency
+        for r in rows
+        if r.source != "gf"
+    )
+
+
+def lowest_matrix_price(rows: Sequence[Any], currency: str) -> str | None:
+    """Matrix's cheapest price for the party in `currency` among `rows`, the
+    merged rows of its whole capped page, or None where it prices none in it."""
+    low: tuple[Decimal, str] | None = None
+    for r in rows:
+        m = _money(r.matrix_price)
+        if m is not None and m[0] == currency and (low is None or m[1] < low[0]):
+            low = (m[1], r.matrix_price)
+    return low[1] if low is not None else None
+
+
+def low_row(rows: Sequence[Any], matrix_low: str | None, currency: str) -> int | None:
+    """The 1-based number, among `rows` in the table's order, of the first
+    Google-only row whose price is in `currency` and under `matrix_low`,
+    Matrix's cheapest price for the party; where Matrix prices nothing,
+    the first Google-only row priced in `currency`. None when no row is.
+
+    A row on both sides is never chosen: Matrix has already priced its
+    flights."""
+    low = _money(matrix_low)
+    if low is not None and low[0] != currency:
+        return None
+    for n, r in enumerate(rows, 1):
+        g = _money(r.gf_price)
+        if (
+            r.source == "gf"
+            and g is not None
+            and g[0] == currency
+            and (low is None or g[1] < low[1])
+        ):
+            return n
+    return None
+
+
 def _row_document(row: Any, c: RowCheck) -> dict[str, Any]:
     return {
         "source": _SOURCE.get(row.source, row.source),
