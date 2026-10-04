@@ -237,9 +237,12 @@ class Leg(BaseModel):
     date_plus: int = Field(default=0, ge=0, le=3)
     route_language: str | None = None  # 'LH+', 'BA AA', '[F* X F*]'
     extension: str | None = None  # 'MAXCONNECT 5:00', etc.
-    time_ranges: tuple[TimeWindow, ...] = ()  # empty = no preference
-    # When the leg's last flight lands, local to its airport. Google Flights
-    # only: Matrix has no input for an arrival time.
+    # Empty = no preference. Matrix holds these to the departure, or to the
+    # arrival on a leg with `is_arrival_date`.
+    time_ranges: tuple[TimeWindow, ...] = ()
+    # When the leg's last flight lands, local to its airport, beside a
+    # departure date. Google Flights only: Matrix bounds one time a slice, so
+    # an arrival-date leg carries its arrival window in `time_ranges` instead.
     arrival_ranges: tuple[TimeWindow, ...] = ()
 
     @field_validator("origins", "destinations")
@@ -254,6 +257,9 @@ class Leg(BaseModel):
         destination: str | list[str] | tuple[str, ...],
         dt: _date | None = None,
         *,
+        is_arrival_date: bool = False,
+        date_minus: int = 0,
+        date_plus: int = 0,
         route_language: str | None = None,
         extension: str | None = None,
         time_ranges: tuple[TimeWindow, ...] = (),
@@ -266,6 +272,9 @@ class Leg(BaseModel):
             origins=os,
             destinations=ds,
             date=dt,
+            is_arrival_date=is_arrival_date,
+            date_minus=date_minus,
+            date_plus=date_plus,
             route_language=route_language,
             extension=extension,
             time_ranges=time_ranges,
