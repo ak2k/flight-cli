@@ -19,10 +19,18 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import anyio
+import anyio.to_thread
 import httpx
 import structlog
 
 from .._envelope import narrow
+from ..providers.base import (
+    answer_deadline,
+    deadline_reason,
+    exception_reason,
+    http_reason,
+    record_failure,
+)
 from .auth import Tokens, get_valid_tokens
 from .auth import refresh as refresh_tokens
 from .models import AirlineSearchResponse, PricingInfoResponse
@@ -187,6 +195,12 @@ class PPClient:
     ) -> None:
         self._tokens = tokens
         self._sem = anyio.Semaphore(concurrency)
+        self._refresh_lock = anyio.Lock()
+        # Pair queries fan out at once, so without this each would ask an
+        # airline PointsPath has just turned away as unsupported before the
+        # first refusal lands: an airline's first request goes out alone.
+        self._first_answered: dict[str, anyio.Event] = {}
+        self._unsupported: set[str] = set()
         self._client = httpx.AsyncClient(
             base_url=API_BASE,
             timeout=timeout,
@@ -237,7 +251,13 @@ class PPClient:
             )
         if r.status_code == HTTPStatus.UNAUTHORIZED:
             log.info("pp_token_refresh", reason="401_retry_once")
-            self._tokens = refresh_tokens(self._tokens)
+            # The refresh is a blocking call. On the loop no deadline could cut
+            # it; in a thread the award deadline stops waiting on it. The lock
+            # keeps refreshes one at a time, each on the token the last returned.
+            async with self._refresh_lock:
+                self._tokens = await anyio.to_thread.run_sync(
+                    refresh_tokens, self._tokens, abandon_on_cancel=True
+                )
             async with self._sem:
                 r = await self._client.request(
                     method,
@@ -253,9 +273,10 @@ class PPClient:
         # 204 = airline has nothing for this route+date; return empty model.
         if r.status_code == HTTPStatus.NO_CONTENT or not r.content:
             if r.status_code >= HTTPStatus.BAD_REQUEST:
-                # An outage, not an empty answer. A note rather than the
-                # warning below, which would add a stderr line to table and JSON.
+                # An outage with nothing to say, not an empty answer.
                 narrow(f"PointsPath: {airline} answered HTTP {r.status_code:d} with no body")
+                log.debug("pp_airline_search_failed", airline=airline, status=r.status_code)
+                record_failure("PointsPath", http_reason(r.status_code), airline=airline)
             return AirlineSearchResponse()
         if r.status_code >= HTTPStatus.BAD_REQUEST:
             if is_unsupported_airline_response(r.status_code, r.text):
@@ -264,17 +285,36 @@ class PPClient:
                 # Logged at debug: it's an expected steady state, not a problem
                 # the user can act on.
                 remember_unsupported_airline(airline)
+                self._unsupported.add(airline)
                 log.debug("pp_airline_unsupported", airline=airline)
             else:
                 narrow()
-                log.warning(
+                log.debug(
                     "pp_airline_search_failed",
                     airline=airline,
                     status=r.status_code,
                     body=r.text[:200],
                 )
+                record_failure("PointsPath", http_reason(r.status_code, r.text), airline=airline)
             return AirlineSearchResponse()
         return AirlineSearchResponse.model_validate(r.json())
+
+    async def _ask_airline(self, spec: SearchSpec, airline: str) -> AirlineSearchResponse | None:
+        """`airline_search`, or None for an airline this client has since
+        learned is unsupported. Until the airline's first request has answered,
+        later ones wait for it outside the semaphore."""
+        first = self._first_answered.get(airline)
+        if first is None:
+            self._first_answered[airline] = first = anyio.Event()
+            try:
+                return await self.airline_search(spec, airline)
+            finally:
+                first.set()
+        await first.wait()
+        if airline in self._unsupported:
+            log.debug("pp_airline_search_skipped_unsupported", airlines=(airline,))
+            return None
+        return await self.airline_search(spec, airline)
 
     async def airline_search_many(
         self,
@@ -293,18 +333,26 @@ class PPClient:
             log.debug("pp_airline_search_skipped_unsupported", airlines=skipped)
 
         async def runner(airline: str) -> None:
-            try:
-                out[airline] = await self.airline_search(spec, airline)
-            except Exception as e:  # noqa: BLE001 - per-airline failures are non-fatal
-                narrow()
-                # Some exceptions, httpx.ReadTimeout among them, have an empty
-                # str(); the type is then the only reason the log carries.
-                log.warning(
-                    "pp_airline_search_exception",
-                    airline=airline,
-                    error=str(e),
-                    error_type=type(e).__name__,
-                )
+            # The deadline counts the wait for a slot of the semaphore too, so a
+            # stalled airline holding a slot costs the search one slot, not more.
+            with anyio.CancelScope(deadline=answer_deadline()) as scope:
+                try:
+                    if (resp := await self._ask_airline(spec, airline)) is not None:
+                        out[airline] = resp
+                except Exception as e:  # noqa: BLE001 - per-airline failures are non-fatal
+                    narrow()
+                    # Some exceptions, httpx.ReadTimeout among them, have an empty
+                    # str(); the type is then the only reason the log carries.
+                    log.debug(
+                        "pp_airline_search_exception",
+                        airline=airline,
+                        error=str(e),
+                        error_type=type(e).__name__,
+                    )
+                    record_failure("PointsPath", exception_reason(e), airline=airline)
+            if scope.cancelled_caught:
+                log.debug("pp_airline_search_cut", airline=airline)
+                record_failure("PointsPath", deadline_reason(), airline=airline)
 
         async with anyio.create_task_group() as tg:
             for a in to_call:

@@ -20,10 +20,19 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import anyio
 import structlog
 
 from ..._envelope import narrow
-from ..base import AwardFlight, CabinAward
+from ..base import (
+    AwardFlight,
+    CabinAward,
+    answer_deadline,
+    deadline_reason,
+    exception_reason,
+    http_reason,
+    record_failure,
+)
 from .auth import SeatsAuthError, is_configured
 from .client import SeatsAeroClient, SeatsAeroError
 
@@ -32,7 +41,7 @@ if TYPE_CHECKING:
 
     from ...pp.client import CashFlightHint
     from ..base import LegQuery
-    from .models import SeatsAvailabilityTrip
+    from .models import CachedSearchResponse, SeatsAvailabilityTrip
 
 log: BoundLogger = structlog.get_logger(__name__)  # pyright: ignore[reportAny]
 
@@ -270,25 +279,33 @@ class SeatsAeroProvider:
         """
         _ = num_passengers, cash_hints
         cabin_slugs = tuple(_cabin_slug(c) for c in cabins) if cabins else None
-        try:
-            page = await self._client.search(
-                origin=leg.origin,
-                destination=leg.destination,
-                start_date=leg.date,
-                end_date=leg.date,
-                include_trips=True,
-                cabins=cabin_slugs,
-                sources=self._sources,
-            )
-        except SeatsAeroError as e:
-            # Provider-level failures (auth, network, schema) are non-fatal:
-            # log + return [] so the registry can move on to other providers.
-            narrow()
-            log.warning("seats_aero_search_failed", error=str(e), status=e.status)
-            return []
-        except Exception as e:  # noqa: BLE001 — propagate-to-registry pattern
-            narrow()
-            log.warning("seats_aero_search_failed", error=str(e))
+        page: CachedSearchResponse | None = None
+        with anyio.CancelScope(deadline=answer_deadline()):
+            try:
+                page = await self._client.search(
+                    origin=leg.origin,
+                    destination=leg.destination,
+                    start_date=leg.date,
+                    end_date=leg.date,
+                    include_trips=True,
+                    cabins=cabin_slugs,
+                    sources=self._sources,
+                )
+            except SeatsAeroError as e:
+                # Provider-level failures (auth, network, schema) are non-fatal:
+                # record + return [] so the registry can move on to other providers.
+                narrow()
+                log.debug("seats_aero_search_failed", error=str(e), status=e.status)
+                record_failure(self.name, http_reason(e.status, e.body))
+                return []
+            except Exception as e:  # noqa: BLE001 — propagate-to-registry pattern
+                narrow()
+                log.debug("seats_aero_search_failed", error=str(e))
+                record_failure(self.name, exception_reason(e))
+                return []
+        if page is None:  # the deadline cut the request
+            log.debug("seats_aero_search_cut")
+            record_failure(self.name, deadline_reason())
             return []
 
         # Collect all trips across all (program, date) availability items

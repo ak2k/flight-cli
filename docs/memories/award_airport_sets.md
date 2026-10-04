@@ -78,3 +78,51 @@ seats.aero's public reference for `/partnerapi/search`
 used: nothing has measured it, a set would share one first page that the
 provider does not paginate past, and one mechanism serves both providers. One
 live seats.aero call would settle it.
+
+## Failures, the shared queue and the deadline (2026-10-02)
+
+A search's award failures print as one stderr line after the fan-out, in table
+and JSON runs alike, and no line when nothing failed:
+
+    Awards incomplete: PointsPath did not answer for TapAirPortugal (ReadTimeout, 3 queries), AirFrance (ReadTimeout); Seats.aero failed (HTTP 503: <body>).
+
+Each provider and each airline is named once. A reason is the error's message,
+its type when the message is blank (a `ReadTimeout`), or `HTTP <status>: <body>`,
+with a count when it repeats; remote text goes through `_safe_text`. Every site
+that swallows a provider failure records it with `record_failure` into the
+`award_run` that `run_pp_for_search` opens (`providers/base.py`, a context
+variable, so no provider signature changes) and logs at debug under its own
+event name, so `-vv` still shows each one.
+
+The pair queries of a search start together, in the order `_plan_pair_queries`
+gives them, and each pair still asks its cabins in turn. Their PointsPath
+requests share the client's one semaphore of 5 first come, first served, so an
+airline that stalls holds one slot rather than every pair behind it. An
+airline's first request goes out alone and the other pairs' requests for it wait
+for that answer, without a slot, so an airline PointsPath refuses as unsupported
+is asked once a search, as when the pairs ran in turn. Seats.aero
+has no semaphore, so a search now sends it all its pair requests at once (6 on
+a six-pair search); nothing has measured how it takes that.
+
+The award phase ends `AWARD_DEADLINE_SECS` = 180 s after it starts
+(`pp/cli.py`). Every request carries the deadline, its wait for a slot included
+(`answer_deadline`), and so does building a provider. Each provider asks its
+pair queries as soon as it is built, without waiting for the others, so a
+PointsPath catalog that stalls to the deadline still leaves Seats.aero the
+whole of it. A token refresh is a
+blocking call, whether a 401 triggers it or checking the tokens before building
+PointsPath finds them stale, so it runs in a worker thread the deadline stops
+waiting on; an abandoned refresh can still hold the process's exit for its own
+20 s timeout once the results have printed. A request still
+unanswered then is cut and named in the line (`not answered within 180 s`, with
+a count), and every answer already in is kept, joined and rendered. The
+deadline sits on each request and not around a provider's whole search, which
+would also cancel the merge of the answers that did arrive.
+
+Measured on the skill's Example 2 (`NYC MUC`, business, round trip: 6 pairs x 2
+cabins x 17 airlines = 204 PointsPath requests) before the change: Matrix
+50.6 s, award phase 202.5 s, its 12 fan-outs one after another (Economy 25.6 to
+35.1 s each, Business 0.9 to 15.7 s). Replayed through one shared queue of 5
+with cabins in turn, the 204 requests finish by 158 s, at least 147 s of it
+service through 5 slots. 180 s sits above that; at 120 s the replay lost every
+Business request.

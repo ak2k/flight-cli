@@ -76,10 +76,11 @@ choice that fits the rest of the stack — don't substitute.
   golden-file tests at `tests/fixtures/` catch field-name and ordering
   regressions in <100ms — exactly the class of bugs that hit us during the
   initial build.
-- **Run pytest after any change to `cli.py` too**, and read
+- **Run pytest after any change to `cli.py` or `pp/cli.py` too**, and read
   [`docs/memories/console_sanitizing.md`](./docs/memories/console_sanitizing.md)
-  before adding a print or a table cell there. `cli.py` is the one file with a
-  whole-file AST gate over it — the `escape_scan` helper in
+  before adding a print or a table cell in either. `src/flight_cli/cli.py` and
+  `src/flight_cli/pp/cli.py` are the only two files with a whole-file AST gate
+  over them — the `escape_scan` helper in
   `tests/test_calendar_split.py`, run as
   `tests/test_calendar_split.py::test_calendar_paths_escape_every_printed_value`.
   A value reaches a Rich console or table one of four ways: through `_quote` or
@@ -309,6 +310,12 @@ leg fan-out picks it up — the matcher and renderers stay provider-blind.
   `fli_bridge.fli_airport`; a test fails on `getattr`/`hasattr`/`Airport[...]`
   on the enum under `src/`. MLH alone resolves to BSL, the same airport. See
   [`gf_routing_and_carriers.md`](./docs/memories/gf_routing_and_carriers.md).
+- fli's `Airline` enum makes 6 codes aliases of another carrier (`Airline.W9`
+  is W6, Wizz Air Hungary rather than Wizz Air UK), and fli's row decoder has
+  no entry for them. Build airline members only through
+  `fli_bridge.fli_airline`; a test fails on `_parse_airline`, `Airline[...]`, a
+  member read off the enum, or `getattr`/`hasattr` on it under `src/`. Every
+  pair is two carriers, so none resolves to the other. Same memory as above.
 
 ## Agent skill
 

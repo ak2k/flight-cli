@@ -9,6 +9,7 @@ so a multi-airport calendar is queried one destination at a time (groupable via
 from __future__ import annotations
 
 import ast
+import base64
 import importlib.util
 import io
 import json
@@ -26,7 +27,7 @@ import typer
 from rich.console import Console
 from typer.testing import CliRunner
 
-from flight_cli import _config, cli
+from flight_cli import _config, _console_text, cli
 from flight_cli._api_key import ApiKeyResolutionError
 from flight_cli._calendar_split import (
     is_empty_calendar,
@@ -42,12 +43,17 @@ from flight_cli.domain import Cabin, CalendarSearch, CalendarWindow, Leg, Search
 from flight_cli.models import (
     CalendarResult,
     Itinerary,
+    ItineraryDetails,
     LegInfo,
     Location,
     SearchResult,
     Slice,
     SliceEndpoint,
 )
+from flight_cli.pp import cli as pp_cli
+from flight_cli.pp.auth import PPAuthError, Tokens
+from flight_cli.pp.match import MatchedFare
+from flight_cli.providers.base import AwardFlight, CabinAward, LegQuery
 from flight_cli.wire import to_wire
 
 if TYPE_CHECKING:
@@ -2847,14 +2853,12 @@ def test_parse_errors_truncate_an_oversized_value(
     # whole value and appended "…" satisfies the line above and nothing else here.
     # Measured against the constant, not against `_quote`, whose own output would
     # grow with the mutant and move the bound out of the mutant's way.
-    assert (
-        len(message) < cli._MAX_ECHOED_VALUE + 200  # pyright: ignore[reportPrivateUsage] — the cap IS the unit
-    )
+    assert len(message) < _console_text.MAX_ECHOED_VALUE + 200
     # What the cap actually governs: the value the user typed, measured where the
     # cap applies — before `repr`, which is where one code point stops being one
     # character. Plus one for the ellipsis.
-    shown = cli._elide(value)  # pyright: ignore[reportPrivateUsage] — the cap IS the unit
-    assert len(shown) <= cli._MAX_ECHOED_VALUE + 1  # pyright: ignore[reportPrivateUsage] — as above
+    shown = _console_text.elide(value)
+    assert len(shown) <= _console_text.MAX_ECHOED_VALUE + 1
 
 
 # Text from somewhere else — a Matrix message, an exception — is not just markup.
@@ -4248,8 +4252,8 @@ def test_quote_keeps_a_normal_value_whole() -> None:
     """Truncation is for the pathological case; an ordinary mistyped value is
     short, and cutting it would hide the typo the message exists to show."""
     quote = cli._quote  # pyright: ignore[reportPrivateUsage] — the helper IS the unit
-    elide = cli._elide  # pyright: ignore[reportPrivateUsage] — as above
-    cap = cli._MAX_ECHOED_VALUE  # pyright: ignore[reportPrivateUsage] — as above
+    elide = _console_text.elide
+    cap = _console_text.MAX_ECHOED_VALUE
     assert quote("5-7") == "'5-7'"
     assert elide("9" * cap) == "9" * cap  # exactly the cap is not cut
     assert elide("9" * (cap + 1)) == "9" * cap + "…"  # one over is
@@ -4305,6 +4309,175 @@ def test_detail_round_trip_bad_duration_is_a_typed_error(
     assert seen == []  # refused before any Matrix work
 
 
+# ─────────── pp/cli.py prints a hostile provider field literally ───────────
+# PointsPath, seats.aero, the token store and an exception's `str()` all choose
+# text `pp/cli.py` prints through its own markup consoles. One payload per field,
+# driven through the renderer that reads it: an unbalanced tag that would raise
+# MarkupError, an ESC that would clear the screen, and a well-formed tag that
+# would eat the text after it.
+_HOSTILE = "[/x]\x1b[2J[bold]AA"
+_HOSTILE_SHOWN = "[/x][2J[bold]AA"  # the ESC dropped, every bracket printed
+
+
+def _pp_console(monkeypatch: pytest.MonkeyPatch, name: str) -> io.StringIO:
+    """`pp_cli.console` or `pp_cli.err` over a wide, colorless buffer, so a cell
+    is never folded mid-payload and no style code puts an ESC of its own there."""
+    buf = io.StringIO()
+    monkeypatch.setattr(
+        pp_cli, name, Console(file=buf, width=1000, force_terminal=False, no_color=True)
+    )
+    return buf
+
+
+def _assert_literal(out: str) -> None:
+    assert _HOSTILE_SHOWN in out, out
+    assert "\x1b" not in out, repr(out)
+
+
+def _hostile_match(field: str) -> MatchedFare:
+    def pick(name: str, default: str) -> str:
+        return _HOSTILE if field == name else default
+
+    cabin = pick("cabin", "Business")
+    award = AwardFlight(
+        origin="JFK",
+        destination="LHR",
+        departure="2026-10-20T18:00:00",
+        arrival="2026-10-21T06:00:00",
+        flight_number="BA178",
+        provider="PointsPath",
+        program=pick("program", "BritishAirways"),
+        funding_banks=[pick("bank", "Amex")],
+        cabins=[
+            CabinAward(
+                cabin=cabin,
+                miles=60_000,
+                tax_usd=5.6,
+                tax_currency=pick("tax currency", "USD"),
+                remaining_seats=1,
+            )
+        ],
+    )
+    cash = Itinerary(
+        displayTotal=pick("price", "USD900.00"),
+        itinerary=ItineraryDetails(
+            slices=[
+                Slice(
+                    flights=[pick("flight", "BA178")],
+                    departure="2026-10-20T18:00:00",
+                    origin=SliceEndpoint(code="JFK"),
+                    destination=SliceEndpoint(code="LHR"),
+                )
+            ]
+        ),
+    )
+    return MatchedFare(itinerary=cash, awards=[award])
+
+
+@pytest.mark.parametrize("field", ["program", "flight", "bank", "price", "tax currency", "cabin"])
+def test_a_matched_award_table_prints_a_hostile_field_literally(
+    monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    """The arms behind `("_render_matches", "cells")`: every remote leaf of a cell
+    is wrapped where it is read, and the markup `_fmt_award_cell` writes on purpose
+    still styles rather than printing as text."""
+    out = _pp_console(monkeypatch, "console")
+    fare = _hostile_match(field)
+    cabin = fare.awards[0].cabins[0].cabin
+    pp_cli._render_matches(  # pyright: ignore[reportPrivateUsage] — the renderer IS the unit
+        [fare],
+        (cabin,),
+        cash_per_cabin={id(fare.itinerary): {cabin: 900.0}},
+        num_passengers=2,
+    )
+    text = out.getvalue()
+    _assert_literal(text)
+    assert "(1 seat)" in text  # `[yellow]` styled the shortfall
+    assert "[dim]" not in text and "[yellow]" not in text and "[/]" not in text
+
+
+@pytest.mark.parametrize(
+    "field", ["provider", "program", "flight", "origin", "departure", "cabin", "bank"]
+)
+def test_an_award_only_table_prints_a_hostile_field_literally(
+    monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    def pick(name: str, default: str) -> str:
+        return _HOSTILE if field == name else default
+
+    out = _pp_console(monkeypatch, "console")
+    award = AwardFlight(
+        origin=pick("origin", "JFK"),
+        destination="LHR",
+        departure=pick("departure", "2026-10-20T18:00:00"),
+        arrival="2026-10-21T06:00:00",
+        flight_number=pick("flight", "BA178"),
+        provider=pick("provider", "PointsPath"),
+        program=pick("program", "BritishAirways"),
+        funding_banks=[pick("bank", "Amex")],
+        cabins=[
+            CabinAward(
+                cabin=pick("cabin", "Business"), miles=60_000, tax_usd=5.6, tax_currency="USD"
+            )
+        ],
+    )
+    pp_cli._render_pp_only([award])  # pyright: ignore[reportPrivateUsage] — the renderer IS the unit
+    _assert_literal(out.getvalue())
+
+
+@pytest.mark.parametrize("where", ["award query", "token check"])
+def test_an_award_failure_prints_a_hostile_exception_literally(
+    monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    """The award phase prints the exception that ended it; its `str()` is text a
+    provider or a library chose."""
+    out = _pp_console(monkeypatch, "err")
+
+    def tokens() -> None:
+        if where == "token check":
+            raise PPAuthError(_HOSTILE)
+
+    async def gather(*_a: object, **_kw: object) -> NoReturn:
+        raise RuntimeError(_HOSTILE)
+
+    monkeypatch.setattr(pp_cli, "get_valid_tokens", tokens)
+    monkeypatch.setattr(pp_cli, "gather_awards", gather)
+    pp_cli.run_pp_for_search(
+        SearchResult.from_api({}),
+        legs=[LegQuery("JFK", "LHR", "2026-10-20", 0, "outbound JFK→LHR 2026-10-20")],
+        provider_filter=("pp",),
+    )
+    _assert_literal(out.getvalue())
+
+
+def _jwt(claims: dict[str, str]) -> str:
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    return f"e30.{payload}.sig"
+
+
+@pytest.mark.parametrize("field", ["stored email", "claimed email", "sub", "role"])
+def test_pp_whoami_prints_a_hostile_token_field_literally(
+    monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    """The token store is a file the browser login wrote from a remote session,
+    and the claims are the remote JWT's."""
+    out = _pp_console(monkeypatch, "console")
+    claims = {
+        "email": _HOSTILE if field == "claimed email" else "a@example.com",
+        "sub": _HOSTILE if field == "sub" else "uid-1",
+        "role": _HOSTILE if field == "role" else "authenticated",
+    }
+    tokens = Tokens(
+        access_token=_jwt(claims),
+        refresh_token="REFRESH",  # noqa: S106 — dummy test value
+        expires_at=9999999999,
+        user_email=_HOSTILE if field == "stored email" else None,
+    )
+    monkeypatch.setattr(pp_cli, "load_tokens", lambda: tokens)
+    pp_cli.pp_whoami()
+    _assert_literal(out.getvalue())
+
+
 # ──────────── every value these paths print is escaped (work-h70kv.9) ───────
 # `err` and `console` are markup-enabled, so any user string or exception message
 # reaching them is markup until escaped: an unbalanced `[/x]` raises MarkupError
@@ -4312,9 +4485,9 @@ def test_detail_round_trip_bad_duration_is_a_typed_error(
 # needs. The cases above cover the values that carry user text today; this reads
 # the source, so a NEW print cannot be added without one.
 #
-# It reads ONE file, `src/flight_cli/cli.py`, and says nothing about any other.
-# `src/flight_cli/pp/cli.py` builds a second markup console of its own and is not
-# scanned here (work-h70kv.19).
+# It reads TWO files, `src/flight_cli/cli.py` and `src/flight_cli/pp/cli.py`, the
+# two modules that build a markup console of their own, and says nothing about any
+# other. `_PRINTABLE_IDENTIFIERS` is keyed by function name across both.
 #
 # Every function is scanned. There is no per-function escape hatch: one exempts
 # every FUTURE print in a function rather than one value, and every MarkupError
@@ -4426,6 +4599,11 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_render_multi_cabin_search", "cabin_labels"),
         ("_render_multi_cabin_search", "sort_label"),
         ("_render_multi_cabin_search", "letter"),
+        # `pp/cli.py`: cells composed from leaves each wrapped where they were read,
+        # and not wrapped again whole, because `_fmt_award_cell` writes its `[dim]`
+        # and `[yellow]` on purpose. The arms of
+        # `test_a_matched_award_table_prints_a_hostile_field_literally` hold it.
+        ("_render_matches", "cells"),
     }
 )
 # A table printed whole needs no entry: `_renderables_built_in` reads the
@@ -4451,6 +4629,10 @@ _TEXT_SINK_METHODS = frozenset(
 # `Text(<literal-or-wrapped>)`, which the wrapper already there settles.
 # `Text.from_markup` is a sink above, and that one does parse markup.
 _RENDERABLE_SINKS = frozenset({"Table", "Panel", "Text"})
+# Attributes Rich parses as markup when the object renders: `Table.title` and
+# `.caption`, `Column.header` and `.footer`, `Panel.title` and `.subtitle`. Matched
+# by attribute NAME, because the scan cannot type the object assigned into.
+_MARKUP_SLOTS = frozenset({"title", "caption", "header", "footer", "subtitle"})
 
 # Presentation types only a number survives: `format("x", "d")` raises, so a field
 # carrying one cannot be a string and cannot carry markup. The alternative is
@@ -4737,6 +4919,39 @@ def _help_faults(src: str, node: ast.Call, names: _Names) -> list[str]:
     ]
 
 
+def _slot_faults(src: str, node: ast.AST, chain: list[str], names: _Names) -> list[str]:
+    """Unescaped text assigned into a markup slot, or nothing.
+
+    Only the attribute ASSIGNED counts: `t.columns[0].header` is a slot and
+    `self.title.text` is not. The value is judged as a print argument would be, so
+    a tuple unpacked into slots faults whatever it holds."""
+    targets: list[ast.expr]
+    if isinstance(node, ast.Assign):
+        targets, value = node.targets, node.value
+    elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and node.value is not None:
+        targets = [node.target]
+        value = node.value
+    else:
+        return []
+    slots: list[str] = []
+    pending = targets[::-1]
+    while pending:
+        target = pending.pop()
+        if isinstance(target, (ast.Tuple, ast.List)):
+            pending += target.elts[::-1]
+        elif isinstance(target, ast.Starred):
+            pending.append(target.value)
+        elif isinstance(target, ast.Attribute) and target.attr in _MARKUP_SLOTS:
+            slots.append(target.attr)
+    if not slots:
+        return []
+    where = chain[0] if chain else "<module>"
+    faults = _argument_faults(src, value, chain, names)
+    return [
+        f"{where}:{node.lineno} .{slot} assigned: {fault}" for slot in slots for fault in faults
+    ]
+
+
 def _spec_has_field(spec: ast.expr | None) -> bool:
     """Whether a format spec interpolates anything. `f"{escape(a):{e}}"` makes `e`
     the padding character, which reaches rich without passing the wrapper."""
@@ -4837,10 +5052,10 @@ def escape_scan(src: str) -> list[str]:
     `.format()`, a `%`, or a concatenation of one is none of those, and neither is
     a field whose conversion or format spec runs after the wrapper.
 
-    It reads CALLS. A markup slot filled by assignment (`t.title = x`,
-    `t.caption = x`, `t.columns[0].header = x`), or by an API this file does not
-    name, is not read — none is live in `cli.py` today, and `Panel` and `Text` sit
-    in `_RENDERABLE_SINKS` unimported, so an aliased import of either would have
+    It reads CALLS, and assignments to a markup slot attribute (`_MARKUP_SLOTS`),
+    by attribute name; a slot filled by an API this file does not name
+    (`setattr(t, "title", x)`) is still not read. `Panel` and `Text` sit in
+    `_RENDERABLE_SINKS` unimported, so an aliased import of either would have
     coverage that looks present and is not. A typer `help=` / `epilog=` f-string is read
     too, for the runtime values in it — Typer renders those through the same markup
     parser, a console away from any print.
@@ -4864,6 +5079,8 @@ def escape_scan(src: str) -> list[str]:
     names = _read_names(tree)
     faults: list[str] = []
     for node in ast.walk(tree):
+        chain = chains.get(node, [])
+        faults += _slot_faults(src, node, chain, names)
         if not isinstance(node, ast.Call):
             continue
         faults += _help_faults(src, node, names)
@@ -4871,7 +5088,6 @@ def escape_scan(src: str) -> list[str]:
             continue
         if _prints_a_renderable(node, names.renderables.get(node, frozenset())):
             continue
-        chain = chains.get(node, [])
         where = chain[0] if chain else "<module>"
         args = list(node.args)
         args += [k.value for k in node.keywords]
@@ -4883,8 +5099,20 @@ def escape_scan(src: str) -> list[str]:
     return faults
 
 
+def _scanned_sources() -> dict[str, str]:
+    """The two modules that print through markup consoles of their own."""
+    return {
+        "cli.py": Path(cli.__file__).read_text(encoding="utf-8"),
+        "pp/cli.py": Path(pp_cli.__file__).read_text(encoding="utf-8"),
+    }
+
+
 def test_calendar_paths_escape_every_printed_value() -> None:
-    faults = escape_scan(Path(cli.__file__).read_text(encoding="utf-8"))
+    faults = [
+        f"{module} {fault}"
+        for module, src in _scanned_sources().items()
+        for fault in escape_scan(src)
+    ]
     assert not faults, (
         "wrap these in _quote (a value the user typed), _safe_text (anything "
         "remote) or a formatter that calls one; add the name to "
@@ -4901,7 +5129,7 @@ def test_printable_identifiers_are_all_load_bearing() -> None:
     It is also what speaks when an allowlisted function is DELETED — its entries
     go inert — where a rename is caught by the scan itself, with the faults at
     the prints rather than a set difference."""
-    src = Path(cli.__file__).read_text(encoding="utf-8")
+    sources = list(_scanned_sources().values())
     inert: list[tuple[str, str]] = []
     for entry in sorted(_PRINTABLE_IDENTIFIERS):
         with pytest.MonkeyPatch.context() as mp:
@@ -4910,7 +5138,7 @@ def test_printable_identifiers_are_all_load_bearing() -> None:
                 "_PRINTABLE_IDENTIFIERS",
                 _PRINTABLE_IDENTIFIERS - {entry},
             )
-            if not escape_scan(src):
+            if not any(escape_scan(src) for src in sources):
                 inert.append(entry)
     assert not inert, f"these entries allow nothing; delete them: {inert}"
 
@@ -4923,16 +5151,17 @@ def test_printable_identifiers_are_all_load_bearing() -> None:
         "_RENDERABLE_SINKS",
         "_TEXT_SINK_METHODS",
         "_HELP_SINKS",
+        "_MARKUP_SLOTS",
     ],
 )
 def test_every_set_the_scan_consults_is_load_bearing(label: str) -> None:
     """A member that changes nothing reads like a decision and is not one, and it
     pre-approves whatever later carries its name. Measured over every source the
     scan reads, because the directions look opposite: dropping a member that
-    ALLOWS makes `cli.py` speak where it was silent, dropping one that READS makes
-    a corpus case go silent where it spoke, and no change at all is what inert
-    means either way. One of these sets grew eleven dead members."""
-    sources = [Path(cli.__file__).read_text(encoding="utf-8"), *_KNOWN_BYPASSES.values()]
+    ALLOWS makes a scanned module speak where it was silent, dropping one that
+    READS makes a corpus case go silent where it spoke, and no change at all is
+    what inert means either way. One of these sets grew eleven dead members."""
+    sources = [*_scanned_sources().values(), *_KNOWN_BYPASSES.values()]
     before = [escape_scan(source) for source in sources]
     members: frozenset[str] = getattr(sys.modules[__name__], label)
     inert: list[str] = []
@@ -5086,6 +5315,26 @@ _KNOWN_BYPASSES = {
     ),
     "a runtime value in a command-group help string": (
         'app = typer.Typer(help=f"reads {_config.config_path()}")\n'
+    ),
+    # Rich parses these slots as markup when the table or panel renders, so an
+    # assignment into one is a print with no call near it. All five names sit in
+    # one source so dropping any of them from `_MARKUP_SLOTS` changes its faults.
+    "a markup slot filled by assignment": (
+        "def _render_search():\n"
+        '    t.title = f"{res.price}"\n'
+        '    t.caption = f"{res.price}"\n'
+        '    t.subtitle = f"{res.price}"\n'
+        '    col.header = f"{res.price}"\n'
+        '    col.footer = f"{res.price}"\n'
+    ),
+    "a markup slot on a subscripted column": (
+        'def _render_search():\n    t.columns[0].header = f"{res.price}"\n'
+    ),
+    "an annotated assignment into a markup slot": (
+        'def _render_search():\n    t.title: str = f"{res.price}"\n'
+    ),
+    "an augmented assignment into a markup slot": (
+        'def _render_search():\n    t.title += f"{res.price}"\n'
     ),
 }
 

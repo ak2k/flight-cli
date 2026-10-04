@@ -25,15 +25,18 @@ stub above all of it would pin none of it.
 from __future__ import annotations
 
 import datetime
+import functools
 import io
 import json
 import os
 import pathlib
+import sys
 import threading
 import time
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+import structlog
 from typer import rich_utils
 
 # Rich settles whether a console styles its output when the console is built, and
@@ -45,7 +48,7 @@ os.environ["TTY_COMPATIBLE"] = "0"
 from flight_cli import _gf_browser
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable, Iterator
 
 # Today, for the modules whose searches carry literal travel dates. fli refuses a
 # travel date before today, so those modules pin the clock before every date they
@@ -103,6 +106,29 @@ def _no_browser_launch(  # pyright: ignore[reportUnusedFunction] - autouse pytes
     monkeypatch.setattr(_gf_browser, "_playwright_factory", _forbidden)
 
 
+@pytest.fixture(autouse=True)
+def _structlog_defaults() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction] - autouse pytest fixture
+    """Every test starts on structlog's defaults.
+
+    The CLI's callback configures structlog for the whole process, at the
+    warning level and with each logger cached on first use. Left in place, one
+    CLI test decides the level every later test's module loggers emit at, and
+    `structlog.testing.capture_logs` swaps the processors, never that level: a
+    debug event it is waiting for is dropped before it arrives. Resetting the
+    configuration is half of it; a module logger first used under it keeps the
+    logger it cached, as an instance attribute over its class's `bind`."""
+    yield
+    if not structlog.is_configured():
+        return
+    structlog.reset_defaults()
+    proxy: type[object] = type(cast("object", structlog.get_logger()))
+    for name, module in list(sys.modules.items()):
+        if name == "flight_cli" or name.startswith("flight_cli."):
+            for value in list(vars(module).values()):
+                if isinstance(value, proxy):
+                    vars(value).pop("bind", None)
+
+
 def capture_err(monkeypatch: pytest.MonkeyPatch) -> io.StringIO:
     """Replace `cli.err` with a wide, colourless console over a buffer.
 
@@ -120,6 +146,20 @@ def capture_err(monkeypatch: pytest.MonkeyPatch) -> io.StringIO:
         cli, "err", Console(file=buf, width=1000, force_terminal=False, no_color=True)
     )
     return buf
+
+
+def hand_out_providers(monkeypatch: pytest.MonkeyPatch, *providers: object) -> None:
+    """Every award search the registry runs is handed `providers`, already
+    built, in this order, in place of the real ones."""
+    from flight_cli.providers import registry
+
+    async def handed(provider: object) -> object:
+        return provider
+
+    def builders(**_kw: object) -> list[Callable[[], Awaitable[object]]]:
+        return [functools.partial(handed, p) for p in providers]
+
+    monkeypatch.setattr(registry, "_enabled_builders", builders)
 
 
 FIXTURE_DIR = pathlib.Path(__file__).parent / "fixtures"
@@ -382,6 +422,29 @@ def _unpriced(ds1_json: str, *, index: int, name: str = "ds:1 payload") -> str:
     # fli's own decoder reads. Emptying the head is the marker; clearing the
     # block would be a malformed row, which is skipped rather than served.
     rows[index][1][0] = []
+    return json.dumps(payload)
+
+
+def _unreadable(ds1_json: str, *, index: int) -> str:
+    """The same payload with the row at `index` read and not parsed: its first
+    leg states no departure day, which every served row carries."""
+    from flight_cli import _gflight_ids as gfid
+
+    payload: list[Any] = json.loads(ds1_json)
+    rows = gfid._rows_from_ds1(payload).rows
+    rows[index][0][2][0][20] = None
+    return json.dumps(payload)
+
+
+def dl_beside_unreadable_as() -> str:
+    """The JFK-LAX capture cut to two rows, DL1788 and AS21+AS487, the AS row
+    unreadable: parsed, the board names no AS flight."""
+    from flight_cli import _gflight_ids as gfid
+
+    payload: list[Any] = json.loads(_unreadable(_ds1("ds1_jfk_lax_tfu.json"), index=16))
+    rows = gfid._rows_from_ds1(payload).rows
+    payload[2] = [[rows[0], rows[16]]]
+    payload[3] = None
     return json.dumps(payload)
 
 
