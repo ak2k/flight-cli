@@ -1359,7 +1359,12 @@ def test_an_award_search_left_only_separate_ticket_rows_by_its_filter_is_handed_
     def _awards(sr: Any, **_kw: object) -> None:
         matched.append(sr)
 
+    # A provider counts as configured whatever credentials this machine holds.
+    def _configured(_sel: cli.ProviderSelection) -> bool:
+        return True
+
     monkeypatch.setattr(cli, "run_pp_for_search", _awards)
+    monkeypatch.setattr(cli, "_should_run_awards", _configured)
     gf_session(_served(_LAX), _lax_with_marked_twin(5, price=100))
     result = _invoke([*_CAPPED, *fmt, "--max-price", "120"])
     assert result.exit_code == 0, result.output
@@ -1585,8 +1590,13 @@ def test_an_awards_only_search_reads_no_cheapest_tab(monkeypatch: pytest.MonkeyP
     def _path(**kw: Any) -> None:
         modes.append(kw.get("separate_tickets", "off"))
 
+    # A provider counts as configured whatever credentials this machine holds.
+    def _awards(sel: cli.ProviderSelection) -> bool:
+        return not sel.cash_only
+
     monkeypatch.setattr(cli, "_run_enriched_path", _path)
     monkeypatch.setattr(cli, "_run_gflight_path", _path)
+    monkeypatch.setattr(cli, "_should_run_awards", _awards)
     base = ["search", "JFK", "LAX", "--dep", _DEP.isoformat(), "--backend", "gflight"]
     for extra in ([], ["--fast"]):
         for awards in (["--awards-only"], ["--cash-only"]):
