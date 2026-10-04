@@ -2582,9 +2582,10 @@ def _report_pin_outcome(
     as a route with no return flights. Anything served makes every refusal a
     footnote to a real answer, and the counts are what tell the user their
     table is short."""
-    # A short table is narrower than what was asked; a pin the row filter
-    # emptied is an answer, so `unmatched` does not count.
-    if served and (refused or stopped is not None):
+    # A short table is narrower than what was asked, and so is one without the
+    # round trips the outbound board priced through an `empty` pin; a pin the
+    # row filter emptied is an answer, so `unmatched` does not count.
+    if served and (refused or empty or stopped is not None):
         narrow()
     # First, because two of the exits below leave by `raise` and nothing after
     # them runs. A stop rule that fires with nothing served would otherwise take

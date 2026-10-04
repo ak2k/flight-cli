@@ -44,8 +44,10 @@ which joins `notes` after the stderr lines, so table and JSON output gain no
 line. The sites: a cabin asked and never recorded (judged
 in the recorder, from `ask_cabins` against what the leaves recorded); Matrix
 finding nothing where Google had rows (`_note_google_rows_unshown`); the
-round-trip pin cap note; return boards refused or pinning stopped with a board
-served (`_gflight_ids._report_pin_outcome`); PointsPath skipped when it was
+round-trip pin cap note; return boards refused, a pin Google served no return
+board for, or pinning stopped, each with a board served
+(`_gflight_ids._report_pin_outcome`): the outbound board priced round trips
+through that pin, so they are missing; PointsPath skipped when it was
 asked for (named in `--providers`, or tokens present that then failed;
 with no tokens it is a note), both in `_pp_preflight` and at the award gate
 (`cli._explain_no_awards`), where failed tokens read as no provider at all;
@@ -67,14 +69,18 @@ are recorded (`cli._record_google_cabin`), so the note gives the number
 board and narrows nothing); a Google board served with no rows for a party
 with an infant and not handed to Matrix (`cli._run_gflight_path`), since Google
 has served such a board on a route with flights. A hand-off
-to Matrix, rows in another currency and a filter that empties a board are
-notes, not narrowings: each is a complete answer to what was asked. So is
+to Matrix, rows in another currency, a filter that empties a board and a pin
+whose return board the row filter emptied are notes, not narrowings: each is a
+complete answer to what was asked. So is
 `cross_check.low_check` in any outcome, `no-answer` included: no flag asks for
 that check of Google's low row, every key asked for is whole without it, and
 its `outcome` and `reason` say whether and how Matrix answered. Its stderr
 line ("Asking Matrix for row N's exact flights") is a note; the line it prints
 under the table is never printed in an envelope run, which takes the document
-path.
+path. Each pin a round trip loses is named on a stderr line of its own
+(`pinned outbound … lost: …`), a note like the count line before it; the
+answer is narrower where that count is of refused or empty return boards, and
+whole where it is of boards the row filter emptied.
 
 ## How the run is held
 

@@ -26,6 +26,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+from conftest import _ds1, _page
 from flight_cli import _envelope, cli
 from flight_cli import _gflight_ids as gfid
 from flight_cli._gf_calgraph import GraphCell, PriceGraph
@@ -42,6 +43,7 @@ from flight_cli.providers.base import AwardFlight, LegQuery
 from flight_cli.providers.seats_aero import auth as seats_auth
 from test_calendar_split import _pair_client, _result
 from test_gf_full_board import _DEP, _LAX, _LHR, _RET, _URL, _return_board, _served
+from test_gf_lost_pins import _EXAMPLE_7, _RETURNS, _outbound, _return
 from test_json_document import _one_document
 from test_party_price_basis import _body as _party_body
 
@@ -413,6 +415,50 @@ def test_a_board_a_filter_emptied_is_a_note_not_a_narrowing(
     # The history is the route's: the filter that drops the insight leaves it.
     assert env["insight"] == []
     assert len(env["price_history"][0]["points"]) == 61
+
+
+def _example_7(gf_session: Callable[..., Any], *returns: str) -> dict[str, Any]:
+    """Skill Example 7 on Google (JFK-LHR, `O:LH+`), its five pins' return
+    boards `returns`, written as an envelope."""
+    assert _EXAMPLE_7[-2:] == ["--format", "json"]
+    gf_session(_outbound(), *returns)
+    return _envelope_of(_run(*_EXAMPLE_7[:-2], *_ENVELOPE))
+
+
+def _logged(env: dict[str, Any], line: str) -> bool:
+    return any(n.endswith(f"] {line}") for n in cast("list[str]", env["notes"]))
+
+
+def test_pins_the_routing_left_without_a_return_are_notes_not_a_narrowing(
+    gf_session: Callable[..., Any],
+) -> None:
+    """Each return board was served, and "none matches the routing" is its
+    answer, so the pins it names leave the answer whole."""
+    env = _example_7(gf_session, *map(_return, _RETURNS))
+    assert (env["backend"], env["complete"], len(_rows(env))) == ("gflight", True, 3)
+    for line in (
+        "2 of 5 pinned outbounds have no return flight matching the routing",
+        "pinned outbound LH405/LH914 (USD943.00) lost: Google served 2 returns for it, "
+        "none matching the routing",
+        "pinned outbound LH411/UA9440 (USD1346.00) lost: Google served 1 return for it, "
+        "none matching the routing",
+    ):
+        assert _logged(env, line), env["notes"]
+
+
+def test_a_pin_google_served_no_return_for_narrows_the_answer(
+    gf_session: Callable[..., Any],
+) -> None:
+    """The outbound board priced round trips through the pin, and its return
+    board came back with no rows, so those trips are missing from the answer."""
+    returns = [_return(n) for n in _RETURNS]
+    returns[1] = _page(_ds1("ds1_zero_rows.json"))
+    env = _example_7(gf_session, *returns)
+    assert (env["backend"], env["complete"], len(_rows(env))) == ("gflight", False, 2)
+    assert _logged(env, "1 of 5 pinned outbounds have no return flight on Google"), env["notes"]
+    assert _logged(
+        env, "pinned outbound LH401/LH900 (USD842.00) lost: Google served no return for it"
+    ), env["notes"]
 
 
 def test_a_google_failure_handed_to_matrix_is_matrixs_answer(
