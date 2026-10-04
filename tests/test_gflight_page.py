@@ -73,6 +73,10 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 FIXTURE_DIR = pathlib.Path(__file__).parent / "fixtures" / "gflight_page"
+# One read for every travel date the boards and filters below name: the pin loop
+# refuses a return board that departs on a day other than its segment asks for,
+# so a second read after midnight would refuse every return board.
+_TODAY = datetime.date.today()
 _FILTERS = cast("Any", None)  # a patched client never encodes the filter
 _real_tfs = gfid.build_search_tfs
 _LIFTS_AFTER_BACKOFFS = 2  # how many rungs the owner climbs before the wall lifts
@@ -656,7 +660,7 @@ def _one_ladders_worth_of_sleep() -> float:
 def _multi_cabin_legs() -> Any:
     from flight_cli.domain import Leg
 
-    return (Leg.of("JFK", "LAX", datetime.date.today() + datetime.timedelta(days=45)),)
+    return (Leg.of("JFK", "LAX", _TODAY + datetime.timedelta(days=45)),)
 
 
 def _fan_out(
@@ -1503,7 +1507,7 @@ def _return_date() -> str:
 
     Derived rather than pinned, for the reason that function derives its own:
     fli refuses a travel date in the past, so a literal rots the suite."""
-    return (datetime.date.today() + datetime.timedelta(days=52)).isoformat()
+    return (_TODAY + datetime.timedelta(days=52)).isoformat()
 
 
 def _cloned_ds1(n: int) -> str:
@@ -1546,7 +1550,7 @@ def test_a_re_pointed_board_still_reports_the_row_that_was_captured() -> None:
     from flight_cli import cli
     from flight_cli.pp.gflight_adapter import fli_results_to_search_result
 
-    asked = (datetime.date.today() + datetime.timedelta(days=52)).isoformat()
+    asked = (_TODAY + datetime.timedelta(days=52)).isoformat()
     payload = json.loads(
         _answering(_ds1("ds1_return_leg_pinned.json"), origin="MIA", destination="HNL", date=asked)
     )
@@ -1598,8 +1602,8 @@ def _round_trip_filters() -> Any:
         FlightSearchFilters,  # fli ships no stubs
     )
 
-    dep = (datetime.date.today() + datetime.timedelta(days=45)).isoformat()
-    ret = (datetime.date.today() + datetime.timedelta(days=52)).isoformat()
+    dep = (_TODAY + datetime.timedelta(days=45)).isoformat()
+    ret = (_TODAY + datetime.timedelta(days=52)).isoformat()
     return FlightSearchFilters(
         passenger_info=PassengerInfo(adults=1),
         flight_segments=[
@@ -1749,7 +1753,7 @@ def test_a_return_board_for_the_wrong_day_is_refused_too(
                     _cloned_ds1(3),
                     origin="LAX",
                     destination="JFK",
-                    date=(datetime.date.today() + datetime.timedelta(days=53)).isoformat(),
+                    date=(_TODAY + datetime.timedelta(days=53)).isoformat(),
                 )
             )
         ),
@@ -1812,7 +1816,7 @@ def _same_day_filters() -> Any:
 def _same_day() -> str:
     """The one date a same-day round trip names. Derived: fli refuses a past
     travel date, so a literal rots the suite."""
-    return (datetime.date.today() + datetime.timedelta(days=45)).isoformat()
+    return (_TODAY + datetime.timedelta(days=45)).isoformat()
 
 
 def test_a_return_board_that_lands_somewhere_else_is_refused(
