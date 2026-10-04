@@ -1064,7 +1064,9 @@ is the same; the one-way test marks a captured row by hand.
 **Where it is read.** Every one-cabin `search` asks for the Cheapest tab:
 `_run_gflight_path` (`--fast`, `--format json`, `--verify`, `--bags`) and the
 default `_run_enriched_path` (the merged table and `--enrich --format json`),
-which reads it in the Google worker that already runs beside Matrix. The
+which reads it in the Google worker that already runs beside Matrix. A leg
+asked as several pages reads each page's tab (see "One answer from several
+Google pages"). The
 renderers mark a row (`†` separate tickets, `‡` self transfer, on the Google and
 the merged table, each with its key line; JSON `separate_tickets`, and fli's
 `self_transfer` for the subset on which bags are rechecked). `--awards-only`,
@@ -1147,16 +1149,21 @@ departure time, and for a round-trip combination its members' keys in slice
 order. A row on two pages is kept once, at the cheaper listing, in the place
 the first listing took. The merged board then takes the usual price order and
 `-n` trim. It carries no price insight, since each page's insight describes
-its own airports.
+its own airports. The key also holds how Google sells each member
+(`ticketing`), so a row on separate tickets stays beside the one-ticket row on
+its flights, as on one page.
 
 **What a paged leg costs.** A one-way is one GET a page. A round trip fetches
 every page's outbound page first, then pins the min(n, 10) cheapest outbounds
 kept across ALL pages (`cli._union_pins`), each on its own page: an outbound
 two pages list is pinned once, on the page that priced it lower, and a page
-that holds no pin costs nothing more. Under a `+CABIN` an outbound is ranked by
+that holds no pin asks no return. Under a `+CABIN` an outbound is ranked by
 its cheapest listing booked in that cabin (`others`), the one a page pins. So a
 paged round trip is pages + min(n, kept outbounds, 10) GETs, at most 14 for the
-four east-coast-to-Europe pages at the default `-n 10`. Each return is priced within its own page's airports: out
+four east-coast-to-Europe pages at the default `-n 10`. A search that reads
+the Cheapest tab adds one GET a page: each page reads its own, after its pins,
+one that holds no pin included (`_page_board` with `top_n` 0, whose insight is
+then its kept outbounds'). Each return is priced within its own page's airports: out
 of JFK and back into IAD, an origin of another page, is not asked. A paged
 round trip that answers prints one dim stderr line saying so.
 
@@ -1187,7 +1194,11 @@ them. Where a board is partial and counts unread rows, a Matrix-only row says
 `google_unread`, not the `not_on_google` the partial board alone leaves, as it
 would on one page: its trip may be one of the unread rows.
 The rows over the stop ceiling are summed as `dropped` is, each counted once,
-for the one stderr line the merged board prints.
+for the one stderr line the merged board prints. So is `separate_hidden`, and a
+page's marked rows are filtered and counted into `dropped` as on one page.
+`separate_failed` is the first page's, in page order, for the one line that
+says the Cheapest tab went unread; a page holding no pin that the search did
+not reach after a stop takes the stop's error, since no page line names it.
 Under `--gf-transport browser` one Chrome serves every page
 (`cli._browser_scope`).
 
@@ -1214,7 +1225,11 @@ loads, 2 per page on a leg asked as several pages, with `--max-price` not
 applied to them. The pair is the cheapest whose return leaves the airport the
 outbound lands at, after it lands; each board is asked alone, so on a same-day
 or overnight trip, or a leg of several destinations, the cheapest each way can
-be a pair no one can fly. The table gets one line after the round-trip table,
+be a pair no one can fly. Both one-ways are one ticket each: the one-way
+searches read no Cheapest tab, and a one-way Google marks as separate tickets,
+already more than one booking, is passed over; with no other priced one-way
+that way the reason is `Google Flights priced no outbound one-way on one
+ticket`. The table gets one line after the round-trip table,
 starting `Two one-way tickets:`, with each one-way's price and flights and the
 total, labeled as two separate tickets; the round-trip rows are unchanged.
 `--format json` writes `{"search": <the usual document>, "split_ticket":

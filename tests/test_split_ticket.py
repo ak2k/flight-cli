@@ -111,6 +111,7 @@ class _Google:
     calls: list[tuple[tuple[Leg, ...], SearchOptions, str, bool]] = field(
         default_factory=list[tuple[tuple[Leg, ...], SearchOptions, str, bool]]
     )
+    modes: list[object] = field(default_factory=list[object])
 
     def __call__(
         self,
@@ -122,6 +123,7 @@ class _Google:
         **_kw: object,
     ) -> gfid.Board[Any]:
         self.calls.append((legs, opts, gf_mode, gf_headed))
+        self.modes.append(_kw.get("separate_tickets", "off"))
         answer = self.round_trip if len(legs) == 2 else self.one_ways[legs[0].origins[0]]
         if isinstance(answer, Exception):
             raise answer
@@ -545,6 +547,11 @@ _NO_PAIR = [
     ),
     pytest.param({"out": []}, "Google Flights priced no outbound one-way", id="empty-board"),
     pytest.param(
+        {"out": [replace(_row("NK1+NK2", "JFK", "LAX", _DEP, 99.0), ticketing="self_transfer")]},
+        "Google Flights priced no outbound one-way on one ticket",
+        id="separate-tickets-only",
+    ),
+    pytest.param(
         {"back": [_row("B6300", "LAX", "JFK", _RET, None)]},
         "Google Flights priced no return one-way",
         id="no-priced-row",
@@ -555,6 +562,21 @@ _NO_PAIR = [
         id="two-currencies",
     ),
 ]
+
+
+def test_the_pair_passes_over_a_one_way_google_sells_as_separate_tickets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A one-way sold as separate tickets is already more than one booking, so a
+    pair holding it is not two tickets: the cheaper NK one-way is passed over
+    for DL747, and neither one-way reads the Cheapest tab. Red at the merge: the
+    pair took the NK one-way."""
+    nk = replace(_row("NK1+NK2", "JFK", "LAX", _DEP, 99.0), ticketing="self_transfer")
+    google = _google(monkeypatch, [*_outbound(), nk])
+    result = _search("--cash-only", "--fast", "--split")
+    assert result.exit_code == 0, result.output
+    assert _split_lines(result.stdout) == [_LINE]
+    assert google.modes == ["show", "off", "off"]
 
 
 @pytest.mark.parametrize(("legs", "reason"), _NO_PAIR)

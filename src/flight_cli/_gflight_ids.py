@@ -2525,7 +2525,9 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
     `separate_tickets` other than "off" reads the Cheapest tab once more, after
     every other fetch, for the itineraries Google sells as separate tickets
     (`_with_separate_tickets`). Only the search itself does; a pinned leg never
-    does."""
+    does. A round trip with `top_n` 0 pins nothing and answers with that tab's
+    rows alone, for a page of a search asked as several whose outbounds are
+    pinned on other pages."""
     if first is None:
         first = outbound_page(filters, transport=transport, currency=currency)
 
@@ -2645,7 +2647,9 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
     dropped += dropped_returns
     paired = Board(
         combos,
-        insight=_kept_insight(first.insight, combos, dropped),
+        # With no pin asked for, the outbounds the filter kept are what is left
+        # to restate the insight from, as on a board with nothing to pin.
+        insight=_kept_insight(first.insight, combos if pins else board, dropped),
         history=first.history,
         dropped=dropped,
         pinned=len(pins),

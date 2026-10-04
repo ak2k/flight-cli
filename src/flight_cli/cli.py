@@ -3439,9 +3439,13 @@ def _split_ticket(
             try:
                 board = _gflight_results((leg,), one_way, top_n, gf_mode, gf_headed)
                 priced = [r for r in _price_ordered(board) if r.flight.price is not None]
-                if not priced:
-                    return f"Google Flights priced no {which} one-way"
-                boards.append(priced)
+                # A one-way sold as separate tickets is already more than one
+                # booking, so a pair holding it would not be two tickets.
+                single = [r for r in priced if not _separately_ticketed(r)]
+                if not single:
+                    ticket = " on one ticket" if priced else ""
+                    return f"Google Flights priced no {which} one-way{ticket}"
+                boards.append(single)
             except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
                 raise
             except Exception as e:  # noqa: BLE001 — see the docstring
@@ -5041,7 +5045,9 @@ def _gflight_results(
     from ._gflight_ids import Board, search_with_ids  # noqa: PLC0415 — fli, ~95 ms
 
     if first is None and not prefer and len(pages := _gf_pages(legs)) > 1:
-        return _gflight_pages(pages, opts, top_n, gf_mode, gf_headed)
+        return _gflight_pages(
+            pages, opts, top_n, gf_mode, gf_headed, separate_tickets=separate_tickets
+        )
     # Only a multi-cabin round trip, or a round trip asked as several pages,
     # sets `first` or `prefer`, only a one-cabin search `separate_tickets`, and
     # only a `+CABIN` search `fits`, so every other search makes the one call to
@@ -5223,15 +5229,17 @@ def _report_pages(asked: _PageAsk) -> None:
 
 
 def _merged_boards(boards: Sequence[Board[Any]]) -> list[Any]:
-    """Every row of `boards` once, by the whole trip (`row_key`): the cheaper
-    listing is kept, in the place the first one took."""
+    """Every row of `boards` once, by the whole trip and how Google sells it
+    (`row_key`, `ticketing`): the cheaper listing is kept, in the place the
+    first one took. A row on separate tickets is a booking of its own, so it
+    stands beside the one-ticket row on its flights, as on one page."""
     from ._gflight_ids import row_key  # noqa: PLC0415 — fli, ~95 ms
 
-    at: dict[tuple[ItineraryKey, ...], int] = {}
+    at: dict[tuple[tuple[ItineraryKey, ...], tuple[Any, ...]], int] = {}
     rows: list[Any] = []
     for board in boards:
         for r in board:
-            key = row_key(r)
+            key = (row_key(r), _ticketings(r))
             seen = at.get(key)
             if seen is None:
                 at[key] = len(rows)
@@ -5279,12 +5287,14 @@ def _union_pins(kept: dict[int, list[Any]], top_n: int) -> dict[int, list[Itiner
     return shares
 
 
-def _gflight_pages(
+def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way a page answers
     pages: list[tuple[Leg, ...]],
     opts: SearchOptions,
     top_n: int,
     gf_mode: GfTransportMode,
     gf_headed: bool,
+    *,
+    separate_tickets: SeparateTickets = "off",
 ) -> Board[Any]:
     """`pages`' boards as one board, each page asked as its own search and
     the rows merged by the whole trip (`_merged_boards`).
@@ -5305,7 +5315,14 @@ def _gflight_pages(
     merged board's `insight` and `history` are None and each answered page's
     ride in `page_insights` and `page_histories`, in page order. The board is
     `partial` where a page is missing or the trip is round: its rows then stop
-    short of what one search would list."""
+    short of what one search would list.
+
+    `separate_tickets` goes to every page, so each reads its own Cheapest tab
+    once, after its pins, a round-trip page that holds no pin included.
+    `separate_hidden` sums the pages' counts and `separate_failed` is the first
+    page's, in page order. A page that holds no pin and was not reached because
+    the search stopped takes the stop as its reason: no page line names it,
+    since its outbounds answered."""
     from ._gf_postfilter import StopDrops  # noqa: PLC0415 — GF-only
     from ._gflight_ids import (  # noqa: PLC0415 — fli, ~95 ms
         Board,
@@ -5315,18 +5332,33 @@ def _gflight_pages(
 
     asked = _PageAsk(pages, gf_mode=gf_mode, bags=opts.bags is not None)
     boards: list[Board[Any]] = []
-    dropped = pinned = unread = 0
+    dropped = pinned = unread = hidden = 0
+    tabs_failed: dict[int, GfBackendError] = {}
     stop_drops = StopDrops()
     extras: dict[int, tuple[PriceInsight | None, PriceHistory | None]] = {}
     with _browser_scope(gf_mode):
         if len(pages[0]) < _ROUND_TRIP_LEGS:
             for i, page in enumerate(pages):
-                board = asked.ask(i, partial(_page_board, page, opts, top_n, gf_mode, gf_headed))
+                board = asked.ask(
+                    i,
+                    partial(
+                        _page_board,
+                        page,
+                        opts,
+                        top_n,
+                        gf_mode,
+                        gf_headed,
+                        separate_tickets=separate_tickets,
+                    ),
+                )
                 if board is not None:
                     boards.append(board)
                     extras[i] = (board.insight, board.history)
                     dropped += board.dropped
                     unread += board.unread
+                    hidden += board.separate_hidden
+                    if board.separate_failed is not None:
+                        tabs_failed[i] = board.separate_failed
                     _add_stop_drops(stop_drops, board.stop_drops)
         else:
             outbounds = [
@@ -5340,6 +5372,12 @@ def _gflight_pages(
             shares = _union_pins(kept, top_n)
             for i, ob in outbounds:
                 keys = shares.get(i, [])
+                # A page with no pin is still asked for its Cheapest tab: a row
+                # sold as separate tickets is its outbound alone.
+                asks = bool(keys) or separate_tickets != "off"
+                if asks and not keys and asked.stopped_at is not None:
+                    tabs_failed[i] = asked.failed[asked.stopped_at]
+                    asks = False
                 board = (
                     asked.ask(
                         i,
@@ -5352,9 +5390,10 @@ def _gflight_pages(
                             gf_headed,
                             first=ob.board,
                             prefer=keys,
+                            separate_tickets=separate_tickets,
                         ),
                     )
-                    if keys
+                    if asks
                     else None
                 )
                 if board is None:
@@ -5373,6 +5412,9 @@ def _gflight_pages(
                     dropped += board.dropped
                     pinned += board.pinned
                     unread += board.unread
+                    hidden += board.separate_hidden
+                    if board.separate_failed is not None:
+                        tabs_failed[i] = board.separate_failed
                     _add_stop_drops(stop_drops, board.stop_drops)
     # Google served the rows of a page none of whose rows parsed, so a flight
     # on one of them is on its board though the page is missing.
@@ -5392,6 +5434,8 @@ def _gflight_pages(
         pinned=pinned,
         partial=bool(asked.failed or asked.unasked) or len(pages[0]) >= _ROUND_TRIP_LEGS,
         unread=unread,
+        separate_hidden=hidden,
+        separate_failed=tabs_failed[min(tabs_failed)] if tabs_failed else None,
     )
     merged.stop_drops = stop_drops
     answered = [extras[i] for i in sorted(extras)]
@@ -5417,12 +5461,24 @@ def _page_board(
     *,
     first: Board[Any] | None = None,
     prefer: Sequence[ItineraryKey] = (),
+    separate_tickets: SeparateTickets = "off",
 ) -> Board[Any]:
     """One page's `_gflight_results` as a Board, which carries the counts
-    `_gflight_pages` sums: a stand-in for the search can return a plain list."""
+    `_gflight_pages` sums: a stand-in for the search can return a plain list.
+    A `top_n` of 0 pins nothing, for a round-trip page that only reads its
+    Cheapest tab."""
     from ._gflight_ids import Board  # noqa: PLC0415 — fli, ~95 ms
 
-    served = _gflight_results(legs, opts, top_n, gf_mode, gf_headed, first=first, prefer=prefer)
+    served = _gflight_results(
+        legs,
+        opts,
+        top_n,
+        gf_mode,
+        gf_headed,
+        first=first,
+        prefer=prefer,
+        separate_tickets=separate_tickets,
+    )
     return served if isinstance(served, Board) else Board(served)
 
 
@@ -5637,6 +5693,12 @@ def _terminal_fare_key(r: Any) -> tuple[int, float]:
     from ._gflight_ids import fare_key  # noqa: PLC0415 — fli, ~95 ms
 
     return fare_key(cast("tuple[Any, ...]", r)[-1] if isinstance(r, tuple) else r)
+
+
+def _ticketings(r: Any) -> tuple[Any, ...]:
+    """How Google sells each member of row `r`, in slice order."""
+    members = cast("tuple[Any, ...]", r) if isinstance(r, tuple) else (r,)
+    return tuple(getattr(m, "ticketing", None) for m in members)
 
 
 def _separately_ticketed(r: Any) -> bool:
