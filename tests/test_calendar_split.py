@@ -770,7 +770,7 @@ def test_the_fanout_note_names_the_combined_query_on_both_formats(
     note = _flat(cap.err)
     assert "Queried 2 airport pairs separately plus the combined query, and merged" in note
     assert (
-        "Round trips that return to another airport of the set come only from the combined "
+        "Round trips that return to a different origin airport come only from the combined "
         "query, which Matrix may under-report." in note
     )
     assert "Queried" not in cap.out
@@ -815,7 +815,7 @@ def test_a_lost_combined_query_is_not_described_as_merged(
     assert "plus the combined query" not in note
     assert "come only from the combined query" not in note
     assert (
-        "Round trips that return to another airport of the set are missing: only the "
+        "Round trips that return to a different origin airport are missing: only the "
         "combined query prices them, and it failed." in note
     )
 
@@ -4524,6 +4524,8 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_run_calendar", "n"),  # fan-out counters
         ("_run_calendar", "rounds"),
         ("_run_calendar", "conc"),
+        # One or two fixed phrases _combined_only_sides wrote, joined by " or ".
+        ("_run_matrix_calendar", "sides"),
         # A title clause this module wrote, printed only for an airport set.
         ("_render_date_grid", "_ACROSS_SET_TITLE"),
         ("_render_graph_range", "_ACROSS_SET_TITLE"),

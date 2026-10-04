@@ -2249,6 +2249,19 @@ def _run_calendar_enriched(
     _deliver_calendar(_write_answer)
 
 
+def _combined_only_sides(search: CalendarSearch) -> str:
+    """Which round trips only the combined query prices, as the clause after
+    "Round trips that": a return to another origin airport needs more than one
+    origin, a return from another destination airport more than one destination."""
+    out = search.legs[0]
+    sides: list[str] = []
+    if len(expand_airports(out.origins)) > 1:
+        sides.append("return to a different origin airport")
+    if len(expand_airports(out.destinations)) > 1:
+        sides.append("come back from a different destination airport")
+    return " or ".join(sides)
+
+
 def _run_matrix_calendar(
     search: CalendarSearch,
     *,
@@ -2291,13 +2304,15 @@ def _run_matrix_calendar(
         # written BEFORE the delivery below, so on stdout a failure there would
         # leave it standing alone under exit 1 — a document, to a caller that reads
         # the stream. On a round trip `n_split` counts the combined query
-        # `_run_calendar` runs beside the pairs; it alone prices a return into
-        # another airport of the set, and Matrix may under-report it, so the note
-        # says the grid answers that part less completely than the rest. When it
-        # failed, the grid holds none of those returns, and the note says that.
+        # `_run_calendar` runs beside the pairs; it alone prices the trips that
+        # leave one airport of a side and come back to another, and Matrix may
+        # under-report it, so the note says the grid answers that part less
+        # completely than the rest. When it failed, the grid holds none of those
+        # trips, and the note says that.
         round_trip = len(search.legs) == _ROUND_TRIP_LEGS
         pairs = n_split - 1 if round_trip else n_split
         with_floor = round_trip and not floor_lost
+        sides = _combined_only_sides(search)
         err.print(
             f"[dim]Queried {pairs:d} "
             + ("origin/destination groups" if max_per_query > 1 else "airport pairs")
@@ -2306,12 +2321,12 @@ def _run_matrix_calendar(
         )
         if with_floor:
             err.print(
-                "[dim]Round trips that return to another airport of the set come only "
+                f"[dim]Round trips that {sides} come only "
                 "from the combined query, which Matrix may under-report.[/]"
             )
         elif round_trip:
             err.print(
-                "[dim]Round trips that return to another airport of the set are missing: "
+                f"[dim]Round trips that {sides} are missing: "
                 "only the combined query prices them, and it failed.[/]"
             )
     if json_out:
@@ -8993,9 +9008,10 @@ def calendar(
             "Multi-airport calendar: max destinations per Matrix request, metro codes "
             "counted as their airports. 1 (default) queries each airport pair "
             "separately, which Matrix prices completely; higher is fewer/faster "
-            "requests but Matrix may under-report (incomplete). A round trip that "
-            "returns to another airport of the set is priced only by one combined "
-            "query run beside them, which Matrix may under-report."
+            "requests but Matrix may under-report (incomplete). Round trips that "
+            "return to a different origin airport, or come back from a different "
+            "destination airport, are priced only by one combined query run beside "
+            "them, which Matrix may under-report."
         ),
         rich_help_panel=_GROUP_BACKEND,
     ),

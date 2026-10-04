@@ -1314,8 +1314,9 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
   that priced it (`origin`, `destination` in the JSON; in the table a `route`
   column for the day's minimum, and the pair beside any trip length another
   pair priced), the two arguments `flight detail` takes. A round trip also runs the
-  user's own combined query beside the pairs, the only source of a return into
-  another airport of the set: it takes a day only when strictly cheaper than
+  user's own combined query beside the pairs, the only source of a trip that
+  returns to a different origin airport or comes back from a different
+  destination airport: it takes a day only when strictly cheaper than
   every pair, its cells name the user's tokens, and a stderr note says so.
   Measured 2026-10-01 over 2026-10-20..11-02: `LHR,DUB JFK --one-way` merged
   DUB's EUR cells with LHR's GBP cells as bare numbers and showed GBP1137 and
