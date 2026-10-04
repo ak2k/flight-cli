@@ -90,6 +90,12 @@ def _preferred_times(windows: Sequence[TimeWindow]) -> list[str]:
     return [w.value for w in windows if isinstance(w, TimeOfDay)]
 
 
+def _spa_date_modifier(leg: Leg) -> str:
+    """The SPA's date-option value, `minus*10 + plus`: its bundle splits it back
+    into the body's `dateModifier` as `{minus: m // 10, plus: m % 10}`."""
+    return str(leg.date_minus * 10 + leg.date_plus)
+
+
 def _spa_specific_leg(leg: Leg, *, return_leg: Leg | None = None) -> dict[str, Any]:
     """SPA URL-state slice for a specific-date search.
 
@@ -98,7 +104,7 @@ def _spa_specific_leg(leg: Leg, *, return_leg: Leg | None = None) -> dict[str, A
     For one-way / multi-city, omit `return_leg`.
     """
     return_date = return_leg.date.isoformat() if return_leg and return_leg.date else ""
-    return_modifier = str(return_leg.date_minus if return_leg else leg.date_plus)
+    return_modifier = _spa_date_modifier(return_leg) if return_leg else "0"
     return_times = _preferred_times(return_leg.time_ranges) if return_leg else []
     return {
         "origin": list(leg.origins),
@@ -109,7 +115,7 @@ def _spa_specific_leg(leg: Leg, *, return_leg: Leg | None = None) -> dict[str, A
             # "depart" | "arrive" — the SPA's encoding of arrival-date intent,
             # the URL-state counterpart of the API's `isArrivalDate` bool.
             "departureDateType": "arrive" if leg.is_arrival_date else "depart",
-            "departureDateModifier": str(leg.date_minus),
+            "departureDateModifier": _spa_date_modifier(leg),
             "departureDatePreferredTimes": _preferred_times(leg.time_ranges),
             "returnDate": return_date,
             "returnDateType": "arrive" if (return_leg and return_leg.is_arrival_date) else "depart",
@@ -891,7 +897,7 @@ def _pinned_tfs_b64(
     out_origins, out_dests = _pinned_slice_airports(out, outbound_segments)
     slices: list[dict[str, Any]] = [
         {
-            "date": out.date.isoformat(),
+            "date": _pinned_slice_date(out.date, outbound_segments),
             "origin": out_origins,
             "destination": out_dests,
             "segments": outbound_segments,
@@ -910,7 +916,7 @@ def _pinned_tfs_b64(
         ret_origins, ret_dests = _pinned_slice_airports(ret, return_segments)
         slices.append(
             {
-                "date": ret.date.isoformat(),
+                "date": _pinned_slice_date(ret.date, return_segments),
                 "origin": ret_origins,
                 "destination": ret_dests,
                 "segments": return_segments,
@@ -982,6 +988,12 @@ def google_flights_explore_url(
         f"https://www.google.com/travel/explore?tfs={urllib.parse.quote(b64)}"
         f"&tfu=GgA&hl={language}&gl={country}&curr={currency}"
     )
+
+
+def _pinned_slice_date(leg_date: date, segments: list[dict[str, str]]) -> str:
+    """A pinned slice's date: its first flight's own day, which a flexible or
+    arrival-date search finds off the leg's date."""
+    return segments[0]["date"] if segments else leg_date.isoformat()
 
 
 def _pinned_slice_airports(

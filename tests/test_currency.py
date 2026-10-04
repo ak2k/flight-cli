@@ -454,7 +454,9 @@ def test_the_enriched_table_asks_both_backends_and_titles_the_currency(
     )
     assert result.exit_code == 0, result.output
     assert gf_asked == ["EUR"]
-    assert matrix_asked == ["EUR"]
+    # The merged search, then the chain search on Google's row under Matrix's
+    # EUR321, in the row's currency.
+    assert matrix_asked == ["EUR", "EUR"]
     assert "(EUR)" in result.stdout
     assert "USD" not in result.stdout
 
