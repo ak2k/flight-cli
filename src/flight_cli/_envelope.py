@@ -91,6 +91,7 @@ class SearchEnvelope(_Frozen):
     price_history: list[PriceHistory]
     verify: dict[str, Any] | None
     cross_check: dict[str, Any] | None
+    split_ticket: dict[str, Any] | None
 
 
 class CalendarEnvelope(_Frozen):
@@ -106,6 +107,7 @@ class CalendarEnvelope(_Frozen):
     price_history: list[PriceHistory]
     verify: dict[str, Any] | None
     cross_check: dict[str, Any] | None
+    split_ticket: dict[str, Any] | None
 
 
 ENVELOPE: TypeAdapter[SearchEnvelope | CalendarEnvelope] = TypeAdapter(
@@ -133,6 +135,7 @@ class _Recorder:
         self.history: list[PriceHistory] = []
         self.verify: dict[str, Any] | None = None
         self.cross_check: dict[str, Any] | None = None
+        self.split_ticket: dict[str, Any] | None = None
         self.reasons: dict[str, str] = {}
 
 
@@ -217,6 +220,13 @@ def record_cross_check(check: dict[str, Any]) -> None:
     if (rec := _slot.recorder) is not None:
         with rec.lock:
             rec.cross_check = check
+
+
+def record_split_ticket(ticket: dict[str, Any]) -> None:
+    """`--split`'s pair: the `split_ticket` object `--format json --split` prints."""
+    if (rec := _slot.recorder) is not None:
+        with rec.lock:
+            rec.split_ticket = ticket
 
 
 class _SoftWrapping(Protocol):
@@ -336,6 +346,7 @@ def _document(rec: _Recorder, *, code: int, stderr: str, stray: str) -> str:
         "price_history": rec.history,
         "verify": rec.verify,
         "cross_check": rec.cross_check,
+        "split_ticket": rec.split_ticket,
     }
     doc = (
         SearchEnvelope(command="search", results=groups, **common)
@@ -380,7 +391,19 @@ def _key_notes(
         else:
             reason = failed
         notes.append(f"{key}: {reason}")
-    return [*notes, *_check_notes(rec, calendar=calendar)]
+    return [*notes, *_check_notes(rec, calendar=calendar), *_split_note(rec, calendar=calendar)]
+
+
+def _split_note(rec: _Recorder, *, calendar: bool) -> list[str]:
+    if rec.split_ticket is not None:
+        return []
+    unpriced = "the run ended before the split ticket was priced"
+    reason = (
+        "a calendar prices no split ticket"
+        if calendar
+        else rec.reasons.get("split_ticket", unpriced)
+    )
+    return [f"split_ticket: {reason}"]
 
 
 def _check_notes(rec: _Recorder, *, calendar: bool) -> list[str]:

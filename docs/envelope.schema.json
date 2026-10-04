@@ -133,6 +133,18 @@
             }
           ],
           "title": "Cross Check"
+        },
+        "split_ticket": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Split Ticket"
         }
       },
       "required": [
@@ -147,7 +159,8 @@
         "insight",
         "price_history",
         "verify",
-        "cross_check"
+        "cross_check",
+        "split_ticket"
       ],
       "title": "CalendarEnvelope",
       "type": "object"
@@ -394,6 +407,18 @@
             }
           ],
           "title": "Cross Check"
+        },
+        "split_ticket": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Split Ticket"
         }
       },
       "required": [
@@ -408,7 +433,8 @@
         "insight",
         "price_history",
         "verify",
-        "cross_check"
+        "cross_check",
+        "split_ticket"
       ],
       "title": "SearchEnvelope",
       "type": "object"

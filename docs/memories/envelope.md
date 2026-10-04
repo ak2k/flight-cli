@@ -25,6 +25,7 @@ its schema is `docs/envelope.schema.json`, generated from the models
 | `price_history` | `[{cabin, currency, points: [{date, price}]}]` | one per Google page that carried one |
 | `verify` | object / null | `--verify`'s check of row `--pick`, the `verify` object `--format json` prints; null when not asked, on a calendar, or when the check failed (exit 1) |
 | `cross_check` | object / null | `--enrich`'s Google-vs-Matrix comparison, the `cross_check` object `--format json --enrich` prints, `low_check` included; null when not asked, skipped, on a calendar, or when Matrix's half failed |
+| `split_ticket` | object / null | `--split`'s pair, the `split_ticket` object `--format json --split` prints (`{outbound, return, total, currency}`, or `{error}` naming why there is no pair); null when not asked, on a calendar, or when Matrix answered the search |
 
 `price` is the trip's: a Google round trip's is its return member's, the fare
 every surface prints for the pair; Matrix's is the solution's price string read
@@ -60,6 +61,9 @@ beside it (`providers/registry.py`, seats.aero, and a PointsPath airline search
 that is not "unsupported" in `pp/client.py`, an error status with an empty
 body and a request the award deadline cut included); a leg with
 `pairs_not_asked`; calendar sub-queries lost;
+a `--split` one-way search that failed, or a `--split` search Matrix answered,
+since the pair was asked for and is not priced (no priced one-way, no pair one
+traveler can fly, or two currencies are the boards' answer, a note);
 `--max-per-query > 1` over a split, and over the one unsplit query when a
 group holds every destination; a round trip over a split set, whose returns
 into another airport of the set come only from the combined query; Google rows the
@@ -102,7 +106,9 @@ rows and `run_pp_for_search` records the awards. `--verify` records its check
 under `verify` (`_envelope.record_verify`), and `--enrich` records Google's rows
 under `results` and its comparison under `cross_check`
 (`cli._answer_cross_check_document`), each with the same refusals as under
-`--format json`. Where Google's half failed, `results` and `backend` stay empty,
+`--format json`. `--split` records its `split_ticket` object where `--format
+json` writes `{search, split_ticket}`, and is refused where JSON refuses it
+(`--enrich`, an award search), the refusal naming the format asked. Where Google's half failed, `results` and `backend` stay empty,
 since the rows are Google's, and their notes say `cross_check` holds Matrix's
 rows alone. `--sellers` and `--fare-rules` write a document of their own
 and are refused with the envelope (exit 2, before any request); a new

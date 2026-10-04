@@ -3101,7 +3101,7 @@ def _split_blocker(  # noqa: PLR0911 — one return per reason the run is refuse
     sellers: bool,
     verify: bool,
     awards_only: bool,
-    awards_json: bool,
+    awards_format: str | None,
 ) -> str | None:
     """Why `--split` cannot run on this search, or None, as a phrase that
     completes "--split …". Decided before the backend is picked, so a refusal
@@ -3109,7 +3109,8 @@ def _split_blocker(  # noqa: PLR0911 — one return per reason the run is refuse
 
     The pair is priced on Google Flights beside a one-cabin round-trip table,
     and the JSON document it joins is the cash one, not the one `--sellers` or
-    `--verify` writes."""
+    `--verify` writes. `awards_format` is the `--format` an award search would
+    write its document into, or None when none runs."""
     if multi_city:
         return "prices a round trip as two one-ways, and --slice is a multi-city search"
     if one_way:
@@ -3124,8 +3125,8 @@ def _split_blocker(  # noqa: PLR0911 — one return per reason the run is refuse
         return "cannot run beside --verify; drop one of them"
     if awards_only:
         return "prints beside the results table, and --awards-only prints none"
-    if awards_json:
-        return "cannot join the award document --format json writes; add --cash-only"
+    if awards_format is not None:
+        return f"cannot join the award document --format {awards_format} writes; add --cash-only"
     return None
 
 
@@ -3410,6 +3411,9 @@ def _split_ticket(
             except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
                 raise
             except Exception as e:  # noqa: BLE001 — see the docstring
+                # The pair was asked for and is unpriced, where every other
+                # reason below is the boards' answer.
+                _envelope.narrow()
                 return f"the {which} one-way failed ({str(e) or type(e).__name__})"
     pair = _cheapest_flown_pair(*boards)
     if pair is None:
@@ -3488,24 +3492,33 @@ def _print_split_ticket(ticket: _SplitTicket | str) -> None:
     )
 
 
+def _split_ticket_object(ticket: _SplitTicket | str, bags: Bags | None) -> dict[str, Any]:
+    """The `split_ticket` object: the pair or, also said on stderr, why there
+    is none."""
+    if isinstance(ticket, str):
+        _report_no_split(ticket)
+        return {"error": ticket}
+    total = ticket.total
+    return {
+        "outbound": _gflight_json_row(ticket.outbound, bags),
+        "return": _gflight_json_row(ticket.back, bags),
+        "total": int(total) if total.is_integer() else total,
+        "currency": ticket.currency,
+    }
+
+
 def _with_split_ticket(
     search_doc: list[Any], ticket: _SplitTicket | str, bags: Bags | None
 ) -> dict[str, Any]:
     """The `--split --format json` document: the search's own document
-    unchanged, beside the pair or, also said on stderr, why there is none."""
-    if isinstance(ticket, str):
-        _report_no_split(ticket)
-        return {"search": search_doc, "split_ticket": {"error": ticket}}
-    total = ticket.total
-    return {
-        "search": search_doc,
-        "split_ticket": {
-            "outbound": _gflight_json_row(ticket.outbound, bags),
-            "return": _gflight_json_row(ticket.back, bags),
-            "total": int(total) if total.is_integer() else total,
-            "currency": ticket.currency,
-        },
-    }
+    unchanged, beside the `split_ticket` object."""
+    return {"search": search_doc, "split_ticket": _split_ticket_object(ticket, bags)}
+
+
+def _record_split_ticket(ticket: _SplitTicket | str, bags: Bags | None) -> None:
+    """Hand the `split_ticket` object to the envelope run."""
+    obj = _split_ticket_object(ticket, bags)
+    _envelope.record_split_ticket(json.loads(json.dumps(obj, default=str)))
 
 
 # ─────────────────────────── result renderers ──────────────────────────────
@@ -6100,7 +6113,9 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
         )
         if split:
             ticket = _split_ticket(legs, opts, top_n, gf_mode, gf_headed)
-            if json_out:
+            if _envelope.active():
+                _record_split_ticket(ticket, opts.bags)
+            elif json_out:
                 doc = _with_split_ticket([], ticket, opts.bags)
                 sys.stdout.write(json.dumps(doc, indent=2, default=str))
             else:
@@ -6157,6 +6172,8 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
                 results[verify_row - 1], verify_row, opts, rps=rps, impersonate=impersonate
             )
             _envelope.record_verify(json.loads(json.dumps(check, default=str)))
+        if split:
+            _record_split_ticket(_split_ticket(legs, opts, top_n, gf_mode, gf_headed), opts.bags)
         if not run_pp:
             return None
     elif json_out and not run_pp:
@@ -8630,7 +8647,7 @@ _FORMAT_OPT = typer.Option(
     autocompletion=_completer(_VALID_FORMATS),
     rich_help_panel=_GROUP_OUTPUT,
 )
-# `search` and `calendar` also write the envelope (`_envelope`): the same twelve
+# `search` and `calendar` also write the envelope (`_envelope`): the same thirteen
 # keys whatever path answered, for a caller that cannot know the path ahead.
 _ENVELOPE_FORMATS = (*_VALID_FORMATS, "envelope")
 _ENVELOPE_FORMAT_CHOICES = "/".join(_ENVELOPE_FORMATS)
@@ -8639,8 +8656,8 @@ _ENVELOPE_FORMAT_OPT = typer.Option(
     "--format",
     help=f"Output format: one of {_ENVELOPE_FORMAT_CHOICES}. envelope is one versioned "
     "JSON document on every path: version, command, backend, currency, complete, "
-    "notes, results, awards, insight, price_history, verify, cross_check. complete is "
-    "false when the answer is narrower than asked, and notes carries what stderr said.",
+    "notes, results, awards, insight, price_history, verify, cross_check, split_ticket. "
+    "complete is false when the answer is narrower than asked, and notes carries what stderr said.",
     autocompletion=_completer(_ENVELOPE_FORMATS),
     rich_help_panel=_GROUP_OUTPUT,
 )
@@ -9091,7 +9108,8 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         "page loads, two per page on a leg asked as several pages) and show, under the "
         "round-trip table, the cheapest pair whose return leaves the airport the outbound "
         "lands at, after it lands, as two separate tickets. --max-price is not applied to "
-        'them. With --format json the document becomes {"search": …, "split_ticket": {…}}.',
+        'them. With --format json the document becomes {"search": …, "split_ticket": {…}}; '
+        "--format envelope carries the same object under split_ticket.",
         rich_help_panel=_GROUP_OUTPUT,
     ),
     currency: Annotated[
@@ -9224,6 +9242,8 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         _envelope.explain("verify", "--verify was not asked")
     if fast is not False:
         _envelope.explain("cross_check", "--enrich was not asked")
+    if not split:
+        _envelope.explain("split_ticket", "--split was not asked")
     ccy = _resolve_currency(currency)
     bags = _parse_bags(bags_spec) if bags_spec is not None else None
     _refuse_date_option_conflicts(
@@ -9345,7 +9365,9 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             sellers=sellers,
             verify=verify,
             awards_only=sel.awards_only,
-            awards_json=json_out and not sel.awards_only and _should_run_awards(sel),
+            awards_format=output
+            if json_out and not sel.awards_only and _should_run_awards(sel)
+            else None,
         )
     ):
         err.print(f"[red]--split {_safe_text(blocker)}.[/]")
@@ -9625,7 +9647,11 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             )
 
     if split:
-        _report_no_split("--split prices Google Flights one-ways, and this search runs on Matrix")
+        on_matrix = "--split prices Google Flights one-ways, and this search runs on Matrix"
+        # The pair was asked for, and no answer here can carry it.
+        _envelope.narrow()
+        _envelope.explain("split_ticket", on_matrix)
+        _report_no_split(on_matrix)
     _run_matrix_path(
         legs=legs,
         opts=opts,

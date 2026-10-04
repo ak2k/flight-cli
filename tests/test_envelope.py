@@ -74,6 +74,7 @@ _KEYS = [
     "price_history",
     "verify",
     "cross_check",
+    "split_ticket",
 ]
 _SEARCH = ["search", "--no-google-url", "--no-matrix-url"]
 _ENVELOPE = ["--format", "envelope"]
@@ -188,6 +189,7 @@ def _envelope_of(r: Result, *, command: str = "search", code: int = 0) -> dict[s
     assert isinstance(env["price_history"], list)
     assert env["verify"] is None or isinstance(env["verify"], dict)
     assert env["cross_check"] is None or isinstance(env["cross_check"], dict)
+    assert env["split_ticket"] is None or isinstance(env["split_ticket"], dict)
     said = [_ANSI.sub("", ln).rstrip() for ln in r.stderr.split("\n") if ln.strip()]
     assert env["notes"][: len(said)] == said
     assert not any(n.startswith("stdout:") for n in cast("list[str]", env["notes"]))
@@ -244,6 +246,8 @@ def test_a_google_one_way_carries_its_rows_insight_and_history(
     assert _notes(env, "verify") == ["verify: --verify was not asked"]
     assert env["cross_check"] is None
     assert _notes(env, "cross_check") == ["cross_check: --enrich was not asked"]
+    assert env["split_ticket"] is None
+    assert _notes(env, "split_ticket") == ["split_ticket: --split was not asked"]
 
 
 def test_the_rows_are_the_json_documents_rows(gf_session: Callable[..., Any]) -> None:
@@ -884,6 +888,7 @@ def test_a_matrix_calendar_carries_each_priced_day(monkeypatch: pytest.MonkeyPat
     assert _notes(env, "insight") == ["insight: a calendar carries none"]
     assert _notes(env, "verify") == ["verify: a calendar checks no row on Matrix"]
     assert _notes(env, "cross_check") == ["cross_check: a calendar runs no cross-check"]
+    assert _notes(env, "split_ticket") == ["split_ticket: a calendar prices no split ticket"]
 
 
 def test_a_split_calendar_missing_a_pair_narrows_the_answer(

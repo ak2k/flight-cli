@@ -19,11 +19,12 @@ import pytest
 from fli.models import Airline, Airport
 from typer.testing import CliRunner
 
+from flight_cli import _envelope, cli
 from flight_cli import _gflight_ids as gfid
-from flight_cli import cli
 from flight_cli._gf_errors import GfThrottledError
 from flight_cli.domain import Leg, SearchOptions
 from flight_cli.models import SearchResult
+from test_envelope import _envelope_of, _notes, _rows
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -656,6 +657,13 @@ def test_a_table_names_why_there_is_no_pair_on_stderr_only(
             "cannot join the award document --format json writes; add --cash-only",
             id="awards-json",
         ),
+        pytest.param(
+            ["--format", "envelope"],
+            True,
+            True,
+            "cannot join the award document --format envelope writes; add --cash-only",
+            id="awards-envelope",
+        ),
     ],
 )
 def test_a_search_split_cannot_join_is_refused_before_any_request(
@@ -710,3 +718,57 @@ def test_auto_answered_by_matrix_says_so_once_and_asks_no_one_way(
     assert matrix == [True]
     assert result.stderr.count(_ON_MATRIX) == 1
     assert [len(legs) for legs, *_ in google.calls] == ([] if board is None else [2])
+
+
+# ──────────────────────────────── the envelope ────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("google", "complete"),
+    [
+        pytest.param({}, True, id="pair"),
+        pytest.param({"round_trip": []}, True, id="empty-round-trip"),
+        pytest.param({"out": []}, True, id="no-priced-one-way"),
+        pytest.param(
+            {"out": GfThrottledError("Google Flights rate-limited the request")},
+            False,
+            id="one-way-failed",
+        ),
+    ],
+)
+def test_the_envelope_carries_the_json_documents_split_ticket(
+    monkeypatch: pytest.MonkeyPatch, google: dict[str, Any], complete: bool
+) -> None:
+    """The round trip's rows go to `results` and the `split_ticket` object
+    `--format json` writes goes to `split_ticket`. A one-way search that failed
+    leaves the pair unpriced, so the answer is narrower; a board with no pair is
+    an answer."""
+    argv = ("--cash-only", "--fast", "--backend", "gflight", "--split")
+    _google(monkeypatch, **google)
+    doc = json.loads(_search(*argv, "--format", "json").stdout)
+    _google(monkeypatch, **google)
+    env = _envelope_of(_search(*argv, "--format", "envelope"))
+    assert (env["backend"], env["complete"]) == ("gflight", complete)
+    assert [r["row"] for r in _rows(env)] == doc["search"]
+    assert env["split_ticket"] == doc["split_ticket"]
+    assert _notes(env, "split_ticket") == []
+
+
+def test_a_split_search_matrix_answers_narrows_with_no_split_ticket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pair was asked for, and Matrix prices no pair of one-ways."""
+    google = _google(monkeypatch)
+
+    def _matrix(**_kw: object) -> None:
+        _envelope.record_search(backend="matrix", cabin="COACH", rows=[])
+
+    monkeypatch.setattr(cli, "_run_matrix_path", _matrix)
+    env = _envelope_of(
+        _search("--cash-only", "--no-airport-changes", "--split", "--format", "envelope")
+    )
+    assert (env["backend"], env["complete"], env["split_ticket"]) == ("matrix", False, None)
+    assert _notes(env, "split_ticket") == [
+        "split_ticket: --split prices Google Flights one-ways, and this search runs on Matrix"
+    ]
+    assert google.calls == []
