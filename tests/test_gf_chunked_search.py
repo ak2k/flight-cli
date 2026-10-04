@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 import pathlib
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, override
@@ -805,6 +806,82 @@ def test_a_paged_round_trip_pins_an_outbound_by_its_listing_in_the_required_cabi
     [(out, _back)] = json.loads(result.stdout)
     assert (out["legs"][0]["flight_number"], out["price"]) == ("6", 120)
     assert out["legs"][0]["amenities"]["cabin"] == "ECONOMY"
+
+
+@dataclass
+class _NoReturn(_Google):
+    """`_Google`, which serves no return for a pin on flight `bare`."""
+
+    bare: int = -1
+
+    @override
+    def __call__(self, filters: Any, *, currency: str = "USD") -> gfid.Board[gfid.GFlightWithId]:
+        board = super().__call__(filters, currency=currency)
+        picked = filters.flight_segments[0].selected_flight
+        if picked is not None and int(picked.legs[0].flight_number) == self.bare:
+            return gfid.Board()
+        return board
+
+
+def test_a_paged_round_trip_names_the_pinned_outbound_it_lost(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """12 origins to LAX is two pages, and `-n 3` pins JFK's and LGA's flights
+    on page 1 and BWI's on page 2, for which Google serves no return. Page 2's
+    search counts it and names it, as one page does."""
+    google = _NoReturn(
+        [(o, "LAX") for o in _EAST],
+        fare=lambda i: 100.0 + i if i in {0, 1, 6} else 300.0 + i,
+        bare=6,
+    )
+    with caplog.at_level(logging.WARNING, logger=gfid.__name__):
+        result = _search(
+            monkeypatch,
+            google,
+            ",".join(_EAST),
+            "LAX",
+            "--backend",
+            "gflight",
+            "--fast",
+            "--format",
+            "json",
+            "-n",
+            "3",
+            ret=True,
+        )
+    assert result.exit_code == 0, result.output
+    assert sorted(pin for _, pin in google.calls if pin is not None) == [0, 1, 6]
+    lines = [r.getMessage() for r in caplog.records if r.name == gfid.__name__]
+    count = "1 of 1 pinned outbounds have no return flight on Google"
+    named = "pinned outbound B66 (USD106.00) lost: Google served no return for it"
+    assert count in lines, lines
+    assert named in lines, lines
+    assert lines.index(count) < lines.index(named)
+    doc = json.loads(result.stdout)
+    assert {pair[0]["legs"][0]["flight_number"] for pair in doc} == {"0", "1"}
+
+
+def test_a_paged_table_prices_a_party_as_its_total(monkeypatch: pytest.MonkeyPatch) -> None:
+    """12 origins to LAX is two pages, and Google prices each for the whole
+    party, so the merged table names the party in its price header as one
+    page's does."""
+    google = _Google([(o, "LAX") for o in _EAST])
+    result = _search(
+        monkeypatch,
+        google,
+        ",".join(_EAST),
+        "LAX",
+        "--backend",
+        "gflight",
+        "--fast",
+        "--adults",
+        "2",
+        "-n",
+        "3",
+    )
+    assert result.exit_code == 0, result.output
+    assert len(google.calls) == 2
+    assert "total (2 travelers)" in result.stdout, result.stdout
 
 
 # ──────────────────────────────── one page ────────────────────────────────
