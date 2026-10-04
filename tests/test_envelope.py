@@ -1,0 +1,1118 @@
+# pyright: reportPrivateUsage=false
+"""`--format envelope`: one document of the same keys for `search` and `calendar`.
+
+Every state below reads stdout as ONE JSON object with exactly the keys of `_KEYS`,
+each of its declared type, the schema's own validation over it, and stderr's lines as
+the head of `notes`. What changes between states is `complete`, which is false
+exactly when the answer is narrower than what was asked, and the keys' values.
+"""
+
+from __future__ import annotations
+
+import io
+import itertools
+import json
+import re
+import sys
+import threading
+from datetime import date, timedelta
+from functools import partial
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, ClassVar, cast, override
+
+import anyio
+import httpx
+import pytest
+import typer
+from typer.testing import CliRunner
+
+from conftest import _ds1, _page
+from flight_cli import _envelope, cli
+from flight_cli import _gflight_ids as gfid
+from flight_cli._gf_calgraph import GraphCell, PriceGraph
+from flight_cli._gf_common import PageFetch
+from flight_cli._gf_errors import GfThrottledError
+from flight_cli.client import MatrixApiError
+from flight_cli.domain import Cabin, CalendarSearch, SpecificDateSearch
+from flight_cli.models import SearchResult
+from flight_cli.pp import auth as pp_auth
+from flight_cli.pp import cli as pp_cli
+from flight_cli.pp import client as pp_client
+from flight_cli.pp.auth import PPAuthError, Tokens
+from flight_cli.providers.base import AwardFlight, LegQuery
+from flight_cli.providers.seats_aero import auth as seats_auth
+from test_calendar_split import _pair_client, _result
+from test_gf_full_board import (
+    _DEP,
+    _LAX,
+    _LHR,
+    _OVER_ONE_STOP,
+    _RET,
+    _URL,
+    _return_board,
+    _served,
+)
+from test_gf_lost_pins import _EXAMPLE_7, _RETURNS, _outbound, _return
+from test_json_document import _one_document
+from test_party_price_basis import _body as _party_body
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from click.testing import Result
+
+_KEYS = [
+    "version",
+    "command",
+    "backend",
+    "currency",
+    "complete",
+    "notes",
+    "results",
+    "awards",
+    "insight",
+    "price_history",
+    "verify",
+    "cross_check",
+]
+_SEARCH = ["search", "--no-google-url", "--no-matrix-url"]
+_ENVELOPE = ["--format", "envelope"]
+_MATRIX_BODY: dict[str, Any] = json.loads(
+    (
+        Path(__file__).parent / "fixtures" / "matrix_currency" / "specific_jfk_lhr_rt_gbp_resp.json"
+    ).read_text()
+)
+_SCHEMA = Path(__file__).parent.parent / "docs" / "envelope.schema.json"
+_ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+# The award gate before `_hermetic` stands in for it, for the states it decides.
+_SHOULD_RUN_AWARDS = cli._should_run_awards
+
+
+class _Matrix:
+    """`MatrixClient` answering every search with `body`, and refusing the cabins in
+    `refused` as Matrix refuses a query, with an error naming its kind."""
+
+    body: ClassVar[dict[str, Any]] = _MATRIX_BODY
+    refused: ClassVar[frozenset[Cabin]] = frozenset()
+    calls: ClassVar[int] = 0
+
+    def __init__(self, **_kw: object) -> None:
+        pass
+
+    async def __aenter__(self) -> _Matrix:
+        return self
+
+    async def __aexit__(self, *_a: object) -> None:
+        return None
+
+    async def execute(self, search: SpecificDateSearch, **_kw: object) -> SearchResult:
+        type(self).calls += 1
+        if search.options.cabin in type(self).refused:
+            raise MatrixApiError("no fares for that cabin", kind="input")
+        return SearchResult.from_api(type(self).body)
+
+
+def _first_row_award(leg: LegQuery) -> AwardFlight:
+    """An award on the flight of the LAX board's cheapest row, so the matcher
+    attaches it to that cash row."""
+    board = gfid._rows_from_page_html(PageFetch(_served(_LAX), _URL, 200))
+    first = cli._price_ordered(board)[0].flight.legs[0]
+    return AwardFlight(
+        origin=leg.origin,
+        destination=leg.destination,
+        departure=first.departure_datetime.isoformat(),
+        arrival=first.arrival_datetime.isoformat(),
+        flight_number=f"{first.airline.name}{first.flight_number}",
+        provider="PointsPath",
+        program="American Airlines",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _hermetic(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:  # pyright: ignore[reportUnusedFunction] - autouse pytest fixture
+    """Matrix, the award providers, the token check and the award decision in
+    process. The decision is the real one under `--cash-only`, which is where it
+    says why `awards` is null, and on otherwise: providers are a property of the
+    machine, and the states below choose them."""
+    monkeypatch.setenv("COLUMNS", "400")
+    monkeypatch.setenv("FLIGHT_CLI_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("MATRIX_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(_Matrix, "body", _MATRIX_BODY)
+    monkeypatch.setattr(_Matrix, "refused", frozenset[Cabin]())
+    monkeypatch.setattr(_Matrix, "calls", 0)
+    monkeypatch.setattr(cli, "MatrixClient", _Matrix)
+
+    async def _gather(
+        *, legs: list[LegQuery], **_kw: object
+    ) -> tuple[list[list[AwardFlight]], list[Any]]:
+        return ([[_first_row_award(lg)] for lg in legs], [])
+
+    real = cli._should_run_awards
+
+    def _decide(sel: cli.ProviderSelection) -> bool:
+        return real(sel) if sel.cash_only else True
+
+    monkeypatch.setattr(cli, "_should_run_awards", _decide)
+    monkeypatch.setattr(pp_cli, "gather_awards", _gather)
+    monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
+    monkeypatch.setattr(pp_cli, "load_tokens", lambda: None)
+
+
+def _run(*args: str) -> Result:
+    return CliRunner().invoke(cli.app, list(args))
+
+
+def _search(*args: str) -> Result:
+    return _run(*_SEARCH, *args, *_ENVELOPE)
+
+
+def _envelope_of(r: Result, *, command: str = "search", code: int = 0) -> dict[str, Any]:
+    """The one envelope on stdout, checked for its keys, their types and the
+    schema, with stderr's lines at the head of its notes."""
+    assert r.exit_code == code, r.output
+    doc = _one_document(r.stdout)
+    assert isinstance(doc, dict)
+    env = cast("dict[str, Any]", doc)
+    assert list(env) == _KEYS
+    _envelope.ENVELOPE.validate_python(env)
+    assert type(env["version"]) is int and env["version"] == 1
+    assert env["command"] == command
+    assert env["backend"] in ("gflight", "matrix", None)
+    assert env["currency"] is None or isinstance(env["currency"], str)
+    assert isinstance(env["complete"], bool)
+    assert isinstance(env["notes"], list)
+    assert all(isinstance(n, str) for n in cast("list[Any]", env["notes"]))
+    assert isinstance(env["results"], list)
+    assert env["awards"] is None or isinstance(env["awards"], list)
+    assert isinstance(env["insight"], list)
+    assert isinstance(env["price_history"], list)
+    assert env["verify"] is None or isinstance(env["verify"], dict)
+    assert env["cross_check"] is None or isinstance(env["cross_check"], dict)
+    said = [_ANSI.sub("", ln).rstrip() for ln in r.stderr.split("\n") if ln.strip()]
+    assert env["notes"][: len(said)] == said
+    assert not any(n.startswith("stdout:") for n in cast("list[str]", env["notes"]))
+    return env
+
+
+def _rows(env: dict[str, Any], cabin: str = "COACH") -> list[dict[str, Any]]:
+    groups = cast("list[dict[str, Any]]", env["results"])
+    (group,) = [g for g in groups if g["cabin"] == cabin]
+    return cast("list[dict[str, Any]]", group["rows"])
+
+
+def _notes(env: dict[str, Any], key: str) -> list[str]:
+    return [n for n in cast("list[str]", env["notes"]) if n.startswith(f"{key}: ")]
+
+
+# ─────────────────────────────── Google search ──────────────────────────────
+
+
+def test_a_google_one_way_carries_its_rows_insight_and_history(
+    gf_session: Callable[..., Any],
+) -> None:
+    gf_session(_served(_LAX))
+    env = _envelope_of(
+        _search(
+            "--cash-only",
+            "JFK",
+            "LAX",
+            "--dep",
+            _DEP.isoformat(),
+            "--backend",
+            "gflight",
+            "--fast",
+            "-n",
+            "5",
+        )
+    )
+    assert (env["backend"], env["currency"], env["complete"]) == ("gflight", "USD", True)
+    rows = _rows(env)
+    assert len(rows) == 5
+    assert all(r["row"]["flight_id"] and r["price"] == r["row"]["price"] for r in rows)
+    assert all(r["currency"] == "USD" for r in rows)
+    (insight,) = env["insight"]
+    assert insight["cabin"] == "COACH" and insight["currency"] == "USD"
+    assert insight["level"] in ("low", "typical", "high")
+    (history,) = env["price_history"]
+    points = history["points"]
+    assert (history["cabin"], history["currency"], len(points)) == ("COACH", "USD", 61)
+    assert points[0] == {"date": "2026-07-29", "price": 169.0}
+    assert points[-1] == {"date": "2026-09-27", "price": 204.0}
+    assert env["awards"] is None
+    assert _notes(env, "awards") == ["awards: --cash-only skips the award search"]
+    assert env["verify"] is None
+    assert _notes(env, "verify") == ["verify: --verify was not asked"]
+    assert env["cross_check"] is None
+    assert _notes(env, "cross_check") == ["cross_check: --enrich was not asked"]
+
+
+def test_the_rows_are_the_json_documents_rows(gf_session: Callable[..., Any]) -> None:
+    args = [
+        "--cash-only",
+        "JFK",
+        "LAX",
+        "--dep",
+        _DEP.isoformat(),
+        "--backend",
+        "gflight",
+        "--fast",
+    ]
+    gf_session(_served(_LAX))
+    document = _run(*_SEARCH, *args, "--format", "json")
+    gf_session(_served(_LAX))
+    env = _envelope_of(_search(*args))
+    assert [r["row"] for r in _rows(env)] == json.loads(document.stdout)
+
+
+def test_each_google_row_carries_googles_co2_figures(gf_session: Callable[..., Any]) -> None:
+    gf_session(_served(_LAX))
+    env = _envelope_of(
+        _search(
+            *("--cash-only", "JFK", "LAX", "--dep", _DEP.isoformat()),
+            *("--backend", "gflight", "--fast", "-n", "95"),
+        )
+    )
+    rows = [r["row"] for r in _rows(env)]
+    assert len(rows) == 95
+    assert all(type(r["co2_emissions_g"]) is int for r in rows)
+    assert all(type(leg["co2_emissions_g"]) is int for r in rows for leg in r["legs"])
+    first = rows[0]
+    assert (
+        first["co2_emissions_g"],
+        first["co2_emissions_typical_g"],
+        first["co2_emissions_delta_pct"],
+        first["emissions_tag"],
+    ) == (261000, 347000, -25, "lower")
+
+
+def test_a_google_round_trip_is_priced_by_its_return(gf_session: Callable[..., Any]) -> None:
+    gf_session(_served(_LHR), _return_board())
+    trip = ["JFK", "LHR", "--dep", _DEP.isoformat(), "--return", _RET.isoformat()]
+    env = _envelope_of(_search("--cash-only", *trip, "--backend", "gflight", "--fast", "-n", "1"))
+    assert (env["backend"], env["complete"]) == ("gflight", True)
+    rows = _rows(env)
+    assert rows
+    for r in rows:
+        outbound, inbound = r["row"]
+        assert (r["price"], r["currency"]) == (inbound["price"], inbound["currency"])
+        assert outbound["legs"][0]["departure_airport"] != inbound["legs"][0]["departure_airport"]
+
+
+def test_an_empty_google_board_is_a_complete_answer(
+    gf_capture: Callable[[str], str], gf_session: Callable[..., Any]
+) -> None:
+    gf_session(gf_capture("ds1_flightless_board.json"))
+    env = _envelope_of(
+        _search(
+            "--cash-only", "JFK", "LAX", "--dep", _DEP.isoformat(), "--backend", "gflight", "--fast"
+        )
+    )
+    assert (env["backend"], env["complete"], _rows(env)) == ("gflight", True, [])
+    assert _notes(env, "results") == ["results: no itinerary in any cabin asked"]
+    assert _notes(env, "insight") == ["insight: no Google Flights page answered with one"]
+    assert _notes(env, "price_history") == [
+        "price_history: no Google Flights page answered with one"
+    ]
+
+
+@pytest.mark.parametrize("flag", ["--inf-lap", "--inf-seat"])
+def test_an_empty_board_for_a_party_with_an_infant_narrows_the_answer(
+    gf_capture: Callable[[str], str], gf_session: Callable[..., Any], flag: str
+) -> None:
+    """Google has served no rows for an infant on a route with flights, so its
+    empty board is not the route's answer, as an adult's is."""
+    gf_session(gf_capture("ds1_zero_rows.json"))
+    env = _envelope_of(
+        _search(
+            "--cash-only",
+            "JFK",
+            "LAX",
+            "--dep",
+            _DEP.isoformat(),
+            flag,
+            "1",
+            "--backend",
+            "gflight",
+            "--fast",
+        )
+    )
+    assert (env["backend"], env["complete"], _rows(env)) == ("gflight", False, [])
+    assert [n for n in env["notes"] if "infant" in n] == [
+        "Google Flights served no rows for a party with an infant, as it has on routes "
+        "with flights. For Matrix's answer, use --backend matrix."
+    ]
+
+
+def test_an_empty_infant_board_handed_to_matrix_is_matrixs_answer(
+    gf_capture: Callable[[str], str], gf_session: Callable[..., Any]
+) -> None:
+    gf_session(gf_capture("ds1_zero_rows.json"))
+    env = _envelope_of(
+        _search("--cash-only", "JFK", "LHR", "--dep", _DEP.isoformat(), "--inf-lap", "1")
+    )
+    assert (env["backend"], env["complete"]) == ("matrix", True)
+    assert "Using Matrix: Google Flights served no rows for a party with an infant." in env["notes"]
+
+
+def test_a_google_row_that_could_not_be_read_narrows_the_answer(
+    gf_session: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The parser keeps the rows it can read and counts the rest on the board,
+    and the answer is narrowed where the board's rows are recorded. A page read
+    only to check it for a wall, as the calendar's graph does, records no board
+    and narrows nothing."""
+    page = PageFetch(_served(_LAX), _URL, 200)
+    lost = gfid._rows_from_page_html(page)[0].flight_id
+    real = gfid._parse_flight_with_id
+
+    def _parse(fd: Any) -> Any:
+        row = real(fd)
+        if row.flight_id == lost:
+            raise ValueError("unreadable departure time")
+        return row
+
+    monkeypatch.setattr(gfid, "_parse_flight_with_id", _parse)
+    gf_session(_served(_LAX))
+    env = _envelope_of(
+        _search(
+            "--cash-only",
+            "JFK",
+            "LAX",
+            "--dep",
+            _DEP.isoformat(),
+            "--backend",
+            "gflight",
+            "--fast",
+            "-n",
+            "100",
+        )
+    )
+    assert (env["backend"], env["complete"]) == ("gflight", False)
+    assert _rows(env) and lost not in {r["row"]["flight_id"] for r in _rows(env)}
+    assert any("could not be read" in n for n in env["notes"]), env["notes"]
+
+    def _wall_check() -> None:
+        gfid._rows_from_page_html(page)
+
+    capsys.readouterr()
+    _envelope.run("calendar", _wall_check, consoles=())
+    assert json.loads(capsys.readouterr().out)["complete"] is True
+
+
+def test_a_board_a_filter_emptied_is_a_note_not_a_narrowing(
+    gf_session: Callable[..., Any],
+) -> None:
+    gf_session(_served(_LAX))
+    env = _envelope_of(
+        _search(
+            "--cash-only",
+            "JFK",
+            "LAX",
+            "--dep",
+            _DEP.isoformat(),
+            "--backend",
+            "gflight",
+            "--fast",
+            "--max-price",
+            "1",
+        )
+    )
+    assert (env["backend"], env["complete"], _rows(env)) == ("gflight", True, [])
+    assert any("rows filtered out" in n for n in env["notes"]), env["notes"]
+    # The history is the route's: the filter that drops the insight leaves it.
+    assert env["insight"] == []
+    assert len(env["price_history"][0]["points"]) == 61
+
+
+def test_rows_over_the_stop_ceiling_are_a_note_not_a_narrowing(
+    gf_session: Callable[..., Any],
+) -> None:
+    """The capture's three two-stop rows are outside the one stop asked for, so
+    the 98 kept are the whole answer and the line counting the three is a note."""
+    gf_session(_served(_LHR))
+    env = _envelope_of(
+        _search(
+            "--cash-only",
+            "JFK",
+            "LHR",
+            "--dep",
+            _DEP.isoformat(),
+            "--backend",
+            "gflight",
+            "--stops",
+            "1",
+            "-n",
+            "200",
+        )
+    )
+    assert (env["backend"], env["complete"], len(_rows(env))) == ("gflight", True, 98)
+    assert cast("list[str]", env["notes"]).count(_OVER_ONE_STOP) == 1, env["notes"]
+
+
+def _example_7(gf_session: Callable[..., Any], *returns: str) -> dict[str, Any]:
+    """Skill Example 7 on Google (JFK-LHR, `O:LH+`), its five pins' return
+    boards `returns`, written as an envelope."""
+    assert _EXAMPLE_7[-2:] == ["--format", "json"]
+    gf_session(_outbound(), *returns)
+    return _envelope_of(_run(*_EXAMPLE_7[:-2], *_ENVELOPE))
+
+
+def _logged(env: dict[str, Any], line: str) -> bool:
+    return any(n.endswith(f"] {line}") for n in cast("list[str]", env["notes"]))
+
+
+def test_pins_the_routing_left_without_a_return_are_notes_not_a_narrowing(
+    gf_session: Callable[..., Any],
+) -> None:
+    """Each return board was served, and "none matches the routing" is its
+    answer, so the pins it names leave the answer whole."""
+    env = _example_7(gf_session, *map(_return, _RETURNS))
+    assert (env["backend"], env["complete"], len(_rows(env))) == ("gflight", True, 3)
+    for line in (
+        "2 of 5 pinned outbounds have no return flight matching the routing",
+        "pinned outbound LH405/LH914 (USD943.00) lost: Google served 2 returns for it, "
+        "none matching the routing",
+        "pinned outbound LH411/UA9440 (USD1346.00) lost: Google served 1 return for it, "
+        "none matching the routing",
+    ):
+        assert _logged(env, line), env["notes"]
+
+
+def test_a_pin_google_served_no_return_for_narrows_the_answer(
+    gf_session: Callable[..., Any],
+) -> None:
+    """The outbound board priced round trips through the pin, and its return
+    board came back with no rows, so those trips are missing from the answer."""
+    returns = [_return(n) for n in _RETURNS]
+    returns[1] = _page(_ds1("ds1_zero_rows.json"))
+    env = _example_7(gf_session, *returns)
+    assert (env["backend"], env["complete"], len(_rows(env))) == ("gflight", False, 2)
+    assert _logged(env, "1 of 5 pinned outbounds have no return flight on Google"), env["notes"]
+    assert _logged(
+        env, "pinned outbound LH401/LH900 (USD842.00) lost: Google served no return for it"
+    ), env["notes"]
+
+
+def test_a_google_failure_handed_to_matrix_is_matrixs_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _wall(*_a: object, **_kw: object) -> Any:
+        raise GfThrottledError("Google Flights rate-limited the request (/sorry/)")
+
+    monkeypatch.setattr(cli, "_gflight_results", _wall)
+    env = _envelope_of(_search("--cash-only", "JFK", "LHR", "--dep", _DEP.isoformat()))
+    assert (env["backend"], env["currency"], env["complete"]) == ("matrix", "GBP", True)
+    assert "Using Matrix: Google Flights rate-limited." in env["notes"]
+    assert _notes(env, "insight") == [
+        "insight: Matrix answered, and only a Google Flights page carries one"
+    ]
+
+
+# ─────────────────────────────── Matrix search ──────────────────────────────
+
+
+def test_a_matrix_search_carries_each_solution_of_the_body() -> None:
+    env = _envelope_of(
+        _search("--cash-only", "JFK", "LHR", "--dep", _DEP.isoformat(), "--backend", "matrix")
+    )
+    assert (env["backend"], env["currency"], env["complete"]) == ("matrix", "GBP", True)
+    solutions = _MATRIX_BODY["solutionList"]["solutions"]
+    rows = _rows(env)
+    assert [r["row"] for r in rows] == solutions
+    assert rows[0]["price"] == float(solutions[0]["ext"]["price"].removeprefix("GBP"))
+    assert env["insight"] == env["price_history"] == []
+    assert _notes(env, "price_history") == [
+        "price_history: Matrix answered, and only a Google Flights page carries one"
+    ]
+
+
+def test_a_matrix_partys_rows_are_priced_at_its_total(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A party's Matrix row is priced at the total its table prints and its cap
+    reads, as a Google row is, in one cabin and in several; null where Matrix
+    states no total for the party, since one passenger's price is not the trip's."""
+    trip = ["--cash-only", "JFK", "LAX", "--dep", _DEP.isoformat(), "--backend", "matrix"]
+    monkeypatch.setattr(_Matrix, "body", _party_body(total="USD203.60"))
+    party = _envelope_of(_search(*trip, "--adults", "2"))
+    assert [(r["price"], r["currency"]) for r in _rows(party)] == [(203.6, "USD")]
+    assert party["currency"] == "USD"
+    cabins = _envelope_of(_search(*trip, "--adults", "2", "--cabin", "economy,business"))
+    assert [r["price"] for g in cabins["results"] for r in g["rows"]] == [203.6, 203.6]
+    assert [r["price"] for r in _rows(_envelope_of(_search(*trip)))] == [103.0]
+    monkeypatch.setattr(_Matrix, "body", _party_body(total=None))
+    untotaled = _envelope_of(_search(*trip, "--adults", "2"))
+    assert [(r["price"], r["currency"]) for r in _rows(untotaled)] == [(None, None)]
+    assert untotaled["complete"] is True
+
+
+def test_a_matrix_cabin_that_failed_narrows_the_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_Matrix, "refused", frozenset({Cabin.BUSINESS}))
+    env = _envelope_of(
+        _search(
+            "--cash-only",
+            "JFK",
+            "LHR",
+            "--dep",
+            _DEP.isoformat(),
+            "--backend",
+            "matrix",
+            "--cabin",
+            "economy,business",
+        )
+    )
+    assert env["complete"] is False
+    assert [g["cabin"] for g in env["results"]] == ["COACH", "BUSINESS"]
+    assert _rows(env, "COACH") and _rows(env, "BUSINESS") == []
+    assert any("Matrix BUSINESS query failed" in n for n in env["notes"]), env["notes"]
+
+
+def test_a_google_cabin_refused_narrows_the_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    board = gfid._rows_from_page_html(PageFetch(_served(_LAX), _URL, 200))
+
+    def _results(_legs: object, opts: Any, *_a: object, **_kw: object) -> Any:
+        if opts.cabin == Cabin.BUSINESS:
+            raise GfThrottledError("Google Flights rate-limited the request (/sorry/)")
+        return board
+
+    monkeypatch.setattr(cli, "_gflight_results", _results)
+    env = _envelope_of(
+        _search(
+            "--cash-only",
+            "JFK",
+            "LAX",
+            "--dep",
+            _DEP.isoformat(),
+            "--backend",
+            "gflight",
+            "--fast",
+            "--cabin",
+            "economy,business",
+            "-n",
+            "3",
+        )
+    )
+    assert (env["backend"], env["complete"]) == ("gflight", False)
+    assert len(_rows(env, "COACH")) == 3 and _rows(env, "BUSINESS") == []
+    assert [i["cabin"] for i in env["insight"]] == ["COACH"]
+    assert any("Google Flights BUSINESS" in n for n in env["notes"]), env["notes"]
+
+
+# ─────────────────────────────────── awards ─────────────────────────────────
+
+
+def test_awards_ride_beside_the_cash_rows(gf_session: Callable[..., Any]) -> None:
+    gf_session(_served(_LAX))
+    env = _envelope_of(
+        _search(
+            "JFK", "LAX", "--dep", _DEP.isoformat(), "--backend", "gflight", "--fast", "-n", "5"
+        )
+    )
+    assert env["complete"] is True
+    assert len(_rows(env)) == 5
+    (leg,) = env["awards"]
+    assert leg["slice_index"] == 0 and leg["leg"].startswith("one-way JFK")
+    assert leg["matches"], leg
+    for match in leg["matches"]:
+        assert match["flights"] and match["flights"][0] == match["flight"]
+    assert any(m["awards"] for m in leg["matches"])
+
+
+def test_pointspath_skipped_with_tokens_that_failed_narrows_the_answer(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _refused() -> Tokens:
+        raise PPAuthError("Supabase refresh failed: HTTP 400")
+
+    monkeypatch.setattr(pp_cli, "load_tokens", lambda: Tokens("access", "refresh", 0))
+    monkeypatch.setattr(pp_cli, "get_valid_tokens", _refused)
+    gf_session(_served(_LAX))
+    env = _envelope_of(
+        _search(
+            "JFK", "LAX", "--dep", _DEP.isoformat(), "--backend", "gflight", "--fast", "-n", "5"
+        )
+    )
+    assert env["complete"] is False
+    assert any(n.startswith("PointsPath skipped: Supabase refresh failed") for n in env["notes"])
+    assert env["awards"] is not None
+
+
+def test_pointspath_skipped_with_no_tokens_is_a_note(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _none() -> Tokens:
+        raise PPAuthError("No PointsPath tokens. Run `flight-cli auth pp login`.")
+
+    monkeypatch.setattr(pp_cli, "get_valid_tokens", _none)
+    gf_session(_served(_LAX))
+    env = _envelope_of(
+        _search(
+            "JFK", "LAX", "--dep", _DEP.isoformat(), "--backend", "gflight", "--fast", "-n", "5"
+        )
+    )
+    assert env["complete"] is True
+    assert any(n.startswith("PointsPath skipped: No PointsPath tokens") for n in env["notes"])
+    assert env["awards"] is not None
+
+
+@pytest.mark.parametrize(
+    ("tokens", "seats", "providers", "complete", "awards_note"),
+    [
+        pytest.param(
+            True, False, (), False, "awards: PointsPath was asked for", id="tokens-failed-alone"
+        ),
+        pytest.param(
+            True,
+            True,
+            ("--providers", "pp"),
+            False,
+            "awards: PointsPath was asked for",
+            id="named-beside-seats",
+        ),
+        pytest.param(
+            False, False, (), True, "awards: no award provider is configured", id="no-tokens"
+        ),
+    ],
+)
+def test_pointspath_lost_at_the_award_gate_narrows_the_answer(
+    tokens: bool,
+    seats: bool,
+    providers: tuple[str, ...],
+    complete: bool,
+    awards_note: str,
+    gf_session: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The award gate reads PointsPath tokens that fail to refresh as no
+    provider at all, so no award search runs and the provider's loss is said at
+    the gate. Through the real gate: a machine that never saved tokens asked
+    nothing of PointsPath."""
+
+    def _refused(_t: Tokens) -> Tokens:
+        raise PPAuthError("Supabase refresh failed: HTTP 400 refresh token expired")
+
+    monkeypatch.setattr(cli, "_should_run_awards", _SHOULD_RUN_AWARDS)
+    monkeypatch.setattr(pp_auth, "TOKENS_PATH", tmp_path / "pp.json")
+    monkeypatch.setattr(pp_auth, "refresh", _refused)
+    monkeypatch.setattr(seats_auth, "KEY_PATH", tmp_path / "seats.json")
+    monkeypatch.delenv("PP_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("PP_REFRESH_TOKEN", raising=False)
+    monkeypatch.delenv(seats_auth.API_KEY_ENV, raising=False)
+    if tokens:
+        monkeypatch.setenv("PP_ACCESS_TOKEN", "access")
+        monkeypatch.setenv("PP_REFRESH_TOKEN", "refresh")
+    if seats:
+        monkeypatch.setenv(seats_auth.API_KEY_ENV, "key")
+    gf_session(_served(_LAX))
+    env = _envelope_of(
+        _search(
+            "JFK",
+            "LAX",
+            "--dep",
+            _DEP.isoformat(),
+            "--backend",
+            "gflight",
+            "--fast",
+            "-n",
+            "5",
+            *providers,
+        )
+    )
+    assert (env["complete"], env["awards"]) == (complete, None)
+    assert len(_rows(env)) == 5
+    (note,) = _notes(env, "awards")
+    assert note.startswith(awards_note), note
+
+
+@pytest.mark.parametrize(
+    ("pp", "seats", "providers", "complete", "awards_ran"),
+    [
+        pytest.param(False, False, "seats-aero", False, False, id="named-alone-none-configured"),
+        pytest.param(True, False, "seats-aero", False, False, id="named-beside-pointspath"),
+        pytest.param(True, False, "pp,seats-aero", False, True, id="one-of-two-named-missing"),
+        pytest.param(False, True, "seats-aero", True, True, id="named-and-configured"),
+    ],
+)
+def test_a_named_provider_that_cannot_run_narrows_the_answer(
+    pp: bool,
+    seats: bool,
+    providers: str,
+    complete: bool,
+    awards_ran: bool,
+    gf_session: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """`--providers` asks for each provider it names, so one with no credentials
+    leaves the answer narrower than asked, whether or not another provider runs.
+    Through the real gate."""
+
+    def _refreshed(t: Tokens) -> Tokens:
+        return t
+
+    monkeypatch.setattr(cli, "_should_run_awards", _SHOULD_RUN_AWARDS)
+    monkeypatch.setattr(pp_auth, "TOKENS_PATH", tmp_path / "pp.json")
+    monkeypatch.setattr(pp_auth, "refresh", _refreshed)
+    monkeypatch.setattr(seats_auth, "KEY_PATH", tmp_path / "seats.json")
+    monkeypatch.delenv("PP_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("PP_REFRESH_TOKEN", raising=False)
+    monkeypatch.delenv(seats_auth.API_KEY_ENV, raising=False)
+    if pp:
+        monkeypatch.setenv("PP_ACCESS_TOKEN", "access")
+        monkeypatch.setenv("PP_REFRESH_TOKEN", "refresh")
+    if seats:
+        monkeypatch.setenv(seats_auth.API_KEY_ENV, "key")
+    gf_session(_served(_LAX))
+    env = _envelope_of(
+        _search(
+            "JFK",
+            "LAX",
+            "--dep",
+            _DEP.isoformat(),
+            "--backend",
+            "gflight",
+            "--fast",
+            "-n",
+            "5",
+            "--providers",
+            providers,
+        )
+    )
+    assert (env["complete"], env["awards"] is not None) == (complete, awards_ran)
+    assert len(_rows(env)) == 5
+    missing = [n for n in env["notes"] if "seats-aero" in n and "not configured" in n]
+    assert len(missing) == (not complete), env["notes"]
+
+
+def test_a_failed_award_query_leaves_awards_null_and_narrows(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _down(**_kw: object) -> Any:
+        raise RuntimeError("providers unreachable")
+
+    monkeypatch.setattr(pp_cli, "gather_awards", _down)
+    gf_session(_served(_LAX))
+    env = _envelope_of(
+        _search("JFK", "LAX", "--dep", _DEP.isoformat(), "--backend", "gflight", "--fast")
+    )
+    assert (env["complete"], env["awards"]) == (False, None)
+    assert _rows(env)
+    assert _notes(env, "awards") == ["awards: the award query failed"]
+
+
+def _pp_airlines_asked(
+    answer: Callable[[httpx.Request], httpx.Response], airlines: tuple[str, ...]
+) -> None:
+    """PointsPath's airline searches for `airlines`, each answered by `answer`."""
+    client = pp_client.PPClient(Tokens("access", "refresh", 0))
+    client._client = httpx.AsyncClient(
+        base_url=pp_client.API_BASE, transport=httpx.MockTransport(answer)
+    )
+    spec = pp_client.SearchSpec(origin="JFK", destination="LAX", date=_DEP.isoformat())
+
+    async def go() -> None:
+        async with client:
+            await client.airline_search_many(spec, airlines)
+
+    anyio.run(go)
+
+
+def test_a_pointspath_airline_that_answered_500_narrows_the_answer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The airline search swallows the failure and answers empty, so the narrowing
+    is said where it is swallowed. One airline fails; the other has no awards."""
+    monkeypatch.setattr(pp_client, "UNSUPPORTED_CACHE", tmp_path / "unsupported.json")
+
+    def _answer(request: httpx.Request) -> httpx.Response:
+        airline = json.loads(request.content)["airline"]
+        return httpx.Response(500 if airline == "Delta" else 204, text="upstream failed")
+
+    for airlines, complete in ((("United",), True), (("Delta", "United"), False)):
+        _envelope.run("search", partial(_pp_airlines_asked, _answer, airlines), consoles=())
+        assert json.loads(capsys.readouterr().out)["complete"] is complete
+
+
+def test_a_pointspath_airline_that_failed_with_no_body_narrows_the_answer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An error status with an empty body is a failure like any other, not the
+    204 that says the airline has nothing on the route. The search's
+    `Awards incomplete:` line names the airline, and is the envelope's note
+    for it (`test_award_failures`)."""
+    monkeypatch.setattr(pp_client, "UNSUPPORTED_CACHE", tmp_path / "unsupported.json")
+
+    def _answer(request: httpx.Request) -> httpx.Response:
+        airline = json.loads(request.content)["airline"]
+        return httpx.Response(503 if airline == "Delta" else 204)
+
+    for airlines, complete in ((("United",), True), (("Delta", "United"), False)):
+        _envelope.run("search", partial(_pp_airlines_asked, _answer, airlines), consoles=())
+        assert json.loads(capsys.readouterr().out)["complete"] is complete
+
+
+# ─────────────────────────────────── calendar ───────────────────────────────
+
+_START = date.today() + timedelta(days=30)
+_CALENDAR = [
+    "calendar",
+    "--start",
+    _START.isoformat(),
+    "--end",
+    (_START + timedelta(days=13)).isoformat(),
+    "--one-way",
+    "--no-cache",
+    "--no-matrix-url",
+    "--no-google-url",
+    *_ENVELOPE,
+]
+
+
+def _priced_grid(price: str) -> Any:
+    return _result({9: {7: (price, 3, {}), 8: ("", 0, {})}}, cheapest=price)
+
+
+def test_a_matrix_calendar_carries_each_priced_day(monkeypatch: pytest.MonkeyPatch) -> None:
+    _pair_client(monkeypatch, {("JFK", "LAX"): _priced_grid("USD204.00")})
+    env = _envelope_of(_run(*_CALENDAR[:1], "JFK", "LAX", *_CALENDAR[1:]), command="calendar")
+    assert (env["backend"], env["currency"], env["complete"]) == ("matrix", "USD", True)
+    (day,) = env["results"]
+    assert (day["price"], day["currency"], day["row"]["date"]) == (204.0, "USD", 7)
+    assert env["awards"] is None
+    assert _notes(env, "awards") == ["awards: calendar runs no award search"]
+    assert _notes(env, "insight") == ["insight: a calendar carries none"]
+    assert _notes(env, "verify") == ["verify: a calendar checks no row on Matrix"]
+    assert _notes(env, "cross_check") == ["cross_check: a calendar runs no cross-check"]
+
+
+def test_a_split_calendar_missing_a_pair_narrows_the_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _pair_client(
+        monkeypatch,
+        {
+            ("JFK", "LAX"): _priced_grid("USD204.00"),
+            ("EWR", "LAX"): MatrixApiError("too busy", kind="brownout"),
+        },
+    )
+    env = _envelope_of(_run(*_CALENDAR[:1], "JFK,EWR", "LAX", *_CALENDAR[1:]), command="calendar")
+    assert (env["backend"], env["complete"]) == ("matrix", False)
+    assert len(env["results"]) == 1
+    assert any("1 of 2 sub-queries failed" in n for n in env["notes"]), env["notes"]
+    assert any(n.startswith("Queried 2 airport pairs") for n in env["notes"]), env["notes"]
+
+
+def test_a_split_calendar_with_every_pair_lost_exits_1_with_its_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _pair_client(
+        monkeypatch,
+        {
+            ("JFK", "LAX"): MatrixApiError("too busy", kind="brownout"),
+            ("EWR", "LAX"): MatrixApiError("too busy", kind="brownout"),
+        },
+    )
+    r = _run(*_CALENDAR[:1], "JFK,EWR", "LAX", *_CALENDAR[1:])
+    env = _envelope_of(r, command="calendar", code=1)
+    assert (env["backend"], env["complete"], env["results"]) == (None, False, [])
+    assert _notes(env, "backend") == ["backend: the run failed before an answer"]
+
+
+def test_one_group_holding_every_destination_narrows_the_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A group as large as the destination list leaves nothing to split, so the
+    one query asks every destination at once: the request Matrix may
+    under-report, as it may a split's groups."""
+    client = _pair_client(monkeypatch, {("JFK", "LAX,SFO"): _priced_grid("USD204.00")})
+    r = _run(*_CALENDAR[:1], "JFK", "LAX,SFO", *_CALENDAR[1:], "--max-per-query", "2")
+    env = _envelope_of(r, command="calendar")
+    assert [",".join(q.legs[0].destinations) for q in client.asked] == ["LAX,SFO"]
+    assert (env["backend"], env["complete"]) == ("matrix", False)
+    assert len(env["results"]) == 1
+    assert any("may under-report" in n for n in env["notes"]), env["notes"]
+
+
+@pytest.mark.parametrize(
+    ("trip", "complete"),
+    [
+        pytest.param(("--duration", "7"), False, id="round-trip"),
+        pytest.param(("--one-way",), True, id="one-way"),
+    ],
+)
+def test_returns_only_the_combined_query_priced_narrow_the_answer(
+    trip: tuple[str, ...], complete: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A round trip over a set asks for returns into another airport of it, and
+    only the combined query prices those: the request Matrix may under-report.
+    A one-way split asks no such return, and every pair answered."""
+    client = _pair_client(
+        monkeypatch,
+        {pair: _priced_grid("USD204.00") for pair in (("JFK", "LAX"), ("EWR", "LAX"))}
+        | {("JFK,EWR", "LAX"): _priced_grid("USD199.00")},
+    )
+    window = [a for a in _CALENDAR[1:] if a != "--one-way"]
+    env = _envelope_of(_run(*_CALENDAR[:1], "JFK,EWR", "LAX", *window, *trip), command="calendar")
+    assert len(client.asked) == (2 if complete else 3)
+    assert (env["backend"], env["complete"]) == ("matrix", complete)
+    assert env["results"]
+    said = any("come only from the combined query" in n for n in env["notes"])
+    assert said is not complete, env["notes"]
+
+
+def test_the_fast_graph_is_a_google_calendar(monkeypatch: pytest.MonkeyPatch) -> None:
+    from flight_cli import _gf_calgraph as cg
+
+    graph = PriceGraph(
+        None,
+        (GraphCell(_START, None, 204.0), GraphCell(_START + timedelta(days=1), None, 214.5)),
+    )
+
+    def _graph(_search: CalendarSearch, *, headed: bool, pages: int = 0) -> PriceGraph:
+        del headed, pages
+        return graph
+
+    monkeypatch.setattr(cg, "price_graph", _graph)
+    r = _run(*_CALENDAR[:1], "JFK", "LAX", *_CALENDAR[1:], "--fast", "--gf-transport", "browser")
+    env = _envelope_of(r, command="calendar")
+    assert (env["backend"], env["currency"], env["complete"]) == ("gflight", "USD", True)
+    assert [(c["price"], c["row"]) for c in env["results"]] == [
+        (204.0, {"departure": _START.isoformat(), "price": 204}),
+        (214.5, {"departure": (_START + timedelta(days=1)).isoformat(), "price": 214.5}),
+    ]
+    assert _Matrix.calls == 0
+
+
+# ─────────────────────────────────── refusals ───────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param(["detail", "JFK", "LAX", "--dep", _DEP.isoformat()], id="detail"),
+        pytest.param(["explore", "JFK"], id="explore"),
+        pytest.param(["fare", "JFK", "LAX", "--dep", _DEP.isoformat()], id="fare"),
+        pytest.param(["gflight", "JFK", "LAX", "--dep", _DEP.isoformat()], id="gflight"),
+        pytest.param(["doctor"], id="doctor"),
+    ],
+)
+def test_other_commands_refuse_the_envelope_naming_the_two_that_write_it(
+    args: list[str],
+) -> None:
+    r = _run(*args, *_ENVELOPE)
+    assert (r.exit_code, r.stdout) == (2, ""), r.output
+    assert "--format envelope is written by search and calendar only" in r.stderr
+    assert _Matrix.calls == 0
+
+
+@pytest.mark.parametrize("flag", ["--sellers", "--fare-rules"])
+def test_a_document_of_its_own_is_refused_before_any_request(
+    flag: str, gf_session: Callable[..., Any]
+) -> None:
+    fake = gf_session(_served(_LAX))
+    r = _search("--cash-only", "JFK", "LAX", "--dep", _DEP.isoformat(), flag)
+    assert (r.exit_code, r.stdout) == (2, ""), r.output
+    assert "use --format json" in r.stderr and flag in r.stderr
+    assert (_Matrix.calls, len(fake.gets)) == (0, 0)
+
+
+def test_a_usage_error_writes_no_envelope() -> None:
+    """Exit 2 is a command that never ran: its stderr, and no document."""
+    r = _search("--cash-only", "JFK", "LAX", "--dep", _DEP.isoformat(), "--cabin", "steerage")
+    assert (r.exit_code, r.stdout) == (2, "")
+    assert "steerage" in r.stderr
+
+
+def test_an_abort_is_said_inside_the_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
+    """click says "Aborted." once the command has returned, which is after the
+    envelope run has stopped hearing stderr. The exit code stays JSON's."""
+
+    def _abort(*_a: object, **_kw: object) -> Any:
+        raise typer.Abort
+
+    monkeypatch.setattr(cli, "_gflight_results", _abort)
+    args = ("--cash-only", "JFK", "LAX", "--dep", _DEP.isoformat(), "--backend", "gflight")
+    as_json = _run(*_SEARCH, *args, "--format", "json")
+    assert (as_json.exit_code, as_json.stdout, as_json.stderr.strip()) == (1, "", "Aborted.")
+    r = _search(*args)
+    env = _envelope_of(r, code=1)
+    assert r.stderr.strip() == "Aborted."
+    assert (env["complete"], env["notes"][0]) == (False, "Aborted.")
+
+
+def test_notes_keep_the_order_stderr_took_the_lines_in(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two threads write stderr at once, the first held inside the stream's own
+    write until the second has written: the notes list the lines in the order
+    stderr took them."""
+    taken: list[str] = []
+    first_in, second_out = threading.Event(), threading.Event()
+
+    class _Stream(io.StringIO):
+        @override
+        def write(self, s: str, /) -> int:
+            taken.append(s.strip())
+            if s.startswith("Google"):
+                first_in.set()
+                second_out.wait(0.5)
+            return len(s)
+
+    def _second() -> None:
+        sys.stderr.write("Matrix: cabin query failed\n")
+        second_out.set()
+
+    def _two_writers() -> None:
+        first = threading.Thread(target=sys.stderr.write, args=("Google: board unavailable\n",))
+        first.start()
+        assert first_in.wait(5)
+        second = threading.Thread(target=_second)
+        second.start()
+        first.join()
+        second.join()
+
+    capsys.readouterr()
+    monkeypatch.setattr(sys, "stderr", _Stream())
+    _envelope.run("search", _two_writers, consoles=())
+    assert taken == ["Google: board unavailable", "Matrix: cabin query failed"]
+    assert json.loads(capsys.readouterr().out)["notes"][:2] == taken
+
+
+# ─────────────────────────────── schema and history ─────────────────────────
+
+
+def test_the_committed_schema_is_the_generated_one() -> None:
+    assert _SCHEMA.read_text() == _envelope.schema_text(), (
+        "regenerate: uv run python -c 'from flight_cli._envelope import schema_text; "
+        'print(schema_text(), end="")\' > docs/envelope.schema.json'
+    )
+
+
+@pytest.mark.parametrize(
+    ("capture", "points", "first", "last"),
+    [
+        ("ds1_jfk_lax_tfu.json", 61, (date(2026, 7, 29), 169.0), (date(2026, 9, 27), 204.0)),
+        ("ds1_jfk_lhr_tfu.json", 62, (date(2026, 7, 28), 289.0), (date(2026, 9, 27), 293.0)),
+    ],
+)
+def test_the_page_carries_a_daily_history(
+    capture: str, points: int, first: tuple[date, float], last: tuple[date, float]
+) -> None:
+    board = gfid._rows_from_page_html(PageFetch(_served(capture), _URL, 200))
+    assert board.history is not None
+    assert (len(board.history.points), board.history.points[0], board.history.points[-1]) == (
+        points,
+        first,
+        last,
+    )
+    assert board.history.currency == "USD"
+    days = [d for d, _ in board.history.points]
+    assert all(b - a == timedelta(days=1) for a, b in itertools.pairwise(days))
+
+
+def test_a_page_without_the_block_has_no_history(gf_capture: Callable[[str], str]) -> None:
+    board = gfid._rows_from_page_html(
+        PageFetch(gf_capture("ds1_metadata_blocks_kept.json"), _URL, 200)
+    )
+    assert board and board.history is None

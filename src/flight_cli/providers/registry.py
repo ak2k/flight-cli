@@ -19,6 +19,7 @@ import anyio
 import anyio.to_thread
 import structlog
 
+from .._envelope import narrow
 from .base import answer_deadline, deadline_reason, exception_reason, record_failure
 from .pointspath.provider import PointsPathProvider
 from .pointspath.provider import is_configured as pp_is_configured
@@ -78,9 +79,11 @@ async def _build_pointspath(airlines: tuple[str, ...] | None) -> AwardProvider |
             if await anyio.to_thread.run_sync(pp_is_configured, abandon_on_cancel=True):
                 return await PointsPathProvider.create(explicit_airlines=airlines)
         except Exception as e:  # noqa: BLE001 — per-provider failures are non-fatal
+            narrow()
             log.debug("provider_init_failed", provider="PointsPath", error=str(e))
             record_failure("PointsPath", exception_reason(e))
     if scope.cancelled_caught:
+        narrow()
         record_failure("PointsPath", deadline_reason())
     return None
 
@@ -92,9 +95,11 @@ async def _build_seats_aero(sources: tuple[str, ...] | None) -> AwardProvider | 
         try:
             return await SeatsAeroProvider.create(explicit_airlines=sources)
         except Exception as e:  # noqa: BLE001 — per-provider failures are non-fatal
+            narrow()
             log.debug("provider_init_failed", provider="Seats.aero", error=str(e))
             record_failure("Seats.aero", exception_reason(e))
     if scope.cancelled_caught:
+        narrow()
         record_failure("Seats.aero", deadline_reason())
     return None
 
@@ -131,6 +136,7 @@ async def _ask(
             cash_hints=cash_hints,
         )
     except Exception as e:  # noqa: BLE001 — surface provider failures, keep others
+        narrow()
         log.debug("provider_search_failed", provider=provider.name, error=str(e))
         record_failure(provider.name, exception_reason(e))
         return []

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import datetime
 import functools
 import itertools
 import json
@@ -84,6 +85,7 @@ from fli.search.flights import SearchFlights  # pyright: ignore[reportMissingTyp
 # `_one_call_browser` looks the attribute up per call and a test can substitute
 # the session without a browser anywhere in the process.
 from . import _gf_browser
+from ._envelope import narrow
 from ._gf_common import TRANSPORT_HTTP, GfTransportMode, PageFetch, cache_dir
 from ._gf_errors import (
     BROWSER_DEFAULT_REMEDY,
@@ -100,7 +102,6 @@ from .fli_bridge import fli_airline, fli_airports
 from .links import build_search_tfs, google_flights_search_page_url
 
 if TYPE_CHECKING:
-    import datetime
     import pathlib
     from collections.abc import Callable, Generator, Iterable, Sequence
 
@@ -1697,6 +1698,64 @@ def _price_insight(payload: list[Any], rows: list[GFlightWithId]) -> PriceInsigh
     return PriceInsight(cheapest=cheapest, typical_low=low, typical_high=high, currency=currency)
 
 
+@dataclass(frozen=True)
+class PriceHistory:
+    """Google's daily price history for a search: `(date, price)` per day, oldest
+    first, in the page's currency (None when no priced row names it).
+
+    From `ds:1[5][10][0]`, measured as `[[epoch_ms, price], ...]`, one point a day.
+    Each stamp is 04:00 UTC on the captures, which is the client's local midnight,
+    so the day is the UTC date twelve hours after the stamp."""
+
+    points: tuple[tuple[datetime.date, float], ...]
+    currency: str | None
+
+
+_HISTORY_IDX = 10
+_HISTORY_DAY_OFFSET = datetime.timedelta(hours=12)
+
+
+def _history_point(point: Any) -> tuple[datetime.date, float] | None:
+    """One `[epoch_ms, price]` pair as `(date, price)`, or None for any other shape."""
+    if not isinstance(point, list) or len(cast("list[Any]", point)) != 2:  # noqa: PLR2004 — a pair
+        return None
+    stamp, price = cast("list[Any]", point)
+    if any(isinstance(v, bool) or not isinstance(v, int | float) for v in (stamp, price)):
+        return None
+    try:
+        when = datetime.datetime.fromtimestamp(stamp / 1000, tz=datetime.UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return (when + _HISTORY_DAY_OFFSET).date(), float(price)
+
+
+def _price_history(payload: list[Any], rows: list[GFlightWithId]) -> PriceHistory | None:
+    """The page's daily price history, or None when it carries none.
+
+    The currency is read off a priced row, as `_price_insight` reads the
+    insight's: the page writes none beside either. A series with any point of
+    another shape is refused whole, since a skipped day would read as a gap
+    in the history rather than as a layout change."""
+    block = payload[_INSIGHT_IDX] if len(payload) > _INSIGHT_IDX else None
+    if not isinstance(block, list) or len(cast("list[Any]", block)) <= _HISTORY_IDX:
+        return None
+    holder = cast("list[Any]", block)[_HISTORY_IDX]
+    if not isinstance(holder, list) or not holder:
+        return None
+    series = cast("list[Any]", holder)[0]
+    if not isinstance(series, list) or not series:
+        return None
+    points = [_history_point(p) for p in cast("list[Any]", series)]
+    kept = [p for p in points if p is not None]
+    if len(kept) != len(points):
+        return None
+    currency = next(
+        (r.flight.currency for r in rows if r.flight.price is not None and r.flight.currency),
+        None,
+    )
+    return PriceHistory(points=tuple(kept), currency=currency)
+
+
 def _kept_insight(
     insight: PriceInsight | None,
     rows: Iterable[GFlightWithId | tuple[GFlightWithId, ...]],
@@ -1729,21 +1788,24 @@ class Board[T](list[T]):
     because an empty answer from those says nothing about the outbounds it did
     not pin. `unread` counts the rows the pages served that the parser could
     not read: a flight on one of them is on Google's board though no row here
-    names it. `stop_drops` is set by the caller that built the row filter: the
-    rows it dropped for the stop ceiling, for whichever path shows the board to
-    say so."""
+    names it. `history` is the route's, so a filter that restates the insight
+    leaves it as the page gave it. `stop_drops` is set by the caller that built
+    the row filter: the rows it dropped for the stop ceiling, for whichever path
+    shows the board to say so."""
 
     def __init__(
         self,
         rows: Iterable[T] = (),
         *,
         insight: PriceInsight | None = None,
+        history: PriceHistory | None = None,
         dropped: int = 0,
         pinned: int = 0,
         unread: int = 0,
     ) -> None:
         super().__init__(rows)
         self.insight = insight
+        self.history = history
         self.dropped = dropped
         self.pinned = pinned
         self.unread = unread
@@ -1916,7 +1978,12 @@ def _rows_from_page_html(page: PageFetch) -> Board[GFlightWithId]:
             f"the row shape changed (sample reasons: {sample})",
             unread=len(reasons),
         )
-    return Board(_deduped(out), insight=_price_insight(payload, out), unread=len(reasons))
+    return Board(
+        _deduped(out),
+        insight=_price_insight(payload, out),
+        history=_price_history(payload, out),
+        unread=len(reasons),
+    )
 
 
 def _one_call(filters: FlightSearchFilters, *, currency: str = "USD") -> Board[GFlightWithId]:
@@ -2273,6 +2340,7 @@ def _with_board_currency(board: Board[GFlightWithId], requested: str) -> Board[G
     return Board(
         map(filled, board),
         insight=board.insight,
+        history=board.history,
         dropped=board.dropped,
         pinned=board.pinned,
         unread=board.unread,
@@ -2377,6 +2445,7 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
         return Board(
             board,
             insight=_kept_insight(first.insight, board, dropped),
+            history=first.history,
             dropped=dropped,
             unread=first.unread,
         )
@@ -2479,6 +2548,7 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
     return Board(
         combos,
         insight=_kept_insight(first.insight, combos, dropped),
+        history=first.history,
         dropped=dropped,
         pinned=len(pins),
         unread=unread,
@@ -2512,6 +2582,11 @@ def _report_pin_outcome(
     as a route with no return flights. Anything served makes every refusal a
     footnote to a real answer, and the counts are what tell the user their
     table is short."""
+    # A short table is narrower than what was asked, and so is one without the
+    # round trips the outbound board priced through an `empty` pin; a pin the
+    # row filter emptied is an answer, so `unmatched` does not count.
+    if served and (refused or empty or stopped is not None):
+        narrow()
     # First, because two of the exits below leave by `raise` and nothing after
     # them runs. A stop rule that fires with nothing served would otherwise take
     # the per-URL refusals with it, and "rate-limited, wait and retry" is the
