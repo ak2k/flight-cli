@@ -855,6 +855,12 @@ def test_the_graph_refuses_the_rest_by_name(search: CalendarSearch, reason: str)
     assert cg.graph_blocker(search) == reason
 
 
+def test_the_graph_refuses_a_cabin_requirement_even_for_its_own_cabin() -> None:
+    """Green at the base and the tip: the graph has no rows to hold it to."""
+    search = _search(extension="+CABIN 2", options=SearchOptions(cabin=Cabin.BUSINESS))
+    assert cg.graph_blocker(search) is not None
+
+
 # At 6fce7b1, for the shapes its gate admitted: the graph asks the same page.
 _FAR = date(2099, 6, 1)
 _BASE_PAGES = {

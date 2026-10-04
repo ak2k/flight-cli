@@ -1147,6 +1147,23 @@ def test_every_round_trip_surface_says_how_many_outbounds_it_combines(
     monkeypatch.setattr(cli, "_gflight_results", _rows)
     monkeypatch.setattr(cli, "_run_gflight_multi", _by_cabin)
 
+    class _NoFares:
+        """Matrix in process, answering every search with no solution."""
+
+        def __init__(self, **_kw: object) -> None:
+            pass
+
+        async def __aenter__(self) -> _NoFares:
+            return self
+
+        async def __aexit__(self, *_a: object) -> None:
+            return None
+
+        async def execute(self, *_a: object, **_kw: object) -> SearchResult:
+            return SearchResult.model_validate({"solutions": [], "solutionCount": 0})
+
+    monkeypatch.setattr(cli, "MatrixClient", _NoFares)
+
     def _gflight_backend(**_kw: object) -> str:
         return cast("str", cli.BACKEND_GFLIGHT)
 

@@ -4595,6 +4595,8 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         # Empty, or `_co2_cell`'s two numbers through `:d` specs inside literal
         # markup; the label only picks the color (the hostile-label arm).
         ("_render_gflight_table", "co2_cell"),
+        # The stacked legs column's width, a count of cells this function took.
+        ("_render_gflight_table", "legs_width"),
         # The cabin letters are this module's own map, keyed by its own enum.
         ("_render_multi_cabin_search", "cabin_labels"),
         ("_render_multi_cabin_search", "sort_label"),
