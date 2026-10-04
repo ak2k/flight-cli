@@ -8,9 +8,18 @@ to answer."""
 from __future__ import annotations
 
 import re
+import shlex
+from datetime import date, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+from typer.testing import CliRunner
+
+from flight_cli import cli
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _ROOT = Path(__file__).resolve().parent.parent
 _DOCS = {
@@ -65,3 +74,34 @@ def test_the_routing_memory_lists_the_night_checks_as_row_checks() -> None:
     tier_2 = text[text.index("- **Tier 2") : text.index("- **Tier 3")]
     assert "-REDEYES" in tier_2
     assert "-OVERNIGHTS" in tier_2
+
+
+def _skill_example(n: int) -> list[str]:
+    """Example `n`'s command in the skill, as the arguments after `flight`."""
+    m = re.search(rf"### Example {n}:.*?```bash\n(.*?)```", _text("skill"), re.DOTALL)
+    assert m, f"the skill has no Example {n} command"
+    argv = shlex.split(m.group(1).replace("\\\n", " "))
+    assert argv[0] == "flight"
+    return argv[1:]
+
+
+def test_skill_example_2_runs_on_google(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Red at the base, which sent Example 2's `+CABIN 2` to Matrix although it
+    names the cabin `--cabin` asks for."""
+    argv = _skill_example(2)
+    for flag, days in (("--dep", 45), ("--return", 52)):
+        argv[argv.index(flag) + 1] = (date.today() + timedelta(days=days)).isoformat()
+    called: list[str] = []
+
+    def _stub(name: str) -> Callable[..., None]:
+        def _path(**_kw: object) -> None:
+            called.append(name)
+
+        return _path
+
+    for name in ("_run_gflight_path", "_run_enriched_path", "_run_matrix_path"):
+        monkeypatch.setattr(cli, name, _stub(name))
+    result = CliRunner().invoke(cli.app, [*argv, "--cash-only"])
+    assert result.exit_code == 0, result.output
+    assert called == ["_run_enriched_path"], result.stderr
+    assert "Using Matrix" not in result.stderr

@@ -651,6 +651,7 @@ def test_a_paged_board_counts_the_rows_every_page_left_unread(
     if ret:
         legs += (Leg.of("LAX", _EAST, _RET),)
     board = cli._gflight_results(legs, SearchOptions(page_size=3), 3)
+    assert isinstance(board, gfid.Board)
     assert len(google.calls) == (2 + 3 if ret else 2)
     assert {page for page, pin in google.calls if pin is not None} <= {(_EAST[6:], ("LAX",))}
     assert board.unread == len(google.calls)
@@ -687,6 +688,7 @@ def test_a_paged_board_counts_the_rows_of_a_page_none_of_whose_rows_parsed(
     if fails != "one-way":
         legs += (Leg.of("LAX", _EAST, _RET),)
     board = cli._gflight_results(legs, SearchOptions(page_size=3), 3)
+    assert isinstance(board, gfid.Board)
     assert len(google.calls) == (2 if fails == "one-way" else 2 + 3)
     assert (board.unread, board.partial) == (3, True)
     missing = f"page 2 of 2 ({','.join(_EAST[6:])}→LAX) is missing: Google Flights' page shape"

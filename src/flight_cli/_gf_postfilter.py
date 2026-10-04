@@ -14,8 +14,9 @@ whole query to Matrix rather than being silently dropped.
 Google has ignored a field it was sent (a carrier exclude on JFK-LHR), so what
 the page encodes is checked here too wherever the row shows it: the stop
 ceiling, the carrier include, the maximum duration, the layover minutes, the
-departure time and a price cap. An alliance is left to Google's own filter, for
-want of a membership table.
+departure time and a price cap. Each row over the stop ceiling is counted, for
+the line that says Google served it. An alliance is left to Google's own
+filter, for want of a membership table that would stay current.
 
 Supported Tier-2 predicates:
   - operating carrier include/exclude (`O:LH+`, `OPAIRLINES`, `-OPAIRLINES`)
@@ -27,17 +28,21 @@ Supported Tier-2 predicates:
   - minimum layover (`MINCONNECT`), on the raw row and encoded as well
   - no red-eye flight (`-REDEYES`) and no overnight stop (`-OVERNIGHTS`), on
     the raw row's local clocks
+  - a cabin (`+CABIN`), every leg booked in it, served only when it is the
+    one cabin the page is asked for
 """
 
 from __future__ import annotations
 
 import itertools
 import re
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from .domain import time_bounds, window_label, within_price_cap
+from .domain import Cabin, time_bounds, window_label, within_price_cap
 from .routing_predicates import (
     AlliancePred,
+    CabinPred,
     CarrierPred,
     ConnectionAirportPred,
     ConnectTimePred,
@@ -59,10 +64,11 @@ if TYPE_CHECKING:
     from .routing_predicates import Predicate
 
 # Tier-2 predicate types this module evaluates: on a parsed slice
-# (`_slice_passes`), or on the raw row (`_row_passes`) for red-eyes and
-# overnight stops, which need each leg's own clocks. A minimum layover is
-# checked on the raw row too.
+# (`_slice_passes`), or on the raw row (`_row_passes`) for red-eyes, overnight
+# stops and cabins, which need each leg's own clocks and cabin. A minimum
+# layover is checked on the raw row too.
 _SUPPORTED: tuple[type, ...] = (
+    CabinPred,
     CarrierPred,
     ConnectionAirportPred,
     ExcludeCodesharePred,
@@ -94,9 +100,10 @@ def _served_by_postfilter(pred: Predicate) -> bool:
     answer has shown which connections it admits. Nor a number Matrix rejects
     as a bad route specification (`AA3000-1`, `AA0`, `AA10000`): Google's empty
     board would stand in for that error. Matrix bounds the number, not its
-    digits: `AA00001` is AA1."""
+    digits: `AA00001` is AA1. Nor a cabin requirement, which
+    `search_page_reasons` serves beside the one cabin the page is asked for."""
     match pred:
-        case ConnectionAirportPred():
+        case ConnectionAirportPred() | CabinPred():
             return False
         case SpecificFlightPred() if pred.several and pred.low != pred.high:
             return False
@@ -125,15 +132,45 @@ def _served_by_page(pred: Predicate) -> bool:
             return False
 
 
-def search_page_reasons(predicates: Iterable[Predicate], stops: int | None = None) -> list[str]:
+_CABIN_FLAG = {
+    Cabin.COACH: "economy",
+    Cabin.PREMIUM_COACH: "premium-coach",
+    Cabin.BUSINESS: "business",
+    Cabin.FIRST: "first",
+}
+
+
+def _page_refusal(pred: Predicate, cabin: Cabin | None) -> list[str]:
+    reasons = page_can_encode([pred])[1]
+    match pred:
+        case ConnectTimePred(max_minutes=0):
+            return ["a maximum layover of 0 min"]
+        case CabinPred():
+            beside = (
+                "beside more than one --cabin"
+                if cabin is None
+                else f"other than --cabin {_CABIN_FLAG[cabin]}"
+            )
+            return [f"{reason} {beside}" for reason in reasons]
+        case _:
+            return reasons
+
+
+def search_page_reasons(
+    predicates: Iterable[Predicate], stops: int | None = None, cabin: Cabin | None = None
+) -> list[str]:
     """Why the search page can't serve `predicates` beside a `--stops` of
-    `stops`: one reason per predicate that its tfs= cannot encode and this
-    module does not post-filter. Empty when the page serves them all.
+    `stops` and the one `--cabin` asked, `cabin` (None for several): one
+    reason per predicate that its tfs= cannot encode and this module does not
+    post-filter. Empty when the page serves them all.
 
     The page is asked for the strictest stop limit alone
     (`fli_bridge.apply_gf_native_filters`), so only that one has to fit.
     3.6 is one include list, so an alliance written beside a carrier or another
-    alliance asks Google for either, and no row check narrows an alliance back."""
+    alliance asks Google for either, and no row check narrows an alliance back.
+    A `+CABIN` naming exactly `cabin` is served, its rows held to it: the page
+    is asked for that cabin, and another set would need rows it never asks
+    for."""
     preds = list(predicates)
     limits = [p.max_stops for p in preds if isinstance(p, StopsPred)]
     if stops is not None:
@@ -142,12 +179,13 @@ def search_page_reasons(predicates: Iterable[Predicate], stops: int | None = Non
     reasons += [
         reason
         for p in preds
-        if not (isinstance(p, StopsPred) or _served_by_postfilter(p) or _served_by_page(p))
-        for reason in (
-            ["a maximum layover of 0 min"]
-            if isinstance(p, ConnectTimePred) and p.max_minutes == 0
-            else page_can_encode([p])[1]
+        if not (
+            isinstance(p, StopsPred)
+            or _served_by_postfilter(p)
+            or _served_by_page(p)
+            or (isinstance(p, CabinPred) and p.cabins == frozenset({cabin}))
         )
+        for reason in _page_refusal(p, cabin)
     ]
     alliances = sum(isinstance(p, AlliancePred) for p in preds)
     includes = any(isinstance(p, CarrierPred) and not (p.exclude or p.operating) for p in preds)
@@ -308,8 +346,22 @@ def _row_fails(row: Any, pred: Predicate) -> bool:
             return any(map(_red_eye, flight.legs))
         case ExcludeOvernightsPred():
             return any(itertools.starmap(_overnight_stop, itertools.pairwise(flight.legs)))
+        case CabinPred():
+            # A leg Google states no cabin for cannot be shown to meet it.
+            wanted = {_GOOGLE_CABIN[c] for c in pred.cabins}
+            booked = [a.cabin for a in row.amenities][: len(flight.legs)]
+            return len(booked) < len(flight.legs) or any(c not in wanted for c in booked)
         case _:
             return False
+
+
+# Each `Cabin` as `_gflight_ids._CABIN` decodes a leg's cabin.
+_GOOGLE_CABIN = {
+    Cabin.COACH: "ECONOMY",
+    Cabin.PREMIUM_COACH: "PREMIUM",
+    Cabin.BUSINESS: "BUSINESS",
+    Cabin.FIRST: "FIRST",
+}
 
 
 # A flight in the air between midnight and 05:00 local flew the night.
@@ -340,6 +392,34 @@ def _overnight_stop(arrived: Any, leaves: Any) -> bool:
     return leaves.departure_datetime.date() > lands.date() or lands.hour < _NIGHT_ENDS_HOUR
 
 
+def listing_fits(
+    per_slice_predicates: Sequence[Sequence[Predicate]],
+) -> Callable[[int, Any], bool] | None:
+    """`fits(i, row)`: whether one listing is booked in slice `i`'s `+CABIN`,
+    which `_gflight_ids.search_with_ids` asks to choose among the listings of
+    one itinerary before `routing_keep`'s filter sees it. None when no slice
+    asks for a cabin."""
+    cabins = [[p for p in preds if isinstance(p, CabinPred)] for preds in per_slice_predicates]
+    if not any(cabins):
+        return None
+
+    def fits(leg: int, row: Any) -> bool:
+        preds = cabins[leg] if leg < len(cabins) else ()
+        return not any(_row_fails(row, p) for p in preds)
+
+    return fits
+
+
+@dataclass
+class StopDrops:
+    """The rows `routing_keep` dropped for making more stops than the ceiling
+    the page was asked for, and that ceiling. One per query: the page is asked
+    for one ceiling, and every slice holds the same codes."""
+
+    rows: int = 0
+    ceiling: int | None = None
+
+
 def routing_keep(
     per_slice_predicates: Sequence[Sequence[Predicate]],
     per_slice_times: Sequence[Sequence[TimeWindow]] = (),
@@ -348,6 +428,7 @@ def routing_keep(
     max_price: int | None = None,
     currency: str = "USD",
     max_stops: int | None = None,
+    stop_drops: StopDrops | None = None,
 ) -> Callable[[int, Any], bool] | None:
     """The per-leg filter `_gflight_ids.search_with_ids` applies to each board
     it is served: `keep(i, row)` is whether one Google Flights row passes slice
@@ -358,7 +439,9 @@ def routing_keep(
 
     The cap and the stop ceiling are checked on every board, a round trip's
     outbound as well as each return: whether or not the page was asked for
-    them, every row is held to them."""
+    them, every row is held to them. Each row over the ceiling is counted in
+    `stop_drops`, before any other check, so the count is every such row
+    Google served."""
     if max_stops is not None and max_stops < 0:
         max_stops = None
     if (
@@ -371,16 +454,19 @@ def routing_keep(
         return None
 
     def keep(leg: int, row: Any) -> bool:
+        preds = per_slice_predicates[leg] if leg < len(per_slice_predicates) else ()
+        ceiling = _stop_ceiling(preds, max_stops)
+        if ceiling is not None and len(row.flight.legs) - 1 > ceiling:
+            if stop_drops is not None:
+                stop_drops.rows += 1
+                stop_drops.ceiling = ceiling
+            return False
         if max_price is not None and not within_price_cap(
             row.flight.price, row.flight.currency, cap=max_price, cap_currency=currency
         ):
             return False
-        preds = per_slice_predicates[leg] if leg < len(per_slice_predicates) else ()
         times = per_slice_times[leg] if leg < len(per_slice_times) else ()
         arrivals = per_slice_arrivals[leg] if leg < len(per_slice_arrivals) else ()
-        ceiling = _stop_ceiling(preds, max_stops)
-        if ceiling is not None and len(row.flight.legs) - 1 > ceiling:
-            return False
         if not _row_passes(row, preds, times, arrivals):
             return False
         if not preds:

@@ -6,7 +6,8 @@ honor each one:
                            connecting airports, stops, max duration, max layover).
   - Tier 2 (GF_POSTFILTER): not a GF query knob, but evaluable on the base
                            response payload (operating carrier, -CODESHARE,
-                           min layover, redeyes/overnights, specific flight #).
+                           min layover, redeyes/overnights, specific flight #,
+                           +CABIN).
   - Tier 3 (MATRIX_ONLY):  fare-construction (fare basis, booking class),
                            anything GF can neither request nor reconstruct, and
                            any token this parser doesn't confidently recognize.
@@ -40,6 +41,8 @@ import re
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import TYPE_CHECKING, assert_never
+
+from .domain import Cabin
 
 # A `reason` quotes the user's own --routing/--extension string back to them, so
 # it can carry any character. It is kept as PLAIN TEXT here and escaped by
@@ -180,6 +183,17 @@ class SpecificFlightPred:
 
 
 @dataclass(frozen=True, slots=True)
+class CabinPred:
+    """`+CABIN`: every leg booked in one of `cabins` — post-filter on each
+    leg's cabin. `token` is the directive as typed, for the reason that quotes
+    it; two spellings of one requirement are one predicate."""
+
+    cabins: frozenset[Cabin]
+    token: str = field(compare=False)
+    tier: Tier = field(default=Tier.GF_POSTFILTER, init=False)
+
+
+@dataclass(frozen=True, slots=True)
 class UnsupportedPred:
     """A token we can neither request on GF nor reconstruct from its payload
     (fare basis, mileage, country filter, ordered routing, unknown). Forces
@@ -201,6 +215,7 @@ Predicate = (
     | ExcludeOvernightsPred
     | ExcludeCodesharePred
     | SpecificFlightPred
+    | CabinPred
     | UnsupportedPred
 )
 
@@ -423,6 +438,26 @@ def _carrier_list(raw: str, args: list[str], *, exclude: bool, operating: bool) 
     return UnsupportedPred(token=raw, reason=f"a carrier list naming {named}, {what} ({raw!r})")
 
 
+_CABIN_CODES = {
+    "1": Cabin.FIRST,
+    "2": Cabin.BUSINESS,
+    "PREMIUM-COACH": Cabin.PREMIUM_COACH,
+    "PE": Cabin.PREMIUM_COACH,
+    "3": Cabin.COACH,
+}
+
+
+def _cabin_list(raw: str, args: list[str]) -> Predicate:
+    """`+CABIN`'s predicate: several values admit any of them. A value Matrix
+    does not define is Matrix's to answer, since read as no cabin it would ask
+    Google a wider question."""
+    bad = [a for a in args if a.upper() not in _CABIN_CODES]
+    if not bad:
+        return CabinPred(frozenset(_CABIN_CODES[a.upper()] for a in args), token=raw)
+    named = " and ".join(repr(a) for a in bad)
+    return UnsupportedPred(token=raw, reason=f"unknown cabin {named} in {raw!r}")
+
+
 # How many arguments each fixed-arity code takes. More words than that are two
 # codes missing their `;`, and the first read alone asks a wider question.
 _ARITY = {
@@ -483,6 +518,8 @@ def _parse_extension_code(directive: str) -> Predicate | None:  # noqa: PLR0911,
             return _carrier_list(raw, args, exclude=True, operating=True)
         case "-CITIES" if args:
             return ConnectionAirportPred(_carrier_codes(args), exclude=True)
+        case "+CABIN" if args:
+            return _cabin_list(raw, args)
         case _:
             return UnsupportedPred(token=raw, reason=f"extension {raw!r} not expressible on GF")
 
@@ -506,12 +543,13 @@ def parse_extension(extension: str) -> list[Predicate]:
 # Two gates start from this and admit more. The search gate
 # (`_gf_postfilter.search_page_reasons`) has rows: the carrier and alliance
 # includes, the duration and the layover bounds the page also encodes (3.6 /
-# 3.12 / 3.17 / 3.18), all but the alliance checked on the rows too, and the
-# Tier-2 predicates the post-filter evaluates the way Matrix does. The Chrome
-# price graph's gate (`_gf_calgraph.graph_blocker`) has no rows and admits the
-# same includes and bounds, one of each a leg, because Google was measured
-# applying them from the URL. Anything else goes to Matrix with the reason
-# printed.
+# 3.12 / 3.17 / 3.18), all but the alliance checked on the rows too, the
+# Tier-2 predicates the post-filter evaluates the way Matrix does, and a
+# `+CABIN` naming the one cabin the page is asked for, held on every leg. The
+# Chrome price graph's gate (`_gf_calgraph.graph_blocker`) has no rows and
+# admits the same includes and bounds, one of each a leg, because Google was
+# measured applying them from the URL. Anything else goes to Matrix with the
+# reason printed.
 
 
 # fli's MaxStops enum stops at TWO_OR_FEWER_STOPS; anything above is ANY, which
@@ -555,6 +593,8 @@ def _page_reason(pred: Predicate) -> str | None:  # noqa: PLR0911, PLR0912 — o
             return f"a specific flight number ({pred.text})"
         case SpecificFlightPred():
             return f"a flight-number range ({pred.text})"
+        case CabinPred():
+            return f"a cabin requirement ({pred.token!r})"
         case _:
             assert_never(pred)
 

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import pytest
 
+from flight_cli.domain import Cabin
 from flight_cli.routing_predicates import (
     AlliancePred,
+    CabinPred,
     CarrierPred,
     ConnectionAirportPred,
     ConnectTimePred,
@@ -203,6 +205,34 @@ def test_an_alliance_directive_naming_none_escalates_as_a_bare_one_does(directiv
     reason = f"extension {directive!r} not expressible on GF"
     assert p == UnsupportedPred(token=directive, reason=reason)
     assert classify(None, directive).requires_matrix
+
+
+@pytest.mark.parametrize(
+    ("directive", "cabins"),
+    [
+        ("+CABIN 2", {Cabin.BUSINESS}),
+        ("+cabin 1 2", {Cabin.FIRST, Cabin.BUSINESS}),
+        ("+CABIN pe", {Cabin.PREMIUM_COACH}),
+        ("+CABIN Premium-Coach", {Cabin.PREMIUM_COACH}),
+        ("+CABIN 3", {Cabin.COACH}),
+    ],
+)
+def test_a_cabin_requirement_admits_any_cabin_it_names(directive: str, cabins: set[Cabin]) -> None:
+    """Red at the base, which read every `+CABIN` as Matrix's."""
+    (p,) = parse_extension(directive)
+    assert p == CabinPred(frozenset(cabins), token=directive)
+    assert p.tier is Tier.GF_POSTFILTER
+    assert not classify(None, directive).requires_matrix
+
+
+@pytest.mark.parametrize(
+    ("directive", "named"),
+    [("+CABIN 4", "'4'"), ("+CABIN 2 coach", "'coach'"), ("+CABIN y j", "'y' and 'j'")],
+)
+def test_a_cabin_matrix_does_not_define_is_matrix_s_naming_it(directive: str, named: str) -> None:
+    """Read as no cabin at all, it would ask Google a wider question."""
+    (p,) = parse_extension(directive)
+    assert p == UnsupportedPred(token=directive, reason=f"unknown cabin {named} in {directive!r}")
 
 
 def test_extension_airlines_include_exclude_operating() -> None:

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, timedelta
+from typing import TYPE_CHECKING
 
 import pytest
 import typer
@@ -31,6 +32,9 @@ from flight_cli.cli import (
 )
 from flight_cli.domain import Bags
 from flight_cli.routing_predicates import classify, page_can_encode
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def _call(backend: str = BACKEND_AUTO, **overrides: object) -> str:
@@ -541,6 +545,116 @@ def test_auto_says_nothing_when_gflight_serves_the_query(
 ) -> None:
     assert _call(extension="MAXSTOPS 1") == BACKEND_GFLIGHT
     assert capsys.readouterr().err == ""
+
+
+# ──────────────────────────────── +CABIN ───────────────────────────────────
+
+# Skill Example 2's codes.
+_STAR_BUSINESS = "ALLIANCE star-alliance; MAXDUR 14:00; +CABIN 2"
+
+
+@pytest.mark.parametrize(
+    ("cabin", "extension"),
+    [
+        ("business", _STAR_BUSINESS),
+        ("premium-coach", "+CABIN pe"),
+        ("premium", "+cabin PREMIUM-COACH"),
+        ("first", "+CABIN 1"),
+        ("economy", "+CABIN 3"),
+    ],
+)
+@pytest.mark.parametrize("backend", ["auto", "gflight"])
+def test_a_cabin_requirement_naming_the_asked_cabin_stays_on_google(
+    monkeypatch: pytest.MonkeyPatch, backend: str, cabin: str, extension: str
+) -> None:
+    """Red at the base, which sent every `+CABIN` to Matrix and refused it
+    under `--backend gflight`. The page is asked for that cabin and each leg of
+    each row is held to it."""
+    called, err = _search_backend(
+        monkeypatch, "--backend", backend, "--cabin", cabin, "--ext", extension
+    )
+    assert called == ["_run_enriched_path"]
+    assert "Using Matrix" not in err
+
+
+@pytest.mark.parametrize(
+    ("args", "reason"),
+    [
+        (("--ext", "+CABIN 2"), "a cabin requirement ('+CABIN 2') other than --cabin economy"),
+        (
+            ("--cabin", "business", "--ext", "+CABIN 1 2"),
+            "a cabin requirement ('+CABIN 1 2') other than --cabin business",
+        ),
+        (
+            ("--cabin", "economy,business", "--ext", "+CABIN 2"),
+            "a cabin requirement ('+CABIN 2') beside more than one --cabin",
+        ),
+    ],
+    ids=["no-cabin", "two-for-one", "two-cabins"],
+)
+def test_a_cabin_requirement_that_is_not_the_one_asked_names_both(
+    monkeypatch: pytest.MonkeyPatch, args: tuple[str, ...], reason: str
+) -> None:
+    """Red at the base, whose reason quoted the code alone."""
+    _, err = _search_backend(monkeypatch, *args)
+    assert f"Using Matrix: Google Flights can't serve {reason}." in err, err
+
+
+def test_a_cabin_requirement_with_no_cabin_given_to_the_picker_is_matrix_s() -> None:
+    """The picker serves `+CABIN` only beside the one cabin it is told of."""
+    assert _call(extension="+CABIN 2") == BACKEND_MATRIX
+    with pytest.raises(typer.BadParameter, match=re.escape("'+CABIN 2') beside more than one")):
+        _call(BACKEND_GFLIGHT, extension="+CABIN 2")
+
+
+def _search_backend(monkeypatch: pytest.MonkeyPatch, *args: str) -> tuple[list[str], str]:
+    """Run `flight search` on auto with every backend path stubbed, reporting
+    which ran and stderr."""
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    called: list[str] = []
+
+    def _stub(name: str) -> Callable[..., None]:
+        def _path(**_kw: object) -> None:
+            called.append(name)
+
+        return _path
+
+    for name in (
+        "_run_gflight_path",
+        "_run_enriched_path",
+        "_run_matrix_path",
+        "_run_gflight_path_multi",
+        "_run_matrix_path_multi",
+    ):
+        monkeypatch.setattr(cli, name, _stub(name))
+    result = CliRunner().invoke(
+        cli.app,
+        ["search", "--cash-only", "JFK", "LHR", "--dep", _future_dep(), *args],
+        env={"COLUMNS": "250"},
+    )
+    assert result.exit_code == 0, result.output
+    return called, " ".join(result.stderr.split())
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("--ext", "+CABIN 2"),
+        ("--cabin", "business", "--ext", "+CABIN 1 2"),
+        ("--cabin", "economy,business", "--ext", "+CABIN 2"),
+    ],
+    ids=["no-cabin", "two-for-one", "two-cabins"],
+)
+def test_a_cabin_requirement_google_cannot_hold_stays_on_matrix_quoting_it(
+    monkeypatch: pytest.MonkeyPatch, args: tuple[str, ...]
+) -> None:
+    """Green at the base and the tip: Matrix answers it, and says why."""
+    called, err = _search_backend(monkeypatch, *args)
+    assert called in (["_run_matrix_path"], ["_run_matrix_path_multi"])
+    assert re.search(r"Using Matrix: Google Flights can't serve .*'\+CABIN [12 ]+'", err), err
 
 
 # ──────────────────────────────── explicit ─────────────────────────────────
