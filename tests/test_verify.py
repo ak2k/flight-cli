@@ -1218,9 +1218,29 @@ def test_a_summary_states_its_stops_whichever_way_it_writes_a_through_flight() -
     connecting = _solution(
         "AS-1", "USD1.00", "2026-10-20T08:00-04:00", "2026-10-20T13:00-07:00", ["AS21", "AS487"], []
     )
-    whole, short = _answer(nonstop, once, twice), _answer(connecting)
-    assert all(cli._states_every_slice(s) for s in whole.solutions)
-    assert not cli._states_every_slice(short.solutions[0])
+    b6 = _row((_flight("B6999", "JFK", "LAX", "2026-10-20T08:00", "2026-10-20T11:00"),))
+    xx = _row((_flight("XX1", "JFK", "LAX", "2026-10-20T08:00", "2026-10-20T13:00"),))
+    split = _row(
+        (
+            _flight("XX1", "JFK", "DEN", "2026-10-20T08:00", "2026-10-20T10:00"),
+            _flight("XX1", "DEN", "LAX", "2026-10-20T11:00", "2026-10-20T13:00"),
+        )
+    )
+    as_row = _row(
+        (
+            _flight("AS21", "JFK", "SEA", "2026-10-20T08:00", "2026-10-20T10:00"),
+            _flight("AS487", "SEA", "LAX", "2026-10-20T11:00", "2026-10-20T13:00"),
+        )
+    )
+    whole, short = _answer(nonstop, once, twice), _answer(connecting, once)
+    n, o, t = whole.solutions
+    assert cli._states_every_slice(n, b6)
+    assert cli._states_every_slice(o, xx)
+    assert cli._states_every_slice(t, xx)
+    assert cli._states_every_slice(t, split)
+    # Written once, the through flight states no stop at DEN, which the row has.
+    assert not cli._states_every_slice(short.solutions[1], split)
+    assert not cli._states_every_slice(short.solutions[0], as_row)
 
 
 @pytest.mark.parametrize("fmt", ["table", "json"])
