@@ -1786,12 +1786,18 @@ class Board[T](list[T]):
     is how an empty answer tells "none matched the routing" from "Google has no
     flights". `pinned` counts the outbounds a round trip searched returns for,
     because an empty answer from those says nothing about the outbounds it did
-    not pin. `unread` counts the rows the pages served that the parser could
-    not read: a flight on one of them is on Google's board though no row here
-    names it. `history` is the route's, so a filter that restates the insight
-    leaves it as the page gave it. `stop_drops` is set by the caller that built
-    the row filter: the rows it dropped for the stop ceiling, for whichever path
-    shows the board to say so."""
+    not pin. `partial` says the rows stop short of what one search of the same
+    legs would list: a page of a search asked as several did not answer, or a
+    round trip asked as several pages priced each return only between its own
+    page's airports. `unread` counts the rows the pages served that the parser
+    could not read: a flight on one of them is on Google's board though no row
+    here names it. `history` is the route's, so a filter that restates the
+    insight leaves it as the page gave it. `stop_drops` is set by the caller
+    that built the row filter: the rows it dropped for the stop ceiling, for
+    whichever path shows the board to say so. `page_insights` and
+    `page_histories` are set on a board merged from several pages, one per
+    page that carried one, in page order: each describes its page's airports
+    alone, so the merged board's `insight` and `history` are None."""
 
     def __init__(
         self,
@@ -1801,6 +1807,7 @@ class Board[T](list[T]):
         history: PriceHistory | None = None,
         dropped: int = 0,
         pinned: int = 0,
+        partial: bool = False,
         unread: int = 0,
     ) -> None:
         super().__init__(rows)
@@ -1808,8 +1815,11 @@ class Board[T](list[T]):
         self.history = history
         self.dropped = dropped
         self.pinned = pinned
+        self.partial = partial
         self.unread = unread
         self.stop_drops: StopDrops | None = None
+        self.page_insights: tuple[PriceInsight, ...] = ()
+        self.page_histories: tuple[PriceHistory, ...] = ()
 
 
 class _PageUnreadError(GfPageShapeError):
@@ -1830,6 +1840,13 @@ def _itinerary_key(row: GFlightWithId) -> ItineraryKey:
     return tuple(
         (leg.airline, leg.flight_number, leg.departure_datetime) for leg in row.flight.legs
     )
+
+
+def row_key(row: GFlightWithId | tuple[GFlightWithId, ...]) -> tuple[ItineraryKey, ...]:
+    """A served row as the trip it is: a one-way row's itinerary, or each
+    member's of a round-trip combination, in slice order."""
+    members = row if isinstance(row, tuple) else (row,)
+    return tuple(_itinerary_key(m) for m in members)
 
 
 def fare_key(row: GFlightWithId) -> tuple[int, float]:

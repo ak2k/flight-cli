@@ -375,7 +375,9 @@ is measured unbounded, because `console.measure` caps it at the console's.
   carry it. The multi-cabin table does not print it yet. Google's cheapest is
   the unfiltered board's, so when the routing filter removed rows the level is
   restated from the cheapest fare kept (a combination's by its return member)
-  against Google's range, and no line prints when no priced row is kept.
+  against Google's range, and no line prints when no priced row is kept. A
+  board merged from several pages prints none (see "One answer from several
+  Google pages").
 
 **Carrier exclude reads the booking carrier.** `~XX+` / `-AIRLINES XX` drops a
 row only when a leg is booked under XX (`flights[i]`), which is Matrix's meaning
@@ -496,6 +498,9 @@ Every one of these is a multi-megabyte page GET, so the count is the cost:
 |---|---|
 | one-way | 1 |
 | round trip | 1 + min(top_n, rows on the board, `_PINNED_FANOUT_CAP` = 10) |
+| a one-way leg over 11 airports | one per page, at most `MAX_GF_PAGES` = 8 |
+| a round trip over 11 airports a leg | pages + min(top_n, outbounds kept across every page, 10) |
+| `search --split` | 2 more (one each way), 2 per page on a leg asked as several |
 | multi-cabin | the above, times the cabin count; a round trip fetches each cabin's outbound page once, ahead of its pins, and hands it back |
 | a persistently throttled leg | `_THROTTLE_RETRY_ATTEMPTS` + 1 = 5, then it aborts |
 | a transport blip | up to 3 GETs per leg (`_TRANSPORT_RETRY_ATTEMPTS` + 1) |
@@ -731,7 +736,8 @@ left unset, Matrix prices in its own default (GBP from LHR, 2026-09-28) and the
 merged LHR-JFK table ranked GBP1004 above USD1043 (about GBP780) before the
 trim. The rank is the backstop for a row Google still prices in another
 currency, which `cli._note_other_currencies` names on stderr. A Google board is
-one page in one currency, so `cli._price_ordered` keeps bare amounts.
+asked in one currency, every page of it when a leg takes several, so
+`cli._price_ordered` keeps bare amounts.
 
 **What a round-trip row's price means.** The two boards price different things.
 An outbound row carries the cheapest round-trip TOTAL reachable from that
@@ -995,6 +1001,118 @@ and the two outcomes are not symmetric, since refusing degrades to Matrix while
 reading it as an empty tells the user the route has no flights. A zero-row board
 with nothing misplaced is still an authoritative empty.
 
+## One answer from several Google pages
+
+**A search leg over 11 airports is asked as several pages.** One Google page
+takes at most `MAX_GF_LEG_AIRPORTS` = 11 airports a leg, origins plus
+destinations, a metro code counted as its members: on 2026-10-01 it refused one
+leg of 12 (no readable `ds:1`). A single-cabin search over that bound is divided
+into pages by `_metro.gf_leg_pages`. Origins go into `a` contiguous groups and
+destinations into `b`, and page (i, j) asks origin group i against destination
+group j, so every (origin, destination) pair is on exactly one page. `a * b` is
+minimized with each page at most 11 airports, a tie goes to fewer groups on the
+side with more airports, group sizes are as even as possible (the first groups
+one longer) and the typed order is kept. East coast to Europe,
+`JFK,LGA,EWR,BOS,IAD,DCA,BWI,PHL` to
+`LHR,CDG,FRA,AMS,IST,MAD,BCN,FCO,MUC,ZRH,VIE,CPH,DUB` (8 + 13 = 21 airports), is
+4 pages, 2 x 2 (4 + 7 and 4 + 6 airports); a 12-airport origin list to one
+airport is 2 pages of 6 origins. The bound is `MAX_GF_PAGES` = 8: past it, or
+with an airport at both ends, `gf_pages_refusal` names why (`30 airports on one
+leg (more than 8 pages of at most 11)`), `auto` goes to Matrix with that reason
+and `--backend gflight` refuses. Three surfaces keep the one-page bound
+(`gf_leg_refusal`): a multi-cabin search, whose cabins all pin the sort cabin's
+outbounds from one page; the calendar's price graph, which is one page; and the
+pinned Google link, which falls back to the itinerary's own airports. Measured
+2026-10-01, that east-coast-to-Europe one-way as four pages: 1.5-2.6 s a page,
+300, 300, 300 and 189 rows, no row on two pages or outside its own page's
+airports. A page tops out near 300 rows, so more pages also return more rows.
+
+**The pages' rows are merged by the whole itinerary.** `cli._merged_boards`
+keys a row by `_gflight_ids.row_key`: every leg's carrier, flight number and
+departure time, and for a round-trip combination its members' keys in slice
+order. A row on two pages is kept once, at the cheaper listing, in the place
+the first listing took. The merged board then takes the usual price order and
+`-n` trim. It carries no price insight, since each page's insight describes
+its own airports.
+
+**What a paged leg costs.** A one-way is one GET a page. A round trip fetches
+every page's outbound page first, then pins the min(n, 10) cheapest outbounds
+kept across ALL pages (`cli._union_pins`), each on its own page: an outbound
+two pages list is pinned once, on the page that priced it lower, and a page
+that holds no pin costs nothing more. Under a `+CABIN` an outbound is ranked by
+its cheapest listing booked in that cabin (`others`), the one a page pins. So a
+paged round trip is pages + min(n, kept outbounds, 10) GETs, at most 14 for the
+four east-coast-to-Europe pages at the default `-n 10`. Each return is priced within its own page's airports: out
+of JFK and back into IAD, an origin of another page, is not asked. A paged
+round trip that answers prints one dim stderr line saying so.
+
+**A refused page is named and the other pages still answer.** `cli._PageAsk`
+asks the pages in order. A page Google refuses (a 503, a page-shape change,
+consent) is named on stderr with its number and airports, `Google Flights page
+2 of 4 (JFK,LGA,EWR,BOS→FCO,MUC,ZRH,VIE,CPH,DUB) is missing: <reason>.`, and
+the next page is asked. A throttle, a spent transport ladder or a dead browser
+is not a fact about one page, as in the pin loop above, so it stops the asking,
+and each page after it is named `not asked after page N stopped the search`. A
+round trip asks every page's outbounds before any page's returns, so a page
+whose outbounds answered before the stop is named `its returns were not asked
+after page N stopped the search`, and no GET follows a throttle.
+When nothing merged and a page failed, the first failed page's error is raised
+and takes the route a one-page refusal takes ("A Google query that FAILS",
+above). Otherwise the answer is the pages that answered and the JSON list keeps
+its shape, as "A partial round trip is a success, deliberately" sets out: the
+account of the missing pages is stderr. `dropped`, the rows the filter removed,
+is summed over every page, its outbounds pinned or not and its returns, so a
+board that every page's filter emptied is still handed to Matrix under `auto`.
+The board is `partial` when a page is missing or the trip is round, and the
+cross-check (`--enrich`) then names no carrier absent from Google: a missing
+page's flights are not on the board, and a return into another page's airports
+was never asked. `unread`, the rows a page served that the parser could not
+read, is summed as `dropped` is, an outbound page that holds no pin included.
+So are the rows of a page missing because none of them parsed: Google served
+them. Where a board is partial and counts unread rows, a Matrix-only row says
+`google_unread`, not the `not_on_google` the partial board alone leaves, as it
+would on one page: its trip may be one of the unread rows.
+The rows over the stop ceiling are summed as `dropped` is, each counted once,
+for the one stderr line the merged board prints.
+Under `--gf-transport browser` one Chrome serves every page
+(`cli._browser_scope`).
+
+**`calendar --fast -d 5-7` asks one price graph per trip length.** On the
+browser graph only, a range is admitted when its graphs fit the 8-load budget,
+counted before any load at ⌈window days / 31⌉ loads a length
+(`_gf_calgraph.page_budget_blocker`); over it `--fast` refuses with the count,
+`a window and trip-length range needing 12 price-graph loads (at most 8)`.
+`price_graphs` asks each length with the loads the lengths before it left, as
+the calendar beside Matrix does. The table has one column per length.
+`--format json` writes `{"origin", "destination", "currency", "trip_lengths":
+[5, 6, 7], "graphs": [...], "lost": [{"trip_length": n, "reason": text}]}`
+(`cli._graph_range_document`): `graphs` holds the single-length document of
+each length that priced, and `lost` each length that did not, with its reason.
+A lost length is also a stderr line, `Google Flights price graph not shown:
+6-night trips: <reason>`. No length priced names every length that way, then the
+no-grid line, and exits 1.
+`--gf-transport http` still refuses a range, and `-d 7` and a one-way are
+unchanged.
+
+**`search --split` prices two one-way tickets beside a round trip.** On a Google
+Flights round trip, after the answer, it asks the one-ways each way: 2 more page
+loads, 2 per page on a leg asked as several pages, with `--max-price` not
+applied to them. The pair is the cheapest whose return leaves the airport the
+outbound lands at, after it lands; each board is asked alone, so on a same-day
+or overnight trip, or a leg of several destinations, the cheapest each way can
+be a pair no one can fly. The table gets one line after the round-trip table,
+starting `Two one-way tickets:`, with each one-way's price and flights and the
+total, labeled as two separate tickets; the round-trip rows are unchanged.
+`--format json` writes `{"search": <the usual document>, "split_ticket":
+{"outbound": row, "return": row, "total": n, "currency": c}}`, or
+`"split_ticket": {"error": text}` when the one-ways could not be priced or no
+return leaves where an outbound lands, after it lands. A one-way, `--slice`,
+several cabins, `--backend matrix`, `--sellers`, `--verify`, `--awards-only`,
+an award JSON document and the `--enrich --format json` cross-check are usage
+errors; under `auto`, when Matrix answers, one stderr line says the split was
+not priced. Measured 2026-10-01, JFK-LAX 10-20/10-27: round trip from USD412,
+one-ways 229 + 184 = 413.
+
 ## Tier model: who honors each constraint
 
 `routing_predicates.classify(routing, extension)` parses both DSLs into a flat
@@ -1151,12 +1269,16 @@ slice has more flights than one beyond the fewest Matrix listed there before
 it names. Otherwise `not_in_matrix`. A Matrix-only row: `no_google_answer`;
 `outbound_not_priced` on a round trip whose outbound leads no Google
 combination (Google pins at most `pinned_fanout(-n)` outbounds);
-`carrier_absent_google` only on a one-way or beside an outbound Google priced;
-neither of those two on a board the row filter cut; otherwise `not_on_google`.
+`carrier_absent_google` only on a one-way or beside an outbound Google priced,
+and not on a board asked as several pages that misses a page or is a round
+trip (each page prices returns only between its own airports); neither of
+those two on a board the row filter cut; otherwise `not_on_google`.
 While the board counts rows Google served that the parser could not read
 (`Board.unread`, a round trip's summed over its outbound page and every return
 page it read, a return page none of whose rows parsed included though it
-refuses its pin), a Matrix-only row that would say `carrier_absent_google` or
+refuses its pin, and a board asked as several pages summed over every page, a
+page missing because none of its rows parsed included), a
+Matrix-only row that would say `carrier_absent_google` or
 `not_on_google` says `google_unread` ("2 of Google's rows could not be read")
 instead: its trip may be one of them. On the JFK-LAX board cut to DL1788 and
 an unreadable AS21/AS487 row, one row parses, and without the count Matrix's
@@ -1209,7 +1331,7 @@ document, the same -n rows>, "cross_check": {"currency", "delta":
 the prices for the party and `delta` Google minus Matrix on a match. Plain `--format json`
 does not cross-check; on auto a failed Google query is still handed to Matrix,
 as before, and `--fast` asks Matrix nothing. It needs no awards (`--cash-only`)
-and no `--sellers` (exit 2 otherwise); a Google-only flag (`--bags`, an arrival
+and no `--sellers` or `--split` (exit 2 otherwise); a Google-only flag (`--bags`, an arrival
 window, `--exclude-basic`) prints the table's "No Matrix enrichment" note and the
 plain document, and `--verify` prints its own such note
 and writes `{"search", "verify"}` instead. Matrix failing leaves `cross_check`
@@ -1258,8 +1380,9 @@ exits rather than the broad except's, so what the user reads is the standing
 reason; the broad except keeps the same exit code for whatever a live transport
 throws once the gate flips. When the grid branch does not apply at all (a code
 that is neither an airport nor a metro code in `_metro.py`, a leg of more than
-11 airports or with one airport at both ends, routing above Tier-1, a Tier-1
-code or zero bound the request would leave out, a trip-length range, or a
+11 airports (a grid is one page) or with one airport at both ends, routing above
+Tier-1, a Tier-1 code or zero bound the request would leave out, a trip-length
+range over `--gf-transport http` or past the browser graph's 8 loads, or a
 constraint the search page's URL cannot carry) `--fast` refuses up front on
 **stderr**, naming the shape, before any Matrix call or JSON write — stdout under
 a JSON request carries a document or nothing, never prose (work-h70kv.9). So a wrapper doing `--fast || fallback` can trust the exit
@@ -1326,9 +1449,11 @@ exits 1 with the rung's install remedy, never a fallback. Without `--fast` the
 same graph prints after Matrix's calendar (below); `http` keeps Matrix's
 calendar alone, and `--gf-headed` with `http` is a usage error.
 
-- **Shape.** One-way, or a round trip of ONE trip length (`-d 7`): the page's
-  graph prices the trip length its own dates imply, so `5-7` refuses. Every
-  round-trip cell's return date is checked against that length.
+- **Shape.** One-way, or a round trip: one graph prices the trip length its own
+  dates imply, so a range (`-d 5-7`) is one graph per length within the
+  8-load budget (see "One answer from several Google pages"), and `--fast
+  --gf-transport http` refuses it. Every round-trip cell's return date is
+  checked against its graph's length.
 - **Airport sets.** A comma-list or metro code on either side is one page: the
   bridge writes every member airport into the URL, and the graph prices each
   date at the cheapest of them. Measured 2026-09-28, one-way, 14 dates each:
@@ -1336,8 +1461,10 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
   the three was the cheapest on some date), and JFK,EWR→LHR on all 14. A round
   trip is not compared that way on purpose: the set page may return to another
   airport of the origin set, as a Matrix metro code does, so its price can sit
-  below the minimum of mirrored pairs. The airports are checked as a search's
-  are (`gf_leg_refusal`, then `_gf_unserveable_reasons` on the expanded codes).
+  below the minimum of mirrored pairs. The airports are checked against ONE
+  page's bound (`gf_leg_refusal`; a single-cabin search over it is asked as
+  several pages, a graph is not), then `_gf_unserveable_reasons` on the
+  expanded codes.
   The JSON names the user's tokens (`"NYC"`, `"JFK,EWR"`), as the table title
   does. Over `--gf-transport http` a set refuses with the browser note, since
   `date_grid` writes one airport per side; without `--fast` Matrix answers it
@@ -1413,7 +1540,9 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
 - **Output.** The table is `_render_date_grid` with the trip length in the
   summary line; `--format json` writes
   `{origin, destination, currency, trip_length, grid: [{departure, return?, price}]}`
-  alone on stdout, with no URL lines.
+  alone on stdout, with no URL lines. A range prints one column per length and
+  writes the range document, one such document per length that priced
+  (`cli._graph_range_document`).
 - **Without `--fast`.** A table calendar reads the graph beside Matrix
   (`cli._run_calendar_beside_graph`). The graph runs on one worker thread,
   started before Matrix's first request, and Matrix runs and delivers on the

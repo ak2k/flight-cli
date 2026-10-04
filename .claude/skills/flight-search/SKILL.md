@@ -16,7 +16,7 @@ intent into the right invocation **on the first try**.
 | Command | Purpose |
 |---|---|
 | `flight search ORIGIN DEST --dep YYYY-MM-DD [--return YYYY-MM-DD]` | Specific-date search. Auto-picks Google Flights for plain cash queries and ITA Matrix when a constraint Google can't serve is set (ordered or positional routing, fare construction, multi-city slice, time-of-day buckets with a gap like `morning,evening`, seniors, youth, an infant on a multi-cabin compare, a `--flex` or `--arrive` date); a stop cap, a carrier include (`XX+`, `AIRLINES`) or one `ALLIANCE` (not both), `MAXDUR`, `MINCONNECT`/`MAXCONNECT`, one time-of-day window per leg or one window to the minute (`--depart-times 9:30-13:45`), an arrival window (`--arrive-times 18:00-21:30`), `-REDEYES`/`-OVERNIGHTS`, `--children`, infants (`--inf-lap`, `--inf-seat`), carrier excludes (`~XX+`, `-AIRLINES`), operating carrier (`O:XX+`, `OPAIRLINES`), `-CODESHARE`, a lone flight number (`DL747`, `AS21+`, `AA1-3000`: the slice is that one flight) and a `+CABIN` naming the one `--cabin` asked stay on Google, which serves its full board (`-n` above 30 works) and checks every row against them except `ALLIANCE`, `--children` and infants, where Google's answer is taken as given; rows over the stop cap are dropped and counted on stderr. Google has served a party with an infant no rows on a route with flights (JFK-LAX), so under auto that empty board goes to Matrix with a note. `--bags`, the arrival windows beside `--dep` and `--exclude-basic` are Google-only: refused where the search needs Matrix, and never handed to it afterwards. Carrier lists take space-separated codes (`-AIRLINES UA DL`); a comma list goes to Matrix, which refuses it. Force with `--backend matrix\|gflight`. PointsPath award overlay runs on both backends when tokens are present. |
-| `flight calendar ORIGIN DEST --start YYYY-MM-DD [--end ...] [-d 5-7]` | Lowest-fare grid across a date window. Default round-trip; `--one-way` flips. Matrix answers first; a multi-airport grid names the airport pair behind each cell (`origin`/`destination` in JSON, a `route` column in the table), the two arguments `detail` takes; a table calendar then prints Google Flights' price graph for the same window, read through a headless Chrome while Matrix runs (one column per trip length of a range, each date priced at the set's cheapest for comma-lists or metro codes; at most 8 page loads). The graph takes a stop cap, cabin, adults, ONE carrier include (`XX+`, `AIRLINES`) or ONE `ALLIANCE`, `MAXDUR`, `MINCONNECT`/`MAXCONNECT`, and on a one-way a `--depart-times` window that ends at 23:59 (`night`, `evening,night`). A calendar Google can't ask gets a "not asked" line, a Google failure a "not shown" line, and neither changes Matrix's output or exit code; calendars run in parallel contend for one Chrome profile, and one that cannot open it prints "not shown" and still gets Matrix's answer. When the two lows differ, one stderr line after Google's table names each with its date pair, trip length and airports, says what both asked, and gives a `flight detail` and a `flight search --backend gflight` command, each repeating the calendar's flags, that show which fare is bookable; quote a fare from either table only after running its command. `--gf-transport http` skips Chrome. `--fast` shows the graph alone (one-way or one trip length like `-d 7`) and exits 1 rather than fall back. |
+| `flight calendar ORIGIN DEST --start YYYY-MM-DD [--end ...] [-d 5-7]` | Lowest-fare grid across a date window. Default round-trip; `--one-way` flips. Matrix answers first; a multi-airport grid names the airport pair behind each cell (`origin`/`destination` in JSON, a `route` column in the table), the two arguments `detail` takes; a table calendar then prints Google Flights' price graph for the same window, read through a headless Chrome while Matrix runs (one column per trip length of a range, each date priced at the set's cheapest for comma-lists or metro codes; at most 8 page loads). The graph takes a stop cap, cabin, adults, ONE carrier include (`XX+`, `AIRLINES`) or ONE `ALLIANCE`, `MAXDUR`, `MINCONNECT`/`MAXCONNECT`, and on a one-way a `--depart-times` window that ends at 23:59 (`night`, `evening,night`). A calendar Google can't ask gets a "not asked" line, a Google failure a "not shown" line, and neither changes Matrix's output or exit code; calendars run in parallel contend for one Chrome profile, and one that cannot open it prints "not shown" and still gets Matrix's answer. When the two lows differ, one stderr line after Google's table names each with its date pair, trip length and airports, says what both asked, and gives a `flight detail` and a `flight search --backend gflight` command, each repeating the calendar's flags, that show which fare is bookable; quote a fare from either table only after running its command. `--gf-transport http` skips Chrome. `--fast` shows the graph alone (one-way, one trip length like `-d 7`, or a range like `-d 5-7` as one column per length within 8 page loads; over `--gf-transport http` one trip length only) and exits 1 rather than fall back. |
 | `flight detail ORIGIN DEST --dep YYYY-MM-DD [--return YYYY-MM-DD] --start ... --end ... [-d 5-7]` | Phase-2 of the calendar flow: full itineraries for a date picked from the grid. Matrix only. Pass every filter the calendar was given — `--routing`/`--ext` (and `--routing-ret`/`--ext-ret`), `--depart-times`/`--return-times`, `--include-unavailable`, `--stops`, cabin, passengers — or its itineraries answer a wider question than the grid priced. |
 | `flight explore ORIGIN [--month YYYY-MM] [--days A-B] [--max-price P]` | "Where can I fly from here, under this price?": Google Flights' explore page (Chrome), priced destinations cheapest first; `--days` must overlap exactly one of weekend (1-4), one week (6-9), two weeks (13-16) nights, and the trips listed span that whole length (5-7 lists 6-9 nights); `--month` must be in the next six months. For "who sells this itinerary cheapest", with each seller's bag fees and booking link, add `--sellers [--pick N]` to `flight search`. |
 | `flight airport QUERY` | IATA / partial-name autocomplete. |
@@ -24,7 +24,7 @@ intent into the right invocation **on the first try**.
 
 Global flags (every search-printing command):
 - `-v` / `-vv` — verbose logging (cache hits, retries) to stderr
-- `--format envelope` — `search` and `calendar`: one JSON object with the same keys on every path (`version`, `command`, `backend`, `currency`, `complete`, `notes`, `results`, `awards`, `insight`, `price_history`, `verify`, `cross_check`). Use it whenever the output is read by a program: `complete: false` means the answer is narrower than asked, and `notes` says why
+- `--format envelope` — `search` and `calendar`: one JSON object with the same keys on every path (`version`, `command`, `backend`, `currency`, `complete`, `notes`, `results`, `awards`, `insight`, `price_history`, `verify`, `cross_check`, `split_ticket`). Use it whenever the output is read by a program: `complete: false` means the answer is narrower than asked, and `notes` says why
 - `--format json` — the answering path's own shape (Google Flights rows, Matrix's raw response, `{cabin: …}`, or the award document); `--json` is a deprecated alias for it
 - `--no-cache` — bypass the on-disk response cache
 - `--matrix-url` / `--google-url` — toggle deep-link emission
@@ -44,6 +44,7 @@ Global flags (every search-printing command):
 - `--slice 'JFK-LHR:2026-10-20:f=1:d=arrive'` — a slice takes `--flex`'s values as `f=` and an arrival date as `d=arrive`, beside `r=`/`e=`; `--flex`/`--arrive` and their return twins are refused beside `--slice`.
 - Awards on a `--flex` or `--arrive` search are asked for departures on the typed date only, and a stderr line says so.
 - `--exclude-basic` — `search` only, Google Flights only: asks Google for economy without basic fares (on JFK-LAX it repriced 78 of 93 fares up). No row says whether its fare is basic, so the rows cannot be checked, and Google served basic fares on JFK-LHR anyway; every run says so on stderr. Refused rather than sent to Matrix; `--cabin economy` alone, no `--sellers` or `--verify` (neither the booking page nor Matrix is asked to leave basic fares out).
+- `--split` — `search` only, a Google Flights round trip: after the answer, prices one-way tickets each way (2 more page loads, 2 per page on a leg asked as several pages; `--max-price` not applied) and prints one `Two one-way tickets:` line with the cheapest pair whose return leaves the airport the outbound lands at, after it lands, and their total, labeled as two separate tickets; JSON becomes `{"search": …, "split_ticket": …}`, and `--format envelope` carries the same object under `split_ticket`. A usage error on a one-way, `--slice`, several cabins, `--backend matrix`, `--sellers`, `--verify`, `--awards-only`, `--enrich --format json` or `envelope`, or an award search under either format.
 - Google rows carry Google's own CO2 estimate, no flag needed: JSON `co2_emissions_g`, `co2_emissions_typical_g` (the route's typical), `co2_emissions_delta_pct` and `emissions_tag` (`lower` / `typical` / `higher`), plus each leg's `co2_emissions_g`; the table's `CO2 kg` column shows kilograms and the percent (green lower, red higher). Null or blank where Google states none.
 - `--providers pp[,seats]` — restrict to a named subset of award providers (default: all configured)
 - Awards over an airport set or metro code (`JFK,EWR`, `NYC`) are asked pair by pair, at most 8 pairs a search (pairs the cash rows fly first); the pairs left out are named on stderr and in the JSON leg's `pairs_not_asked`, so narrow the set rather than trust a missing award there
@@ -230,9 +231,13 @@ When users mention regions / metros, expand to the right IATA list. Two flavors:
 **IATA metro codes Matrix accepts as a single token** (prefer these). `flight
 search` and `flight calendar --fast` serve them on Google Flights over every
 airport listed; `HOU`, `LAX`, `BER`, `SHA`, `BKK` and `DPS` are also airport
-codes and stay that one airport there. A leg of more than 11 airports (origins
-plus destinations, metro codes counted as their members) goes to Matrix, and
-`--fast` refuses it:
+codes and stay that one airport there. One Google page takes 11 airports a leg
+(origins plus destinations, metro codes counted as their members). A
+single-cabin `flight search` over that is asked as several pages, up to 8, and
+the rows merged. A leg past 8 pages, a multi-cabin search over 11, and a leg
+with an airport at both ends go to Matrix. `flight calendar` keeps the bound
+of 11: `--fast` refuses a leg over it, and without `--fast` Matrix answers it
+alone:
 
 | Metro | Code | Airports it covers |
 |---|---|---|
@@ -345,6 +350,15 @@ User: "find me a cheap flight from anywhere on the east coast to anywhere in Eur
 flight calendar 'JFK,LGA,EWR,BOS,IAD,DCA,BWI,PHL' \
                 'LHR,CDG,FRA,AMS,IST,MAD,BCN,FCO,MUC,ZRH,VIE,CPH,DUB' \
                 --start 2026-09-01 --end 2026-09-30 -d 7-10
+```
+A calendar over 11 airports still runs on Matrix (one sub-search per airport
+pair, 104 here, and on this round trip the combined query beside them), without
+Google's price graph. For one date, `flight search` over the same 21 airports
+is answered by Google Flights as 4 pages:
+```bash
+flight search 'JFK,LGA,EWR,BOS,IAD,DCA,BWI,PHL' \
+              'LHR,CDG,FRA,AMS,IST,MAD,BCN,FCO,MUC,ZRH,VIE,CPH,DUB' \
+              --dep 2026-09-15
 ```
 
 ### Example 7: specific carrier + connection time
