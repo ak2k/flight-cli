@@ -422,3 +422,21 @@ def test_hostile_rule_text_is_printed_as_text(
     assert result.exit_code == 0, result.output
     assert "[/x]BAD[bold]" in result.stdout
     assert "\x1b" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [pytest.param("legs", None, id="legs-null"), pytest.param("origin", "JFK", id="origin-scalar")],
+)
+def test_booked_flights_the_model_cannot_read_do_not_fail_the_rules(
+    matrix: _Matrix, monkeypatch: pytest.MonkeyPatch, key: str, value: object
+) -> None:
+    """Red at the base: the itinerary's validation error failed the run, and
+    the rules are read from the fares beside it."""
+    details = _fixture("summarize/booking_details_jfk_lhr_rt_gbp.json")
+    details["bookingDetails"]["itinerary"]["slices"][0]["segments"][0][key] = value
+    _answer_details_with(matrix, monkeypatch, details)
+    result = _run("--fare-rules", *_QUIET)
+    assert result.exit_code == 0, result.output
+    assert "JFK→LHR  AA  fare basis OLN0T0BV  booking code B  COACH" in result.stdout
+    assert "TICKET IS NON-REFUNDABLE." in result.stdout

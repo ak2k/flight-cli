@@ -12,7 +12,14 @@ from __future__ import annotations
 from datetime import datetime  # noqa: TC003
 from typing import Any, cast
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    ValidatorFunctionWrapHandler,
+    field_validator,
+)
 
 
 class _Loose(BaseModel):
@@ -426,6 +433,18 @@ class BookingDetails(_Loose):
     # The only place Matrix dates each flight of a connection: a search's
     # slice gives the day of its two ends alone.
     itinerary: BookedItinerary | None = None
+
+    @field_validator("itinerary", mode="wrap")
+    @classmethod
+    def _itinerary_or_none(
+        cls, value: Any, handler: ValidatorFunctionWrapHandler
+    ) -> BookedItinerary | None:
+        # `--fare-rules` reads only the fares beside it, so an itinerary in a
+        # shape this model does not know reads as one Matrix did not send.
+        try:
+            return cast("BookedItinerary | None", handler(value))
+        except ValidationError:
+            return None
 
     @property
     def pricings(self) -> list[TicketPricing]:

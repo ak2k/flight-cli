@@ -9,12 +9,14 @@ launcher seam is pointed at a fake, and the conftest guard stays on.
 from __future__ import annotations
 
 import io
+import shlex
 import signal
 import threading
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any, NoReturn, override
 
 import pytest
+import typer
 from rich.console import Console
 from typer.testing import CliRunner
 
@@ -24,15 +26,18 @@ from flight_cli import cli
 from flight_cli._gf_errors import GfBrowserUnavailableError, GfConsentError, GfThrottledError
 from flight_cli.client import MatrixApiError
 from flight_cli.domain import CalendarSearch, CalendarWindow, Leg
+from flight_cli.routing_predicates import MaxDurationPred, classify
 from test_calendar_split import _result
 
 if TYPE_CHECKING:
     import pathlib
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Sequence
 
     from click.testing import Result
 
+    from flight_cli.domain import CalendarFollowup
     from flight_cli.models import CalendarResult
+    from flight_cli.routing_predicates import Predicate
 
 # Far enough out that fli's travel-date validation never sees the past.
 _START = date.today() + timedelta(days=60)
@@ -712,6 +717,412 @@ def test_a_matrix_failure_keeps_its_lines_and_exit_code_under_googles_table(
     assert result.stderr == base.stderr
     assert result.stdout.startswith(base.stdout)
     assert "NYC → LON: lowest fare per departure day" in _flat(result.stdout)
+
+
+# ───────────────────────────── the two lows ──────────────────────────────────
+
+_DIFFER = "Matrix and Google Flights differ on the lowest fare:"
+_STOP_CLAUSE = (
+    "; Matrix held each direction to one stop more than the fewest on its route, "
+    "Google allowed any number of stops."
+)
+_ONE_WAY_STOP_CLAUSE = _STOP_CLAUSE.replace("each direction", "each trip")
+_HOW = (
+    "Matrix's grid is fares Matrix priced; Google's graph is one price per date pair "
+    "with no itinerary behind it; either can leave out a fare the other lists."
+)
+# A day's lowest fare, and its fare per trip length.
+_Day = tuple[str, dict[int, str]]
+
+
+def _iso(offset: int) -> str:
+    return (_START + timedelta(days=offset)).isoformat()
+
+
+def _matrix_prices(
+    monkeypatch: pytest.MonkeyPatch, days: dict[int, _Day], pairs: dict[str, dict[int, _Day]]
+) -> list[CalendarSearch]:
+    """Matrix prices `_START + offset` for each offset of `days`, filed by month as
+    Matrix files it; a query between the airports a key of `pairs` names
+    ("EWR-LGW") prices that key's days instead. Returns the queries it is asked."""
+    asked: list[CalendarSearch] = []
+
+    class _Priced(_Matrix):
+        @override
+        async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
+            del cache
+            asked.append(search)
+            leg = search.legs[0]
+            answer = pairs.get(f"{','.join(leg.origins)}-{','.join(leg.destinations)}", days)
+            by_month: dict[int, dict[int, tuple[str, int, dict[int, str]]]] = {}
+            for offset, (low, nights) in answer.items():
+                when = _START + timedelta(days=offset)
+                by_month.setdefault(when.month, {})[when.day] = (low, 3, nights)
+            return _result(by_month)
+
+    monkeypatch.setattr(cli, "MatrixClient", _Priced)
+    return asked
+
+
+def _note(result: Result) -> str:
+    """The one note on stderr, flattened, from its opening to the end."""
+    err = _flat(result.stderr)
+    opening = "Matrix and Google Flights "
+    assert err.count(opening) == 1, err
+    return err[err.index(opening) :]
+
+
+_JFK_LHR_DAY = {2: ("USD500.00", {5: "USD500.00", 7: "USD520.00"})}
+_JFK_LHR_GRAPHS: dict[int | None, cg.PriceGraph | BaseException] = {
+    5: _graph(5, (0, 340.0)),
+    6: _graph(6, (1, 300.0)),
+    7: _graph(7, (0, 300.0), (1, 310.0)),
+}
+
+
+def test_two_lows_that_differ_get_one_note_naming_both_on_stderr_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Google's 300 is on its first row, 7 nights from the first day, ahead of the
+    same 300 at 6 nights a day later."""
+    _matrix_prices(monkeypatch, _JFK_LHR_DAY, {})
+    _graphs_are(monkeypatch, _JFK_LHR_GRAPHS)
+
+    def _no_note(*_a: object, **_k: object) -> None:
+        return None
+
+    with monkeypatch.context() as m:
+        m.setattr(cli, "_two_lows_note", _no_note, raising=False)
+        quiet = _run("JFK", "LHR", "-d", "5-7")
+    result = _run("JFK", "LHR", "-d", "5-7")
+    note = (
+        f"{_DIFFER} Matrix USD500.00 ({_iso(2)} to {_iso(7)}, 5 nights, JFK→LHR), "
+        f"Google Flights USD300 ({_iso(0)} to {_iso(7)}, 7 nights, JFK→LHR). "
+        "Both asked economy, 1 adult, 5-7 nights, in USD, between the same airports"
+        f"{_STOP_CLAUSE[:-1]}. {_HOW} A search on the date pair shows what is bookable: "
+        f"flight detail JFK LHR --dep {_iso(2)} --return {_iso(7)} (Matrix), "
+        f"flight search JFK LHR --dep {_iso(0)} --return {_iso(7)} --backend gflight (Google)."
+    )
+    assert result.exit_code == quiet.exit_code == 0, result.output
+    assert result.stdout == quiet.stdout
+    assert _note(result) == note
+    assert _flat(_flat(result.stderr).replace(note, "")) == _flat(quiet.stderr)
+
+
+@pytest.mark.parametrize(
+    ("limit", "flags"),
+    [(("--stops", "1"), "--stops 1"), (("--ext", "MAXSTOPS 1"), "--ext 'MAXSTOPS 1'")],
+    ids=["stops", "stop-code"],
+)
+def test_a_stop_limit_google_was_asked_drops_the_stop_clause(
+    limit: tuple[str, str], flags: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _matrix_prices(monkeypatch, _JFK_LHR_DAY, {})
+    _graphs_are(monkeypatch, _JFK_LHR_GRAPHS)
+    result = _run("JFK", "LHR", "-d", "5-7", *limit)
+    note = _note(result)
+    assert result.exit_code == 0, result.output
+    assert note.startswith(_DIFFER)
+    assert "between the same airports. Matrix's grid" in note
+    assert "one stop more than the fewest" not in note
+    assert "any number of stops" not in note
+    assert f"--return {_iso(7)} {flags} (Matrix)" in note
+    assert f"--return {_iso(7)} {flags} --backend gflight (Google)." in note
+
+
+def test_a_metro_low_names_matrixs_pair_and_googles_cheapest_across_the_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _matrix_prices(
+        monkeypatch,
+        {2: ("USD500.00", {5: "USD500.00"})},
+        {"EWR-LGW": {2: ("USD450.00", {5: "USD450.00", 6: "USD470.00"})}},
+    )
+    _graphs_are(monkeypatch, {n: _graph(n, (0, 300.0 + n)) for n in (5, 6, 7)})
+    result = _run("NYC", "LON", "-d", "5-7")
+    note = _note(result)
+    assert result.exit_code == 0, result.output
+    assert note.startswith(
+        f"{_DIFFER} Matrix USD450.00 ({_iso(2)} to {_iso(7)}, 5 nights, EWR→LGW), "
+        f"Google Flights USD305 ({_iso(0)} to {_iso(5)}, 5 nights, cheapest across NYC→LON). "
+    )
+    assert note.endswith(
+        f"flight detail EWR LGW --dep {_iso(2)} --return {_iso(7)} --currency USD (Matrix), "
+        f"flight search NYC LON --dep {_iso(0)} --return {_iso(5)} --backend gflight (Google)."
+    )
+
+
+def test_a_one_way_names_one_date_and_no_nights(monkeypatch: pytest.MonkeyPatch) -> None:
+    _matrix_prices(monkeypatch, {2: ("USD500.00", {})}, {})
+    _graphs_are(monkeypatch, {None: _graph(None, (0, 300.0), (1, 320.0))})
+    result = _run("JFK", "LHR", "--one-way")
+    assert result.exit_code == 0, result.output
+    assert _note(result) == (
+        f"{_DIFFER} Matrix USD500.00 ({_iso(2)}, one-way, JFK→LHR), "
+        f"Google Flights USD300 ({_iso(0)}, one-way, JFK→LHR). "
+        "Both asked economy, 1 adult, one-way, in USD, between the same airports"
+        f"{_ONE_WAY_STOP_CLAUSE[:-1]}. {_HOW} A search on the date shows what is bookable: "
+        f"flight detail JFK LHR --dep {_iso(2)} (Matrix), "
+        f"flight search JFK LHR --dep {_iso(0)} --backend gflight (Google)."
+    )
+
+
+def test_a_lost_length_names_the_lengths_google_priced_after_its_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _matrix_prices(monkeypatch, _JFK_LHR_DAY, {})
+    _graphs_are(monkeypatch, {5: _graph(5, (0, 300.0)), 6: _graph(6, (0, 310.0)), 7: _missed()})
+    result = _run("JFK", "LHR", "-d", "5-7")
+    err = _flat(result.stderr)
+    note = _note(result)
+    assert result.exit_code == 0, result.output
+    assert err.index(f"{_NOT_SHOWN} 7-night trips:") < err.index(_DIFFER)
+    assert (
+        "Both asked economy, 1 adult, in USD, between the same airports, Matrix for "
+        f"5-7 nights; Google's graph priced 5-6-night trips only{_STOP_CLAUSE}"
+    ) in note
+    assert f"Google Flights USD300 ({_iso(0)} to {_iso(5)}, 5 nights, JFK→LHR)" in note
+
+
+def test_a_range_left_with_one_length_names_that_length(monkeypatch: pytest.MonkeyPatch) -> None:
+    _matrix_prices(monkeypatch, _JFK_LHR_DAY, {})
+    _graphs_are(monkeypatch, {5: _graph(5, (0, 300.0)), 6: _missed(), 7: _missed()})
+    result = _run("JFK", "LHR", "-d", "5-7")
+    note = _note(result)
+    assert result.exit_code == 0, result.output
+    assert "5-night trips only" in note
+    assert "5-5-night" not in note
+
+
+@pytest.mark.parametrize("low", ["GBP400.00", "GBP300.00"], ids=["apart", "same-number"])
+def test_a_matrix_grid_in_another_currency_is_named_and_not_compared(
+    low: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _matrix_prices(monkeypatch, {2: (low, {5: low})}, {})
+    _graphs_are(monkeypatch, {n: _graph(n, (0, 300.0)) for n in (5, 6, 7)})
+    result = _run("LHR", "JFK", "-d", "5-7")
+    note = _note(result)
+    assert result.exit_code == 0, result.output
+    assert _DIFFER not in note
+    assert note.startswith(
+        "Matrix and Google Flights priced in different currencies, so their lowest fares "
+        f"are not compared: Matrix {low} ({_iso(2)} to {_iso(7)}, 5 nights, LHR→JFK), "
+        f"Google Flights USD300 ({_iso(0)} to {_iso(5)}, 5 nights, LHR→JFK); "
+        "--currency USD asks Matrix in USD. Both asked economy, 1 adult, 5-7 nights, "
+        "between the same airports;"
+    )
+    assert "in USD, between" not in note
+
+
+def test_a_low_in_a_later_month_of_the_window_is_dated_in_that_month(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Matrix files a day by month and day of month; 35 days on is always in a
+    later month than the window's first day."""
+    _matrix_prices(
+        monkeypatch,
+        {3: ("USD520.00", {5: "USD520.00"}), 35: ("USD500.00", {6: "USD500.00"})},
+        {},
+    )
+    _graphs_are(monkeypatch, {n: _graph(n, (0, 300.0)) for n in (5, 6, 7)})
+    result = _run("JFK", "LHR", "-d", "5-7", end=_START + timedelta(days=40))
+    assert result.exit_code == 0, result.output
+    assert f"Matrix USD500.00 ({_iso(35)} to {_iso(41)}, 6 nights, JFK→LHR)" in _note(result)
+
+
+def test_both_commands_ask_the_calendars_own_question(monkeypatch: pytest.MonkeyPatch) -> None:
+    _matrix_prices(monkeypatch, {2: ("USD900.00", {3: "USD900.00", 4: "USD950.00"})}, {})
+    _graphs_are(monkeypatch, {n: _graph(n, (1, 700.0)) for n in (3, 4)})
+    asked = ("--cabin", "business", "--adults", "2", "--stops", "1", "--routing", "AA+")
+    result = _run("JFK", "LHR", "-d", "3-4", *asked)
+    note = _note(result)
+    assert result.exit_code == 0, result.output
+    assert "Both asked business, 2 adults, 3-4 nights, in USD, between the same airports." in note
+    assert note.endswith(
+        f"flight detail JFK LHR --dep {_iso(2)} --return {_iso(5)} -d 3-4 --cabin business "
+        "--adults 2 --stops 1 --routing AA+ (Matrix), "
+        f"flight search JFK LHR --dep {_iso(1)} --return {_iso(4)} --cabin business --adults 2 "
+        "--stops 1 --routing AA+ --backend gflight (Google)."
+    )
+
+
+def test_the_detail_it_names_asks_matrix_in_the_currency_its_grid_was_asked_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two origins and no `--currency` ask Matrix's grid in USD; one London pair
+    asked alone would answer in pounds."""
+    asked = _matrix_prices(monkeypatch, {2: ("USD500.00", {5: "USD500.00"})}, {})
+    _graphs_are(monkeypatch, {n: _graph(n, (0, 300.0)) for n in (5, 6, 7)})
+    result = _run("LON", "PAR", "-d", "5-7")
+    note = _note(result)
+    assert result.exit_code == 0, result.output
+    detail: list[CalendarFollowup] = []
+
+    def _sent(search: CalendarFollowup, *_a: object) -> NoReturn:
+        detail.append(search)
+        raise typer.Exit(0)
+
+    monkeypatch.setattr(cli, "_run", _sent)
+    command = shlex.split(note[note.index("flight detail ") : note.index(" (Matrix)")])
+    ran = CliRunner().invoke(cli.app, command[1:])
+    assert ran.exit_code == 0, ran.output
+    assert {s.options.currency for s in asked} == {"USD"}
+    assert [s.options.currency for s in detail] == ["USD"]
+
+
+def test_the_note_is_one_line_so_a_narrow_terminal_breaks_no_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A newline inside a command would cut it short when pasted."""
+    _matrix_prices(monkeypatch, _JFK_LHR_DAY, {})
+    _graphs_are(monkeypatch, _JFK_LHR_GRAPHS)
+    monkeypatch.setenv("COLUMNS", "80")
+    monkeypatch.setattr(cli, "err", Console(stderr=True))
+    result = _run("JFK", "LHR", "-d", "5-7")
+    assert result.exit_code == 0, result.output
+    (line,) = [ln for ln in result.stderr.splitlines() if "Matrix and Google Flights" in ln]
+    assert line.startswith("Matrix and Google Flights differ on the lowest fare:")
+    assert line.endswith(
+        f"flight detail JFK LHR --dep {_iso(2)} --return {_iso(7)} (Matrix), "
+        f"flight search JFK LHR --dep {_iso(0)} --return {_iso(7)} --backend gflight (Google)."
+    )
+
+
+@pytest.mark.parametrize("sep", ["\r", "\n", "\u2028"], ids=["cr", "lf", "line-separator"])
+def test_a_code_typed_across_any_whitespace_is_asked_again_on_the_notes_one_line(
+    monkeypatch: pytest.MonkeyPatch, sep: str
+) -> None:
+    """The codes' parsers split on any whitespace; the console drops some of it,
+    which joins a code to its argument, and breaks the line on the rest."""
+    asked = _matrix_prices(monkeypatch, _JFK_LHR_DAY, {})
+    _graphs_are(monkeypatch, _JFK_LHR_GRAPHS)
+    result = _run("JFK", "LHR", "-d", "5-7", "--ext", f"MAXDUR{sep}9:00")
+    assert result.exit_code == 0, result.output
+    (line,) = [ln for ln in result.stderr.splitlines() if "Matrix and Google Flights" in ln]
+    assert line.endswith(
+        f"flight detail JFK LHR --dep {_iso(2)} --return {_iso(7)} --ext 'MAXDUR 9:00' "
+        f"(Matrix), flight search JFK LHR --dep {_iso(0)} --return {_iso(7)} "
+        "--ext 'MAXDUR 9:00' --backend gflight (Google)."
+    )
+    replayed: list[tuple[Leg, ...]] = []
+
+    def _detail(search: CalendarFollowup, *_a: object) -> NoReturn:
+        replayed.append(search.legs)
+        raise typer.Exit(0)
+
+    def _search(*, legs: tuple[Leg, ...], **_kw: object) -> NoReturn:
+        replayed.append(legs)
+        raise typer.Exit(0)
+
+    monkeypatch.setattr(cli, "_run", _detail)
+    for path in ("_run_enriched_path", "_run_gflight_path", "_run_matrix_path"):
+        monkeypatch.setattr(cli, path, _search)
+    for start, end in (("flight detail ", " (Matrix)"), ("flight search ", " (Google)")):
+        command = shlex.split(line[line.index(start) : line.index(end)])
+        ran = CliRunner().invoke(cli.app, command[1:])
+        assert ran.exit_code == 0, ran.output
+
+    def _codes(legs: Sequence[Leg]) -> list[tuple[Predicate, ...]]:
+        return [classify(leg.route_language, leg.extension).predicates for leg in legs]
+
+    assert len(replayed) == 2
+    assert _codes(replayed[0]) == _codes(replayed[1]) == _codes(asked[0].legs)
+    assert _codes(asked[0].legs)[0] == (MaxDurationPred(minutes=540),)
+
+
+def test_a_price_matrix_wrote_is_printed_as_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    _matrix_prices(monkeypatch, {2: ("USD[/x]500.00", {5: "USD[/x]500.00"})}, {})
+    _graphs_are(monkeypatch, {n: _graph(n, (0, 300.0)) for n in (5, 6, 7)})
+    result = _run("JFK", "LHR", "-d", "5-7")
+    assert result.exit_code == 0, result.output
+    assert f"{_DIFFER} Matrix USD[/x]500.00 ({_iso(2)} to {_iso(7)}" in _note(result)
+
+
+@pytest.mark.parametrize(
+    ("days", "graphs", "not_shown"),
+    [
+        ({2: ("USD300.00", {5: "USD300.00"})}, {n: _graph(n, (0, 300.0)) for n in (5, 6, 7)}, 0),
+        ({2: ("USD300.40", {5: "USD300.40"})}, {n: _graph(n, (0, 300.0)) for n in (5, 6, 7)}, 0),
+        ({2: ("USD299.50", {5: "USD299.50"})}, {n: _graph(n, (0, 299.8)) for n in (5, 6, 7)}, 0),
+        ({}, {n: _graph(n, (0, 300.0)) for n in (5, 6, 7)}, 0),
+        (_JFK_LHR_DAY, {n: GfThrottledError("x") for n in (5, 6, 7)}, 1),
+    ],
+    ids=["equal", "cents-apart", "both-print-300", "matrix-priced-nothing", "graph-failed"],
+)
+def test_lows_that_agree_or_a_side_that_priced_nothing_get_no_note(
+    days: dict[int, _Day],
+    graphs: dict[int | None, cg.PriceGraph | BaseException],
+    not_shown: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _matrix_prices(monkeypatch, days, {})
+    _graphs_are(monkeypatch, graphs)
+    result = _run("JFK", "LHR", "-d", "5-7")
+    err = _flat(result.stderr)
+    assert result.exit_code == 0, result.output
+    assert "Matrix and Google Flights" not in err
+    assert err.count(_NOT_SHOWN) == not_shown
+
+
+def test_a_grid_matrixs_table_calls_empty_gets_no_note(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A priced day under no solutions is still a grid Matrix's table reports as empty."""
+
+    class _NoSolutions(_Matrix):
+        @override
+        async def execute(self, search: CalendarSearch, *, cache: bool = True) -> CalendarResult:
+            del search, cache
+            when = _START + timedelta(days=2)
+            return _result({when.month: {when.day: ("USD500.00", 0, {5: "USD500.00"})}})
+
+    monkeypatch.setattr(cli, "MatrixClient", _NoSolutions)
+    _graphs_are(monkeypatch, _JFK_LHR_GRAPHS)
+    result = _run("JFK", "LHR", "-d", "5-7")
+    assert result.exit_code == 0, result.output
+    assert "Calendar empty." in result.stdout
+    assert "Matrix and Google Flights" not in _flat(result.stderr)
+
+
+def test_a_failed_matrix_gets_no_note_and_keeps_its_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "MatrixClient", _DeadMatrix)
+    _graphs_are(monkeypatch, _JFK_LHR_GRAPHS)
+    base = _run("JFK", "LHR", "-d", "5-7", "--gf-transport", "http")
+    result = _run("JFK", "LHR", "-d", "5-7")
+    assert base.exit_code == result.exit_code == 1
+    assert result.stderr == base.stderr
+    assert "Matrix and Google Flights" not in _flat(result.stderr)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [("--format", "json"), ("--gf-transport", "http"), ("-d", "7", "--fast")],
+    ids=["json", "http", "fast"],
+)
+def test_json_http_and_fast_print_no_note(
+    shape: tuple[str, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _matrix_prices(monkeypatch, _JFK_LHR_DAY, {})
+    _graphs_are(monkeypatch, _JFK_LHR_GRAPHS)
+    result = _run("JFK", "LHR", "-d", "5-7", *shape)
+    assert result.exit_code == 0, result.output
+    assert "Matrix and Google Flights" not in _flat(result.stdout + result.stderr)
+
+
+def test_a_note_that_cannot_be_composed_leaves_both_answers_as_they_were(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _matrix_prices(monkeypatch, _JFK_LHR_DAY, {})
+    _graphs_are(monkeypatch, _JFK_LHR_GRAPHS)
+    base = _run("JFK", "LHR", "-d", "5-7", "--gf-transport", "http")
+
+    def _broken(*_a: object, **_k: object) -> NoReturn:
+        raise ValueError("no note")
+
+    monkeypatch.setattr(cli, "_two_lows_note", _broken, raising=False)
+    result = _run("JFK", "LHR", "-d", "5-7")
+    assert result.exit_code == 0, result.output
+    assert result.stdout.startswith(base.stdout)
+    assert result.stderr == base.stderr
+    assert "Traceback" not in result.output
 
 
 # ───────────────────────────── Ctrl-C ─────────────────────────────────────────
