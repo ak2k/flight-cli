@@ -1059,6 +1059,57 @@ def test_a_summary_short_of_a_slice_field_gives_no_verdict(
     assert matrix.summarized() == []
 
 
+_DETAILS_SHORT_OF_A_FLIGHT = (
+    "Matrix returned booking details that do not state every flight's number, airports "
+    "and times, so this itinerary cannot be checked flight by flight."
+)
+_DETAILS_WITHOUT_FLIGHTS = (
+    "Matrix returned booking details without their flights, so this itinerary cannot be "
+    "checked flight by flight."
+)
+
+
+def _without_departures(row: Any) -> dict[str, Any]:
+    details = _details_of(row)
+    for segment in details["bookingDetails"]["itinerary"]["slices"][0]["segments"]:
+        del segment["departure"], segment["legs"][0]["departure"]
+    return details
+
+
+@pytest.mark.parametrize("fmt", ["table", "json"])
+def test_details_short_of_a_flight_give_no_verdict(
+    gf_session: Callable[..., Any], matrix: _Matrix, fmt: str
+) -> None:
+    """A flight with no departure compares unequal to every flight, so the
+    candidate may be the row."""
+    n, row = _as_row()
+    matrix.chain = _chain(_row_solution("AS-1", f"USD{row.flight.price:.2f}", row))
+    matrix.details = {"AS-1": _without_departures(row)}
+    gf_session(_served())
+    result = _run("-n", "40", "--fast", "--verify", "--pick", str(n), "--format", fmt)
+    _gives_no_verdict(result, fmt, _DETAILS_SHORT_OF_A_FLIGHT)
+    assert matrix.summarized() == [("viewDetails", "AS-1")]
+
+
+def test_the_first_unreadable_candidate_in_matrixs_order_says_why(
+    gf_session: Callable[..., Any], matrix: _Matrix
+) -> None:
+    n, row = _as_row()
+    price = f"USD{row.flight.price:.2f}"
+    matrix.chain = _chain(_row_solution("AS-1", price, row), _row_solution("AS-2", price, row))
+    short: dict[str, Any] = _without_departures(row)
+    without: dict[str, Any] = {"bookingDetails": {}}
+    for first, second, why, not_why in [
+        (short, without, _DETAILS_SHORT_OF_A_FLIGHT, _DETAILS_WITHOUT_FLIGHTS),
+        (without, short, _DETAILS_WITHOUT_FLIGHTS, _DETAILS_SHORT_OF_A_FLIGHT),
+    ]:
+        matrix.details = {"AS-1": first, "AS-2": second}
+        gf_session(_served())
+        result = _run("-n", "40", "--fast", "--verify", "--pick", str(n))
+        _gives_no_verdict(result, "table", why)
+        assert not_why not in _flat(result.stderr)
+
+
 def _no_request(monkeypatch: pytest.MonkeyPatch) -> None:
     def _forbidden(*_a: object, **_kw: object) -> Any:
         raise AssertionError("refused before any request")

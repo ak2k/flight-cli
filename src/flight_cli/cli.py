@@ -4363,7 +4363,7 @@ def _same_itinerary(
             "so they cannot be checked flight by flight.[/]"
         )
         raise typer.Exit(1)
-    unreadable: list[int] = []
+    unreadable: list[str] = []
 
     async def go() -> tuple[int, _FareRulesAnswer] | None:
         async with MatrixClient(rps=rps, impersonate=impersonate) as c:
@@ -4373,23 +4373,23 @@ def _same_itinerary(
                 )
                 bd = details.booking_details
                 if bd is None or bd.itinerary is None:
-                    unreadable.append(i)
+                    unreadable.append(_DETAILS_WITHOUT_FLIGHTS)
                     continue
                 if _verify.same_flights(row, bd.itinerary):
                     rules = await _rules_of(
                         c, bd.fares, session=session, solution_set=solution_set, solution_id=sid
                     )
                     return i, _FareRulesAnswer(n, details, rules)
+                if not _states_every_flight(bd.itinerary):
+                    unreadable.append(_DETAILS_SHORT_OF_A_FLIGHT)
             return None
 
     found = _run_matrix(go, said="Matrix booking details failed")
     # A candidate whose flights cannot be read may be the row, so "another
-    # itinerary" would not be known to be true.
+    # itinerary" would not be known to be true. The first one in Matrix's
+    # order is named, as the low check names it.
     if found is None and unreadable:
-        err.print(
-            "[red]Matrix returned booking details without their flights, "
-            "so this itinerary cannot be checked flight by flight.[/]"
-        )
+        err.print(f"[red]{_safe_text(unreadable[0])}[/]")
         raise typer.Exit(1)
     return found
 
@@ -5896,6 +5896,17 @@ class _UncheckableAnswerError(Exception):
     """Matrix answered the chain in a shape that cannot be read flight by flight."""
 
 
+_DETAILS_WITHOUT_FLIGHTS = (
+    "Matrix returned booking details without their flights, "
+    "so this itinerary cannot be checked flight by flight."
+)
+_DETAILS_SHORT_OF_A_FLIGHT = (
+    "Matrix returned booking details that do not state every flight's "
+    "number, airports and times, so this itinerary cannot be checked "
+    "flight by flight."
+)
+
+
 def _states_every_slice(solution: Itinerary) -> bool:
     """Whether Matrix's summary of `solution` states each slice's flights,
     stops, end airports and times. A slice missing any of them compares
@@ -5976,18 +5987,11 @@ async def _exact_flights_on(
         details = answer.booking_details
         itinerary = details.itinerary if details is not None else None
         if itinerary is None:
-            unreadable = unreadable or (
-                "Matrix returned booking details without their flights, "
-                "so this itinerary cannot be checked flight by flight."
-            )
+            unreadable = unreadable or _DETAILS_WITHOUT_FLIGHTS
         elif _verify.same_flights(row, itinerary):
             return _verify.Verdict("match", solution=chain.solutions[i], details=details)
         elif not _states_every_flight(itinerary):
-            unreadable = unreadable or (
-                "Matrix returned booking details that do not state every flight's "
-                "number, airports and times, so this itinerary cannot be checked "
-                "flight by flight."
-            )
+            unreadable = unreadable or _DETAILS_SHORT_OF_A_FLIGHT
     if unreadable:
         # A candidate whose flights cannot be read may be the row, so "another
         # itinerary" would not be known to be true.
