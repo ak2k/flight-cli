@@ -10074,6 +10074,8 @@ def fare(
     return_times: Annotated[
         str | None, typer.Option("--return-times", help="Preferred return times-of-day")
     ] = None,
+    routing_return: str | None = typer.Option(None, "--routing-ret", help=_ROUTING_RET_HELP),
+    extension_return: str | None = typer.Option(None, "--ext-ret", help=_EXT_RET_HELP),
     stops: Annotated[
         int | None,
         typer.Option(
@@ -10130,6 +10132,16 @@ def fare(
     )
     if pp:
         err.print("[dim]Note: `--pp` is now a no-op (PP is implicit on Matrix backend).[/]")
+    if (routing_return is not None or extension_return is not None) and (slice_specs or not ret):
+        err.print(
+            "[red]--routing-ret and --ext-ret set the return's codes, and need a --return.[/] "
+            + (
+                "A --slice takes its own in its r= and e= fields."
+                if slice_specs
+                else "Drop them, or add --return."
+            )
+        )
+        raise typer.Exit(2)
     # This block is `search`'s, near-duplicated. Deliberately not shared: `fare`
     # is deprecated and prints so on every run, and a helper spanning a command
     # on its way out ties the survivor's leg building to the leaving one.
@@ -10150,13 +10162,19 @@ def fare(
             ),
         )
         if ret:
+            ret_routing, ret_extension = _return_codes(
+                routing=routing,
+                extension=extension,
+                routing_return=routing_return,
+                extension_return=extension_return,
+            )
             legs += (
                 Leg.of(
                     destinations,
                     origins,
                     _parse_date(ret),
-                    route_language=routing,
-                    extension=extension,
+                    route_language=ret_routing,
+                    extension=ret_extension,
                     time_ranges=ret_times,
                 ),
             )
