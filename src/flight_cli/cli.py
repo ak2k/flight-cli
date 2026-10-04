@@ -4436,15 +4436,17 @@ def _check_on_matrix(
         return _Checked(
             _verify.unpriced(row, cast("SearchResult", _run(probe, rps_, imp, True))), None
         )
-    found = _same_itinerary(
-        chain, _verify.candidates(row, chain), row, n, rps=rps_, impersonate=imp
-    )
-    if found is None:
-        try:
-            return _Checked(_other_itinerary(chain), None)
-        except _UncheckableAnswerError as e:
-            err.print(f"[red]{_safe_text(str(e))}[/]")
-            raise typer.Exit(1) from None
+    idxs = _verify.candidates(row, chain)
+    try:
+        # With no candidate the page alone decides, so what keeps it from being
+        # read whole is named before a missing session, as the low check names it.
+        other = None if idxs else _other_itinerary(chain)
+        found = _same_itinerary(chain, idxs, row, n, rps=rps_, impersonate=imp)
+        if found is None:
+            return _Checked(_other_itinerary(chain) if other is None else other, None)
+    except _UncheckableAnswerError as e:
+        err.print(f"[red]{_safe_text(str(e))}[/]")
+        raise typer.Exit(1) from None
     idx, answer = found
     return _Checked(
         _verify.Verdict(

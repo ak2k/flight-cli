@@ -1110,6 +1110,73 @@ def test_the_first_unreadable_candidate_in_matrixs_order_says_why(
         assert not_why not in _flat(result.stderr)
 
 
+def _without_a_session(row: Any, answer: str) -> dict[str, Any]:
+    """A chain answer with no session in which no solution is a candidate:
+    cut short of Matrix's answer, with a summary silent on its flights, or
+    whole."""
+    page = SearchOptions().page_size
+    later = [_row_solution(f"AS-{i}", "USD100.00", row, lands_later=1) for i in range(page)]
+    own = _row_solution("AS-1", f"USD{row.flight.price:.2f}", row)
+    if answer == "short-page":
+        chain = _chain(*later, own)
+    elif answer == "summary-short-of-a-slice-field":
+        del own["itinerary"]["slices"][0]["flights"]
+        chain = _chain(own)
+    else:
+        chain = _chain(*later)
+    del chain["session"]
+    return chain
+
+
+@pytest.mark.parametrize("fmt", ["table", "json"])
+@pytest.mark.parametrize(
+    ("answer", "why"),
+    [
+        pytest.param(
+            "short-page",
+            f"Matrix listed only {SearchOptions().page_size:d} of its "
+            f"{SearchOptions().page_size + 1:d} itineraries on these flights, "
+            "and none listed is these exact flights.",
+            id="short-page",
+        ),
+        pytest.param(
+            "summary-short-of-a-slice-field",
+            "Matrix listed an itinerary that does not state every slice's flights, airports "
+            "and times, so it cannot be checked flight by flight.",
+            id="summary-short-of-a-slice-field",
+        ),
+    ],
+)
+def test_with_no_candidate_the_page_is_named_before_a_missing_session(
+    gf_session: Callable[..., Any], matrix: _Matrix, fmt: str, answer: str, why: str
+) -> None:
+    """With no candidate the low check reads the page alone, and names what
+    keeps it from being read whole."""
+    n, row = _as_row()
+    matrix.chain = _without_a_session(row, answer)
+    gf_session(_served())
+    result = _run("-n", "40", "--fast", "--verify", "--pick", str(n), "--format", fmt)
+    _gives_no_verdict(result, fmt, why)
+    assert "without a session" not in _flat(result.stderr)
+    assert matrix.summarized() == []
+
+
+def test_a_whole_page_without_a_session_still_says_so(
+    gf_session: Callable[..., Any], matrix: _Matrix
+) -> None:
+    n, row = _as_row()
+    matrix.chain = _without_a_session(row, "whole")
+    gf_session(_served())
+    result = _run("-n", "40", "--fast", "--verify", "--pick", str(n))
+    _gives_no_verdict(
+        result,
+        "table",
+        "Matrix answered without a session for these flights, so they cannot be checked "
+        "flight by flight.",
+    )
+    assert matrix.summarized() == []
+
+
 def _no_request(monkeypatch: pytest.MonkeyPatch) -> None:
     def _forbidden(*_a: object, **_kw: object) -> Any:
         raise AssertionError("refused before any request")
