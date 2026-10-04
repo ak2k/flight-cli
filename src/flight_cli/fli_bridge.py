@@ -7,7 +7,7 @@ the window start as departure + mean(duration) as return."""
 
 from __future__ import annotations
 
-import functools
+import threading
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, assert_never
 
@@ -30,7 +30,7 @@ from .routing_predicates import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
     from enum import Enum
 
     from .domain import Leg, TimeWindow
@@ -61,7 +61,32 @@ def _own_member(code: str, canonical: Enum) -> Any:
     return member
 
 
-@functools.cache
+class _BuiltOnce:
+    """A table built on its first call, by one thread. Threads that call before
+    it exists wait for that build rather than each making a table whose aliased
+    members are distinct objects from the others'."""
+
+    def __init__(self, build: Callable[[], dict[str, Any]]) -> None:
+        self._build = build
+        self._lock = threading.Lock()
+        self._table: dict[str, Any] | None = None
+        self.__doc__ = build.__doc__
+
+    def __call__(self) -> dict[str, Any]:
+        table = self._table
+        if table is None:
+            with self._lock:
+                if self._table is None:
+                    self._table = self._build()
+                table = self._table
+        return table
+
+    def cache_clear(self) -> None:
+        with self._lock:
+            self._table = None
+
+
+@_BuiltOnce
 def fli_airports() -> dict[str, Any]:
     """Every code in fli's airport table, to the member a request for it carries.
 
@@ -91,7 +116,7 @@ def fli_airport(code: str) -> Any:
         raise AttributeError(code) from None
 
 
-@functools.cache
+@_BuiltOnce
 def fli_airlines() -> dict[str, Any]:
     """Every key in fli's airline table, alliances included, to the member a
     request or a row for it carries.
