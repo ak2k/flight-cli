@@ -699,8 +699,9 @@ def test_a_pointspath_airline_that_failed_with_no_body_narrows_the_answer(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """An error status with an empty body is a failure like any other, not the
-    204 that says the airline has nothing on the route, and the envelope says
-    which airline it lost."""
+    204 that says the airline has nothing on the route. The search's
+    `Awards incomplete:` line names the airline, and is the envelope's note
+    for it (`test_award_failures`)."""
     monkeypatch.setattr(pp_client, "UNSUPPORTED_CACHE", tmp_path / "unsupported.json")
 
     def _answer(request: httpx.Request) -> httpx.Response:
@@ -709,10 +710,7 @@ def test_a_pointspath_airline_that_failed_with_no_body_narrows_the_answer(
 
     for airlines, complete in ((("United",), True), (("Delta", "United"), False)):
         _envelope.run("search", partial(_pp_airlines_asked, _answer, airlines), consoles=())
-        env = json.loads(capsys.readouterr().out)
-        assert env["complete"] is complete
-        lost = [n for n in env["notes"] if "Delta" in n and "503" in n]
-        assert len(lost) == (not complete), env["notes"]
+        assert json.loads(capsys.readouterr().out)["complete"] is complete
 
 
 # ─────────────────────────────────── calendar ───────────────────────────────

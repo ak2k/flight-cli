@@ -49,10 +49,12 @@ with no tokens it is a note), both in `_pp_preflight` and at the award gate
 any other provider `--providers` names that has no credentials, at the award
 gate (`cli._should_run_awards`), whether or not another provider runs;
 the award query failing; the Matrix half of an `--enrich` cross-check
-failing; a provider failing to start or answer
-(`providers/registry.py`, seats.aero, and a PointsPath airline search that is
-not "unsupported" in `pp/client.py`, an error status with an empty body
-included); a leg with `pairs_not_asked`; calendar sub-queries lost;
+failing; every award failure the search names in its `Awards incomplete:`
+line, which is then the note: each `record_failure` call has a `narrow()`
+beside it (`providers/registry.py`, seats.aero, and a PointsPath airline search
+that is not "unsupported" in `pp/client.py`, an error status with an empty
+body and a request the award deadline cut included); a leg with
+`pairs_not_asked`; calendar sub-queries lost;
 `--max-per-query > 1` over a split, and over the one unsplit query when a
 group holds every destination; a round trip over a split set, whose returns
 into another airport of the set come only from the combined query; Google rows on a

@@ -274,7 +274,7 @@ class PPClient:
         if r.status_code == HTTPStatus.NO_CONTENT or not r.content:
             if r.status_code >= HTTPStatus.BAD_REQUEST:
                 # An outage with nothing to say, not an empty answer.
-                narrow(f"PointsPath: {airline} answered HTTP {r.status_code:d} with no body")
+                narrow()
                 log.debug("pp_airline_search_failed", airline=airline, status=r.status_code)
                 record_failure("PointsPath", http_reason(r.status_code), airline=airline)
             return AirlineSearchResponse()
@@ -351,6 +351,7 @@ class PPClient:
                     )
                     record_failure("PointsPath", exception_reason(e), airline=airline)
             if scope.cancelled_caught:
+                narrow()
                 log.debug("pp_airline_search_cut", airline=airline)
                 record_failure("PointsPath", deadline_reason(), airline=airline)
 

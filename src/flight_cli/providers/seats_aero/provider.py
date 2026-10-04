@@ -304,6 +304,7 @@ class SeatsAeroProvider:
                 record_failure(self.name, exception_reason(e))
                 return []
         if page is None:  # the deadline cut the request
+            narrow()
             log.debug("seats_aero_search_cut")
             record_failure(self.name, deadline_reason())
             return []

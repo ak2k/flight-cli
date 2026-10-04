@@ -83,6 +83,7 @@ async def _build_pointspath(airlines: tuple[str, ...] | None) -> AwardProvider |
             log.debug("provider_init_failed", provider="PointsPath", error=str(e))
             record_failure("PointsPath", exception_reason(e))
     if scope.cancelled_caught:
+        narrow()
         record_failure("PointsPath", deadline_reason())
     return None
 
@@ -98,6 +99,7 @@ async def _build_seats_aero(sources: tuple[str, ...] | None) -> AwardProvider | 
             log.debug("provider_init_failed", provider="Seats.aero", error=str(e))
             record_failure("Seats.aero", exception_reason(e))
     if scope.cancelled_caught:
+        narrow()
         record_failure("Seats.aero", deadline_reason())
     return None
 
