@@ -62,6 +62,9 @@ flight search JFK LHR --arrive 2026-10-21 --arrive-times evening
 # Force a backend explicitly:
 flight search JFK LHR --dep 2026-08-15 --backend matrix
 flight search JFK LHR --dep 2026-08-15 --backend gflight
+# When the Google table is wider than the output (80 columns when no std
+# stream is a terminal), its legs print one per line and the CO2 column may
+# be left out with a note; --format json carries every value.
 
 # lowest-fare calendar across a date window (one Matrix call per airport
 # pair, PAR split into CDG, ORY and BVA, returns 30 days × N durations)
