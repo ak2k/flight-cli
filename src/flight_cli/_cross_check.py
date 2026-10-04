@@ -191,7 +191,8 @@ def low_row(rows: Sequence[Any], matrix_low: str | None, currency: str) -> int |
     the first Google-only row priced in `currency`. None when no row is.
 
     A row on both sides is never chosen: Matrix has already priced its
-    flights."""
+    flights. Nor is a row Google sells as separate tickets: Matrix prices one
+    ticket, so its price for those flights is no check on that booking's."""
     low = _money(matrix_low)
     if low is not None and low[0] != currency:
         return None
@@ -199,6 +200,7 @@ def low_row(rows: Sequence[Any], matrix_low: str | None, currency: str) -> int |
         g = _money(r.gf_price)
         if (
             r.source == "gf"
+            and getattr(r.itinerary, "ticketing", None) is None
             and g is not None
             and g[0] == currency
             and (low is None or g[1] < low[1])
