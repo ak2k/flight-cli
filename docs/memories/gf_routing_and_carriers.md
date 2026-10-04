@@ -1297,7 +1297,9 @@ R being "Matrix returned no fare on these exact flights" or the other-itinerary
 sentence; or, in yellow, `…: no answer: R`, R the 60 s or the error's kind and
 message. The table, the row's reason and the exit code stay as they were. A
 row both sides price, a Matrix fare in another currency or with no party
-total, and Matrix's low at or under Google's ask nothing more. Measured
+total, and Matrix's low at or under Google's ask nothing more. A row Google
+sells as separate tickets is passed over for the next Google-only row: Matrix
+prices one ticket, so a gap would say nothing of that booking. Measured
 2026-10-02 at `-n 10`, Google's low was under Matrix's whole answer on all four
 routes tried, and the chain priced Google's exact flights on three: EWR-ORY
 11-10/11-17, TAP USD429 against Matrix's 12 trips from USD527, Matrix
