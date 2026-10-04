@@ -308,9 +308,10 @@ def test_a_google_row_that_could_not_be_read_narrows_the_answer(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The parser keeps the rows it can read and drops the rest, so the
-    narrowing is said where it drops them. A page read only to check it for a
-    wall, as the calendar's graph does, answers nothing and narrows nothing."""
+    """The parser keeps the rows it can read and counts the rest on the board,
+    and the answer is narrowed where the board's rows are recorded. A page read
+    only to check it for a wall, as the calendar's graph does, records no board
+    and narrows nothing."""
     page = PageFetch(_served(_LAX), _URL, 200)
     lost = gfid._rows_from_page_html(page)[0].flight_id
     real = gfid._parse_flight_with_id

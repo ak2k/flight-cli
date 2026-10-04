@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -1088,3 +1089,30 @@ def test_the_awards_refusal_names_the_format_asked(
     assert "--enrich --format envelope cross-checks cash fares only; add --cash-only" in said
     assert result.stdout == ""
     assert bodies == []
+
+
+def test_the_envelopes_unread_note_counts_what_its_cross_check_counts(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    """One count, the board's `unread`: the rows Google served that could not be
+    read narrow the answer, and the note says the number `google.unread` does."""
+    _weave(monkeypatch, _unread(gf_rows, 2))
+    env = _envelope_of(_run([*_SEARCH, "-n", "5", "--enrich", "--format", "envelope"]))
+    counted = env["cross_check"]["google"]["unread"]
+    said = [re.findall(r"\d+", n) for n in env["notes"] if "could not be read" in n]
+    assert (env["complete"], counted, said) == (False, 2, [[str(counted)]])
+
+
+def test_the_envelopes_cross_check_carries_the_unread_count_and_the_partys_prices(
+    monkeypatch: pytest.MonkeyPatch, gf_rows: Callable[..., list[Any]]
+) -> None:
+    """The cross-check document gained `google.unread` and prices for the whole
+    party; the envelope carries the document `--format json` prints, so both."""
+    _weave(monkeypatch, _unread(gf_rows, 2), matrix=_party_of_two)
+    args = [*_SEARCH, "--adults", "2", "-n", "3", "--enrich", "--format"]
+    doc = _document(_run([*args, "json"]))
+    env = _envelope_of(_run([*args, "envelope"]))
+    assert env["cross_check"] == doc["cross_check"]
+    assert env["cross_check"]["google"]["unread"] == 2
+    assert env["cross_check"]["rows"][0]["matrix_price"] == "USD203.60"
+    assert [r["row"] for r in _rows(env)] == doc["search"]

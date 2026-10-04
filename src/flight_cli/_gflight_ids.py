@@ -1862,12 +1862,9 @@ def _deduped(rows: list[GFlightWithId]) -> list[GFlightWithId]:
     return out
 
 
-def _rows_from_page_html(page: PageFetch, *, answering: bool = False) -> Board[GFlightWithId]:
+def _rows_from_page_html(page: PageFetch) -> Board[GFlightWithId]:
     """The flight rows a rendered search page carries — the single parser both
     rungs go through; a rung supplies bytes, never interpretation.
-
-    `answering` says the board answers a search, so the rows it could not read
-    narrow that answer. A page read only to check it for a wall answers nothing.
 
     The order is load-bearing. The captcha interstitial is a throttle before it
     is anything else; only then is a non-2xx Google declining to serve; only then
@@ -1964,11 +1961,6 @@ def _rows_from_page_html(page: PageFetch, *, answering: bool = False) -> Board[G
             f"the row shape changed (sample reasons: {sample})",
             unread=len(reasons),
         )
-    if reasons and answering:
-        narrow(
-            f"Google Flights: {len(reasons):d} of {len(rows):d} rows on the page "
-            "could not be read and are left out of the answer"
-        )
     return Board(
         _deduped(out),
         insight=_price_insight(payload, out),
@@ -1979,7 +1971,7 @@ def _rows_from_page_html(page: PageFetch, *, answering: bool = False) -> Board[G
 
 def _one_call(filters: FlightSearchFilters, *, currency: str = "USD") -> Board[GFlightWithId]:
     """Rung 1: fetch the search page over curl_cffi and read its rows."""
-    rows = _rows_from_page_html(_fetch_page(filters, currency=currency), answering=True)
+    rows = _rows_from_page_html(_fetch_page(filters, currency=currency))
     # A page we could READ means Google answered a warm session — save its
     # cookies (NID) so the next one-shot CLI process starts warm instead of
     # cold. Rung-1 only: rung 2 keeps its own Chrome profile, and its cookies
@@ -2131,8 +2123,7 @@ def _one_call_browser(
     a test can substitute the session without a browser anywhere in the
     process."""
     return _rows_from_page_html(
-        _gf_browser.session(headed=headed).get_html(search_page_url(filters, currency=currency)),
-        answering=True,
+        _gf_browser.session(headed=headed).get_html(search_page_url(filters, currency=currency))
     )
 
 

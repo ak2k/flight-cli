@@ -4618,14 +4618,24 @@ def _record_google_cabin(
     *,
     insight: PriceInsight | None,
     history: PriceHistory | None,
+    unread: int,
     bags: Bags | None = None,
 ) -> None:
     """Hand one cabin's Google rows to the envelope run, with its page's insight
     and history. Each row is the object `_gflight_json_document` prints for it,
     priced by its last member: a round trip's fare is the one every surface
-    prints for the combination."""
+    prints for the combination.
+
+    `unread` is the board's: the rows its pages served that the parser could not
+    read, so the answer is narrower by them. Counted on the board and not per
+    page, the note gives the number the cross-check's `google.unread` does."""
     if not _envelope.active():
         return
+    if unread:
+        _envelope.narrow(
+            f"Google Flights: {unread:d} {_CABIN_NAMES[cabin]} rows its pages served "
+            "could not be read and are left out of the answer"
+        )
     printed: list[Any] = json.loads(json.dumps(_gflight_json_document(results, bags), default=str))
     rows: list[_envelope.ResultRow] = []
     for r, row in zip(results, printed, strict=True):
@@ -5258,6 +5268,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
             results,
             insight=getattr(results, "insight", None),
             history=getattr(results, "history", None),
+            unread=getattr(results, "unread", 0),
         )
         _answer_gf_empty(
             dropped,
@@ -5285,6 +5296,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     # than exist, which is the failure this backend is most prone to.
     insight = getattr(results, "insight", None)
     history = getattr(results, "history", None)
+    unread: int = getattr(results, "unread", 0)
     results = _price_ordered(results)[:top_n]
     # A pinned link follows only where one is asked for, the format has room for
     # it and row one can be pinned: `--format json` emits no link at all, and a
@@ -5310,7 +5322,9 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     # models. Suppressing the noisy unknown-type chatter for this rendering
     # block keeps the boundary localized.
     if _envelope.active():
-        _record_google_cabin(opts.cabin, results, insight=insight, history=history, bags=opts.bags)
+        _record_google_cabin(
+            opts.cabin, results, insight=insight, history=history, unread=unread, bags=opts.bags
+        )
         if verify_row is not None:
             check = _verify_document(
                 results[verify_row - 1], verify_row, opts, rps=rps, impersonate=impersonate
@@ -5807,6 +5821,7 @@ def _answer_cross_check_document(
                 rows,
                 insight=getattr(served, "insight", None),
                 history=getattr(served, "history", None),
+                unread=getattr(served, "unread", 0),
                 bags=opts.bags,
             )
         if checked is not None:
@@ -6835,6 +6850,7 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
                 _price_ordered(board)[:top_n],
                 insight=getattr(board, "insight", None),
                 history=getattr(board, "history", None),
+                unread=getattr(board, "unread", 0),
             )
         if not run_pp:
             return None

@@ -57,9 +57,11 @@ body and a request the award deadline cut included); a leg with
 `pairs_not_asked`; calendar sub-queries lost;
 `--max-per-query > 1` over a split, and over the one unsplit query when a
 group holds every destination; a round trip over a split set, whose returns
-into another airport of the set come only from the combined query; Google rows on a
-search page the parser could not read (not the calendar graph's wall check,
-which answers nothing). A hand-off
+into another airport of the set come only from the combined query; Google rows the
+parser could not read, counted once from the board's `unread` where its rows
+are recorded (`cli._record_google_cabin`), so the note gives the number
+`cross_check.google.unread` does (the calendar graph's wall check records no
+board and narrows nothing). A hand-off
 to Matrix, rows in another currency and a filter that empties a board are
 notes, not narrowings: each is a complete answer to what was asked.
 
