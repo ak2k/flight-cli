@@ -42,7 +42,16 @@ from flight_cli.pp.auth import PPAuthError, Tokens
 from flight_cli.providers.base import AwardFlight, LegQuery
 from flight_cli.providers.seats_aero import auth as seats_auth
 from test_calendar_split import _pair_client, _result
-from test_gf_full_board import _DEP, _LAX, _LHR, _RET, _URL, _return_board, _served
+from test_gf_full_board import (
+    _DEP,
+    _LAX,
+    _LHR,
+    _OVER_ONE_STOP,
+    _RET,
+    _URL,
+    _return_board,
+    _served,
+)
 from test_gf_lost_pins import _EXAMPLE_7, _RETURNS, _outbound, _return
 from test_json_document import _one_document
 from test_party_price_basis import _body as _party_body
@@ -415,6 +424,31 @@ def test_a_board_a_filter_emptied_is_a_note_not_a_narrowing(
     # The history is the route's: the filter that drops the insight leaves it.
     assert env["insight"] == []
     assert len(env["price_history"][0]["points"]) == 61
+
+
+def test_rows_over_the_stop_ceiling_are_a_note_not_a_narrowing(
+    gf_session: Callable[..., Any],
+) -> None:
+    """The capture's three two-stop rows are outside the one stop asked for, so
+    the 98 kept are the whole answer and the line counting the three is a note."""
+    gf_session(_served(_LHR))
+    env = _envelope_of(
+        _search(
+            "--cash-only",
+            "JFK",
+            "LHR",
+            "--dep",
+            _DEP.isoformat(),
+            "--backend",
+            "gflight",
+            "--stops",
+            "1",
+            "-n",
+            "200",
+        )
+    )
+    assert (env["backend"], env["complete"], len(_rows(env))) == ("gflight", True, 98)
+    assert cast("list[str]", env["notes"]).count(_OVER_ONE_STOP) == 1, env["notes"]
 
 
 def _example_7(gf_session: Callable[..., Any], *returns: str) -> dict[str, Any]:

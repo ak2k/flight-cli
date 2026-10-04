@@ -69,9 +69,10 @@ are recorded (`cli._record_google_cabin`), so the note gives the number
 board and narrows nothing); a Google board served with no rows for a party
 with an infant and not handed to Matrix (`cli._run_gflight_path`), since Google
 has served such a board on a route with flights. A hand-off
-to Matrix, rows in another currency, a filter that empties a board and a pin
-whose return board the row filter emptied are notes, not narrowings: each is a
-complete answer to what was asked. So is
+to Matrix, rows in another currency, a filter that empties a board, rows
+Google served over the stop ceiling asked for (`cli._note_stop_drops` counts
+them) and a pin whose return board the row filter emptied are notes, not
+narrowings: each is a complete answer to what was asked. So is
 `cross_check.low_check` in any outcome, `no-answer` included: no flag asks for
 that check of Google's low row, every key asked for is whole without it, and
 its `outcome` and `reason` say whether and how Matrix answered. Its stderr
