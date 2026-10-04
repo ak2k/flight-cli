@@ -61,7 +61,10 @@ class Answers:
     one-ticket rows are compared with Matrix, which sells one ticket: a trip
     Google sells as separate tickets is not that trip's one-ticket price.
     `google_filtered` says the row filter removed rows from that board, which
-    then cannot show a flight to be absent from Google. `stop_limit` says a
+    then cannot show a flight to be absent from Google. `google_partial` says
+    the board stops short of what one search would list (a page of a search
+    asked as several missing, or a round trip's returns priced page by page),
+    so a carrier it lacks may fly where it was not asked. `stop_limit` says a
     stop limit was sent; without one Matrix searches one flight beyond the
     fewest a slice needs. `passengers` is the party: Google prices all of it,
     while the price Matrix lists is one passenger's, rounded up. `uncapped` is
@@ -79,6 +82,7 @@ class Answers:
     currency: str
     passengers: int = 1
     uncapped: SearchResult | None = None
+    google_partial: bool = False
     google_unread: int = 0
 
 
@@ -418,7 +422,9 @@ def _matrix_only(
     if not a.google_filtered and (out is not None or not a.round_trip):
         if a.round_trip and out not in facts.google_outbounds:
             found.append(("outbound_not_priced", "Google priced no return for this outbound"))
-        elif absent := [c for c in _carriers(slices) if c not in facts.google_carriers]:
+        elif not a.google_partial and (
+            absent := [c for c in _carriers(slices) if c not in facts.google_carriers]
+        ):
             found.append(
                 unread
                 or ("carrier_absent_google", f"no {_either(absent)} flight on Google's board")
