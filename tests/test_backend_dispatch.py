@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, timedelta
+from typing import TYPE_CHECKING
 
 import pytest
 import typer
@@ -31,6 +32,9 @@ from flight_cli.cli import (
 )
 from flight_cli.domain import Bags
 from flight_cli.routing_predicates import classify, page_can_encode
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def _call(backend: str = BACKEND_AUTO, **overrides: object) -> str:
@@ -123,25 +127,60 @@ def test_a_leg_of_exactly_eleven_airports_stays_on_gflight() -> None:
     assert _call(origin=",".join(_TEN), destination="LAX") == BACKEND_GFLIGHT
 
 
-def test_a_leg_of_twelve_airports_goes_to_matrix_naming_the_count(
+def test_a_single_cabin_leg_of_twelve_airports_stays_on_gflight(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Google's page declined 15 airports in one leg outright; the bound keeps
-    region lists Matrix answered on Matrix rather than failing on Google."""
-    assert _call(origin=",".join(_TEN), destination="LAX,SFO") == BACKEND_MATRIX
+    """Google's page declined 15 airports in one leg outright, so a leg over
+    its bound is asked as several pages, and the search stays on Google."""
+    for backend in (BACKEND_AUTO, BACKEND_GFLIGHT):
+        assert _call(backend, origin=",".join(_TEN), destination="LAX,SFO") == BACKEND_GFLIGHT
+    assert capsys.readouterr().err == ""
+
+
+def test_a_multi_cabin_leg_of_twelve_airports_goes_to_matrix_naming_the_count(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Every cabin pins the sort cabin's outbounds from one page, so a
+    multi-cabin leg keeps the one-page bound."""
+    assert _call(origin=",".join(_TEN), destination="LAX,SFO", multi_cabin=True) == BACKEND_MATRIX
     printed = " ".join(capsys.readouterr().err.split())
     assert "12 airports on one leg (its limit is 11)" in printed, printed
 
 
 def test_the_bound_counts_a_metro_code_as_its_members() -> None:
     # LON is six airports: 6 + 6 = 12.
-    assert _call(origin="LON", destination="JFK,LGA,EWR,BOS,IAD,DCA") == BACKEND_MATRIX
-    assert _call(origin="LON", destination="JFK,LGA,EWR,BOS,IAD") == BACKEND_GFLIGHT
+    assert (
+        _call(origin="LON", destination="JFK,LGA,EWR,BOS,IAD,DCA", multi_cabin=True)
+        == BACKEND_MATRIX
+    )
+    assert (
+        _call(origin="LON", destination="JFK,LGA,EWR,BOS,IAD", multi_cabin=True) == BACKEND_GFLIGHT
+    )
+    assert _call(origin="LON", destination="JFK,LGA,EWR,BOS,IAD,DCA") == BACKEND_GFLIGHT
 
 
-def test_explicit_gflight_refuses_a_leg_over_the_bound() -> None:
+def test_explicit_gflight_refuses_a_multi_cabin_leg_over_the_bound() -> None:
     with pytest.raises(typer.BadParameter, match=r"12 airports on one leg \(its limit is 11\)"):
-        _call(BACKEND_GFLIGHT, origin=",".join(_TEN), destination="LAX,SFO")
+        _call(BACKEND_GFLIGHT, origin=",".join(_TEN), destination="LAX,SFO", multi_cabin=True)
+
+
+# 15 + 15 airports: 3 x 3 = 9 pages of at most 11, one past the bound.
+_FIFTEEN_FROM = "JFK,LGA,EWR,BOS,IAD,DCA,BWI,PHL,ATL,MIA,FLL,CLT,RDU,DTW,PIT"
+_FIFTEEN_TO = "LHR,CDG,FRA,AMS,IST,MAD,BCN,FCO,MUC,ZRH,VIE,CPH,DUB,LIS,ATH"
+
+
+def test_a_leg_past_the_page_bound_goes_to_matrix_naming_why(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert _call(origin=_FIFTEEN_FROM, destination=_FIFTEEN_TO) == BACKEND_MATRIX
+    printed = " ".join(capsys.readouterr().err.split())
+    assert "30 airports on one leg (more than 8 pages of at most 11)" in printed, printed
+    with pytest.raises(
+        typer.BadParameter, match=r"30 airports on one leg \(more than 8 pages of at most 11\)"
+    ):
+        _call(BACKEND_GFLIGHT, origin=_FIFTEEN_FROM, destination=_FIFTEEN_TO)
+    # One airport fewer is the bound exactly: 4 x 2 = 8 pages.
+    assert _call(origin=_FIFTEEN_FROM, destination=_FIFTEEN_TO[:-4]) == BACKEND_GFLIGHT
 
 
 @pytest.mark.parametrize(
@@ -506,6 +545,116 @@ def test_auto_says_nothing_when_gflight_serves_the_query(
 ) -> None:
     assert _call(extension="MAXSTOPS 1") == BACKEND_GFLIGHT
     assert capsys.readouterr().err == ""
+
+
+# ──────────────────────────────── +CABIN ───────────────────────────────────
+
+# Skill Example 2's codes.
+_STAR_BUSINESS = "ALLIANCE star-alliance; MAXDUR 14:00; +CABIN 2"
+
+
+@pytest.mark.parametrize(
+    ("cabin", "extension"),
+    [
+        ("business", _STAR_BUSINESS),
+        ("premium-coach", "+CABIN pe"),
+        ("premium", "+cabin PREMIUM-COACH"),
+        ("first", "+CABIN 1"),
+        ("economy", "+CABIN 3"),
+    ],
+)
+@pytest.mark.parametrize("backend", ["auto", "gflight"])
+def test_a_cabin_requirement_naming_the_asked_cabin_stays_on_google(
+    monkeypatch: pytest.MonkeyPatch, backend: str, cabin: str, extension: str
+) -> None:
+    """Red at the base, which sent every `+CABIN` to Matrix and refused it
+    under `--backend gflight`. The page is asked for that cabin and each leg of
+    each row is held to it."""
+    called, err = _search_backend(
+        monkeypatch, "--backend", backend, "--cabin", cabin, "--ext", extension
+    )
+    assert called == ["_run_enriched_path"]
+    assert "Using Matrix" not in err
+
+
+@pytest.mark.parametrize(
+    ("args", "reason"),
+    [
+        (("--ext", "+CABIN 2"), "a cabin requirement ('+CABIN 2') other than --cabin economy"),
+        (
+            ("--cabin", "business", "--ext", "+CABIN 1 2"),
+            "a cabin requirement ('+CABIN 1 2') other than --cabin business",
+        ),
+        (
+            ("--cabin", "economy,business", "--ext", "+CABIN 2"),
+            "a cabin requirement ('+CABIN 2') beside more than one --cabin",
+        ),
+    ],
+    ids=["no-cabin", "two-for-one", "two-cabins"],
+)
+def test_a_cabin_requirement_that_is_not_the_one_asked_names_both(
+    monkeypatch: pytest.MonkeyPatch, args: tuple[str, ...], reason: str
+) -> None:
+    """Red at the base, whose reason quoted the code alone."""
+    _, err = _search_backend(monkeypatch, *args)
+    assert f"Using Matrix: Google Flights can't serve {reason}." in err, err
+
+
+def test_a_cabin_requirement_with_no_cabin_given_to_the_picker_is_matrix_s() -> None:
+    """The picker serves `+CABIN` only beside the one cabin it is told of."""
+    assert _call(extension="+CABIN 2") == BACKEND_MATRIX
+    with pytest.raises(typer.BadParameter, match=re.escape("'+CABIN 2') beside more than one")):
+        _call(BACKEND_GFLIGHT, extension="+CABIN 2")
+
+
+def _search_backend(monkeypatch: pytest.MonkeyPatch, *args: str) -> tuple[list[str], str]:
+    """Run `flight search` on auto with every backend path stubbed, reporting
+    which ran and stderr."""
+    from typer.testing import CliRunner
+
+    from flight_cli import cli
+
+    called: list[str] = []
+
+    def _stub(name: str) -> Callable[..., None]:
+        def _path(**_kw: object) -> None:
+            called.append(name)
+
+        return _path
+
+    for name in (
+        "_run_gflight_path",
+        "_run_enriched_path",
+        "_run_matrix_path",
+        "_run_gflight_path_multi",
+        "_run_matrix_path_multi",
+    ):
+        monkeypatch.setattr(cli, name, _stub(name))
+    result = CliRunner().invoke(
+        cli.app,
+        ["search", "--cash-only", "JFK", "LHR", "--dep", _future_dep(), *args],
+        env={"COLUMNS": "250"},
+    )
+    assert result.exit_code == 0, result.output
+    return called, " ".join(result.stderr.split())
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("--ext", "+CABIN 2"),
+        ("--cabin", "business", "--ext", "+CABIN 1 2"),
+        ("--cabin", "economy,business", "--ext", "+CABIN 2"),
+    ],
+    ids=["no-cabin", "two-for-one", "two-cabins"],
+)
+def test_a_cabin_requirement_google_cannot_hold_stays_on_matrix_quoting_it(
+    monkeypatch: pytest.MonkeyPatch, args: tuple[str, ...]
+) -> None:
+    """Green at the base and the tip: Matrix answers it, and says why."""
+    called, err = _search_backend(monkeypatch, *args)
+    assert called in (["_run_matrix_path"], ["_run_matrix_path_multi"])
+    assert re.search(r"Using Matrix: Google Flights can't serve .*'\+CABIN [12 ]+'", err), err
 
 
 # ──────────────────────────────── explicit ─────────────────────────────────
