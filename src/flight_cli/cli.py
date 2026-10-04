@@ -7347,7 +7347,7 @@ _FORMAT_OPT = typer.Option(
     help=f"Output format: one of {_FORMAT_CHOICES}.",
     rich_help_panel=_GROUP_OUTPUT,
 )
-# `search` and `calendar` also write the envelope (`_envelope`): the same ten
+# `search` and `calendar` also write the envelope (`_envelope`): the same twelve
 # keys whatever path answered, for a caller that cannot know the path ahead.
 _ENVELOPE_FORMATS = (*_VALID_FORMATS, "envelope")
 _ENVELOPE_FORMAT_CHOICES = "/".join(_ENVELOPE_FORMATS)
