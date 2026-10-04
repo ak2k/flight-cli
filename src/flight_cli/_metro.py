@@ -1,10 +1,14 @@
 """IATA metro codes and the airport sets Google Flights is asked for.
 
 Matrix takes a metro code (`NYC`) as one token; Google's search page takes
-airports only, repeated per leg. The two sites that build a Google request or
-link (`fli_bridge`, the pinned link) expand metro codes through this table, and
-the backend picker and the link caveats count them the same way. The domain
-`Search`, the Matrix request and the Matrix deep link keep the user's tokens."""
+airports only, repeated per leg. Four modules expand metro codes through this
+table: `fli_bridge` and `links` build the Google request and the pinned link;
+`cli` counts members the same way, for example in the backend picker, the link
+caveats and the calendar grid gates, and asks the award providers one query per
+member-airport pair; `_calendar_split` fans a multi-airport calendar out into
+one Matrix query per member-airport pair. The domain `Search`, the user's
+search asked of Matrix as one query and the Matrix deep link keep the user's
+tokens, as does the combined query a round-trip calendar runs beside its pairs."""
 
 from __future__ import annotations
 
