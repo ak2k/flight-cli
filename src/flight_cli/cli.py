@@ -23,6 +23,7 @@ import sys
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from functools import partial
+from itertools import groupby
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -5909,14 +5910,23 @@ _DETAILS_SHORT_OF_A_FLIGHT = (
 )
 
 
+def _flight_count(codes: Iterable[str]) -> int:
+    """Flights in a slice's legs: consecutive legs under one number are one
+    through flight, whichever side splits it."""
+    return sum(1 for _ in groupby(codes))
+
+
 def _states_every_slice(solution: Itinerary) -> bool:
     """Whether Matrix's summary of `solution` states each slice's flights,
     stops, end airports and times. A slice missing any of them compares
-    unequal to every row, so it is no candidate whatever its flights are."""
+    unequal to every row, so it is no candidate whatever its flights are.
+    Flights connect at one airport fewer than there are of them; a through
+    flight may add its own stop, so more stops still state every one."""
     slices = solution.itinerary.slices if solution.itinerary else []
     return bool(slices) and all(
         s.flights
         and all(s.flights)
+        and len(s.stops) >= _flight_count(s.flights) - 1
         and all(p is not None and p.code for p in (s.origin, s.destination, *s.stops))
         and _verify.wall_clock(s.departure)
         and _verify.wall_clock(s.arrival)

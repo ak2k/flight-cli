@@ -1177,6 +1177,52 @@ def test_a_whole_page_without_a_session_still_says_so(
     assert matrix.summarized() == []
 
 
+@pytest.mark.parametrize("fmt", ["table", "json"])
+def test_a_connecting_summary_without_its_stop_gives_no_verdict(
+    gf_session: Callable[..., Any], matrix: _Matrix, fmt: str
+) -> None:
+    """The row's own itinerary, its summary silent on the airport its two
+    flights connect at, so it is no candidate."""
+    n, row = _as_row()
+    sol = _row_solution("AS-1", f"USD{row.flight.price:.2f}", row)
+    del sol["itinerary"]["slices"][0]["stops"]
+    matrix.chain = _chain(sol)
+    matrix.details = {"AS-1": _details_of(row)}
+    gf_session(_served())
+    result = _run("-n", "40", "--fast", "--verify", "--pick", str(n), "--format", fmt)
+    _gives_no_verdict(
+        result,
+        fmt,
+        "Matrix listed an itinerary that does not state every slice's flights, airports and "
+        "times, so it cannot be checked flight by flight.",
+    )
+    assert matrix.summarized() == []
+
+
+def test_a_summary_states_its_stops_whichever_way_it_writes_a_through_flight() -> None:
+    nonstop = _solution(
+        "B6-1", "USD1.00", "2026-10-20T08:00-04:00", "2026-10-20T11:00-07:00", ["B6999"], []
+    )
+    del nonstop["itinerary"]["slices"][0]["stops"]
+    once = _solution(
+        "XX-1", "USD1.00", "2026-10-20T08:00-04:00", "2026-10-20T13:00-07:00", ["XX1"], []
+    )
+    twice = _solution(
+        "XX-2",
+        "USD1.00",
+        "2026-10-20T08:00-04:00",
+        "2026-10-20T13:00-07:00",
+        ["XX1", "XX1"],
+        ["DEN"],
+    )
+    connecting = _solution(
+        "AS-1", "USD1.00", "2026-10-20T08:00-04:00", "2026-10-20T13:00-07:00", ["AS21", "AS487"], []
+    )
+    whole, short = _answer(nonstop, once, twice), _answer(connecting)
+    assert all(cli._states_every_slice(s) for s in whole.solutions)
+    assert not cli._states_every_slice(short.solutions[0])
+
+
 def _no_request(monkeypatch: pytest.MonkeyPatch) -> None:
     def _forbidden(*_a: object, **_kw: object) -> Any:
         raise AssertionError("refused before any request")
