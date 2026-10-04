@@ -53,6 +53,7 @@ from test_gf_full_board import (
     _served,
 )
 from test_gf_lost_pins import _EXAMPLE_7, _RETURNS, _outbound, _return
+from test_gf_separate_tickets import _THROTTLE_PAGE, _lax_with_marked_twin
 from test_json_document import _one_document
 from test_party_price_basis import _body as _party_body
 
@@ -453,6 +454,48 @@ def test_rows_over_the_stop_ceiling_are_a_note_not_a_narrowing(
     )
     assert (env["backend"], env["complete"], len(_rows(env))) == ("gflight", True, 98)
     assert cast("list[str]", env["notes"]).count(_OVER_ONE_STOP) == 1, env["notes"]
+
+
+_UNREAD_TAB = "Itineraries on separate tickets not read: Google Flights rate-limited."
+_HIDDEN_ONE = "Google Flights: 1 itinerary on separate tickets hidden (--no-separate-tickets)."
+
+
+@pytest.mark.parametrize(
+    ("tab", "asked", "marked", "complete", "note"),
+    [
+        pytest.param(_lax_with_marked_twin(5), [], ["aR5Sef"], True, None, id="shown"),
+        pytest.param(
+            _lax_with_marked_twin(5), ["--no-separate-tickets"], [], True, _HIDDEN_ONE, id="hidden"
+        ),
+        pytest.param(_THROTTLE_PAGE, [], [], False, _UNREAD_TAB, id="unread"),
+    ],
+)
+def test_separate_ticket_rows_are_results_and_only_an_unread_cheapest_tab_narrows(
+    gf_session: Callable[..., Any],
+    tab: str,
+    asked: list[str],
+    marked: list[str],
+    complete: bool,
+    note: str | None,
+) -> None:
+    """A row sold as separate tickets is a result like any, flagged in its row.
+    The rows `--no-separate-tickets` hid were opted out of, so their count is a
+    note; a Cheapest tab that went unread may have held rows the user asked
+    for, so its line narrows the answer."""
+    gf_session(_served(_LAX), tab)
+    env = _envelope_of(
+        _search(
+            *("--cash-only", "JFK", "LAX", "--dep", _DEP.isoformat()),
+            *("--backend", "gflight", "--fast", "-n", "1000", *asked),
+        )
+    )
+    assert (env["backend"], env["complete"]) == ("gflight", complete)
+    rows = _rows(env)
+    assert [r["row"]["flight_id"] for r in rows if r["row"]["separate_tickets"]] == marked
+    assert all(r["price"] == r["row"]["price"] for r in rows)
+    notes = cast("list[str]", env["notes"])
+    for line in (_UNREAD_TAB, _HIDDEN_ONE):
+        assert notes.count(line) == (line == note), notes
 
 
 def _example_7(gf_session: Callable[..., Any], *returns: str) -> dict[str, Any]:

@@ -79,11 +79,19 @@ with an infant and not handed to Matrix (`cli._run_gflight_path`), since Google
 has served such a board on a route with flights; a Google board with rows
 asked as several pages that is `partial` (`cli._gflight_pages`): a page did not
 answer, or the trip is round and each return flies back between its own
-page's airports. A hand-off
+page's airports; Google's Cheapest tab unread (`cli._note_separate_tickets`,
+whose `Itineraries on separate tickets not read: …` line is the note), since
+it may list itineraries on separate tickets the user did not opt out of. A
+hand-off
 to Matrix, rows in another currency, a filter that empties a board, rows
 Google served over the stop ceiling asked for (`cli._note_stop_drops` counts
-them) and a pin whose return board the row filter emptied are notes, not
-narrowings: each is a complete answer to what was asked. So is
+them), a pin whose return board the row filter emptied, the count of
+itineraries `--no-separate-tickets` hid and a Cheapest tab left unread for a
+return check its rows cannot be held to are notes, not narrowings: each is a
+complete answer to what was asked. A row Google sells as separate tickets is a
+result like any other, `separate_tickets: true` in its `row`; no top-level key
+carries the hidden count or the unread tab, only their stderr lines in
+`notes`. So is
 `cross_check.low_check` in any outcome, `no-answer` included: no flag asks for
 that check of Google's low row, every key asked for is whole without it, and
 its `outcome` and `reason` say whether and how Matrix answered. Its stderr

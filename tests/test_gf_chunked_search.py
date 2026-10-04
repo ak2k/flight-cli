@@ -14,7 +14,7 @@ import json
 import logging
 import pathlib
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, override
+from typing import TYPE_CHECKING, Any, cast, override
 
 import pytest
 from fli.models.airport import Airport
@@ -104,19 +104,32 @@ class _Google:
     raised for every GET on that page; `added(page)` adds rows to its outbound
     board. Every board served, outbound or return, also counts `unread` rows the
     parser could not read. `calls` records each GET as (page, pinned flight
-    number or None)."""
+    number or None), and `cheapest` the page of each Cheapest-tab GET. That tab
+    lists the page's outbound rows and `marked(page)`, the rows it sells on
+    separate tickets, and `refuse_cheapest(page)` is raised for its GET."""
 
     pairs: list[tuple[str, str]]
     fare: Callable[[int], float] = lambda i: 100.0 + i
     refuse: Callable[[Page], Exception | None] = lambda _page: None
     added: Callable[[Page], list[gfid.GFlightWithId]] = lambda _page: []
+    marked: Callable[[Page], list[gfid.GFlightWithId]] = lambda _page: []
+    refuse_cheapest: Callable[[Page], Exception | None] = lambda _page: None
     unread: int = 0
     calls: list[tuple[Page, int | None]] = field(default_factory=list[tuple[Page, int | None]])
     urls: list[str] = field(default_factory=list[str])
+    cheapest: list[Page] = field(default_factory=list[Page])
 
-    def __call__(self, filters: Any, *, currency: str = "USD") -> gfid.Board[gfid.GFlightWithId]:
+    def __call__(
+        self, filters: Any, *, currency: str = "USD", cheapest: bool = False
+    ) -> gfid.Board[gfid.GFlightWithId]:
         out = filters.flight_segments[0]
         page: Page = (_codes(out.departure_airport), _codes(out.arrival_airport))
+        if cheapest:
+            self.cheapest.append(page)
+            refusal = self.refuse_cheapest(page)
+            if refusal is not None:
+                raise refusal
+            return gfid.Board([*self._outbounds(page), *self.marked(page)])
         picked = out.selected_flight
         self.calls.append((page, None if picked is None else int(picked.legs[0].flight_number)))
         self.urls.append(gfid.search_page_url(filters, currency=currency))
@@ -124,12 +137,7 @@ class _Google:
         if refusal is not None:
             raise refusal
         if picked is None:
-            rows = [
-                _row(i, _DEP, o, d, self.fare(i))
-                for i, (o, d) in enumerate(self.pairs)
-                if o in page[0] and d in page[1]
-            ]
-            return gfid.Board([*rows, *self.added(page)], unread=self.unread)
+            return gfid.Board([*self._outbounds(page), *self.added(page)], unread=self.unread)
         flown = picked.legs[0]
         number = int(flown.flight_number)
         back_from, back_to = flown.arrival_airport.name, flown.departure_airport.name
@@ -140,6 +148,13 @@ class _Google:
             ],
             unread=self.unread,
         )
+
+    def _outbounds(self, page: Page) -> list[gfid.GFlightWithId]:
+        return [
+            _row(i, _DEP, o, d, self.fare(i))
+            for i, (o, d) in enumerate(self.pairs)
+            if o in page[0] and d in page[1]
+        ]
 
     def pages(self) -> list[Page]:
         return list(dict.fromkeys(p for p, _ in self.calls))
@@ -393,10 +408,10 @@ def test_a_browser_search_holds_one_session_across_its_pages(
     sessions: list[gfb.GfBrowserSession] = []
 
     def browser(
-        filters: Any, *, headed: bool, currency: str = "USD"
+        filters: Any, *, headed: bool, currency: str = "USD", cheapest: bool = False
     ) -> gfid.Board[gfid.GFlightWithId]:
         sessions.append(gfb.session(headed=headed))
-        return google(filters, currency=currency)
+        return google(filters, currency=currency, cheapest=cheapest)
 
     monkeypatch.setattr(gfid, "_one_call_browser", browser)
     result = _search(
@@ -413,7 +428,7 @@ def test_a_browser_search_holds_one_session_across_its_pages(
         "browser",
     )
     assert result.exit_code == 0, result.output
-    assert len(sessions) == 4
+    assert len(sessions) == 4 + 4  # each page, then its Cheapest tab
     assert len({id(s) for s in sessions}) == 1
 
 
@@ -502,7 +517,7 @@ def test_a_round_trip_with_few_pins_spends_them_where_the_cheapest_are(
     ]
 
 
-def test_a_page_with_no_pin_costs_no_further_get(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_page_with_no_pin_asks_no_return(monkeypatch: pytest.MonkeyPatch) -> None:
     pairs = [(o, "LAX") for o in _EAST]
     # Page 2's six are the cheapest, so `-n 3` pins nothing on page 1.
     google = _Google(pairs, fare=lambda i: 100.0 + i if i >= 6 else 300.0 + i)
@@ -523,6 +538,8 @@ def test_a_page_with_no_pin_costs_no_further_get(monkeypatch: pytest.MonkeyPatch
     assert result.exit_code == 0, result.output
     assert len(google.calls) == 2 + 3
     assert {page for page, pin in google.calls if pin is not None} == {(_EAST[6:], ("LAX",))}
+    # Each page reads its Cheapest tab once, the one holding no pin included.
+    assert google.cheapest == [(_EAST[:6], ("LAX",)), (_EAST[6:], ("LAX",))]
 
 
 def _round_trip_throttled_on_page_two(
@@ -762,8 +779,10 @@ class _Relisted(_Google):
     relisted: int = -1
 
     @override
-    def __call__(self, filters: Any, *, currency: str = "USD") -> gfid.Board[gfid.GFlightWithId]:
-        board = super().__call__(filters, currency=currency)
+    def __call__(
+        self, filters: Any, *, currency: str = "USD", cheapest: bool = False
+    ) -> gfid.Board[gfid.GFlightWithId]:
+        board = super().__call__(filters, currency=currency, cheapest=cheapest)
         return gfid.Board(map(self._listed, board), unread=board.unread)
 
     def _listed(self, row: gfid.GFlightWithId) -> gfid.GFlightWithId:
@@ -816,8 +835,10 @@ class _NoReturn(_Google):
     bare: int = -1
 
     @override
-    def __call__(self, filters: Any, *, currency: str = "USD") -> gfid.Board[gfid.GFlightWithId]:
-        board = super().__call__(filters, currency=currency)
+    def __call__(
+        self, filters: Any, *, currency: str = "USD", cheapest: bool = False
+    ) -> gfid.Board[gfid.GFlightWithId]:
+        board = super().__call__(filters, currency=currency, cheapest=cheapest)
         picked = filters.flight_segments[0].selected_flight
         if picked is not None and int(picked.legs[0].flight_number) == self.bare:
             return gfid.Board()
@@ -1063,9 +1084,11 @@ class _Priced(_Google):
     daily history of its own, numbered by the order the pages were asked in."""
 
     @override
-    def __call__(self, filters: Any, *, currency: str = "USD") -> gfid.Board[gfid.GFlightWithId]:
-        board = super().__call__(filters, currency=currency)
-        if filters.flight_segments[0].selected_flight is not None:
+    def __call__(
+        self, filters: Any, *, currency: str = "USD", cheapest: bool = False
+    ) -> gfid.Board[gfid.GFlightWithId]:
+        board = super().__call__(filters, currency=currency, cheapest=cheapest)
+        if cheapest or filters.flight_segments[0].selected_flight is not None:
             return board
         n = len(self.pages())
         return gfid.Board(
@@ -1124,3 +1147,161 @@ def test_the_envelope_carries_every_pages_rows_insight_and_history(
     assert [r["row"] for r in _rows(env)] == doc
     assert [i["typical_low"] for i in env["insight"]] == [200.0 + n for n in pages]
     assert [h["points"][0]["price"] for h in env["price_history"]] == [400.0 + n for n in pages]
+
+
+# ───────────────────────────── separate tickets ─────────────────────────────
+
+_EX6_PAGES: list[Page] = [
+    (_EX6_FROM[:4], _EX6_TO[:7]),
+    (_EX6_FROM[:4], _EX6_TO[7:]),
+    (_EX6_FROM[4:], _EX6_TO[:7]),
+    (_EX6_FROM[4:], _EX6_TO[7:]),
+]
+
+
+def _marked(row: gfid.GFlightWithId) -> gfid.GFlightWithId:
+    return replace(row, ticketing="separate_tickets")
+
+
+def _shown_marked(doc: list[Any]) -> list[tuple[str, float]]:
+    """(flight number, price) of each member on separate tickets, sorted."""
+    members: list[dict[str, Any]] = []
+    for r in doc:
+        members.extend(cast("list[dict[str, Any]]", r if isinstance(r, list) else [r]))
+    return sorted(
+        (m["legs"][0]["flight_number"], m["price"]) for m in members if m["separate_tickets"]
+    )
+
+
+@pytest.mark.parametrize("hide", [False, True], ids=["show", "hide"])
+def test_a_paged_one_way_reads_each_pages_cheapest_tab_once_and_filters_its_rows(
+    monkeypatch: pytest.MonkeyPatch, hide: bool
+) -> None:
+    """Page 1's tab sells flight 0 on separate tickets at $90, page 3's flight
+    950 at $95 and page 4's flight 960 at $175, over `--max-price 150`. Each is
+    shown or counted as on one page: the $90 booking beside flight 0's one
+    ticket, and the $175 one filtered out of both. Red at the merge: no page
+    read its Cheapest tab."""
+    marked = {
+        _EX6_PAGES[0]: [_marked(_row(0, _DEP, "JFK", "LHR", 90.0))],
+        _EX6_PAGES[2]: [_marked(_row(950, _DEP, "IAD", "LHR", 95.0))],
+        _EX6_PAGES[3]: [_marked(_row(960, _DEP, "IAD", "VIE", 175.0))],
+    }
+    google = _Google(_EX6_PAIRS, marked=lambda page: marked.get(page, []))
+    buf = capture_err(monkeypatch)
+    result = _search(
+        monkeypatch,
+        google,
+        ",".join(_EX6_FROM),
+        ",".join(_EX6_TO),
+        *("--backend", "gflight", "--fast", "--format", "json", "-n", "200"),
+        *("--max-price", "150"),
+        *(["--no-separate-tickets"] if hide else []),
+    )
+    assert result.exit_code == 0, result.output
+    assert google.cheapest == _EX6_PAGES
+    doc = json.loads(result.stdout)
+    printed = _flat(buf.getvalue())
+    note = "Google Flights: 2 itineraries on separate tickets hidden (--no-separate-tickets)."
+    if hide:
+        assert _shown_marked(doc) == []
+        assert printed.count(note) == 1, printed
+    else:
+        assert _shown_marked(doc) == [("0", 90.0), ("950", 95.0)]
+        assert sorted(r["price"] for r in doc if r["legs"][0]["flight_number"] == "0") == [
+            90.0,
+            100.0,
+        ]
+        assert "hidden" not in printed
+
+
+def test_a_paged_round_trip_reads_the_cheapest_tab_of_a_page_that_holds_no_pin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ten cheapest outbounds are all on pages 1 and 2, so pages 3 and 4
+    hold no pin; each still reads its tab once, as one page does after its
+    pins, and page 4's outbound on separate tickets is a row of its own. Red at
+    the merge: no page read its Cheapest tab."""
+    marked = {_EX6_PAGES[3]: [_marked(_row(960, _DEP, "IAD", "VIE", 99.0))]}
+    google = _Google(_EX6_PAIRS, marked=lambda page: marked.get(page, []))
+    result = _search(
+        monkeypatch,
+        google,
+        ",".join(_EX6_FROM),
+        ",".join(_EX6_TO),
+        *("--backend", "gflight", "--fast", "--format", "json", "-n", "200"),
+        ret=True,
+    )
+    assert result.exit_code == 0, result.output
+    assert {page for page, pin in google.calls if pin is not None} == set(_EX6_PAGES[:2])
+    assert google.cheapest == _EX6_PAGES
+    doc = json.loads(result.stdout)
+    assert [len(r) for r in doc].count(1) == 1
+    assert _shown_marked(doc) == [("960", 99.0)]
+
+
+def test_a_paged_search_names_the_first_cheapest_tab_it_could_not_read_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pages 2 and 4 refuse their tabs; the line names page 2's reason, and
+    page 1's row on separate tickets is still shown. Red at the merge: no page
+    read its Cheapest tab, so nothing was refused or shown."""
+    refused: dict[Page, Exception] = {
+        _EX6_PAGES[1]: GfUpstreamStatusError(503),
+        _EX6_PAGES[3]: GfUpstreamStatusError(404),
+    }
+    marked = {_EX6_PAGES[0]: [_marked(_row(0, _DEP, "JFK", "LHR", 90.0))]}
+    google = _Google(
+        _EX6_PAIRS,
+        marked=lambda page: marked.get(page, []),
+        refuse_cheapest=refused.get,
+    )
+    buf = capture_err(monkeypatch)
+    result = _search(
+        monkeypatch,
+        google,
+        ",".join(_EX6_FROM),
+        ",".join(_EX6_TO),
+        *("--backend", "gflight", "--fast", "--format", "json", "-n", "200"),
+    )
+    assert result.exit_code == 0, result.output
+    printed = _flat(buf.getvalue())
+    assert printed.count("Itineraries on separate tickets not read") == 1, printed
+    assert (
+        "Itineraries on separate tickets not read: Google Flights returned HTTP 503." in printed
+    ), printed
+    assert _shown_marked(json.loads(result.stdout)) == [("0", 90.0)]
+
+
+def test_a_page_with_no_pin_left_unread_by_a_stop_says_why_its_tab_was_not_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ten cheapest outbounds are on pages 1 and 2, and page 2's returns are
+    throttled, which stops the search before pages 3 and 4, holding no pin,
+    read their Cheapest tabs. No page line names those two, so the
+    separate-ticket line does. Red at the merge: no page read its tab and
+    nothing said so."""
+
+    def refuse(page: Page) -> Exception | None:
+        pinned = google.calls[-1][1] is not None
+        return GfThrottledError("rate-limited") if page == _EX6_PAGES[1] and pinned else None
+
+    google = _Google(_EX6_PAIRS, refuse=refuse)
+    buf = capture_err(monkeypatch)
+    result = _search(
+        monkeypatch,
+        google,
+        ",".join(_EX6_FROM),
+        ",".join(_EX6_TO),
+        *("--backend", "gflight", "--fast", "--format", "json", "-n", "200"),
+        ret=True,
+    )
+    assert result.exit_code == 0, result.output
+    assert google.cheapest == _EX6_PAGES[:1]
+    printed = _flat(buf.getvalue())
+    assert _missing(2, "Google Flights rate-limited") in printed, printed
+    assert "page 3 of 4" not in printed
+    assert "page 4 of 4" not in printed
+    assert "Itineraries on separate tickets not read: Google Flights rate-limited." in printed, (
+        printed
+    )

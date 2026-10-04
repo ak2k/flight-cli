@@ -559,6 +559,11 @@ def _priced(source: str, gf: str | None = None, mx: str | None = None) -> Merged
     )
 
 
+def _sold_separately(gf: str, ticketing: str = "separate_tickets") -> MergedRow:
+    it = _its(_slice(["ZZ1"]), price=gf).model_copy(update={"ticketing": ticketing})
+    return MergedRow(itinerary=it, gf_price=gf, matrix_price=None, source="gf", google=it)
+
+
 @pytest.mark.parametrize(
     ("rows", "matrix_low", "want"),
     [
@@ -610,6 +615,18 @@ def _priced(source: str, gf: str | None = None, mx: str | None = None) -> Merged
             "USD120.00",
             None,
             id="matrix-under-googles-low",
+        ),
+        pytest.param(
+            [_sold_separately("USD100.00"), _priced("gf", gf="USD150.00")],
+            "USD200.00",
+            2,
+            id="a-row-on-separate-tickets-is-passed-over",
+        ),
+        pytest.param(
+            [_sold_separately("USD100.00", "self_transfer")],
+            None,
+            None,
+            id="a-self-transfer-is-passed-over-beside-an-empty-matrix-answer",
         ),
     ],
 )
@@ -682,7 +699,7 @@ def _weave(
     )
     bodies: list[dict[str, Any]] = []
 
-    def _gf(*_a: Any) -> list[Any]:
+    def _gf(*_a: Any, **_kw: Any) -> list[Any]:
         if google_fails:
             raise GfThrottledError("rate-limited")
         return rows

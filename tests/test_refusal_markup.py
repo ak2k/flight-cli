@@ -1268,6 +1268,8 @@ def test_the_awards_only_refusal_escapes_the_providers_the_user_typed(
     monkeypatch.setattr(
         "flight_cli.providers.registry.has_any_configured", lambda: True, raising=True
     )
+    monkeypatch.setattr("flight_cli.providers.pointspath.provider.is_configured", lambda: True)
+    monkeypatch.setattr("flight_cli.providers.seats_aero.auth.is_configured", lambda: False)
     sel = cli.ProviderSelection(
         awards_only=True,
         cash_only=False,

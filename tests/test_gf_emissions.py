@@ -54,7 +54,8 @@ _CO2_FIELDS = (
     "emissions_tag",
 )
 # The row keys of every Google JSON document, as fli's FlightResult dumps them
-# plus the flight id; the CO2 four were there before, all null.
+# plus the flight id and `separate_tickets`; the CO2 four were there before,
+# all null.
 _ROW_KEYS = {
     "booking_token",
     "co2_emissions_delta_pct",
@@ -71,6 +72,7 @@ _ROW_KEYS = {
     "primary_airline",
     "primary_airline_name",
     "self_transfer",
+    "separate_tickets",
     "stops",
 }
 

@@ -300,6 +300,12 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> Any:
 # ─────────────────────────── ds:1 extraction ───────────────────────────
 
 
+@pytest.mark.parametrize("path", sorted(FIXTURE_DIR.glob("ds1_*.json")), ids=lambda p: p.name)
+def test_every_page_fixture_has_its_session_id_scrubbed(path: pathlib.Path) -> None:
+    """The FIXTURE POLICY above: `[0][4]` is the one value naming the capture."""
+    assert json.loads(path.read_text())[0][4] == "SCRUBBED-SESSION-ID"
+
+
 def test_extract_ds1_reads_the_flights_blob_past_other_keys() -> None:
     payload = gfid._extract_ds1(_page(_ds1("ds1_jfk_lax_3rows.json")))
     assert payload is not None

@@ -248,7 +248,7 @@ def test_n_above_thirty_returns_the_rows_the_full_board_holds(
     rows: list[Any] = json.loads(result.stdout)
     assert len(rows) == 60
     assert len({_json_booked(r) + str(r["legs"][0]["departure_datetime"]) for r in rows}) == 60
-    assert len(fake.gets) == 1
+    assert len(fake.gets) == 2  # the board, then its Cheapest tab
     assert "tfu=EgQIABABIgA" in fake.gets[0]
 
 
@@ -597,7 +597,7 @@ def test_a_round_trip_that_loses_no_pin_adds_nothing_to_stderr(
     assert result.exit_code == 0, result.output
     assert result.stdout
     assert result.stderr == ""
-    assert len(fake.gets) == 11
+    assert len(fake.gets) == 12  # the outbound, ten pins, then the Cheapest tab
 
 
 def test_a_return_board_the_routing_empties_is_counted_and_routed_to_matrix(
