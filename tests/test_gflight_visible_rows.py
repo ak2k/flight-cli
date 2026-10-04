@@ -326,11 +326,28 @@ def _enriched(
     async def _stashes_matrix(state: dict[str, Any], *_a: object, **_kw: object) -> None:
         state["matrix"] = answer
 
+    class _Chain:
+        """Matrix answering the chain search a Google row under all its fares
+        is asked: no fare on those flights."""
+
+        def __init__(self, **_kw: object) -> None:
+            pass
+
+        async def __aenter__(self) -> _Chain:
+            return self
+
+        async def __aexit__(self, *_a: object) -> None:
+            return None
+
+        async def execute(self, *_a: object, **_kw: object) -> SearchResult:
+            return _empty_matrix()
+
     def _gf(*_a: object, **_kw: object) -> list[Any]:
         return rows
 
     monkeypatch.setattr(cli, "_gflight_results", _gf)
     monkeypatch.setattr(cli, "_matrix_into", _stashes_matrix)
+    monkeypatch.setattr(cli, "MatrixClient", _Chain)
     cli._run_enriched_path(
         legs=_one_way(),
         opts=SearchOptions(cabin=Cabin.COACH),
