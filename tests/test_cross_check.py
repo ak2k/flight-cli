@@ -21,7 +21,16 @@ from typer.testing import CliRunner
 from conftest import _answering, _ds1, _page, _unreadable, dl_beside_unreadable_as
 from flight_cli import _gflight_ids as gfid
 from flight_cli import cli
-from flight_cli._cross_check import Answers, CrossCheck, RowCheck, cross_check, document
+from flight_cli._cross_check import (
+    Answers,
+    CrossCheck,
+    RowCheck,
+    cross_check,
+    document,
+    every_matrix_price_in,
+    low_row,
+    lowest_matrix_price,
+)
 from flight_cli._enrich import MergedRow, merge_results
 from flight_cli._gf_common import PageFetch
 from flight_cli._gf_errors import GfThrottledError
@@ -536,6 +545,112 @@ def test_the_document_is_the_rows_in_order_with_numbers_for_deltas() -> None:
         ],
     }
     assert (last["source"], last["delta"], last["reasons"]) == ("google", None, ["not_in_matrix"])
+
+
+# ─────────────────────── the row Matrix is asked about ──────────────────────
+
+
+def _priced(source: str, gf: str | None = None, mx: str | None = None) -> MergedRow:
+    return MergedRow(
+        itinerary=_its(_slice(["ZZ1"]), price=gf or mx or "USD1.00"),
+        gf_price=gf,
+        matrix_price=mx,
+        source=source,
+    )
+
+
+@pytest.mark.parametrize(
+    ("rows", "matrix_low", "want"),
+    [
+        pytest.param(
+            [_priced("gf", gf="USD200.00"), _priced("gf", gf="USD199.99")],
+            "USD200.00",
+            2,
+            id="a-tie-with-matrix-is-not-under-it",
+        ),
+        pytest.param(
+            [_priced("gf", gf="USD150.00"), _priced("gf", gf="USD150.00")],
+            "USD200.00",
+            1,
+            id="of-two-tied-rows-the-first",
+        ),
+        pytest.param(
+            [_priced("both", gf="USD100.00", mx="USD300.00"), _priced("gf", gf="USD200.00")],
+            "USD300.00",
+            2,
+            id="a-row-on-both-sides-cheaper-on-google-is-never-chosen",
+        ),
+        pytest.param(
+            [_priced("gf", gf="EUR100.00"), _priced("gf", gf="USD150.00")],
+            "USD200.00",
+            2,
+            id="a-row-in-another-currency-is-passed-over",
+        ),
+        pytest.param([_priced("gf", gf="USD150.00")], "EUR200.00", None, id="matrix-in-another"),
+        pytest.param(
+            [_priced("gf"), _priced("gf", gf="USD150.00")],
+            "USD200.00",
+            2,
+            id="a-row-google-did-not-price-is-passed-over",
+        ),
+        pytest.param(
+            [_priced("gf", gf="EUR100.00"), _priced("gf", gf="USD900.00")],
+            None,
+            2,
+            id="an-empty-matrix-answer-leaves-any-row-in-the-currency",
+        ),
+        pytest.param(
+            [_priced("matrix", mx="USD150.00"), _priced("gf", gf="USD150.00")],
+            "USD150.00",
+            None,
+            id="matrix-at-googles-low",
+        ),
+        pytest.param(
+            [_priced("matrix", mx="USD120.00"), _priced("gf", gf="USD150.00")],
+            "USD120.00",
+            None,
+            id="matrix-under-googles-low",
+        ),
+    ],
+)
+def test_the_checked_row_is_the_first_google_only_row_under_matrixs_low(
+    rows: list[MergedRow], matrix_low: str | None, want: int | None
+) -> None:
+    assert low_row(rows, matrix_low, "USD") == want
+
+
+def test_matrixs_low_is_its_cheapest_party_price_in_the_currency() -> None:
+    rows = [
+        _priced("matrix", mx="USD300.00"),
+        _priced("both", gf="USD90.00", mx="USD250.00"),
+        _priced("matrix", mx="GBP100.00"),
+        _priced("gf", gf="USD80.00"),
+    ]
+    assert lowest_matrix_price(rows, "USD") == "USD250.00"
+    assert lowest_matrix_price([_priced("gf", gf="USD80.00")], "USD") is None
+
+
+@pytest.mark.parametrize(
+    ("rows", "want"),
+    [
+        pytest.param(
+            [_priced("matrix", mx="USD300.00"), _priced("both", gf="USD9.00", mx="USD250.00")],
+            True,
+            id="every-matrix-price-in-the-currency",
+        ),
+        pytest.param([_priced("gf", gf="EUR80.00")], True, id="no-matrix-row"),
+        pytest.param(
+            [_priced("matrix", mx="USD300.00"), _priced("matrix", mx="GBP100.00")],
+            False,
+            id="a-matrix-price-in-another-currency",
+        ),
+        pytest.param([_priced("matrix")], False, id="a-matrix-row-with-no-party-price"),
+    ],
+)
+def test_a_google_row_is_under_every_matrix_fare_only_beside_comparable_prices(
+    rows: list[MergedRow], want: bool
+) -> None:
+    assert every_matrix_price_in(rows, "USD") is want
 
 
 # ───────────────────────────── the CLI: one weave ───────────────────────────
