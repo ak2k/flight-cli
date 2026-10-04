@@ -338,6 +338,12 @@ def parse_routing(routing: str) -> list[Predicate]:
 # (`~AA,UA,DL+`), and so does the first alternative's prefix (`X:`, `O:`, `l:`)
 # to each alternative that carries none of its own (`O:AA,UA` is `O:AA,O:UA`).
 _RE_CODE_PREFIX = re.compile(r"^[A-Z]+:")
+# A code left with no prefix reads under Matrix's documented default: `C:` (the
+# marketing carrier) for two characters, `X:` (a connection airport) for three
+# letters. No other prefix is folded: a wrong fold would copy onto the return a
+# routing that means something else there.
+_RE_CARRIER_DEFAULT = re.compile(r"^[A-Z0-9]{2}$")
+_RE_AIRPORT_DEFAULT = re.compile(r"^[A-Z]{3}$")
 # A flight number: an airline designator (`_RE_AIRLINE`'s shape), digits, an
 # optional range and an optional quantifier. Wider than `_RE_FLIGHTNUM`, which
 # decides what Google post-filters and so stays letters-only.
@@ -351,6 +357,18 @@ def _is_one_flight(alternative: str) -> bool:
     return m is not None and (m.group(2) is None or int(m.group(1)) == int(m.group(2)))
 
 
+def _with_prefix(alternative: str, lead: str) -> str:
+    if _RE_CODE_PREFIX.match(alternative):
+        return alternative
+    if lead:
+        return lead + alternative
+    if _RE_CARRIER_DEFAULT.match(alternative):
+        return "C:" + alternative
+    if _RE_AIRPORT_DEFAULT.match(alternative):
+        return "X:" + alternative
+    return alternative
+
+
 def _direction_key(tok: str) -> tuple[bool, frozenset[str], str]:
     upper = tok.upper()
     group = upper.removeprefix("~")
@@ -359,7 +377,7 @@ def _direction_key(tok: str) -> tuple[bool, frozenset[str], str]:
     lead = m.group() if (m := _RE_CODE_PREFIX.match(alternatives[0])) else ""
     return (
         group != upper,
-        frozenset(a if _RE_CODE_PREFIX.match(a) else lead + a for a in alternatives),
+        frozenset(_with_prefix(a, lead) for a in alternatives),
         group[len(body) :],
     )
 
@@ -381,14 +399,12 @@ def direction_dependence(routing: str) -> str | None:
     outbound's `UA LH` asks for UA then LH again, from the far end. Two things
     make an expression depend on direction: a token naming a flight number,
     since a flight flies one way, and a token sequence that differs from its
-    reversal. Tokens compare case-insensitively and a comma group as a set
-    of prefixed alternatives under its `~` and quantifier, so `DFW,DEN DEN,DFW`
-    and `O:AA,O:UA O:UA,O:AA` are palindromes. The
-    phrase completes "--routing X …"."""
-    text = routing.strip()
-    if text.startswith("[") and text.endswith("]"):
-        text = text[1:-1]
-    tokens = text.split()
+    reversal. Brackets only separate tokens. Tokens compare case-insensitively
+    and a comma group as a set of prefixed alternatives under its `~` and
+    quantifier, a bare two-character code reading as `C:` and a bare
+    three-letter one as `X:`, so `DFW,DEN DEN,DFW`, `O:AA,O:UA O:UA,O:AA` and
+    `AA C:AA` are palindromes. The phrase completes "--routing X …"."""
+    tokens = routing.replace("[", " ").replace("]", " ").split()
     if flight := next((t for t in tokens if _names_one_flight(t)), None):
         return f"names flight {flight!r}, which flies one way"
     keys = [_direction_key(t) for t in tokens]
