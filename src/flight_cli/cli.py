@@ -6329,7 +6329,12 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     dropped: int = getattr(results, "dropped", 0)
     # Said before the hand-off below: shown or read, these itineraries could
     # have answered a search that now goes to Matrix.
-    _note_separate_tickets(results, gf_mode=gf_mode, bags=opts.bags is not None)
+    _note_separate_tickets(
+        results,
+        gf_mode=gf_mode,
+        bags=opts.bags is not None,
+        unchecked=unchecked if separate_tickets == "show" else None,
+    )
     # Handed on before the pin-cap and currency notes, because both describe
     # Google's answer and Matrix gives this one. Never with `--sellers`: an
     # empty board fails that below, as a board with no row to open.
@@ -6370,8 +6375,6 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     _pin_cap_note(legs=legs, top_n=top_n)
     _note_other_currencies(results, opts.currency or "USD")
     _note_stop_drops(results)
-    if unchecked and separate_tickets == "show":
-        _note_unchecked_return(unchecked)
 
     if not results and (sellers or verify):
         # Why the board is empty is the search's answer; the flag's own exit
