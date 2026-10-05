@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=false
 """An auto search handed to Matrix still says the Cheapest tab went unread.
 
 The tab is left unread when a return check only the row filter makes, never
