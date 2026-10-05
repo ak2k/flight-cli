@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-_MEMO = Path(__file__).resolve().parent.parent / "docs" / "memories" / "gf_routing_and_carriers.md"
+_MEMO = Path(__file__).resolve().parent.parent / "docs" / "memories" / "gf_request_budget.md"
 
 
 def test_the_cheapest_round_trip_claim_names_a_refused_return_board() -> None:

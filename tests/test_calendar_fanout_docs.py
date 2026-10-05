@@ -13,7 +13,7 @@ def _flat(rel: str) -> str:
 
 
 def test_memo_l4_measurement_matches_the_recorded_run() -> None:
-    memo = _flat("docs/memories/gf_routing_and_carriers.md")
+    memo = _flat("docs/memories/gf_date_grid.md")
     assert "8 of the 18 pairs priced nothing" in memo
     assert "LGA→STN priced 1 day" in memo
     assert "cheaper on 10-28 to 11-02" in memo
