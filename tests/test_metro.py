@@ -16,9 +16,12 @@ from fli.models.airport import Airport
 
 from flight_cli._metro import (
     MAX_GF_LEG_AIRPORTS,
+    MAX_GF_PAGES,
     METRO_MEMBERS,
     expand_airports,
+    gf_leg_pages,
     gf_leg_refusal,
+    gf_pages_refusal,
 )
 
 _MEMO = Path(__file__).resolve().parents[1] / "docs" / "memories" / "airport_groups.md"
@@ -101,3 +104,91 @@ def test_the_leg_bound_counts_expanded_airports_on_both_ends() -> None:
 def test_an_airport_at_both_ends_is_refused_after_expansion() -> None:
     assert gf_leg_refusal(["NYC"], ["JFK"]) == "an airport at both ends of a leg (JFK)"
     assert gf_leg_refusal(["NYC"], ["LAX"]) is None
+
+
+# The skill's Example 6: 8 east-coast origins, 13 European destinations.
+_EX6_FROM = ("JFK", "LGA", "EWR", "BOS", "IAD", "DCA", "BWI", "PHL")
+_EX6_TO = (
+    "LHR",
+    "CDG",
+    "FRA",
+    "AMS",
+    "IST",
+    "MAD",
+    "BCN",
+    "FCO",
+    "MUC",
+    "ZRH",
+    "VIE",
+    "CPH",
+    "DUB",
+)
+# The skill's "US East Coast" list: 12 airports.
+_EAST_COAST = ("JFK", "LGA", "EWR", "BOS", "IAD", "DCA", "BWI", "PHL", "ATL", "MIA", "FLL", "CLT")
+
+
+def _pairs(pages: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...]) -> list[tuple[str, str]]:
+    return [(o, d) for os, ds in pages for o in os for d in ds]
+
+
+def test_example_six_is_four_pages_that_ask_every_pair_once() -> None:
+    pages = gf_leg_pages(_EX6_FROM, _EX6_TO)
+    assert pages is not None
+    assert len(pages) == 4
+    assert all(len(os) + len(ds) <= MAX_GF_LEG_AIRPORTS for os, ds in pages)
+    pairs = _pairs(pages)
+    assert len(pairs) == len(set(pairs)) == 8 * 13 == 104
+    assert set(pairs) == {(o, d) for o in _EX6_FROM for d in _EX6_TO}
+    # Two origin groups of four against destinations split 7 / 6, order kept.
+    assert pages[0] == (_EX6_FROM[:4], _EX6_TO[:7])
+    assert pages[1] == (_EX6_FROM[:4], _EX6_TO[7:])
+    assert pages[3] == (_EX6_FROM[4:], _EX6_TO[7:])
+    assert gf_pages_refusal(_EX6_FROM, _EX6_TO) is None
+
+
+def test_the_east_coast_to_one_airport_is_two_pages() -> None:
+    pages = gf_leg_pages(_EAST_COAST, ["LAX"])
+    assert pages == ((_EAST_COAST[:6], ("LAX",)), (_EAST_COAST[6:], ("LAX",)))
+
+
+def test_a_leg_that_fits_is_one_page_equal_to_the_leg() -> None:
+    assert gf_leg_pages(["JFK", "EWR"], ["LHR"]) == ((("JFK", "EWR"), ("LHR",)),)
+    # A metro code is planned as its members, as the page is asked for them.
+    assert gf_leg_pages(["NYC"], ["LON"]) == (
+        (("JFK", "LGA", "EWR"), ("LHR", "LGW", "STN", "LTN", "LCY", "SEN")),
+    )
+    ten = _EAST_COAST[:10]
+    assert gf_leg_pages(ten, ["LAX"]) == ((ten, ("LAX",)),)
+
+
+def test_a_tie_goes_to_fewer_groups_on_the_larger_side() -> None:
+    """7 origins + 14 destinations is 4 pages as 1 x 4 or as 2 x 2; the side
+    with more airports keeps fewer groups."""
+    codes = [f"Q{i:02d}" for i in range(21)]
+    pages = gf_leg_pages(codes[:7], codes[7:])
+    assert pages is not None
+    assert len(pages) == 4
+    assert {ds for _, ds in pages} == {tuple(codes[7:14]), tuple(codes[14:])}
+    assert {os for os, _ in pages} == {tuple(codes[:4]), tuple(codes[4:7])}
+
+
+def test_a_leg_past_the_page_bound_is_refused_naming_why() -> None:
+    """15 + 15 needs 3 x 3 = 9 pages of at most 11: one more than the bound."""
+    assert MAX_GF_PAGES == 8
+    codes = [f"Q{i:02d}" for i in range(30)]
+    assert gf_leg_pages(codes[:15], codes[15:]) is None
+    assert gf_pages_refusal(codes[:15], codes[15:]) == (
+        "30 airports on one leg (more than 8 pages of at most 11)"
+    )
+    # 15 + 14 is the bound exactly: 4 x 2 = 8 pages of 4 + 7.
+    eight = gf_leg_pages(codes[:15], codes[15:29])
+    assert eight is not None
+    assert len(eight) == MAX_GF_PAGES
+    assert gf_pages_refusal(codes[:15], codes[15:29]) is None
+
+
+def test_the_page_plan_refuses_an_airport_at_both_ends() -> None:
+    assert gf_pages_refusal(["NYC"], ["JFK"]) == "an airport at both ends of a leg (JFK)"
+    assert gf_pages_refusal([*_EAST_COAST, "LAX"], ["LAX"]) == (
+        "an airport at both ends of a leg (LAX)"
+    )

@@ -38,6 +38,7 @@ from flight_cli._gflight_ids import GFlightWithId
 from flight_cli.client import MatrixClient
 from flight_cli.domain import Cabin, Pax, SearchOptions
 from flight_cli.models import BookingDetailsResult, SearchResult
+from test_envelope import _envelope_of, _notes, _rows
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1606,3 +1607,38 @@ def test_a_booking_the_model_cannot_read_is_not_checked_flight_by_flight(
     err = _flat(result.stderr)
     assert "this itinerary cannot be checked flight by flight." in err
     assert "validation error" not in err
+
+
+# ─────────────────────────────── the envelope ───────────────────────────────
+
+
+def test_the_envelope_carries_the_check_under_verify(
+    gf_session: Callable[..., Any], matrix: _Matrix
+) -> None:
+    n, row = _as_row()
+    matrix.chain = _chain(_row_solution("AS-1", f"USD{row.flight.price:.2f}", row))
+    matrix.details = {"AS-1": _details_of(row)}
+    args = ("-n", "40", "--verify", "--pick", str(n))
+    gf_session(_served())
+    doc = json.loads(_run(*args, "--format", "json").stdout)
+    gf_session(_served())
+    env = _envelope_of(_run(*args, "--format", "envelope"))
+    assert (env["backend"], env["complete"]) == ("gflight", True)
+    assert [r["row"] for r in _rows(env)] == doc["search"]
+    assert env["verify"] == doc["verify"]
+    assert env["verify"]["outcome"] == "match"
+    assert not _notes(env, "verify")
+
+
+def test_a_matrix_error_leaves_the_envelopes_verify_null_and_exits_1(
+    gf_session: Callable[..., Any], matrix: _Matrix
+) -> None:
+    n, _ = _as_row()
+    matrix.error = {"error": {"message": "backend [/x] busy", "type": "INTERNAL"}}
+    gf_session(_served())
+    result = _run("-n", "40", "--verify", "--pick", str(n), "--format", "envelope")
+    env = _envelope_of(result, code=1)
+    assert (env["backend"], env["complete"], env["verify"]) == ("gflight", False, None)
+    assert len(_rows(env)) == 40
+    assert "Matrix returned an error (INTERNAL): backend [/x] busy" in env["notes"]
+    assert _notes(env, "verify") == ["verify: the run ended before the row was checked"]

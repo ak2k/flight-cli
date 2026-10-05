@@ -27,6 +27,7 @@ from flight_cli import _verify, cli
 from flight_cli._gf_common import PageFetch
 from flight_cli.client import MatrixClient
 from flight_cli.domain import SearchOptions
+from test_envelope import _envelope_of
 from test_verify import (
     _DEP,
     _SEARCH,
@@ -605,3 +606,46 @@ def test_fast_and_verify_runs_ask_matrix_nothing_more(
             SearchOptions().page_size
         ]
         assert _routed(matrix) == matrix.searches()
+
+
+# ─────────────────────────────── the envelope ───────────────────────────────
+
+
+def test_the_envelope_carries_the_check_inside_its_cross_check(
+    gf_session: Callable[..., Any], matrix: _Matrix
+) -> None:
+    """The envelope's `cross_check` is the object `--format json` prints,
+    `low_check` included, and the check's stderr line is one of its notes."""
+    low = _low()
+    price = _price(low)
+    matrix.probe = _chain(_b6("USD999.00"))
+    matrix.chain = _chain(_row_solution("DL-1", price, low))
+    matrix.details = {"DL-1": _details_of(low)}
+    gf_session(_served())
+    document = _run("-n", "10", "--enrich", "--format", "json")
+    assert document.exit_code == 0, document.output
+    gf_session(_served())
+    env = _envelope_of(_run("-n", "10", "--enrich", "--format", "envelope"))
+    assert env["cross_check"] == json.loads(document.stdout)["cross_check"]
+    assert env["cross_check"]["low_check"]["outcome"] == "match"
+    assert env["complete"] is True
+    assert "Asking Matrix for row 1's exact flights (at most 60 s)…" in env["notes"]
+
+
+def test_a_check_matrix_did_not_answer_leaves_the_envelope_complete(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """No flag asks for the check, so its failure leaves every key that was
+    asked for whole; `low_check` says Matrix did not answer, and why."""
+    fake = _ChainError()
+    _install(monkeypatch, tmp_path, fake, fake.refuse)
+    fake.probe = _chain(_b6("USD999.00"))
+    gf_session(_served())
+    env = _envelope_of(_run("-n", "10", "--enrich", "--format", "envelope"))
+    low_check = env["cross_check"]["low_check"]
+    assert (low_check["outcome"], low_check["reason"]) == (
+        "no-answer",
+        "Matrix returned an error (internal): boom",
+    )
+    assert env["complete"] is True
+    assert len(_routed(fake)) == 1
