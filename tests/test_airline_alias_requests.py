@@ -317,6 +317,7 @@ def _enum_lookups(tree: ast.AST) -> list[int]:
     # An annotation and `ItineraryKey` name the type, not a code, and the body of
     # `fli_airlines` is where `fli_bridge` builds its own table.
     roots: list[ast.AST] = []
+    table: list[ast.stmt] = []
     for node in nodes:
         if isinstance(node, ast.arg | ast.AnnAssign) and node.annotation is not None:
             roots.append(node.annotation)
@@ -324,10 +325,19 @@ def _enum_lookups(tree: ast.AST) -> list[int]:
             if node.returns is not None:
                 roots.append(node.returns)
             if isinstance(node, ast.FunctionDef) and node.name == "fli_airlines":
-                roots.extend(node.body)
+                table.extend(node.body)
         elif isinstance(node, ast.TypeAlias) and node.name.id == "ItineraryKey":
             roots.append(node.value)
-    exempt = {id(sub) for root in roots for sub in ast.walk(root)}
+    # A call or lambda in a type is `Annotated` metadata, which typer and pydantic run.
+    code = {
+        id(sub)
+        for root in roots
+        for run in ast.walk(root)
+        if isinstance(run, ast.Call | ast.Lambda)
+        for sub in ast.walk(run)
+    }
+    exempt = {id(sub) for root in roots for sub in ast.walk(root)} - code
+    exempt |= {id(sub) for stmt in table for sub in ast.walk(stmt)}
     return sorted(
         node.lineno
         for node in nodes

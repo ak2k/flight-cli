@@ -70,3 +70,16 @@ def test_the_guard_sees_the_enum_renamed_in_one_module_and_used_in_another(
     monkeypatch.setattr(guard, "_SRC", tmp_path)
     with pytest.raises(AssertionError, match=r"\['carriers\.py:1'\]"):
         guard.test_no_code_resolves_an_airline_through_flis_enum()
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from fli.models import Airline\n"
+        "def f(c: Annotated[str, Option(callback=lambda v: Airline[v])]) -> None: ...",
+        "from fli.models import Airline\nx: Annotated[str, AfterValidator(Airline)]",
+    ],
+)
+def test_the_guard_sees_the_enum_in_annotation_metadata_that_runs(source: str) -> None:
+    """Typer and pydantic call what `Annotated` carries, so that is code, not a type."""
+    assert _enum_lookups(ast.parse(source)) == [2]
