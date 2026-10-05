@@ -8381,7 +8381,11 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
         {cab: fli_by_cabin[cab] for cab in dict.fromkeys((sort_by, *cabins)) if cab in fli_by_cabin}
     )
     rows = _merge_cabins(
-        results_by_cabin, sort_by=sort_by, top_n=top_n, currency=opts.currency or "USD"
+        results_by_cabin,
+        sort_by=sort_by,
+        top_n=top_n,
+        currency=opts.currency or "USD",
+        slices=len(legs),
     )
     # `not json_out` for the reason given at the same gate in
     # `_run_gflight_path`: with awards on, the document is written below this.
