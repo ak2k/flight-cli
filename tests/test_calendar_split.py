@@ -4591,6 +4591,9 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_render_multi_cabin_search", "out_cell"),
         ("_render_multi_cabin_search", "ret_cell"),
         ("_render_multi_cabin_search", "price_cells"),
+        # `_fmt_slice_cell` of a Google one-way; the hostile flight number of
+        # tests/test_open_jaw_search.py holds it.
+        ("_render_open_jaw", "ticket"),
         ("_render_calendar", "row"),
         ("_render_gflight_table", "label"),  # the row number, and its a/b suffix
         ("_render_gflight_table", "dur"),  # "3h05m", from an integer count of minutes
