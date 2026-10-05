@@ -240,7 +240,7 @@ class _SharedThrottleLadder:
     wall nothing is getting through — and each CALL carries its own attempt
     count too, because a refillable shared budget cannot bound one. The
     arithmetic and the measured costs live once, in the budget section of
-    docs/memories/gf_routing_and_carriers.md.
+    docs/memories/gf_request_budget.md.
 
     The transport budget rides the same object because the network is one
     network, and it probes the same way: `_is_transport_failure` admits only the
@@ -337,7 +337,7 @@ class _SharedThrottleLadder:
         # the caller's own attempt count, and what guarantees the report arrives
         # is `retry_throttled`'s `finally`, which stands an owner down whatever
         # door it leaves by. The reasoning and the elapsed bounds live in the
-        # budget section of docs/memories/gf_routing_and_carriers.md.
+        # budget section of docs/memories/gf_throttle_ladder.md.
         settled.wait()
         with self._lock:
             return None if round_.exhausted else 0.0
@@ -366,7 +366,7 @@ class _SharedThrottleLadder:
         (cabins - 1)` GETs between them rather than that many each. Sharing is
         what makes the budget a statement about the network, which is one
         network. The arithmetic and the measured costs live once, in the budget
-        section of docs/memories/gf_routing_and_carriers.md — the same place
+        section of docs/memories/gf_request_budget.md — the same place
         the class docstring points at for the wall."""
         with self._lock:
             self._wall.refill()
@@ -596,7 +596,7 @@ def _extract_ds1(html: str) -> list[Any] | None:
         # layout has just changed, which is the failure this backend actually
         # meets. The ruling and the measurements are under
         # "A page may carry more than one `ds:1` blob" in
-        # docs/memories/gf_routing_and_carriers.md. Pinned by
+        # docs/memories/gf_page_refusals_and_ds1.md. Pinned by
         # `test_a_decoy_whose_rows_partly_parse_is_served_short_and_silently`
         # and `test_the_chosen_blob_is_counted_structurally_not_parsed`.
         rows = _board_row_count(decoded) if _is_a_readable_board(decoded) else 0
@@ -1440,7 +1440,7 @@ def _rows_from_ds1(payload: list[Any]) -> _Ds1Board:
     plus where else in the payload flight rows turned up.
 
     How many row blocks a SERVED page carries varies by request — see the
-    shapes table in docs/memories/gf_routing_and_carriers.md — so counting them
+    shapes table in docs/memories/gf_page_refusals_and_ds1.md — so counting them
     is not a validity test, and a board with no flights at all is served with
     nothing at either index. The only layout change the payload can actually
     prove is rows appearing somewhere we don't read, so the scan is positive:
@@ -1607,7 +1607,7 @@ def _get_search_page(client: Any, url: str) -> Any:
     `@retry(stop_after_attempt(3))` and calls `raise_for_status()`, so a
     persistently throttled leg would cost three fli attempts inside each of our
     throttle retries. The arithmetic and the resulting number live once, in the
-    budget section of docs/memories/gf_routing_and_carriers.md. `retry_throttled`
+    budget section of docs/memories/gf_request_budget.md. `retry_throttled`
     is the only ladder, so throttle handling lives where the classification
     does.
 
@@ -2810,7 +2810,7 @@ def _report_pin_outcome(
         # account of what is missing. What that costs a machine consumer, and
         # why the alternatives were refused, is argued once under
         # "A partial round trip is a success, deliberately." in
-        # docs/memories/gf_routing_and_carriers.md. The comment below covers
+        # docs/memories/gf_request_budget.md. The comment below covers
         # the all-refused arm and the pin-ORDER trade, which are different
         # questions. Driven by
         # `test_a_throttle_on_a_later_pin_keeps_what_was_already_served`, its

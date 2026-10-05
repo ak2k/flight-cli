@@ -147,7 +147,7 @@ class _LiveStderr:
     it gets the diagnostic in a closed stream or in stdout, where the
     `--format json` document goes. Both failures are written up under **A
     diagnostic resolves its stream per write** in
-    docs/memories/gf_routing_and_carriers.md. Resolving per write is
+    docs/memories/gf_request_budget.md. Resolving per write is
     what `_StderrHandler` does for the stdlib half of this module, for the same
     reason, and a stream that cannot be written to is written nowhere.
 
