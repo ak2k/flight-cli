@@ -1842,7 +1842,9 @@ class Board[T](list[T]):
     alone, so the merged board's `insight` and `history` are None.
     `separate_hidden` counts the separate-ticket itineraries a search asked to
     hide, and `separate_failed` is why the Cheapest tab, where those are listed,
-    went unread."""
+    went unread. `stopped` is the throttle, transport failure or dead browser
+    that ended a round trip's pin loop after some pin was served: the rows are
+    kept, and a caller that asks more pages reads it to end the search."""
 
     def __init__(
         self,
@@ -1856,6 +1858,7 @@ class Board[T](list[T]):
         unread: int = 0,
         separate_hidden: int = 0,
         separate_failed: GfBackendError | None = None,
+        stopped: GfBackendError | None = None,
     ) -> None:
         super().__init__(rows)
         self.insight = insight
@@ -1867,6 +1870,7 @@ class Board[T](list[T]):
         self.stop_drops: StopDrops | None = None
         self.separate_hidden = separate_hidden
         self.separate_failed = separate_failed
+        self.stopped = stopped
         self.page_insights: tuple[PriceInsight, ...] = ()
         self.page_histories: tuple[PriceHistory, ...] = ()
 
@@ -2654,6 +2658,7 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
         dropped=dropped,
         pinned=len(pins),
         unread=unread,
+        stopped=stopped,
     )
     # Before the pin outcome is judged: a separate-ticket itinerary needs no
     # return board, so one that is shown is served even when every return
@@ -2724,6 +2729,7 @@ def _with_separate_tickets(
             unread=answer.unread + unread,
             separate_hidden=hidden,
             separate_failed=failed,
+            stopped=answer.stopped,
         )
 
     if stopped is not None:

@@ -5184,9 +5184,11 @@ class _PageAsk:
     still asked. A throttle, a spent transport ladder or a dead browser is not
     a fact about a page: the wall is per-IP, the network is one network, and
     every later page would navigate on the same session. It ends the asking,
-    and every page after it is named as not asked. A round trip asks every
-    page's outbounds before any page's returns, so a page that answered its
-    outbounds before the stop is named for the returns it did not get."""
+    and every page after it is named as not asked. A pin loop that stopped
+    after serving some pins answers with its rows, and the stop it carries ends
+    the asking as a raised one does. A round trip asks every page's outbounds
+    before any page's returns, so a page that answered its outbounds before the
+    stop is named for the returns it did not get."""
 
     def __init__(
         self, pages: list[tuple[Leg, ...]], *, gf_mode: GfTransportMode, bags: bool
@@ -5213,6 +5215,11 @@ class _PageAsk:
             self.failed[i] = e
         else:
             self.answered.add(i)
+            # `getattr`: the answer is a Board, an outbound or a stand-in list.
+            held: GfBackendError | None = getattr(answer, "stopped", None)
+            if held is not None:
+                self.stopped_at = i
+                self.failed[i] = held
             return answer
         return None
 
