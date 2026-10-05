@@ -2793,7 +2793,7 @@ def _report_pin_outcome(
     # round trips the outbound board priced through an `empty` pin; a pin the
     # row filter emptied is an answer, so `unmatched` does not count.
     if served and (refused or empty or stopped is not None):
-        narrow()
+        narrow(of="gflight")
     # First, because two of the exits below leave by `raise` and nothing after
     # them runs. A stop rule that fires with nothing served would otherwise take
     # the per-URL refusals with it, and "rate-limited, wait and retry" is the

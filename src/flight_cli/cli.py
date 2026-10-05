@@ -3473,7 +3473,7 @@ def _split_ticket(
             except Exception as e:  # noqa: BLE001 — see the docstring
                 # The pair was asked for and is unpriced, where every other
                 # reason below is the boards' answer.
-                _envelope.narrow()
+                _envelope.narrow(of="gflight")
                 return f"the {which} one-way failed ({str(e) or type(e).__name__})"
     pair = _cheapest_flown_pair(*boards)
     if pair is None:
@@ -5603,13 +5603,8 @@ def _record_google_cabin(
     if not _envelope.active():
         return
     if served and getattr(served, "partial", False):
-        _envelope.narrow()
-    unread: int = getattr(served, "unread", 0)
-    if unread:
-        _envelope.narrow(
-            f"Google Flights: {unread:d} {_CABIN_NAMES[cabin]} rows its pages served "
-            "could not be read and are left out of the answer"
-        )
+        _envelope.narrow(of="gflight")
+    _note_google_unread(cabin, served)
     printed: list[Any] = json.loads(json.dumps(_gflight_json_document(results, bags), default=str))
     rows: list[_envelope.ResultRow] = []
     for r, row in zip(results, printed, strict=True):
@@ -5653,6 +5648,19 @@ def _record_google_cabin(
             for h in histories
         ],
     )
+
+
+def _note_google_unread(cabin: Cabin, served: Any) -> None:
+    """Note on the envelope the rows `served`'s pages served that the parser
+    could not read: a flight on one of them is on Google's board though no row
+    names it, whichever backend then answers."""
+    unread: int = getattr(served, "unread", 0)
+    if unread:
+        _envelope.narrow(
+            f"Google Flights: {unread:d} {_CABIN_NAMES[cabin]} rows its pages served "
+            "could not be read and are left out of the answer",
+            of="gflight",
+        )
 
 
 def _matrix_envelope_rows(res: SearchResult, passengers: int) -> list[_envelope.ResultRow]:
@@ -5759,7 +5767,7 @@ def _note_separate_tickets(
         _note_unchecked_return(unchecked)
     unread: GfBackendError | None = getattr(results, "separate_failed", None)
     if unread is not None:
-        _envelope.narrow()
+        _envelope.narrow(of="gflight")
         # `removesuffix`: a browser refusal's note ends in its remedy's full stop.
         note = _gf_refusal(unread, transport=gf_mode, bags=bags).note.removesuffix(".")
         err.print(f"[dim]Itineraries on separate tickets not read: {note}.[/]")
@@ -6330,6 +6338,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     )
     if (dropped or infant_board) and matrix_fallback and not sellers:
         if not results:
+            _note_google_unread(opts.cabin, results)
             if infant_board:
                 err.print(
                     "[dim]Using Matrix: Google Flights served no rows for a party with an "
@@ -6339,6 +6348,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
         # The award table matches one-ticket rows, so a board of separate-ticket
         # rows alone answers an award search no better than an empty one.
         if run_pp and all(_separately_ticketed(r) for r in results):
+            _note_google_unread(opts.cabin, results)
             err.print(
                 "[dim]Using Matrix: no one-ticket Google Flights itinerary matched "
                 f"{_safe_text(_row_checks(legs, opts))} ({dropped:d} rows filtered out). "
@@ -6352,7 +6362,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
             )
             return 0
     if infant_board:
-        _envelope.narrow()
+        _envelope.narrow(of="gflight")
         err.print(
             "[yellow]Google Flights served no rows for a party with an infant, as it has "
             f"on routes with flights. For Matrix's answer, {_safe_text(matrix_remedy)}.[/]"
@@ -7619,7 +7629,7 @@ def _pin_cap_note(*, legs: tuple[Leg, ...], top_n: int) -> None:
 
     pins = pinned_fanout(top_n)
     if len(legs) >= _ROUND_TRIP_LEGS and pins < top_n:
-        _envelope.narrow()
+        _envelope.narrow(of="gflight")
         err.print(
             f"[dim]Google Flights combines returns against up to {pins:d} cheapest outbounds.[/]"
         )
@@ -8334,6 +8344,8 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
         and (dropped := getattr(fli_by_cabin[cab], "dropped", 0))
     }
     if emptied and matrix_fallback:
+        for cab, board in fli_by_cabin.items():
+            _note_google_unread(cab, board)
         return _MatrixHandOff(emptied, tuple(cab for cab in cabins if fli_by_cabin.get(cab)))
     # Only below the hand-off: each note describes Google's table, and a
     # handed-off search prints Matrix's, where '—' is a cabin with no price.
