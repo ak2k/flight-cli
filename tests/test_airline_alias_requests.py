@@ -311,53 +311,62 @@ def _enum_lookups(tree: ast.AST) -> list[int]:
         if alias.name == "Airline" and alias.asname
     }
 
-    def is_enum(node: ast.expr) -> bool:
-        return (isinstance(node, ast.Name) and node.id in names) or (
-            isinstance(node, ast.Attribute) and node.attr == "Airline"
-        )
-
-    members = set(Airline.__members__)
-    # Iterating the whole table is how `fli_bridge` builds its own.
-    iterated = {
-        id(node.value) for node in nodes if isinstance(node, ast.Attribute) and node.attr == "items"
-    }
-    lines: list[int] = []
+    # An annotation and `ItineraryKey` name the type, not a code, and the body of
+    # `fli_airlines` is where `fli_bridge` builds its own table.
+    roots: list[ast.AST] = []
     for node in nodes:
-        if (
-            (isinstance(node, ast.Name) and node.id == "_parse_airline")
-            or (isinstance(node, ast.Attribute) and node.attr == "_parse_airline")
-            or (isinstance(node, ast.alias) and node.name == "_parse_airline")
-            or (isinstance(node, ast.Subscript) and is_enum(node.value))
-            or (isinstance(node, ast.Attribute) and is_enum(node.value) and node.attr in members)
+        if isinstance(node, ast.arg | ast.AnnAssign) and node.annotation is not None:
+            roots.append(node.annotation)
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            if node.returns is not None:
+                roots.append(node.returns)
+            if isinstance(node, ast.FunctionDef) and node.name == "fli_airlines":
+                roots.extend(node.body)
+        elif isinstance(node, ast.TypeAlias) and node.name.id == "ItineraryKey":
+            roots.append(node.value)
+    exempt = {id(sub) for root in roots for sub in ast.walk(root)}
+    return sorted(
+        node.lineno
+        for node in nodes
+        if id(node) not in exempt
+        and (
+            (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in names)
             or (
                 isinstance(node, ast.Attribute)
-                and node.attr == "__members__"
-                and is_enum(node.value)
-                and id(node) not in iterated
+                and isinstance(node.ctx, ast.Load)
+                and node.attr == "Airline"
             )
-            or (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id in {"getattr", "hasattr"}
-                and node.args
-                and is_enum(node.args[0])
-            )
-        ):
-            lines.append(node.lineno)
-    return lines
+            or (isinstance(node, ast.Name) and node.id == "_parse_airline")
+            or (isinstance(node, ast.Attribute) and node.attr == "_parse_airline")
+            or (isinstance(node, ast.alias) and node.name == "_parse_airline")
+        )
+    )
 
 
 def test_no_code_resolves_an_airline_through_flis_enum() -> None:
     """The enum hands an aliased code another carrier's member and fli's
-    decoder has no entry for one, so every lookup goes through
-    `fli_bridge.fli_airline`. Read from the syntax tree, so prose naming either
-    does not match."""
+    decoder has no entry for one, so every load of the enum outside an
+    annotation, the `ItineraryKey` alias and the body of `fli_airlines` fails,
+    as does any use of `_parse_airline`."""
     found = [
         f"{path.relative_to(_SRC).as_posix()}:{line}"
         for path in sorted(_SRC.rglob("*.py"))
         for line in _enum_lookups(ast.parse(path.read_text(), filename=str(path)))
     ]
     assert not found, f"airline lookups through fli's enum or decoder: {found}"
+
+
+def test_the_allowlist_names_exist_only_where_the_source_defines_them() -> None:
+    """The guard exempts `fli_airlines` and `ItineraryKey` by name, so a second
+    definition elsewhere would be a hole."""
+    found: dict[str, list[str]] = {"fli_airlines": [], "ItineraryKey": []}
+    for path in sorted(_SRC.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
+            if isinstance(node, ast.FunctionDef) and node.name == "fli_airlines":
+                found["fli_airlines"].append(path.name)
+            elif isinstance(node, ast.TypeAlias) and node.name.id == "ItineraryKey":
+                found["ItineraryKey"].append(path.name)
+    assert found == {"fli_airlines": ["fli_bridge.py"], "ItineraryKey": ["_gflight_ids.py"]}
 
 
 @pytest.mark.parametrize(
