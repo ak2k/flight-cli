@@ -722,7 +722,12 @@ def test_the_rows_own_itinerary_verifies_with_its_fares(
     assert google[0]["dates"] == [leg["departure_datetime"][:10] for leg in listed["legs"]]
     assert google[0]["airports"] == [["JFK", "SEA"], ["SEA", "LAX"]]
     assert verdict["google"]["price"] == price
-    assert verdict["matrix"] == {"price": price, "total": "USD213.20", "slices": google}
+    assert verdict["matrix"] == {
+        "price": price,
+        "per_traveler": price,
+        "total": "USD213.20",
+        "slices": google,
+    }
     assert verdict["delta"] == 0.0
     assert verdict["missing_carriers"] == []
     assert [(f["fare_basis"], f["booking_code"]) for f in verdict["fares"]] == [

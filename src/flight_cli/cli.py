@@ -4476,9 +4476,13 @@ def _print_verified(
     console.print(
         f"[bold green]Verified on Matrix[/] · itinerary #{n:d} · {_safe_text(_trip_text(row))}"
     )
-    matrix = verdict.solution.price
+    matrix = party_price(verdict.solution, opts.pax.total)
+    shown = matrix or "—"
+    if matrix is None and opts.pax.total > 1 and verdict.solution.price:
+        # One passenger's fare beside Google's party total has no gap to state.
+        shown = f"{verdict.solution.price} per traveler"
     console.print(
-        f"Matrix {_safe_text(matrix or '—')} · Google {_safe_text(row.price or '—')}"
+        f"Matrix {_safe_text(shown)} · Google {_safe_text(row.price or '—')}"
         f"{_safe_text(_price_gap(row.price, matrix))}"
     )
     if checked.rules is not None:
@@ -4503,7 +4507,9 @@ def _write_verified(
     except typer.Exit:
         sys.stdout.write(json.dumps({"search": search_doc, "verify": None}, indent=2, default=str))
         raise
-    doc = _verify.document(n, row, checked.verdict, _fare_rules_document(checked.rules))
+    doc = _verify.document(
+        n, row, checked.verdict, _fare_rules_document(checked.rules), passengers=opts.pax.total
+    )
     sys.stdout.write(json.dumps({"search": search_doc, "verify": doc}, indent=2, default=str))
 
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
+from ._enrich import party_price
 from ._multi_cabin import parse_price, price_currency
 from .domain import Leg, SearchOptions
 
@@ -381,17 +382,19 @@ def fares(details: BookingDetails | None) -> list[dict[str, Any]]:
 
 
 def document(
-    n: int, row: Row, verdict: Verdict, fare_rules: dict[str, Any] | None
+    n: int, row: Row, verdict: Verdict, fare_rules: dict[str, Any] | None, passengers: int = 1
 ) -> dict[str, Any]:
     """The `verify` object of `--format json`. Matrix's side, the delta and the
     fares are there only on a match: a price for any other itinerary would be
-    read as this row's."""
+    read as this row's. Matrix's price is for the party of `passengers`, as
+    Google's is."""
     matched = verdict.outcome == "match" and verdict.solution is not None
     matrix: dict[str, Any] | None = None
     if matched and verdict.solution is not None:
         itn = verdict.details.itinerary if verdict.details else None
         matrix = {
-            "price": verdict.solution.price,
+            "price": party_price(verdict.solution, passengers),
+            "per_traveler": verdict.solution.price,
             "total": verdict.details.display_total if verdict.details else None,
             "slices": [_slice_document(s) for s in booked_flights(itn)] if itn else [],
         }
