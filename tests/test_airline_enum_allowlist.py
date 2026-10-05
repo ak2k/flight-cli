@@ -6,10 +6,15 @@ uses that name no code."""
 from __future__ import annotations
 
 import ast
+from typing import TYPE_CHECKING
 
 import pytest
 
+import test_airline_alias_requests as guard
 from test_airline_alias_requests import _enum_lookups
+
+if TYPE_CHECKING:
+    import pathlib
 
 
 @pytest.mark.parametrize(
@@ -54,3 +59,14 @@ def test_the_guard_passes_the_uses_that_cannot_alias(source: str) -> None:
 def test_the_guard_still_sees_what_the_exemptions_do_not_cover(source: str) -> None:
     """Only the annotations, `ItineraryKey` and the body of `fli_airlines` are exempt."""
     assert _enum_lookups(ast.parse(source)) == [2]
+
+
+def test_the_guard_sees_the_enum_renamed_in_one_module_and_used_in_another(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard reads one module at a time, and each of these passes it alone."""
+    (tmp_path / "carriers.py").write_text("from fli.models.airline import Airline as Carrier\n")
+    (tmp_path / "use.py").write_text("from flight_cli.carriers import Carrier\nCarrier['W9']\n")
+    monkeypatch.setattr(guard, "_SRC", tmp_path)
+    with pytest.raises(AssertionError, match=r"\['carriers\.py:1'\]"):
+        guard.test_no_code_resolves_an_airline_through_flis_enum()

@@ -301,9 +301,12 @@ def test_a_digit_leading_carrier_prints_as_its_code(gf_session: Callable[..., An
 # ──────────────────────────────── the trap ──────────────────────────────
 
 
+_ENUM_NAMES = frozenset({"Airline", "FliAirline"})
+
+
 def _enum_lookups(tree: ast.AST) -> list[int]:
     nodes = list(ast.walk(tree))
-    names = {"Airline", "FliAirline"} | {
+    names = _ENUM_NAMES | {
         alias.asname
         for node in nodes
         if isinstance(node, ast.ImportFrom)
@@ -343,16 +346,28 @@ def _enum_lookups(tree: ast.AST) -> list[int]:
     )
 
 
+def _renames(tree: ast.AST) -> list[int]:
+    # `_enum_lookups` reads one module at a time, so a name the enum is imported
+    # under here would pass it in another module that imports that name from here.
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+        if alias.name == "Airline" and (alias.asname or alias.name) not in _ENUM_NAMES
+    ]
+
+
 def test_no_code_resolves_an_airline_through_flis_enum() -> None:
     """The enum hands an aliased code another carrier's member and fli's
     decoder has no entry for one, so every load of the enum outside an
     annotation, the `ItineraryKey` alias and the body of `fli_airlines` fails,
-    as does any use of `_parse_airline`."""
-    found = [
-        f"{path.relative_to(_SRC).as_posix()}:{line}"
-        for path in sorted(_SRC.rglob("*.py"))
-        for line in _enum_lookups(ast.parse(path.read_text(), filename=str(path)))
-    ]
+    as do any use of `_parse_airline` and an import that renames the enum."""
+    found: list[str] = []
+    for path in sorted(_SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        lines = sorted([*_enum_lookups(tree), *_renames(tree)])
+        found += [f"{path.relative_to(_SRC).as_posix()}:{line}" for line in lines]
     assert not found, f"airline lookups through fli's enum or decoder: {found}"
 
 
