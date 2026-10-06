@@ -18,6 +18,7 @@ import pytest
 
 from flight_cli import cli
 from flight_cli._gf_errors import GfThrottledError
+from flight_cli.pp import cli as pp_cli
 from test_envelope import _envelope_of, _notes
 from test_open_jaw_search import _KEY, _Google, _matrix, _matrix_body, _search, _table_rows
 from test_split_ticket import _row
@@ -476,7 +477,8 @@ _ALONE = "--backend gflight answers a multi-city search with Google Flights' sep
         pytest.param(
             ("--awards-only", "--format", "json"),
             None,
-            f"--awards-only prints award space alone, and {_ALONE}. Drop either.",
+            f"--awards-only prints award space alone, and {_ALONE}. Drop --backend gflight, or "
+            "drop --awards-only and add --cash-only.",
             id="awards-only-json",
         ),
         pytest.param(
@@ -561,6 +563,50 @@ def test_backend_gflight_refuses_what_separate_tickets_cannot_answer(
     assert result.exit_code == 2, result.output
     assert said in _stderr(result)
     assert google.calls == [] and matrix.searches == []
+
+
+def _configured(sel: cli.ProviderSelection) -> bool:
+    """An award provider is configured: awards run unless --cash-only."""
+    return not sel.cash_only
+
+
+@pytest.mark.parametrize(
+    ("fmt", "remedy", "remedied"),
+    [
+        pytest.param(
+            "table", "Drop either.", (("--awards-only",), ("--backend", "gflight")), id="table"
+        ),
+        pytest.param(
+            "json",
+            "Drop --backend gflight, or drop --awards-only and add --cash-only.",
+            (("--awards-only",), ("--backend", "gflight", "--cash-only")),
+            id="json",
+        ),
+    ],
+)
+def test_backend_gflight_awards_only_remedies_hold(
+    monkeypatch: pytest.MonkeyPatch, fmt: str, remedy: str, remedied: tuple[tuple[str, ...], ...]
+) -> None:
+    """Each remedy the --awards-only refusal names answers once followed, with
+    an award provider configured. Under --format json, dropping --awards-only
+    alone still runs an award search, whose document has no place for the
+    separate tickets, so that remedy adds --cash-only."""
+
+    async def _gather(*, legs: list[Any], **_kw: Any) -> tuple[list[list[Any]], list[Any]]:
+        return ([[] for _ in legs], [])
+
+    monkeypatch.setattr(cli, "_should_run_awards", _configured)
+    monkeypatch.setattr(pp_cli, "gather_awards", _gather)
+    monkeypatch.setattr(pp_cli, "stored_tokens", lambda: None)
+    monkeypatch.setattr(pp_cli, "load_tokens", lambda: None)
+    google, matrix = _google(monkeypatch), _matrix(monkeypatch)
+    refused = _search("--backend", "gflight", "--awards-only", "--format", fmt, slices=_slices())
+    assert refused.exit_code == 2, refused.output
+    assert f"--awards-only prints award space alone, and {_ALONE}. {remedy}" in _stderr(refused)
+    assert google.calls == [] and matrix.searches == []
+    for argv in remedied:
+        result = _search(*argv, "--format", fmt, slices=_slices())
+        assert result.exit_code == 0, (argv, result.output)
 
 
 def test_backend_gflight_still_refuses_a_slice_round_trip(

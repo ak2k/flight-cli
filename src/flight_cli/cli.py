@@ -4297,8 +4297,14 @@ def _gflight_multi_city_blocker(
     if blocker is not None:
         return f"{_SEPARATE_ALONE}, and none is asked: {blocker}. Drop --backend gflight"
     if awards_only:
-        # Ahead of the award document's refusal, whose --cash-only it excludes.
-        return f"--awards-only prints award space alone, and {_SEPARATE_ALONE}. Drop either"
+        # Ahead of the award document's refusal, whose --cash-only it excludes;
+        # dropping --awards-only alone would meet that refusal next.
+        remedy = (
+            "Drop --backend gflight, or drop --awards-only and add --cash-only"
+            if awards_json
+            else "Drop either"
+        )
+        return f"--awards-only prints award space alone, and {_SEPARATE_ALONE}. {remedy}"
     if awards_json:
         return (
             f"{_SEPARATE_ALONE}, and an award search writes its own --format json document. "
