@@ -263,6 +263,38 @@ def test_three_full_boards_cost_far_less_than_their_product(
     assert [c.total_cents for c in combos[:4]] == [55000, 55100, 55100, 55100]
 
 
+def test_three_boards_at_one_fare_cost_far_less_than_their_product(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three 150-row boards, every row at one fare, as when a carrier prices a
+    day's flights alike: 3,375,000 flyable combinations at one total. The ten
+    first in board order are answered in under 200,000 `flyable` calls."""
+    day = dt.date.today() + dt.timedelta(days=30)
+    boards = [
+        [
+            _row(f"{carrier}{j:d}", frm, to, day + dt.timedelta(days=3 * i), 150.0)
+            for j in range(150)
+        ]
+        for i, (carrier, frm, to) in enumerate(
+            (("UA", "SFO", "ORD"), ("AA", "ORD", "BOS"), ("B6", "BOS", "SFO"))
+        )
+    ]
+    calls = 0
+
+    def counted(a: Any, b: Any) -> bool:
+        nonlocal calls
+        calls += 1
+        return flyable(a, b)
+
+    monkeypatch.setattr(_open_jaw, "flyable", counted)
+    combos = combine(*boards, currency="USD", limit=10)
+    assert calls < 200_000
+    first, middle, last = boards
+    assert [tuple(map(id, c.tickets)) for c in combos] == [
+        (id(first[0]), id(middle[0]), id(last[j])) for j in range(10)
+    ]
+
+
 def test_three_boards_tie_in_the_first_boards_order_then_the_next() -> None:
     """Three combinations total 600.00, and the cheapest row of the first board
     is its second, so board order and price order disagree. Red at the base,

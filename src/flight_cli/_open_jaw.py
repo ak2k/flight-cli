@@ -70,7 +70,10 @@ def combine(
     27,000,000 combinations. The cheapest flyable run from a row to the last
     board bounds every combination through that row, so a board is walked
     cheapest row first and its walk stops at the first row whose fare alone
-    takes the total past the `limit`-th cheapest found."""
+    takes the total past the `limit`-th cheapest found. A run whose bound ties
+    that total is passed over too once its board positions so far sort after
+    that combination's, since it would rank after it: boards of one fare would
+    otherwise be walked through their whole product."""
     # Each board as (cents, position on the board, row), cheapest first.
     priced = [
         sorted(
@@ -105,26 +108,36 @@ def combine(
     def bar() -> float:
         return -kept[0][0] if len(kept) == limit else ceiling
 
-    def walk(i: int, picked: tuple[int, ...], spent: int) -> None:
-        for p, (c, _, row) in enumerate(priced[i]):
+    def beaten(total: float, at: tuple[int, ...]) -> bool:
+        """Whether every combination costing at least `total`, at board
+        positions starting `at`, ranks after all of those kept."""
+        if len(kept) < limit:
+            return total > ceiling
+        neg_total, neg_at, _ = kept[0]
+        if total != -neg_total:
+            return total > -neg_total
+        return at > tuple(-pos for pos in neg_at[: len(at)])
+
+    def walk(i: int, picked: tuple[int, ...], at: tuple[int, ...], spent: int) -> None:
+        for p, (c, j, row) in enumerate(priced[i]):
             if spent + c > bar():
                 break  # every later row of the board costs as much or more
             # Bounded before `flyable` is asked, which is the walk's cost.
-            if through[i][p] == math.inf or spent + through[i][p] > bar():
+            if through[i][p] == math.inf or beaten(spent + through[i][p], (*at, j)):
                 continue
             if picked and not flyable(priced[i - 1][picked[-1]][2], row):
                 continue
             here = (*picked, p)
             if i < last:
-                walk(i + 1, here, spent + c)
+                walk(i + 1, here, (*at, j), spent + c)
                 continue
-            key = (-(spent + c), tuple(-priced[k][q][1] for k, q in enumerate(here)), here)
+            key = (-(spent + c), tuple(-pos for pos in (*at, j)), here)
             if len(kept) < limit:
                 heapq.heappush(kept, key)
             elif key > kept[0]:
                 heapq.heapreplace(kept, key)
 
-    walk(0, (), 0)
+    walk(0, (), (), 0)
     return [
         Combination(tuple(priced[k][q][2] for k, q in enumerate(here)), -neg_total, currency)
         for neg_total, _, here in sorted(kept, reverse=True)
