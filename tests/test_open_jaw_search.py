@@ -757,12 +757,15 @@ def test_a_one_way_board_at_the_row_cap_says_where_it_stops(
     assert line in env["notes"]
 
 
+@pytest.mark.parametrize("emptied", [False, True], ids=["shown", "emptied"])
 def test_a_one_way_board_counts_the_rows_it_drops_over_the_stop_ceiling(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, emptied: bool
 ) -> None:
     """As every other Google board shown says so: a line, which the envelope
-    carries as a note, `complete` unchanged. Red at the base, which counted
-    none on a one-way board."""
+    carries as a note, `complete` unchanged. A board the drops emptied says so
+    too, since the line saying it priced no one-way does not name the ceiling.
+    Red at the base, which counted none on a one-way board."""
+    first: list[Any] | None = [] if emptied else None
     line = (
         "Google Flights JFK→LHR one-way returned 1 row over the stop ceiling it was asked "
         "for (0); it is not shown."
@@ -777,13 +780,13 @@ def test_a_one_way_board_counts_the_rows_it_drops_over_the_stop_ceiling(
 
         monkeypatch.setattr(cli, "_gflight_results", _served)
 
-    _dropping(_google(monkeypatch))
+    _dropping(_google(monkeypatch, first=first))
     _matrix(monkeypatch)
     result = _search("--cash-only", "--stops", "0")
     assert result.exit_code == 0, result.output
     assert " ".join(result.stderr.split()).count(line) == 1, result.stderr
-    assert _TITLE in result.stdout
-    _dropping(_google(monkeypatch))
+    assert (_TITLE in result.stdout) is not emptied
+    _dropping(_google(monkeypatch, first=first))
     _matrix(monkeypatch)
     env = _envelope_of(_search("--cash-only", "--stops", "0", "--format", "envelope"))
     assert (env["backend"], env["complete"]) == ("matrix", True), env["notes"]
