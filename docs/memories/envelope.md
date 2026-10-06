@@ -13,7 +13,7 @@ its schema is `docs/envelope.schema.json`, generated from the models
 
 | key | type | what it holds |
 |---|---|---|
-| `version` | `1` | bumped on any change a reader must handle |
+| `version` | `1` | bumped on any change a reader must handle; a new key is not one, but the schema forbids keys it does not name, so a reader validating against an older `docs/envelope.schema.json` regenerates it |
 | `command` | `"search"` / `"calendar"` | the discriminator |
 | `backend` | `"gflight"` / `"matrix"` / null | who answered; null when nothing did |
 | `currency` | string / null | the one currency every priced row shares, else null |
@@ -23,6 +23,7 @@ its schema is `docs/envelope.schema.json`, generated from the models
 | `awards` | list / null | the award document's per-leg entries; each match also carries `flights`, every flight of its slice. Null when no award search ran or it failed |
 | `insight` | `[{cabin, currency, cheapest, typical_low, typical_high, level}]` | one per Google page that carried one; a leg asked as several pages gives one per page, in page order |
 | `price_history` | `[{cabin, currency, points: [{date, price}]}]` | one per Google page that carried one, as `insight` |
+| `price_graph` | `[{trip_length, currency, cells: [{departure, return, price}]}]` | a calendar's Google price graph, one entry per trip length that priced (`trip_length` and `return` null on a one-way); each cell is Google's estimate for one date pair, with no itinerary behind it. Empty, with its note, on a search, a calendar that did not ask it (no `--gf-transport browser` or `auto`, `--gf-transport http`, or a refusal by the graph's gate, named) and one whose graph failed |
 | `verify` | object / null | `--verify`'s check of row `--pick`, the `verify` object `--format json` prints; null when not asked, on a calendar, or when the check failed (exit 1) |
 | `cross_check` | object / null | `--enrich`'s Google-vs-Matrix comparison, the `cross_check` object `--format json --enrich` prints, `low_check` included; null when not asked, skipped, on a calendar, or when Matrix's half failed |
 | `split_ticket` | object / null | `--split`'s pair, the `split_ticket` object `--format json --split` prints (`{outbound, return, total, currency}`, or `{error}` naming why there is no pair); null when not asked, on a calendar, or when Matrix answered the search |
@@ -35,7 +36,8 @@ party. A party's solution Matrix states no total for has a null `price`: one
 passenger's price is not the trip's, and its `row` still carries it.
 A `calendar --fast` trip-length range writes every priced length's cells to
 `results` as one list, each the object the range document's `graphs[].grid`
-prints; its `return` date names its length.
+prints; its `return` date names its length. `price_graph` carries the same
+cells, one entry per length.
 
 Exit codes are those of `--format json` in the same state, and an envelope is
 written at exit 0 and 1. Exit 2 is a usage error and writes none.
@@ -70,7 +72,11 @@ since the pair was asked for and is not priced (no priced one-way, no pair one
 traveler can fly, or two currencies are the boards' answer, a note);
 `--max-per-query > 1` over a split, and over the one unsplit query when a
 group holds every destination; a round trip over a split set, whose returns
-into another airport of the set come only from the combined query; Google rows the
+into another airport of the set come only from the combined query; a
+departure date of the calendar's window that Matrix's grid holds no fare for
+at some trip length asked (`cli._say_unpriced`, one `Matrix priced no fare on
+…` line per length), which may be a day with no service, since the grid
+cannot tell the two apart; Google rows the
 parser could not read, counted once from the board's `unread` where its rows
 are recorded (`cli._record_google_cabin`), so the note gives the number
 `cross_check.google.unread` does (the calendar graph's wall check records no
@@ -100,7 +106,9 @@ under the table is never printed in an envelope run, which takes the document
 path. Each pin a round trip loses is named on a stderr line of its own
 (`pinned outbound … lost: …`), a note like the count line before it; the
 answer is narrower where that count is of refused or empty return boards, and
-whole where it is of boards the row filter emptied.
+whole where it is of boards the row filter emptied. Google's price graph not
+asked or not shown beside a Matrix calendar is a note too: Matrix's grid is
+the answer, and the graph is Google's estimate beside it.
 
 ## How the run is held
 
@@ -121,7 +129,9 @@ rows and `run_pp_for_search` records the awards. `--verify` records its check
 under `verify` (`_envelope.record_verify`), and `--enrich` records Google's rows
 under `results` and its comparison under `cross_check`
 (`cli._answer_cross_check_document`), each with the same refusals as under
-`--format json`. `--split` records its `split_ticket` object where `--format
+`--format json`. A calendar that reads Google's graph records Matrix's days and
+the graph once both are in (`cli._run_calendar_beside_graph`), the graph even
+when Matrix failed. `--split` records its `split_ticket` object where `--format
 json` writes `{search, split_ticket}`, and is refused where JSON refuses it
 (`--enrich`, an award search), the refusal naming the format asked. Where Google's half failed, `results` and `backend` stay empty,
 since the rows are Google's, and their notes say `cross_check` holds Matrix's
@@ -147,7 +157,9 @@ no request: it is on the page the search already fetched.
 
 Envelopes for `detail`, `explore`, `fare`, `gflight` and `doctor` (each
 refuses `--format envelope` naming the two commands); `--sellers` and
-`--fare-rules` inside it; ISO dates for Matrix calendar days (Matrix's raw
-months carry no `month` key and pad weeks with disabled days, so a day's date
-is not derived here); Google's facets (`ds:1[7]`); an exit code of its own for
-a partial answer (`complete` says it).
+`--fare-rules` inside it; ISO dates inside Matrix calendar days (a raw month
+carries `month` and `year` and pads its weeks with the neighboring months'
+days marked `disabled`; a `row` stays the day object Matrix sent, its day of
+the month alone, though the unpriced-dates line dates each day it names);
+Google's facets (`ds:1[7]`); an exit code of its own for a partial answer
+(`complete` says it).

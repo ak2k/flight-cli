@@ -84,10 +84,12 @@ flight calendar MIA PAR --start 2026-06-07 -d 5-7 \
     --routing "LH+" --ext "MAXCONNECT 2:00" --depart-times morning
 
 # Without --fast, a table calendar prints Google Flights' price graph under
-# Matrix's grid. Matrix lists fares it priced; Google gives one price per date
-# pair with no itinerary behind it, so their lows can differ. When they do, one
-# stderr line names both lows with their date pairs, says what both asked, and
-# gives the search on each date pair that shows which fare is bookable.
+# Matrix's grid, and --format json or envelope carries it when given
+# --gf-transport browser. Matrix lists fares it priced; Google gives one price
+# per date pair with no itinerary behind it, so their lows can differ. When they
+# do, one stderr line names both lows with their date pairs, says what both
+# asked, and gives the search on each date pair that shows which fare is
+# bookable. A departure date Matrix priced no fare on is named on stderr too.
 flight calendar NYC PAR --start 2026-10-20 --end 2026-11-19 -d 5-7
 
 # phase-2 of the calendar flow: full itineraries for a picked date. Give it
@@ -122,8 +124,8 @@ Every result-printing command supports:
 - `--fare-rules` (`search`) — after the table, print itinerary `--pick N`'s fare basis, booking codes and fare rules (penalties, changes, refunds) from Matrix
 - `--verify` (`search`, Google Flights) — after the table, ask Matrix for itinerary `--pick N` as exactly that itinerary (its flights by number, each on its own day and minute, between its airports) and print Matrix's price beside Google's with the fare basis, booking codes and fare rules; or say why Matrix does not price it: those flights only on another itinerary, no fare, or a carrier it lists nowhere on that route and day. With `--format json` the document is `{"search": [...], "verify": {...}}`, and `--format envelope` carries the same object under `verify`; `verify.delta` is Google's price minus Matrix's
 - `--no-separate-tickets` (`search`, Google Flights) — hide the itineraries Google sells as separate tickets, which every one-cabin search that shows Google rows otherwise adds from Google's Cheapest tab, marked `†` (`‡` for a self transfer, where bags are rechecked between flights) on the Google and merged tables or `separate_tickets: true`, a round trip as its outbound alone at Google's round-trip total, never priced against Matrix (cross-check reason `separate_tickets`) and skipped, with a reason, by awards, `--sellers`, `--verify` and pinned links
-- `--format envelope` (`search`, `calendar`) — for agents and scripts: one JSON object with the same keys on every path (`version`, `command`, `backend`, `currency`, `complete`, `notes`, `results`, `awards`, `insight`, `price_history`, `verify`, `cross_check`, `split_ticket`). `complete` is false when the answer is narrower than asked, such as a cabin, a calendar sub-query, an award provider or Google's Cheapest tab lost, and `notes` carries what stderr said. Schema: [`docs/envelope.schema.json`](docs/envelope.schema.json)
-- `--format json` — the answering path's own document: Google Flights rows, Matrix's raw response, `{cabin: …}` for several cabins, or the award document when awards run. `--json` is a deprecated alias for it
+- `--format envelope` (`search`, `calendar`) — for agents and scripts: one JSON object with the same keys on every path (`version`, `command`, `backend`, `currency`, `complete`, `notes`, `results`, `awards`, `insight`, `price_history`, `price_graph`, `verify`, `cross_check`, `split_ticket`). `complete` is false when the answer is narrower than asked, such as a cabin, a calendar sub-query, a departure date Matrix priced no fare on, an award provider or Google's Cheapest tab lost, and `notes` carries what stderr said. A calendar's `price_graph` is Google's estimate per date pair, read under `--gf-transport browser`. Schema: [`docs/envelope.schema.json`](docs/envelope.schema.json)
+- `--format json` — the answering path's own document: Google Flights rows, Matrix's raw response (a calendar's with `google_price_graph` beside it under `--gf-transport browser`), `{cabin: …}` for several cabins, or the award document when awards run. `--json` is a deprecated alias for it
 - `--no-cache` — bypass the on-disk response cache (`~/.cache/flight-cli/`)
 
 ### Power-user features
