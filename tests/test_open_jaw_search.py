@@ -354,7 +354,6 @@ def test_a_row_in_another_currency_is_counted_and_never_summed(
     [
         pytest.param(("--backend", "matrix"), None, id="backend-matrix"),
         pytest.param((), ("JFK-LHR:{out}", "LHR-JFK:{back}"), id="slice-round-trip"),
-        pytest.param((), ("JFK-LHR:{out}", "CDG-JFK:{back}", "JFK-MIA:{later}"), id="three-slices"),
         pytest.param(("--format", "json"), None, id="json-without-split"),
     ],
 )
@@ -563,12 +562,6 @@ def test_split_on_a_table_prints_what_the_table_prints_without_it(
     [
         pytest.param(
             (),
-            ("JFK-LHR:{out}", "CDG-JFK:{back}", "JFK-MIA:{later}"),
-            "--split prices a round trip as two one-ways, and --slice is a multi-city search.",
-            id="three-slices",
-        ),
-        pytest.param(
-            (),
             ("JFK-LHR:{out}", "LHR-JFK:{back}"),
             "--split prices a round trip as two one-ways, and --slice is a multi-city search.",
             id="slice-round-trip",
@@ -587,7 +580,7 @@ def test_split_is_refused_where_it_cannot_join(
     slices: tuple[str, ...] | None,
     said: str,
 ) -> None:
-    """The two multi-city arms are green at the base, in the base's words."""
+    """The round-trip arm is green at the base, in the base's words."""
     out, back = _days()
     later = back + dt.timedelta(days=3)
     google, matrix = _google(monkeypatch), _matrix(monkeypatch)
@@ -799,16 +792,16 @@ def test_a_one_way_board_counts_the_rows_it_drops_over_the_stop_ceiling(
         pytest.param(None, True, id="open-jaw"),
         pytest.param(("JFK-LHR:{out}", "LHR-JFK:{back}"), False, id="slice-round-trip"),
         pytest.param(
-            ("JFK-LHR:{out}", "CDG-JFK:{back}", "JFK-MIA:{later}"), False, id="three-slices"
+            ("JFK-LHR:{out}", "CDG-JFK:{back}", "JFK-MIA:{later}"), True, id="three-slices"
         ),
     ],
 )
 def test_the_matrix_line_says_what_google_cannot_serve(
     monkeypatch: pytest.MonkeyPatch, slices: tuple[str, ...] | None, on_one_ticket: bool
 ) -> None:
-    """An open jaw's line sits above Google's separate tickets for it, so it
-    names the one ticket Google can't sell. Red at the base for the open jaw;
-    the other two keep the base's words."""
+    """A multi-city trip's line sits above Google's separate tickets for it, so
+    it names the one ticket Google can't sell. Red at the base for the open jaw
+    and three slices; a round trip keeps the base's words."""
     out, back = _days()
     later = back + dt.timedelta(days=3)
     _google(monkeypatch)
