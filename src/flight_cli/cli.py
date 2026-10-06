@@ -9205,9 +9205,14 @@ def _run_matrix_path_multi(
         )
         return
 
-    rows = _merge_cabins(
-        results_by_cabin, sort_by=sort_by, top_n=top_n, currency=opts.currency or "USD"
+    # Left unset, Matrix prices in its own default (GBP from LHR): the join
+    # ranks, and names each cabin's cheapest, in the currency it answered in.
+    currency = (
+        opts.currency
+        or _title_currency(it.price for res in results_by_cabin.values() for it in res.solutions)
+        or "USD"
     )
+    rows = _merge_cabins(results_by_cabin, sort_by=sort_by, top_n=top_n, currency=currency)
     # `not json_out` for the reason given at the same gate in
     # `_run_gflight_path`: with awards on, the document is written below this.
     if not sel.awards_only and not json_out:
@@ -9216,7 +9221,7 @@ def _run_matrix_path_multi(
             cabins=cabins,
             sort_by=sort_by,
             results_by_cabin=results_by_cabin,
-            currency=opts.currency or "USD",
+            currency=currency,
         )
 
     if run_pp:

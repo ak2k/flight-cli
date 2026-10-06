@@ -850,7 +850,7 @@ _MATRIX = {
 }
 
 
-def _matrix_answer(fares: tuple[tuple[str, float], ...]) -> SearchResult:
+def _matrix_answer(fares: tuple[tuple[str, float], ...], currency: str = "USD") -> SearchResult:
     def slice_of(flight: str) -> dict[str, Any]:
         hour = int(flight[2:]) - 94
         return {
@@ -862,7 +862,7 @@ def _matrix_answer(fares: tuple[tuple[str, float], ...]) -> SearchResult:
         }
 
     solutions = [
-        {"displayTotal": f"USD{fare:.2f}", "itinerary": {"slices": [slice_of(flight)]}}
+        {"displayTotal": f"{currency}{fare:.2f}", "itinerary": {"slices": [slice_of(flight)]}}
         for flight, fare in fares
     ]
     return SearchResult.from_api(
@@ -870,9 +870,9 @@ def _matrix_answer(fares: tuple[tuple[str, float], ...]) -> SearchResult:
     )
 
 
-def _matrix_search(monkeypatch: pytest.MonkeyPatch, *extra: str) -> Result:
+def _matrix_search(monkeypatch: pytest.MonkeyPatch, *extra: str, currency: str = "USD") -> Result:
     def _multi(**_kw: object) -> dict[Cabin, SearchResult]:
-        return {cab: _matrix_answer(fares) for cab, fares in _MATRIX.items()}
+        return {cab: _matrix_answer(fares, currency) for cab, fares in _MATRIX.items()}
 
     monkeypatch.setattr(cli, "_run_matrix_multi", _multi)
     return CliRunner().invoke(
@@ -895,6 +895,20 @@ def test_a_matrix_table_names_a_cabins_own_cheapest_off_it(
     assert _cells(result.stdout)["BUSINESS"] == {1500.0, 1400.0}
     assert [line for line in result.stdout.splitlines() if "own cheapest" in line] == [
         "J's own cheapest: USD900.00 (UA103), on no row above; "
+        "--sort business lists J's cheapest first."
+    ]
+
+
+def test_a_matrix_table_in_its_own_currency_names_a_cabins_own_cheapest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no --currency, Matrix prices in its own default (GBP from LHR): the
+    line names the fare in the currency the table prints. Red at the base."""
+    result = _matrix_search(monkeypatch, currency="GBP")
+    assert result.exit_code == 0, result.output
+    assert _cells(result.stdout)["BUSINESS"] == {1500.0, 1400.0}
+    assert [line for line in result.stdout.splitlines() if "own cheapest" in line] == [
+        "J's own cheapest: GBP900.00 (UA103), on no row above; "
         "--sort business lists J's cheapest first."
     ]
 
