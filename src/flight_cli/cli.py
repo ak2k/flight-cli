@@ -5512,9 +5512,13 @@ def _print_verified(
     console.print(
         f"[bold green]Verified on Matrix[/] · itinerary #{n:d} · {_safe_text(_trip_text(row))}"
     )
-    matrix = verdict.solution.price
+    matrix = party_price(verdict.solution, opts.pax.total)
+    shown = matrix or "—"
+    if matrix is None and opts.pax.total > 1 and verdict.solution.price:
+        # One passenger's fare beside Google's party total has no gap to state.
+        shown = f"{verdict.solution.price} per traveler"
     console.print(
-        f"Matrix {_safe_text(matrix or '—')} · Google {_safe_text(row.price or '—')}"
+        f"Matrix {_safe_text(shown)} · Google {_safe_text(row.price or '—')}"
         f"{_safe_text(_price_gap(row.price, matrix))}"
     )
     if checked.rules is not None:
@@ -5547,7 +5551,9 @@ def _verify_document(
     """Row `n`'s `verify` object, or exit 1 with the reason on stderr."""
     row = _verify.google_row(r)
     checked = _check_on_matrix(row, n, opts, rps=rps, impersonate=impersonate)
-    return _verify.document(n, row, checked.verdict, _fare_rules_document(checked.rules))
+    return _verify.document(
+        n, row, checked.verdict, _fare_rules_document(checked.rules), passengers=opts.pax.total
+    )
 
 
 class _GfQuery(NamedTuple):
