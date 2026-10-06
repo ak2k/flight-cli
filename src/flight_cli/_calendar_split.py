@@ -32,7 +32,8 @@ no-flights result (every sub-search empty) from a recovered one.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from datetime import timedelta
+from typing import TYPE_CHECKING, Any, cast
 
 from ._metro import expand_airports
 from .models import CalendarResult
@@ -40,10 +41,14 @@ from .models import CalendarResult
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from .domain import CalendarSearch
+    from .domain import CalendarSearch, CalendarWindow
 
 # The (origin, destination) a sub-query asked, each side comma-joined.
 type Pair = tuple[str, str]
+
+# A day of a month recurs 365 days later at the soonest, so a window holds one
+# twice only when its last day is at least this far past its first.
+_RECUR = timedelta(days=365)
 
 
 def is_empty_calendar(res: CalendarResult) -> bool:
@@ -135,7 +140,7 @@ def price_currencies(res: CalendarResult) -> tuple[str, ...]:
 
 @dataclass
 class _Cell:
-    """Per (month, day) aggregate while merging pair grids."""
+    """Per (year, month, day) aggregate while merging pair grids."""
 
     date: int
     min_price: str
@@ -148,16 +153,31 @@ class _Cell:
     )
 
 
+def _month_years(res: CalendarResult) -> list[int]:
+    """The year each of `res`'s months names in its body, by position, 0 where
+    it names none: the parsed month drops it."""
+    raw: Any = (res.raw or {}).get("calendar")
+    found: Any = cast("dict[str, Any]", raw).get("months") if isinstance(raw, dict) else None
+    bodies: list[Any] = cast("list[Any]", found) if isinstance(found, list) else []
+    if len(bodies) != len(res.months):
+        return [0] * len(res.months)
+    years: list[int] = []
+    for body in bodies:
+        year: Any = cast("dict[str, Any]", body).get("year") if isinstance(body, dict) else None
+        years.append(year if isinstance(year, int) else 0)
+    return years
+
+
 def _fold(
-    cells: dict[tuple[int, int], _Cell], pair: Pair, res: CalendarResult, *, floor: bool
+    cells: dict[tuple[int, int, int], _Cell], pair: Pair, res: CalendarResult, *, floor: bool
 ) -> None:
     """Fold one answer's priced days into `cells`, each kept only where strictly
     cheaper than what is there, so a tie stays with whichever came first."""
-    for m in res.months:
+    for m, year in zip(res.months, _month_years(res), strict=True):
         for d in m.days:
             if d.disabled or not d.min_price:
                 continue
-            key = (m.month or 0, d.date)
+            key = (year, m.month or 0, d.date)
             pv = d.price_value
             cell = cells.get(key)
             if cell is None:
@@ -183,8 +203,10 @@ def _fold(
 def merge_calendar_results(
     results: Sequence[tuple[Pair, CalendarResult]],
     floor: tuple[Pair, CalendarResult] | None = None,
+    *,
+    window: CalendarWindow | None = None,
 ) -> CalendarResult:
-    """Merge per-pair calendar grids into one: per (month, day) the lowest fare
+    """Merge per-pair calendar grids into one: per departure day the lowest fare
     across pairs, with each per-duration column also taken as the cross-pair
     minimum and `solution_count` summed. Every day and every duration names the
     pair whose query priced it; on a tie the earlier pair keeps it. The prices
@@ -197,8 +219,14 @@ def merge_calendar_results(
     set. It takes a cell only when strictly cheaper than every pair. Its
     solutions overlap the pairs', so its counts are used only on a day the pairs
     counted none, in that day and in the grid's total alike: the total stays the
-    sum of the days, and a grid only the floor priced never reads as empty."""
-    cells: dict[tuple[int, int], _Cell] = {}
+    sum of the days, and a grid only the floor priced never reads as empty.
+
+    `window` is the departure window asked. One of a year or more holds a day
+    of a month twice, so its months are one per year and month, each naming its
+    year, which is how a reader tells the two days apart. A shorter window holds
+    each day of a month once, so its months stay one per month number and name
+    no year."""
+    cells: dict[tuple[int, int, int], _Cell] = {}
     cheapest_pv: float | None = None
     cheapest_notice: dict[str, Any] = {}
     # The floor last, so the strict comparisons leave every tie to a pair.
@@ -212,8 +240,9 @@ def merge_calendar_results(
     total_sols = sum(res.solution_count for _, res in results) + sum(
         c.floor_sols for c in cells.values() if not c.sols
     )
-    by_month: dict[int, list[dict[str, Any]]] = {}
-    for (month, _date), cell in cells.items():
+    dated = window is not None and window.end - window.start >= _RECUR
+    by_month: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    for (year, month, _date), cell in cells.items():
         day: dict[str, Any] = {
             "date": cell.date,
             "solutionCount": cell.sols or cell.floor_sols,
@@ -227,10 +256,14 @@ def merge_calendar_results(
                 ]
             },
         }
-        by_month.setdefault(month, []).append(day)
+        by_month.setdefault((year if dated else 0, month), []).append(day)
     months = [
-        {"month": month, "weeks": [{"days": sorted(days, key=lambda x: x["date"])}]}
-        for month, days in sorted(by_month.items())
+        {
+            "month": month,
+            **({"year": year} if year else {}),
+            "weeks": [{"days": sorted(days, key=lambda x: x["date"])}],
+        }
+        for (year, month), days in sorted(by_month.items())
     ]
     return CalendarResult.from_api(
         {

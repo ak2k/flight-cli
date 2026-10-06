@@ -1,0 +1,41 @@
+55 solutions  · overall cheapest: 407.00 (USD)  · window 2026-10-20 → 2026-11-16  · duration 7-7 nights
+JFK → LAX: lowest fare per departure day
+                 (USD)                  
+┏━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━┓
+┃ departure ┃     min ┃      7n ┃ sols ┃
+┡━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━┩
+│        31 │  407.00 │  407.00 │    4 │
+│         4 │  407.00 │  407.00 │    1 │
+│         5 │  407.00 │  407.00 │    1 │
+│         7 │  407.00 │  407.00 │    6 │
+│        10 │  407.00 │  407.00 │    1 │
+│        24 │  432.00 │  432.00 │    3 │
+│         3 │  462.00 │  462.00 │    1 │
+│        11 │  462.00 │  462.00 │    1 │
+│        20 │  467.00 │  467.00 │    2 │
+│        26 │  500.00 │  500.00 │    1 │
+│        27 │  500.00 │  500.00 │    1 │
+│        28 │  500.00 │  500.00 │    1 │
+│        29 │  500.00 │  500.00 │    1 │
+│        30 │  500.00 │  500.00 │    1 │
+│         6 │  512.00 │  512.00 │    1 │
+│        16 │  513.00 │  513.00 │    2 │
+│        23 │  602.00 │  602.00 │    2 │
+│         9 │  617.00 │  617.00 │    1 │
+│        21 │  677.00 │  677.00 │    2 │
+│        25 │  709.00 │  709.00 │    4 │
+│        14 │  737.00 │  737.00 │    4 │
+│        22 │  778.00 │  778.00 │    2 │
+│         1 │  793.00 │  793.00 │    6 │
+│         8 │  842.00 │  842.00 │    6 │
+│         2 │  847.00 │  847.00 │    1 │
+│        12 │  862.00 │  862.00 │    1 │
+│        15 │  913.00 │  913.00 │    2 │
+│        13 │ 1017.00 │ 1017.00 │    1 │
+└───────────┴─────────┴─────────┴──────┘
+
+Matrix deep-link:
+  https://matrix.itasoftware.com/calendar?search=eyJ0eXBlIjoicm91bmQtdHJpcCIsInNsaWNlcyI6W3sib3JpZ2luIjpbIkpGSyJdLCJkZXN0IjpbIkxBWCJdLCJkYXRlcyI6eyJzZWFyY2hEYXRlVHlwZSI6ImNhbGVuZGFyIiwiZGVwYXJ0dXJlRGF
+0ZSI6IjIwMjYtMTAtMjAiLCJkZXBhcnR1cmVEYXRlVHlwZSI6ImRlcGFydCIsImRlcGFydHVyZURhdGVNb2RpZmllciI6IjAiLCJkZXBhcnR1cmVEYXRlUHJlZmVycmVkVGltZXMiOltdLCJkdXJhdGlvbiI6IjciLCJyZXR1cm5EYXRlVHlwZSI6ImRlcGFydCIsInJ
+ldHVybkRhdGVNb2RpZmllciI6IjAiLCJyZXR1cm5EYXRlUHJlZmVycmVkVGltZXMiOltdfX1dLCJvcHRpb25zIjp7ImNhYmluIjoiQ09BQ0giLCJzdG9wcyI6Ii0xIiwiZXh0cmFTdG9wcyI6IjEiLCJhbGxvd0FpcnBvcnRDaGFuZ2VzIjoidHJ1ZSIsInNob3dPbmx
+5QXZhaWxhYmxlIjoidHJ1ZSJ9LCJwYXgiOnsiYWR1bHRzIjoiMSJ9fQ%3D%3D

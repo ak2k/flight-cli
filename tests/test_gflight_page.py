@@ -628,7 +628,7 @@ def test_a_persistent_throttle_costs_exactly_one_ladder(client: Any) -> None:
     """THE request budget: one initial GET plus `_THROTTLE_RETRY_ATTEMPTS`
     retries, and no second ladder underneath it. What a nested one would cost is
     worked out once, in the budget section of
-    docs/memories/gf_routing_and_carriers.md."""
+    docs/memories/gf_request_budget.md."""
     fake = client(_FakeResponse(text="", status_code=429))
     with pytest.raises(GfThrottledError):
         gfid._one_call_with_retry(_FILTERS)

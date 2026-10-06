@@ -88,7 +88,7 @@ go into detail and are loaded on demand.
   positive scan that tells a flight-less board from a moved layout. Read
   before touching `_gflight_ids._extract_ds1` / `_rows_from_ds1`.
 - [gf_request_budget.md](gf_request_budget.md) — Page GETs per search (the
-  table every docstring points at), the round-trip pin cap of 10 and which
+  table most docstrings point at), the round-trip pin cap of 10 and which
   outbounds are pinned, the sort cabin leading multi-cabin pins, the pin
   loop's one stop rule, typed Matrix failures, what a round-trip row's price
   means, and why a partial round trip exits 0. Read before touching
@@ -103,13 +103,15 @@ go into detail and are loaded on demand.
   transport ladder per fan-out with a single prober, waiter parks and
   refills, which curl failures retry and which propagate, and the measured
   client-context rate budget (burst cap, rolling allowance, fast recovery)
-  behind the reactive design. Read before touching
+  behind the reactive design, and the order in which `auto` escalates a
+  throttle to Chrome. Read before touching
   `_gflight_ids.retry_throttled`.
 - [gf_separate_tickets.md](gf_separate_tickets.md) — Self transfers and
   separate tickets from the Cheapest tab's `row[7]`: the `tfu=` that asks for
   it, merged into the default board rather than swapped, marked round trips,
   `--no-separate-tickets`, and what the award matcher, `--sellers`, `--verify`,
-  links and the Matrix cross-check do with a marked row.
+  links and the Matrix cross-check do with a marked row; the multi-cabin join
+  key, and an open jaw answered as one Google one-way per slice beside Matrix.
 - [gf_multi_page_legs.md](gf_multi_page_legs.md) — A leg over 11 airports
   asked as several pages (`_metro.gf_leg_pages`, at most 8), how the pages'
   rows merge, a paged round trip's pins and cost, a refused page,
