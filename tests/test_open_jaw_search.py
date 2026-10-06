@@ -471,17 +471,33 @@ def test_json_split_names_why_there_is_no_combination(
     assert doc["split_ticket"] == {"error": error}
 
 
+@pytest.mark.parametrize(
+    ("boards", "slices", "complete"),
+    [
+        pytest.param({}, None, True, id="combinations"),
+        pytest.param({"first": []}, None, True, id="empty-board"),
+        pytest.param({"second": RuntimeError("boom")}, None, False, id="failed-board"),
+        pytest.param({}, ("JFK-LHR:{out}", "CDG-JFK:{back}:e=F BC=j"), False, id="not-asked"),
+    ],
+)
 def test_the_envelope_carries_the_json_documents_split_ticket(
     monkeypatch: pytest.MonkeyPatch,
+    boards: dict[str, Any],
+    slices: tuple[str, ...] | None,
+    complete: bool,
 ) -> None:
+    """A board with no combination is an answer; one that failed, or a slice
+    Google was not asked about, leaves the tickets asked for unpriced."""
+    out, back = _days()
+    given = None if slices is None else tuple(s.format(out=out, back=back) for s in slices)
     argv = ("--cash-only", "--split", "-n", "3")
-    _google(monkeypatch)
+    _google(monkeypatch, **boards)
     _matrix(monkeypatch)
-    doc = json.loads(_search(*argv, "--format", "json").stdout)
-    _google(monkeypatch)
+    doc = json.loads(_search(*argv, "--format", "json", slices=given).stdout)
+    _google(monkeypatch, **boards)
     _matrix(monkeypatch)
-    env = _envelope_of(_search(*argv, "--format", "envelope"))
-    assert (env["backend"], env["complete"]) == ("matrix", True)
+    env = _envelope_of(_search(*argv, "--format", "envelope", slices=given))
+    assert (env["backend"], env["complete"]) == ("matrix", complete)
     assert env["split_ticket"] == doc["split_ticket"]
     assert _notes(env, "split_ticket") == []
 

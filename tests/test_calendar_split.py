@@ -4610,6 +4610,8 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_render_multi_cabin_search", "cabin_labels"),
         ("_render_multi_cabin_search", "sort_label"),
         ("_render_multi_cabin_search", "letter"),
+        # Whether a shown row is marked, a bool this function computed.
+        ("_render_multi_cabin_search", "shows_mark"),
         # `pp/cli.py`: cells composed from leaves each wrapped where they were read,
         # and not wrapped again whole, because `_fmt_award_cell` writes its `[dim]`
         # and `[yellow]` on purpose. The arms of

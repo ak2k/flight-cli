@@ -42,7 +42,7 @@ def test_pairs_come_cheapest_total_first() -> None:
         ("BA2", "AF1", 96600),
         ("BA2", "AF2", 100000),
     ]
-    assert [(c.total, c.currency) for c in combos][0] == (861.0, "USD")
+    assert (combos[0].total, combos[0].currency) == (861.0, "USD")
 
 
 def test_equal_totals_keep_the_first_boards_order_then_the_seconds() -> None:
