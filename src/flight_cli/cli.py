@@ -886,11 +886,13 @@ def _google_reasons(
     return_flex: tuple[int, int] = (0, 0),
     arrive: bool = False,
     return_arrive: bool = False,
+    open_jaw: bool = False,
 ) -> list[str]:
     """Every reason Google Flights' search page can't serve this request, each
     a phrase completing "Google Flights can't serve …"; empty when it can.
     What each reason is and why is `_pick_backend`'s docstring, which acts on
-    them."""
+    them. An `open_jaw`'s reason says "on one ticket": Google still prices it
+    as one-way tickets (`_answer_open_jaw`)."""
     from ._gf_postfilter import search_page_reasons  # noqa: PLC0415
     from .routing_predicates import classify  # noqa: PLC0415
 
@@ -898,7 +900,7 @@ def _google_reasons(
     if fare_rules:
         reasons.append("fare rules")
     if slice_specs:
-        reasons.append("a multi-city itinerary")
+        reasons.append("a multi-city itinerary" + (" on one ticket" if open_jaw else ""))
     reasons.extend(
         _date_option_reasons(
             flex=flex, return_flex=return_flex, arrive=arrive, return_arrive=return_arrive
@@ -977,6 +979,7 @@ def _pick_backend(
     return_flex: tuple[int, int] = (0, 0),
     arrive: bool = False,
     return_arrive: bool = False,
+    open_jaw: bool = False,
 ) -> str:
     """Resolve --backend to a concrete backend.
 
@@ -1078,6 +1081,7 @@ def _pick_backend(
         return_flex=return_flex,
         arrive=arrive,
         return_arrive=return_arrive,
+        open_jaw=open_jaw,
     )
 
     # The same reasons go out two ways, and only one of them is markup. A
@@ -10766,6 +10770,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             )
         )
         raise typer.Exit(2)
+    open_jaw = _is_open_jaw(tuple(map(_parse_slice_spec, slice_specs or [])))
     if split and (
         blocker := _split_blocker(
             multi_city=bool(slice_specs),
@@ -10778,7 +10783,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             awards_format=output
             if json_out and not sel.awards_only and _should_run_awards(sel)
             else None,
-            open_jaw=_is_open_jaw(tuple(map(_parse_slice_spec, slice_specs or []))),
+            open_jaw=open_jaw,
             fare_rules=fare_rules,
         )
     ):
@@ -10824,6 +10829,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         return_flex=ret_flex,
         arrive=bool(arrive),
         return_arrive=bool(return_arrive),
+        open_jaw=open_jaw,
     )
     if verify and resolved == BACKEND_MATRIX:
         err.print("[red]--verify needs a Google Flights row, and this search runs on Matrix.[/]")

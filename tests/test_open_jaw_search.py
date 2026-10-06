@@ -788,3 +788,34 @@ def test_a_one_way_board_counts_the_rows_it_drops_over_the_stop_ceiling(
     env = _envelope_of(_search("--cash-only", "--stops", "0", "--format", "envelope"))
     assert (env["backend"], env["complete"]) == ("matrix", True), env["notes"]
     assert env["notes"].count(line) == 1
+
+
+@pytest.mark.parametrize(
+    ("slices", "on_one_ticket"),
+    [
+        pytest.param(None, True, id="open-jaw"),
+        pytest.param(("JFK-LHR:{out}", "LHR-JFK:{back}"), False, id="slice-round-trip"),
+        pytest.param(
+            ("JFK-LHR:{out}", "CDG-JFK:{back}", "JFK-MIA:{later}"), False, id="three-slices"
+        ),
+    ],
+)
+def test_the_matrix_line_says_what_google_cannot_serve(
+    monkeypatch: pytest.MonkeyPatch, slices: tuple[str, ...] | None, on_one_ticket: bool
+) -> None:
+    """An open jaw's line sits above Google's separate tickets for it, so it
+    names the one ticket Google can't sell. Red at the base for the open jaw;
+    the other two keep the base's words."""
+    out, back = _days()
+    later = back + dt.timedelta(days=3)
+    _google(monkeypatch)
+    _matrix(monkeypatch)
+    given = (
+        None if slices is None else tuple(s.format(out=out, back=back, later=later) for s in slices)
+    )
+    result = _search("--cash-only", slices=given)
+    assert result.exit_code == 0, result.output
+    said = "Using Matrix: Google Flights can't serve a multi-city itinerary" + (
+        " on one ticket." if on_one_ticket else "."
+    )
+    assert said in " ".join(result.stderr.split()), result.stderr
