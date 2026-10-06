@@ -24,7 +24,7 @@ from flight_cli import _envelope, cli
 from flight_cli import _gf_calgraph as cg
 from flight_cli._gf_errors import GfBrowserUnavailableError
 from flight_cli.models import CalendarResult
-from test_calendar_split import _result
+from test_calendar_split import _pair_client, _result
 
 if TYPE_CHECKING:
     from click.testing import Result
@@ -242,6 +242,56 @@ def test_a_window_holding_a_day_of_the_month_twice_dates_it_by_its_year(
     assert _lines(result.stderr) == [line]
     if fmt == "envelope":
         assert _lines("\n".join(_envelope_of(result)["notes"])) == [line]
+
+
+@pytest.mark.parametrize("fmt", list(_FORMATS))
+def test_an_empty_grid_names_every_date_asked(fmt: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    _serve(monkeypatch, {"solutionCount": 0, "calendar": {"months": []}})
+    result = _run(*_ROUTE, "--gf-transport", "http", *_FORMATS[fmt])
+    assert result.exit_code == 0, result.output
+    line = (
+        "Matrix priced no fare on 28 of 28 departure dates asked for 7-night trips: "
+        "2026-10-20 to 2026-11-16."
+    )
+    assert _lines(result.stderr) == [line]
+    if fmt == "envelope":
+        env = _envelope_of(result)
+        assert env["complete"] is False
+        assert _lines("\n".join(env["notes"])) == [line]
+
+
+@pytest.mark.parametrize("fmt", list(_FORMATS))
+def test_a_merged_grid_names_each_lengths_unpriced_dates_across_a_month_end(
+    fmt: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each airport pair prices other days and lengths, and the merged grid
+    prices a date for a length where any pair did."""
+    both = {6: "USD300.00", 7: "USD310.00"}
+    _pair_client(
+        monkeypatch,
+        {
+            ("JFK", "LAX"): _result({10: {29: ("USD300.00", 2, both), 30: ("USD300.00", 2, both)}}),
+            ("EWR", "LAX"): _result(
+                {
+                    10: {31: ("USD320.00", 2, {7: "USD320.00"})},
+                    11: {1: ("USD330.00", 2, {6: "USD330.00", 7: "USD340.00"})},
+                }
+            ),
+        },
+    )
+    window = ["--start", "2026-10-29", "--end", "2026-11-02", "-d", "6-7"]
+    result = _run("calendar", "JFK,EWR", "LAX", *window, "--gf-transport", "http", *_FORMATS[fmt])
+    assert result.exit_code == 0, result.output
+    lines = [
+        "Matrix priced no fare on 2 of 5 departure dates asked for 6-night trips: "
+        "2026-10-31, 2026-11-02.",
+        "Matrix priced no fare on 1 of 5 departure dates asked for 7-night trips: 2026-11-02.",
+    ]
+    assert _lines(result.stderr) == lines
+    if fmt == "envelope":
+        env = _envelope_of(result)
+        assert env["complete"] is False
+        assert _lines("\n".join(env["notes"])) == lines
 
 
 def test_a_grid_pricing_every_date_asked_reads_as_it_did(
