@@ -9,9 +9,11 @@ results from an IP that was simultaneously throttling curl_cffi.
 
 This module supplies **bytes only**. `_gflight_ids._rows_from_page_html` reads
 them, exactly as it reads rung 1's, so there is one parser and one set of
-verdicts about what a block means. Verified 2026-09-02 on JFK-LAX: curl_cffi
-and a headless Chrome navigation of the same URL in the same minute both
-decoded 30 rows with the identical first `flight_id`.
+verdicts about what a block means. Both rungs read one board because both send
+the `HeadlessChrome` UA token, by which Google picks the board it serves a
+multi-airport search; a headed window is given it (`_send_the_headless_token`).
+Measured 2026-10-05 on NYC-LON: 300 rows from USD488 under the token, a curated
+72 from USD679 without it. A single airport pair reads one board either way.
 
 Three things are deliberate and easy to undo by accident:
 
@@ -188,6 +190,16 @@ def _announce() -> None:
         return
     _notice_state["printed"] = True
     _err.print("[dim]Google Flights: opening Chrome (rung 2)…[/]")
+
+
+def announce_escalation() -> None:
+    """The line an `auto` search prints when a throttle moves it to Chrome, in
+    place of `_announce`'s: it says Chrome is opening, and why."""
+    _notice_state["printed"] = True
+    _err.print(
+        "[dim]Google Flights rate-limited the request; opening Chrome (rung 2) for the "
+        "rest of this search…[/]"
+    )
 
 
 class Control(NamedTuple):
@@ -580,6 +592,8 @@ class GfBrowserSession:
                 **_launch_target(),
             )
             self._page = self._context.new_page()
+            if self._headed:
+                _send_the_headless_token(self._context, self._page)
         # Any launch failure — missing Chrome, locked profile, driver crash — is one
         # refusal to the caller, who cannot act on the distinctions patchright draws.
         except Exception as e:
@@ -633,6 +647,26 @@ def _swallow(what: str, shutdown: Callable[[], object]) -> KeyboardInterrupt | N
         log.debug("could not close the gflight browser %s: %s", what, e)
         return e if isinstance(e, KeyboardInterrupt) else None
     return None
+
+
+def _send_the_headless_token(context: Any, page: Any) -> None:
+    """Make a headed window's User-Agent say `HeadlessChrome`, as a headless
+    one's already does.
+
+    Google serves a multi-airport search a different board by that token: under
+    it the 300 cheapest rows across every airport pair, under plain `Chrome` a
+    curated ~75. Headless Chrome and rung 1 both send it, so a headed window
+    without it would read a board the default search never shows. Set once on
+    the session's one page, so every navigation on it carries the token. A UA
+    that already has it is left alone, and a headless page is never set to
+    plain `Chrome/`: that reads the curated board."""
+    cdp = context.new_cdp_session(page)
+    ua = str(cdp.send("Browser.getVersion")["userAgent"])
+    if "HeadlessChrome/" not in ua:
+        cdp.send(
+            "Emulation.setUserAgentOverride",
+            {"userAgent": ua.replace(" Chrome/", " HeadlessChrome/")},
+        )
 
 
 def _launch_target() -> dict[str, str]:
@@ -798,11 +832,12 @@ def interrupt_guard(*, armed: bool = True) -> Generator[None]:
     wait, though: it is never restored, so it stands for the rest of the
     process's life, and what makes arming this arm broadly safe is that by then
     there is nothing left for a second Ctrl-C to stop. The enriched arm arms it
-    only for the browser transport, because there the search runs on a worker no
-    interrupt reaches — on any other transport the first Ctrl-C cannot free that
-    worker, and an ignored second one leaves nothing that can. `auto` is `http`
-    today, so the escalate-on-throttle rung opens a browser on an enriched path
-    this gate leaves unarmed the day it lands.
+    only for the transports that can open a browser, `browser` and `auto`, which
+    escalates a throttle to one, because there the search runs on a worker no
+    interrupt reaches — on `http` the first Ctrl-C cannot free that worker, and
+    an ignored second one leaves nothing that can. An `auto` search that never
+    escalates pays that: its second Ctrl-C is ignored while the worker finishes
+    its GETs.
 
     The default handler raises `KeyboardInterrupt` on the main thread and stops
     there, which leaves the two arms broken in different ways. On `--fast` the

@@ -54,7 +54,13 @@ _FLL_LGA = [
     *("--backend", "gflight", "--fast", "-n", "1000"),
 ]
 _THROTTLE_PAGE = "<html>Our systems have detected unusual traffic</html>"
-_SHAPELESS_PAGE = "<html><body>no flight data here</body></html>"
+# A `ds:1` too short to hold a board: a layout change, refused at one read. A
+# page with no `ds:1` at all is read three times (`_read_search_page`).
+_SHAPELESS_PAGE = (
+    "<html><body><script>"
+    "AF_initDataCallback({key: 'ds:1', hash: '9', data:[[]], sideChannel: {}});"
+    "</script></body></html>"
+)
 _KEY = (
     "† separate tickets: Google sells this trip as more than one booking. "
     "‡ self transfer: separate tickets, and you collect and recheck bags between flights."
@@ -563,7 +569,8 @@ def test_the_skill_and_the_help_name_the_searches_that_read_the_cheapest_tab(
         for p in group.commands["search"].params
         if isinstance(p, click.Option) and "--no-separate-tickets" in p.opts
     ]
-    assert "one-cabin search" in (flag.help or "")
+    assert "Cheapest tab" in (flag.help or "")
+    assert "one-cabin" not in (flag.help or "")
 
 
 def test_the_deprecated_command_reads_no_cheapest_tab(gf_session: Callable[..., Any]) -> None:
@@ -1455,7 +1462,7 @@ def test_an_award_document_whose_cheapest_row_is_on_separate_tickets_lists_one_t
 
     monkeypatch.setattr(cli, "_should_run_awards", _configured)
     monkeypatch.setattr(pp_cli, "gather_awards", _gather)
-    monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
+    monkeypatch.setattr(pp_cli, "stored_tokens", lambda: None)
     args = [*_CAPPED, "--format", "json", "-n", "1"]
     pages = (_served(_LAX), _lax_with_marked_twin(5, price=100))
     base = _as_the_base(gf_session, args, *pages)

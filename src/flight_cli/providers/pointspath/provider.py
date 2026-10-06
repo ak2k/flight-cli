@@ -17,7 +17,7 @@ import anyio
 import anyio.to_thread
 import structlog
 
-from ...pp.auth import PPAuthError, get_valid_tokens
+from ...pp.auth import get_valid_tokens, load_tokens
 from ...pp.client import (
     DEFAULT_AIRLINES,
     CashFlightHint,
@@ -223,14 +223,6 @@ class PointsPathProvider:
 
 # Auto-detect entry point used by registry.py.
 def is_configured() -> bool:
-    """True iff PP tokens are present and (best-effort) usable.
-
-    Doesn't network: returns False if tokens are missing or fail the
-    in-memory validity check. Token refresh (which does network) happens
-    inside PPClient itself when the provider is actually invoked.
-    """
-    try:
-        get_valid_tokens()
-    except PPAuthError:
-        return False
-    return True
+    """True iff PP tokens are stored, stale or not. Sends no request: the one
+    refresh of a stale token is `create`'s, under the award deadline."""
+    return load_tokens() is not None

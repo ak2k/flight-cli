@@ -1546,7 +1546,7 @@ def _matrix_multi(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Cabin, ...]]:
 def _boards_per_cabin(monkeypatch: pytest.MonkeyPatch, boards: dict[Cabin, list[Any]]) -> None:
     """Google answers each cabin's query with its own board."""
 
-    def _gf(_legs: object, opts: SearchOptions, *_a: object) -> list[Any]:
+    def _gf(_legs: object, opts: SearchOptions, *_a: object, **_kw: object) -> list[Any]:
         return boards[opts.cabin]
 
     monkeypatch.setattr(cli, "_gflight_results", _gf)
