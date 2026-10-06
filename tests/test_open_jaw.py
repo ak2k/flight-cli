@@ -1,14 +1,18 @@
 # pyright: reportPrivateUsage=false
-"""`_open_jaw.combine`: an open jaw's one-way boards paired into the cheapest
-combinations flyable in order, each total in one currency."""
+"""`_open_jaw.combine`: a multi-city trip's one-way boards, one per slice,
+combined into the cheapest runs flyable in order, each total in one currency."""
 
 from __future__ import annotations
 
 import datetime as dt
+import itertools
 from typing import Any
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
+from flight_cli import _open_jaw
 from flight_cli._open_jaw import Combination, combine, flyable
 from test_split_ticket import _row
 
@@ -156,3 +160,138 @@ def test_a_row_in_another_currency_is_never_summed() -> None:
     combos = combine(first, second, currency="USD", limit=5)
     assert _flights(combos) == [("BA2", "AF1", 86100)]
     assert {c.currency for c in combos} == {"USD"}
+
+
+# ─────────────────────────── three or more boards ───────────────────────────
+
+_AIRPORTS = ("SFO", "ORD", "BOS", "MIA")
+
+
+@st.composite
+def _boards(draw: st.DrawFn) -> list[list[Any]]:
+    """Two to four boards of up to six rows, unordered, whose fares tie often
+    and whose airports and times make some runs flyable and some not."""
+    day = dt.date.today() + dt.timedelta(days=30)
+    boards: list[list[Any]] = []
+    for i in range(draw(st.integers(2, 4))):
+        frm, to = draw(st.sampled_from([(a, b) for a in _AIRPORTS for b in _AIRPORTS if a != b]))
+        rows = [
+            _row(
+                f"UA{i:d}{j:d}",
+                frm,
+                to,
+                day + dt.timedelta(days=draw(st.integers(0, 3))),
+                draw(st.sampled_from([100.10, 150.15, 200.20, 250.25, 300.0])),
+                currency=draw(st.sampled_from(["USD", "USD", "USD", "", "EUR"])),
+                at=dt.time(draw(st.integers(0, 23)), 0),
+                hours=draw(st.integers(1, 8)),
+            )
+            for j in range(draw(st.integers(0, 6)))
+        ]
+        boards.append(rows)
+    return boards
+
+
+def _product(boards: list[list[Any]], *, limit: int, cap: int | None) -> list[Combination]:
+    """Every flyable combination in USD, ranked by total and then board
+    position, cut to `limit`: what `combine` answers without building this."""
+    found: list[tuple[int, tuple[int, ...], tuple[Any, ...]]] = []
+    for at in itertools.product(*(range(len(b)) for b in boards)):
+        picked = tuple(b[j] for b, j in zip(boards, at, strict=True))
+        if any((r.flight.currency or "USD") != "USD" for r in picked):
+            continue
+        if not all(flyable(a, b) for a, b in itertools.pairwise(picked)):
+            continue
+        total = sum(round(r.flight.price * 100) for r in picked)
+        if cap is None or total <= cap * 100:
+            found.append((total, at, picked))
+    found.sort(key=lambda f: (f[0], f[1]))
+    return [Combination(picked, total, "USD") for total, _, picked in found[:limit]]
+
+
+def _which(combos: list[Combination]) -> list[tuple[int, tuple[int, ...]]]:
+    return [(c.total_cents, tuple(map(id, c.tickets))) for c in combos]
+
+
+@settings(deadline=None, max_examples=300)
+@given(
+    boards=_boards(),
+    limit=st.integers(1, 8),
+    cap=st.sampled_from([None, None, 400, 600, 900]),
+)
+def test_n_boards_answer_as_their_whole_product_would(
+    boards: list[list[Any]], limit: int, cap: int | None
+) -> None:
+    """Red at the base, whose `combine` took two boards."""
+    got = combine(*boards, currency="USD", limit=limit, cap=cap)
+    assert _which(got) == _which(_product(boards, limit=limit, cap=cap))
+    assert all(len(c.tickets) == len(boards) for c in got)
+
+
+def test_three_full_boards_cost_far_less_than_their_product(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three 300-row boards whose cheapest middle tickets all leave before the
+    first ticket lands: 27,000,000 combinations, answered in under 200,000
+    `flyable` calls. Red at the base, whose `combine` took two boards."""
+    day = dt.date.today() + dt.timedelta(days=30)
+    first = [_row(f"UA{i:d}", "SFO", "ORD", day, 100.0 + i, at=dt.time(10, 0)) for i in range(300)]
+    middle = [
+        _row(f"AA{i:d}", "ORD", "BOS", day, 50.0 + i, at=dt.time(8 if i < 200 else 15, 0))
+        for i in range(300)
+    ]
+    last = [
+        _row(f"B6{i:d}", "BOS", "SFO", day + dt.timedelta(days=4), 200.0 + i) for i in range(300)
+    ]
+    calls = 0
+
+    def counted(a: Any, b: Any) -> bool:
+        nonlocal calls
+        calls += 1
+        return flyable(a, b)
+
+    monkeypatch.setattr(_open_jaw, "flyable", counted)
+    combos = combine(first, middle, last, currency="USD", limit=10)
+    assert calls < 200_000
+    # The cheapest middle ticket that leaves after the first lands is AA200.
+    assert [tuple(map(id, c.tickets)) for c in combos[:4]] == [
+        (id(first[0]), id(middle[200]), id(last[0])),
+        (id(first[0]), id(middle[200]), id(last[1])),
+        (id(first[0]), id(middle[201]), id(last[0])),
+        (id(first[1]), id(middle[200]), id(last[0])),
+    ]
+    assert [c.total_cents for c in combos[:4]] == [55000, 55100, 55100, 55100]
+
+
+def test_three_boards_tie_in_the_first_boards_order_then_the_next() -> None:
+    """Three combinations total 600.00, and the cheapest row of the first board
+    is its second, so board order and price order disagree. Red at the base,
+    whose `combine` took two boards."""
+    out = dt.date.today() + dt.timedelta(days=30)
+    first = [_row("UA2", "SFO", "ORD", out, 250.0), _row("UA1", "SFO", "ORD", out, 200.0)]
+    middle = [
+        _row("AA1", "ORD", "BOS", out + dt.timedelta(days=1), 150.0),
+        _row("AA2", "ORD", "BOS", out + dt.timedelta(days=1), 200.0),
+    ]
+    last = [
+        _row("B61", "BOS", "SFO", out + dt.timedelta(days=2), 250.0),
+        _row("B62", "BOS", "SFO", out + dt.timedelta(days=2), 200.0),
+    ]
+    combos = combine(first, middle, last, currency="USD", limit=10)
+    named = [
+        "/".join(
+            f"{r.flight.legs[0].airline.name}{r.flight.legs[0].flight_number}" for r in c.tickets
+        )
+        for c in combos
+    ]
+    assert [c.total_cents for c in combos] == [
+        55000,
+        60000,
+        60000,
+        60000,
+        65000,
+        65000,
+        65000,
+        70000,
+    ]
+    assert named[1:4] == ["UA2/AA1/B62", "UA1/AA1/B61", "UA1/AA2/B62"]
