@@ -4591,6 +4591,9 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_render_multi_cabin_search", "out_cell"),
         ("_render_multi_cabin_search", "ret_cell"),
         ("_render_multi_cabin_search", "price_cells"),
+        # `_fmt_slice_cell` of a Google one-way; the hostile flight number of
+        # tests/test_open_jaw_search.py holds it.
+        ("_render_open_jaw", "ticket"),
         ("_render_calendar", "row"),
         ("_render_gflight_table", "label"),  # the row number, and its a/b suffix
         ("_render_gflight_table", "dur"),  # "3h05m", from an integer count of minutes
@@ -4607,6 +4610,8 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_render_multi_cabin_search", "cabin_labels"),
         ("_render_multi_cabin_search", "sort_label"),
         ("_render_multi_cabin_search", "letter"),
+        # Whether a shown row is marked, a bool this function computed.
+        ("_render_multi_cabin_search", "shows_mark"),
         # `pp/cli.py`: cells composed from leaves each wrapped where they were read,
         # and not wrapped again whole, because `_fmt_award_cell` writes its `[dim]`
         # and `[yellow]` on purpose. The arms of
