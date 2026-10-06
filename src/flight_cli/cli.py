@@ -4185,6 +4185,7 @@ def _answer_open_jaw(
     output: str,
     split: bool,
     google_url: bool,
+    awards: bool = False,
 ) -> dict[str, Any] | None:
     """Google Flights' separate-ticket answer to the open jaw `legs`, shown
     ahead of Matrix's one-ticket answer: the table, or in a document the
@@ -4194,10 +4195,13 @@ def _answer_open_jaw(
 
     The envelope asks what the table asks, so the two hold the same fares.
     `--format json` asks nothing without `split`: its document is Matrix's own
-    body, which has no place for the tickets."""
+    body, which has no place for the tickets. With `awards` on, it is the
+    award document, which `--split` joins only beside `--cash-only`."""
     asked = split or output != "json"
     if blocker is None and not asked:
-        blocker = "--format json carries them only with --split"
+        blocker = "--format json carries them only with --split" + (
+            " and --cash-only" if awards else ""
+        )
     answer: _OpenJaw | str
     if blocker is not None:
         err.print(f"[dim]No separate tickets on Google Flights: {_safe_text(blocker)}.[/]")
@@ -11109,6 +11113,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             output=output,
             split=split,
             google_url=google_url,
+            awards=run_awards,
         )
     elif split:
         on_matrix = "--split prices Google Flights one-ways, and this search runs on Matrix"

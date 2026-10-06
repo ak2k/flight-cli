@@ -601,13 +601,15 @@ def test_split_is_refused_where_it_cannot_join(
 
 
 def _awards_on(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _yes(_sel: cli.ProviderSelection) -> bool:
-        return True
+    """An award provider is configured: awards run unless `--cash-only`."""
+
+    def _configured(sel: cli.ProviderSelection) -> bool:
+        return not sel.cash_only
 
     def _awards(*_a: object, **_kw: object) -> None:
         return None
 
-    monkeypatch.setattr(cli, "_should_run_awards", _yes)
+    monkeypatch.setattr(cli, "_should_run_awards", _configured)
     monkeypatch.setattr(cli, "run_pp_for_search", _awards)
 
 
@@ -741,6 +743,27 @@ def test_json_without_split_says_why_it_carries_no_tickets(
     stderr = " ".join(result.stderr.split())
     assert stderr.count("No separate tickets on Google Flights") == 1, stderr
     assert said in stderr
+
+
+def test_json_with_awards_names_every_flag_the_tickets_need(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With awards on, `--format json` writes the award document, which `--split`
+    cannot join: the line names `--cash-only` too, and that command carries them."""
+    _awards_on(monkeypatch)
+    google, _ = _google(monkeypatch), _matrix(monkeypatch)
+    result = _search("--format", "json")
+    assert result.exit_code == 0, result.output
+    assert google.calls == []
+    assert (
+        "No separate tickets on Google Flights: --format json carries them only with --split "
+        "and --cash-only." in " ".join(result.stderr.split())
+    )
+    _google(monkeypatch)
+    _matrix(monkeypatch)
+    followed = _search("--format", "json", "--split", "--cash-only")
+    assert followed.exit_code == 0, followed.output
+    assert json.loads(followed.stdout)["split_ticket"]["combinations"]
 
 
 @pytest.mark.parametrize(
