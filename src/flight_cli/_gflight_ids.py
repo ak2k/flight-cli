@@ -1876,7 +1876,9 @@ class Board[T](list[T]):
     hide, and `separate_failed` is why the Cheapest tab, where those are listed,
     went unread. `capped_at` is the highest fare on a page that stopped at
     Google's row cap (`_ROW_CAP`): every fare at or below it is listed, and a
-    dearer one may be missing. A round trip carries its outbound page's."""
+    dearer one may be missing. A round trip carries its outbound page's, and a
+    board showing the Cheapest tab's separate tickets the lower of its own and
+    the tab's."""
 
     def __init__(
         self,
