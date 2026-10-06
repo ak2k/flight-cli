@@ -261,6 +261,37 @@ def test_an_empty_grid_names_every_date_asked(fmt: str, monkeypatch: pytest.Monk
 
 
 @pytest.mark.parametrize("fmt", list(_FORMATS))
+def test_a_grid_the_table_calls_empty_lists_no_fare_it_names_unpriced(
+    fmt: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A day priced under no solutions is a grid Matrix's table prints as empty,
+    so the envelope lists no row beside the line that names every date."""
+    day = {
+        "date": 22,
+        "solutionCount": 0,
+        "minPrice": "USD500.00",
+        "tripDuration": {"options": [{"tripLength": 7, "minPrice": "USD500.00"}]},
+    }
+    month = {"month": 10, "year": 2026, "weeks": [{"days": [day]}]}
+    _serve(monkeypatch, {"solutionCount": 0, "calendar": {"months": [month]}})
+    window = ["--start", "2026-10-20", "--end", "2026-10-23", "-d", "7"]
+    result = _run("calendar", "JFK", "LAX", *window, "--gf-transport", "http", *_FORMATS[fmt])
+    assert result.exit_code == 0, result.output
+    line = (
+        "Matrix priced no fare on 4 of 4 departure dates asked for 7-night trips: "
+        "2026-10-20 to 2026-10-23."
+    )
+    assert _lines(result.stderr) == [line]
+    if fmt == "table":
+        assert "Calendar empty." in result.stdout
+    if fmt == "envelope":
+        env = _envelope_of(result)
+        assert env["results"] == []
+        assert "results: no priced day" in env["notes"]
+        assert env["complete"] is False
+
+
+@pytest.mark.parametrize("fmt", list(_FORMATS))
 def test_a_merged_grid_names_each_lengths_unpriced_dates_across_a_month_end(
     fmt: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

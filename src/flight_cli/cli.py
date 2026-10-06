@@ -5881,7 +5881,11 @@ def _matrix_envelope_rows(res: SearchResult, passengers: int) -> list[_envelope.
 
 def _calendar_envelope_rows(res: CalendarResult) -> list[_envelope.ResultRow]:
     """Each priced day of a Matrix calendar as envelope rows, the day object as
-    the body `--format json` prints holds it."""
+    the body `--format json` prints holds it. A grid the table prints as empty
+    has none: a day priced under no solutions is not a fare the table shows,
+    and the unpriced-dates note names its date."""
+    if is_empty_calendar(res):
+        return []
 
     def items(holder: Any, key: str) -> list[Any]:
         found: Any = cast("dict[str, Any]", holder).get(key) if isinstance(holder, dict) else None
