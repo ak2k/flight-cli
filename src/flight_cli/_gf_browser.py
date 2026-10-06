@@ -580,6 +580,8 @@ class GfBrowserSession:
                 **_launch_target(),
             )
             self._page = self._context.new_page()
+            if self._headed:
+                _send_the_headless_token(self._context, self._page)
         # Any launch failure — missing Chrome, locked profile, driver crash — is one
         # refusal to the caller, who cannot act on the distinctions patchright draws.
         except Exception as e:
@@ -633,6 +635,26 @@ def _swallow(what: str, shutdown: Callable[[], object]) -> KeyboardInterrupt | N
         log.debug("could not close the gflight browser %s: %s", what, e)
         return e if isinstance(e, KeyboardInterrupt) else None
     return None
+
+
+def _send_the_headless_token(context: Any, page: Any) -> None:
+    """Make a headed window's User-Agent say `HeadlessChrome`, as a headless
+    one's already does.
+
+    Google serves a multi-airport search a different board by that token: under
+    it the 300 cheapest rows across every airport pair, under plain `Chrome` a
+    curated ~75. Headless Chrome and rung 1 both send it, so a headed window
+    without it would read a board the default search never shows. Set once on
+    the session's one page, so every navigation on it carries the token. A UA
+    that already has it is left alone, and a headless page is never set to
+    plain `Chrome/`: that reads the curated board."""
+    cdp = context.new_cdp_session(page)
+    ua = str(cdp.send("Browser.getVersion")["userAgent"])
+    if "HeadlessChrome/" not in ua:
+        cdp.send(
+            "Emulation.setUserAgentOverride",
+            {"userAgent": ua.replace(" Chrome/", " HeadlessChrome/")},
+        )
 
 
 def _launch_target() -> dict[str, str]:
