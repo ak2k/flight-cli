@@ -225,6 +225,25 @@ def test_a_one_way_names_its_unpriced_dates_with_no_trip_length(
     ]
 
 
+@pytest.mark.parametrize("fmt", list(_FORMATS))
+def test_a_window_holding_a_day_of_the_month_twice_dates_it_by_its_year(
+    fmt: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2026-10-20 to 2027-10-20 holds October 20 twice. Matrix's body names
+    each month's year, so its fare on 2026-10-20 prices that date alone."""
+    _serve(monkeypatch, _BODY)
+    window = ["--start", "2026-10-20", "--end", "2027-10-20", "-d", "7"]
+    result = _run("calendar", "JFK", "LAX", *window, "--gf-transport", "http", *_FORMATS[fmt])
+    assert result.exit_code == 0, result.output
+    line = (
+        "Matrix priced no fare on 343 of 366 departure dates asked for 7-night trips: "
+        "2026-10-26 to 2026-10-30, 2026-11-17 to 2027-10-20."
+    )
+    assert _lines(result.stderr) == [line]
+    if fmt == "envelope":
+        assert _lines("\n".join(_envelope_of(result)["notes"])) == [line]
+
+
 def test_a_grid_pricing_every_date_asked_reads_as_it_did(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

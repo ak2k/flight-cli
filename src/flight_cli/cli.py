@@ -2851,12 +2851,42 @@ class _Low(NamedTuple):
     destination: str
 
 
-def _window_date(month: int | None, day: int, sd: date, ed: date) -> date | None:
-    """The one date of the window with this day of the month, in this month when
-    the grid names one; None when no date of the window or more than one is."""
+def _window_date(
+    month: int | None, day: int, sd: date, ed: date, *, year: int | None = None
+) -> date | None:
+    """The one date of the window with this day of the month, in this month and
+    year where the grid names them; None when no date of the window or more than
+    one is."""
     days = (sd + timedelta(days=i) for i in range((ed - sd).days + 1))
-    hits = [d for d in days if d.day == day and (not month or d.month == month)]
+    hits = [
+        d
+        for d in days
+        if d.day == day and (not month or d.month == month) and (not year or d.year == year)
+    ]
     return hits[0] if len(hits) == 1 else None
+
+
+def _window_days(res: CalendarResult, sd: date, ed: date) -> Generator[tuple[date, CalendarDay]]:
+    """Each day of Matrix's grid that falls on one date of the window, with that
+    date. A disabled day is the padding of a neighboring month.
+
+    A window of a year or more holds some day of a month twice, and only the
+    month's year tells the two apart. The parsed month drops the year Matrix's
+    body names for it, so it is read from the body. A merged grid's months name
+    no year."""
+    raw: Any = (res.raw or {}).get("calendar")
+    found: Any = cast("dict[str, Any]", raw).get("months") if isinstance(raw, dict) else None
+    bodies: list[Any] = cast("list[Any]", found) if isinstance(found, list) else []
+    if len(bodies) != len(res.months):
+        bodies = [None] * len(res.months)
+    for month, body in zip(res.months, bodies, strict=True):
+        year: Any = cast("dict[str, Any]", body).get("year") if isinstance(body, dict) else None
+        for day in month.days:
+            when = _window_date(
+                month.month, day.date, sd, ed, year=year if isinstance(year, int) else None
+            )
+            if not day.disabled and when is not None:
+                yield when, day
 
 
 def _date_runs(dates: Sequence[date]) -> str:
@@ -2878,23 +2908,18 @@ def _unpriced_lines(
     """One line for each trip length (None on a one-way) that Matrix's grid holds
     no fare for on some departure date of the window, naming those dates.
 
-    A day is placed as `_matrix_low` places it, and a disabled day is the padding
-    of a neighboring month. A round-trip day prices a length only through that
-    length's option, since the day's own price is its cheapest length's. A grid
-    the table prints as empty prices no date."""
+    A day is placed as `_matrix_low` places it. A round-trip day prices a length
+    only through that length's option, since the day's own price is its cheapest
+    length's. A grid the table prints as empty prices no date."""
     asked = [sd + timedelta(days=i) for i in range((ed - sd).days + 1)]
     priced: dict[int | None, set[date]] = {nights: set() for nights in lengths}
     if not is_empty_calendar(res):
-        for month in res.months:
-            for day in month.days:
-                when = _window_date(month.month, day.date, sd, ed)
-                if day.disabled or when is None:
-                    continue
-                if None in priced and day.min_price:
-                    priced[None].add(when)
-                for option in day.options:
-                    if option.trip_length in priced and option.min_price:
-                        priced[option.trip_length].add(when)
+        for when, day in _window_days(res, sd, ed):
+            if None in priced and day.min_price:
+                priced[None].add(when)
+            for option in day.options:
+                if option.trip_length in priced and option.min_price:
+                    priced[option.trip_length].add(when)
     lines: list[str] = []
     for nights in lengths:
         missing = [d for d in asked if d not in priced[nights]]
@@ -2937,21 +2962,16 @@ def _matrix_low(
     """The row Matrix's table lists first: its cheapest priced day, the earliest
     of a tie, at that day's cheapest trip length, the shortest of a tie.
 
-    A day's cell holds no year, so a day that is no single date of the window is
-    passed over. A round-trip day with no trip length has no return date to
-    name, so it gives no low rather than a wrong one. A grid the table prints as
-    empty has no low either."""
+    A day that is no single date of the window is passed over. A round-trip day
+    with no trip length has no return date to name, so it gives no low rather
+    than a wrong one. A grid the table prints as empty has no low either."""
     if is_empty_calendar(res):
         return None
     best: tuple[float, date, str, CalendarDay] | None = None
-    for month in res.months:
-        for day in month.days:
-            price, amount = day.min_price, day.price_value
-            if day.disabled or not price or amount is None:
-                continue
-            when = _window_date(month.month, day.date, sd, ed)
-            if when is not None and (best is None or (amount, when) < best[:2]):
-                best = (amount, when, price, day)
+    for when, day in _window_days(res, sd, ed):
+        price, amount = day.min_price, day.price_value
+        if price and amount is not None and (best is None or (amount, when) < best[:2]):
+            best = (amount, when, price, day)
     if best is None:
         return None
     amount, when, price, day = best
