@@ -8113,9 +8113,13 @@ def _render_multi_cabin_search(
     cabins: tuple[Cabin, ...],
     sort_by: Cabin,
     title_prefix: str = "Itineraries",
+    passengers: int = 1,
 ) -> None:
     """Render multi-cabin merged rows. One row per itinerary, one price column
-    per requested cabin, '—' for missing."""
+    per requested cabin, '—' for missing.
+
+    For a party of `passengers`, each cell prints the row's total for that
+    cabin; a cabin with no total prints one passenger's price, starred."""
     if not rows:
         console.print("[yellow]No itineraries.[/]")
         return
@@ -8123,12 +8127,15 @@ def _render_multi_cabin_search(
     ccy_tag = f" ({_safe_text(ccy)})" if ccy else ""
     cabin_labels = "+".join(_CABIN_TO_LETTER[c] for c in cabins)
     sort_label = _CABIN_TO_LETTER[sort_by]
+    party = passengers > 1
+    starred = False
 
     t = Table(
         # `title_prefix` is a parameter: its value is chosen by whoever calls, and
         # a claim about every present and future caller is not one this function
         # can keep. The two callers pass a literal, so the wrap costs nothing.
-        title=f"{_safe_text(title_prefix)} · {cabin_labels} (sorted by {sort_label}){ccy_tag}",
+        title=f"{_safe_text(title_prefix)} · {cabin_labels} (sorted by {sort_label}){ccy_tag}"
+        + (f" · total for {passengers:d} travelers" if party else ""),
         show_header=True,
         header_style="bold green",
     )
@@ -8137,7 +8144,7 @@ def _render_multi_cabin_search(
     t.add_column("outbound")
     t.add_column("return")
     for letter in (_CABIN_TO_LETTER[c] for c in cabins):
-        t.add_column(f"{letter}{ccy_tag}", justify="right")
+        t.add_column(f"{letter} total{ccy_tag}" if party else f"{letter}{ccy_tag}", justify="right")
 
     for i, row in enumerate(rows, 1):
         itn = row.itinerary.itinerary
@@ -8147,9 +8154,21 @@ def _render_multi_cabin_search(
 
         out_cell = _fmt_slice_cell(slcs[0]) if slcs else "—"
         ret_cell = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
-        price_cells = [_amount(row.prices.get(cab), ccy) for cab in cabins]
+        price_cells: list[str] = []
+        for cab in cabins:
+            total = row.totals.get(cab)
+            if not party:
+                price_cells.append(_amount(row.prices.get(cab), ccy))
+            elif total or cab not in row.prices:
+                price_cells.append(_amount(total, ccy))
+            else:
+                # No space before the star: Rich wraps a narrow cell at its spaces.
+                price_cells.append(f"{_amount(row.prices[cab], ccy)}*")
+                starred = True
         t.add_row(f"{i:d}", carriers or "?", out_cell, ret_cell, *price_cells)
     console.print(t)
+    if starred:
+        console.print("* per traveler: Matrix states no total for the party")
 
 
 def _validate_sort_cabin(sort_by: Cabin, cabins: tuple[Cabin, ...]) -> None:
@@ -8233,12 +8252,16 @@ def _run_matrix_path_multi(
         return
 
     rows = _merge_cabins(
-        results_by_cabin, sort_by=sort_by, top_n=top_n, currency=opts.currency or "USD"
+        results_by_cabin,
+        sort_by=sort_by,
+        top_n=top_n,
+        currency=opts.currency or "USD",
+        total_of=lambda it: party_price(it, opts.pax.total),
     )
     # `not json_out` for the reason given at the same gate in
     # `_run_gflight_path`: with awards on, the document is written below this.
     if not sel.awards_only and not json_out:
-        _render_multi_cabin_search(rows, cabins=cabins, sort_by=sort_by)
+        _render_multi_cabin_search(rows, cabins=cabins, sort_by=sort_by, passengers=opts.pax.total)
 
     if run_pp:
         # PP runs once against the merged result so award flights match against
@@ -8380,14 +8403,23 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
     results_by_cabin = _gflight_to_search_result_per_cabin(
         {cab: fli_by_cabin[cab] for cab in dict.fromkeys((sort_by, *cabins)) if cab in fli_by_cabin}
     )
+    # Google prices the whole party, so its listed price is the total.
     rows = _merge_cabins(
-        results_by_cabin, sort_by=sort_by, top_n=top_n, currency=opts.currency or "USD"
+        results_by_cabin,
+        sort_by=sort_by,
+        top_n=top_n,
+        currency=opts.currency or "USD",
+        total_of=lambda it: it.price,
     )
     # `not json_out` for the reason given at the same gate in
     # `_run_gflight_path`: with awards on, the document is written below this.
     if not sel.awards_only and not json_out:
         _render_multi_cabin_search(
-            rows, cabins=cabins, sort_by=sort_by, title_prefix="Google Flights"
+            rows,
+            cabins=cabins,
+            sort_by=sort_by,
+            title_prefix="Google Flights",
+            passengers=opts.pax.total,
         )
 
     if run_pp:
