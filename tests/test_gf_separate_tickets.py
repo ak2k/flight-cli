@@ -563,7 +563,8 @@ def test_the_skill_and_the_help_name_the_searches_that_read_the_cheapest_tab(
         for p in group.commands["search"].params
         if isinstance(p, click.Option) and "--no-separate-tickets" in p.opts
     ]
-    assert "one-cabin search" in (flag.help or "")
+    assert "Cheapest tab" in (flag.help or "")
+    assert "one-cabin" not in (flag.help or "")
 
 
 def test_the_deprecated_command_reads_no_cheapest_tab(gf_session: Callable[..., Any]) -> None:

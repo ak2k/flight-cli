@@ -11,7 +11,7 @@ hooks XHR and parses exactly these indices — we just had to read them.
 **Source changed, indices did not (work-h70kv, 2026-09):** the rows used to come
 from the `/GetShoppingResults` response; that RPC is gated now, so the search
 path reads the same rows out of the `ds:1` blob the public search page inlines
-(see `gf_routing_and_carriers.md`). Re-verified live 2026-09-02 against a JFK-LAX
+(see `gf_search_transport.md`). Re-verified live 2026-09-02 against a JFK-LAX
 board: 33-element leg tuples, every index in the table below present and the same
 type. `_parse_leg_amenities` is unchanged.
 

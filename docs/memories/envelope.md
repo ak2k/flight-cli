@@ -25,7 +25,7 @@ its schema is `docs/envelope.schema.json`, generated from the models
 | `price_history` | `[{cabin, currency, points: [{date, price}]}]` | one per Google page that carried one, as `insight` |
 | `verify` | object / null | `--verify`'s check of row `--pick`, the `verify` object `--format json` prints; null when not asked, on a calendar, or when the check failed (exit 1) |
 | `cross_check` | object / null | `--enrich`'s Google-vs-Matrix comparison, the `cross_check` object `--format json --enrich` prints, `low_check` included; null when not asked, skipped, on a calendar, or when Matrix's half failed |
-| `split_ticket` | object / null | `--split`'s pair, the `split_ticket` object `--format json --split` prints (`{outbound, return, total, currency}`, or `{error}` naming why there is no pair); null when not asked, on a calendar, or when Matrix answered the search |
+| `split_ticket` | object / null | `--split`'s answer, the `split_ticket` object `--format json --split` prints: on a round trip the pair (`{outbound, return, total, currency}`), on an open jaw the combinations (`{currency, combinations}`), or `{error}` naming why there is none; null when not asked, on a calendar, or when Matrix answered a round trip |
 
 `price` is the trip's: a Google round trip's is its return member's, the fare
 every surface prints for the pair; Matrix's is the solution's price string read
@@ -66,9 +66,13 @@ that is not "unsupported" in `pp/client.py`, an error status with an empty
 body and a request the award deadline cut included); a leg with
 `pairs_not_asked`; calendar sub-queries lost; a length of a `calendar --fast`
 range whose graph was lost;
-a `--split` one-way search that failed, or a `--split` search Matrix answered,
-since the pair was asked for and is not priced (no priced one-way, no pair one
-traveler can fly, or two currencies are the boards' answer, a note);
+a `--split` one-way search that failed, a `--split` round trip Matrix answered,
+or a `--split` open jaw Google was not asked about, since the tickets were asked
+for and are not priced (no priced one-way, no pair one traveler can fly, or two
+currencies are the boards' answer, a note); an open jaw's one-way board missing
+a page or holding rows the parser could not read (`cli._one_way_boards`, the
+unread rows a note naming the slice), since its cheapest tickets may be among
+them;
 `--max-per-query > 1` over a split, and over the one unsplit query when a
 group holds every destination; a round trip over a split set, whose returns
 into another airport of the set come only from the combined query; Google rows the
