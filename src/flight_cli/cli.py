@@ -8144,7 +8144,13 @@ def _render_multi_cabin_search(
     t.add_column("outbound")
     t.add_column("return")
     for letter in (_CABIN_TO_LETTER[c] for c in cabins):
-        t.add_column(f"{letter} total{ccy_tag}" if party else f"{letter}{ccy_tag}", justify="right")
+        # Folded: a party cell squeezed by Rich's default ellipsis loses its last
+        # digits and the star that marks a per-traveler fare.
+        t.add_column(
+            f"{letter} total{ccy_tag}" if party else f"{letter}{ccy_tag}",
+            justify="right",
+            overflow="fold" if party else "ellipsis",
+        )
 
     for i, row in enumerate(rows, 1):
         itn = row.itinerary.itinerary

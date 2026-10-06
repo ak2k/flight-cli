@@ -102,6 +102,36 @@ def test_a_cabin_without_a_total_is_marked_per_traveler(monkeypatch: pytest.Monk
     assert "* per traveler: Matrix states no total for the party" in out
 
 
+def test_a_narrow_four_cabin_party_table_keeps_every_digit_and_star(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fan_out(**_kw: Any) -> dict[Cabin, SearchResult]:
+        return {
+            Cabin.COACH: SearchResult.from_api(_body(price="USD103.00", total="USD206.00")),
+            Cabin.PREMIUM_COACH: SearchResult.from_api(_body(price="USD203.00", total="USD406.20")),
+            Cabin.BUSINESS: SearchResult.from_api(_body(price="USD6303.20", total="USD12606.40")),
+            Cabin.FIRST: SearchResult.from_api(_body(price="USD14703.25", total=None)),
+        }
+
+    buf = StringIO()
+    monkeypatch.setattr(cli, "_run_matrix_multi", _fan_out)
+    monkeypatch.setattr(cli, "console", Console(file=buf, width=80, no_color=True))
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            *("search", "JFK", "LAX", "--dep", _DEP.isoformat(), *_LINKLESS, "--adults", "2"),
+            *("--backend", "matrix", "--cabin", "economy,premium,business,first"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    # One itinerary, so every body line belongs to it; a cell wrapped onto
+    # several lines is rejoined column by column.
+    body = [line.split("│") for line in buf.getvalue().splitlines() if line.startswith("│")]
+    cells = ["".join(parts[col].strip() for parts in body) for col in range(-5, -1)]
+    assert cells == ["206.00", "406.20", "12606.40", "14703.25*"]
+    assert "* per traveler: Matrix states no total for the party" in buf.getvalue()
+
+
 def test_one_traveler_prints_the_listed_prices(monkeypatch: pytest.MonkeyPatch) -> None:
     _matrix_answers(monkeypatch, economy_total="USD203.60")
     out = _search()
