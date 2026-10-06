@@ -22,6 +22,7 @@ from typer.testing import CliRunner
 from conftest import LITERAL_DATES_NOW
 from flight_cli import _envelope, cli
 from flight_cli import _gf_calgraph as cg
+from flight_cli._gf_errors import GfBrowserUnavailableError
 from flight_cli.models import CalendarResult
 from test_calendar_split import _result
 
@@ -240,3 +241,152 @@ def test_a_grid_pricing_every_date_asked_reads_as_it_did(
     assert (document.stdout, document.stderr) == (json.dumps(full, indent=2), "")
     assert _lines("\n".join(_envelope_of(env)["notes"])) == []
     assert _envelope_of(env)["complete"] is True
+
+
+# ───────────────────────────── Google's graph ─────────────────────────────────
+
+_GRAPH_7N = _graph(7, {d: float(p) for d, p in _GOOGLE_7N.items()})
+_TWO_LOWS = "Matrix and Google Flights differ on the lowest fare:"
+_BROWSER = ("--gf-transport", "browser")
+
+
+def _two_lows(lines: list[str]) -> list[str]:
+    return [ln for ln in lines if ln.startswith(_TWO_LOWS)]
+
+
+def test_every_format_carries_googles_graph_and_the_two_lows_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _serve(monkeypatch, _BODY)
+    seen = _graphs(monkeypatch, {7: _GRAPH_7N})
+    table = _run(*_ROUTE)
+    document = _run(*_ROUTE, "--format", "json", *_BROWSER)
+    result = _run(*_ROUTE, "--format", "envelope", *_BROWSER)
+    assert table.exit_code == document.exit_code == result.exit_code == 0, result.output
+    assert seen == [7, 7, 7]
+    env = _envelope_of(result)
+    assert env["price_graph"] == [
+        {
+            "trip_length": 7,
+            "currency": "USD",
+            "cells": [
+                {
+                    "departure": d,
+                    "return": (date.fromisoformat(d) + timedelta(days=7)).isoformat(),
+                    "price": float(p),
+                }
+                for d, p in sorted(_GOOGLE_7N.items())
+            ],
+        }
+    ]
+    (note,) = _two_lows(env["notes"])
+    assert "Matrix USD407.00 (2026-10-31 to 2026-11-07, 7 nights, JFK→LAX)" in note
+    assert "Google Flights USD318 (2026-10-27 to 2026-11-03, 7 nights, JFK→LAX)" in note
+    assert _two_lows(table.stderr.split("\n")) == _two_lows(document.stderr.split("\n")) == [note]
+    assert not any("price graph not" in n for n in env["notes"])
+    assert _notes(env, "price_graph") == []
+    # The graph narrows nothing: the dates Matrix left unpriced do.
+    assert _lines("\n".join(env["notes"])) == [_UNPRICED]
+    assert env["complete"] is False
+    body = json.loads(document.stdout)
+    graph = body.pop("google_price_graph")
+    assert body == _BODY
+    assert (graph["trip_lengths"], graph["lost"], len(graph["graphs"])) == ([7], [], 1)
+    assert graph["graphs"][0]["grid"][7] == {
+        "departure": "2026-10-27",
+        "return": "2026-11-03",
+        "price": 318,
+    }
+
+
+def _notes(env: dict[str, Any], key: str) -> list[str]:
+    return [n for n in cast("list[str]", env["notes"]) if n.startswith(f"{key}: ")]
+
+
+def _range_grid() -> dict[str, Any]:
+    """Matrix pricing every date of 2026-10-20..23 at every length of 5-7."""
+    every = {5: "USD300.00", 6: "USD310.00", 7: "USD320.00"}
+    return _body_of(_result({10: {d: ("USD300.00", 3, every) for d in range(20, 24)}}))
+
+
+_RANGE = ["calendar", "JFK", "LAX", "--start", "2026-10-20", "--end", "2026-10-23", "-d", "5-7"]
+_RANGE_DAYS = {"2026-10-20": 290.0, "2026-10-21": 295.0}
+
+
+def test_a_range_that_lost_a_length_carries_the_lengths_that_priced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _serve(monkeypatch, _range_grid())
+    lost = cg.GfPriceGraphError("Google Flights answered the price graph with an empty result")
+    _graphs(monkeypatch, {5: _graph(5, _RANGE_DAYS), 6: _graph(6, _RANGE_DAYS), 7: lost})
+    result = _run(*_RANGE, "--format", "envelope", *_BROWSER)
+    document = _run(*_RANGE, "--format", "json", *_BROWSER)
+    assert result.exit_code == document.exit_code == 0, result.output
+    env = _envelope_of(result)
+    assert [(g["trip_length"], len(g["cells"])) for g in env["price_graph"]] == [(5, 2), (6, 2)]
+    shown = "Google Flights price graph not shown: 7-night trips: Google Flights answered"
+    assert sum(n.startswith(shown) for n in env["notes"]) == 1, env["notes"]
+    assert env["complete"] is True
+    graph = json.loads(document.stdout)["google_price_graph"]
+    assert [g["trip_length"] for g in graph["graphs"]] == [5, 6]
+    assert graph["lost"] == [
+        {
+            "trip_length": 7,
+            "reason": "Google Flights answered the price graph with an empty result.",
+        }
+    ]
+
+
+def test_a_graph_chrome_could_not_read_is_one_line_and_narrows_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    full = _fully_priced()
+    _serve(monkeypatch, full)
+    _graphs(monkeypatch, {7: GfBrowserUnavailableError("Chrome could not start.")})
+    result = _run(*_ROUTE, "--format", "envelope", *_BROWSER)
+    document = _run(*_ROUTE, "--format", "json", *_BROWSER)
+    assert result.exit_code == document.exit_code == 0, result.output
+    line = (
+        "Google Flights price graph not shown: Chrome could not start. "
+        "--gf-transport http skips Chrome."
+    )
+    env = _envelope_of(result)
+    assert [n for n in env["notes"] if "price graph" in n.replace("_", " ")] == [
+        line,
+        "price_graph: not shown: Chrome could not start.",
+    ]
+    assert env["price_graph"] == []
+    assert env["complete"] is True
+    assert json.loads(document.stdout) == full
+    assert [ln for ln in document.stderr.split("\n") if "price graph" in ln] == [line]
+
+
+@pytest.mark.parametrize(
+    ("body", "complete"), [(_BODY, False), (_fully_priced(), True)], ids=["gap", "whole"]
+)
+def test_an_envelope_with_no_transport_named_opens_no_chrome(
+    body: dict[str, Any], complete: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The browser guard stays armed: a page load here fails the test."""
+    _serve(monkeypatch, body)
+    result = _run(*_ROUTE, "--format", "envelope")
+    assert result.exit_code == 0, result.output
+    env = _envelope_of(result)
+    why = "--format envelope reads it only under --gf-transport browser, which opens Chrome"
+    assert env["price_graph"] == []
+    assert _notes(env, "price_graph") == [f"price_graph: not asked: {why}"]
+    assert f"Google Flights price graph not asked: {why}." in env["notes"]
+    assert "opening Chrome" not in result.stderr
+    assert env["complete"] is complete
+
+
+def test_http_names_why_the_envelope_holds_no_graph(monkeypatch: pytest.MonkeyPatch) -> None:
+    _serve(monkeypatch, _fully_priced())
+    result = _run(*_ROUTE, "--format", "envelope", "--gf-transport", "http")
+    env = _envelope_of(result)
+    assert env["price_graph"] == []
+    assert _notes(env, "price_graph") == [
+        "price_graph: not asked: --gf-transport http reads no price graph"
+    ]
+    assert not any("price graph not asked" in n for n in env["notes"])
+    assert env["complete"] is True

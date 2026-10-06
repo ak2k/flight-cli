@@ -73,6 +73,7 @@ _KEYS = [
     "awards",
     "insight",
     "price_history",
+    "price_graph",
     "verify",
     "cross_check",
     "split_ticket",
@@ -188,6 +189,7 @@ def _envelope_of(r: Result, *, command: str = "search", code: int = 0) -> dict[s
     assert env["awards"] is None or isinstance(env["awards"], list)
     assert isinstance(env["insight"], list)
     assert isinstance(env["price_history"], list)
+    assert isinstance(env["price_graph"], list)
     assert env["verify"] is None or isinstance(env["verify"], dict)
     assert env["cross_check"] is None or isinstance(env["cross_check"], dict)
     assert env["split_ticket"] is None or isinstance(env["split_ticket"], dict)
@@ -241,6 +243,8 @@ def test_a_google_one_way_carries_its_rows_insight_and_history(
     assert (history["cabin"], history["currency"], len(points)) == ("COACH", "USD", 61)
     assert points[0] == {"date": "2026-07-29", "price": 169.0}
     assert points[-1] == {"date": "2026-09-27", "price": 204.0}
+    assert env["price_graph"] == []
+    assert _notes(env, "price_graph") == ["price_graph: a search carries none"]
     assert env["awards"] is None
     assert _notes(env, "awards") == ["awards: --cash-only skips the award search"]
     assert env["verify"] is None
@@ -1044,6 +1048,17 @@ def test_the_fast_graph_is_a_google_calendar(monkeypatch: pytest.MonkeyPatch) ->
         (204.0, {"departure": _START.isoformat(), "price": 204}),
         (214.5, {"departure": (_START + timedelta(days=1)).isoformat(), "price": 214.5}),
     ]
+    # The same cells under the key every calendar carries Google's graph in.
+    assert env["price_graph"] == [
+        {
+            "trip_length": None,
+            "currency": "USD",
+            "cells": [
+                {"departure": c["row"]["departure"], "return": None, "price": c["price"]}
+                for c in env["results"]
+            ],
+        }
+    ]
     assert _Matrix.calls == 0
 
 
@@ -1150,6 +1165,22 @@ def test_the_committed_schema_is_the_generated_one() -> None:
         "regenerate: uv run python -c 'from flight_cli._envelope import schema_text; "
         'print(schema_text(), end="")\' > docs/envelope.schema.json'
     )
+
+
+def test_a_graph_cell_is_published_and_written_with_a_return_key() -> None:
+    """The schema and the document name the field alike, though Python cannot."""
+    schema = json.loads(_SCHEMA.read_text())
+    assert list(schema["$defs"]["PriceGraphCell"]["properties"]) == ["departure", "return", "price"]
+    rec = _envelope._Recorder("calendar")
+    cell = {"departure": "2026-10-20", "return": "2026-10-27", "price": 318.0}
+    rec.graphs = [
+        _envelope.PriceGraph(
+            trip_length=7, currency="USD", cells=[_envelope.PriceGraphCell.model_validate(cell)]
+        )
+    ]
+    doc = json.loads(_envelope._document(rec, code=0, stderr="", stray=""))
+    assert doc["price_graph"] == [{"trip_length": 7, "currency": "USD", "cells": [cell]}]
+    _envelope.ENVELOPE.validate_python(doc)
 
 
 @pytest.mark.parametrize(

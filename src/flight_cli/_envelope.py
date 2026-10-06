@@ -78,6 +78,23 @@ class PriceHistory(_Frozen):
     points: list[PricePoint]
 
 
+class PriceGraphCell(_Frozen):
+    """One date pair of Google's price graph; `return` is null on a one-way."""
+
+    departure: dt.date
+    return_date: dt.date | None = Field(alias="return")
+    price: float
+
+
+class PriceGraph(_Frozen):
+    """Google's price graph for one trip length (null on a one-way): its
+    estimate for each date pair, with no itinerary behind it."""
+
+    trip_length: int | None
+    currency: str
+    cells: list[PriceGraphCell]
+
+
 class SearchEnvelope(_Frozen):
     version: Literal[1]
     command: Literal["search"]
@@ -89,6 +106,7 @@ class SearchEnvelope(_Frozen):
     awards: list[dict[str, Any]] | None
     insight: list[Insight]
     price_history: list[PriceHistory]
+    price_graph: list[PriceGraph]
     verify: dict[str, Any] | None
     cross_check: dict[str, Any] | None
     split_ticket: dict[str, Any] | None
@@ -105,6 +123,7 @@ class CalendarEnvelope(_Frozen):
     awards: list[dict[str, Any]] | None
     insight: list[Insight]
     price_history: list[PriceHistory]
+    price_graph: list[PriceGraph]
     verify: dict[str, Any] | None
     cross_check: dict[str, Any] | None
     split_ticket: dict[str, Any] | None
@@ -133,6 +152,7 @@ class _Recorder:
         self.awards: list[dict[str, Any]] | None = None
         self.insight: list[Insight] = []
         self.history: list[PriceHistory] = []
+        self.graphs: list[PriceGraph] = []
         self.verify: dict[str, Any] | None = None
         self.cross_check: dict[str, Any] | None = None
         self.split_ticket: dict[str, Any] | None = None
@@ -200,6 +220,13 @@ def record_calendar(*, backend: Backend, rows: Sequence[ResultRow]) -> None:
         with rec.lock:
             rec.backend = backend
             rec.days = list(rows)
+
+
+def record_price_graph(graphs: Sequence[PriceGraph]) -> None:
+    """Google's price graph read for a calendar, one entry per trip length."""
+    if (rec := _slot.recorder) is not None:
+        with rec.lock:
+            rec.graphs = list(graphs)
 
 
 def record_awards(entries: list[dict[str, Any]]) -> None:
@@ -344,6 +371,7 @@ def _document(rec: _Recorder, *, code: int, stderr: str, stray: str) -> str:
         "awards": rec.awards,
         "insight": rec.insight,
         "price_history": rec.history,
+        "price_graph": rec.graphs,
         "verify": rec.verify,
         "cross_check": rec.cross_check,
         "split_ticket": rec.split_ticket,
@@ -353,7 +381,8 @@ def _document(rec: _Recorder, *, code: int, stderr: str, stray: str) -> str:
         if rec.command == "search"
         else CalendarEnvelope(command="calendar", results=rows, **common)
     )
-    return json.dumps(doc.model_dump(mode="json"), indent=2)
+    # By alias: a graph cell's `return` is a keyword in Python.
+    return json.dumps(doc.model_dump(mode="json", by_alias=True), indent=2)
 
 
 def _key_notes(
@@ -391,7 +420,19 @@ def _key_notes(
         else:
             reason = failed
         notes.append(f"{key}: {reason}")
-    return [*notes, *_check_notes(rec, calendar=calendar), *_split_note(rec, calendar=calendar)]
+    return [
+        *notes,
+        *_graph_note(rec, calendar=calendar, failed=failed),
+        *_check_notes(rec, calendar=calendar),
+        *_split_note(rec, calendar=calendar),
+    ]
+
+
+def _graph_note(rec: _Recorder, *, calendar: bool, failed: str) -> list[str]:
+    if rec.graphs:
+        return []
+    reason = rec.reasons.get("price_graph", failed) if calendar else "a search carries none"
+    return [f"price_graph: {reason}"]
 
 
 def _split_note(rec: _Recorder, *, calendar: bool) -> list[str]:
