@@ -190,6 +190,16 @@ def _announce() -> None:
     _err.print("[dim]Google Flights: opening Chrome (rung 2)…[/]")
 
 
+def announce_escalation() -> None:
+    """The line an `auto` search prints when a throttle moves it to Chrome, in
+    place of `_announce`'s: it says Chrome is opening, and why."""
+    _notice_state["printed"] = True
+    _err.print(
+        "[dim]Google Flights rate-limited the request; opening Chrome (rung 2) for the "
+        "rest of this search…[/]"
+    )
+
+
 class Control(NamedTuple):
     """A control on the page, found the way assistive technology finds it: by
     ARIA role and exact accessible name. Not a CSS selector, which Google's
@@ -798,11 +808,12 @@ def interrupt_guard(*, armed: bool = True) -> Generator[None]:
     wait, though: it is never restored, so it stands for the rest of the
     process's life, and what makes arming this arm broadly safe is that by then
     there is nothing left for a second Ctrl-C to stop. The enriched arm arms it
-    only for the browser transport, because there the search runs on a worker no
-    interrupt reaches — on any other transport the first Ctrl-C cannot free that
-    worker, and an ignored second one leaves nothing that can. `auto` is `http`
-    today, so the escalate-on-throttle rung opens a browser on an enriched path
-    this gate leaves unarmed the day it lands.
+    only for the transports that can open a browser, `browser` and `auto`, which
+    escalates a throttle to one, because there the search runs on a worker no
+    interrupt reaches — on `http` the first Ctrl-C cannot free that worker, and
+    an ignored second one leaves nothing that can. An `auto` search that never
+    escalates pays that: its second Ctrl-C is ignored while the worker finishes
+    its GETs.
 
     The default handler raises `KeyboardInterrupt` on the main thread and stops
     there, which leaves the two arms broken in different ways. On `--fast` the

@@ -1,11 +1,11 @@
-# GF throttle and transport retry: the shared single-prober ladder, `retry_throttled`, curl error classification, Google's client-context rate budget
+# GF throttle and transport retry: the shared single-prober ladder, `retry_throttled`, curl error classification, `auto`'s escalation to Chrome, Google's client-context rate budget
 
 How the search retries a Google Flights throttle or an unreachable network:
 one ladder per fan-out with a single prober, what ends a waiter's park, which
 successes refill which rungs, which curl failures are retried, and the measured
 throttle behind the reactive design. Read before touching
-`_gflight_ids.retry_throttled`, `shared_throttle_ladder`, `GfTransportError`,
-or `cli._run_gflight_multi`.
+`_gflight_ids.retry_throttled`, `shared_throttle_ladder`, `_one_call_auto`,
+`GfTransportError`, or `cli._run_gflight_multi`.
 
 **One ladder per fan-out, not per cabin.** The multi-cabin path runs a cabin per
 thread; laddering separately, four cabins spend 4 x 5 = 20 multi-megabyte GETs
@@ -136,6 +136,59 @@ how a defect becomes unfindable.
 The request timeout is fli's own `REQUEST_TIMEOUT`, imported rather than copied:
 it is the value that reads and validates `FLI_TIMEOUT`, and a duplicate constant
 here silently ignores whatever the user set.
+
+## `auto`: a throttle the ladder cannot clear moves the search to Chrome
+
+Under `--gf-transport auto` a search runs rung 1 under the ladder above. The
+order, from `_gflight_ids._one_call_auto` out:
+
+1. http under the ladder;
+2. the ladder spent on a throttle (`GfThrottledError`);
+3. if the search has not escalated yet: one stderr line (`Google Flights
+   rate-limited the request; opening Chrome (rung 2) for the rest of this
+   search…`), the same request on Chrome, and the search's flag set;
+4. Chrome answers, or its failure is that request's, never retried on http;
+5. a pin loop that stopped after serving keeps its rows and carries the stop
+   (`Board.stopped`);
+6. `cli._PageAsk` gives that page up and asks nothing more;
+7. `cli._report_pages` names every page not asked;
+8. the merged board carries the stop too, so `--split` asks no one-way after
+   the round trip's stop, and `cli._one_way_boards` (`--split`, an open jaw)
+   asks no later leg after one leg's stop; the reason names each one-way not
+   asked (`cli._search_stop` reads a board's stop, its Cheapest tab's
+   included). Steps 5-8 hold on every transport; on `http` and `browser`,
+   step 2's throttle is itself the stop.
+
+Every Google request of the search after step 3 goes straight to Chrome: the
+remaining pins, the other pages, the Cheapest tab, `--split`'s one-ways. One
+escalation costs one ladder (five GETs) before Chrome, and nothing after it
+spends rung 1.
+
+Only a throttle escalates. A transport failure is the network, which Chrome
+shares, and a refusal of the page (a consent wall, a 503, a re-shaped page) is
+the page's own. A refusal met after the escalation is worded as rung 2's
+(`cli._rung_reached`): "rate-limited the browser rung", with no advice to wait
+for a ladder Chrome does not run.
+
+The flag is one object per search (`search_escalation`, opened by `cli.search`
+on the thread that starts the workers, and by `cli._open_jaw_tickets` around an
+open jaw's two one-ways, which Matrix's search asks beside its own answer), in
+a ContextVar beside `_fanout_ladder`
+for the same reason: every worker of the search reads the same object, so the
+line prints once. A rung-1 GET reads it first, so a thread still backing off
+when another escalated takes its next request to Chrome (`_EscalatedError`).
+Chrome's lifetime is separate and thread-local, as on `browser`: opened by the
+first request that needs it, closed where the browser transport closes one
+(`cli._gflight_query`'s `finally`, `cli._browser_scope`), a no-op on a thread
+that never escalated. The enriched path arms its interrupt guard under `auto`
+as under `browser`, so Ctrl-C stops an escalated Chrome; an `auto` search that
+never escalates pays for it with a second Ctrl-C ignored while its worker
+finishes. The enriched path's `--split` runs on a worker of its own, so after
+an escalation it opens a second Chrome there.
+
+A multi-cabin search does not escalate: it fans its cabins out on http under
+`auto`, since a thread per cabin escalating would be a Chrome per cabin on one
+profile.
 
 ## GF throttle (per client-context, dynamic) — handle reactively, not with a fixed cap
 

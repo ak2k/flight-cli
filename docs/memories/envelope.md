@@ -45,7 +45,23 @@ written at exit 0 and 1. Exit 2 is a usage error and writes none.
 Each narrowing calls `_envelope.narrow()` where it happens; outside an envelope
 run the call does nothing. A site that writes no stderr line passes a note,
 which joins `notes` after the stderr lines, so table and JSON output gain no
-line. The sites: a cabin asked and never recorded (judged
+line.
+
+A narrowing of Google's answer passes `of="gflight"`, and it counts toward
+`complete` unless Matrix answered the search (`_envelope._document`, against
+the backend that recorded rows). So after a whole search goes to Matrix,
+`complete` is Matrix's answer's: a return board refused, a pin loop stopped, a
+Cheapest tab unread or Google rows the parser could not read stay their stderr
+line or note. The Google sites are every `narrow` in `_gflight_ids` (a test
+fails on one that names no backend) and, in `cli`, the pin cap note, the
+infant's empty board, a `partial` board, unread rows, the unread Cheapest tab
+and a round trip's failed `--split` one-way. A hand-off that holds Google's board (emptied
+by the filter, an infant's empty board, separate-ticket rows alone on an award
+search, a multi-cabin search) notes its unread rows as `_record_google_cabin`
+does. Matrix, provider, calendar and `--split`-on-Matrix narrowings name no
+backend and count whoever answers, and so do an open jaw's one-way boards
+(`cli._one_way_boards` with `narrow`): their tickets are shown beside Matrix's
+answer, never in its place. The sites: a cabin asked and never recorded (judged
 in the recorder, from `ask_cabins` against what the leaves recorded); Matrix
 finding nothing where Google had rows (`_note_google_rows_unshown`); the
 round-trip pin cap note; return boards refused, a pin Google served no return
