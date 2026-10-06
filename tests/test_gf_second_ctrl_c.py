@@ -118,9 +118,10 @@ def test_a_throttle_after_the_first_ctrl_c_prints_no_escalation_line(
     assert capsys.readouterr().err == ""
 
 
-# A weave whose worker thread waits `hold` seconds, with a second thread sending
-# SIGINT twice, 50 ms apart. `browser` registers a stub session first, so a
-# driver is open and nothing real is launched.
+# A weave whose worker thread starts `start_delay` seconds in and waits `hold`
+# seconds, with a second thread sending SIGINT twice, 50 ms apart, once the
+# worker is running. `browser` registers a stub session first, so a driver is
+# open and nothing real is launched.
 _PROBE = textwrap.dedent(
     """
     import os, signal, sys, threading, time
@@ -128,20 +129,25 @@ _PROBE = textwrap.dedent(
     from flight_cli import _gf_browser as gfb
     from flight_cli import cli
 
-    mode, hold = sys.argv[1], float(sys.argv[2])
+    mode, hold, start_delay = sys.argv[1], float(sys.argv[2]), float(sys.argv[3])
     signal.signal(signal.SIGINT, signal.default_int_handler)
     if mode == "browser":
         gfb._remember(gfb.GfBrowserSession(headed=False))
 
+    started = threading.Event()
+
     def work():
+        print("WORKER_STARTED", flush=True)
+        started.set()
         threading.Event().wait(hold)
         print("WORKER_FINISHED", flush=True)
 
     async def go():
+        await anyio.sleep(start_delay)
         await anyio.to_thread.run_sync(work)
 
     def sender():
-        time.sleep(0.5)
+        started.wait(30)
         os.kill(os.getpid(), signal.SIGINT)
         time.sleep(0.05)
         os.kill(os.getpid(), signal.SIGINT)
@@ -155,19 +161,29 @@ _PROBE = textwrap.dedent(
 )
 
 
-def _probe(mode: str) -> str:
+def _probe(mode: str, start_delay: float = 0.0) -> str:
     done = subprocess.run(  # noqa: S603 — this interpreter and a literal probe
-        [sys.executable, "-c", _PROBE, mode, "3"],
+        [sys.executable, "-c", _PROBE, mode, "3", str(start_delay)],
         capture_output=True,
         text=True,
         timeout=60,
         check=False,
     )
+    # An interrupt that lands before the worker runs leaves nothing to wait out,
+    # so it would pass these tests whatever the handler does.
+    assert "WORKER_STARTED" in done.stdout, done.stdout
     return done.stdout
 
 
 def test_a_second_ctrl_c_ends_an_auto_search_before_its_worker_finishes() -> None:
     out = _probe("auto")
+
+    assert "MAIN_CANCELLED" in out
+    assert "WORKER_FINISHED" not in out
+
+
+def test_a_second_ctrl_c_ends_an_auto_search_whose_worker_starts_late() -> None:
+    out = _probe("auto", start_delay=0.8)
 
     assert "MAIN_CANCELLED" in out
     assert "WORKER_FINISHED" not in out
