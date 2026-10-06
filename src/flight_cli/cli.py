@@ -1359,16 +1359,14 @@ def _named_not_configured(names: list[str]) -> str:
 
 def _explain_no_awards(sel: ProviderSelection, reason: str) -> None:
     """Say why no award search runs, and narrow the answer when a provider was
-    asked for: named in `--providers`, or PointsPath holding saved tokens that
-    no filter leaves out. Here such tokens failed to validate or refresh, which
-    `is_configured` reads as none, so no later step can say the provider was
-    lost. A machine with no tokens never asked PointsPath."""
+    asked for: named in `--providers`. A machine with no tokens never asked
+    PointsPath."""
     if not _envelope.active():
         return
     named = sel.provider_filter
     lost: list[str] = []
-    if ("pp" in named) if named is not None else (load_tokens() is not None):
-        lost.append("PointsPath was asked for, and its tokens are missing or failed to refresh")
+    if named is not None and "pp" in named:
+        lost.append("PointsPath was asked for, and it has no tokens")
     if others := [n for n in named or () if n != "pp"]:
         lost.append(_named_not_configured(others))
     if lost:

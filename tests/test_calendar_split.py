@@ -4497,7 +4497,7 @@ def test_an_award_failure_prints_a_hostile_exception_literally(
     async def gather(*_a: object, **_kw: object) -> NoReturn:
         raise RuntimeError(_HOSTILE)
 
-    monkeypatch.setattr(pp_cli, "get_valid_tokens", tokens)
+    monkeypatch.setattr(pp_cli, "stored_tokens", tokens)
     monkeypatch.setattr(pp_cli, "gather_awards", gather)
     pp_cli.run_pp_for_search(
         SearchResult.from_api({}),

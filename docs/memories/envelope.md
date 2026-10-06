@@ -70,9 +70,10 @@ round-trip pin cap note; return boards refused, a pin Google served no return
 board for, or pinning stopped, each with a board served
 (`_gflight_ids._report_pin_outcome`): the outbound board priced round trips
 through that pin, so they are missing; PointsPath skipped when it was
-asked for (named in `--providers`, or tokens present that then failed;
-with no tokens it is a note), both in `_pp_preflight` and at the award gate
-(`cli._explain_no_awards`), where failed tokens read as no provider at all;
+asked for (named in `--providers`; with no tokens it is a note), both in
+`_pp_preflight` and at the award gate (`cli._explain_no_awards`); tokens
+that fail to refresh are not a skip: the refresh runs in the provider build
+and its failure is an award failure (the `Awards incomplete:` line, below);
 any other provider `--providers` names that has no credentials, at the award
 gate (`cli._should_run_awards`), whether or not another provider runs;
 the award query failing; the Matrix half of an `--enrich` cross-check
