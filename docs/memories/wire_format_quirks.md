@@ -195,11 +195,12 @@ to show — the gate note, a throttle, the wait for Matrix — is on stderr for 
 same reason: stdout carries the answer or nothing. Exit 2 is an input refusal,
 raised before any Matrix call.
 
-Partial sub-query coverage is the one middle state, and it is a stderr NOTE
-beside a complete-looking stdout document: exit 0, a grid, and a line saying how
-many origin/destination groups are missing from it.
-The JSON carries no field for that, so a caller that must know whether the grid
-is whole reads stderr, or asks for one destination at a time.
+Partial coverage is the one middle state, and it is a stderr NOTE beside a
+complete-looking stdout document: exit 0, a grid, and a line saying how many
+origin/destination groups are missing from it, or one line per trip length
+naming the departure dates Matrix priced no fare on (`cli._say_unpriced`).
+The JSON carries no field for either, so a caller that must know whether the
+grid is whole reads stderr or `--format envelope`, whose `complete` is false.
 
 Four readings cover every calendar that ran. Exit 1 with stdout empty is no
 answer at all: the window was never priced, and stderr says why. Exit 0 with

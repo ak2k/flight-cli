@@ -552,8 +552,8 @@ class _Doctor:
     # ────────────────────────────── providers ─────────────────────────────
 
     def check_pointspath(self) -> _Outcome:
-        # Stored, not `is_configured()`: that refreshes, and turns a refresh
-        # that fails into "not configured" — a skip where the user needs a fail.
+        # Stored, not `is_configured()`: that reads a missing and an unreadable
+        # store alike as not configured — a skip where the user needs a fail.
         if pp_auth.load_tokens() is None:
             if pp_auth.TOKENS_PATH.exists():
                 raise _unreadable_store(pp_auth.TOKENS_PATH, "`flight auth pp login`")

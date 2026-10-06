@@ -142,7 +142,7 @@ def fli_results_to_search_result(results: Sequence[Any]) -> SearchResult:
     reachable from that outbound; the return board fetched with it pinned
     prices each of its rows at THAT combination's total. The itinerary fare is
     therefore the terminal member's; why that is the true one, with the
-    measurements, is in `docs/memories/gf_routing_and_carriers.md`.
+    measurements, is in `docs/memories/gf_request_budget.md`.
 
     A member may carry no price at all — Google does not always surface one —
     and such a row is carried with `price=None` rather than dropped, so the

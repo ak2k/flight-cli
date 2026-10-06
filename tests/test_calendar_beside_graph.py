@@ -9,6 +9,7 @@ launcher seam is pointed at a fake, and the conftest guard stays on.
 from __future__ import annotations
 
 import io
+import json
 import shlex
 import signal
 import threading
@@ -251,30 +252,61 @@ def test_a_single_graph_refused_for_its_window_names_no_trip_length_range(
     assert cg.page_budget_blocker(search) == "a window needing 9 price-graph loads (at most 8)"
 
 
-def test_json_is_matrixs_document_alone_and_says_nothing(
-    monkeypatch: pytest.MonkeyPatch, matrix: None
+@pytest.mark.parametrize("headed", [(), ("--gf-headed",)], ids=["headless", "headed"])
+def test_json_with_no_transport_named_is_matrixs_document_and_names_the_one_that_reads_the_graph(
+    headed: tuple[str, ...], monkeypatch: pytest.MonkeyPatch, matrix: None
 ) -> None:
+    """A script's calendar opens no Chrome it did not name a transport for, and
+    `--gf-headed` names none; stderr says which flag reads the graph."""
     calls = _matrix_calls(monkeypatch)
     seen = _graphs_are(monkeypatch, {})
     base = _run("NYC", "LON", "--one-way", "--format", "json", "--gf-transport", "http")
-    result = _run("NYC", "LON", "--one-way", "--format", "json")
+    result = _run("NYC", "LON", "--one-way", "--format", "json", *headed)
     assert result.exit_code == base.exit_code == 0
     assert result.stdout == base.stdout
-    assert result.stderr == base.stderr
+    not_read = (
+        "Google Flights price graph not asked: --format json reads it only under "
+        "--gf-transport browser, which opens Chrome."
+    )
+    assert _flat(result.stderr) == _flat(f"{not_read} {base.stderr}")
     assert calls == {"calendar": 2, "weave": 0}
     assert seen == []
 
 
-def test_json_with_a_transport_asked_for_says_why_the_graph_is_not(
-    monkeypatch: pytest.MonkeyPatch, matrix: None
+@pytest.mark.parametrize("transport", ["browser", "auto"])
+def test_json_with_the_browser_named_carries_googles_graph_beside_matrixs_body(
+    transport: str, monkeypatch: pytest.MonkeyPatch, matrix: None
 ) -> None:
-    """A flag asking for Chrome that is then dropped is said out loud, on stderr."""
-    seen = _graphs_are(monkeypatch, {})
+    calls = _matrix_calls(monkeypatch)
+    seen = _graphs_are(monkeypatch, {None: _OW})
     base = _run("NYC", "LON", "--one-way", "--format", "json", "--gf-transport", "http")
-    result = _run("NYC", "LON", "--one-way", "--format", "json", "--gf-transport", "browser")
-    assert result.stdout == base.stdout
-    assert _flat(result.stderr).count(f"{_NOT_ASKED} JSON output.") == 1
-    assert seen == []
+    result = _run("NYC", "LON", "--one-way", "--format", "json", "--gf-transport", transport)
+    assert result.exit_code == base.exit_code == 0, result.output
+    document = json.loads(result.stdout)
+    graph = document.pop("google_price_graph")
+    assert document == json.loads(base.stdout)
+    assert graph == {
+        "origin": "NYC",
+        "destination": "LON",
+        "currency": "USD",
+        "trip_lengths": [None],
+        "graphs": [
+            {
+                "origin": "NYC",
+                "destination": "LON",
+                "currency": "USD",
+                "trip_length": None,
+                "grid": [
+                    {"departure": _START.isoformat(), "price": 204},
+                    {"departure": (_START + timedelta(days=1)).isoformat(), "price": 214},
+                ],
+            }
+        ],
+        "lost": [],
+    }
+    assert "not asked" not in _flat(result.stderr)
+    assert [s["nights"] for s in seen] == [None]
+    assert calls == {"calendar": 2, "weave": 0}
 
 
 def test_http_keeps_the_weave_for_a_one_way_pair_and_never_asks_the_graph(
@@ -1100,9 +1132,9 @@ def test_a_failed_matrix_gets_no_note_and_keeps_its_exit(monkeypatch: pytest.Mon
 @pytest.mark.parametrize(
     "shape",
     [("--format", "json"), ("--gf-transport", "http"), ("-d", "7", "--fast")],
-    ids=["json", "http", "fast"],
+    ids=["json-reading-no-graph", "http", "fast"],
 )
-def test_json_http_and_fast_print_no_note(
+def test_json_reading_no_graph_http_and_fast_print_no_note(
     shape: tuple[str, ...], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _matrix_prices(monkeypatch, _JFK_LHR_DAY, {})
@@ -1110,6 +1142,18 @@ def test_json_http_and_fast_print_no_note(
     result = _run("JFK", "LHR", "-d", "5-7", *shape)
     assert result.exit_code == 0, result.output
     assert "Matrix and Google Flights" not in _flat(result.stdout + result.stderr)
+
+
+@pytest.mark.parametrize("fmt", ["json", "envelope"])
+def test_a_document_that_read_the_graph_prints_the_tables_note(
+    fmt: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _matrix_prices(monkeypatch, _JFK_LHR_DAY, {})
+    _graphs_are(monkeypatch, _JFK_LHR_GRAPHS)
+    table = _run("JFK", "LHR", "-d", "5-7")
+    result = _run("JFK", "LHR", "-d", "5-7", "--format", fmt, "--gf-transport", "browser")
+    assert table.exit_code == result.exit_code == 0, result.output
+    assert _note(result) == _note(table)
 
 
 def test_a_note_that_cannot_be_composed_leaves_both_answers_as_they_were(

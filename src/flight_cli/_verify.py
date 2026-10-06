@@ -16,6 +16,7 @@ from datetime import date, datetime
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from ._cross_check import separate_tickets_reason
+from ._enrich import party_price
 from ._multi_cabin import parse_price, price_currency
 from .domain import Leg, SearchOptions
 
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
         SliceEndpoint,
     )
 
-Outcome = Literal["match", "other-itinerary", "no-solution", "carrier-absent", "separate-tickets"]
+Outcome = Literal["match", "other-itinerary", "no-solution", "carrier-unseen", "separate-tickets"]
 
 
 class Flight(NamedTuple):
@@ -333,8 +334,8 @@ def listed_carriers(probe: SearchResult) -> set[str]:
 def unpriced(row: Row, probe: SearchResult) -> Verdict:
     """Why Matrix has no fare for the row's flights, from the same legs asked
     without the chain and with at most the row's most stops in a slice. A
-    carrier is absent only when that answer lists itineraries and names none
-    of its."""
+    carrier is unseen when that answer lists itineraries and names none of
+    its, which says nothing about Matrix's other trips."""
     stops = most_stops(row)
     within = f"with at most {stops:d} stop{'' if stops == 1 else 's'}"
     if not probe.solutions:
@@ -347,10 +348,12 @@ def unpriced(row: Row, probe: SearchResult) -> Verdict:
     carriers = list(dict.fromkeys(f.carrier for s in row.slices for f in s))
     missing = tuple(c for c in carriers if c not in listed)
     if missing:
+        read, total = len(probe.solutions), probe.solution_count
+        of = f" of {total:d}" if total > read else ""
         return Verdict(
-            "carrier-absent",
-            f"Matrix lists no itinerary {within} on {_join(missing)} for this route "
-            f"and day; it lists {_join(sorted(listed))}",
+            "carrier-unseen",
+            f"none of the {read:d}{of} trips Matrix returned {within} names "
+            f"{_join(missing)} for this route and day; they name {_join(sorted(listed))}",
             missing_carriers=missing,
         )
     return Verdict(
@@ -398,17 +401,19 @@ def fares(details: BookingDetails | None) -> list[dict[str, Any]]:
 
 
 def document(
-    n: int, row: Row, verdict: Verdict, fare_rules: dict[str, Any] | None
+    n: int, row: Row, verdict: Verdict, fare_rules: dict[str, Any] | None, passengers: int = 1
 ) -> dict[str, Any]:
     """The `verify` object of `--format json`. Matrix's side, the delta and the
     fares are there only on a match: a price for any other itinerary would be
-    read as this row's."""
+    read as this row's. Matrix's price is for the party of `passengers`, as
+    Google's is."""
     matched = verdict.outcome == "match" and verdict.solution is not None
     matrix: dict[str, Any] | None = None
     if matched and verdict.solution is not None:
         itn = verdict.details.itinerary if verdict.details else None
         matrix = {
-            "price": verdict.solution.price,
+            "price": party_price(verdict.solution, passengers),
+            "per_traveler": verdict.solution.price,
             "total": verdict.details.display_total if verdict.details else None,
             "slices": [_slice_document(s) for s in booked_flights(itn)] if itn else [],
         }
