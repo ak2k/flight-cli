@@ -16,8 +16,8 @@ from conftest import capture_err
 from flight_cli import _gflight_ids as gfid
 from flight_cli import cli
 from flight_cli._gf_errors import GfThrottledError
-from test_gf_auto_escalation import _rungs
 from test_envelope import _envelope_of
+from test_gf_auto_escalation import _rungs
 from test_gf_chunked_search import (
     _EX6_FROM,
     _EX6_PAGES,
