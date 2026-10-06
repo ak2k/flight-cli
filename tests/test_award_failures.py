@@ -123,7 +123,7 @@ def _use_providers(
     hand_out_providers(
         monkeypatch, PointsPathProvider(pp, PricingInfoResponse(), _AIRLINES), SeatsAeroProvider(sa)
     )
-    monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
+    monkeypatch.setattr(pp_cli, "stored_tokens", lambda: None)
     monkeypatch.setattr("flight_cli.pp.client.UNSUPPORTED_CACHE", tmp_path / "unsupported.json")
 
 
@@ -194,7 +194,7 @@ def test_a_provider_that_fails_whole_is_named_once(
     monkeypatch.setattr(registry, "seats_is_configured", lambda: True)
     monkeypatch.setattr(registry, "PointsPathProvider", _Unbuildable)
     monkeypatch.setattr(registry, "SeatsAeroProvider", _Raising)
-    monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
+    monkeypatch.setattr(pp_cli, "stored_tokens", lambda: None)
     log.configure("warning")
     _run()
     captured = capsys.readouterr()
@@ -368,13 +368,12 @@ def test_a_token_refresh_ends_at_the_award_deadline(
     ], captured.err
 
 
-@pytest.mark.parametrize("stuck", ["checking it is configured", "building it"])
 def test_a_token_check_ends_at_the_award_deadline(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], stuck: str
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Checking PointsPath's tokens refreshes stale ones with a blocking request.
-    The registry's check and the provider's own made it on the event loop, where
-    no deadline could cut it: a refresh that did not return held the award phase."""
+    """Building PointsPath's provider refreshes a stale token with a blocking
+    request. In a thread the deadline cuts it: a refresh that did not return
+    does not hold the award phase."""
     release = threading.Event()
 
     def stuck_tokens() -> Tokens:
@@ -384,10 +383,9 @@ def test_a_token_check_ends_at_the_award_deadline(
         raise PPAuthError(msg)
 
     monkeypatch.setattr(pp_provider, "get_valid_tokens", stuck_tokens)
-    if stuck == "building it":
-        monkeypatch.setattr(registry, "pp_is_configured", lambda: True)
+    monkeypatch.setattr(registry, "pp_is_configured", lambda: True)
     monkeypatch.setattr(registry, "seats_is_configured", lambda: False)
-    monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
+    monkeypatch.setattr(pp_cli, "stored_tokens", lambda: None)
     monkeypatch.setattr(pp_cli, "AWARD_DEADLINE_SECS", 0.5)
     log.configure("warning")
     search = threading.Thread(target=_run, daemon=True)
@@ -474,7 +472,7 @@ def _built_as(provider: str, create: Any) -> Callable[[pytest.MonkeyPatch, Path]
         monkeypatch.setattr(
             registry, "PointsPathProvider" if pp else "SeatsAeroProvider", _Provider
         )
-        monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
+        monkeypatch.setattr(pp_cli, "stored_tokens", lambda: None)
 
     return use
 
@@ -500,7 +498,7 @@ def _searching_raises(monkeypatch: pytest.MonkeyPatch, _tmp_path: Path) -> None:
             return None
 
     hand_out_providers(monkeypatch, _Raising())
-    monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
+    monkeypatch.setattr(pp_cli, "stored_tokens", lambda: None)
 
 
 @pytest.mark.parametrize(

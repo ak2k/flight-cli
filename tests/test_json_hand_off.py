@@ -112,7 +112,7 @@ def arms(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _Arms:
 
     monkeypatch.setattr(cli, "MatrixClient", _Matrix)
     monkeypatch.setattr(pp_cli, "gather_awards", _gather)
-    monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
+    monkeypatch.setattr(pp_cli, "stored_tokens", lambda: None)
     monkeypatch.setattr(cli, "_should_run_awards", _awards_run)
     return state
 
