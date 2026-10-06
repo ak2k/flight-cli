@@ -5134,10 +5134,13 @@ def _note_stop_drops(results: list[Any], cabin: Cabin | None = None) -> None:
     err.print(f"[dim]{_safe_text(note)}[/]")
 
 
-def _note_row_cap(results: list[Any], cabin: Cabin | None = None) -> None:
+def _note_row_cap(results: list[Any], requested: str, cabin: Cabin | None = None) -> None:
     """One stderr line when the board stopped at Google's row cap, naming its
     highest fare: one above it may be missing. Called beside
-    `_note_stop_drops`, by each path that shows the board.
+    `_note_stop_drops`, by each path that shows the board, a board the routing
+    emptied included: a match priced above the cap may be what is missing. That
+    board has no row left to carry a currency, so the line names `requested`,
+    the one the page was asked for.
 
     A plain line, not a narrowing, so the envelope carries it as a note and
     `complete` keeps its meaning: every fare at or below the cap is on the
@@ -5147,7 +5150,7 @@ def _note_row_cap(results: list[Any], cabin: Cabin | None = None) -> None:
     )
 
     capped_at: float | None = getattr(results, "capped_at", None)
-    if not results or capped_at is None:
+    if capped_at is None:
         return
     currencies = Counter(
         ccy
@@ -5155,7 +5158,7 @@ def _note_row_cap(results: list[Any], cabin: Cabin | None = None) -> None:
         for m in (cast("tuple[Any, ...]", r) if isinstance(r, tuple) else (r,))
         if (ccy := cast("str | None", getattr(getattr(m, "flight", None), "currency", None)))
     )
-    ccy = currencies.most_common(1)[0][0] if currencies else ""
+    ccy = currencies.most_common(1)[0][0] if currencies else requested
     google = "Google Flights" if cabin is None else f"Google Flights {cabin.value}"
     note = (
         f"{google} stops at {_ROW_CAP:d} rows for this search: "
@@ -6396,7 +6399,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     _pin_cap_note(legs=legs, top_n=top_n)
     _note_other_currencies(results, opts.currency or "USD")
     _note_stop_drops(results)
-    _note_row_cap(results)
+    _note_row_cap(results, opts.currency or "USD")
     if unchecked and separate_tickets == "show":
         _note_unchecked_return(unchecked)
 
@@ -7444,7 +7447,10 @@ def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, 
             state["gf"] = gf
             _note_other_currencies(gf, requested)
             _note_stop_drops(gf)
-            _note_row_cap(gf)
+            # Beside rows only: with Google's board empty the merged table is
+            # Matrix's, and the line would describe a board nobody is shown.
+            if gf:
+                _note_row_cap(gf, requested)
             _note_separate_tickets(
                 gf,
                 gf_mode=gf_mode,
@@ -8425,7 +8431,7 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
         if cab in fli_by_cabin:
             _note_other_currencies(fli_by_cabin[cab], opts.currency or "USD")
             _note_stop_drops(fli_by_cabin[cab], cab)
-            _note_row_cap(fli_by_cabin[cab], cab)
+            _note_row_cap(fli_by_cabin[cab], opts.currency or "USD", cab)
     for cab in emptied:
         err.print(
             f"[yellow]Google Flights {_safe_text(cab.value)}: "

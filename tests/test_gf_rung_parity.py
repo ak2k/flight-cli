@@ -25,6 +25,7 @@ import pytest
 from typer.testing import CliRunner
 
 from conftest import (
+    FIXTURE_DIR,
     GFLIGHT_PAGE_DIR,
     _answering,
     _FakeRateLimiter,
@@ -38,12 +39,14 @@ from flight_cli import _gflight_ids as gfid
 from flight_cli._gf_common import PageFetch
 from flight_cli._gf_errors import GfPageShapeError
 from flight_cli.domain import Leg, SearchOptions
+from flight_cli.models import SearchResult
 from test_gf_full_board import _DEP, _RET, _SEARCH, _URL, _no_matrix, _one_way_filters
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
 _DIR = GFLIGHT_PAGE_DIR / "rung_parity"
+_MATRIX = FIXTURE_DIR / "matrix_currency" / "specific_jfk_lhr_rt_gbp_resp.json"
 _HEADLESS_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) HeadlessChrome/146.0.0.0 Safari/537.36"
@@ -438,3 +441,73 @@ def test_a_multi_cabin_search_names_each_capped_cabin(monkeypatch: pytest.Monkey
     assert _cap_lines(" ".join(result.stderr.split())) == [
         _CAP_LINE.replace("Google Flights", "Google Flights COACH")
     ]
+
+
+def test_a_capped_board_the_routing_emptied_still_names_its_cap(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red while the line needed a row beside it. No row on the token board
+    flies SN, and one priced above the cap may be missing from it: the line is
+    what says the empty answer stops there. The currency is the one asked for,
+    since no row is left to carry one."""
+    gf_session(_answered("ds1_nyc_lon_token"))
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    argv = _search("--routing", "O:SN+", "--fast", "--format", "envelope")
+    result = CliRunner().invoke(cli.app, argv)
+    assert result.exit_code == 0, result.output
+    env = json.loads(result.stdout)
+    assert (env["backend"], env["complete"], env["results"][0]["rows"]) == ("gflight", True, [])
+    assert _cap_lines(" ".join(result.stderr.split())) == [_CAP_LINE]
+    assert _cap_lines(" ".join(env["notes"])) == [_CAP_LINE]
+
+
+def test_a_multi_cabin_search_names_the_cap_of_a_cabin_the_routing_emptied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red while the line needed a row beside it: the emptied arm, with no
+    hand-off asked for."""
+    from fli.models import SeatType  # pyright: ignore[reportMissingTypeStubs]
+
+    pages = {
+        SeatType.ECONOMY: _answered("ds1_nyc_lon_token"),
+        SeatType.BUSINESS: _answered("ds1_nyc_lon_curated"),
+    }
+
+    def one_call(filters: Any, *, currency: str = "USD", cheapest: bool = False) -> Any:
+        del currency, cheapest
+        return gfid._rows_from_page_html(PageFetch(pages[filters.seat_type], _URL, 200))
+
+    monkeypatch.setattr(gfid, "_one_call", one_call)
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    argv = _search("--cabin", "economy,business", "--routing", "O:SN+", "--fast")
+    result = CliRunner().invoke(cli.app, argv)
+    stderr = " ".join(result.stderr.split())
+    assert "Google Flights COACH: no itinerary matched" in stderr, result.output
+    assert _cap_lines(stderr) == [_CAP_LINE.replace("Google Flights", "Google Flights COACH")]
+
+
+def test_the_merged_table_names_no_cap_for_a_board_the_routing_emptied(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Green before and after: the default search reads Google's board beside
+    Matrix's and, with Google's emptied, answers from Matrix, so the line would
+    describe a board nobody is shown."""
+    gf_session(_answered("ds1_nyc_lon_token"))
+    weave: list[object] = []
+    handed: list[object] = []
+
+    async def matrix_into(state: dict[str, Any], *args: object) -> None:
+        weave.append(args)
+        state["matrix"] = SearchResult.from_api(json.loads(_MATRIX.read_text()))
+
+    def matrix(**kw: object) -> None:
+        handed.append(kw)
+
+    monkeypatch.setattr(cli, "_matrix_into", matrix_into)
+    monkeypatch.setattr(cli, "_run_matrix_path", matrix)
+    argv = [*_SEARCH, "NYC", "LON", "--dep", _DEP.isoformat(), "--routing", "O:SN+"]
+    result = CliRunner().invoke(cli.app, argv, env={"COLUMNS": "250"})
+    assert result.exit_code == 0, result.output
+    assert (len(weave), len(handed)) == (1, 0)
+    stderr = " ".join(result.stderr.split())
+    assert "rows for this search" not in stderr, stderr
