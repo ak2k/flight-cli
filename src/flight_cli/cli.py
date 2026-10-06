@@ -10521,8 +10521,9 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         "lands at, after it lands, as two separate tickets. --max-price is not applied to "
         'them. With --format json the document becomes {"search": …, "split_ticket": {…}}; '
         "--format envelope carries the same object under split_ticket. On an open jaw (two "
-        "--slice that are not a round trip), whose table shows its separate tickets anyway, "
-        "--format json carries them as split_ticket's combinations beside Matrix's document.",
+        "--slice that are not a round trip), whose table and --format envelope show its "
+        "separate tickets anyway, --format json carries them only with --split, as "
+        "split_ticket's combinations beside Matrix's document.",
         rich_help_panel=_GROUP_OUTPUT,
     ),
     currency: Annotated[

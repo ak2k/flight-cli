@@ -26,7 +26,7 @@ its schema is `docs/envelope.schema.json`, generated from the models
 | `price_graph` | `[{trip_length, currency, cells: [{departure, return, price}]}]` | a calendar's Google price graph, one entry per trip length that priced (`trip_length` and `return` null on a one-way); each cell is Google's estimate for one date pair, with no itinerary behind it. Empty, with its note, on a search, a calendar that did not ask it (no `--gf-transport browser` or `auto`, `--gf-transport http`, or a refusal by the graph's gate, named) and one whose graph failed |
 | `verify` | object / null | `--verify`'s check of row `--pick`, the `verify` object `--format json` prints; null when not asked, on a calendar, or when the check failed (exit 1) |
 | `cross_check` | object / null | `--enrich`'s Google-vs-Matrix comparison, the `cross_check` object `--format json --enrich` prints, `low_check` included; null when not asked, skipped, on a calendar, or when Matrix's half failed |
-| `split_ticket` | object / null | `--split`'s answer, the `split_ticket` object `--format json --split` prints: on a round trip the pair (`{outbound, return, total, currency}`), on an open jaw the combinations (`{currency, combinations}`), or `{error}` naming why there is none; null when not asked, on a calendar, or when Matrix answered a round trip |
+| `split_ticket` | object / null | `--split`'s answer, the `split_ticket` object `--format json --split` prints: on a round trip the pair (`{outbound, return, total, currency}`), or `{error}` naming why there is none. An open jaw's combinations (`{currency, combinations}`) or `{error}` on every envelope run, `--split` or not, since its table lists them without the flag. Null on a round trip not asked, on a calendar, or when Matrix answered a round trip |
 
 `price` is the trip's: a Google round trip's is its return member's, the fare
 every surface prints for the pair; Matrix's is the solution's price string read
@@ -34,6 +34,12 @@ as a number, for a party the total Matrix states (`party_price`), the number its
 itinerary table prints and `--max-price` reads, as Google's row prices the whole
 party. A party's solution Matrix states no total for has a null `price`: one
 passenger's price is not the trip's, and its `row` still carries it.
+A multi-cabin Google search lists, under each cabin, its `-n` cheapest rows,
+then, in price order, each other row of its board whose fare the table prints
+in that cabin. The table prices every cabin on the sort cabin's itineraries, so
+a fare it shows can sit far down another cabin's board; the rows added are read
+off the boards already fetched. A multi-cabin Matrix search lists each cabin's
+whole answer.
 A `calendar --fast` trip-length range writes every priced length's cells to
 `results` as one list, each the object the range document's `graphs[].grid`
 prints; its `return` date names its length. `price_graph` carries the same
@@ -86,7 +92,8 @@ body and a request the award deadline cut included); a leg with
 range whose graph was lost;
 a `--split` one-way search that failed, a `--split` round trip Matrix answered,
 or a `--split` open jaw Google was not asked about, since the tickets were asked
-for and are not priced (no priced one-way, no pair one traveler can fly, or two
+for and are not priced (without `--split` that open jaw's `{error}` narrows
+nothing: its table lists no tickets either) (no priced one-way, no pair one traveler can fly, or two
 currencies are the boards' answer, a note); an open jaw's one-way board missing
 a page or holding rows the parser could not read (`cli._one_way_boards`, the
 unread rows a note naming the slice), since its cheapest tickets may be among
