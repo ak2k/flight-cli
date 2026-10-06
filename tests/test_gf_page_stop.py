@@ -20,6 +20,7 @@ from flight_cli.domain import Cabin, Leg, SearchOptions
 from test_envelope import _envelope_of
 from test_gf_auto_escalation import _rungs
 from test_gf_chunked_search import (
+    _EAST,
     _EX6_FROM,
     _EX6_PAGES,
     _EX6_PAIRS,
@@ -407,3 +408,103 @@ def test_a_cabins_board_carries_the_stop_that_ended_its_pins_beside_its_cheapest
     assert board.separate_failed is board.stopped
     assert len(board) == 2  # the pin served before the stop, its two returns
     assert google.cheapest == []
+
+
+def _no_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_sleep(*_a: object) -> None:
+        return None
+
+    monkeypatch.setattr(gfid.time, "sleep", no_sleep)
+    monkeypatch.setattr(gfid.random, "random", lambda: 0.0)
+
+
+@pytest.mark.parametrize("transport", ["http", "browser"])
+def test_split_asks_no_one_way_after_the_round_trips_pins_stopped(
+    monkeypatch: pytest.MonkeyPatch, transport: str
+) -> None:
+    """The round trip's second pin meets the wall: its rows stand, and
+    `--split` asks neither one-way on that wall but names both. Red before: it
+    asked the outbound one-way, on http a ladder more on the same IP."""
+    _no_backoff(monkeypatch)
+    gets: list[Page] = []
+
+    def refuse(page: Page) -> Exception | None:
+        gets.append(page)
+        # The outbound page and the first pin are served; the second pin meets the wall.
+        return GfThrottledError("rate-limited") if len(gets) >= 3 else None
+
+    google = _Google([("JFK", "LAX"), ("LGA", "LAX"), ("EWR", "LAX")], refuse=refuse)
+
+    def chrome(filters: Any, *, headed: bool, currency: str = "USD", cheapest: bool = False) -> Any:
+        assert headed is False
+        return google(filters, currency=currency, cheapest=cheapest)
+
+    monkeypatch.setattr(gfid, "_one_call_browser", chrome)
+    result = _search(
+        monkeypatch,
+        google,
+        "JFK,LGA,EWR",
+        "LAX",
+        "--backend",
+        "gflight",
+        "--fast",
+        "--format",
+        "json",
+        "--split",
+        "--gf-transport",
+        transport,
+        ret=True,
+    )
+    assert result.exit_code == 0, result.output
+    # Chrome runs no ladder: the second pin is one request there.
+    ladder = gfid._THROTTLE_RETRY_ATTEMPTS + 1 if transport == "http" else 1
+    assert len(gets) == 2 + ladder, gets
+    doc = json.loads(result.stdout)
+    assert len(doc["search"]) == 2  # the pin served before the stop, its two returns
+    reason = (
+        "the outbound and return one-ways were not asked after the round trip stopped "
+        "the search (rate-limited)"
+    )
+    assert doc["split_ticket"] == {"error": reason}
+    assert f"No split tickets: {reason}." in _flat(result.stderr)
+
+
+def test_split_asks_no_return_one_way_after_an_outbound_one_way_page_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The round trip is answered whole on two pages. `--split`'s outbound
+    one-way is asked on the same two pages, and its second meets the wall: the
+    return one-way is not asked on that wall, and the reason names it. Red
+    before: the one-way's board kept its first page's rows but not the stop, so
+    the return one-way was asked on both of its pages."""
+    _no_backoff(monkeypatch)
+    second: tuple[str, ...] = _EAST[6:]
+    google = _Google([(o, "LHR") for o in _EAST])
+
+    def refuse(page: Page) -> Exception | None:
+        # The round trip asks the second page's outbounds once; the one-way asks them again.
+        asked = google.calls.count((page, None))
+        return GfThrottledError("rate-limited") if page[0] == second and asked >= 2 else None
+
+    google.refuse = refuse
+    result = _search(
+        monkeypatch,
+        google,
+        ",".join(_EAST),
+        "LHR",
+        "--backend",
+        "gflight",
+        "--fast",
+        "--format",
+        "json",
+        "--split",
+        ret=True,
+    )
+    assert result.exit_code == 0, result.output
+    assert [page for page, _ in google.calls if page[0] == ("LHR",)] == [], google.calls
+    reason = (
+        "the return one-way was not asked after the outbound one-way stopped the search "
+        "(rate-limited)"
+    )
+    assert json.loads(result.stdout)["split_ticket"] == {"error": reason}
+    assert f"No split tickets: {reason}." in _flat(result.stderr), result.stderr

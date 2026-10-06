@@ -536,7 +536,8 @@ def test_no_return_one_traveler_can_fly_is_named(
 _NO_PAIR = [
     pytest.param(
         {"out": GfThrottledError("Google Flights rate-limited the request")},
-        "the outbound one-way failed (Google Flights rate-limited the request)",
+        "the outbound one-way failed (Google Flights rate-limited the request), and the "
+        "return one-way was not asked after it stopped the search",
         id="outbound-refused",
     ),
     pytest.param(

@@ -150,7 +150,13 @@ order, from `_gflight_ids._one_call_auto` out:
 5. a pin loop that stopped after serving keeps its rows and carries the stop
    (`Board.stopped`);
 6. `cli._PageAsk` gives that page up and asks nothing more;
-7. `cli._report_pages` names every page not asked.
+7. `cli._report_pages` names every page not asked;
+8. the merged board carries the stop too, so `--split` asks no one-way after
+   the round trip's stop, and `cli._one_way_boards` (`--split`, an open jaw)
+   asks no later leg after one leg's stop; the reason names each one-way not
+   asked (`cli._search_stop` reads a board's stop, its Cheapest tab's
+   included). Steps 5-8 hold on every transport; on `http` and `browser`,
+   step 2's throttle is itself the stop.
 
 Every Google request of the search after step 3 goes straight to Chrome: the
 remaining pins, the other pages, the Cheapest tab, `--split`'s one-ways. One

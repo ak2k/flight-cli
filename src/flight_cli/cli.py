@@ -3532,13 +3532,26 @@ def _one_way_boards(
 
     With `narrow`, a board missing a page, or rows its pages served that could
     not be read, narrows the envelope run, the unread rows in a note naming the
-    leg: the rows it lacks may be the leg's cheapest tickets."""
+    leg: the rows it lacks may be the leg's cheapest tickets.
+
+    A leg whose pages met a stop (`_search_stop`) ends the asking, as a page's
+    does in `_PageAsk`: every later leg would meet the same wall, so each is
+    named as not asked instead."""
     from ._gf_browser import interrupt_guard  # noqa: PLC0415 — GF-only
+
+    def unpriced(reason: str) -> str:
+        # The tickets were asked for and are unpriced, where every other
+        # reason is the boards' answer. A round trip's pair is priced
+        # beside Google's answer; an open jaw's tickets (`narrow`) beside
+        # Matrix's, so they name no backend.
+        _envelope.narrow(of=None if narrow else "gflight")
+        return reason
 
     one_way = opts.model_copy(update={"max_price": None})
     boards: list[list[Any]] = []
     with interrupt_guard(), _browser_scope(gf_mode):
-        for leg, which in legs:
+        for i, (leg, which) in enumerate(legs):
+            rest = [later for _, later in legs[i + 1 :]]
             try:
                 board = _gflight_results((leg,), one_way, top_n, gf_mode, gf_headed)
                 if narrow and getattr(board, "partial", False):
@@ -3547,6 +3560,11 @@ def _one_way_boards(
                     _envelope.narrow(
                         f"Google Flights {which} one-way: {unread:d} rows its pages served "
                         "could not be read and are left out of the answer"
+                    )
+                if rest and (stop := _search_stop(board)) is not None:
+                    return unpriced(
+                        f"{_one_ways_not_asked(rest)} after the {which} one-way stopped the "
+                        f"search ({str(stop) or type(stop).__name__})"
                     )
                 priced = [r for r in _price_ordered(board) if r.flight.price is not None]
                 # A one-way sold as separate tickets is already more than one
@@ -3559,13 +3577,17 @@ def _one_way_boards(
             except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
                 raise
             except Exception as e:  # noqa: BLE001 — see the docstring
-                # The tickets were asked for and are unpriced, where every other
-                # reason is the boards' answer. A round trip's pair is priced
-                # beside Google's answer; an open jaw's tickets (`narrow`) beside
-                # Matrix's, so they name no backend.
-                _envelope.narrow(of=None if narrow else "gflight")
-                return f"the {which} one-way failed ({str(e) or type(e).__name__})"
+                failed = f"the {which} one-way failed ({str(e) or type(e).__name__})"
+                if rest and isinstance(e, _GF_STOPS):
+                    failed += f", and {_one_ways_not_asked(rest)} after it stopped the search"
+                return unpriced(failed)
     return boards
+
+
+def _one_ways_not_asked(which: Sequence[str]) -> str:
+    """The one-ways labeled `which`, said as not asked. Plain text."""
+    asked = "one-way was" if len(which) == 1 else "one-ways were"
+    return f"the {_join_reasons(list(which))} {asked} not asked"
 
 
 def _split_ticket(
@@ -3574,9 +3596,20 @@ def _split_ticket(
     top_n: int,
     gf_mode: GfTransportMode,
     gf_headed: bool,
+    *,
+    stopped: GfBackendError | None = None,
 ) -> _SplitTicket | str:
     """The `--split` pair for the round trip `legs`, or the plain-text reason
-    there is none, from each leg's one-way board (`_one_way_boards`)."""
+    there is none, from each leg's one-way board (`_one_way_boards`).
+    `stopped` is the stop the round trip's own search met (`_search_stop`),
+    after which neither one-way is asked."""
+    if stopped is not None:
+        # The pair was asked for and is unpriced, as a failed one-way leaves it.
+        _envelope.narrow(of="gflight")
+        return (
+            f"{_one_ways_not_asked(('outbound', 'return'))} after the round trip stopped the "
+            f"search ({str(stopped) or type(stopped).__name__})"
+        )
     requested = opts.currency or "USD"
     boards = _one_way_boards(
         ((legs[0], "outbound"), (legs[1], "return")), opts, top_n, gf_mode, gf_headed
@@ -5573,6 +5606,15 @@ def _gf_pages(legs: tuple[Leg, ...]) -> list[tuple[Leg, ...]]:
 _GF_STOPS = (GfThrottledError, GfTransportError, GfBrowserUnavailableError)
 
 
+def _search_stop(board: Any) -> GfBackendError | None:
+    """The stop `board`'s search met, or None: one that ended its pins or its
+    pages (`Board.stopped`), or its Cheapest tab refused for one, as `_PageAsk`
+    reads a page's answer. Any later request of the search would meet it too."""
+    held: GfBackendError | None = getattr(board, "stopped", None)
+    tab: GfBackendError | None = getattr(board, "separate_failed", None)
+    return held if held is not None else tab if isinstance(tab, _GF_STOPS) else None
+
+
 class _PageAsk:
     """The pages of one search, asked in order, and what each one met.
 
@@ -5878,6 +5920,8 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
         unread=unread,
         separate_hidden=hidden,
         separate_failed=tabs_failed[min(tabs_failed)] if tabs_failed else None,
+        # For a caller that asks Google more after this board (`_one_way_boards`).
+        stopped=asked.stop,
     )
     merged.stop_drops = stop_drops
     answered = [extras[i] for i in sorted(extras)]
@@ -6866,7 +6910,9 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
             answer_follows=(run_pp and (json_out or awards_only)) or (split and json_out),
         )
         if split:
-            ticket = _split_ticket(legs, opts, top_n, gf_mode, gf_headed)
+            ticket = _split_ticket(
+                legs, opts, top_n, gf_mode, gf_headed, stopped=_search_stop(results)
+            )
             if _envelope.active():
                 _record_split_ticket(ticket, opts.bags)
             elif json_out:
@@ -6926,7 +6972,10 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
             )
             _envelope.record_verify(json.loads(json.dumps(check, default=str)))
         if split:
-            _record_split_ticket(_split_ticket(legs, opts, top_n, gf_mode, gf_headed), opts.bags)
+            ticket = _split_ticket(
+                legs, opts, top_n, gf_mode, gf_headed, stopped=_search_stop(served)
+            )
+            _record_split_ticket(ticket, opts.bags)
         if not run_pp:
             return None
     elif json_out and not run_pp:
@@ -6943,7 +6992,9 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
             return None
         if split:
             doc: Any = _with_split_ticket(
-                out, _split_ticket(legs, opts, top_n, gf_mode, gf_headed), opts.bags
+                out,
+                _split_ticket(legs, opts, top_n, gf_mode, gf_headed, stopped=_search_stop(served)),
+                opts.bags,
             )
         elif seller_row is not None:
             doc = _search_and_sellers(
@@ -6984,7 +7035,9 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
             _report_paint_failure(e)
             raise typer.Exit(1) from e
         if split:
-            _print_split_ticket(_split_ticket(legs, opts, top_n, gf_mode, gf_headed))
+            _print_split_ticket(
+                _split_ticket(legs, opts, top_n, gf_mode, gf_headed, stopped=_search_stop(served))
+            )
 
     # Always adapt to SearchResult shape so the URL emission has segment
     # info for the pinned link (cheap: just shuffles existing fields).
@@ -7883,7 +7936,15 @@ def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, 
             )
             if split and "gf_err" not in state:
                 state["split"] = await anyio.to_thread.run_sync(
-                    _split_ticket, legs, opts, top_n, gf_mode, gf_headed
+                    partial(
+                        _split_ticket,
+                        legs,
+                        opts,
+                        top_n,
+                        gf_mode,
+                        gf_headed,
+                        stopped=_search_stop(gf),
+                    )
                 )
 
     _run_the_weave(_go, state, gf_mode)
