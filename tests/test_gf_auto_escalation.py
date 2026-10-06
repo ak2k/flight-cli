@@ -23,6 +23,7 @@ from flight_cli import _gflight_ids as gfid
 from flight_cli import cli
 from flight_cli._gf_common import PageFetch
 from flight_cli._gf_errors import GfBackendError, GfBrowserUnavailableError, GfThrottledError
+from flight_cli.domain import Cabin
 from test_envelope import (
     _hermetic,  # noqa: F401 # pyright: ignore[reportUnusedImport] — Matrix in process
 )
@@ -585,3 +586,33 @@ def test_the_one_way_tickets_are_asked_inside_the_searchs_one_escalation(
     # An open jaw's object lists its combinations; a round trip's is its pair.
     cheapest = ticket["combinations"][0] if "combinations" in ticket else ticket
     assert cheapest["total"] == total, ticket
+
+
+# ─────────── (k) a cabin's Cheapest-tab note after the escalation ───────────
+
+
+def test_a_cabins_unread_cheapest_tab_keeps_its_return_check_cabin_and_rung(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The note keeps both of its callers' words: the return check the tab was
+    left unread for, which a one-cabin search passes, and the cabin whose tab
+    it was, which a multi-cabin search passes, the refusal worded as the rung
+    the search reached."""
+    buf = capture_err(monkeypatch)
+    board = gfid.Board[Any](separate_failed=GfThrottledError("rate-limited"))
+    with gfid.search_escalation():
+        latch = gfid._search_escalation.get()
+        assert latch is not None and latch.take()
+        cli._note_separate_tickets(
+            board, gf_mode="auto", bags=False, unchecked="-AIRLINES AA", cabin=Cabin.BUSINESS
+        )
+    said = _flat(buf.getvalue())
+    unchecked = (
+        "Itineraries on separate tickets not read: Google lists no return for them "
+        "to check against -AIRLINES AA."
+    )
+    tab = (
+        "Google Flights BUSINESS: itineraries on separate tickets not read: "
+        "Google Flights rate-limited the browser rung."
+    )
+    assert said == f"{unchecked} {tab}", said
