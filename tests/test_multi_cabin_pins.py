@@ -938,7 +938,17 @@ _MATRIX = {
 }
 
 
-def _matrix_answer(fares: tuple[tuple[str, float], ...], currency: str = "USD") -> SearchResult:
+def _matrix_answer(
+    fares: tuple[tuple[str, float], ...],
+    currency: str = "USD",
+    *,
+    party: int = 1,
+    totaled: bool = True,
+) -> SearchResult:
+    """`fares` as Matrix answers them for one traveler; for a `party`, each is
+    one traveler's price beside the party's total, which a cabin not `totaled`
+    states none of."""
+
     def slice_of(flight: str) -> dict[str, Any]:
         hour = int(flight[2:]) - 94
         return {
@@ -949,18 +959,32 @@ def _matrix_answer(fares: tuple[tuple[str, float], ...], currency: str = "USD") 
             "destination": {"code": "LAX"},
         }
 
+    def priced(fare: float) -> dict[str, Any]:
+        if party == 1:
+            return {"displayTotal": f"{currency}{fare:.2f}"}
+        total = {"displayTotal": f"{currency}{fare * party:.2f}"} if totaled else {}
+        return {"ext": {"price": f"{currency}{fare:.2f}"}, **total}
+
     solutions = [
-        {"displayTotal": f"{currency}{fare:.2f}", "itinerary": {"slices": [slice_of(flight)]}}
-        for flight, fare in fares
+        {**priced(fare), "itinerary": {"slices": [slice_of(flight)]}} for flight, fare in fares
     ]
     return SearchResult.from_api(
         {"solutionList": {"solutions": solutions}, "solutionCount": len(solutions)}
     )
 
 
-def _matrix_search(monkeypatch: pytest.MonkeyPatch, *extra: str, currency: str = "USD") -> Result:
+def _matrix_search(
+    monkeypatch: pytest.MonkeyPatch,
+    *extra: str,
+    currency: str = "USD",
+    party: int = 1,
+    untotaled: frozenset[Cabin] = frozenset(),
+) -> Result:
     def _multi(**_kw: object) -> dict[Cabin, SearchResult]:
-        return {cab: _matrix_answer(fares, currency) for cab, fares in _MATRIX.items()}
+        return {
+            cab: _matrix_answer(fares, currency, party=party, totaled=cab not in untotaled)
+            for cab, fares in _MATRIX.items()
+        }
 
     monkeypatch.setattr(cli, "_run_matrix_multi", _multi)
     return CliRunner().invoke(
@@ -1001,11 +1025,62 @@ def test_a_matrix_table_in_its_own_currency_names_a_cabins_own_cheapest(
     ]
 
 
+@pytest.mark.parametrize("party", [1, 2])
 def test_every_fare_a_matrix_table_prints_is_a_row_of_its_cabin_in_the_envelope(
+    monkeypatch: pytest.MonkeyPatch, party: int
+) -> None:
+    """Matrix's envelope carries each cabin's whole answer, priced as the table
+    and the line under it print it: for two, at the party's total. Green at the
+    base, and for two at the merge."""
+    adults = ("--adults", str(party))
+    shown = _cells(_matrix_search(monkeypatch, *adults, party=party).stdout)
+    envelope = _matrix_search(monkeypatch, *adults, "--format", "envelope", party=party)
+    listed = _document_prices(envelope, "envelope")
+    for cab, cells in shown.items():
+        assert cells, cab
+        assert cells - set(listed[cab]) == set(), cab
+    assert 900.0 * party in listed["BUSINESS"]
+
+
+def test_a_partys_matrix_line_names_a_cabins_own_cheapest_at_the_partys_total(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Matrix's envelope carries each cabin's whole answer. Green at the base."""
-    shown = _cells(_matrix_search(monkeypatch).stdout)
-    listed = _document_prices(_matrix_search(monkeypatch, "--format", "envelope"), "envelope")
-    for cab, cells in shown.items():
-        assert cells - set(listed[cab]) == set(), cab
+    """Two adults: the table prints each cabin's party total, so the line names
+    business's own cheapest at the total Matrix states for the two, and says so.
+    Red at the merge, which named one traveler's price beside the totals."""
+    result = _matrix_search(monkeypatch, "--adults", "2", party=2)
+    assert result.exit_code == 0, result.output
+    assert _cells(result.stdout)["BUSINESS"] == {3000.0, 2800.0}
+    assert [line for line in result.stdout.splitlines() if "own cheapest" in line] == [
+        "J's own cheapest, total for 2 travelers: USD1800.00 (UA103), on no row above; "
+        "--sort business lists J's cheapest first."
+    ]
+
+
+def test_a_partys_matrix_line_says_per_traveler_where_matrix_states_no_total(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Matrix states no total for business, so its column is starred per
+    traveler, and the line names one traveler's price as such. Red at the
+    merge."""
+    result = _matrix_search(
+        monkeypatch, "--adults", "2", party=2, untotaled=frozenset({Cabin.BUSINESS})
+    )
+    assert result.exit_code == 0, result.output
+    assert [line for line in result.stdout.splitlines() if "own cheapest" in line] == [
+        "J's own cheapest, per traveler: USD900.00 (UA103), on no row above; "
+        "--sort business lists J's cheapest first."
+    ]
+
+
+def test_a_partys_google_line_names_the_total_google_lists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Google prices the whole party, so its listed fare is the total the column
+    prints, and the line says it is. Red at the merge."""
+    result = _search(monkeypatch, _reversed(monkeypatch), "--adults", "2")
+    assert result.exit_code == 0, result.output
+    assert [line for line in result.stdout.splitlines() if "own cheapest" in line] == [
+        "J's own cheapest, total for 2 travelers: USD1020.00 (B6109 / B6900), on no row above; "
+        "--sort business lists J's cheapest first."
+    ]

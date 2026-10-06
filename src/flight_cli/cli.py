@@ -9011,6 +9011,7 @@ def _render_multi_cabin_search(
     slices: int = 1,
     results_by_cabin: dict[Cabin, SearchResult] | None = None,
     currency: str = "USD",
+    total_of: Callable[[Itinerary], str | None] | None = None,
 ) -> None:
     """Render multi-cabin merged rows. One row per itinerary, one price column
     per requested cabin, '—' for missing.
@@ -9024,7 +9025,8 @@ def _render_multi_cabin_search(
 
     `results_by_cabin` is what `rows` were merged from, in `currency`, the one
     the merge ranked by: each cabin's own cheapest the table does not show is
-    named under it (`_print_own_cheapest`)."""
+    named under it (`_print_own_cheapest`), at its total from `total_of`, the
+    one the merge was given, for a party."""
     if not rows:
         console.print("[yellow]No itineraries.[/]")
         return
@@ -9089,7 +9091,13 @@ def _render_multi_cabin_search(
         console.print("* per traveler: Matrix states no total for the party")
     if results_by_cabin is not None:
         named = _print_own_cheapest(
-            rows, results_by_cabin, cabins=cabins, sort_by=sort_by, currency=currency
+            rows,
+            results_by_cabin,
+            cabins=cabins,
+            sort_by=sort_by,
+            currency=currency,
+            passengers=passengers,
+            total_of=total_of,
         )
         marked.extend(it for it in named if it.ticketing is not None)
     if marked:
@@ -9116,6 +9124,8 @@ def _print_own_cheapest(
     cabins: tuple[Cabin, ...],
     sort_by: Cabin,
     currency: str,
+    passengers: int = 1,
+    total_of: Callable[[Itinerary], str | None] | None = None,
 ) -> list[Itinerary]:
     """One line under the multi-cabin table for each cabin but `sort_by` whose
     own cheapest listing (`cheapest`: in `currency`, else in the first other
@@ -9123,6 +9133,10 @@ def _print_own_cheapest(
     column shows in that listing's currency, or whose column shows none in it,
     and the listings named. No rate is known, so two currencies' fares never
     compare.
+
+    For a party of `passengers`, the line names the listing's total
+    (`total_of`), as the party's column prints its cells, or one traveler's
+    price where it has none, and says which.
 
     The table prices every cabin on the sort cabin's itineraries, so another
     cabin's cheapest fare can be on an itinerary no row shows, while a document
@@ -9135,6 +9149,8 @@ def _print_own_cheapest(
         if own is None or amount is None:
             continue
         own_currency = price_currency(own.price) or currency
+        # Compared on `prices`, the basis `merge` ranks on: a party's column can
+        # mix totals with starred one-traveler prices, and the two do not compare.
         shown = [
             parse_price(p)
             for row in rows
@@ -9148,9 +9164,18 @@ def _print_own_cheapest(
         flights = " / ".join(
             "+".join(s.flights) for s in (own.itinerary.slices if own.itinerary else [])
         )
+        total = total_of(own) if passengers > 1 and total_of is not None else None
+        summed = parse_price(total) if total else None
+        if passengers <= 1:
+            basis, figure, code = "", amount, own_currency
+        elif summed is not None:
+            basis = f", total for {passengers:d} travelers"
+            figure, code = summed, price_currency(total) or own_currency
+        else:
+            basis, figure, code = ", per traveler", amount, own_currency
         console.print(
-            f"{_safe_text(letter)}'s own cheapest: {_safe_text(own_currency)}{amount:.2f}"
-            f"{_safe_text(mark)} ({_safe_text(flights)}), on no row above; "
+            f"{_safe_text(letter)}'s own cheapest{_safe_text(basis)}: {_safe_text(code)}"
+            f"{figure:.2f}{_safe_text(mark)} ({_safe_text(flights)}), on no row above; "
             f"--sort {_safe_text(_CABIN_FLAG_NAMES[cab])} lists {_safe_text(letter)}'s "
             "cheapest first.",
             soft_wrap=True,
@@ -9245,12 +9270,9 @@ def _run_matrix_path_multi(
         or _title_currency(it.price for res in results_by_cabin.values() for it in res.solutions)
         or "USD"
     )
+    total_of = partial(party_price, passengers=opts.pax.total)
     rows = _merge_cabins(
-        results_by_cabin,
-        sort_by=sort_by,
-        top_n=top_n,
-        currency=currency,
-        total_of=lambda it: party_price(it, opts.pax.total),
+        results_by_cabin, sort_by=sort_by, top_n=top_n, currency=currency, total_of=total_of
     )
     # `not json_out` for the reason given at the same gate in
     # `_run_gflight_path`: with awards on, the document is written below this.
@@ -9262,6 +9284,7 @@ def _run_matrix_path_multi(
             passengers=opts.pax.total,
             results_by_cabin=results_by_cabin,
             currency=currency,
+            total_of=total_of,
         )
 
     if run_pp:
@@ -9449,13 +9472,17 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
     results_by_cabin = _gflight_to_search_result_per_cabin(
         {cab: fli_by_cabin[cab] for cab in dict.fromkeys((sort_by, *cabins)) if cab in fli_by_cabin}
     )
+
     # Google prices the whole party, so its listed price is the total.
+    def total_of(it: Itinerary) -> str | None:
+        return it.price
+
     rows = _merge_cabins(
         results_by_cabin,
         sort_by=sort_by,
         top_n=top_n,
         currency=opts.currency or "USD",
-        total_of=lambda it: it.price,
+        total_of=total_of,
         slices=len(legs),
     )
 
@@ -9489,6 +9516,7 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
             slices=len(legs),
             results_by_cabin=results_by_cabin,
             currency=opts.currency or "USD",
+            total_of=total_of,
         )
 
     if run_pp:
