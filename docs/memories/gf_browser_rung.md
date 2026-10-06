@@ -297,8 +297,8 @@ lets the throttle tests substitute it.
 
 ## What is not here
 
-`auto` is accepted and documented as identical to `http`; escalate-on-persistent-
-throttle plus the once-per-process latch is the follow-up. Also out, each a bd
-follow-up under `work-udpp1`: booking options and parallel tabs. The calendar
+`auto` escalates a search to this rung once a throttle outlasts rung 1's
+ladder; the order is in [gf_throttle_ladder.md](gf_throttle_ladder.md). Also
+out, each a bd follow-up under `work-udpp1`: booking options and parallel tabs. The calendar
 date grid through the browser is in
 [gf_date_grid.md](gf_date_grid.md) (`--fast`).

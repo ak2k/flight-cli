@@ -5029,12 +5029,9 @@ def _gflight_query(
             fits=listing_fits(per_slice_preds),
         )
     finally:
-        # Named positively, because only rung 2 opens anything to close. The
-        # call would be a no-op on the others, but reaching for it would read
-        # as though an http search might hold a Chrome — the one thing that
-        # transport promises it never does, and `auto` is that transport under
-        # another name until the escalation rung lands.
-        if transport.mode == TRANSPORT_BROWSER:
+        # Every transport but `http`, which promises it never holds a Chrome:
+        # `browser` opens one, and `auto` opens one once it escalates.
+        if transport.mode != TRANSPORT_HTTP:
             from ._gf_browser import close_thread_session  # noqa: PLC0415 — GF-only; see above
 
             close_thread_session()
@@ -5242,7 +5239,8 @@ def _report_pages(asked: _PageAsk) -> None:
         out = asked.pages[i][0]
         e = asked.failed.get(i)
         if e is not None:
-            why = _gf_refusal(e, transport=asked.gf_mode, bags=asked.bags).note.removesuffix(".")
+            rung = _rung_reached(asked.gf_mode)
+            why = _gf_refusal(e, transport=rung, bags=asked.bags).note.removesuffix(".")
         elif i in asked.answered:
             why = (
                 f"its returns were not asked after page {(asked.stopped_at or 0) + 1:d} "
@@ -5512,8 +5510,10 @@ def _page_board(
 
 
 def _browser_scope(gf_mode: GfTransportMode) -> contextlib.AbstractContextManager[None]:
-    """One Chrome for every page of a browser search, closed once at the end."""
-    if gf_mode != TRANSPORT_BROWSER:
+    """One Chrome for every page of a search that can open one, closed once at
+    the end: `browser`, or `auto` once it escalates. Nothing opens on a thread
+    that never reached rung 2, so the close there is a no-op."""
+    if gf_mode == TRANSPORT_HTTP:
         return contextlib.nullcontext()
     from ._gf_browser import session_scope  # noqa: PLC0415 — GF-only
 
@@ -5769,7 +5769,8 @@ def _note_separate_tickets(
     if unread is not None:
         _envelope.narrow(of="gflight")
         # `removesuffix`: a browser refusal's note ends in its remedy's full stop.
-        note = _gf_refusal(unread, transport=gf_mode, bags=bags).note.removesuffix(".")
+        rung = _rung_reached(gf_mode)
+        note = _gf_refusal(unread, transport=rung, bags=bags).note.removesuffix(".")
         err.print(f"[dim]Itineraries on separate tickets not read: {note}.[/]")
     hidden: int = getattr(results, "separate_hidden", 0)
     if hidden:
@@ -5886,6 +5887,14 @@ class _GfRefusal(NamedTuple):
 
 
 _GF_DECLINED = "Google Flights declined the request"
+
+
+def _rung_reached(gf_mode: GfTransportMode) -> GfTransportMode:
+    """The rung this search's Google requests last ran on: `gf_mode`, or the
+    browser once `auto` escalated to it, so a refusal is worded as that rung's."""
+    from ._gflight_ids import escalated  # noqa: PLC0415 — fli, ~95 ms
+
+    return TRANSPORT_BROWSER if escalated() else gf_mode
 
 
 def _gf_refusal(  # noqa: PLR0911 — one return per refusal type; see the docstring
@@ -6307,7 +6316,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
                 separate_tickets="off" if unchecked else separate_tickets,
             )
     except GfBackendError as e:
-        refusal = _gf_refusal(e, transport=gf_mode, bags=opts.bags is not None)
+        refusal = _gf_refusal(e, transport=_rung_reached(gf_mode), bags=opts.bags is not None)
         if hand_off_failure:
             # `removesuffix`, because a browser refusal's note already ends in
             # the full stop its remedy carries and every other refusal's does not.
@@ -6704,11 +6713,12 @@ def _run_the_weave(
             # Runner installs nothing. `_run_enriched_path` is the only caller,
             # so this is the enriched search path and nothing else.
             #
-            # Armed only for the transport that can open a browser. This half
-            # runs on a worker no interrupt reaches, so on the transports that
-            # hold no driver the first Ctrl-C has nothing to free and an ignored
-            # second one takes away the only thing that could end the process.
-            with interrupt_guard(armed=gf_mode == TRANSPORT_BROWSER):
+            # Armed only for the transports that can open a browser, `auto`
+            # among them since it escalates a throttle to one. This half runs on
+            # a worker no interrupt reaches, so on `http` the first Ctrl-C has
+            # nothing to free and an ignored second one takes away the only
+            # thing that could end the process.
+            with interrupt_guard(armed=gf_mode != TRANSPORT_HTTP):
                 anyio.run(go)
         except* KeyboardInterrupt:
             # With no Runner handler installed, the interrupt lands wherever the
@@ -6817,17 +6827,17 @@ def _report_enriched_gf_failure(
     `_paint_first_gf_table` cannot: the sibling is painted from inside the weave
     and can only guess.
 
-    `transport` is the rung the search actually ran on. Every wording below is
-    dispatched with it, or the browser rung's throttle — which has no retry
-    ladder to wait for — reaches the default search path telling the user to
-    wait a moment and try again.
+    `transport` is the search's, read as the rung it reached (`_rung_reached`).
+    Every wording below is dispatched with it, or the browser rung's throttle —
+    which has no retry ladder to wait for — reaches the default search path
+    telling the user to wait a moment and try again.
 
     `json_out` is the cross-check document, where stdout holds the document
     alone and the rows Matrix answered are all it explains."""
     if not isinstance(e, GfBackendError):
         err.print(f"[yellow]Google Flights query failed:[/] {_safe_text(e)}")
     else:
-        refusal = _gf_refusal(e, transport=transport)
+        refusal = _gf_refusal(e, transport=_rung_reached(transport))
         if matrix_answered and json_out:
             err.print(f"[yellow]{refusal.note}[/] — the cross-check holds Matrix's rows only.")
         elif matrix_answered and not awards_only:
@@ -8043,12 +8053,14 @@ def _run_gflight_multi(
         if served is not None:
             return served
 
-    # Rung 1 for every cabin below: either the caller asked for it, or rung 2
-    # could not open at all and said so. A browser mode reaching the fan-out
-    # would open a session per worker thread, which is the profile-lock
-    # collision the series runner exists to avoid.
-    fanout_mode = TRANSPORT_HTTP if gf_mode == TRANSPORT_BROWSER else gf_mode
-    plan = _CabinSearches(legs, opts, cabins, top_n, fanout_mode, gf_headed, sort_by or cabins[0])
+    # Rung 1 for every cabin below: the caller asked for it, rung 2 could not
+    # open at all and said so, or `auto` asked, which does not escalate here. A
+    # mode that can open a browser reaching the fan-out would open a session per
+    # worker thread, which is the profile-lock collision the series runner
+    # exists to avoid.
+    plan = _CabinSearches(
+        legs, opts, cabins, top_n, TRANSPORT_HTTP, gf_headed, sort_by or cabins[0]
+    )
     results = _CabinBoards()
 
     async def query_cabin[T](cab: Cabin, call: Callable[[], T], into: dict[Cabin, T]) -> None:
@@ -9541,8 +9553,9 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             "[bold]http[/] (default) is one curl_cffi GET; [bold]browser[/] launches a real "
             "Chrome (headless unless [bold]--gf-headed[/]) against the same URL, a few "
             "seconds per search, and survives the rate limit that blocks http; "
-            "[bold]auto[/] is identical to http today (escalate-on-throttle lands "
-            "separately). A multi-cabin [bold]browser[/] search runs its cabins one at "
+            "[bold]auto[/] is http until Google rate-limits it past the retries, then "
+            "Chrome for the rest of the search (a multi-cabin search stays on http). "
+            "A multi-cabin [bold]browser[/] search runs its cabins one at "
             "a time through a single Chrome (~10s for two cabins, ~14s for three, against "
             "~1.3s over http), and falls back to http if Chrome cannot open. Needs "
             # Escaped: rich reads `[browser]` as a style tag and deletes it, which
@@ -9951,6 +9964,10 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                 "JFK-LHR anyway.[/]"
             )
         enrich = fast is False or (fast is None and not json_out)
+        # Opened below on this thread, which starts the search's workers: each
+        # copies the one escalation, so one throttle moves all of them to Chrome.
+        from ._gflight_ids import search_escalation  # noqa: PLC0415 — fli, ~95 ms
+
         # An awards-only run prints no Google row, and its award table matches
         # one-ticket rows only, so the Cheapest tab would buy it nothing.
         separate: SeparateTickets = (
@@ -9974,54 +9991,56 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             ):
                 err.print(f"[red]--enrich --format {_safe_text(output)} {_safe_text(blocker)}.[/]")
                 raise typer.Exit(2)
-            _run_enriched_path(
+            with search_escalation():
+                _run_enriched_path(
+                    legs=legs,
+                    opts=opts,
+                    top_n=page_size,
+                    run_pp=run_awards,
+                    sel=sel,
+                    matrix_url=matrix_url,
+                    google_url=google_url,
+                    pick=pick,
+                    rps=_resolve_rps(rps),
+                    impersonate=_resolve_impersonate(impersonate),
+                    no_cache=_resolve_no_cache(no_cache),
+                    gf_mode=gf_mode,
+                    gf_headed=gf_headed,
+                    sellers=sellers,
+                    split=split,
+                    json_out=json_out,
+                    separate_tickets=separate,
+                )
+            return
+        with search_escalation():
+            unmatched = _run_gflight_path(
                 legs=legs,
                 opts=opts,
                 top_n=page_size,
+                json_out=json_out,
                 run_pp=run_awards,
                 sel=sel,
                 matrix_url=matrix_url,
                 google_url=google_url,
                 pick=pick,
-                rps=_resolve_rps(rps),
-                impersonate=_resolve_impersonate(impersonate),
-                no_cache=_resolve_no_cache(no_cache),
                 gf_mode=gf_mode,
                 gf_headed=gf_headed,
                 sellers=sellers,
+                # A row handed to Matrix is no Google row to check.
+                matrix_fallback=backend == BACKEND_AUTO and not google_only and not verify,
+                hand_off_failure=backend == BACKEND_AUTO
+                and not google_only
+                and json_out
+                and not fast
+                and not sellers
+                and not verify,
                 split=split,
-                json_out=json_out,
+                matrix_remedy=_matrix_remedy(google_only),
+                verify=verify,
+                rps=rps,
+                impersonate=impersonate,
                 separate_tickets=separate,
             )
-            return
-        unmatched = _run_gflight_path(
-            legs=legs,
-            opts=opts,
-            top_n=page_size,
-            json_out=json_out,
-            run_pp=run_awards,
-            sel=sel,
-            matrix_url=matrix_url,
-            google_url=google_url,
-            pick=pick,
-            gf_mode=gf_mode,
-            gf_headed=gf_headed,
-            sellers=sellers,
-            # A row handed to Matrix is no Google row to check.
-            matrix_fallback=backend == BACKEND_AUTO and not google_only and not verify,
-            hand_off_failure=backend == BACKEND_AUTO
-            and not google_only
-            and json_out
-            and not fast
-            and not sellers
-            and not verify,
-            split=split,
-            matrix_remedy=_matrix_remedy(google_only),
-            verify=verify,
-            rps=rps,
-            impersonate=impersonate,
-            separate_tickets=separate,
-        )
         if unmatched is None:
             return
         if unmatched:

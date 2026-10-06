@@ -103,7 +103,8 @@ go into detail and are loaded on demand.
   transport ladder per fan-out with a single prober, waiter parks and
   refills, which curl failures retry and which propagate, and the measured
   client-context rate budget (burst cap, rolling allowance, fast recovery)
-  behind the reactive design. Read before touching
+  behind the reactive design, and the order in which `auto` escalates a
+  throttle to Chrome. Read before touching
   `_gflight_ids.retry_throttled`.
 - [gf_separate_tickets.md](gf_separate_tickets.md) — Self transfers and
   separate tickets from the Cheapest tab's `row[7]`: the `tfu=` that asks for
