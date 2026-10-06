@@ -3739,7 +3739,9 @@ def _one_way_boards(
 
     A board at Google's row cap says so (`_note_row_cap`) once every leg
     answered, since the tickets drawn from it stop at its cap, or when it holds
-    no ticket, since one priced above its cap may be what it lacks."""
+    no ticket, since one priced above its cap may be what it lacks. The rows it
+    served over the stop ceiling are counted beside that line
+    (`_note_stop_drops`), as on every other board shown."""
     from ._gf_browser import interrupt_guard  # noqa: PLC0415 — GF-only
 
     def unpriced(reason: str) -> str:
@@ -3776,6 +3778,7 @@ def _one_way_boards(
                 # booking, so tickets holding it would not be one booking each.
                 single = [r for r in priced if not _separately_ticketed(r)]
                 if not single:
+                    _note_stop_drops(board, one_way=which)
                     _note_row_cap(board, requested, one_way=which)
                     ticket = " on one ticket" if priced else ""
                     return f"Google Flights priced no {which} one-way{ticket}"
@@ -3789,6 +3792,7 @@ def _one_way_boards(
                     failed += f", and {_one_ways_not_asked(rest)} after it stopped the search"
                 return unpriced(failed)
     for which, board in read:
+        _note_stop_drops(board, one_way=which)
         _note_row_cap(board, requested, one_way=which)
     return boards
 
@@ -5756,18 +5760,31 @@ def _gflight_results(
     return results
 
 
-def _note_stop_drops(results: list[Any], cabin: Cabin | None = None) -> None:
+def _note_stop_drops(
+    results: list[Any], cabin: Cabin | None = None, *, one_way: str | None = None
+) -> None:
     """One stderr line counting the rows Google served over the stop ceiling it
     was asked for, from `_gflight_results`' tally. Called, like
     `_note_other_currencies`, by each path that answers with the board: a board
     the filter emptied says so in its own line, and one handed to Matrix is not
-    shown at all."""
+    shown at all. `one_way` labels a one-way board an open jaw or `--split`
+    reads (`_one_way_boards`), as `_note_row_cap` labels it; such a board is
+    counted even when the drops emptied it, since its own line says only that
+    it priced no one-way."""
     drops: StopDrops | None = getattr(results, "stop_drops", None)
-    if not results or drops is None or not drops.rows or drops.ceiling is None:
+    if drops is None or not drops.rows or drops.ceiling is None:
+        return
+    if not results and one_way is None:
         return
     rows = f"{drops.rows:d} row{'' if drops.rows == 1 else 's'}"
     shown = "it is" if drops.rows == 1 else "they are"
-    google = "Google Flights" if cabin is None else f"Google Flights {cabin.value}"
+    google = (
+        f"Google Flights {cabin.value}"
+        if cabin is not None
+        else f"Google Flights {one_way} one-way"
+        if one_way is not None
+        else "Google Flights"
+    )
     note = (
         f"{google} returned {rows} over the stop ceiling it was asked for "
         f"({drops.ceiling:d}); {shown} not shown."

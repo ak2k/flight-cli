@@ -18,6 +18,7 @@ from typer.testing import CliRunner
 
 from flight_cli import _envelope, cli
 from flight_cli import _gflight_ids as gfid
+from flight_cli._gf_postfilter import StopDrops
 from flight_cli.domain import Leg, SearchOptions
 from flight_cli.models import SearchResult
 from test_envelope import _envelope_of, _notes
@@ -754,3 +755,36 @@ def test_a_one_way_board_at_the_row_cap_says_where_it_stops(
     env = _envelope_of(_search("--cash-only", "--split", "--format", "envelope"))
     assert (env["backend"], env["complete"]) == ("matrix", True), env["notes"]
     assert line in env["notes"]
+
+
+def test_a_one_way_board_counts_the_rows_it_drops_over_the_stop_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """As every other Google board shown says so: a line, which the envelope
+    carries as a note, `complete` unchanged. Red at the base, which counted
+    none on a one-way board."""
+    line = (
+        "Google Flights JFK→LHR one-way returned 1 row over the stop ceiling it was asked "
+        "for (0); it is not shown."
+    )
+
+    def _dropping(google: _Google) -> None:
+        def _served(legs: tuple[Leg, ...], *a: Any, **kw: Any) -> gfid.Board[Any]:
+            board = google(legs, *a, **kw)
+            if legs[0].origins[0] == "JFK":
+                board.stop_drops = StopDrops(rows=1, ceiling=0)
+            return board
+
+        monkeypatch.setattr(cli, "_gflight_results", _served)
+
+    _dropping(_google(monkeypatch))
+    _matrix(monkeypatch)
+    result = _search("--cash-only", "--stops", "0")
+    assert result.exit_code == 0, result.output
+    assert " ".join(result.stderr.split()).count(line) == 1, result.stderr
+    assert _TITLE in result.stdout
+    _dropping(_google(monkeypatch))
+    _matrix(monkeypatch)
+    env = _envelope_of(_search("--cash-only", "--stops", "0", "--format", "envelope"))
+    assert (env["backend"], env["complete"]) == ("matrix", True), env["notes"]
+    assert env["notes"].count(line) == 1
