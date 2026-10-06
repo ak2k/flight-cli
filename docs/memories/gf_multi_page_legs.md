@@ -63,7 +63,9 @@ consent) is named on stderr with its number and airports, `Google Flights page
 2 of 4 (JFK,LGA,EWR,BOS→FCO,MUC,ZRH,VIE,CPH,DUB) is missing: <reason>.`, and
 the next page is asked. A throttle, a spent transport ladder or a dead browser
 is not a fact about one page, as in the pin loop above, so it stops the asking,
-and each page after it is named `not asked after page N stopped the search`. A
+and each page after it is named `not asked after page N stopped the search`.
+One met by a page's Cheapest tab stops it too: that page's board answered, so
+no page line names it, and the separate-ticket line says why. A
 round trip asks every page's outbounds before any page's returns, so a page
 whose outbounds answered before the stop is named `its returns were not asked
 after page N stopped the search`, and no GET follows a throttle.

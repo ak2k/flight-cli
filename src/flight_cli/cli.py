@@ -5174,6 +5174,10 @@ def _gf_pages(legs: tuple[Leg, ...]) -> list[tuple[Leg, ...]]:
     return pages
 
 
+# A failure of the IP, the network or the browser session, not of one page (`_PageAsk`).
+_GF_STOPS = (GfThrottledError, GfTransportError, GfBrowserUnavailableError)
+
+
 class _PageAsk:
     """The pages of one search, asked in order, and what each one met.
 
@@ -5183,9 +5187,11 @@ class _PageAsk:
     every later page would navigate on the same session. It ends the asking,
     and every page after it is named as not asked. A pin loop that stopped
     after serving some pins answers with its rows, and the stop it carries ends
-    the asking as a raised one does. A round trip asks every page's outbounds
-    before any page's returns, so a page that answered its outbounds before the
-    stop is named for the returns it did not get."""
+    the asking as a raised one does. So does one a page's Cheapest tab met: the
+    page answered, so no page line names it, and the tab's line says why. A
+    round trip asks every page's outbounds before any page's returns, so a page
+    that answered its outbounds before the stop is named for the returns it did
+    not get."""
 
     def __init__(
         self, pages: list[tuple[Leg, ...]], *, gf_mode: GfTransportMode, bags: bool
@@ -5197,6 +5203,7 @@ class _PageAsk:
         self.unasked: set[int] = set()
         self.answered: set[int] = set()
         self.stopped_at: int | None = None
+        self.stop: GfBackendError | None = None
 
     def ask[T](self, i: int, call: Callable[[], T]) -> T | None:
         """`call`'s answer for page `i`, or None once its failure is recorded."""
@@ -5205,8 +5212,8 @@ class _PageAsk:
             return None
         try:
             answer = call()
-        except (GfThrottledError, GfTransportError, GfBrowserUnavailableError) as e:
-            self.stopped_at = i
+        except _GF_STOPS as e:
+            self._stopped(i, e)
             self.failed[i] = e
         except GfBackendError as e:
             self.failed[i] = e
@@ -5214,11 +5221,18 @@ class _PageAsk:
             self.answered.add(i)
             # `getattr`: the answer is a Board, an outbound or a stand-in list.
             held: GfBackendError | None = getattr(answer, "stopped", None)
+            tab: GfBackendError | None = getattr(answer, "separate_failed", None)
             if held is not None:
-                self.stopped_at = i
+                self._stopped(i, held)
                 self.failed[i] = held
+            elif isinstance(tab, _GF_STOPS):
+                self._stopped(i, tab)
             return answer
         return None
+
+    def _stopped(self, i: int, e: GfBackendError) -> None:
+        self.stopped_at = i
+        self.stop = e
 
     def report(self) -> None:
         """One stderr line per page that did not answer, in page order."""
@@ -5402,8 +5416,8 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
                 # A page with no pin is still asked for its Cheapest tab: a row
                 # sold as separate tickets is its outbound alone.
                 asks = bool(keys) or separate_tickets != "off"
-                if asks and not keys and asked.stopped_at is not None:
-                    tabs_failed[i] = asked.failed[asked.stopped_at]
+                if asks and not keys and asked.stop is not None:
+                    tabs_failed[i] = asked.stop
                     asks = False
                 board = (
                     asked.ask(
