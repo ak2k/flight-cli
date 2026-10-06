@@ -54,7 +54,13 @@ _FLL_LGA = [
     *("--backend", "gflight", "--fast", "-n", "1000"),
 ]
 _THROTTLE_PAGE = "<html>Our systems have detected unusual traffic</html>"
-_SHAPELESS_PAGE = "<html><body>no flight data here</body></html>"
+# A `ds:1` too short to hold a board: a layout change, refused at one read. A
+# page with no `ds:1` at all is read three times (`_read_search_page`).
+_SHAPELESS_PAGE = (
+    "<html><body><script>"
+    "AF_initDataCallback({key: 'ds:1', hash: '9', data:[[]], sideChannel: {}});"
+    "</script></body></html>"
+)
 _KEY = (
     "† separate tickets: Google sells this trip as more than one booking. "
     "‡ self transfer: separate tickets, and you collect and recheck bags between flights."

@@ -112,7 +112,9 @@ it may list itineraries on separate tickets the user did not opt out of. A
 hand-off
 to Matrix, rows in another currency, a filter that empties a board, rows
 Google served over the stop ceiling asked for (`cli._note_stop_drops` counts
-them), a pin whose return board the row filter emptied, the count of
+them), a board shown at Google's 300-row cap (`cli._note_row_cap`, never said
+for a board handed to Matrix), a pin whose return board the row filter emptied,
+the count of
 itineraries `--no-separate-tickets` hid and a Cheapest tab left unread for a
 return check its rows cannot be held to are notes, not narrowings: each is a
 complete answer to what was asked. A row Google sells as separate tickets is a

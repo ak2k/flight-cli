@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from .domain import Cabin
     from .models import Itinerary, SearchResult
 
@@ -113,10 +115,12 @@ class MultiCabinRow:
     so its own price is the one shown for that cabin. `prices` maps each cabin
     we have a price for to its raw price string (e.g. 'USD623.00'). Cabins
     with no price are absent from the dict — renderer treats absence as '—'.
+    `totals` maps each cabin to the party's total price where one is known.
     """
 
     itinerary: Itinerary
     prices: dict[Cabin, str] = field(default_factory=dict)
+    totals: dict[Cabin, str] = field(default_factory=dict)
 
 
 def merge(
@@ -125,6 +129,7 @@ def merge(
     sort_by: Cabin,
     top_n: int,
     currency: str,
+    total_of: Callable[[Itinerary], str | None] | None = None,
     slices: int = 1,
 ) -> list[MultiCabinRow]:
     """Join itineraries across cabins. Sorted by `sort_by`'s price under
@@ -139,6 +144,10 @@ def merge(
 
     Itineraries that can't be keyed (no flight, a blank flight or no
     departure on a slice) are skipped.
+
+    `total_of` gives a listing's party total, read off the listing `prices`
+    holds. Rows still rank on `prices`: a party's total is one passenger's
+    price times a near-constant, so the order holds.
 
     `slices` is how many the search asked for. A separate-ticket listing with
     fewer is a round trip's outbound alone at Google's round-trip total, and
@@ -170,6 +179,11 @@ def merge(
         MultiCabinRow(
             itinerary=next(iter(by_cabin.values())),
             prices={cabin: it.price for cabin, it in by_cabin.items() if it.price},
+            totals={
+                cabin: total
+                for cabin, it in by_cabin.items()
+                if total_of and (total := total_of(it))
+            },
         )
         for by_cabin in listings.values()
     ]
