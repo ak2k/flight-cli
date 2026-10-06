@@ -16,6 +16,7 @@ from conftest import capture_err
 from flight_cli import _gflight_ids as gfid
 from flight_cli import cli
 from flight_cli._gf_errors import GfThrottledError
+from flight_cli.domain import Cabin, Leg, SearchOptions
 from test_envelope import _envelope_of
 from test_gf_auto_escalation import _rungs
 from test_gf_chunked_search import (
@@ -31,7 +32,7 @@ from test_gf_chunked_search import (
     _Priced,
     _search,
 )
-from test_gf_full_board import _DEP
+from test_gf_full_board import _DEP, _RET
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -368,3 +369,41 @@ def test_a_page_whose_returns_a_stop_left_unasked_keeps_its_outbound_insight(
     )
     assert [i["typical_low"] for i in env["insight"]] == [201.0, 202.0, 203.0, 204.0]
     assert [h["points"][0]["price"] for h in env["price_history"]] == [401.0, 402.0, 403.0, 404.0]
+
+
+@pytest.mark.parametrize("ask", ["search", "led"])
+def test_a_cabins_board_carries_the_stop_that_ended_its_pins_beside_its_cheapest_tab(
+    monkeypatch: pytest.MonkeyPatch, ask: str
+) -> None:
+    """A multi-cabin search reads each cabin's Cheapest tab, so each cabin's
+    board, alone or led by the sort cabin's pins, is the one the tab is added
+    to. The stop that ended its pins rides on it as on a one-cabin board, and
+    the tab is not asked on the wall."""
+
+    def no_sleep(*_a: object) -> None:
+        return None
+
+    monkeypatch.setattr(gfid.time, "sleep", no_sleep)
+    monkeypatch.setattr(gfid.random, "random", lambda: 0.0)
+    gets: list[Page] = []
+
+    def refuse(page: Page) -> Exception | None:
+        gets.append(page)
+        # The outbound page and the first pin are served; the second pin meets the wall.
+        return GfThrottledError("rate-limited") if len(gets) >= 3 else None
+
+    google = _Google([("JFK", "LAX"), ("LGA", "LAX"), ("EWR", "LAX")], refuse=refuse)
+    monkeypatch.setattr(gfid, "_one_call", google)
+    legs = (
+        Leg(origins=("JFK", "LGA", "EWR"), destinations=("LAX",), date=_DEP),
+        Leg(origins=("LAX",), destinations=("JFK", "LGA", "EWR"), date=_RET),
+    )
+    cabins = (Cabin.COACH, Cabin.BUSINESS)
+    plan = cli._CabinSearches(legs, SearchOptions(), cabins, 10, "http", False, Cabin.COACH, "show")
+    call = plan.search(Cabin.BUSINESS) if ask == "search" else plan.led(Cabin.BUSINESS, [])
+    board = call()
+    assert isinstance(board, gfid.Board)
+    assert isinstance(board.stopped, GfThrottledError), board.stopped
+    assert board.separate_failed is board.stopped
+    assert len(board) == 2  # the pin served before the stop, its two returns
+    assert google.cheapest == []
