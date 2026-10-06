@@ -8939,6 +8939,16 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
         and not fli_by_cabin[cab]
         and (dropped := getattr(fli_by_cabin[cab], "dropped", 0))
     }
+    # Said before the hand-off below, as the one-cabin path says them: shown or
+    # read, these itineraries could have answered a search that now goes to
+    # Matrix.
+    for cab in cabins:
+        if cab in fli_by_cabin:
+            _note_separate_tickets(
+                fli_by_cabin[cab], gf_mode=gf_mode, bags=opts.bags is not None, cabin=cab
+            )
+    if unchecked and separate_tickets == "show":
+        _note_unchecked_return(unchecked)
     if emptied and matrix_fallback:
         for cab, board in fli_by_cabin.items():
             _note_google_unread(cab, board)
@@ -8959,13 +8969,8 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
         err.print(f"[dim]{join_note}[/]")
     for cab in cabins:
         if cab in fli_by_cabin:
-            _note_separate_tickets(
-                fli_by_cabin[cab], gf_mode=gf_mode, bags=opts.bags is not None, cabin=cab
-            )
             _note_other_currencies(fli_by_cabin[cab], opts.currency or "USD")
             _note_stop_drops(fli_by_cabin[cab], cab)
-    if unchecked and separate_tickets == "show":
-        _note_unchecked_return(unchecked)
     for cab in emptied:
         err.print(
             f"[yellow]Google Flights {_safe_text(cab.value)}: "

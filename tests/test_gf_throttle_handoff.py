@@ -183,3 +183,30 @@ def test_every_narrowing_in_the_google_search_module_names_google() -> None:
         and not any(k.arg == "of" for k in node.keywords)
     ]
     assert unscoped == []
+
+
+def test_a_multi_cabin_hand_off_says_each_cabins_cheapest_tab_went_unread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red before: the multi-cabin path said its Cheapest-tab notes only below
+    its hand-off, so a search handed to Matrix never said a cabin's tab went
+    unread, where the one-cabin path says it ahead of the hand-off line."""
+
+    def nothing() -> None:
+        return None
+
+    _google(
+        monkeypatch,
+        nothing,
+        lambda: gfid.Board(dropped=5, separate_failed=GfThrottledError("rate-limited")),
+    )
+    env = _auto("--cash-only", "--cabin", "economy,business")
+    said = _said(env)
+    for cab in ("COACH", "BUSINESS"):
+        line = (
+            f"Google Flights {cab}: itineraries on separate tickets not read: "
+            "Google Flights rate-limited."
+        )
+        assert line in said, said
+        assert said.index(line) < said.index("Using Matrix:"), said
+    assert (env["backend"], env["complete"]) == ("matrix", True), env["notes"]

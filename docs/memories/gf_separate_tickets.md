@@ -57,10 +57,10 @@ The row filter can check that outbound and the round-trip total, never the
 return. So when the return carries a check Google's query does not apply, a
 Tier-2 predicate (`-AIRLINES AA`) or a time window, which Google widens to whole
 hours, the Cheapest tab is not read and one stderr line names the check. An
-empty one-cabin answer then hands off to Matrix as it does without the tab, and
-the line prints first, with the other separate-ticket notes, ahead of the
-`Using Matrix:` line. Every path that reads the tab makes this check
-(`cli._return_checks_google_skips`).
+empty answer then hands off to Matrix as it does without the tab, and the line
+prints first, with the other separate-ticket notes (each cabin's, on a
+multi-cabin search), ahead of the `Using Matrix:` line. Every path that reads
+the tab makes this check (`cli._return_checks_google_skips`).
 
 **One-way: none seen from a US IP.** One-way Cheapest boards carried no mark on
 FLL-LGA (114 rows), LAX-BKK (95), JFK-ATH (127), CMN-DXB or LAX-OKA. The decode
