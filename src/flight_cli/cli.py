@@ -3775,17 +3775,21 @@ def _open_jaw_tickets(
     jaw `legs` (`_open_jaw.combine`), or the plain-text reason there is none.
 
     A price cap holds each combination's total, as it would a trip's fare."""
+    from ._gflight_ids import search_escalation  # noqa: PLC0415 — fli, ~95 ms
     from ._open_jaw import combine  # noqa: PLC0415 — only an open jaw combines
 
     currency = opts.currency or "USD"
-    boards = _one_way_boards(
-        tuple((leg, _slice_route(leg)) for leg in legs),
-        opts,
-        top_n,
-        gf_mode,
-        gf_headed,
-        narrow=True,
-    )
+    # The one-ways are one search to `auto`: a throttle on the first moves the
+    # second to Chrome too, rather than to a ladder of its own on the same IP.
+    with search_escalation():
+        boards = _one_way_boards(
+            tuple((leg, _slice_route(leg)) for leg in legs),
+            opts,
+            top_n,
+            gf_mode,
+            gf_headed,
+            narrow=True,
+        )
     if isinstance(boards, str):
         return boards
     first, second = boards

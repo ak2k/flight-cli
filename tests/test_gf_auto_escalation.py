@@ -38,8 +38,10 @@ from test_gf_chunked_search import (
     _flat,
     _Google,
     _missing,
+    _row,
 )
 from test_gf_full_board import _DEP, _LAX, _RET, _URL, _served
+from test_open_jaw_search import _days, _first, _second
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -525,3 +527,61 @@ def test_a_thread_waiting_on_its_ladder_follows_a_siblings_escalation_to_chrome(
     assert all(isinstance(a, gfid.Board) for a in answers.values()), answers
     b_ladder = [("B", "http")] * (gfid._THROTTLE_RETRY_ATTEMPTS + 1)
     assert calls == [("A", "http"), *b_ladder, ("B", "line"), ("B", "chrome"), ("A", "chrome")]
+
+
+# ─────────── (j) the one-way tickets an open jaw and `--split` ask ───────────
+
+
+def _throttled(*_a: object, **_kw: object) -> Any:
+    raise GfThrottledError("rate-limited")
+
+
+def _open_jaw_arm() -> tuple[list[str], Callable[..., gfid.Board[gfid.GFlightWithId]], int]:
+    """An open jaw's two slices, Chrome answering each one-way by its origin,
+    and the total of the cheapest combination."""
+    out, back = _days()
+    boards = {"JFK": _first(), "CDG": _second()}
+
+    def chrome(filters: Any, *, currency: str = "USD", cheapest: bool = False) -> Any:
+        assert not cheapest, "a one-way ticket reads no Cheapest tab"
+        return gfid.Board(boards[filters.flight_segments[0].departure_airport[0][0].name])
+
+    args = ["--slice", f"JFK-LHR:{out}", "--slice", f"CDG-JFK:{back}", "--format", "json"]
+    return args, chrome, 861
+
+
+def _split_arm() -> tuple[list[str], Callable[..., gfid.Board[gfid.GFlightWithId]], int]:
+    """A Google round trip under `--split`, and the total of its pair: the
+    outbound one-way at 100 and a return one-way on the return day at 150."""
+    google = _Google(
+        [("JFK", "LAX")],
+        added=lambda page: (
+            [_row(7, _RET, "LAX", "JFK", 150.0)] if page == (("LAX",), ("JFK",)) else []
+        ),
+    )
+    args = ["JFK", "LAX", "--dep", _DEP.isoformat(), "--return", _RET.isoformat(), *_FAST_JSON]
+    return args, google, 250
+
+
+@pytest.mark.usefixtures("keep_sigint")
+@pytest.mark.parametrize("arm", [_open_jaw_arm, _split_arm], ids=["open-jaw", "split"])
+def test_the_one_way_tickets_are_asked_inside_the_searchs_one_escalation(
+    monkeypatch: pytest.MonkeyPatch,
+    arm: Callable[[], tuple[list[str], Callable[..., gfid.Board[gfid.GFlightWithId]], int]],
+) -> None:
+    """Every request after the first throttle is Chrome's, and the move is said
+    once, beside whichever answer the one-way tickets are asked for. The open
+    jaw is red at the merge: its one-ways were asked outside any search, so
+    each spent its own ladder and said the move again."""
+    events: list[str] = []
+    args, chrome, total = arm()
+    _rungs(monkeypatch, events, http=_throttled, chrome=chrome)
+    result = _run(*args, "--split", "--gf-transport", "auto")
+    assert result.exit_code == 0, result.output
+    assert events[:5] == ["http"] * 5, events
+    _no_http_after_chrome(events)
+    assert _flat(result.stderr).count(_LINE) == 1, result.stderr
+    ticket = json.loads(result.stdout)["split_ticket"]
+    # An open jaw's object lists its combinations; a round trip's is its pair.
+    cheapest = ticket["combinations"][0] if "combinations" in ticket else ticket
+    assert cheapest["total"] == total, ticket
