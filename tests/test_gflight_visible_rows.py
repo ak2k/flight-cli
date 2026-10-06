@@ -1,7 +1,7 @@
 # pyright: reportPrivateUsage=false
 """`-n` is one number for everything the user can act on.
 
-Google's search page serves its whole board — around thirty rows — whatever
+Google's search page serves its whole board — around a hundred rows — whatever
 count is asked of it, so the count is applied on the way out. What is under
 test is that the table, the JSON document, the pinned deep link and the award
 matcher are all handed the SAME set, and that the wide board still reaches the
