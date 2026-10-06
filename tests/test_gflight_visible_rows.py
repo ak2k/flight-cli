@@ -243,7 +243,7 @@ def test_the_award_matcher_is_given_the_rows_the_user_saw(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Awards are fanned out per itinerary and priced against its cash fare, so
-    a matcher handed the whole board spends thirty lookups to report on rows
+    a matcher handed the whole board spends about a hundred lookups to report on rows
     the user cannot pick."""
     seen: list[SearchResult] = []
 

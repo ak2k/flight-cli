@@ -337,7 +337,7 @@ class _SharedThrottleLadder:
         # the caller's own attempt count, and what guarantees the report arrives
         # is `retry_throttled`'s `finally`, which stands an owner down whatever
         # door it leaves by. The reasoning and the elapsed bounds live in the
-        # budget section of docs/memories/gf_throttle_ladder.md.
+        # docs/memories/gf_throttle_ladder.md.
         settled.wait()
         with self._lock:
             return None if round_.exhausted else 0.0

@@ -669,7 +669,7 @@ def test_a_last_attempt_still_books_the_rung_that_ends_the_round() -> None:
 
     Left unbooked, the round is merely released — so every waiter wakes to a
     budget that looks unspent and pays a GET each to learn what this call
-    already knows. What that costs is in the budget section of
+    already knows. What that costs is in
     docs/memories/gf_throttle_ladder.md."""
     ladder = _ladder()
     for _ in range(_gflight_ids._TRANSPORT_RETRY_ATTEMPTS):
