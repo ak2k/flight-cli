@@ -10925,7 +10925,15 @@ def _calendar_without_fast(
                 f"--format {fmt} reads it only under --gf-transport browser, which opens Chrome"
             )
         if not_asked is not None:
-            err.print(f"[dim]Google Flights price graph not asked: {_safe_text(not_asked)}.[/]")
+            # Beside a machine format it is one line, as the unpriced lines are, so
+            # a reader matches it whole; the table wraps it to the terminal.
+            if json_out:
+                err.print(
+                    f"[dim]Google Flights price graph not asked: {_safe_text(not_asked)}.[/]",
+                    soft_wrap=True,
+                )
+            else:
+                err.print(f"[dim]Google Flights price graph not asked: {_safe_text(not_asked)}.[/]")
             _envelope.explain("price_graph", f"not asked: {not_asked}")
     rps_now = _resolve_rps(rps)
     impersonate_now = _resolve_impersonate(impersonate)

@@ -409,3 +409,19 @@ def test_http_names_why_the_envelope_holds_no_graph(monkeypatch: pytest.MonkeyPa
     ]
     assert not any("price graph not asked" in n for n in env["notes"])
     assert env["complete"] is True
+
+
+def test_a_json_calendar_says_on_one_line_why_it_read_no_graph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At the 80 columns Rich gives a stderr that is no terminal, so a reader
+    matches it whole, as it does the unpriced lines and the two-lows note."""
+    _serve(monkeypatch, _fully_priced())
+    result = CliRunner().invoke(
+        cli.app, [*_ROUTE, "--format", "json", "--no-cache"], env={"COLUMNS": "80"}
+    )
+    assert result.exit_code == 0, result.output
+    assert result.stderr == (
+        "Google Flights price graph not asked: --format json reads it only under "
+        "--gf-transport browser, which opens Chrome.\n"
+    )
