@@ -609,6 +609,58 @@ def test_backend_gflight_awards_only_remedies_hold(
         assert result.exit_code == 0, (argv, result.output)
 
 
+_SELLERS = f"--sellers opens the booking page of a row on one ticket, and {_ALONE}. Drop it."
+
+
+@pytest.mark.parametrize(
+    ("given", "refusals"),
+    [
+        pytest.param(
+            ("--sellers", "--bags", "1"),
+            (_SELLERS, f"--bags prices bags on rows on one ticket, and {_ALONE}. Drop it."),
+            id="bags",
+        ),
+        pytest.param(
+            ("--sellers", "--exclude-basic"),
+            (
+                _SELLERS,
+                f"--exclude-basic asks for rows on one ticket without basic economy, and "
+                f"{_ALONE}. Drop it.",
+            ),
+            id="exclude-basic",
+        ),
+        pytest.param(
+            ("--sellers", "--pick", "99"),
+            (
+                _SELLERS,
+                f"--pick names a row on one ticket, and {_ALONE}. Drop it, or drop --backend "
+                "gflight.",
+            ),
+            id="pick",
+        ),
+    ],
+)
+def test_backend_gflight_refuses_sellers_beside_another_flag_one_at_a_time(
+    monkeypatch: pytest.MonkeyPatch, given: tuple[str, ...], refusals: tuple[str, ...]
+) -> None:
+    """Each refusal names one flag, and dropping each named flag in turn
+    answers the search. The multi-city refusal speaks before --sellers' own
+    check, whose "drop --bags or --sellers" would not hold here: dropping
+    either alone is refused on the other."""
+    google, matrix = _google(monkeypatch), _matrix(monkeypatch)
+    argv = ["--cash-only", "--backend", "gflight", *given]
+    for said in refusals:
+        refused = _search(*argv, slices=_slices())
+        assert refused.exit_code == 2, refused.output
+        assert said in _stderr(refused)
+        assert google.calls == [] and matrix.searches == []
+        at = argv.index(said.split()[0])
+        del argv[at : at + (1 if argv[at] in ("--sellers", "--exclude-basic") else 2)]
+    result = _search(*argv, slices=_slices())
+    assert result.exit_code == 0, (argv, result.output)
+    assert len(google.calls) == 3 and matrix.searches == []
+
+
 def test_backend_gflight_still_refuses_a_slice_round_trip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

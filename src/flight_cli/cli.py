@@ -11085,20 +11085,6 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
     # rather than reassigned: the parameter is declared `str` for typer's sake,
     # and reassigning it would throw away the narrowing this call just did.
     gf_mode = _resolve_gf_transport(gf_transport)
-    if sellers and (
-        blocker := _sellers_blocker(
-            backend=resolved,
-            multi_cabin=len(cabins_tuple) > 1,
-            awards_only=sel.awards_only,
-            awards_json=run_awards and json_out,
-            pick=pick,
-            page_size=page_size,
-            bags=bags,
-            exclude_basic=exclude_basic,
-        )
-    ):
-        err.print(f"[red]--sellers {_safe_text(blocker)}.[/]")
-        raise typer.Exit(2)
 
     # Each applies to no slice, on Matrix as on Google.
     top_codes = (
@@ -11142,6 +11128,24 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             awards=run_awards,
         )
         return
+
+    # Below the multi-city answer above, which refuses --sellers itself: this
+    # check's "drop --bags or --sellers" would not hold there, since Google's
+    # separate tickets refuse each of the two.
+    if sellers and (
+        blocker := _sellers_blocker(
+            backend=resolved,
+            multi_cabin=len(cabins_tuple) > 1,
+            awards_only=sel.awards_only,
+            awards_json=run_awards and json_out,
+            pick=pick,
+            page_size=page_size,
+            bags=bags,
+            exclude_basic=exclude_basic,
+        )
+    ):
+        err.print(f"[red]--sellers {_safe_text(blocker)}.[/]")
+        raise typer.Exit(2)
 
     if len(cabins_tuple) > 1:
         if beside_matrix and per_slice:
