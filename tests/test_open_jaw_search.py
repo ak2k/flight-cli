@@ -21,6 +21,7 @@ from flight_cli import _gflight_ids as gfid
 from flight_cli.domain import Leg, SearchOptions
 from flight_cli.models import SearchResult
 from test_envelope import _envelope_of, _notes
+from test_gf_rung_parity import _board
 from test_split_ticket import _row
 
 if TYPE_CHECKING:
@@ -607,3 +608,46 @@ def test_envelope_without_split_explains_the_null(monkeypatch: pytest.MonkeyPatc
     assert env["split_ticket"] is None
     assert _notes(env, "split_ticket") == ["split_ticket: --split was not asked"]
     assert _envelope.active() is False
+
+
+@pytest.mark.parametrize(
+    ("second", "said"),
+    [
+        pytest.param(None, None, id="shown"),
+        pytest.param(
+            [],
+            "No separate tickets on Google Flights: Google Flights priced no CDG→JFK one-way.",
+            id="emptied",
+        ),
+    ],
+)
+def test_a_one_way_board_at_the_row_cap_says_where_it_stops(
+    monkeypatch: pytest.MonkeyPatch, second: list[Any] | None, said: str | None
+) -> None:
+    """A ticket priced above the CDG→JFK board's cap may be missing from the
+    combinations, or be the one a board with no ticket lacks, so the board says
+    so, as a note: the envelope stays complete. Red before, which printed no
+    line for a one-way board."""
+    google = _google(monkeypatch, second=second)
+    _matrix(monkeypatch)
+
+    def capped(legs: tuple[Leg, ...], *a: Any, **kw: Any) -> gfid.Board[Any]:
+        board = google(legs, *a, **kw)
+        if legs[0].origins[0] == "CDG":
+            board.capped_at = _board("ds1_nyc_lon_token").capped_at
+        return board
+
+    monkeypatch.setattr(cli, "_gflight_results", capped)
+    line = (
+        "Google Flights CDG→JFK one-way stops at 300 rows for this search: "
+        "fares above USD1006.00 may be missing."
+    )
+    result = _search("--cash-only")
+    assert result.exit_code == 0, result.output
+    stderr = " ".join(result.stderr.split())
+    assert stderr.count(line) == 1, stderr
+    assert "JFK→LHR one-way stops" not in stderr
+    assert said is None or said in stderr, stderr
+    env = _envelope_of(_search("--cash-only", "--split", "--format", "envelope"))
+    assert (env["backend"], env["complete"]) == ("matrix", True), env["notes"]
+    assert line in env["notes"]

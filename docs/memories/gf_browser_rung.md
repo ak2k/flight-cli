@@ -82,7 +82,11 @@ each path that shows it prints one stderr line: `Google Flights stops at 300
 rows for this search: fares above USD1006.00 may be missing.` A round trip
 names its outbound page's figure, and a board merged from pages the lowest of
 every page read, one that holds no pin included. A board that shows separate
-tickets takes the lower of its own figure and the Cheapest tab's. It is a
+tickets takes the lower of its own figure and the Cheapest tab's. Each one-way
+board an open jaw or `--split` reads (`cli._one_way_boards`) prints its own
+line, labeled by its slice (`Google Flights CDG→JFK one-way stops at ...`) or
+leg (`return one-way`): once every leg answered, since the tickets drawn from
+it stop at its cap, or alone when it holds no ticket. It is a
 note, not a narrowing (`complete` stays true): on five same-run pairs every
 curated row priced at or below the cap was on the token board at the same
 price, and the curated-only rows started at USD1035. Two consequences follow.

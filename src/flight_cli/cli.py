@@ -3736,7 +3736,11 @@ def _one_way_boards(
 
     A leg whose pages met a stop (`_search_stop`) ends the asking, as a page's
     does in `_PageAsk`: every later leg would meet the same wall, so each is
-    named as not asked instead."""
+    named as not asked instead.
+
+    A board at Google's row cap says so (`_note_row_cap`) once every leg
+    answered, since the tickets drawn from it stop at its cap, or when it holds
+    no ticket, since one priced above its cap may be what it lacks."""
     from ._gf_browser import interrupt_guard  # noqa: PLC0415 — GF-only
 
     def unpriced(reason: str) -> str:
@@ -3748,7 +3752,9 @@ def _one_way_boards(
         return reason
 
     one_way = opts.model_copy(update={"max_price": None})
+    requested = opts.currency or "USD"
     boards: list[list[Any]] = []
+    read: list[tuple[str, Any]] = []
     with interrupt_guard(), _browser_scope(gf_mode):
         for i, (leg, which) in enumerate(legs):
             rest = [later for _, later in legs[i + 1 :]]
@@ -3771,9 +3777,11 @@ def _one_way_boards(
                 # booking, so tickets holding it would not be one booking each.
                 single = [r for r in priced if not _separately_ticketed(r)]
                 if not single:
+                    _note_row_cap(board, requested, one_way=which)
                     ticket = " on one ticket" if priced else ""
                     return f"Google Flights priced no {which} one-way{ticket}"
                 boards.append(single)
+                read.append((which, board))
             except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
                 raise
             except Exception as e:  # noqa: BLE001 — see the docstring
@@ -3781,6 +3789,8 @@ def _one_way_boards(
                 if rest and isinstance(e, _GF_STOPS):
                     failed += f", and {_one_ways_not_asked(rest)} after it stopped the search"
                 return unpriced(failed)
+    for which, board in read:
+        _note_row_cap(board, requested, one_way=which)
     return boards
 
 
@@ -5755,13 +5765,16 @@ def _note_stop_drops(results: list[Any], cabin: Cabin | None = None) -> None:
     err.print(f"[dim]{_safe_text(note)}[/]")
 
 
-def _note_row_cap(results: list[Any], requested: str, cabin: Cabin | None = None) -> None:
+def _note_row_cap(
+    results: list[Any], requested: str, cabin: Cabin | None = None, *, one_way: str | None = None
+) -> None:
     """One stderr line when the board stopped at Google's row cap, naming its
     highest fare: one above it may be missing. Called beside
     `_note_stop_drops`, by each path that shows the board, a board the routing
     emptied included: a match priced above the cap may be what is missing. That
     board has no row left to carry a currency, so the line names `requested`,
-    the one the page was asked for.
+    the one the page was asked for. `one_way` labels a one-way board an open
+    jaw or `--split` reads (`_one_way_boards`), as `cabin` labels a cabin's.
 
     A plain line, not a narrowing, so the envelope carries it as a note and
     `complete` keeps its meaning: every fare at or below the cap is on the
@@ -5780,7 +5793,13 @@ def _note_row_cap(results: list[Any], requested: str, cabin: Cabin | None = None
         if (ccy := cast("str | None", getattr(getattr(m, "flight", None), "currency", None)))
     )
     ccy = currencies.most_common(1)[0][0] if currencies else requested
-    google = "Google Flights" if cabin is None else f"Google Flights {cabin.value}"
+    google = (
+        f"Google Flights {cabin.value}"
+        if cabin is not None
+        else f"Google Flights {one_way} one-way"
+        if one_way is not None
+        else "Google Flights"
+    )
     note = (
         f"{google} stops at {_ROW_CAP:d} rows for this search: "
         f"fares above {ccy}{capped_at:.2f} may be missing."
