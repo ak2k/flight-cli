@@ -8836,10 +8836,22 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
 
     if run_pp:
         # Matrix sells one ticket and an award is one booking, so a row Google
-        # sells as separate tickets is neither matched nor valued.
-        one_ticket = [r for r in rows if r.itinerary.ticketing is None]
-        _note_award_skips(len(rows) - len(one_ticket))
-        rows = one_ticket
+        # sells as separate tickets is neither matched nor valued. The first
+        # `-n` one-ticket rows are joined anew, so a marked row that takes a
+        # table row takes none from the award table.
+        _note_award_skips(sum(r.itinerary.ticketing is not None for r in rows))
+        rows = _merge_cabins(
+            {
+                cab: res.model_copy(
+                    update={"solutions": [it for it in res.solutions if it.ticketing is None]}
+                )
+                for cab, res in results_by_cabin.items()
+            },
+            sort_by=sort_by,
+            top_n=top_n,
+            currency=opts.currency or "USD",
+            slices=len(legs),
+        )
         merged = _merge_results_into_one(results_by_cabin, rows)
         p = opts.pax
         run_pp_for_search(

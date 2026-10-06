@@ -183,6 +183,37 @@ def test_no_marked_row_reaches_the_award_matcher(monkeypatch: pytest.MonkeyPatch
     assert "50.00 ‡" in result.stdout
 
 
+def test_a_marked_row_takes_no_row_from_the_award_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    """At `-n 1` the table's one row is the marked one; the award matcher still
+    gets the cheapest one-ticket row, priced as it is with the marked rows
+    hidden. Red at the base, which shows no marked row."""
+    pools: list[list[tuple[str, dict[str, float]]]] = []
+
+    def _awards(res: SearchResult, **kw: Any) -> None:
+        cash: dict[int, dict[str, float]] = kw["cash_per_cabin"]
+        pools.append([(it.price or "", cash.get(id(it), {})) for it in res.solutions])
+
+    def _yes(_sel: cli.ProviderSelection) -> bool:
+        return True
+
+    monkeypatch.setattr(cli, "run_pp_for_search", _awards)
+    monkeypatch.setattr(cli, "_should_run_awards", _yes)
+    shown = _search(monkeypatch, _Google(), "-n", "1", cash_only=False)
+    hidden = _search(monkeypatch, _Google(), "-n", "1", "--no-separate-tickets", cash_only=False)
+    assert shown.exit_code == hidden.exit_code == 0, shown.output
+    assert "50.00 ‡" in shown.stdout
+    with_marks, without = pools
+    assert len(with_marks) == 1
+    assert with_marks == without
+    assert (
+        " ".join(shown.stderr.split()).count(
+            "Awards are matched to one-ticket rows; 1 row on separate tickets is not in the "
+            "award table."
+        )
+        == 1
+    )
+
+
 def test_awards_only_reads_no_cheapest_tab(monkeypatch: pytest.MonkeyPatch) -> None:
     """Green at the base."""
 
