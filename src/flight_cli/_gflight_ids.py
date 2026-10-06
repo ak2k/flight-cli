@@ -2744,8 +2744,18 @@ def _with_separate_tickets(
         return with_notes(answer, hidden=len(marked), filtered=filtered, unread=page.unread)
     # The insight's level is read off the cheapest fare the answer holds, and a
     # separate-ticket fare can undercut every one-ticket fare on the base board.
+    # Only fares in the insight's currency count: the level compares them with
+    # Google's range in that currency.
     insight = answer.insight
-    fares = [r.flight.price for r in marked if r.flight.price is not None]
+    fares = (
+        []
+        if insight is None
+        else [
+            p
+            for r in marked
+            if (p := r.flight.price) is not None and r.flight.currency == insight.currency
+        ]
+    )
     if insight is not None and fares:
         insight = replace(insight, cheapest=min(insight.cheapest, *fares))
     unread = page.unread
