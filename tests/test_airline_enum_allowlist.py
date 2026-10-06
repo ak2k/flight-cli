@@ -83,3 +83,25 @@ def test_the_guard_sees_the_enum_renamed_in_one_module_and_used_in_another(
 def test_the_guard_sees_the_enum_in_annotation_metadata_that_runs(source: str) -> None:
     """Typer and pydantic call what `Annotated` carries, so that is code, not a type."""
     assert _enum_lookups(ast.parse(source)) == [2]
+
+
+@pytest.mark.parametrize(
+    ("source", "lines"),
+    [
+        ("from fli.models import Airline\ndef f(c: Literal[Airline.W9]) -> None: ...", [2]),
+        ("from fli.models import Airline\ndef f() -> Literal[Airline['W9']]: ...", [2]),
+        ("from fli.models import Airline\nx: Annotated[str, Airline.W9]", [2]),
+        (
+            "from fli.models import Airline\n"
+            "class M(BaseModel):\n    carrier: Literal[Airline.W9] = Airline.W6",
+            [3, 3],
+        ),
+        ("from fli.models import Airline\ndef f(x: Airline) -> tuple[Airline, str]: ...", []),
+        ("import fli.models\nx: fli.models.Airline | None", []),
+    ],
+)
+def test_the_guard_sees_a_member_the_enum_names_inside_a_type(
+    source: str, lines: list[int]
+) -> None:
+    """`Literal[Airline.W9]` names a code, and pydantic hands it the W6 member."""
+    assert _enum_lookups(ast.parse(source)) == lines

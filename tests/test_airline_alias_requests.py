@@ -328,12 +328,20 @@ def _enum_lookups(tree: ast.AST) -> list[int]:
                 table.extend(node.body)
         elif isinstance(node, ast.TypeAlias) and node.name.id == "ItineraryKey":
             roots.append(node.value)
-    # A call or lambda in a type is `Annotated` metadata, which typer and pydantic run.
+    # A call or lambda in a type is `Annotated` metadata, which typer and pydantic
+    # run, and a member or subscript of the enum names a code, as `Literal` does.
     code = {
         id(sub)
         for root in roots
         for run in ast.walk(root)
         if isinstance(run, ast.Call | ast.Lambda)
+        or (
+            isinstance(run, ast.Attribute | ast.Subscript)
+            and (
+                (isinstance(run.value, ast.Name) and run.value.id in names)
+                or (isinstance(run.value, ast.Attribute) and run.value.attr == "Airline")
+            )
+        )
         for sub in ast.walk(run)
     }
     exempt = {id(sub) for root in roots for sub in ast.walk(root)} - code
