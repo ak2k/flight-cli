@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
+import itertools
 import json
 import pathlib
 import re
@@ -818,6 +819,54 @@ def test_every_fare_the_table_prints_is_a_row_of_its_cabin_in_the_document(
         assert listed[cab][:10] == own[:10], cab
     assert len(listed["BUSINESS"]) == 20
     assert len(listed["COACH"]) == 10
+
+
+def _in_euros(google: _Google, pins: dict[int, float]) -> Callable[..., gfid.Board[Any]]:
+    """`google` with business's return board on each outbound in `pins` priced
+    in EUR, from that fare up by one a return."""
+
+    def call(
+        filters: Any, transport: Any, *, currency: str = "USD", cheapest: bool = False
+    ) -> gfid.Board[gfid.GFlightWithId]:
+        board = google(filters, transport, currency=currency, cheapest=cheapest)
+        picked = filters.flight_segments[0].selected_flight
+        flight = None if picked is None else int(picked.legs[0].flight_number)
+        if filters.seat_type.name != "BUSINESS" or flight is None or flight not in pins:
+            return board
+        return gfid.Board(
+            [
+                replace(r, flight=r.flight.model_copy(update={"currency": "EUR", "price": fare}))
+                for r, fare in zip(board, itertools.count(pins[flight]), strict=False)
+            ]
+        )
+
+    return call
+
+
+@pytest.mark.parametrize("fmt", ["envelope", "json"])
+def test_the_cheapest_fare_the_table_names_is_a_row_of_its_cabin_in_the_document(
+    monkeypatch: pytest.MonkeyPatch, fmt: str
+) -> None:
+    """Business's returns on 105 and 106 are priced in EUR, below its USD1020 by
+    number, so they are its ten cheapest rows by amount. The line under the
+    table still names USD1020, and the document carries it. Red at the base."""
+    euros = {105: 900.0, 106: 910.0}
+    table = _search(monkeypatch, _in_euros(_reversed(monkeypatch), euros))
+    assert table.exit_code == 0, table.output
+    assert _OWN_LINE in table.stdout.splitlines()
+    document = _search(monkeypatch, _in_euros(_reversed(monkeypatch), euros), "--format", fmt)
+    if fmt == "envelope":
+        business = next(g for g in _envelope_of(document)["results"] if g["cabin"] == "BUSINESS")
+        listed = [(r["currency"], r["price"]) for r in business["rows"]]
+    else:
+        assert document.exit_code == 0, document.output
+        doc: dict[str, list[list[dict[str, Any]]]] = json.loads(document.stdout)
+        listed = [(row[-1]["currency"], row[-1]["price"]) for row in doc["BUSINESS"]]
+    assert listed[:10] == sorted(("EUR", base + j) for base in euros.values() for j in range(5))
+    assert listed[10] == ("USD", 1020.0)
+    assert [price for _, price in listed] == sorted(price for _, price in listed)
+    assert {("USD", p) for p in _cells(table.stdout)["BUSINESS"]} <= set(listed)
+    assert len(listed) == 21
 
 
 def test_the_table_and_both_documents_load_the_same_pages(monkeypatch: pytest.MonkeyPatch) -> None:

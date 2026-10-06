@@ -36,9 +36,12 @@ party. A party's solution Matrix states no total for has a null `price`: one
 passenger's price is not the trip's, and its `row` still carries it.
 A multi-cabin Google search lists, under each cabin, its `-n` cheapest rows,
 then, in price order, each other row of its board whose fare the table prints
-in that cabin. The table prices every cabin on the sort cabin's itineraries, so
-a fare it shows can sit far down another cabin's board; the rows added are read
-off the boards already fetched. A multi-cabin Matrix search lists each cabin's
+in that cabin, and the cabin's cheapest in the requested currency, which the
+line under the table names when no row shows it. The table prices every cabin
+on the sort cabin's itineraries, so a fare it shows can sit far down another
+cabin's board, and the `-n` cheapest are cheapest by amount, so rows Google
+priced in another currency can come before it; the rows added are read off the
+boards already fetched. A multi-cabin Matrix search lists each cabin's
 whole answer.
 A `calendar --fast` trip-length range writes every priced length's cells to
 `results` as one list, each the object the range document's `graphs[].grid`

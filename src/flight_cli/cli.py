@@ -9270,18 +9270,26 @@ class _MatrixHandOff(NamedTuple):
 
 
 def _cabin_document_rows(
-    board: list[Any], rows: list[MultiCabinRow], cabin: Cabin, top_n: int
+    board: list[Any],
+    rows: list[MultiCabinRow],
+    cabin: Cabin,
+    top_n: int,
+    *,
+    own: Itinerary | None,
 ) -> list[Any]:
     """`cabin`'s Google board as a multi-cabin document carries it: its `top_n`
     cheapest rows, then, in price order, each other row whose fare the joined
-    table `rows` prints in `cabin`.
+    table `rows` prints in `cabin`, and `own`, the cabin's cheapest listing in
+    the requested currency, which the table names under it when no row shows it.
 
     The table prices every cabin on the sort cabin's itineraries, so a fare it
     prints can sit far down another cabin's board; without it, the document
-    and the table of one search would hold different fares. The count is the
-    user's, not the bumped one the cabins were queried at, which only gives
-    the join overlap. A table row's listing is found by its itinerary key and
-    price, the first such row in price order, as the join keeps it."""
+    and the table of one search would hold different fares. The `top_n` are
+    cheapest by the bare amount, so rows Google priced in another currency can
+    fill them ahead of `own`. The count is the user's, not the bumped one the
+    cabins were queried at, which only gives the join overlap. A listing is
+    found by its itinerary key and price, the first such row in price order,
+    as the join keeps it."""
     from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
 
     def listing(r: Any) -> tuple[object, str | None] | None:
@@ -9294,7 +9302,10 @@ def _cabin_document_rows(
         (itinerary_key(row.itinerary), price)
         for row in rows
         if (price := row.prices.get(cabin)) is not None
-    } - {listing(r) for r in carried}
+    }
+    if own is not None and own.price is not None:
+        wanted.add((itinerary_key(own), own.price))
+    wanted -= {listing(r) for r in carried}
     for r in ordered[top_n:]:
         if not wanted:
             break
@@ -9411,14 +9422,20 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
         currency=opts.currency or "USD",
         slices=len(legs),
     )
+
+    def document_rows(cab: Cabin, board: list[Any]) -> list[Any]:
+        res = results_by_cabin.get(cab)
+        own = cheapest(res, currency=opts.currency or "USD") if res is not None else None
+        return _cabin_document_rows(board, rows, cab, top_n, own=own)
+
     if _envelope.active():
         for cab, board in fli_by_cabin.items():
-            _record_google_cabin(cab, _cabin_document_rows(board, rows, cab, top_n), board)
+            _record_google_cabin(cab, document_rows(cab, board), board)
         if not run_pp:
             return None
     elif json_out and not run_pp:
         out = {
-            cab.value: _gflight_json_document(_cabin_document_rows(board, rows, cab, top_n))
+            cab.value: _gflight_json_document(document_rows(cab, board))
             for cab, board in fli_by_cabin.items()
         }
         sys.stdout.write(json.dumps(out, indent=2, default=str))
