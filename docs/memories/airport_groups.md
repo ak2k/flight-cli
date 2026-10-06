@@ -24,16 +24,19 @@ handles the airport-equivalence semantics.
 member airport below at once, because Google's search page takes airport codes
 only (repeated per leg); Matrix still gets the code itself. The six below that
 are also an airport code (`HOU`, `LAX`, `BER`, `SHA`, `BKK`, `DPS`) stay that one
-airport on Google Flights. A leg of more than 11 airports, origins plus
-destinations after expansion, goes to Matrix: Google's page declined 15 on one
-side outright. `src/flight_cli/_metro.py` holds the same table, and
-`tests/test_metro.py` fails when the two differ. `flight calendar` expands
-them the same way, under the same bound: Google's price graph over a set
-prices each date at its cheapest member airport, alone under `--fast` and
+airport on Google Flights. One Google page takes at most 11 airports a leg,
+origins plus destinations after expansion (it refused 12 on one leg, and 15 on
+one side). A single-cabin search over that is asked as several pages, each
+(origin, destination) pair on one, and the rows merged. A leg past 8 pages, a
+multi-cabin search over 11, and a leg with an airport at both ends go to Matrix
+(see `gf_multi_page_legs.md`). `src/flight_cli/_metro.py` holds the same
+table, and `tests/test_metro.py` fails when the two differ. `flight calendar`
+expands them the same way, under the one-page bound of 11: Google's price graph
+over a set prices each date at its cheapest member airport, alone under `--fast` and
 printed after Matrix's calendar without it. Matrix answers a set, metro codes
 split into the airports below, with one query per airport pair, merged in one
 currency with each day naming its pair, and on a round trip with the combined
-query beside them (see `gf_routing_and_carriers.md`).
+query beside them (see `gf_date_grid.md`).
 
 | Metro | IATA metro | Constituent airports |
 |---|---|---|

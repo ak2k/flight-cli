@@ -770,7 +770,7 @@ def test_the_fanout_note_names_the_combined_query_on_both_formats(
     note = _flat(cap.err)
     assert "Queried 2 airport pairs separately plus the combined query, and merged" in note
     assert (
-        "Round trips that return to another airport of the set come only from the combined "
+        "Round trips that return to a different origin airport come only from the combined "
         "query, which Matrix may under-report." in note
     )
     assert "Queried" not in cap.out
@@ -815,7 +815,7 @@ def test_a_lost_combined_query_is_not_described_as_merged(
     assert "plus the combined query" not in note
     assert "come only from the combined query" not in note
     assert (
-        "Round trips that return to another airport of the set are missing: only the "
+        "Round trips that return to a different origin airport are missing: only the "
         "combined query prices them, and it failed." in note
     )
 
@@ -1648,12 +1648,12 @@ def test_render_calendar_round_trip_keeps_nights_and_columns(
 # `--fast || fallback` read Matrix output as a fast grid. Each shape now refuses.
 
 
-@pytest.mark.parametrize("transport", ["http", "browser"])
+@pytest.mark.parametrize("transport", ["http"])
 def test_fast_refuses_a_trip_length_range(
     transport: str, monkeypatch: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The page's graph prices ONE trip length, so the default `5-7` has no single
-    question to ask it, on either transport."""
+    """The RPC grid prices ONE trip length, so over http the default `5-7` has no
+    single question to ask it. The browser asks one price graph per length."""
     monkeypatch.setattr(cli, "MatrixClient", _PricedClient)
     monkeypatch.setattr("flight_cli._gf_browser.session", _no_browser)
     calls = _spy_renderers(monkeypatch)
@@ -4524,6 +4524,8 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_run_calendar", "n"),  # fan-out counters
         ("_run_calendar", "rounds"),
         ("_run_calendar", "conc"),
+        # One or two fixed phrases _combined_only_sides wrote, joined by " or ".
+        ("_run_matrix_calendar", "sides"),
         # A title clause this module wrote, printed only for an airport set.
         ("_render_date_grid", "_ACROSS_SET_TITLE"),
         ("_render_graph_range", "_ACROSS_SET_TITLE"),
@@ -4549,10 +4551,14 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         # tests in `tests/test_gf_browser.py` are what hold these.
         ("_run_gflight_path", "refusal.message"),
         ("_run_gflight_path", "note"),  # a refusal's note, or `_safe_text` of a failure
+        ("_note_separate_tickets", "note"),  # a refusal's note
         ("_report_enriched_gf_failure", "refusal.note"),
         ("_report_enriched_gf_failure", "refusal.message"),
         ("query_cabin", "refusal.note"),
         ("note_missing_column", "note"),
+        # A refusal's note, or a sentence around the page number that stopped
+        # the search; tests/test_gf_chunked_search.py prints a hostile one.
+        ("_report_pages", "why"),
         # Built here from the pin budget, and every part of it is ours.
         ("_run_gflight_path_multi", "join_note"),
         ("_validate_sort_cabin", "sort_by.value"),  # the same enum, one command over
@@ -4585,6 +4591,9 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_render_multi_cabin_search", "out_cell"),
         ("_render_multi_cabin_search", "ret_cell"),
         ("_render_multi_cabin_search", "price_cells"),
+        # `_fmt_slice_cell` of a Google one-way; the hostile flight number of
+        # tests/test_open_jaw_search.py holds it.
+        ("_render_open_jaw", "ticket"),
         ("_render_calendar", "row"),
         ("_render_gflight_table", "label"),  # the row number, and its a/b suffix
         ("_render_gflight_table", "dur"),  # "3h05m", from an integer count of minutes
@@ -4601,6 +4610,8 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_render_multi_cabin_search", "cabin_labels"),
         ("_render_multi_cabin_search", "sort_label"),
         ("_render_multi_cabin_search", "letter"),
+        # Whether a shown row is marked, a bool this function computed.
+        ("_render_multi_cabin_search", "shows_mark"),
         # `pp/cli.py`: cells composed from leaves each wrapped where they were read,
         # and not wrapped again whole, because `_fmt_award_cell` writes its `[dim]`
         # and `[yellow]` on purpose. The arms of

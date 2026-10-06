@@ -59,6 +59,11 @@ With no routing codes set the SPA **omits all four keys**; with any set it
 emits all four (blank string for the unused ones). `_spa_routing_fields`
 mirrors that, so our links stay byte-identical to the app's own in both cases
 — the tracked fixtures in `tests/fixtures/matrix_url/` cover both shapes.
+The calendar slice uses the same `_spa_routing_fields`, so `routingRet`/`extRet`
+hold the return's own codes, and a return that copies the outbound's codes
+repeats them. The calendar link was not recaptured from the SPA for a copied
+return: its explicit codes follow the specific-date link, and a recapture with
+`research/record_user_session.py` is the way to confirm them.
 
 ## Capture recipe
 

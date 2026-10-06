@@ -23,14 +23,16 @@ import stamina
 from typer.testing import CliRunner
 
 from flight_cli import _gflight_ids as gfid
-from flight_cli import cli
+from flight_cli import _verify, cli
 from flight_cli._gf_common import PageFetch
 from flight_cli.client import MatrixClient
 from flight_cli.domain import SearchOptions
+from test_envelope import _envelope_of
 from test_verify import (
     _DEP,
     _SEARCH,
     _URL,
+    _as_row,
     _booked,
     _chain,
     _details_of,
@@ -375,6 +377,39 @@ def test_a_silent_summary_beside_a_candidate_flown_a_day_later_is_no_answer(
     assert matrix.summarized() == [("viewDetails", "DL-0")]
 
 
+@pytest.mark.parametrize("left_out", ["the summary's stop", "a booked flight"])
+def test_a_connection_the_answer_leaves_out_is_no_answer_rather_than_another_itinerary(
+    tmp_path: pathlib.Path, left_out: str
+) -> None:
+    """The AS21 AS487 row asked as its exact flights: the one solution is the
+    row, its summary silent on the connection or its details on AS487."""
+    _n, row = _as_row()
+    fake = _Matrix()
+    sol = _row_solution("AS-1", _price(row), row)
+    details = _details_of(row)
+    if left_out == "the summary's stop":
+        del sol["itinerary"]["slices"][0]["stops"]
+        why = _SUMMARY_SILENT
+    else:
+        details["bookingDetails"]["itinerary"]["slices"][0]["segments"].pop()
+        why = (
+            "Matrix returned booking details that do not state every flight's number, "
+            "airports and times, so this itinerary cannot be checked flight by flight."
+        )
+    fake.chain = _chain(sol)
+    fake.details = {"AS-1": details}
+
+    async def go() -> Any:
+        c = MatrixClient(api_key="test-key", cache_dir=str(tmp_path), rps=1000.0)
+        c._http._client = httpx.AsyncClient(transport=httpx.MockTransport(fake.handler))
+        async with c:
+            return await cli._exact_flights_on(c, _verify.google_row(row), SearchOptions())
+
+    with pytest.raises(cli._UncheckableAnswerError) as raised:
+        anyio.run(go)
+    assert str(raised.value) == why
+
+
 def test_a_chain_past_the_bound_is_no_answer_and_leaves_the_table(
     gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
@@ -571,3 +606,46 @@ def test_fast_and_verify_runs_ask_matrix_nothing_more(
             SearchOptions().page_size
         ]
         assert _routed(matrix) == matrix.searches()
+
+
+# ─────────────────────────────── the envelope ───────────────────────────────
+
+
+def test_the_envelope_carries_the_check_inside_its_cross_check(
+    gf_session: Callable[..., Any], matrix: _Matrix
+) -> None:
+    """The envelope's `cross_check` is the object `--format json` prints,
+    `low_check` included, and the check's stderr line is one of its notes."""
+    low = _low()
+    price = _price(low)
+    matrix.probe = _chain(_b6("USD999.00"))
+    matrix.chain = _chain(_row_solution("DL-1", price, low))
+    matrix.details = {"DL-1": _details_of(low)}
+    gf_session(_served())
+    document = _run("-n", "10", "--enrich", "--format", "json")
+    assert document.exit_code == 0, document.output
+    gf_session(_served())
+    env = _envelope_of(_run("-n", "10", "--enrich", "--format", "envelope"))
+    assert env["cross_check"] == json.loads(document.stdout)["cross_check"]
+    assert env["cross_check"]["low_check"]["outcome"] == "match"
+    assert env["complete"] is True
+    assert "Asking Matrix for row 1's exact flights (at most 60 s)…" in env["notes"]
+
+
+def test_a_check_matrix_did_not_answer_leaves_the_envelope_complete(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """No flag asks for the check, so its failure leaves every key that was
+    asked for whole; `low_check` says Matrix did not answer, and why."""
+    fake = _ChainError()
+    _install(monkeypatch, tmp_path, fake, fake.refuse)
+    fake.probe = _chain(_b6("USD999.00"))
+    gf_session(_served())
+    env = _envelope_of(_run("-n", "10", "--enrich", "--format", "envelope"))
+    low_check = env["cross_check"]["low_check"]
+    assert (low_check["outcome"], low_check["reason"]) == (
+        "no-answer",
+        "Matrix returned an error (internal): boom",
+    )
+    assert env["complete"] is True
+    assert len(_routed(fake)) == 1

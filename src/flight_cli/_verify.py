@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
+from ._cross_check import separate_tickets_reason
 from ._enrich import party_price
 from ._multi_cabin import parse_price, price_currency
 from .domain import Leg, SearchOptions
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
         SliceEndpoint,
     )
 
-Outcome = Literal["match", "other-itinerary", "no-solution", "carrier-absent"]
+Outcome = Literal["match", "other-itinerary", "no-solution", "carrier-unseen", "separate-tickets"]
 
 
 class Flight(NamedTuple):
@@ -53,10 +54,12 @@ class Flight(NamedTuple):
 
 
 class Row(NamedTuple):
-    """A Google row: each slice's legs, and the price the table prints."""
+    """A Google row: each slice's legs, the price the table prints, and how
+    Google sells it when that is more than one ticket."""
 
     slices: tuple[tuple[Flight, ...], ...]
     price: str | None
+    ticketing: str | None = None
 
 
 class Verdict(NamedTuple):
@@ -124,7 +127,12 @@ def google_row(r: Any) -> Row:
     )
     fare = results[-1]
     price: float | None = fare.price
-    return Row(slices, None if price is None else f"{fare.currency or 'USD'}{price:.2f}")
+    kinds = {getattr(m, "ticketing", None) for m in members}
+    return Row(
+        slices,
+        None if price is None else f"{fare.currency or 'USD'}{price:.2f}",
+        next((k for k in ("self_transfer", "separate_tickets") if k in kinds), None),
+    )
 
 
 def _folded(codes: Sequence[str]) -> list[str]:
@@ -279,6 +287,15 @@ def _join(items: Sequence[str]) -> str:
     return ", ".join(items)
 
 
+def on_separate_tickets(row: Row) -> Verdict | None:
+    """The verdict on a row Google sells as separate tickets, decided without
+    asking Matrix, which prices one ticket and so never this booking; None for
+    a one-ticket row."""
+    if row.ticketing is None:
+        return None
+    return Verdict("separate-tickets", separate_tickets_reason(row.ticketing))
+
+
 def other_itinerary(answered: int) -> Verdict:
     plural = "y" if answered == 1 else "ies"
     return Verdict(
@@ -317,8 +334,8 @@ def listed_carriers(probe: SearchResult) -> set[str]:
 def unpriced(row: Row, probe: SearchResult) -> Verdict:
     """Why Matrix has no fare for the row's flights, from the same legs asked
     without the chain and with at most the row's most stops in a slice. A
-    carrier is absent only when that answer lists itineraries and names none
-    of its."""
+    carrier is unseen when that answer lists itineraries and names none of
+    its, which says nothing about Matrix's other trips."""
     stops = most_stops(row)
     within = f"with at most {stops:d} stop{'' if stops == 1 else 's'}"
     if not probe.solutions:
@@ -331,10 +348,12 @@ def unpriced(row: Row, probe: SearchResult) -> Verdict:
     carriers = list(dict.fromkeys(f.carrier for s in row.slices for f in s))
     missing = tuple(c for c in carriers if c not in listed)
     if missing:
+        read, total = len(probe.solutions), probe.solution_count
+        of = f" of {total:d}" if total > read else ""
         return Verdict(
-            "carrier-absent",
-            f"Matrix lists no itinerary {within} on {_join(missing)} for this route "
-            f"and day; it lists {_join(sorted(listed))}",
+            "carrier-unseen",
+            f"none of the {read:d}{of} trips Matrix returned {within} names "
+            f"{_join(missing)} for this route and day; they name {_join(sorted(listed))}",
             missing_carriers=missing,
         )
     return Verdict(

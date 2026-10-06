@@ -128,7 +128,9 @@ than the grid priced. The followup body carries a time window as each slice's
 `timeRanges` and availability as `checkAvailability`, and Matrix applies the
 window: live 2026-10-01, a `calendarFollowup` JFK-LAX 2026-10-20 one-way with
 the morning window (`8:00`-`11:00`) gave 8 of 8 solutions departing 08:00 to
-11:00, both ends inclusive.
+11:00, both ends inclusive. A one-way `detail` refuses `--return-times`,
+`--routing-ret` and `--ext-ret` with exit 2, because they set the return and a
+one-way has none, as `search` does for the codes.
 
 A multi-airport or metro calendar is asked one airport pair per query, so
 `detail` also needs the pair that priced the picked cell, not the calendar's

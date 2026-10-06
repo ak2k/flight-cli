@@ -38,6 +38,7 @@ from flight_cli._gflight_ids import GFlightWithId
 from flight_cli.client import MatrixClient
 from flight_cli.domain import Cabin, Pax, SearchOptions
 from flight_cli.models import BookingDetailsResult, SearchResult
+from test_envelope import _envelope_of, _notes, _rows
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -453,11 +454,12 @@ _WN = _row(
 )
 
 
-def test_a_carrier_the_route_lists_nowhere_is_named_absent() -> None:
+def test_a_carrier_the_route_lists_nowhere_is_named_unseen() -> None:
     verdict = v.unpriced(_WN, _probe("AA", "DL", "F9", "XE", "UA"))
-    assert verdict.outcome == "carrier-absent"
+    assert verdict.outcome == "carrier-unseen"
     assert verdict.missing_carriers == ("WN",)
     assert verdict.reason is not None
+    assert "none of the 5 trips Matrix returned" in verdict.reason
     assert "WN" in verdict.reason
     assert "AA, DL, F9, UA, XE" in verdict.reason
     assert "at most 0 stops" in verdict.reason
@@ -469,7 +471,7 @@ def test_a_carrier_the_route_lists_is_no_solution() -> None:
     assert verdict.missing_carriers == ()
 
 
-def test_an_empty_probe_proves_no_carrier_absent() -> None:
+def test_an_empty_probe_names_no_unseen_carrier() -> None:
     verdict = v.unpriced(_WN, SearchResult.from_api({"solutionList": {"solutions": []}}))
     assert verdict.outcome == "no-solution"
     assert verdict.missing_carriers == ()
@@ -933,7 +935,7 @@ def _listing(*carriers: str) -> dict[str, Any]:
     return _probe(*carriers).raw or {}
 
 
-def test_a_carrier_matrix_lists_nowhere_is_named(
+def test_a_carrier_matrix_lists_nowhere_is_not_seen(
     gf_session: Callable[..., Any], matrix: _Matrix
 ) -> None:
     n, _ = _as_row()
@@ -942,7 +944,7 @@ def test_a_carrier_matrix_lists_nowhere_is_named(
     result = _run("-n", "40", "--verify", "--pick", str(n), "--format", "json")
     assert result.exit_code == 0, result.output
     verdict = json.loads(result.stdout)["verify"]
-    assert verdict["outcome"] == "carrier-absent"
+    assert verdict["outcome"] == "carrier-unseen"
     assert verdict["missing_carriers"] == ["AS"]
     assert "AS" in verdict["reason"]
     assert verdict["matrix"] is None
@@ -996,6 +998,306 @@ def test_booking_details_without_their_flights_fail_rather_than_claim_another_tr
     assert result.exit_code == 1, result.output
     assert json.loads(result.stdout)["verify"] is None
     assert "cannot be checked flight by flight" in " ".join(result.stderr.split())
+
+
+def _gives_no_verdict(result: Any, fmt: str, why: str) -> None:
+    """Exit 1 with `why` on stderr after the search's own output, and no
+    verdict in either format."""
+    assert result.exit_code == 1, result.output
+    assert why in _flat(result.stderr)
+    assert "other itinerar" not in _flat(result.output)
+    if fmt == "json":
+        doc = json.loads(result.stdout)
+        assert doc["verify"] is None
+        assert len(doc["search"]) == 40
+    else:
+        assert "Google Flights" in result.stdout
+        assert "Not verified" not in result.stdout
+
+
+@pytest.mark.parametrize("fmt", ["table", "json"])
+@pytest.mark.parametrize("listed", ["no-candidate", "a-candidate-flown-a-day-later"])
+def test_a_page_short_of_matrixs_answer_gives_no_verdict(
+    gf_session: Callable[..., Any], matrix: _Matrix, fmt: str, listed: str
+) -> None:
+    """Matrix answers one more solution than the chain's page holds, and the
+    row's own itinerary is the one past it."""
+    n, row = _as_row()
+    page = SearchOptions().page_size
+    later = [_row_solution(f"AS-{i}", "USD100.00", row, lands_later=1) for i in range(page)]
+    if listed == "a-candidate-flown-a-day-later":
+        later[0] = _row_solution("AS-0", "USD100.00", row)
+        matrix.details = {"AS-0": _details_of(row, later={0: 1})}
+    matrix.chain = _chain(*later, _row_solution("AS-1", f"USD{row.flight.price:.2f}", row))
+    gf_session(_served())
+    result = _run("-n", "40", "--fast", "--verify", "--pick", str(n), "--format", fmt)
+    _gives_no_verdict(
+        result,
+        fmt,
+        f"Matrix listed only {page:d} of its {page + 1:d} itineraries on these flights, "
+        "and none listed is these exact flights.",
+    )
+
+
+@pytest.mark.parametrize(
+    "silent_on", ["flights", "origin", "destination", "departure", "arrival", "itinerary"]
+)
+def test_a_summary_short_of_a_slice_field_gives_no_verdict(
+    gf_session: Callable[..., Any], matrix: _Matrix, silent_on: str
+) -> None:
+    """The row's own itinerary, its summary silent on one field, so it is no
+    candidate and booking details are never asked of it."""
+    n, row = _as_row()
+    sol = _row_solution("AS-1", f"USD{row.flight.price:.2f}", row)
+    if silent_on == "itinerary":
+        del sol["itinerary"]
+    else:
+        del sol["itinerary"]["slices"][0][silent_on]
+    matrix.chain = _chain(sol)
+    matrix.details = {"AS-1": _details_of(row)}
+    gf_session(_served())
+    result = _run("-n", "40", "--fast", "--verify", "--pick", str(n))
+    _gives_no_verdict(
+        result,
+        "table",
+        "Matrix listed an itinerary that does not state every slice's flights, airports and "
+        "times, so it cannot be checked flight by flight.",
+    )
+    assert matrix.summarized() == []
+
+
+_DETAILS_SHORT_OF_A_FLIGHT = (
+    "Matrix returned booking details that do not state every flight's number, airports "
+    "and times, so this itinerary cannot be checked flight by flight."
+)
+_DETAILS_WITHOUT_FLIGHTS = (
+    "Matrix returned booking details without their flights, so this itinerary cannot be "
+    "checked flight by flight."
+)
+
+
+def _without_departures(row: Any) -> dict[str, Any]:
+    details = _details_of(row)
+    for segment in details["bookingDetails"]["itinerary"]["slices"][0]["segments"]:
+        del segment["departure"], segment["legs"][0]["departure"]
+    return details
+
+
+@pytest.mark.parametrize("fmt", ["table", "json"])
+def test_details_short_of_a_flight_give_no_verdict(
+    gf_session: Callable[..., Any], matrix: _Matrix, fmt: str
+) -> None:
+    """A flight with no departure compares unequal to every flight, so the
+    candidate may be the row."""
+    n, row = _as_row()
+    matrix.chain = _chain(_row_solution("AS-1", f"USD{row.flight.price:.2f}", row))
+    matrix.details = {"AS-1": _without_departures(row)}
+    gf_session(_served())
+    result = _run("-n", "40", "--fast", "--verify", "--pick", str(n), "--format", fmt)
+    _gives_no_verdict(result, fmt, _DETAILS_SHORT_OF_A_FLIGHT)
+    assert matrix.summarized() == [("viewDetails", "AS-1")]
+
+
+def test_the_first_unreadable_candidate_in_matrixs_order_says_why(
+    gf_session: Callable[..., Any], matrix: _Matrix
+) -> None:
+    n, row = _as_row()
+    price = f"USD{row.flight.price:.2f}"
+    matrix.chain = _chain(_row_solution("AS-1", price, row), _row_solution("AS-2", price, row))
+    short: dict[str, Any] = _without_departures(row)
+    without: dict[str, Any] = {"bookingDetails": {}}
+    for first, second, why, not_why in [
+        (short, without, _DETAILS_SHORT_OF_A_FLIGHT, _DETAILS_WITHOUT_FLIGHTS),
+        (without, short, _DETAILS_WITHOUT_FLIGHTS, _DETAILS_SHORT_OF_A_FLIGHT),
+    ]:
+        matrix.details = {"AS-1": first, "AS-2": second}
+        gf_session(_served())
+        result = _run("-n", "40", "--fast", "--verify", "--pick", str(n))
+        _gives_no_verdict(result, "table", why)
+        assert not_why not in _flat(result.stderr)
+
+
+def _without_a_session(row: Any, answer: str) -> dict[str, Any]:
+    """A chain answer with no session in which no solution is a candidate:
+    cut short of Matrix's answer, with a summary silent on its flights, or
+    whole."""
+    page = SearchOptions().page_size
+    later = [_row_solution(f"AS-{i}", "USD100.00", row, lands_later=1) for i in range(page)]
+    own = _row_solution("AS-1", f"USD{row.flight.price:.2f}", row)
+    if answer == "short-page":
+        chain = _chain(*later, own)
+    elif answer == "summary-short-of-a-slice-field":
+        del own["itinerary"]["slices"][0]["flights"]
+        chain = _chain(own)
+    else:
+        chain = _chain(*later)
+    del chain["session"]
+    return chain
+
+
+@pytest.mark.parametrize("fmt", ["table", "json"])
+@pytest.mark.parametrize(
+    ("answer", "why"),
+    [
+        pytest.param(
+            "short-page",
+            f"Matrix listed only {SearchOptions().page_size:d} of its "
+            f"{SearchOptions().page_size + 1:d} itineraries on these flights, "
+            "and none listed is these exact flights.",
+            id="short-page",
+        ),
+        pytest.param(
+            "summary-short-of-a-slice-field",
+            "Matrix listed an itinerary that does not state every slice's flights, airports "
+            "and times, so it cannot be checked flight by flight.",
+            id="summary-short-of-a-slice-field",
+        ),
+    ],
+)
+def test_with_no_candidate_the_page_is_named_before_a_missing_session(
+    gf_session: Callable[..., Any], matrix: _Matrix, fmt: str, answer: str, why: str
+) -> None:
+    """With no candidate the low check reads the page alone, and names what
+    keeps it from being read whole."""
+    n, row = _as_row()
+    matrix.chain = _without_a_session(row, answer)
+    gf_session(_served())
+    result = _run("-n", "40", "--fast", "--verify", "--pick", str(n), "--format", fmt)
+    _gives_no_verdict(result, fmt, why)
+    assert "without a session" not in _flat(result.stderr)
+    assert matrix.summarized() == []
+
+
+def test_a_whole_page_without_a_session_still_says_so(
+    gf_session: Callable[..., Any], matrix: _Matrix
+) -> None:
+    n, row = _as_row()
+    matrix.chain = _without_a_session(row, "whole")
+    gf_session(_served())
+    result = _run("-n", "40", "--fast", "--verify", "--pick", str(n))
+    _gives_no_verdict(
+        result,
+        "table",
+        "Matrix answered without a session for these flights, so they cannot be checked "
+        "flight by flight.",
+    )
+    assert matrix.summarized() == []
+
+
+@pytest.mark.parametrize("fmt", ["table", "json"])
+def test_a_connecting_summary_without_its_stop_gives_no_verdict(
+    gf_session: Callable[..., Any], matrix: _Matrix, fmt: str
+) -> None:
+    """The row's own itinerary, its summary silent on the airport its two
+    flights connect at, so it is no candidate."""
+    n, row = _as_row()
+    sol = _row_solution("AS-1", f"USD{row.flight.price:.2f}", row)
+    del sol["itinerary"]["slices"][0]["stops"]
+    matrix.chain = _chain(sol)
+    matrix.details = {"AS-1": _details_of(row)}
+    gf_session(_served())
+    result = _run("-n", "40", "--fast", "--verify", "--pick", str(n), "--format", fmt)
+    _gives_no_verdict(
+        result,
+        fmt,
+        "Matrix listed an itinerary that does not state every slice's flights, airports and "
+        "times, so it cannot be checked flight by flight.",
+    )
+    assert matrix.summarized() == []
+
+
+def test_a_summary_states_its_stops_whichever_way_it_writes_a_through_flight() -> None:
+    nonstop = _solution(
+        "B6-1", "USD1.00", "2026-10-20T08:00-04:00", "2026-10-20T11:00-07:00", ["B6999"], []
+    )
+    del nonstop["itinerary"]["slices"][0]["stops"]
+    once = _solution(
+        "XX-1", "USD1.00", "2026-10-20T08:00-04:00", "2026-10-20T13:00-07:00", ["XX1"], []
+    )
+    twice = _solution(
+        "XX-2",
+        "USD1.00",
+        "2026-10-20T08:00-04:00",
+        "2026-10-20T13:00-07:00",
+        ["XX1", "XX1"],
+        ["DEN"],
+    )
+    connecting = _solution(
+        "AS-1", "USD1.00", "2026-10-20T08:00-04:00", "2026-10-20T13:00-07:00", ["AS21", "AS487"], []
+    )
+    b6 = _row((_flight("B6999", "JFK", "LAX", "2026-10-20T08:00", "2026-10-20T11:00"),))
+    xx = _row((_flight("XX1", "JFK", "LAX", "2026-10-20T08:00", "2026-10-20T13:00"),))
+    split = _row(
+        (
+            _flight("XX1", "JFK", "DEN", "2026-10-20T08:00", "2026-10-20T10:00"),
+            _flight("XX1", "DEN", "LAX", "2026-10-20T11:00", "2026-10-20T13:00"),
+        )
+    )
+    as_row = _row(
+        (
+            _flight("AS21", "JFK", "SEA", "2026-10-20T08:00", "2026-10-20T10:00"),
+            _flight("AS487", "SEA", "LAX", "2026-10-20T11:00", "2026-10-20T13:00"),
+        )
+    )
+    whole, short = _answer(nonstop, once, twice), _answer(connecting, once)
+    n, o, t = whole.solutions
+    assert cli._states_every_slice(n, b6)
+    assert cli._states_every_slice(o, xx)
+    assert cli._states_every_slice(t, xx)
+    assert cli._states_every_slice(t, split)
+    # Written once, the through flight states no stop at DEN, which the row has.
+    assert not cli._states_every_slice(short.solutions[1], split)
+    assert not cli._states_every_slice(short.solutions[0], as_row)
+
+
+@pytest.mark.parametrize("fmt", ["table", "json"])
+def test_details_without_one_of_the_rows_flights_give_no_verdict(
+    gf_session: Callable[..., Any], matrix: _Matrix, fmt: str
+) -> None:
+    """The one candidate's details state AS21 alone, so they may be the row's
+    AS21 AS487 with a flight left out."""
+    n, row = _as_row()
+    matrix.chain = _chain(_row_solution("AS-1", f"USD{row.flight.price:.2f}", row))
+    details = _details_of(row)
+    details["bookingDetails"]["itinerary"]["slices"][0]["segments"].pop()
+    matrix.details = {"AS-1": details}
+    gf_session(_served())
+    result = _run("-n", "40", "--fast", "--verify", "--pick", str(n), "--format", fmt)
+    _gives_no_verdict(result, fmt, _DETAILS_SHORT_OF_A_FLIGHT)
+    assert matrix.summarized() == [("viewDetails", "AS-1")]
+
+
+def test_details_that_split_a_through_flight_state_every_flight() -> None:
+    """Google writes XX1 as one leg and Matrix books it as two a day later: the
+    details state every flight and are another itinerary."""
+    whole = _row((_flight("XX1", "JFK", "LAX", "2026-10-20T08:00", "2026-10-20T13:00"),))
+    seg = _segment("XX1", "JFK", "LAX", "2026-10-21T08:00-04:00", "2026-10-21T13:00-07:00")
+    seg["legs"] = [
+        {
+            "origin": {"code": "JFK"},
+            "destination": {"code": "DEN"},
+            "departure": "2026-10-21T08:00-04:00",
+            "arrival": "2026-10-21T10:00-06:00",
+        },
+        {
+            "origin": {"code": "DEN"},
+            "destination": {"code": "LAX"},
+            "departure": "2026-10-21T11:00-06:00",
+            "arrival": "2026-10-21T13:00-07:00",
+        },
+    ]
+    details = BookingDetailsResult.from_api(
+        {"bookingDetails": {"itinerary": {"slices": [{"segments": [seg]}]}}}
+    ).booking_details
+    assert details is not None and details.itinerary is not None
+    assert not v.same_flights(whole, details.itinerary)
+    assert cli._states_every_flight(details.itinerary, whole)
+    two = _l4_row("2026-10-21")
+    l4 = _l4_details("2026-10-21").booking_details
+    assert l4 is not None and l4.itinerary is not None
+    assert cli._states_every_flight(l4.itinerary, two)
+    l4.itinerary.slices[0].segments.pop()
+    assert not cli._states_every_flight(l4.itinerary, two)
 
 
 def _no_request(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1311,3 +1613,38 @@ def test_a_booking_the_model_cannot_read_is_not_checked_flight_by_flight(
     err = _flat(result.stderr)
     assert "this itinerary cannot be checked flight by flight." in err
     assert "validation error" not in err
+
+
+# ─────────────────────────────── the envelope ───────────────────────────────
+
+
+def test_the_envelope_carries_the_check_under_verify(
+    gf_session: Callable[..., Any], matrix: _Matrix
+) -> None:
+    n, row = _as_row()
+    matrix.chain = _chain(_row_solution("AS-1", f"USD{row.flight.price:.2f}", row))
+    matrix.details = {"AS-1": _details_of(row)}
+    args = ("-n", "40", "--verify", "--pick", str(n))
+    gf_session(_served())
+    doc = json.loads(_run(*args, "--format", "json").stdout)
+    gf_session(_served())
+    env = _envelope_of(_run(*args, "--format", "envelope"))
+    assert (env["backend"], env["complete"]) == ("gflight", True)
+    assert [r["row"] for r in _rows(env)] == doc["search"]
+    assert env["verify"] == doc["verify"]
+    assert env["verify"]["outcome"] == "match"
+    assert not _notes(env, "verify")
+
+
+def test_a_matrix_error_leaves_the_envelopes_verify_null_and_exits_1(
+    gf_session: Callable[..., Any], matrix: _Matrix
+) -> None:
+    n, _ = _as_row()
+    matrix.error = {"error": {"message": "backend [/x] busy", "type": "INTERNAL"}}
+    gf_session(_served())
+    result = _run("-n", "40", "--verify", "--pick", str(n), "--format", "envelope")
+    env = _envelope_of(result, code=1)
+    assert (env["backend"], env["complete"], env["verify"]) == ("gflight", False, None)
+    assert len(_rows(env)) == 40
+    assert "Matrix returned an error (INTERNAL): backend [/x] busy" in env["notes"]
+    assert _notes(env, "verify") == ["verify: the run ended before the row was checked"]
