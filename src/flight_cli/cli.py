@@ -20,7 +20,6 @@ import json
 import re
 import shlex
 import sys
-from collections import Counter
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from functools import partial, wraps
@@ -5771,28 +5770,26 @@ def _note_row_cap(
     """One stderr line when the board stopped at Google's row cap, naming its
     highest fare: one above it may be missing. Called beside
     `_note_stop_drops`, by each path that shows the board, a board the routing
-    emptied included: a match priced above the cap may be what is missing. That
-    board has no row left to carry a currency, so the line names `requested`,
-    the one the page was asked for. `one_way` labels a one-way board an open
-    jaw or `--split` reads (`_one_way_boards`), as `cabin` labels a cabin's.
+    emptied included: a match priced above the cap may be what is missing.
+    Each cap is named in the currency of the page that stopped there
+    (`Board.capped_at`), which no row may carry once a filter has run;
+    `requested` names a cap whose page decoded no currency. `one_way` labels a
+    one-way board an open jaw or `--split` reads (`_one_way_boards`), as
+    `cabin` labels a cabin's.
 
     A plain line, not a narrowing, so the envelope carries it as a note and
     `complete` keeps its meaning: every fare at or below the cap is on the
     board."""
     from ._gflight_ids import (  # noqa: PLC0415 — fli, ~95 ms
         _ROW_CAP,  # pyright: ignore[reportPrivateUsage] — the cap `capped_at` was read against
+        lowest_caps,
     )
 
-    capped_at: float | None = getattr(results, "capped_at", None)
-    if capped_at is None:
+    capped_at: dict[str, float] = getattr(results, "capped_at", None) or {}
+    caps = lowest_caps(*({ccy or requested: amount} for ccy, amount in capped_at.items()))
+    if not caps:
         return
-    currencies = Counter(
-        ccy
-        for r in results
-        for m in (cast("tuple[Any, ...]", r) if isinstance(r, tuple) else (r,))
-        if (ccy := cast("str | None", getattr(getattr(m, "flight", None), "currency", None)))
-    )
-    ccy = currencies.most_common(1)[0][0] if currencies else requested
+    bounds = " and ".join(f"{ccy}{amount:.2f}" for ccy, amount in sorted(caps.items()))
     google = (
         f"Google Flights {cabin.value}"
         if cabin is not None
@@ -5801,8 +5798,7 @@ def _note_row_cap(
         else "Google Flights"
     )
     note = (
-        f"{google} stops at {_ROW_CAP:d} rows for this search: "
-        f"fares above {ccy}{capped_at:.2f} may be missing."
+        f"{google} stops at {_ROW_CAP:d} rows for this search: fares above {bounds} may be missing."
     )
     err.print(f"[dim]{_safe_text(note)}[/]")
 
@@ -6069,6 +6065,7 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
         Board,
         _kept_insight,  # pyright: ignore[reportPrivateUsage] — a page's insight past its filter
         _PageUnreadError,  # pyright: ignore[reportPrivateUsage] — the refusal that counts rows
+        lowest_caps,
     )
 
     asked = _PageAsk(pages, gf_mode=gf_mode, bags=opts.bags is not None)
@@ -6077,7 +6074,7 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
     tabs_failed: dict[int, GfBackendError] = {}
     stop_drops = StopDrops()
     extras: dict[int, tuple[PriceInsight | None, PriceHistory | None]] = {}
-    unboarded_caps: list[float | None] = []
+    unboarded_caps: list[dict[str, float]] = []
     with _browser_scope(gf_mode):
         if len(pages[0]) < _ROUND_TRIP_LEGS:
             for i, page in enumerate(pages):
@@ -6182,12 +6179,7 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
         unread=unread,
         separate_hidden=hidden,
         separate_failed=tabs_failed[min(tabs_failed)] if tabs_failed else None,
-        # The lowest: a fare above it may be missing from the page that
-        # stopped there, though another page lists dearer ones.
-        capped_at=min(
-            (c for c in (*(b.capped_at for b in boards), *unboarded_caps) if c is not None),
-            default=None,
-        ),
+        capped_at=lowest_caps(*(b.capped_at for b in boards), *unboarded_caps),
         # For a caller that asks Google more after this board (`_one_way_boards`).
         stopped=asked.stop,
     )

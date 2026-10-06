@@ -107,7 +107,7 @@ from .links import build_search_tfs, google_flights_search_page_url
 
 if TYPE_CHECKING:
     import pathlib
-    from collections.abc import Callable, Generator, Iterable, Sequence
+    from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
 
     from fli.models.google_flights.flights import (  # pyright: ignore[reportMissingTypeStubs]
         FlightSearchFilters,
@@ -1919,13 +1919,15 @@ class Board[T](list[T]):
     alone, so the merged board's `insight` and `history` are None.
     `separate_hidden` counts the separate-ticket itineraries a search asked to
     hide, and `separate_failed` is why the Cheapest tab, where those are listed,
-    went unread. `capped_at` is the highest fare on a page that stopped at
-    Google's row cap (`_ROW_CAP`): every fare at or below it is listed, and a
-    dearer one may be missing. A round trip carries its outbound page's, and a
-    board showing the Cheapest tab's separate tickets the lower of its own and
-    the tab's. `stopped` is the throttle, transport failure or dead browser
-    that ended a round trip's pin loop after some pin was served: the rows are
-    kept, and a caller that asks more pages reads it to end the search."""
+    went unread. `capped_at` maps a currency to the highest fare on a page
+    priced in it that stopped at Google's row cap (`_ROW_CAP`): every fare in
+    that currency at or below it is listed, and a dearer one may be missing.
+    Empty when no page stopped there. A round trip carries its outbound page's,
+    and a board showing the Cheapest tab's separate tickets the lower of its own
+    and the tab's in each currency (`lowest_caps`). `stopped` is the throttle,
+    transport failure or dead browser that ended a round trip's pin loop after
+    some pin was served: the rows are kept, and a caller that asks more pages
+    reads it to end the search."""
 
     def __init__(
         self,
@@ -1939,7 +1941,7 @@ class Board[T](list[T]):
         unread: int = 0,
         separate_hidden: int = 0,
         separate_failed: GfBackendError | None = None,
-        capped_at: float | None = None,
+        capped_at: Mapping[str, float] | None = None,
         stopped: GfBackendError | None = None,
     ) -> None:
         super().__init__(rows)
@@ -1949,13 +1951,31 @@ class Board[T](list[T]):
         self.pinned = pinned
         self.partial = partial
         self.unread = unread
-        self.capped_at = capped_at
+        self.capped_at: dict[str, float] = dict(capped_at or {})
         self.stop_drops: StopDrops | None = None
         self.separate_hidden = separate_hidden
         self.separate_failed = separate_failed
         self.stopped = stopped
         self.page_insights: tuple[PriceInsight, ...] = ()
         self.page_histories: tuple[PriceHistory, ...] = ()
+
+
+def lowest_caps(*caps: Mapping[str, float]) -> dict[str, float]:
+    """The lowest of `caps` in each currency (`Board.capped_at`): a fare above
+    it may be missing from the page that stopped there, though another page
+    lists dearer ones. Amounts in two currencies do not compare, so each keeps
+    its own."""
+    lowest: dict[str, float] = {}
+    for cap in caps:
+        for currency, amount in cap.items():
+            lowest[currency] = min(amount, lowest.get(currency, amount))
+    return lowest
+
+
+def _decoded_currency(rows: Iterable[GFlightWithId]) -> str | None:
+    """The currency most of `rows` decoded to, or None when none did."""
+    decoded = Counter(r.flight.currency for r in rows if r.flight.currency)
+    return decoded.most_common(1)[0][0] if decoded else None
 
 
 class _PageUnreadError(GfPageShapeError):
@@ -2152,8 +2172,13 @@ def _rows_from_page_html(page: PageFetch) -> Board[GFlightWithId]:
         history=_price_history(payload, out),
         unread=len(reasons),
         # The raw count, unread rows included: the cap is on what Google
-        # served, and no field of the page states it.
-        capped_at=max(fares) if len(rows) >= _ROW_CAP and fares else None,
+        # served, and no field of the page states it. Keyed "" when no row
+        # decoded a currency, until `_with_board_currency` names the page's.
+        capped_at=(
+            {_decoded_currency(served) or "": max(fares)}
+            if len(rows) >= _ROW_CAP and fares
+            else None
+        ),
     )
 
 
@@ -2579,9 +2604,10 @@ def _with_board_currency(board: Board[GFlightWithId], requested: str) -> Board[G
     when that decode fails, and every renderer downstream would then label the
     price USD. One page is priced in one currency, so the row takes the
     currency the rows beside it decoded to, and the requested one only when
-    none did. The page's price insight rides along."""
-    decoded = Counter(r.flight.currency for r in board if r.flight.currency)
-    fill = decoded.most_common(1)[0][0] if decoded else requested
+    none did. The page's price insight rides along, and its row cap is in that
+    currency too: the cap is named by it after a filter has removed every row
+    that carried it."""
+    fill = _decoded_currency(board) or requested
 
     def filled(r: GFlightWithId) -> GFlightWithId:
         if not r.flight.currency:
@@ -2595,7 +2621,7 @@ def _with_board_currency(board: Board[GFlightWithId], requested: str) -> Board[G
         dropped=board.dropped,
         pinned=board.pinned,
         unread=board.unread,
-        capped_at=board.capped_at,
+        capped_at={fill: min(board.capped_at.values())} if board.capped_at else None,
     )
 
 
@@ -2881,7 +2907,7 @@ def _with_separate_tickets(
         insight: PriceInsight | None = answer.insight,
         filtered: int = 0,
         unread: int = 0,
-        capped_at: float | None = answer.capped_at,
+        capped_at: Mapping[str, float] = answer.capped_at,
     ) -> Board[GFlightWithId | tuple[GFlightWithId, ...]]:
         return Board(
             rows,
@@ -2931,7 +2957,7 @@ def _with_separate_tickets(
     unread = page.unread
     # A marked row priced above the tab's cap may be missing from the rows it
     # adds, the routing having left any of them or not.
-    capped_at = min((c for c in (answer.capped_at, page.capped_at) if c is not None), default=None)
+    capped_at = lowest_caps(answer.capped_at, page.capped_at)
     if filters.trip_type == TripType.ONE_WAY:
         return with_notes(
             [*answer, *marked],

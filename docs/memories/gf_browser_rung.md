@@ -77,11 +77,14 @@ more, two navigations in all (`_BOARDLESS_NAVIGATIONS`), since a navigation
 costs seconds where a GET costs one request.
 
 A page of 300 raw rows, unread ones included, stopped at Google's cap
-(`_ROW_CAP`), so its board records its highest fare as `Board.capped_at`, and
-each path that shows it prints one stderr line: `Google Flights stops at 300
-rows for this search: fares above USD1006.00 may be missing.` A round trip
-names its outbound page's figure, and a board merged from pages the lowest of
-every page read, one that holds no pin included. A board that shows separate
+(`_ROW_CAP`), so its board records its highest fare as `Board.capped_at`, in
+the page's own currency, and each path that shows it prints one stderr line:
+`Google Flights stops at 300 rows for this search: fares above USD1006.00 may
+be missing.` The currency is the page's, not the rows', since a filter can
+leave only rows of another page; pages capped in two currencies name both
+(`fares above EUR1006.00 and USD1006.00`). A round trip
+names its outbound page's figure, and a board merged from pages the lowest in
+each currency of every page read, one that holds no pin included. A board that shows separate
 tickets takes the lower of its own figure and the Cheapest tab's. Each one-way
 board an open jaw or `--split` reads (`cli._one_way_boards`) prints its own
 line, labeled by its slice (`Google Flights CDG→JFK one-way stops at ...`) or

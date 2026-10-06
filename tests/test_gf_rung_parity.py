@@ -321,28 +321,43 @@ def _capped(rows: int, *, unreadable: int | None = None) -> gfid.Board[gfid.GFli
 def test_a_board_at_the_row_cap_names_its_highest_fare() -> None:
     """Red at the base, whose board recorded no cap. The raw count decides, an
     unread row included: no field of the page states the cap."""
-    assert _board("ds1_nyc_lon_token").capped_at == 1006.0
+    assert _board("ds1_nyc_lon_token").capped_at == {"USD": 1006.0}
     one_unread = _capped(300, unreadable=7)
-    assert (len(one_unread), one_unread.unread, one_unread.capped_at) == (299, 1, 1006.0)
-    assert _capped(299).capped_at is None
+    assert (len(one_unread), one_unread.unread, one_unread.capped_at) == (299, 1, {"USD": 1006.0})
+    assert _capped(299).capped_at == {}
     for name in ("ds1_nyc_lon_curated", *(n for pair in _SINGLE_PAIRS for n in pair)):
-        assert _board(name).capped_at is None, name
+        assert _board(name).capped_at == {}, name
 
 
 def test_the_cap_survives_the_boards_currency_fill() -> None:
-    """Red at the base: no cap to carry."""
+    """Red at the base: no cap to carry. The cap is in its page's currency,
+    whichever one the search asked for, and one no row named takes the asked."""
     board = _board("ds1_nyc_lon_token")
-    assert gfid._with_board_currency(board, "USD").capped_at == 1006.0
+    assert gfid._with_board_currency(board, "EUR").capped_at == {"USD": 1006.0}
+    eur = gfid.Board(
+        [replace(r, flight=r.flight.model_copy(update={"currency": "EUR"})) for r in board],
+        capped_at=board.capped_at,
+    )
+    assert gfid._with_board_currency(eur, "USD").capped_at == {"EUR": 1006.0}
+    undecoded = gfid.Board(
+        [replace(r, flight=r.flight.model_copy(update={"currency": None})) for r in board],
+        capped_at={"": 1006.0},
+    )
+    assert gfid._with_board_currency(undecoded, "EUR").capped_at == {"EUR": 1006.0}
 
 
 @pytest.mark.parametrize(
     ("caps", "merged"),
-    [((900.0, 700.0), 700.0), ((None, 800.0), 800.0), ((None, None), None)],
+    [
+        (({"USD": 900.0}, {"USD": 700.0}), {"USD": 700.0}),
+        ((dict[str, float](), {"USD": 800.0}), {"USD": 800.0}),
+        ((dict[str, float](), dict[str, float]()), dict[str, float]()),
+    ],
     ids=["both", "one", "neither"],
 )
 def test_a_board_merged_from_pages_takes_the_lowest_cap(
-    caps: tuple[float | None, float | None],
-    merged: float | None,
+    caps: tuple[dict[str, float], dict[str, float]],
+    merged: dict[str, float],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Red at the base, whose boards took no cap. 12 origins to LAX is two
@@ -360,6 +375,46 @@ def test_a_board_merged_from_pages_takes_the_lowest_cap(
     board = cli._gflight_results((Leg.of(_EAST, "LAX", _DEP),), SearchOptions(), 5)
     assert isinstance(board, gfid.Board)
     assert board.capped_at == merged
+
+
+@pytest.mark.parametrize(
+    ("usd_capped", "bound"),
+    [(False, "EUR1006.00"), (True, "EUR1006.00 and USD1006.00")],
+    ids=["one-page-capped", "both-pages-capped"],
+)
+def test_the_cap_line_names_the_currency_of_the_page_that_stopped(
+    usd_capped: bool, bound: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red before, which read the line's currency off the rows the price cap
+    left. 12 origins to LAX is two pages: the first answers in EUR and stops at
+    the row cap, the second in USD. Every EUR fare is over the price cap, so
+    only USD rows are shown, and the EUR cap still bounds the EUR fares."""
+    from test_gf_chunked_search import _EAST, _Google
+
+    day = _DEP.isoformat()
+    raw = _page(_answering(_ds1("ds1_nyc_lon_token"), origin="JFK", destination="LAX", date=day))
+    token = gfid._rows_from_page_html(PageFetch(raw, _URL, 200))
+    eur = gfid.Board(
+        [replace(r, flight=r.flight.model_copy(update={"currency": "EUR"})) for r in token],
+        capped_at=token.capped_at,
+    )
+    google = _Google([(o, "LAX") for o in _EAST])
+
+    def one_call(filters: Any, *, currency: str = "USD", cheapest: bool = False) -> Any:
+        if filters.flight_segments[0].departure_airport[0][0].name in _EAST[:6]:
+            return eur
+        board = google(filters, currency=currency, cheapest=cheapest)
+        return gfid.Board(board, capped_at=token.capped_at) if usd_capped else board
+
+    monkeypatch.setattr(gfid, "_one_call", one_call)
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    argv = [*_SEARCH, ",".join(_EAST), "LAX", "--dep", _DEP.isoformat(), "--backend", "gflight"]
+    result = CliRunner().invoke(cli.app, [*argv, "--fast", "--max-price", "200"])
+    assert result.exit_code == 0, result.output
+    stderr = " ".join(result.stderr.split())
+    line = f"Google Flights stops at 300 rows for this search: fares above {bound} may be missing."
+    assert stderr.count("rows for this search") == 1, stderr
+    assert line in stderr, stderr
 
 
 @pytest.mark.parametrize("capped", [0, 1], ids=["unpinned-page", "pinned-page"])
@@ -380,14 +435,14 @@ def test_a_round_trip_page_names_its_cap_pinned_or_not(
         page = 0 if out.departure_airport[0][0].name in _EAST[:6] else 1
         if page != capped or out.selected_flight is not None or cheapest:
             return board
-        return gfid.Board(board, unread=board.unread, capped_at=900.0)
+        return gfid.Board(board, unread=board.unread, capped_at={"USD": 900.0})
 
     monkeypatch.setattr(gfid, "_one_call", one_call)
     legs = (Leg.of(_EAST, "LAX", _DEP), Leg.of("LAX", _EAST, _RET))
     board = cli._gflight_results(legs, SearchOptions(), 1)
     assert isinstance(board, gfid.Board)
     assert {p for p, n in google.calls if n is not None} == {(_EAST[6:], ("LAX",))}
-    assert board.capped_at == 900.0
+    assert board.capped_at == {"USD": 900.0}
 
 
 def _keeps_none(_leg: int, _row: gfid.GFlightWithId) -> bool:
@@ -397,19 +452,19 @@ def _keeps_none(_leg: int, _row: gfid.GFlightWithId) -> bool:
 @pytest.mark.parametrize(
     ("mode", "base_cap", "keep", "merged"),
     [
-        ("show", None, None, 1006.0),
-        ("show", 1200.0, None, 1006.0),
-        ("show", 900.0, None, 900.0),
-        ("show", None, _keeps_none, 1006.0),
-        ("hide", None, None, None),
+        ("show", {}, None, {"USD": 1006.0}),
+        ("show", {"USD": 1200.0}, None, {"USD": 1006.0}),
+        ("show", {"USD": 900.0}, None, {"USD": 900.0}),
+        ("show", {}, _keeps_none, {"USD": 1006.0}),
+        ("hide", {}, None, {}),
     ],
     ids=["uncapped-base", "higher-base-cap", "lower-base-cap", "marked-rows-filtered", "hidden"],
 )
 def test_the_cheapest_tabs_cap_rides_the_rows_it_adds(
     mode: gfid.SeparateTickets,
-    base_cap: float | None,
+    base_cap: dict[str, float],
     keep: Callable[[int, gfid.GFlightWithId], bool] | None,
-    merged: float | None,
+    merged: dict[str, float],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Red at 01c8265 for the uncapped base, the higher base cap and the
@@ -547,8 +602,8 @@ def test_a_capped_board_the_routing_emptied_still_names_its_cap(
 ) -> None:
     """Red while the line needed a row beside it. No row on the token board
     flies SN, and one priced above the cap may be missing from it: the line is
-    what says the empty answer stops there. The currency is the one asked for,
-    since no row is left to carry one."""
+    what says the empty answer stops there. The currency is the capped page's,
+    which no row is left to carry."""
     gf_session(_answered("ds1_nyc_lon_token"))
     monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
     argv = _search("--routing", "O:SN+", "--fast", "--format", "envelope")
