@@ -1885,7 +1885,7 @@ def _run_calendar(
                 # Merge BEFORE reporting: whether what survived says anything is
                 # what decides between a note and a refusal, and only the merge
                 # knows.
-                merged = merge_calendar_results(fan.results, fan.floor)
+                merged = merge_calendar_results(fan.results, fan.floor, window=search.window)
                 empty = is_empty_calendar(merged)
                 _report_calendar_fanout(fan, n, merged_empty=empty)
                 floor_lost = floor is not None and fan.floor is None
@@ -2873,7 +2873,7 @@ def _window_days(res: CalendarResult, sd: date, ed: date) -> Generator[tuple[dat
     A window of a year or more holds some day of a month twice, and only the
     month's year tells the two apart. The parsed month drops the year Matrix's
     body names for it, so it is read from the body. A merged grid's months name
-    no year."""
+    their year only where its window holds some day of a month twice."""
     raw: Any = (res.raw or {}).get("calendar")
     found: Any = cast("dict[str, Any]", raw).get("months") if isinstance(raw, dict) else None
     bodies: list[Any] = cast("list[Any]", found) if isinstance(found, list) else []

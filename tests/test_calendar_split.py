@@ -78,8 +78,11 @@ def _cal(
 def _result(
     by_month_day: dict[int, dict[int, tuple[str, int, dict[int, str]]]],
     cheapest: str | None = None,
+    *,
+    year: int | None = None,
 ) -> CalendarResult:
-    """by_month_day: {month: {date: (minPrice, solutionCount, {duration: price})}}."""
+    """by_month_day: {month: {date: (minPrice, solutionCount, {duration: price})}},
+    each month naming `year` where one is given, as Matrix's own body does."""
     months: list[dict[str, Any]] = []
     total = 0
     for month, days in by_month_day.items():
@@ -96,7 +99,10 @@ def _result(
                     },
                 }
             )
-        months.append({"month": month, "weeks": [{"days": day_list}]})
+        body_month: dict[str, Any] = {"month": month, "weeks": [{"days": day_list}]}
+        if year is not None:
+            body_month["year"] = year
+        months.append(body_month)
     body: dict[str, Any] = {"solutionCount": total, "calendar": {"months": months}}
     if cheapest:
         body["currencyNotice"] = {"ext": {"price": cheapest}}
@@ -197,6 +203,54 @@ def test_merge_keeps_same_date_in_different_months_distinct() -> None:
     b = _result({10: {7: ("USD400.00", 1, {5: "USD400.00"})}})
     merged = merge_calendar_results([(("MIA", "VIE"), a), (("MIA", "CDG"), b)])
     assert len(merged.priced_days) == 2  # Sep-7 and Oct-7 must not collide
+
+
+def _days_by_month(res: CalendarResult) -> list[tuple[Any, Any, list[tuple[Any, Any, Any]]]]:
+    """Each month of `res`'s body as (year, month, [(date, minPrice, origin)])."""
+    assert res.raw is not None
+    return [
+        (m.get("year"), m["month"], [(d["date"], d["minPrice"], d["origin"]) for d in w["days"]])
+        for m in res.raw["calendar"]["months"]
+        for w in m["weeks"]
+    ]
+
+
+def test_merge_keeps_two_octobers_of_a_year_long_window_apart() -> None:
+    """2026-10-20 to 2027-10-20 holds October 20 twice: each pair's fare stays
+    on its own year's date, and each merged month names its year."""
+    window = CalendarWindow(
+        start=date(2026, 10, 20), end=date(2027, 10, 20), duration_min=0, duration_max=0
+    )
+    a = _result({10: {20: ("USD200.00", 1, {})}}, year=2026)
+    b = _result({10: {20: ("USD300.00", 2, {})}}, year=2027)
+    merged = merge_calendar_results([(("JFK", "LAX"), a), (("EWR", "LAX"), b)], window=window)
+    assert _days_by_month(merged) == [
+        (2026, 10, [(20, "USD200.00", "JFK")]),
+        (2027, 10, [(20, "USD300.00", "EWR")]),
+    ]
+    assert [d.solution_count for d in merged.priced_days] == [1, 2]
+
+
+def test_a_merged_window_under_a_year_names_no_year() -> None:
+    """Under 366 days no day of a month recurs, so the grid is the one merged
+    from the same answers naming no year, one month per month number, even
+    where the window holds a month number in two years."""
+    window = CalendarWindow(
+        start=date(2026, 10, 20), end=date(2027, 10, 14), duration_min=0, duration_max=0
+    )
+    one_way = dict[int, str]()
+    late = {10: {20: ("USD200.00", 1, one_way)}, 12: {31: ("USD210.00", 1, one_way)}}
+    early = {1: {1: ("USD220.00", 1, one_way)}, 10: {14: ("USD230.00", 1, one_way)}}
+    named = merge_calendar_results(
+        [(("JFK", "LAX"), _result(late, year=2026)), (("EWR", "LAX"), _result(early, year=2027))],
+        window=window,
+    )
+    bare = merge_calendar_results(
+        [(("JFK", "LAX"), _result(late)), (("EWR", "LAX"), _result(early))]
+    )
+    assert named.raw == bare.raw
+    months = [(y, m) for y, m, _ in _days_by_month(named)]
+    assert sorted(months, key=lambda ym: ym[1]) == [(None, 1), (None, 10), (None, 12)]
 
 
 # ───────────────── orchestration: _run_calendar per-destination ─────────────
