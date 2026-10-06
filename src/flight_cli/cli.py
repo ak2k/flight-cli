@@ -7900,7 +7900,9 @@ def _ask_low_row(
 ) -> _LowCheck:
     """Row `n` asked of Matrix as exactly its flights, within
     `_LOW_CHECK_SECONDS`. One event loop holds the whole conversation, so the
-    bound cancels whichever request is in flight. Every failure is the outcome
+    bound cancels whichever request is in flight. The client may not
+    re-bootstrap its key, which runs synchronously: a 403 is the check's
+    no-answer. Every failure is the outcome
     "no-answer": the table is already printed, and the exit code stays the
     search's."""
     row = _verify.google_row(fli_row)
@@ -7910,7 +7912,7 @@ def _ask_low_row(
     )
 
     async def go() -> _verify.Verdict | None:
-        async with MatrixClient(rps=rps, impersonate=impersonate) as c:
+        async with MatrixClient(rps=rps, impersonate=impersonate, rebootstrap=False) as c:
             with anyio.move_on_after(_LOW_CHECK_SECONDS):
                 return await _exact_flights_on(c, row, opts)
         return None
