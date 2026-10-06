@@ -7454,9 +7454,10 @@ def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, 
             state["gf"] = gf
             _note_other_currencies(gf, requested)
             _note_stop_drops(gf)
-            # Beside rows only: with Google's board empty the merged table is
-            # Matrix's, and the line would describe a board nobody is shown.
-            if gf:
+            # With Google's board empty the merged table is Matrix's, and the
+            # line would describe a board nobody is shown. The document's
+            # `search` half is Google's board, emptied or not.
+            if gf or json_out:
                 _note_row_cap(gf, requested)
             _note_separate_tickets(
                 gf,

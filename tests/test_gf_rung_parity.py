@@ -575,3 +575,27 @@ def test_the_merged_table_names_no_cap_for_a_board_the_routing_emptied(
     assert (len(weave), len(handed)) == (1, 0)
     stderr = " ".join(result.stderr.split())
     assert "rows for this search" not in stderr, stderr
+
+
+@pytest.mark.parametrize("fmt", ["json", "envelope"])
+def test_the_cross_check_document_names_the_cap_of_a_board_the_routing_emptied(
+    fmt: str, gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red at ef32ded, which printed the line beside rows only. The document's
+    `search` half is Google's board, emptied or not, so the line describes a
+    board it shows."""
+    gf_session(_answered("ds1_nyc_lon_token"))
+
+    async def matrix_into(state: dict[str, Any], *_args: object) -> None:
+        state["matrix"] = SearchResult.from_api(json.loads(_MATRIX.read_text()))
+
+    monkeypatch.setattr(cli, "_matrix_into", matrix_into)
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    argv = [*_SEARCH, "NYC", "LON", "--dep", _DEP.isoformat(), "--routing", "O:SN+"]
+    result = CliRunner().invoke(cli.app, [*argv, "--enrich", "--format", fmt])
+    assert result.exit_code == 0, result.output
+    assert _cap_lines(" ".join(result.stderr.split())) == [_CAP_LINE]
+    if fmt == "envelope":
+        env = json.loads(result.stdout)
+        assert (env["backend"], env["complete"], env["results"][0]["rows"]) == ("gflight", True, [])
+        assert _cap_lines(" ".join(env["notes"])) == [_CAP_LINE]

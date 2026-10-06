@@ -89,7 +89,9 @@ own Chrome, so a multi-airport search can list a fare (USD488) that page does
 not show. And a routing-filtered multi-airport search loses the curated-only
 rows above the cap, which the cap line names, on a board the filter emptied
 too. The merged table is the exception: with Google's board empty it shows
-Matrix's rows, and prints no line.
+Matrix's rows, and prints no line. The cross-check document (`--enrich
+--format json` or `envelope`) prints it, since its `search` half is Google's
+board.
 
 ## Four settings that look arbitrary and are not
 
