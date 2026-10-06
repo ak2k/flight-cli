@@ -2911,9 +2911,9 @@ def _say_unpriced(res: CalendarResult, search: CalendarSearch) -> None:
     """Name the asked departure dates Matrix's grid left unpriced, after its
     answer, in every format.
 
-    Matrix under-reports a calendar without saying so (quirk #7), and a date
-    missing from the grid otherwise reads as a date with no fare. The grid cannot
-    tell that from a day with no service, so either way the answer is narrower
+    Matrix under-reports a calendar without saying so (quirk #7), so a date its
+    grid holds no fare for is named rather than left out. The grid cannot tell
+    such a date from a day with no service; either way the answer is narrower
     than the question."""
     window = search.window
     lengths: tuple[int | None, ...] = (None,)
