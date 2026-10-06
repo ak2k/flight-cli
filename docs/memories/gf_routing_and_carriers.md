@@ -2,18 +2,19 @@
 
 How `--routing`/`--extension` reach Google Flights, and the carrier-identity
 indices that make it correct. Read before touching `routing_predicates.py`,
-`_gf_postfilter.py`, `fli_bridge.apply_gf_native_filters`,
-`links.build_search_tfs`, `fli_bridge.fli_airport`, or
+`_gf_postfilter.py`, `fli_bridge.apply_gf_native_filters`, or
 `_gflight_ids._parse_leg_amenities` / `_flight_leg`.
 
 ## Where the rest went
 
 - [gf_search_transport.md](gf_search_transport.md) — the search page's `tfs=`
-  fields, aliased codes, price cap, bags, CO2, row checks, the full board.
+  fields (`links.build_search_tfs`), aliased codes (`fli_bridge.fli_airport`),
+  price cap, bags, CO2, row checks, the full board.
 - [gf_page_refusals_and_ds1.md](gf_page_refusals_and_ds1.md) — typed refusals,
   which `ds:1` blob is served, where rows sit, the authoritative empty.
 - [gf_request_budget.md](gf_request_budget.md) — page GETs per search, the pin
-  cap and pin choice, what a round-trip row's price means, partial round trips.
+  cap and pin choice, what a round-trip row's price means, partial round trips,
+  the three Matrix failures typed rather than raised as a traceback.
 - [gf_row_order_and_merge.md](gf_row_order_and_merge.md) — `-n`, `--pick`,
   price order, the merged table, the multi-cabin join key, currencies.
 - [gf_throttle_ladder.md](gf_throttle_ladder.md) — the shared throttle and
@@ -270,8 +271,11 @@ against 88 trips from USD818, the chain was empty (19.0 s); `--verify`'s
 unrouted second search then listed only AA, BA and IB though the 88 trips name
 DL and VS, so a carrier read off it would be wrong, and this check never asks
 it. The bound does not cover building the client, which reads the API key from
-its disk cache, nor the re-bootstrap `MatrixClient` runs synchronously on a
-403; the search has just used the same key.
+its disk cache. The check's client is built with `rebootstrap=False`: a 403
+invalidates the cached key and is the line `…: no answer: ApiKeyResolutionError:
+Matrix rejected the API key with HTTP 403.`, since the re-bootstrap other
+clients run on a 403 is synchronous and would hold the loop past the bound. The
+key can differ from the search's, whose answer may come from the response cache.
 
 **`--format json --enrich`** writes `{"search": <the plain --format json
 document, the same -n rows>, "cross_check": {"currency", "delta":

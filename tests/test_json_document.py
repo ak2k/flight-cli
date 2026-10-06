@@ -333,7 +333,7 @@ def test_the_awards_only_json_serializer_is_driven_by_something(
         return ([[award]], [])
 
     monkeypatch.setattr(pp_cli, "gather_awards", _gather)
-    monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
+    monkeypatch.setattr(pp_cli, "stored_tokens", lambda: None)
 
     pp_cli.run_pp_for_search(
         _matrix_result(),

@@ -3,11 +3,12 @@
 What a Google Flights search costs in page GETs and which outbounds a round
 trip pins: the GETs table, `_PINNED_FANOUT_CAP`, the sort cabin leading every
 cabin's pins, the pin loop's one stop rule, what a round-trip row's price
-means, why a partial round trip exits 0, and `log.py`'s per-write stream. Read
+means, why a partial round trip exits 0, the three Matrix failures typed
+rather than raised as a traceback, and `log.py`'s per-write stream. Read
 before touching `_gflight_ids.search_with_ids` / `_pins` / `pin_keys`,
 `cli._CabinSearches`, `cli._multi_cabin_join_note`, or `cli._pin_cap_note`.
 
-# Request budget
+## Request budget
 
 Every one of these is a multi-megabyte page GET, so the count is the cost:
 
@@ -26,7 +27,8 @@ Every one of these is a multi-megabyte page GET, so the count is the cost:
 | a multi-cabin fan-out under a transport outage | one ladder for the group: at most 3 + (cabins - 1) |
 | a round trip whose pins meet a throttle or an outage | it stops at that pin: no further pin is fetched |
 | a round trip whose every pin blips and recovers | 1 + 3 x pins = 31 at the default `-n 10` |
-| a round trip whose return boards all refuse (5xx, consent, layout) | 1 + pins, the same as a successful search |
+| a round trip whose return boards all refuse (5xx, consent, a `ds:1` whose layout we cannot read) | 1 + pins, the same as a successful search |
+| a page that carries no `ds:1` | up to 3 GETs, each with the `HeadlessChrome` token (`_read_search_page`); 1 + 3 x pins = 31 when every return board of a default round trip carries none |
 | a round trip on a wall that keeps lifting and closing | 55 for one cabin, 220 for four, against 44 healthy — `cabins x calls x (_THROTTLE_RETRY_ATTEMPTS + 1)` |
 | a one-cabin `search` that is not `--awards-only` (the default merged table, `--fast`, either `--format json`) | the above + 1: the Cheapest tab, fetched last and not at all once the pins stopped on a wall, an outage or a dead browser |
 
