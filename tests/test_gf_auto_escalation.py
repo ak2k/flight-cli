@@ -8,6 +8,7 @@ after the escalation" is read off one list."""
 
 from __future__ import annotations
 
+import contextvars
 import json
 import signal
 import threading
@@ -461,3 +462,66 @@ def test_an_escalation_with_no_browser_hands_the_search_to_matrix(
     assert said.count(_LINE) == 1, said
     assert "Using Matrix: Google Flights' browser rung is unavailable" in said, said
     assert json.loads(result.stdout)
+
+
+# ─────────── (i) a sibling escalates while a thread waits on its ladder ───────────
+
+
+def test_a_thread_waiting_on_its_ladder_follows_a_siblings_escalation_to_chrome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Thread A is in its ladder's backoff when thread B's ladder runs out and
+    moves the search to Chrome. A's next attempt goes to Chrome, not to rung 1,
+    and the move is said once. Both share one search as a fan-out's workers do,
+    each running in a copy of the context that opened it."""
+    parked = threading.Event()
+    moved = threading.Event()
+    calls: list[tuple[str, str]] = []
+
+    def fetch(*_a: object, **_kw: object) -> Any:
+        calls.append((threading.current_thread().name, "http"))
+        raise GfThrottledError("rate-limited")
+
+    def backoff(_s: float) -> None:
+        if threading.current_thread().name == "A":
+            parked.set()
+            moved.wait(5)
+
+    def navigate(*_a: object, **_kw: object) -> Any:
+        calls.append((threading.current_thread().name, "chrome"))
+        return _lax()
+
+    def line() -> None:
+        calls.append((threading.current_thread().name, "line"))
+
+    monkeypatch.setattr(gfid, "_fetch_page", fetch)
+    monkeypatch.setattr(gfid.time, "sleep", backoff)
+    monkeypatch.setattr(gfid, "_one_call_browser", navigate)
+    monkeypatch.setattr(gfb, "announce_escalation", line)
+    filters: Any = object()
+    answers: dict[str, object] = {}
+
+    def ask(name: str, context: contextvars.Context) -> None:
+        if name == "B":
+            parked.wait(5)
+        try:
+            answers[name] = context.run(gfid._one_call_auto, filters, headed=False)
+        except Exception as e:
+            answers[name] = e
+        finally:
+            if name == "B":
+                moved.set()
+
+    with gfid.search_escalation():
+        threads = [
+            threading.Thread(target=ask, args=(name, contextvars.copy_context()), name=name)
+            for name in ("A", "B")
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+    assert not any(t.is_alive() for t in threads)
+    assert all(isinstance(a, gfid.Board) for a in answers.values()), answers
+    b_ladder = [("B", "http")] * (gfid._THROTTLE_RETRY_ATTEMPTS + 1)
+    assert calls == [("A", "http"), *b_ladder, ("B", "line"), ("B", "chrome"), ("A", "chrome")]
