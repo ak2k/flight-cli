@@ -1,0 +1,998 @@
+{
+ "calendar": {
+  "months": [
+   {
+    "weeks": [
+     {
+      "days": [
+       {
+        "date": 27,
+        "disabled": true,
+        "solutionCount": 0
+       },
+       {
+        "date": 28,
+        "disabled": true,
+        "solutionCount": 0
+       },
+       {
+        "date": 29,
+        "disabled": true,
+        "solutionCount": 0
+       },
+       {
+        "date": 30,
+        "disabled": true,
+        "solutionCount": 0
+       },
+       {
+        "date": 1,
+        "solutionCount": 0
+       },
+       {
+        "date": 2,
+        "solutionCount": 0
+       },
+       {
+        "date": 3,
+        "solutionCount": 0
+       }
+      ]
+     },
+     {
+      "days": [
+       {
+        "date": 4,
+        "solutionCount": 0
+       },
+       {
+        "date": 5,
+        "solutionCount": 0
+       },
+       {
+        "date": 6,
+        "solutionCount": 0
+       },
+       {
+        "date": 7,
+        "solutionCount": 0
+       },
+       {
+        "date": 8,
+        "solutionCount": 0
+       },
+       {
+        "date": 9,
+        "solutionCount": 0
+       },
+       {
+        "date": 10,
+        "solutionCount": 0
+       }
+      ]
+     },
+     {
+      "days": [
+       {
+        "date": 11,
+        "solutionCount": 0
+       },
+       {
+        "date": 12,
+        "solutionCount": 0
+       },
+       {
+        "date": 13,
+        "solutionCount": 0
+       },
+       {
+        "date": 14,
+        "solutionCount": 0
+       },
+       {
+        "date": 15,
+        "solutionCount": 0
+       },
+       {
+        "date": 16,
+        "solutionCount": 0
+       },
+       {
+        "date": 17,
+        "solutionCount": 0
+       }
+      ]
+     },
+     {
+      "days": [
+       {
+        "date": 18,
+        "solutionCount": 0
+       },
+       {
+        "date": 19,
+        "solutionCount": 0
+       },
+       {
+        "date": 20,
+        "tripDuration": {
+         "options": [
+          {
+           "solution": {
+            "ext": {
+             "warnings": {
+              "overnight": true
+             }
+            },
+            "itinerary": {
+             "arrival": "2026-10-28T05:03-04:00"
+            },
+            "slices": [
+             {
+              "departure": "2026-10-20T07:00-04:00"
+             },
+             {
+              "departure": "2026-10-27T20:50-07:00"
+             }
+            ]
+           },
+           "minPrice": "USD467.00",
+           "minPriceInSummary": true,
+           "tripLength": 7,
+           "solutionCount": 2
+          }
+         ]
+        },
+        "minPrice": "USD467.00",
+        "solutionCount": 2
+       },
+       {
+        "date": 21,
+        "tripDuration": {
+         "options": [
+          {
+           "solution": {
+            "itinerary": {
+             "arrival": "2026-10-28T20:40-04:00"
+            },
+            "slices": [
+             {
+              "departure": "2026-10-21T10:59-04:00"
+             },
+             {
+              "departure": "2026-10-28T12:23-07:00"
+             }
+            ]
+           },
+           "minPrice": "USD677.00",
+           "minPriceInSummary": true,
+           "tripLength": 7,
+           "solutionCount": 2
+          }
+         ]
+        },
+        "minPrice": "USD677.00",
+        "solutionCount": 2
+       },
+       {
+        "date": 22,
+        "tripDuration": {
+         "options": [
+          {
+           "solution": {
+            "ext": {
+             "warnings": {
+              "overnight": true
+             }
+            },
+            "itinerary": {
+             "arrival": "2026-10-30T05:03-04:00"
+            },
+            "slices": [
+             {
+              "departure": "2026-10-22T11:00-04:00"
+             },
+             {
+              "departure": "2026-10-29T20:50-07:00"
+             }
+            ]
+           },
+           "minPrice": "USD778.00",
+           "minPriceInSummary": true,
+           "tripLength": 7,
+           "solutionCount": 2
+          }
+         ]
+        },
+        "minPrice": "USD778.00",
+        "solutionCount": 2
+       },
+       {
+        "date": 23,
+        "tripDuration": {
+         "options": [
+          {
+           "solution": {
+            "ext": {
+             "warnings": {
+              "overnight": true
+             }
+            },
+            "itinerary": {
+             "arrival": "2026-10-31T05:03-04:00"
+            },
+            "slices": [
+             {
+              "departure": "2026-10-23T11:00-04:00"
+             },
+             {
+              "departure": "2026-10-30T20:50-07:00"
+             }
+            ]
+           },
+           "minPrice": "USD602.00",
+           "minPriceInSummary": true,
+           "tripLength": 7,
+           "solutionCount": 2
+          }
+         ]
+        },
+        "minPrice": "USD602.00",
+        "solutionCount": 2
+       },
+       {
+        "date": 24,
+        "tripDuration": {
+         "options": [
+          {
+           "solution": {
+            "itinerary": {
+             "arrival": "2026-10-31T20:40-04:00"
+            },
+            "slices": [
+             {
+              "departure": "2026-10-24T11:00-04:00"
+             },
+             {
+              "departure": "2026-10-31T12:23-07:00"
+             }
+            ]
+           },
+           "minPrice": "USD432.00",
+           "minPriceInSummary": true,
+           "tripLength": 7,
+           "solutionCount": 3
+          }
+         ]
+        },
+        "minPrice": "USD432.00",
+        "minPriceInWeek": true,
+        "solutionCount": 3
+       }
+      ]
+     },
+     {
+      "days": [
+       {
+        "date": 25,
+        "tripDuration": {
+         "options": [
+          {
+           "solution": {
+            "itinerary": {
+             "arrival": "2026-11-01T16:17-05:00"
+            },
+            "slices": [
+             {
+              "departure": "2026-10-25T09:45-04:00"
+             },
+             {
+              "departure": "2026-11-01T08:00-08:00"
+             }
+            ]
+           },
+           "minPrice": "USD709.00",
+           "minPriceInSummary": true,
+           "tripLength": 7,
+           "solutionCount": 4
+          }
+         ]
+        },
+        "minPrice": "USD709.00",
+        "solutionCount": 4
+       },
+       {
+        "date": 26,
+        "solutionCount": 0
+       },
+       {
+        "date": 27,
+        "solutionCount": 0
+       },
+       {
+        "date": 28,
+        "solutionCount": 0
+       },
+       {
+        "date": 29,
+        "solutionCount": 0
+       },
+       {
+        "date": 30,
+        "solutionCount": 0
+       },
+       {
+        "date": 31,
+        "tripDuration": {
+         "options": [
+          {
+           "solution": {
+            "itinerary": {
+             "arrival": "2026-11-07T16:22-05:00"
+            },
+            "slices": [
+             {
+              "departure": "2026-10-31T19:29-04:00"
+             },
+             {
+              "departure": "2026-11-07T08:05-08:00"
+             }
+            ]
+           },
+           "minPrice": "USD407.00",
+           "minPriceInSummary": true,
+           "tripLength": 7,
+           "solutionCount": 4
+          }
+         ]
+        },
+        "minPrice": "USD407.00",
+        "minPriceInCalendar": true,
+        "minPriceInMonth": true,
+        "minPriceInWeek": true,
+        "solutionCount": 4
+       }
+      ]
+     }
+    ],
+    "month": 10,
+    "year": 2026
+   },
+   {
+    "weeks": [
+     {
+      "days": [
+       {
+        "date": 1,
+        "tripDuration": {
+         "options": [
+          {
+           "solution": {
+            "ext": {
+             "warnings": {
+              "overnight": true
+             }
+            },
+            "itinerary": {
+             "arrival": "2026-11-09T05:03-05:00"
+            },
+            "slices": [
+             {
+              "departure": "2026-11-01T11:00-05:00"
+             },
+             {
+              "departure": "2026-11-08T20:50-08:00"
+             }
+            ]
+           },
+           "minPrice": "USD793.00",
+           "minPriceInSummary": true,
+           "tripLength": 7,
+           "solutionCount": 6
+          }
+         ]
+        },
+        "minPrice": "USD793.00",
+        "solutionCount": 6
+       },
+       {
+        "date": 2,
+        "tripDuration": {
+         "options": [
+          {
+           "solution": {
+            "itinerary": {
+             "arrival": "2026-11-09T23:52-05:00"
+            },
+            "slices": [
+             {
+              "departure": "2026-11-02T11:00-05:00"
+             },
+             {
+              "departure": "2026-11-09T15:40-08:00"
+             }
+            ]
+           },
+           "minPrice": "USD847.00",
+           "minPriceInSummary": true,
+           "tripLength": 7,
+           "solutionCount": 1
+          }
+         ]
+        },
+        "minPrice": "USD847.00",
+        "solutionCount": 1
+       },
+       {
+        "date": 3,
+        "tripDuration": {
+         "options": [
+          {
+           "solution": {
+            "itinerary": {
+             "arrival": "2026-11-10T23:52-05:00"
+            },
+            "slices": [
+             {
+              "departure": "2026-11-03T11:00-05:00"
+             },
+             {
+              "departure": "2026-11-10T15:40-08:00"
+             }
+            ]
+           },
+           "minPrice": "USD462.00",
+           "minPriceInSummary": true,
+           "tripLength": 7,
+           "solutionCount": 1
+          }
+         ]
+        },
+        "minPrice": "USD462.00",
+        "solutionCount": 1
+       },
+       {
+        "date": 4,
+        "tripDuration": {
+         "options": [
+          {
+           "solution": {
+            "itinerary": {
+             "arrival": "2026-11-11T23:52-05:00"
+            },
+            "slices": [
+             {
+              "departure": "2026-11-04T11:00-05:00"
+             },
+             {
+              "departure": "2026-11-11T15:40-08:00"
+             }
+            ]
+           },
+           "minPrice": "USD407.00",
+           "minPriceInSummary": true,
+           "tripLength": 7,
+           "solutionCount": 1
+          }
+         ]
+        },
+        "minPrice": "USD407.00",
+        "minPriceInCalendar": true,
+        "minPriceInMonth": true,
+        "minPriceInWeek": true,
+        "solutionCount": 1
+       },
+       {
+        "date": 5,
+        "tripDuration": {
+         "options": [
+          {
+           "solution": {
+            "itinerary": {
+             "arrival": "2026-11-12T23:52-05:00"
+            },
+            "slices": [
+             {
+              "departure": "2026-11-05T11:00-05:00"
+             },
+             {
+              "departure": "2026-11-12T15:40-08:00"
+             }
+            ]
+           },
+           "minPrice": "USD407.00",
+           "minPriceInSummary": true,
+           "tripLength": 7,
+           "solutionCount": 1
+          }
+         ]
+        },
+        "minPrice": "USD407.00",
+        "minPriceInCalendar": true,
+        "minPriceInMonth": true,
+        "minPriceInWeek": true,
+        "solutionCount": 1
+       },
+       {
+        "date": 6,
+        "tripDuration": {
+         "options": [
+          {
+           "solution": {
+            "itinerary": {
+             "arrival": "2026-11-13T23:52-05:00"
+            },
+            "slices": [
+             {
+              "departure": "2026-11-06T11:00-05:00"
+             },
+             {
+              "departure": "2026-11-13T15:40-08:00"
+             }
+            ]
+           },
+           "minPrice": "USD512.00",
+           "minPriceInSummary": true,
+           "tripLength": 7,
+           "solutionCount": 1
+          }
+         ]
+        },
+        "minPrice": "USD512.00",
+        "solutionCount": 1
+       },
+       {
+        "date": 7,
+        "tripDuration": {
+         "options": [
+          {
+           "solution": {
+            "itinerary": {
+             "arrival": "2026-11-14T23:52-05:00"
+            },
+            "slices": [
+             {
+              "departure": "2026-11-07T11:00-05:00"
+             },
+             {
+              "departure": "2026-11-14T15:40-08:00"
+             }
+            ]
+           },
+           "minPrice": "USD407.00",
+           "minPriceInSummary": true,
+           "tripLength": 7,
+           "solutionCount": 6
+          }
+         ]
+        },
+        "minPrice": "USD407.00",
+        "minPriceInCalendar": true,
+        "minPriceInMonth": true,
+        "minPriceInWeek": true,
+        "solutionCount": 6
+       }
+      ]
+     },
+     {
+      "days": [
+       {
+        "date": 8,
+        "tripDuration": {
+         "options": [
+          {
+           "solution": {
+            "ext": {
+             "warnings": {
+              "overnight": true
+             }
+            },
+            "itinerary": {
+             "arrival": "2026-11-16T05:28-05:00"
+            },
+            "slices": [
+             {
+              "departure": "2026-11-08T11:00-05:00"
+             },
+             {
+              "departure": "2026-11-15T21:15-08:00"
+             }
+            ]
+           },
+           "minPrice": "USD842.00",
+           "minPriceInSummary": true,
+           "tripLength": 7,
+           "solutionCount": 6
+          }
+         ]
+        },
+        "minPrice": "USD842.00",
+        "solutionCount": 6
+       },
+       {
+        "date": 9,
+        "tripDuration": {
+         "options": [
+          {
+           "solution": {
+            "itinerary": {
+             "arrival": "2026-11-16T23:52-05:00"
+            },
+            "slices": [
+             {
+              "departure": "2026-11-09T12:00-05:00"
+             },
+             {
+              "departure": "2026-11-16T15:40-08:00"
+             }
+            ]
+           },
+           "minPrice": "USD617.00",
+           "minPriceInSummary": true,
+           "tripLength": 7,
+           "solutionCount": 1
+          }
+         ]
+        },
+        "minPrice": "USD617.00",
+        "solutionCount": 1
+       },
+       {
+        "date": 10,
+        "tripDuration": {
+         "options": [
+          {
+           "solution": {
+            "itinerary": {
+             "arrival": "2026-11-17T23:52-05:00"
+            },
+            "slices": [
+             {
+              "departure": "2026-11-10T12:00-05:00"
+             },
+             {
+              "departure": "2026-11-17T15:40-08:00"
+             }
+            ]
+           },
+           "minPrice": "USD407.00",
+           "minPriceInSummary": true,
+           "tripLength": 7,
+           "solutionCount": 1
+          }
+         ]
+        },
+        "minPrice": "USD407.00",
+        "minPriceInCalendar": true,
+        "minPriceInMonth": true,
+        "minPriceInWeek": true,
+        "solutionCount": 1
+       },
+       {
+        "date": 11,
+        "tripDuration": {
+         "options": [
+          {
+           "solution": {
+            "itinerary": {
+             "arrival": "2026-11-18T23:52-05:00"
+            },
+            "slices": [
+             {
+              "departure": "2026-11-11T12:00-05:00"
+             },
+             {
+              "departure": "2026-11-18T15:40-08:00"
+             }
+            ]
+           },
+           "minPrice": "USD462.00",
+           "minPriceInSummary": true,
+           "tripLength": 7,
+           "solutionCount": 1
+          }
+         ]
+        },
+        "minPrice": "USD462.00",
+        "solutionCount": 1
+       },
+       {
+        "date": 12,
+        "tripDuration": {
+         "options": [
+          {
+           "solution": {
+            "itinerary": {
+             "arrival": "2026-11-19T23:52-05:00"
+            },
+            "slices": [
+             {
+              "departure": "2026-11-12T12:00-05:00"
+             },
+             {
+              "departure": "2026-11-19T15:40-08:00"
+             }
+            ]
+           },
+           "minPrice": "USD862.00",
+           "minPriceInSummary": true,
+           "tripLength": 7,
+           "solutionCount": 1
+          }
+         ]
+        },
+        "minPrice": "USD862.00",
+        "solutionCount": 1
+       },
+       {
+        "date": 13,
+        "tripDuration": {
+         "options": [
+          {
+           "solution": {
+            "itinerary": {
+             "arrival": "2026-11-20T23:52-05:00"
+            },
+            "slices": [
+             {
+              "departure": "2026-11-13T12:00-05:00"
+             },
+             {
+              "departure": "2026-11-20T15:40-08:00"
+             }
+            ]
+           },
+           "minPrice": "USD1017.00",
+           "minPriceInSummary": true,
+           "tripLength": 7,
+           "solutionCount": 1
+          }
+         ]
+        },
+        "minPrice": "USD1017.00",
+        "solutionCount": 1
+       },
+       {
+        "date": 14,
+        "tripDuration": {
+         "options": [
+          {
+           "solution": {
+            "ext": {
+             "warnings": {
+              "overnight": true
+             }
+            },
+            "itinerary": {
+             "arrival": "2026-11-22T05:28-05:00"
+            },
+            "slices": [
+             {
+              "departure": "2026-11-14T12:00-05:00"
+             },
+             {
+              "departure": "2026-11-21T21:15-08:00"
+             }
+            ]
+           },
+           "minPrice": "USD737.00",
+           "minPriceInSummary": true,
+           "tripLength": 7,
+           "solutionCount": 4
+          }
+         ]
+        },
+        "minPrice": "USD737.00",
+        "solutionCount": 4
+       }
+      ]
+     },
+     {
+      "days": [
+       {
+        "date": 15,
+        "tripDuration": {
+         "options": [
+          {
+           "solution": {
+            "ext": {
+             "warnings": {
+              "overnight": true
+             }
+            },
+            "itinerary": {
+             "arrival": "2026-11-23T05:28-05:00"
+            },
+            "slices": [
+             {
+              "departure": "2026-11-15T12:00-05:00"
+             },
+             {
+              "departure": "2026-11-22T21:15-08:00"
+             }
+            ]
+           },
+           "minPrice": "USD913.00",
+           "minPriceInSummary": true,
+           "tripLength": 7,
+           "solutionCount": 2
+          }
+         ]
+        },
+        "minPrice": "USD913.00",
+        "solutionCount": 2
+       },
+       {
+        "date": 16,
+        "tripDuration": {
+         "options": [
+          {
+           "solution": {
+            "itinerary": {
+             "arrival": "2026-11-23T23:52-05:00"
+            },
+            "slices": [
+             {
+              "departure": "2026-11-16T12:00-05:00"
+             },
+             {
+              "departure": "2026-11-23T15:40-08:00"
+             }
+            ]
+           },
+           "minPrice": "USD513.00",
+           "minPriceInSummary": true,
+           "tripLength": 7,
+           "solutionCount": 2
+          }
+         ]
+        },
+        "minPrice": "USD513.00",
+        "minPriceInWeek": true,
+        "solutionCount": 2
+       },
+       {
+        "date": 17,
+        "solutionCount": 0
+       },
+       {
+        "date": 18,
+        "solutionCount": 0
+       },
+       {
+        "date": 19,
+        "solutionCount": 0
+       },
+       {
+        "date": 20,
+        "solutionCount": 0
+       },
+       {
+        "date": 21,
+        "solutionCount": 0
+       }
+      ]
+     },
+     {
+      "days": [
+       {
+        "date": 22,
+        "solutionCount": 0
+       },
+       {
+        "date": 23,
+        "solutionCount": 0
+       },
+       {
+        "date": 24,
+        "solutionCount": 0
+       },
+       {
+        "date": 25,
+        "solutionCount": 0
+       },
+       {
+        "date": 26,
+        "solutionCount": 0
+       },
+       {
+        "date": 27,
+        "solutionCount": 0
+       },
+       {
+        "date": 28,
+        "solutionCount": 0
+       }
+      ]
+     },
+     {
+      "days": [
+       {
+        "date": 29,
+        "solutionCount": 0
+       },
+       {
+        "date": 30,
+        "solutionCount": 0
+       },
+       {
+        "date": 1,
+        "disabled": true,
+        "solutionCount": 0
+       },
+       {
+        "date": 2,
+        "disabled": true,
+        "solutionCount": 0
+       },
+       {
+        "date": 3,
+        "disabled": true,
+        "solutionCount": 0
+       },
+       {
+        "date": 4,
+        "disabled": true,
+        "solutionCount": 0
+       },
+       {
+        "date": 5,
+        "disabled": true,
+        "solutionCount": 0
+       }
+      ]
+     }
+    ],
+    "month": 11,
+    "year": 2026
+   }
+  ]
+ },
+ "currencyNotice": {
+  "ext": {
+   "price": "USD407.00"
+  }
+ },
+ "itineraryCarrierList": {
+  "groups": [
+   {
+    "label": {
+     "code": "AA",
+     "shortName": "American"
+    },
+    "minPrice": "USD407.00",
+    "minPriceInSummary": true
+   },
+   {
+    "label": {
+     "code": "DL",
+     "shortName": "Delta"
+    },
+    "minPrice": "USD407.00",
+    "minPriceInSummary": true
+   }
+  ]
+ },
+ "itineraryStopCountList": {
+  "groups": [
+   {
+    "label": 0,
+    "minPrice": "USD407.00",
+    "minPriceInSummary": true
+   }
+  ]
+ },
+ "overnightFlightsCalendar": {
+  "groups": [
+   {
+    "label": "OVERNIGHT",
+    "minPrice": "USD407.00",
+    "minPriceInSummary": true
+   }
+  ]
+ },
+ "id": "mWoKiXlah9v7PsfKP0lGrp",
+ "session": "FAy0lGrpRRxWRJIYlZWv1wVLc",
+ "solutionCount": 55,
+ "solutionSet": "0V7PpTg8Xxp8PDIWKabODIJ"
+}

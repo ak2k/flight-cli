@@ -12,6 +12,10 @@ the slice's departure and arrival as stated. Trips behind one first flight
 connect or land differently at different fares, so a shorter key prints one
 trip's fare against another's flights. Nothing cabin-specific is in the key,
 so an itinerary both cabins list is one row with both prices.
+
+A listing Google sells as separate tickets or as a self transfer also keys how
+it is sold: it is a different booking of the same flights, so it never shares
+a row, or a price column, with a one-ticket listing of them.
 """
 
 from __future__ import annotations
@@ -27,7 +31,8 @@ if TYPE_CHECKING:
 
 # (flight numbers, per-flight dates, departure, arrival)
 SliceKey = tuple[tuple[str, ...], tuple[str, ...], str, str | None]
-ItineraryKey = tuple[SliceKey, ...]
+# Each slice's key, then, for a listing not sold as one ticket, how it is sold.
+ItineraryKey = tuple[SliceKey | str, ...]
 
 _CASH_NUM_RE = re.compile(r"[\d,]*\d+(?:\.\d+)?")
 _CURRENCY_RE = re.compile(r"[A-Z]{3}")
@@ -39,7 +44,8 @@ def _norm_fn(fn: str | None) -> str:
 
 def itinerary_key(itin: Itinerary) -> ItineraryKey | None:
     """Per slice: every flight number, the flights' dates where the slice
-    states them, and its departure and arrival strings. None when a slice has
+    states them, and its departure and arrival strings, then `itin.ticketing`
+    for a listing Google sells as more than one booking. None when a slice has
     no flight, a blank one, or no departure, since such an itinerary can't be
     told apart from another; a missing arrival is keyed as missing.
     """
@@ -52,7 +58,9 @@ def itinerary_key(itin: Itinerary) -> ItineraryKey | None:
         if not flights or not all(flights) or not s.departure:
             return None
         slice_keys.append((flights, tuple(s.segment_dates), s.departure, s.arrival))
-    return tuple(slice_keys)
+    if itin.ticketing is None:
+        return tuple(slice_keys)
+    return (*slice_keys, itin.ticketing)
 
 
 def parse_price(s: str | None) -> float | None:
@@ -117,6 +125,7 @@ def merge(
     sort_by: Cabin,
     top_n: int,
     currency: str,
+    slices: int = 1,
 ) -> list[MultiCabinRow]:
     """Join itineraries across cabins. Sorted by `sort_by`'s price under
     `price_rank`: rows priced in `currency` first by amount, any other
@@ -130,18 +139,28 @@ def merge(
 
     Itineraries that can't be keyed (no flight, a blank flight or no
     departure on a slice) are skipped.
+
+    `slices` is how many the search asked for. A separate-ticket listing with
+    fewer is a round trip's outbound alone at Google's round-trip total, and
+    Google lists no return for it, so each cabin's may fly a different one:
+    it is a row of its own in every cabin.
     """
 
     def rank(it: Itinerary) -> tuple[int, str, float]:
         return price_rank(it.price, parse_price(it.price), currency=currency)
 
-    listings: dict[ItineraryKey, dict[Cabin, Itinerary]] = {}
+    listings: dict[ItineraryKey | tuple[ItineraryKey, Cabin], dict[Cabin, Itinerary]] = {}
     for cabin, res in results_by_cabin.items():
         for it in res.solutions:
             key = itinerary_key(it)
             if key is None:
                 continue
-            by_cabin = listings.setdefault(key, {})
+            outbound_alone = (
+                it.ticketing is not None
+                and it.itinerary is not None
+                and len(it.itinerary.slices) < slices
+            )
+            by_cabin = listings.setdefault((key, cabin) if outbound_alone else key, {})
             held = by_cabin.get(cabin)
             if held is None or rank(it) < rank(held):
                 by_cabin[cabin] = it

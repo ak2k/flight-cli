@@ -266,7 +266,7 @@ Full detail at [`docs/memories/MEMORY.md`](./docs/memories/MEMORY.md).
    The gflight **search** path fetches Google's public page instead
    (`GetShoppingResults` has been gated since 2026-08), where an empty board is
    authoritative and every refusal is typed — see
-   [`gf_routing_and_carriers.md`](./docs/memories/gf_routing_and_carriers.md).
+   [`gf_page_refusals_and_ds1.md`](./docs/memories/gf_page_refusals_and_ds1.md).
 8. **Two-phase calendar flow.** `name: "calendar"` returns the date grid;
    user picks a date in the UI; `name: "calendarFollowup"` returns full
    itineraries for that date. Both use the same `/v1/search` endpoint.
@@ -309,7 +309,7 @@ leg fan-out picks it up — the matcher and renderers stay provider-blind.
   for the wrong airport. Build airport members only through
   `fli_bridge.fli_airport`; a test fails on `getattr`/`hasattr`/`Airport[...]`
   on the enum under `src/`. MLH alone resolves to BSL, the same airport. See
-  [`gf_routing_and_carriers.md`](./docs/memories/gf_routing_and_carriers.md).
+  [`gf_search_transport.md`](./docs/memories/gf_search_transport.md).
 - fli's `Airline` enum makes 6 codes aliases of another carrier (`Airline.W9`
   is W6, Wizz Air Hungary rather than Wizz Air UK), and fli's row decoder has
   no entry for them. Build airline members only through

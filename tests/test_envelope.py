@@ -39,6 +39,7 @@ from flight_cli.pp import auth as pp_auth
 from flight_cli.pp import cli as pp_cli
 from flight_cli.pp import client as pp_client
 from flight_cli.pp.auth import PPAuthError, Tokens
+from flight_cli.providers import registry
 from flight_cli.providers.base import AwardFlight, LegQuery
 from flight_cli.providers.seats_aero import auth as seats_auth
 from test_calendar_split import _pair_client, _result
@@ -73,6 +74,7 @@ _KEYS = [
     "awards",
     "insight",
     "price_history",
+    "price_graph",
     "verify",
     "cross_check",
     "split_ticket",
@@ -156,7 +158,7 @@ def _hermetic(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:  # pyrig
 
     monkeypatch.setattr(cli, "_should_run_awards", _decide)
     monkeypatch.setattr(pp_cli, "gather_awards", _gather)
-    monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
+    monkeypatch.setattr(pp_cli, "stored_tokens", lambda: None)
     monkeypatch.setattr(pp_cli, "load_tokens", lambda: None)
 
 
@@ -188,6 +190,7 @@ def _envelope_of(r: Result, *, command: str = "search", code: int = 0) -> dict[s
     assert env["awards"] is None or isinstance(env["awards"], list)
     assert isinstance(env["insight"], list)
     assert isinstance(env["price_history"], list)
+    assert isinstance(env["price_graph"], list)
     assert env["verify"] is None or isinstance(env["verify"], dict)
     assert env["cross_check"] is None or isinstance(env["cross_check"], dict)
     assert env["split_ticket"] is None or isinstance(env["split_ticket"], dict)
@@ -241,6 +244,8 @@ def test_a_google_one_way_carries_its_rows_insight_and_history(
     assert (history["cabin"], history["currency"], len(points)) == ("COACH", "USD", 61)
     assert points[0] == {"date": "2026-07-29", "price": 169.0}
     assert points[-1] == {"date": "2026-09-27", "price": 204.0}
+    assert env["price_graph"] == []
+    assert _notes(env, "price_graph") == ["price_graph: a search carries none"]
     assert env["awards"] is None
     assert _notes(env, "awards") == ["awards: --cash-only skips the award search"]
     assert env["verify"] is None
@@ -665,22 +670,42 @@ def test_awards_ride_beside_the_cash_rows(gf_session: Callable[..., Any]) -> Non
     assert any(m["awards"] for m in leg["matches"])
 
 
-def test_pointspath_skipped_with_tokens_that_failed_narrows_the_answer(
-    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("extra", [(), ("--awards-only",)])
+def test_pointspath_tokens_that_fail_to_refresh_are_an_awards_incomplete_note(
+    extra: tuple[str, ...],
+    gf_session: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    def _refused() -> Tokens:
+    def _refused(_t: Tokens) -> Tokens:
         raise PPAuthError("Supabase refresh failed: HTTP 400")
 
-    monkeypatch.setattr(pp_cli, "load_tokens", lambda: Tokens("access", "refresh", 0))
-    monkeypatch.setattr(pp_cli, "get_valid_tokens", _refused)
+    monkeypatch.setattr(pp_cli, "gather_awards", registry.gather_awards)
+    monkeypatch.setattr(seats_auth, "KEY_PATH", tmp_path / "seats.json")
+    monkeypatch.delenv(seats_auth.API_KEY_ENV, raising=False)
+    monkeypatch.setenv("PP_ACCESS_TOKEN", "access")
+    monkeypatch.setenv("PP_REFRESH_TOKEN", "refresh")
+    monkeypatch.setattr(pp_auth, "refresh", _refused)
     gf_session(_served(_LAX))
     env = _envelope_of(
         _search(
-            "JFK", "LAX", "--dep", _DEP.isoformat(), "--backend", "gflight", "--fast", "-n", "5"
+            "JFK",
+            "LAX",
+            "--dep",
+            _DEP.isoformat(),
+            "--backend",
+            "gflight",
+            "--fast",
+            "-n",
+            "5",
+            *extra,
         )
     )
     assert env["complete"] is False
-    assert any(n.startswith("PointsPath skipped: Supabase refresh failed") for n in env["notes"])
+    assert any(
+        n.startswith("Awards incomplete: PointsPath failed (Supabase refresh failed")
+        for n in env["notes"]
+    )
     assert env["awards"] is not None
 
 
@@ -690,7 +715,7 @@ def test_pointspath_skipped_with_no_tokens_is_a_note(
     def _none() -> Tokens:
         raise PPAuthError("No PointsPath tokens. Run `flight-cli auth pp login`.")
 
-    monkeypatch.setattr(pp_cli, "get_valid_tokens", _none)
+    monkeypatch.setattr(pp_cli, "stored_tokens", _none)
     gf_session(_served(_LAX))
     env = _envelope_of(
         _search(
@@ -703,27 +728,18 @@ def test_pointspath_skipped_with_no_tokens_is_a_note(
 
 
 @pytest.mark.parametrize(
-    ("tokens", "seats", "providers", "complete", "awards_note"),
+    ("providers", "complete", "awards_note"),
     [
         pytest.param(
-            True, False, (), False, "awards: PointsPath was asked for", id="tokens-failed-alone"
-        ),
-        pytest.param(
-            True,
-            True,
             ("--providers", "pp"),
             False,
-            "awards: PointsPath was asked for",
-            id="named-beside-seats",
+            "awards: PointsPath was asked for, and it has no tokens",
+            id="named-no-tokens",
         ),
-        pytest.param(
-            False, False, (), True, "awards: no award provider is configured", id="no-tokens"
-        ),
+        pytest.param((), True, "awards: no award provider is configured", id="no-tokens"),
     ],
 )
 def test_pointspath_lost_at_the_award_gate_narrows_the_answer(
-    tokens: bool,
-    seats: bool,
     providers: tuple[str, ...],
     complete: bool,
     awards_note: str,
@@ -731,26 +747,15 @@ def test_pointspath_lost_at_the_award_gate_narrows_the_answer(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The award gate reads PointsPath tokens that fail to refresh as no
-    provider at all, so no award search runs and the provider's loss is said at
-    the gate. Through the real gate: a machine that never saved tokens asked
-    nothing of PointsPath."""
-
-    def _refused(_t: Tokens) -> Tokens:
-        raise PPAuthError("Supabase refresh failed: HTTP 400 refresh token expired")
-
+    """With no tokens the award gate finds no provider, so no award search runs
+    and the gate says why. Through the real gate: naming PointsPath narrows the
+    answer, and a machine that never saved tokens asked nothing of it."""
     monkeypatch.setattr(cli, "_should_run_awards", _SHOULD_RUN_AWARDS)
     monkeypatch.setattr(pp_auth, "TOKENS_PATH", tmp_path / "pp.json")
-    monkeypatch.setattr(pp_auth, "refresh", _refused)
     monkeypatch.setattr(seats_auth, "KEY_PATH", tmp_path / "seats.json")
     monkeypatch.delenv("PP_ACCESS_TOKEN", raising=False)
     monkeypatch.delenv("PP_REFRESH_TOKEN", raising=False)
     monkeypatch.delenv(seats_auth.API_KEY_ENV, raising=False)
-    if tokens:
-        monkeypatch.setenv("PP_ACCESS_TOKEN", "access")
-        monkeypatch.setenv("PP_REFRESH_TOKEN", "refresh")
-    if seats:
-        monkeypatch.setenv(seats_auth.API_KEY_ENV, "key")
     gf_session(_served(_LAX))
     env = _envelope_of(
         _search(
@@ -920,12 +925,27 @@ def _priced_grid(price: str) -> Any:
     return _result({9: {7: (price, 3, {}), 8: ("", 0, {})}}, cheapest=price)
 
 
+_WINDOW_DAYS = [_START + timedelta(days=i) for i in range(14)]
+
+
+def _window_grid(price: str) -> Any:
+    """Every departure date of `_CALENDAR`'s window priced, 7-night trips too,
+    and the day after it unpriced."""
+    by_month: dict[int, dict[int, tuple[str, int, dict[int, str]]]] = {}
+    for when in _WINDOW_DAYS:
+        by_month.setdefault(when.month, {})[when.day] = (price, 3, {7: price})
+    after = _WINDOW_DAYS[-1] + timedelta(days=1)
+    by_month.setdefault(after.month, {})[after.day] = ("", 0, {})
+    return _result(by_month, cheapest=price)
+
+
 def test_a_matrix_calendar_carries_each_priced_day(monkeypatch: pytest.MonkeyPatch) -> None:
-    _pair_client(monkeypatch, {("JFK", "LAX"): _priced_grid("USD204.00")})
+    _pair_client(monkeypatch, {("JFK", "LAX"): _window_grid("USD204.00")})
     env = _envelope_of(_run(*_CALENDAR[:1], "JFK", "LAX", *_CALENDAR[1:]), command="calendar")
     assert (env["backend"], env["currency"], env["complete"]) == ("matrix", "USD", True)
-    (day,) = env["results"]
-    assert (day["price"], day["currency"], day["row"]["date"]) == (204.0, "USD", 7)
+    assert [(d["price"], d["currency"], d["row"]["date"]) for d in env["results"]] == [
+        (204.0, "USD", when.day) for when in _WINDOW_DAYS
+    ]
     assert env["awards"] is None
     assert _notes(env, "awards") == ["awards: calendar runs no award search"]
     assert _notes(env, "insight") == ["insight: a calendar carries none"]
@@ -997,8 +1017,8 @@ def test_returns_only_the_combined_query_priced_narrow_the_answer(
     A one-way split asks no such return, and every pair answered."""
     client = _pair_client(
         monkeypatch,
-        {pair: _priced_grid("USD204.00") for pair in (("JFK", "LAX"), ("EWR", "LAX"))}
-        | {("JFK,EWR", "LAX"): _priced_grid("USD199.00")},
+        {pair: _window_grid("USD204.00") for pair in (("JFK", "LAX"), ("EWR", "LAX"))}
+        | {("JFK,EWR", "LAX"): _window_grid("USD199.00")},
     )
     window = [a for a in _CALENDAR[1:] if a != "--one-way"]
     env = _envelope_of(_run(*_CALENDAR[:1], "JFK,EWR", "LAX", *window, *trip), command="calendar")
@@ -1028,6 +1048,17 @@ def test_the_fast_graph_is_a_google_calendar(monkeypatch: pytest.MonkeyPatch) ->
     assert [(c["price"], c["row"]) for c in env["results"]] == [
         (204.0, {"departure": _START.isoformat(), "price": 204}),
         (214.5, {"departure": (_START + timedelta(days=1)).isoformat(), "price": 214.5}),
+    ]
+    # The same cells under the key every calendar carries Google's graph in.
+    assert env["price_graph"] == [
+        {
+            "trip_length": None,
+            "currency": "USD",
+            "cells": [
+                {"departure": c["row"]["departure"], "return": None, "price": c["price"]}
+                for c in env["results"]
+            ],
+        }
     ]
     assert _Matrix.calls == 0
 
@@ -1135,6 +1166,22 @@ def test_the_committed_schema_is_the_generated_one() -> None:
         "regenerate: uv run python -c 'from flight_cli._envelope import schema_text; "
         'print(schema_text(), end="")\' > docs/envelope.schema.json'
     )
+
+
+def test_a_graph_cell_is_published_and_written_with_a_return_key() -> None:
+    """The schema and the document name the field alike, though Python cannot."""
+    schema = json.loads(_SCHEMA.read_text())
+    assert list(schema["$defs"]["PriceGraphCell"]["properties"]) == ["departure", "return", "price"]
+    rec = _envelope._Recorder("calendar")
+    cell = {"departure": "2026-10-20", "return": "2026-10-27", "price": 318.0}
+    rec.graphs = [
+        _envelope.PriceGraph(
+            trip_length=7, currency="USD", cells=[_envelope.PriceGraphCell.model_validate(cell)]
+        )
+    ]
+    doc = json.loads(_envelope._document(rec, code=0, stderr="", stray=""))
+    assert doc["price_graph"] == [{"trip_length": 7, "currency": "USD", "cells": [cell]}]
+    _envelope.ENVELOPE.validate_python(doc)
 
 
 @pytest.mark.parametrize(
