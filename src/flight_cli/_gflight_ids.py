@@ -2795,6 +2795,7 @@ def _with_separate_tickets(
         insight: PriceInsight | None = answer.insight,
         filtered: int = 0,
         unread: int = 0,
+        capped_at: float | None = answer.capped_at,
     ) -> Board[GFlightWithId | tuple[GFlightWithId, ...]]:
         return Board(
             rows,
@@ -2805,7 +2806,7 @@ def _with_separate_tickets(
             unread=answer.unread + unread,
             separate_hidden=hidden,
             separate_failed=failed,
-            capped_at=answer.capped_at,
+            capped_at=capped_at,
         )
 
     if stopped is not None:
@@ -2831,10 +2832,23 @@ def _with_separate_tickets(
     if insight is not None and fares:
         insight = replace(insight, cheapest=min(insight.cheapest, *fares))
     unread = page.unread
+    # A marked row priced above the tab's cap may be missing from the rows it
+    # adds, the routing having left any of them or not.
+    capped_at = min((c for c in (answer.capped_at, page.capped_at) if c is not None), default=None)
     if filters.trip_type == TripType.ONE_WAY:
-        return with_notes([*answer, *marked], insight=insight, filtered=filtered, unread=unread)
+        return with_notes(
+            [*answer, *marked],
+            insight=insight,
+            filtered=filtered,
+            unread=unread,
+            capped_at=capped_at,
+        )
     return with_notes(
-        [*answer, *((r,) for r in marked)], insight=insight, filtered=filtered, unread=unread
+        [*answer, *((r,) for r in marked)],
+        insight=insight,
+        filtered=filtered,
+        unread=unread,
+        capped_at=capped_at,
     )
 
 

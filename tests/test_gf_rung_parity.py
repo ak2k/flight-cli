@@ -19,6 +19,7 @@ import gzip
 import json
 import logging
 import re
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -336,6 +337,53 @@ def test_a_board_merged_from_pages_takes_the_lowest_cap(
     board = cli._gflight_results((Leg.of(_EAST, "LAX", _DEP),), SearchOptions(), 5)
     assert isinstance(board, gfid.Board)
     assert board.capped_at == merged
+
+
+def _keeps_none(_leg: int, _row: gfid.GFlightWithId) -> bool:
+    return False
+
+
+@pytest.mark.parametrize(
+    ("mode", "base_cap", "keep", "merged"),
+    [
+        ("show", None, None, 1006.0),
+        ("show", 1200.0, None, 1006.0),
+        ("show", 900.0, None, 900.0),
+        ("show", None, _keeps_none, 1006.0),
+        ("hide", None, None, None),
+    ],
+    ids=["uncapped-base", "higher-base-cap", "lower-base-cap", "marked-rows-filtered", "hidden"],
+)
+def test_the_cheapest_tabs_cap_rides_the_rows_it_adds(
+    mode: gfid.SeparateTickets,
+    base_cap: float | None,
+    keep: Callable[[int, gfid.GFlightWithId], bool] | None,
+    merged: float | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red at 01c8265 for the uncapped base, the higher base cap and the
+    filtered marked rows, where the board kept the base page's cap alone. Shown,
+    the tab's marked rows join the board, and one priced above the tab's cap may
+    be missing from them whether or not the routing left any. Hidden, they are
+    only counted, so the board shown keeps its own cap."""
+    token = _board("ds1_nyc_lon_token")
+    tab = gfid.Board(
+        [replace(r, ticketing="self_transfer") for r in token], capped_at=token.capped_at
+    )
+
+    def one_call_laddered(*_a: object, **_kw: object) -> gfid.Board[gfid.GFlightWithId]:
+        return tab
+
+    monkeypatch.setattr(gfid, "_one_call_laddered", one_call_laddered)
+    answer = gfid._with_separate_tickets(
+        _one_way_filters(),
+        gfid.Board([token[0]], capped_at=base_cap),
+        mode=mode,
+        transport=gfid.HTTP_TRANSPORT,
+        currency="USD",
+        keep=keep,
+    )
+    assert answer.capped_at == merged
 
 
 def _search(*extra: str) -> list[str]:
