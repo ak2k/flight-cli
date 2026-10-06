@@ -26,7 +26,7 @@ its schema is `docs/envelope.schema.json`, generated from the models
 | `price_graph` | `[{trip_length, currency, cells: [{departure, return, price}]}]` | a calendar's Google price graph, one entry per trip length that priced (`trip_length` and `return` null on a one-way); each cell is Google's estimate for one date pair, with no itinerary behind it. Empty, with its note, on a search, a calendar that did not ask it (no `--gf-transport browser` or `auto`, `--gf-transport http`, or a refusal by the graph's gate, named) and one whose graph failed |
 | `verify` | object / null | `--verify`'s check of row `--pick`, the `verify` object `--format json` prints; null when not asked, on a calendar, or when the check failed (exit 1) |
 | `cross_check` | object / null | `--enrich`'s Google-vs-Matrix comparison, the `cross_check` object `--format json --enrich` prints, `low_check` included; null when not asked, skipped, on a calendar, or when Matrix's half failed |
-| `split_ticket` | object / null | `--split`'s answer, the `split_ticket` object `--format json --split` prints: on a round trip the pair (`{outbound, return, total, currency}`), or `{error}` naming why there is none. An open jaw's combinations (`{currency, combinations}`) or `{error}` on every envelope run, `--split` or not, since its table lists them without the flag. Null on a round trip not asked, on a calendar, or when Matrix answered a round trip |
+| `split_ticket` | object / null | `--split`'s answer, the `split_ticket` object `--format json --split` prints: on a round trip the pair (`{outbound, return, total, currency}`), or `{error}` naming why there is none. A multi-city search's combinations (two or more `--slice` that are not a round trip; `{currency, combinations}`) or `{error}` on every envelope run, `--split` or not, since its table lists them without the flag. Under `--backend gflight` they are the whole answer: `backend` is `gflight`, `results` holds one empty entry whose note says the tickets are in `split_ticket`, and `currency` is null. Null on a round trip not asked, on a calendar, or when Matrix answered a round trip |
 
 `price` is the trip's: a Google round trip's is its return member's, the fare
 every surface prints for the pair; Matrix's is the solution's price string read
@@ -67,9 +67,10 @@ and a round trip's failed `--split` one-way. A hand-off that holds Google's boar
 by the filter, an infant's empty board, separate-ticket rows alone on an award
 search, a multi-cabin search) notes its unread rows as `_record_google_cabin`
 does. Matrix, provider, calendar and `--split`-on-Matrix narrowings name no
-backend and count whoever answers, and so do an open jaw's one-way boards
-(`cli._one_way_boards` with `narrow`): their tickets are shown beside Matrix's
-answer, never in its place. The sites: a cabin asked and never recorded (judged
+backend and count whoever answers, and so do a multi-city search's one-way
+boards (`cli._one_way_boards` with `narrow`): their tickets are shown beside
+Matrix's answer, or alone under `--backend gflight`, never as a one-ticket
+row. The sites: a cabin asked and never recorded (judged
 in the recorder, from `ask_cabins` against what the leaves recorded); Matrix
 finding nothing where Google had rows (`_note_google_rows_unshown`); the
 round-trip pin cap note; return boards refused, a pin Google served no return
@@ -91,13 +92,14 @@ body and a request the award deadline cut included); a leg with
 `pairs_not_asked`; calendar sub-queries lost; a length of a `calendar --fast`
 range whose graph was lost;
 a `--split` one-way search that failed, a `--split` round trip Matrix answered,
-or a `--split` open jaw Google was not asked about, since the tickets were asked
-for and are not priced (without `--split` that open jaw's `{error}` narrows
-nothing: its table lists no tickets either) (no priced one-way, no pair one traveler can fly, or two
-currencies are the boards' answer, a note); an open jaw's one-way board missing
-a page or holding rows the parser could not read (`cli._one_way_boards`, the
-unread rows a note naming the slice), since its cheapest tickets may be among
-them;
+or a `--split` multi-city search Google was not asked about, since the tickets
+were asked for and are not priced (without `--split` that search's `{error}`
+narrows nothing: its table lists no tickets either) (no priced one-way, no pair one traveler can fly, or two
+currencies are the boards' answer, a note); a multi-city search's one-way
+board missing a page or holding rows the parser could not read
+(`cli._one_way_boards`, the unread rows a note naming the slice), since its
+cheapest tickets may be among them, or holding no row at all for a party with
+an infant, as on a Google search;
 `--max-per-query > 1` over a split, and over the one unsplit query when a
 group holds every destination; a round trip over a split set, whose returns
 into another airport of the set come only from the combined query; a

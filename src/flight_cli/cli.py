@@ -3971,7 +3971,7 @@ def _record_split_ticket(ticket: _SplitTicket | str, bags: Bags | None) -> None:
     _envelope.record_split_ticket(json.loads(json.dumps(obj, default=str)))
 
 
-# ─────────────────────── open jaw on separate tickets ───────────────────────
+# ───────────────────── multi-city on separate tickets ──────────────────────
 
 
 class _OpenJaw(NamedTuple):
@@ -5139,7 +5139,7 @@ def _run_matrix_path(
     """Matrix path: Alkali call → optional cash render → optional fare rules →
     optional PP augmentation → URLs.
 
-    `split_ticket` is an open jaw's separate-ticket object, which the JSON
+    `split_ticket` is a multi-city trip's separate-ticket object, which the JSON
     document carries beside Matrix's as `{"search": …, "split_ticket": …}`."""
     # A cap holds each fare in the cap's currency, so Matrix is asked in it:
     # left unset, it prices in its own default (GBP from LHR) and the cap keeps
@@ -5937,8 +5937,8 @@ def _note_stop_drops(
     was asked for, from `_gflight_results`' tally. Called, like
     `_note_other_currencies`, by each path that answers with the board: a board
     the filter emptied says so in its own line, and one handed to Matrix is not
-    shown at all. `one_way` labels a one-way board an open jaw or `--split`
-    reads (`_one_way_boards`), as `_note_row_cap` labels it; such a board is
+    shown at all. `one_way` labels a one-way board a multi-city trip or
+    `--split` reads (`_one_way_boards`), as `_note_row_cap` labels it; such a board is
     counted even when the drops emptied it, since its own line says only that
     it priced no one-way."""
     drops: StopDrops | None = getattr(results, "stop_drops", None)
@@ -5972,7 +5972,7 @@ def _note_row_cap(
     Each cap is named in the currency of the page that stopped there
     (`Board.capped_at`), which no row may carry once a filter has run;
     `requested` names a cap whose page decoded no currency. `one_way` labels a
-    one-way board an open jaw or `--split` reads (`_one_way_boards`), as
+    one-way board a multi-city trip or `--split` reads (`_one_way_boards`), as
     `cabin` labels a cabin's.
 
     A plain line, not a narrowing, so the envelope carries it as a note and
@@ -10412,8 +10412,9 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             "--slice",
             "-s",
             help=_SLICE_HELP
-            + " Matrix answers. Two slices that are not a round trip (an open jaw) also show "
-            "Google Flights' cheapest one-way per slice, combined as separate tickets.",
+            + " Matrix answers, on one ticket. Two or more slices that are not a round trip (an "
+            "open jaw, or a longer multi-city trip) also show Google Flights' cheapest one-way "
+            "per slice, combined as separate tickets; --backend gflight shows those alone.",
             rich_help_panel=_GROUP_ITINERARY,
         ),
     ] = None,
@@ -10424,7 +10425,9 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             help=(
                 "auto|matrix|gflight. auto picks gflight for plain searches and "
                 "matrix when Matrix-only flags are set (routing/extension/slice/"
-                "time-of-day/extra pax types/PP config)."
+                "time-of-day/extra pax types/PP config). gflight on two or more --slice that "
+                "are not a round trip shows Google Flights' separate tickets alone, one "
+                "one-way per slice, and asks Matrix nothing."
             ),
             autocompletion=_completer(_VALID_BACKENDS),
             rich_help_panel=_GROUP_BACKEND,
@@ -10608,8 +10611,8 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                 "self transfer, which a search otherwise shows from Google's Cheapest tab "
                 "(marked † and ‡ on the Google, merged and multi-cabin tables, "
                 "separate_tickets: true in --format json), and say how many were hidden; "
-                "on an open jaw, ask Google for no one-way tickets. Matrix sells every "
-                "itinerary as one ticket, so there it changes nothing."
+                "on a multi-city --slice search, ask Google for no one-way tickets. Matrix "
+                "sells every itinerary as one ticket, so there it changes nothing."
             ),
             rich_help_panel=_GROUP_FILTERING,
         ),
@@ -10686,10 +10689,10 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         "round-trip table, the cheapest pair whose return leaves the airport the outbound "
         "lands at, after it lands, as two separate tickets. --max-price is not applied to "
         'them. With --format json the document becomes {"search": …, "split_ticket": {…}}; '
-        "--format envelope carries the same object under split_ticket. On an open jaw (two "
-        "--slice that are not a round trip), whose table and --format envelope show its "
-        "separate tickets anyway, --format json carries them only with --split, as "
-        "split_ticket's combinations beside Matrix's document.",
+        "--format envelope carries the same object under split_ticket. On a multi-city "
+        "search (two or more --slice that are not a round trip), whose table and --format "
+        "envelope show its separate tickets anyway, --format json carries them only with "
+        "--split, as split_ticket's combinations beside Matrix's document.",
         rich_help_panel=_GROUP_OUTPUT,
     ),
     currency: Annotated[
