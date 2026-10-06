@@ -2032,7 +2032,7 @@ def _no_chrome_rung(seen: list[tuple[str, Any]] | None = None) -> Any:
     `e.remedy`, or prints it unescaped, is then readable off the buffer."""
 
     def _rung(
-        _legs: Any, opts: Any, _top_n: Any, gf_mode: Any = None, _headed: Any = False
+        _legs: Any, opts: Any, _top_n: Any, gf_mode: Any = None, _headed: Any = False, **_kw: Any
     ) -> list[Any]:
         if seen is not None:
             seen.append((str(opts.cabin.value), gf_mode))
@@ -2179,7 +2179,7 @@ def _transport_seen(
 
     calls: list[tuple[Any, ...]] = []
 
-    def _record(_legs: Any, _opts: Any, _top_n: Any, *rest: Any) -> list[Any]:
+    def _record(_legs: Any, _opts: Any, _top_n: Any, *rest: Any, **_kw: Any) -> list[Any]:
         calls.append(rest)
         return []
 
@@ -2247,7 +2247,7 @@ def _multi_cabin_transports(
 
     calls: list[tuple[str, Any, Any]] = []
 
-    def _record(_legs: Any, opts: Any, _top_n: Any, *rest: Any) -> list[Any]:
+    def _record(_legs: Any, opts: Any, _top_n: Any, *rest: Any, **_kw: Any) -> list[Any]:
         calls.append((str(opts.cabin.value), *rest))
         return []
 
@@ -2387,7 +2387,7 @@ def test_two_cabins_at_rung_two_share_one_browser_launch(
     pw = _install(monkeypatch, tmp_path)
 
     def _rung(
-        _legs: Any, _opts: Any, _top_n: Any, _mode: Any = None, headed: Any = False
+        _legs: Any, _opts: Any, _top_n: Any, _mode: Any = None, headed: Any = False, **_kw: Any
     ) -> list[Any]:
         try:
             gfb.session(headed=bool(headed)).get_html(_PAGE_URL)
@@ -2521,7 +2521,7 @@ def test_a_launch_failure_after_a_cabin_was_served_stays_a_per_cabin_note(
     raised: list[GfBrowserUnavailableError] = []
 
     def _rung(
-        _legs: Any, opts: Any, _top_n: Any, mode: Any = None, _headed: Any = False
+        _legs: Any, opts: Any, _top_n: Any, mode: Any = None, _headed: Any = False, **_kw: Any
     ) -> list[Any]:
         seen.append((str(opts.cabin.value), mode))
         if opts.cabin is Cabin.BUSINESS:
@@ -2570,7 +2570,8 @@ def test_the_headed_flag_reaches_the_launch_call_itself(
     launch call rather than off anything that reports it. Nothing is stubbed
     between the option and that call; rung 1 is blocked, so a transport that
     failed to arrive shows up as no launch at all rather than as a quiet
-    fallback to curl_cffi."""
+    fallback to curl_cffi. The Cheapest tab is the second navigation, on the
+    same browser."""
     from typer.testing import CliRunner
 
     from flight_cli import cli
@@ -2599,7 +2600,9 @@ def test_the_headed_flag_reaches_the_launch_call_itself(
     assert pw.chromium.launches == 1
     assert pw.chromium.launch_kwargs["headless"] is False
     assert pw.chromium.launch_kwargs["channel"] == "chrome"
-    assert len(_page_of(pw).gotos) == 1
+    gotos = [url for url, _, _ in _page_of(pw).gotos]
+    assert len(gotos) == 2
+    assert "tfu=EggIABABIAIoASIA" in gotos[1]
 
 
 def test_a_matrix_multi_cabin_search_opens_no_browser_session(

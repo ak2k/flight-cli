@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
+from ._cross_check import separate_tickets_reason
 from ._multi_cabin import parse_price, price_currency
 from .domain import Leg, SearchOptions
 
@@ -32,7 +33,7 @@ if TYPE_CHECKING:
         SliceEndpoint,
     )
 
-Outcome = Literal["match", "other-itinerary", "no-solution", "carrier-unseen"]
+Outcome = Literal["match", "other-itinerary", "no-solution", "carrier-unseen", "separate-tickets"]
 
 
 class Flight(NamedTuple):
@@ -52,10 +53,12 @@ class Flight(NamedTuple):
 
 
 class Row(NamedTuple):
-    """A Google row: each slice's legs, and the price the table prints."""
+    """A Google row: each slice's legs, the price the table prints, and how
+    Google sells it when that is more than one ticket."""
 
     slices: tuple[tuple[Flight, ...], ...]
     price: str | None
+    ticketing: str | None = None
 
 
 class Verdict(NamedTuple):
@@ -123,7 +126,12 @@ def google_row(r: Any) -> Row:
     )
     fare = results[-1]
     price: float | None = fare.price
-    return Row(slices, None if price is None else f"{fare.currency or 'USD'}{price:.2f}")
+    kinds = {getattr(m, "ticketing", None) for m in members}
+    return Row(
+        slices,
+        None if price is None else f"{fare.currency or 'USD'}{price:.2f}",
+        next((k for k in ("self_transfer", "separate_tickets") if k in kinds), None),
+    )
 
 
 def _folded(codes: Sequence[str]) -> list[str]:
@@ -276,6 +284,15 @@ def same_flights(row: Row, itinerary: BookedItinerary) -> bool:
 
 def _join(items: Sequence[str]) -> str:
     return ", ".join(items)
+
+
+def on_separate_tickets(row: Row) -> Verdict | None:
+    """The verdict on a row Google sells as separate tickets, decided without
+    asking Matrix, which prices one ticket and so never this booking; None for
+    a one-ticket row."""
+    if row.ticketing is None:
+        return None
+    return Verdict("separate-tickets", separate_tickets_reason(row.ticketing))
 
 
 def other_itinerary(answered: int) -> Verdict:

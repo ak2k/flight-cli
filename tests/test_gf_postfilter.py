@@ -19,6 +19,7 @@ from fli.models.airport import Airport  # pyright: ignore[reportMissingTypeStubs
 from conftest import _ds1
 from flight_cli import _gflight_ids as gfid
 from flight_cli._gf_postfilter import (
+    StopDrops,
     apply_postfilter,
     can_postfilter,
     routing_keep,
@@ -529,6 +530,38 @@ def test_a_return_board_is_held_to_the_ceiling() -> None:
 
 def test_a_negative_limit_is_no_limit() -> None:
     assert _stop_keep(-1, "MAXDUR 9:00")(0, _one_stop())
+
+
+def test_each_row_over_the_ceiling_is_counted_and_no_other_drop() -> None:
+    """Red at the base, which counted none. Only the one-stop row on the return
+    board, whose codes ask for nonstops, is counted: the same row within the
+    outbound's ceiling and the nonstop are dropped for the cap alone."""
+    drops = StopDrops()
+    keep = routing_keep(
+        [[], classify(None, "MAXSTOPS 0").predicates],
+        max_price=250,
+        max_stops=1,
+        stop_drops=drops,
+    )
+    assert keep is not None
+    rows = [(0, _one_stop()), (1, _one_stop()), (1, _priced(300.0)), (1, _priced(200.0))]
+    assert [keep(leg, row) for leg, row in rows] == [False, False, False, True]
+    assert drops == StopDrops(rows=1, ceiling=0)
+
+
+def test_a_cabin_requirement_holds_every_leg() -> None:
+    """Red at the base, which refused `+CABIN`. A leg in another cabin, a leg
+    Google states no cabin for and a leg with no amenities each fail."""
+    keep = routing_keep([classify(None, "+CABIN 2").predicates])
+    assert keep is not None
+    row = _one_stop()
+    business = replace(row, amenities=[replace(a, cabin="BUSINESS") for a in row.amenities])
+    mixed = replace(
+        business, amenities=[business.amenities[0], replace(row.amenities[1], cabin="FIRST")]
+    )
+    unstated = replace(business, amenities=[business.amenities[0], row.amenities[1]])
+    short = replace(business, amenities=business.amenities[:1])
+    assert [keep(0, r) for r in (business, mixed, unstated, short)] == [True, False, False, False]
 
 
 def test_the_checks_are_named_in_the_users_words() -> None:
