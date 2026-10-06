@@ -5428,8 +5428,8 @@ def _check_on_matrix(
 
     The chain search is uncached, because booking details are asked of its
     session. When it finds nothing, the same legs are asked again without the
-    chain, to tell a carrier Matrix lists nowhere on the route from a fare it
-    does not have.
+    chain, to tell a carrier none of Matrix's returned trips name from a fare
+    it does not have.
 
     A row Google sells as separate tickets is not asked at all: Matrix prices
     one ticket, never that booking."""
@@ -10347,10 +10347,10 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             "day and minute, between its airports. Prints Matrix's price beside Google's "
             "and the fare basis, booking code and fare rules of each fare, or why Matrix "
             "does not price it: those flights only on another itinerary, no fare at all, "
-            "or a carrier it lists nowhere on that route and day. Google Flights only; one "
-            "--cabin, no --bags, --sellers or --fare-rules. With --format json the "
-            'document becomes {"search": …, "verify": …}, where delta is Google\'s price '
-            "minus Matrix's.",
+            "or that none of the trips Matrix returned for that route and day names its "
+            "carrier. Google Flights only; one --cabin, no --bags, --sellers or --fare-rules. "
+            'With --format json the document becomes {"search": …, "verify": …}, where '
+            "delta is Google's price minus Matrix's.",
             rich_help_panel=_GROUP_OUTPUT,
         ),
     ] = False,
