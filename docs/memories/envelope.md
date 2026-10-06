@@ -19,7 +19,7 @@ its schema is `docs/envelope.schema.json`, generated from the models
 | `currency` | string / null | the one currency every priced row shares, else null |
 | `complete` | bool | false when the run exits 1 or the answer is narrower than asked |
 | `notes` | list of strings | every non-blank stderr line of the run (ANSI removed, in order), then one line per null or empty key, `key: why` |
-| `results` | search: `[{cabin, rows}]`, one per `--cabin` in order; calendar: `rows` | `{price, currency, row}`, where `row` is the object `--format json` prints, unchanged |
+| `results` | search: `[{cabin, rows}]`, one per `--cabin` in order; calendar: `rows`, one per priced day, none when the table prints the grid as empty | `{price, currency, row}`, where `row` is the object `--format json` prints, unchanged |
 | `awards` | list / null | the award document's per-leg entries; each match also carries `flights`, every flight of its slice. Null when no award search ran or it failed |
 | `insight` | `[{cabin, currency, cheapest, typical_low, typical_high, level}]` | one per Google page that carried one; a leg asked as several pages gives one per page, in page order |
 | `price_history` | `[{cabin, currency, points: [{date, price}]}]` | one per Google page that carried one, as `insight` |
