@@ -5401,6 +5401,7 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
     tabs_failed: dict[int, GfBackendError] = {}
     stop_drops = StopDrops()
     extras: dict[int, tuple[PriceInsight | None, PriceHistory | None]] = {}
+    unboarded_caps: list[float | None] = []
     with _browser_scope(gf_mode):
         if len(pages[0]) < _ROUND_TRIP_LEGS:
             for i, page in enumerate(pages):
@@ -5471,6 +5472,9 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
                     dropped += left
                     unread += ob.board.unread
                     _add_stop_drops(stop_drops, ob.stop_drops)
+                    # Read though none of its trips is shown: one through its
+                    # airports priced above its cap may be missing.
+                    unboarded_caps.append(ob.board.capped_at)
                 else:
                     boards.append(board)
                     extras[i] = (board.insight, board.history)
@@ -5503,7 +5507,10 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
         separate_failed=tabs_failed[min(tabs_failed)] if tabs_failed else None,
         # The lowest: a fare above it may be missing from the page that
         # stopped there, though another page lists dearer ones.
-        capped_at=min((b.capped_at for b in boards if b.capped_at is not None), default=None),
+        capped_at=min(
+            (c for c in (*(b.capped_at for b in boards), *unboarded_caps) if c is not None),
+            default=None,
+        ),
     )
     merged.stop_drops = stop_drops
     answered = [extras[i] for i in sorted(extras)]

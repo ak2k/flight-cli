@@ -339,6 +339,34 @@ def test_a_board_merged_from_pages_takes_the_lowest_cap(
     assert board.capped_at == merged
 
 
+@pytest.mark.parametrize("capped", [0, 1], ids=["unpinned-page", "pinned-page"])
+def test_a_round_trip_page_names_its_cap_pinned_or_not(
+    capped: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red at 01c8265 for the unpinned page. 12 origins to LAX is two pages,
+    and `-n 1` pins only the second page's outbounds, the cheapest. The first
+    page's were read all the same, and a trip through its airports priced above
+    its cap may be missing from the board."""
+    from test_gf_chunked_search import _EAST, _Google
+
+    google = _Google([(o, "LAX") for o in _EAST], fare=lambda i: 200.0 - i)
+
+    def one_call(filters: Any, *, currency: str = "USD", cheapest: bool = False) -> Any:
+        board = google(filters, currency=currency, cheapest=cheapest)
+        out = filters.flight_segments[0]
+        page = 0 if out.departure_airport[0][0].name in _EAST[:6] else 1
+        if page != capped or out.selected_flight is not None or cheapest:
+            return board
+        return gfid.Board(board, unread=board.unread, capped_at=900.0)
+
+    monkeypatch.setattr(gfid, "_one_call", one_call)
+    legs = (Leg.of(_EAST, "LAX", _DEP), Leg.of("LAX", _EAST, _RET))
+    board = cli._gflight_results(legs, SearchOptions(), 1)
+    assert isinstance(board, gfid.Board)
+    assert {p for p, n in google.calls if n is not None} == {(_EAST[6:], ("LAX",))}
+    assert board.capped_at == 900.0
+
+
 def _keeps_none(_leg: int, _row: gfid.GFlightWithId) -> bool:
     return False
 
