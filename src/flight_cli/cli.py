@@ -857,6 +857,41 @@ def _gf_unmappable_reasons(backend: str, predicates: Sequence[Predicate]) -> lis
 _GF_MAX_PASSENGERS = 9
 
 
+def _slice_legs(
+    slice_specs: list[str], *, routing: str | None, extension: str | None
+) -> tuple[Leg, ...]:
+    """The legs of `--slice` specs, each taking the top-level codes as defaults.
+
+    A slice's own `r=`/`e=`, even an empty one, replaces the top-level value
+    whole, as `--routing-ret` does on a round trip."""
+    legs: list[Leg] = []
+    for spec in slice_specs:
+        leg = _parse_slice_spec(spec)
+        update: dict[str, str] = {}
+        if leg.route_language is None and routing is not None:
+            update["route_language"] = routing
+        if leg.extension is None and extension is not None:
+            update["extension"] = extension
+        legs.append(leg.model_copy(update=update))
+    return tuple(legs)
+
+
+def _refuse_times_beside_slice(
+    *, slice_specs: list[str] | None, depart_times: str | None, return_times: str | None
+) -> None:
+    """Refuse a time window beside `--slice`: a slice has no time field, and a
+    trip of N slices has no single outbound or return to give one to."""
+    if not slice_specs:
+        return
+    for flag, value in (("--depart-times", depart_times), ("--return-times", return_times)):
+        if value is not None:
+            err.print(
+                f"[red]{_safe_text(flag)} sets the times of a search given by origin and "
+                f"destination.[/] A --slice takes no times: drop {_safe_text(flag)}."
+            )
+            raise typer.Exit(2)
+
+
 def _pick_backend(  # noqa: PLR0912 — one branch per reason a request needs Matrix
     *,
     backend: str,
@@ -9094,7 +9129,8 @@ _ROUTING_RET_HELP = (
 _EXT_RET_HELP = "The return's extension codes; '' for none. Unset, a round trip copies --ext."
 _SLICE_HELP = (
     "Multi-city: 'ORIG-DEST:DATE[:r=ROUTING:e=EXT:f=FLEX:d=arrive]'. Repeat. f= takes "
-    "--flex's values; d=arrive makes DATE the day the slice lands."
+    "--flex's values; d=arrive makes DATE the day the slice lands. A top-level "
+    "--routing/--extension is the default for a slice with no r=/e=."
 )
 
 
@@ -9655,6 +9691,9 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         depart_times=depart_times,
         return_times=return_times,
     )
+    _refuse_times_beside_slice(
+        slice_specs=slice_specs, depart_times=depart_times, return_times=return_times
+    )
     out_flex = _parse_flex(flex, "--flex")
     ret_flex = _parse_flex(return_flex, "--return-flex")
     out_day, ret_day = dep or arrive, ret or return_arrive
@@ -9815,7 +9854,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         err.print("[red]--verify needs a Google Flights row, and this search runs on Matrix.[/]")
         raise typer.Exit(2)
     if slice_specs:
-        legs = tuple(_parse_slice_spec(s) for s in slice_specs)
+        legs = _slice_legs(slice_specs, routing=routing, extension=extension)
     elif origin and destination and out_day:
         origins, destinations = _require_airports(origin, destination)
         out_times = _parse_search_times(depart_times, "--depart-times")
@@ -10185,11 +10224,14 @@ def fare(
             )
         )
         raise typer.Exit(2)
+    _refuse_times_beside_slice(
+        slice_specs=slice_specs, depart_times=depart_times, return_times=return_times
+    )
     # This block is `search`'s, near-duplicated. Deliberately not shared: `fare`
     # is deprecated and prints so on every run, and a helper spanning a command
     # on its way out ties the survivor's leg building to the leaving one.
     if slice_specs:
-        legs = tuple(_parse_slice_spec(s) for s in slice_specs)
+        legs = _slice_legs(slice_specs, routing=routing, extension=extension)
     elif origin and destination and dep:
         origins, destinations = _require_airports(origin, destination)
         out_times = _parse_times(depart_times)
