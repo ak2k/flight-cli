@@ -124,6 +124,46 @@ def test_round_trip_tuple_maps_to_two_slices() -> None:
     assert sr.cheapest_price == "USD1421.00"
 
 
+def test_a_round_trip_names_each_marketing_carrier_once_in_leg_order() -> None:
+    """Every leg of both members, as the flight numbers name them; a leg whose
+    airline has no code adds none. Red before, which named no carrier."""
+    out = _result(
+        900.0,
+        _leg("100", "JFK", "ORD", datetime(2026, 8, 15, 8, 0), datetime(2026, 8, 15, 10, 0)),
+        _leg(
+            "200",
+            "ORD",
+            "LHR",
+            datetime(2026, 8, 15, 12, 0),
+            datetime(2026, 8, 16, 2, 0),
+            airline_iata="UA",
+        ),
+    )
+    ret = _result(
+        1200.0,
+        _leg(
+            "300",
+            "LHR",
+            "ORD",
+            datetime(2026, 8, 22, 9, 0),
+            datetime(2026, 8, 22, 12, 0),
+            airline_iata="UA",
+        ),
+        _leg(
+            "400",
+            "ORD",
+            "JFK",
+            datetime(2026, 8, 22, 14, 0),
+            datetime(2026, 8, 22, 17, 0),
+            airline_iata="",
+        ),
+        _leg("500", "JFK", "BOS", datetime(2026, 8, 22, 19, 0), datetime(2026, 8, 22, 20, 0)),
+    )
+    it = fli_results_to_search_result([(out, ret)]).solutions[0]
+    assert it.itinerary is not None
+    assert [c.code for c in it.itinerary.carriers] == ["AA", "UA"]
+
+
 def test_connection_slice_flattens_all_flight_numbers_first_origin_last_dest() -> None:
     """Connecting itinerary: slice.flights lists every leg; origin/destination
     are first/last leg's airports (so the (route, time) fallback key works)."""

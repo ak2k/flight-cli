@@ -830,6 +830,18 @@ def test_the_table_and_both_documents_load_the_same_pages(monkeypatch: pytest.Mo
         assert google.cheapest == {"ECONOMY": 1, "BUSINESS": 1}, extra
 
 
+def test_each_row_names_its_carriers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Red at the base, which printed `?` on every Google row."""
+    result = _search(monkeypatch, _reversed(monkeypatch))
+    assert result.exit_code == 0, result.output
+    carriers = [
+        [c.strip() for c in line.strip().strip("│").split("│")][1]
+        for line in result.stdout.splitlines()
+        if _TABLE_ROW.match(line)
+    ]
+    assert carriers == ["B6"] * 10
+
+
 # A one-way Matrix answer per cabin: economy's cheapest two are UA101 and UA102,
 # business's cheapest is UA103, which a two-row economy-sorted table leaves out.
 _MATRIX = {
