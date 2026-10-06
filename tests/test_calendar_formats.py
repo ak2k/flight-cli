@@ -23,6 +23,7 @@ from conftest import LITERAL_DATES_NOW
 from flight_cli import _envelope, cli
 from flight_cli import _gf_calgraph as cg
 from flight_cli._gf_errors import GfBrowserUnavailableError
+from flight_cli.client import MatrixApiError
 from flight_cli.models import CalendarResult
 from test_calendar_split import _pair_client, _result
 
@@ -359,7 +360,7 @@ def test_every_format_carries_googles_graph_and_the_two_lows_note(
 ) -> None:
     _serve(monkeypatch, _BODY)
     seen = _graphs(monkeypatch, {7: _GRAPH_7N})
-    table = _run(*_ROUTE)
+    table = _run(*_ROUTE, *_BROWSER)
     document = _run(*_ROUTE, "--format", "json", *_BROWSER)
     result = _run(*_ROUTE, "--format", "envelope", *_BROWSER)
     assert table.exit_code == document.exit_code == result.exit_code == 0, result.output
@@ -435,6 +436,29 @@ def test_a_range_that_lost_a_length_carries_the_lengths_that_priced(
             "reason": "Google Flights answered the price graph with an empty result.",
         }
     ]
+
+
+def test_a_failed_matrix_keeps_its_exit_and_the_envelope_keeps_googles_graph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--format json` is Matrix's body, so no answer writes no document; the
+    envelope still records the graph that priced."""
+    _serve(monkeypatch, _BODY)
+
+    async def _refuse(*_args: object, **_kw: object) -> CalendarResult:
+        raise MatrixApiError("matrix is unreachable", kind="server")
+
+    monkeypatch.setattr(cli.MatrixClient, "execute", _refuse)
+    _graphs(monkeypatch, {7: _GRAPH_7N})
+    result = _run(*_ROUTE, "--format", "envelope", *_BROWSER)
+    document = _run(*_ROUTE, "--format", "json", *_BROWSER)
+    assert result.exit_code == document.exit_code == 1, result.output
+    env = _envelope_of(result)
+    assert [(g["trip_length"], len(g["cells"])) for g in env["price_graph"]] == [(7, 28)]
+    assert env["results"] == []
+    assert env["complete"] is False
+    assert document.stdout == ""
+    assert "matrix is unreachable" in document.stderr
 
 
 def test_a_graph_chrome_could_not_read_is_one_line_and_narrows_nothing(
