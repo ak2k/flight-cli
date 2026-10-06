@@ -355,7 +355,6 @@ def test_a_row_in_another_currency_is_counted_and_never_summed(
         pytest.param((), ("JFK-LHR:{out}", "LHR-JFK:{back}"), id="slice-round-trip"),
         pytest.param((), ("JFK-LHR:{out}", "CDG-JFK:{back}", "JFK-MIA:{later}"), id="three-slices"),
         pytest.param(("--format", "json"), None, id="json-without-split"),
-        pytest.param(("--format", "envelope"), None, id="envelope-without-split"),
     ],
 )
 def test_other_searches_ask_google_nothing(
@@ -600,14 +599,118 @@ def test_split_is_refused_where_it_cannot_join(
     assert google.calls == [] and matrix.searches == []
 
 
-def test_envelope_without_split_explains_the_null(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Green at the base."""
-    _google(monkeypatch)
-    _matrix(monkeypatch)
-    env = _envelope_of(_search("--cash-only", "--format", "envelope"))
-    assert env["split_ticket"] is None
-    assert _notes(env, "split_ticket") == ["split_ticket: --split was not asked"]
+def test_the_envelope_without_split_carries_the_tables_combinations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The table lists the separate tickets with no flag, so the envelope of
+    the same search carries them, asked exactly as the table asks them. Red at
+    the base, which asked Google nothing and explained a null `split_ticket`
+    as "--split was not asked"."""
+    google, matrix = _google(monkeypatch), _matrix(monkeypatch)
+    table = _search("--cash-only", "-n", "3")
+    assert table.exit_code == 0, table.output
+    shown = [r[1] for r in _table_rows(table.stdout, _TITLE) if r[0]]
+    asked = [(legs, opts.max_price, kw) for legs, opts, kw in google.calls]
+    google, matrix = _google(monkeypatch), _matrix(monkeypatch)
+    env = _envelope_of(_search("--cash-only", "-n", "3", "--format", "envelope"))
+    assert (env["backend"], env["complete"]) == ("matrix", True)
+    combos = env["split_ticket"]["combinations"]
+    assert (
+        [f"USD{c['total']:.2f} †" for c in combos]
+        == shown
+        == ["USD861.00 †", "USD895.00 †", "USD966.00 †"]
+    )
+    assert all(c["separate_tickets"] is True for c in combos)
+    assert _notes(env, "split_ticket") == []
+    assert [(legs, opts.max_price, kw) for legs, opts, kw in google.calls] == asked
+    assert asked == [
+        ((matrix.searches[0].legs[0],), None, {}),
+        ((matrix.searches[0].legs[1],), None, {}),
+    ]
+    assert len(matrix.searches) == 1
     assert _envelope.active() is False
+
+
+@pytest.mark.parametrize(
+    ("boards", "extra", "error", "complete", "note"),
+    [
+        pytest.param(
+            {"second": RuntimeError("boom")},
+            (),
+            "the CDG→JFK one-way failed (boom)",
+            False,
+            "No separate tickets on Google Flights: the CDG→JFK one-way failed (boom).",
+            id="failed",
+        ),
+        pytest.param(
+            {"first": []},
+            (),
+            "Google Flights priced no JFK→LHR one-way",
+            True,
+            "No separate tickets on Google Flights: Google Flights priced no JFK→LHR one-way.",
+            id="empty",
+        ),
+        pytest.param(
+            {},
+            ("--no-separate-tickets",),
+            "--no-separate-tickets was given",
+            True,
+            "No separate tickets on Google Flights: --no-separate-tickets was given.",
+            id="opted-out",
+        ),
+    ],
+)
+def test_the_envelope_without_split_keeps_splits_rules(
+    monkeypatch: pytest.MonkeyPatch,
+    boards: dict[str, Any],
+    extra: tuple[str, ...],
+    error: str,
+    complete: bool,
+    note: str,
+) -> None:
+    """A failed one-way leaves the tickets the table would list unpriced; an
+    empty board is an answer; an opt-out asks nothing and narrows nothing,
+    since the table lists no tickets either. Red at the base, whose envelope
+    held a null `split_ticket` and asked Google nothing."""
+    google = _google(monkeypatch, **boards)
+    _matrix(monkeypatch)
+    env = _envelope_of(_search("--cash-only", *extra, "--format", "envelope"))
+    assert (env["backend"], env["complete"]) == ("matrix", complete)
+    assert note in env["notes"]
+    assert _notes(env, "split_ticket") == []
+    assert env["split_ticket"] == {"error": error}
+    assert (google.calls == []) is bool(extra)
+
+
+@pytest.mark.parametrize(
+    ("extra", "said"),
+    [
+        pytest.param(
+            (),
+            "No separate tickets on Google Flights: --format json carries them only with --split.",
+            id="unasked",
+        ),
+        pytest.param(
+            ("--no-separate-tickets",),
+            "No separate tickets on Google Flights: --no-separate-tickets was given.",
+            id="opted-out",
+        ),
+    ],
+)
+def test_json_without_split_says_why_it_carries_no_tickets(
+    monkeypatch: pytest.MonkeyPatch, extra: tuple[str, ...], said: str
+) -> None:
+    """Matrix's own body is the document and Google is asked nothing (green at
+    the base); one line says where the tickets the table lists went, or the
+    blocker's line where one applies (red at the base, which said nothing)."""
+    google, matrix = _google(monkeypatch), _matrix(monkeypatch)
+    result = _search("--cash-only", *extra, "--format", "json")
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == _matrix_body(matrix.searches[0].legs)
+    assert google.calls == []
+    stderr = " ".join(result.stderr.split())
+    assert stderr.count("No separate tickets on Google Flights") == 1, stderr
+    assert said in stderr
 
 
 @pytest.mark.parametrize(

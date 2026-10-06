@@ -4172,20 +4172,29 @@ def _answer_open_jaw(
     gf_mode: GfTransportMode,
     gf_headed: bool,
     blocker: str | None,
-    json_out: bool,
+    output: str,
+    split: bool,
     google_url: bool,
 ) -> dict[str, Any] | None:
     """Google Flights' separate-ticket answer to the open jaw `legs`, shown
-    ahead of Matrix's one-ticket answer: the table, or with `json_out` the
+    ahead of Matrix's one-ticket answer: the table, or in a document the
     `split_ticket` object, which is returned for Matrix's document to carry.
     `blocker` is why nothing is asked (`_open_jaw_blocker`), said on stderr.
-    A failed or empty board is said on stderr and leaves Matrix to answer."""
+    A failed or empty board is said on stderr and leaves Matrix to answer.
+
+    The envelope asks what the table asks, so the two hold the same fares.
+    `--format json` asks nothing without `split`: its document is Matrix's own
+    body, which has no place for the tickets."""
+    asked = split or output != "json"
+    if blocker is None and not asked:
+        blocker = "--format json carries them only with --split"
     answer: _OpenJaw | str
     if blocker is not None:
         err.print(f"[dim]No separate tickets on Google Flights: {_safe_text(blocker)}.[/]")
-        # Asked for under --split and not priced, as a round trip Matrix answers
-        # is; a failed board narrows where it fails, and an empty one is an answer.
-        _envelope.narrow()
+        if split:
+            # Asked for and not priced, as a round trip Matrix answers is; a
+            # failed board narrows where it fails, and an empty one is an answer.
+            _envelope.narrow()
         answer = blocker
     else:
         answer = _open_jaw_tickets(legs, opts, top_n, gf_mode, gf_headed)
@@ -4193,7 +4202,9 @@ def _answer_open_jaw(
             _report_no_open_jaw(answer)
         else:
             _note_open_jaw_currencies(answer)
-    if json_out:
+    if not asked:
+        return None
+    if output != "table":
         obj = json.loads(json.dumps(_open_jaw_object(answer, legs, opts), default=str))
         _envelope.record_split_ticket(obj)
         return obj
@@ -10943,13 +10954,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             )
 
     split_ticket: dict[str, Any] | None = None
-    if (
-        slice_specs
-        and backend == BACKEND_AUTO
-        and not sel.awards_only
-        and (split or not json_out)
-        and _is_open_jaw(legs)
-    ):
+    if slice_specs and backend == BACKEND_AUTO and not sel.awards_only and _is_open_jaw(legs):
         split_ticket = _answer_open_jaw(
             legs=legs,
             opts=opts,
@@ -10968,7 +10973,8 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                     ("--return-times", return_times),
                 ),
             ),
-            json_out=json_out,
+            output=output,
+            split=split,
             google_url=google_url,
         )
     elif split:
