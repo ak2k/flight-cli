@@ -31,11 +31,11 @@ from .auth import (
     PPAuthError,
     Tokens,
     clear_tokens,
-    get_valid_tokens,
     import_from_tokens_file,
     load_tokens,
     login_from_chrome,
     login_via_browser,
+    stored_tokens,
 )
 from .client import DEFAULT_CABINS, CashFlightHint
 from .gflight_adapter import cash_hints_from_search_result
@@ -561,9 +561,10 @@ def run_pp_for_search(
 
 
 def _pp_preflight(provider_filter: tuple[str, ...] | None) -> bool:
-    """Validate and refresh PointsPath's tokens ahead of the fan-out, so a bad
-    login reads as itself. False when PointsPath was the one provider asked
-    for and could not run, and the award search stops there."""
+    """Check PointsPath has tokens ahead of the fan-out, so a missing login
+    reads as itself; it reads them and sends no request. False when
+    PointsPath was the one provider asked for and has none, and the award
+    search stops there."""
     # PP tokens are required only if PP is actually going to run. Skip the
     # pre-flight check when the filter excludes PP — otherwise a seats-only
     # invocation errors here before seats even gets a chance to run.
@@ -573,7 +574,7 @@ def _pp_preflight(provider_filter: tuple[str, ...] | None) -> bool:
     if not pp_in_filter:
         return True
     try:
-        get_valid_tokens()  # validate + refresh up-front, surface a clear error
+        _ = stored_tokens()
     except PPAuthError as e:
         # Soft-warn if PP fails but other providers might still run.
         # When PP is the only target (filter explicitly == "pp"), it's
@@ -583,9 +584,9 @@ def _pp_preflight(provider_filter: tuple[str, ...] | None) -> bool:
             _envelope.explain("awards", "PointsPath, the one provider asked for, could not run")
             err.print(f"[red]--pp: {_safe_text(e)}[/]")
             return False
-        # Narrower only when PointsPath was asked for: by name, or by tokens
-        # that then failed. A user with no tokens never asked it.
-        if provider_filter is not None or load_tokens() is not None:
+        # Narrower only when PointsPath was named. A user with no tokens never
+        # asked it.
+        if provider_filter is not None:
             _envelope.narrow()
         err.print(f"[yellow]PointsPath skipped: {_safe_text(e)}[/]")
     return True
