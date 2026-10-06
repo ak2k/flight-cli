@@ -266,11 +266,38 @@ class _FakePage:
         return cast("_FakeResponse | None", outcome)
 
 
+_HEADED_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+)
+
+
+class _FakeCdp:
+    """A CDP session on the page: `Browser.getVersion` answers the context's
+    UA, and every command is recorded on the context."""
+
+    def __init__(self, context: _FakeContext) -> None:
+        self._context = context
+
+    def send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        self._context.cdp_sent.append((method, params))
+        if self._context.cdp_error is not None:
+            raise self._context.cdp_error
+        return {"userAgent": self._context.user_agent} if method == "Browser.getVersion" else {}
+
+
 class _FakeContext:
     def __init__(self, page: _FakePage, new_page_error: BaseException | None = None) -> None:
         self._page = page
         self._new_page_error = new_page_error
         self.closed = False
+        self.user_agent = _HEADED_UA
+        self.cdp_error: BaseException | None = None
+        self.cdp_sent: list[tuple[str, dict[str, Any] | None]] = []
+
+    def new_cdp_session(self, page: _FakePage) -> _FakeCdp:
+        assert page is self._page
+        return _FakeCdp(self)
 
     def new_page(self) -> _FakePage:
         # The last step inside `_ensure_page`'s try, and the one whose failure
@@ -792,6 +819,61 @@ def test_an_explicit_binary_replaces_the_channel(
 
     assert pw.chromium.launch_kwargs["executable_path"] == "/opt/chrome"
     assert "channel" not in pw.chromium.launch_kwargs
+
+
+_HEADLESS_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) HeadlessChrome/154.0.0.0 Safari/537.36"
+)
+
+
+@pytest.mark.parametrize(
+    ("headed", "ua", "sent"),
+    [
+        (
+            True,
+            _HEADED_UA,
+            [
+                ("Browser.getVersion", None),
+                ("Emulation.setUserAgentOverride", {"userAgent": _HEADLESS_UA}),
+            ],
+        ),
+        (True, _HEADLESS_UA, [("Browser.getVersion", None)]),
+        (False, _HEADLESS_UA, []),
+    ],
+    ids=["headed", "headed-with-the-token", "headless"],
+)
+def test_a_headed_window_sends_the_headless_token_once(
+    headed: bool,
+    ua: str,
+    sent: list[tuple[str, dict[str, Any] | None]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    """Red at the base for `headed`, which sent Chrome's own UA and so read the
+    curated board Google serves a plain `Chrome/` token. Set once at launch, on
+    the page every later navigation reuses. A headless page already sends the
+    token and gets no CDP command."""
+    pw = _install(monkeypatch, tmp_path)
+    pw.chromium._context.user_agent = ua
+    with gfb.GfBrowserSession(headed=headed) as session:
+        session.get_html(_PAGE_URL)
+        session.get_html(_PAGE_URL)
+    assert pw.chromium._context.cdp_sent == sent
+
+
+def test_a_headed_window_whose_ua_cannot_be_set_is_a_launch_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """Red at the base, which sent no CDP command. The window would read a
+    board the default search never shows, so it is refused as any launch step
+    is, and the context and driver are taken down."""
+    pw = _install(monkeypatch, tmp_path)
+    pw.chromium._context.cdp_error = RuntimeError("Target page, context or browser has been closed")
+    session = gfb.GfBrowserSession(headed=True)
+    with pytest.raises(GfBrowserUnavailableError):
+        session.get_html(_PAGE_URL)
+    assert (pw.chromium._context.closed, pw.stopped) == (True, True)
 
 
 @pytest.mark.parametrize(
