@@ -1912,14 +1912,16 @@ class _PageUnreadError(GfPageShapeError):
         self.unread = unread
 
 
-# Reads of one search-page URL that carries no board before rung 1 refuses it.
+# Reads of one search-page URL that carries no board before it is refused. A
+# rung-2 navigation costs seconds where a rung-1 GET costs one request.
 _BOARDLESS_READS = 3
+_BOARDLESS_NAVIGATIONS = 2
 
 
 class _BoardlessPageError(GfPageShapeError):
     """The page carried no `ds:1` payload that decodes. Under the token Google
     sometimes serves such a page, and the next read of the URL carries the
-    board, so rung 1 reads it again (`_read_search_page`). A payload that
+    board, so either rung reads it again (`_read_search_page`). A payload that
     decodes to a layout we cannot read is a layout change, and is not."""
 
 
@@ -2103,7 +2105,10 @@ def _one_call(
     filters: FlightSearchFilters, *, currency: str = "USD", cheapest: bool = False
 ) -> Board[GFlightWithId]:
     """Rung 1: fetch the search page over curl_cffi and read its rows."""
-    rows = _read_search_page(filters, currency=currency, cheapest=cheapest)
+    rows = _read_search_page(
+        functools.partial(_fetch_page, filters, currency=currency, cheapest=cheapest),
+        reads=_BOARDLESS_READS,
+    )
     # A page we could READ means Google answered a warm session — save its
     # cookies (NID) so the next one-shot CLI process starts warm instead of
     # cold. Rung-1 only: rung 2 keeps its own Chrome profile, and its cookies
@@ -2118,23 +2123,22 @@ def _one_call(
     return rows
 
 
-def _read_search_page(
-    filters: FlightSearchFilters, *, currency: str, cheapest: bool
-) -> Board[GFlightWithId]:
-    """The page's board, read again while the page carries none
-    (`_BoardlessPageError`), and refused after `_BOARDLESS_READS` reads.
+def _read_search_page(fetch: Callable[[], PageFetch], *, reads: int) -> Board[GFlightWithId]:
+    """The board on the page `fetch` returns, fetched again while the page
+    carries none (`_BoardlessPageError`), and refused after `reads` fetches.
 
-    Every read sends the token. Without it a multi-airport search is served
-    the curated board, which can leave out the cheapest fare rung 2 lists, so
-    a refusal that hands the search to Matrix is the truer answer."""
-    reads = 1
+    Every fetch sends the token, on either rung. Without it a multi-airport
+    search is served the curated board, which can leave out the cheapest fare
+    the token board lists, so a refusal that hands the search to Matrix is the
+    truer answer."""
+    fetched = 1
     while True:
         try:
-            return _rows_from_page_html(_fetch_page(filters, currency=currency, cheapest=cheapest))
+            return _rows_from_page_html(fetch())
         except _BoardlessPageError as e:
-            if reads == _BOARDLESS_READS:
+            if fetched == reads:
                 raise
-            reads += 1
+            fetched += 1
             log.debug("Google Flights' search page did not read (%s); reading it again", e)
 
 
@@ -2271,16 +2275,16 @@ def _one_call_browser(
 
     No retry ladder around it. Rung 2 costs a browser launch and up to a 30 s
     navigation, and a refusal it hits is terminal — re-driving Chrome through
-    rung 1's backoff would spend ~22 s more to be told the same thing.
+    rung 1's backoff would spend ~22 s more to be told the same thing. A page
+    that carries no board is the exception, navigated once more
+    (`_BOARDLESS_NAVIGATIONS`): the next read of that URL carries the board.
 
     Reached through the module attribute, never a name bound at import time, so
     a test can substitute the session without a browser anywhere in the
     process."""
-    return _rows_from_page_html(
-        _gf_browser.session(headed=headed).get_html(
-            search_page_url(filters, currency=currency, cheapest=cheapest)
-        )
-    )
+    session = _gf_browser.session(headed=headed)
+    url = search_page_url(filters, currency=currency, cheapest=cheapest)
+    return _read_search_page(functools.partial(session.get_html, url), reads=_BOARDLESS_NAVIGATIONS)
 
 
 def _one_call_laddered(

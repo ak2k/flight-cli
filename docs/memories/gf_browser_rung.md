@@ -72,7 +72,9 @@ with the token (`_gflight_ids._read_search_page`, raised as
 `_BoardlessPageError`), and then refuses it. It never reads without the token:
 that gets the curated board, which can leave out the fare rung 2 lists (USD679
 where the token board starts at USD488). A `ds:1` that decodes to a layout we
-cannot read is still refused at one read. Rung 2 does not re-read.
+cannot read is still refused at one read. Rung 2 navigates such a page once
+more, two navigations in all (`_BOARDLESS_NAVIGATIONS`), since a navigation
+costs seconds where a GET costs one request.
 
 A page of 300 raw rows, unread ones included, stopped at Google's cap
 (`_ROW_CAP`), so its board records its highest fare as `Board.capped_at`, and
@@ -137,7 +139,9 @@ arithmetic; what follows is this rung's own measurement. The pin cap named there
 is why the count stops growing with `-n`. Measured here with a recorder in place
 of the session and a 30-row board on each leg: `-n 1` → 2, `-n 3` → 4, `-n 10`
 → 11, `-n 25` → 11, `-n 100` → 11. Eleven is therefore the ceiling for any
-`-n`, so at the 30 s nav ceiling the worst case is 330 s. `atexit` gets only a
+`-n`, so at the 30 s nav ceiling the worst case is 330 s. A page with no board
+on it is navigated twice, so the eleven become at most 22 when every page comes
+back boardless the first time. `atexit` gets only a
 best-effort close, and is structurally same-thread: thread-local storage means
 interpreter shutdown on the main thread cannot see a worker's session.
 

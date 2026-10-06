@@ -107,13 +107,17 @@ class _UaClient:
 
 
 class _Chrome:
-    """Rung 2's session, serving what its navigation read."""
+    """Rung 2's session, serving what its navigations read in turn, the last
+    page again once the others are spent."""
 
-    def __init__(self, html: str) -> None:
-        self._html = html
+    def __init__(self, *pages: str) -> None:
+        self._pages = list(pages)
+        self.navigations = 0
 
     def get_html(self, _url: str) -> PageFetch:
-        return PageFetch(self._html, _URL, 200)
+        self.navigations += 1
+        html = self._pages.pop(0) if len(self._pages) > 1 else self._pages[0]
+        return PageFetch(html, _URL, 200)
 
 
 def _chrome_serving(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
@@ -121,6 +125,16 @@ def _chrome_serving(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
         return _Chrome(_html(name))
 
     monkeypatch.setattr(_gf_browser, "session", session)
+
+
+def _chrome(monkeypatch: pytest.MonkeyPatch, *pages: str) -> _Chrome:
+    chrome = _Chrome(*pages)
+
+    def session(*, headed: bool) -> _Chrome:
+        return chrome
+
+    monkeypatch.setattr(_gf_browser, "session", session)
+    return chrome
 
 
 def _serve(
@@ -263,6 +277,27 @@ def test_a_search_whose_token_pages_carry_no_board_is_refused(
     result = CliRunner().invoke(cli.app, argv)
     assert (result.exit_code, result.stdout, session.uas) == (1, "", [_HEADLESS_UA] * 3)
     assert "no readable ds:1 payload" in " ".join(result.stderr.split())
+
+
+@pytest.mark.parametrize("headed", [False, True], ids=["headless", "headed"])
+def test_a_chrome_page_with_no_board_is_navigated_again(
+    headed: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red at ef32ded, which refused the leg as a page-shape change at one
+    navigation where rung 1 reads the same page again and lists its board."""
+    chrome = _chrome(monkeypatch, _NO_BOARD, _html("ds1_nyc_lon_chrome"))
+    transport = gfid.GfTransport(mode="browser", headed=headed)
+    board = gfid._one_call_laddered(_one_way_filters(), transport)
+    assert (_shape(board), chrome.navigations) == ((300, 488.0), 2)
+
+
+def test_a_chrome_page_twice_with_no_board_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Red at ef32ded, which refused at one navigation. A navigation costs
+    seconds where a rung-1 read costs one request, so two bound it."""
+    chrome = _chrome(monkeypatch, _NO_BOARD)
+    with pytest.raises(GfPageShapeError, match="no readable ds:1 payload"):
+        gfid._one_call_laddered(_one_way_filters(), gfid.GfTransport(mode="browser"))
+    assert chrome.navigations == 2
 
 
 # ───────────────────────── the board's row cap ─────────────────────────
