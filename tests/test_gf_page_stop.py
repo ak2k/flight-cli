@@ -230,3 +230,100 @@ def test_a_throttle_on_a_round_trip_pages_cheapest_tab_asks_no_later_return(
     assert (
         printed.count("Itineraries on separate tickets not read: Google Flights rate-limited.") == 1
     ), printed
+
+
+# Page 1 serves an empty board: no (origin, destination) of the search is on it.
+_OFF_FIRST = [
+    (o, d) for o, d in _EX6_PAIRS if not (o in _EX6_PAGES[0][0] and d in _EX6_PAGES[0][1])
+]
+
+
+def _first_tab_throttled(monkeypatch: pytest.MonkeyPatch) -> _Google:
+    def no_sleep(*_a: object) -> None:
+        return None
+
+    monkeypatch.setattr(gfid.time, "sleep", no_sleep)
+    monkeypatch.setattr(gfid.random, "random", lambda: 0.0)
+    return _Google(
+        _OFF_FIRST,
+        refuse_cheapest=lambda page: (
+            GfThrottledError("rate-limited") if page == _EX6_PAGES[0] else None
+        ),
+    )
+
+
+@pytest.mark.parametrize("ret", [False, True], ids=["one-way", "round-trip"])
+def test_an_empty_answer_beside_pages_a_tab_stop_left_unasked_is_handed_to_matrix(
+    monkeypatch: pytest.MonkeyPatch, ret: bool
+) -> None:
+    """Page 1's board is empty and its Cheapest tab is throttled, which ends
+    the search before any later page is asked. The empty answer is not a route
+    with no flights, so auto hands the search to Matrix with the throttle.
+    Red at the tip: `[]` on stdout and no hand-off."""
+    handed: list[object] = []
+
+    def matrix(**kw: object) -> None:
+        handed.append(kw)
+
+    monkeypatch.setattr(cli, "_run_matrix_path", matrix)
+    google = _first_tab_throttled(monkeypatch)
+    buf = capture_err(monkeypatch)
+    result = _search(
+        monkeypatch,
+        google,
+        ",".join(_EX6_FROM),
+        ",".join(_EX6_TO),
+        *("--format", "json"),
+        ret=ret,
+    )
+    printed = _flat(buf.getvalue())
+    assert result.exit_code == 0, result.output
+    assert set(google.cheapest) == {_EX6_PAGES[0]}
+    if not ret:
+        assert google.pages() == [_EX6_PAGES[0]]
+    assert len(handed) == 1, printed
+    assert result.stdout == ""
+    assert "Using Matrix: Google Flights rate-limited" in printed, printed
+
+
+def test_an_empty_answer_beside_pages_a_tab_stop_left_unasked_exits_with_the_throttle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--backend gflight` exits 1 with the throttle's reason, as a search
+    none of whose pages answered does. Red at the tip: exit 0 with `[]`."""
+    google = _first_tab_throttled(monkeypatch)
+    buf = capture_err(monkeypatch)
+    result = _search(
+        monkeypatch,
+        google,
+        ",".join(_EX6_FROM),
+        ",".join(_EX6_TO),
+        *("--backend", "gflight", "--fast", "--format", "json"),
+    )
+    printed = _flat(buf.getvalue())
+    assert google.pages() == [_EX6_PAGES[0]]
+    assert result.exit_code == 1, (result.stdout, printed)
+    assert "Google Flights rate-limited" in printed, printed
+    for n in (2, 3, 4):
+        assert _missing(n, "not asked after page 1 stopped the search") in printed, printed
+
+
+def test_an_empty_first_page_with_no_stop_answers_from_the_later_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Green at the tip: with no stop every page is asked, the later pages'
+    rows answer, and nothing is handed to Matrix."""
+    handed: list[object] = []
+
+    def matrix(**kw: object) -> None:
+        handed.append(kw)
+
+    monkeypatch.setattr(cli, "_run_matrix_path", matrix)
+    google = _Google(_OFF_FIRST)
+    result = _search(
+        monkeypatch, google, ",".join(_EX6_FROM), ",".join(_EX6_TO), "--format", "json"
+    )
+    assert result.exit_code == 0, result.output
+    assert len(google.pages()) == 4
+    assert json.loads(result.stdout)
+    assert not handed

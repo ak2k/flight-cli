@@ -5240,11 +5240,16 @@ class _PageAsk:
 
     def raise_if_empty(self, rows: list[Any]) -> None:
         """Raise the first failed page's error when nothing was merged, as one
-        page raises its own. An empty board beside a page that never answered
-        would read as a route with no flights, and a refusal is handed to
-        Matrix or exits with its reason where that would not."""
-        if not rows and self.failed:
+        page raises its own, or else the stop that left a page unasked. An
+        empty board beside a page that never answered would read as a route
+        with no flights, and a refusal is handed to Matrix or exits with its
+        reason where that would not."""
+        if rows:
+            return
+        if self.failed:
             raise self.failed[min(self.failed)]
+        if self.unasked and self.stop is not None:
+            raise self.stop
 
 
 def _report_pages(asked: _PageAsk) -> None:
