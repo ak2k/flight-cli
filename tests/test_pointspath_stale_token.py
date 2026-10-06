@@ -90,9 +90,11 @@ def test_the_refresh_of_a_stale_token_ends_at_the_award_deadline(
 ) -> None:
     release = threading.Event()
 
-    def stuck_refresh(tokens: Tokens) -> Tokens:
+    def stuck_refresh(_tokens: Tokens) -> Tokens:
         _ = release.wait()
-        return tokens
+        # Once released, the login is refused, so nothing reaches PointsPath.
+        msg = "released"
+        raise PPAuthError(msg)
 
     _stale_stored_token(monkeypatch, tmp_path)
     _real_pointspath_beside_healthy_seats(monkeypatch)
