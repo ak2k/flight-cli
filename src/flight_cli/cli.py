@@ -3433,7 +3433,9 @@ def _split_blocker(  # noqa: PLR0911 — one return per reason the run is refuse
 
     An `open_jaw` (two `--slice` that are not a round trip's) is priced as one
     one-way per slice beside Matrix's table instead, and its document is
-    Matrix's, which `--fare-rules` writes a document of its own around."""
+    Matrix's, which `--fare-rules` writes a document of its own around. The
+    envelope records its tickets beside an award search's rows without
+    `--split`, so asking for them there is no conflict."""
     if open_jaw:
         if fare_rules:
             return "cannot run beside --fare-rules; drop one of them"
@@ -3451,7 +3453,7 @@ def _split_blocker(  # noqa: PLR0911 — one return per reason the run is refuse
         return "cannot run beside --verify; drop one of them"
     if awards_only:
         return "prints beside the results table, and --awards-only prints none"
-    if awards_format is not None:
+    if awards_format is not None and not (open_jaw and awards_format == "envelope"):
         return f"cannot join the award document --format {awards_format} writes; add --cash-only"
     return None
 
