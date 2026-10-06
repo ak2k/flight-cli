@@ -1,7 +1,8 @@
 # pyright: reportPrivateUsage=false, reportMissingTypeStubs=false
 """`flight search` on a multi-city trip of three slices: Google Flights'
 cheapest one-way per slice, combined as separate tickets, beside Matrix's
-one-ticket answer.
+one-ticket answer on `--backend auto` and in its place under `--backend
+gflight`.
 
 Google and Matrix are faked as in `test_open_jaw_search`: Google answers each
 one-way by its leg's origin, Matrix every search with one USD812 itinerary. No
@@ -17,7 +18,7 @@ import pytest
 
 from flight_cli import cli
 from flight_cli._gf_errors import GfThrottledError
-from test_envelope import _envelope_of
+from test_envelope import _envelope_of, _notes
 from test_open_jaw_search import _KEY, _Google, _matrix, _matrix_body, _search, _table_rows
 from test_split_ticket import _row
 
@@ -37,6 +38,7 @@ def _slices() -> tuple[str, ...]:
 
 # A title wider than its table wraps, so it is read off the words of stdout.
 _TITLE = "Separate tickets on Google Flights · SFO→ORD + ORD→BOS + BOS→SFO (USD)"
+_OPEN_JAW_TITLE = "Separate tickets on Google Flights · JFK→LHR + CDG→JFK (USD)"
 
 
 def _boards() -> dict[str, list[Any] | Exception]:
@@ -64,6 +66,11 @@ def _google(monkeypatch: pytest.MonkeyPatch, **boards: list[Any] | Exception) ->
     google = _Google({**_boards(), **boards})
     monkeypatch.setattr(cli, "_gflight_results", google)
     return google
+
+
+def _open_jaw_slices() -> tuple[str, ...]:
+    one, _, three = _days()
+    return (f"JFK-LHR:{one}", f"CDG-JFK:{three}")
 
 
 def _run(*extra: str, slices: tuple[str, ...] | None = None) -> Any:
@@ -280,3 +287,290 @@ def test_an_infants_empty_board_narrows_the_answer(
     assert said in env["notes"]
     assert not any("priced no" in n for n in env["notes"])
     assert (env["backend"], env["complete"]) == ("matrix", False)
+
+
+# ──────────────────────────── --backend gflight ────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("slices", "title", "asked"),
+    [
+        pytest.param(_slices(), _TITLE, 3, id="three-slices"),
+        pytest.param(_open_jaw_slices(), _OPEN_JAW_TITLE, 2, id="open-jaw"),
+    ],
+)
+def test_backend_gflight_answers_with_separate_tickets_alone(
+    monkeypatch: pytest.MonkeyPatch, slices: tuple[str, ...], title: str, asked: int
+) -> None:
+    """The table, its key and its links, and no line about Matrix, which is
+    asked nothing. Red at the base, which refused the search (exit 2)."""
+    google, matrix = _google(monkeypatch), _matrix(monkeypatch)
+    result = _search("--cash-only", "--backend", "gflight", "--google-url", slices=slices)
+    assert result.exit_code == 0, result.output
+    assert matrix.searches == [] and len(google.calls) == asked
+    assert title in " ".join(result.stdout.split())
+    assert _KEY in " ".join(result.stdout.split())
+    assert "Itineraries" not in result.stdout
+    assert "Matrix" not in result.stderr
+    lines = result.stdout.splitlines()
+    for j in range(1, asked + 1):
+        at = next(i for i, ln in enumerate(lines) if f"Google Flights (#1, ticket {j:d} " in ln)
+        assert lines[at + 1].strip().startswith("https://www.google.com/travel/flights")
+
+
+@pytest.mark.parametrize("split", [False, True], ids=["plain", "split"])
+@pytest.mark.parametrize(
+    ("slices", "totals"),
+    [
+        pytest.param(_slices(), _TOTALS[:3], id="three-slices"),
+        pytest.param(_open_jaw_slices(), [861], id="open-jaw"),
+    ],
+)
+def test_backend_gflight_json_is_an_empty_search_beside_the_tickets(
+    monkeypatch: pytest.MonkeyPatch, slices: tuple[str, ...], totals: list[int], split: bool
+) -> None:
+    """`{"search": [], "split_ticket": …}`, `--split` or not. Red at the base,
+    which refused the search (exit 2)."""
+    google, matrix = _google(monkeypatch), _matrix(monkeypatch)
+    extra = ("--split",) if split else ()
+    result = _search(
+        "--cash-only", "--backend", "gflight", "--format", "json", "-n", "3", *extra, slices=slices
+    )
+    assert result.exit_code == 0, result.output
+    doc = json.loads(result.stdout)
+    assert list(doc) == ["search", "split_ticket"] and doc["search"] == []
+    assert [c["total"] for c in doc["split_ticket"]["combinations"]] == totals
+    assert matrix.searches == [] and len(google.calls) == len(slices)
+
+
+@pytest.mark.parametrize(
+    ("slices", "totals"),
+    [
+        pytest.param(_slices(), _TOTALS[:3], id="three-slices"),
+        pytest.param(_open_jaw_slices(), [861], id="open-jaw"),
+    ],
+)
+def test_backend_gflight_envelope_holds_no_row_on_one_ticket(
+    monkeypatch: pytest.MonkeyPatch, slices: tuple[str, ...], totals: list[int]
+) -> None:
+    """Google answered, with no row: the combinations are `split_ticket`'s,
+    never a `results` row, and set no currency. Red at the base, which
+    refused the search (exit 2)."""
+    google, matrix = _google(monkeypatch), _matrix(monkeypatch)
+    env = _envelope_of(
+        _search(
+            "--cash-only", "--backend", "gflight", "--format", "envelope", "-n", "3", slices=slices
+        )
+    )
+    assert (env["backend"], env["complete"], env["currency"]) == ("gflight", True, None)
+    assert env["results"] == [{"cabin": "COACH", "rows": []}]
+    assert _notes(env, "results") == [
+        "results: Google Flights is asked no multi-city itinerary on one ticket; its separate "
+        "tickets are in split_ticket"
+    ]
+    assert [c["total"] for c in env["split_ticket"]["combinations"]] == totals
+    assert _notes(env, "split_ticket") == []
+    assert matrix.searches == [] and len(google.calls) == len(slices)
+
+
+@pytest.mark.parametrize("fmt", ["table", "json", "envelope"])
+def test_backend_gflight_fails_on_a_failed_board(monkeypatch: pytest.MonkeyPatch, fmt: str) -> None:
+    """Exit 1, a table's or JSON's stdout empty, the envelope incomplete. Red at
+    the base, which refused the search (exit 2)."""
+    google = _google(monkeypatch, ORD=RuntimeError("boom"))
+    matrix = _matrix(monkeypatch)
+    result = _run("--backend", "gflight", "--format", fmt)
+    said = "No separate tickets on Google Flights: the ORD→BOS one-way failed (boom)."
+    assert matrix.searches == [] and len(google.calls) == 2
+    if fmt == "envelope":
+        env = _envelope_of(result, code=1)
+        assert env["complete"] is False and env["split_ticket"] == {
+            "error": "the ORD→BOS one-way failed (boom)"
+        }
+        assert said in env["notes"]
+        return
+    assert result.exit_code == 1, result.output
+    assert result.stdout == ""
+    assert said in _stderr(result)
+
+
+@pytest.mark.parametrize("fmt", ["table", "envelope"])
+def test_backend_gflight_says_no_award_search_runs(
+    monkeypatch: pytest.MonkeyPatch, fmt: str
+) -> None:
+    """Awards are on wherever a provider is configured and --cash-only is not
+    given; they match rows on one ticket, of which there are none. Red at the
+    base, which refused the search (exit 2)."""
+    google, matrix = _google(monkeypatch), _matrix(monkeypatch)
+    monkeypatch.setattr(cli, "_should_run_awards", _awards_on)
+    result = _search("--backend", "gflight", "--format", fmt, slices=_slices())
+    line = "No award search: awards are matched to rows on one ticket, and none is asked."
+    assert matrix.searches == [] and len(google.calls) == 3
+    if fmt == "envelope":
+        env = _envelope_of(result)
+        assert line in env["notes"]
+        assert _notes(env, "awards") == [
+            "awards: awards are matched to rows on one ticket, and none is asked"
+        ]
+        return
+    assert result.exit_code == 0, result.output
+    assert _stderr(result).count(line) == 1
+    assert _TITLE in " ".join(result.stdout.split())
+
+
+def test_backend_gflight_names_the_infants_empty_board_and_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red at the base, which refused the search (exit 2)."""
+    _google(monkeypatch, ORD=[])
+    _matrix(monkeypatch)
+    env = _envelope_of(_run("--inf-lap", "1", "--backend", "gflight", "--format", "envelope"))
+    assert (
+        "No separate tickets on Google Flights: Google Flights served no rows for a party with "
+        "an infant on the ORD→BOS one-way, as it has on routes with flights. For Matrix's "
+        "answer, drop --backend gflight."
+    ) in env["notes"]
+    assert (env["backend"], env["complete"]) == ("gflight", False)
+
+
+_ALONE = "--backend gflight answers a multi-city search with Google Flights' separate tickets alone"
+
+
+@pytest.mark.parametrize(
+    ("extra", "slices", "said"),
+    [
+        pytest.param(
+            ("--no-separate-tickets",),
+            None,
+            f"{_ALONE}, and none is asked: --no-separate-tickets was given. Drop --backend "
+            "gflight.",
+            id="opted-out",
+        ),
+        pytest.param(
+            ("--routing", "UA+"),
+            None,
+            f"{_ALONE}, and none is asked: --routing reaches no --slice, so the one-ways could "
+            "not be held to it. Drop --backend gflight.",
+            id="top-level-routing",
+        ),
+        pytest.param(
+            (),
+            ("SFO-ORD:{one}", "ORD-BOS:{two}:e=F BC=j", "BOS-SFO:{three}"),
+            f"{_ALONE}, and none is asked: Google Flights can't serve slice 2 (ORD→BOS) as a "
+            "one-way: extension 'F BC=j' not expressible on GF. Drop --backend gflight.",
+            id="unservable-slice",
+        ),
+        pytest.param(
+            ("--cabin", "economy,business"),
+            None,
+            f"{_ALONE}, and none is asked: each is priced in one cabin, and --cabin asks for 2. "
+            "Drop --backend gflight.",
+            id="multi-cabin",
+        ),
+        pytest.param(
+            ("--awards-only",),
+            None,
+            f"--awards-only prints award space alone, and {_ALONE}. Drop either.",
+            id="awards-only",
+        ),
+        pytest.param(
+            ("--awards-only", "--format", "json"),
+            None,
+            f"--awards-only prints award space alone, and {_ALONE}. Drop either.",
+            id="awards-only-json",
+        ),
+        pytest.param(
+            ("--award-json",),
+            None,
+            f"{_ALONE}, and an award search writes its own --format json document. Add "
+            "--cash-only.",
+            id="award-search-json",
+        ),
+        pytest.param(
+            ("--sellers",),
+            None,
+            f"--sellers opens the booking page of a row on one ticket, and {_ALONE}. Drop it.",
+            id="sellers",
+        ),
+        pytest.param(
+            ("--enrich",),
+            None,
+            f"--enrich checks rows on one ticket against Matrix, and {_ALONE}. Drop it.",
+            id="enrich",
+        ),
+        pytest.param(
+            ("--bags", "1"),
+            None,
+            f"--bags prices bags on rows on one ticket, and {_ALONE}. Drop it.",
+            id="bags",
+        ),
+        pytest.param(
+            ("--exclude-basic",),
+            None,
+            f"--exclude-basic asks for rows on one ticket without basic economy, and {_ALONE}. "
+            "Drop it.",
+            id="exclude-basic",
+        ),
+        pytest.param(
+            ("--arrive-times", "18:00-21:30"),
+            None,
+            f"--arrive-times holds rows on one ticket to a window, and {_ALONE}. Drop it.",
+            id="arrive-times",
+        ),
+        pytest.param(
+            ("--return", "{three}", "--return-arrive-times", "18:00-21:30"),
+            None,
+            f"--return-arrive-times holds rows on one ticket to a window, and {_ALONE}. Drop it.",
+            id="return-arrive-times",
+        ),
+        pytest.param(
+            ("--pick", "2"),
+            None,
+            f"--pick names a row on one ticket, and {_ALONE}. Drop it, or drop --backend gflight.",
+            id="pick",
+        ),
+        pytest.param(
+            ("--verify",),
+            None,
+            "--verify checks a Google Flights row on one ticket, and a --slice search shows none.",
+            id="verify",
+        ),
+    ],
+)
+def test_backend_gflight_refuses_what_separate_tickets_cannot_answer(
+    monkeypatch: pytest.MonkeyPatch,
+    extra: tuple[str, ...],
+    slices: tuple[str, ...] | None,
+    said: str,
+) -> None:
+    """Exit 2 before any request, naming the flag and a remedy that holds.
+    Red at the base, which refused every one as "a multi-city itinerary"."""
+    one, two, three = _days()
+    google, matrix = _google(monkeypatch), _matrix(monkeypatch)
+    if "--award-json" in extra:
+        monkeypatch.setattr(cli, "_should_run_awards", _awards_on)
+        argv = ["--backend", "gflight", "--format", "json"]
+    elif "--awards-only" in extra:
+        monkeypatch.setattr(cli, "_should_run_awards", _awards_on)
+        argv = ["--backend", "gflight", *extra]
+    else:
+        argv = ["--cash-only", "--backend", "gflight"]
+        argv += [a.format(one=one, two=two, three=three) for a in extra]
+    given = tuple(s.format(one=one, two=two, three=three) for s in slices or _slices())
+    result = _search(*argv, slices=given)
+    assert result.exit_code == 2, result.output
+    assert said in _stderr(result)
+    assert google.calls == [] and matrix.searches == []
+
+
+def test_backend_gflight_still_refuses_a_slice_round_trip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One ticket each way is a round trip Google sells as one; given as two
+    --slice it stays refused. Green at the base."""
+    one, _, three = _days()
+    google, matrix = _google(monkeypatch), _matrix(monkeypatch)
+    result = _run("--backend", "gflight", slices=(f"JFK-LHR:{one}", f"LHR-JFK:{three}"))
+    assert result.exit_code == 2, result.output
+    assert "--backend gflight can't serve this request: a multi-city itinerary." in _stderr(result)
+    assert google.calls == [] and matrix.searches == []

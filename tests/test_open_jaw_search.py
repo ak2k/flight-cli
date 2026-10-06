@@ -410,15 +410,6 @@ def test_an_awards_only_open_jaw_asks_google_nothing(monkeypatch: pytest.MonkeyP
     assert len(matrix.searches) == len(awarded) == 1
 
 
-def test_backend_gflight_is_refused_on_an_open_jaw(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Green at the base."""
-    google, matrix = _google(monkeypatch), _matrix(monkeypatch)
-    result = _search("--cash-only", "--backend", "gflight")
-    assert result.exit_code == 2, result.output
-    assert "a multi-city itinerary" in result.output
-    assert google.calls == [] and matrix.searches == []
-
-
 # ──────────────────────────── --split's JSON ─────────────────────────────
 
 

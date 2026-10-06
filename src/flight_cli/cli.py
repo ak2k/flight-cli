@@ -1040,7 +1040,9 @@ def _pick_backend(
     drop from one they can't.
 
     Explicit --backend matrix: matrix. --backend gflight: gflight, unless the
-    request is inexpressible on GF (error).
+    request is inexpressible on GF (error). A trip of one one-way per slice
+    (`open_jaw`) whose only reason is that one ticket stays on gflight, which
+    answers it with separate tickets alone (`_answer_multi_city_on_google`).
 
     `--bags` needs Google Flights, because Matrix prices no bags, and so do an
     arrival window and `--exclude-basic` (`_google_only`). With one,
@@ -1104,7 +1106,7 @@ def _pick_backend(
             f"{_safe_text(_join_reasons(reasons))}.[/]"
         )
         return BACKEND_MATRIX
-    if backend == BACKEND_GFLIGHT and reasons:
+    if backend == BACKEND_GFLIGHT and reasons and reasons != [_MULTI_CITY_ON_ONE_TICKET]:
         # typer renders a BadParameter as plain Text, never markup — escaping
         # here would print the backslashes instead of hiding them.
         raise typer.BadParameter(
@@ -3435,9 +3437,9 @@ def _split_blocker(  # noqa: PLR0911 — one return per reason the run is refuse
     write its document into, or None when none runs.
 
     An `open_jaw` (two or more `--slice` that are not a round trip's,
-    `_one_way_per_slice`) is priced as one one-way per slice beside Matrix's
-    table instead, and its document is Matrix's, which `--fare-rules` writes a
-    document of its own around."""
+    `_one_way_per_slice`) is priced as one one-way per slice instead, beside
+    Matrix's table or alone under `--backend gflight`, and its document is
+    Matrix's, which `--fare-rules` writes a document of its own around."""
     if open_jaw:
         if fare_rules:
             return "cannot run beside --fare-rules; drop one of them"
@@ -4264,6 +4266,123 @@ def _answer_open_jaw(
     if not isinstance(answer, str):
         _render_open_jaw(answer, legs, opts, google_url=google_url)
     return None
+
+
+_SEPARATE_ALONE = (
+    "--backend gflight answers a multi-city search with Google Flights' separate tickets alone"
+)
+
+
+def _gflight_multi_city_blocker(
+    *,
+    blocker: str | None,
+    awards_only: bool,
+    awards_json: bool,
+    sellers: bool,
+    enrich: bool,
+    bags: Bags | None,
+    exclude_basic: bool,
+    arrive_times: str | None,
+    return_arrive_times: str | None,
+    pick: int | None,
+) -> str | None:
+    """Why `--backend gflight` cannot answer a multi-city trip
+    (`_one_way_per_slice`), as a plain-text sentence ending in its remedy, or
+    None. Read off the flags alone, so a refusal costs no request.
+
+    Google Flights answers the trip with one one-way per slice and nothing
+    else (`_answer_multi_city_on_google`), so a flag that acts on a row on one
+    ticket has none to act on. `blocker` is why no one-way would be asked
+    (`_open_jaw_blocker`), which leaves nothing to answer with."""
+    if blocker is not None:
+        return f"{_SEPARATE_ALONE}, and none is asked: {blocker}. Drop --backend gflight"
+    if awards_only:
+        # Ahead of the award document's refusal, whose --cash-only it excludes.
+        return f"--awards-only prints award space alone, and {_SEPARATE_ALONE}. Drop either"
+    if awards_json:
+        return (
+            f"{_SEPARATE_ALONE}, and an award search writes its own --format json document. "
+            "Add --cash-only"
+        )
+    for flag, given, acts, remedy in (
+        ("--sellers", sellers, "opens the booking page of a row on one ticket", "Drop it"),
+        ("--enrich", enrich, "checks rows on one ticket against Matrix", "Drop it"),
+        ("--bags", bags is not None, "prices bags on rows on one ticket", "Drop it"),
+        (
+            "--exclude-basic",
+            exclude_basic,
+            "asks for rows on one ticket without basic economy",
+            "Drop it",
+        ),
+        ("--arrive-times", bool(arrive_times), "holds rows on one ticket to a window", "Drop it"),
+        (
+            "--return-arrive-times",
+            bool(return_arrive_times),
+            "holds rows on one ticket to a window",
+            "Drop it",
+        ),
+        (
+            "--pick",
+            pick is not None,
+            "names a row on one ticket",
+            "Drop it, or drop --backend gflight",
+        ),
+    ):
+        if given:
+            return f"{flag} {acts}, and {_SEPARATE_ALONE}. {remedy}"
+    return None
+
+
+def _answer_multi_city_on_google(
+    *,
+    legs: tuple[Leg, ...],
+    opts: SearchOptions,
+    top_n: int,
+    gf_mode: GfTransportMode,
+    gf_headed: bool,
+    output: str,
+    google_url: bool,
+    awards: bool,
+) -> None:
+    """`--backend gflight` on a multi-city trip (`_one_way_per_slice`):
+    Google Flights' separate tickets alone, as `_answer_open_jaw` shows them
+    beside Matrix's answer, and Matrix asked nothing. The document is
+    `{"search": [], "split_ticket": …}`, `--split` or not, since the tickets
+    are the whole answer. `awards` is whether an award search would run: it
+    matches rows on one ticket, and there are none.
+
+    Exits 1 when a board failed or stopped the search (`_OneWaysUnpriced`),
+    with a table's or JSON's stdout empty; an empty board, or no flyable
+    combination, is an answer."""
+    if awards:
+        no_awards = "awards are matched to rows on one ticket, and none is asked"
+        err.print(f"[dim]No award search: {_safe_text(no_awards)}.[/]")
+        _envelope.explain("awards", no_awards)
+    answer = _open_jaw_tickets(legs, opts, top_n, gf_mode, gf_headed)
+    if isinstance(answer, _NoInfantRows):
+        _report_no_open_jaw(f"{answer}. For Matrix's answer, drop --backend gflight")
+    elif isinstance(answer, str):
+        _report_no_open_jaw(answer)
+    else:
+        _note_open_jaw_currencies(answer)
+    failed = isinstance(answer, _OneWaysUnpriced)
+    if not failed:
+        _envelope.record_search(backend="gflight", cabin=opts.cabin.value, rows=[])
+        _envelope.explain(
+            "results",
+            "Google Flights is asked no multi-city itinerary on one ticket; its separate "
+            "tickets are in split_ticket",
+        )
+    if output == "table":
+        if not isinstance(answer, str):
+            _render_open_jaw(answer, legs, opts, google_url=google_url)
+    else:
+        obj = json.loads(json.dumps(_open_jaw_object(answer, legs, opts), default=str))
+        _envelope.record_split_ticket(obj)
+        if not failed and not _envelope.active():
+            sys.stdout.write(json.dumps({"search": [], "split_ticket": obj}, indent=2))
+    if failed:
+        raise typer.Exit(1)
 
 
 # ─────────────────────────── result renderers ──────────────────────────────
@@ -5410,7 +5529,9 @@ def _verify_blocker(  # noqa: PLR0911 — one return per reason the run is refus
         return "asks Matrix, which prices no bags; drop --bags"
     if exclude_basic:
         return "asks Matrix, which is not asked to leave out basic economy; drop --exclude-basic"
-    if backend == BACKEND_MATRIX or slice_specs or date_options:
+    if slice_specs:
+        return "checks a Google Flights row on one ticket, and a --slice search shows none"
+    if backend == BACKEND_MATRIX or date_options:
         return "needs a Google Flights row, and this search runs on Matrix"
     n = 1 if pick is None else pick
     if not 1 <= n <= page_size:
@@ -10978,6 +11099,40 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         ("--return-times", return_times),
     )
     beside_matrix = bool(slice_specs) and backend == BACKEND_AUTO and not sel.awards_only
+
+    # `_pick_backend` puts a --slice search on Google only as one one-way per slice.
+    if slice_specs and resolved == BACKEND_GFLIGHT:
+        if blocker := _gflight_multi_city_blocker(
+            blocker=_open_jaw_blocker(
+                legs=legs,
+                opts=opts,
+                no_separate_tickets=no_separate_tickets,
+                top_codes=top_codes,
+                cabins=len(cabins_tuple),
+            ),
+            awards_only=sel.awards_only,
+            awards_json=output == "json" and run_awards,
+            sellers=sellers,
+            enrich=fast is False,
+            bags=bags,
+            exclude_basic=exclude_basic,
+            arrive_times=google_arrive_times,
+            return_arrive_times=google_return_arrive_times,
+            pick=pick,
+        ):
+            err.print(f"[red]{_safe_text(blocker)}.[/]")
+            raise typer.Exit(2)
+        _answer_multi_city_on_google(
+            legs=legs,
+            opts=opts,
+            top_n=page_size,
+            gf_mode=gf_mode,
+            gf_headed=gf_headed,
+            output=output,
+            google_url=google_url,
+            awards=run_awards,
+        )
+        return
 
     if len(cabins_tuple) > 1:
         if beside_matrix and per_slice:
