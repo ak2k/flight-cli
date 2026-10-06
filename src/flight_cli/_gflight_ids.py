@@ -25,9 +25,11 @@ parsed and a top-N is the caller's trim.
 
 That page has two transports (`GfTransport`, `_one_call_laddered`): rung 1 is
 the curl_cffi GET below, rung 2 is a real Chrome navigating the same URL
-(`_gf_browser`), which earns a far larger rate budget. Both go through
-`_rows_from_page_html` — one parser, one set of verdicts about what a block
-means. A rung supplies bytes; it never gets to interpret them.
+(`_gf_browser`), which earns a far larger rate budget. `auto` starts on rung 1
+and moves a search to rung 2 when a throttle outlasts the ladder
+(`_one_call_auto`). Both go through `_rows_from_page_html` — one parser, one set
+of verdicts about what a block means. A rung supplies bytes; it never gets to
+interpret them.
 """
 
 from __future__ import annotations
@@ -240,7 +242,7 @@ class _SharedThrottleLadder:
     wall nothing is getting through — and each CALL carries its own attempt
     count too, because a refillable shared budget cannot bound one. The
     arithmetic and the measured costs live once, in the budget section of
-    docs/memories/gf_routing_and_carriers.md.
+    docs/memories/gf_request_budget.md.
 
     The transport budget rides the same object because the network is one
     network, and it probes the same way: `_is_transport_failure` admits only the
@@ -337,7 +339,7 @@ class _SharedThrottleLadder:
         # the caller's own attempt count, and what guarantees the report arrives
         # is `retry_throttled`'s `finally`, which stands an owner down whatever
         # door it leaves by. The reasoning and the elapsed bounds live in the
-        # budget section of docs/memories/gf_routing_and_carriers.md.
+        # docs/memories/gf_throttle_ladder.md.
         settled.wait()
         with self._lock:
             return None if round_.exhausted else 0.0
@@ -366,7 +368,7 @@ class _SharedThrottleLadder:
         (cabins - 1)` GETs between them rather than that many each. Sharing is
         what makes the budget a statement about the network, which is one
         network. The arithmetic and the measured costs live once, in the budget
-        section of docs/memories/gf_routing_and_carriers.md — the same place
+        section of docs/memories/gf_request_budget.md — the same place
         the class docstring points at for the wall."""
         with self._lock:
             self._wall.refill()
@@ -403,6 +405,57 @@ class _SharedThrottleLadder:
 _fanout_ladder: contextvars.ContextVar[_SharedThrottleLadder | None] = contextvars.ContextVar(
     "flight_cli_fanout_ladder", default=None
 )
+
+
+class _Escalation:
+    """Whether a search on `auto` has moved to Chrome. Set once, by the first of
+    its threads whose ladder ran out on a throttle, and read by every thread of
+    that search before it asks Google anything.
+
+    The flag only. Chrome itself is thread-local (`_gf_browser.session`), so a
+    thread that reads it set opens or reuses its own, and closes it where the
+    browser transport closes one."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.done = False
+
+    def take(self) -> bool:
+        """Mark the search escalated: True for the one call that did, so the
+        move is said once whichever threads meet the wall."""
+        with self._lock:
+            first = not self.done
+            self.done = True
+            return first
+
+
+# The escalation of the search running now, or None outside one. A ContextVar
+# for `_fanout_ladder`'s reason: every worker of one search reads the object its
+# caller set, and two searches never share one.
+_search_escalation: contextvars.ContextVar[_Escalation | None] = contextvars.ContextVar(
+    "flight_cli_search_escalation", default=None
+)
+
+
+@contextlib.contextmanager
+def search_escalation() -> Generator[None]:
+    """Make every GF call inside this block one search to `auto`: the first
+    throttle a ladder cannot clear moves all of them to Chrome, said once.
+
+    Opened on the thread that starts the search's workers, before it starts
+    them, so each worker copies this search's flag. A call outside it escalates
+    for itself alone."""
+    token = _search_escalation.set(_Escalation())
+    try:
+        yield
+    finally:
+        _search_escalation.reset(token)
+
+
+def escalated() -> bool:
+    """Whether the search running now has moved to Chrome."""
+    latch = _search_escalation.get()
+    return latch is not None and latch.done
 
 
 @contextlib.contextmanager
@@ -596,7 +649,7 @@ def _extract_ds1(html: str) -> list[Any] | None:
         # layout has just changed, which is the failure this backend actually
         # meets. The ruling and the measurements are under
         # "A page may carry more than one `ds:1` blob" in
-        # docs/memories/gf_routing_and_carriers.md. Pinned by
+        # docs/memories/gf_page_refusals_and_ds1.md. Pinned by
         # `test_a_decoy_whose_rows_partly_parse_is_served_short_and_silently`
         # and `test_the_chosen_blob_is_counted_structurally_not_parsed`.
         rows = _board_row_count(decoded) if _is_a_readable_board(decoded) else 0
@@ -1440,7 +1493,7 @@ def _rows_from_ds1(payload: list[Any]) -> _Ds1Board:
     plus where else in the payload flight rows turned up.
 
     How many row blocks a SERVED page carries varies by request — see the
-    shapes table in docs/memories/gf_routing_and_carriers.md — so counting them
+    shapes table in docs/memories/gf_page_refusals_and_ds1.md — so counting them
     is not a validity test, and a board with no flights at all is served with
     nothing at either index. The only layout change the payload can actually
     prove is rows appearing somewhere we don't read, so the scan is positive:
@@ -1607,7 +1660,7 @@ def _get_search_page(client: Any, url: str) -> Any:
     `@retry(stop_after_attempt(3))` and calls `raise_for_status()`, so a
     persistently throttled leg would cost three fli attempts inside each of our
     throttle retries. The arithmetic and the resulting number live once, in the
-    budget section of docs/memories/gf_routing_and_carriers.md. `retry_throttled`
+    budget section of docs/memories/gf_request_budget.md. `retry_throttled`
     is the only ladder, so throttle handling lives where the classification
     does.
 
@@ -1842,7 +1895,9 @@ class Board[T](list[T]):
     alone, so the merged board's `insight` and `history` are None.
     `separate_hidden` counts the separate-ticket itineraries a search asked to
     hide, and `separate_failed` is why the Cheapest tab, where those are listed,
-    went unread."""
+    went unread. `stopped` is the throttle, transport failure or dead browser
+    that ended a round trip's pin loop after some pin was served: the rows are
+    kept, and a caller that asks more pages reads it to end the search."""
 
     def __init__(
         self,
@@ -1856,6 +1911,7 @@ class Board[T](list[T]):
         unread: int = 0,
         separate_hidden: int = 0,
         separate_failed: GfBackendError | None = None,
+        stopped: GfBackendError | None = None,
     ) -> None:
         super().__init__(rows)
         self.insight = insight
@@ -1867,6 +1923,7 @@ class Board[T](list[T]):
         self.stop_drops: StopDrops | None = None
         self.separate_hidden = separate_hidden
         self.separate_failed = separate_failed
+        self.stopped = stopped
         self.page_insights: tuple[PriceInsight, ...] = ()
         self.page_histories: tuple[PriceHistory, ...] = ()
 
@@ -2056,6 +2113,10 @@ def _one_call(
     filters: FlightSearchFilters, *, currency: str = "USD", cheapest: bool = False
 ) -> Board[GFlightWithId]:
     """Rung 1: fetch the search page over curl_cffi and read its rows."""
+    if escalated():
+        # Another thread of this search moved it to Chrome while this one was
+        # on its ladder; `_one_call_auto` takes this request there too.
+        raise _EscalatedError
     rows = _rows_from_page_html(_fetch_page(filters, currency=currency, cheapest=cheapest))
     # A page we could READ means Google answered a warm session — save its
     # cookies (NID) so the next one-shot CLI process starts warm instead of
@@ -2178,9 +2239,8 @@ class GfTransport:
 
     - `http` — rung 1 only: one curl_cffi GET under the throttle backoff.
     - `browser` — rung 2 only: one real-Chrome navigation, no rung-1 fallback.
-    - `auto` — today identical to `http`. The escalate-on-persistent-throttle
-      rung lands separately; the mode exists now so the CLI surface and every
-      call site are already the shape it needs.
+    - `auto` — rung 1 until a throttle outlasts the backoff, then rung 2 for
+      that request and the rest of the search (`_one_call_auto`).
 
     Frozen, and defaulting to `http`, so an unpassed `transport` is rung 1.
 
@@ -2216,6 +2276,34 @@ def _one_call_browser(
     )
 
 
+class _EscalatedError(Exception):
+    """A rung-1 request in a search `auto` has already moved to Chrome. Raised
+    by `_one_call` and caught by `_one_call_auto`, the one caller it can reach:
+    only `auto` sets the flag `_one_call` reads."""
+
+
+def _one_call_auto(
+    filters: FlightSearchFilters, *, headed: bool, currency: str = "USD", cheapest: bool = False
+) -> Board[GFlightWithId]:
+    """`auto`: rung 1 until a throttle outlasts its ladder, then rung 2 for this
+    request and every later one of the search, on every thread of it.
+
+    Only a throttle moves it: the budget Google gives a thin client is what
+    Chrome escapes. A transport failure is the network, which Chrome shares, and
+    a refusal of the page is the page's own. A failure on Chrome is this
+    request's, never retried on rung 1."""
+    latch = _search_escalation.get() or _Escalation()
+    if not latch.done:
+        try:
+            return _one_call_with_retry(filters, currency=currency, cheapest=cheapest)
+        except _EscalatedError:
+            pass
+        except GfThrottledError:
+            if latch.take():
+                _gf_browser.announce_escalation()
+    return _one_call_browser(filters, headed=headed, currency=currency, cheapest=cheapest)
+
+
 def _one_call_laddered(
     filters: FlightSearchFilters,
     transport: GfTransport,
@@ -2228,12 +2316,11 @@ def _one_call_laddered(
     The single place that knows which rungs exist, so `search_with_ids` — and
     the recursion that drives a round trip's return legs — never has to.
 
-    Exhaustive, and checked: `auto` is spelled out beside `http` rather than
-    swept up by a trailing `else`, and `assert_never` makes a fourth mode that
-    never reached here a basedpyright error at the point it is added. Without
-    that, a forgotten rung ships green and quietly runs the transport the user
-    did not ask for — a failure that reads as the browser rung simply not
-    working.
+    Exhaustive, and checked: every mode is spelled out rather than swept up by
+    a trailing `else`, and `assert_never` makes a fourth mode that never
+    reached here a basedpyright error at the point it is added. Without that, a
+    forgotten rung ships green and quietly runs the transport the user did not
+    ask for — a failure that reads as the browser rung simply not working.
 
     Literal patterns rather than the `TRANSPORT_*` constants: a bare name in a
     `case` is a capture pattern, so `case TRANSPORT_BROWSER` would bind every
@@ -2243,8 +2330,12 @@ def _one_call_laddered(
             return _one_call_browser(
                 filters, headed=transport.headed, currency=currency, cheapest=cheapest
             )
-        case "http" | "auto":
+        case "http":
             return _one_call_with_retry(filters, currency=currency, cheapest=cheapest)
+        case "auto":
+            return _one_call_auto(
+                filters, headed=transport.headed, currency=currency, cheapest=cheapest
+            )
         case _:
             assert_never(transport.mode)
 
@@ -2654,6 +2745,7 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
         dropped=dropped,
         pinned=len(pins),
         unread=unread,
+        stopped=stopped,
     )
     # Before the pin outcome is judged: a separate-ticket itinerary needs no
     # return board, so one that is shown is served even when every return
@@ -2724,6 +2816,7 @@ def _with_separate_tickets(
             unread=answer.unread + unread,
             separate_hidden=hidden,
             separate_failed=failed,
+            stopped=answer.stopped,
         )
 
     if stopped is not None:
@@ -2787,7 +2880,7 @@ def _report_pin_outcome(
     # round trips the outbound board priced through an `empty` pin; a pin the
     # row filter emptied is an answer, so `unmatched` does not count.
     if served and (refused or empty or stopped is not None):
-        narrow()
+        narrow(of="gflight")
     # First, because two of the exits below leave by `raise` and nothing after
     # them runs. A stop rule that fires with nothing served would otherwise take
     # the per-URL refusals with it, and "rate-limited, wait and retry" is the
@@ -2810,7 +2903,7 @@ def _report_pin_outcome(
         # account of what is missing. What that costs a machine consumer, and
         # why the alternatives were refused, is argued once under
         # "A partial round trip is a success, deliberately." in
-        # docs/memories/gf_routing_and_carriers.md. The comment below covers
+        # docs/memories/gf_request_budget.md. The comment below covers
         # the all-refused arm and the pin-ORDER trade, which are different
         # questions. Driven by
         # `test_a_throttle_on_a_later_pin_keeps_what_was_already_served`, its

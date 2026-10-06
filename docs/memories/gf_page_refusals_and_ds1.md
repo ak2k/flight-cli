@@ -134,7 +134,7 @@ payload sits just past. The decoys hold 2-7 rows and the scan is sub-millisecond
 so full depth costs nothing worth a cutoff.
 At `[2]`/`[3]` the test must NOT require a parse, or a block whose rows have all
 changed shape would drop to an empty board instead of reaching the 0-of-N parse
-guard below, which is what catches a moved ROW layout. Both share one tuple of
+guard above, which is what catches a moved ROW layout. Both share one tuple of
 "this did not decode" exception types (`_ROW_PARSE_ERRORS`), so a widening —
 `OverflowError` from an absurd price, `TypeError` from a null legs field — can't
 land in one and miss the other.

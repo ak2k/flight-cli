@@ -1,4 +1,4 @@
-"""The routing memory and the README count what a calendar fan-out asks and priced."""
+"""The date-grid memory and the README count what a calendar fan-out asks and priced."""
 
 from __future__ import annotations
 

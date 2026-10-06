@@ -1,7 +1,7 @@
 # pyright: reportPrivateUsage=false
 """`-n` is one number for everything the user can act on.
 
-Google's search page serves its whole board — around thirty rows — whatever
+Google's search page serves its whole board — around a hundred rows — whatever
 count is asked of it, so the count is applied on the way out. What is under
 test is that the table, the JSON document, the pinned deep link and the award
 matcher are all handed the SAME set, and that the wide board still reaches the
@@ -243,7 +243,7 @@ def test_the_award_matcher_is_given_the_rows_the_user_saw(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Awards are fanned out per itinerary and priced against its cash fare, so
-    a matcher handed the whole board spends thirty lookups to report on rows
+    a matcher handed the whole board spends about a hundred lookups to report on rows
     the user cannot pick."""
     seen: list[SearchResult] = []
 

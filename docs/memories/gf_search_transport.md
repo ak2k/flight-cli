@@ -393,5 +393,5 @@ context, not IP, so real Chrome survives the throttle that blocks the thin
 client. `_one_call_laddered(filters, transport)` picks the rung; `_fetch_page`
 and `GfBrowserSession.get_html` both feed `_rows_from_page_html`, which is the
 only place a refusal is diagnosed. A rung supplies bytes, never interpretation.
-`auto` is accepted today and identical to `http`; escalate-on-throttle is a
-follow-up. Details, measurements and traps: [gf_browser_rung.md](gf_browser_rung.md).
+`auto` is rung 1 until a throttle outlasts its ladder, then rung 2 for the rest
+of the search ([gf_throttle_ladder.md](gf_throttle_ladder.md)). Details, measurements and traps: [gf_browser_rung.md](gf_browser_rung.md).

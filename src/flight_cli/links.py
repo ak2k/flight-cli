@@ -163,12 +163,12 @@ def _spa_specific_slices(legs: tuple[Leg, ...]) -> tuple[str, list[dict[str, Any
     n = len(legs)
     if n == 1:
         return "one-way", [_spa_specific_leg(legs[0])]
-    if n == _ROUND_TRIP_LEGS and _is_inverse_pair(legs[0], legs[1]):
+    if n == _ROUND_TRIP_LEGS and is_inverse_pair(legs[0], legs[1]):
         return "round-trip", [_spa_specific_leg(legs[0], return_leg=legs[1])]
     return "multi-city", [_spa_specific_leg(leg) for leg in legs]
 
 
-def _is_inverse_pair(out: Leg, ret: Leg) -> bool:
+def is_inverse_pair(out: Leg, ret: Leg) -> bool:
     """Whether two legs form a true round trip — the return departs where the
     outbound landed AND lands where it started.
 

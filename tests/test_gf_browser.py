@@ -693,8 +693,8 @@ def test_under_bags_a_browser_that_dies_after_a_served_pin_points_at_dropping_th
 def test_the_http_rungs_never_consult_the_browser(
     monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
-    """`auto` is documented as identical to `http` until the escalation rung
-    lands; this is what makes that documentation true."""
+    """`auto` reaches the browser only on a throttle its ladder cannot clear
+    (`test_gf_auto_escalation`); a board rung 1 serves is http's answer."""
 
     def _forbidden(*, headed: bool) -> object:
         raise AssertionError(f"mode={mode} reached the browser rung (headed={headed})")
@@ -1401,13 +1401,15 @@ def _drive_gflight_results(
     return closed
 
 
+@pytest.mark.parametrize("mode", ["browser", "auto"])
 def test_the_browser_session_is_closed_when_the_search_succeeds(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, mode: GfTransportMode
 ) -> None:
     """A playwright object may only be closed by its creating thread, and the
     enrich path runs the query in an `anyio` worker — so this `finally` is the
-    only guarantee a Chrome does not outlive the search."""
-    assert _drive_gflight_results(monkeypatch, mode="browser") == [1]
+    only guarantee a Chrome does not outlive the search. `auto` too: it opens
+    one once a throttle escalates it."""
+    assert _drive_gflight_results(monkeypatch, mode=mode) == [1]
 
 
 def test_the_browser_session_is_closed_when_the_search_raises(
@@ -1418,18 +1420,11 @@ def test_the_browser_session_is_closed_when_the_search_raises(
     assert _drive_gflight_results(monkeypatch, mode="browser", blow_up=RuntimeError("boom")) == [1]
 
 
-@pytest.mark.parametrize("mode", ["http", "auto"])
-def test_an_http_search_never_reaches_for_the_closer(
-    monkeypatch: pytest.MonkeyPatch, mode: GfTransportMode
-) -> None:
+def test_an_http_search_never_reaches_for_the_closer(monkeypatch: pytest.MonkeyPatch) -> None:
     """Rung 1 opens nothing to close. The call would be a no-op, but reaching
     for it at all would read as though an http search might hold a Chrome —
-    the one thing this transport promises it never does.
-
-    `auto` too: it is documented four times over as identical to http, and the
-    ladder maps it to rung 1. A gate that treated it as a possible Chrome
-    holder would make one of those two statements false."""
-    assert _drive_gflight_results(monkeypatch, mode=mode) == []
+    the one thing this transport promises it never does."""
+    assert _drive_gflight_results(monkeypatch, mode="http") == []
 
 
 # ─────────────────────────────── the guard itself ──────────────────────────────
@@ -2032,7 +2027,7 @@ def _no_chrome_rung(seen: list[tuple[str, Any]] | None = None) -> Any:
     `e.remedy`, or prints it unescaped, is then readable off the buffer."""
 
     def _rung(
-        _legs: Any, opts: Any, _top_n: Any, gf_mode: Any = None, _headed: Any = False
+        _legs: Any, opts: Any, _top_n: Any, gf_mode: Any = None, _headed: Any = False, **_kw: Any
     ) -> list[Any]:
         if seen is not None:
             seen.append((str(opts.cabin.value), gf_mode))
@@ -2247,7 +2242,7 @@ def _multi_cabin_transports(
 
     calls: list[tuple[str, Any, Any]] = []
 
-    def _record(_legs: Any, opts: Any, _top_n: Any, *rest: Any) -> list[Any]:
+    def _record(_legs: Any, opts: Any, _top_n: Any, *rest: Any, **_kw: Any) -> list[Any]:
         calls.append((str(opts.cabin.value), *rest))
         return []
 
@@ -2291,18 +2286,16 @@ def test_every_cabin_of_a_multi_cabin_browser_search_reaches_the_rung_as_browser
     ]
 
 
-def test_every_cabin_of_a_multi_cabin_auto_search_reaches_the_rung_as_auto(
+def test_every_cabin_of_a_multi_cabin_auto_search_reaches_the_rung_as_http(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The coercion's OTHER arm: only a browser mode becomes http at the fan-out.
-
-    `auto` is http today, so replacing the conditional with the constant is
-    invisible to every other check — and the escalation the conditional exists
-    for would then arrive already flattened. Sorted, because this arm fans its
-    cabins out in parallel."""
+    """`auto` fans its cabins out on http and does not escalate: a thread per
+    cabin escalating would be a Chrome per cabin on one profile, the lock
+    collision the series runner exists to avoid. Sorted, because this arm fans
+    its cabins out in parallel."""
     assert sorted(_multi_cabin_transports(monkeypatch, "--gf-transport", "auto")) == [
-        ("BUSINESS", "auto", False),
-        ("COACH", "auto", False),
+        ("BUSINESS", "http", False),
+        ("COACH", "http", False),
     ]
 
 
@@ -2387,7 +2380,7 @@ def test_two_cabins_at_rung_two_share_one_browser_launch(
     pw = _install(monkeypatch, tmp_path)
 
     def _rung(
-        _legs: Any, _opts: Any, _top_n: Any, _mode: Any = None, headed: Any = False
+        _legs: Any, _opts: Any, _top_n: Any, _mode: Any = None, headed: Any = False, **_kw: Any
     ) -> list[Any]:
         try:
             gfb.session(headed=bool(headed)).get_html(_PAGE_URL)
@@ -2521,7 +2514,7 @@ def test_a_launch_failure_after_a_cabin_was_served_stays_a_per_cabin_note(
     raised: list[GfBrowserUnavailableError] = []
 
     def _rung(
-        _legs: Any, opts: Any, _top_n: Any, mode: Any = None, _headed: Any = False
+        _legs: Any, opts: Any, _top_n: Any, mode: Any = None, _headed: Any = False, **_kw: Any
     ) -> list[Any]:
         seen.append((str(opts.cabin.value), mode))
         if opts.cabin is Cabin.BUSINESS:
@@ -3379,20 +3372,21 @@ def test_the_fast_arm_arms_the_guard_around_its_whole_search(
 
 
 @pytest.mark.parametrize("mode", ["http", "auto", "browser"])
-def test_the_enriched_arm_arms_the_guard_only_for_the_browser_transport(
+def test_the_enriched_arm_arms_the_guard_for_the_transports_that_open_a_browser(
     monkeypatch: pytest.MonkeyPatch, keep_sigint: None, mode: GfTransportMode
 ) -> None:
     """The other arm decides per transport, and the reason is the worker.
 
     This half runs inside `anyio.to_thread.run_sync`, which will not abandon its
-    worker, and no signal reaches that thread. On the browser transport the
-    handler's stop is what frees it, which is the whole point of arming. On a
-    transport that holds no driver the stop frees nothing, and an ignore that
-    outlives the first Ctrl-C throws away the only key left: the second one,
-    which is what breaks the join interpreter shutdown is blocked on.
+    worker, and no signal reaches that thread. On a transport that can hold a
+    driver the handler's stop is what frees it, which is the whole point of
+    arming. On `http` the stop frees nothing, and an ignore that outlives the
+    first Ctrl-C throws away the only key left: the second one, which is what
+    breaks the join interpreter shutdown is blocked on.
 
-    `auto` sits with `http` because the ladder maps it to rung 1, the same
-    reading the closer test above takes."""
+    `auto` sits with `browser` because it escalates a throttle to Chrome, the
+    same reading the closer test above takes. An `auto` search that never
+    escalates pays for it: its second Ctrl-C is ignored."""
     from flight_cli import cli
 
     before = signal.getsignal(signal.SIGINT)
@@ -3405,7 +3399,7 @@ def test_the_enriched_arm_arms_the_guard_only_for_the_browser_transport(
 
     cli._run_the_weave(_nothing, state, mode)
 
-    if mode == "browser":
+    if mode != "http":
         assert len(seen) == 1
         assert seen[0] is not before
         assert callable(seen[0])
