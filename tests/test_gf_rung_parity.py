@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import logging
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -35,6 +36,7 @@ from conftest import (
 from flight_cli import _gf_browser, cli
 from flight_cli import _gflight_ids as gfid
 from flight_cli._gf_common import PageFetch
+from flight_cli._gf_errors import GfPageShapeError
 from flight_cli.domain import Leg, SearchOptions
 from test_gf_full_board import _DEP, _RET, _SEARCH, _URL, _no_matrix, _one_way_filters
 
@@ -47,6 +49,9 @@ _HEADLESS_UA = (
     "(KHTML, like Gecko) HeadlessChrome/146.0.0.0 Safari/537.36"
 )
 _FLI_HEADERS = {"content-type": "application/x-www-form-urlencoded;charset=UTF-8"}
+# What a token read is sometimes served live, on either rung: a page with no
+# `ds:1` on it, where the next read of the same URL carries the board.
+_NO_BOARD = "<!doctype html><html><body></body></html>"
 
 
 def _ds1(name: str) -> str:
@@ -68,10 +73,11 @@ def _shape(board: list[gfid.GFlightWithId]) -> tuple[int, float]:
 
 class _UaSession:
     """fli's per-thread curl_cffi session, serving the board Google serves the
-    User-Agent a request carries."""
+    User-Agent a request carries. The first `boardless` token reads are served a
+    page with no board on it."""
 
-    def __init__(self, *, curated: str, headless: str) -> None:
-        self._curated, self._headless = curated, headless
+    def __init__(self, *, curated: str, headless: str, boardless: int = 0) -> None:
+        self._curated, self._headless, self._boardless = curated, headless, boardless
         self.headers = dict(_FLI_HEADERS)
         self.cookies = _NullCookies()
         self.uas: list[str] = []
@@ -80,7 +86,12 @@ class _UaSession:
         sent: dict[str, str] = {**self.headers, **(kw.get("headers") or {})}
         ua = next((v for k, v in sent.items() if k.lower() == "user-agent"), "")
         self.uas.append(ua)
-        return _FakeResponse(text=self._headless if "HeadlessChrome/" in ua else self._curated)
+        if "HeadlessChrome/" not in ua:
+            return _FakeResponse(text=self._curated)
+        if self._boardless:
+            self._boardless -= 1
+            return _FakeResponse(text=_NO_BOARD)
+        return _FakeResponse(text=self._headless)
 
 
 class _UaClient:
@@ -109,8 +120,10 @@ def _chrome_serving(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     monkeypatch.setattr(_gf_browser, "session", session)
 
 
-def _serve(monkeypatch: pytest.MonkeyPatch, *, curated: str, headless: str) -> _UaSession:
-    session = _UaSession(curated=_html(curated), headless=_html(headless))
+def _serve(
+    monkeypatch: pytest.MonkeyPatch, *, curated: str, headless: str, boardless: int = 0
+) -> _UaSession:
+    session = _UaSession(curated=_html(curated), headless=_html(headless), boardless=boardless)
     monkeypatch.setattr(gfid, "get_client", lambda: _UaClient(session))
     return session
 
@@ -189,6 +202,75 @@ def test_the_token_ua_is_curl_cffis_default_chrome() -> None:
     version = re.fullmatch(r".* HeadlessChrome/(\d+)\.0\.0\.0 Safari/537\.36", gfid._SEARCH_PAGE_UA)
     assert version is not None
     assert f"chrome{version.group(1)}" == DEFAULT_CHROME
+
+
+# ───────────────────────── a token page with no board ─────────────────────────
+
+
+def test_a_token_page_with_no_board_is_read_again(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red while one boardless page refused the leg: the next read of the same
+    URL carries the full board."""
+    gf_session()
+    session = _serve(
+        monkeypatch, curated="ds1_nyc_lon_curated", headless="ds1_nyc_lon_token", boardless=1
+    )
+    board = gfid._one_call_laddered(_one_way_filters(), gfid.HTTP_TRANSPORT)
+    assert (_shape(board), session.uas) == ((300, 488.0), [_HEADLESS_UA, _HEADLESS_UA])
+
+
+def test_a_token_page_twice_with_no_board_is_read_without_the_token(
+    gf_session: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Red while one boardless page refused the leg. The board a plain `Chrome/`
+    UA is served is shorter, and the warning says so, but it is Google's answer
+    where the refusal sent the search to Matrix."""
+    gf_session()
+    session = _serve(
+        monkeypatch, curated="ds1_nyc_lon_curated", headless="ds1_nyc_lon_token", boardless=2
+    )
+    with caplog.at_level(logging.WARNING, logger=gfid.__name__):
+        board = gfid._one_call_laddered(_one_way_filters(), gfid.HTTP_TRANSPORT)
+    assert (_shape(board), session.uas) == ((72, 679.0), [_HEADLESS_UA, _HEADLESS_UA, ""])
+    assert [r.getMessage() for r in caplog.records] == [
+        "Google Flights' full board did not read twice (Google Flights' search page carried "
+        "no readable ds:1 payload; the page shape changed); read the shorter board it serves "
+        "a regular browser, which can leave cheaper fares out"
+    ]
+
+
+def test_a_page_with_no_board_under_either_ua_is_refused_after_three_reads(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red while the first refusal was final, at one read. Three bound what a
+    page whose layout really changed costs before it is refused."""
+    gf_session()
+    session = _UaSession(curated=_NO_BOARD, headless=_NO_BOARD)
+    monkeypatch.setattr(gfid, "get_client", lambda: _UaClient(session))
+    with pytest.raises(GfPageShapeError, match="no readable ds:1 payload"):
+        gfid._one_call_laddered(_one_way_filters(), gfid.HTTP_TRANSPORT)
+    assert session.uas == [_HEADLESS_UA, _HEADLESS_UA, ""]
+
+
+def test_a_search_whose_token_pages_carry_no_board_answers_from_google(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red while a boardless token page refused the search as a page-shape
+    change, which the default search hands to Matrix."""
+    gf_session()
+    session = _UaSession(curated=_answered("ds1_nyc_lon_curated"), headless=_NO_BOARD)
+    monkeypatch.setattr(gfid, "get_client", lambda: _UaClient(session))
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    argv = [*_SEARCH, "NYC", "LON", "--dep", _DEP.isoformat(), "--fast", "--format", "envelope"]
+    result = CliRunner().invoke(cli.app, argv)
+    assert result.exit_code == 0, result.output
+    env = json.loads(result.stdout)
+    assert (env["backend"], env["complete"]) == ("gflight", True)
+    assert min(r["price"] for r in env["results"][0]["rows"]) == 679.0
+    assert [n for n in env["notes"] if "shorter board" in n]
 
 
 # ───────────────────────── the board's row cap ─────────────────────────
