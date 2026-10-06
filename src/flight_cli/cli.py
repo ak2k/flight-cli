@@ -9205,7 +9205,7 @@ def _render_gflight_table(
     what says which combination costs what. The itinerary fare downstream is
     the terminal member's; the argument and the measurements are under
     "What a round-trip row's price means." in
-    docs/memories/gf_routing_and_carriers.md and in
+    docs/memories/gf_request_budget.md and in
     `tests/pp/test_gflight_adapter.py`."""
     origin = ",".join(legs[0].origins) or "?"
     destination = ",".join(legs[0].destinations) or "?"

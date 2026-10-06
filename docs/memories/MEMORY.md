@@ -88,7 +88,7 @@ go into detail and are loaded on demand.
   positive scan that tells a flight-less board from a moved layout. Read
   before touching `_gflight_ids._extract_ds1` / `_rows_from_ds1`.
 - [gf_request_budget.md](gf_request_budget.md) — Page GETs per search (the
-  table every docstring points at), the round-trip pin cap of 10 and which
+  table most docstrings point at), the round-trip pin cap of 10 and which
   outbounds are pinned, the sort cabin leading multi-cabin pins, the pin
   loop's one stop rule, typed Matrix failures, what a round-trip row's price
   means, and why a partial round trip exits 0. Read before touching

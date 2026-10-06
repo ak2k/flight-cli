@@ -98,7 +98,7 @@ The grid paint in the weave is runtime-dead until the gate flips;
 `_run_calendar_enriched` itself still runs under `--gf-transport http` (it is
 what paints Matrix there).
 
-# `--fast`: the page's own price graph, through Chrome
+### `--fast`: the page's own price graph, through Chrome
 
 The search page signs its own `GetCalendarGraph`, so `_gf_calgraph` lets the page
 ask: Chrome opens the filtered search page on the window's first date, clicks

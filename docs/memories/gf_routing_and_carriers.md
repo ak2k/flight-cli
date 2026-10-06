@@ -2,18 +2,19 @@
 
 How `--routing`/`--extension` reach Google Flights, and the carrier-identity
 indices that make it correct. Read before touching `routing_predicates.py`,
-`_gf_postfilter.py`, `fli_bridge.apply_gf_native_filters`,
-`links.build_search_tfs`, `fli_bridge.fli_airport`, or
+`_gf_postfilter.py`, `fli_bridge.apply_gf_native_filters`, or
 `_gflight_ids._parse_leg_amenities` / `_flight_leg`.
 
 ## Where the rest went
 
 - [gf_search_transport.md](gf_search_transport.md) — the search page's `tfs=`
-  fields, aliased codes, price cap, bags, CO2, row checks, the full board.
+  fields (`links.build_search_tfs`), aliased codes (`fli_bridge.fli_airport`),
+  price cap, bags, CO2, row checks, the full board.
 - [gf_page_refusals_and_ds1.md](gf_page_refusals_and_ds1.md) — typed refusals,
   which `ds:1` blob is served, where rows sit, the authoritative empty.
 - [gf_request_budget.md](gf_request_budget.md) — page GETs per search, the pin
-  cap and pin choice, what a round-trip row's price means, partial round trips.
+  cap and pin choice, what a round-trip row's price means, partial round trips,
+  the three Matrix failures typed rather than raised as a traceback.
 - [gf_row_order_and_merge.md](gf_row_order_and_merge.md) — `-n`, `--pick`,
   price order, the merged table, the multi-cabin join key, currencies.
 - [gf_throttle_ladder.md](gf_throttle_ladder.md) — the shared throttle and
