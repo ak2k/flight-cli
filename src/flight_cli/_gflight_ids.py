@@ -1600,6 +1600,18 @@ def _is_transport_failure(e: BaseException) -> bool:
     return isinstance(e, curl_exc.RequestException) and code in _retryable_curl_codes()
 
 
+# The board Google serves a multi-airport search follows this token: under
+# `HeadlessChrome` it is the 300 cheapest rows across every airport pair, under
+# `Chrome` a curated ~75 that can leave the cheapest pair's fare out. Rung 2's
+# headless Chrome sends the token, so rung 1 sends it too and both read one
+# board. This is curl_cffi's own `chrome` UA with the token added; a test pins
+# its version to curl_cffi's default Chrome profile.
+_SEARCH_PAGE_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) HeadlessChrome/146.0.0.0 Safari/537.36"
+)
+
+
 def _get_search_page(client: Any, url: str) -> Any:
     """GET the search page through fli's session, bypassing fli's `Client.get`.
 
@@ -1633,6 +1645,9 @@ def _get_search_page(client: Any, url: str) -> Any:
         return client._session().get(  # pyright: ignore[reportAny]  # fli/curl_cffi untyped
             url,
             impersonate="chrome",
+            # Per request, never on the session: every other request fli makes
+            # on this thread's session keeps curl_cffi's own UA.
+            headers={"User-Agent": _SEARCH_PAGE_UA},
             allow_redirects=True,
             # fli's own value, imported rather than copied: it is the one that
             # reads and validates `FLI_TIMEOUT`, and a duplicate here silently
