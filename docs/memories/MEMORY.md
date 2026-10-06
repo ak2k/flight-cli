@@ -110,7 +110,8 @@ go into detail and are loaded on demand.
   separate tickets from the Cheapest tab's `row[7]`: the `tfu=` that asks for
   it, merged into the default board rather than swapped, marked round trips,
   `--no-separate-tickets`, and what the award matcher, `--sellers`, `--verify`,
-  links and the Matrix cross-check do with a marked row.
+  links and the Matrix cross-check do with a marked row; the multi-cabin join
+  key, and an open jaw answered as one Google one-way per slice beside Matrix.
 - [gf_multi_page_legs.md](gf_multi_page_legs.md) — A leg over 11 airports
   asked as several pages (`_metro.gf_leg_pages`, at most 8), how the pages'
   rows merge, a paged round trip's pins and cost, a refused page,

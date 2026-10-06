@@ -2027,7 +2027,7 @@ def _no_chrome_rung(seen: list[tuple[str, Any]] | None = None) -> Any:
     `e.remedy`, or prints it unescaped, is then readable off the buffer."""
 
     def _rung(
-        _legs: Any, opts: Any, _top_n: Any, gf_mode: Any = None, _headed: Any = False
+        _legs: Any, opts: Any, _top_n: Any, gf_mode: Any = None, _headed: Any = False, **_kw: Any
     ) -> list[Any]:
         if seen is not None:
             seen.append((str(opts.cabin.value), gf_mode))
@@ -2242,7 +2242,7 @@ def _multi_cabin_transports(
 
     calls: list[tuple[str, Any, Any]] = []
 
-    def _record(_legs: Any, opts: Any, _top_n: Any, *rest: Any) -> list[Any]:
+    def _record(_legs: Any, opts: Any, _top_n: Any, *rest: Any, **_kw: Any) -> list[Any]:
         calls.append((str(opts.cabin.value), *rest))
         return []
 
@@ -2380,7 +2380,7 @@ def test_two_cabins_at_rung_two_share_one_browser_launch(
     pw = _install(monkeypatch, tmp_path)
 
     def _rung(
-        _legs: Any, _opts: Any, _top_n: Any, _mode: Any = None, headed: Any = False
+        _legs: Any, _opts: Any, _top_n: Any, _mode: Any = None, headed: Any = False, **_kw: Any
     ) -> list[Any]:
         try:
             gfb.session(headed=bool(headed)).get_html(_PAGE_URL)
@@ -2514,7 +2514,7 @@ def test_a_launch_failure_after_a_cabin_was_served_stays_a_per_cabin_note(
     raised: list[GfBrowserUnavailableError] = []
 
     def _rung(
-        _legs: Any, opts: Any, _top_n: Any, mode: Any = None, _headed: Any = False
+        _legs: Any, opts: Any, _top_n: Any, mode: Any = None, _headed: Any = False, **_kw: Any
     ) -> list[Any]:
         seen.append((str(opts.cabin.value), mode))
         if opts.cabin is Cabin.BUSINESS:

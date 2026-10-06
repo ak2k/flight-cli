@@ -94,7 +94,8 @@ def _row(number: int, day: dt.date, frm: Any, to: Any, price: float | None) -> g
 class _Google:
     """Google Flights below the ladder, recording every GET and every pinned
     outbound by seat. `refuse` raises for a (seat, pinned flight) pair, None
-    being the outbound page; `chrome` runs first on every rung-2 GET."""
+    being the outbound page; `chrome` runs first on every rung-2 GET. Each
+    cabin's Cheapest tab lists no row and is counted apart, in `cheapest`."""
 
     def __init__(
         self,
@@ -107,15 +108,20 @@ class _Google:
         self.refuse = refuse or {}
         self.chrome = chrome
         self.gets: Counter[str] = Counter()
+        self.cheapest: Counter[str] = Counter()
         self.pins: dict[str, list[int]] = {}
         self.modes: list[tuple[str, str]] = []
         self._lock = threading.Lock()
 
     def __call__(
-        self, filters: Any, transport: Any, *, currency: str = "USD"
+        self, filters: Any, transport: Any, *, currency: str = "USD", cheapest: bool = False
     ) -> gfid.Board[gfid.GFlightWithId]:
         _ = currency
         seat: str = filters.seat_type.name
+        if cheapest:
+            with self._lock:
+                self.cheapest[seat] += 1
+            return gfid.Board()
         picked = filters.flight_segments[0].selected_flight
         flight = None if picked is None else int(picked.legs[0].flight_number)
         with self._lock:
@@ -385,7 +391,7 @@ def test_a_joined_row_shows_the_sort_cabins_seats(monkeypatch: pytest.MonkeyPatc
     google = _Google({"ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS})
 
     def seated(
-        filters: Any, transport: Any, *, currency: str = "USD"
+        filters: Any, transport: Any, *, currency: str = "USD", cheapest: bool = False
     ) -> gfid.Board[gfid.GFlightWithId]:
         seat: str = filters.seat_type.name
         economy = seat == "ECONOMY"
@@ -394,7 +400,7 @@ def test_a_joined_row_shows_the_sort_cabins_seats(monkeypatch: pytest.MonkeyPatc
             pitch_inches=31 if economy else None,
             legroom_class="AVERAGE" if economy else "Suite",
         )
-        board = google(filters, transport, currency=currency)
+        board = google(filters, transport, currency=currency, cheapest=cheapest)
         return gfid.Board([replace(r, amenities=[amenities]) for r in board])
 
     fan_out = cli._run_gflight_multi
