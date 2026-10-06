@@ -5444,9 +5444,10 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
                 )
                 if board is None:
                     left = len(ob.board) - len(kept[i])
-                    if not keys:
-                        # Answered with nothing to pin: its insight, past its
-                        # filter, is still this page's.
+                    if not keys or i in asked.unasked:
+                        # Its outbounds answered and none of its returns was
+                        # asked: their insight, past its filter, is still this
+                        # page's.
                         insight = _kept_insight(ob.board.insight, kept[i], left)
                         extras[i] = (insight, ob.board.history)
                     dropped += left

@@ -17,6 +17,7 @@ from flight_cli import _gflight_ids as gfid
 from flight_cli import cli
 from flight_cli._gf_errors import GfThrottledError
 from test_gf_auto_escalation import _rungs
+from test_envelope import _envelope_of
 from test_gf_chunked_search import (
     _EX6_FROM,
     _EX6_PAGES,
@@ -27,6 +28,7 @@ from test_gf_chunked_search import (
     _Google,
     _missing,
     _numbers,
+    _Priced,
     _search,
 )
 from test_gf_full_board import _DEP
@@ -327,3 +329,42 @@ def test_an_empty_first_page_with_no_stop_answers_from_the_later_pages(
     assert len(google.pages()) == 4
     assert json.loads(result.stdout)
     assert not handed
+
+
+def test_a_page_whose_returns_a_stop_left_unasked_keeps_its_outbound_insight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ten cheapest outbounds are on pages 1 and 2, and page 1's tab is
+    throttled after its pins, so page 2's returns are not asked. Its outbounds
+    answered, as those of pages 3 and 4, which hold no pin, did: the envelope
+    lists every page's insight and history, in page order. Red at the tip:
+    page 2's were dropped, so page 3's stood second."""
+
+    def no_sleep(*_a: object) -> None:
+        return None
+
+    monkeypatch.setattr(gfid.time, "sleep", no_sleep)
+    monkeypatch.setattr(gfid.random, "random", lambda: 0.0)
+    google = _Priced(
+        _EX6_PAIRS,
+        refuse_cheapest=lambda page: (
+            GfThrottledError("rate-limited") if page == _EX6_PAGES[0] else None
+        ),
+    )
+    buf = capture_err(monkeypatch)
+    env = _envelope_of(
+        _search(
+            monkeypatch,
+            google,
+            ",".join(_EX6_FROM),
+            ",".join(_EX6_TO),
+            *("--backend", "gflight", "--fast", "--format", "envelope", "-n", "200"),
+            ret=True,
+        )
+    )
+    printed = _flat(buf.getvalue())
+    assert _missing(2, "its returns were not asked after page 1 stopped the search") in printed, (
+        printed
+    )
+    assert [i["typical_low"] for i in env["insight"]] == [201.0, 202.0, 203.0, 204.0]
+    assert [h["points"][0]["price"] for h in env["price_history"]] == [401.0, 402.0, 403.0, 404.0]
