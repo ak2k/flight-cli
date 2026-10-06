@@ -76,6 +76,37 @@ def test_the_routing_memory_lists_the_night_checks_as_row_checks() -> None:
     assert "-OVERNIGHTS" in tier_2
 
 
+def _sentence(memory: str, anchor: str) -> str:
+    """The sentence of `docs/memories/<memory>` that names `anchor`."""
+    text = " ".join((_ROUTING_MEMORY.parent / memory).read_text().split())
+    at = text.index(anchor)
+    return text[text.rfind(". ", 0, at) + 2 : text.find(". ", at)]
+
+
+@pytest.mark.parametrize(
+    ("memory", "anchor", "says"),
+    [
+        pytest.param(
+            "gf_throttle_ladder.md",
+            "`cli._open_jaw_tickets`",
+            ("one one-way per slice", "--backend gflight"),
+            id="escalation",
+        ),
+        pytest.param(
+            "gf_browser_rung.md", "`cli._one_way_boards`", ("multi-city",), id="row-cap-line"
+        ),
+    ],
+)
+def test_the_memories_read_the_one_ways_of_every_multi_city_search(
+    memory: str, anchor: str, says: tuple[str, ...]
+) -> None:
+    """Every multi-city search, an open jaw among them, reads one one-way per
+    slice, and under --backend gflight Matrix is asked nothing beside them."""
+    sentence = _sentence(memory, anchor)
+    for words in says:
+        assert words in sentence, sentence
+
+
 def _skill_example(n: int) -> list[str]:
     """Example `n`'s command in the skill, as the arguments after `flight`."""
     m = re.search(rf"### Example {n}:.*?```bash\n(.*?)```", _text("skill"), re.DOTALL)
