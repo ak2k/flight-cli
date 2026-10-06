@@ -46,10 +46,63 @@ A non-2xx is deliberately NOT a shape error. "Google changed the page" sends a
 reader to re-derive the extract; "Google declined to serve" is usually an outage
 and needs no code change at all.
 
-Parity is measured, not assumed. 2026-09-02, JFK-LAX 2026-10-14, same URL, same
-minute: curl_cffi 30 rows / first `flight_id` `fuqYmc`; headless Chrome 30 rows
-/ `fuqYmc`; headed Chrome the same. `research/probe_gf_browser_page.py`
-(uncommitted) re-runs the comparison.
+Parity is measured, not assumed, and it holds per User-Agent token. For a
+multi-airport search Google serves a different board by the UA's token: under
+`HeadlessChrome` the 300 cheapest rows across every airport pair, under plain
+`Chrome` a curated ~75. Measured 2026-10-05 on NYC-LON 2026-11-04, same URL:
+curl_cffi's own `Chrome/146` UA and a headed Chrome read the same 72 rows from
+USD679; headless Chrome, and curl_cffi with only the token changed, read 300
+rows from USD488 (TP212/TP1328 EWR-OPO-LGW). A single airport pair (BOS-LHR,
+EWR-LGW, JFK-LAX) reads one board under either token. So every reader of a
+search page sends the token: rung 1 on each GET (`_gflight_ids._SEARCH_PAGE_UA`,
+curl_cffi's `chrome` UA with the token added, its version pinned by a test to
+curl_cffi's default Chrome profile and set per request so no other request on
+fli's session changes), headless Chrome by its own UA, and a `--gf-headed`
+window through a CDP `Emulation.setUserAgentOverride` set once in
+`_ensure_page`, which every later navigation on that page carries (booking,
+sellers, explore and the price graph too). Never set a headless page to plain
+`Chrome/`: that reads the curated board and loses the USD488 fare.
+`tests/test_gf_rung_parity.py` replays the nine pages behind these figures.
+
+Under the token Google sometimes serves a page with no `ds:1` on it. On
+2026-10-05 that happened to 2 of 7 rung-1 reads of q01 and 1 of 4 headless
+Chrome reads, and the next read of the same URL carried the board. No failing
+body was captured. Rung 1 therefore reads such a page up to three times, each
+with the token (`_gflight_ids._read_search_page`, raised as
+`_BoardlessPageError`), and then refuses it. It never reads without the token:
+that gets the curated board, which can leave out the fare rung 2 lists (USD679
+where the token board starts at USD488). A `ds:1` that decodes to a layout we
+cannot read is still refused at one read. Rung 2 navigates such a page once
+more, two navigations in all (`_BOARDLESS_NAVIGATIONS`), since a navigation
+costs seconds where a GET costs one request.
+
+A page of 300 raw rows, unread ones included, stopped at Google's cap
+(`_ROW_CAP`), so its board records its highest fare as `Board.capped_at`, in
+the page's own currency, and each path that shows it prints one stderr line:
+`Google Flights stops at 300 rows for this search: fares above USD1006.00 may
+be missing.` The currency is the page's, not the rows', since a filter can
+leave only rows of another page; pages capped in two currencies name both
+(`fares above EUR1006.00 and USD1006.00`). A round trip
+names its outbound page's figure, and a board merged from pages the lowest in
+each currency of every page read, one that holds no pin included. A board that shows separate
+tickets takes the lower of its own figure and the Cheapest tab's. Each one-way
+board an open jaw or `--split` reads (`cli._one_way_boards`) prints its own
+line, labeled by its slice (`Google Flights CDG→JFK one-way stops at ...`) or
+leg (`return one-way`): once every leg answered, since the tickets drawn from
+it stop at its cap, or alone when it holds no ticket. It is a
+note, not a narrowing (`complete` stays true): on five same-run pairs every
+curated row priced at or below the cap was on the token board at the same
+price, and the curated-only rows started at USD1035. Two consequences follow.
+The Google Flights link the CLI prints opens the curated board in the user's
+own Chrome, so a multi-airport search can list a fare (USD488) that page does
+not show. And a routing-filtered multi-airport search loses the curated-only
+rows above the cap, which the cap line names, on a board the filter emptied
+too. The merged table is the exception: with Google's board empty it shows
+Matrix's rows, and prints no line. So does a search handed to Matrix, on every
+hand-off arm: the cap bounds the board Matrix replaced, not Matrix's answer
+(`tests/test_gf_throttle_handoff.py`). The cross-check document (`--enrich
+--format json` or `envelope`) prints it, since its `search` half is Google's
+board.
 
 ## Four settings that look arbitrary and are not
 
@@ -95,7 +148,9 @@ arithmetic; what follows is this rung's own measurement. The pin cap named there
 is why the count stops growing with `-n`. Measured here with a recorder in place
 of the session and a 30-row board on each leg: `-n 1` → 2, `-n 3` → 4, `-n 10`
 → 11, `-n 25` → 11, `-n 100` → 11. Eleven is therefore the ceiling for any
-`-n`, so at the 30 s nav ceiling the worst case is 330 s. `atexit` gets only a
+`-n`, so at the 30 s nav ceiling the worst case is 330 s. A page with no board
+on it is navigated twice, so the eleven become at most 22 when every page comes
+back boardless the first time. `atexit` gets only a
 best-effort close, and is structurally same-thread: thread-local storage means
 interpreter shutdown on the main thread cannot see a worker's session.
 

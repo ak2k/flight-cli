@@ -3770,7 +3770,11 @@ def _one_way_boards(
 
     A leg whose pages met a stop (`_search_stop`) ends the asking, as a page's
     does in `_PageAsk`: every later leg would meet the same wall, so each is
-    named as not asked instead."""
+    named as not asked instead.
+
+    A board at Google's row cap says so (`_note_row_cap`) once every leg
+    answered, since the tickets drawn from it stop at its cap, or when it holds
+    no ticket, since one priced above its cap may be what it lacks."""
     from ._gf_browser import interrupt_guard  # noqa: PLC0415 — GF-only
 
     def unpriced(reason: str) -> str:
@@ -3782,7 +3786,9 @@ def _one_way_boards(
         return reason
 
     one_way = opts.model_copy(update={"max_price": None})
+    requested = opts.currency or "USD"
     boards: list[list[Any]] = []
+    read: list[tuple[str, Any]] = []
     with interrupt_guard(), _browser_scope(gf_mode):
         for i, (leg, which) in enumerate(legs):
             rest = [later for _, later in legs[i + 1 :]]
@@ -3805,9 +3811,11 @@ def _one_way_boards(
                 # booking, so tickets holding it would not be one booking each.
                 single = [r for r in priced if not _separately_ticketed(r)]
                 if not single:
+                    _note_row_cap(board, requested, one_way=which)
                     ticket = " on one ticket" if priced else ""
                     return f"Google Flights priced no {which} one-way{ticket}"
                 boards.append(single)
+                read.append((which, board))
             except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
                 raise
             except Exception as e:  # noqa: BLE001 — see the docstring
@@ -3815,6 +3823,8 @@ def _one_way_boards(
                 if rest and isinstance(e, _GF_STOPS):
                     failed += f", and {_one_ways_not_asked(rest)} after it stopped the search"
                 return unpriced(failed)
+    for which, board in read:
+        _note_row_cap(board, requested, one_way=which)
     return boards
 
 
@@ -5789,6 +5799,45 @@ def _note_stop_drops(results: list[Any], cabin: Cabin | None = None) -> None:
     err.print(f"[dim]{_safe_text(note)}[/]")
 
 
+def _note_row_cap(
+    results: list[Any], requested: str, cabin: Cabin | None = None, *, one_way: str | None = None
+) -> None:
+    """One stderr line when the board stopped at Google's row cap, naming its
+    highest fare: one above it may be missing. Called beside
+    `_note_stop_drops`, by each path that shows the board, a board the routing
+    emptied included: a match priced above the cap may be what is missing.
+    Each cap is named in the currency of the page that stopped there
+    (`Board.capped_at`), which no row may carry once a filter has run;
+    `requested` names a cap whose page decoded no currency. `one_way` labels a
+    one-way board an open jaw or `--split` reads (`_one_way_boards`), as
+    `cabin` labels a cabin's.
+
+    A plain line, not a narrowing, so the envelope carries it as a note and
+    `complete` keeps its meaning: every fare at or below the cap is on the
+    board."""
+    from ._gflight_ids import (  # noqa: PLC0415 — fli, ~95 ms
+        _ROW_CAP,  # pyright: ignore[reportPrivateUsage] — the cap `capped_at` was read against
+        lowest_caps,
+    )
+
+    capped_at: dict[str, float] = getattr(results, "capped_at", None) or {}
+    caps = lowest_caps(*({ccy or requested: amount} for ccy, amount in capped_at.items()))
+    if not caps:
+        return
+    bounds = " and ".join(f"{ccy}{amount:.2f}" for ccy, amount in sorted(caps.items()))
+    google = (
+        f"Google Flights {cabin.value}"
+        if cabin is not None
+        else f"Google Flights {one_way} one-way"
+        if one_way is not None
+        else "Google Flights"
+    )
+    note = (
+        f"{google} stops at {_ROW_CAP:d} rows for this search: fares above {bounds} may be missing."
+    )
+    err.print(f"[dim]{_safe_text(note)}[/]")
+
+
 class _Outbound(NamedTuple):
     """One cabin's outbound page, the row filter its pins are held to, that
     filter's count of the rows over the stop ceiling, and the cabin check that
@@ -6051,6 +6100,7 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
         Board,
         _kept_insight,  # pyright: ignore[reportPrivateUsage] — a page's insight past its filter
         _PageUnreadError,  # pyright: ignore[reportPrivateUsage] — the refusal that counts rows
+        lowest_caps,
     )
 
     asked = _PageAsk(pages, gf_mode=gf_mode, bags=opts.bags is not None)
@@ -6059,6 +6109,7 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
     tabs_failed: dict[int, GfBackendError] = {}
     stop_drops = StopDrops()
     extras: dict[int, tuple[PriceInsight | None, PriceHistory | None]] = {}
+    unboarded_caps: list[dict[str, float]] = []
     with _browser_scope(gf_mode):
         if len(pages[0]) < _ROUND_TRIP_LEGS:
             for i, page in enumerate(pages):
@@ -6130,6 +6181,9 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
                     dropped += left
                     unread += ob.board.unread
                     _add_stop_drops(stop_drops, ob.stop_drops)
+                    # Read though none of its trips is shown: one through its
+                    # airports priced above its cap may be missing.
+                    unboarded_caps.append(ob.board.capped_at)
                 else:
                     boards.append(board)
                     extras[i] = (board.insight, board.history)
@@ -6160,6 +6214,7 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
         unread=unread,
         separate_hidden=hidden,
         separate_failed=tabs_failed[min(tabs_failed)] if tabs_failed else None,
+        capped_at=lowest_caps(*(b.capped_at for b in boards), *unboarded_caps),
         # For a caller that asks Google more after this board (`_one_way_boards`).
         stopped=asked.stop,
     )
@@ -7108,6 +7163,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     _pin_cap_note(legs=legs, top_n=top_n)
     _note_other_currencies(results, opts.currency or "USD")
     _note_stop_drops(results)
+    _note_row_cap(results, opts.currency or "USD")
 
     if not results and (sellers or verify):
         # Why the board is empty is the search's answer; the flag's own exit
@@ -8165,6 +8221,11 @@ def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, 
             state["gf"] = gf
             _note_other_currencies(gf, requested)
             _note_stop_drops(gf)
+            # With Google's board empty the merged table is Matrix's, and the
+            # line would describe a board nobody is shown. The document's
+            # `search` half is Google's board, emptied or not.
+            if gf or json_out:
+                _note_row_cap(gf, requested)
             _note_separate_tickets(
                 gf,
                 gf_mode=gf_mode,
@@ -8943,11 +9004,14 @@ def _render_multi_cabin_search(
     cabins: tuple[Cabin, ...],
     sort_by: Cabin,
     title_prefix: str = "Itineraries",
+    passengers: int = 1,
     slices: int = 1,
 ) -> None:
     """Render multi-cabin merged rows. One row per itinerary, one price column
     per requested cabin, '—' for missing.
 
+    For a party of `passengers`, each cell prints the row's total for that
+    cabin; a cabin with no total prints one passenger's price, starred.
     A row Google sells as separate tickets ends each of its prices in `†`, or
     `‡` for a self transfer, as the one-cabin table does, and the key follows.
     `slices` is how many the search asked for: such a row with fewer is a
@@ -8959,6 +9023,8 @@ def _render_multi_cabin_search(
     ccy_tag = f" ({_safe_text(ccy)})" if ccy else ""
     cabin_labels = "+".join(_CABIN_TO_LETTER[c] for c in cabins)
     sort_label = _CABIN_TO_LETTER[sort_by]
+    party = passengers > 1
+    starred = False
     marked = [row for row in rows if row.itinerary.ticketing is not None]
     shows_mark = bool(marked)
 
@@ -8966,7 +9032,8 @@ def _render_multi_cabin_search(
         # `title_prefix` is a parameter: its value is chosen by whoever calls, and
         # a claim about every present and future caller is not one this function
         # can keep. The two callers pass a literal, so the wrap costs nothing.
-        title=f"{_safe_text(title_prefix)} · {cabin_labels} (sorted by {sort_label}){ccy_tag}",
+        title=f"{_safe_text(title_prefix)} · {cabin_labels} (sorted by {sort_label}){ccy_tag}"
+        + (f" · total for {passengers:d} travelers" if party else ""),
         show_header=True,
         header_style="bold green",
     )
@@ -8975,8 +9042,15 @@ def _render_multi_cabin_search(
     t.add_column("outbound")
     t.add_column("return")
     for letter in (_CABIN_TO_LETTER[c] for c in cabins):
-        # Unwrapped where a mark is shown, so it stays on its amount's line.
-        t.add_column(f"{letter}{ccy_tag}", justify="right", no_wrap=shows_mark)
+        # Folded: a party cell squeezed by Rich's default ellipsis loses its last
+        # digits and the star that marks a per-traveler fare. Unwrapped where a
+        # mark is shown, so it stays on its amount's line.
+        t.add_column(
+            f"{letter} total{ccy_tag}" if party else f"{letter}{ccy_tag}",
+            justify="right",
+            overflow="fold" if party else "ellipsis",
+            no_wrap=shows_mark,
+        )
 
     for i, row in enumerate(rows, 1):
         itn = row.itinerary.itinerary
@@ -8986,14 +9060,24 @@ def _render_multi_cabin_search(
 
         out_cell = _fmt_slice_cell(slcs[0]) if slcs else "—"
         ret_cell = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
+        price_cells: list[str] = []
         ticketing = row.itinerary.ticketing
         mark = " ‡" if ticketing == "self_transfer" else " †" if ticketing else ""
-        price_cells = [
-            _amount(row.prices.get(cab), ccy) + (mark if row.prices.get(cab) else "")
-            for cab in cabins
-        ]
+        for cab in cabins:
+            total = row.totals.get(cab)
+            if not party:
+                cell = _amount(row.prices.get(cab), ccy)
+            elif total or cab not in row.prices:
+                cell = _amount(total, ccy)
+            else:
+                # No space before the star: Rich wraps a narrow cell at its spaces.
+                cell = f"{_amount(row.prices[cab], ccy)}*"
+                starred = True
+            price_cells.append(cell + (mark if row.prices.get(cab) else ""))
         t.add_row(f"{i:d}", carriers or "?", out_cell, ret_cell, *price_cells)
     console.print(t)
+    if starred:
+        console.print("* per traveler: Matrix states no total for the party")
     if shows_mark:
         _print_ticketing_key(
             outbound_only=any(
@@ -9084,12 +9168,16 @@ def _run_matrix_path_multi(
         return
 
     rows = _merge_cabins(
-        results_by_cabin, sort_by=sort_by, top_n=top_n, currency=opts.currency or "USD"
+        results_by_cabin,
+        sort_by=sort_by,
+        top_n=top_n,
+        currency=opts.currency or "USD",
+        total_of=lambda it: party_price(it, opts.pax.total),
     )
     # `not json_out` for the reason given at the same gate in
     # `_run_gflight_path`: with awards on, the document is written below this.
     if not sel.awards_only and not json_out:
-        _render_multi_cabin_search(rows, cabins=cabins, sort_by=sort_by)
+        _render_multi_cabin_search(rows, cabins=cabins, sort_by=sort_by, passengers=opts.pax.total)
 
     if run_pp:
         # PP runs once against the merged result so award flights match against
@@ -9217,6 +9305,7 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
         if cab in fli_by_cabin:
             _note_other_currencies(fli_by_cabin[cab], opts.currency or "USD")
             _note_stop_drops(fli_by_cabin[cab], cab)
+            _note_row_cap(fli_by_cabin[cab], opts.currency or "USD", cab)
     for cab in emptied:
         err.print(
             f"[yellow]Google Flights {_safe_text(cab.value)}: "
@@ -9251,18 +9340,25 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
     results_by_cabin = _gflight_to_search_result_per_cabin(
         {cab: fli_by_cabin[cab] for cab in dict.fromkeys((sort_by, *cabins)) if cab in fli_by_cabin}
     )
+    # Google prices the whole party, so its listed price is the total.
     rows = _merge_cabins(
         results_by_cabin,
         sort_by=sort_by,
         top_n=top_n,
         currency=opts.currency or "USD",
+        total_of=lambda it: it.price,
         slices=len(legs),
     )
     # `not json_out` for the reason given at the same gate in
     # `_run_gflight_path`: with awards on, the document is written below this.
     if not sel.awards_only and not json_out:
         _render_multi_cabin_search(
-            rows, cabins=cabins, sort_by=sort_by, title_prefix="Google Flights", slices=len(legs)
+            rows,
+            cabins=cabins,
+            sort_by=sort_by,
+            title_prefix="Google Flights",
+            passengers=opts.pax.total,
+            slices=len(legs),
         )
 
     if run_pp:
