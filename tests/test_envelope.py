@@ -920,12 +920,27 @@ def _priced_grid(price: str) -> Any:
     return _result({9: {7: (price, 3, {}), 8: ("", 0, {})}}, cheapest=price)
 
 
+_WINDOW_DAYS = [_START + timedelta(days=i) for i in range(14)]
+
+
+def _window_grid(price: str) -> Any:
+    """Every departure date of `_CALENDAR`'s window priced, 7-night trips too,
+    and the day after it unpriced."""
+    by_month: dict[int, dict[int, tuple[str, int, dict[int, str]]]] = {}
+    for when in _WINDOW_DAYS:
+        by_month.setdefault(when.month, {})[when.day] = (price, 3, {7: price})
+    after = _WINDOW_DAYS[-1] + timedelta(days=1)
+    by_month.setdefault(after.month, {})[after.day] = ("", 0, {})
+    return _result(by_month, cheapest=price)
+
+
 def test_a_matrix_calendar_carries_each_priced_day(monkeypatch: pytest.MonkeyPatch) -> None:
-    _pair_client(monkeypatch, {("JFK", "LAX"): _priced_grid("USD204.00")})
+    _pair_client(monkeypatch, {("JFK", "LAX"): _window_grid("USD204.00")})
     env = _envelope_of(_run(*_CALENDAR[:1], "JFK", "LAX", *_CALENDAR[1:]), command="calendar")
     assert (env["backend"], env["currency"], env["complete"]) == ("matrix", "USD", True)
-    (day,) = env["results"]
-    assert (day["price"], day["currency"], day["row"]["date"]) == (204.0, "USD", 7)
+    assert [(d["price"], d["currency"], d["row"]["date"]) for d in env["results"]] == [
+        (204.0, "USD", when.day) for when in _WINDOW_DAYS
+    ]
     assert env["awards"] is None
     assert _notes(env, "awards") == ["awards: calendar runs no award search"]
     assert _notes(env, "insight") == ["insight: a calendar carries none"]
@@ -997,8 +1012,8 @@ def test_returns_only_the_combined_query_priced_narrow_the_answer(
     A one-way split asks no such return, and every pair answered."""
     client = _pair_client(
         monkeypatch,
-        {pair: _priced_grid("USD204.00") for pair in (("JFK", "LAX"), ("EWR", "LAX"))}
-        | {("JFK,EWR", "LAX"): _priced_grid("USD199.00")},
+        {pair: _window_grid("USD204.00") for pair in (("JFK", "LAX"), ("EWR", "LAX"))}
+        | {("JFK,EWR", "LAX"): _window_grid("USD199.00")},
     )
     window = [a for a in _CALENDAR[1:] if a != "--one-way"]
     env = _envelope_of(_run(*_CALENDAR[:1], "JFK,EWR", "LAX", *window, *trip), command="calendar")

@@ -2384,6 +2384,7 @@ def _run_calendar_enriched(
         _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
 
     _deliver_calendar(_write_answer)
+    _say_unpriced(res, search)
 
 
 def _combined_only_sides(search: CalendarSearch, max_per_query: int) -> str:
@@ -2476,26 +2477,26 @@ def _run_matrix_calendar(
             )
     if _envelope.active():
         _envelope.record_calendar(backend="matrix", rows=_calendar_envelope_rows(res))
-        return None
-    if json_out:
+    elif json_out:
         sys.stdout.write(json.dumps(res.raw, indent=2))
-        return None
+    else:
 
-    def _write_answer() -> None:
-        _render_calendar(
-            res,
-            dmin=dmin,
-            dmax=dmax,
-            origin=origins,
-            destination=dests,
-            sd=sd,
-            ed=ed,
-            round_trip=len(search.legs) == _ROUND_TRIP_LEGS,
-        )
-        _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
+        def _write_answer() -> None:
+            _render_calendar(
+                res,
+                dmin=dmin,
+                dmax=dmax,
+                origin=origins,
+                destination=dests,
+                sd=sd,
+                ed=ed,
+                round_trip=len(search.legs) == _ROUND_TRIP_LEGS,
+            )
+            _emit_urls(search, matrix_url=matrix_url, google_url=google_url)
 
-    _deliver_calendar(_write_answer)
-    return res
+        _deliver_calendar(_write_answer)
+    _say_unpriced(res, search)
+    return None if json_out else res
 
 
 def _default_graph_blocker(
@@ -2742,6 +2743,72 @@ def _window_date(month: int | None, day: int, sd: date, ed: date) -> date | None
     days = (sd + timedelta(days=i) for i in range((ed - sd).days + 1))
     hits = [d for d in days if d.day == day and (not month or d.month == month)]
     return hits[0] if len(hits) == 1 else None
+
+
+def _date_runs(dates: Sequence[date]) -> str:
+    """Ascending dates, comma-separated, each run of consecutive ones as `A to B`."""
+    runs: list[tuple[date, date]] = []
+    for d in dates:
+        if runs and d - runs[-1][1] == timedelta(days=1):
+            runs[-1] = (runs[-1][0], d)
+        else:
+            runs.append((d, d))
+    return ", ".join(
+        a.isoformat() if a == b else f"{a.isoformat()} to {b.isoformat()}" for a, b in runs
+    )
+
+
+def _unpriced_lines(
+    res: CalendarResult, *, sd: date, ed: date, lengths: Sequence[int | None]
+) -> list[str]:
+    """One line for each trip length (None on a one-way) that Matrix's grid holds
+    no fare for on some departure date of the window, naming those dates.
+
+    A day is placed as `_matrix_low` places it, and a disabled day is the padding
+    of a neighboring month. A round-trip day prices a length only through that
+    length's option, since the day's own price is its cheapest length's. A grid
+    the table prints as empty prices no date."""
+    asked = [sd + timedelta(days=i) for i in range((ed - sd).days + 1)]
+    priced: dict[int | None, set[date]] = {nights: set() for nights in lengths}
+    if not is_empty_calendar(res):
+        for month in res.months:
+            for day in month.days:
+                when = _window_date(month.month, day.date, sd, ed)
+                if day.disabled or when is None:
+                    continue
+                if None in priced and day.min_price:
+                    priced[None].add(when)
+                for option in day.options:
+                    if option.trip_length in priced and option.min_price:
+                        priced[option.trip_length].add(when)
+    lines: list[str] = []
+    for nights in lengths:
+        missing = [d for d in asked if d not in priced[nights]]
+        if missing:
+            trips = "" if nights is None else f" for {nights:d}-night trips"
+            lines.append(
+                f"Matrix priced no fare on {len(missing):d} of {len(asked):d} departure "
+                f"dates asked{trips}: {_date_runs(missing)}."
+            )
+    return lines
+
+
+def _say_unpriced(res: CalendarResult, search: CalendarSearch) -> None:
+    """Name the asked departure dates Matrix's grid left unpriced, after its
+    answer, in every format.
+
+    Matrix under-reports a calendar without saying so (quirk #7), and a date
+    missing from the grid otherwise reads as a date with no fare. The grid cannot
+    tell that from a day with no service, so either way the answer is narrower
+    than the question."""
+    window = search.window
+    lengths: tuple[int | None, ...] = (None,)
+    if len(search.legs) == _ROUND_TRIP_LEGS:
+        lengths = tuple(range(window.duration_min, window.duration_max + 1))
+    for line in _unpriced_lines(res, sd=window.start, ed=window.end, lengths=lengths):
+        _envelope.narrow()
+        # One line, as the two-lows note, so a reader matches it whole.
+        err.print(f"[yellow]{_safe_text(line)}[/]", soft_wrap=True)
 
 
 def _matrix_low(

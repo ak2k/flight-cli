@@ -889,10 +889,13 @@ def test_calendar_enriched_paints_grid_then_matrix(
     _run_enriched()
     assert calls["grid"] == 1  # GF grid painted (fast, first)
     assert calls["calendar"] == 1  # authoritative Matrix calendar painted
-    # Nothing on stderr but the paint's own status line: the weave reports whatever
-    # it stashed on both branches, so the branch where it stashed nothing names no
-    # failure, and the line saying Matrix is still coming is not one.
-    assert _flat(capsys.readouterr().err) == "…refining with Matrix (full grid + durations)…"
+    # Nothing on stderr but the paint's own status line and the dates Matrix's grid
+    # left unpriced: the weave reports whatever it stashed on both branches, so the
+    # branch where it stashed nothing names no failure, and neither line is one.
+    assert _flat(capsys.readouterr().err) == (
+        "…refining with Matrix (full grid + durations)… "
+        "Matrix priced no fare on 30 of 31 departure dates asked: 2026-09-08 to 2026-10-07."
+    )
 
 
 def test_calendar_enriched_gf_throttle_still_paints_matrix(monkeypatch: Any) -> None:
