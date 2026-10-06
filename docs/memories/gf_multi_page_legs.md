@@ -71,7 +71,10 @@ whose outbounds answered before the stop is named `its returns were not asked
 after page N stopped the search`, and no GET follows a throttle.
 When nothing merged and a page failed, the first failed page's error is raised
 and takes the route a one-page refusal takes ("A Google query that FAILS",
-above). Otherwise the answer is the pages that answered and the JSON list keeps
+above); with no failed page, a stop that left a page unasked, such as one a
+Cheapest tab met, is raised the same way, since an empty answer beside an
+unasked page is not a route with no flights. Otherwise the answer is the pages
+that answered and the JSON list keeps
 its shape, as "A partial round trip is a success, deliberately" sets out: the
 account of the missing pages is stderr. `dropped`, the rows the filter removed,
 is summed over every page, its outbounds pinned or not and its returns, so a
