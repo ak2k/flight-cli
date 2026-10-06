@@ -105,13 +105,18 @@ def price_rank(price: str | None, amount: float | None, *, currency: str) -> tup
 
 
 def cheapest(res: SearchResult, *, currency: str) -> Itinerary | None:
-    """`res`'s listing priced lowest in `currency`, the earlier of two equal
-    ones, among those `merge` can key; None when none is priced in `currency`."""
+    """`res`'s listing priced lowest in `currency`, or, when none is priced in
+    it, lowest in the first other currency by code, as `price_rank` orders
+    them; the earlier of two equal ones, among those `merge` can key. None when
+    no such listing's price names a currency.
+
+    Google can price a whole cabin in another currency than the one asked, and
+    that cabin's cheapest fare can still be on no row of the table."""
     priced = [
         (rank, it)
         for it in res.solutions
         if itinerary_key(it) is not None
-        and (rank := price_rank(it.price, parse_price(it.price), currency=currency))[0] == 0
+        and (rank := price_rank(it.price, parse_price(it.price), currency=currency))[0] <= 1
     ]
     return min(priced, key=lambda p: p[0])[1] if priced else None
 

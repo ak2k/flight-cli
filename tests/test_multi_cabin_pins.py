@@ -869,6 +869,45 @@ def test_the_cheapest_fare_the_table_names_is_a_row_of_its_cabin_in_the_document
     assert len(listed) == 21
 
 
+def _business_in_euros(google: _Google) -> Callable[..., gfid.Board[Any]]:
+    """`google` with every business row, outbound and return, priced in EUR at
+    the same number."""
+
+    def call(
+        filters: Any, transport: Any, *, currency: str = "USD", cheapest: bool = False
+    ) -> gfid.Board[gfid.GFlightWithId]:
+        board = google(filters, transport, currency=currency, cheapest=cheapest)
+        if filters.seat_type.name != "BUSINESS":
+            return board
+        return gfid.Board(
+            [replace(r, flight=r.flight.model_copy(update={"currency": "EUR"})) for r in board]
+        )
+
+    return call
+
+
+def test_a_cabin_google_prices_only_in_another_currency_names_its_own_cheapest_in_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Google prices every business row in EUR though USD was asked. Its column
+    starts at EUR1097 and its envelope list at EUR1020, so the line names
+    EUR1020 against the EUR fares the column shows. Red at the base."""
+    table = _search(monkeypatch, _business_in_euros(_reversed(monkeypatch)))
+    assert table.exit_code == 0, table.output
+    j_cells = {prices[1] for _, prices in _table(table.stdout)}
+    assert all(cell.startswith("EUR") for cell in j_cells), j_cells
+    assert min(float(cell.removeprefix("EUR")) for cell in j_cells) == 1097.0
+    assert [line for line in table.stdout.splitlines() if "own cheapest" in line] == [
+        "J's own cheapest: EUR1020.00 (B6109 / B6900), on no row above; "
+        "--sort business lists J's cheapest first."
+    ]
+    document = _search(
+        monkeypatch, _business_in_euros(_reversed(monkeypatch)), "--format", "envelope"
+    )
+    business = next(g for g in _envelope_of(document)["results"] if g["cabin"] == "BUSINESS")
+    assert (business["rows"][0]["currency"], business["rows"][0]["price"]) == ("EUR", 1020.0)
+
+
 def test_the_table_and_both_documents_load_the_same_pages(monkeypatch: pytest.MonkeyPatch) -> None:
     """The rows a document adds are read off the boards the join already holds.
     Green at the base."""

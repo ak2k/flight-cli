@@ -9095,8 +9095,11 @@ def _print_own_cheapest(
     currency: str,
 ) -> list[Itinerary]:
     """One line under the multi-cabin table for each cabin but `sort_by` whose
-    own cheapest listing in `currency` is priced below every fare its column
-    shows in `currency`, or whose column shows none, and the listings named.
+    own cheapest listing (`cheapest`: in `currency`, else in the first other
+    currency by code that the cabin is priced in) is priced below every fare its
+    column shows in that listing's currency, or whose column shows none in it,
+    and the listings named. No rate is known, so two currencies' fares never
+    compare.
 
     The table prices every cabin on the sort cabin's itineraries, so another
     cabin's cheapest fare can be on an itinerary no row shows, while a document
@@ -9108,10 +9111,11 @@ def _print_own_cheapest(
         amount = parse_price(own.price) if own is not None else None
         if own is None or amount is None:
             continue
+        own_currency = price_currency(own.price) or currency
         shown = [
             parse_price(p)
             for row in rows
-            if (p := row.prices.get(cab)) and price_currency(p) == currency
+            if (p := row.prices.get(cab)) and price_currency(p) == own_currency
         ]
         if any(p is not None and p <= amount for p in shown):
             continue
@@ -9122,7 +9126,7 @@ def _print_own_cheapest(
             "+".join(s.flights) for s in (own.itinerary.slices if own.itinerary else [])
         )
         console.print(
-            f"{_safe_text(letter)}'s own cheapest: {_safe_text(currency)}{amount:.2f}"
+            f"{_safe_text(letter)}'s own cheapest: {_safe_text(own_currency)}{amount:.2f}"
             f"{_safe_text(mark)} ({_safe_text(flights)}), on no row above; "
             f"--sort {_safe_text(_CABIN_FLAG_NAMES[cab])} lists {_safe_text(letter)}'s "
             "cheapest first.",
@@ -9279,8 +9283,8 @@ def _cabin_document_rows(
 ) -> list[Any]:
     """`cabin`'s Google board as a multi-cabin document carries it: its `top_n`
     cheapest rows, then, in price order, each other row whose fare the joined
-    table `rows` prints in `cabin`, and `own`, the cabin's cheapest listing in
-    the requested currency, which the table names under it when no row shows it.
+    table `rows` prints in `cabin`, and `own`, the cabin's `cheapest` listing,
+    which the table names under it when no row shows it.
 
     The table prices every cabin on the sort cabin's itineraries, so a fare it
     prints can sit far down another cabin's board; without it, the document
