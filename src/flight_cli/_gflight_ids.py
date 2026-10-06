@@ -499,6 +499,10 @@ _DS_FLIGHTS_KEY = "ds:1"
 # that order because page order is what breaks a tie between equal fares once a
 # board is ordered by price (`fare_key`).
 _DS_ROW_BLOCKS = (2, 3)
+# The most rows one page serves across both blocks: a multi-airport board read
+# under the `HeadlessChrome` token stops there, at its cheapest 300 (measured
+# 2026-10-05 on seven NYC-LON pages, 5 + 295 each).
+_ROW_CAP = 300
 _SHAPE_ERROR_SAMPLE_REASONS = 3
 # What "this data is not a decodable flight row" means, in ONE place. The probe
 # and the row loop must agree: a decode failure the probe swallowed but the row
@@ -1857,7 +1861,9 @@ class Board[T](list[T]):
     alone, so the merged board's `insight` and `history` are None.
     `separate_hidden` counts the separate-ticket itineraries a search asked to
     hide, and `separate_failed` is why the Cheapest tab, where those are listed,
-    went unread."""
+    went unread. `capped_at` is the highest fare on a page that stopped at
+    Google's row cap (`_ROW_CAP`): every fare at or below it is listed, and a
+    dearer one may be missing. A round trip carries its outbound page's."""
 
     def __init__(
         self,
@@ -1871,6 +1877,7 @@ class Board[T](list[T]):
         unread: int = 0,
         separate_hidden: int = 0,
         separate_failed: GfBackendError | None = None,
+        capped_at: float | None = None,
     ) -> None:
         super().__init__(rows)
         self.insight = insight
@@ -1879,6 +1886,7 @@ class Board[T](list[T]):
         self.pinned = pinned
         self.partial = partial
         self.unread = unread
+        self.capped_at = capped_at
         self.stop_drops: StopDrops | None = None
         self.separate_hidden = separate_hidden
         self.separate_failed = separate_failed
@@ -2059,11 +2067,16 @@ def _rows_from_page_html(page: PageFetch) -> Board[GFlightWithId]:
             f"the row shape changed (sample reasons: {sample})",
             unread=len(reasons),
         )
+    served = _deduped(out)
+    fares = [r.flight.price for r in served if r.flight.price is not None]
     return Board(
-        _deduped(out),
+        served,
         insight=_price_insight(payload, out),
         history=_price_history(payload, out),
         unread=len(reasons),
+        # The raw count, unread rows included: the cap is on what Google
+        # served, and no field of the page states it.
+        capped_at=max(fares) if len(rows) >= _ROW_CAP and fares else None,
     )
 
 
@@ -2449,6 +2462,7 @@ def _with_board_currency(board: Board[GFlightWithId], requested: str) -> Board[G
         dropped=board.dropped,
         pinned=board.pinned,
         unread=board.unread,
+        capped_at=board.capped_at,
     )
 
 
@@ -2574,6 +2588,7 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
             history=first.history,
             dropped=dropped,
             unread=first.unread,
+            capped_at=first.capped_at,
         )
         return answer if separate is None else separate(answer)
 
@@ -2669,6 +2684,9 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
         dropped=dropped,
         pinned=len(pins),
         unread=unread,
+        # The outbound page's alone: each return page lists one pin's returns,
+        # so its cap says nothing about which trips are on the board.
+        capped_at=first.capped_at,
     )
     # Before the pin outcome is judged: a separate-ticket itinerary needs no
     # return board, so one that is shown is served even when every return
@@ -2739,6 +2757,7 @@ def _with_separate_tickets(
             unread=answer.unread + unread,
             separate_hidden=hidden,
             separate_failed=failed,
+            capped_at=answer.capped_at,
         )
 
     if stopped is not None:

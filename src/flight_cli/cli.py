@@ -20,6 +20,7 @@ import json
 import re
 import shlex
 import sys
+from collections import Counter
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from functools import partial, wraps
@@ -5133,6 +5134,36 @@ def _note_stop_drops(results: list[Any], cabin: Cabin | None = None) -> None:
     err.print(f"[dim]{_safe_text(note)}[/]")
 
 
+def _note_row_cap(results: list[Any], cabin: Cabin | None = None) -> None:
+    """One stderr line when the board stopped at Google's row cap, naming its
+    highest fare: one above it may be missing. Called beside
+    `_note_stop_drops`, by each path that shows the board.
+
+    A plain line, not a narrowing, so the envelope carries it as a note and
+    `complete` keeps its meaning: every fare at or below the cap is on the
+    board."""
+    from ._gflight_ids import (  # noqa: PLC0415 — fli, ~95 ms
+        _ROW_CAP,  # pyright: ignore[reportPrivateUsage] — the cap `capped_at` was read against
+    )
+
+    capped_at: float | None = getattr(results, "capped_at", None)
+    if not results or capped_at is None:
+        return
+    currencies = Counter(
+        ccy
+        for r in results
+        for m in (cast("tuple[Any, ...]", r) if isinstance(r, tuple) else (r,))
+        if (ccy := cast("str | None", getattr(getattr(m, "flight", None), "currency", None)))
+    )
+    ccy = currencies.most_common(1)[0][0] if currencies else ""
+    google = "Google Flights" if cabin is None else f"Google Flights {cabin.value}"
+    note = (
+        f"{google} stops at {_ROW_CAP:d} rows for this search: "
+        f"fares above {ccy}{capped_at:.2f} may be missing."
+    )
+    err.print(f"[dim]{_safe_text(note)}[/]")
+
+
 class _Outbound(NamedTuple):
     """One cabin's outbound page, the row filter its pins are held to, that
     filter's count of the rows over the stop ceiling, and the cabin check that
@@ -5467,6 +5498,9 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
         unread=unread,
         separate_hidden=hidden,
         separate_failed=tabs_failed[min(tabs_failed)] if tabs_failed else None,
+        # The lowest: a fare above it may be missing from the page that
+        # stopped there, though another page lists dearer ones.
+        capped_at=min((b.capped_at for b in boards if b.capped_at is not None), default=None),
     )
     merged.stop_drops = stop_drops
     answered = [extras[i] for i in sorted(extras)]
@@ -6362,6 +6396,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     _pin_cap_note(legs=legs, top_n=top_n)
     _note_other_currencies(results, opts.currency or "USD")
     _note_stop_drops(results)
+    _note_row_cap(results)
     if unchecked and separate_tickets == "show":
         _note_unchecked_return(unchecked)
 
@@ -7409,6 +7444,7 @@ def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, 
             state["gf"] = gf
             _note_other_currencies(gf, requested)
             _note_stop_drops(gf)
+            _note_row_cap(gf)
             _note_separate_tickets(
                 gf,
                 gf_mode=gf_mode,
@@ -8389,6 +8425,7 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
         if cab in fli_by_cabin:
             _note_other_currencies(fli_by_cabin[cab], opts.currency or "USD")
             _note_stop_drops(fli_by_cabin[cab], cab)
+            _note_row_cap(fli_by_cabin[cab], cab)
     for cab in emptied:
         err.print(
             f"[yellow]Google Flights {_safe_text(cab.value)}: "

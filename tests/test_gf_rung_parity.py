@@ -16,16 +16,27 @@ whose board is the same under either UA.
 from __future__ import annotations
 
 import gzip
+import json
 import re
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from typer.testing import CliRunner
 
-from conftest import GFLIGHT_PAGE_DIR, _FakeRateLimiter, _FakeResponse, _NullCookies, _page
-from flight_cli import _gf_browser
+from conftest import (
+    GFLIGHT_PAGE_DIR,
+    _answering,
+    _FakeRateLimiter,
+    _FakeResponse,
+    _NullCookies,
+    _page,
+    _unreadable,
+)
+from flight_cli import _gf_browser, cli
 from flight_cli import _gflight_ids as gfid
 from flight_cli._gf_common import PageFetch
-from test_gf_full_board import _URL, _one_way_filters
+from flight_cli.domain import Leg, SearchOptions
+from test_gf_full_board import _DEP, _RET, _SEARCH, _URL, _no_matrix, _one_way_filters
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -178,3 +189,170 @@ def test_the_token_ua_is_curl_cffis_default_chrome() -> None:
     version = re.fullmatch(r".* HeadlessChrome/(\d+)\.0\.0\.0 Safari/537\.36", gfid._SEARCH_PAGE_UA)
     assert version is not None
     assert f"chrome{version.group(1)}" == DEFAULT_CHROME
+
+
+# ───────────────────────── the board's row cap ─────────────────────────
+
+_CAP_LINE = (
+    "Google Flights stops at 300 rows for this search: fares above USD1006.00 may be missing."
+)
+
+
+def _capped(rows: int, *, unreadable: int | None = None) -> gfid.Board[gfid.GFlightWithId]:
+    """The token page cut to its first `rows` raw rows, one of them unreadable
+    at `unreadable`."""
+    payload: list[Any] = json.loads(_ds1("ds1_nyc_lon_token"))
+    payload[3][0] = payload[3][0][: rows - len(payload[2][0])]
+    ds1 = json.dumps(payload)
+    if unreadable is not None:
+        ds1 = _unreadable(ds1, index=unreadable)
+    return gfid._rows_from_page_html(PageFetch(_page(ds1), _URL, 200))
+
+
+def test_a_board_at_the_row_cap_names_its_highest_fare() -> None:
+    """Red at the base, whose board recorded no cap. The raw count decides, an
+    unread row included: no field of the page states the cap."""
+    assert _board("ds1_nyc_lon_token").capped_at == 1006.0
+    one_unread = _capped(300, unreadable=7)
+    assert (len(one_unread), one_unread.unread, one_unread.capped_at) == (299, 1, 1006.0)
+    assert _capped(299).capped_at is None
+    for name in ("ds1_nyc_lon_curated", *(n for pair in _SINGLE_PAIRS for n in pair)):
+        assert _board(name).capped_at is None, name
+
+
+def test_the_cap_survives_the_boards_currency_fill() -> None:
+    """Red at the base: no cap to carry."""
+    board = _board("ds1_nyc_lon_token")
+    assert gfid._with_board_currency(board, "USD").capped_at == 1006.0
+
+
+@pytest.mark.parametrize(
+    ("caps", "merged"),
+    [((900.0, 700.0), 700.0), ((None, 800.0), 800.0), ((None, None), None)],
+    ids=["both", "one", "neither"],
+)
+def test_a_board_merged_from_pages_takes_the_lowest_cap(
+    caps: tuple[float | None, float | None],
+    merged: float | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red at the base, whose boards took no cap. 12 origins to LAX is two
+    pages; a fare above the lower cap may be missing from that page."""
+    from test_gf_chunked_search import _EAST, _row
+
+    def one_call(filters: Any, *, currency: str = "USD", cheapest: bool = False) -> Any:
+        del currency, cheapest
+        origins = [a[0].name for a in filters.flight_segments[0].departure_airport]
+        page = 0 if origins[0] in _EAST[:6] else 1
+        rows = [_row(i, _DEP, o, "LAX", 100.0 + i) for i, o in enumerate(origins)]
+        return gfid.Board(rows, capped_at=caps[page])
+
+    monkeypatch.setattr(gfid, "_one_call", one_call)
+    board = cli._gflight_results((Leg.of(_EAST, "LAX", _DEP),), SearchOptions(), 5)
+    assert isinstance(board, gfid.Board)
+    assert board.capped_at == merged
+
+
+def _search(*extra: str) -> list[str]:
+    return [*_SEARCH, "NYC", "LON", "--dep", _DEP.isoformat(), "--backend", "gflight", *extra]
+
+
+def _answered(name: str, *, origin: str | None = None, destination: str | None = None) -> str:
+    day = (_DEP if origin is None else _RET).isoformat()
+    return _page(_answering(_ds1(name), origin=origin, destination=destination, date=day))
+
+
+def _cap_lines(text: str) -> list[str]:
+    return re.findall(r"Google Flights[A-Z ]* stops at 300 rows[^.]*\.\d\d may be missing\.", text)
+
+
+@pytest.mark.parametrize(
+    "fmt", [(), ("--format", "json"), ("--format", "envelope")], ids=["table", "json", "envelope"]
+)
+def test_a_capped_board_says_where_it_stops_once(
+    fmt: tuple[str, ...], gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red at the base, which printed no line. A note in the envelope, not a
+    narrowing: every fare at or below the cap is on the board."""
+    gf_session(_answered("ds1_nyc_lon_token"))
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    result = CliRunner().invoke(cli.app, _search("--fast", *fmt), env={"COLUMNS": "250"})
+    assert result.exit_code == 0, result.output
+    assert _cap_lines(" ".join(result.stderr.split())) == [_CAP_LINE]
+    if fmt[-1:] == ("envelope",):
+        env = json.loads(result.stdout)
+        assert (env["backend"], env["complete"]) == ("gflight", True)
+        assert _cap_lines(" ".join(env["notes"])) == [_CAP_LINE]
+
+
+def test_a_board_under_the_cap_prints_no_line(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Green at the base and the tip."""
+    gf_session(_answered("ds1_nyc_lon_curated"))
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    result = CliRunner().invoke(cli.app, _search("--fast", "--format", "json"))
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)
+    assert "rows for this search" not in result.stderr
+
+
+def test_a_round_trip_names_its_outbound_boards_cap(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red at the base. Each return page lists one pin's returns, so the
+    outbound page's cap is the one that says which trips may be missing."""
+    gf_session(
+        _answered("ds1_nyc_lon_token"),
+        _answered("ds1_nyc_lon_curated", origin="LHR", destination="JFK"),
+    )
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    argv = _search("--return", _RET.isoformat(), "--fast", "--format", "json")
+    result = CliRunner().invoke(cli.app, argv)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)
+    assert _cap_lines(" ".join(result.stderr.split())) == [_CAP_LINE]
+
+
+def test_a_search_handed_to_matrix_prints_no_cap_line(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Green at the base and the tip: the line describes Google's board, and
+    a hand-off shows Matrix's."""
+    gf_session(_answered("ds1_nyc_lon_token"))
+    ran: list[bool] = []
+
+    def matrix(**_kw: object) -> None:
+        ran.append(True)
+
+    monkeypatch.setattr(cli, "_run_matrix_path", matrix)
+    argv = [*_SEARCH, "NYC", "LON", "--dep", _DEP.isoformat(), "--routing", "O:NZ+", "--fast"]
+    result = CliRunner().invoke(cli.app, [*argv, "--format", "json"])
+    assert result.exit_code == 0, result.output
+    assert ran == [True]
+    stderr = " ".join(result.stderr.split())
+    assert "Using Matrix: no Google Flights itinerary matched" in stderr
+    assert "rows for this search" not in stderr
+
+
+def test_a_multi_cabin_search_names_each_capped_cabin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Red at the base. Economy's board stopped at the cap and business's did
+    not, so the one line names economy."""
+    from fli.models import SeatType  # pyright: ignore[reportMissingTypeStubs]
+
+    pages = {
+        SeatType.ECONOMY: _answered("ds1_nyc_lon_token"),
+        SeatType.BUSINESS: _answered("ds1_nyc_lon_curated"),
+    }
+
+    def one_call(filters: Any, *, currency: str = "USD", cheapest: bool = False) -> Any:
+        del currency, cheapest
+        return gfid._rows_from_page_html(PageFetch(pages[filters.seat_type], _URL, 200))
+
+    monkeypatch.setattr(gfid, "_one_call", one_call)
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    result = CliRunner().invoke(cli.app, _search("--cabin", "economy,business", "--fast"))
+    assert result.exit_code == 0, result.output
+    assert _cap_lines(" ".join(result.stderr.split())) == [
+        _CAP_LINE.replace("Google Flights", "Google Flights COACH")
+    ]
