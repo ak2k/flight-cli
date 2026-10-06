@@ -39,6 +39,7 @@ from flight_cli.pp import auth as pp_auth
 from flight_cli.pp import cli as pp_cli
 from flight_cli.pp import client as pp_client
 from flight_cli.pp.auth import PPAuthError, Tokens
+from flight_cli.providers import registry
 from flight_cli.providers.base import AwardFlight, LegQuery
 from flight_cli.providers.seats_aero import auth as seats_auth
 from test_calendar_split import _pair_client, _result
@@ -156,7 +157,7 @@ def _hermetic(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:  # pyrig
 
     monkeypatch.setattr(cli, "_should_run_awards", _decide)
     monkeypatch.setattr(pp_cli, "gather_awards", _gather)
-    monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
+    monkeypatch.setattr(pp_cli, "stored_tokens", lambda: None)
     monkeypatch.setattr(pp_cli, "load_tokens", lambda: None)
 
 
@@ -665,22 +666,42 @@ def test_awards_ride_beside_the_cash_rows(gf_session: Callable[..., Any]) -> Non
     assert any(m["awards"] for m in leg["matches"])
 
 
-def test_pointspath_skipped_with_tokens_that_failed_narrows_the_answer(
-    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("extra", [(), ("--awards-only",)])
+def test_pointspath_tokens_that_fail_to_refresh_are_an_awards_incomplete_note(
+    extra: tuple[str, ...],
+    gf_session: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    def _refused() -> Tokens:
+    def _refused(_t: Tokens) -> Tokens:
         raise PPAuthError("Supabase refresh failed: HTTP 400")
 
-    monkeypatch.setattr(pp_cli, "load_tokens", lambda: Tokens("access", "refresh", 0))
-    monkeypatch.setattr(pp_cli, "get_valid_tokens", _refused)
+    monkeypatch.setattr(pp_cli, "gather_awards", registry.gather_awards)
+    monkeypatch.setattr(seats_auth, "KEY_PATH", tmp_path / "seats.json")
+    monkeypatch.delenv(seats_auth.API_KEY_ENV, raising=False)
+    monkeypatch.setenv("PP_ACCESS_TOKEN", "access")
+    monkeypatch.setenv("PP_REFRESH_TOKEN", "refresh")
+    monkeypatch.setattr(pp_auth, "refresh", _refused)
     gf_session(_served(_LAX))
     env = _envelope_of(
         _search(
-            "JFK", "LAX", "--dep", _DEP.isoformat(), "--backend", "gflight", "--fast", "-n", "5"
+            "JFK",
+            "LAX",
+            "--dep",
+            _DEP.isoformat(),
+            "--backend",
+            "gflight",
+            "--fast",
+            "-n",
+            "5",
+            *extra,
         )
     )
     assert env["complete"] is False
-    assert any(n.startswith("PointsPath skipped: Supabase refresh failed") for n in env["notes"])
+    assert any(
+        n.startswith("Awards incomplete: PointsPath failed (Supabase refresh failed")
+        for n in env["notes"]
+    )
     assert env["awards"] is not None
 
 
@@ -690,7 +711,7 @@ def test_pointspath_skipped_with_no_tokens_is_a_note(
     def _none() -> Tokens:
         raise PPAuthError("No PointsPath tokens. Run `flight-cli auth pp login`.")
 
-    monkeypatch.setattr(pp_cli, "get_valid_tokens", _none)
+    monkeypatch.setattr(pp_cli, "stored_tokens", _none)
     gf_session(_served(_LAX))
     env = _envelope_of(
         _search(
@@ -703,27 +724,18 @@ def test_pointspath_skipped_with_no_tokens_is_a_note(
 
 
 @pytest.mark.parametrize(
-    ("tokens", "seats", "providers", "complete", "awards_note"),
+    ("providers", "complete", "awards_note"),
     [
         pytest.param(
-            True, False, (), False, "awards: PointsPath was asked for", id="tokens-failed-alone"
-        ),
-        pytest.param(
-            True,
-            True,
             ("--providers", "pp"),
             False,
-            "awards: PointsPath was asked for",
-            id="named-beside-seats",
+            "awards: PointsPath was asked for, and it has no tokens",
+            id="named-no-tokens",
         ),
-        pytest.param(
-            False, False, (), True, "awards: no award provider is configured", id="no-tokens"
-        ),
+        pytest.param((), True, "awards: no award provider is configured", id="no-tokens"),
     ],
 )
 def test_pointspath_lost_at_the_award_gate_narrows_the_answer(
-    tokens: bool,
-    seats: bool,
     providers: tuple[str, ...],
     complete: bool,
     awards_note: str,
@@ -731,26 +743,15 @@ def test_pointspath_lost_at_the_award_gate_narrows_the_answer(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The award gate reads PointsPath tokens that fail to refresh as no
-    provider at all, so no award search runs and the provider's loss is said at
-    the gate. Through the real gate: a machine that never saved tokens asked
-    nothing of PointsPath."""
-
-    def _refused(_t: Tokens) -> Tokens:
-        raise PPAuthError("Supabase refresh failed: HTTP 400 refresh token expired")
-
+    """With no tokens the award gate finds no provider, so no award search runs
+    and the gate says why. Through the real gate: naming PointsPath narrows the
+    answer, and a machine that never saved tokens asked nothing of it."""
     monkeypatch.setattr(cli, "_should_run_awards", _SHOULD_RUN_AWARDS)
     monkeypatch.setattr(pp_auth, "TOKENS_PATH", tmp_path / "pp.json")
-    monkeypatch.setattr(pp_auth, "refresh", _refused)
     monkeypatch.setattr(seats_auth, "KEY_PATH", tmp_path / "seats.json")
     monkeypatch.delenv("PP_ACCESS_TOKEN", raising=False)
     monkeypatch.delenv("PP_REFRESH_TOKEN", raising=False)
     monkeypatch.delenv(seats_auth.API_KEY_ENV, raising=False)
-    if tokens:
-        monkeypatch.setenv("PP_ACCESS_TOKEN", "access")
-        monkeypatch.setenv("PP_REFRESH_TOKEN", "refresh")
-    if seats:
-        monkeypatch.setenv(seats_auth.API_KEY_ENV, "key")
     gf_session(_served(_LAX))
     env = _envelope_of(
         _search(

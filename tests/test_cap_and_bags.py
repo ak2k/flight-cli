@@ -698,7 +698,7 @@ def awards_on(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(cli, "_should_run_awards", _configured)
     monkeypatch.setattr(pp_cli, "gather_awards", _gather)
-    monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
+    monkeypatch.setattr(pp_cli, "stored_tokens", lambda: None)
 
 
 def _award_document(*args: str) -> list[dict[str, Any]]:

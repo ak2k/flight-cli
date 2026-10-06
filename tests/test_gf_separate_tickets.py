@@ -1455,7 +1455,7 @@ def test_an_award_document_whose_cheapest_row_is_on_separate_tickets_lists_one_t
 
     monkeypatch.setattr(cli, "_should_run_awards", _configured)
     monkeypatch.setattr(pp_cli, "gather_awards", _gather)
-    monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
+    monkeypatch.setattr(pp_cli, "stored_tokens", lambda: None)
     args = [*_CAPPED, "--format", "json", "-n", "1"]
     pages = (_served(_LAX), _lax_with_marked_twin(5, price=100))
     base = _as_the_base(gf_session, args, *pages)

@@ -64,7 +64,7 @@ def test_providers_closed_in_same_loop_they_were_built_in(
 
     # Neutralize the PP token pre-flight and the cash-hint extraction so the
     # function body reaches `_go` without needing real tokens or a SearchResult.
-    monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
+    monkeypatch.setattr(pp_cli, "stored_tokens", lambda: None)
     monkeypatch.setattr(pp_cli, "cash_hints_from_search_result", _no_cash_hints)
     monkeypatch.setattr(pp_cli, "gather_awards", fake_gather_awards)
 
@@ -109,7 +109,7 @@ def test_clean_exit_does_not_raise_event_loop_closed(monkeypatch: Any) -> None:
         per_leg: list[list[AwardFlight]] = [[] for _ in legs]
         return per_leg, [provider]
 
-    monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
+    monkeypatch.setattr(pp_cli, "stored_tokens", lambda: None)
     monkeypatch.setattr(pp_cli, "cash_hints_from_search_result", _no_cash_hints)
     monkeypatch.setattr(pp_cli, "gather_awards", fake_gather_awards)
 
