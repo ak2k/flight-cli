@@ -399,7 +399,11 @@ def test_an_awards_only_open_jaw_asks_google_nothing(monkeypatch: pytest.MonkeyP
     def _awards(*a: object, **_kw: object) -> None:
         awarded.append(a)
 
+    def _yes(_sel: cli.ProviderSelection) -> bool:
+        return True
+
     monkeypatch.setattr(cli, "run_pp_for_search", _awards)
+    monkeypatch.setattr(cli, "_should_run_awards", _yes)
     result = _search("--awards-only")
     assert result.exit_code == 0, result.output
     assert google.calls == []

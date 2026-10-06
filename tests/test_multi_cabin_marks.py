@@ -189,7 +189,11 @@ def test_awards_only_reads_no_cheapest_tab(monkeypatch: pytest.MonkeyPatch) -> N
     def _awards(*_a: object, **_kw: object) -> None:
         return None
 
+    def _yes(_sel: cli.ProviderSelection) -> bool:
+        return True
+
     monkeypatch.setattr(cli, "run_pp_for_search", _awards)
+    monkeypatch.setattr(cli, "_should_run_awards", _yes)
     google = _Google()
     result = _search(monkeypatch, google, "--awards-only", cash_only=False)
     assert result.exit_code == 0, result.output
