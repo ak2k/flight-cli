@@ -104,6 +104,18 @@ def price_rank(price: str | None, amount: float | None, *, currency: str) -> tup
     return (0, "", amount) if code == currency else (1, code, amount)
 
 
+def cheapest(res: SearchResult, *, currency: str) -> Itinerary | None:
+    """`res`'s listing priced lowest in `currency`, the earlier of two equal
+    ones, among those `merge` can key; None when none is priced in `currency`."""
+    priced = [
+        (rank, it)
+        for it in res.solutions
+        if itinerary_key(it) is not None
+        and (rank := price_rank(it.price, parse_price(it.price), currency=currency))[0] == 0
+    ]
+    return min(priced, key=lambda p: p[0])[1] if priced else None
+
+
 @dataclass
 class MultiCabinRow:
     """One itinerary observed across one or more cabin queries.
