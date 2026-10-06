@@ -90,11 +90,13 @@ that is not "unsupported" in `pp/client.py`, an error status with an empty
 body and a request the award deadline cut included); a leg with
 `pairs_not_asked`; calendar sub-queries lost; a length of a `calendar --fast`
 range whose graph was lost;
-a `--split` one-way search that failed, a `--split` round trip Matrix answered,
-or a `--split` open jaw Google was not asked about, since the tickets were asked
-for and are not priced (without `--split` that open jaw's `{error}` narrows
-nothing: its table lists no tickets either) (no priced one-way, no pair one traveler can fly, or two
-currencies are the boards' answer, a note); an open jaw's one-way board missing
+a one-way search that failed, on a `--split` round trip or on any open jaw
+(an open jaw's table lists its tickets with no flag), where no priced one-way,
+no pair one traveler can fly, or two currencies are the boards' answer, a note;
+a `--split` round trip Matrix answered, or a `--split` open jaw Google was not
+asked about, since the tickets were asked for and are not priced, while without
+`--split` that open jaw's `{error}` narrows nothing, as its table lists no
+tickets either; an open jaw's one-way board missing
 a page or holding rows the parser could not read (`cli._one_way_boards`, the
 unread rows a note naming the slice), since its cheapest tickets may be among
 them;
