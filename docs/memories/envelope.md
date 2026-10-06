@@ -68,8 +68,9 @@ range whose graph was lost;
 a `--split` one-way search that failed, or a `--split` search Matrix answered,
 since the pair was asked for and is not priced (no priced one-way, no pair one
 traveler can fly, or two currencies are the boards' answer, a note);
-`--max-per-query > 1` over a split, and over the one unsplit query when a
-group holds every destination; a round trip over a split set, whose returns
+`--max-per-query > 1` over a split when a query asks several destinations, and
+over the one unsplit query when a group holds every destination; a round trip
+over a split set, whose returns
 into another airport of the set come only from the combined query; Google rows the
 parser could not read, counted once from the board's `unread` where its rows
 are recorded (`cli._record_google_cabin`), so the note gives the number
