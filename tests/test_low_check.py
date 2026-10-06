@@ -23,7 +23,7 @@ import stamina
 from typer.testing import CliRunner
 
 from flight_cli import _gflight_ids as gfid
-from flight_cli import cli
+from flight_cli import _verify, cli
 from flight_cli._gf_common import PageFetch
 from flight_cli.client import MatrixClient
 from flight_cli.domain import SearchOptions
@@ -32,6 +32,7 @@ from test_verify import (
     _DEP,
     _SEARCH,
     _URL,
+    _as_row,
     _booked,
     _chain,
     _details_of,
@@ -374,6 +375,39 @@ def test_a_silent_summary_beside_a_candidate_flown_a_day_later_is_no_answer(
     assert f"{_LINE}1's flights ({_chain_text(low)}): no answer: {_SUMMARY_SILENT}" in under, under
     assert "other itinerar" not in under
     assert matrix.summarized() == [("viewDetails", "DL-0")]
+
+
+@pytest.mark.parametrize("left_out", ["the summary's stop", "a booked flight"])
+def test_a_connection_the_answer_leaves_out_is_no_answer_rather_than_another_itinerary(
+    tmp_path: pathlib.Path, left_out: str
+) -> None:
+    """The AS21 AS487 row asked as its exact flights: the one solution is the
+    row, its summary silent on the connection or its details on AS487."""
+    _n, row = _as_row()
+    fake = _Matrix()
+    sol = _row_solution("AS-1", _price(row), row)
+    details = _details_of(row)
+    if left_out == "the summary's stop":
+        del sol["itinerary"]["slices"][0]["stops"]
+        why = _SUMMARY_SILENT
+    else:
+        details["bookingDetails"]["itinerary"]["slices"][0]["segments"].pop()
+        why = (
+            "Matrix returned booking details that do not state every flight's number, "
+            "airports and times, so this itinerary cannot be checked flight by flight."
+        )
+    fake.chain = _chain(sol)
+    fake.details = {"AS-1": details}
+
+    async def go() -> Any:
+        c = MatrixClient(api_key="test-key", cache_dir=str(tmp_path), rps=1000.0)
+        c._http._client = httpx.AsyncClient(transport=httpx.MockTransport(fake.handler))
+        async with c:
+            return await cli._exact_flights_on(c, _verify.google_row(row), SearchOptions())
+
+    with pytest.raises(cli._UncheckableAnswerError) as raised:
+        anyio.run(go)
+    assert str(raised.value) == why
 
 
 def test_a_chain_past_the_bound_is_no_answer_and_leaves_the_table(

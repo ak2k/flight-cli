@@ -23,6 +23,7 @@ import sys
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from functools import partial, wraps
+from itertools import groupby, pairwise
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -147,6 +148,7 @@ if TYPE_CHECKING:
     )
     from .models import (
         BookedItinerary,
+        BookingDetails,
         BookingDetailsResult,
         CalendarDay,
         CalendarResult,
@@ -4753,8 +4755,9 @@ def _same_itinerary(
     impersonate: str,
 ) -> tuple[int, _FareRulesAnswer] | None:
     """The first of `idxs` whose booking details are row `n` flight by flight,
-    with its fare rules, or None. One booking-details call per candidate, in
-    Matrix's order, so a cheaper candidate that is another trip is passed over."""
+    with its fare rules, or None when `res` is read whole and none is. One
+    booking-details call per candidate, in Matrix's order, so a cheaper
+    candidate that is another trip is passed over."""
     session, solution_set = res.session, res.solution_set
     sids = [sid for sid in (res.solutions[i].id for i in idxs) if sid]
     if not (session and solution_set and len(sids) == len(idxs)):
@@ -4763,7 +4766,7 @@ def _same_itinerary(
             "so they cannot be checked flight by flight.[/]"
         )
         raise typer.Exit(1)
-    unreadable: list[int] = []
+    read: list[BookingDetails | None] = []
 
     async def go() -> tuple[int, _FareRulesAnswer] | None:
         async with MatrixClient(rps=rps, impersonate=impersonate) as c:
@@ -4772,25 +4775,21 @@ def _same_itinerary(
                     session=session, solution_set=solution_set, solution_id=sid
                 )
                 bd = details.booking_details
-                if bd is None or bd.itinerary is None:
-                    unreadable.append(i)
-                    continue
-                if _verify.same_flights(row, bd.itinerary):
+                if (
+                    bd is not None
+                    and bd.itinerary is not None
+                    and _verify.same_flights(row, bd.itinerary)
+                ):
                     rules = await _rules_of(
                         c, bd.fares, session=session, solution_set=solution_set, solution_id=sid
                     )
                     return i, _FareRulesAnswer(n, details, rules)
+                read.append(bd)
             return None
 
     found = _run_matrix(go, said="Matrix booking details failed")
-    # A candidate whose flights cannot be read may be the row, so "another
-    # itinerary" would not be known to be true.
-    if found is None and unreadable:
-        err.print(
-            "[red]Matrix returned booking details without their flights, "
-            "so this itinerary cannot be checked flight by flight.[/]"
-        )
-        raise typer.Exit(1)
+    if found is None:
+        _read_whole(res, row, read)
     return found
 
 
@@ -4832,18 +4831,28 @@ def _check_on_matrix(
             True,
         ),
     )
-    if not chain.solutions:
-        err.print("[dim]Matrix has no fare on those flights; asking which carriers it lists…[/]")
-        probe = SpecificDateSearch(
-            legs=_verify.matrix_legs(row, routed=False),
-            options=_verify.matrix_options(row, opts, max_stops=_verify.most_stops(row)),
-        )
-        return _Checked(
-            _verify.unpriced(row, cast("SearchResult", _run(probe, rps_, imp, True))), None
-        )
-    found = _same_itinerary(
-        chain, _verify.candidates(row, chain), row, n, rps=rps_, impersonate=imp
-    )
+    idxs = _verify.candidates(row, chain)
+    try:
+        if not idxs:
+            # With no candidate the page alone decides, so what keeps it from
+            # being read whole is named before a second search or a missing
+            # session, as the low check names it.
+            _read_whole(chain, row, [])
+            if not chain.solutions:
+                err.print(
+                    "[dim]Matrix has no fare on those flights; asking which carriers it lists…[/]"
+                )
+                probe = SpecificDateSearch(
+                    legs=_verify.matrix_legs(row, routed=False),
+                    options=_verify.matrix_options(row, opts, max_stops=_verify.most_stops(row)),
+                )
+                return _Checked(
+                    _verify.unpriced(row, cast("SearchResult", _run(probe, rps_, imp, True))), None
+                )
+        found = _same_itinerary(chain, idxs, row, n, rps=rps_, impersonate=imp)
+    except _UncheckableAnswerError as e:
+        err.print(f"[red]{_safe_text(str(e))}[/]")
+        raise typer.Exit(1) from None
     if found is None:
         return _Checked(_verify.other_itinerary(len(chain.solutions)), None)
     idx, answer = found
@@ -7011,48 +7020,96 @@ class _UncheckableAnswerError(Exception):
     """Matrix answered the chain in a shape that cannot be read flight by flight."""
 
 
-def _states_every_slice(solution: Itinerary) -> bool:
-    """Whether Matrix's summary of `solution` states each slice's flights,
-    stops, end airports and times. A slice missing any of them compares
-    unequal to every row, so it is no candidate whatever its flights are."""
+_DETAILS_WITHOUT_FLIGHTS = (
+    "Matrix returned booking details without their flights, "
+    "so this itinerary cannot be checked flight by flight."
+)
+_DETAILS_SHORT_OF_A_FLIGHT = (
+    "Matrix returned booking details that do not state every flight's "
+    "number, airports and times, so this itinerary cannot be checked "
+    "flight by flight."
+)
+_SUMMARY_SHORT_OF_A_SLICE = (
+    "Matrix listed an itinerary that does not state every slice's flights, "
+    "airports and times, so it cannot be checked flight by flight."
+)
+
+
+def _states_every_slice(solution: Itinerary, row: _verify.Row) -> bool:
+    """Whether Matrix's summary of `solution` states each of `row`'s slices:
+    its flights, stops, end airports and times. The chain admits only the
+    row's flights, so a summary naming others has left one out. Legs connect
+    at one airport fewer than there are of them, and either side may write a
+    through flight as one leg, so the stops are at least the longer side's
+    legs less one."""
     slices = solution.itinerary.slices if solution.itinerary else []
-    return bool(slices) and all(
-        s.flights
-        and all(s.flights)
+    return len(slices) == len(row.slices) and all(
+        _verify.routing([_verify._token(f) for f in s.flights])  # pyright: ignore[reportPrivateUsage] — the token form candidates compare
+        == _verify.routing([f.code for f in legs])
+        and len(s.stops) >= max(len(s.flights), len(legs)) - 1
         and all(p is not None and p.code for p in (s.origin, s.destination, *s.stops))
         and _verify.wall_clock(s.departure)
         and _verify.wall_clock(s.arrival)
-        for s in slices
+        for s, legs in zip(slices, row.slices, strict=True)
     )
 
 
-def _other_itinerary(chain: SearchResult) -> _verify.Verdict:
-    """No solution `chain` lists is the row. That says Matrix prices these
-    flights only as other itineraries when the page holds its whole answer
-    and every summary on it can be compared with the row; otherwise the row's
-    own itinerary may be on it or past it, so this raises
-    `_UncheckableAnswerError` instead."""
+def _flights_of(legs: Sequence[_verify.Flight]) -> list[tuple[str, str, str]]:
+    """Each flight in a slice's legs, by number and the airports it leaves and
+    reaches. Consecutive legs under one number are one through flight, which
+    either side may split; one whose legs do not join end to end has lost a
+    leg, so it has no airports."""
+    out: list[tuple[str, str, str]] = []
+    for code, run in groupby(legs, key=lambda f: f.code):
+        flown = list(run)
+        joined = all(a.destination == b.origin for a, b in pairwise(flown))
+        out.append((code, flown[0].origin, flown[-1].destination) if joined else (code, "", ""))
+    return out
+
+
+def _states_every_flight(itinerary: BookedItinerary, row: _verify.Row) -> bool:
+    """Whether booking details state each of `row`'s flights, slice by slice,
+    between the airports the row flies it, and every leg's carrier, number,
+    airports and times. A candidate's summary has the row's flights and
+    airports, so details short of them have left a flight or a leg out."""
+    booked = _verify.booked_flights(itinerary)
+    return len(booked) == len(row.slices) and all(
+        _flights_of(b) == _flights_of(legs) and all(all(f) for f in b)
+        for b, legs in zip(booked, row.slices, strict=True)
+    )
+
+
+def _read_whole(
+    chain: SearchResult, row: _verify.Row, read: Sequence[BookingDetails | None]
+) -> None:
+    """Raise `_UncheckableAnswerError` unless `chain` is Matrix's whole answer
+    on `row`'s flights, every summary on it states the row's slices, and
+    `read`, the booking details of each candidate that is not the row, in
+    Matrix's order, state every flight. Short of that, the row's own itinerary
+    may be one the answer leaves out, so no solution being the row does not
+    show that Matrix prices these flights only on other itineraries, or not at
+    all."""
+    for details in read:
+        itinerary = details.itinerary if details is not None else None
+        if itinerary is None:
+            raise _UncheckableAnswerError(_DETAILS_WITHOUT_FLIGHTS)
+        if not _states_every_flight(itinerary, row):
+            raise _UncheckableAnswerError(_DETAILS_SHORT_OF_A_FLIGHT)
     listed = len(chain.solutions)
+    # An empty answer leaves out its zero count; a listed one without its
+    # count may stop short of it.
+    if listed and "solutionCount" not in (chain.raw or {}):
+        raise _UncheckableAnswerError(
+            f"Matrix listed {listed:d} itinerar{'y' if listed == 1 else 'ies'} on these "
+            "flights without saying how many it found, and none listed is these exact flights."
+        )
     if chain.solution_count > listed:
         raise _UncheckableAnswerError(
             f"Matrix listed only {listed:d} of its {chain.solution_count:d} itineraries "
             "on these flights, and none listed is these exact flights."
         )
-    if not all(_states_every_slice(s) for s in chain.solutions):
-        raise _UncheckableAnswerError(
-            "Matrix listed an itinerary that does not state every slice's flights, "
-            "airports and times, so it cannot be checked flight by flight."
-        )
-    return _verify.other_itinerary(listed)
-
-
-def _states_every_flight(itinerary: BookedItinerary) -> bool:
-    """Whether booking details state each flight's carrier, number, airports
-    and times. A flight missing any of them compares unequal to every flight,
-    so an itinerary that does not match the row is another only when this
-    holds."""
-    booked = _verify.booked_flights(itinerary)
-    return bool(booked) and all(s and all(all(f) for f in s) for s in booked)
+    if not all(_states_every_slice(s, row) for s in chain.solutions):
+        raise _UncheckableAnswerError(_SUMMARY_SHORT_OF_A_SLICE)
 
 
 async def _exact_flights_on(
@@ -7071,43 +7128,29 @@ async def _exact_flights_on(
             cache=False,
         ),
     )
+    idxs = _verify.candidates(row, chain)
+    read: list[BookingDetails | None] = []
+    if idxs:
+        session, solution_set = chain.session, chain.solution_set
+        sids = [sid for sid in (chain.solutions[i].id for i in idxs) if sid]
+        if not (session and solution_set and len(sids) == len(idxs)):
+            raise _UncheckableAnswerError(
+                "Matrix answered without a session for these flights, "
+                "so they cannot be checked flight by flight."
+            )
+        for i, sid in zip(idxs, sids, strict=True):
+            answer = await c.booking_details(
+                session=session, solution_set=solution_set, solution_id=sid
+            )
+            details = answer.booking_details
+            itinerary = details.itinerary if details is not None else None
+            if itinerary is not None and _verify.same_flights(row, itinerary):
+                return _verify.Verdict("match", solution=chain.solutions[i], details=details)
+            read.append(details)
+    _read_whole(chain, row, read)
     if not chain.solutions:
         return _verify.Verdict("no-solution", "Matrix returned no fare on these exact flights")
-    idxs = _verify.candidates(row, chain)
-    if not idxs:
-        return _other_itinerary(chain)
-    session, solution_set = chain.session, chain.solution_set
-    sids = [sid for sid in (chain.solutions[i].id for i in idxs) if sid]
-    if not (session and solution_set and len(sids) == len(idxs)):
-        raise _UncheckableAnswerError(
-            "Matrix answered without a session for these flights, "
-            "so they cannot be checked flight by flight."
-        )
-    unreadable: str | None = None
-    for i, sid in zip(idxs, sids, strict=True):
-        answer = await c.booking_details(
-            session=session, solution_set=solution_set, solution_id=sid
-        )
-        details = answer.booking_details
-        itinerary = details.itinerary if details is not None else None
-        if itinerary is None:
-            unreadable = unreadable or (
-                "Matrix returned booking details without their flights, "
-                "so this itinerary cannot be checked flight by flight."
-            )
-        elif _verify.same_flights(row, itinerary):
-            return _verify.Verdict("match", solution=chain.solutions[i], details=details)
-        elif not _states_every_flight(itinerary):
-            unreadable = unreadable or (
-                "Matrix returned booking details that do not state every flight's "
-                "number, airports and times, so this itinerary cannot be checked "
-                "flight by flight."
-            )
-    if unreadable:
-        # A candidate whose flights cannot be read may be the row, so "another
-        # itinerary" would not be known to be true.
-        raise _UncheckableAnswerError(unreadable)
-    return _other_itinerary(chain)
+    return _verify.other_itinerary(len(chain.solutions))
 
 
 def _low_check_failure(e: Exception) -> str:
