@@ -125,7 +125,8 @@ class _Recorder:
         self.command: Command = command
         self.lock = threading.Lock()
         self.backend: Backend | None = None
-        self.narrowed = False
+        # The backend whose answer each narrowing narrowed, None for the search's.
+        self.narrowed: list[Backend | None] = []
         self.narrowings: list[str] = []
         self.asked: list[str] = []
         self.by_cabin: dict[str, list[ResultRow]] = {}
@@ -151,14 +152,17 @@ def active() -> bool:
     return _slot.recorder is not None
 
 
-def narrow(note: str | None = None) -> None:
+def narrow(note: str | None = None, *, of: Backend | None = None) -> None:
     """The answer is narrower than what was asked: said where the narrowing is.
 
     `note` joins the envelope's notes, for a site with no stderr line of its
-    own: the table and JSON outputs print nothing there."""
+    own: the table and JSON outputs print nothing there. `of` names the backend
+    whose answer is narrower. Once the other backend answers the search in its
+    place, what that backend could not read narrows nothing that is shown, and
+    stays only as its stderr line or its note."""
     if (rec := _slot.recorder) is not None:
         with rec.lock:
-            rec.narrowed = True
+            rec.narrowed.append(of)
             if note is not None:
                 rec.narrowings.append(note)
 
@@ -327,7 +331,8 @@ def _document(rec: _Recorder, *, code: int, stderr: str, stray: str) -> str:
         rows = rec.days
     priced = {r.currency for r in rows if r.price is not None}
     currency = next(iter(priced)) if len(priced) == 1 else None
-    complete = code == 0 and not rec.narrowed and not unanswered
+    narrowed = any(of is None or rec.backend in (None, of) for of in rec.narrowed)
+    complete = code == 0 and not narrowed and not unanswered
     notes = [
         *_note_lines(stderr),
         *rec.narrowings,
