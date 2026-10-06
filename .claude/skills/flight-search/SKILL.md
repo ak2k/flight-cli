@@ -24,8 +24,8 @@ intent into the right invocation **on the first try**.
 
 Global flags (every search-printing command):
 - `-v` / `-vv` — verbose logging (cache hits, retries) to stderr
-- `--format envelope` — `search` and `calendar`: one JSON object with the same keys on every path (`version`, `command`, `backend`, `currency`, `complete`, `notes`, `results`, `awards`, `insight`, `price_history`, `verify`, `cross_check`, `split_ticket`). Use it whenever the output is read by a program: `complete: false` means the answer is narrower than asked, and `notes` says why
-- `--format json` — the answering path's own shape (Google Flights rows, Matrix's raw response, `{cabin: …}`, or the award document); `--json` is a deprecated alias for it
+- `--format envelope` — `search` and `calendar`: one JSON object with the same keys on every path (`version`, `command`, `backend`, `currency`, `complete`, `notes`, `results`, `awards`, `insight`, `price_history`, `price_graph`, `verify`, `cross_check`, `split_ticket`). Use it whenever the output is read by a program: `complete: false` means the answer is narrower than asked (on a calendar, also departure dates Matrix priced no fare on, each named in `notes`), and `notes` says why. Add `--gf-transport browser` to a calendar to read Google's price graph into `price_graph` (opens a headless Chrome); without it the key is empty and its note says so
+- `--format json` — the answering path's own shape (Google Flights rows, Matrix's raw response, `{cabin: …}`, or the award document; a calendar under `--gf-transport browser` adds `google_price_graph` to Matrix's body); `--json` is a deprecated alias for it
 - `--no-cache` — bypass the on-disk response cache
 - `--matrix-url` / `--google-url` — toggle deep-link emission
 - `--cash-only` — skip all award providers; show only the cash table
