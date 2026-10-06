@@ -46,10 +46,36 @@ A non-2xx is deliberately NOT a shape error. "Google changed the page" sends a
 reader to re-derive the extract; "Google declined to serve" is usually an outage
 and needs no code change at all.
 
-Parity is measured, not assumed. 2026-09-02, JFK-LAX 2026-10-14, same URL, same
-minute: curl_cffi 30 rows / first `flight_id` `fuqYmc`; headless Chrome 30 rows
-/ `fuqYmc`; headed Chrome the same. `research/probe_gf_browser_page.py`
-(uncommitted) re-runs the comparison.
+Parity is measured, not assumed, and it holds per User-Agent token. For a
+multi-airport search Google serves a different board by the UA's token: under
+`HeadlessChrome` the 300 cheapest rows across every airport pair, under plain
+`Chrome` a curated ~75. Measured 2026-10-05 on NYC-LON 2026-11-04, same URL:
+curl_cffi's own `Chrome/146` UA and a headed Chrome read the same 72 rows from
+USD679; headless Chrome, and curl_cffi with only the token changed, read 300
+rows from USD488 (TP212/TP1328 EWR-OPO-LGW). A single airport pair (BOS-LHR,
+EWR-LGW, JFK-LAX) reads one board under either token. So every reader of a
+search page sends the token: rung 1 on each GET (`_gflight_ids._SEARCH_PAGE_UA`,
+curl_cffi's `chrome` UA with the token added, its version pinned by a test to
+curl_cffi's default Chrome profile and set per request so no other request on
+fli's session changes), headless Chrome by its own UA, and a `--gf-headed`
+window through a CDP `Emulation.setUserAgentOverride` set once in
+`_ensure_page`, which every later navigation on that page carries (booking,
+sellers, explore and the price graph too). Never set a headless page to plain
+`Chrome/`: that reads the curated board and loses the USD488 fare.
+`tests/test_gf_rung_parity.py` replays the nine pages behind these figures.
+
+A page of 300 raw rows, unread ones included, stopped at Google's cap
+(`_ROW_CAP`), so its board records its highest fare as `Board.capped_at`, and
+each path that shows it prints one stderr line: `Google Flights stops at 300
+rows for this search: fares above USD1006.00 may be missing.` A round trip
+names its outbound page's figure, a board merged from pages the lowest. It is a
+note, not a narrowing (`complete` stays true): on five same-run pairs every
+curated row priced at or below the cap was on the token board at the same
+price, and the curated-only rows started at USD1035. Two consequences follow.
+The Google Flights link the CLI prints opens the curated board in the user's
+own Chrome, so a multi-airport search can list a fare (USD488) that page does
+not show. And a routing-filtered multi-airport search loses the curated-only
+rows above the cap, which the cap line names.
 
 ## Four settings that look arbitrary and are not
 

@@ -21,11 +21,14 @@ returns with distinct flight_ids.
 
 The page URL asks for the full board (`tfu=`, see
 `links.google_flights_search_page_url`), so every row Google has for a leg is
-parsed and a top-N is the caller's trim.
+parsed and a top-N is the caller's trim. A multi-airport board stops at
+Google's 300 cheapest rows, and says so (`_ROW_CAP`, `Board.capped_at`).
 
 That page has two transports (`GfTransport`, `_one_call_laddered`): rung 1 is
 the curl_cffi GET below, rung 2 is a real Chrome navigating the same URL
-(`_gf_browser`), which earns a far larger rate budget. Both go through
+(`_gf_browser`), which earns a far larger rate budget. Both send the
+`HeadlessChrome` UA token, by which Google picks the board it serves a
+multi-airport search (`_SEARCH_PAGE_UA`), and both go through
 `_rows_from_page_html` — one parser, one set of verdicts about what a block
 means. A rung supplies bytes; it never gets to interpret them.
 """

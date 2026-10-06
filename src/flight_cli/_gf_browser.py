@@ -9,9 +9,11 @@ results from an IP that was simultaneously throttling curl_cffi.
 
 This module supplies **bytes only**. `_gflight_ids._rows_from_page_html` reads
 them, exactly as it reads rung 1's, so there is one parser and one set of
-verdicts about what a block means. Verified 2026-09-02 on JFK-LAX: curl_cffi
-and a headless Chrome navigation of the same URL in the same minute both
-decoded 30 rows with the identical first `flight_id`.
+verdicts about what a block means. Both rungs read one board because both send
+the `HeadlessChrome` UA token, by which Google picks the board it serves a
+multi-airport search; a headed window is given it (`_send_the_headless_token`).
+Measured 2026-10-05 on NYC-LON: 300 rows from USD488 under the token, a curated
+72 from USD679 without it. A single airport pair reads one board either way.
 
 Three things are deliberate and easy to undo by accident:
 
