@@ -22,7 +22,8 @@ the same object because the network is one network, and it probes the same way:
 the classifier admits only the curl failures that DO clear, so a waiter has an
 outcome worth waiting for. Each arm keeps its own round; only the lock is
 shared. One worker can own both at once, so standing down releases both — a
-SUCCESS does not, and the next paragraph is where that asymmetry is stated.
+SUCCESS does not, and the paragraph after "Release before park" is where that
+asymmetry is stated.
 
 **A waiter's park ends on the owner's report and on nothing else.** The wait
 carries no clock, because there is nothing for one to decide: `release()` sets

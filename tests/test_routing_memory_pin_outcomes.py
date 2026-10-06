@@ -1,4 +1,4 @@
-"""The routing memory names every pin outcome that leaves row 1 dearer than the board's cheapest."""
+"""The request-budget memory names every pin outcome that leaves row 1 dearer than the board's cheapest."""
 
 from __future__ import annotations
 
