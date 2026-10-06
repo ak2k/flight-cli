@@ -16,7 +16,7 @@ import threading
 import time
 from dataclasses import replace
 from datetime import date, timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import pytest
 import typer
@@ -397,6 +397,64 @@ def test_merge_prices_an_itinerary_listed_twice_at_its_cheaper_listing(
     assert [(r.prices, r.itinerary.price) for r in rows] == [
         ({Cabin.COACH: "USD450.00"}, "USD450.00")
     ]
+
+
+def _b6172(price: str, ticketing: Literal["separate_tickets"] | None = None) -> Itinerary:
+    """B6172 one way, as listed on Google's board in one cabin."""
+    it = _trip(("B6172", "2026-10-20T08:00", "2026-10-20T11:00"), price=price)
+    return it.model_copy(update={"ticketing": ticketing})
+
+
+def test_a_separate_ticket_listing_is_its_own_row():
+    """Economy lists B6172 on one ticket at USD260 and on separate tickets at
+    USD246, business on one ticket at USD900. The business fare is a one-ticket
+    fare, so it shares the one-ticket listing's row, and the cheaper economy
+    fare is a different booking on a row of its own."""
+    rows = merge(
+        {
+            Cabin.COACH: _result(_b6172("USD260.00"), _b6172("USD246.00", "separate_tickets")),
+            Cabin.BUSINESS: _result(_b6172("USD900.00")),
+        },
+        sort_by=Cabin.COACH,
+        top_n=10,
+        currency="USD",
+    )
+    assert [(r.itinerary.ticketing, r.prices) for r in rows] == [
+        ("separate_tickets", {Cabin.COACH: "USD246.00"}),
+        (None, {Cabin.COACH: "USD260.00", Cabin.BUSINESS: "USD900.00"}),
+    ]
+
+
+def test_a_round_trip_on_separate_tickets_is_never_joined_across_cabins():
+    """Each cabin's is its outbound alone at a round-trip total, and Google
+    lists no return for it, so the two cabins may fly different returns."""
+    rows = merge(
+        {
+            Cabin.COACH: _result(_b6172("USD480.00", "separate_tickets")),
+            Cabin.BUSINESS: _result(_b6172("USD1900.00", "separate_tickets")),
+        },
+        sort_by=Cabin.COACH,
+        top_n=10,
+        currency="USD",
+        slices=2,
+    )
+    assert [r.prices for r in rows] == [
+        {Cabin.COACH: "USD480.00"},
+        {Cabin.BUSINESS: "USD1900.00"},
+    ]
+
+
+def test_a_one_way_on_separate_tickets_joins_the_same_listing_in_another_cabin():
+    rows = merge(
+        {
+            Cabin.COACH: _result(_b6172("USD246.00", "separate_tickets")),
+            Cabin.BUSINESS: _result(_b6172("USD880.00", "separate_tickets")),
+        },
+        sort_by=Cabin.COACH,
+        top_n=10,
+        currency="USD",
+    )
+    assert [r.prices for r in rows] == [{Cabin.COACH: "USD246.00", Cabin.BUSINESS: "USD880.00"}]
 
 
 def test_merge_keeps_round_trips_whose_outbounds_share_a_first_flight_apart():

@@ -177,15 +177,23 @@ def refresh(tokens: Tokens) -> Tokens:
     return new
 
 
-def get_valid_tokens() -> Tokens:
-    """Return tokens that are good for at least the next ~minute. Refreshes
-    on the fly if stale. Raises PPAuthError if no tokens are available."""
+def stored_tokens() -> Tokens:
+    """Return the stored tokens, stale or not, without sending a request.
+    Raises PPAuthError if no tokens are available."""
     t = load_tokens()
     if t is None:
         raise PPAuthError(
             "No PointsPath tokens. Run `flight-cli auth pp login --tokens-file ...` "
             "or set PP_ACCESS_TOKEN."
         )
+    return t
+
+
+def get_valid_tokens() -> Tokens:
+    """Return tokens that are good for at least the next ~minute. A stale
+    token is refreshed by a blocking request. Raises PPAuthError if no tokens
+    are available or the refresh fails."""
+    t = stored_tokens()
     if t.needs_refresh():
         t = refresh(t)
     return t
