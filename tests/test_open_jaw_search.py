@@ -506,6 +506,43 @@ def test_the_envelope_carries_the_json_documents_split_ticket(
     assert _notes(env, "split_ticket") == []
 
 
+@pytest.mark.parametrize(
+    ("origin", "damage", "note"),
+    [
+        pytest.param(
+            "JFK",
+            {"unread": 3},
+            "Google Flights JFK→LHR one-way: 3 rows its pages served could not be read and "
+            "are left out of the answer",
+            id="unread",
+        ),
+        pytest.param("CDG", {"partial": True}, None, id="partial"),
+    ],
+)
+def test_a_board_short_of_rows_leaves_the_envelope_incomplete(
+    monkeypatch: pytest.MonkeyPatch, origin: str, damage: dict[str, Any], note: str | None
+) -> None:
+    """A slice's board that could not read some rows, or is missing a page, may
+    lack its cheapest tickets: the combinations stand, and the envelope says it
+    is narrower than asked. Red at the base, which asks Google nothing."""
+    google = _google(monkeypatch)
+    _matrix(monkeypatch)
+
+    def _short(legs: tuple[Leg, ...], *a: Any, **kw: Any) -> gfid.Board[Any]:
+        board = google(legs, *a, **kw)
+        if legs[0].origins[0] == origin:
+            for name, value in damage.items():
+                setattr(board, name, value)
+        return board
+
+    monkeypatch.setattr(cli, "_gflight_results", _short)
+    env = _envelope_of(_search("--cash-only", "--split", "--format", "envelope", "-n", "1"))
+    assert env["complete"] is False
+    assert [c["total"] for c in env["split_ticket"]["combinations"]] == [861]
+    if note is not None:
+        assert note in env["notes"]
+
+
 def test_split_on_a_table_prints_what_the_table_prints_without_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

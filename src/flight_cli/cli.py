@@ -3515,6 +3515,8 @@ def _one_way_boards(
     top_n: int,
     gf_mode: GfTransportMode,
     gf_headed: bool,
+    *,
+    narrow: bool = False,
 ) -> list[list[Any]] | str:
     """Each leg of `legs` asked alone on Google Flights, as its priced rows sold
     on one ticket, in price order; or the plain-text reason a leg has none,
@@ -3524,7 +3526,11 @@ def _one_way_boards(
 
     Asked without the price cap: it bounds the whole trip's fare, and held to
     each one-way it would admit tickets costing up to twice the cap together.
-    One Chrome serves every leg on the browser rung."""
+    One Chrome serves every leg on the browser rung.
+
+    With `narrow`, a board missing a page, or rows its pages served that could
+    not be read, narrows the envelope run, the unread rows in a note naming the
+    leg: the rows it lacks may be the leg's cheapest tickets."""
     from ._gf_browser import interrupt_guard  # noqa: PLC0415 — GF-only
 
     one_way = opts.model_copy(update={"max_price": None})
@@ -3533,6 +3539,13 @@ def _one_way_boards(
         for leg, which in legs:
             try:
                 board = _gflight_results((leg,), one_way, top_n, gf_mode, gf_headed)
+                if narrow and getattr(board, "partial", False):
+                    _envelope.narrow()
+                if narrow and (unread := cast("int", getattr(board, "unread", 0))):
+                    _envelope.narrow(
+                        f"Google Flights {which} one-way: {unread:d} rows its pages served "
+                        "could not be read and are left out of the answer"
+                    )
                 priced = [r for r in _price_ordered(board) if r.flight.price is not None]
                 # A one-way sold as separate tickets is already more than one
                 # booking, so tickets holding it would not be one booking each.
@@ -3762,7 +3775,12 @@ def _open_jaw_tickets(
 
     currency = opts.currency or "USD"
     boards = _one_way_boards(
-        tuple((leg, _slice_route(leg)) for leg in legs), opts, top_n, gf_mode, gf_headed
+        tuple((leg, _slice_route(leg)) for leg in legs),
+        opts,
+        top_n,
+        gf_mode,
+        gf_headed,
+        narrow=True,
     )
     if isinstance(boards, str):
         return boards

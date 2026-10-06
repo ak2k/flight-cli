@@ -68,7 +68,10 @@ range whose graph was lost;
 a `--split` one-way search that failed, a `--split` round trip Matrix answered,
 or a `--split` open jaw Google was not asked about, since the tickets were asked
 for and are not priced (no priced one-way, no pair one traveler can fly, or two
-currencies are the boards' answer, a note);
+currencies are the boards' answer, a note); an open jaw's one-way board missing
+a page or holding rows the parser could not read (`cli._one_way_boards`, the
+unread rows a note naming the slice), since its cheapest tickets may be among
+them;
 `--max-per-query > 1` over a split, and over the one unsplit query when a
 group holds every destination; a round trip over a split set, whose returns
 into another airport of the set come only from the combined query; Google rows the
