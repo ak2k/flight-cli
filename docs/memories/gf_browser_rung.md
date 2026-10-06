@@ -67,11 +67,12 @@ sellers, explore and the price graph too). Never set a headless page to plain
 Under the token Google sometimes serves a page with no `ds:1` on it. On
 2026-10-05 that happened to 2 of 7 rung-1 reads of q01 and 1 of 4 headless
 Chrome reads, and the next read of the same URL carried the board. No failing
-body was captured. Rung 1 therefore reads such a page once more with the token
-and then once without it (`_gflight_ids._read_search_page`, raised as
-`_BoardlessPageError`). The read without the token gets the curated board and
-logs a warning that says so. A `ds:1` that decodes to a layout we cannot read
-is still refused at one read. Rung 2 does not re-read.
+body was captured. Rung 1 therefore reads such a page up to three times, each
+with the token (`_gflight_ids._read_search_page`, raised as
+`_BoardlessPageError`), and then refuses it. It never reads without the token:
+that gets the curated board, which can leave out the fare rung 2 lists (USD679
+where the token board starts at USD488). A `ds:1` that decodes to a layout we
+cannot read is still refused at one read. Rung 2 does not re-read.
 
 A page of 300 raw rows, unread ones included, stopped at Google's cap
 (`_ROW_CAP`), so its board records its highest fare as `Board.capped_at`, and

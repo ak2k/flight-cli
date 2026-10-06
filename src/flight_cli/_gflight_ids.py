@@ -1619,12 +1619,8 @@ _SEARCH_PAGE_UA = (
 )
 
 
-def _get_search_page(client: Any, url: str, *, token: bool = True) -> Any:
+def _get_search_page(client: Any, url: str) -> Any:
     """GET the search page through fli's session, bypassing fli's `Client.get`.
-
-    `token=False` sends curl_cffi's own `Chrome/` UA instead of
-    `_SEARCH_PAGE_UA`, for the read that falls back to the shorter board
-    (`_read_search_page`).
 
     DIVERGE, and the reason is a request budget. `Client.get` is wrapped in
     `@retry(stop_after_attempt(3))` and calls `raise_for_status()`, so a
@@ -1658,7 +1654,7 @@ def _get_search_page(client: Any, url: str, *, token: bool = True) -> Any:
             impersonate="chrome",
             # Per request, never on the session: every other request fli makes
             # on this thread's session keeps curl_cffi's own UA.
-            headers={"User-Agent": _SEARCH_PAGE_UA} if token else None,
+            headers={"User-Agent": _SEARCH_PAGE_UA},
             allow_redirects=True,
             # fli's own value, imported rather than copied: it is the one that
             # reads and validates `FLI_TIMEOUT`, and a duplicate here silently
@@ -1676,7 +1672,6 @@ def _fetch_page(
     *,
     currency: str = "USD",
     cheapest: bool = False,
-    token: bool = True,
 ) -> PageFetch:
     """One GET of the public search page.
 
@@ -1692,9 +1687,7 @@ def _fetch_page(
     backs off on."""
     client = get_client()
     _seed_cookies_once(client)
-    resp = _get_search_page(
-        client, search_page_url(filters, currency=currency, cheapest=cheapest), token=token
-    )
+    resp = _get_search_page(client, search_page_url(filters, currency=currency, cheapest=cheapest))
     return PageFetch(
         html=resp.text,  # pyright: ignore[reportAny]  # fli/curl_cffi untyped
         final_url=str(resp.url),  # pyright: ignore[reportAny]  # fli/curl_cffi untyped
@@ -1919,6 +1912,10 @@ class _PageUnreadError(GfPageShapeError):
         self.unread = unread
 
 
+# Reads of one search-page URL that carries no board before rung 1 refuses it.
+_BOARDLESS_READS = 3
+
+
 class _BoardlessPageError(GfPageShapeError):
     """The page carried no `ds:1` payload that decodes. Under the token Google
     sometimes serves such a page, and the next read of the URL carries the
@@ -2124,29 +2121,21 @@ def _one_call(
 def _read_search_page(
     filters: FlightSearchFilters, *, currency: str, cheapest: bool
 ) -> Board[GFlightWithId]:
-    """The page's board, read with the token; a page with no board on it is
-    read once more with the token, then once without (`_BoardlessPageError`).
+    """The page's board, read again while the page carries none
+    (`_BoardlessPageError`), and refused after `_BOARDLESS_READS` reads.
 
-    Without the token a multi-airport search is served a shorter board, which
-    is still Google's answer where a refusal hands the search to Matrix. A page
-    that carries no board under either UA costs three reads before it is
-    refused."""
-    read = functools.partial(_fetch_page, filters, currency=currency, cheapest=cheapest)
-    try:
-        return _rows_from_page_html(read())
-    except _BoardlessPageError as e:
-        log.debug("Google Flights' search page did not read (%s); reading it again", e)
-    try:
-        return _rows_from_page_html(read())
-    except _BoardlessPageError as e:
-        unread = e
-    board = _rows_from_page_html(read(token=False))
-    log.warning(
-        "Google Flights' full board did not read twice (%s); read the shorter board it "
-        "serves a regular browser, which can leave cheaper fares out",
-        unread,
-    )
-    return board
+    Every read sends the token. Without it a multi-airport search is served
+    the curated board, which can leave out the cheapest fare rung 2 lists, so
+    a refusal that hands the search to Matrix is the truer answer."""
+    reads = 1
+    while True:
+        try:
+            return _rows_from_page_html(_fetch_page(filters, currency=currency, cheapest=cheapest))
+        except _BoardlessPageError as e:
+            if reads == _BOARDLESS_READS:
+                raise
+            reads += 1
+            log.debug("Google Flights' search page did not read (%s); reading it again", e)
 
 
 def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:

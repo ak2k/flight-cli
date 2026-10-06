@@ -2476,8 +2476,8 @@ def test_the_documented_round_trip_costs_compose_from_their_factors(client: Any)
         gfid.search_with_ids(_round_trip_filters(), top_n=10)
     assert len(fake.gets) == 1 + pins == 11, fake.gets
 
-    # Every return board carries no `ds:1` at all: read twice with the token
-    # and once without it before it is refused.
+    # Every return board carries no `ds:1` at all: read three times before it
+    # is refused.
     fake = client(_FakeResponse(text=board), _FakeResponse(text=_SHAPE_CHANGE_PAGE))
     with pytest.raises(GfPageShapeError, match="no readable ds:1 payload"):
         gfid.search_with_ids(_round_trip_filters(), top_n=10)

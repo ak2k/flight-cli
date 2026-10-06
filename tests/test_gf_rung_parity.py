@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import gzip
 import json
-import logging
 import re
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -224,57 +223,46 @@ def test_a_token_page_with_no_board_is_read_again(
     assert (_shape(board), session.uas) == ((300, 488.0), [_HEADLESS_UA, _HEADLESS_UA])
 
 
-def test_a_token_page_twice_with_no_board_is_read_without_the_token(
-    gf_session: Callable[..., Any],
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+def test_a_token_page_twice_with_no_board_is_read_a_third_time_with_the_token(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Red while one boardless page refused the leg. The board a plain `Chrome/`
-    UA is served is shorter, and the warning says so, but it is Google's answer
-    where the refusal sent the search to Matrix."""
+    """Red at ef32ded, whose third read dropped the token and answered the
+    curated 72 rows from USD679 where rung 2 read 300 from USD488."""
     gf_session()
     session = _serve(
         monkeypatch, curated="ds1_nyc_lon_curated", headless="ds1_nyc_lon_token", boardless=2
     )
-    with caplog.at_level(logging.WARNING, logger=gfid.__name__):
-        board = gfid._one_call_laddered(_one_way_filters(), gfid.HTTP_TRANSPORT)
-    assert (_shape(board), session.uas) == ((72, 679.0), [_HEADLESS_UA, _HEADLESS_UA, ""])
-    assert [r.getMessage() for r in caplog.records] == [
-        "Google Flights' full board did not read twice (Google Flights' search page carried "
-        "no readable ds:1 payload; the page shape changed); read the shorter board it serves "
-        "a regular browser, which can leave cheaper fares out"
-    ]
+    board = gfid._one_call_laddered(_one_way_filters(), gfid.HTTP_TRANSPORT)
+    assert (_shape(board), session.uas) == ((300, 488.0), [_HEADLESS_UA] * 3)
 
 
-def test_a_page_with_no_board_under_either_ua_is_refused_after_three_reads(
+def test_a_page_with_no_board_is_refused_after_three_token_reads(
     gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Red while the first refusal was final, at one read. Three bound what a
+    """Red at ef32ded, whose third read dropped the token. Three bound what a
     page whose layout really changed costs before it is refused."""
     gf_session()
     session = _UaSession(curated=_NO_BOARD, headless=_NO_BOARD)
     monkeypatch.setattr(gfid, "get_client", lambda: _UaClient(session))
     with pytest.raises(GfPageShapeError, match="no readable ds:1 payload"):
         gfid._one_call_laddered(_one_way_filters(), gfid.HTTP_TRANSPORT)
-    assert session.uas == [_HEADLESS_UA, _HEADLESS_UA, ""]
+    assert session.uas == [_HEADLESS_UA] * 3
 
 
-def test_a_search_whose_token_pages_carry_no_board_answers_from_google(
+def test_a_search_whose_token_pages_carry_no_board_is_refused(
     gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Red while a boardless token page refused the search as a page-shape
-    change, which the default search hands to Matrix."""
+    """Red at ef32ded, which answered from the curated board at USD679 and
+    called it complete. That board can leave out the fare rung 2 lists, so the
+    search says it read no board rather than answering from it."""
     gf_session()
     session = _UaSession(curated=_answered("ds1_nyc_lon_curated"), headless=_NO_BOARD)
     monkeypatch.setattr(gfid, "get_client", lambda: _UaClient(session))
     monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
-    argv = [*_SEARCH, "NYC", "LON", "--dep", _DEP.isoformat(), "--fast", "--format", "envelope"]
+    argv = [*_SEARCH, "NYC", "LON", "--dep", _DEP.isoformat(), "--fast", "--format", "json"]
     result = CliRunner().invoke(cli.app, argv)
-    assert result.exit_code == 0, result.output
-    env = json.loads(result.stdout)
-    assert (env["backend"], env["complete"]) == ("gflight", True)
-    assert min(r["price"] for r in env["results"][0]["rows"]) == 679.0
-    assert [n for n in env["notes"] if "shorter board" in n]
+    assert (result.exit_code, result.stdout, session.uas) == (1, "", [_HEADLESS_UA] * 3)
+    assert "no readable ds:1 payload" in " ".join(result.stderr.split())
 
 
 # ───────────────────────── the board's row cap ─────────────────────────
