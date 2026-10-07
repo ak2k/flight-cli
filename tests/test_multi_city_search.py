@@ -504,6 +504,13 @@ _ALONE = "--backend gflight answers a multi-city search with Google Flights' sep
             id="top-level-times",
         ),
         pytest.param(
+            ("--extension", "F BC=j"),
+            None,
+            f"{_ALONE}, and none is asked: Google Flights can't serve slice 1 (SFO→ORD) as a "
+            "one-way: extension 'F BC=j' not expressible on GF. Drop --backend gflight.",
+            id="top-level-unservable-extension",
+        ),
+        pytest.param(
             (),
             ("SFO-ORD:{one}", "ORD-BOS:{two}:e=F BC=j", "BOS-SFO:{three}"),
             f"{_ALONE}, and none is asked: Google Flights can't serve slice 2 (ORD→BOS) as a "
@@ -622,6 +629,20 @@ def test_backend_gflight_holds_each_one_way_to_the_top_level_routing(
     assert result.exit_code == 0, result.output
     assert [legs[0].route_language for legs, _, _ in google.calls] == ["UA+"] * 3
     assert matrix.searches == []
+
+
+@pytest.mark.parametrize("backend", ["auto", "gflight"])
+def test_a_top_level_code_every_slice_overrides_keeps_no_one_way_off_google(
+    monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
+    """Each slice's own empty `e=` replaces the top-level code, so Google is
+    asked every one-way and no line names the code."""
+    google, _ = _google(monkeypatch), _matrix(monkeypatch)
+    slices = tuple(f"{s}:e=" for s in _slices())
+    result = _run("--backend", backend, "--extension", "F BC=j", slices=slices)
+    assert result.exit_code == 0, result.output
+    assert [legs[0].extension for legs, _, _ in google.calls] == [""] * 3
+    assert "F BC=j" not in _stderr(result)
 
 
 def _configured(sel: cli.ProviderSelection) -> bool:

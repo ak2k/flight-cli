@@ -11288,8 +11288,10 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
     )
     resolved = _pick_backend(
         backend=backend,
-        routing=routing,
-        extension=extension,
+        # Beside --slice a top-level code is only the default of a slice with
+        # no r=/e=, and `_open_jaw_blocker` judges each slice by its own codes.
+        routing=None if slice_specs else routing,
+        extension=None if slice_specs else extension,
         slice_specs=slice_specs,
         depart_times=depart_times,
         return_times=return_times,
