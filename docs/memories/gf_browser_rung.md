@@ -269,11 +269,16 @@ proved it cannot see.
 A driver that cannot START is a different refusal from a Chrome that cannot
 launch: `start()` raising means no launch was tried, so `_ensure_page` raises
 `_driver_failure`, whose remedy is `_INSTALL_HINT` (patchright's own install)
-rather than `_LAUNCH_REMEDY`. patchright also leaves that spawn error on the
-transport's `on_error_future`, which nothing awaits, so asyncio would print it
-as "Future exception was never retrieved" after the refusal;
-`_retrieve_driver_failure` reads it first. That walk is a fourth private
-patchright attribute, guarded like `_driver_process_id`.
+rather than `_LAUNCH_REMEDY`. patchright also parks the start error where
+nothing awaits it — the transport's `on_error_future` when node cannot be
+spawned, the connection's `init` task when node runs and exits — so asyncio
+would print it as "exception was never retrieved" after the refusal.
+`_quiet_driver_failure` gives the loop patchright made for that manager an
+exception handler that drops those reports: one handler covers every future on
+the loop, where retrieving each would take one private attribute per place
+patchright parks an error. It reads `_loop` and `_own_loop`, guarded like
+`_driver_process_id`, and leaves a loop patchright did not make (the caller's)
+alone.
 
 ## What it costs
 

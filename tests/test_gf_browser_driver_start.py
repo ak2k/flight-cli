@@ -1,10 +1,10 @@
 """A patchright driver that cannot start: one quiet refusal that names the driver.
 
-patchright's `start()` spawns a node driver. When that spawn fails, the
-transport parks the error on a future nobody reads, and asyncio prints
-"Future exception was never retrieved" with a ~40-line traceback after the
-typed refusal. The refusal also told the user to install Chrome, which is not
-what is missing.
+patchright's `start()` spawns a node driver. When node cannot be spawned, or
+runs and exits before the handshake, patchright parks the error where nothing
+reads it, and asyncio would print it as "exception was never retrieved" with a
+traceback after the typed refusal. Neither case is a missing Chrome, so the
+refusal points at patchright's install.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from flight_cli._gf_errors import GfBrowserUnavailableError
 if TYPE_CHECKING:
     import pathlib
 
-_UNRETRIEVED = "Future exception was never retrieved"
+_UNRETRIEVED = "exception was never retrieved"
 
 
 def _no_trace_left(caplog: pytest.LogCaptureFixture) -> bool:
@@ -35,40 +35,35 @@ def _no_trace_left(caplog: pytest.LogCaptureFixture) -> bool:
     return not any(_UNRETRIEVED in r.getMessage() for r in caplog.records)
 
 
-class _FailedTransport:
-    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
-        self.on_error_future: asyncio.Future[None] = loop.create_future()
-        self.on_error_future.set_exception(FileNotFoundError(2, "No such file or directory"))
-
-
-class _FailedConnection:
-    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
-        self._transport = _FailedTransport(loop)
-
-
 class _DriverThatCannotStart:
-    """The slice of patchright's manager a failed `start()` leaves behind."""
+    """The slice of patchright's manager a failed `start()` leaves behind: the
+    loop it ran on, whether patchright made that loop, and the error parked on a
+    future of it."""
 
-    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
-        self._connection = _FailedConnection(loop)
+    def __init__(self, loop: asyncio.AbstractEventLoop, *, own_loop: bool = True) -> None:
+        self._loop = loop
+        self._own_loop = own_loop
+        self.parked: asyncio.Future[None] = loop.create_future()
+        self.parked.set_exception(FileNotFoundError(2, "No such file or directory"))
 
     def start(self) -> None:
         raise FileNotFoundError(2, "No such file or directory: 'node'")
 
 
 def _install_real_patchright(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, node: pathlib.Path
 ) -> list[asyncio.AbstractEventLoop]:
-    """Point the seam at the real `sync_playwright` and a driver path that does not exist.
+    """Point the seam at the real `sync_playwright` and `node` as its driver binary.
 
-    Nothing is spawned: `start()` fails at the first `exec`, so no node and no
-    Chrome run. `MATRIX_CACHE_DIR` is a tmp dir, checked before the session can
-    make a profile directory in it. Returns the event loops patchright makes,
-    because a failed `start()` never closes its own and the test must."""
+    No real node and no Chrome run: `node` is missing, so `start()` fails at the
+    first `exec`, or is a script that exits at once. `MATRIX_CACHE_DIR` is a tmp
+    dir, checked before the session can make a profile directory in it. Returns
+    the event loops patchright makes, because a failed `start()` never closes its
+    own and the test must."""
     from patchright.sync_api import sync_playwright
 
     monkeypatch.setenv("MATRIX_CACHE_DIR", str(tmp_path))
-    monkeypatch.setenv("PLAYWRIGHT_NODEJS_PATH", str(tmp_path / "no-such-node"))
+    monkeypatch.setenv("PLAYWRIGHT_NODEJS_PATH", str(node))
     assert gfb._profile_dir().is_relative_to(tmp_path)  # pyright: ignore[reportPrivateUsage]
     monkeypatch.setattr(gfb, "_playwright_factory", lambda: sync_playwright)
     loops: list[asyncio.AbstractEventLoop] = []
@@ -86,7 +81,7 @@ def test_a_real_driver_that_cannot_start_is_one_quiet_refusal_naming_the_driver(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.ERROR, logger="asyncio")
-    loops = _install_real_patchright(monkeypatch, tmp_path)
+    loops = _install_real_patchright(monkeypatch, tmp_path, tmp_path / "no-such-node")
     session = gfb.GfBrowserSession(headed=False)
     try:
         with pytest.raises(GfBrowserUnavailableError) as e:
@@ -108,7 +103,32 @@ def test_a_real_driver_that_cannot_start_is_one_quiet_refusal_naming_the_driver(
             loop.close()
 
 
-def test_a_failed_driver_start_retrieves_the_error_it_left_on_the_transport(
+def test_a_real_driver_that_exits_at_once_is_one_quiet_refusal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A driver binary that runs and exits before the handshake leaves its error
+    on patchright's `init` task, not on the transport's future."""
+    caplog.set_level(logging.ERROR, logger="asyncio")
+    node = tmp_path / "exits-at-once"
+    node.write_text("#!/bin/sh\ntrue\n")
+    node.chmod(0o755)
+    loops = _install_real_patchright(monkeypatch, tmp_path, node)
+    session = gfb.GfBrowserSession(headed=False)
+    try:
+        with pytest.raises(GfBrowserUnavailableError) as e:
+            session.get_html("https://www.google.com/travel/flights")
+        session.close()
+        reason = e.value.reason
+        del e, session
+
+        assert "driver failed to start" in reason
+        assert _no_trace_left(caplog)
+    finally:
+        for loop in loops:
+            loop.close()
+
+
+def test_a_failed_driver_start_reports_nothing_it_left_on_its_own_loop(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.ERROR, logger="asyncio")
@@ -127,7 +147,28 @@ def test_a_failed_driver_start_retrieves_the_error_it_left_on_the_transport(
         loop.close()
 
 
-def test_a_manager_without_the_transport_future_still_refuses_cleanly(
+def test_a_driver_start_on_the_callers_loop_leaves_that_loop_alone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """patchright refuses its sync API inside a running loop, and the loop it
+    holds then is the caller's: that one keeps asyncio's reports."""
+    loop = asyncio.new_event_loop()
+    manager = _DriverThatCannotStart(loop, own_loop=False)
+    monkeypatch.setenv("MATRIX_CACHE_DIR", str(tmp_path))
+    assert gfb._profile_dir().is_relative_to(tmp_path)  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(gfb, "_playwright_factory", lambda: lambda: manager)
+    session = gfb.GfBrowserSession(headed=False)
+    try:
+        with pytest.raises(GfBrowserUnavailableError):
+            session.get_html("https://www.google.com/travel/flights")
+        session.close()
+        assert loop.get_exception_handler() is None
+    finally:
+        manager.parked.exception()
+        loop.close()
+
+
+def test_a_manager_without_patchrights_loop_still_refuses_cleanly(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
     """A patchright build that moves the private chain must not turn the

@@ -52,6 +52,7 @@ from ._gf_common import PageFetch, cache_dir
 from ._gf_errors import BROWSER_DEFAULT_REMEDY, GfBrowserUnavailableError
 
 if TYPE_CHECKING:
+    import asyncio
     import pathlib
     import types
     from collections.abc import Callable, Generator
@@ -170,19 +171,29 @@ def _driver_failure(detail: str) -> GfBrowserUnavailableError:
     )
 
 
-def _retrieve_driver_failure(manager: Any) -> None:
-    """Mark the error a failed `start()` parked on the transport as read.
+def _quiet_driver_failure(manager: Any) -> None:
+    """Keep asyncio from reporting again the error a failed `start()` raised.
 
-    The transport sets the spawn error on `on_error_future` and raises it too;
-    nothing awaits the future, so asyncio prints it as "never retrieved" when
-    the manager is collected. A lookup, as `_driver_process_id` is: a patchright
-    build that moves it leaves the report printed and the refusal intact."""
+    patchright also parks that error where nothing awaits it — the transport's
+    `on_error_future` when node cannot be spawned, the connection's `init` task
+    when node runs and exits — and asyncio prints each as "exception was never
+    retrieved", with a traceback, when the manager is collected. All of them
+    live on the loop patchright made for this manager, which never runs again,
+    so a handler on that loop covers every one of them. A loop patchright did
+    not make is the caller's and keeps its reports. A lookup, as
+    `_driver_process_id` is: a patchright build that moves either attribute
+    leaves the report printed and the refusal intact."""
     try:
-        future = manager._connection._transport.on_error_future
-        if future.done() and not future.cancelled():
-            future.exception()
+        loop, own_loop = manager._loop, manager._own_loop
     except AttributeError:
         return
+    if own_loop:
+        loop.set_exception_handler(_drop_unretrieved)
+
+
+def _drop_unretrieved(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+    if not str(context.get("message", "")).endswith("exception was never retrieved"):
+        loop.default_exception_handler(context)
 
 
 def _playwright_factory() -> Callable[[], Any]:
@@ -631,7 +642,7 @@ class GfBrowserSession:
         except Exception as e:
             if self._playwright is None:
                 # `start()` raised, so no launch was tried: the driver is what failed.
-                _retrieve_driver_failure(manager)
+                _quiet_driver_failure(manager)
                 self.close()
                 raise _driver_failure(_detail(e)) from e
             self.close()
