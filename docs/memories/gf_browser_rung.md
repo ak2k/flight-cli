@@ -76,6 +76,12 @@ cannot read is still refused at one read. Rung 2 navigates such a page once
 more, two navigations in all (`_BOARDLESS_NAVIGATIONS`), since a navigation
 costs seconds where a GET costs one request.
 
+A page whose `ds:1` holds Google's server error in place of the board is typed
+apart from one with no `ds:1` (`GfSearchServerError`; see
+[gf_page_refusals_and_ds1.md](gf_page_refusals_and_ds1.md)). Rung 1 reads it
+again after a pause, under `retry_throttled`; rung 2 navigates it once more at
+once, two navigations in all, as it does a page with no `ds:1`.
+
 A page of 300 raw rows, unread ones included, stopped at Google's cap
 (`_ROW_CAP`), so its board records its highest fare as `Board.capped_at`, in
 the page's own currency, and each path that shows it prints one stderr line:

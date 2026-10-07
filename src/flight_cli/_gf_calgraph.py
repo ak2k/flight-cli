@@ -26,7 +26,12 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from . import _gf_browser
 from ._gf_browser import Control
 from ._gf_dategrid import grid_routing_blocker, unwritten_constraint
-from ._gf_errors import GfBackendError, GfBrowserUnavailableError, GfPageShapeError
+from ._gf_errors import (
+    GfBackendError,
+    GfBrowserUnavailableError,
+    GfPageShapeError,
+    GfSearchServerError,
+)
 from ._gf_rpc_shared import GfPageRpcError, result_payloads
 from ._gflight_ids import (
     _rows_from_page_html,  # pyright: ignore[reportPrivateUsage]
@@ -331,9 +336,10 @@ def _refuse_a_wall(page: PageFetch) -> None:
     """Name a throttle, consent or error page before the click would time out
     on it, with the verdicts the search path reaches on the same page.
 
-    A page whose rows moved can still draw the graph, so the one refusal that
-    is about the rows is not this path's to raise."""
-    with contextlib.suppress(GfPageShapeError):
+    The graph is its own request, so a page whose rows moved, or whose board
+    Google answered with a server error, can still draw it: the two refusals
+    about the board are not this path's to raise."""
+    with contextlib.suppress(GfPageShapeError, GfSearchServerError):
         _rows_from_page_html(page)
 
 

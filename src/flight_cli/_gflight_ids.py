@@ -43,6 +43,7 @@ import functools
 import itertools
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -90,7 +91,7 @@ from fli.search.flights import SearchFlights  # pyright: ignore[reportMissingTyp
 # the session without a browser anywhere in the process.
 from . import _gf_browser
 from ._envelope import narrow
-from ._gf_common import TRANSPORT_HTTP, GfTransportMode, PageFetch, cache_dir
+from ._gf_common import TRANSPORT_BROWSER, TRANSPORT_HTTP, GfTransportMode, PageFetch, cache_dir
 from ._gf_errors import (
     BROWSER_DEFAULT_REMEDY,
     GfBackendError,
@@ -98,6 +99,7 @@ from ._gf_errors import (
     GfConsentError,
     GfPageShapeError,
     GfPinIgnoredError,
+    GfSearchServerError,
     GfThrottledError,
     GfTransportError,
     GfUpstreamStatusError,
@@ -158,6 +160,12 @@ _THROTTLE_BACKOFF_S = 1.0  # exponential base: ~1, 2, 4, 8s (plus 0-50% jitter)
 # failure surviving three attempts is usually the network being down, and a long
 # backoff there only delays the Matrix fallback the user is going to get anyway.
 _TRANSPORT_RETRY_ATTEMPTS = 2
+
+# Pauses before each re-read of a page Google answered with a server error
+# (`GfSearchServerError`). On NYC-LON three reads inside 0.65 s all failed and a
+# read ~150 s later carried the board, so a re-read at once buys nothing, and a
+# longer wait delays the hand-off to Matrix for an error that may outlast it.
+_SERVER_ERROR_PAUSES_S = (2.0, 6.0)
 
 
 def _backoff_for(attempt: int) -> float:
@@ -410,17 +418,19 @@ _fanout_ladder: contextvars.ContextVar[_SharedThrottleLadder | None] = contextva
 
 
 class _Escalation:
-    """Whether a search on `auto` has moved to Chrome. Set once, by the first of
-    its threads whose ladder ran out on a throttle, and read by every thread of
-    that search before it asks Google anything.
+    """Whether a search on `auto` has moved to Chrome, and how long it may
+    still pause for Google's server errors. The flag is set once, by the first
+    of its threads whose ladder ran out on a throttle, and read by every thread
+    of that search before it asks Google anything.
 
-    The flag only. Chrome itself is thread-local (`_gf_browser.session`), so a
-    thread that reads it set opens or reuses its own, and closes it where the
-    browser transport closes one."""
+    Chrome itself is thread-local (`_gf_browser.session`), so a thread that
+    reads the flag set opens or reuses its own, and closes it where the browser
+    transport closes one."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self.done = False
+        self._pause_left = sum(_SERVER_ERROR_PAUSES_S)
 
     def take(self) -> bool:
         """Mark the search escalated: True for the one call that did, so the
@@ -429,6 +439,16 @@ class _Escalation:
             first = not self.done
             self.done = True
             return first
+
+    def pause(self, wanted: float) -> float:
+        """The part of `wanted` seconds this search may still pause before
+        re-reading a page Google answered with a server error, taken from what
+        it has left. One page's schedule in all: a search of eight pages would
+        otherwise wait 64 s on an error that outlasts its pauses."""
+        with self._lock:
+            granted = min(wanted, self._pause_left)
+            self._pause_left -= granted
+            return granted
 
 
 # The escalation of the search running now, or None outside one. A ContextVar
@@ -441,12 +461,14 @@ _search_escalation: contextvars.ContextVar[_Escalation | None] = contextvars.Con
 
 @contextlib.contextmanager
 def search_escalation() -> Generator[None]:
-    """Make every GF call inside this block one search to `auto`: the first
-    throttle a ladder cannot clear moves all of them to Chrome, said once.
+    """Make every GF call inside this block one search: on `auto` the first
+    throttle a ladder cannot clear moves all of them to Chrome, said once, and
+    on every transport they share one budget of pauses for Google's server
+    errors (`_Escalation.pause`).
 
     Opened on the thread that starts the search's workers, before it starts
-    them, so each worker copies this search's flag. A call outside it escalates
-    for itself alone."""
+    them, so each worker copies this search's object. A call outside it
+    escalates and pauses for itself alone."""
     token = _search_escalation.set(_Escalation())
     try:
         yield
@@ -545,9 +567,16 @@ _CONSENT_FORM_RE = re.compile(
 _DS_BLOB_RE = re.compile(
     r"AF_initDataCallback\(((?:(?!AF_initDataCallback\()[\s\S])*?),\s*sideChannel\s*:"
 )
+# A search Google failed on its own side: `data:` holds an RPC status, and the
+# blob ends `errorHasStatus: true` where a board's ends on `sideChannel`, so
+# `_DS_BLOB_RE` never matches it. Tempered the same way.
+_DS_ERROR_BLOB_RE = re.compile(
+    r"AF_initDataCallback\(((?:(?!AF_initDataCallback\()[\s\S])*?),\s*errorHasStatus\s*:\s*true\b"
+)
 _DS_KEY_RE = re.compile(r"key:\s*'([^']+)'")
 # Greedy to the end of the captured head — `data:` is the last key before
-# `sideChannel`, so everything after the first one is the payload.
+# `sideChannel` (or `errorHasStatus`), so everything after the first one is the
+# payload.
 _DS_DATA_RE = re.compile(r"data:\s*(.*)$", re.S)
 _DS_FLIGHTS_KEY = "ds:1"
 # `ds:1[2]` is Google's own top-flights board, `[3]` the rest. Concatenated in
@@ -673,6 +702,28 @@ def _extract_ds1(html: str) -> list[Any] | None:
     if carries_rows is not None:
         return carries_rows
     return long_enough if long_enough is not None else first_decodable
+
+
+def _ds1_error_status(html: str) -> int | None:
+    """The code of the RPC status (`[code, message, details]`) a `ds:1` holds
+    in place of a board, or None when no `ds:1` on the page holds one."""
+    for match in _DS_ERROR_BLOB_RE.finditer(html):
+        blob = match.group(1)
+        key = _DS_KEY_RE.search(blob)
+        data = _DS_DATA_RE.search(blob)
+        if not key or key.group(1) != _DS_FLIGHTS_KEY or not data:
+            continue
+        try:
+            status: Any = json.loads(data.group(1))
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(status, list):
+            continue
+        head = cast("list[Any]", status)[:1]
+        # `type(...) is int`, since a bool passes `isinstance(..., int)`.
+        if head and type(head[0]) is int:
+            return head[0]
+    return None
 
 
 def _is_a_readable_board(payload: list[Any]) -> bool:
@@ -1793,6 +1844,14 @@ def _insight_amount(block: list[Any], index: int) -> float | None:
     return float(amount)
 
 
+def _page_currency(rows: list[GFlightWithId]) -> str | None:
+    """The currency a priced row of the page decoded to, or None."""
+    return next(
+        (r.flight.currency for r in rows if r.flight.price is not None and r.flight.currency),
+        None,
+    )
+
+
 def _price_insight(payload: list[Any], rows: list[GFlightWithId]) -> PriceInsight | None:
     """The page's price insight, or None when it carries none.
 
@@ -1806,10 +1865,7 @@ def _price_insight(payload: list[Any], rows: list[GFlightWithId]) -> PriceInsigh
     cheapest = _insight_amount(items, _INSIGHT_CHEAPEST_IDX)
     low = _insight_amount(items, _INSIGHT_TYPICAL_LOW_IDX)
     high = _insight_amount(items, _INSIGHT_TYPICAL_HIGH_IDX)
-    currency = next(
-        (r.flight.currency for r in rows if r.flight.price is not None and r.flight.currency),
-        None,
-    )
+    currency = _page_currency(rows)
     if cheapest is None or low is None or high is None or low > high or currency is None:
         return None
     return PriceInsight(cheapest=cheapest, typical_low=low, typical_high=high, currency=currency)
@@ -1866,11 +1922,144 @@ def _price_history(payload: list[Any], rows: list[GFlightWithId]) -> PriceHistor
     kept = [p for p in points if p is not None]
     if len(kept) != len(points):
         return None
-    currency = next(
-        (r.flight.currency for r in rows if r.flight.price is not None and r.flight.currency),
-        None,
+    return PriceHistory(points=tuple(kept), currency=_page_currency(rows))
+
+
+@dataclass(frozen=True)
+class RouteFacets:
+    """The filter choices Google's page states for a search, from `ds:1[7]`:
+    its fare range in the page's currency (None when no priced row names it),
+    trip-length and layover ranges in minutes, the alliances and airlines its
+    Airlines filter offers as `(code, name)`, and the airports a trip may
+    connect at as `(code, city)`, each list in the page's order.
+
+    Measured on 20 captures as `[[[None, low], [None, high]], [alliances,
+    airlines], [airports, layover_low, layover_high], [duration_low,
+    duration_high], ...]`. The block describes the search, not the rows served:
+    every rung's read of one search and a round trip's outbound and return
+    pages carry the same one, and its airlines are the filter's, not the rows'
+    carriers. The Cheapest tab's can differ. What `[4]` to `[7]` mean is not
+    established, so they are not read. `origins` and `destinations` are the
+    search's airports, which the page does not state; `outbound_page` names
+    them."""
+
+    currency: str | None
+    price_low: float
+    price_high: float
+    duration_low: int
+    duration_high: int
+    layover_low: int
+    layover_high: int
+    alliances: tuple[tuple[str, str], ...]
+    airlines: tuple[tuple[str, str], ...]
+    connections: tuple[tuple[str, str], ...]
+    origins: tuple[str, ...] = ()
+    destinations: tuple[str, ...] = ()
+
+
+_FACETS_IDX = 7
+_FACETS_READ = 4  # the price, carrier, connection and duration parts
+
+
+def _named_pairs(block: Any) -> tuple[tuple[str, str], ...] | None:
+    """`[[code, name], ...]` as pairs, or None when any entry is another shape."""
+    if not isinstance(block, list):
+        return None
+    pairs: list[tuple[str, str]] = []
+    for entry in cast("list[Any]", block):
+        if not isinstance(entry, list) or len(cast("list[Any]", entry)) != 2:  # noqa: PLR2004 — a pair
+            return None
+        code, name = cast("list[Any]", entry)
+        if not isinstance(code, str) or not isinstance(name, str):
+            return None
+        pairs.append((code, name))
+    return tuple(pairs)
+
+
+def _fare_bound(price: list[Any], index: int) -> float | None:
+    """One end of the fare range, or None when it is not a finite number: the
+    page's JSON can hold an integer too large for a float, or `1e400`, which
+    reads as infinity."""
+    try:
+        amount = _insight_amount(price, index)
+    except OverflowError:
+        return None
+    return amount if amount is not None and math.isfinite(amount) else None
+
+
+def _minute_range(low: Any, high: Any) -> tuple[int, int] | None:
+    """Whole minutes `low` to `high`, or None for another shape or a low above its high."""
+    if any(isinstance(v, bool) or not isinstance(v, int) for v in (low, high)) or low > high:
+        return None
+    return low, high
+
+
+def _parts(value: Any, size: int) -> list[Any] | None:
+    """`value` when it is a list of exactly `size` entries."""
+    if not isinstance(value, list) or len(cast("list[Any]", value)) != size:
+        return None
+    return cast("list[Any]", value)
+
+
+def _route_facets(payload: list[Any], rows: list[GFlightWithId]) -> RouteFacets | None:
+    """The page's route facets, or None when it states none.
+
+    A block with any part read here of another shape, or a range whose low is
+    above its high, gives none at all: a part read beside a misread one would
+    be offered as Google's. The currency is read off a priced row, as the
+    insight's is."""
+    block = payload[_FACETS_IDX] if len(payload) > _FACETS_IDX else None
+    if block is None:
+        return None
+    facets = _read_facets(block, _page_currency(rows))
+    if facets is None:
+        log.debug(
+            "ds:1[%d] carried no readable route facets (type %s)",
+            _FACETS_IDX,
+            type(block).__name__,
+        )
+    return facets
+
+
+def _read_facets(block: Any, currency: str | None) -> RouteFacets | None:
+    if not isinstance(block, list) or len(cast("list[Any]", block)) < _FACETS_READ:
+        return None
+    price, carriers, hubs, duration = cast("list[Any]", block)[:_FACETS_READ]
+    carriers = _parts(carriers, 2)
+    hubs = _parts(hubs, 3)
+    duration = _parts(duration, 2)
+    if not isinstance(price, list) or carriers is None or hubs is None or duration is None:
+        return None
+    low = _fare_bound(cast("list[Any]", price), 0)
+    high = _fare_bound(cast("list[Any]", price), 1)
+    alliances = _named_pairs(carriers[0])
+    airlines = _named_pairs(carriers[1])
+    connections = _named_pairs(hubs[0])
+    layover = _minute_range(hubs[1], hubs[2])
+    trip = _minute_range(duration[0], duration[1])
+    if (
+        low is None
+        or high is None
+        or low > high
+        or alliances is None
+        or airlines is None
+        or connections is None
+        or layover is None
+        or trip is None
+    ):
+        return None
+    return RouteFacets(
+        currency=currency,
+        price_low=low,
+        price_high=high,
+        duration_low=trip[0],
+        duration_high=trip[1],
+        layover_low=layover[0],
+        layover_high=layover[1],
+        alliances=alliances,
+        airlines=airlines,
+        connections=connections,
     )
-    return PriceHistory(points=tuple(kept), currency=currency)
 
 
 def _kept_insight(
@@ -1916,10 +2105,12 @@ class Board[T](list[T]):
     here names it. `history` is the route's, so a filter that restates the
     insight leaves it as the page gave it. `stop_drops` is set by the caller
     that built the row filter: the rows it dropped for the stop ceiling, for
-    whichever path shows the board to say so. `page_insights` and
-    `page_histories` are set on a board merged from several pages, one per
-    page that carried one, in page order: each describes its page's airports
-    alone, so the merged board's `insight` and `history` are None.
+    whichever path shows the board to say so. `facets` are the search's
+    route facets, from its own page: a round trip's outbound page, never a
+    return page or the Cheapest tab. `page_insights`, `page_histories` and
+    `page_facets` are set on a board merged from several pages, one per page
+    that carried one, in page order: each describes its page's airports
+    alone, so the merged board's `insight`, `history` and `facets` are None.
     `separate_hidden` counts the separate-ticket itineraries a search asked to
     hide, and `separate_failed` is why the Cheapest tab, where those are listed,
     went unread. `capped_at` maps a currency to the highest fare on a page
@@ -1939,6 +2130,7 @@ class Board[T](list[T]):
         *,
         insight: PriceInsight | None = None,
         history: PriceHistory | None = None,
+        facets: RouteFacets | None = None,
         dropped: int = 0,
         pinned: int = 0,
         partial: bool = False,
@@ -1951,6 +2143,7 @@ class Board[T](list[T]):
         super().__init__(rows)
         self.insight = insight
         self.history = history
+        self.facets = facets
         self.dropped = dropped
         self.pinned = pinned
         self.partial = partial
@@ -1962,6 +2155,7 @@ class Board[T](list[T]):
         self.stopped = stopped
         self.page_insights: tuple[PriceInsight, ...] = ()
         self.page_histories: tuple[PriceHistory, ...] = ()
+        self.page_facets: tuple[RouteFacets, ...] = ()
 
 
 def lowest_caps(*caps: Mapping[str, float]) -> dict[str, float]:
@@ -1992,17 +2186,19 @@ class _PageUnreadError(GfPageShapeError):
         self.unread = unread
 
 
-# Reads of one search-page URL that carries no board before it is refused. A
-# rung-2 navigation costs seconds where a rung-1 GET costs one request.
+# Reads of one search-page URL that carries no board before it is refused, and
+# on rung 2 of one that carries Google's server error. A rung-2 navigation costs
+# seconds where a rung-1 GET costs one request.
 _BOARDLESS_READS = 3
 _BOARDLESS_NAVIGATIONS = 2
 
 
 class _BoardlessPageError(GfPageShapeError):
-    """The page carried no `ds:1` payload that decodes. Under the token Google
-    sometimes serves such a page, and the next read of the URL carries the
-    board, so either rung reads it again (`_read_search_page`). A payload that
-    decodes to a layout we cannot read is a layout change, and is not."""
+    """The page carried no `ds:1` payload that decodes, and no server error in
+    its place (`GfSearchServerError`). Under the token Google sometimes serves
+    such a page, and the next read of the URL carries the board, so either rung
+    reads it again (`_read_search_page`). A payload that decodes to a layout we
+    cannot read is a layout change, and is not."""
 
 
 # One itinerary, as `_deduped` and the round-trip pins tell them apart.
@@ -2079,14 +2275,16 @@ def _rows_from_page_html(page: PageFetch) -> Board[GFlightWithId]:
 
     The order is load-bearing. The captcha interstitial is a throttle before it
     is anything else; only then is a non-2xx Google declining to serve; only then
-    is a missing `ds:1` read as consent; only then is an absent row block one.
+    is a `ds:1` holding an RPC status Google's server error; only then is a
+    missing `ds:1` read as consent; only then is an absent row block one.
     Every one of those would otherwise decode as zero rows and reach the user
     as "no flights on this route".
 
     Refusals are typed and raised (`GfThrottledError` / `GfUpstreamStatusError`
-    / `GfConsentError` / `GfPageShapeError`); a page that decodes with zero rows
-    returns an empty board, which is Google's authoritative answer and not retried.
-    A row that does not parse is skipped and counted in the board's `unread`."""
+    / `GfSearchServerError` / `GfConsentError` / `GfPageShapeError`); a page
+    that decodes with zero rows returns an empty board, which is Google's
+    authoritative answer and not retried. A row that does not parse is skipped
+    and counted in the board's `unread`."""
     html, final_url, status_code = page
     # Both rungs arrive here carrying the status they were served: rung 1 reads
     # it off the response, rung 2 off the navigation, and neither rules on it.
@@ -2106,6 +2304,11 @@ def _rows_from_page_html(page: PageFetch) -> Board[GFlightWithId]:
         raise GfUpstreamStatusError(status_code)
     payload = _extract_ds1(html)
     if payload is None:
+        status = _ds1_error_status(html)
+        if status is not None:
+            # Only code 13 has been seen; any other code is read as the same
+            # server error by choice.
+            raise GfSearchServerError(status)
         if _is_consent_page(final_url=final_url, html=html):
             raise GfConsentError(
                 "Google served its consent page instead of search results (no flight rows to read)"
@@ -2182,6 +2385,7 @@ def _rows_from_page_html(page: PageFetch) -> Board[GFlightWithId]:
         served,
         insight=_price_insight(payload, out),
         history=_price_history(payload, out),
+        facets=_route_facets(payload, out),
         unread=len(reasons),
         # The raw count, unread rows included: the cap is on what Google
         # served, and no field of the page states it. Keyed "" when no row
@@ -2220,9 +2424,15 @@ def _one_call(
     return rows
 
 
-def _read_search_page(fetch: Callable[[], PageFetch], *, reads: int) -> Board[GFlightWithId]:
-    """The board on the page `fetch` returns, fetched again while the page
-    carries none (`_BoardlessPageError`), and refused after `reads` fetches.
+def _read_search_page(
+    fetch: Callable[[], PageFetch],
+    *,
+    reads: int,
+    again: tuple[type[GfBackendError], ...] = (_BoardlessPageError,),
+) -> Board[GFlightWithId]:
+    """The board on the page `fetch` returns, fetched again at once while the
+    page is refused as one of `again`, and refused after `reads` fetches.
+    Rung 1 leaves a server error to `retry_throttled`, which pauses first.
 
     Every fetch sends the token, on either rung. Without it a multi-airport
     search is served the curated board, which can leave out the cheapest fare
@@ -2232,15 +2442,17 @@ def _read_search_page(fetch: Callable[[], PageFetch], *, reads: int) -> Board[GF
     while True:
         try:
             return _rows_from_page_html(fetch())
-        except _BoardlessPageError as e:
+        except again as e:
             if fetched == reads:
                 raise
             fetched += 1
             log.debug("Google Flights' search page did not read (%s); reading it again", e)
 
 
-def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
-    """Run a GF call under two distinct retry policies (see the constants above);
+def retry_throttled[T](  # noqa: PLR0915 — one arm per retry policy, each with its own budget
+    call: Callable[[], T], *, retry_empty: bool = True
+) -> T:
+    """Run a GF call under the retry policies below (see the constants above);
     shared by the search and date-grid paths.
 
     - cold-session **falsy result** -> a few quick, linearly-spaced retries on the
@@ -2259,12 +2471,19 @@ def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
       The type matters to the caller: the network is not a property of the
       query, so a caller looping over related queries stops rather than meeting
       one outage once per query.
+    - Google's **server error** in place of a board (`GfSearchServerError`) ->
+      a re-read after each of `_SERVER_ERROR_PAUSES_S`, re-raised when they are
+      spent. Each re-read is one of the call's wall attempts and books no rung
+      of the shared ladder, whose round the call gives up before each pause;
+      the pauses come out of the search's budget (`_Escalation.pause`), so a
+      search of many pages pauses for one.
 
     Both budgets come from ONE ladder object, bound here for the whole call:
     the fan-out's when there is one, otherwise this call's own. Inside a
     fan-out that ladder is shared, so the group backs off once against a wall
     that is per-IP (see `_SharedThrottleLadder`)."""
     ladder = _fanout_ladder.get() or _SharedThrottleLadder()
+    search = _search_escalation.get() or _Escalation()
     empty_attempts = 0
     # Per-CALL ceilings beside the ladder's per-fan-out ones. The ladder bounds
     # what the group spends against one wall; these bound what THIS call spends
@@ -2276,6 +2495,7 @@ def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
     # loop with no exit.
     wall_attempts = 0
     net_attempts = 0
+    server_errors = 0
     met_network = False
     try:
         while True:
@@ -2316,6 +2536,27 @@ def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
                 )
                 time.sleep(backoff)
                 continue
+            except GfSearchServerError as e:
+                # One of this call's wall attempts, so a page that errs and
+                # then throttles spends no more than one that throttles. Never
+                # booked on the shared round: an error on one page says nothing
+                # about the per-IP wall the fan-out shares.
+                server_errors += 1
+                wall_attempts += 1
+                if (
+                    server_errors > len(_SERVER_ERROR_PAUSES_S)
+                    or wall_attempts > _THROTTLE_RETRY_ATTEMPTS
+                ):
+                    raise
+                # Not probing the wall while it pauses, so a sibling parked on a
+                # round this call owns retries now rather than after the pause.
+                ladder.stand_down()
+                # Once the search has spent its pauses the page is read again
+                # at once, as a page with no board is.
+                pause = search.pause(_SERVER_ERROR_PAUSES_S[server_errors - 1])
+                log.debug("%s; reading the page again in %.0fs", e, pause)
+                time.sleep(pause)
+                continue
             ladder.succeeded(network=met_network)
             if result or not retry_empty:
                 return result
@@ -2333,8 +2574,8 @@ def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
 def _one_call_with_retry(
     filters: FlightSearchFilters, *, currency: str = "USD", cheapest: bool = False
 ) -> Board[GFlightWithId]:
-    """`_one_call` under the throttle retry only — a parsed-empty page is an
-    answer, so it costs exactly one GET and no sleep."""
+    """`_one_call` under `retry_throttled` with its empty retry off — a
+    parsed-empty page is an answer, so it costs exactly one GET and no sleep."""
     return retry_throttled(
         lambda: _one_call(filters, currency=currency, cheapest=cheapest), retry_empty=False
     )
@@ -2344,7 +2585,7 @@ def _one_call_with_retry(
 class GfTransport:
     """Which rung of the search-page transport a query may use.
 
-    - `http` — rung 1 only: one curl_cffi GET under the throttle backoff.
+    - `http` — rung 1 only: a curl_cffi GET, retried by `retry_throttled`.
     - `browser` — rung 2 only: one real-Chrome navigation, no rung-1 fallback.
     - `auto` — rung 1 until a throttle outlasts the backoff, then rung 2 for
       that request and the rest of the search (`_one_call_auto`).
@@ -2372,15 +2613,21 @@ def _one_call_browser(
     No retry ladder around it. Rung 2 costs a browser launch and up to a 30 s
     navigation, and a refusal it hits is terminal — re-driving Chrome through
     rung 1's backoff would spend ~22 s more to be told the same thing. A page
-    that carries no board is the exception, navigated once more
-    (`_BOARDLESS_NAVIGATIONS`): the next read of that URL carries the board.
+    that carries no board, or Google's server error in its place, is the
+    exception, navigated once more and at once (`_BOARDLESS_NAVIGATIONS`): the
+    next read of that URL can carry the board, and a navigation already takes
+    seconds.
 
     Reached through the module attribute, never a name bound at import time, so
     a test can substitute the session without a browser anywhere in the
     process."""
     session = _gf_browser.session(headed=headed)
     url = search_page_url(filters, currency=currency, cheapest=cheapest)
-    return _read_search_page(functools.partial(session.get_html, url), reads=_BOARDLESS_NAVIGATIONS)
+    return _read_search_page(
+        functools.partial(session.get_html, url),
+        reads=_BOARDLESS_NAVIGATIONS,
+        again=(_BoardlessPageError, GfSearchServerError),
+    )
 
 
 class _EscalatedError(Exception):
@@ -2541,8 +2788,23 @@ def outbound_page(
     filters: FlightSearchFilters, *, transport: GfTransport, currency: str
 ) -> Board[GFlightWithId]:
     """The page `search_with_ids` starts from, for a caller that needs it before
-    the pins are chosen and hands it back as `first`."""
-    return _with_board_currency(_one_call_laddered(filters, transport, currency=currency), currency)
+    the pins are chosen and hands it back as `first`.
+
+    Its route facets are labeled with the search's airports, the first
+    segment's, since the page states none beside them."""
+    board = _with_board_currency(
+        _one_call_laddered(filters, transport, currency=currency), currency
+    )
+    if board.facets is not None:
+        wanted = filters.flight_segments[0]
+        board.facets = replace(
+            board.facets,
+            origins=tuple(a[0].name for a in wanted.departure_airport if isinstance(a[0], Airport)),
+            destinations=tuple(
+                a[0].name for a in wanted.arrival_airport if isinstance(a[0], Airport)
+            ),
+        )
+    return board
 
 
 def _unpinned_board(
@@ -2630,6 +2892,7 @@ def _with_board_currency(board: Board[GFlightWithId], requested: str) -> Board[G
         map(filled, board),
         insight=board.insight,
         history=board.history,
+        facets=board.facets,
         dropped=board.dropped,
         pinned=board.pinned,
         unread=board.unread,
@@ -2757,6 +3020,7 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
             board,
             insight=_kept_insight(first.insight, board, dropped),
             history=first.history,
+            facets=first.facets,
             dropped=dropped,
             unread=first.unread,
             capped_at=first.capped_at,
@@ -2798,14 +3062,15 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
             break
         except GfBackendError as e:
             # A refusal of this URL: a re-shaped return board, a consent wall,
-            # a 503. The pins are independent queries, so the next one may well
-            # be served, and unwinding would throw away every combination
-            # already fetched.
+            # a 503, a server error its re-reads did not clear. The pins are
+            # independent queries, so the next one may well be served, and
+            # unwinding would throw away every combination already fetched.
             #
             # A 503 arrives here having spent no ladder. `retry_throttled`
-            # retries throttles and transport failures and nothing else, and
-            # a 5xx comes back as `GfUpstreamStatusError` — so ten pins
-            # meeting ten 503s cost ten GETs, not ten ladders.
+            # retries throttles, transport failures and Google's server error
+            # page and nothing else, and a 5xx comes back as
+            # `GfUpstreamStatusError` — so ten pins meeting ten 503s cost ten
+            # GETs, not ten ladders.
             refused.append(e)
             lost.append(_lost_pin(picked, str(e), currency))
             unread += e.unread if isinstance(e, _PageUnreadError) else 0
@@ -2856,6 +3121,7 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
         # to restate the insight from, as on a board with nothing to pin.
         insight=_kept_insight(first.insight, combos if pins else board, dropped),
         history=first.history,
+        facets=first.facets,
         dropped=dropped,
         pinned=len(pins),
         unread=unread,
@@ -2879,6 +3145,7 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
         checks=checks,
         empty=empty,
         lost=lost,
+        browser=transport.mode == TRANSPORT_BROWSER or escalated(),
     )
     return answer
 
@@ -2930,6 +3197,7 @@ def _with_separate_tickets(
             rows,
             insight=insight,
             history=answer.history,
+            facets=answer.facets,
             dropped=answer.dropped + filtered,
             pinned=answer.pinned,
             unread=answer.unread + unread,
@@ -3006,6 +3274,7 @@ def _report_pin_outcome(
     checks: str = "the routing",
     empty: int = 0,
     lost: Sequence[str] = (),
+    browser: bool = False,
 ) -> None:
     """Account for what the pin loop met: a counted warning, or a raise.
 
@@ -3014,7 +3283,8 @@ def _report_pin_outcome(
     return matches `checks`" is its answer. So is an `empty` one, a pin Google
     served no return for. `lost` names each pin dropped, after every count and
     before any raise: a count says the table is short, and only the names say
-    which outbounds a user can look up elsewhere.
+    which outbounds a user can look up elsewhere. `browser` is whether the stop
+    was met on the browser rung, which words a throttle as `cli._gf_refusal` does.
 
     Raising is for the case where nothing at all was served — then the refusal
     IS the outcome, and swallowing it reports a round trip with no return legs
@@ -3059,7 +3329,7 @@ def _report_pin_outcome(
             "stopped pinning: %d of %d return boards skipped; %s",
             skipped,
             pins,
-            _why_pinning_stopped(stopped, bags=bags),
+            _why_pinning_stopped(stopped, bags=bags, browser=browser),
         )
     for line in lost:
         log.warning("%s", line)
@@ -3106,7 +3376,9 @@ def browser_remedy(e: GfBrowserUnavailableError, *, bags: bool) -> str:
     return e.remedy
 
 
-def _why_pinning_stopped(stopped: GfBackendError, *, bags: bool = False) -> str:
+def _why_pinning_stopped(
+    stopped: GfBackendError, *, bags: bool = False, browser: bool = False
+) -> str:
     """The clause naming what ended the fan-out, in the failure's own words.
 
     Not one fixed phrase, because the three stops send the reader to three
@@ -3116,6 +3388,10 @@ def _why_pinning_stopped(stopped: GfBackendError, *, bags: bool = False) -> str:
     in its line because a browser refusal ends in its own remedy, and a
     sentence that ends on the move the user makes reads as one."""
     if isinstance(stopped, GfThrottledError):
+        # Rung 1's wall is the IP's; Chrome's is its own, which the page line
+        # words the same way.
+        if browser:
+            return "Google Flights rate-limited the browser rung"
         return "Google Flights rate-limited this IP"
     if isinstance(stopped, GfBrowserUnavailableError):
         return f"the browser rung stopped — {stopped.reason} {browser_remedy(stopped, bags=bags)}"
