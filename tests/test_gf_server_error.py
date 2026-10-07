@@ -433,6 +433,17 @@ def test_a_search_pauses_at_most_eight_seconds_for_server_errors(
     assert "page shape" not in stderr
 
 
+def test_the_deprecated_alias_pauses_at_most_eight_seconds_for_server_errors(
+    gf_session: Callable[..., Any], clock: _Clock
+) -> None:
+    """Red while the alias ran outside the search's scope, where each page
+    paused 8 s of its own."""
+    fake = gf_session(_answered("ds1_nyc_lon_token"), _error_page())
+    argv = ["gflight", "NYC", "LON", "--dep", _DEP.isoformat(), "--return", _RET.isoformat()]
+    CliRunner().invoke(cli.app, argv)
+    assert sum(clock.sleeps) <= 8.0, (clock.sleeps, len(fake.gets))
+
+
 # ───────────────────────── the user is told ─────────────────────────
 
 _NYC_LON = [*_SEARCH, "NYC", "LON", "--dep", _DEP.isoformat(), "--gf-transport", "http"]

@@ -183,7 +183,8 @@ re-shaped page) is the page's own. A refusal met after the escalation is worded 
 for a ladder Chrome does not run.
 
 The flag is one object per search (`search_escalation`, opened by `cli.search`
-on the thread that starts the workers, and by `cli._open_jaw_tickets` around a
+and its deprecated `cli.gflight` alias on the thread that starts the workers,
+and by `cli._open_jaw_tickets` around a
 multi-city search's one one-way per slice, asked beside Matrix's answer on
 `auto` and in its place under `--backend gflight`, and by
 `cli._run_gflight_multi` around a multi-cabin fan-out, which never escalates

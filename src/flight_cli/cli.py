@@ -12768,7 +12768,10 @@ def gflight(
             pick=None,
         )
         return
-    _run_gflight_path(legs=legs, opts=opts, top_n=top_n, json_out=json_out)
+    from ._gflight_ids import search_escalation  # noqa: PLC0415 — fli, ~95 ms
+
+    with search_escalation():
+        _run_gflight_path(legs=legs, opts=opts, top_n=top_n, json_out=json_out)
 
 
 @app.command()
