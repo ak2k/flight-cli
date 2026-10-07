@@ -572,30 +572,17 @@ def _parse_bags(spec: str) -> Bags:
 def _refuse_cap_and_bag_conflicts(
     *,
     cabins: tuple[Cabin, ...],
-    max_price: int | None,
     bags: Bags | None,
     seated: int,
     arrival_flags: tuple[str, ...] = (),
     exclude_basic: bool = False,
 ) -> None:
-    """Refuse `--max-price` or `--bags` beside several cabins, whose compare
-    applies neither, an arrival window beside several cabins, whose compare
-    can end on Matrix, `--exclude-basic` beside any cabin but economy, and
-    `--bags` for more than one traveler. Before the backend is announced: a
-    refusal after "Using Matrix" reads as a search that started and then
-    failed."""
-    if len(cabins) > 1 and max_price is not None:
-        err.print(
-            "[red]--max-price takes one --cabin: a multi-cabin compare applies no cap.[/] "
-            "Drop the extra --cabin values."
-        )
-        raise typer.Exit(2)
-    if len(cabins) > 1 and bags is not None:
-        err.print(
-            "[red]--bags takes one --cabin: a multi-cabin compare prices no bags.[/] "
-            "Drop the extra --cabin values."
-        )
-        raise typer.Exit(2)
+    """Refuse an arrival window beside several cabins, whose compare can end
+    on Matrix, `--exclude-basic` beside any cabin but economy, and `--bags`
+    for more than one traveler. `--max-price` and `--bags` beside several
+    cabins pass: each cabin's search asks for them as a one-cabin search does.
+    Before the backend is announced: a refusal after "Using Matrix" reads as a
+    search that started and then failed."""
     if len(cabins) > 1 and arrival_flags:
         err.print(
             f"[red]{_safe_text(arrival_flags[0])} takes one --cabin: a multi-cabin compare "
@@ -10838,7 +10825,6 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         _refuse_fare_rules_conflicts(cabins=_resolve_cabin_list(cabin), sel=sel, json_out=json_out)
     _refuse_cap_and_bag_conflicts(
         cabins=_resolve_cabin_list(cabin),
-        max_price=max_price,
         bags=bags,
         seated=adults + children + inf_seat + inf_lap,
         arrival_flags=tuple(
