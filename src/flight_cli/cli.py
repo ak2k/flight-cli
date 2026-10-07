@@ -3019,8 +3019,10 @@ def _say_unpriced(res: CalendarResult, search: CalendarSearch) -> None:
 
 
 def _cheapest_option(day: CalendarDay) -> DurationOption | None:
-    """The trip length a round-trip day's own price is: its cheapest, the shortest of a tie."""
-    return min(day.options, key=lambda o: (o.price_value, o.trip_length), default=None)
+    """The trip length a round-trip day's own price is: its cheapest, the shortest
+    of a tie. An option with an empty price prices no trip, so it is never that."""
+    priced = [o for o in day.options if o.min_price]
+    return min(priced, key=lambda o: (o.price_value, o.trip_length), default=None)
 
 
 def _matrix_low(

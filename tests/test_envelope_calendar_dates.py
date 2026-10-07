@@ -76,6 +76,25 @@ def test_a_day_returns_after_its_cheapest_trip_length(monkeypatch: pytest.Monkey
     ]
 
 
+def test_a_trip_length_with_an_empty_price_is_not_the_cheapest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An option Matrix sent without a price names no trip, so no return."""
+    days = {
+        20: ("USD300.00", 3, {7: "USD300.00"}),
+        21: ("USD320.00", 3, {7: "USD320.00", 6: ""}),
+        22: ("USD330.00", 3, {6: ""}),
+    }
+    _serve(monkeypatch, _body_of(_result({10: days}, year=2026)))
+    window = ["--start", "2026-10-20", "--end", "2026-10-22", "-d", "6-7"]
+    env = _calendar(*window)
+    assert _dates(env) == [
+        (20, "2026-10-20", "2026-10-27"),
+        (21, "2026-10-21", "2026-10-28"),
+        (22, "2026-10-22", None),
+    ]
+
+
 def test_a_one_way_day_has_no_return(monkeypatch: pytest.MonkeyPatch) -> None:
     days = {d: ("USD200.00", 2, dict[int, str]()) for d in (20, 21)}
     _serve(monkeypatch, _body_of(_result({10: days}, year=2026)))
