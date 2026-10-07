@@ -24,7 +24,7 @@ import json
 import re
 import sys
 import threading
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, TextIO, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, TextIO, assert_never, cast
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
@@ -47,6 +47,16 @@ class ResultRow(_Frozen):
     price: float | None
     currency: str | None
     row: Any
+
+
+class CalendarRow(ResultRow):
+    """A calendar's priced day or graph cell, with the dates it prices beside
+    `row`, which for a Matrix day holds its day of the month alone. `departure`
+    is null for a day the window does not place on one date; `return` is null on
+    a one-way and on a round-trip day that names no trip length."""
+
+    departure: dt.date | None
+    return_date: dt.date | None = Field(alias="return")
 
 
 class CabinRows(_Frozen):
@@ -159,7 +169,7 @@ class CalendarEnvelope(_Frozen):
     currency: str | None
     complete: bool
     notes: list[str]
-    results: list[ResultRow]
+    results: list[CalendarRow]
     awards: list[dict[str, Any]] | None
     insight: list[Insight]
     price_history: list[PriceHistory]
@@ -190,7 +200,7 @@ class _Recorder:
         self.narrowings: list[str] = []
         self.asked: list[str] = []
         self.by_cabin: dict[str, list[ResultRow]] = {}
-        self.days: list[ResultRow] = []
+        self.days: list[CalendarRow] = []
         self.awards: list[dict[str, Any]] | None = None
         self.insight: list[Insight] = []
         self.history: list[PriceHistory] = []
@@ -263,7 +273,7 @@ def record_search(
             rec.facets.extend(facets)
 
 
-def record_calendar(*, backend: Backend, rows: Sequence[ResultRow]) -> None:
+def record_calendar(*, backend: Backend, rows: Sequence[CalendarRow]) -> None:
     if (rec := _slot.recorder) is not None:
         with rec.lock:
             rec.backend = backend
@@ -392,14 +402,18 @@ def _note_lines(text: str) -> list[str]:
 def _document(rec: _Recorder, *, code: int, stderr: str, stray: str) -> str:
     unanswered: list[str] = []
     groups: list[CabinRows] = []
-    if rec.command == "search":
-        asked = rec.asked or list(rec.by_cabin)
-        unanswered = [c for c in asked if c not in rec.by_cabin]
-        extra = [c for c in rec.by_cabin if c not in asked]
-        groups = [CabinRows(cabin=c, rows=rec.by_cabin.get(c, [])) for c in [*asked, *extra]]
-        rows = [r for g in groups for r in g.rows]
-    else:
-        rows = rec.days
+    rows: Sequence[ResultRow]
+    match rec.command:
+        case "search":
+            asked = rec.asked or list(rec.by_cabin)
+            unanswered = [c for c in asked if c not in rec.by_cabin]
+            extra = [c for c in rec.by_cabin if c not in asked]
+            groups = [CabinRows(cabin=c, rows=rec.by_cabin.get(c, [])) for c in [*asked, *extra]]
+            rows = [r for g in groups for r in g.rows]
+        case "calendar":
+            rows = rec.days
+        case _:
+            assert_never(rec.command)
     priced = {r.currency for r in rows if r.price is not None}
     currency = next(iter(priced)) if len(priced) == 1 else None
     narrowed = any(of is None or rec.backend in (None, of) for of in rec.narrowed)
@@ -426,17 +440,20 @@ def _document(rec: _Recorder, *, code: int, stderr: str, stray: str) -> str:
         "cross_check": rec.cross_check,
         "split_ticket": rec.split_ticket,
     }
-    doc = (
-        SearchEnvelope(command="search", results=groups, **common)
-        if rec.command == "search"
-        else CalendarEnvelope(command="calendar", results=rows, **common)
-    )
+    doc: SearchEnvelope | CalendarEnvelope
+    match rec.command:
+        case "search":
+            doc = SearchEnvelope(command="search", results=groups, **common)
+        case "calendar":
+            doc = CalendarEnvelope(command="calendar", results=rec.days, **common)
+        case _:
+            assert_never(rec.command)
     # By alias: a graph cell's `return` is a keyword in Python.
     return json.dumps(doc.model_dump(mode="json", by_alias=True), indent=2)
 
 
 def _key_notes(
-    rec: _Recorder, code: int, *, rows: list[ResultRow], priced: set[str | None]
+    rec: _Recorder, code: int, *, rows: Sequence[ResultRow], priced: set[str | None]
 ) -> list[str]:
     """One line per null or empty key, naming the key and why."""
     calendar = rec.command == "calendar"

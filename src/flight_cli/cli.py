@@ -126,7 +126,7 @@ from .links import (
     search_page_cap,
 )
 from .log import configure as configure_logging
-from .models import FareRulesResult, Itinerary
+from .models import CalendarDay, CalendarMonth, FareRulesResult, Itinerary
 from .pp import cli as _pp_cli
 from .pp.auth import load_tokens
 from .pp.cli import auth_app, run_pp_for_search
@@ -154,8 +154,8 @@ if TYPE_CHECKING:
         BookedItinerary,
         BookingDetails,
         BookingDetailsResult,
-        CalendarDay,
         CalendarResult,
+        DurationOption,
         FareRule,
         FareRules,
         LegInfo,
@@ -2288,8 +2288,14 @@ def _run_fast_browser_grid(
                 _envelope.record_calendar(
                     backend="gflight",
                     rows=[
-                        _envelope.ResultRow(
-                            price=cell["price"], currency=graph["currency"], row=cell
+                        _envelope.CalendarRow.model_validate(
+                            {
+                                "price": cell["price"],
+                                "currency": graph["currency"],
+                                "row": cell,
+                                "departure": cell["departure"],
+                                "return": cell.get("return"),
+                            }
                         )
                         for graph in graphs
                         for cell in cast("list[dict[str, Any]]", graph["grid"])
@@ -2624,7 +2630,7 @@ def _write_matrix_calendar(
     beside Matrix's body as `google_price_graph`: Matrix's own keys are
     camelCase, so it cannot meet one of them."""
     if _envelope.active():
-        _envelope.record_calendar(backend="matrix", rows=_calendar_envelope_rows(res))
+        _envelope.record_calendar(backend="matrix", rows=_calendar_envelope_rows(res, sd=sd, ed=ed))
     elif json_out:
         body = res.raw if graph is None else {**(res.raw or {}), "google_price_graph": graph}
         sys.stdout.write(json.dumps(body, indent=2))
@@ -3031,6 +3037,13 @@ def _say_unpriced(res: CalendarResult, search: CalendarSearch) -> None:
         err.print(f"[yellow]{_safe_text(line)}[/]", soft_wrap=True)
 
 
+def _cheapest_option(day: CalendarDay) -> DurationOption | None:
+    """The trip length a round-trip day's own price is: its cheapest, the shortest
+    of a tie. An option with an empty price prices no trip, so it is never that."""
+    priced = [o for o in day.options if o.min_price]
+    return min(priced, key=lambda o: (o.price_value, o.trip_length), default=None)
+
+
 def _matrix_low(
     res: CalendarResult,
     *,
@@ -3056,7 +3069,7 @@ def _matrix_low(
     if best is None:
         return None
     amount, when, price, day = best
-    option = min(day.options, key=lambda o: (o.price_value, o.trip_length), default=None)
+    option = _cheapest_option(day)
     if round_trip and option is None:
         return None
     back = when + timedelta(days=option.trip_length) if round_trip and option else None
@@ -6732,11 +6745,18 @@ def _matrix_envelope_rows(res: SearchResult, passengers: int) -> list[_envelope.
     return rows
 
 
-def _calendar_envelope_rows(res: CalendarResult) -> list[_envelope.ResultRow]:
+def _calendar_envelope_rows(
+    res: CalendarResult, *, sd: date, ed: date
+) -> list[_envelope.CalendarRow]:
     """Each priced day of a Matrix calendar as envelope rows, the day object as
-    the body `--format json` prints holds it. A grid the table prints as empty
-    has none: a day priced under no solutions is not a fare the table shows,
-    and the unpriced-dates note names its date."""
+    the body `--format json` prints it, with the dates it prices beside it. A
+    grid the table prints as empty has none: a day priced under no solutions is
+    not a fare the table shows, and the unpriced-dates note names its date.
+
+    The departure is placed as `_window_days` places it, by the month its parsed
+    model reads and the body's `year`, and is null where no one date of the window is. The
+    return is `_matrix_low`'s: that departure plus the day's cheapest trip
+    length, null on a one-way and on a day naming no length."""
     if is_empty_calendar(res):
         return []
 
@@ -6744,8 +6764,11 @@ def _calendar_envelope_rows(res: CalendarResult) -> list[_envelope.ResultRow]:
         found: Any = cast("dict[str, Any]", holder).get(key) if isinstance(holder, dict) else None
         return cast("list[Any]", found) if isinstance(found, list) else []
 
-    rows: list[_envelope.ResultRow] = []
+    rows: list[_envelope.CalendarRow] = []
     for month in items((res.raw or {}).get("calendar"), "months"):
+        body = cast("dict[str, Any]", month) if isinstance(month, dict) else {}
+        number = CalendarMonth.model_validate(body).month
+        year: Any = body.get("year")
         for week in items(month, "weeks"):
             for day in items(week, "days"):
                 if not isinstance(day, dict):
@@ -6753,9 +6776,25 @@ def _calendar_envelope_rows(res: CalendarResult) -> list[_envelope.ResultRow]:
                 fields = cast("dict[str, Any]", day)
                 price: Any = fields.get("minPrice")
                 if isinstance(price, str) and price and not fields.get("disabled"):
+                    parsed = CalendarDay.model_validate(fields)
+                    when = _window_date(
+                        number,
+                        parsed.date,
+                        sd,
+                        ed,
+                        year=year if isinstance(year, int) else None,
+                    )
+                    option = _cheapest_option(parsed)
+                    back = when + timedelta(days=option.trip_length) if when and option else None
                     rows.append(
-                        _envelope.ResultRow(
-                            price=parse_price(price), currency=price_currency(price), row=fields
+                        _envelope.CalendarRow.model_validate(
+                            {
+                                "price": parse_price(price),
+                                "currency": price_currency(price),
+                                "row": fields,
+                                "departure": when,
+                                "return": back,
+                            }
                         )
                     )
     return rows

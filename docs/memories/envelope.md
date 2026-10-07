@@ -19,7 +19,7 @@ its schema is `docs/envelope.schema.json`, generated from the models
 | `currency` | string / null | the one currency every priced row shares, else null |
 | `complete` | bool | false when the run exits 1 or the answer is narrower than asked |
 | `notes` | list of strings | every non-blank stderr line of the run (ANSI removed, in order), then one line per null or empty key, `key: why` |
-| `results` | search: `[{cabin, rows}]`, one per `--cabin` in order; calendar: `rows`, one per priced day, none when the table prints the grid as empty | `{price, currency, row}`, where `row` is the object `--format json` prints, unchanged |
+| `results` | search: `[{cabin, rows}]`, one per `--cabin` in order; calendar: `rows`, one per priced day, none when the table prints the grid as empty | `{price, currency, row}`, where `row` is the object `--format json` prints, unchanged; a calendar's rows also carry `departure` and `return` (ISO dates, below) |
 | `awards` | list / null | the award document's per-leg entries; each match also carries `flights`, every flight of its slice. Null when no award search ran or it failed |
 | `insight` | `[{cabin, currency, cheapest, typical_low, typical_high, level}]` | one per Google page that carried one; a leg asked as several pages gives one per page, in page order |
 | `price_history` | `[{cabin, currency, points: [{date, price}]}]` | one per Google page that carried one, as `insight` |
@@ -51,6 +51,16 @@ A `calendar --fast` trip-length range writes every priced length's cells to
 `results` as one list, each the object the range document's `graphs[].grid`
 prints; its `return` date names its length. `price_graph` carries the same
 cells, one entry per length.
+
+A calendar row's `departure` and `return` date what its `row` cannot: a Matrix
+day's `row` is the day object Matrix sent, its day of the month alone. The
+departure is placed as the unpriced-dates line places a day
+(`cli._window_date`, by the month's own `month` and `year`), and is null for a
+priced day that is no one date of the window. The return is that departure
+plus the day's cheapest trip length, the shortest of a tie, as the two-lows
+note's Matrix low names it (`cli._cheapest_option`); it is null on a one-way
+and on a round-trip day with no trip length. A Google cell's are its own
+`departure` and `return`.
 
 Exit codes are those of `--format json` in the same state, and an envelope is
 written at exit 0 and 1. Exit 2 is a usage error and writes none.
@@ -265,8 +275,7 @@ cost no request.
 
 Envelopes for `detail`, `explore`, `fare`, `gflight` and `doctor` (each
 refuses `--format envelope` naming the two commands); `--sellers` and
-`--fare-rules` inside it; ISO dates inside Matrix calendar days (a raw month
-carries `month` and `year` and pads its weeks with the neighboring months'
-days marked `disabled`; a `row` stays the day object Matrix sent, its day of
-the month alone, though the unpriced-dates line dates each day it names);
-an exit code of its own for a partial answer (`complete` says it).
+`--fare-rules` inside it; ISO dates inside a Matrix calendar day's `row` (a
+`row` stays the day object Matrix sent, its day of the month alone; the dates
+are beside it, as `departure` and `return`); Google's facets (`ds:1[7]`); an
+exit code of its own for a partial answer (`complete` says it).
