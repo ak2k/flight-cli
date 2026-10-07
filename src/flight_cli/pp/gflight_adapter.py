@@ -27,6 +27,7 @@ from ..models import (
     LegInfo,
     SearchResult,
     Slice,
+    SliceCarrier,
     SliceEndpoint,
 )
 from .client import CashFlightHint
@@ -142,7 +143,7 @@ def fli_results_to_search_result(results: Sequence[Any]) -> SearchResult:
     reachable from that outbound; the return board fetched with it pinned
     prices each of its rows at THAT combination's total. The itinerary fare is
     therefore the terminal member's; why that is the true one, with the
-    measurements, is in `docs/memories/gf_routing_and_carriers.md`.
+    measurements, is in `docs/memories/gf_request_budget.md`.
 
     A member may carry no price at all — Google does not always surface one —
     and such a row is carried with `price=None` rather than dropped, so the
@@ -165,10 +166,13 @@ def fli_results_to_search_result(results: Sequence[Any]) -> SearchResult:
         # rule, because `unwrapped[-1]` is `unwrapped[0]` when there is one.
         fare_fr = unwrapped[-1][0]
         price_str = _price_string(fare_fr)
+        # Each marketing airline once, in leg order, as the flight numbers name them.
+        codes = (_airport_code(leg.airline) for fr, _, _ in unwrapped for leg in fr.legs)
+        carriers = [SliceCarrier(code=code) for code in dict.fromkeys(codes) if code]
         solutions.append(
             Itinerary(
                 ext=ItineraryExt(price=price_str),
-                itinerary=ItineraryDetails(slices=slices, carriers=[]),
+                itinerary=ItineraryDetails(slices=slices, carriers=carriers),
                 ticketing=_ticketing(items_raw),
             ),
         )

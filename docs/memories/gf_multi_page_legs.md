@@ -63,13 +63,18 @@ consent) is named on stderr with its number and airports, `Google Flights page
 2 of 4 (JFK,LGA,EWR,BOS→FCO,MUC,ZRH,VIE,CPH,DUB) is missing: <reason>.`, and
 the next page is asked. A throttle, a spent transport ladder or a dead browser
 is not a fact about one page, as in the pin loop above, so it stops the asking,
-and each page after it is named `not asked after page N stopped the search`. A
+and each page after it is named `not asked after page N stopped the search`.
+One met by a page's Cheapest tab stops it too: that page's board answered, so
+no page line names it, and the separate-ticket line says why. A
 round trip asks every page's outbounds before any page's returns, so a page
 whose outbounds answered before the stop is named `its returns were not asked
 after page N stopped the search`, and no GET follows a throttle.
 When nothing merged and a page failed, the first failed page's error is raised
 and takes the route a one-page refusal takes ("A Google query that FAILS",
-above). Otherwise the answer is the pages that answered and the JSON list keeps
+above); with no failed page, a stop that left a page unasked, such as one a
+Cheapest tab met, is raised the same way, since an empty answer beside an
+unasked page is not a route with no flights. Otherwise the answer is the pages
+that answered and the JSON list keeps
 its shape, as "A partial round trip is a success, deliberately" sets out: the
 account of the missing pages is stderr. `dropped`, the rows the filter removed,
 is summed over every page, its outbounds pinned or not and its returns, so a

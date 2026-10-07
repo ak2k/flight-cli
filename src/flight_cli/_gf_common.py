@@ -30,15 +30,16 @@ from typing import Literal, NamedTuple, get_args
 # The Google Flights search page has two transports. `http` is the curl_cffi GET
 # rung 1 has always used. `browser` drives a real Chrome to the same URL, which
 # earns a far larger rate budget when Google throttles the thin client. `auto`
-# is the shape the escalate-on-throttle rung will take and is `http` until then,
-# so a script written against it keeps working when that rung lands.
+# is `http` until a throttle outlasts its ladder, then `browser` for the rest of
+# the search.
 type GfTransportMode = Literal["auto", "http", "browser"]
 
 # The two modes anything compares against by name. `auto` is spelled in the
-# `Literal` and in `VALID_TRANSPORT_MODES` only: nothing branches on it, and the
-# ladder dispatches on bare literals anyway, because a name in a `case` captures
-# rather than compares. Annotated rather than bare, so a typo is a basedpyright
-# error here instead of a mode the CLI offers and no rung answers.
+# `Literal` and in `VALID_TRANSPORT_MODES` only: what tells it apart is "not
+# `http`" or "not `browser`", and the ladder dispatches on bare literals anyway,
+# because a name in a `case` captures rather than compares. Annotated rather
+# than bare, so a typo is a basedpyright error here instead of a mode the CLI
+# offers and no rung answers.
 TRANSPORT_HTTP: GfTransportMode = "http"
 TRANSPORT_BROWSER: GfTransportMode = "browser"
 

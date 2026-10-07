@@ -21,8 +21,8 @@ shape change or flakiness?" for a scheduled canary. Code: `src/flight_cli/_docto
 | `seats-aero` | live | the stored key passes the `whoami` probe. Costs one unit of the 1000-a-day quota |
 
 A provider is checked when its credential is STORED, not when
-`is_configured()` says so: that call refreshes, and turns a failed refresh
-into "not configured", which would make a dead token a skip.
+`is_configured()` says so: that call reads a missing and an unreadable store
+alike as not configured, a skip where the user needs a fail.
 
 `matrix-search` sends the key in use, or `matrix-spa-key`'s key when none is
 in use; with neither it is a skip naming `matrix-spa-key`. It sends with the

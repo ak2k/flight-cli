@@ -266,11 +266,38 @@ class _FakePage:
         return cast("_FakeResponse | None", outcome)
 
 
+_HEADED_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+)
+
+
+class _FakeCdp:
+    """A CDP session on the page: `Browser.getVersion` answers the context's
+    UA, and every command is recorded on the context."""
+
+    def __init__(self, context: _FakeContext) -> None:
+        self._context = context
+
+    def send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        self._context.cdp_sent.append((method, params))
+        if self._context.cdp_error is not None:
+            raise self._context.cdp_error
+        return {"userAgent": self._context.user_agent} if method == "Browser.getVersion" else {}
+
+
 class _FakeContext:
     def __init__(self, page: _FakePage, new_page_error: BaseException | None = None) -> None:
         self._page = page
         self._new_page_error = new_page_error
         self.closed = False
+        self.user_agent = _HEADED_UA
+        self.cdp_error: BaseException | None = None
+        self.cdp_sent: list[tuple[str, dict[str, Any] | None]] = []
+
+    def new_cdp_session(self, page: _FakePage) -> _FakeCdp:
+        assert page is self._page
+        return _FakeCdp(self)
 
     def new_page(self) -> _FakePage:
         # The last step inside `_ensure_page`'s try, and the one whose failure
@@ -693,8 +720,8 @@ def test_under_bags_a_browser_that_dies_after_a_served_pin_points_at_dropping_th
 def test_the_http_rungs_never_consult_the_browser(
     monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
-    """`auto` is documented as identical to `http` until the escalation rung
-    lands; this is what makes that documentation true."""
+    """`auto` reaches the browser only on a throttle its ladder cannot clear
+    (`test_gf_auto_escalation`); a board rung 1 serves is http's answer."""
 
     def _forbidden(*, headed: bool) -> object:
         raise AssertionError(f"mode={mode} reached the browser rung (headed={headed})")
@@ -792,6 +819,61 @@ def test_an_explicit_binary_replaces_the_channel(
 
     assert pw.chromium.launch_kwargs["executable_path"] == "/opt/chrome"
     assert "channel" not in pw.chromium.launch_kwargs
+
+
+_HEADLESS_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) HeadlessChrome/154.0.0.0 Safari/537.36"
+)
+
+
+@pytest.mark.parametrize(
+    ("headed", "ua", "sent"),
+    [
+        (
+            True,
+            _HEADED_UA,
+            [
+                ("Browser.getVersion", None),
+                ("Emulation.setUserAgentOverride", {"userAgent": _HEADLESS_UA}),
+            ],
+        ),
+        (True, _HEADLESS_UA, [("Browser.getVersion", None)]),
+        (False, _HEADLESS_UA, []),
+    ],
+    ids=["headed", "headed-with-the-token", "headless"],
+)
+def test_a_headed_window_sends_the_headless_token_once(
+    headed: bool,
+    ua: str,
+    sent: list[tuple[str, dict[str, Any] | None]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    """Red at the base for `headed`, which sent Chrome's own UA and so read the
+    curated board Google serves a plain `Chrome/` token. Set once at launch, on
+    the page every later navigation reuses. A headless page already sends the
+    token and gets no CDP command."""
+    pw = _install(monkeypatch, tmp_path)
+    pw.chromium._context.user_agent = ua
+    with gfb.GfBrowserSession(headed=headed) as session:
+        session.get_html(_PAGE_URL)
+        session.get_html(_PAGE_URL)
+    assert pw.chromium._context.cdp_sent == sent
+
+
+def test_a_headed_window_whose_ua_cannot_be_set_is_a_launch_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """Red at the base, which sent no CDP command. The window would read a
+    board the default search never shows, so it is refused as any launch step
+    is, and the context and driver are taken down."""
+    pw = _install(monkeypatch, tmp_path)
+    pw.chromium._context.cdp_error = RuntimeError("Target page, context or browser has been closed")
+    session = gfb.GfBrowserSession(headed=True)
+    with pytest.raises(GfBrowserUnavailableError):
+        session.get_html(_PAGE_URL)
+    assert (pw.chromium._context.closed, pw.stopped) == (True, True)
 
 
 @pytest.mark.parametrize(
@@ -1401,13 +1483,15 @@ def _drive_gflight_results(
     return closed
 
 
+@pytest.mark.parametrize("mode", ["browser", "auto"])
 def test_the_browser_session_is_closed_when_the_search_succeeds(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, mode: GfTransportMode
 ) -> None:
     """A playwright object may only be closed by its creating thread, and the
     enrich path runs the query in an `anyio` worker — so this `finally` is the
-    only guarantee a Chrome does not outlive the search."""
-    assert _drive_gflight_results(monkeypatch, mode="browser") == [1]
+    only guarantee a Chrome does not outlive the search. `auto` too: it opens
+    one once a throttle escalates it."""
+    assert _drive_gflight_results(monkeypatch, mode=mode) == [1]
 
 
 def test_the_browser_session_is_closed_when_the_search_raises(
@@ -1418,18 +1502,11 @@ def test_the_browser_session_is_closed_when_the_search_raises(
     assert _drive_gflight_results(monkeypatch, mode="browser", blow_up=RuntimeError("boom")) == [1]
 
 
-@pytest.mark.parametrize("mode", ["http", "auto"])
-def test_an_http_search_never_reaches_for_the_closer(
-    monkeypatch: pytest.MonkeyPatch, mode: GfTransportMode
-) -> None:
+def test_an_http_search_never_reaches_for_the_closer(monkeypatch: pytest.MonkeyPatch) -> None:
     """Rung 1 opens nothing to close. The call would be a no-op, but reaching
     for it at all would read as though an http search might hold a Chrome —
-    the one thing this transport promises it never does.
-
-    `auto` too: it is documented four times over as identical to http, and the
-    ladder maps it to rung 1. A gate that treated it as a possible Chrome
-    holder would make one of those two statements false."""
-    assert _drive_gflight_results(monkeypatch, mode=mode) == []
+    the one thing this transport promises it never does."""
+    assert _drive_gflight_results(monkeypatch, mode="http") == []
 
 
 # ─────────────────────────────── the guard itself ──────────────────────────────
@@ -2032,7 +2109,7 @@ def _no_chrome_rung(seen: list[tuple[str, Any]] | None = None) -> Any:
     `e.remedy`, or prints it unescaped, is then readable off the buffer."""
 
     def _rung(
-        _legs: Any, opts: Any, _top_n: Any, gf_mode: Any = None, _headed: Any = False
+        _legs: Any, opts: Any, _top_n: Any, gf_mode: Any = None, _headed: Any = False, **_kw: Any
     ) -> list[Any]:
         if seen is not None:
             seen.append((str(opts.cabin.value), gf_mode))
@@ -2247,7 +2324,7 @@ def _multi_cabin_transports(
 
     calls: list[tuple[str, Any, Any]] = []
 
-    def _record(_legs: Any, opts: Any, _top_n: Any, *rest: Any) -> list[Any]:
+    def _record(_legs: Any, opts: Any, _top_n: Any, *rest: Any, **_kw: Any) -> list[Any]:
         calls.append((str(opts.cabin.value), *rest))
         return []
 
@@ -2291,18 +2368,16 @@ def test_every_cabin_of_a_multi_cabin_browser_search_reaches_the_rung_as_browser
     ]
 
 
-def test_every_cabin_of_a_multi_cabin_auto_search_reaches_the_rung_as_auto(
+def test_every_cabin_of_a_multi_cabin_auto_search_reaches_the_rung_as_http(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The coercion's OTHER arm: only a browser mode becomes http at the fan-out.
-
-    `auto` is http today, so replacing the conditional with the constant is
-    invisible to every other check — and the escalation the conditional exists
-    for would then arrive already flattened. Sorted, because this arm fans its
-    cabins out in parallel."""
+    """`auto` fans its cabins out on http and does not escalate: a thread per
+    cabin escalating would be a Chrome per cabin on one profile, the lock
+    collision the series runner exists to avoid. Sorted, because this arm fans
+    its cabins out in parallel."""
     assert sorted(_multi_cabin_transports(monkeypatch, "--gf-transport", "auto")) == [
-        ("BUSINESS", "auto", False),
-        ("COACH", "auto", False),
+        ("BUSINESS", "http", False),
+        ("COACH", "http", False),
     ]
 
 
@@ -2387,7 +2462,7 @@ def test_two_cabins_at_rung_two_share_one_browser_launch(
     pw = _install(monkeypatch, tmp_path)
 
     def _rung(
-        _legs: Any, _opts: Any, _top_n: Any, _mode: Any = None, headed: Any = False
+        _legs: Any, _opts: Any, _top_n: Any, _mode: Any = None, headed: Any = False, **_kw: Any
     ) -> list[Any]:
         try:
             gfb.session(headed=bool(headed)).get_html(_PAGE_URL)
@@ -2521,7 +2596,7 @@ def test_a_launch_failure_after_a_cabin_was_served_stays_a_per_cabin_note(
     raised: list[GfBrowserUnavailableError] = []
 
     def _rung(
-        _legs: Any, opts: Any, _top_n: Any, mode: Any = None, _headed: Any = False
+        _legs: Any, opts: Any, _top_n: Any, mode: Any = None, _headed: Any = False, **_kw: Any
     ) -> list[Any]:
         seen.append((str(opts.cabin.value), mode))
         if opts.cabin is Cabin.BUSINESS:
@@ -2763,10 +2838,10 @@ class _Recorder:
 def keep_sigint() -> Iterator[None]:
     """Save and restore this process's SIGINT disposition around a test.
 
-    The guard deliberately leaves `SIG_IGN` installed once an interrupt has been
-    handled — for the life of the process, which in a test run is the life of the
-    whole suite. Without this, the first test to trigger the handler makes Ctrl-C
-    do nothing for every test after it."""
+    The guard deliberately leaves `SIG_IGN` installed once an interrupt that
+    found a driver open has been handled — for the life of the process, which in
+    a test run is the life of the whole suite. Without this, the first test whose
+    interrupt finds a driver open makes Ctrl-C do nothing for every test after it."""
     previous = signal.getsignal(signal.SIGINT)
     yield
     signal.signal(signal.SIGINT, previous)
@@ -3262,7 +3337,7 @@ def test_the_guard_installs_a_handler_and_gives_it_back_on_a_clean_search(
 def test_the_guard_stops_every_driver_and_then_ignores_the_next_ctrl_c(
     keep_sigint: None,
 ) -> None:
-    """What the handler does, in the order that matters.
+    """What the handler does, in the order that matters, with a driver open.
 
     `SIG_IGN` goes in FIRST, before anything a second signal could re-enter: the
     stop below raises the `asyncio` logger's level, and clearing the logging
@@ -3276,6 +3351,7 @@ def test_the_guard_stops_every_driver_and_then_ignores_the_next_ctrl_c(
     what it would do instead is land in the middle of that shutdown, as a second
     `KeyboardInterrupt` through interpreter finalisation."""
     stopped: list[str] = []
+    gfb._remember(gfb.GfBrowserSession(headed=False))
 
     def _stop() -> None:
         # Read DURING the stop, which is the only place the two orderings
@@ -3379,20 +3455,22 @@ def test_the_fast_arm_arms_the_guard_around_its_whole_search(
 
 
 @pytest.mark.parametrize("mode", ["http", "auto", "browser"])
-def test_the_enriched_arm_arms_the_guard_only_for_the_browser_transport(
+def test_the_enriched_arm_arms_the_guard_for_the_transports_that_open_a_browser(
     monkeypatch: pytest.MonkeyPatch, keep_sigint: None, mode: GfTransportMode
 ) -> None:
     """The other arm decides per transport, and the reason is the worker.
 
     This half runs inside `anyio.to_thread.run_sync`, which will not abandon its
-    worker, and no signal reaches that thread. On the browser transport the
-    handler's stop is what frees it, which is the whole point of arming. On a
-    transport that holds no driver the stop frees nothing, and an ignore that
-    outlives the first Ctrl-C throws away the only key left: the second one,
-    which is what breaks the join interpreter shutdown is blocked on.
+    worker, and no signal reaches that thread. On a transport that can hold a
+    driver the handler's stop is what frees it, which is the whole point of
+    arming. On `http` the stop frees nothing, and an ignore that outlives the
+    first Ctrl-C throws away the only key left: the second one, which is what
+    breaks the join interpreter shutdown is blocked on.
 
-    `auto` sits with `http` because the ladder maps it to rung 1, the same
-    reading the closer test above takes."""
+    `auto` sits with `browser` because it escalates a throttle to Chrome, the
+    same reading the closer test above takes. An `auto` search that never
+    escalated has no driver to stop, and gives its second Ctrl-C back
+    (`tests/test_gf_second_ctrl_c.py`)."""
     from flight_cli import cli
 
     before = signal.getsignal(signal.SIGINT)
@@ -3405,7 +3483,7 @@ def test_the_enriched_arm_arms_the_guard_only_for_the_browser_transport(
 
     cli._run_the_weave(_nothing, state, mode)
 
-    if mode == "browser":
+    if mode != "http":
         assert len(seen) == 1
         assert seen[0] is not before
         assert callable(seen[0])
