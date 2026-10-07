@@ -108,6 +108,16 @@ fallback the user is going to get anyway. When the budget is spent it becomes
 prints a typed line rather than a curl traceback, and the pin loop can tell an
 unreachable network apart from a board that refused for its own reasons.
 
+Another arm reads a page again when Google answered it with a server error
+(`GfSearchServerError`), after 2 s and then 6 s. Each re-read is one of the
+call's wall attempts, so a page that errs and then throttles costs no more
+calls than one that throttles: 5 GETs, where reading it as a page with no
+`ds:1` and then laddering cost 7. The arm never books a rung of the shared
+round: an error on one page says nothing about the per-IP wall. Its pauses come
+out of a budget of 8 s per search, on the object `search_escalation` opens, so
+a search of many pages waits once. The measurements are in
+[gf_page_refusals_and_ds1.md](gf_page_refusals_and_ds1.md).
+
 Only a failure to REACH Google is retried — `curl_cffi`'s `ConnectionError` and
 `Timeout` (DNS, a reset socket, connect and read timeouts), **plus four
 result codes those classes do not cover**: `PARTIAL_FILE`, `HTTP2`,
@@ -165,8 +175,8 @@ escalation costs one ladder (five GETs) before Chrome, and nothing after it
 spends rung 1.
 
 Only a throttle escalates. A transport failure is the network, which Chrome
-shares, and a refusal of the page (a consent wall, a 503, a re-shaped page) is
-the page's own. A refusal met after the escalation is worded as rung 2's
+shares, and a refusal of the page (a consent wall, a 503, a server error, a
+re-shaped page) is the page's own. A refusal met after the escalation is worded as rung 2's
 (`cli._rung_reached`): "rate-limited the browser rung", with no advice to wait
 for a ladder Chrome does not run.
 
