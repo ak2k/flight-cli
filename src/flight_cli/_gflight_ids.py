@@ -43,6 +43,7 @@ import functools
 import itertools
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -1843,6 +1844,14 @@ def _insight_amount(block: list[Any], index: int) -> float | None:
     return float(amount)
 
 
+def _page_currency(rows: list[GFlightWithId]) -> str | None:
+    """The currency a priced row of the page decoded to, or None."""
+    return next(
+        (r.flight.currency for r in rows if r.flight.price is not None and r.flight.currency),
+        None,
+    )
+
+
 def _price_insight(payload: list[Any], rows: list[GFlightWithId]) -> PriceInsight | None:
     """The page's price insight, or None when it carries none.
 
@@ -1856,10 +1865,7 @@ def _price_insight(payload: list[Any], rows: list[GFlightWithId]) -> PriceInsigh
     cheapest = _insight_amount(items, _INSIGHT_CHEAPEST_IDX)
     low = _insight_amount(items, _INSIGHT_TYPICAL_LOW_IDX)
     high = _insight_amount(items, _INSIGHT_TYPICAL_HIGH_IDX)
-    currency = next(
-        (r.flight.currency for r in rows if r.flight.price is not None and r.flight.currency),
-        None,
-    )
+    currency = _page_currency(rows)
     if cheapest is None or low is None or high is None or low > high or currency is None:
         return None
     return PriceInsight(cheapest=cheapest, typical_low=low, typical_high=high, currency=currency)
@@ -1916,11 +1922,144 @@ def _price_history(payload: list[Any], rows: list[GFlightWithId]) -> PriceHistor
     kept = [p for p in points if p is not None]
     if len(kept) != len(points):
         return None
-    currency = next(
-        (r.flight.currency for r in rows if r.flight.price is not None and r.flight.currency),
-        None,
+    return PriceHistory(points=tuple(kept), currency=_page_currency(rows))
+
+
+@dataclass(frozen=True)
+class RouteFacets:
+    """The filter choices Google's page states for a search, from `ds:1[7]`:
+    its fare range in the page's currency (None when no priced row names it),
+    trip-length and layover ranges in minutes, the alliances and airlines its
+    Airlines filter offers as `(code, name)`, and the airports a trip may
+    connect at as `(code, city)`, each list in the page's order.
+
+    Measured on 20 captures as `[[[None, low], [None, high]], [alliances,
+    airlines], [airports, layover_low, layover_high], [duration_low,
+    duration_high], ...]`. The block describes the search, not the rows served:
+    every rung's read of one search and a round trip's outbound and return
+    pages carry the same one, and its airlines are the filter's, not the rows'
+    carriers. The Cheapest tab's can differ. What `[4]` to `[7]` mean is not
+    established, so they are not read. `origins` and `destinations` are the
+    search's airports, which the page does not state; `outbound_page` names
+    them."""
+
+    currency: str | None
+    price_low: float
+    price_high: float
+    duration_low: int
+    duration_high: int
+    layover_low: int
+    layover_high: int
+    alliances: tuple[tuple[str, str], ...]
+    airlines: tuple[tuple[str, str], ...]
+    connections: tuple[tuple[str, str], ...]
+    origins: tuple[str, ...] = ()
+    destinations: tuple[str, ...] = ()
+
+
+_FACETS_IDX = 7
+_FACETS_READ = 4  # the price, carrier, connection and duration parts
+
+
+def _named_pairs(block: Any) -> tuple[tuple[str, str], ...] | None:
+    """`[[code, name], ...]` as pairs, or None when any entry is another shape."""
+    if not isinstance(block, list):
+        return None
+    pairs: list[tuple[str, str]] = []
+    for entry in cast("list[Any]", block):
+        if not isinstance(entry, list) or len(cast("list[Any]", entry)) != 2:  # noqa: PLR2004 — a pair
+            return None
+        code, name = cast("list[Any]", entry)
+        if not isinstance(code, str) or not isinstance(name, str):
+            return None
+        pairs.append((code, name))
+    return tuple(pairs)
+
+
+def _fare_bound(price: list[Any], index: int) -> float | None:
+    """One end of the fare range, or None when it is not a finite number: the
+    page's JSON can hold an integer too large for a float, or `1e400`, which
+    reads as infinity."""
+    try:
+        amount = _insight_amount(price, index)
+    except OverflowError:
+        return None
+    return amount if amount is not None and math.isfinite(amount) else None
+
+
+def _minute_range(low: Any, high: Any) -> tuple[int, int] | None:
+    """Whole minutes `low` to `high`, or None for another shape or a low above its high."""
+    if any(isinstance(v, bool) or not isinstance(v, int) for v in (low, high)) or low > high:
+        return None
+    return low, high
+
+
+def _parts(value: Any, size: int) -> list[Any] | None:
+    """`value` when it is a list of exactly `size` entries."""
+    if not isinstance(value, list) or len(cast("list[Any]", value)) != size:
+        return None
+    return cast("list[Any]", value)
+
+
+def _route_facets(payload: list[Any], rows: list[GFlightWithId]) -> RouteFacets | None:
+    """The page's route facets, or None when it states none.
+
+    A block with any part read here of another shape, or a range whose low is
+    above its high, gives none at all: a part read beside a misread one would
+    be offered as Google's. The currency is read off a priced row, as the
+    insight's is."""
+    block = payload[_FACETS_IDX] if len(payload) > _FACETS_IDX else None
+    if block is None:
+        return None
+    facets = _read_facets(block, _page_currency(rows))
+    if facets is None:
+        log.debug(
+            "ds:1[%d] carried no readable route facets (type %s)",
+            _FACETS_IDX,
+            type(block).__name__,
+        )
+    return facets
+
+
+def _read_facets(block: Any, currency: str | None) -> RouteFacets | None:
+    if not isinstance(block, list) or len(cast("list[Any]", block)) < _FACETS_READ:
+        return None
+    price, carriers, hubs, duration = cast("list[Any]", block)[:_FACETS_READ]
+    carriers = _parts(carriers, 2)
+    hubs = _parts(hubs, 3)
+    duration = _parts(duration, 2)
+    if not isinstance(price, list) or carriers is None or hubs is None or duration is None:
+        return None
+    low = _fare_bound(cast("list[Any]", price), 0)
+    high = _fare_bound(cast("list[Any]", price), 1)
+    alliances = _named_pairs(carriers[0])
+    airlines = _named_pairs(carriers[1])
+    connections = _named_pairs(hubs[0])
+    layover = _minute_range(hubs[1], hubs[2])
+    trip = _minute_range(duration[0], duration[1])
+    if (
+        low is None
+        or high is None
+        or low > high
+        or alliances is None
+        or airlines is None
+        or connections is None
+        or layover is None
+        or trip is None
+    ):
+        return None
+    return RouteFacets(
+        currency=currency,
+        price_low=low,
+        price_high=high,
+        duration_low=trip[0],
+        duration_high=trip[1],
+        layover_low=layover[0],
+        layover_high=layover[1],
+        alliances=alliances,
+        airlines=airlines,
+        connections=connections,
     )
-    return PriceHistory(points=tuple(kept), currency=currency)
 
 
 def _kept_insight(
@@ -1966,10 +2105,12 @@ class Board[T](list[T]):
     here names it. `history` is the route's, so a filter that restates the
     insight leaves it as the page gave it. `stop_drops` is set by the caller
     that built the row filter: the rows it dropped for the stop ceiling, for
-    whichever path shows the board to say so. `page_insights` and
-    `page_histories` are set on a board merged from several pages, one per
-    page that carried one, in page order: each describes its page's airports
-    alone, so the merged board's `insight` and `history` are None.
+    whichever path shows the board to say so. `facets` are the search's
+    route facets, from its own page: a round trip's outbound page, never a
+    return page or the Cheapest tab. `page_insights`, `page_histories` and
+    `page_facets` are set on a board merged from several pages, one per page
+    that carried one, in page order: each describes its page's airports
+    alone, so the merged board's `insight`, `history` and `facets` are None.
     `separate_hidden` counts the separate-ticket itineraries a search asked to
     hide, and `separate_failed` is why the Cheapest tab, where those are listed,
     went unread. `capped_at` maps a currency to the highest fare on a page
@@ -1988,6 +2129,7 @@ class Board[T](list[T]):
         *,
         insight: PriceInsight | None = None,
         history: PriceHistory | None = None,
+        facets: RouteFacets | None = None,
         dropped: int = 0,
         pinned: int = 0,
         partial: bool = False,
@@ -2000,6 +2142,7 @@ class Board[T](list[T]):
         super().__init__(rows)
         self.insight = insight
         self.history = history
+        self.facets = facets
         self.dropped = dropped
         self.pinned = pinned
         self.partial = partial
@@ -2011,6 +2154,7 @@ class Board[T](list[T]):
         self.stopped = stopped
         self.page_insights: tuple[PriceInsight, ...] = ()
         self.page_histories: tuple[PriceHistory, ...] = ()
+        self.page_facets: tuple[RouteFacets, ...] = ()
 
 
 def lowest_caps(*caps: Mapping[str, float]) -> dict[str, float]:
@@ -2240,6 +2384,7 @@ def _rows_from_page_html(page: PageFetch) -> Board[GFlightWithId]:
         served,
         insight=_price_insight(payload, out),
         history=_price_history(payload, out),
+        facets=_route_facets(payload, out),
         unread=len(reasons),
         # The raw count, unread rows included: the cap is on what Google
         # served, and no field of the page states it. Keyed "" when no row
@@ -2642,8 +2787,23 @@ def outbound_page(
     filters: FlightSearchFilters, *, transport: GfTransport, currency: str
 ) -> Board[GFlightWithId]:
     """The page `search_with_ids` starts from, for a caller that needs it before
-    the pins are chosen and hands it back as `first`."""
-    return _with_board_currency(_one_call_laddered(filters, transport, currency=currency), currency)
+    the pins are chosen and hands it back as `first`.
+
+    Its route facets are labeled with the search's airports, the first
+    segment's, since the page states none beside them."""
+    board = _with_board_currency(
+        _one_call_laddered(filters, transport, currency=currency), currency
+    )
+    if board.facets is not None:
+        wanted = filters.flight_segments[0]
+        board.facets = replace(
+            board.facets,
+            origins=tuple(a[0].name for a in wanted.departure_airport if isinstance(a[0], Airport)),
+            destinations=tuple(
+                a[0].name for a in wanted.arrival_airport if isinstance(a[0], Airport)
+            ),
+        )
+    return board
 
 
 def _unpinned_board(
@@ -2731,6 +2891,7 @@ def _with_board_currency(board: Board[GFlightWithId], requested: str) -> Board[G
         map(filled, board),
         insight=board.insight,
         history=board.history,
+        facets=board.facets,
         dropped=board.dropped,
         pinned=board.pinned,
         unread=board.unread,
@@ -2858,6 +3019,7 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
             board,
             insight=_kept_insight(first.insight, board, dropped),
             history=first.history,
+            facets=first.facets,
             dropped=dropped,
             unread=first.unread,
             capped_at=first.capped_at,
@@ -2954,6 +3116,7 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
         # to restate the insight from, as on a board with nothing to pin.
         insight=_kept_insight(first.insight, combos if pins else board, dropped),
         history=first.history,
+        facets=first.facets,
         dropped=dropped,
         pinned=len(pins),
         unread=unread,
@@ -3029,6 +3192,7 @@ def _with_separate_tickets(
             rows,
             insight=insight,
             history=answer.history,
+            facets=answer.facets,
             dropped=answer.dropped + filtered,
             pinned=answer.pinned,
             unread=answer.unread + unread,

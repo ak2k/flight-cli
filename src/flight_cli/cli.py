@@ -146,6 +146,7 @@ if TYPE_CHECKING:
         ItineraryKey,
         PriceHistory,
         PriceInsight,
+        RouteFacets,
         SeparateTickets,
     )
     from ._open_jaw import Combination
@@ -6315,11 +6316,12 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
     cross-check calls no flight absent from Google while any are.
     `stop_drops` sums the rows over the stop ceiling the same way, for the
     one line that counts them.
-    A page's price insight and history describe its own airports, so the
-    merged board's `insight` and `history` are None and each answered page's
-    ride in `page_insights` and `page_histories`, in page order. The board is
-    `partial` where a page is missing or the trip is round: its rows then stop
-    short of what one search would list.
+    A page's price insight, history and facets describe its own airports, so
+    the merged board's `insight`, `history` and `facets` are None and each
+    answered page's ride in `page_insights`, `page_histories` and
+    `page_facets`, in page order. The board is `partial` where a page is
+    missing or the trip is round: its rows then stop short of what one search
+    would list.
 
     `separate_tickets` goes to every page, so each reads its own Cheapest tab
     once, after its pins, a round-trip page that holds no pin included.
@@ -6340,7 +6342,7 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
     dropped = pinned = unread = hidden = 0
     tabs_failed: dict[int, GfBackendError] = {}
     stop_drops = StopDrops()
-    extras: dict[int, tuple[PriceInsight | None, PriceHistory | None]] = {}
+    extras: dict[int, tuple[PriceInsight | None, PriceHistory | None, RouteFacets | None]] = {}
     unboarded_caps: list[dict[str, float]] = []
     with _browser_scope(gf_mode):
         if len(pages[0]) < _ROUND_TRIP_LEGS:
@@ -6359,7 +6361,7 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
                 )
                 if board is not None:
                     boards.append(board)
-                    extras[i] = (board.insight, board.history)
+                    extras[i] = (board.insight, board.history, board.facets)
                     dropped += board.dropped
                     unread += board.unread
                     hidden += board.separate_hidden
@@ -6410,7 +6412,7 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
                         # asked: their insight, past its filter, is still this
                         # page's.
                         insight = _kept_insight(ob.board.insight, kept[i], left)
-                        extras[i] = (insight, ob.board.history)
+                        extras[i] = (insight, ob.board.history, ob.board.facets)
                     dropped += left
                     unread += ob.board.unread
                     _add_stop_drops(stop_drops, ob.stop_drops)
@@ -6419,7 +6421,7 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
                     unboarded_caps.append(ob.board.capped_at)
                 else:
                     boards.append(board)
-                    extras[i] = (board.insight, board.history)
+                    extras[i] = (board.insight, board.history, board.facets)
                     dropped += board.dropped
                     pinned += board.pinned
                     unread += board.unread
@@ -6453,8 +6455,9 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
     )
     merged.stop_drops = stop_drops
     answered = [extras[i] for i in sorted(extras)]
-    merged.page_insights = tuple(ins for ins, _ in answered if ins is not None)
-    merged.page_histories = tuple(h for _, h in answered if h is not None)
+    merged.page_insights = tuple(ins for ins, _, _ in answered if ins is not None)
+    merged.page_histories = tuple(h for _, h, _ in answered if h is not None)
+    merged.page_facets = tuple(f for _, _, f in answered if f is not None)
     return merged
 
 
@@ -6588,11 +6591,11 @@ def _gflight_json_document(results: list[Any], bags: Bags | None = None) -> list
 def _record_google_cabin(
     cabin: Cabin, results: list[Any], served: Any, *, bags: Bags | None = None
 ) -> None:
-    """Hand one cabin's Google rows to the envelope run, with the insight and
-    history of each page that answered `served`, the board as the search
-    returned it. Each row is the object `_gflight_json_document` prints for it,
-    priced by its last member: a round trip's fare is the one every surface
-    prints for the combination.
+    """Hand one cabin's Google rows to the envelope run, with the insight,
+    history and facets of each page that answered `served`, the board as the
+    search returned it. Each row is the object `_gflight_json_document` prints
+    for it, priced by its last member: a round trip's fare is the one every
+    surface prints for the combination.
 
     `served.unread` is the board's: the rows its pages served that the parser
     could not read, so the answer is narrower by them. Counted on the board and
@@ -6624,6 +6627,10 @@ def _record_google_cabin(
     histories: Sequence[PriceHistory] = (
         (history,) if history is not None else getattr(served, "page_histories", ())
     )
+    own: RouteFacets | None = getattr(served, "facets", None)
+    facets: Sequence[RouteFacets] = (
+        (own,) if own is not None else getattr(served, "page_facets", ())
+    )
     _envelope.record_search(
         backend="gflight",
         cabin=cabin.value,
@@ -6646,6 +6653,28 @@ def _record_google_cabin(
                 points=[_envelope.PricePoint(date=d, price=v) for d, v in h.points],
             )
             for h in histories
+        ],
+        facets=[
+            _envelope.RouteFacets(
+                cabin=cabin.value,
+                origins=list(f.origins),
+                destinations=list(f.destinations),
+                currency=f.currency,
+                price=_envelope.PriceRange(low=f.price_low, high=f.price_high),
+                duration_minutes=_envelope.MinuteRange(low=f.duration_low, high=f.duration_high),
+                layover_minutes=_envelope.MinuteRange(low=f.layover_low, high=f.layover_high),
+                airlines=[_envelope.CodeName(code=c, name=n) for c, n in f.airlines],
+                # Spelled as `--extension 'ALLIANCE …'` takes it, the inverse of
+                # how the page is asked for one, so a code passes straight back.
+                alliances=[
+                    _envelope.CodeName(code=c.lower().replace("_", "-"), name=n)
+                    for c, n in f.alliances
+                ],
+                connecting_airports=[
+                    _envelope.ConnectingAirport(code=c, city=n) for c, n in f.connections
+                ],
+            )
+            for f in facets
         ],
     )
 
@@ -10559,7 +10588,7 @@ _FORMAT_OPT = typer.Option(
     autocompletion=_completer(_VALID_FORMATS),
     rich_help_panel=_GROUP_OUTPUT,
 )
-# `search` and `calendar` also write the envelope (`_envelope`): the same thirteen
+# `search` and `calendar` also write the envelope (`_envelope`): the same fifteen
 # keys whatever path answered, for a caller that cannot know the path ahead.
 _ENVELOPE_FORMATS = (*_VALID_FORMATS, "envelope")
 _ENVELOPE_FORMAT_CHOICES = "/".join(_ENVELOPE_FORMATS)
@@ -10568,8 +10597,9 @@ _ENVELOPE_FORMAT_OPT = typer.Option(
     "--format",
     help=f"Output format: one of {_ENVELOPE_FORMAT_CHOICES}. envelope is one versioned "
     "JSON document on every path: version, command, backend, currency, complete, "
-    "notes, results, awards, insight, price_history, verify, cross_check, split_ticket. "
-    "complete is false when the answer is narrower than asked, and notes carries what stderr said.",
+    "notes, results, awards, insight, price_history, facets, price_graph, verify, "
+    "cross_check, split_ticket. complete is false when the answer is narrower than "
+    "asked, and notes carries what stderr said.",
     autocompletion=_completer(_ENVELOPE_FORMATS),
     rich_help_panel=_GROUP_OUTPUT,
 )

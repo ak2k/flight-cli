@@ -50,7 +50,8 @@ errorHasStatus: true,});`. The blob ends on `errorHasStatus`, not on
 it (`_DS_ERROR_BLOB_RE`): the first blob keyed `ds:1` whose `data:` decodes to a
 list with an int, not a bool, at `[0]`. It runs only when `_extract_ds1` found
 no board, before the consent check, so a page that carries a board reads as
-before. Measured on NYC-LON in 2026-10, the search fell back to Matrix this way
+before, and no part of an error page is read as a board: its rows, insight,
+history and route facets come from the re-read that carries one. Measured on NYC-LON in 2026-10, the search fell back to Matrix this way
 on 3 of 8 probe loads and 1 of 10 sampler loads; the three failing reads
 captured, one load's reads of one URL, all carry code 13, and none of 300 clean
 bodies or the 27 committed fixtures matches. Only 13 has been seen; any other
@@ -162,7 +163,8 @@ nesting-depth test would report a relocation on every ordinary page. It reads
 EVERY row, not a leading window: unparseable rows at the head of a moved block
 are exactly what a layout change looks like, so any fixed depth is a number some
 payload sits just past. The decoys hold 2-7 rows and the scan is sub-millisecond,
-so full depth costs nothing worth a cutoff.
+so full depth costs nothing worth a cutoff. `ds:1[7]`, one of those structures,
+is read as the search's route facets (`_route_facets`; envelope.md, "Route facets").
 At `[2]`/`[3]` the test must NOT require a parse, or a block whose rows have all
 changed shape would drop to an empty board instead of reaching the 0-of-N parse
 guard above, which is what catches a moved ROW layout. Both share one tuple of

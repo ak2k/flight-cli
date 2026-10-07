@@ -110,6 +110,13 @@
           "title": "Price History",
           "type": "array"
         },
+        "facets": {
+          "items": {
+            "$ref": "#/$defs/RouteFacets"
+          },
+          "title": "Facets",
+          "type": "array"
+        },
         "price_graph": {
           "items": {
             "$ref": "#/$defs/PriceGraph"
@@ -165,12 +172,51 @@
         "awards",
         "insight",
         "price_history",
+        "facets",
         "price_graph",
         "verify",
         "cross_check",
         "split_ticket"
       ],
       "title": "CalendarEnvelope",
+      "type": "object"
+    },
+    "CodeName": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "name"
+      ],
+      "title": "CodeName",
+      "type": "object"
+    },
+    "ConnectingAirport": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "city": {
+          "title": "City",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "city"
+      ],
+      "title": "ConnectingAirport",
       "type": "object"
     },
     "Insight": {
@@ -216,6 +262,25 @@
         "level"
       ],
       "title": "Insight",
+      "type": "object"
+    },
+    "MinuteRange": {
+      "additionalProperties": false,
+      "properties": {
+        "low": {
+          "title": "Low",
+          "type": "integer"
+        },
+        "high": {
+          "title": "High",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "low",
+        "high"
+      ],
+      "title": "MinuteRange",
       "type": "object"
     },
     "PriceGraph": {
@@ -342,6 +407,25 @@
       "title": "PricePoint",
       "type": "object"
     },
+    "PriceRange": {
+      "additionalProperties": false,
+      "properties": {
+        "low": {
+          "title": "Low",
+          "type": "number"
+        },
+        "high": {
+          "title": "High",
+          "type": "number"
+        }
+      },
+      "required": [
+        "low",
+        "high"
+      ],
+      "title": "PriceRange",
+      "type": "object"
+    },
     "ResultRow": {
       "additionalProperties": false,
       "description": "One itinerary, priced day or graph cell. `row` is the object `--format\njson` prints for it, unchanged; `price` is the trip's price, a round trip's\nbeing its last member's.",
@@ -378,6 +462,85 @@
         "row"
       ],
       "title": "ResultRow",
+      "type": "object"
+    },
+    "RouteFacets": {
+      "additionalProperties": false,
+      "description": "The filter choices Google's page states for one cabin's search, labeled\nwith its airports: its fare range in the rows' basis and currency, its\ntrip-length and layover ranges, and the alliances, airlines and connecting\nairports its filters offer, in the page's order. An alliance's code is\nspelled as `--extension 'ALLIANCE \u2026'` takes it.",
+      "properties": {
+        "cabin": {
+          "title": "Cabin",
+          "type": "string"
+        },
+        "origins": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Origins",
+          "type": "array"
+        },
+        "destinations": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Destinations",
+          "type": "array"
+        },
+        "currency": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Currency"
+        },
+        "price": {
+          "$ref": "#/$defs/PriceRange"
+        },
+        "duration_minutes": {
+          "$ref": "#/$defs/MinuteRange"
+        },
+        "layover_minutes": {
+          "$ref": "#/$defs/MinuteRange"
+        },
+        "airlines": {
+          "items": {
+            "$ref": "#/$defs/CodeName"
+          },
+          "title": "Airlines",
+          "type": "array"
+        },
+        "alliances": {
+          "items": {
+            "$ref": "#/$defs/CodeName"
+          },
+          "title": "Alliances",
+          "type": "array"
+        },
+        "connecting_airports": {
+          "items": {
+            "$ref": "#/$defs/ConnectingAirport"
+          },
+          "title": "Connecting Airports",
+          "type": "array"
+        }
+      },
+      "required": [
+        "cabin",
+        "origins",
+        "destinations",
+        "currency",
+        "price",
+        "duration_minutes",
+        "layover_minutes",
+        "airlines",
+        "alliances",
+        "connecting_airports"
+      ],
+      "title": "RouteFacets",
       "type": "object"
     },
     "SearchEnvelope": {
@@ -461,6 +624,13 @@
           "title": "Price History",
           "type": "array"
         },
+        "facets": {
+          "items": {
+            "$ref": "#/$defs/RouteFacets"
+          },
+          "title": "Facets",
+          "type": "array"
+        },
         "price_graph": {
           "items": {
             "$ref": "#/$defs/PriceGraph"
@@ -516,6 +686,7 @@
         "awards",
         "insight",
         "price_history",
+        "facets",
         "price_graph",
         "verify",
         "cross_check",
