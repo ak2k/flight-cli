@@ -801,11 +801,76 @@ def test_without_bags_no_price_is_marked(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "Bags:" not in result.stdout
 
 
+def _insight(cheapest: float, low: float, high: float) -> gfid.PriceInsight:
+    return gfid.PriceInsight(cheapest=cheapest, typical_low=low, typical_high=high, currency="USD")
+
+
+_Y_INSIGHT = "Price insight for Y: prices are typical for this trip (usually USD150.00-USD300.00)."
+_J_INSIGHT = "Price insight for J: prices are high for this trip (usually USD2000.00-USD3500.00)."
+
+
+def _with_insights(
+    google: _Google, insights: dict[str, gfid.PriceInsight]
+) -> Callable[..., gfid.Board[Any]]:
+    """`google` with each seat's outbound page in `insights` carrying its insight."""
+
+    def call(
+        filters: Any, transport: Any, *, currency: str = "USD", cheapest: bool = False
+    ) -> gfid.Board[gfid.GFlightWithId]:
+        board = google(filters, transport, currency=currency, cheapest=cheapest)
+        if cheapest or filters.flight_segments[0].selected_flight is not None:
+            return board
+        return gfid.Board(list(board), insight=insights.get(filters.seat_type.name))
+
+    return call
+
+
+_INSIGHTS = {"ECONOMY": _insight(200, 150, 300), "BUSINESS": _insight(4000, 2000, 3500)}
+
+
+def test_each_google_cabins_insight_follows_every_other_line_in_cabin_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In `--cabin` order, whichever cabin the table is sorted by, and after
+    the line naming a cabin's own cheapest. Red at the D1 commit."""
+    google = _with_insights(_reversed(monkeypatch), _INSIGHTS)
+    result = _search(monkeypatch, google, "--sort", "business")
+    assert result.exit_code == 0, result.output
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert lines[-2:] == [_Y_INSIGHT, _J_INSIGHT]
+    assert _own_lines(result.stdout)
+    assert sum("Price insight" in line for line in lines) == 2
+
+
+def test_a_cabin_with_no_insight_prints_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Red at the D1 commit, which printed no insight at all."""
+    google = _with_insights(
+        _Google({"ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS}), {"BUSINESS": _INSIGHTS["BUSINESS"]}
+    )
+    result = _search(monkeypatch, google)
+    assert result.exit_code == 0, result.output
+    assert [line for line in result.stdout.splitlines() if "Price insight" in line] == [_J_INSIGHT]
+
+
+def test_the_documents_carry_no_insight_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The JSON stays the boards' rows, and the envelope carries each insight
+    under `insight`, as it did. Green at the D1 commit."""
+    google = _with_insights(_Google({"ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS}), _INSIGHTS)
+    document = _search(monkeypatch, google, "--format", "json")
+    assert document.exit_code == 0, document.output
+    assert set(json.loads(document.stdout)) == {"COACH", "BUSINESS"}
+    envelope = _envelope_of(_search(monkeypatch, google, "--format", "envelope"))
+    assert [(i["cabin"], i["level"]) for i in envelope["insight"]] == [
+        ("COACH", "typical"),
+        ("BUSINESS", "high"),
+    ]
+
+
 def test_a_marked_row_reads_amount_bags_then_ticketing_and_the_keys_follow_in_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The bags key comes before the ticketing key. Red at the D1 commit,
-    whose renderer took no bag mark."""
+    """The bags key comes before the ticketing key, and the insight line after
+    both. Red at the D1 commit, whose renderer took no bag mark."""
     [it] = _matrix_answer((("UA101", 300.0),)).solutions
     it = it.model_copy(update={"ticketing": "separate_tickets"})
     row = MultiCabinRow(itinerary=it, prices={Cabin.COACH: "USD300.00"}, listings={Cabin.COACH: it})
@@ -820,12 +885,14 @@ def test_a_marked_row_reads_amount_bags_then_ticketing_and_the_keys_follow_in_or
         cabins=(Cabin.COACH,),
         sort_by=Cabin.COACH,
         bag_mark=mark,
+        insights={Cabin.COACH: _insight(200, 150, 300)},
     )
     lines = [line for line in buffer.getvalue().splitlines() if line.strip()]
     assert "300.00 ✓ †" in _table_cells(lines)
     after = lines[[i for i, line in enumerate(lines) if line.startswith("└")][-1] + 1 :]
     assert after[0] == _BAGS_KEY
     assert after[1].startswith("† separate tickets")
+    assert after[-1] == _Y_INSIGHT
 
 
 def _table_cells(lines: list[str]) -> list[str]:

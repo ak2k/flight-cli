@@ -9000,6 +9000,7 @@ def _render_multi_cabin_search(
     currency: str = "USD",
     total_of: Callable[[Itinerary], str | None] | None = None,
     bag_mark: Callable[[Itinerary], str] | None = None,
+    insights: Mapping[Cabin, PriceInsight] | None = None,
 ) -> None:
     """Render multi-cabin merged rows. One row per itinerary, one price column
     per requested cabin, '—' for missing.
@@ -9018,7 +9019,8 @@ def _render_multi_cabin_search(
 
     Under `--bags`, `bag_mark` marks each price with whether the cell's own
     listing includes the bags asked for, ahead of `†` or `‡`, and a key line
-    follows."""
+    follows. `insights` are Google's price insights by cabin, one line each
+    after every other line, as the one-cabin table prints its one."""
     if not rows:
         console.print("[yellow]No itineraries.[/]")
         return
@@ -9105,6 +9107,22 @@ def _render_multi_cabin_search(
                 len(it.itinerary.slices if it.itinerary else []) < slices for it in marked
             )
         )
+    _print_cabin_insights(cabins, insights or {})
+
+
+def _print_cabin_insights(
+    cabins: tuple[Cabin, ...], insights: Mapping[Cabin, PriceInsight]
+) -> None:
+    """The one-cabin table's price insight line, named for its cabin, for each
+    of `cabins` that has one, in that order."""
+    for cab in cabins:
+        if (insight := insights.get(cab)) is not None:
+            console.print(
+                f"Price insight for {_safe_text(_CABIN_TO_LETTER[cab])}: prices are "
+                f"{_safe_text(insight.level)} for this trip "
+                f"(usually {_safe_text(insight.currency)}{insight.typical_low:.2f}"
+                f"-{_safe_text(insight.currency)}{insight.typical_high:.2f})."
+            )
 
 
 # Each cabin as `--cabin` and `--sort` take it, in one shell word.
@@ -9573,6 +9591,11 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
             currency=opts.currency or "USD",
             total_of=total_of,
             bag_mark=bag_mark,
+            insights={
+                cab: insight
+                for cab, board in fli_by_cabin.items()
+                if (insight := getattr(board, "insight", None)) is not None
+            },
         )
 
     if run_pp:
