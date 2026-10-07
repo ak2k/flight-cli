@@ -3439,7 +3439,9 @@ def _split_blocker(  # noqa: PLR0911 — one return per reason the run is refuse
     An `open_jaw` (two or more `--slice` that are not a round trip's,
     `_one_way_per_slice`) is priced as one one-way per slice instead, beside
     Matrix's table or alone under `--backend gflight`, and its document is
-    Matrix's, which `--fare-rules` writes a document of its own around."""
+    Matrix's, which `--fare-rules` writes a document of its own around. The
+    envelope records its tickets beside an award search's rows without
+    `--split`, so asking for them there is no conflict."""
     if open_jaw:
         if fare_rules:
             return "cannot run beside --fare-rules; drop one of them"
@@ -3457,7 +3459,7 @@ def _split_blocker(  # noqa: PLR0911 — one return per reason the run is refuse
         return "cannot run beside --verify; drop one of them"
     if awards_only:
         return "prints beside the results table, and --awards-only prints none"
-    if awards_format is not None:
+    if awards_format is not None and not (open_jaw and awards_format == "envelope"):
         return f"cannot join the award document --format {awards_format} writes; add --cash-only"
     return None
 
@@ -4229,6 +4231,7 @@ def _answer_open_jaw(
     output: str,
     split: bool,
     google_url: bool,
+    awards: bool = False,
 ) -> dict[str, Any] | None:
     """Google Flights' separate-ticket answer to the multi-city trip `legs`
     (`_one_way_per_slice`), shown ahead of Matrix's one-ticket answer: the
@@ -4239,10 +4242,13 @@ def _answer_open_jaw(
 
     The envelope asks what the table asks, so the two hold the same fares.
     `--format json` asks nothing without `split`: its document is Matrix's own
-    body, which has no place for the tickets."""
+    body, which has no place for the tickets. With `awards` on, it is the
+    award document, which `--split` joins only beside `--cash-only`."""
     asked = split or output != "json"
     if blocker is None and not asked:
-        blocker = "--format json carries them only with --split"
+        blocker = "--format json carries them only with --split" + (
+            " and --cash-only" if awards else ""
+        )
     answer: _OpenJaw | str
     if blocker is not None:
         err.print(f"[dim]No separate tickets on Google Flights: {_safe_text(blocker)}.[/]")
@@ -9173,13 +9179,17 @@ def _render_multi_cabin_search(
     cabins: tuple[Cabin, ...],
     sort_by: Cabin,
     title_prefix: str = "Itineraries",
+    passengers: int = 1,
     slices: int = 1,
     results_by_cabin: dict[Cabin, SearchResult] | None = None,
     currency: str = "USD",
+    total_of: Callable[[Itinerary], str | None] | None = None,
 ) -> None:
     """Render multi-cabin merged rows. One row per itinerary, one price column
     per requested cabin, '—' for missing.
 
+    For a party of `passengers`, each cell prints the row's total for that
+    cabin; a cabin with no total prints one passenger's price, starred.
     A row Google sells as separate tickets ends each of its prices in `†`, or
     `‡` for a self transfer, as the one-cabin table does, and the key follows.
     `slices` is how many the search asked for: such a row with fewer is a
@@ -9187,7 +9197,8 @@ def _render_multi_cabin_search(
 
     `results_by_cabin` is what `rows` were merged from, in `currency`, the one
     the merge ranked by: each cabin's own cheapest the table does not show is
-    named under it (`_print_own_cheapest`)."""
+    named under it (`_print_own_cheapest`), at its total from `total_of`, the
+    one the merge was given, for a party."""
     if not rows:
         console.print("[yellow]No itineraries.[/]")
         return
@@ -9195,6 +9206,8 @@ def _render_multi_cabin_search(
     ccy_tag = f" ({_safe_text(ccy)})" if ccy else ""
     cabin_labels = "+".join(_CABIN_TO_LETTER[c] for c in cabins)
     sort_label = _CABIN_TO_LETTER[sort_by]
+    party = passengers > 1
+    starred = False
     marked = [row.itinerary for row in rows if row.itinerary.ticketing is not None]
     shows_mark = bool(marked)
 
@@ -9202,7 +9215,8 @@ def _render_multi_cabin_search(
         # `title_prefix` is a parameter: its value is chosen by whoever calls, and
         # a claim about every present and future caller is not one this function
         # can keep. The two callers pass a literal, so the wrap costs nothing.
-        title=f"{_safe_text(title_prefix)} · {cabin_labels} (sorted by {sort_label}){ccy_tag}",
+        title=f"{_safe_text(title_prefix)} · {cabin_labels} (sorted by {sort_label}){ccy_tag}"
+        + (f" · total for {passengers:d} travelers" if party else ""),
         show_header=True,
         header_style="bold green",
     )
@@ -9211,8 +9225,15 @@ def _render_multi_cabin_search(
     t.add_column("outbound")
     t.add_column("return")
     for letter in (_CABIN_TO_LETTER[c] for c in cabins):
-        # Unwrapped where a mark is shown, so it stays on its amount's line.
-        t.add_column(f"{letter}{ccy_tag}", justify="right", no_wrap=shows_mark)
+        # Folded: a party cell squeezed by Rich's default ellipsis loses its last
+        # digits and the star that marks a per-traveler fare. Unwrapped where a
+        # mark is shown, so it stays on its amount's line.
+        t.add_column(
+            f"{letter} total{ccy_tag}" if party else f"{letter}{ccy_tag}",
+            justify="right",
+            overflow="fold" if party else "ellipsis",
+            no_wrap=shows_mark,
+        )
 
     for i, row in enumerate(rows, 1):
         itn = row.itinerary.itinerary
@@ -9222,17 +9243,33 @@ def _render_multi_cabin_search(
 
         out_cell = _fmt_slice_cell(slcs[0]) if slcs else "—"
         ret_cell = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
+        price_cells: list[str] = []
         ticketing = row.itinerary.ticketing
         mark = " ‡" if ticketing == "self_transfer" else " †" if ticketing else ""
-        price_cells = [
-            _amount(row.prices.get(cab), ccy) + (mark if row.prices.get(cab) else "")
-            for cab in cabins
-        ]
+        for cab in cabins:
+            total = row.totals.get(cab)
+            if not party:
+                cell = _amount(row.prices.get(cab), ccy)
+            elif total or cab not in row.prices:
+                cell = _amount(total, ccy)
+            else:
+                # No space before the star: Rich wraps a narrow cell at its spaces.
+                cell = f"{_amount(row.prices[cab], ccy)}*"
+                starred = True
+            price_cells.append(cell + (mark if row.prices.get(cab) else ""))
         t.add_row(f"{i:d}", carriers or "?", out_cell, ret_cell, *price_cells)
     console.print(t)
+    if starred:
+        console.print("* per traveler: Matrix states no total for the party")
     if results_by_cabin is not None:
         named = _print_own_cheapest(
-            rows, results_by_cabin, cabins=cabins, sort_by=sort_by, currency=currency
+            rows,
+            results_by_cabin,
+            cabins=cabins,
+            sort_by=sort_by,
+            currency=currency,
+            passengers=passengers,
+            total_of=total_of,
         )
         marked.extend(it for it in named if it.ticketing is not None)
     if marked:
@@ -9259,10 +9296,19 @@ def _print_own_cheapest(
     cabins: tuple[Cabin, ...],
     sort_by: Cabin,
     currency: str,
+    passengers: int = 1,
+    total_of: Callable[[Itinerary], str | None] | None = None,
 ) -> list[Itinerary]:
     """One line under the multi-cabin table for each cabin but `sort_by` whose
-    own cheapest listing in `currency` is priced below every fare its column
-    shows in `currency`, or whose column shows none, and the listings named.
+    own cheapest listing (`cheapest`: in `currency`, else in the first other
+    currency by code that the cabin is priced in) is priced below every fare its
+    column shows in that listing's currency, or whose column shows none in it,
+    and the listings named. No rate is known, so two currencies' fares never
+    compare.
+
+    For a party of `passengers`, the line names the listing's total
+    (`total_of`), as the party's column prints its cells, or one traveler's
+    price where it has none, and says which.
 
     The table prices every cabin on the sort cabin's itineraries, so another
     cabin's cheapest fare can be on an itinerary no row shows, while a document
@@ -9274,10 +9320,13 @@ def _print_own_cheapest(
         amount = parse_price(own.price) if own is not None else None
         if own is None or amount is None:
             continue
+        own_currency = price_currency(own.price) or currency
+        # Compared on `prices`, the basis `merge` ranks on: a party's column can
+        # mix totals with starred one-traveler prices, and the two do not compare.
         shown = [
             parse_price(p)
             for row in rows
-            if (p := row.prices.get(cab)) and price_currency(p) == currency
+            if (p := row.prices.get(cab)) and price_currency(p) == own_currency
         ]
         if any(p is not None and p <= amount for p in shown):
             continue
@@ -9287,9 +9336,18 @@ def _print_own_cheapest(
         flights = " / ".join(
             "+".join(s.flights) for s in (own.itinerary.slices if own.itinerary else [])
         )
+        total = total_of(own) if passengers > 1 and total_of is not None else None
+        summed = parse_price(total) if total else None
+        if passengers <= 1:
+            basis, figure, code = "", amount, own_currency
+        elif summed is not None:
+            basis = f", total for {passengers:d} travelers"
+            figure, code = summed, price_currency(total) or own_currency
+        else:
+            basis, figure, code = ", per traveler", amount, own_currency
         console.print(
-            f"{_safe_text(letter)}'s own cheapest: {_safe_text(currency)}{amount:.2f}"
-            f"{_safe_text(mark)} ({_safe_text(flights)}), on no row above; "
+            f"{_safe_text(letter)}'s own cheapest{_safe_text(basis)}: {_safe_text(code)}"
+            f"{figure:.2f}{_safe_text(mark)} ({_safe_text(flights)}), on no row above; "
             f"--sort {_safe_text(_CABIN_FLAG_NAMES[cab])} lists {_safe_text(letter)}'s "
             "cheapest first.",
             soft_wrap=True,
@@ -9377,8 +9435,16 @@ def _run_matrix_path_multi(
         )
         return
 
+    # Left unset, Matrix prices in its own default (GBP from LHR): the join
+    # ranks, and names each cabin's cheapest, in the currency it answered in.
+    currency = (
+        opts.currency
+        or _title_currency(it.price for res in results_by_cabin.values() for it in res.solutions)
+        or "USD"
+    )
+    total_of = partial(party_price, passengers=opts.pax.total)
     rows = _merge_cabins(
-        results_by_cabin, sort_by=sort_by, top_n=top_n, currency=opts.currency or "USD"
+        results_by_cabin, sort_by=sort_by, top_n=top_n, currency=currency, total_of=total_of
     )
     # `not json_out` for the reason given at the same gate in
     # `_run_gflight_path`: with awards on, the document is written below this.
@@ -9387,8 +9453,10 @@ def _run_matrix_path_multi(
             rows,
             cabins=cabins,
             sort_by=sort_by,
+            passengers=opts.pax.total,
             results_by_cabin=results_by_cabin,
-            currency=opts.currency or "USD",
+            currency=currency,
+            total_of=total_of,
         )
 
     if run_pp:
@@ -9431,18 +9499,26 @@ class _MatrixHandOff(NamedTuple):
 
 
 def _cabin_document_rows(
-    board: list[Any], rows: list[MultiCabinRow], cabin: Cabin, top_n: int
+    board: list[Any],
+    rows: list[MultiCabinRow],
+    cabin: Cabin,
+    top_n: int,
+    *,
+    own: Itinerary | None,
 ) -> list[Any]:
     """`cabin`'s Google board as a multi-cabin document carries it: its `top_n`
     cheapest rows, then, in price order, each other row whose fare the joined
-    table `rows` prints in `cabin`.
+    table `rows` prints in `cabin`, and `own`, the cabin's `cheapest` listing,
+    which the table names under it when no row shows it.
 
     The table prices every cabin on the sort cabin's itineraries, so a fare it
     prints can sit far down another cabin's board; without it, the document
-    and the table of one search would hold different fares. The count is the
-    user's, not the bumped one the cabins were queried at, which only gives
-    the join overlap. A table row's listing is found by its itinerary key and
-    price, the first such row in price order, as the join keeps it."""
+    and the table of one search would hold different fares. The `top_n` are
+    cheapest by the bare amount, so rows Google priced in another currency can
+    fill them ahead of `own`. The count is the user's, not the bumped one the
+    cabins were queried at, which only gives the join overlap. A listing is
+    found by its itinerary key and price, the first such row in price order,
+    as the join keeps it."""
     from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
 
     def listing(r: Any) -> tuple[object, str | None] | None:
@@ -9455,7 +9531,10 @@ def _cabin_document_rows(
         (itinerary_key(row.itinerary), price)
         for row in rows
         if (price := row.prices.get(cabin)) is not None
-    } - {listing(r) for r in carried}
+    }
+    if own is not None and own.price is not None:
+        wanted.add((itinerary_key(own), own.price))
+    wanted -= {listing(r) for r in carried}
     for r in ordered[top_n:]:
         if not wanted:
             break
@@ -9565,21 +9644,33 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
     results_by_cabin = _gflight_to_search_result_per_cabin(
         {cab: fli_by_cabin[cab] for cab in dict.fromkeys((sort_by, *cabins)) if cab in fli_by_cabin}
     )
+
+    # Google prices the whole party, so its listed price is the total.
+    def total_of(it: Itinerary) -> str | None:
+        return it.price
+
     rows = _merge_cabins(
         results_by_cabin,
         sort_by=sort_by,
         top_n=top_n,
         currency=opts.currency or "USD",
+        total_of=total_of,
         slices=len(legs),
     )
+
+    def document_rows(cab: Cabin, board: list[Any]) -> list[Any]:
+        res = results_by_cabin.get(cab)
+        own = cheapest(res, currency=opts.currency or "USD") if res is not None else None
+        return _cabin_document_rows(board, rows, cab, top_n, own=own)
+
     if _envelope.active():
         for cab, board in fli_by_cabin.items():
-            _record_google_cabin(cab, _cabin_document_rows(board, rows, cab, top_n), board)
+            _record_google_cabin(cab, document_rows(cab, board), board)
         if not run_pp:
             return None
     elif json_out and not run_pp:
         out = {
-            cab.value: _gflight_json_document(_cabin_document_rows(board, rows, cab, top_n))
+            cab.value: _gflight_json_document(document_rows(cab, board))
             for cab, board in fli_by_cabin.items()
         }
         sys.stdout.write(json.dumps(out, indent=2, default=str))
@@ -9593,9 +9684,11 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
             cabins=cabins,
             sort_by=sort_by,
             title_prefix="Google Flights",
+            passengers=opts.pax.total,
             slices=len(legs),
             results_by_cabin=results_by_cabin,
             currency=opts.currency or "USD",
+            total_of=total_of,
         )
 
     if run_pp:
@@ -11336,6 +11429,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             output=output,
             split=split,
             google_url=google_url,
+            awards=run_awards,
         )
     elif split:
         on_matrix = "--split prices Google Flights one-ways, and this search runs on Matrix"

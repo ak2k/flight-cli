@@ -584,6 +584,37 @@ def test_split_is_refused_where_it_cannot_join(
     assert google.calls == [] and matrix.searches == []
 
 
+def _awards_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An award provider is configured: awards run unless `--cash-only`."""
+
+    def _configured(sel: cli.ProviderSelection) -> bool:
+        return not sel.cash_only
+
+    def _awards(*_a: object, **_kw: object) -> None:
+        return None
+
+    monkeypatch.setattr(cli, "_should_run_awards", _configured)
+    monkeypatch.setattr(cli, "run_pp_for_search", _awards)
+
+
+def test_split_joins_the_envelope_an_award_search_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The envelope carries an open jaw's tickets beside the award rows with no
+    flag, so `--split` asks for what it already holds and is not refused."""
+    _awards_on(monkeypatch)
+    google, _ = _google(monkeypatch), _matrix(monkeypatch)
+    plain = _envelope_of(_search("-n", "3", "--format", "envelope"))
+    asked = google.calls
+    google, matrix = _google(monkeypatch), _matrix(monkeypatch)
+    result = _search("-n", "3", "--format", "envelope", "--split")
+    assert result.exit_code == 0, result.output
+    env = _envelope_of(result)
+    assert env["split_ticket"] == plain["split_ticket"]
+    assert len(env["split_ticket"]["combinations"]) == 3
+    assert env["complete"] is plain["complete"] is True
+    assert google.calls == asked
+    assert len(matrix.searches) == 1
+
+
 def test_the_envelope_without_split_carries_the_tables_combinations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -696,6 +727,27 @@ def test_json_without_split_says_why_it_carries_no_tickets(
     stderr = " ".join(result.stderr.split())
     assert stderr.count("No separate tickets on Google Flights") == 1, stderr
     assert said in stderr
+
+
+def test_json_with_awards_names_every_flag_the_tickets_need(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With awards on, `--format json` writes the award document, which `--split`
+    cannot join: the line names `--cash-only` too, and that command carries them."""
+    _awards_on(monkeypatch)
+    google, _ = _google(monkeypatch), _matrix(monkeypatch)
+    result = _search("--format", "json")
+    assert result.exit_code == 0, result.output
+    assert google.calls == []
+    assert (
+        "No separate tickets on Google Flights: --format json carries them only with --split "
+        "and --cash-only." in " ".join(result.stderr.split())
+    )
+    _google(monkeypatch)
+    _matrix(monkeypatch)
+    followed = _search("--format", "json", "--split", "--cash-only")
+    assert followed.exit_code == 0, followed.output
+    assert json.loads(followed.stdout)["split_ticket"]["combinations"]
 
 
 @pytest.mark.parametrize(

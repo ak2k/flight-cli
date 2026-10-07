@@ -36,10 +36,14 @@ party. A party's solution Matrix states no total for has a null `price`: one
 passenger's price is not the trip's, and its `row` still carries it.
 A multi-cabin Google search lists, under each cabin, its `-n` cheapest rows,
 then, in price order, each other row of its board whose fare the table prints
-in that cabin. The table prices every cabin on the sort cabin's itineraries, so
-a fare it shows can sit far down another cabin's board; the rows added are read
-off the boards already fetched. A multi-cabin Matrix search lists each cabin's
-whole answer.
+in that cabin, and the cabin's cheapest in the requested currency (in the
+currency Google priced it in, for a cabin priced in none of the requested one),
+which the line under the table names when no row shows it. The table prices
+every cabin on the sort cabin's itineraries, so a fare it shows can sit far
+down another cabin's board, and the `-n` cheapest are cheapest by amount, so
+rows Google priced in another currency can come before it; the rows added are
+read off the boards already fetched. A multi-cabin Matrix search lists each
+cabin's whole answer.
 A `calendar --fast` trip-length range writes every priced length's cells to
 `results` as one list, each the object the range document's `graphs[].grid`
 prints; its `return` date names its length. `price_graph` carries the same
@@ -91,11 +95,13 @@ that is not "unsupported" in `pp/client.py`, an error status with an empty
 body and a request the award deadline cut included); a leg with
 `pairs_not_asked`; calendar sub-queries lost; a length of a `calendar --fast`
 range whose graph was lost;
-a `--split` one-way search that failed, a `--split` round trip Matrix answered,
-or a `--split` multi-city search Google was not asked about, since the tickets
-were asked for and are not priced (without `--split` that search's `{error}`
-narrows nothing: its table lists no tickets either) (no priced one-way, no pair one traveler can fly, or two
-currencies are the boards' answer, a note); a multi-city search's one-way
+a one-way search that failed, on a `--split` round trip or on any multi-city
+search (a multi-city search's table lists its tickets with no flag), where no
+priced one-way, no pair one traveler can fly, or two currencies are the boards'
+answer, a note; a `--split` round trip Matrix answered, or a `--split`
+multi-city search Google was not asked about, since the tickets were asked for
+and are not priced, while without `--split` that search's `{error}` narrows
+nothing, as its table lists no tickets either; a multi-city search's one-way
 board missing a page or holding rows the parser could not read
 (`cli._one_way_boards`, the unread rows a note naming the slice), since its
 cheapest tickets may be among them, or holding no row at all for a party with

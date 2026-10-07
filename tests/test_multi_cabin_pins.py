@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
+import itertools
 import json
 import pathlib
 import re
@@ -820,6 +821,93 @@ def test_every_fare_the_table_prints_is_a_row_of_its_cabin_in_the_document(
     assert len(listed["COACH"]) == 10
 
 
+def _in_euros(google: _Google, pins: dict[int, float]) -> Callable[..., gfid.Board[Any]]:
+    """`google` with business's return board on each outbound in `pins` priced
+    in EUR, from that fare up by one a return."""
+
+    def call(
+        filters: Any, transport: Any, *, currency: str = "USD", cheapest: bool = False
+    ) -> gfid.Board[gfid.GFlightWithId]:
+        board = google(filters, transport, currency=currency, cheapest=cheapest)
+        picked = filters.flight_segments[0].selected_flight
+        flight = None if picked is None else int(picked.legs[0].flight_number)
+        if filters.seat_type.name != "BUSINESS" or flight is None or flight not in pins:
+            return board
+        return gfid.Board(
+            [
+                replace(r, flight=r.flight.model_copy(update={"currency": "EUR", "price": fare}))
+                for r, fare in zip(board, itertools.count(pins[flight]), strict=False)
+            ]
+        )
+
+    return call
+
+
+@pytest.mark.parametrize("fmt", ["envelope", "json"])
+def test_the_cheapest_fare_the_table_names_is_a_row_of_its_cabin_in_the_document(
+    monkeypatch: pytest.MonkeyPatch, fmt: str
+) -> None:
+    """Business's returns on 105 and 106 are priced in EUR, below its USD1020 by
+    number, so they are its ten cheapest rows by amount. The line under the
+    table still names USD1020, and the document carries it. Red at the base."""
+    euros = {105: 900.0, 106: 910.0}
+    table = _search(monkeypatch, _in_euros(_reversed(monkeypatch), euros))
+    assert table.exit_code == 0, table.output
+    assert _OWN_LINE in table.stdout.splitlines()
+    document = _search(monkeypatch, _in_euros(_reversed(monkeypatch), euros), "--format", fmt)
+    if fmt == "envelope":
+        business = next(g for g in _envelope_of(document)["results"] if g["cabin"] == "BUSINESS")
+        listed = [(r["currency"], r["price"]) for r in business["rows"]]
+    else:
+        assert document.exit_code == 0, document.output
+        doc: dict[str, list[list[dict[str, Any]]]] = json.loads(document.stdout)
+        listed = [(row[-1]["currency"], row[-1]["price"]) for row in doc["BUSINESS"]]
+    assert listed[:10] == sorted(("EUR", base + j) for base in euros.values() for j in range(5))
+    assert listed[10] == ("USD", 1020.0)
+    assert [price for _, price in listed] == sorted(price for _, price in listed)
+    assert {("USD", p) for p in _cells(table.stdout)["BUSINESS"]} <= set(listed)
+    assert len(listed) == 21
+
+
+def _business_in_euros(google: _Google) -> Callable[..., gfid.Board[Any]]:
+    """`google` with every business row, outbound and return, priced in EUR at
+    the same number."""
+
+    def call(
+        filters: Any, transport: Any, *, currency: str = "USD", cheapest: bool = False
+    ) -> gfid.Board[gfid.GFlightWithId]:
+        board = google(filters, transport, currency=currency, cheapest=cheapest)
+        if filters.seat_type.name != "BUSINESS":
+            return board
+        return gfid.Board(
+            [replace(r, flight=r.flight.model_copy(update={"currency": "EUR"})) for r in board]
+        )
+
+    return call
+
+
+def test_a_cabin_google_prices_only_in_another_currency_names_its_own_cheapest_in_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Google prices every business row in EUR though USD was asked. Its column
+    starts at EUR1097 and its envelope list at EUR1020, so the line names
+    EUR1020 against the EUR fares the column shows. Red at the base."""
+    table = _search(monkeypatch, _business_in_euros(_reversed(monkeypatch)))
+    assert table.exit_code == 0, table.output
+    j_cells = {prices[1] for _, prices in _table(table.stdout)}
+    assert all(cell.startswith("EUR") for cell in j_cells), j_cells
+    assert min(float(cell.removeprefix("EUR")) for cell in j_cells) == 1097.0
+    assert [line for line in table.stdout.splitlines() if "own cheapest" in line] == [
+        "J's own cheapest: EUR1020.00 (B6109 / B6900), on no row above; "
+        "--sort business lists J's cheapest first."
+    ]
+    document = _search(
+        monkeypatch, _business_in_euros(_reversed(monkeypatch)), "--format", "envelope"
+    )
+    business = next(g for g in _envelope_of(document)["results"] if g["cabin"] == "BUSINESS")
+    assert (business["rows"][0]["currency"], business["rows"][0]["price"]) == ("EUR", 1020.0)
+
+
 def test_the_table_and_both_documents_load_the_same_pages(monkeypatch: pytest.MonkeyPatch) -> None:
     """The rows a document adds are read off the boards the join already holds.
     Green at the base."""
@@ -850,7 +938,17 @@ _MATRIX = {
 }
 
 
-def _matrix_answer(fares: tuple[tuple[str, float], ...]) -> SearchResult:
+def _matrix_answer(
+    fares: tuple[tuple[str, float], ...],
+    currency: str = "USD",
+    *,
+    party: int = 1,
+    totaled: bool = True,
+) -> SearchResult:
+    """`fares` as Matrix answers them for one traveler; for a `party`, each is
+    one traveler's price beside the party's total, which a cabin not `totaled`
+    states none of."""
+
     def slice_of(flight: str) -> dict[str, Any]:
         hour = int(flight[2:]) - 94
         return {
@@ -861,18 +959,32 @@ def _matrix_answer(fares: tuple[tuple[str, float], ...]) -> SearchResult:
             "destination": {"code": "LAX"},
         }
 
+    def priced(fare: float) -> dict[str, Any]:
+        if party == 1:
+            return {"displayTotal": f"{currency}{fare:.2f}"}
+        total = {"displayTotal": f"{currency}{fare * party:.2f}"} if totaled else {}
+        return {"ext": {"price": f"{currency}{fare:.2f}"}, **total}
+
     solutions = [
-        {"displayTotal": f"USD{fare:.2f}", "itinerary": {"slices": [slice_of(flight)]}}
-        for flight, fare in fares
+        {**priced(fare), "itinerary": {"slices": [slice_of(flight)]}} for flight, fare in fares
     ]
     return SearchResult.from_api(
         {"solutionList": {"solutions": solutions}, "solutionCount": len(solutions)}
     )
 
 
-def _matrix_search(monkeypatch: pytest.MonkeyPatch, *extra: str) -> Result:
+def _matrix_search(
+    monkeypatch: pytest.MonkeyPatch,
+    *extra: str,
+    currency: str = "USD",
+    party: int = 1,
+    untotaled: frozenset[Cabin] = frozenset(),
+) -> Result:
     def _multi(**_kw: object) -> dict[Cabin, SearchResult]:
-        return {cab: _matrix_answer(fares) for cab, fares in _MATRIX.items()}
+        return {
+            cab: _matrix_answer(fares, currency, party=party, totaled=cab not in untotaled)
+            for cab, fares in _MATRIX.items()
+        }
 
     monkeypatch.setattr(cli, "_run_matrix_multi", _multi)
     return CliRunner().invoke(
@@ -899,11 +1011,76 @@ def test_a_matrix_table_names_a_cabins_own_cheapest_off_it(
     ]
 
 
-def test_every_fare_a_matrix_table_prints_is_a_row_of_its_cabin_in_the_envelope(
+def test_a_matrix_table_in_its_own_currency_names_a_cabins_own_cheapest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Matrix's envelope carries each cabin's whole answer. Green at the base."""
-    shown = _cells(_matrix_search(monkeypatch).stdout)
-    listed = _document_prices(_matrix_search(monkeypatch, "--format", "envelope"), "envelope")
+    """With no --currency, Matrix prices in its own default (GBP from LHR): the
+    line names the fare in the currency the table prints. Red at the base."""
+    result = _matrix_search(monkeypatch, currency="GBP")
+    assert result.exit_code == 0, result.output
+    assert _cells(result.stdout)["BUSINESS"] == {1500.0, 1400.0}
+    assert [line for line in result.stdout.splitlines() if "own cheapest" in line] == [
+        "J's own cheapest: GBP900.00 (UA103), on no row above; "
+        "--sort business lists J's cheapest first."
+    ]
+
+
+@pytest.mark.parametrize("party", [1, 2])
+def test_every_fare_a_matrix_table_prints_is_a_row_of_its_cabin_in_the_envelope(
+    monkeypatch: pytest.MonkeyPatch, party: int
+) -> None:
+    """Matrix's envelope carries each cabin's whole answer, priced as the table
+    and the line under it print it: for two, at the party's total. Green at the
+    base, and for two at the merge."""
+    adults = ("--adults", str(party))
+    shown = _cells(_matrix_search(monkeypatch, *adults, party=party).stdout)
+    envelope = _matrix_search(monkeypatch, *adults, "--format", "envelope", party=party)
+    listed = _document_prices(envelope, "envelope")
     for cab, cells in shown.items():
+        assert cells, cab
         assert cells - set(listed[cab]) == set(), cab
+    assert 900.0 * party in listed["BUSINESS"]
+
+
+def test_a_partys_matrix_line_names_a_cabins_own_cheapest_at_the_partys_total(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two adults: the table prints each cabin's party total, so the line names
+    business's own cheapest at the total Matrix states for the two, and says so.
+    Red at the merge, which named one traveler's price beside the totals."""
+    result = _matrix_search(monkeypatch, "--adults", "2", party=2)
+    assert result.exit_code == 0, result.output
+    assert _cells(result.stdout)["BUSINESS"] == {3000.0, 2800.0}
+    assert [line for line in result.stdout.splitlines() if "own cheapest" in line] == [
+        "J's own cheapest, total for 2 travelers: USD1800.00 (UA103), on no row above; "
+        "--sort business lists J's cheapest first."
+    ]
+
+
+def test_a_partys_matrix_line_says_per_traveler_where_matrix_states_no_total(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Matrix states no total for business, so its column is starred per
+    traveler, and the line names one traveler's price as such. Red at the
+    merge."""
+    result = _matrix_search(
+        monkeypatch, "--adults", "2", party=2, untotaled=frozenset({Cabin.BUSINESS})
+    )
+    assert result.exit_code == 0, result.output
+    assert [line for line in result.stdout.splitlines() if "own cheapest" in line] == [
+        "J's own cheapest, per traveler: USD900.00 (UA103), on no row above; "
+        "--sort business lists J's cheapest first."
+    ]
+
+
+def test_a_partys_google_line_names_the_total_google_lists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Google prices the whole party, so its listed fare is the total the column
+    prints, and the line says it is. Red at the merge."""
+    result = _search(monkeypatch, _reversed(monkeypatch), "--adults", "2")
+    assert result.exit_code == 0, result.output
+    assert [line for line in result.stdout.splitlines() if "own cheapest" in line] == [
+        "J's own cheapest, total for 2 travelers: USD1020.00 (B6109 / B6900), on no row above; "
+        "--sort business lists J's cheapest first."
+    ]
