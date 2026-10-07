@@ -240,18 +240,18 @@ def test_a_flight_number_carrying_markup_and_an_escape_prints_literally(
             id="slice-extension",
         ),
         pytest.param(
-            ("--extension", "MAXCONNECT 2:00"),
+            ("--extension", "F BC=j"),
             None,
-            "No separate tickets on Google Flights: --extension reaches no --slice, so the "
-            "one-ways could not be held to it.",
+            "No separate tickets on Google Flights: Google Flights can't serve slice 1 "
+            "(JFK→LHR) as a one-way: extension 'F BC=j' not expressible on GF.",
             id="top-level-extension",
         ),
         pytest.param(
             ("--routing", "BA+", "--depart-times", "morning"),
             None,
-            "No separate tickets on Google Flights: --routing and --depart-times reach no "
-            "--slice, so the one-ways could not be held to them.",
-            id="top-level-routing-and-times",
+            "No separate tickets on Google Flights: --depart-times reaches no --slice, so the "
+            "one-ways could not be held to it.",
+            id="top-level-times",
         ),
         pytest.param(
             ("--no-separate-tickets",),
@@ -277,6 +277,17 @@ def test_an_open_jaw_google_cannot_hold_to_its_codes_asks_google_nothing(
     assert "Separate tickets" not in result.stdout
     assert len(matrix.searches) == 1
     assert "Itineraries" in result.stdout
+
+
+def test_an_open_jaw_holds_each_one_way_to_the_top_level_codes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    google, _ = _google(monkeypatch), _matrix(monkeypatch)
+    result = _search("--cash-only", "--routing", "BA+", "--extension", "MAXCONNECT 2:00")
+    assert result.exit_code == 0, result.output
+    held = [(legs[0].route_language, legs[0].extension) for legs, _, _ in google.calls]
+    assert held == [("BA+", "MAXCONNECT 2:00")] * 2
+    assert "Separate tickets" in result.stdout
 
 
 # ─────────────────────────── no combination ──────────────────────────────
