@@ -86,6 +86,9 @@ is three trips from one outbound with cheaper trips from the next off the
 table. The trade is that a top-flights row, often a nonstop a few dollars
 dearer, can fall below a small `-n`; a larger `-n` brings it back. The page's
 order survives as the tie-break. The `-n` help string states the rule.
+Wherever a top-flights row sorts, it still says Google picked it: `top_flight` in the
+JSON and envelope, `★` before its number in the Google table. Nothing keeps a
+top flight that `-n` trims.
 
 Three things still read the whole board, and this is why the trim cannot move
 into the query: the Tier-2 post-filter, because a routing constraint is answered
@@ -94,9 +97,11 @@ can sit at row 25 of 30 — the multi-cabin join, whose per-cabin queries are
 deliberately widened (`_bumped_query_top_n`) so the cabins have overlap to join
 on and are trimmed back to the user's count by `_multi_cabin.merge`, and the
 enriched weave, which hands the untrimmed board to `merge_results` and bounds the
-merged table afterwards in `_render_merged`. The multi-cabin `--format json` arm
-trims per cabin for the same reason, to the user's count and not the bumped one —
-the same count as the table beside it, drawn from a different set.
+merged table afterwards in `_render_merged`. The multi-cabin `--format json` and
+envelope arms trim per cabin for the same reason, to the user's count and not the
+bumped one, then add each other row of the cabin's board whose fare the table
+prints (`cli._cabin_document_rows`), so every fare the table shows is a row of
+its cabin in the document.
 
 **The multi-cabin join keys the whole itinerary.** `_multi_cabin.itinerary_key`
 takes, per slice, every flight number, each flight's date where the answer gives

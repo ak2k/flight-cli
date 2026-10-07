@@ -3652,7 +3652,11 @@ def test_the_provider_opt_help_names_the_file_this_process_reads() -> None:
     """The help says WHERE to put the option it is showing a flag for, and
     `FLIGHT_CLI_CONFIG_DIR` moves that file — a hardcoded default names a path the
     user may not have. Same defect, same fix, as the diagnostic one function over."""
-    assert str(_config.config_path()) in (cli._PROVIDER_OPT.help or "")  # pyright: ignore[reportPrivateUsage] — the option IS the unit
+    spec = importlib.util.spec_from_file_location("flight_cli._cli_help_probe", cli.__file__)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert str(_config.config_path()) in (module._PROVIDER_OPT.help or "")  # pyright: ignore[reportPrivateUsage] — the option IS the unit
 
 
 def _cli_module_with_config_dir(monkeypatch: Any, config_dir: str) -> ModuleType:
@@ -4640,13 +4644,11 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         # token on purpose.
         ("_render_search", "cells"),
         ("_render_search", "it_carriers"),
-        ("_render_search", "out"),
-        ("_render_search", "ret"),
+        ("_render_search", "slice_cells"),
         ("_render_merged", "out"),
         ("_render_merged", "ret"),
         ("_render_multi_cabin_search", "carriers"),
-        ("_render_multi_cabin_search", "out_cell"),
-        ("_render_multi_cabin_search", "ret_cell"),
+        ("_render_multi_cabin_search", "slice_cells"),
         ("_render_multi_cabin_search", "price_cells"),
         # `_fmt_slice_cell` of a Google one-way; the hostile flight number of
         # tests/test_open_jaw_search.py holds it.
@@ -4663,6 +4665,10 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_render_gflight_table", "co2_cell"),
         # The stacked legs column's width, a count of cells this function took.
         ("_render_gflight_table", "legs_width"),
+        # The slice column headers `_slice_headers` wrote: two literals, or
+        # "slice N" around a `:d` count.
+        ("_render_search", "header"),
+        ("_render_multi_cabin_search", "header"),
         # The cabin letters are this module's own map, keyed by its own enum.
         ("_render_multi_cabin_search", "cabin_labels"),
         ("_render_multi_cabin_search", "sort_label"),
@@ -5462,7 +5468,7 @@ def test_escape_scan_passes_clean_source() -> None:
         "def _render_search():\n"
         "    t.add_row(*cells)\n"
         '    t.add_row(it_carriers or "?")\n'
-        '    t.add_row(out if slcs else "—")\n'
+        '    t.add_row(it_carriers if itn else "—")\n'
         '    t.add_column("a" + "b")\n'
     )
     assert not escape_scan(clean)

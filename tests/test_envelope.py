@@ -74,6 +74,7 @@ _KEYS = [
     "awards",
     "insight",
     "price_history",
+    "facets",
     "price_graph",
     "verify",
     "cross_check",
@@ -190,6 +191,7 @@ def _envelope_of(r: Result, *, command: str = "search", code: int = 0) -> dict[s
     assert env["awards"] is None or isinstance(env["awards"], list)
     assert isinstance(env["insight"], list)
     assert isinstance(env["price_history"], list)
+    assert isinstance(env["facets"], list)
     assert isinstance(env["price_graph"], list)
     assert env["verify"] is None or isinstance(env["verify"], dict)
     assert env["cross_check"] is None or isinstance(env["cross_check"], dict)

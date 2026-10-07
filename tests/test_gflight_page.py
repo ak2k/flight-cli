@@ -2467,12 +2467,21 @@ def test_the_documented_round_trip_costs_compose_from_their_factors(client: Any)
     assert out is not None and len(out) == pins
     assert len(fake.gets) == 1 + per_pin * pins == 31, fake.gets
 
-    # Every return board refuses: one GET each, no retry, and the refusal is
-    # the outcome — the same cost as a search that worked.
-    fake = client(_FakeResponse(text=board), _FakeResponse(text=_SHAPE_CHANGE_PAGE))
-    with pytest.raises(GfPageShapeError):
+    # Every return board's `ds:1` decodes to a layout we cannot read: one GET
+    # each, no retry, and the refusal is the outcome — the same cost as a
+    # search that worked.
+    relaid = _SHAPE_CHANGE_PAGE.replace("'ds:4'", "'ds:1'")
+    fake = client(_FakeResponse(text=board), _FakeResponse(text=relaid))
+    with pytest.raises(GfPageShapeError, match="too few to hold a board"):
         gfid.search_with_ids(_round_trip_filters(), top_n=10)
     assert len(fake.gets) == 1 + pins == 11, fake.gets
+
+    # Every return board carries no `ds:1` at all: read three times before it
+    # is refused.
+    fake = client(_FakeResponse(text=board), _FakeResponse(text=_SHAPE_CHANGE_PAGE))
+    with pytest.raises(GfPageShapeError, match="no readable ds:1 payload"):
+        gfid.search_with_ids(_round_trip_filters(), top_n=10)
+    assert len(fake.gets) == 1 + 3 * pins == 31, fake.gets
 
 
 # One GET, standing in for fli's request timeout: long enough that a waiter

@@ -234,7 +234,8 @@ row.
 Routing language is **per-slice (per direction)**, and each slice's expression
 reads from that slice's own origin. `--routing` is the outbound's and
 `--routing-ret` the return's, on `search`, `calendar` and `detail`; multi-city
-sets one per slice (`--slice ...:r=`).
+sets one per slice (`--slice ...:r=`); a slice with no `r=` takes `--routing`
+(`cli._slice_legs`), and one with an empty `r=` takes none.
 
 A slice with no `routeLanguage` is unconstrained (live 2026-10-01: JFK-LHR
 2026-10-20/27 with `F* X:BOS F*` on slice[0] alone gave 25 of 70 solutions,

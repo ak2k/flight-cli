@@ -15,9 +15,12 @@ round trip's combinations in the order the fan-out built them, pin-major; both
 are put in price order before the trim, ties kept in the order they arrived and
 unpriced rows last.
 
-The multi-cabin arms are where only the COUNT agrees: the JSON document carries
-the first `-n` of each cabin's own board and the table carries the top `-n` of
-the join, which is the same number of rows drawn from different sets.
+The multi-cabin arms carry more than `-n` where the table needs it. The table
+shows the top `-n` of the join, which prices every cabin on the sort cabin's
+itineraries; each cabin's list in the JSON document and the envelope holds the
+first `-n` of that cabin's own board, then, in price order, each other row of
+the board whose fare the table prints or the line under it names. Every fare
+the table shows is then a row of its cabin in the document.
 
 No rows is a value and has its own shape: an empty board is `[]` under
 `--format json` and a sentence on stdout otherwise, while a query that failed is
@@ -814,7 +817,7 @@ def test_a_one_way_table_handed_the_whole_board_prints_its_cheapest_rows(
 
 
 _NO_PRICE_CELL = "—"
-_ROW = re.compile(r"^│\s*\d+\s*│")
+_ROW = re.compile(r"^│\s*★?\d+\s*│")
 
 
 def test_a_round_trip_row_google_did_not_price_is_shown_last_and_reads_as_a_dash(

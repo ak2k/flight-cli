@@ -227,9 +227,10 @@ class PPClient:
     ) -> None:
         await self.aclose()
 
-    def _auth_headers(self) -> dict[str, str]:
+    @staticmethod
+    def _auth_headers(tokens: Tokens) -> dict[str, str]:
         return {
-            "authorization": f"Bearer {self._tokens.access_token}",
+            "authorization": f"Bearer {tokens.access_token}",
             "content-type": "application/json",
         }
 
@@ -242,29 +243,33 @@ class PPClient:
         params: _JsonDict | None = None,
     ) -> httpx.Response:
         async with self._sem:
+            sent = self._tokens
             r = await self._client.request(
                 method,
                 path,
                 json=json_body,
                 params=params,
-                headers=self._auth_headers(),
+                headers=self._auth_headers(sent),
             )
         if r.status_code == HTTPStatus.UNAUTHORIZED:
             log.info("pp_token_refresh", reason="401_retry_once")
             # The refresh is a blocking call. On the loop no deadline could cut
             # it; in a thread the award deadline stops waiting on it. The lock
-            # keeps refreshes one at a time, each on the token the last returned.
+            # keeps refreshes one at a time. A request that queued behind a
+            # refresh of the token it was sent with retries on the result
+            # instead of refreshing that result again.
             async with self._refresh_lock:
-                self._tokens = await anyio.to_thread.run_sync(
-                    refresh_tokens, self._tokens, abandon_on_cancel=True
-                )
+                if self._tokens.access_token == sent.access_token:
+                    self._tokens = await anyio.to_thread.run_sync(
+                        refresh_tokens, self._tokens, abandon_on_cancel=True
+                    )
             async with self._sem:
                 r = await self._client.request(
                     method,
                     path,
                     json=json_body,
                     params=params,
-                    headers=self._auth_headers(),
+                    headers=self._auth_headers(self._tokens),
                 )
         return r
 
