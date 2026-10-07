@@ -5830,7 +5830,8 @@ class _PageAsk:
     and every page after it is named as not asked. A pin loop that stopped
     after serving some pins answers with its rows, and the stop it carries ends
     the asking as a raised one does. So does one a page's Cheapest tab met: the
-    page answered, so no page line names it, and the tab's line says why. A
+    page answered, so no page line names it, and the tab's line says why, ahead of
+    an earlier page's refused tab, which gets a line of its own. A
     round trip asks every page's outbounds before any page's returns, so a page
     that answered its outbounds before the stop is named for the returns it did
     not get."""
@@ -5846,6 +5847,8 @@ class _PageAsk:
         self.answered: set[int] = set()
         self.stopped_at: int | None = None
         self.stop: GfBackendError | None = None
+        # A page's refused Cheapest tab that the stop's line is printed ahead of.
+        self.displaced: dict[int, GfBackendError] = {}
 
     def ask[T](self, i: int, call: Callable[[], T]) -> T | None:
         """`call`'s answer for page `i`, or None once its failure is recorded."""
@@ -5875,6 +5878,24 @@ class _PageAsk:
     def _stopped(self, i: int, e: GfBackendError) -> None:
         self.stopped_at = i
         self.stop = e
+
+    def tab_refusal(self, tabs: dict[int, GfBackendError]) -> GfBackendError | None:
+        """The refusal the one tab line says, of the pages' refused tabs `tabs`:
+        the first page's, but a stop no page line names goes ahead of it, and
+        the first page's refusal is then `displaced` onto a line of its own."""
+        if not tabs:
+            return None
+        first = min(tabs)
+        stop = self.stop
+        if (
+            stop is None
+            or tabs[first] is stop
+            or stop in self.failed.values()
+            or stop not in tabs.values()
+        ):
+            return tabs[first]
+        self.displaced[first] = tabs[first]
+        return stop
 
     def report(self) -> None:
         """One stderr line per page that did not answer, in page order."""
@@ -5913,6 +5934,15 @@ def _report_pages(asked: _PageAsk) -> None:
             f"[yellow]Google Flights page {i + 1:d} of {n:d} "
             f"({_safe_text(','.join(out.origins))}→{_safe_text(','.join(out.destinations))}) "
             f"is missing: {why}.[/]"
+        )
+    for i, e in sorted(asked.displaced.items()):
+        rung = _rung_reached(asked.gf_mode)
+        why = _gf_refusal(e, transport=rung, bags=asked.bags).note.removesuffix(".")
+        out = asked.pages[i][0]
+        err.print(
+            f"[dim]Google Flights page {i + 1:d} of {n:d} "
+            f"({_safe_text(','.join(out.origins))}→{_safe_text(','.join(out.destinations))}): "
+            f"itineraries on separate tickets not read: {why}.[/]"
         )
 
 
@@ -6008,9 +6038,10 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
     `separate_tickets` goes to every page, so each reads its own Cheapest tab
     once, after its pins, a round-trip page that holds no pin included.
     `separate_hidden` sums the pages' counts and `separate_failed` is the first
-    page's, in page order. A page that holds no pin and was not reached because
-    the search stopped takes the stop as its reason: no page line names it,
-    since its outbounds answered."""
+    page's, in page order, unless a stop met by a later page's tab goes ahead
+    of it (`_PageAsk.tab_refusal`). A page that holds no pin and was not
+    reached because the search stopped takes the stop as its reason: no page
+    line names it, since its outbounds answered."""
     from ._gf_postfilter import StopDrops  # noqa: PLC0415 — GF-only
     from ._gflight_ids import (  # noqa: PLC0415 — fli, ~95 ms
         Board,
@@ -6108,6 +6139,7 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
     # Google served the rows of a page none of whose rows parsed, so a flight
     # on one of them is on its board though the page is missing.
     unread += sum(e.unread for e in asked.failed.values() if isinstance(e, _PageUnreadError))
+    separate_failed = asked.tab_refusal(tabs_failed)
     asked.report()
     rows = _merged_boards(boards)
     asked.raise_if_empty(rows)
@@ -6124,7 +6156,7 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
         partial=bool(asked.failed or asked.unasked) or len(pages[0]) >= _ROUND_TRIP_LEGS,
         unread=unread,
         separate_hidden=hidden,
-        separate_failed=tabs_failed[min(tabs_failed)] if tabs_failed else None,
+        separate_failed=separate_failed,
         # For a caller that asks Google more after this board (`_one_way_boards`).
         stopped=asked.stop,
     )
