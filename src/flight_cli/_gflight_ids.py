@@ -1885,11 +1885,12 @@ class RouteFacets:
     Measured on 20 captures as `[[[None, low], [None, high]], [alliances,
     airlines], [airports, layover_low, layover_high], [duration_low,
     duration_high], ...]`. The block describes the search, not the rows served:
-    it is identical on every page of one search, its return pages and every
-    rung's read included, and its airlines are the filter's, not the rows'
-    carriers. What `[4]` to `[7]` mean is not established, so they are not
-    read. `origins` and `destinations` are the search's airports, which the
-    page does not state; `outbound_page` names them."""
+    every rung's read of one search and a round trip's outbound and return
+    pages carry the same one, and its airlines are the filter's, not the rows'
+    carriers. The Cheapest tab's can differ. What `[4]` to `[7]` mean is not
+    established, so they are not read. `origins` and `destinations` are the
+    search's airports, which the page does not state; `outbound_page` names
+    them."""
 
     currency: str | None
     price_low: float
@@ -1941,8 +1942,8 @@ def _parts(value: Any, size: int) -> list[Any] | None:
 def _route_facets(payload: list[Any], rows: list[GFlightWithId]) -> RouteFacets | None:
     """The page's route facets, or None when it states none.
 
-    A block with any part read here of another shape, or a range whose low
-    passes its high, gives none at all: a part read beside a misread one would
+    A block with any part read here of another shape, or a range whose low is
+    above its high, gives none at all: a part read beside a misread one would
     be offered as Google's. The currency is read off a priced row, as the
     insight's is."""
     block = payload[_FACETS_IDX] if len(payload) > _FACETS_IDX else None

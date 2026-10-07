@@ -6298,9 +6298,9 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
     A page's price insight, history and facets describe its own airports, so
     the merged board's `insight`, `history` and `facets` are None and each
     answered page's ride in `page_insights`, `page_histories` and
-    `page_facets`, in page order. The board is
-    `partial` where a page is missing or the trip is round: its rows then stop
-    short of what one search would list.
+    `page_facets`, in page order. The board is `partial` where a page is
+    missing or the trip is round: its rows then stop short of what one search
+    would list.
 
     `separate_tickets` goes to every page, so each reads its own Cheapest tab
     once, after its pins, a round-trip page that holds no pin included.
@@ -6572,9 +6572,9 @@ def _record_google_cabin(
 ) -> None:
     """Hand one cabin's Google rows to the envelope run, with the insight,
     history and facets of each page that answered `served`, the board as the
-    search returned it. Each row is the object `_gflight_json_document` prints for it,
-    priced by its last member: a round trip's fare is the one every surface
-    prints for the combination.
+    search returned it. Each row is the object `_gflight_json_document` prints
+    for it, priced by its last member: a round trip's fare is the one every
+    surface prints for the combination.
 
     `served.unread` is the board's: the rows its pages served that the parser
     could not read, so the answer is narrower by them. Counted on the board and
