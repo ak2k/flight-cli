@@ -271,6 +271,20 @@ def test_a_server_error_throughout_is_refused_as_one_after_three_reads(
     assert (caught.value.code, len(fake.gets), clock.sleeps) == (13, 3, [2.0, 6.0])
 
 
+@pytest.mark.parametrize(
+    ("errors", "gets", "sleeps"), [(1, 4, [2.0]), (2, 5, [2.0, 6.0])], ids=["once", "twice"]
+)
+def test_a_re_read_that_meets_no_board_gets_its_own_three_reads(
+    errors: int, gets: int, sleeps: list[float], gf_session: Callable[..., Any], clock: _Clock
+) -> None:
+    """A guard, the figure `gf_request_budget.md` states: a re-read is a whole
+    page read, so a page with no `ds:1` behind the error gets its three."""
+    fake = gf_session(*[_error_page()] * errors, _NO_BOARD)
+    with pytest.raises(gfid._BoardlessPageError):
+        _http()
+    assert (len(fake.gets), clock.sleeps) == (gets, sleeps)
+
+
 def test_a_server_error_then_a_throttle_spends_no_more_than_the_ladder(
     gf_session: Callable[..., Any], clock: _Clock
 ) -> None:
