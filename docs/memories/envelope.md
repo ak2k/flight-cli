@@ -74,10 +74,11 @@ and a round trip's failed `--split` one-way. A hand-off that holds Google's boar
 by the filter, an infant's empty board, separate-ticket rows alone on an award
 search, a multi-cabin search) notes its unread rows as `_record_google_cabin`
 does. Matrix, provider, calendar and `--split`-on-Matrix narrowings name no
-backend and count whoever answers, and so do a multi-city search's one-way
-boards (`cli._one_way_boards` with `narrow`): their tickets are shown beside
-Matrix's answer, or alone under `--backend gflight`, never as a one-ticket
-row. The sites: a cabin asked and never recorded (judged
+backend and count whoever answers, and so do a one-way board's missing page and
+unread rows (`cli._one_way_boards`, a multi-city search's or a round trip's
+`--split`): their tickets are shown beside Matrix's answer, or alone under
+`--backend gflight`, never as a one-ticket row. The sites: a cabin asked and
+never recorded (judged
 in the recorder, from `ask_cabins` against what the leaves recorded); Matrix
 finding nothing where Google had rows (`_note_google_rows_unshown`); the
 round-trip pin cap note; return boards refused, a pin Google served no return
@@ -104,11 +105,11 @@ priced one-way, no pair one traveler can fly, or two currencies are the boards'
 answer, a note; a `--split` round trip Matrix answered, or a `--split`
 multi-city search Google was not asked about, since the tickets were asked for
 and are not priced, while without `--split` that search's `{error}` narrows
-nothing, as its table lists no tickets either; a multi-city search's one-way
-board missing a page or holding rows the parser could not read
-(`cli._one_way_boards`, the unread rows a note naming the slice), since its
-cheapest tickets may be among them, or holding no row at all for a party with
-an infant, as on a Google search;
+nothing, as its table lists no tickets either; a one-way board (a multi-city
+search's or a round trip's) missing a page or holding rows the parser could not
+read (`cli._one_way_boards`, the unread rows a note naming the leg or slice),
+since its cheapest tickets may be among them, or holding no row at all for a
+party with an infant, as on a Google search;
 `--max-per-query > 1` over a split when a query asks several destinations, and
 over the one unsplit query when a group holds every destination; a round trip
 over a split set, whose returns
