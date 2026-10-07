@@ -9211,16 +9211,25 @@ def _validate_sort_cabin(sort_by: Cabin, cabins: tuple[Cabin, ...]) -> None:
         raise typer.Exit(2)
 
 
-def _note_google_rows_unshown(cabins: Iterable[Cabin]) -> None:
+def _note_google_rows_unshown(cabins: Iterable[Cabin], *, cap: str | None = None) -> None:
     """Name each cabin Google Flights had rows for that Matrix, answering the
     search in its place, returned no itinerary for: those rows are not in the
-    output."""
+    output. Under a `cap`, Matrix may have returned fares the cap removed, so
+    the line says Matrix shows none under it."""
     names = ", ".join(c.value for c in cabins)
-    if names:
-        _envelope.narrow()
+    if not names:
+        return
+    _envelope.narrow()
+    if cap is None:
         err.print(
             f"[yellow]Matrix returned no itinerary for {_safe_text(names)}, where Google "
             "Flights had rows; --backend gflight shows them.[/]"
+        )
+    else:
+        err.print(
+            f"[yellow]Matrix shows no itinerary at or under {_safe_text(cap)} for "
+            f"{_safe_text(names)}, where Google Flights had rows; --backend gflight "
+            "shows them.[/]"
         )
 
 
@@ -9276,9 +9285,9 @@ def _run_matrix_path_multi(
     """Matrix multi-cabin: N parallel cabin queries → client-side join → render.
 
     `google_answered` names the cabins Google Flights had rows for when the
-    search was handed here; any of them Matrix returns no itinerary for, by
-    failing or by finding none, is named on stderr, since the hand-off already
-    set Google's rows aside.
+    search was handed here; any of them Matrix shows no itinerary for, by
+    failing, by finding none or by the cap removing all it found, is named on
+    stderr, since the hand-off already set Google's rows aside.
 
     Under a cap, each cabin's answer is asked and cut as `_run_matrix_path`
     cuts its one answer, and a cabin left with no fare says so on stderr."""
@@ -9306,7 +9315,7 @@ def _run_matrix_path_multi(
     # the table and the awards all draw from the fares under the cap.
     results_by_cabin = _cabins_capped(results_by_cabin, opts)
     found = {c for c, r in results_by_cabin.items() if r.solutions}
-    _note_google_rows_unshown(c for c in google_answered if c not in found)
+    _note_google_rows_unshown((c for c in google_answered if c not in found), cap=_cap_text(opts))
     if not results_by_cabin:
         err.print("[red]All cabin queries failed.[/]")
         raise typer.Exit(1)

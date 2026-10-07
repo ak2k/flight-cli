@@ -601,6 +601,38 @@ def test_without_bags_a_cabin_the_cap_empties_hands_the_search_to_matrix(
     )
 
 
+def test_a_handed_off_cabin_the_cap_empties_on_matrix_is_named_as_not_shown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Handed the search, Matrix returns economy fares the cap then removes, so
+    the line says Matrix shows none under the cap rather than that it returned
+    none. Google's economy rows under the cap are left out, so the line still
+    points at them and the envelope stays narrowed. Red where the line said
+    Matrix returned no itinerary."""
+    over = {
+        Cabin.COACH: (("UA101", 750.0), ("UA102", 800.0), ("UA103", 850.0)),
+        Cabin.BUSINESS: _MATRIX[Cabin.BUSINESS],
+    }
+
+    def _multi(*, opts: SearchOptions, **_kw: object) -> dict[Cabin, SearchResult]:
+        return {cab: _matrix_answer(fares) for cab, fares in over.items()}
+
+    monkeypatch.setattr(cli, "_run_matrix_multi", _multi)
+    for fmt in ("table", "envelope"):
+        google = _Google({"ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS})
+        result = _search(monkeypatch, google, "--max-price", "700", "--format", fmt, backend="auto")
+        assert result.exit_code == 0, result.output
+        stderr = _flat(result.stderr)
+        assert "Matrix COACH: no fare at or under USD 700." in stderr
+        assert (
+            "Matrix shows no itinerary at or under USD 700 for COACH, where Google Flights "
+            "had rows; --backend gflight shows them."
+        ) in stderr, fmt
+        assert "returned no itinerary" not in stderr
+        if fmt == "envelope":
+            assert _envelope_of(result)["complete"] is False
+
+
 def test_a_cabin_whose_capped_page_served_nothing_says_no_fare_is_under_the_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
