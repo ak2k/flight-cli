@@ -90,7 +90,7 @@ from fli.search.flights import SearchFlights  # pyright: ignore[reportMissingTyp
 # the session without a browser anywhere in the process.
 from . import _gf_browser
 from ._envelope import narrow
-from ._gf_common import TRANSPORT_HTTP, GfTransportMode, PageFetch, cache_dir
+from ._gf_common import TRANSPORT_BROWSER, TRANSPORT_HTTP, GfTransportMode, PageFetch, cache_dir
 from ._gf_errors import (
     BROWSER_DEFAULT_REMEDY,
     GfBackendError,
@@ -2977,6 +2977,7 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
         checks=checks,
         empty=empty,
         lost=lost,
+        browser=transport.mode == TRANSPORT_BROWSER or escalated(),
     )
     return answer
 
@@ -3104,6 +3105,7 @@ def _report_pin_outcome(
     checks: str = "the routing",
     empty: int = 0,
     lost: Sequence[str] = (),
+    browser: bool = False,
 ) -> None:
     """Account for what the pin loop met: a counted warning, or a raise.
 
@@ -3112,7 +3114,8 @@ def _report_pin_outcome(
     return matches `checks`" is its answer. So is an `empty` one, a pin Google
     served no return for. `lost` names each pin dropped, after every count and
     before any raise: a count says the table is short, and only the names say
-    which outbounds a user can look up elsewhere.
+    which outbounds a user can look up elsewhere. `browser` is whether the stop
+    was met on the browser rung, which words a throttle as `cli._gf_refusal` does.
 
     Raising is for the case where nothing at all was served — then the refusal
     IS the outcome, and swallowing it reports a round trip with no return legs
@@ -3157,7 +3160,7 @@ def _report_pin_outcome(
             "stopped pinning: %d of %d return boards skipped; %s",
             skipped,
             pins,
-            _why_pinning_stopped(stopped, bags=bags),
+            _why_pinning_stopped(stopped, bags=bags, browser=browser),
         )
     for line in lost:
         log.warning("%s", line)
@@ -3204,7 +3207,9 @@ def browser_remedy(e: GfBrowserUnavailableError, *, bags: bool) -> str:
     return e.remedy
 
 
-def _why_pinning_stopped(stopped: GfBackendError, *, bags: bool = False) -> str:
+def _why_pinning_stopped(
+    stopped: GfBackendError, *, bags: bool = False, browser: bool = False
+) -> str:
     """The clause naming what ended the fan-out, in the failure's own words.
 
     Not one fixed phrase, because the three stops send the reader to three
@@ -3214,6 +3219,10 @@ def _why_pinning_stopped(stopped: GfBackendError, *, bags: bool = False) -> str:
     in its line because a browser refusal ends in its own remedy, and a
     sentence that ends on the move the user makes reads as one."""
     if isinstance(stopped, GfThrottledError):
+        # Rung 1's wall is the IP's; Chrome's is its own, which the page line
+        # words the same way.
+        if browser:
+            return "Google Flights rate-limited the browser rung"
         return "Google Flights rate-limited this IP"
     if isinstance(stopped, GfBrowserUnavailableError):
         return f"the browser rung stopped — {stopped.reason} {browser_remedy(stopped, bags=bags)}"
