@@ -106,8 +106,9 @@ board missing a page or holding rows the parser could not read
 (`cli._one_way_boards`, the unread rows a note naming the slice), since its
 cheapest tickets may be among them, or holding no row at all for a party with
 an infant, as on a Google search;
-`--max-per-query > 1` over a split, and over the one unsplit query when a
-group holds every destination; a round trip over a split set, whose returns
+`--max-per-query > 1` over a split when a query asks several destinations, and
+over the one unsplit query when a group holds every destination; a round trip
+over a split set, whose returns
 into another airport of the set come only from the combined query; a
 departure date of the calendar's window that Matrix's grid holds no fare for
 at some trip length asked (`cli._say_unpriced`, one `Matrix priced no fare on
@@ -117,7 +118,10 @@ parser could not read, counted once from the board's `unread` where its rows
 are recorded (`cli._record_google_cabin`), so the note gives the number
 `cross_check.google.unread` does (the calendar graph's wall check records no
 board and narrows nothing); a Google board served with no rows for a party
-with an infant and not handed to Matrix (`cli._run_gflight_path`), since Google
+with an infant and not handed to Matrix (`cli._run_gflight_path`) and, under
+`--enrich --format envelope`, a board with no rows for such a party
+(`cli._answer_cross_check_document`), whose `results` note names the infant
+and, when Matrix answered, says `cross_check` holds Matrix's rows, since Google
 has served such a board on a route with flights; a Google board with rows
 asked as several pages that is `partial` (`cli._gflight_pages`): a page did not
 answer, or the trip is round and each return flies back between its own
