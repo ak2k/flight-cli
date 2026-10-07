@@ -266,6 +266,29 @@ answering an `OSError` with "unlocked" is the deliberate direction: erring the
 other way refuses the rung and tells the user to delete files the process just
 proved it cannot see.
 
+A driver that cannot START is a different refusal from a Chrome that cannot
+launch: `start()` raising means no launch was tried, so `_ensure_page` raises
+`_driver_failure`, whose remedy is `_INSTALL_HINT` (patchright's own install)
+rather than `_LAUNCH_REMEDY`. What the failed start leaves on the loop
+patchright made for that manager reports itself, with a traceback, when
+collected: the error parked on the transport's `on_error_future` or the
+connection's `init` task, an `init` task still waiting on a driver that sent a
+malformed frame, and that driver's pipes, whose finalizer raises "Event loop is
+closed" when the loop's own finalizer ran first. `_quiet_driver_failure` gives
+that loop an exception handler that drops every report (everything on it
+belongs to the failed start), then closes a spawned driver's stdin and runs the loop until asyncio
+has reaped it, bounded by `_DRIVER_EXIT_TIMEOUT_S`, so its pipes are closed
+before any finalizer sees them. It drains the driver's stdout meanwhile
+(`communicate()`, as patchright's own stop does): nothing reads it after
+`start()` raised, and a driver with more to write than the pipe holds would
+otherwise block and outlive the refusal. One still up at the deadline is
+killed through asyncio's process handle and reaped, since the refusal drops
+the session's only handle on it. A driver that exits before the handshake
+makes `start()` raise an `AttributeError` about patchright's own state, so the
+refusal's detail is the error parked on the `init` task (`_parked_driver_error`). It reads `_loop`, `_own_loop` and the
+`_connection._transport._proc` chain, guarded like `_driver_process_id`, and
+leaves a loop patchright did not make (the caller's) alone.
+
 ## What it costs
 
 Measured 2026-09-02 on this Mac: cold launch plus one navigation, start to
