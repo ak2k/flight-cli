@@ -76,6 +76,12 @@ cannot read is still refused at one read. Rung 2 navigates such a page once
 more, two navigations in all (`_BOARDLESS_NAVIGATIONS`), since a navigation
 costs seconds where a GET costs one request.
 
+A page whose `ds:1` holds Google's server error in place of the board is typed
+apart from one with no `ds:1` (`GfSearchServerError`; see
+[gf_page_refusals_and_ds1.md](gf_page_refusals_and_ds1.md)). Rung 1 reads it
+again after a pause, under `retry_throttled`; rung 2 navigates it once more at
+once, two navigations in all, as it does a page with no `ds:1`.
+
 A page of 300 raw rows, unread ones included, stopped at Google's cap
 (`_ROW_CAP`), so its board records its highest fare as `Board.capped_at`, in
 the page's own currency, and each path that shows it prints one stderr line:
@@ -259,6 +265,29 @@ unnamed. The driver text has to name the singleton too. And `_profile_is_locked`
 answering an `OSError` with "unlocked" is the deliberate direction: erring the
 other way refuses the rung and tells the user to delete files the process just
 proved it cannot see.
+
+A driver that cannot START is a different refusal from a Chrome that cannot
+launch: `start()` raising means no launch was tried, so `_ensure_page` raises
+`_driver_failure`, whose remedy is `_INSTALL_HINT` (patchright's own install)
+rather than `_LAUNCH_REMEDY`. What the failed start leaves on the loop
+patchright made for that manager reports itself, with a traceback, when
+collected: the error parked on the transport's `on_error_future` or the
+connection's `init` task, an `init` task still waiting on a driver that sent a
+malformed frame, and that driver's pipes, whose finalizer raises "Event loop is
+closed" when the loop's own finalizer ran first. `_quiet_driver_failure` gives
+that loop an exception handler that drops every report (everything on it
+belongs to the failed start), then closes a spawned driver's stdin and runs the loop until asyncio
+has reaped it, bounded by `_DRIVER_EXIT_TIMEOUT_S`, so its pipes are closed
+before any finalizer sees them. It drains the driver's stdout meanwhile
+(`communicate()`, as patchright's own stop does): nothing reads it after
+`start()` raised, and a driver with more to write than the pipe holds would
+otherwise block and outlive the refusal. One still up at the deadline is
+killed through asyncio's process handle and reaped, since the refusal drops
+the session's only handle on it. A driver that exits before the handshake
+makes `start()` raise an `AttributeError` about patchright's own state, so the
+refusal's detail is the error parked on the `init` task (`_parked_driver_error`). It reads `_loop`, `_own_loop` and the
+`_connection._transport._proc` chain, guarded like `_driver_process_id`, and
+leaves a loop patchright did not make (the caller's) alone.
 
 ## What it costs
 

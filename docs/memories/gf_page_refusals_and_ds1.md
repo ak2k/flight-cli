@@ -27,6 +27,10 @@ from a moved layout. Read before touching `_gf_errors.py`,
   `GfPageShapeError` because "Google declined to serve this" and "the extract
   is broken" send a reader to different work, and either rung can raise it:
   rung 1 reads the status off the response, rung 2 off the navigation.
+- `GfSearchServerError` — a 200 whose `ds:1` holds Google's server error in
+  place of a board, with the error's `code`. Typed apart from
+  `GfPageShapeError` for the same reason: the page has not changed shape. See
+  "A server error in place of the board" below.
 - `GfBrowserUnavailableError` — rung 2 could not produce bytes at all: no
   patchright, no Chrome, a profile another `flight` holds, a dead navigation.
   Never a statement about the route. Its `remedy` is a separate attribute that
@@ -36,6 +40,34 @@ from a moved layout. Read before touching `_gf_errors.py`,
 A page that decodes with zero rows returns `[]` and is Google's authoritative
 answer, so the search path passes `retry_empty=False` and spends exactly one GET
 on it.
+
+**A server error in place of the board.** Google sometimes answers a search
+page with HTTP 200 and a `ds:1` that holds an RPC status rather than rows:
+`AF_initDataCallback({key: 'ds:1', data:[13,null,[[...ErrorResponse...]]],
+errorHasStatus: true,});`. The blob ends on `errorHasStatus`, not on
+`sideChannel`, so `_DS_BLOB_RE` never matches it, and read as a page with no
+`ds:1` it would be reported as a page-shape change. `_ds1_error_status` reads
+it (`_DS_ERROR_BLOB_RE`): the first blob keyed `ds:1` whose `data:` decodes to a
+list with an int, not a bool, at `[0]`. It runs only when `_extract_ds1` found
+no board, before the consent check, so a page that carries a board reads as
+before, and no part of an error page is read as a board: its rows, insight,
+history and route facets come from the re-read that carries one. Measured on NYC-LON in 2026-10, the search fell back to Matrix this way
+on 3 of 8 probe loads and 1 of 10 sampler loads; the three failing reads
+captured, one load's reads of one URL, all carry code 13, and none of 300 clean
+bodies or the 27 committed fixtures matches. Only 13 has been seen; any other
+code is read as the same error by choice.
+
+The error does not last, and its length is not known: three reads of one URL
+inside 0.65 s all failed, and a read ~150 s later carried the board. Rung 1
+reads such a page again after 2 s, then 6 s (`_SERVER_ERROR_PAUSES_S`, an arm of
+`retry_throttled`: each re-read is one of the call's wall attempts and books no
+rung of the shared ladder; see [gf_throttle_ladder.md](gf_throttle_ladder.md)).
+A search pauses 8 s at most in all, whatever its page count
+(`_Escalation.pause`); after that, a page's error is read again at once, three
+reads, then refused. Rung 2 navigates it once more at once, as it does a page
+with no `ds:1`. The refusal names the error and its code ("Google Flights
+answered with a server error (status 13)") on every rendering, and the
+fallback to Matrix is otherwise the one a re-shaped page gets.
 
 **A page may carry more than one `ds:1` blob**, and this one hydrates in stages,
 so `_extract_ds1` decodes them ALL and serves the one carrying the most rows at
@@ -131,7 +163,8 @@ nesting-depth test would report a relocation on every ordinary page. It reads
 EVERY row, not a leading window: unparseable rows at the head of a moved block
 are exactly what a layout change looks like, so any fixed depth is a number some
 payload sits just past. The decoys hold 2-7 rows and the scan is sub-millisecond,
-so full depth costs nothing worth a cutoff.
+so full depth costs nothing worth a cutoff. `ds:1[7]`, one of those structures,
+is read as the search's route facets (`_route_facets`; envelope.md, "Route facets").
 At `[2]`/`[3]` the test must NOT require a parse, or a block whose rows have all
 changed shape would drop to an empty board instead of reaching the 0-of-N parse
 guard above, which is what catches a moved ROW layout. Both share one tuple of

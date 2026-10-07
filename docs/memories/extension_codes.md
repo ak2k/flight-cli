@@ -249,7 +249,8 @@ Like `routeLanguage`, `commandLine` is **per-slice**. Outbound and return get
 independent extension strings. The CLI exposes both via `--extension` (or
 `--ext`) and `--ext-ret` on `search`, `calendar` and `detail`; `--ext-ret ''`
 sends none on the return. No code is positional, so unset, `--ext-ret` copies
-`--extension`. Multi-city sets one per slice.
+`--extension`. Multi-city sets one per slice (`:e=`); a slice with no `e=` takes
+`--extension` (`cli._slice_legs`).
 
 ## Pitfalls
 
