@@ -70,15 +70,19 @@ def _tests_error(test: ast.expr) -> bool:
             return False
 
 
+def _arm_kind(node: ast.ExceptHandler | ast.If) -> str | None:
+    if isinstance(node, ast.ExceptHandler):
+        return "except" if node.type and _names_error(node.type) else None
+    return "isinstance" if _tests_error(node.test) else None
+
+
 def _arms(node: ast.AST, fn: str, found: list[tuple[str, str, bool]]) -> None:
     """Each arm the module docstring counts, as (enclosing function, kind,
     whether its body calls the reporter)."""
     for child in ast.iter_child_nodes(node):
         inside = child.name if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef) else fn
-        if isinstance(child, ast.ExceptHandler) and child.type and _names_error(child.type):
-            found.append((fn, "except", _calls_reporter(child.body)))
-        elif isinstance(child, ast.If) and _tests_error(child.test):
-            found.append((fn, "isinstance", _calls_reporter(child.body)))
+        if isinstance(child, ast.ExceptHandler | ast.If) and (kind := _arm_kind(child)):
+            found.append((fn, kind, _calls_reporter(child.body)))
         _arms(child, inside, found)
 
 
@@ -86,21 +90,31 @@ def test_every_arm_that_names_a_matrix_error_reports_it_through_the_reporter() -
     found: list[tuple[str, str, bool]] = []
     _arms(_cli_tree(), "<module>", found)
     reporting = [(fn, kind) for fn, kind, said in found if said]
-    # Counted, not collected into a set: a second silent arm in a function
-    # `_SOFT` already lists is a new arm, not the listed one again.
-    silent = Counter((fn, kind) for fn, kind, said in found if not said)
-    listed = Counter(_SOFT.keys())
+    # A key names a function and a kind, not one arm, so a listed key is counted
+    # whole, reporting arms too: else a second silent arm, or one that takes the
+    # place of a listed arm now reporting, would pass as the listed one.
+    counted = Counter(
+        (fn, kind, said) for fn, kind, said in found if not said or (fn, kind) in _SOFT
+    )
+    listed = Counter((fn, kind, False) for fn, kind in _SOFT)
     assert len(reporting) >= 1, found
-    assert silent == listed, (
-        f"arms naming MatrixApiError that do not call {_REPORTER}: "
-        f"unlisted {sorted((silent - listed).elements())}, "
-        f"stale {sorted((listed - silent).elements())}"
+    assert counted == listed, (
+        f"arms naming MatrixApiError, as (function, kind, calls {_REPORTER}): "
+        f"unlisted {sorted((counted - listed).elements())}, "
+        f"stale {sorted((listed - counted).elements())}"
     )
 
 
-def _census_with(monkeypatch: pytest.MonkeyPatch, arm: str, into: str | None = None) -> None:
+def _census_with(
+    monkeypatch: pytest.MonkeyPatch,
+    arm: str,
+    into: str | None = None,
+    *,
+    report_listed: bool = False,
+) -> None:
     """Points the census at cli.py with `arm` put first in the def named `into`
-    that already names the error, or in the module when `into` is None."""
+    that already names the error, or in the module when `into` is None. With
+    `report_listed`, the arms already in `into` call the reporter first."""
     tree = _cli_tree()
     target: ast.Module | ast.FunctionDef | ast.AsyncFunctionDef = tree
     if into is not None:
@@ -111,6 +125,9 @@ def _census_with(monkeypatch: pytest.MonkeyPatch, arm: str, into: str | None = N
             and n.name == into
             and _names_error(n)
         ]
+    for n in ast.walk(target) if report_listed else ():
+        if isinstance(n, ast.ExceptHandler | ast.If) and _arm_kind(n):
+            n.body[:0] = ast.parse(f"{_REPORTER}(e)").body
     target.body[:0] = ast.parse(arm).body
     monkeypatch.setattr(sys.modules[__name__], "_cli_tree", lambda: tree)
 
@@ -123,10 +140,12 @@ def _census_with(monkeypatch: pytest.MonkeyPatch, arm: str, into: str | None = N
     ],
     ids=["except", "isinstance"],
 )
-def test_the_census_fails_on_a_second_silent_arm_in_a_soft_function(
-    monkeypatch: pytest.MonkeyPatch, into: str, arm: str
+@pytest.mark.parametrize("report_listed", [False, True], ids=["listed-silent", "listed-reports"])
+def test_the_census_fails_on_a_silent_arm_joining_a_soft_function(
+    monkeypatch: pytest.MonkeyPatch, into: str, arm: str, report_listed: bool
 ) -> None:
-    _census_with(monkeypatch, arm, into)
+    """A new silent arm beside the listed one, which stays silent or now reports."""
+    _census_with(monkeypatch, arm, into, report_listed=report_listed)
     with pytest.raises(AssertionError) as failed:
         test_every_arm_that_names_a_matrix_error_reports_it_through_the_reporter()
     assert f"unlisted [({into!r}" in str(failed.value)
@@ -163,7 +182,7 @@ def test_the_census_fails_on_an_isinstance_arm_under_and_or(
     _census_with(monkeypatch, f"def _new_arm(f):\n    if {cond}:\n        raise typer.Exit(1)")
     with pytest.raises(AssertionError) as failed:
         test_every_arm_that_names_a_matrix_error_reports_it_through_the_reporter()
-    assert "unlisted [('_new_arm', 'isinstance')]" in str(failed.value)
+    assert "unlisted [('_new_arm', 'isinstance', False)]" in str(failed.value)
 
 
 @pytest.mark.parametrize(
