@@ -12,6 +12,10 @@ from __future__ import annotations
 import ast
 import pathlib
 import re
+import sys
+from collections import Counter
+
+import pytest
 
 from flight_cli import cli as cli_mod
 
@@ -66,12 +70,50 @@ def test_every_arm_that_names_a_matrix_error_reports_it_through_the_reporter() -
     found: list[tuple[str, str, bool]] = []
     _arms(_cli_tree(), "<module>", found)
     reporting = [(fn, kind) for fn, kind, said in found if said]
-    silent = {(fn, kind) for fn, kind, said in found if not said}
+    # Counted, not collected into a set: a second silent arm in a function
+    # `_SOFT` already lists is a new arm, not the listed one again.
+    silent = Counter((fn, kind) for fn, kind, said in found if not said)
+    listed = Counter(_SOFT.keys())
     assert len(reporting) >= 1, found
-    assert silent == set(_SOFT), (
+    assert silent == listed, (
         f"arms naming MatrixApiError that do not call {_REPORTER}: "
-        f"unlisted {sorted(silent - set(_SOFT))}, stale {sorted(set(_SOFT) - silent)}"
+        f"unlisted {sorted((silent - listed).elements())}, "
+        f"stale {sorted((listed - silent).elements())}"
     )
+
+
+def _census_with(monkeypatch: pytest.MonkeyPatch, arm: str, into: str | None = None) -> None:
+    """Points the census at cli.py with `arm` put first in the def named `into`
+    that already names the error, or in the module when `into` is None."""
+    tree = _cli_tree()
+    target: ast.Module | ast.FunctionDef | ast.AsyncFunctionDef = tree
+    if into is not None:
+        (target,) = [
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
+            and n.name == into
+            and _names_error(n)
+        ]
+    target.body[:0] = ast.parse(arm).body
+    monkeypatch.setattr(sys.modules[__name__], "_cli_tree", lambda: tree)
+
+
+@pytest.mark.parametrize(
+    ("into", "arm"),
+    [
+        ("query_cabin", "try:\n    pass\nexcept MatrixApiError as e2:\n    raise typer.Exit(1)"),
+        ("_low_check_failure", "if isinstance(e, MatrixApiError):\n    raise typer.Exit(1)"),
+    ],
+    ids=["except", "isinstance"],
+)
+def test_the_census_fails_on_a_second_silent_arm_in_a_soft_function(
+    monkeypatch: pytest.MonkeyPatch, into: str, arm: str
+) -> None:
+    _census_with(monkeypatch, arm, into)
+    with pytest.raises(AssertionError) as failed:
+        test_every_arm_that_names_a_matrix_error_reports_it_through_the_reporter()
+    assert f"unlisted [({into!r}" in str(failed.value)
 
 
 def test_the_reporter_docstring_names_no_private_function_of_the_module() -> None:
