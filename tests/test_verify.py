@@ -454,11 +454,12 @@ _WN = _row(
 )
 
 
-def test_a_carrier_the_route_lists_nowhere_is_named_absent() -> None:
+def test_a_carrier_the_route_lists_nowhere_is_named_unseen() -> None:
     verdict = v.unpriced(_WN, _probe("AA", "DL", "F9", "XE", "UA"))
-    assert verdict.outcome == "carrier-absent"
+    assert verdict.outcome == "carrier-unseen"
     assert verdict.missing_carriers == ("WN",)
     assert verdict.reason is not None
+    assert "none of the 5 trips Matrix returned" in verdict.reason
     assert "WN" in verdict.reason
     assert "AA, DL, F9, UA, XE" in verdict.reason
     assert "at most 0 stops" in verdict.reason
@@ -470,7 +471,7 @@ def test_a_carrier_the_route_lists_is_no_solution() -> None:
     assert verdict.missing_carriers == ()
 
 
-def test_an_empty_probe_proves_no_carrier_absent() -> None:
+def test_an_empty_probe_names_no_unseen_carrier() -> None:
     verdict = v.unpriced(_WN, SearchResult.from_api({"solutionList": {"solutions": []}}))
     assert verdict.outcome == "no-solution"
     assert verdict.missing_carriers == ()
@@ -723,7 +724,12 @@ def test_the_rows_own_itinerary_verifies_with_its_fares(
     assert google[0]["dates"] == [leg["departure_datetime"][:10] for leg in listed["legs"]]
     assert google[0]["airports"] == [["JFK", "SEA"], ["SEA", "LAX"]]
     assert verdict["google"]["price"] == price
-    assert verdict["matrix"] == {"price": price, "total": "USD213.20", "slices": google}
+    assert verdict["matrix"] == {
+        "price": price,
+        "per_traveler": price,
+        "total": "USD213.20",
+        "slices": google,
+    }
     assert verdict["delta"] == 0.0
     assert verdict["missing_carriers"] == []
     assert [(f["fare_basis"], f["booking_code"]) for f in verdict["fares"]] == [
@@ -929,7 +935,7 @@ def _listing(*carriers: str) -> dict[str, Any]:
     return _probe(*carriers).raw or {}
 
 
-def test_a_carrier_matrix_lists_nowhere_is_named(
+def test_a_carrier_matrix_lists_nowhere_is_not_seen(
     gf_session: Callable[..., Any], matrix: _Matrix
 ) -> None:
     n, _ = _as_row()
@@ -938,7 +944,7 @@ def test_a_carrier_matrix_lists_nowhere_is_named(
     result = _run("-n", "40", "--verify", "--pick", str(n), "--format", "json")
     assert result.exit_code == 0, result.output
     verdict = json.loads(result.stdout)["verify"]
-    assert verdict["outcome"] == "carrier-absent"
+    assert verdict["outcome"] == "carrier-unseen"
     assert verdict["missing_carriers"] == ["AS"]
     assert "AS" in verdict["reason"]
     assert verdict["matrix"] is None
@@ -1342,21 +1348,29 @@ def test_awards_json_is_refused_naming_cash_only(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.parametrize(
-    "args",
+    ("args", "said"),
     [
-        pytest.param(["--slice", f"JFK-LAX:{_DEP}"], id="slice"),
-        pytest.param(["--include-unavailable"], id="matrix-only-constraint"),
+        # A multi-city search under --backend gflight runs on Google, as
+        # separate tickets, so the refusal names the row it lacks.
+        pytest.param(
+            ["--slice", f"JFK-LAX:{_DEP}"],
+            "--verify checks a Google Flights row on one ticket, and a --slice search shows none.",
+            id="slice",
+        ),
+        pytest.param(
+            ["--include-unavailable"],
+            "--verify needs a Google Flights row, and this search runs on Matrix.",
+            id="matrix-only-constraint",
+        ),
     ],
 )
-def test_a_search_that_runs_on_matrix_is_refused_before_any_request(
-    monkeypatch: pytest.MonkeyPatch, args: list[str]
+def test_a_search_with_no_google_row_is_refused_before_any_request(
+    monkeypatch: pytest.MonkeyPatch, args: list[str], said: str
 ) -> None:
     _no_request(monkeypatch)
     result = _run("--verify", *args)
     assert result.exit_code == 2, result.output
-    assert "--verify needs a Google Flights row, and this search runs on Matrix." in (
-        " ".join(result.stderr.split())
-    )
+    assert said in " ".join(result.stderr.split())
     assert result.stdout == ""
 
 

@@ -261,14 +261,12 @@ def test_bags_are_refused_where_only_matrix_could_answer(
 @pytest.mark.parametrize(
     "args,says",
     [
-        (["--max-price", "250", "--cabin", "economy,business"], "--max-price takes one --cabin"),
-        (["--bags", "1", "--cabin", "y,j"], "--bags takes one --cabin"),
         # Google counts the bags for the party and then states no allowance.
         (["--bags", "1", "--adults", "2"], "--bags takes one traveler"),
         (["--bags", "1", "--children", "1"], "--bags takes one traveler"),
         (["--bags", "1", "--sellers", "--fast"], "--sellers lists fares from a booking page"),
     ],
-    ids=["cap-cabins", "bags-cabins", "bags-two-adults", "bags-child", "bags-sellers"],
+    ids=["bags-two-adults", "bags-child", "bags-sellers"],
 )
 def test_what_the_flags_cannot_be_combined_with_exits_2_before_any_backend(
     ran: list[tuple[str, dict[str, Any]]], args: list[str], says: str
@@ -278,6 +276,27 @@ def test_what_the_flags_cannot_be_combined_with_exits_2_before_any_backend(
     assert not ran
     assert says in _flat(result.output)
     assert "Using Matrix" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("args", "asked"),
+    [
+        (["--max-price", "250", "--cabin", "economy,business"], {"max_price": 250}),
+        (["--bags", "1", "--cabin", "y,j"], {"bags": Bags(checked=1, carry_on=0)}),
+    ],
+    ids=["cap-cabins", "bags-cabins"],
+)
+def test_several_cabins_search_with_the_cap_or_the_bags(
+    ran: list[tuple[str, dict[str, Any]]], args: list[str], asked: dict[str, Any]
+) -> None:
+    """Each cabin's search is the one-cabin search with the flag. Red at the
+    base, which refused both (exit 2)."""
+    result = _search_cli(*args)
+    assert result.exit_code == 0, result.output
+    [(name, kw)] = ran
+    assert name == "_run_gflight_path_multi"
+    for field, value in asked.items():
+        assert getattr(kw["opts"], field) == value
 
 
 def test_a_price_cap_with_sellers_is_allowed(ran: list[tuple[str, dict[str, Any]]]) -> None:
@@ -698,7 +717,7 @@ def awards_on(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(cli, "_should_run_awards", _configured)
     monkeypatch.setattr(pp_cli, "gather_awards", _gather)
-    monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
+    monkeypatch.setattr(pp_cli, "stored_tokens", lambda: None)
 
 
 def _award_document(*args: str) -> list[dict[str, Any]]:

@@ -1,7 +1,7 @@
 # pyright: reportPrivateUsage=false
 """`-n` is one number for everything the user can act on.
 
-Google's search page serves its whole board — around thirty rows — whatever
+Google's search page serves its whole board — around a hundred rows — whatever
 count is asked of it, so the count is applied on the way out. What is under
 test is that the table, the JSON document, the pinned deep link and the award
 matcher are all handed the SAME set, and that the wide board still reaches the
@@ -15,9 +15,12 @@ round trip's combinations in the order the fan-out built them, pin-major; both
 are put in price order before the trim, ties kept in the order they arrived and
 unpriced rows last.
 
-The multi-cabin arms are where only the COUNT agrees: the JSON document carries
-the first `-n` of each cabin's own board and the table carries the top `-n` of
-the join, which is the same number of rows drawn from different sets.
+The multi-cabin arms carry more than `-n` where the table needs it. The table
+shows the top `-n` of the join, which prices every cabin on the sort cabin's
+itineraries; each cabin's list in the JSON document and the envelope holds the
+first `-n` of that cabin's own board, then, in price order, each other row of
+the board whose fare the table prints or the line under it names. Every fare
+the table shows is then a row of its cabin in the document.
 
 No rows is a value and has its own shape: an empty board is `[]` under
 `--format json` and a sentence on stdout otherwise, while a query that failed is
@@ -243,7 +246,7 @@ def test_the_award_matcher_is_given_the_rows_the_user_saw(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Awards are fanned out per itinerary and priced against its cash fare, so
-    a matcher handed the whole board spends thirty lookups to report on rows
+    a matcher handed the whole board spends about a hundred lookups to report on rows
     the user cannot pick."""
     seen: list[SearchResult] = []
 
@@ -814,7 +817,7 @@ def test_a_one_way_table_handed_the_whole_board_prints_its_cheapest_rows(
 
 
 _NO_PRICE_CELL = "—"
-_ROW = re.compile(r"^│\s*\d+\s*│")
+_ROW = re.compile(r"^│\s*★?\d+\s*│")
 
 
 def test_a_round_trip_row_google_did_not_price_is_shown_last_and_reads_as_a_dash(
