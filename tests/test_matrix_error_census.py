@@ -2,10 +2,13 @@
 through `_print_matrix_error`, so one backend error reads the same whichever
 command asked for it.
 
-Parsed from the module, so a new arm that names `MatrixApiError` and prints it
-some other way fails here until it reports through the reporter or is added to
-`_SOFT` with its reason. A list of callers in the reporter's docstring rots on
-the next edit and says nothing when it does; this does."""
+Parsed from the module. An arm is an `except` whose type names
+`MatrixApiError`, or an `if` whose test is `isinstance(..., MatrixApiError)`
+alone or under `and`/`or`. A new arm that prints the error some other way fails
+here until it reports through the reporter or is added to `_SOFT` with its
+reason. Not seen: a negated test, an `isinstance` inside another call, a
+`match` case and a conditional expression. A list of callers in the reporter's
+docstring rots on the next edit and says nothing when it does; this does."""
 
 from __future__ import annotations
 
@@ -48,20 +51,26 @@ def _calls_reporter(body: list[ast.stmt]) -> bool:
     )
 
 
+def _tests_error(test: ast.expr) -> bool:
+    """Whether the `if` body is a branch a `MatrixApiError` takes. A negated
+    test sends it to the other branch, so `not` is not looked through."""
+    match test:
+        case ast.Call(func=ast.Name(id="isinstance")):
+            return _names_error(test)
+        case ast.BoolOp(values=values):
+            return any(_tests_error(v) for v in values)
+        case _:
+            return False
+
+
 def _arms(node: ast.AST, fn: str, found: list[tuple[str, str, bool]]) -> None:
-    """Each handler or `isinstance` branch that names the error, as
-    (enclosing function, kind, whether its body calls the reporter)."""
+    """Each arm the module docstring counts, as (enclosing function, kind,
+    whether its body calls the reporter)."""
     for child in ast.iter_child_nodes(node):
         inside = child.name if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef) else fn
         if isinstance(child, ast.ExceptHandler) and child.type and _names_error(child.type):
             found.append((fn, "except", _calls_reporter(child.body)))
-        elif (
-            isinstance(child, ast.If)
-            and isinstance(child.test, ast.Call)
-            and isinstance(child.test.func, ast.Name)
-            and child.test.func.id == "isinstance"
-            and _names_error(child.test)
-        ):
+        elif isinstance(child, ast.If) and _tests_error(child.test):
             found.append((fn, "isinstance", _calls_reporter(child.body)))
         _arms(child, inside, found)
 
@@ -134,3 +143,17 @@ def test_the_console_sanitizing_note_points_at_this_census() -> None:
     text = " ".join(note.read_text().split())
     assert "tests/test_matrix_error_census.py" in text
     assert "is the one deliberate exception" not in text
+
+
+@pytest.mark.parametrize(
+    "cond",
+    ["isinstance(f, MatrixApiError) and f.message", "f is None or isinstance(f, MatrixApiError)"],
+    ids=["and", "or"],
+)
+def test_the_census_fails_on_an_isinstance_arm_under_and_or(
+    monkeypatch: pytest.MonkeyPatch, cond: str
+) -> None:
+    _census_with(monkeypatch, f"def _new_arm(f):\n    if {cond}:\n        raise typer.Exit(1)")
+    with pytest.raises(AssertionError) as failed:
+        test_every_arm_that_names_a_matrix_error_reports_it_through_the_reporter()
+    assert "unlisted [('_new_arm', 'isinstance')]" in str(failed.value)
