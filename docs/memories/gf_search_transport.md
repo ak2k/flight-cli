@@ -271,6 +271,15 @@ each leg `co2_emissions_g`, null where the slot is empty. The Google table adds
 `CO2 kg` (kilograms and the percent; green lower, red higher) when a shown row
 has a figure.
 
+**Google's Top flights (`ds:1[2]`).** `_rows_from_page_html` marks each row its
+page lists in `[2]`, and every Google JSON row carries `top_flight`, false for
+the rest. An itinerary listed twice keeps the mark on whichever listing dedupe
+or the page merge keeps. A round trip's outbound reads its outbound page and its
+return the pinned return page, which may carry a `[2]` or not (the shapes table
+in `gf_page_refusals_and_ds1.md`). The Cheapest tab's own `[2]` is not this
+board, so no row it adds is marked. The Google table numbers a marked member
+`★N`, with one key line under it.
+
 **The table at the output's width.** Rich takes the width from the first of
 stdin, stdout and stderr that is a terminal; `COLUMNS` overrides it; with no
 terminal and no `COLUMNS` it is 80. So `flight … | less` from a terminal prints

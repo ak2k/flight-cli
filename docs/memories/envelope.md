@@ -154,6 +154,15 @@ whole where it is of boards the row filter emptied. Google's price graph not
 asked or not shown beside a Matrix calendar is a note too: Matrix's grid is
 the answer, and the graph is Google's estimate beside it.
 
+Like `separate_tickets`, `top_flight` is a field of each Google member of a
+`row` and narrows nothing. It is true when the page that listed the member put
+that itinerary on Google's Top flights board (`ds:1[2]`): an outbound's
+outbound page, a return's pinned return page, a `--split`, open-jaw or
+multi-city ticket's one-way page. It is false on every row the Cheapest tab
+adds and on every member of a page with no such board, which writes no note.
+Matrix rows carry neither key. `row` is untyped in the schema, so
+`docs/envelope.schema.json` does not change.
+
 ## How the run is held
 
 `cli._envelope_command` decorates `search` and `calendar`. Under `--format

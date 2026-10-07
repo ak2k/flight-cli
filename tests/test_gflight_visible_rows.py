@@ -817,7 +817,7 @@ def test_a_one_way_table_handed_the_whole_board_prints_its_cheapest_rows(
 
 
 _NO_PRICE_CELL = "—"
-_ROW = re.compile(r"^│\s*\d+\s*│")
+_ROW = re.compile(r"^│\s*★?\d+\s*│")
 
 
 def test_a_round_trip_row_google_did_not_price_is_shown_last_and_reads_as_a_dash(

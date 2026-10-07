@@ -20,7 +20,7 @@ import json
 import re
 import shlex
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta
 from functools import partial, wraps
 from itertools import groupby, pairwise
@@ -6168,7 +6168,8 @@ def _merged_boards(boards: Sequence[Board[Any]]) -> list[Any]:
     """Every row of `boards` once, by the whole trip and how Google sells it
     (`row_key`, `ticketing`): the cheaper listing is kept, in the place the
     first one took. A row on separate tickets is a booking of its own, so it
-    stands beside the one-ticket row on its flights, as on one page."""
+    stands beside the one-ticket row on its flights, as on one page. A member
+    either page put on its Top flights board is a top flight on the row kept."""
     from ._gflight_ids import row_key  # noqa: PLC0415 — fli, ~95 ms
 
     at: dict[tuple[tuple[ItineraryKey, ...], tuple[Any, ...]], int] = {}
@@ -6181,8 +6182,25 @@ def _merged_boards(boards: Sequence[Board[Any]]) -> list[Any]:
                 at[key] = len(rows)
                 rows.append(r)
             elif _terminal_fare_key(r) < _terminal_fare_key(rows[seen]):
-                rows[seen] = r
+                rows[seen] = _with_top_marks(r, rows[seen])
+            else:
+                rows[seen] = _with_top_marks(rows[seen], r)
     return rows
+
+
+def _with_top_marks(kept: Any, dropped: Any) -> Any:
+    """`kept`, each member a top flight where it or `dropped`'s member in the
+    same slice is one."""
+    one_way = not isinstance(kept, tuple)
+    ours = (kept,) if one_way else cast("tuple[Any, ...]", kept)
+    theirs = (dropped,) if one_way else cast("tuple[Any, ...]", dropped)
+    members = tuple(
+        replace(k, top_flight=True)
+        if getattr(d, "top_flight", False) and not getattr(k, "top_flight", False)
+        else k
+        for k, d in zip(ours, theirs, strict=True)
+    )
+    return members[0] if one_way else members
 
 
 def _kept(outbound: _Outbound) -> list[Any]:
@@ -6221,6 +6239,22 @@ def _union_pins(kept: dict[int, list[Any]], top_n: int) -> dict[int, list[Itiner
     for key in pin_keys(Board(union), top_n=top_n):
         shares.setdefault(owner[key], []).append(key)
     return shares
+
+
+def _mark_tops(boards: Sequence[Board[Any]], kept: Iterable[Sequence[Any]]) -> None:
+    """Mark, in place, every listing on `boards` of an outbound that any page's
+    `kept` rows mark. `_union_pins` pins an outbound on one page alone, so its
+    pairs never meet another page's copy in `_merged_boards`."""
+    from ._gflight_ids import row_key  # noqa: PLC0415 — fli, ~95 ms
+
+    tops = {row_key(r) for rows in kept for r in rows if getattr(r, "top_flight", False)}
+    if not tops:
+        return
+    for board in boards:
+        for j, r in enumerate(board):
+            if not r.top_flight and row_key(r) in tops:
+                others = tuple(replace(o, top_flight=True) for o in r.others)
+                board[j] = replace(r, top_flight=True, others=others)
 
 
 def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way a page answers
@@ -6308,6 +6342,7 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
             # Once a page, so its filter counts each row over the stop ceiling once.
             kept = {i: _kept(ob) for i, ob in outbounds}
             shares = _union_pins(kept, top_n)
+            _mark_tops([ob.board for _, ob in outbounds], kept.values())
             for i, ob in outbounds:
                 keys = shares.get(i, [])
                 # A page with no pin is still asked for its Cheapest tab: a row
@@ -6472,6 +6507,9 @@ def _gflight_json_row(g: Any, bags: Bags | None = None) -> dict[str, Any]:
     a self transfer included, and null where the page does not say; fli's
     `self_transfer` is the subset on which bags are rechecked.
 
+    `top_flight` is true for a row the page that listed it put on Google's Top
+    flights board.
+
     A leg's `departure_airport`/`arrival_airport` are IATA codes and its
     `*_airport_name` fields hold fli's names for those airports."""
     row: dict[str, Any] = {**g.flight.model_dump(mode="json"), "flight_id": g.flight_id}
@@ -6479,6 +6517,7 @@ def _gflight_json_row(g: Any, bags: Bags | None = None) -> dict[str, Any]:
         row["separate_tickets"] = True
     else:
         row["separate_tickets"] = None if g.flight.self_transfer is None else False
+    row["top_flight"] = getattr(g, "top_flight", False)
     legs: list[Any] = row.get("legs") or []
     # fli dumps an `Airport` member by its value, the name; its member name is the code.
     for leg, src in zip(legs, g.flight.legs, strict=False):
@@ -9992,7 +10031,9 @@ def _render_gflight_table(
     split a designator such as "EI 152" across two lines. Google prices the
     whole party, so for `passengers` above one the price header names the party.
     A row Google sells as separate tickets ends its price in `†`, or `‡` for a
-    self transfer, and a key line follows only when one is shown.
+    self transfer, and a key line follows only when one is shown. A member its
+    page put on Google's Top flights board is numbered `★N`, with its own key
+    line under the same rule.
 
     A round-trip combination can print two DIFFERENT prices, on its `Na` and
     `Nb` rows, and that reads as a bug until you know what each is: the `a` row
@@ -10067,7 +10108,9 @@ def _render_gflight_table(
             items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
             for j, g in enumerate(items):
                 fr = g.flight  # unwrap GFlightWithId → fli FlightResult
-                label = f"{i}{'a' if j == 0 else 'b'}" if len(items) > 1 else str(i)
+                label = ("★" if getattr(g, "top_flight", False) else "") + (
+                    f"{i}{'a' if j == 0 else 'b'}" if len(items) > 1 else str(i)
+                )
                 (legs_str, legroom_str), *more = _gflight_leg_rows(
                     g, match_carriers, route=per_row_route, stacked=stacked
                 )
@@ -10124,11 +10167,21 @@ def _render_gflight_table(
                 isinstance(r, tuple) and len(cast("tuple[Any, ...]", r)) == 1 for r in shown
             )
         )
+    _print_top_flight_key(members)
     if insight is not None:
         console.print(
             f"Price insight: prices are {_safe_text(insight.level)} for this trip "
             f"(usually {_safe_text(insight.currency)}{insight.typical_low:.2f}"
             f"-{_safe_text(insight.currency)}{insight.typical_high:.2f})."
+        )
+
+
+def _print_top_flight_key(members: list[Any]) -> None:
+    """The key under a table that numbers a top flight `★N`, when `members`,
+    the rows it shows, hold one."""
+    if any(getattr(g, "top_flight", False) for g in members):
+        console.print(
+            "[dim]★ top flight: Google lists it under Top flights. The table is in price order.[/]"
         )
 
 
