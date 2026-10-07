@@ -22,6 +22,7 @@ import pytest
 from conftest import FIXTURE_DIR, GFLIGHT_PAGE_DIR, _answering, _ds1, _page
 from flight_cli import _gflight_ids as gfid
 from flight_cli._gf_common import PageFetch
+from flight_cli._gf_errors import GfPageShapeError, GfSearchServerError
 from flight_cli.cli import BACKEND_GFLIGHT
 from test_backend_dispatch import _call
 from test_calendar_split import _pair_client
@@ -39,6 +40,7 @@ from test_envelope import (
 from test_gf_full_board import _DEP, _LAX, _RET, _served
 from test_gf_lost_pins import _RETURNS, _return
 from test_gf_separate_tickets import _FLL_LGA, _fll_lga_pages
+from test_gf_server_error import _error_page
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -461,6 +463,26 @@ def test_a_flightless_board_carries_none(
     gf_session(gf_capture("ds1_flightless_board.json"))
     env = _envelope_of(_envelope(*_LAX_ONE_WAY))
     assert (env["facets"], _notes(env, "facets")) == ([], [_NO_PAGE])
+
+
+def test_a_server_error_reads_no_facets_and_the_re_read_states_them(
+    gf_session: Callable[..., Any],
+) -> None:
+    """The error status is named before any part of the page is read as a
+    board, and a search that meets it once carries the facets of the page
+    read after it, as the same search does without it."""
+    with pytest.raises(GfSearchServerError) as caught:
+        gfid._rows_from_page_html(PageFetch(_error_page(), _URL, 200))
+    assert caught.value.code == 13
+    assert not isinstance(caught.value, GfPageShapeError)
+    gf_session(_served(_LAX))
+    clean = _envelope_of(_envelope(*_LAX_ONE_WAY))
+    fake = gf_session(_error_page(), _served(_LAX))
+    env = _envelope_of(_envelope(*_LAX_ONE_WAY))
+    assert (env["facets"], _notes(env, "facets")) == (clean["facets"], [])
+    assert len(env["facets"]) == 1
+    # The error, its re-read, then the Cheapest tab.
+    assert len(fake.gets) == 3
 
 
 def test_a_matrix_answer_carries_none() -> None:

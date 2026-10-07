@@ -50,7 +50,8 @@ errorHasStatus: true,});`. The blob ends on `errorHasStatus`, not on
 it (`_DS_ERROR_BLOB_RE`): the first blob keyed `ds:1` whose `data:` decodes to a
 list with an int, not a bool, at `[0]`. It runs only when `_extract_ds1` found
 no board, before the consent check, so a page that carries a board reads as
-before. Measured on NYC-LON in 2026-10, the search fell back to Matrix this way
+before, and no part of an error page is read as a board: its rows, insight,
+history and route facets come from the re-read that carries one. Measured on NYC-LON in 2026-10, the search fell back to Matrix this way
 on 3 of 8 probe loads and 1 of 10 sampler loads; the three failing reads
 captured, one load's reads of one URL, all carry code 13, and none of 300 clean
 bodies or the 27 committed fixtures matches. Only 13 has been seen; any other
