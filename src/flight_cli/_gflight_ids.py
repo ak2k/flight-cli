@@ -2116,9 +2116,10 @@ class Board[T](list[T]):
     went unread. `capped_at` maps a currency to the highest fare on a page
     priced in it that stopped at Google's row cap (`_ROW_CAP`): every fare in
     that currency at or below it is listed, and a dearer one may be missing.
-    Empty when no page stopped there. A round trip carries its outbound page's,
-    and a board showing the Cheapest tab's separate tickets the lower of its own
-    and the tab's in each currency (`lowest_caps`). `stopped` is the throttle,
+    Empty when no page stopped there. A round trip carries the lowest of its
+    outbound page's and its return pages' in each currency, and a board
+    showing the Cheapest tab's separate tickets the lower of its own and the
+    tab's in each currency (`lowest_caps`). `stopped` is the throttle,
     transport failure or dead browser that ended a round trip's pin loop after
     some pin was served: the rows are kept, and a caller that asks more pages
     reads it to end the search."""
@@ -3036,6 +3037,7 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
     lost: list[str] = []
     dropped_returns = 0
     unread = first.unread
+    return_caps: list[Mapping[str, float]] = []
     # The segment the recursion below is asked to FILL, which is the one after
     # the pin it is given — checking the pinned segment instead would compare a
     # return board against the outbound and accept a page that ignored the pin,
@@ -3088,6 +3090,9 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
             refused.append(GfPinIgnoredError(ignored))
             lost.append(_lost_pin(picked, str(refused[-1]), currency))
             continue
+        # Read off the page, before the routing runs on it: a return above the
+        # page's cap may be the one missing, the routing having left any or not.
+        return_caps.append(nxt.capped_at)
         leg = selected_count + 1
         listed = [nx if isinstance(nx, tuple) else _listing(leg, nx, fits) for nx in nxt]
         kept = [
@@ -3120,9 +3125,9 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
         dropped=dropped,
         pinned=len(pins),
         unread=unread,
-        # The outbound page's alone: each return page lists one pin's returns,
-        # so its cap says nothing about which trips are on the board.
-        capped_at=first.capped_at,
+        # A return page lists its pin's round-trip totals, so its cap compares
+        # with the outbound page's.
+        capped_at=lowest_caps(first.capped_at, *return_caps),
         stopped=stopped,
     )
     # Before the pin outcome is judged: a separate-ticket itinerary needs no
