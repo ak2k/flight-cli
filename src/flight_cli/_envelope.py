@@ -24,7 +24,7 @@ import json
 import re
 import sys
 import threading
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, TextIO, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, TextIO, assert_never, cast
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
@@ -359,14 +359,17 @@ def _document(rec: _Recorder, *, code: int, stderr: str, stray: str) -> str:
     unanswered: list[str] = []
     groups: list[CabinRows] = []
     rows: Sequence[ResultRow]
-    if rec.command == "search":
-        asked = rec.asked or list(rec.by_cabin)
-        unanswered = [c for c in asked if c not in rec.by_cabin]
-        extra = [c for c in rec.by_cabin if c not in asked]
-        groups = [CabinRows(cabin=c, rows=rec.by_cabin.get(c, [])) for c in [*asked, *extra]]
-        rows = [r for g in groups for r in g.rows]
-    else:
-        rows = rec.days
+    match rec.command:
+        case "search":
+            asked = rec.asked or list(rec.by_cabin)
+            unanswered = [c for c in asked if c not in rec.by_cabin]
+            extra = [c for c in rec.by_cabin if c not in asked]
+            groups = [CabinRows(cabin=c, rows=rec.by_cabin.get(c, [])) for c in [*asked, *extra]]
+            rows = [r for g in groups for r in g.rows]
+        case "calendar":
+            rows = rec.days
+        case _:
+            assert_never(rec.command)
     priced = {r.currency for r in rows if r.price is not None}
     currency = next(iter(priced)) if len(priced) == 1 else None
     narrowed = any(of is None or rec.backend in (None, of) for of in rec.narrowed)
@@ -392,11 +395,14 @@ def _document(rec: _Recorder, *, code: int, stderr: str, stray: str) -> str:
         "cross_check": rec.cross_check,
         "split_ticket": rec.split_ticket,
     }
-    doc = (
-        SearchEnvelope(command="search", results=groups, **common)
-        if rec.command == "search"
-        else CalendarEnvelope(command="calendar", results=rec.days, **common)
-    )
+    doc: SearchEnvelope | CalendarEnvelope
+    match rec.command:
+        case "search":
+            doc = SearchEnvelope(command="search", results=groups, **common)
+        case "calendar":
+            doc = CalendarEnvelope(command="calendar", results=rec.days, **common)
+        case _:
+            assert_never(rec.command)
     # By alias: a graph cell's `return` is a keyword in Python.
     return json.dumps(doc.model_dump(mode="json", by_alias=True), indent=2)
 
