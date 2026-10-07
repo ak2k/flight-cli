@@ -9228,17 +9228,30 @@ def _cabins_capped(
     results_by_cabin: dict[Cabin, SearchResult], opts: SearchOptions
 ) -> dict[Cabin, SearchResult]:
     """Each cabin's Matrix answer cut to the fares under the search's cap
-    (`_price_capped`), each cabin it leaves with no fare named on stderr."""
+    (`_price_capped`), each cabin it leaves with no fare named on stderr.
+
+    A cabin keeps Matrix's own count where the cap dropped a fare it could not
+    read, one stating no total in the cap's currency, so only a count of zero
+    says no fare is under the cap; otherwise the line says those fares are not
+    shown."""
     capped = {
         cab: _price_capped(res, opts, passengers=opts.pax.total)
         for cab, res in results_by_cabin.items()
     }
     if (cap := _cap_text(opts)) is not None:
         for cab, res in capped.items():
-            if not res.solutions:
+            if res.solutions:
+                continue
+            if res.solution_count == 0:
                 err.print(
                     f"[yellow]Matrix {_safe_text(cab.value)}: no fare at or under "
                     f"{_safe_text(cap)}.[/]"
+                )
+            else:
+                err.print(
+                    f"[yellow]Matrix {_safe_text(cab.value)}: no fare that states a "
+                    f"{_safe_text(opts.currency or 'USD')} total is at or under "
+                    f"{_safe_text(cap)}; those that state none are not shown.[/]"
                 )
     return capped
 

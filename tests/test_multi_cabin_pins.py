@@ -1533,17 +1533,31 @@ def test_a_capped_matrix_document_holds_no_fare_over_the_cap(
 
 
 @pytest.mark.parametrize(
-    ("untotaled", "business", "count"),
-    [(frozenset[Cabin](), [1800.0], 1), (frozenset({Cabin.BUSINESS}), list[float](), 3)],
+    ("untotaled", "business", "count", "line"),
+    [
+        (frozenset[Cabin](), [1800.0], 1, None),
+        (
+            frozenset({Cabin.BUSINESS}),
+            list[float](),
+            3,
+            "Matrix BUSINESS: no fare that states a USD total is at or under USD 2000; "
+            "those that state none are not shown.",
+        ),
+    ],
     ids=["totaled", "untotaled"],
 )
 def test_a_partys_capped_matrix_cabin_is_held_to_its_total(
-    monkeypatch: pytest.MonkeyPatch, untotaled: frozenset[Cabin], business: list[float], count: int
+    monkeypatch: pytest.MonkeyPatch,
+    untotaled: frozenset[Cabin],
+    business: list[float],
+    count: int,
+    line: str | None,
 ) -> None:
     """Two adults under USD2000: UA103's total is USD1800, and the other
     business totals are over the cap. Where Matrix states no total, no fare
-    can be held to the cap, so none is kept and Matrix's count stays. Red at
-    the D1 commit."""
+    can be held to the cap, so none is kept and Matrix's count stays, and the
+    line says those fares are not shown: none was read as over the cap. Red at
+    the D1 commit; the untotaled line red where it said no fare was under."""
     args = ("--adults", "2", "--max-price", "2000")
     envelope = _matrix_search(
         monkeypatch, *args, "--format", "envelope", party=2, untotaled=untotaled
@@ -1554,8 +1568,12 @@ def test_a_partys_capped_matrix_cabin_is_held_to_its_total(
         _matrix_search(monkeypatch, *args, "--format", "json", party=2, untotaled=untotaled)
     )
     assert raw["BUSINESS"] == ([f"USD{p:.2f}" for p in business], count)
-    said = "Matrix BUSINESS: no fare at or under USD 2000." in _flat(envelope.stderr)
-    assert said == (not business)
+    stderr = _flat(envelope.stderr)
+    assert "no fare at or under" not in stderr
+    if line is None:
+        assert "Matrix BUSINESS" not in stderr
+    else:
+        assert line in stderr
 
 
 def test_a_capped_matrix_compare_asks_matrix_in_the_cap_s_currency(
