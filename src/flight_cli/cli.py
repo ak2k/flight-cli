@@ -3768,6 +3768,18 @@ def _slice_headers(count: int) -> list[str]:
     return [f"slice {n:d}" for n in range(1, count + 1)]
 
 
+def _keep_slice_cells_whole(table: Table, count: int) -> None:
+    """Rich narrows a table wider than the console by cutting cells with `…`,
+    which on a table of many slices can drop the one flight number two rows
+    differ by; there a slice cell folds onto more lines instead."""
+    if count <= _ROUND_TRIP_LEGS:
+        return
+    slice_headers = _slice_headers(count)
+    for column in table.columns:
+        if column.header in slice_headers:
+            column.overflow = "fold"
+
+
 def _slice_cells(slcs: list[Slice], count: int) -> list[str]:
     """One cell per slice column, `—` where the itinerary has fewer slices."""
     return [_fmt_slice_cell(slcs[i]) if i < len(slcs) else "—" for i in range(count)]
@@ -3858,6 +3870,7 @@ def _render_search(
     count = max([_ROUND_TRIP_LEGS, *(len(it.itinerary.slices) for it in shown if it.itinerary)])
     for header in _slice_headers(count):
         st.add_column(header)
+    _keep_slice_cells_whole(st, count)
     for i, it in enumerate(shown, 1):
         itn = it.itinerary
         slcs: list[Slice] = itn.slices if itn else []
@@ -8196,6 +8209,7 @@ def _render_multi_cabin_search(
         t.add_column(header)
     for letter in (_CABIN_TO_LETTER[c] for c in cabins):
         t.add_column(f"{letter}{ccy_tag}", justify="right")
+    _keep_slice_cells_whole(t, count)
 
     for i, row in enumerate(rows, 1):
         itn = row.itinerary.itinerary

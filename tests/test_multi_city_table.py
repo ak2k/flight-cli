@@ -16,7 +16,7 @@ from flight_cli.models import Itinerary, SearchResult
 
 def _slice(origin: str, destination: str, flight: str) -> dict[str, Any]:
     return {
-        "flights": [flight],
+        "flights": flight.split("/"),
         "origin": {"code": origin},
         "destination": {"code": destination},
         "departure": "2026-11-01T09:00",
@@ -25,12 +25,13 @@ def _slice(origin: str, destination: str, flight: str) -> dict[str, Any]:
     }
 
 
-def _itinerary(*flights: str) -> Itinerary:
-    """A priced itinerary of one slice per flight number, each its own city pair."""
-    pairs = [("JFK", "LAX"), ("LAX", "BOS"), ("BOS", "SFO")]
+def _itinerary(*flights: str, price: str = "USD500.00") -> Itinerary:
+    """A priced itinerary of one slice per flight (or `/`-joined connecting
+    flights), each its own city pair."""
+    pairs = [("JFK", "LAX"), ("LAX", "BOS"), ("BOS", "SFO"), ("SFO", "SEA"), ("SEA", "ORD")]
     return Itinerary.model_validate(
         {
-            "ext": {"price": "USD500.00"},
+            "ext": {"price": price},
             "itinerary": {
                 "slices": [_slice(o, d, f) for (o, d), f in zip(pairs, flights, strict=False)],
                 "carriers": [{"code": "UA"}],
@@ -95,3 +96,52 @@ def test_a_short_row_on_a_three_slice_table_dashes_its_missing_slices(
     assert "slice 3" in text
     (short_line,) = [line for line in text.splitlines() if "UA77" in line]
     assert short_line.count("—") == 2
+
+
+@pytest.fixture
+def narrow(monkeypatch: pytest.MonkeyPatch) -> io.StringIO:
+    """The table's console at 80 columns, the width Rich gives output that is
+    not a terminal."""
+    buf = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buf, width=80, color_system=None))
+    return buf
+
+
+def _render(table: str, itineraries: list[Itinerary]) -> None:
+    if table == "single-cabin":
+        cli._render_search(_result(*itineraries))  # pyright: ignore[reportPrivateUsage]
+        return
+    rows: list[MultiCabinRow] = []
+    for itn in itineraries:
+        row = MultiCabinRow(itinerary=itn)
+        row.prices[Cabin.COACH] = itn.price or ""
+        rows.append(row)
+    cli._render_multi_cabin_search(  # pyright: ignore[reportPrivateUsage]
+        rows, cabins=(Cabin.COACH,), sort_by=Cabin.COACH
+    )
+
+
+def _rows(text: str) -> list[list[str]]:
+    """Each table row's cells, a cell's lines joined with spaces dropped, so a
+    value folded over several lines reads whole. A row starts where `#` is set."""
+    rows: list[list[str]] = []
+    for line in text.splitlines():
+        cells = line.split("│")[1:-1]
+        if cells and cells[0].strip():
+            rows.append([""] * len(cells))
+        if cells and rows:
+            rows[-1] = [a + b.replace(" ", "") for a, b in zip(rows[-1], cells, strict=True)]
+    return rows
+
+
+@pytest.mark.parametrize("table", ["single-cabin", "multi-cabin"])
+def test_a_narrow_four_slice_table_prints_each_flight_number_whole(
+    narrow: io.StringIO, table: str
+) -> None:
+    connecting = ("UA100/UA200", "UA101/UA201", "UA102/UA202")
+    _render(table, [_itinerary(*connecting, last) for last in ("UA300/UA1023", "UA300/UA1028")])
+    text = narrow.getvalue()
+    assert "…" not in text
+    first, second = _rows(text)
+    assert any("UA300/UA1023" in cell for cell in first)
+    assert any("UA300/UA1028" in cell for cell in second)
