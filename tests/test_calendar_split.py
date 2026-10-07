@@ -3652,7 +3652,11 @@ def test_the_provider_opt_help_names_the_file_this_process_reads() -> None:
     """The help says WHERE to put the option it is showing a flag for, and
     `FLIGHT_CLI_CONFIG_DIR` moves that file — a hardcoded default names a path the
     user may not have. Same defect, same fix, as the diagnostic one function over."""
-    assert str(_config.config_path()) in (cli._PROVIDER_OPT.help or "")  # pyright: ignore[reportPrivateUsage] — the option IS the unit
+    spec = importlib.util.spec_from_file_location("flight_cli._cli_help_probe", cli.__file__)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert str(_config.config_path()) in (module._PROVIDER_OPT.help or "")  # pyright: ignore[reportPrivateUsage] — the option IS the unit
 
 
 def _cli_module_with_config_dir(monkeypatch: Any, config_dir: str) -> ModuleType:
