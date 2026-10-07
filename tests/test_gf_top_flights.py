@@ -21,6 +21,7 @@ from conftest import GFLIGHT_PAGE_DIR, _answering, _ds1, _page
 from flight_cli import _gflight_ids as gfid
 from flight_cli import cli
 from flight_cli._gf_common import PageFetch
+from test_gf_separate_tickets import _FLL_LGA, _fll_lga_pages
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -254,3 +255,25 @@ def test_a_return_page_that_lists_a_top_board_marks_that_return_alone(
     doc, _ = _round_trip(gf_session, _return_with_top(1))
     assert {ret["flight_id"] for _, ret in doc if ret["top_flight"]} == {moved.flight_id}
     assert any(not ret["top_flight"] for _, ret in doc)
+
+
+# ───────────────────────────── the Cheapest tab ─────────────────────────────
+
+
+def test_no_row_the_cheapest_tab_adds_is_marked(gf_session: Callable[..., Any]) -> None:
+    """The Cheapest page lists its own `[2]`, B6272 on separate tickets among
+    it, and that is not Google's Top flights board; AA2720 is on the Best
+    page's."""
+    fake = gf_session(*_fll_lga_pages())
+    result = CliRunner().invoke(cli.app, [*_SEARCH, *_FLL_LGA, "--format", "json"])
+    assert result.exit_code == 0, result.output
+    assert len(fake.gets) == 11 + 1  # the board, ten pins, then the Cheapest tab
+    doc: list[list[dict[str, Any]]] = json.loads(result.stdout)
+    alone = [m for r in doc if len(r) == 1 for m in r]
+    assert len(alone) == 33
+    assert all(m["separate_tickets"] is True for m in alone)
+    assert [m["top_flight"] for m in alone].count(True) == 0
+    aa2720 = [out for out, *_ in doc if [leg["flight_number"] for leg in out["legs"]] == ["2720"]]
+    assert aa2720
+    assert all(out["top_flight"] is True for out in aa2720)
+    assert all(not out["top_flight"] for out, *_ in doc if out not in aa2720)

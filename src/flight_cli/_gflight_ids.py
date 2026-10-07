@@ -2901,7 +2901,8 @@ def _with_separate_tickets(
     round-trip total: Google serves no return board for it, pinned or not.
 
     `fits` picks each marked itinerary's listing, among its marked listings, as
-    it picks a base row's (`_marked_listing`).
+    it picks a base row's (`_marked_listing`). No row it adds is a top flight:
+    the page's own `[2]` is not Google's Top flights board.
 
     The page is not fetched when pinning stopped on a wall, the network or the
     browser, because it would meet the same one. A refusal of this page leaves
@@ -2942,7 +2943,9 @@ def _with_separate_tickets(
     except GfBackendError as e:
         unparsed = e.unread if isinstance(e, _PageUnreadError) else 0
         return with_notes(answer, failed=e, unread=unparsed)
-    listed = [m for r in page if (m := _marked_listing(r, fits)) is not None]
+    listed = [
+        replace(m, top_flight=False) for r in page if (m := _marked_listing(r, fits)) is not None
+    ]
     marked = [r for r in listed if keep is None or keep(0, r)]
     # Counted with the base's, so an answer they would have filled reads as
     # none matching the routing, not as Google having no flights.
