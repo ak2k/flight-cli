@@ -12,13 +12,35 @@ from __future__ import annotations
 
 import gzip
 import json
-from typing import Any
+import re
+from datetime import date
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from conftest import GFLIGHT_PAGE_DIR, _page
+from conftest import FIXTURE_DIR, GFLIGHT_PAGE_DIR, _answering, _ds1, _page
 from flight_cli import _gflight_ids as gfid
 from flight_cli._gf_common import PageFetch
+from test_calendar_split import _pair_client
+from test_envelope import (
+    _CALENDAR,
+    _SEARCH,
+    _envelope_of,
+    _example_7,
+    _hermetic,  # noqa: F401 # pyright: ignore[reportUnusedImport] — Matrix in process
+    _notes,
+    _rows,
+    _run,
+    _window_grid,
+)
+from test_gf_full_board import _DEP, _LAX, _RET, _served
+from test_gf_lost_pins import _RETURNS, _return
+from test_gf_separate_tickets import _FLL_LGA, _fll_lga_pages
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from click.testing import Result
 
 _URL = "https://www.google.com/travel/flights?tfs=abc"
 _ALLIANCES = (
@@ -260,3 +282,179 @@ def test_a_block_of_another_shape_states_none_and_leaves_the_board(mangle: Any) 
     assert list(board) == list(base)
     assert (board.insight, board.history) == (base.insight, base.history)
     assert base.insight is not None and base.history is not None
+
+
+# ─────────────────────────────────── envelope ───────────────────────────────
+
+_LAX_ONE_WAY = [
+    *("--cash-only", "JFK", "LAX", "--dep", _DEP.isoformat()),
+    *("--backend", "gflight", "--fast"),
+]
+_FACET_KEYS = [
+    "cabin",
+    "origins",
+    "destinations",
+    "currency",
+    "price",
+    "duration_minutes",
+    "layover_minutes",
+    "airlines",
+    "alliances",
+    "connecting_airports",
+]
+_NO_PAGE = "facets: no Google Flights page answered with one"
+# `--format json` of `_LAX_ONE_WAY` on the JFK-LAX capture, its dates as offsets
+# from the departure day (`_days_from_dep`).
+_RECORDED = FIXTURE_DIR / "gf_jfk_lax_fast_document.json"
+_ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _days_from_dep(text: str) -> str:
+    return _ISO_DAY.sub(lambda m: f"DEP{(date.fromisoformat(m[0]) - _DEP).days:+d}", text)
+
+
+def _envelope(*args: str) -> Result:
+    return _run(*_SEARCH, *args, "--format", "envelope")
+
+
+def _lax_with(block: Callable[[list[Any]], None]) -> str:
+    payload: list[Any] = json.loads(_ds1(_LAX))
+    block(payload[7])
+    return _page(
+        _answering(json.dumps(payload), origin=None, destination=None, date=_DEP.isoformat())
+    )
+
+
+def test_a_one_way_carries_its_pages_facets_with_its_cabin_and_airports(
+    gf_session: Callable[..., Any],
+) -> None:
+    fake = gf_session(_served(_LAX))
+    env = _envelope_of(_envelope(*_LAX_ONE_WAY))
+    (facets,) = env["facets"]
+    assert list(facets) == _FACET_KEYS
+    assert (facets["cabin"], facets["origins"], facets["destinations"], facets["currency"]) == (
+        "COACH",
+        ["JFK"],
+        ["LAX"],
+        "USD",
+    )
+    assert facets["price"] == {"low": 204.0, "high": 1502.0}
+    assert facets["duration_minutes"] == {"low": 363, "high": 1409}
+    assert facets["layover_minutes"] == {"low": 28, "high": 974}
+    assert type(facets["price"]["low"]) is float and type(facets["layover_minutes"]["low"]) is int
+    assert (len(facets["airlines"]), facets["airlines"][0]) == (
+        14,
+        {"code": "AS", "name": "Alaska"},
+    )
+    assert facets["alliances"] == [{"code": c, "name": n} for c, n in _ALLIANCES]
+    assert (len(facets["connecting_airports"]), facets["connecting_airports"][0]) == (
+        22,
+        {"code": "ABQ", "city": "Albuquerque"},
+    )
+    assert _notes(env, "facets") == []
+    assert env["complete"] is True
+    # The board and its Cheapest tab: the facets are on the page already read.
+    assert len(fake.gets) == 2
+
+
+def test_the_json_document_carries_no_facets(gf_session: Callable[..., Any]) -> None:
+    """Byte for byte the document recorded without them, for the same GETs: a
+    one-way's is a bare list, which a key would turn into an object."""
+    fake = gf_session(_served(_LAX))
+    r = _run(*_SEARCH, *_LAX_ONE_WAY, "--format", "json")
+    assert r.exit_code == 0, r.output
+    assert _days_from_dep(r.stdout) == _RECORDED.read_text()
+    assert len(fake.gets) == 2
+
+
+def _return_stating_other_facets(name: str) -> str:
+    payload: list[Any] = json.loads(_ds1(name))
+    payload[7][0] = [[None, 1], [None, 2]]
+    payload[7][1][1] = [["ZZ", "Elsewhere"]]
+    return _page(
+        _answering(json.dumps(payload), origin=None, destination=None, date=_RET.isoformat())
+    )
+
+
+@pytest.mark.parametrize("edited", [False, True], ids=["as-served", "returns-edited"])
+def test_a_round_trip_carries_its_outbound_pages_facets_alone(
+    gf_session: Callable[..., Any], edited: bool
+) -> None:
+    """Its five return pages state the same block; edited, they still add
+    nothing and change nothing. The routing filter keeps 3 trips and leaves
+    the page's ranges as served."""
+    pages = map(_return_stating_other_facets if edited else _return, _RETURNS)
+    env = _example_7(gf_session, *pages)
+    assert len(_rows(env)) == 3
+    (facets,) = env["facets"]
+    assert (facets["cabin"], facets["origins"], facets["destinations"]) == (
+        "COACH",
+        ["JFK"],
+        ["LHR"],
+    )
+    assert facets["price"] == {"low": 810.0, "high": 2316.0}
+    assert (len(facets["airlines"]), len(facets["connecting_airports"])) == (34, 27)
+
+
+def test_a_round_trip_reads_no_facets_off_its_cheapest_tab(
+    gf_session: Callable[..., Any],
+) -> None:
+    """FLL-LGA's Cheapest tab states USD220-2097, 11 airlines and 21 airports;
+    its separate-ticket rows are on the board, its block is not."""
+    gf_session(*_fll_lga_pages())
+    env = _envelope_of(_envelope("--cash-only", *_FLL_LGA))
+    assert any(len(r["row"]) == 1 for r in _rows(env))
+    (facets,) = env["facets"]
+    assert (facets["origins"], facets["destinations"]) == (["FLL"], ["LGA"])
+    assert facets["price"] == {"low": 234.0, "high": 2097.0}
+    assert (len(facets["airlines"]), len(facets["connecting_airports"])) == (9, 13)
+
+
+def test_each_cabin_carries_its_own_pages_facets(gf_session: Callable[..., Any]) -> None:
+    gf_session(_served(_LAX))
+    env = _envelope_of(_envelope(*_LAX_ONE_WAY, "--cabin", "economy,business", "-n", "3"))
+    assert [(f["cabin"], f["origins"], f["destinations"]) for f in env["facets"]] == [
+        ("COACH", ["JFK"], ["LAX"]),
+        ("BUSINESS", ["JFK"], ["LAX"]),
+    ]
+
+
+def test_a_flightless_board_carries_none(
+    gf_session: Callable[..., Any], gf_capture: Callable[[str], str]
+) -> None:
+    gf_session(gf_capture("ds1_flightless_board.json"))
+    env = _envelope_of(_envelope(*_LAX_ONE_WAY))
+    assert (env["facets"], _notes(env, "facets")) == ([], [_NO_PAGE])
+
+
+def test_a_matrix_answer_carries_none() -> None:
+    env = _envelope_of(
+        _envelope("--cash-only", "JFK", "LHR", "--dep", _DEP.isoformat(), "--backend", "matrix")
+    )
+    assert (env["facets"], _notes(env, "facets")) == (
+        [],
+        ["facets: Matrix answered, and only a Google Flights page carries one"],
+    )
+
+
+def test_a_calendar_carries_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    _pair_client(monkeypatch, {("JFK", "LAX"): _window_grid("USD204.00")})
+    env = _envelope_of(_run(*_CALENDAR[:1], "JFK", "LAX", *_CALENDAR[1:]), command="calendar")
+    assert (env["facets"], _notes(env, "facets")) == ([], ["facets: a calendar carries none"])
+
+
+def test_a_mangled_block_is_a_note_and_nothing_else(gf_session: Callable[..., Any]) -> None:
+    """No entry and the empty key's note, with the rows, `complete`, the exit
+    status and stderr as the whole page gives them: the block says nothing
+    about the answer."""
+    gf_session(_served(_LAX))
+    whole = _envelope(*_LAX_ONE_WAY)
+    gf_session(_lax_with(_string_price))
+    mangled = _envelope(*_LAX_ONE_WAY)
+    env, base = _envelope_of(mangled), _envelope_of(whole)
+    assert (env["facets"], _notes(env, "facets")) == ([], [_NO_PAGE])
+    assert (mangled.exit_code, mangled.stderr) == (whole.exit_code, whole.stderr)
+    assert [n for n in env["notes"] if n != _NO_PAGE] == base["notes"]
+    assert {k: v for k, v in env.items() if k not in ("facets", "notes")} == {
+        k: v for k, v in base.items() if k not in ("facets", "notes")
+    }
