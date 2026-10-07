@@ -160,6 +160,12 @@ _THROTTLE_BACKOFF_S = 1.0  # exponential base: ~1, 2, 4, 8s (plus 0-50% jitter)
 # backoff there only delays the Matrix fallback the user is going to get anyway.
 _TRANSPORT_RETRY_ATTEMPTS = 2
 
+# Pauses before each re-read of a page Google answered with a server error
+# (`GfSearchServerError`). On NYC-LON three reads inside 0.65 s all failed and a
+# read ~150 s later carried the board, so a re-read at once buys nothing, and a
+# longer wait delays the hand-off to Matrix for an error that may outlast it.
+_SERVER_ERROR_PAUSES_S = (2.0, 6.0)
+
 
 def _backoff_for(attempt: int) -> float:
     """The jittered exponential backoff for the given rung.
@@ -411,17 +417,19 @@ _fanout_ladder: contextvars.ContextVar[_SharedThrottleLadder | None] = contextva
 
 
 class _Escalation:
-    """Whether a search on `auto` has moved to Chrome. Set once, by the first of
-    its threads whose ladder ran out on a throttle, and read by every thread of
-    that search before it asks Google anything.
+    """Whether a search on `auto` has moved to Chrome, and how long it may
+    still pause for Google's server errors. The flag is set once, by the first
+    of its threads whose ladder ran out on a throttle, and read by every thread
+    of that search before it asks Google anything.
 
-    The flag only. Chrome itself is thread-local (`_gf_browser.session`), so a
-    thread that reads it set opens or reuses its own, and closes it where the
-    browser transport closes one."""
+    Chrome itself is thread-local (`_gf_browser.session`), so a thread that
+    reads the flag set opens or reuses its own, and closes it where the browser
+    transport closes one."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self.done = False
+        self._pause_left = sum(_SERVER_ERROR_PAUSES_S)
 
     def take(self) -> bool:
         """Mark the search escalated: True for the one call that did, so the
@@ -430,6 +438,16 @@ class _Escalation:
             first = not self.done
             self.done = True
             return first
+
+    def pause(self, wanted: float) -> float:
+        """The part of `wanted` seconds this search may still pause before
+        re-reading a page Google answered with a server error, taken from what
+        it has left. One page's schedule in all: a search of eight pages would
+        otherwise wait 64 s on an error that outlasts its pauses."""
+        with self._lock:
+            granted = min(wanted, self._pause_left)
+            self._pause_left -= granted
+            return granted
 
 
 # The escalation of the search running now, or None outside one. A ContextVar
@@ -442,12 +460,14 @@ _search_escalation: contextvars.ContextVar[_Escalation | None] = contextvars.Con
 
 @contextlib.contextmanager
 def search_escalation() -> Generator[None]:
-    """Make every GF call inside this block one search to `auto`: the first
-    throttle a ladder cannot clear moves all of them to Chrome, said once.
+    """Make every GF call inside this block one search: on `auto` the first
+    throttle a ladder cannot clear moves all of them to Chrome, said once, and
+    on every transport they share one budget of pauses for Google's server
+    errors (`_Escalation.pause`).
 
     Opened on the thread that starts the search's workers, before it starts
-    them, so each worker copies this search's flag. A call outside it escalates
-    for itself alone."""
+    them, so each worker copies this search's object. A call outside it
+    escalates and pauses for itself alone."""
     token = _search_escalation.set(_Escalation())
     try:
         yield
@@ -2020,8 +2040,9 @@ class _PageUnreadError(GfPageShapeError):
         self.unread = unread
 
 
-# Reads of one search-page URL that carries no board before it is refused. A
-# rung-2 navigation costs seconds where a rung-1 GET costs one request.
+# Reads of one search-page URL that carries no board before it is refused, and
+# on rung 2 of one that carries Google's server error. A rung-2 navigation costs
+# seconds where a rung-1 GET costs one request.
 _BOARDLESS_READS = 3
 _BOARDLESS_NAVIGATIONS = 2
 
@@ -2256,9 +2277,15 @@ def _one_call(
     return rows
 
 
-def _read_search_page(fetch: Callable[[], PageFetch], *, reads: int) -> Board[GFlightWithId]:
-    """The board on the page `fetch` returns, fetched again while the page
-    carries none (`_BoardlessPageError`), and refused after `reads` fetches.
+def _read_search_page(
+    fetch: Callable[[], PageFetch],
+    *,
+    reads: int,
+    again: tuple[type[GfBackendError], ...] = (_BoardlessPageError,),
+) -> Board[GFlightWithId]:
+    """The board on the page `fetch` returns, fetched again at once while the
+    page is refused as one of `again`, and refused after `reads` fetches.
+    Rung 1 leaves a server error to `retry_throttled`, which pauses first.
 
     Every fetch sends the token, on either rung. Without it a multi-airport
     search is served the curated board, which can leave out the cheapest fare
@@ -2268,7 +2295,7 @@ def _read_search_page(fetch: Callable[[], PageFetch], *, reads: int) -> Board[GF
     while True:
         try:
             return _rows_from_page_html(fetch())
-        except _BoardlessPageError as e:
+        except again as e:
             if fetched == reads:
                 raise
             fetched += 1
@@ -2276,7 +2303,7 @@ def _read_search_page(fetch: Callable[[], PageFetch], *, reads: int) -> Board[GF
 
 
 def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
-    """Run a GF call under two distinct retry policies (see the constants above);
+    """Run a GF call under the retry policies below (see the constants above);
     shared by the search and date-grid paths.
 
     - cold-session **falsy result** -> a few quick, linearly-spaced retries on the
@@ -2295,12 +2322,18 @@ def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
       The type matters to the caller: the network is not a property of the
       query, so a caller looping over related queries stops rather than meeting
       one outage once per query.
+    - Google's **server error** in place of a board (`GfSearchServerError`) ->
+      a re-read after each of `_SERVER_ERROR_PAUSES_S`, re-raised when they are
+      spent. Each re-read is one of the call's wall attempts and books no rung
+      of the shared ladder; the pauses come out of the search's budget
+      (`_Escalation.pause`), so a search of many pages pauses for one.
 
     Both budgets come from ONE ladder object, bound here for the whole call:
     the fan-out's when there is one, otherwise this call's own. Inside a
     fan-out that ladder is shared, so the group backs off once against a wall
     that is per-IP (see `_SharedThrottleLadder`)."""
     ladder = _fanout_ladder.get() or _SharedThrottleLadder()
+    search = _search_escalation.get() or _Escalation()
     empty_attempts = 0
     # Per-CALL ceilings beside the ladder's per-fan-out ones. The ladder bounds
     # what the group spends against one wall; these bound what THIS call spends
@@ -2312,6 +2345,7 @@ def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
     # loop with no exit.
     wall_attempts = 0
     net_attempts = 0
+    server_errors = 0
     met_network = False
     try:
         while True:
@@ -2352,6 +2386,24 @@ def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
                 )
                 time.sleep(backoff)
                 continue
+            except GfSearchServerError as e:
+                # One of this call's wall attempts, so a page that errs and
+                # then throttles spends no more than one that throttles. Never
+                # booked on the shared round: an error on one page says nothing
+                # about the per-IP wall the fan-out shares.
+                server_errors += 1
+                wall_attempts += 1
+                if (
+                    server_errors > len(_SERVER_ERROR_PAUSES_S)
+                    or wall_attempts > _THROTTLE_RETRY_ATTEMPTS
+                ):
+                    raise
+                # Once the search has spent its pauses the page is read again
+                # at once, as a page with no board is.
+                pause = search.pause(_SERVER_ERROR_PAUSES_S[server_errors - 1])
+                log.debug("%s; reading the page again in %.0fs", e, pause)
+                time.sleep(pause)
+                continue
             ladder.succeeded(network=met_network)
             if result or not retry_empty:
                 return result
@@ -2369,8 +2421,8 @@ def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
 def _one_call_with_retry(
     filters: FlightSearchFilters, *, currency: str = "USD", cheapest: bool = False
 ) -> Board[GFlightWithId]:
-    """`_one_call` under the throttle retry only — a parsed-empty page is an
-    answer, so it costs exactly one GET and no sleep."""
+    """`_one_call` under `retry_throttled` with its empty retry off — a
+    parsed-empty page is an answer, so it costs exactly one GET and no sleep."""
     return retry_throttled(
         lambda: _one_call(filters, currency=currency, cheapest=cheapest), retry_empty=False
     )
@@ -2380,7 +2432,7 @@ def _one_call_with_retry(
 class GfTransport:
     """Which rung of the search-page transport a query may use.
 
-    - `http` — rung 1 only: one curl_cffi GET under the throttle backoff.
+    - `http` — rung 1 only: a curl_cffi GET, retried by `retry_throttled`.
     - `browser` — rung 2 only: one real-Chrome navigation, no rung-1 fallback.
     - `auto` — rung 1 until a throttle outlasts the backoff, then rung 2 for
       that request and the rest of the search (`_one_call_auto`).
@@ -2408,15 +2460,21 @@ def _one_call_browser(
     No retry ladder around it. Rung 2 costs a browser launch and up to a 30 s
     navigation, and a refusal it hits is terminal — re-driving Chrome through
     rung 1's backoff would spend ~22 s more to be told the same thing. A page
-    that carries no board is the exception, navigated once more
-    (`_BOARDLESS_NAVIGATIONS`): the next read of that URL carries the board.
+    that carries no board, or Google's server error in its place, is the
+    exception, navigated once more and at once (`_BOARDLESS_NAVIGATIONS`): the
+    next read of that URL can carry the board, and a navigation already takes
+    seconds.
 
     Reached through the module attribute, never a name bound at import time, so
     a test can substitute the session without a browser anywhere in the
     process."""
     session = _gf_browser.session(headed=headed)
     url = search_page_url(filters, currency=currency, cheapest=cheapest)
-    return _read_search_page(functools.partial(session.get_html, url), reads=_BOARDLESS_NAVIGATIONS)
+    return _read_search_page(
+        functools.partial(session.get_html, url),
+        reads=_BOARDLESS_NAVIGATIONS,
+        again=(_BoardlessPageError, GfSearchServerError),
+    )
 
 
 class _EscalatedError(Exception):
@@ -2833,14 +2891,15 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
             break
         except GfBackendError as e:
             # A refusal of this URL: a re-shaped return board, a consent wall,
-            # a 503. The pins are independent queries, so the next one may well
-            # be served, and unwinding would throw away every combination
-            # already fetched.
+            # a 503, a server error its re-reads did not clear. The pins are
+            # independent queries, so the next one may well be served, and
+            # unwinding would throw away every combination already fetched.
             #
             # A 503 arrives here having spent no ladder. `retry_throttled`
-            # retries throttles and transport failures and nothing else, and
-            # a 5xx comes back as `GfUpstreamStatusError` — so ten pins
-            # meeting ten 503s cost ten GETs, not ten ladders.
+            # retries throttles, transport failures and Google's server error
+            # page and nothing else, and a 5xx comes back as
+            # `GfUpstreamStatusError` — so ten pins meeting ten 503s cost ten
+            # GETs, not ten ladders.
             refused.append(e)
             lost.append(_lost_pin(picked, str(e), currency))
             unread += e.unread if isinstance(e, _PageUnreadError) else 0

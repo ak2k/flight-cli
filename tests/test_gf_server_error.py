@@ -13,17 +13,34 @@ from __future__ import annotations
 import gzip
 import json
 import re
-from typing import Any
+import time
+from typing import TYPE_CHECKING, Any
 
 import pytest
+from typer.testing import CliRunner
 
 from conftest import GFLIGHT_PAGE_DIR, _ds1, _page
-from flight_cli import _doctor, _gf_calgraph, cli
+from flight_cli import _doctor, _gf_browser, _gf_calgraph, cli
 from flight_cli import _gflight_ids as gfid
 from flight_cli._gf_common import PageFetch
-from flight_cli._gf_errors import GfBackendError, GfPageShapeError, GfSearchServerError
-from test_gf_full_board import _URL
-from test_gf_rung_parity import _NO_BOARD
+from flight_cli._gf_errors import (
+    GfBackendError,
+    GfPageShapeError,
+    GfSearchServerError,
+    GfThrottledError,
+)
+from test_gf_full_board import _RET, _URL, _no_matrix, _one_way_filters
+from test_gf_rung_parity import (
+    _NO_BOARD,
+    _answered,
+    _chrome,
+    _html,
+    _search,
+    _shape,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _ERROR_PAGES = [
     "page_ds1_error_status13.html.gz",
@@ -183,3 +200,146 @@ def test_the_price_graph_does_not_refuse_on_a_server_error() -> None:
     """A guard, green at the base, which suppressed the page as a shape error:
     the graph is its own request."""
     _gf_calgraph._refuse_a_wall(PageFetch(_error_page(), _URL, 200))
+
+
+# ───────────────────────── the page is read again ─────────────────────────
+
+_THROTTLED = "<html><body>Our systems have detected unusual traffic</body></html>"
+
+
+class _Clock:
+    """`time`, recording each sleep rather than taking it."""
+
+    def __init__(self) -> None:
+        self.sleeps: list[float] = []
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
+    """Installed over `gf_session`'s own stand-in when both are asked for:
+    fixtures a test names are set up in order, and this one comes last."""
+    recorder = _Clock()
+    monkeypatch.setattr(gfid, "time", recorder)
+    return recorder
+
+
+def _http() -> gfid.Board[gfid.GFlightWithId]:
+    return gfid._one_call_laddered(_one_way_filters(), gfid.HTTP_TRANSPORT)
+
+
+def test_a_server_error_then_the_board_reads_the_board_after_a_pause(
+    gf_session: Callable[..., Any], clock: _Clock
+) -> None:
+    """Red at the base by its sleeps, `[]`: the page re-read at once. One
+    read was all the base gave a page it took for one with no board."""
+    fake = gf_session(_error_page(), _html("ds1_nyc_lon_token"))
+    board = _http()
+    assert (_shape(board), len(fake.gets), clock.sleeps) == ((300, 488.0), 2, [2.0])
+
+
+def test_a_server_error_twice_then_the_board_pauses_longer_the_second_time(
+    gf_session: Callable[..., Any], clock: _Clock
+) -> None:
+    """Red at the base by its sleeps, `[]`."""
+    fake = gf_session(_error_page(), _error_page(), _html("ds1_nyc_lon_token"))
+    board = _http()
+    assert (_shape(board), len(fake.gets), clock.sleeps) == ((300, 488.0), 3, [2.0, 6.0])
+
+
+def test_a_server_error_throughout_is_refused_as_one_after_three_reads(
+    gf_session: Callable[..., Any], clock: _Clock
+) -> None:
+    """Red at the base, which refused it as `_BoardlessPageError` after three
+    reads and no pause."""
+    fake = gf_session(_error_page())
+    with pytest.raises(GfSearchServerError) as caught:
+        _http()
+    assert (caught.value.code, len(fake.gets), clock.sleeps) == (13, 3, [2.0, 6.0])
+
+
+def test_a_server_error_then_a_throttle_spends_no_more_than_the_ladder(
+    gf_session: Callable[..., Any], clock: _Clock
+) -> None:
+    """Red at the base, which spent 7 GETs: three reads of the page, then a
+    ladder of its own. Each re-read is one of the call's wall attempts here."""
+    fake = gf_session(_error_page(), _error_page(), _THROTTLED)
+    with pytest.raises(GfThrottledError):
+        _http()
+    assert (len(fake.gets), clock.sleeps[:2]) == (5, [2.0, 6.0])
+
+
+def test_a_server_error_spends_no_rung_of_the_shared_ladder(
+    gf_session: Callable[..., Any], clock: _Clock
+) -> None:
+    """A guard, green at the base by behavior: the base never brought this page
+    to the ladder. The shared round is the per-IP wall's, and a server error
+    on one page says nothing about it."""
+    gf_session(_error_page())
+    with gfid.shared_throttle_ladder():
+        ladder = gfid._fanout_ladder.get()
+        assert ladder is not None
+        with pytest.raises(GfSearchServerError):
+            _http()
+        assert (ladder._wall.spent, ladder._wall.owner) == (0, None)
+    assert clock.sleeps == [2.0, 6.0]
+
+
+def test_auto_does_not_open_chrome_on_a_server_error(
+    gf_session: Callable[..., Any], clock: _Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A guard, green at the base by behavior (no Chrome, after three reads):
+    only a throttle moves `auto` to Chrome. Red at the base on the type."""
+    opened: list[bool] = []
+
+    def session(*, headed: bool) -> object:
+        opened.append(headed)
+        pytest.fail("auto opened Chrome on a server error")
+
+    monkeypatch.setattr(_gf_browser, "session", session)
+    fake = gf_session(_error_page())
+    with pytest.raises(GfSearchServerError):
+        gfid._one_call_laddered(_one_way_filters(), gfid.GfTransport(mode="auto"))
+    assert (opened, len(fake.gets), clock.sleeps) == ([], 3, [2.0, 6.0])
+
+
+def test_chrome_navigates_a_server_error_once_more_without_a_pause(
+    monkeypatch: pytest.MonkeyPatch, clock: _Clock
+) -> None:
+    """A guard, green at the base, which navigated again as for a page with no
+    board: a navigation costs seconds, so rung 2 keeps its two."""
+    chrome = _chrome(monkeypatch, _error_page(), _html("ds1_nyc_lon_chrome"))
+    board = gfid._one_call_laddered(_one_way_filters(), gfid.GfTransport(mode="browser"))
+    assert (_shape(board), chrome.navigations, clock.sleeps) == ((300, 488.0), 2, [])
+
+
+def test_chrome_refuses_a_server_error_twice_as_that_error(
+    monkeypatch: pytest.MonkeyPatch, clock: _Clock
+) -> None:
+    """Red at the base, which refused it as `_BoardlessPageError`."""
+    chrome = _chrome(monkeypatch, _error_page())
+    with pytest.raises(GfSearchServerError):
+        gfid._one_call_laddered(_one_way_filters(), gfid.GfTransport(mode="browser"))
+    assert (chrome.navigations, clock.sleeps) == (2, [])
+
+
+def test_a_search_pauses_at_most_eight_seconds_for_server_errors(
+    gf_session: Callable[..., Any], clock: _Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red without the search's budget, which paused 8 s for each page: the ten
+    return pages of the round trip and its Cheapest tab, 88 s. Green at the base,
+    which paused for none; red there on the refusal it named."""
+    fake = gf_session(_answered("ds1_nyc_lon_token"), _error_page())
+    monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
+    argv = _search("--return", _RET.isoformat(), "--fast")
+    result = CliRunner().invoke(cli.app, argv)
+    assert result.exit_code == 1, result.output
+    assert sum(clock.sleeps) <= 8.0, (clock.sleeps, len(fake.gets))
+    stderr = " ".join(result.stderr.split())
+    assert "Google Flights answered with a server error (status 13)" in stderr, stderr
+    assert "page shape" not in stderr
