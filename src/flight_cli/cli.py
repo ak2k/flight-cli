@@ -1533,14 +1533,11 @@ def _print_matrix_error(e: MatrixApiError) -> None:
 
     Matrix echoes the routing string back inside `message` ("Illegal COMMAND-LINE
     prefix: BA[/weird]AA"), so all three fields carry remote text onto a markup
-    console. Every Matrix reporter that FAILS a command reports through here — the
-    calendar sites, `_run` (which serves `detail` and the search path), the search
-    weave and the group-level multi-cabin arm — so one Matrix error reads the same
-    whichever command asked for it. The per-cabin fan-out and a calendar fan-out
-    that lost only some groups are the exceptions, and deliberate: each failure is
-    soft, one part of several, so it prints a yellow line naming that part and
-    wraps the fields itself rather than reporting a red failure for a command that
-    is still going to answer."""
+    console. Every arm that fails a command on a `MatrixApiError` reports through
+    here, so one Matrix error reads the same whichever command asked for it;
+    `tests/test_matrix_error_census.py` asserts it. An arm that is soft, one part
+    of several that still answers, prints a yellow line naming that part and wraps
+    the fields itself."""
     err.print(f"[red]Matrix returned an error ({_safe_text(e.kind)}):[/] {_safe_text(e.message)}")
     if e.request_id:
         err.print(f"[dim]request_id: {_safe_text(e.request_id)}[/]")
