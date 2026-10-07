@@ -3760,6 +3760,19 @@ def _fmt_slice_cell(s: Slice) -> str:
     return f"{head}\n{tail}" if tail else head
 
 
+def _slice_headers(count: int) -> list[str]:
+    """Column headers for `count` slices. A multi-city slice 2 is not a return,
+    so the round-trip names are kept only for tables of two slices or fewer."""
+    if count <= _ROUND_TRIP_LEGS:
+        return ["outbound", "return"]
+    return [f"slice {n:d}" for n in range(1, count + 1)]
+
+
+def _slice_cells(slcs: list[Slice], count: int) -> list[str]:
+    """One cell per slice column, `—` where the itinerary has fewer slices."""
+    return [_fmt_slice_cell(slcs[i]) if i < len(slcs) else "—" for i in range(count)]
+
+
 def _seated_pax(p: Pax) -> int:
     """Occupants needing their own seat.
 
@@ -3841,15 +3854,16 @@ def _render_search(
     st.add_column("#", justify="right")
     st.add_column(f"total ({passengers:d} travelers)" if party else "price", justify="right")
     st.add_column("carriers")
-    st.add_column("outbound")
-    st.add_column("return")
-    for i, it in enumerate(res.solutions[:limit], 1):
+    shown = res.solutions[:limit]
+    count = max([_ROUND_TRIP_LEGS, *(len(it.itinerary.slices) for it in shown if it.itinerary)])
+    for header in _slice_headers(count):
+        st.add_column(header)
+    for i, it in enumerate(shown, 1):
         itn = it.itinerary
         slcs: list[Slice] = itn.slices if itn else []
         it_carriers = ",".join(_safe_text(c.code or "?") for c in (itn.carriers if itn else []))
 
-        out = _fmt_slice_cell(slcs[0]) if slcs else "—"
-        ret = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
+        slice_cells = _slice_cells(slcs, count)
         total = party_price(it, passengers)
         st.add_row(
             f"{i:d}",
@@ -3857,8 +3871,7 @@ def _render_search(
             if total or not it.price
             else f"{_amount(it.price, ccy)} per traveler",
             it_carriers or "?",
-            out,
-            ret,
+            *slice_cells,
         )
     console.print(st)
 
@@ -8177,8 +8190,10 @@ def _render_multi_cabin_search(
     )
     t.add_column("#", justify="right")
     t.add_column("carriers")
-    t.add_column("outbound")
-    t.add_column("return")
+    slice_counts = [len(r.itinerary.itinerary.slices) for r in rows if r.itinerary.itinerary]
+    count = max([_ROUND_TRIP_LEGS, *slice_counts])
+    for header in _slice_headers(count):
+        t.add_column(header)
     for letter in (_CABIN_TO_LETTER[c] for c in cabins):
         t.add_column(f"{letter}{ccy_tag}", justify="right")
 
@@ -8188,10 +8203,9 @@ def _render_multi_cabin_search(
         # Wrapped per code, as `_render_search` does with the same field.
         carriers = ",".join(_safe_text(c.code or "?") for c in (itn.carriers if itn else []))
 
-        out_cell = _fmt_slice_cell(slcs[0]) if slcs else "—"
-        ret_cell = _fmt_slice_cell(slcs[1]) if len(slcs) > 1 else "—"
+        slice_cells = _slice_cells(slcs, count)
         price_cells = [_amount(row.prices.get(cab), ccy) for cab in cabins]
-        t.add_row(f"{i:d}", carriers or "?", out_cell, ret_cell, *price_cells)
+        t.add_row(f"{i:d}", carriers or "?", *slice_cells, *price_cells)
     console.print(t)
 
 

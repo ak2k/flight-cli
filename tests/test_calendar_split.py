@@ -4583,13 +4583,11 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         # token on purpose.
         ("_render_search", "cells"),
         ("_render_search", "it_carriers"),
-        ("_render_search", "out"),
-        ("_render_search", "ret"),
+        ("_render_search", "slice_cells"),
         ("_render_merged", "out"),
         ("_render_merged", "ret"),
         ("_render_multi_cabin_search", "carriers"),
-        ("_render_multi_cabin_search", "out_cell"),
-        ("_render_multi_cabin_search", "ret_cell"),
+        ("_render_multi_cabin_search", "slice_cells"),
         ("_render_multi_cabin_search", "price_cells"),
         ("_render_calendar", "row"),
         ("_render_gflight_table", "label"),  # the row number, and its a/b suffix
@@ -4603,6 +4601,10 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_render_gflight_table", "co2_cell"),
         # The stacked legs column's width, a count of cells this function took.
         ("_render_gflight_table", "legs_width"),
+        # The slice column headers `_slice_headers` wrote: two literals, or
+        # "slice N" around a `:d` count.
+        ("_render_search", "header"),
+        ("_render_multi_cabin_search", "header"),
         # The cabin letters are this module's own map, keyed by its own enum.
         ("_render_multi_cabin_search", "cabin_labels"),
         ("_render_multi_cabin_search", "sort_label"),
@@ -5400,7 +5402,7 @@ def test_escape_scan_passes_clean_source() -> None:
         "def _render_search():\n"
         "    t.add_row(*cells)\n"
         '    t.add_row(it_carriers or "?")\n'
-        '    t.add_row(out if slcs else "—")\n'
+        '    t.add_row(it_carriers if itn else "—")\n'
         '    t.add_column("a" + "b")\n'
     )
     assert not escape_scan(clean)
