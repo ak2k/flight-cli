@@ -655,7 +655,13 @@ class GfBrowserSession:
         except Exception as e:
             if self._playwright is None:
                 # `start()` raised, so no launch was tried: the driver is what failed.
-                _quiet_driver_failure(manager)
+                # The reap runs the driver's loop, so an interrupt can land in it, and
+                # the sibling arm below never sees one raised from inside this one.
+                try:
+                    _quiet_driver_failure(manager)
+                except BaseException:
+                    self._dead = True
+                    raise
                 self.close()
                 raise _driver_failure(_detail(e)) from e
             self.close()

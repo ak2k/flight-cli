@@ -16,6 +16,7 @@ import os
 import signal
 import sys
 import threading
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -59,6 +60,14 @@ class _DriverThatCannotStart:
 
     def start(self) -> None:
         raise FileNotFoundError(2, "No such file or directory: 'node'")
+
+
+class _DriverThatOutlivesItsStart(_DriverThatCannotStart):
+    """The same, with a spawned driver where patchright keeps it."""
+
+    def __init__(self, loop: asyncio.AbstractEventLoop, driver: asyncio.subprocess.Process) -> None:
+        super().__init__(loop)
+        self._connection = SimpleNamespace(_transport=SimpleNamespace(_proc=driver))
 
 
 def _install_real_patchright(
@@ -226,6 +235,39 @@ def test_a_failed_driver_start_reports_nothing_it_left_on_its_own_loop(
         del session
         assert _no_trace_left(caplog)
     finally:
+        loop.close()
+
+
+def test_an_interrupt_while_a_failed_start_is_reaped_still_stops_the_driver(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The reap runs inside the start-failure arm, so an interrupt there is not
+    seen by the arm that records one, and a driver that ignores stdin EOF is
+    stopped by nothing else."""
+    loop = asyncio.new_event_loop()
+    pipe = asyncio.subprocess.PIPE
+    driver = loop.run_until_complete(
+        asyncio.create_subprocess_exec("sleep", "30", stdin=pipe, stdout=pipe)
+    )
+    manager = _DriverThatOutlivesItsStart(loop, driver)
+    monkeypatch.setenv("MATRIX_CACHE_DIR", str(tmp_path))
+    assert gfb._profile_dir().is_relative_to(tmp_path)  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(gfb, "_playwright_factory", lambda: lambda: manager)
+
+    def _interrupt() -> None:
+        raise KeyboardInterrupt
+
+    session = gfb.GfBrowserSession(headed=False)
+    try:
+        loop.call_later(0.2, _interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            session.get_html("https://www.google.com/travel/flights")
+        session.close()
+        assert loop.run_until_complete(asyncio.wait_for(driver.wait(), 2)) == -signal.SIGKILL
+    finally:
+        if driver.returncode is None:
+            driver.kill()
+            loop.run_until_complete(driver.wait())
         loop.close()
 
 
