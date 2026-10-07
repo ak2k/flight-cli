@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import math
 import re
 from datetime import date
 from typing import TYPE_CHECKING, Any
@@ -258,11 +259,27 @@ def _hubs_without_bounds(block: list[Any]) -> None:
     del block[2][1:]
 
 
+def _price_beyond_a_float(block: list[Any]) -> None:
+    block[0][1][1] = 10**400
+
+
+def _price_infinite(block: list[Any]) -> None:
+    """`1e400` on the page reads as this."""
+    block[0][1][1] = math.inf
+
+
+def _price_not_a_number(block: list[Any]) -> None:
+    block[0][0][1] = math.nan
+
+
+_PRICE_MANGLES = [_string_price, _price_beyond_a_float, _price_infinite, _price_not_a_number]
+
+
 @pytest.mark.parametrize(
     "mangle",
     [
         _short,
-        _string_price,
+        *_PRICE_MANGLES,
         _price_reversed,
         _duration_reversed,
         _layover_reversed,
@@ -443,13 +460,16 @@ def test_a_calendar_carries_none(monkeypatch: pytest.MonkeyPatch) -> None:
     assert (env["facets"], _notes(env, "facets")) == ([], ["facets: a calendar carries none"])
 
 
-def test_a_mangled_block_is_a_note_and_nothing_else(gf_session: Callable[..., Any]) -> None:
+@pytest.mark.parametrize("mangle", _PRICE_MANGLES)
+def test_a_mangled_block_is_a_note_and_nothing_else(
+    gf_session: Callable[..., Any], mangle: Callable[[list[Any]], None]
+) -> None:
     """No entry and the empty key's note, with the rows, `complete`, the exit
     status and stderr as the whole page gives them: the block says nothing
     about the answer."""
     gf_session(_served(_LAX))
     whole = _envelope(*_LAX_ONE_WAY)
-    gf_session(_lax_with(_string_price))
+    gf_session(_lax_with(mangle))
     mangled = _envelope(*_LAX_ONE_WAY)
     env, base = _envelope_of(mangled), _envelope_of(whole)
     assert (env["facets"], _notes(env, "facets")) == ([], [_NO_PAGE])
@@ -458,3 +478,14 @@ def test_a_mangled_block_is_a_note_and_nothing_else(gf_session: Callable[..., An
     assert {k: v for k, v in env.items() if k not in ("facets", "notes")} == {
         k: v for k, v in base.items() if k not in ("facets", "notes")
     }
+
+
+@pytest.mark.parametrize("mangle", _PRICE_MANGLES)
+def test_a_mangled_block_leaves_the_json_document(
+    gf_session: Callable[..., Any], mangle: Callable[[list[Any]], None]
+) -> None:
+    """Every page's block is read, whatever the format asked for."""
+    gf_session(_lax_with(mangle))
+    r = _run(*_SEARCH, *_LAX_ONE_WAY, "--format", "json")
+    assert r.exit_code == 0, r.output
+    assert _days_from_dep(r.stdout) == _RECORDED.read_text()

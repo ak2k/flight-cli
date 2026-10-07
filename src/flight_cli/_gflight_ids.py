@@ -43,6 +43,7 @@ import functools
 import itertools
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -1925,6 +1926,17 @@ def _named_pairs(block: Any) -> tuple[tuple[str, str], ...] | None:
     return tuple(pairs)
 
 
+def _fare_bound(price: list[Any], index: int) -> float | None:
+    """One end of the fare range, or None when it is not a finite number: the
+    page's JSON can hold an integer too large for a float, or `1e400`, which
+    reads as infinity."""
+    try:
+        amount = _insight_amount(price, index)
+    except OverflowError:
+        return None
+    return amount if amount is not None and math.isfinite(amount) else None
+
+
 def _minute_range(low: Any, high: Any) -> tuple[int, int] | None:
     """Whole minutes `low` to `high`, or None for another shape or a low above its high."""
     if any(isinstance(v, bool) or not isinstance(v, int) for v in (low, high)) or low > high:
@@ -1968,8 +1980,8 @@ def _read_facets(block: Any, currency: str | None) -> RouteFacets | None:
     duration = _parts(duration, 2)
     if not isinstance(price, list) or carriers is None or hubs is None or duration is None:
         return None
-    low = _insight_amount(cast("list[Any]", price), 0)
-    high = _insight_amount(cast("list[Any]", price), 1)
+    low = _fare_bound(cast("list[Any]", price), 0)
+    high = _fare_bound(cast("list[Any]", price), 1)
     alliances = _named_pairs(carriers[0])
     airlines = _named_pairs(carriers[1])
     connections = _named_pairs(hubs[0])

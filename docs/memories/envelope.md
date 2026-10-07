@@ -222,8 +222,8 @@ and 9 live pages; the other 7 captures carry null there.
 - `[3]` `[duration_low, duration_high]`: the trip-length range, in minutes.
 
 The reader is all or nothing. A block shorter than four parts, any of these
-parts of another shape, or a range whose low is above its high gives no
-entry, never part of one. It leaves `complete`, the exit status and stderr as
+parts of another shape, a fare that is not a finite number, or a range whose
+low is above its high gives no entry, never part of one. It leaves `complete`, the exit status and stderr as
 they were, and the empty key carries its note as `insight`'s does.
 
 The block describes the search, not the rows served. It is the same on the
