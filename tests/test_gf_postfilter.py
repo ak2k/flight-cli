@@ -25,9 +25,10 @@ from flight_cli._gf_postfilter import (
     routing_keep,
     row_check_names,
     search_page_reasons,
+    states_other_cabin,
 )
 from flight_cli._gflight_ids import GFlightWithId, LegAmenities
-from flight_cli.domain import TimeOfDay
+from flight_cli.domain import Cabin, TimeOfDay
 from flight_cli.models import (
     Itinerary,
     ItineraryDetails,
@@ -562,6 +563,25 @@ def test_a_cabin_requirement_holds_every_leg() -> None:
     unstated = replace(business, amenities=[business.amenities[0], row.amenities[1]])
     short = replace(business, amenities=business.amenities[:1])
     assert [keep(0, r) for r in (business, mixed, unstated, short)] == [True, False, False, False]
+
+
+def test_a_round_trip_states_another_cabin_when_either_slice_does() -> None:
+    """Red at the base, which had no `states_other_cabin`. A leg with no stated
+    cabin does not state another, and a round trip is as its slices are."""
+    row = _one_stop()
+    economy = replace(row, amenities=[replace(a, cabin="ECONOMY") for a in row.amenities])
+    first = replace(
+        economy, amenities=[economy.amenities[0], replace(row.amenities[1], cabin="FIRST")]
+    )
+    unstated = replace(row, amenities=[replace(a, cabin=None) for a in row.amenities])
+    assert [states_other_cabin(r, Cabin.COACH) for r in (economy, first, unstated)] == [
+        False,
+        True,
+        False,
+    ]
+    assert states_other_cabin((economy, first), Cabin.COACH)
+    assert not states_other_cabin((economy, unstated), Cabin.COACH)
+    assert states_other_cabin(economy, Cabin.BUSINESS)
 
 
 def test_the_checks_are_named_in_the_users_words() -> None:

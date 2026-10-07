@@ -260,7 +260,10 @@ message. The table, the row's reason and the exit code stay as they were. A
 row both sides price, a Matrix fare in another currency or with no party
 total, and Matrix's low at or under Google's ask nothing more. A row Google
 sells as separate tickets is passed over for the next Google-only row: Matrix
-prices one ticket, so a gap would say nothing of that booking. Measured
+prices one ticket, so a gap would say nothing of that booking. So is a row whose
+cheapest listing states a leg in another cabin than the search's
+(`_gf_postfilter.states_other_cabin`; an unstated cabin does not count), since
+Matrix is asked in the search's cabin. Measured
 2026-10-02 at `-n 10`, Google's low was under Matrix's whole answer on all four
 routes tried, and the chain priced Google's exact flights on three: EWR-ORY
 11-10/11-17, TAP USD429 against Matrix's 12 trips from USD527, Matrix
@@ -271,8 +274,11 @@ against 88 trips from USD818, the chain was empty (19.0 s); `--verify`'s
 unrouted second search then listed only AA, BA and IB though the 88 trips name
 DL and VS, so a carrier read off it would be wrong, and this check never asks
 it. The bound does not cover building the client, which reads the API key from
-its disk cache, nor the re-bootstrap `MatrixClient` runs synchronously on a
-403; the search has just used the same key.
+its disk cache. The check's client is built with `rebootstrap=False`: a 403
+invalidates the cached key and is the line `…: no answer: ApiKeyResolutionError:
+Matrix rejected the API key with HTTP 403.`, since the re-bootstrap other
+clients run on a 403 is synchronous and would hold the loop past the bound. The
+key can differ from the search's, whose answer may come from the response cache.
 
 **`--format json --enrich`** writes `{"search": <the plain --format json
 document, the same -n rows>, "cross_check": {"currency", "delta":

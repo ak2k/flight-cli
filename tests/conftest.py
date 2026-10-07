@@ -45,7 +45,9 @@ from typer import rich_utils
 # and break the suite's text assertions.
 os.environ["TTY_COMPATIBLE"] = "0"
 
-from flight_cli import _gf_browser
+from flight_cli import _config, _gf_browser
+from flight_cli.pp import auth as pp_auth
+from flight_cli.providers.seats_aero import auth as seats_auth
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
@@ -104,6 +106,31 @@ def _no_browser_launch(  # pyright: ignore[reportUnusedFunction] - autouse pytes
         pytest.fail("this test reached rung 2's real browser launcher")
 
     monkeypatch.setattr(_gf_browser, "_playwright_factory", _forbidden)
+
+
+@pytest.fixture(autouse=True)
+def _no_local_provider_credentials(  # pyright: ignore[reportUnusedFunction] - autouse pytest fixture
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """No test reads or writes this machine's award-provider credentials or
+    config; a test that needs one sets it itself."""
+    names = ("PP_ACCESS_TOKEN", "PP_REFRESH_TOKEN", "SEATS_AERO_API_KEY", "FLIGHT_CLI_CONFIG_DIR")
+    for name in names:
+        monkeypatch.delenv(name, raising=False)
+    # Not the test's `tmp_path`, so a test's own files never meet these stores.
+    home = tmp_path_factory.mktemp("no_credentials")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(home / ".cache"))
+    # The stores are fixed when their modules are imported, so HOME does not move them.
+    config = home / ".config" / "flight-cli"
+    monkeypatch.setattr(pp_auth, "CONFIG_DIR", config)
+    monkeypatch.setattr(pp_auth, "TOKENS_PATH", config / "pp.json")
+    profile = home / ".cache" / "flight-cli" / "browser-profile"
+    monkeypatch.setattr(pp_auth, "BROWSER_PROFILE_DIR", profile)
+    monkeypatch.setattr(seats_auth, "CONFIG_DIR", config)
+    monkeypatch.setattr(seats_auth, "KEY_PATH", config / "seats.json")
+    monkeypatch.setattr(_config, "DEFAULT_CONFIG_PATH", config / "config.toml")
 
 
 @pytest.fixture(autouse=True)

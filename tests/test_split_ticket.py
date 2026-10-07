@@ -22,9 +22,11 @@ from typer.testing import CliRunner
 from flight_cli import _envelope, cli
 from flight_cli import _gflight_ids as gfid
 from flight_cli._gf_errors import GfThrottledError
+from flight_cli._gf_postfilter import StopDrops
 from flight_cli.domain import Leg, SearchOptions
 from flight_cli.models import SearchResult
 from test_envelope import _envelope_of, _notes, _rows
+from test_gf_rung_parity import _board
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -795,3 +797,66 @@ def test_a_split_search_matrix_answers_narrows_with_no_split_ticket(
         "split_ticket: --split prices Google Flights one-ways, and this search runs on Matrix"
     ]
     assert google.calls == []
+
+
+def test_a_one_way_board_at_the_row_cap_says_where_it_stops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A return priced above its one-way board's cap may be missing from the
+    pair, so the board says so, as a note: the envelope stays complete. Red
+    before, which printed no line for a one-way board."""
+    google = _google(monkeypatch)
+
+    def capped(legs: tuple[Leg, ...], *a: Any, **kw: Any) -> gfid.Board[Any]:
+        board = google(legs, *a, **kw)
+        if len(legs) == 1 and legs[0].origins[0] == "LAX":
+            board.capped_at = _board("ds1_nyc_lon_token").capped_at
+        return board
+
+    monkeypatch.setattr(cli, "_gflight_results", capped)
+    line = (
+        "Google Flights return one-way stops at 300 rows for this search: "
+        "fares above USD1006.00 may be missing."
+    )
+    result = _search("--cash-only", "--fast", "--split")
+    assert result.exit_code == 0, result.output
+    assert _split_lines(result.stdout) == [_LINE]
+    assert " ".join(result.stderr.split()).count(line) == 1, result.stderr
+    assert "outbound one-way stops" not in result.stderr
+    argv = ("--cash-only", "--fast", "--backend", "gflight", "--split", "--format", "envelope")
+    env = _envelope_of(_search(*argv))
+    assert (env["backend"], env["complete"]) == ("gflight", True), env["notes"]
+    assert line in env["notes"]
+
+
+def test_a_one_way_board_counts_the_rows_it_drops_over_the_stop_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """As every other Google board shown says so: a line, which the envelope
+    carries as a note, `complete` unchanged. Red at the base, which counted
+    none on a one-way board."""
+    line = (
+        "Google Flights outbound one-way returned 1 row over the stop ceiling it was asked "
+        "for (0); it is not shown."
+    )
+
+    def _dropping(google: _Google) -> None:
+        def _served(legs: tuple[Leg, ...], *a: Any, **kw: Any) -> gfid.Board[Any]:
+            board = google(legs, *a, **kw)
+            if len(legs) == 1 and legs[0].origins[0] == "JFK":
+                board.stop_drops = StopDrops(rows=1, ceiling=0)
+            return board
+
+        monkeypatch.setattr(cli, "_gflight_results", _served)
+
+    _dropping(_google(monkeypatch))
+    result = _search("--cash-only", "--fast", "--split", "--stops", "0")
+    assert result.exit_code == 0, result.output
+    assert " ".join(result.stderr.split()).count(line) == 1, result.stderr
+    assert len(_split_lines(result.stdout)) == 1
+    _dropping(_google(monkeypatch))
+    env = _envelope_of(
+        _search("--cash-only", "--fast", "--split", "--stops", "0", "--format", "envelope")
+    )
+    assert (env["backend"], env["complete"]) == ("gflight", True), env["notes"]
+    assert env["notes"].count(line) == 1

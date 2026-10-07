@@ -108,6 +108,18 @@ fallback the user is going to get anyway. When the budget is spent it becomes
 prints a typed line rather than a curl traceback, and the pin loop can tell an
 unreachable network apart from a board that refused for its own reasons.
 
+Another arm reads a page again when Google answered it with a server error
+(`GfSearchServerError`), after 2 s and then 6 s. Each re-read is one of the
+call's wall attempts, so a page that errs and then throttles costs no more
+calls than one that throttles: 5 GETs, where reading it as a page with no
+`ds:1` and then laddering cost 7. The arm never books a rung of the shared
+round: an error on one page says nothing about the per-IP wall. It stands down
+a round it owns before it pauses, so a sibling parked on that round retries at
+once rather than after up to 8 s of pauses. Its pauses come
+out of a budget of 8 s per search, on the object `search_escalation` opens, so
+a search of many pages waits once. The measurements are in
+[gf_page_refusals_and_ds1.md](gf_page_refusals_and_ds1.md).
+
 Only a failure to REACH Google is retried — `curl_cffi`'s `ConnectionError` and
 `Timeout` (DNS, a reset socket, connect and read timeouts), **plus four
 result codes those classes do not cover**: `PARTIAL_FILE`, `HTTP2`,
@@ -165,14 +177,21 @@ escalation costs one ladder (five GETs) before Chrome, and nothing after it
 spends rung 1.
 
 Only a throttle escalates. A transport failure is the network, which Chrome
-shares, and a refusal of the page (a consent wall, a 503, a re-shaped page) is
-the page's own. A refusal met after the escalation is worded as rung 2's
+shares, and a refusal of the page (a consent wall, a 503, a server error, a
+re-shaped page) is the page's own. A refusal met after the escalation is worded as rung 2's
 (`cli._rung_reached`): "rate-limited the browser rung", with no advice to wait
-for a ladder Chrome does not run.
+for a ladder Chrome does not run. The pin loop's "stopped pinning" line words a
+throttle the same way on `browser` and after an escalation
+(`_gflight_ids._why_pinning_stopped`), so one run names a throttle one way; on
+`http` it is still "rate-limited this IP".
 
 The flag is one object per search (`search_escalation`, opened by `cli.search`
-on the thread that starts the workers, and by `cli._open_jaw_tickets` around an
-open jaw's two one-ways, which Matrix's search asks beside its own answer), in
+and its deprecated `cli.gflight` alias on the thread that starts the workers,
+and by `cli._open_jaw_tickets` around a
+multi-city search's one one-way per slice, asked beside Matrix's answer on
+`auto` and in its place under `--backend gflight`, and by
+`cli._run_gflight_multi` around a multi-cabin fan-out, which never escalates
+but shares the object's budget of server-error pauses), in
 a ContextVar beside `_fanout_ladder`
 for the same reason: every worker of the search reads the same object, so the
 line prints once. A rung-1 GET reads it first, so a thread still backing off
@@ -181,10 +200,12 @@ Chrome's lifetime is separate and thread-local, as on `browser`: opened by the
 first request that needs it, closed where the browser transport closes one
 (`cli._gflight_query`'s `finally`, `cli._browser_scope`), a no-op on a thread
 that never escalated. The enriched path arms its interrupt guard under `auto`
-as under `browser`, so Ctrl-C stops an escalated Chrome; an `auto` search that
-never escalates pays for it with a second Ctrl-C ignored while its worker
-finishes. The enriched path's `--split` runs on a worker of its own, so after
-an escalation it opens a second Chrome there.
+as under `browser`, so Ctrl-C stops an escalated Chrome. The handler ignores a
+second Ctrl-C only when it stopped a driver; an `auto` search that never
+escalated has none, so its second Ctrl-C ends the wait on the worker, as on
+`http`, and a throttle met after the first prints no escalation line. The
+enriched path's `--split` runs on a worker of its own, so after an escalation it
+opens a second Chrome there.
 
 A multi-cabin search does not escalate: it fans its cabins out on http under
 `auto`, since a thread per cabin escalating would be a Chrome per cabin on one
