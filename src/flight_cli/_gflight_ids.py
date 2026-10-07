@@ -1141,6 +1141,9 @@ class GFlightWithId:
     # Set when Google sells the itinerary as more than one booking; None for one
     # ticket and for a row that does not say (`_ticketing`).
     ticketing: Ticketing | None = None
+    # Set when the page that listed this itinerary put it on Google's Top
+    # flights board (`ds:1[2]`), whichever of its listings `_deduped` kept.
+    top_flight: bool = False
     # The dearer listings of this itinerary that `_deduped` folded into this
     # one, one per other cabin mix, cheapest first: a cabin requirement this
     # listing fails can still be met by one of them (`_listing`).
@@ -2044,12 +2047,16 @@ def _deduped(rows: list[GFlightWithId]) -> list[GFlightWithId]:
     dates included: the same flight numbers a day apart are a different trip.
     The first listing keeps its place, because page order breaks ties between
     equal fares in the trim and in the round-trip pins. A listing booked in
-    another cabin mix is kept on the row as one of its `others`."""
+    another cabin mix is kept on the row as one of its `others`. An itinerary
+    any listing of which is a top flight is one on every listing, since a
+    later step may show any of them (`_listing`)."""
     listed: dict[ItineraryKey, list[GFlightWithId]] = {}
     for row in rows:
         listed.setdefault(_itinerary_key(row), []).append(row)
     out: list[GFlightWithId] = []
-    for listings in listed.values():
+    for found in listed.values():
+        top = any(r.top_flight for r in found)
+        listings = [replace(r, top_flight=True) for r in found] if top else found
         best = min(listings, key=fare_key)
         mixes = {_cabins(best)}
         others: list[GFlightWithId] = []
@@ -2143,17 +2150,21 @@ def _rows_from_page_html(page: PageFetch) -> Board[GFlightWithId]:
                 [type(payload[i]).__name__ for i in _DS_ROW_BLOCKS],
             )
         return Board()  # Google's own answer: this leg has no flights.
+    # `_rows_from_ds1` reads the top-flights block first, so its rows lead.
+    top_block = payload[_DS_ROW_BLOCKS[0]]
+    top = len(cast("list[Any]", top_block[0])) if _looks_like_a_row_block(top_block) else 0
     out: list[GFlightWithId] = []
     reasons: list[str] = []
-    for fd in rows:
+    for i, fd in enumerate(rows):
         try:
-            out.append(_parse_flight_with_id(fd))
+            row = _parse_flight_with_id(fd)
         except _ROW_PARSE_ERRORS as e:
             # %r / !r, not %s: this text comes from the page, and a raw ESC
             # or C1 byte written to a terminal is not a diagnostic.
             log.debug("skipping flight with unparseable data: %r", e)
             reasons.append(f"{type(e).__name__}: {e!r}")
             continue
+        out.append(replace(row, top_flight=True) if i < top else row)
     if not out:
         # Rows were there and none of them parsed — the row layout moved, which
         # is a different fact from "this route has no flights". Sampled reasons

@@ -6483,6 +6483,9 @@ def _gflight_json_row(g: Any, bags: Bags | None = None) -> dict[str, Any]:
     a self transfer included, and null where the page does not say; fli's
     `self_transfer` is the subset on which bags are rechecked.
 
+    `top_flight` is true for a row the page that listed it put on Google's Top
+    flights board.
+
     A leg's `departure_airport`/`arrival_airport` are IATA codes and its
     `*_airport_name` fields hold fli's names for those airports."""
     row: dict[str, Any] = {**g.flight.model_dump(mode="json"), "flight_id": g.flight_id}
@@ -6490,6 +6493,7 @@ def _gflight_json_row(g: Any, bags: Bags | None = None) -> dict[str, Any]:
         row["separate_tickets"] = True
     else:
         row["separate_tickets"] = None if g.flight.self_transfer is None else False
+    row["top_flight"] = getattr(g, "top_flight", False)
     legs: list[Any] = row.get("legs") or []
     # fli dumps an `Airport` member by its value, the name; its member name is the code.
     for leg, src in zip(legs, g.flight.legs, strict=False):
