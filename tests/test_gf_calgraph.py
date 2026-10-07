@@ -135,14 +135,14 @@ def test_error_13_is_a_refusal_and_not_a_throttle() -> None:
         cg.parse_graph(_fixture("error13.body"), trip_length=None)
     assert e.value.code == 13
     assert "error 13" in str(e.value)
-    assert "rate" not in str(e.value).replace("rather than a rate limit", "")
+    assert "rate" not in str(e.value)
     assert not isinstance(e.value, GfThrottledError)
 
 
 @pytest.mark.parametrize(
     ("body", "expected"),
     [
-        (')]}\'\n\n20\n[["wrb.fr",null,null]]\n', "empty result"),
+        (')]}\'\n\n20\n[["wrb.fr",null,null]]\n', "came back empty"),
         ("<html>not an envelope</html>", "could not be read"),
         (')]}\'\n\n9\n[["di",7]]\n', "could not be read"),
         (_body([]), "no dates"),

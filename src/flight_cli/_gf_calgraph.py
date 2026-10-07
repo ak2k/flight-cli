@@ -18,17 +18,16 @@ fli is heavy, so `cli` imports this module only when a browser grid runs.
 from __future__ import annotations
 
 import contextlib
-import json
-import re
 import urllib.parse
 from datetime import date, timedelta
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from . import _gf_browser
 from ._gf_browser import Control
 from ._gf_dategrid import grid_routing_blocker, unwritten_constraint
 from ._gf_errors import GfBackendError, GfBrowserUnavailableError, GfPageShapeError
+from ._gf_rpc_shared import GfPageRpcError, result_payloads
 from ._gflight_ids import (
     _rows_from_page_html,  # pyright: ignore[reportPrivateUsage]
     search_page_url,
@@ -70,12 +69,7 @@ _PAGE_DAYS = 31
 # Google reads a latest departure hour to its last minute, so whole hours bound
 # a window exactly only when it ends on the day's last minute.
 _DAY_END = 23 * 60 + 59
-_XSSI_GUARD = ")]}'"
-# A batchexecute `rt=c` body is chunked: a length line, then one JSON array of
-# rows. The stated length does not count what `len(str)` counts, so each chunk
-# is read by decoding one JSON value instead.
-_CHUNK_HEAD = re.compile(r"\s*\d+\s*\n")
-_RESULT_ROW = "wrb.fr"
+_WHAT = "Google Flights' price graph"
 
 
 class GfPriceGraphError(GfBackendError):
@@ -354,31 +348,6 @@ class _WallCheck:
         self.passed = True
 
 
-def _envelope_rows(body: str) -> list[Any]:
-    rows: list[Any] = []
-    text = body.removeprefix(_XSSI_GUARD)
-    decoder = json.JSONDecoder()
-    at = 0
-    while (head := _CHUNK_HEAD.match(text, at)) is not None:
-        chunk, at = decoder.raw_decode(text, head.end())
-        if isinstance(chunk, list):
-            rows.extend(chunk)  # pyright: ignore[reportUnknownArgumentType] — decoded JSON
-    return rows
-
-
-def _result_row(body: str) -> list[Any]:
-    """The one result row of the graph's answer; the others are bookkeeping."""
-    unreadable = "Google Flights' price graph response could not be read; its shape changed"
-    try:
-        rows = _envelope_rows(body)
-    except ValueError as e:
-        raise GfPriceGraphError(unreadable) from e
-    for row in rows:
-        if isinstance(row, list) and cast("list[Any]", row)[:1] == [_RESULT_ROW]:
-            return cast("list[Any]", row)
-    raise GfPriceGraphError(unreadable)
-
-
 def _price(cell: list[Any]) -> float | None:
     """The fare in a graph cell, `[dep, ret, [[_, price], token], _]`."""
     try:
@@ -394,29 +363,22 @@ def parse_graph(body: str, *, trip_length: int | None) -> _GraphPage:
     """Read one `GetCalendarGraph` response the page received.
 
     Refuses rather than returning nothing: an error row, a body with no result
-    row, a result with no dated cell, and anything that does not decode are all
-    `GfPriceGraphError`. A dated cell with no fare still counts toward what the
-    graph covers; only a priced one is returned.
+    row, a result with no dated cell, and anything that does not decode, text
+    left after the last chunk included, are all `GfPriceGraphError`. A dated
+    cell with no fare still counts toward what the graph covers; only a priced
+    one is returned.
 
     On a round trip every cell's return date has to sit `trip_length` nights
     after its departure. The page sets the trip length from its own dates, and a
     graph of some other length would otherwise be printed as this one."""
-    row = _result_row(body)
-    # `[tag, rpc id, payload, …]`; an error row leaves the payload empty.
-    payload = next(iter(row[2:3]), None)
-    if not payload:
-        code = _error_code(row)
-        raise GfPriceGraphError(
-            f"Google Flights answered the price graph with error {code}, a refusal of this "
-            "browser session rather than a rate limit"
-            if code is not None
-            else "Google Flights answered the price graph with an empty result",
-            code=code,
-        )
+    try:
+        payload = result_payloads(body, what=_WHAT)[0]
+    except GfPageRpcError as e:
+        raise GfPriceGraphError(str(e), code=e.code) from e
     dated: list[date] = []
     priced: list[GraphCell] = []
     try:
-        for cell in json.loads(payload)[1]:
+        for cell in payload[1]:
             departure = date.fromisoformat(cell[0])
             returning = date.fromisoformat(cell[1]) if trip_length is not None else None
             if returning is not None and (returning - departure).days != trip_length:
@@ -434,15 +396,6 @@ def parse_graph(body: str, *, trip_length: int | None) -> _GraphPage:
     if not dated:
         raise GfPriceGraphError("Google Flights' price graph carried no dates")
     return _GraphPage(max(dated), priced)
-
-
-def _error_code(row: list[Any]) -> int | None:
-    """An error row's code: `row[5] = [code, None, [details]]`."""
-    try:
-        code = row[5][0]
-    except (IndexError, TypeError):
-        return None
-    return code if isinstance(code, int) and not isinstance(code, bool) else None
 
 
 def price_graph(search: CalendarSearch, *, headed: bool, pages: int = _MAX_PAGES) -> PriceGraph:
