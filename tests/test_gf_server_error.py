@@ -13,6 +13,7 @@ from __future__ import annotations
 import gzip
 import json
 import re
+import socket
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -29,8 +30,10 @@ from flight_cli._gf_errors import (
     GfSearchServerError,
     GfThrottledError,
 )
-from test_gf_full_board import _RET, _URL, _no_matrix, _one_way_filters
+from flight_cli.models import SearchResult
+from test_gf_full_board import _DEP, _RET, _SEARCH, _URL, _no_matrix, _one_way_filters
 from test_gf_rung_parity import (
+    _MATRIX,
     _NO_BOARD,
     _answered,
     _chrome,
@@ -41,6 +44,8 @@ from test_gf_rung_parity import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from click.testing import Result
 
 _ERROR_PAGES = [
     "page_ds1_error_status13.html.gz",
@@ -343,3 +348,84 @@ def test_a_search_pauses_at_most_eight_seconds_for_server_errors(
     stderr = " ".join(result.stderr.split())
     assert "Google Flights answered with a server error (status 13)" in stderr, stderr
     assert "page shape" not in stderr
+
+
+# ───────────────────────── the user is told ─────────────────────────
+
+_NYC_LON = [*_SEARCH, "NYC", "LON", "--dep", _DEP.isoformat(), "--gf-transport", "http"]
+
+
+def _run(
+    argv: list[str], page: str, gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> Result:
+    """`argv` with every Google page answering `page`, and both Matrix entry
+    points stubbed: the weave's reads a capture, a hand-off runs nothing."""
+    gf_session(page)
+
+    async def matrix_into(state: dict[str, Any], *_args: object) -> None:
+        state["matrix"] = SearchResult.from_api(json.loads(_MATRIX.read_text()))
+
+    def matrix(**_kw: object) -> None:
+        return None
+
+    def offline(*_a: object) -> None:
+        pytest.fail("the search reached the network")
+
+    monkeypatch.setattr(cli, "_matrix_into", matrix_into)
+    monkeypatch.setattr(cli, "_run_matrix_path", matrix)
+    monkeypatch.setattr(socket.socket, "connect", offline)
+    return CliRunner().invoke(cli.app, argv, env={"COLUMNS": "250"})
+
+
+def _lines(text: str) -> list[str]:
+    return [" ".join(line.split()) for line in text.splitlines() if line.strip()]
+
+
+def test_the_envelope_hands_off_naming_the_server_error(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red at the base, whose note read "Using Matrix: Google Flights' page
+    shape changed.". The hand-off is otherwise the base's: exit 0, and the
+    envelope's `backend` and `complete` as a page with no board leaves them."""
+    argv = [*_NYC_LON, "--format", "envelope"]
+    control = _run(argv, _NO_BOARD, gf_session, monkeypatch)
+    result = _run(argv, _error_page(), gf_session, monkeypatch)
+    assert (result.exit_code, control.exit_code) == (0, 0), result.output
+    note = "Using Matrix: Google Flights answered with a server error (status 13)."
+    assert note in _lines(result.stderr)
+    assert "page shape" not in result.output
+    env, base = json.loads(result.stdout), json.loads(control.stdout)
+    assert note in env["notes"]
+    assert (env["backend"], env["complete"]) == (base["backend"], base["complete"])
+
+
+def test_the_default_table_names_the_server_error_beside_matrix(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red at the base, which printed "Google Flights' page shape changed —
+    showing Matrix only.", as a page with no board still does."""
+    control = _run(_NYC_LON, _NO_BOARD, gf_session, monkeypatch)
+    result = _run(_NYC_LON, _error_page(), gf_session, monkeypatch)
+    assert (result.exit_code, control.exit_code) == (0, 0), result.output
+    assert "Google Flights' page shape changed — showing Matrix only." in _lines(control.stdout)
+    assert (
+        "Google Flights answered with a server error (status 13) — showing Matrix only."
+        in _lines(result.stdout)
+    )
+    assert "page shape" not in result.output
+
+
+def test_google_alone_refuses_naming_the_server_error(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red at the base, which refused as "Google Flights' page shape changed"
+    at the same exit status."""
+    argv = [*_NYC_LON, "--backend", "gflight", "--fast"]
+    control = _run(argv, _NO_BOARD, gf_session, monkeypatch)
+    result = _run(argv, _error_page(), gf_session, monkeypatch)
+    assert (result.exit_code, control.exit_code) == (1, 1), result.output
+    assert "Google Flights' page shape changed" in " ".join(control.stderr.split())
+    assert _lines(result.stderr) == [
+        "Google Flights answered with a server error (status 13). Retry later, or use "
+        "--backend matrix."
+    ]
