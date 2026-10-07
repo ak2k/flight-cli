@@ -3747,9 +3747,10 @@ def _one_way_boards(
     each one-way it would admit tickets costing up to twice the cap together.
     One Chrome serves every leg on the browser rung.
 
-    With `narrow`, a board missing a page, or rows its pages served that could
-    not be read, narrows the envelope run, the unread rows in a note naming the
-    leg: the rows it lacks may be the leg's cheapest tickets.
+    A board missing a page, or rows its pages served that could not be read,
+    narrows the envelope run, the unread rows in a note naming the leg: the rows
+    it lacks may be the leg's cheapest tickets. `narrow` is the open jaw's: its
+    unpriced tickets narrow whoever answers the search.
 
     A leg whose pages met a stop (`_search_stop`) ends the asking, as a page's
     does in `_PageAsk`: every later leg would meet the same wall, so each is
@@ -3783,9 +3784,9 @@ def _one_way_boards(
             rest = [later for _, later in legs[i + 1 :]]
             try:
                 board = _gflight_results((leg,), one_way, top_n, gf_mode, gf_headed)
-                if narrow and getattr(board, "partial", False):
+                if getattr(board, "partial", False):
                     _envelope.narrow()
-                if narrow and (unread := cast("int", getattr(board, "unread", 0))):
+                if unread := cast("int", getattr(board, "unread", 0)):
                     _envelope.narrow(
                         f"Google Flights {which} one-way: {unread:d} rows its pages served "
                         "could not be read and are left out of the answer"
