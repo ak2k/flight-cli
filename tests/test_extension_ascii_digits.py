@@ -69,6 +69,15 @@ def test_non_ascii_digit_goes_to_matrix_with_its_reason(digit: str) -> None:
     assert reasons == [f"extension {directive!r} not expressible on GF"]
 
 
+def test_maxstops_past_the_int_digit_limit_is_unsupported_not_a_crash() -> None:
+    # `int()` refuses a string of more than 4300 digits.
+    directive = "MAXSTOPS " + "1" * 4301
+    assert parse_extension(directive) == [
+        UnsupportedPred(token=directive, reason=f"extension {directive!r} not expressible on GF")
+    ]
+    assert _backend(directive) == BACKEND_MATRIX
+
+
 def test_ascii_digits_still_parse() -> None:
     assert parse_extension("MAXSTOPS 1") == [StopsPred(max_stops=1)]
     assert parse_extension("MAXSTOPS 12") == [StopsPred(max_stops=12)]

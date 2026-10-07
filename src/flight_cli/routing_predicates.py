@@ -426,9 +426,10 @@ def mirrored_routing(routing: str) -> str | None:
 # ─────────────────────────── extension parser ──────────────────────────
 
 # ASCII digits only: `\d` and `str.isdigit` also take Arabic-Indic digits, and
-# `isdigit` a superscript `int` cannot read.
+# `isdigit` a superscript `int` cannot read. A count is bounded because `int`
+# refuses a string of more than 4300 digits.
 _RE_HHMM = re.compile(r"^([0-9]{1,2}):([0-5][0-9])$")
-_RE_ASCII_COUNT = re.compile(r"[0-9]+")
+_RE_ASCII_COUNT = re.compile(r"[0-9]{1,9}")
 
 
 def _parse_hhmm(arg: str) -> int | None:

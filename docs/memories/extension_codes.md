@@ -72,9 +72,10 @@ Codes are **case-insensitive** for the keyword (`ALLIANCE` ≡ `alliance`).
 - **Times**: `HH:MM` (e.g. `MAXCONNECT 2:00`, `MAXDUR 18:00`, `PADCONNECT 0:30`)
 - **Distances**: plain integers in miles (e.g. `MAXMILES 2900`)
 - **Counts**: plain integers (e.g. `MAXSTOPS 1`)
-- **Digits** in a count or a time are ASCII `0`-`9`. Any other digit (a
-  superscript, an Arabic-Indic one) makes a code flight-cli does not parse, so
-  it goes to Matrix with that reason.
+- **Digits** in a count or a time are ASCII `0`-`9`, and a count has at most
+  9 of them. Any other digit (a superscript, an Arabic-Indic one) or a longer
+  count makes a code flight-cli does not parse, so it goes to Matrix with that
+  reason.
 - **Carrier/airport/aircraft codes**: IATA-style, space-separated for lists
 
 ## Itinerary constraint codes
