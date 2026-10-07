@@ -86,6 +86,9 @@ is three trips from one outbound with cheaper trips from the next off the
 table. The trade is that a top-flights row, often a nonstop a few dollars
 dearer, can fall below a small `-n`; a larger `-n` brings it back. The page's
 order survives as the tie-break. The `-n` help string states the rule.
+Wherever such a row sorts, it still says Google picked it: `top_flight` in the
+JSON and envelope, `★` before its number in the Google table. Nothing keeps a
+top flight that `-n` trims.
 
 Three things still read the whole board, and this is why the trim cannot move
 into the query: the Tier-2 post-filter, because a routing constraint is answered
