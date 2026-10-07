@@ -131,7 +131,8 @@ nesting-depth test would report a relocation on every ordinary page. It reads
 EVERY row, not a leading window: unparseable rows at the head of a moved block
 are exactly what a layout change looks like, so any fixed depth is a number some
 payload sits just past. The decoys hold 2-7 rows and the scan is sub-millisecond,
-so full depth costs nothing worth a cutoff.
+so full depth costs nothing worth a cutoff. `ds:1[7]`, one of those structures,
+is read as the search's route facets (`_route_facets`; envelope.md, "Route facets").
 At `[2]`/`[3]` the test must NOT require a parse, or a block whose rows have all
 changed shape would drop to an empty board instead of reaching the 0-of-N parse
 guard above, which is what catches a moved ROW layout. Both share one tuple of

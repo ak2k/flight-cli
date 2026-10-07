@@ -10410,7 +10410,7 @@ _FORMAT_OPT = typer.Option(
     autocompletion=_completer(_VALID_FORMATS),
     rich_help_panel=_GROUP_OUTPUT,
 )
-# `search` and `calendar` also write the envelope (`_envelope`): the same thirteen
+# `search` and `calendar` also write the envelope (`_envelope`): the same fifteen
 # keys whatever path answered, for a caller that cannot know the path ahead.
 _ENVELOPE_FORMATS = (*_VALID_FORMATS, "envelope")
 _ENVELOPE_FORMAT_CHOICES = "/".join(_ENVELOPE_FORMATS)
@@ -10419,8 +10419,9 @@ _ENVELOPE_FORMAT_OPT = typer.Option(
     "--format",
     help=f"Output format: one of {_ENVELOPE_FORMAT_CHOICES}. envelope is one versioned "
     "JSON document on every path: version, command, backend, currency, complete, "
-    "notes, results, awards, insight, price_history, verify, cross_check, split_ticket. "
-    "complete is false when the answer is narrower than asked, and notes carries what stderr said.",
+    "notes, results, awards, insight, price_history, facets, price_graph, verify, "
+    "cross_check, split_ticket. complete is false when the answer is narrower than "
+    "asked, and notes carries what stderr said.",
     autocompletion=_completer(_ENVELOPE_FORMATS),
     rich_help_panel=_GROUP_OUTPUT,
 )
