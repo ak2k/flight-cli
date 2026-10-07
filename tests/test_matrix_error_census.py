@@ -17,10 +17,14 @@ import pathlib
 import re
 import sys
 from collections import Counter
+from typing import TYPE_CHECKING
 
 import pytest
 
 from flight_cli import cli as cli_mod
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 _REPORTER = "_print_matrix_error"
 
@@ -43,11 +47,14 @@ def _names_error(node: ast.AST) -> bool:
     return any(isinstance(n, ast.Name) and n.id == "MatrixApiError" for n in ast.walk(node))
 
 
-def _calls_reporter(body: list[ast.stmt]) -> bool:
+def _calls_reporter(nodes: Iterable[ast.AST]) -> bool:
+    """Whether running `nodes` calls the reporter. A def or a lambda among them
+    runs only if something calls it, so neither is looked into."""
     return any(
-        isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == _REPORTER
-        for stmt in body
-        for n in ast.walk(stmt)
+        (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == _REPORTER)
+        or _calls_reporter(ast.iter_child_nodes(n))
+        for n in nodes
+        if not isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda)
     )
 
 
@@ -157,3 +164,21 @@ def test_the_census_fails_on_an_isinstance_arm_under_and_or(
     with pytest.raises(AssertionError) as failed:
         test_every_arm_that_names_a_matrix_error_reports_it_through_the_reporter()
     assert "unlisted [('_new_arm', 'isinstance')]" in str(failed.value)
+
+
+@pytest.mark.parametrize(
+    "deferred",
+    ["def later():\n            _print_matrix_error(e)", "later = lambda: _print_matrix_error(e)"],
+    ids=["def", "lambda"],
+)
+def test_the_census_fails_on_a_reporter_call_the_arm_only_defines(
+    monkeypatch: pytest.MonkeyPatch, deferred: str
+) -> None:
+    _census_with(
+        monkeypatch,
+        "def _new_arm(f):\n    try:\n        pass\n    except MatrixApiError as e:\n"
+        f"        {deferred}\n        raise typer.Exit(1)",
+    )
+    with pytest.raises(AssertionError) as failed:
+        test_every_arm_that_names_a_matrix_error_reports_it_through_the_reporter()
+    assert "unlisted [('_new_arm', 'except'" in str(failed.value)
