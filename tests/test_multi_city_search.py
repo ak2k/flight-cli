@@ -20,7 +20,15 @@ from flight_cli import cli
 from flight_cli._gf_errors import GfThrottledError
 from flight_cli.pp import cli as pp_cli
 from test_envelope import _envelope_of, _notes
-from test_open_jaw_search import _KEY, _Google, _matrix, _matrix_body, _search, _table_rows
+from test_open_jaw_search import (
+    _KEY,
+    _Google,
+    _matrix,
+    _matrix_body,
+    _search,
+    _table_rows,
+)
+from test_open_jaw_search import _awards_on as _awards_configured
 from test_split_ticket import _row
 
 if TYPE_CHECKING:
@@ -160,6 +168,47 @@ def test_split_json_carries_the_combinations_beside_matrixs_document(
     for combo in combos:
         assert combo["total"] == sum(t["price"] for t in combo["tickets"])
         assert [t["flight_id"].split("-")[1][:2] for t in combo["tickets"]] == ["UA", "AA", "WN"]
+
+
+def test_split_joins_the_envelope_an_award_search_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """As on an open jaw: the envelope carries the three slices' tickets beside
+    the award rows with no flag, so `--split` asks for what it already holds."""
+    _awards_configured(monkeypatch)
+    google, _ = _google(monkeypatch), _matrix(monkeypatch)
+    plain = _envelope_of(_search("--format", "envelope", slices=_slices()))
+    asked = google.calls
+    google, matrix = _google(monkeypatch), _matrix(monkeypatch)
+    result = _search("--format", "envelope", "--split", slices=_slices())
+    assert result.exit_code == 0, result.output
+    env = _envelope_of(result)
+    assert env["split_ticket"] == plain["split_ticket"]
+    assert [c["total"] for c in env["split_ticket"]["combinations"]] == _TOTALS
+    assert env["complete"] is plain["complete"] is True
+    assert google.calls == asked and len(asked) == 3
+    assert len(matrix.searches) == 1
+
+
+def test_json_with_awards_names_every_flag_the_tickets_need(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """As on an open jaw: the award document has no place for the tickets, so
+    the line names `--cash-only` beside `--split`, and that command carries them."""
+    _awards_configured(monkeypatch)
+    google, _ = _google(monkeypatch), _matrix(monkeypatch)
+    result = _search("--format", "json", slices=_slices())
+    assert result.exit_code == 0, result.output
+    assert google.calls == []
+    assert (
+        "No separate tickets on Google Flights: --format json carries them only with --split "
+        "and --cash-only." in _stderr(result)
+    )
+    _google(monkeypatch)
+    _matrix(monkeypatch)
+    followed = _run("--format", "json", "--split")
+    assert followed.exit_code == 0, followed.output
+    assert [c["total"] for c in json.loads(followed.stdout)["split_ticket"]["combinations"]] == (
+        _TOTALS
+    )
 
 
 def test_a_throttle_on_the_first_slice_leaves_the_rest_unasked(
