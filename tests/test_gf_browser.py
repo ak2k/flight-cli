@@ -2838,10 +2838,10 @@ class _Recorder:
 def keep_sigint() -> Iterator[None]:
     """Save and restore this process's SIGINT disposition around a test.
 
-    The guard deliberately leaves `SIG_IGN` installed once an interrupt has been
-    handled — for the life of the process, which in a test run is the life of the
-    whole suite. Without this, the first test to trigger the handler makes Ctrl-C
-    do nothing for every test after it."""
+    The guard deliberately leaves `SIG_IGN` installed once an interrupt that
+    found a driver open has been handled — for the life of the process, which in
+    a test run is the life of the whole suite. Without this, the first test whose
+    interrupt finds a driver open makes Ctrl-C do nothing for every test after it."""
     previous = signal.getsignal(signal.SIGINT)
     yield
     signal.signal(signal.SIGINT, previous)
@@ -3337,7 +3337,7 @@ def test_the_guard_installs_a_handler_and_gives_it_back_on_a_clean_search(
 def test_the_guard_stops_every_driver_and_then_ignores_the_next_ctrl_c(
     keep_sigint: None,
 ) -> None:
-    """What the handler does, in the order that matters.
+    """What the handler does, in the order that matters, with a driver open.
 
     `SIG_IGN` goes in FIRST, before anything a second signal could re-enter: the
     stop below raises the `asyncio` logger's level, and clearing the logging
@@ -3351,6 +3351,7 @@ def test_the_guard_stops_every_driver_and_then_ignores_the_next_ctrl_c(
     what it would do instead is land in the middle of that shutdown, as a second
     `KeyboardInterrupt` through interpreter finalisation."""
     stopped: list[str] = []
+    gfb._remember(gfb.GfBrowserSession(headed=False))
 
     def _stop() -> None:
         # Read DURING the stop, which is the only place the two orderings
@@ -3468,7 +3469,8 @@ def test_the_enriched_arm_arms_the_guard_for_the_transports_that_open_a_browser(
 
     `auto` sits with `browser` because it escalates a throttle to Chrome, the
     same reading the closer test above takes. An `auto` search that never
-    escalates pays for it: its second Ctrl-C is ignored."""
+    escalated has no driver to stop, and gives its second Ctrl-C back
+    (`tests/test_gf_second_ctrl_c.py`)."""
     from flight_cli import cli
 
     before = signal.getsignal(signal.SIGINT)

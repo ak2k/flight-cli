@@ -171,8 +171,9 @@ the page's own. A refusal met after the escalation is worded as rung 2's
 for a ladder Chrome does not run.
 
 The flag is one object per search (`search_escalation`, opened by `cli.search`
-on the thread that starts the workers, and by `cli._open_jaw_tickets` around an
-open jaw's two one-ways, which Matrix's search asks beside its own answer), in
+on the thread that starts the workers, and by `cli._open_jaw_tickets` around a
+multi-city search's one one-way per slice, asked beside Matrix's answer on
+`auto` and in its place under `--backend gflight`), in
 a ContextVar beside `_fanout_ladder`
 for the same reason: every worker of the search reads the same object, so the
 line prints once. A rung-1 GET reads it first, so a thread still backing off
@@ -181,10 +182,12 @@ Chrome's lifetime is separate and thread-local, as on `browser`: opened by the
 first request that needs it, closed where the browser transport closes one
 (`cli._gflight_query`'s `finally`, `cli._browser_scope`), a no-op on a thread
 that never escalated. The enriched path arms its interrupt guard under `auto`
-as under `browser`, so Ctrl-C stops an escalated Chrome; an `auto` search that
-never escalates pays for it with a second Ctrl-C ignored while its worker
-finishes. The enriched path's `--split` runs on a worker of its own, so after
-an escalation it opens a second Chrome there.
+as under `browser`, so Ctrl-C stops an escalated Chrome. The handler ignores a
+second Ctrl-C only when it stopped a driver; an `auto` search that never
+escalated has none, so its second Ctrl-C ends the wait on the worker, as on
+`http`, and a throttle met after the first prints no escalation line. The
+enriched path's `--split` runs on a worker of its own, so after an escalation it
+opens a second Chrome there.
 
 A multi-cabin search does not escalate: it fans its cabins out on http under
 `auto`, since a thread per cabin escalating would be a Chrome per cabin on one

@@ -194,7 +194,10 @@ def _announce() -> None:
 
 def announce_escalation() -> None:
     """The line an `auto` search prints when a throttle moves it to Chrome, in
-    place of `_announce`'s: it says Chrome is opening, and why."""
+    place of `_announce`'s: it says Chrome is opening, and why. Silent once an
+    interrupt has been seen: `_ensure_page` refuses that launch, so nothing opens."""
+    if _interrupt_state["seen"]:
+        return
     _notice_state["printed"] = True
     _err.print(
         "[dim]Google Flights rate-limited the request; opening Chrome (rung 2) for the "
@@ -829,15 +832,15 @@ def interrupt_guard(*, armed: bool = True) -> Generator[None]:
     it for every Google Flights search, before the transport is known: that
     search runs on the thread the signal is delivered to, so nothing after the
     handler can block. The ignore the handler installs is not scoped to that
-    wait, though: it is never restored, so it stands for the rest of the
-    process's life, and what makes arming this arm broadly safe is that by then
-    there is nothing left for a second Ctrl-C to stop. The enriched arm arms it
-    only for the transports that can open a browser, `browser` and `auto`, which
-    escalates a throttle to one, because there the search runs on a worker no
-    interrupt reaches — on `http` the first Ctrl-C cannot free that worker, and
-    an ignored second one leaves nothing that can. An `auto` search that never
-    escalates pays that: its second Ctrl-C is ignored while the worker finishes
-    its GETs.
+    wait, though: when the handler stopped a driver it is never restored, so it
+    stands for the rest of the process's life, and what makes arming this arm
+    broadly safe is that by then there is nothing left for a second Ctrl-C to
+    stop. The enriched arm arms it only for the transports that can open a
+    browser, `browser` and `auto`, which escalates a throttle to one, because
+    there the search runs on a worker no interrupt reaches — on `http` the first
+    Ctrl-C cannot free that worker, and an ignored second one leaves nothing that
+    can. An `auto` search that never escalated has no driver for the handler to
+    stop, so it hands the next Ctrl-C back (below).
 
     The default handler raises `KeyboardInterrupt` on the main thread and stops
     there, which leaves the two arms broken in different ways. On `--fast` the
@@ -864,13 +867,17 @@ def interrupt_guard(*, armed: bool = True) -> Generator[None]:
     CPython's own lines: anyio imports `asyncio.Runner` rather than using its
     vendored copy (`anyio/_backends/_asyncio.py:111-112`).
 
-    After the first one, SIGINT is IGNORED for the rest of the process's life —
-    including by the restore below, which is skipped. There is nothing left for a
-    second Ctrl-C to stop: the drivers are dead and the exit is already running.
+    After a first one that finds a driver open, SIGINT is IGNORED for the rest of
+    the process's life — including by the restore below, which is skipped. There
+    is nothing left for a second Ctrl-C to stop: the drivers are dead and the exit
+    is already running.
     What it would do instead is land in the middle of that exit, as a second
     `KeyboardInterrupt` through interpreter finalisation. The cost is real: a
     shutdown that ever did hang could no longer be interrupted from the same
-    terminal.
+    terminal. A first one that finds no driver open puts the previous disposition
+    back once the stop has returned, so a second Ctrl-C ends the wait on a worker,
+    as it does on `http`. The ignore still goes in first in that case too, and a
+    launch not yet registered reads `_interrupt_state` rather than the register.
 
     Only the main thread may install a handler; on any other this is a no-op that
     still runs its body, which is correct — that thread's Ctrl-C arrives on the
@@ -898,7 +905,12 @@ def interrupt_guard(*, armed: bool = True) -> Generator[None]:
         # BEFORE the snapshot: a launch that has not registered a driver yet
         # cannot be reached by the stop, and this is what it reads instead.
         _interrupt_state["seen"] = True
+        # Read once and used after the stop: it decides whether the ignore stays.
+        with _live_lock:
+            driver_open = bool(_live)
         stop_all_drivers()
+        if not driver_open:
+            signal.signal(signal.SIGINT, previous)
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGINT, _on_sigint)

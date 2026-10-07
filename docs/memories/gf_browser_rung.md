@@ -86,7 +86,7 @@ leave only rows of another page; pages capped in two currencies name both
 names its outbound page's figure, and a board merged from pages the lowest in
 each currency of every page read, one that holds no pin included. A board that shows separate
 tickets takes the lower of its own figure and the Cheapest tab's. Each one-way
-board an open jaw or `--split` reads (`cli._one_way_boards`) prints its own
+board a multi-city search or `--split` reads (`cli._one_way_boards`) prints its own
 line, labeled by its slice (`Google Flights CDG→JFK one-way stops at ...`) or
 leg (`return one-way`): once every leg answered, since the tickets drawn from
 it stop at its cap, or alone when it holds no ticket. It is a
@@ -173,7 +173,10 @@ arrived after it was already over — so those two graded as ordinary interrupts
 A second Ctrl-C during the shutdown changes none of it, and that is held by the
 disposition rather than by a live case: the handler installs `SIG_IGN` before
 it does anything else, and the shutdown is over inside 60 ms — faster than a
-second signal can be aimed into it.
+second signal can be aimed into it. The ignore stays only when a driver was
+open; with none (an `auto` search that never escalated) the handler gives the
+previous disposition back after its stop, so a second Ctrl-C ends the wait on
+the worker.
 
 The mechanism, because a hang here is otherwise re-derived from scratch: an
 interrupt that unwinds a patchright call kills the greenlet running that call's
