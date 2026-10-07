@@ -574,7 +574,8 @@ _DS_ERROR_BLOB_RE = re.compile(
 )
 _DS_KEY_RE = re.compile(r"key:\s*'([^']+)'")
 # Greedy to the end of the captured head — `data:` is the last key before
-# `sideChannel`, so everything after the first one is the payload.
+# `sideChannel` (or `errorHasStatus`), so everything after the first one is the
+# payload.
 _DS_DATA_RE = re.compile(r"data:\s*(.*)$", re.S)
 _DS_FLIGHTS_KEY = "ds:1"
 # `ds:1[2]` is Google's own top-flights board, `[3]` the rest. Concatenated in

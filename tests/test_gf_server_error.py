@@ -227,8 +227,8 @@ class _Clock:
 
 @pytest.fixture
 def clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
-    """Installed over `gf_session`'s own stand-in when both are asked for:
-    fixtures a test names are set up in order, and this one comes last."""
+    """Named after `gf_session`, whose own stand-in this replaces: pytest sets
+    fixtures up in the order a test names them."""
     recorder = _Clock()
     monkeypatch.setattr(gfid, "time", recorder)
     return recorder
@@ -241,8 +241,8 @@ def _http() -> gfid.Board[gfid.GFlightWithId]:
 def test_a_server_error_then_the_board_reads_the_board_after_a_pause(
     gf_session: Callable[..., Any], clock: _Clock
 ) -> None:
-    """Red at the base by its sleeps, `[]`: the page re-read at once. One
-    read was all the base gave a page it took for one with no board."""
+    """Red at the base by its sleeps, `[]`: it read the page again at once, as
+    one with no board."""
     fake = gf_session(_error_page(), _html("ds1_nyc_lon_token"))
     board = _http()
     assert (_shape(board), len(fake.gets), clock.sleeps) == ((300, 488.0), 2, [2.0])
@@ -282,9 +282,9 @@ def test_a_server_error_then_a_throttle_spends_no_more_than_the_ladder(
 def test_a_server_error_spends_no_rung_of_the_shared_ladder(
     gf_session: Callable[..., Any], clock: _Clock
 ) -> None:
-    """A guard, green at the base by behavior: the base never brought this page
-    to the ladder. The shared round is the per-IP wall's, and a server error
-    on one page says nothing about it."""
+    """A guard, green at the base by behavior, which never brought this page
+    to the ladder; red there on the type. The shared round is the per-IP
+    wall's, and a server error on one page says nothing about it."""
     gf_session(_error_page())
     with gfid.shared_throttle_ladder():
         ladder = gfid._fanout_ladder.get()
