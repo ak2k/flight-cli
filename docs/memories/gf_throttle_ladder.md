@@ -183,7 +183,9 @@ for a ladder Chrome does not run.
 The flag is one object per search (`search_escalation`, opened by `cli.search`
 on the thread that starts the workers, and by `cli._open_jaw_tickets` around a
 multi-city search's one one-way per slice, asked beside Matrix's answer on
-`auto` and in its place under `--backend gflight`), in
+`auto` and in its place under `--backend gflight`, and by
+`cli._run_gflight_multi` around a multi-cabin fan-out, which never escalates
+but shares the object's budget of server-error pauses), in
 a ContextVar beside `_fanout_ladder`
 for the same reason: every worker of the search reads the same object, so the
 line prints once. A rung-1 GET reads it first, so a thread still backing off

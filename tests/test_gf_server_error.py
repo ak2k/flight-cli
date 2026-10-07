@@ -333,15 +333,22 @@ def test_chrome_refuses_a_server_error_twice_as_that_error(
     assert (chrome.navigations, clock.sleeps) == (2, [])
 
 
+@pytest.mark.parametrize(
+    "cabins", [(), ("--cabin", "economy,business")], ids=["one-cabin", "two-cabins"]
+)
 def test_a_search_pauses_at_most_eight_seconds_for_server_errors(
-    gf_session: Callable[..., Any], clock: _Clock, monkeypatch: pytest.MonkeyPatch
+    cabins: tuple[str, ...],
+    gf_session: Callable[..., Any],
+    clock: _Clock,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Red without the search's budget, which paused 8 s for each page: the ten
-    return pages of the round trip and its Cheapest tab, 88 s. Green at the base,
-    which paused for none; red there on the refusal it named."""
+    return pages of the round trip and its Cheapest tab, 88 s, and 96 s once a
+    second cabin's outbound errs too. Green at the base, which paused for none;
+    red there on the refusal it named."""
     fake = gf_session(_answered("ds1_nyc_lon_token"), _error_page())
     monkeypatch.setattr(cli, "_run_matrix_path", _no_matrix)
-    argv = _search("--return", _RET.isoformat(), "--fast")
+    argv = _search("--return", _RET.isoformat(), "--fast", *cabins)
     result = CliRunner().invoke(cli.app, argv)
     assert result.exit_code == 1, result.output
     assert sum(clock.sleeps) <= 8.0, (clock.sleeps, len(fake.gets))

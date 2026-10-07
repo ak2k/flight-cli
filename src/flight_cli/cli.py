@@ -9145,10 +9145,12 @@ def _run_gflight_multi(
     native filters and the Tier-2 post-filter cannot drift apart. They also
     share ONE throttle ladder: Google's wall is per-IP, so a cabin per thread
     laddering against it separately spends the cabin count times the requests to
-    be told the same thing. On a round trip (`_CabinSearches`, led by `sort_by`,
-    default the first cabin) every cabin's outbound page, then every cabin's
-    pins, are two fan-outs inside that one ladder and one event loop."""
-    from ._gflight_ids import shared_throttle_ladder  # noqa: PLC0415
+    be told the same thing. They are one search, too, so they share one budget
+    of pauses for Google's server errors (`search_escalation`). On a round trip
+    (`_CabinSearches`, led by `sort_by`, default the first cabin) every cabin's
+    outbound page, then every cabin's pins, are two fan-outs inside that one
+    ladder and one event loop."""
+    from ._gflight_ids import search_escalation, shared_throttle_ladder  # noqa: PLC0415
 
     if gf_mode == TRANSPORT_BROWSER:
         served = _gflight_cabins_in_series(
@@ -9208,7 +9210,7 @@ def _run_gflight_multi(
             {cab: plan.led(cab, pins, pages[cab]) for cab in cabins if cab in pages}, results
         )
 
-    with shared_throttle_ladder():
+    with shared_throttle_ladder(), search_escalation():
         try:
             anyio.run(go)
         except (typer.Exit, typer.Abort):
