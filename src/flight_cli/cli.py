@@ -10603,7 +10603,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                 "default USD). N is compared with the printed price, which for a party "
                 "is the total. Google Flights is asked for a USD cap, and every row "
                 "is checked; Matrix is asked in the cap's currency and its answer cut to "
-                "the fares under it. One --cabin."
+                "the fares under it. Several --cabin values each take it."
             ),
             rich_help_panel=_GROUP_FILTERING,
         ),
@@ -10618,7 +10618,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                 "default 0): '1' is one checked bag, '1,1' adds a carry-on. Each row "
                 "then says whether its price includes them. Google Flights only, since "
                 "Matrix prices no bags: refused where the search needs Matrix. One "
-                "traveler and one --cabin."
+                "traveler."
             ),
             rich_help_panel=_GROUP_FILTERING,
         ),
