@@ -425,7 +425,10 @@ def mirrored_routing(routing: str) -> str | None:
 
 # ─────────────────────────── extension parser ──────────────────────────
 
-_RE_HHMM = re.compile(r"^(\d{1,2}):([0-5]\d)$")
+# ASCII digits only: `\d` and `str.isdigit` also take Arabic-Indic digits, and
+# `isdigit` a superscript `int` cannot read.
+_RE_HHMM = re.compile(r"^([0-9]{1,2}):([0-5][0-9])$")
+_RE_ASCII_COUNT = re.compile(r"[0-9]+")
 
 
 def _parse_hhmm(arg: str) -> int | None:
@@ -502,7 +505,7 @@ def _parse_extension_code(directive: str) -> Predicate | None:  # noqa: PLR0911,
         )
 
     match keyword:
-        case "MAXSTOPS" if args and args[0].isdigit():
+        case "MAXSTOPS" if args and _RE_ASCII_COUNT.fullmatch(args[0]):
             return StopsPred(max_stops=int(args[0]))
         case "MAXDUR" if args and (mins := _parse_hhmm(args[0])) is not None:
             return MaxDurationPred(minutes=mins)
