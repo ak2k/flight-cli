@@ -858,6 +858,8 @@ def _gf_unmappable_reasons(backend: str, predicates: Sequence[Predicate]) -> lis
 # page its own UI never builds.
 _GF_MAX_PASSENGERS = 9
 
+_MULTI_CITY_ON_ONE_TICKET = "a multi-city itinerary on one ticket"
+
 
 def _google_reasons(
     *,
@@ -891,8 +893,9 @@ def _google_reasons(
     """Every reason Google Flights' search page can't serve this request, each
     a phrase completing "Google Flights can't serve …"; empty when it can.
     What each reason is and why is `_pick_backend`'s docstring, which acts on
-    them. An `open_jaw`'s reason says "on one ticket": Google still prices it
-    as one-way tickets (`_answer_open_jaw`)."""
+    them. With `open_jaw`, a trip of one one-way per slice
+    (`_one_way_per_slice`), the reason says "on one ticket": Google still
+    prices it as one-way tickets (`_answer_open_jaw`)."""
     from ._gf_postfilter import search_page_reasons  # noqa: PLC0415
     from .routing_predicates import classify  # noqa: PLC0415
 
@@ -900,7 +903,7 @@ def _google_reasons(
     if fare_rules:
         reasons.append("fare rules")
     if slice_specs:
-        reasons.append("a multi-city itinerary" + (" on one ticket" if open_jaw else ""))
+        reasons.append(_MULTI_CITY_ON_ONE_TICKET if open_jaw else "a multi-city itinerary")
     reasons.extend(
         _date_option_reasons(
             flex=flex, return_flex=return_flex, arrive=arrive, return_arrive=return_arrive
@@ -1037,7 +1040,9 @@ def _pick_backend(
     drop from one they can't.
 
     Explicit --backend matrix: matrix. --backend gflight: gflight, unless the
-    request is inexpressible on GF (error).
+    request is inexpressible on GF (error). A trip of one one-way per slice
+    (`open_jaw`) whose only reason is that one ticket stays on gflight, which
+    answers it with separate tickets alone (`_answer_multi_city_on_google`).
 
     `--bags` needs Google Flights, because Matrix prices no bags, and so do an
     arrival window and `--exclude-basic` (`_google_only`). With one,
@@ -1101,7 +1106,7 @@ def _pick_backend(
             f"{_safe_text(_join_reasons(reasons))}.[/]"
         )
         return BACKEND_MATRIX
-    if backend == BACKEND_GFLIGHT and reasons:
+    if backend == BACKEND_GFLIGHT and reasons and reasons != [_MULTI_CITY_ON_ONE_TICKET]:
         # typer renders a BadParameter as plain Text, never markup — escaping
         # here would print the backslashes instead of hiding them.
         raise typer.BadParameter(
@@ -3431,8 +3436,9 @@ def _split_blocker(  # noqa: PLR0911 — one return per reason the run is refuse
     `--verify` writes. `awards_format` is the `--format` an award search would
     write its document into, or None when none runs.
 
-    An `open_jaw` (two `--slice` that are not a round trip's) is priced as one
-    one-way per slice beside Matrix's table instead, and its document is
+    An `open_jaw` (two or more `--slice` that are not a round trip's,
+    `_one_way_per_slice`) is priced as one one-way per slice instead, beside
+    Matrix's table or alone under `--backend gflight`, and its document is
     Matrix's, which `--fare-rules` writes a document of its own around. The
     envelope records its tickets beside an award search's rows without
     `--split`, so asking for them there is no conflict."""
@@ -3716,6 +3722,22 @@ class _SplitTicket(NamedTuple):
 _SPLIT_UNFINISHED = "the one-way searches did not finish"
 
 
+class _OneWaysUnpriced(str):
+    """Why one-way tickets asked for are unpriced: a board failed, or a stop
+    left later slices unasked. Every other reason `_one_way_boards` gives is
+    the boards' own answer."""
+
+    __slots__ = ()
+
+
+class _NoInfantRows(str):
+    """Why a slice's one-way board for a party with an infant holds no row:
+    Google has served such a board on routes with flights, so it answers
+    nothing about the slice."""
+
+    __slots__ = ()
+
+
 def _one_way_boards(
     legs: Sequence[tuple[Leg, str]],
     opts: SearchOptions,
@@ -3741,7 +3763,10 @@ def _one_way_boards(
 
     A leg whose pages met a stop (`_search_stop`) ends the asking, as a page's
     does in `_PageAsk`: every later leg would meet the same wall, so each is
-    named as not asked instead.
+    named as not asked instead. A failed or stopped leg's reason is an
+    `_OneWaysUnpriced`. With `narrow`, a leg Google served no row at all for a
+    party with an infant is an `_NoInfantRows`, which narrows the run as
+    `_run_gflight_path` does for the same board.
 
     A board at Google's row cap says so (`_note_row_cap`) once every leg
     answered, since the tickets drawn from it stop at its cap, or when it holds
@@ -3750,14 +3775,15 @@ def _one_way_boards(
     (`_note_stop_drops`), as on every other board shown."""
     from ._gf_browser import interrupt_guard  # noqa: PLC0415 — GF-only
 
-    def unpriced(reason: str) -> str:
+    def unpriced(reason: str) -> _OneWaysUnpriced:
         # The tickets were asked for and are unpriced, where every other
         # reason is the boards' answer. A round trip's pair is priced
-        # beside Google's answer; an open jaw's tickets (`narrow`) beside
-        # Matrix's, so they name no backend.
+        # beside Google's answer; a multi-city trip's tickets (`narrow`)
+        # beside Matrix's, or alone, so they name no backend.
         _envelope.narrow(of=None if narrow else "gflight")
-        return reason
+        return _OneWaysUnpriced(reason)
 
+    infant = bool(opts.pax.infants_in_seat or opts.pax.infants_in_lap)
     one_way = opts.model_copy(update={"max_price": None})
     requested = opts.currency or "USD"
     boards: list[list[Any]] = []
@@ -3786,6 +3812,12 @@ def _one_way_boards(
                 if not single:
                     _note_stop_drops(board, one_way=which)
                     _note_row_cap(board, requested, one_way=which)
+                    if narrow and infant and not (board or getattr(board, "dropped", 0)):
+                        _envelope.narrow()
+                        return _NoInfantRows(
+                            "Google Flights served no rows for a party with an infant on the "
+                            f"{which} one-way, as it has on routes with flights"
+                        )
                     ticket = " on one ticket" if priced else ""
                     return f"Google Flights priced no {which} one-way{ticket}"
                 boards.append(single)
@@ -3941,22 +3973,26 @@ def _record_split_ticket(ticket: _SplitTicket | str, bags: Bags | None) -> None:
     _envelope.record_split_ticket(json.loads(json.dumps(obj, default=str)))
 
 
-# ─────────────────────── open jaw on separate tickets ───────────────────────
+# ───────────────────── multi-city on separate tickets ──────────────────────
 
 
 class _OpenJaw(NamedTuple):
-    """An open jaw's answer on Google Flights: the cheapest combinations of one
-    one-way ticket per slice, the currency each total is summed in, and how
-    many one-way rows were priced in another, which no total adds."""
+    """A multi-city trip's answer on Google Flights: the cheapest combinations
+    of one one-way ticket per slice, the currency each total is summed in, and
+    how many one-way rows were priced in another, which no total adds."""
 
     combinations: list[Combination]
     currency: str
     other_currency: int
 
 
-def _is_open_jaw(legs: Sequence[Leg]) -> bool:
-    """Two slices that are not a round trip's (`links.is_inverse_pair`)."""
-    return len(legs) == _ROUND_TRIP_LEGS and not is_inverse_pair(legs[0], legs[1])
+def _one_way_per_slice(legs: Sequence[Leg]) -> bool:
+    """Two or more slices that are not a round trip's (`links.is_inverse_pair`):
+    an open jaw or a longer multi-city trip, which Google Flights sells as one
+    one-way ticket per slice."""
+    if len(legs) == _ROUND_TRIP_LEGS:
+        return not is_inverse_pair(legs[0], legs[1])
+    return len(legs) > _ROUND_TRIP_LEGS
 
 
 def _slice_route(leg: Leg) -> str:
@@ -3970,13 +4006,17 @@ def _open_jaw_blocker(
     opts: SearchOptions,
     no_separate_tickets: bool,
     top_codes: Sequence[tuple[str, str | None]],
+    cabins: int = 1,
 ) -> str | None:
-    """Why an open jaw's one-ways are not asked of Google Flights, as a
-    plain-text phrase, or None when they are: an opt-out, a top-level option
-    that applies to no slice, or a slice the search page can't serve as a
-    one-way (`_google_reasons`, asked of the slice alone)."""
+    """Why a multi-city trip's one-ways (`_one_way_per_slice`) are not asked of
+    Google Flights, as a plain-text phrase, or None when they are: an opt-out,
+    several `cabins` (a combination's tickets are priced in one), a top-level
+    option that applies to no slice, or a slice the search page can't serve as
+    a one-way (`_google_reasons`, asked of the slice alone)."""
     if no_separate_tickets:
         return "--no-separate-tickets was given"
+    if cabins > 1:
+        return f"each is priced in one cabin, and --cabin asks for {cabins:d}"
     flags = [flag for flag, value in top_codes if value]
     if flags:
         verb, them = ("reaches", "it") if len(flags) == 1 else ("reach", "them")
@@ -4023,16 +4063,17 @@ def _open_jaw_tickets(
     gf_mode: GfTransportMode,
     gf_headed: bool,
 ) -> _OpenJaw | str:
-    """The `top_n` cheapest combinations of one one-way per slice of the open
-    jaw `legs` (`_open_jaw.combine`), or the plain-text reason there is none.
+    """The `top_n` cheapest combinations of one one-way per slice of the
+    multi-city trip `legs` (`_open_jaw.combine`), or the plain-text reason
+    there is none, typed as `_one_way_boards` types it.
 
     A price cap holds each combination's total, as it would a trip's fare."""
     from ._gflight_ids import search_escalation  # noqa: PLC0415 — fli, ~95 ms
-    from ._open_jaw import combine  # noqa: PLC0415 — only an open jaw combines
+    from ._open_jaw import combine  # noqa: PLC0415 — only a multi-city trip combines
 
     currency = opts.currency or "USD"
     # The one-ways are one search to `auto`: a throttle on the first moves the
-    # second to Chrome too, rather than to a ladder of its own on the same IP.
+    # rest to Chrome too, rather than each to a ladder of its own on one IP.
     with search_escalation():
         boards = _one_way_boards(
             tuple((leg, _slice_route(leg)) for leg in legs),
@@ -4044,18 +4085,23 @@ def _open_jaw_tickets(
         )
     if isinstance(boards, str):
         return boards
-    first, second = boards
     other = sum((r.flight.currency or currency) != currency for board in boards for r in board)
-    combos = combine(first, second, currency=currency, limit=top_n, cap=opts.max_price)
+    combos = combine(*boards, currency=currency, limit=top_n, cap=opts.max_price)
     if combos:
         return _OpenJaw(combos, currency, other)
     for leg, board in zip(legs, boards, strict=True):
         if all((r.flight.currency or currency) != currency for r in board):
             return f"Google Flights priced no {_slice_route(leg)} one-way in {currency}"
-    if opts.max_price is not None and combine(first, second, currency=currency, limit=1):
-        return f"no pair at or under {currency} {opts.max_price:d}"
+    pair = len(legs) == _ROUND_TRIP_LEGS
+    if opts.max_price is not None and combine(*boards, currency=currency, limit=1):
+        return f"no {'pair' if pair else 'combination'} at or under {currency} {opts.max_price:d}"
+    if pair:
+        return (
+            "no pair where the second ticket leaves after the first lands "
+            "(from another airport, on a later day)"
+        )
     return (
-        "no pair where the second ticket leaves after the first lands "
+        "no combination where each ticket leaves after the one before it lands "
         "(from another airport, on a later day)"
     )
 
@@ -4092,7 +4138,7 @@ def _note_open_jaw_currencies(answer: _OpenJaw) -> None:
 def _render_open_jaw(
     answer: _OpenJaw, legs: tuple[Leg, ...], opts: SearchOptions, *, google_url: bool
 ) -> None:
-    """The open jaw's combinations, a row per ticket under its numbered total,
+    """A multi-city trip's combinations, a row per ticket under its numbered total,
     then the key to the total's `†` and, under `google_url`, a link to each
     ticket of the cheapest.
 
@@ -4148,8 +4194,8 @@ def _render_open_jaw(
 def _open_jaw_object(
     answer: _OpenJaw | str, legs: tuple[Leg, ...], opts: SearchOptions
 ) -> dict[str, Any]:
-    """The `split_ticket` object of an open jaw: its combinations, each ticket
-    a Google row with a link to it, or why there are none."""
+    """The `split_ticket` object of a multi-city trip: its combinations, each
+    ticket a Google row with a link to it, or why there are none."""
     if isinstance(answer, str):
         return {"error": answer}
     return {
@@ -4187,9 +4233,10 @@ def _answer_open_jaw(
     google_url: bool,
     awards: bool = False,
 ) -> dict[str, Any] | None:
-    """Google Flights' separate-ticket answer to the open jaw `legs`, shown
-    ahead of Matrix's one-ticket answer: the table, or in a document the
-    `split_ticket` object, which is returned for Matrix's document to carry.
+    """Google Flights' separate-ticket answer to the multi-city trip `legs`
+    (`_one_way_per_slice`), shown ahead of Matrix's one-ticket answer: the
+    table, or in a document the `split_ticket` object, which is returned for
+    Matrix's document to carry.
     `blocker` is why nothing is asked (`_open_jaw_blocker`), said on stderr.
     A failed or empty board is said on stderr and leaves Matrix to answer.
 
@@ -4225,6 +4272,129 @@ def _answer_open_jaw(
     if not isinstance(answer, str):
         _render_open_jaw(answer, legs, opts, google_url=google_url)
     return None
+
+
+_SEPARATE_ALONE = (
+    "--backend gflight answers a multi-city search with Google Flights' separate tickets alone"
+)
+
+
+def _gflight_multi_city_blocker(
+    *,
+    blocker: str | None,
+    awards_only: bool,
+    awards_json: bool,
+    sellers: bool,
+    enrich: bool,
+    bags: Bags | None,
+    exclude_basic: bool,
+    arrive_times: str | None,
+    return_arrive_times: str | None,
+    pick: int | None,
+) -> str | None:
+    """Why `--backend gflight` cannot answer a multi-city trip
+    (`_one_way_per_slice`), as a plain-text sentence ending in its remedy, or
+    None. Read off the flags alone, so a refusal costs no request.
+
+    Google Flights answers the trip with one one-way per slice and nothing
+    else (`_answer_multi_city_on_google`), so a flag that acts on a row on one
+    ticket has none to act on. `blocker` is why no one-way would be asked
+    (`_open_jaw_blocker`), which leaves nothing to answer with."""
+    if blocker is not None:
+        return f"{_SEPARATE_ALONE}, and none is asked: {blocker}. Drop --backend gflight"
+    if awards_only:
+        # Ahead of the award document's refusal, whose --cash-only it excludes;
+        # dropping --awards-only alone would meet that refusal next.
+        remedy = (
+            "Drop --backend gflight, or drop --awards-only and add --cash-only"
+            if awards_json
+            else "Drop either"
+        )
+        return f"--awards-only prints award space alone, and {_SEPARATE_ALONE}. {remedy}"
+    if awards_json:
+        return (
+            f"{_SEPARATE_ALONE}, and an award search writes its own --format json document. "
+            "Add --cash-only"
+        )
+    for flag, given, acts, remedy in (
+        ("--sellers", sellers, "opens the booking page of a row on one ticket", "Drop it"),
+        ("--enrich", enrich, "checks rows on one ticket against Matrix", "Drop it"),
+        ("--bags", bags is not None, "prices bags on rows on one ticket", "Drop it"),
+        (
+            "--exclude-basic",
+            exclude_basic,
+            "asks for rows on one ticket without basic economy",
+            "Drop it",
+        ),
+        ("--arrive-times", bool(arrive_times), "holds rows on one ticket to a window", "Drop it"),
+        (
+            "--return-arrive-times",
+            bool(return_arrive_times),
+            "holds rows on one ticket to a window",
+            "Drop it",
+        ),
+        (
+            "--pick",
+            pick is not None,
+            "names a row on one ticket",
+            "Drop it, or drop --backend gflight",
+        ),
+    ):
+        if given:
+            return f"{flag} {acts}, and {_SEPARATE_ALONE}. {remedy}"
+    return None
+
+
+def _answer_multi_city_on_google(
+    *,
+    legs: tuple[Leg, ...],
+    opts: SearchOptions,
+    top_n: int,
+    gf_mode: GfTransportMode,
+    gf_headed: bool,
+    output: str,
+    google_url: bool,
+    awards: bool,
+) -> None:
+    """`--backend gflight` on a multi-city trip (`_one_way_per_slice`):
+    Google Flights' separate tickets alone, as `_answer_open_jaw` shows them
+    beside Matrix's answer, and Matrix asked nothing. The document is
+    `{"search": [], "split_ticket": …}`, `--split` or not, since the tickets
+    are the whole answer. `awards` is whether an award search would run: it
+    matches rows on one ticket, and there are none.
+
+    Exits 1 when a board failed or stopped the search (`_OneWaysUnpriced`),
+    with a table's or JSON's stdout empty; an empty board, or no flyable
+    combination, is an answer."""
+    if awards:
+        no_awards = "awards are matched to rows on one ticket, and none is asked"
+        err.print(f"[dim]No award search: {_safe_text(no_awards)}.[/]")
+        _envelope.explain("awards", no_awards)
+    answer = _open_jaw_tickets(legs, opts, top_n, gf_mode, gf_headed)
+    if isinstance(answer, _NoInfantRows):
+        _report_no_open_jaw(f"{answer}. For Matrix's answer, drop --backend gflight")
+    elif isinstance(answer, str):
+        _report_no_open_jaw(answer)
+    else:
+        _note_open_jaw_currencies(answer)
+    failed = isinstance(answer, _OneWaysUnpriced)
+    if not failed:
+        _envelope.record_search(backend="gflight", cabin=opts.cabin.value, rows=[])
+        _envelope.explain(
+            "results",
+            "Google Flights is asked no multi-city itinerary on one ticket; its separate "
+            "tickets are in split_ticket",
+        )
+    if output == "table":
+        if not isinstance(answer, str):
+            _render_open_jaw(answer, legs, opts, google_url=google_url)
+    else:
+        obj = json.loads(json.dumps(_open_jaw_object(answer, legs, opts), default=str))
+        _envelope.record_split_ticket(obj)
+        if not failed and not _envelope.active():
+            sys.stdout.write(json.dumps({"search": [], "split_ticket": obj}, indent=2))
+    if failed:
+        raise typer.Exit(1)
 
 
 # ─────────────────────────── result renderers ──────────────────────────────
@@ -4981,7 +5151,7 @@ def _run_matrix_path(
     """Matrix path: Alkali call → optional cash render → optional fare rules →
     optional PP augmentation → URLs.
 
-    `split_ticket` is an open jaw's separate-ticket object, which the JSON
+    `split_ticket` is a multi-city trip's separate-ticket object, which the JSON
     document carries beside Matrix's as `{"search": …, "split_ticket": …}`."""
     # A cap holds each fare in the cap's currency, so Matrix is asked in it:
     # left unset, it prices in its own default (GBP from LHR) and the cap keeps
@@ -5371,7 +5541,9 @@ def _verify_blocker(  # noqa: PLR0911 — one return per reason the run is refus
         return "asks Matrix, which prices no bags; drop --bags"
     if exclude_basic:
         return "asks Matrix, which is not asked to leave out basic economy; drop --exclude-basic"
-    if backend == BACKEND_MATRIX or slice_specs or date_options:
+    if slice_specs:
+        return "checks a Google Flights row on one ticket, and a --slice search shows none"
+    if backend == BACKEND_MATRIX or date_options:
         return "needs a Google Flights row, and this search runs on Matrix"
     n = 1 if pick is None else pick
     if not 1 <= n <= page_size:
@@ -5777,8 +5949,8 @@ def _note_stop_drops(
     was asked for, from `_gflight_results`' tally. Called, like
     `_note_other_currencies`, by each path that answers with the board: a board
     the filter emptied says so in its own line, and one handed to Matrix is not
-    shown at all. `one_way` labels a one-way board an open jaw or `--split`
-    reads (`_one_way_boards`), as `_note_row_cap` labels it; such a board is
+    shown at all. `one_way` labels a one-way board a multi-city trip or
+    `--split` reads (`_one_way_boards`), as `_note_row_cap` labels it; such a board is
     counted even when the drops emptied it, since its own line says only that
     it priced no one-way."""
     drops: StopDrops | None = getattr(results, "stop_drops", None)
@@ -5812,7 +5984,7 @@ def _note_row_cap(
     Each cap is named in the currency of the page that stopped there
     (`Board.capped_at`), which no row may carry once a filter has run;
     `requested` names a cap whose page decoded no currency. `one_way` labels a
-    one-way board an open jaw or `--split` reads (`_one_way_boards`), as
+    one-way board a multi-city trip or `--split` reads (`_one_way_boards`), as
     `cabin` labels a cabin's.
 
     A plain line, not a narrowing, so the envelope carries it as a note and
@@ -10348,8 +10520,9 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             "--slice",
             "-s",
             help=_SLICE_HELP
-            + " Matrix answers. Two slices that are not a round trip (an open jaw) also show "
-            "Google Flights' cheapest one-way per slice, combined as separate tickets.",
+            + " Matrix answers, on one ticket. Two or more slices that are not a round trip (an "
+            "open jaw, or a longer multi-city trip) also show Google Flights' cheapest one-way "
+            "per slice, combined as separate tickets; --backend gflight shows those alone.",
             rich_help_panel=_GROUP_ITINERARY,
         ),
     ] = None,
@@ -10360,7 +10533,9 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             help=(
                 "auto|matrix|gflight. auto picks gflight for plain searches and "
                 "matrix when Matrix-only flags are set (routing/extension/slice/"
-                "time-of-day/extra pax types/PP config)."
+                "time-of-day/extra pax types/PP config). gflight on two or more --slice that "
+                "are not a round trip shows Google Flights' separate tickets alone, one "
+                "one-way per slice, and asks Matrix nothing."
             ),
             autocompletion=_completer(_VALID_BACKENDS),
             rich_help_panel=_GROUP_BACKEND,
@@ -10544,8 +10719,8 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                 "self transfer, which a search otherwise shows from Google's Cheapest tab "
                 "(marked † and ‡ on the Google, merged and multi-cabin tables, "
                 "separate_tickets: true in --format json), and say how many were hidden; "
-                "on an open jaw, ask Google for no one-way tickets. Matrix sells every "
-                "itinerary as one ticket, so there it changes nothing."
+                "on a multi-city --slice search, ask Google for no one-way tickets. Matrix "
+                "sells every itinerary as one ticket, so there it changes nothing."
             ),
             rich_help_panel=_GROUP_FILTERING,
         ),
@@ -10622,10 +10797,10 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         "round-trip table, the cheapest pair whose return leaves the airport the outbound "
         "lands at, after it lands, as two separate tickets. --max-price is not applied to "
         'them. With --format json the document becomes {"search": …, "split_ticket": {…}}; '
-        "--format envelope carries the same object under split_ticket. On an open jaw (two "
-        "--slice that are not a round trip), whose table and --format envelope show its "
-        "separate tickets anyway, --format json carries them only with --split, as "
-        "split_ticket's combinations beside Matrix's document.",
+        "--format envelope carries the same object under split_ticket. On a multi-city "
+        "search (two or more --slice that are not a round trip), whose table and --format "
+        "envelope show its separate tickets anyway, --format json carries them only with "
+        "--split, as split_ticket's combinations beside Matrix's document.",
         rich_help_panel=_GROUP_OUTPUT,
     ),
     currency: Annotated[
@@ -10873,7 +11048,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             )
         )
         raise typer.Exit(2)
-    open_jaw = _is_open_jaw(tuple(map(_parse_slice_spec, slice_specs or [])))
+    per_slice = _one_way_per_slice(tuple(map(_parse_slice_spec, slice_specs or [])))
     if split and (
         blocker := _split_blocker(
             multi_city=bool(slice_specs),
@@ -10886,7 +11061,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             awards_format=output
             if json_out and not sel.awards_only and _should_run_awards(sel)
             else None,
-            open_jaw=open_jaw,
+            open_jaw=per_slice,
             fare_rules=fare_rules,
         )
     ):
@@ -10932,7 +11107,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         return_flex=ret_flex,
         arrive=bool(arrive),
         return_arrive=bool(return_arrive),
-        open_jaw=open_jaw,
+        open_jaw=per_slice,
     )
     if verify and resolved == BACKEND_MATRIX:
         err.print("[red]--verify needs a Google Flights row, and this search runs on Matrix.[/]")
@@ -11012,6 +11187,53 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
     # rather than reassigned: the parameter is declared `str` for typer's sake,
     # and reassigning it would throw away the narrowing this call just did.
     gf_mode = _resolve_gf_transport(gf_transport)
+
+    # Each applies to no slice, on Matrix as on Google.
+    top_codes = (
+        ("--routing", routing),
+        ("--extension", extension),
+        ("--depart-times", depart_times),
+        ("--return-times", return_times),
+    )
+    beside_matrix = bool(slice_specs) and backend == BACKEND_AUTO and not sel.awards_only
+
+    # `_pick_backend` puts a --slice search on Google only as one one-way per slice.
+    if slice_specs and resolved == BACKEND_GFLIGHT:
+        if blocker := _gflight_multi_city_blocker(
+            blocker=_open_jaw_blocker(
+                legs=legs,
+                opts=opts,
+                no_separate_tickets=no_separate_tickets,
+                top_codes=top_codes,
+                cabins=len(cabins_tuple),
+            ),
+            awards_only=sel.awards_only,
+            awards_json=output == "json" and run_awards,
+            sellers=sellers,
+            enrich=fast is False,
+            bags=bags,
+            exclude_basic=exclude_basic,
+            arrive_times=google_arrive_times,
+            return_arrive_times=google_return_arrive_times,
+            pick=pick,
+        ):
+            err.print(f"[red]{_safe_text(blocker)}.[/]")
+            raise typer.Exit(2)
+        _answer_multi_city_on_google(
+            legs=legs,
+            opts=opts,
+            top_n=page_size,
+            gf_mode=gf_mode,
+            gf_headed=gf_headed,
+            output=output,
+            google_url=google_url,
+            awards=run_awards,
+        )
+        return
+
+    # Below the multi-city answer above, which refuses --sellers itself: this
+    # check's "drop --bags or --sellers" would not hold there, since Google's
+    # separate tickets refuse each of the two.
     if sellers and (
         blocker := _sellers_blocker(
             backend=resolved,
@@ -11028,6 +11250,24 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         raise typer.Exit(2)
 
     if len(cabins_tuple) > 1:
+        if beside_matrix and per_slice:
+            _answer_open_jaw(
+                legs=legs,
+                opts=opts,
+                top_n=page_size,
+                gf_mode=gf_mode,
+                gf_headed=gf_headed,
+                blocker=_open_jaw_blocker(
+                    legs=legs,
+                    opts=opts,
+                    no_separate_tickets=no_separate_tickets,
+                    top_codes=top_codes,
+                    cabins=len(cabins_tuple),
+                ),
+                output=output,
+                split=split,
+                google_url=google_url,
+            )
         # `_pick_backend` already refused anything the page can't encode, so a
         # constraint that survived to here is one the fan-out honours natively.
         # Re-testing `routing or extension` here would drop it to Matrix with no
@@ -11182,7 +11422,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             )
 
     split_ticket: dict[str, Any] | None = None
-    if slice_specs and backend == BACKEND_AUTO and not sel.awards_only and _is_open_jaw(legs):
+    if beside_matrix and per_slice:
         split_ticket = _answer_open_jaw(
             legs=legs,
             opts=opts,
@@ -11193,13 +11433,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                 legs=legs,
                 opts=opts,
                 no_separate_tickets=no_separate_tickets,
-                # Each is applied to no slice, on Matrix as on Google.
-                top_codes=(
-                    ("--routing", routing),
-                    ("--extension", extension),
-                    ("--depart-times", depart_times),
-                    ("--return-times", return_times),
-                ),
+                top_codes=top_codes,
             ),
             output=output,
             split=split,

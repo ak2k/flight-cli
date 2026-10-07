@@ -171,8 +171,9 @@ the page's own. A refusal met after the escalation is worded as rung 2's
 for a ladder Chrome does not run.
 
 The flag is one object per search (`search_escalation`, opened by `cli.search`
-on the thread that starts the workers, and by `cli._open_jaw_tickets` around an
-open jaw's two one-ways, which Matrix's search asks beside its own answer), in
+on the thread that starts the workers, and by `cli._open_jaw_tickets` around a
+multi-city search's one one-way per slice, asked beside Matrix's answer on
+`auto` and in its place under `--backend gflight`), in
 a ContextVar beside `_fanout_ladder`
 for the same reason: every worker of the search reads the same object, so the
 line prints once. A rung-1 GET reads it first, so a thread still backing off
