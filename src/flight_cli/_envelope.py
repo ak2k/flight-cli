@@ -49,6 +49,16 @@ class ResultRow(_Frozen):
     row: Any
 
 
+class CalendarRow(ResultRow):
+    """A calendar's priced day or graph cell, with the dates it prices beside
+    `row`, which for a Matrix day holds its day of the month alone. `departure`
+    is null for a day the window does not place on one date; `return` is null on
+    a one-way and on a round-trip day that names no trip length."""
+
+    departure: dt.date | None
+    return_date: dt.date | None = Field(alias="return")
+
+
 class CabinRows(_Frozen):
     cabin: str
     rows: list[ResultRow]
@@ -119,7 +129,7 @@ class CalendarEnvelope(_Frozen):
     currency: str | None
     complete: bool
     notes: list[str]
-    results: list[ResultRow]
+    results: list[CalendarRow]
     awards: list[dict[str, Any]] | None
     insight: list[Insight]
     price_history: list[PriceHistory]
@@ -149,7 +159,7 @@ class _Recorder:
         self.narrowings: list[str] = []
         self.asked: list[str] = []
         self.by_cabin: dict[str, list[ResultRow]] = {}
-        self.days: list[ResultRow] = []
+        self.days: list[CalendarRow] = []
         self.awards: list[dict[str, Any]] | None = None
         self.insight: list[Insight] = []
         self.history: list[PriceHistory] = []
@@ -219,7 +229,7 @@ def record_search(
             rec.history.extend(histories)
 
 
-def record_calendar(*, backend: Backend, rows: Sequence[ResultRow]) -> None:
+def record_calendar(*, backend: Backend, rows: Sequence[CalendarRow]) -> None:
     if (rec := _slot.recorder) is not None:
         with rec.lock:
             rec.backend = backend
@@ -348,6 +358,7 @@ def _note_lines(text: str) -> list[str]:
 def _document(rec: _Recorder, *, code: int, stderr: str, stray: str) -> str:
     unanswered: list[str] = []
     groups: list[CabinRows] = []
+    rows: Sequence[ResultRow]
     if rec.command == "search":
         asked = rec.asked or list(rec.by_cabin)
         unanswered = [c for c in asked if c not in rec.by_cabin]
@@ -384,14 +395,14 @@ def _document(rec: _Recorder, *, code: int, stderr: str, stray: str) -> str:
     doc = (
         SearchEnvelope(command="search", results=groups, **common)
         if rec.command == "search"
-        else CalendarEnvelope(command="calendar", results=rows, **common)
+        else CalendarEnvelope(command="calendar", results=rec.days, **common)
     )
     # By alias: a graph cell's `return` is a keyword in Python.
     return json.dumps(doc.model_dump(mode="json", by_alias=True), indent=2)
 
 
 def _key_notes(
-    rec: _Recorder, code: int, *, rows: list[ResultRow], priced: set[str | None]
+    rec: _Recorder, code: int, *, rows: Sequence[ResultRow], priced: set[str | None]
 ) -> list[str]:
     """One line per null or empty key, naming the key and why."""
     calendar = rec.command == "calendar"

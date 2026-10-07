@@ -76,7 +76,7 @@
         },
         "results": {
           "items": {
-            "$ref": "#/$defs/ResultRow"
+            "$ref": "#/$defs/CalendarRow"
           },
           "title": "Results",
           "type": "array"
@@ -171,6 +171,70 @@
         "split_ticket"
       ],
       "title": "CalendarEnvelope",
+      "type": "object"
+    },
+    "CalendarRow": {
+      "additionalProperties": false,
+      "description": "A calendar's priced day or graph cell, with the dates it prices beside\n`row`, which for a Matrix day holds its day of the month alone. `departure`\nis null for a day the window does not place on one date; `return` is null on\na one-way and on a round-trip day that names no trip length.",
+      "properties": {
+        "price": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Price"
+        },
+        "currency": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Currency"
+        },
+        "row": {
+          "title": "Row"
+        },
+        "departure": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Departure"
+        },
+        "return": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Return"
+        }
+      },
+      "required": [
+        "price",
+        "currency",
+        "row",
+        "departure",
+        "return"
+      ],
+      "title": "CalendarRow",
       "type": "object"
     },
     "Insight": {
