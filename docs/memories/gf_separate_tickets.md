@@ -137,9 +137,10 @@ cabin's is a row of its own (`merge(slices=...)`). Award matching and the cash
 map skip marked rows, and `_note_award_skips` counts them once.
 
 **Open jaw.** Two `--slice` that are not a round trip (`links.is_inverse_pair`)
-go to Matrix, which prices one ticket. On `--backend auto`, one cabin, a table
-or `--split`, `search` also asks each slice's one-way board alone (the fetch
-`--split` uses, `cli._one_way_boards`: priced one-ticket rows, no price cap)
+go to Matrix, which prices one ticket. On `--backend auto`, one cabin, a table,
+`--format envelope` or `--split`, `search` also asks each slice's one-way board
+alone (the fetch `--split` uses, `cli._one_way_boards`: priced one-ticket rows,
+no price cap, the rows over a stop ceiling counted on stderr)
 and `_open_jaw.combine` pairs them: every pair flyable in order, sorted by
 total in cents, ties first-board-major, at most `-n`, none over `--max-price`.
 Flyable: from the airport the first ticket lands at, the second leaves after it
@@ -147,11 +148,18 @@ lands (one local clock); from another airport, on a later local day, because
 rows carry no UTC offset and the ground transfer is unknown. A row priced in
 another currency is never summed.
 
+The envelope asks exactly what the table asks and records the combinations
+as `split_ticket`, so the two hold the same tickets; `--format json` keeps
+Matrix's own body and asks Google only with `--split`, saying so on stderr. The
+`Using Matrix:` line above the table names "a multi-city itinerary on one
+ticket": Google sells the trip only as the tickets below it.
+
 Google is not asked when a slice's own codes, flex or arrival date are ones
 the page can't serve as a one-way (`_google_reasons` on the slice alone), when
 a top-level `--routing`, `--extension`, `--depart-times` or `--return-times` is
 set (none reaches a `--slice`, on Matrix either), or under
-`--no-separate-tickets`.
+`--no-separate-tickets`. The envelope records that reason as `{error}`, which
+narrows `complete` only under `--split`.
 
 **Measured 2026-10-05, JFK-LHR 2026-10-20 + CDG-JFK 2026-10-27, one adult.**
 Matrix: 39 solutions from USD812. Google one-ways: 97 and 113 priced rows,

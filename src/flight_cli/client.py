@@ -85,7 +85,12 @@ class MatrixClient:
         cache_dir: str | None = None,
         cache_read: bool = True,
         cache_write: bool = True,
+        rebootstrap: bool = True,
     ) -> None:
+        # `rebootstrap=False` makes a 403 final: the re-bootstrap below is
+        # synchronous, so a caller that bounds its requests in time cannot
+        # allow it.
+        self._rebootstrap = rebootstrap
         # If not supplied, resolve at construction time:
         # env var → on-disk cache → bootstrap-scrape from Matrix's SPA.
         # Never hardcoded in the source.
@@ -118,7 +123,9 @@ class MatrixClient:
         On a 403 from Matrix (typically a stale or wrong cached API key),
         invalidate the cache, re-bootstrap once, and retry. If the retry
         also 403s, surface ApiKeyResolutionError with the recovery guidance
-        from _api_key._help_text — instead of a raw httpx traceback.
+        from _api_key._help_text — instead of a raw httpx traceback. A client
+        built with `rebootstrap=False` invalidates the cache and raises on the
+        first 403, so the next run bootstraps.
         """
         try:
             data = await self._http.post_json(
@@ -131,6 +138,8 @@ class MatrixClient:
             if e.response.status_code != HTTPStatus.FORBIDDEN:
                 raise
             invalidate_cache()
+            if not self._rebootstrap:
+                raise ApiKeyResolutionError("Matrix rejected the API key with HTTP 403.") from e
             self._api_key = resolve_api_key(force_bootstrap=True)
             try:
                 data = await self._http.post_json(

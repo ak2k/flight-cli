@@ -28,6 +28,7 @@ from flight_cli import cli
 from flight_cli._gf_common import PageFetch
 from flight_cli._multi_cabin import (
     MultiCabinRow,
+    cheapest,
     itinerary_key,
     merge,
     parse_price,
@@ -315,6 +316,20 @@ def test_merge_ranks_the_requested_currency_first_then_each_other_by_code():
         "$10",
         None,
     ]
+
+
+def _cheapest_price(*prices: str) -> str | None:
+    found = cheapest(_result(*_priced(*prices)), currency="USD")
+    return found.price if found is not None else None
+
+
+def test_cheapest_reads_another_currency_only_when_none_is_priced_in_the_requested_one():
+    """A USD fare is the cheapest however small a number another currency
+    prices. With none in USD, the lowest in the first other currency by code;
+    a price naming no currency is never one."""
+    assert _cheapest_price("EUR100.00", "USD900.00", "USD800.00") == "USD800.00"
+    assert _cheapest_price("GBP50.00", "EUR300.00", "$10", "EUR200.00") == "EUR200.00"
+    assert _cheapest_price("$10") is None
 
 
 @pytest.mark.parametrize("currency", ["USD", "GBP"])
