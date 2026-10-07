@@ -92,7 +92,9 @@ def _table(out: str, title: str) -> tuple[str, list[list[str]]]:
         cells
         for ln in lines
         if ln.strip().startswith("│")
-        and (cells := [c.strip() for c in ln.strip().strip("│").split("│")])[0].isdigit()
+        and (cells := [c.strip() for c in ln.strip().strip("│").split("│")])[0]
+        .removeprefix("★")
+        .isdigit()
     ]
     return " ".join(" ".join(h[1] for h in header).split()), rows
 
