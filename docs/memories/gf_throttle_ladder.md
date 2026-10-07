@@ -113,7 +113,9 @@ Another arm reads a page again when Google answered it with a server error
 call's wall attempts, so a page that errs and then throttles costs no more
 calls than one that throttles: 5 GETs, where reading it as a page with no
 `ds:1` and then laddering cost 7. The arm never books a rung of the shared
-round: an error on one page says nothing about the per-IP wall. Its pauses come
+round: an error on one page says nothing about the per-IP wall. It stands down
+a round it owns before it pauses, so a sibling parked on that round retries at
+once rather than after up to 8 s of pauses. Its pauses come
 out of a budget of 8 s per search, on the object `search_escalation` opens, so
 a search of many pages waits once. The measurements are in
 [gf_page_refusals_and_ds1.md](gf_page_refusals_and_ds1.md).

@@ -2303,7 +2303,9 @@ def _read_search_page(
             log.debug("Google Flights' search page did not read (%s); reading it again", e)
 
 
-def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
+def retry_throttled[T](  # noqa: PLR0915 — one arm per retry policy, each with its own budget
+    call: Callable[[], T], *, retry_empty: bool = True
+) -> T:
     """Run a GF call under the retry policies below (see the constants above);
     shared by the search and date-grid paths.
 
@@ -2326,8 +2328,9 @@ def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
     - Google's **server error** in place of a board (`GfSearchServerError`) ->
       a re-read after each of `_SERVER_ERROR_PAUSES_S`, re-raised when they are
       spent. Each re-read is one of the call's wall attempts and books no rung
-      of the shared ladder; the pauses come out of the search's budget
-      (`_Escalation.pause`), so a search of many pages pauses for one.
+      of the shared ladder, whose round the call gives up before each pause;
+      the pauses come out of the search's budget (`_Escalation.pause`), so a
+      search of many pages pauses for one.
 
     Both budgets come from ONE ladder object, bound here for the whole call:
     the fan-out's when there is one, otherwise this call's own. Inside a
@@ -2399,6 +2402,9 @@ def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
                     or wall_attempts > _THROTTLE_RETRY_ATTEMPTS
                 ):
                     raise
+                # Not probing the wall while it pauses, so a sibling parked on a
+                # round this call owns retries now rather than after the pause.
+                ladder.stand_down()
                 # Once the search has spent its pauses the page is read again
                 # at once, as a page with no board is.
                 pause = search.pause(_SERVER_ERROR_PAUSES_S[server_errors - 1])

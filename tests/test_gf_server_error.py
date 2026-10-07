@@ -10,12 +10,14 @@ in the other it comes before `ds:4`.
 
 from __future__ import annotations
 
+import contextvars
 import gzip
 import json
 import re
 import socket
+import threading
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, override
 
 import pytest
 from typer.testing import CliRunner
@@ -210,6 +212,7 @@ def test_the_price_graph_does_not_refuse_on_a_server_error() -> None:
 # ───────────────────────── the page is read again ─────────────────────────
 
 _THROTTLED = "<html><body>Our systems have detected unusual traffic</body></html>"
+_SERVER_ERROR_PAUSE = gfid._SERVER_ERROR_PAUSES_S[0]
 
 
 class _Clock:
@@ -293,6 +296,65 @@ def test_a_server_error_spends_no_rung_of_the_shared_ladder(
             _http()
         assert (ladder._wall.spent, ladder._wall.owner) == (0, None)
     assert clock.sleeps == [2.0, 6.0]
+
+
+def test_a_server_error_frees_a_sibling_parked_on_the_throttle_round(
+    gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red while the arm kept the round through its pauses, where B read its
+    board only after A's whole call. A owns the round, B parks on it, and A's
+    re-read meets the server error: A is no longer probing the wall, so B is
+    freed before A pauses."""
+    gf_session(_html("ds1_nyc_lon_token"))
+    board = _html("ds1_nyc_lon_token")
+    pages = {"A": [_THROTTLED, _error_page(), _error_page(), board], "B": [_THROTTLED, board]}
+    events: list[str] = []
+    lock = threading.Lock()
+    a_owns, b_throttled, b_served = threading.Event(), threading.Event(), threading.Event()
+
+    def fetch(_filters: object, **_kw: object) -> PageFetch:
+        me = threading.current_thread().name
+        if me == "B":
+            assert a_owns.wait(5)
+        with lock:
+            body = pages[me].pop(0)
+            events.append(f"{me} GET {'board' if body is board else 'other'}")
+        if me == "B":
+            (b_served if body is board else b_throttled).set()
+        return PageFetch(body, _URL, 200)
+
+    class Clock(_Clock):
+        @override
+        def sleep(self, seconds: float) -> None:
+            if threading.current_thread().name != "A":
+                return
+            if not a_owns.is_set():
+                # A's throttle backoff: it owns the round, and B is let in.
+                a_owns.set()
+                assert b_throttled.wait(5)
+            elif seconds == _SERVER_ERROR_PAUSE:
+                b_served.wait(2)
+            with lock:
+                events.append(f"A slept {seconds}")
+
+    monkeypatch.setattr(gfid, "_fetch_page", fetch)
+    monkeypatch.setattr(gfid, "time", Clock())
+    served: dict[str, int] = {}
+
+    def run() -> None:
+        served[threading.current_thread().name] = len(_http())
+
+    with gfid.shared_throttle_ladder():
+        threads = [
+            threading.Thread(target=contextvars.copy_context().run, args=(run,), name=name)
+            for name in ("A", "B")
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(10)
+    assert served == {"A": 300, "B": 300}
+    assert events.index("B GET board") < events.index(f"A slept {_SERVER_ERROR_PAUSE}"), events
 
 
 def test_auto_does_not_open_chrome_on_a_server_error(
