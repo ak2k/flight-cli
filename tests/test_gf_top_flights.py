@@ -10,18 +10,21 @@ is never one: that page's `[2]` is not the Top flights board.
 from __future__ import annotations
 
 import gzip
+import io
 import json
 from dataclasses import replace
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from rich.console import Console
 from typer.testing import CliRunner
 
 from conftest import GFLIGHT_PAGE_DIR, _answering, _ds1, _page
 from flight_cli import _gflight_ids as gfid
 from flight_cli import cli
 from flight_cli._gf_common import PageFetch
+from flight_cli.domain import Leg
 from test_gf_separate_tickets import _FLL_LGA, _fll_lga_pages
 
 if TYPE_CHECKING:
@@ -305,3 +308,110 @@ def test_a_round_trip_marked_only_in_its_outbound_keeps_that_member_alone_marked
     (kept,) = cli._merged_boards([gfid.Board([first]), gfid.Board([second])])
     assert kept[1].flight.price == 800.0
     assert [m.top_flight for m in kept] == [True, False]
+
+
+# ──────────────────────────────── the table ───────────────────────────────
+
+_KEY = "★ top flight: Google lists it under Top flights. The table is in price order."
+
+
+def _cells(stdout: str) -> list[list[str]]:
+    """The cells of every table line that starts a row: its `#` is filled."""
+    rows = [
+        [c.strip() for c in ln.strip("│").split("│")]
+        for ln in stdout.splitlines()
+        if ln.startswith("│")
+    ]
+    return [r for r in rows if r[0]]
+
+
+def test_the_table_stars_the_top_rows_it_shows_and_keys_them_once(
+    gf_session: Callable[..., Any],
+) -> None:
+    """`-n 3` shows the three USD293 rows, none of them Google's pick, so no
+    star and no key."""
+    gf_session(_served(_ds1(_LHR)))
+    table = CliRunner().invoke(cli.app, _one_way("--fast", "-n", "10"), env={"COLUMNS": "200"})
+    gf_session(_served(_ds1(_LHR)))
+    document = CliRunner().invoke(cli.app, _one_way("--fast", "-n", "10", "--format", "json"))
+    assert table.exit_code == 0, table.output
+    assert document.exit_code == 0, document.output
+    cells = _cells(table.stdout)
+    assert [c[0] for c in cells] == ["1", "2", "3", "★4", "★5", "★6", "★7", "★8", "9", "10"]
+    assert [c[1] for c in cells] == [f"USD{r['price']:.2f}" for r in json.loads(document.stdout)]
+    assert table.stdout.count("★") == 5 + 1
+    assert table.stdout.splitlines().count(_KEY) == 1
+    gf_session(_served(_ds1(_LHR)))
+    short = CliRunner().invoke(cli.app, _one_way("--fast", "-n", "3"), env={"COLUMNS": "200"})
+    assert short.exit_code == 0, short.output
+    assert [c[0] for c in _cells(short.stdout)] == ["1", "2", "3"]
+    assert "★" not in short.stdout
+    assert "top flight" not in short.stdout
+
+
+def test_a_round_trip_stars_the_outbound_member_alone(gf_session: Callable[..., Any]) -> None:
+    argv = [*_one_way("--fast", "-n", "10"), "--return", _RET.isoformat()]
+    ret = _served(_ds1(_RETURN), origin="LHR", destination="JFK")
+    gf_session(_served(_ds1(_LHR)), ret)
+    table = CliRunner().invoke(cli.app, argv, env={"COLUMNS": "250"})
+    gf_session(_served(_ds1(_LHR)), ret)
+    document = CliRunner().invoke(cli.app, [*argv, "--format", "json"])
+    assert table.exit_code == 0, table.output
+    assert document.exit_code == 0, document.output
+    starred = [c[0] for c in _cells(table.stdout) if c[0].startswith("★")]
+    doc: list[list[dict[str, Any]]] = json.loads(document.stdout)
+    assert starred == [f"★{i}a" for i, (out, _) in enumerate(doc, 1) if out["top_flight"]]
+    assert starred
+    assert table.stdout.splitlines().count(_KEY) == 1
+
+
+def _render(monkeypatch: pytest.MonkeyPatch, results: list[Any], width: int) -> str:
+    buffer = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, width=width, no_color=True))
+    cli._render_gflight_table(results, legs=(Leg.of("JFK", "LHR", _DEP),), top_n=len(results))
+    return buffer.getvalue()
+
+
+def _table(text: str) -> list[str]:
+    lines = text.splitlines()
+    return lines[: next(i for i, ln in enumerate(lines) if ln.startswith("└")) + 1]
+
+
+_LHR_ROWS = [
+    gfid._parse_flight_with_id(r) for r in gfid._rows_from_ds1(json.loads(_ds1(_LHR))).rows
+]
+
+
+def test_a_starred_label_no_longer_than_the_longest_keeps_every_line_as_wide(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The twelve-row board's top rows are numbered 4-8 and its longest label
+    is 12, so the star takes a cell the `#` column already pads."""
+    plain = _LHR_ROWS[:12]
+    marked = [replace(g, top_flight=True) if k < 5 else g for k, g in enumerate(plain)]
+    for width in range(80, 121, 2):
+        shown, base = _render(monkeypatch, marked, width), _render(monkeypatch, plain, width)
+        assert [c[0] for c in _cells(shown)][3:8] == ["★4", "★5", "★6", "★7", "★8"]
+        assert [ln.replace("★", " ") for ln in _table(shown)] == _table(base), width
+        assert shown.splitlines().count(_KEY) == 1
+
+
+def test_a_starred_longest_label_widens_the_number_column_by_one_cell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`★10` is a cell wider than `10`. Where the unstarred table fit the
+    console exactly, that cell can change which layout fits; the labels and
+    prices stay as they were."""
+    plain = cli._price_ordered(_LHR_ROWS[:10])
+    marked = [*plain[:9], replace(plain[9], top_flight=True)]
+    for width in range(80, 121, 2):
+        shown, base = _render(monkeypatch, marked, width), _render(monkeypatch, plain, width)
+        assert max(len(ln) for ln in _table(shown)) <= width
+        assert all(ln.endswith("┓") for ln in shown.splitlines() if ln.startswith("┏"))
+        head, head_base = (
+            next(ln for ln in _table(t) if ln.startswith("┃")).split("┃")[1] for t in (shown, base)
+        )
+        assert len(head) == len(head_base) + 1, width
+        assert [c[:2] for c in _cells(shown)] == [
+            ["★10" if c[0] == "10" else c[0], c[1]] for c in _cells(base)
+        ]

@@ -582,7 +582,7 @@ def test_the_deprecated_command_reads_no_cheapest_tab(gf_session: Callable[..., 
 
 # ──────────────────────────────── the table ───────────────────────────────
 
-_ROW = re.compile(r"^│\s*(\d+[ab]?)\s*│([^│]*)│")
+_ROW = re.compile(r"^│\s*(★?\d+[ab]?)\s*│([^│]*)│")
 
 
 def _price_cells(stdout: str) -> dict[str, str]:
@@ -599,7 +599,7 @@ def test_the_table_marks_exactly_the_separate_ticket_rows_and_keys_them_once(
     marked = {label: cell for label, cell in cells.items() if cell.endswith(("†", "‡"))}
     assert sum(cell.endswith(" ‡") for cell in marked.values()) == 28
     assert sum(cell.endswith(" †") for cell in marked.values()) == 5
-    assert all(label.isdigit() for label in marked)
+    assert all(label.removeprefix("★").isdigit() for label in marked)
     assert len(cells) - len(marked) == 60  # 30 pairs, an `a` and a `b` row each
     said = " ".join(result.stdout.split())
     assert said.count(_KEY) == 1

@@ -9894,7 +9894,9 @@ def _render_gflight_table(
     split a designator such as "EI 152" across two lines. Google prices the
     whole party, so for `passengers` above one the price header names the party.
     A row Google sells as separate tickets ends its price in `†`, or `‡` for a
-    self transfer, and a key line follows only when one is shown.
+    self transfer, and a key line follows only when one is shown. A member its
+    page put on Google's Top flights board is numbered `★N`, with its own key
+    line under the same rule.
 
     A round-trip combination can print two DIFFERENT prices, on its `Na` and
     `Nb` rows, and that reads as a bug until you know what each is: the `a` row
@@ -9969,7 +9971,9 @@ def _render_gflight_table(
             items: list[Any] = list(r) if isinstance(r, tuple) else [r]  # pyright: ignore[reportUnknownArgumentType]
             for j, g in enumerate(items):
                 fr = g.flight  # unwrap GFlightWithId → fli FlightResult
-                label = f"{i}{'a' if j == 0 else 'b'}" if len(items) > 1 else str(i)
+                label = ("★" if getattr(g, "top_flight", False) else "") + (
+                    f"{i}{'a' if j == 0 else 'b'}" if len(items) > 1 else str(i)
+                )
                 (legs_str, legroom_str), *more = _gflight_leg_rows(
                     g, match_carriers, route=per_row_route, stacked=stacked
                 )
@@ -10026,11 +10030,21 @@ def _render_gflight_table(
                 isinstance(r, tuple) and len(cast("tuple[Any, ...]", r)) == 1 for r in shown
             )
         )
+    _print_top_flight_key(members)
     if insight is not None:
         console.print(
             f"Price insight: prices are {_safe_text(insight.level)} for this trip "
             f"(usually {_safe_text(insight.currency)}{insight.typical_low:.2f}"
             f"-{_safe_text(insight.currency)}{insight.typical_high:.2f})."
+        )
+
+
+def _print_top_flight_key(members: list[Any]) -> None:
+    """The key under a table that numbers a top flight `★N`, when `members`,
+    the rows it shows, hold one."""
+    if any(getattr(g, "top_flight", False) for g in members):
+        console.print(
+            "[dim]★ top flight: Google lists it under Top flights. The table is in price order.[/]"
         )
 
 
