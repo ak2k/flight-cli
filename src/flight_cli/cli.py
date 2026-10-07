@@ -572,30 +572,17 @@ def _parse_bags(spec: str) -> Bags:
 def _refuse_cap_and_bag_conflicts(
     *,
     cabins: tuple[Cabin, ...],
-    max_price: int | None,
     bags: Bags | None,
     seated: int,
     arrival_flags: tuple[str, ...] = (),
     exclude_basic: bool = False,
 ) -> None:
-    """Refuse `--max-price` or `--bags` beside several cabins, whose compare
-    applies neither, an arrival window beside several cabins, whose compare
-    can end on Matrix, `--exclude-basic` beside any cabin but economy, and
-    `--bags` for more than one traveler. Before the backend is announced: a
-    refusal after "Using Matrix" reads as a search that started and then
-    failed."""
-    if len(cabins) > 1 and max_price is not None:
-        err.print(
-            "[red]--max-price takes one --cabin: a multi-cabin compare applies no cap.[/] "
-            "Drop the extra --cabin values."
-        )
-        raise typer.Exit(2)
-    if len(cabins) > 1 and bags is not None:
-        err.print(
-            "[red]--bags takes one --cabin: a multi-cabin compare prices no bags.[/] "
-            "Drop the extra --cabin values."
-        )
-        raise typer.Exit(2)
+    """Refuse an arrival window beside several cabins, whose compare can end
+    on Matrix, `--exclude-basic` beside any cabin but economy, and `--bags`
+    for more than one traveler. `--max-price` and `--bags` beside several
+    cabins pass: each cabin's search asks for them as a one-cabin search does.
+    Before the backend is announced: a refusal after "Using Matrix" reads as a
+    search that started and then failed."""
     if len(cabins) > 1 and arrival_flags:
         err.print(
             f"[red]{_safe_text(arrival_flags[0])} takes one --cabin: a multi-cabin compare "
@@ -9250,6 +9237,8 @@ def _render_multi_cabin_search(
     results_by_cabin: dict[Cabin, SearchResult] | None = None,
     currency: str = "USD",
     total_of: Callable[[Itinerary], str | None] | None = None,
+    bag_mark: Callable[[Itinerary], str] | None = None,
+    insights: Mapping[Cabin, PriceInsight] | None = None,
 ) -> None:
     """Render multi-cabin merged rows. One row per itinerary, one price column
     per requested cabin, '—' for missing.
@@ -9264,7 +9253,12 @@ def _render_multi_cabin_search(
     `results_by_cabin` is what `rows` were merged from, in `currency`, the one
     the merge ranked by: each cabin's own cheapest the table does not show is
     named under it (`_print_own_cheapest`), at its total from `total_of`, the
-    one the merge was given, for a party."""
+    one the merge was given, for a party.
+
+    Under `--bags`, `bag_mark` marks each price with whether the cell's own
+    listing includes the bags asked for, ahead of `†` or `‡`, and a key line
+    follows. `insights` are Google's price insights by cabin, one line each
+    after every other line, as the one-cabin table prints its one."""
     if not rows:
         console.print("[yellow]No itineraries.[/]")
         return
@@ -9275,7 +9269,7 @@ def _render_multi_cabin_search(
     party = passengers > 1
     starred = False
     marked = [row.itinerary for row in rows if row.itinerary.ticketing is not None]
-    shows_mark = bool(marked)
+    shows_mark = bool(marked) or bag_mark is not None
 
     t = Table(
         # `title_prefix` is a parameter: its value is chosen by whoever calls, and
@@ -9322,7 +9316,9 @@ def _render_multi_cabin_search(
                 # No space before the star: Rich wraps a narrow cell at its spaces.
                 cell = f"{_amount(row.prices[cab], ccy)}*"
                 starred = True
-            price_cells.append(cell + (mark if row.prices.get(cab) else ""))
+            priced = row.prices.get(cab)
+            bag = f" {bag_mark(row.listings[cab])}" if priced and bag_mark is not None else ""
+            price_cells.append(cell + (bag + mark if priced else ""))
         t.add_row(f"{i:d}", carriers or "?", out_cell, ret_cell, *price_cells)
     console.print(t)
     if starred:
@@ -9336,14 +9332,35 @@ def _render_multi_cabin_search(
             currency=currency,
             passengers=passengers,
             total_of=total_of,
+            bag_mark=bag_mark,
         )
         marked.extend(it for it in named if it.ticketing is not None)
+    if bag_mark is not None:
+        console.print(
+            "Bags: ✓ the fare includes the bags asked for, ✗ it does not, ? Google does not say."
+        )
     if marked:
         _print_ticketing_key(
             outbound_only=any(
                 len(it.itinerary.slices if it.itinerary else []) < slices for it in marked
             )
         )
+    _print_cabin_insights(cabins, insights or {})
+
+
+def _print_cabin_insights(
+    cabins: tuple[Cabin, ...], insights: Mapping[Cabin, PriceInsight]
+) -> None:
+    """The one-cabin table's price insight line, named for its cabin, for each
+    of `cabins` that has one, in that order."""
+    for cab in cabins:
+        if (insight := insights.get(cab)) is not None:
+            console.print(
+                f"Price insight for {_safe_text(_CABIN_TO_LETTER[cab])}: prices are "
+                f"{_safe_text(insight.level)} for this trip "
+                f"(usually {_safe_text(insight.currency)}{insight.typical_low:.2f}"
+                f"-{_safe_text(insight.currency)}{insight.typical_high:.2f})."
+            )
 
 
 # Each cabin as `--cabin` and `--sort` take it, in one shell word.
@@ -9364,6 +9381,7 @@ def _print_own_cheapest(
     currency: str,
     passengers: int = 1,
     total_of: Callable[[Itinerary], str | None] | None = None,
+    bag_mark: Callable[[Itinerary], str] | None = None,
 ) -> list[Itinerary]:
     """One line under the multi-cabin table for each cabin but `sort_by` whose
     own cheapest listing (`cheapest`: in `currency`, else in the first other
@@ -9374,7 +9392,8 @@ def _print_own_cheapest(
 
     For a party of `passengers`, the line names the listing's total
     (`total_of`), as the party's column prints its cells, or one traveler's
-    price where it has none, and says which.
+    price where it has none, and says which. Under `--bags`, `bag_mark` marks
+    the amount as the table marks a cell.
 
     The table prices every cabin on the sort cabin's itineraries, so another
     cabin's cheapest fare can be on an itinerary no row shows, while a document
@@ -9411,9 +9430,11 @@ def _print_own_cheapest(
             figure, code = summed, price_currency(total) or own_currency
         else:
             basis, figure, code = ", per traveler", amount, own_currency
+        bag = f" {bag_mark(own)}" if bag_mark is not None else ""
         console.print(
             f"{_safe_text(letter)}'s own cheapest{_safe_text(basis)}: {_safe_text(code)}"
-            f"{figure:.2f}{_safe_text(mark)} ({_safe_text(flights)}), on no row above; "
+            f"{figure:.2f}{_safe_text(bag)}{_safe_text(mark)} ({_safe_text(flights)}), "
+            "on no row above; "
             f"--sort {_safe_text(_CABIN_FLAG_NAMES[cab])} lists {_safe_text(letter)}'s "
             "cheapest first.",
             soft_wrap=True,
@@ -9428,17 +9449,58 @@ def _validate_sort_cabin(sort_by: Cabin, cabins: tuple[Cabin, ...]) -> None:
         raise typer.Exit(2)
 
 
-def _note_google_rows_unshown(cabins: Iterable[Cabin]) -> None:
+def _note_google_rows_unshown(cabins: Iterable[Cabin], *, cap: str | None = None) -> None:
     """Name each cabin Google Flights had rows for that Matrix, answering the
     search in its place, returned no itinerary for: those rows are not in the
-    output."""
+    output. Under a `cap`, Matrix may have returned fares the cap removed, so
+    the line says Matrix shows none under it."""
     names = ", ".join(c.value for c in cabins)
-    if names:
-        _envelope.narrow()
+    if not names:
+        return
+    _envelope.narrow()
+    if cap is None:
         err.print(
             f"[yellow]Matrix returned no itinerary for {_safe_text(names)}, where Google "
             "Flights had rows; --backend gflight shows them.[/]"
         )
+    else:
+        err.print(
+            f"[yellow]Matrix shows no itinerary at or under {_safe_text(cap)} for "
+            f"{_safe_text(names)}, where Google Flights had rows; --backend gflight "
+            "shows them.[/]"
+        )
+
+
+def _cabins_capped(
+    results_by_cabin: dict[Cabin, SearchResult], opts: SearchOptions
+) -> dict[Cabin, SearchResult]:
+    """Each cabin's Matrix answer cut to the fares under the search's cap
+    (`_price_capped`), each cabin it leaves with no fare named on stderr.
+
+    A cabin keeps Matrix's own count where the cap dropped a fare it could not
+    read, one stating no total in the cap's currency, so only a count of zero
+    says no fare is under the cap; otherwise the line says those fares are not
+    shown."""
+    capped = {
+        cab: _price_capped(res, opts, passengers=opts.pax.total)
+        for cab, res in results_by_cabin.items()
+    }
+    if (cap := _cap_text(opts)) is not None:
+        for cab, res in capped.items():
+            if res.solutions:
+                continue
+            if res.solution_count == 0:
+                err.print(
+                    f"[yellow]Matrix {_safe_text(cab.value)}: no fare at or under "
+                    f"{_safe_text(cap)}.[/]"
+                )
+            else:
+                err.print(
+                    f"[yellow]Matrix {_safe_text(cab.value)}: no fare that states a "
+                    f"{_safe_text(opts.currency or 'USD')} total is at or under "
+                    f"{_safe_text(cap)}; those that state none are not shown.[/]"
+                )
+    return capped
 
 
 def _run_matrix_path_multi(
@@ -9461,9 +9523,16 @@ def _run_matrix_path_multi(
     """Matrix multi-cabin: N parallel cabin queries → client-side join → render.
 
     `google_answered` names the cabins Google Flights had rows for when the
-    search was handed here; any of them Matrix returns no itinerary for, by
-    failing or by finding none, is named on stderr, since the hand-off already
-    set Google's rows aside."""
+    search was handed here; any of them Matrix shows no itinerary for, by
+    failing, by finding none or by the cap removing all it found, is named on
+    stderr, since the hand-off already set Google's rows aside.
+
+    Under a cap, each cabin's answer is asked and cut as `_run_matrix_path`
+    cuts its one answer, and a cabin left with no fare says so on stderr."""
+    # As in `_run_matrix_path`: left unset, Matrix prices in its own default
+    # currency and the cap keeps nothing.
+    if opts.max_price is not None:
+        opts = opts.model_copy(update={"currency": opts.currency or "USD"})
     # Widen each per-cabin query so the join has overlap to render — top_n
     # rows visible after merge, but each cabin's underlying query pulls
     # `_bumped_query_top_n` candidates. See _bumped_query_top_n docstring.
@@ -9480,8 +9549,11 @@ def _run_matrix_path_multi(
     except typer.Exit:
         _note_google_rows_unshown(google_answered)
         raise
+    # Before anything reads them, so the documents, the join, the lines under
+    # the table and the awards all draw from the fares under the cap.
+    results_by_cabin = _cabins_capped(results_by_cabin, opts)
     found = {c for c, r in results_by_cabin.items() if r.solutions}
-    _note_google_rows_unshown(c for c in google_answered if c not in found)
+    _note_google_rows_unshown((c for c in google_answered if c not in found), cap=_cap_text(opts))
     if not results_by_cabin:
         err.print("[red]All cabin queries failed.[/]")
         raise typer.Exit(1)
@@ -9698,11 +9770,18 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
             _note_other_currencies(fli_by_cabin[cab], opts.currency or "USD")
             _note_stop_drops(fli_by_cabin[cab], cab)
             _note_row_cap(fli_by_cabin[cab], opts.currency or "USD", cab)
-    for cab in emptied:
-        err.print(
-            f"[yellow]Google Flights {_safe_text(cab.value)}: "
-            f"no itinerary matched {_safe_text(_row_checks(legs, opts))}.[/]"
-        )
+    page_cap = _page_cap_text(opts)
+    for cab in cabins:
+        if cab in emptied:
+            err.print(
+                f"[yellow]Google Flights {_safe_text(cab.value)}: "
+                f"no itinerary matched {_safe_text(_row_checks(legs, opts))}.[/]"
+            )
+        elif page_cap is not None and cab in fli_by_cabin and not fli_by_cabin[cab]:
+            err.print(
+                f"[yellow]Google Flights {_safe_text(cab.value)}: no fare at or under "
+                f"{_safe_text(page_cap)}.[/]"
+            )
 
     # The sort cabin first, then the rest as asked: a row several cabins price
     # shows the first itinerary `_merge_cabins` meets, so the table sorted on a
@@ -9723,6 +9802,22 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
         total_of=total_of,
         slices=len(legs),
     )
+    # Every cabin's listings, by `id`, to the bags Google states for each
+    # member: a row's cells and its award matches each read their own listing.
+    bags_by_id = (
+        {
+            key: stated
+            for cab, res in results_by_cabin.items()
+            for key, stated in _bags_by_itinerary(fli_by_cabin[cab], res).items()
+        }
+        if opts.bags is not None
+        else None
+    )
+    bag_mark = (
+        None
+        if bags_by_id is None or opts.bags is None
+        else partial(_bag_mark, bags_included=bags_by_id, asked=opts.bags)
+    )
 
     def document_rows(cab: Cabin, board: list[Any]) -> list[Any]:
         res = results_by_cabin.get(cab)
@@ -9731,12 +9826,12 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
 
     if _envelope.active():
         for cab, board in fli_by_cabin.items():
-            _record_google_cabin(cab, document_rows(cab, board), board)
+            _record_google_cabin(cab, document_rows(cab, board), board, bags=opts.bags)
         if not run_pp:
             return None
     elif json_out and not run_pp:
         out = {
-            cab.value: _gflight_json_document(document_rows(cab, board))
+            cab.value: _gflight_json_document(document_rows(cab, board), opts.bags)
             for cab, board in fli_by_cabin.items()
         }
         sys.stdout.write(json.dumps(out, indent=2, default=str))
@@ -9755,6 +9850,12 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
             results_by_cabin=results_by_cabin,
             currency=opts.currency or "USD",
             total_of=total_of,
+            bag_mark=bag_mark,
+            insights={
+                cab: insight
+                for cab, board in fli_by_cabin.items()
+                if (insight := getattr(board, "insight", None)) is not None
+            },
         )
 
     if run_pp:
@@ -9788,6 +9889,7 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
             provider_filter=sel.provider_filter,
             seats_sources=sel.seats_sources(),
             cash_per_cabin=_cash_per_cabin_multi(rows),
+            bags_included=bags_by_id,
         )
     return None
 
@@ -10132,6 +10234,23 @@ def _bag_cell(stated: tuple[int | None, int | None], asked: Bags) -> str:
     if all(have is not None for have, _ in pairs):
         return "incl."
     return "unknown"
+
+
+def _bag_mark(
+    listing: Itinerary,
+    *,
+    bags_included: Mapping[int, Sequence[tuple[int | None, int | None]]],
+    asked: Bags,
+) -> str:
+    """Whether `listing`'s price includes the bags asked for, as one mark
+    over `_bag_cell`'s verdict on each of its members' statements
+    (`bags_included`, by `id`): `✗` when any member's leaves a bag out, `✓`
+    when every member's includes them, `?` otherwise. A combination includes
+    the bags only where each of its fares does."""
+    verdicts = {_bag_cell(stated, asked) for stated in bags_included.get(id(listing), ())}
+    if "not incl." in verdicts:
+        return "✗"
+    return "✓" if verdicts == {"incl."} else "?"
 
 
 # AVERAGE/BELOW/ABOVE are pitch-relative judgments — collapse them to color on
@@ -10761,7 +10880,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                 "default USD). N is compared with the printed price, which for a party "
                 "is the total. Google Flights is asked for a USD cap, and every row "
                 "is checked; Matrix is asked in the cap's currency and its answer cut to "
-                "the fares under it. One --cabin."
+                "the fares under it. Several --cabin values each take it."
             ),
             rich_help_panel=_GROUP_FILTERING,
         ),
@@ -10776,7 +10895,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                 "default 0): '1' is one checked bag, '1,1' adds a carry-on. Each row "
                 "then says whether its price includes them. Google Flights only, since "
                 "Matrix prices no bags: refused where the search needs Matrix. One "
-                "traveler and one --cabin."
+                "traveler."
             ),
             rich_help_panel=_GROUP_FILTERING,
         ),
@@ -11093,7 +11212,6 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         _refuse_fare_rules_conflicts(cabins=_resolve_cabin_list(cabin), sel=sel, json_out=json_out)
     _refuse_cap_and_bag_conflicts(
         cabins=_resolve_cabin_list(cabin),
-        max_price=max_price,
         bags=bags,
         seated=adults + children + inf_seat + inf_lap,
         arrival_flags=tuple(
@@ -11356,7 +11474,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                 sel=sel,
                 gf_mode=gf_mode,
                 gf_headed=gf_headed,
-                matrix_fallback=backend == BACKEND_AUTO,
+                matrix_fallback=backend == BACKEND_AUTO and not google_only,
                 separate_tickets=_separate_tickets_mode(
                     awards_only=sel.awards_only, no_separate_tickets=no_separate_tickets
                 ),
