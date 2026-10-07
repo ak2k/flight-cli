@@ -26,7 +26,7 @@ its schema is `docs/envelope.schema.json`, generated from the models
 | `price_graph` | `[{trip_length, currency, cells: [{departure, return, price}]}]` | a calendar's Google price graph, one entry per trip length that priced (`trip_length` and `return` null on a one-way); each cell is Google's estimate for one date pair, with no itinerary behind it. Empty, with its note, on a search, a calendar that did not ask it (no `--gf-transport browser` or `auto`, `--gf-transport http`, or a refusal by the graph's gate, named) and one whose graph failed |
 | `verify` | object / null | `--verify`'s check of row `--pick`, the `verify` object `--format json` prints; null when not asked, on a calendar, or when the check failed (exit 1) |
 | `cross_check` | object / null | `--enrich`'s Google-vs-Matrix comparison, the `cross_check` object `--format json --enrich` prints, `low_check` included; null when not asked, skipped, on a calendar, or when Matrix's half failed |
-| `split_ticket` | object / null | `--split`'s answer, the `split_ticket` object `--format json --split` prints: on a round trip the pair (`{outbound, return, total, currency}`), on an open jaw the combinations (`{currency, combinations}`), or `{error}` naming why there is none; null when not asked, on a calendar, or when Matrix answered a round trip |
+| `split_ticket` | object / null | `--split`'s answer, the `split_ticket` object `--format json --split` prints: on a round trip the pair (`{outbound, return, total, currency}`), or `{error}` naming why there is none. A multi-city search's combinations (two or more `--slice` that are not a round trip; `{currency, combinations}`) or `{error}` on every envelope run, `--split` or not, since its table lists them without the flag. Under `--backend gflight` they are the whole answer: `backend` is `gflight`, `results` holds one empty entry whose note says the tickets are in `split_ticket`, and `currency` is null. Null on a round trip not asked, on a calendar, or when Matrix answered a round trip |
 
 `price` is the trip's: a Google round trip's is its return member's, the fare
 every surface prints for the pair; Matrix's is the solution's price string read
@@ -34,6 +34,18 @@ as a number, for a party the total Matrix states (`party_price`), the number its
 itinerary table prints and `--max-price` reads, as Google's row prices the whole
 party. A party's solution Matrix states no total for has a null `price`: one
 passenger's price is not the trip's, and its `row` still carries it.
+A multi-cabin Google search lists, under each cabin, its `-n` cheapest rows,
+then, in price order, each other row of its board whose fare the table prints
+in that cabin, and the cabin's cheapest in the requested currency (in the
+currency Google priced it in, for a cabin priced in none of the requested one),
+which the line under the table names when no row shows it. The table prices
+every cabin on the sort cabin's itineraries, so a fare it shows can sit far
+down another cabin's board, and the `-n` cheapest are cheapest by amount, so
+rows Google priced in another currency can come before it; the rows added are
+read off the boards already fetched. A multi-cabin Matrix search lists each
+cabin's whole answer, under `--max-price` its fares under the cap. Under
+`--bags` each member of a Google `row` carries `bags_included`, on several
+cabins as on one.
 A `calendar --fast` trip-length range writes every priced length's cells to
 `results` as one list, each the object the range document's `graphs[].grid`
 prints; its `return` date names its length. `price_graph` carries the same
@@ -61,10 +73,11 @@ and a round trip's failed `--split` one-way. A hand-off that holds Google's boar
 by the filter, an infant's empty board, separate-ticket rows alone on an award
 search, a multi-cabin search) notes its unread rows as `_record_google_cabin`
 does. Matrix, provider, calendar and `--split`-on-Matrix narrowings name no
-backend and count whoever answers, and so do a `--split` one-way board's
-missing page and unread rows (`cli._one_way_boards`, an open jaw's or a round
-trip's): its tickets are shown beside the answer, never in its place. The
-sites: a cabin asked and never recorded (judged
+backend and count whoever answers, and so do a one-way board's missing page and
+unread rows (`cli._one_way_boards`, a multi-city search's or a round trip's
+`--split`): their tickets are shown beside Matrix's answer, or alone under
+`--backend gflight`, never as a one-ticket row. The sites: a cabin asked and
+never recorded (judged
 in the recorder, from `ask_cabins` against what the leaves recorded); Matrix
 finding nothing where Google had rows (`_note_google_rows_unshown`); the
 round-trip pin cap note; return boards refused, a pin Google served no return
@@ -85,16 +98,20 @@ that is not "unsupported" in `pp/client.py`, an error status with an empty
 body and a request the award deadline cut included); a leg with
 `pairs_not_asked`; calendar sub-queries lost; a length of a `calendar --fast`
 range whose graph was lost;
-a `--split` one-way search that failed, a `--split` round trip Matrix answered,
-or a `--split` open jaw Google was not asked about, since the tickets were asked
-for and are not priced (no priced one-way, no pair one traveler can fly, or two
-currencies are the boards' answer, a note); a `--split` one-way board (an open
-jaw's or a round trip's) missing a page or holding rows the parser could not
+a one-way search that failed, on a `--split` round trip or on any multi-city
+search (a multi-city search's table lists its tickets with no flag), where no
+priced one-way, no pair one traveler can fly, or two currencies are the boards'
+answer, a note; a `--split` round trip Matrix answered, or a `--split`
+multi-city search Google was not asked about, since the tickets were asked for
+and are not priced, while without `--split` that search's `{error}` narrows
+nothing, as its table lists no tickets either; a one-way board (a multi-city
+search's or a round trip's) missing a page or holding rows the parser could not
 read (`cli._one_way_boards`, the unread rows a note naming the leg or slice),
-since its cheapest tickets may be among
-them;
-`--max-per-query > 1` over a split, and over the one unsplit query when a
-group holds every destination; a round trip over a split set, whose returns
+since its cheapest tickets may be among them, or holding no row at all for a
+party with an infant, as on a Google search;
+`--max-per-query > 1` over a split when a query asks several destinations, and
+over the one unsplit query when a group holds every destination; a round trip
+over a split set, whose returns
 into another airport of the set come only from the combined query; a
 departure date of the calendar's window that Matrix's grid holds no fare for
 at some trip length asked (`cli._say_unpriced`, one `Matrix priced no fare on
@@ -104,7 +121,10 @@ parser could not read, counted once from the board's `unread` where its rows
 are recorded (`cli._record_google_cabin`), so the note gives the number
 `cross_check.google.unread` does (the calendar graph's wall check records no
 board and narrows nothing); a Google board served with no rows for a party
-with an infant and not handed to Matrix (`cli._run_gflight_path`), since Google
+with an infant and not handed to Matrix (`cli._run_gflight_path`) and, under
+`--enrich --format envelope`, a board with no rows for such a party
+(`cli._answer_cross_check_document`), whose `results` note names the infant
+and, when Matrix answered, says `cross_check` holds Matrix's rows, since Google
 has served such a board on a route with flights; a Google board with rows
 asked as several pages that is `partial` (`cli._gflight_pages`): a page did not
 answer, or the trip is round and each return flies back between its own
@@ -114,7 +134,9 @@ it may list itineraries on separate tickets the user did not opt out of. A
 hand-off
 to Matrix, rows in another currency, a filter that empties a board, rows
 Google served over the stop ceiling asked for (`cli._note_stop_drops` counts
-them), a pin whose return board the row filter emptied, the count of
+them), a board shown at Google's 300-row cap (`cli._note_row_cap`, never said
+for a board handed to Matrix), a pin whose return board the row filter emptied,
+the count of
 itineraries `--no-separate-tickets` hid and a Cheapest tab left unread for a
 return check its rows cannot be held to are notes, not narrowings: each is a
 complete answer to what was asked. A row Google sells as separate tickets is a
@@ -132,6 +154,15 @@ answer is narrower where that count is of refused or empty return boards, and
 whole where it is of boards the row filter emptied. Google's price graph not
 asked or not shown beside a Matrix calendar is a note too: Matrix's grid is
 the answer, and the graph is Google's estimate beside it.
+
+Like `separate_tickets`, `top_flight` is a field of each Google member of a
+`row` and narrows nothing. It is true when the page that listed the member put
+that itinerary on Google's Top flights board (`ds:1[2]`): an outbound's
+outbound page, a return's pinned return page, a `--split`, open-jaw or
+multi-city ticket's one-way page. It is false on every row the Cheapest tab
+adds and on every member of a page with no such board, which writes no note.
+Matrix rows carry neither key. `row` is untyped in the schema, so
+`docs/envelope.schema.json` does not change.
 
 ## How the run is held
 

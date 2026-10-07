@@ -237,8 +237,16 @@ Both are top-level fields, written after the cabin (9) and before 14.
   the fallback after the row check empties a board, and `--sellers` is
   refused, since the booking page is not asked for bags. No refusal under
   `--bags` points at `--backend matrix`; it says to drop `--bags`.
-- Neither flag takes more than one `--cabin`. Printed Google links carry
-  neither field; under `--bags` each link says its prices leave the bags out.
+- Beside several `--cabin` values each cabin's page is asked for both, and
+  its rows checked, as a one-cabin search's are: the same page loads, each
+  carrying the flags. Under `--bags` a cabin the row check empties keeps its
+  empty column rather than handing the compare to Matrix; each price in the
+  table ends in `✓`, `✗` or `?`, the verdict over every member of that
+  cabin's own listing (`✗` when one is `not incl.`, `✓` when all are
+  `incl.`), with one key line under the table. Matrix's multi-cabin answer is
+  asked in the cap's currency and each cabin's cut as above; a cabin left with
+  no fare says so on stderr. Printed Google links carry neither field; under
+  `--bags` each link says its prices leave the bags out.
 
 The date grids do not serve any of the new constraints yet: `page_can_encode`
 and each predicate's `Tier` still answer for them, and they have no rows to
@@ -262,6 +270,15 @@ has been measured. Each Google JSON row fills `co2_emissions_g`,
 each leg `co2_emissions_g`, null where the slot is empty. The Google table adds
 `CO2 kg` (kilograms and the percent; green lower, red higher) when a shown row
 has a figure.
+
+**Google's Top flights (`ds:1[2]`).** `_rows_from_page_html` marks each row its
+page lists in `[2]`, and every Google JSON row carries `top_flight`, false for
+the rest. An itinerary listed twice keeps the mark on whichever listing dedupe
+or the page merge keeps. A round trip's outbound reads its outbound page and its
+return the pinned return page, which may carry a `[2]` or not (the shapes table
+in `gf_page_refusals_and_ds1.md`). The Cheapest tab's own `[2]` is not this
+board, so no row it adds is marked. The Google table numbers a marked member
+`★N`, with one key line under it.
 
 **The table at the output's width.** Rich takes the width from the first of
 stdin, stdout and stderr that is a terminal; `COLUMNS` overrides it; with no
@@ -345,7 +362,9 @@ line of its own.
   derived (below the range low, above it high); `[0]` looked like a level code
   (4, 4, 5) in three samples and is not used. One `Price insight:` line prints
   under the Google table, in the page's currency; the JSON document does not
-  carry it. The multi-cabin table does not print it yet. Google's cheapest is
+  carry it. The multi-cabin table prints one per Google cabin that has one
+  (`Price insight for J: …`), in `--cabin` order, after every other line
+  under it. Google's cheapest is
   the unfiltered board's, so when the routing filter removed rows the level is
   restated from the cheapest fare kept (a combination's by its return member)
   against Google's range, and no line prints when no priced row is kept. A
