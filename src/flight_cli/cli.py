@@ -9190,6 +9190,25 @@ def _note_google_rows_unshown(cabins: Iterable[Cabin]) -> None:
         )
 
 
+def _cabins_capped(
+    results_by_cabin: dict[Cabin, SearchResult], opts: SearchOptions
+) -> dict[Cabin, SearchResult]:
+    """Each cabin's Matrix answer cut to the fares under the search's cap
+    (`_price_capped`), each cabin it leaves with no fare named on stderr."""
+    capped = {
+        cab: _price_capped(res, opts, passengers=opts.pax.total)
+        for cab, res in results_by_cabin.items()
+    }
+    if (cap := _cap_text(opts)) is not None:
+        for cab, res in capped.items():
+            if not res.solutions:
+                err.print(
+                    f"[yellow]Matrix {_safe_text(cab.value)}: no fare at or under "
+                    f"{_safe_text(cap)}.[/]"
+                )
+    return capped
+
+
 def _run_matrix_path_multi(
     *,
     legs: tuple[Leg, ...],
@@ -9212,7 +9231,14 @@ def _run_matrix_path_multi(
     `google_answered` names the cabins Google Flights had rows for when the
     search was handed here; any of them Matrix returns no itinerary for, by
     failing or by finding none, is named on stderr, since the hand-off already
-    set Google's rows aside."""
+    set Google's rows aside.
+
+    Under a cap, each cabin's answer is asked and cut as `_run_matrix_path`
+    cuts its one answer, and a cabin left with no fare says so on stderr."""
+    # As in `_run_matrix_path`: left unset, Matrix prices in its own default
+    # currency and the cap keeps nothing.
+    if opts.max_price is not None:
+        opts = opts.model_copy(update={"currency": opts.currency or "USD"})
     # Widen each per-cabin query so the join has overlap to render — top_n
     # rows visible after merge, but each cabin's underlying query pulls
     # `_bumped_query_top_n` candidates. See _bumped_query_top_n docstring.
@@ -9229,6 +9255,9 @@ def _run_matrix_path_multi(
     except typer.Exit:
         _note_google_rows_unshown(google_answered)
         raise
+    # Before anything reads them, so the documents, the join, the lines under
+    # the table and the awards all draw from the fares under the cap.
+    results_by_cabin = _cabins_capped(results_by_cabin, opts)
     found = {c for c, r in results_by_cabin.items() if r.solutions}
     _note_google_rows_unshown(c for c in google_answered if c not in found)
     if not results_by_cabin:
@@ -9447,11 +9476,18 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
             _note_other_currencies(fli_by_cabin[cab], opts.currency or "USD")
             _note_stop_drops(fli_by_cabin[cab], cab)
             _note_row_cap(fli_by_cabin[cab], opts.currency or "USD", cab)
-    for cab in emptied:
-        err.print(
-            f"[yellow]Google Flights {_safe_text(cab.value)}: "
-            f"no itinerary matched {_safe_text(_row_checks(legs, opts))}.[/]"
-        )
+    page_cap = _page_cap_text(opts)
+    for cab in cabins:
+        if cab in emptied:
+            err.print(
+                f"[yellow]Google Flights {_safe_text(cab.value)}: "
+                f"no itinerary matched {_safe_text(_row_checks(legs, opts))}.[/]"
+            )
+        elif page_cap is not None and cab in fli_by_cabin and not fli_by_cabin[cab]:
+            err.print(
+                f"[yellow]Google Flights {_safe_text(cab.value)}: no fare at or under "
+                f"{_safe_text(page_cap)}.[/]"
+            )
 
     # The sort cabin first, then the rest as asked: a row several cabins price
     # shows the first itinerary `_merge_cabins` meets, so the table sorted on a

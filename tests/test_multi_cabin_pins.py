@@ -574,6 +574,20 @@ def test_without_bags_a_cabin_the_cap_empties_hands_the_search_to_matrix(
     )
 
 
+def test_a_cabin_whose_capped_page_served_nothing_says_no_fare_is_under_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Business's USD page, asked for the cap, served no row. Red at the D1
+    commit, which said nothing of business."""
+    google = _Google({"ECONOMY": _ECONOMY, "BUSINESS": []})
+    result = _search(monkeypatch, google, "--max-price", "1000")
+    assert result.exit_code == 0, result.output
+    assert "Google Flights BUSINESS: no fare at or under USD 1000." in _flat(result.stderr)
+    assert "Google Flights COACH" not in result.stderr
+    uncapped = _search(monkeypatch, _Google({"ECONOMY": _ECONOMY, "BUSINESS": []}))
+    assert "no fare at or under" not in uncapped.stderr
+
+
 # ─────────────────────────────────── rung 2 ────────────────────────────────────
 
 
@@ -1028,8 +1042,11 @@ def _matrix_search(
     currency: str = "USD",
     party: int = 1,
     untotaled: frozenset[Cabin] = frozenset(),
+    asked: list[SearchOptions] | None = None,
 ) -> Result:
-    def _multi(**_kw: object) -> dict[Cabin, SearchResult]:
+    def _multi(*, opts: SearchOptions, **_kw: object) -> dict[Cabin, SearchResult]:
+        if asked is not None:
+            asked.append(opts)
         return {
             cab: _matrix_answer(fares, currency, party=party, totaled=cab not in untotaled)
             for cab, fares in _MATRIX.items()
@@ -1133,3 +1150,108 @@ def test_a_partys_google_line_names_the_total_google_lists(
         "J's own cheapest, total for 2 travelers: USD1020.00 (B6109 / B6900), on no row above; "
         "--sort business lists J's cheapest first."
     ]
+
+
+def _own_lines(stdout: str) -> list[str]:
+    return [line for line in stdout.splitlines() if "own cheapest" in line]
+
+
+def test_a_capped_matrix_cabin_keeps_only_its_fares_under_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Business keeps UA103 at USD900 alone, which no row of the economy-sorted
+    table flies, so its line names it. Red at the D1 commit, whose J column
+    printed USD1500 and USD1400."""
+    result = _matrix_search(monkeypatch, "--max-price", "1000")
+    assert result.exit_code == 0, result.output
+    assert _cells(result.stdout) == {"COACH": {300.0, 350.0}, "BUSINESS": set()}
+    assert _own_lines(result.stdout) == [
+        "J's own cheapest: USD900.00 (UA103), on no row above; "
+        "--sort business lists J's cheapest first."
+    ]
+    assert "no fare at or under" not in result.stderr
+
+
+def test_a_matrix_cabin_the_cap_leaves_no_fare_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Red at the D1 commit."""
+    result = _matrix_search(monkeypatch, "--max-price", "800")
+    assert result.exit_code == 0, result.output
+    assert _cells(result.stdout) == {"COACH": {300.0, 350.0}, "BUSINESS": set()}
+    assert _own_lines(result.stdout) == []
+    assert "Matrix BUSINESS: no fare at or under USD 800." in _flat(result.stderr)
+    assert "Matrix COACH" not in result.stderr
+
+
+def _envelope_prices(result: Result) -> tuple[dict[str, list[float]], bool]:
+    env = _envelope_of(result)
+    return {g["cabin"]: [r["price"] for r in g["rows"]] for g in env["results"]}, env["complete"]
+
+
+def _raw_counts(result: Result) -> dict[str, tuple[list[str], int]]:
+    """Each cabin's `{cabin: raw}` document: its fares and its `solutionCount`."""
+    assert result.exit_code == 0, result.output
+    doc: dict[str, dict[str, Any]] = json.loads(result.stdout)
+    return {
+        cab: (
+            [s.get("displayTotal") for s in raw["solutionList"]["solutions"]],
+            raw["solutionCount"],
+        )
+        for cab, raw in doc.items()
+    }
+
+
+@pytest.mark.parametrize(
+    ("cap", "business", "count"), [("1000", [900.0], 1), ("800", [], 0)], ids=["1000", "800"]
+)
+def test_a_capped_matrix_document_holds_no_fare_over_the_cap(
+    monkeypatch: pytest.MonkeyPatch, cap: str, business: list[float], count: int
+) -> None:
+    """Business's dropped fares are all over the cap, so its count is the kept
+    rows; economy drops none, so its count stays Matrix's. The cap narrows
+    nothing. Red at the D1 commit."""
+    listed, complete = _envelope_prices(
+        _matrix_search(monkeypatch, "--max-price", cap, "--format", "envelope")
+    )
+    assert listed == {"COACH": [300.0, 350.0, 400.0], "BUSINESS": business}
+    assert complete == _envelope_prices(_matrix_search(monkeypatch, "--format", "envelope"))[1]
+    raw = _raw_counts(_matrix_search(monkeypatch, "--max-price", cap, "--format", "json"))
+    assert raw == {
+        "COACH": (["USD300.00", "USD350.00", "USD400.00"], 3),
+        "BUSINESS": ([f"USD{p:.2f}" for p in business], count),
+    }
+
+
+@pytest.mark.parametrize(
+    ("untotaled", "business", "count"),
+    [(frozenset[Cabin](), [1800.0], 1), (frozenset({Cabin.BUSINESS}), list[float](), 3)],
+    ids=["totaled", "untotaled"],
+)
+def test_a_partys_capped_matrix_cabin_is_held_to_its_total(
+    monkeypatch: pytest.MonkeyPatch, untotaled: frozenset[Cabin], business: list[float], count: int
+) -> None:
+    """Two adults under USD2000: UA103's total is USD1800, and the other
+    business totals are over the cap. Where Matrix states no total, no fare
+    can be held to the cap, so none is kept and Matrix's count stays. Red at
+    the D1 commit."""
+    args = ("--adults", "2", "--max-price", "2000")
+    envelope = _matrix_search(
+        monkeypatch, *args, "--format", "envelope", party=2, untotaled=untotaled
+    )
+    listed, _ = _envelope_prices(envelope)
+    assert listed == {"COACH": [600.0, 700.0, 800.0], "BUSINESS": business}
+    raw = _raw_counts(
+        _matrix_search(monkeypatch, *args, "--format", "json", party=2, untotaled=untotaled)
+    )
+    assert raw["BUSINESS"] == ([f"USD{p:.2f}" for p in business], count)
+    said = "Matrix BUSINESS: no fare at or under USD 2000." in _flat(envelope.stderr)
+    assert said == (not business)
+
+
+def test_a_capped_matrix_compare_asks_matrix_in_the_cap_s_currency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red at the D1 commit, which left the currency to Matrix."""
+    asked: list[SearchOptions] = []
+    assert _matrix_search(monkeypatch, "--max-price", "1000", asked=asked).exit_code == 0
+    assert _matrix_search(monkeypatch, asked=asked).exit_code == 0
+    assert [opts.currency for opts in asked] == ["USD", None]
