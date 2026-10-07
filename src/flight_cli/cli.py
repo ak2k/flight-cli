@@ -8308,29 +8308,36 @@ def _low_check(
 ) -> _LowCheck | None:
     """Matrix asked for the exact flights of the first Google-only row the
     table shows under every fare in Matrix's own answer, or None where no row
-    is, which asks Matrix nothing more. A Matrix fare with no price for the
-    party in `currency` cannot be compared, so it leaves no row under every
-    fare. It is looked for in `uncapped`, Matrix's page before the price cap,
-    because the cap drops such a fare from `merged`."""
+    is, which asks Matrix nothing more. A row whose listing Google books in a
+    cabin other than the search's is passed over, as Matrix is asked in the
+    search's cabin. A Matrix fare with no price for the party in `currency`
+    cannot be compared, so it leaves no row under every fare. It is looked for
+    in `uncapped`, Matrix's page before the price cap, because the cap drops
+    such a fare from `merged`."""
     from ._enrich import merge_results  # noqa: PLC0415 — as in `_run_enriched_path`
+    from ._gf_postfilter import states_other_cabin  # noqa: PLC0415 — GF-only
 
     whole = merge_results(board, uncapped, currency=currency, passengers=opts.pax.total)
     if not every_matrix_price_in(whole, currency):
         return None
     matrix_low = lowest_matrix_price(merged, currency)
-    n = low_row(merged[:top_n], matrix_low, currency)
-    if n is None:
-        return None
-    chosen = merged[n - 1]
     # `board` holds one itinerary per fli result, in order, less an empty
     # round trip, so the row's own result is found by the itinerary's identity.
     results = cast("list[Any]", [r for r in gf if not (isinstance(r, tuple) and not r)])
-    if len(results) != len(board.solutions) or chosen.gf_price is None:
+    if len(results) != len(board.solutions):
         return None
-    fli_row = next(
-        (r for it, r in zip(board.solutions, results, strict=True) if it is chosen.google), None
-    )
-    if fli_row is None:
+    listed = {id(it): r for it, r in zip(board.solutions, results, strict=True)}
+
+    def in_cabin(row: Any) -> bool:
+        listing = listed.get(id(row.google))
+        return listing is None or not states_other_cabin(listing, opts.cabin)
+
+    n = low_row(merged[:top_n], matrix_low, currency, comparable=in_cabin)
+    if n is None:
+        return None
+    chosen = merged[n - 1]
+    fli_row = listed.get(id(chosen.google))
+    if fli_row is None or chosen.gf_price is None:
         return None
     return _ask_low_row(
         n,
