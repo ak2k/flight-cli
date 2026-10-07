@@ -269,16 +269,18 @@ proved it cannot see.
 A driver that cannot START is a different refusal from a Chrome that cannot
 launch: `start()` raising means no launch was tried, so `_ensure_page` raises
 `_driver_failure`, whose remedy is `_INSTALL_HINT` (patchright's own install)
-rather than `_LAUNCH_REMEDY`. patchright also parks the start error where
-nothing awaits it — the transport's `on_error_future` when node cannot be
-spawned, the connection's `init` task when node runs and exits — so asyncio
-would print it as "exception was never retrieved" after the refusal.
-`_quiet_driver_failure` gives the loop patchright made for that manager an
-exception handler that drops those reports: one handler covers every future on
-the loop, where retrieving each would take one private attribute per place
-patchright parks an error. It reads `_loop` and `_own_loop`, guarded like
-`_driver_process_id`, and leaves a loop patchright did not make (the caller's)
-alone.
+rather than `_LAUNCH_REMEDY`. What the failed start leaves on the loop
+patchright made for that manager reports itself, with a traceback, when
+collected: the error parked on the transport's `on_error_future` or the
+connection's `init` task, an `init` task still waiting on a driver that sent a
+malformed frame, and that driver's pipes, whose finalizer raises "Event loop is
+closed" when the loop's own finalizer ran first. `_quiet_driver_failure` gives
+that loop an exception handler that drops every report (everything on it
+belongs to the failed start), then closes a spawned driver's stdin and runs the loop until asyncio
+has reaped it, bounded by `_DRIVER_EXIT_TIMEOUT_S`, so its pipes are closed
+before any finalizer sees them. It reads `_loop`, `_own_loop` and the
+`_connection._transport._proc` chain, guarded like `_driver_process_id`, and
+leaves a loop patchright did not make (the caller's) alone.
 
 ## What it costs
 

@@ -1,10 +1,10 @@
 """A patchright driver that cannot start: one quiet refusal that names the driver.
 
-patchright's `start()` spawns a node driver. When node cannot be spawned, or
-runs and exits before the handshake, patchright parks the error where nothing
-reads it, and asyncio would print it as "exception was never retrieved" with a
-traceback after the typed refusal. Neither case is a missing Chrome, so the
-refusal points at patchright's install.
+patchright's `start()` spawns a node driver. When node cannot be spawned, runs
+and exits before the handshake, or sends a frame that is not JSON, what the
+failed start left behind would make asyncio print a traceback after the typed
+refusal. None of these is a missing Chrome, so the refusal points at
+patchright's install.
 """
 
 from __future__ import annotations
@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import gc
 import logging
+import sys
+import threading
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -22,17 +24,24 @@ from flight_cli._gf_errors import GfBrowserUnavailableError
 if TYPE_CHECKING:
     import pathlib
 
-_UNRETRIEVED = "exception was never retrieved"
-
 
 def _no_trace_left(caplog: pytest.LogCaptureFixture) -> bool:
-    """True when collecting every dead object logged no unretrieved future.
+    """True when collecting every dead object logged nothing on `asyncio`.
 
     `caplog.set_level` on the `asyncio` logger, because `stop_driver` raises
     that logger to CRITICAL for the rest of the process and a test that ran
     after one would otherwise pass without looking."""
     gc.collect()
-    return not any(_UNRETRIEVED in r.getMessage() for r in caplog.records)
+    return not any(r.name == "asyncio" for r in caplog.records)
+
+
+def _join_child_watchers() -> None:
+    """asyncio reaps a child on a thread of its own where it has no pidfd, and
+    that thread holds the child's transport until then: collecting before it
+    is done moves whatever the transport reports into a later test."""
+    for thread in threading.enumerate():
+        if thread.name.startswith("asyncio-waitpid-"):
+            thread.join(5)
 
 
 class _DriverThatCannotStart:
@@ -126,6 +135,44 @@ def test_a_real_driver_that_exits_at_once_is_one_quiet_refusal(
     finally:
         for loop in loops:
             loop.close()
+
+
+def test_a_real_driver_that_sends_a_malformed_frame_is_one_quiet_refusal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A frame that is not JSON fails `start()` while patchright's `init` task
+    still waits and the driver is still up. Each reports itself when collected:
+    the task through the loop, the driver's pipes from their finalizer, which
+    raises once the loop is closed. The loops are closed before the collection,
+    an order a collected loop's own finalizer also gives."""
+    caplog.set_level(logging.WARNING, logger="asyncio")
+    payload = b"not json"
+    frame = tmp_path / "frame"
+    frame.write_bytes(len(payload).to_bytes(4, "little") + payload)
+    node = tmp_path / "sends-a-malformed-frame"
+    node.write_text(f"#!/bin/sh\ncat '{frame}'\n")
+    node.chmod(0o755)
+    loops = _install_real_patchright(monkeypatch, tmp_path, node)
+    unraisable: list[str] = []
+
+    def _keep(u: sys.UnraisableHookArgs) -> None:
+        unraisable.append(f"{u.err_msg}: {u.exc_value!r}")
+
+    monkeypatch.setattr(sys, "unraisablehook", _keep)
+    session = gfb.GfBrowserSession(headed=False)
+    try:
+        with pytest.raises(GfBrowserUnavailableError) as e:
+            session.get_html("https://www.google.com/travel/flights")
+        session.close()
+        reason = e.value.reason
+        del e, session
+        _join_child_watchers()
+    finally:
+        for loop in loops:
+            loop.close()
+    assert "driver failed to start" in reason
+    assert _no_trace_left(caplog)
+    assert unraisable == []
 
 
 def test_a_failed_driver_start_reports_nothing_it_left_on_its_own_loop(

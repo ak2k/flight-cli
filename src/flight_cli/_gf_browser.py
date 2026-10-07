@@ -37,6 +37,7 @@ Three things are deliberate and easy to undo by accident:
 
 from __future__ import annotations
 
+import asyncio
 import atexit
 import contextlib
 import logging
@@ -52,7 +53,6 @@ from ._gf_common import PageFetch, cache_dir
 from ._gf_errors import BROWSER_DEFAULT_REMEDY, GfBrowserUnavailableError
 
 if TYPE_CHECKING:
-    import asyncio
     import pathlib
     import types
     from collections.abc import Callable, Generator
@@ -84,6 +84,9 @@ _EVICTED = "Request content was evicted from inspector cache"
 # The sync API delivers events only while one of its calls is running, so the
 # capture waits in short driver-side sleeps and reads what they delivered.
 _POLL_MS = 100
+# A driver that answers `start()` with garbage is still running; it exits on
+# stdin EOF, and one still up after this is left as asyncio would leave it.
+_DRIVER_EXIT_TIMEOUT_S = 5.0
 # Escape hatch for a Chrome that isn't where `channel="chrome"` looks; pointing
 # it at a missing binary is also how a caller forces the typed refusal.
 _BROWSER_BIN_ENV = "FLIGHT_CLI_GF_BROWSER_BIN"
@@ -174,26 +177,34 @@ def _driver_failure(detail: str) -> GfBrowserUnavailableError:
 def _quiet_driver_failure(manager: Any) -> None:
     """Keep asyncio from reporting again the error a failed `start()` raised.
 
-    patchright also parks that error where nothing awaits it — the transport's
-    `on_error_future` when node cannot be spawned, the connection's `init` task
-    when node runs and exits — and asyncio prints each as "exception was never
-    retrieved", with a traceback, when the manager is collected. All of them
-    live on the loop patchright made for this manager, which never runs again,
-    so a handler on that loop covers every one of them. A loop patchright did
-    not make is the caller's and keeps its reports. A lookup, as
-    `_driver_process_id` is: a patchright build that moves either attribute
-    leaves the report printed and the refusal intact."""
+    What that start left on the loop patchright made for this manager reports
+    itself, with a traceback, when collected: the error parked where nothing
+    awaits it (the transport's `on_error_future`, the connection's `init`
+    task), an `init` task still waiting on a driver that sent garbage, and that
+    driver's pipes, whose finalizer raises once the loop's own has closed it.
+    So the loop's handler drops every report, and a driver that was spawned is
+    let exit on stdin EOF and reaped on that loop now, which leaves its pipes
+    nothing to do. A loop patchright did not make is the caller's and keeps its
+    reports. A lookup, as `_driver_process_id` is: a patchright build that
+    moves an attribute leaves the report printed and the refusal intact."""
     try:
         loop, own_loop = manager._loop, manager._own_loop
     except AttributeError:
         return
-    if own_loop:
-        loop.set_exception_handler(_drop_unretrieved)
+    if not own_loop:
+        return
+    loop.set_exception_handler(_drop_report)
+    try:
+        driver = manager._connection._transport._proc
+        driver.stdin.close()
+    except AttributeError:
+        return
+    with contextlib.suppress(TimeoutError):
+        loop.run_until_complete(asyncio.wait_for(driver.wait(), _DRIVER_EXIT_TIMEOUT_S))
 
 
-def _drop_unretrieved(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
-    if not str(context.get("message", "")).endswith("exception was never retrieved"):
-        loop.default_exception_handler(context)
+def _drop_report(_loop: asyncio.AbstractEventLoop, _context: dict[str, Any]) -> None:
+    pass
 
 
 def _playwright_factory() -> Callable[[], Any]:
