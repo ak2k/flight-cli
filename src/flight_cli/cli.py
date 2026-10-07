@@ -6252,6 +6252,22 @@ def _union_pins(kept: dict[int, list[Any]], top_n: int) -> dict[int, list[Itiner
     return shares
 
 
+def _mark_tops(boards: Sequence[Board[Any]], kept: Iterable[Sequence[Any]]) -> None:
+    """Mark, in place, every listing on `boards` of an outbound that any page's
+    `kept` rows mark. `_union_pins` pins an outbound on one page alone, so its
+    pairs never meet another page's copy in `_merged_boards`."""
+    from ._gflight_ids import row_key  # noqa: PLC0415 — fli, ~95 ms
+
+    tops = {row_key(r) for rows in kept for r in rows if getattr(r, "top_flight", False)}
+    if not tops:
+        return
+    for board in boards:
+        for j, r in enumerate(board):
+            if not r.top_flight and row_key(r) in tops:
+                others = tuple(replace(o, top_flight=True) for o in r.others)
+                board[j] = replace(r, top_flight=True, others=others)
+
+
 def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way a page answers
     pages: list[tuple[Leg, ...]],
     opts: SearchOptions,
@@ -6337,6 +6353,7 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
             # Once a page, so its filter counts each row over the stop ceiling once.
             kept = {i: _kept(ob) for i, ob in outbounds}
             shares = _union_pins(kept, top_n)
+            _mark_tops([ob.board for _, ob in outbounds], kept.values())
             for i, ob in outbounds:
                 keys = shares.get(i, [])
                 # A page with no pin is still asked for its Cheapest tab: a row

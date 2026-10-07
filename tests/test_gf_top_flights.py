@@ -25,10 +25,13 @@ from flight_cli import _gflight_ids as gfid
 from flight_cli import cli
 from flight_cli._gf_common import PageFetch
 from flight_cli.domain import Leg
+from test_gf_chunked_search import _EX6_FROM, _EX6_PAIRS, _EX6_TO, _Google, _row, _search
 from test_gf_separate_tickets import _FLL_LGA, _fll_lga_pages
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from test_gf_chunked_search import Page
 
 _DEP = date.today() + timedelta(days=45)
 _RET = date.today() + timedelta(days=52)
@@ -308,6 +311,38 @@ def test_a_round_trip_marked_only_in_its_outbound_keeps_that_member_alone_marked
     (kept,) = cli._merged_boards([gfid.Board([first]), gfid.Board([second])])
     assert kept[1].flight.price == 800.0
     assert [m.top_flight for m in kept] == [True, False]
+
+
+@pytest.mark.parametrize("marked_on", ["dearer", "cheaper"])
+@pytest.mark.parametrize("ret", [False, True], ids=["one-way", "round-trip"])
+def test_an_outbound_two_pages_list_is_marked_where_either_page_marks_it(
+    monkeypatch: pytest.MonkeyPatch, marked_on: str, ret: bool
+) -> None:
+    """Two pages list flight 999, the first at 250 and the second at 300, and
+    one of them puts it on its top board. A round trip pins 999 on the cheaper
+    page alone, so its pairs come from that page's copy: it carries the mark
+    either page gave it, as the one-way merge's kept row does, and the GETs are
+    the ones every paged search makes."""
+    cheaper_page = (_EX6_FROM[:4], _EX6_TO[:7])
+
+    def added(page: Page) -> list[gfid.GFlightWithId]:
+        if page[0] != _EX6_FROM[:4]:
+            return []
+        cheaper = page == cheaper_page
+        row = _row(999, _DEP, "JFK", "LHR", 250.0 if cheaper else 300.0)
+        return [replace(row, top_flight=cheaper == (marked_on == "cheaper"))]
+
+    google = _Google(_EX6_PAIRS, fare=lambda i: 400.0 + i, added=added)
+    args = ["--backend", "gflight", "--fast", "--format", "json", "-n", "1000"]
+    result = _search(monkeypatch, google, ",".join(_EX6_FROM), ",".join(_EX6_TO), *args, ret=ret)
+    assert result.exit_code == 0, result.output
+    doc: list[Any] = json.loads(result.stdout)
+    members = [m for row in doc for m in (row if ret else [row])]
+    marked = [(m["legs"][0]["flight_number"], m["price"]) for m in members if m["top_flight"]]
+    # A round trip pairs the pinned 999 with each of its two returns.
+    assert marked == [("999", 250.0)] * (2 if ret else 1)
+    pins = [pin for _, pin in google.calls if pin is not None]
+    assert (len(google.calls), pins.count(999)) == ((4 + 10, 1) if ret else (4, 0))
 
 
 # ──────────────────────────────── the table ───────────────────────────────
