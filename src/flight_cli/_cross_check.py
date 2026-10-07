@@ -33,7 +33,7 @@ from ._enrich import (
 from ._multi_cabin import price_currency
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
 
     from .models import Itinerary, SearchResult, Slice
 
@@ -188,7 +188,13 @@ def lowest_matrix_price(rows: Sequence[Any], currency: str) -> str | None:
     return low[1] if low is not None else None
 
 
-def low_row(rows: Sequence[Any], matrix_low: str | None, currency: str) -> int | None:
+def low_row(
+    rows: Sequence[Any],
+    matrix_low: str | None,
+    currency: str,
+    *,
+    comparable: Callable[[Any], bool] | None = None,
+) -> int | None:
     """The 1-based number, among `rows` in the table's order, of the first
     Google-only row whose price is in `currency` and under `matrix_low`,
     Matrix's cheapest price for the party; where Matrix prices nothing,
@@ -196,7 +202,9 @@ def low_row(rows: Sequence[Any], matrix_low: str | None, currency: str) -> int |
 
     A row on both sides is never chosen: Matrix has already priced its
     flights. Nor is a row Google sells as separate tickets: Matrix prices one
-    ticket, so its price for those flights is no check on that booking's."""
+    ticket, so its price for those flights is no check on that booking's. Nor
+    is a row `comparable` refuses, whose Google price is for another cabin
+    than Matrix is asked in."""
     low = _money(matrix_low)
     if low is not None and low[0] != currency:
         return None
@@ -208,6 +216,7 @@ def low_row(rows: Sequence[Any], matrix_low: str | None, currency: str) -> int |
             and g is not None
             and g[0] == currency
             and (low is None or g[1] < low[1])
+            and (comparable is None or comparable(r))
         ):
             return n
     return None

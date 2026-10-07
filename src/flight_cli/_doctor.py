@@ -44,6 +44,7 @@ from ._gf_errors import (
     GfConsentError,
     GfPageShapeError,
     GfPinIgnoredError,
+    GfSearchServerError,
     GfThrottledError,
     GfTransportError,
     GfUpstreamStatusError,
@@ -708,7 +709,7 @@ def _classify(e: Exception) -> tuple[Cause, str]:  # noqa: PLR0911, PLR0912 — 
             return "throttled", str(e)
         case GfTransportError():
             return "unreachable", str(e)
-        case GfUpstreamStatusError():
+        case GfUpstreamStatusError() | GfSearchServerError():
             return "upstream", str(e)
         case GfConsentError():
             return "consent", str(e)
