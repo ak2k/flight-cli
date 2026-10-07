@@ -283,7 +283,9 @@ before any finalizer sees them. It drains the driver's stdout meanwhile
 `start()` raised, and a driver with more to write than the pipe holds would
 otherwise block and outlive the refusal. One still up at the deadline is
 killed through asyncio's process handle and reaped, since the refusal drops
-the session's only handle on it. It reads `_loop`, `_own_loop` and the
+the session's only handle on it. A driver that exits before the handshake
+makes `start()` raise an `AttributeError` about patchright's own state, so the
+refusal's detail is the error parked on the `init` task (`_parked_driver_error`). It reads `_loop`, `_own_loop` and the
 `_connection._transport._proc` chain, guarded like `_driver_process_id`, and
 leaves a loop patchright did not make (the caller's) alone.
 

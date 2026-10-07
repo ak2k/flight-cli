@@ -218,6 +218,19 @@ def _drop_report(_loop: asyncio.AbstractEventLoop, _context: dict[str, Any]) -> 
     pass
 
 
+def _parked_driver_error(manager: Any) -> Exception | None:
+    """The error a driver that exited before the handshake left on patchright's
+    `init` task. `start()` then raises an `AttributeError` about patchright's own
+    state, which names no cause a user can act on. A lookup, as
+    `_driver_process_id` is."""
+    try:
+        task = manager._connection._init_task
+        error = task.exception() if task.done() and not task.cancelled() else None
+    except AttributeError:
+        return None
+    return error if isinstance(error, Exception) else None
+
+
 def _playwright_factory() -> Callable[[], Any]:
     """patchright's `sync_playwright`, imported on demand.
 
@@ -672,7 +685,7 @@ class GfBrowserSession:
                     self._dead = True
                     raise
                 self.close()
-                raise _driver_failure(_detail(e)) from e
+                raise _driver_failure(_detail(_parked_driver_error(manager) or e)) from e
             self.close()
             raise _launch_failure(profile, _detail(e)) from e
         # The launch block's broad `except Exception` above calls `close()`; an

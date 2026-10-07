@@ -172,13 +172,16 @@ def test_a_real_driver_that_exits_at_once_is_one_quiet_refusal(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A driver binary that runs and exits before the handshake leaves its error
-    on patchright's `init` task, not on the transport's future."""
+    on patchright's `init` task, not on the transport's future, and `start()`
+    raises patchright's own complaint about an attribute it never set."""
     caplog.set_level(logging.ERROR, logger="asyncio")
     node = tmp_path / "exits-at-once"
     node.write_text("#!/bin/sh\ntrue\n")
     node.chmod(0o755)
     reason = _refusal_from(monkeypatch, tmp_path, node)
     assert "driver failed to start" in reason
+    assert "Connection closed while reading from the driver" in reason
+    assert "_playwright" not in reason
     assert _no_trace_left(caplog)
 
 
