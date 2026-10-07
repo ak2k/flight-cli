@@ -168,7 +168,10 @@ Only a throttle escalates. A transport failure is the network, which Chrome
 shares, and a refusal of the page (a consent wall, a 503, a re-shaped page) is
 the page's own. A refusal met after the escalation is worded as rung 2's
 (`cli._rung_reached`): "rate-limited the browser rung", with no advice to wait
-for a ladder Chrome does not run.
+for a ladder Chrome does not run. The pin loop's "stopped pinning" line words a
+throttle the same way on `browser` and after an escalation
+(`_gflight_ids._why_pinning_stopped`), so one run names a throttle one way; on
+`http` it is still "rate-limited this IP".
 
 The flag is one object per search (`search_escalation`, opened by `cli.search`
 on the thread that starts the workers, and by `cli._open_jaw_tickets` around a
