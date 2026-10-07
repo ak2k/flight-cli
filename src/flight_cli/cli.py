@@ -9508,6 +9508,17 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
         total_of=total_of,
         slices=len(legs),
     )
+    # Every cabin's listings, by `id`, to the bags Google states for each
+    # member: a row's cells and its award matches each read their own listing.
+    bags_by_id = (
+        {
+            key: stated
+            for cab, res in results_by_cabin.items()
+            for key, stated in _bags_by_itinerary(fli_by_cabin[cab], res).items()
+        }
+        if opts.bags is not None
+        else None
+    )
 
     def document_rows(cab: Cabin, board: list[Any]) -> list[Any]:
         res = results_by_cabin.get(cab)
@@ -9516,12 +9527,12 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
 
     if _envelope.active():
         for cab, board in fli_by_cabin.items():
-            _record_google_cabin(cab, document_rows(cab, board), board)
+            _record_google_cabin(cab, document_rows(cab, board), board, bags=opts.bags)
         if not run_pp:
             return None
     elif json_out and not run_pp:
         out = {
-            cab.value: _gflight_json_document(document_rows(cab, board))
+            cab.value: _gflight_json_document(document_rows(cab, board), opts.bags)
             for cab, board in fli_by_cabin.items()
         }
         sys.stdout.write(json.dumps(out, indent=2, default=str))
@@ -9573,6 +9584,7 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
             provider_filter=sel.provider_filter,
             seats_sources=sel.seats_sources(),
             cash_per_cabin=_cash_per_cabin_multi(rows),
+            bags_included=bags_by_id,
         )
     return None
 

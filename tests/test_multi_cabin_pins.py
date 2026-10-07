@@ -588,6 +588,122 @@ def test_a_cabin_whose_capped_page_served_nothing_says_no_fare_is_under_the_cap(
     assert "no fare at or under" not in uncapped.stderr
 
 
+# What each seat's fares cover, as (checked, carry-on): its outbounds, then its
+# returns. Under `--bags 1`, economy's include no checked bag and business's do.
+_STATED: dict[str, tuple[tuple[int | None, int | None], tuple[int | None, int | None]]] = {
+    "ECONOMY": ((0, 1), (0, 0)),
+    "PREMIUM_ECONOMY": ((1, 1), (1, 1)),
+    "BUSINESS": ((2, 1), (2, 1)),
+}
+
+
+def _with_bags(google: _Google, *, unstated: int | None = None) -> Callable[..., gfid.Board[Any]]:
+    """`google` with each row stating the bags its fare covers (`_STATED`),
+    and business's returns on the outbound `unstated` stating none."""
+
+    def call(
+        filters: Any, transport: Any, *, currency: str = "USD", cheapest: bool = False
+    ) -> gfid.Board[gfid.GFlightWithId]:
+        board = google(filters, transport, currency=currency, cheapest=cheapest)
+        seat: str = filters.seat_type.name
+        picked = filters.flight_segments[0].selected_flight
+        flight = None if picked is None else int(picked.legs[0].flight_number)
+        outbound, back = _STATED[seat]
+        stated = (
+            outbound
+            if flight is None
+            else (None, None)
+            if seat == "BUSINESS" and flight == unstated
+            else back
+        )
+        return gfid.Board([replace(r, bags_included=stated) for r in board])
+
+    return call
+
+
+def _members(result: Result, fmt: str) -> dict[str, list[Any]]:
+    """Each cabin's row members in the document: both of a round trip's pair."""
+    if fmt == "envelope":
+        groups = {
+            g["cabin"]: [r["row"] for r in g["rows"]] for g in _envelope_of(result)["results"]
+        }
+    else:
+        assert result.exit_code == 0, result.output
+        groups = json.loads(result.stdout)
+    return {cab: [m for row in rows for m in row] for cab, rows in groups.items()}
+
+
+@pytest.mark.parametrize("fmt", ["envelope", "json"])
+def test_each_member_of_each_cabins_rows_says_what_its_price_covers(
+    monkeypatch: pytest.MonkeyPatch, fmt: str
+) -> None:
+    """Red at the D1 commit, where no member carried `bags_included`."""
+    google = _with_bags(_Google({"ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS}))
+    members = _members(_search(monkeypatch, google, "--bags", "1", "--format", fmt), fmt)
+    assert set(members) == {"COACH", "BUSINESS"}
+    for cab, seat in (("COACH", "ECONOMY"), ("BUSINESS", "BUSINESS")):
+        assert members[cab], cab
+        out, back = _STATED[seat]
+        assert [m["bags_included"] for m in members[cab]] == [
+            {"checked": c, "carry_on": k} for _ in members[cab][::2] for c, k in (out, back)
+        ], cab
+
+
+@pytest.mark.parametrize("fmt", ["envelope", "json"])
+def test_without_bags_no_member_says_what_its_price_covers(
+    monkeypatch: pytest.MonkeyPatch, fmt: str
+) -> None:
+    """Green at the D1 commit."""
+    google = _with_bags(_Google({"ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS}))
+    members = _members(_search(monkeypatch, google, "--format", fmt), fmt)
+    assert all(members.values())
+    assert not any("bags_included" in m for ms in members.values() for m in ms)
+
+
+def _award_legs(monkeypatch: pytest.MonkeyPatch, *extra: str) -> list[dict[str, Any]]:
+    """The award document of a two-cabin round trip, with a provider that
+    matches nothing, so every cash row reaches it on its own."""
+    from flight_cli.pp import cli as pp_cli
+
+    async def _gather(*, legs: list[Any], **_kw: Any) -> tuple[list[list[Any]], list[Any]]:
+        return ([[] for _ in legs], [])
+
+    def _configured(_sel: cli.ProviderSelection) -> bool:
+        return True
+
+    monkeypatch.setattr(cli, "_should_run_awards", _configured)
+    monkeypatch.setattr(pp_cli, "gather_awards", _gather)
+    monkeypatch.setattr(pp_cli, "stored_tokens", lambda: None)
+    google = _with_bags(_Google({"ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS}))
+    result = _search(monkeypatch, google, "--format", "json", *extra)
+    assert result.exit_code == 0, result.output
+    return json.loads(result.stdout)
+
+
+def test_each_cash_match_beside_the_awards_says_what_its_own_slice_covers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The table's rows are economy's listings: one carry-on out, no bag back.
+    Red at the D1 commit, whose matches carried no `bags_included`."""
+    out, back = _award_legs(monkeypatch, "--bags", "1")
+    assert len(out["matches"]) == len(back["matches"]) == 10
+    assert {json.dumps(m["bags_included"]) for m in out["matches"]} == {
+        json.dumps({"checked": 0, "carry_on": 1})
+    }
+    assert {json.dumps(m["bags_included"]) for m in back["matches"]} == {
+        json.dumps({"checked": 0, "carry_on": 0})
+    }
+
+
+def test_without_bags_the_cash_matches_beside_the_awards_carry_no_statement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Green at the D1 commit."""
+    legs = _award_legs(monkeypatch)
+    assert all(leg["matches"] for leg in legs)
+    assert not any("bags_included" in m for leg in legs for m in leg["matches"])
+
+
 # ─────────────────────────────────── rung 2 ────────────────────────────────────
 
 
