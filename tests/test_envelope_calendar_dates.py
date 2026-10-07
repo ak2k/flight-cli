@@ -122,6 +122,16 @@ def test_a_priced_day_outside_the_window_has_no_date(monkeypatch: pytest.MonkeyP
     assert _dates(env) == [(20, "2026-10-20", "2026-10-27"), (28, None, None)]
 
 
+def test_a_month_named_as_a_numeric_string_is_that_month(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A month of "10" is October, as the unpriced-dates note reads it, so its
+    21st falls before a window opening on October 22 and is not November 21."""
+    body = _body_of(_result({10: {21: ("USD300.00", 1, {7: "USD300.00"})}}, year=2026))
+    body["calendar"]["months"][0]["month"] = "10"
+    _serve(monkeypatch, body)
+    env = _calendar("--start", "2026-10-22", "--end", "2026-11-21", "-d", "7")
+    assert _dates(env) == [(21, None, None)]
+
+
 def test_a_google_graph_cell_names_its_departure_and_return(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

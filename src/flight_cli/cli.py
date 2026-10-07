@@ -125,7 +125,7 @@ from .links import (
     search_page_cap,
 )
 from .log import configure as configure_logging
-from .models import CalendarDay, FareRulesResult, Itinerary
+from .models import CalendarDay, CalendarMonth, FareRulesResult, Itinerary
 from .pp import cli as _pp_cli
 from .pp.auth import load_tokens
 from .pp.cli import auth_app, run_pp_for_search
@@ -6369,8 +6369,8 @@ def _calendar_envelope_rows(
     grid the table prints as empty has none: a day priced under no solutions is
     not a fare the table shows, and the unpriced-dates note names its date.
 
-    The departure is placed as `_window_days` places it, by the month's own
-    `month` and `year`, and is null where no one date of the window is. The
+    The departure is placed as `_window_days` places it, by the month its parsed
+    model reads and the body's `year`, and is null where no one date of the window is. The
     return is `_matrix_low`'s: that departure plus the day's cheapest trip
     length, null on a one-way and on a day naming no length."""
     if is_empty_calendar(res):
@@ -6383,7 +6383,7 @@ def _calendar_envelope_rows(
     rows: list[_envelope.CalendarRow] = []
     for month in items((res.raw or {}).get("calendar"), "months"):
         body = cast("dict[str, Any]", month) if isinstance(month, dict) else {}
-        number: Any = body.get("month")
+        number = CalendarMonth.model_validate(body).month
         year: Any = body.get("year")
         for week in items(month, "weeks"):
             for day in items(week, "days"):
@@ -6394,7 +6394,7 @@ def _calendar_envelope_rows(
                 if isinstance(price, str) and price and not fields.get("disabled"):
                     parsed = CalendarDay.model_validate(fields)
                     when = _window_date(
-                        number if isinstance(number, int) else None,
+                        number,
                         parsed.date,
                         sd,
                         ed,
