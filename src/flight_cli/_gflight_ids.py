@@ -2047,8 +2047,8 @@ def _deduped(rows: list[GFlightWithId]) -> list[GFlightWithId]:
     dates included: the same flight numbers a day apart are a different trip.
     The first listing keeps its place, because page order breaks ties between
     equal fares in the trim and in the round-trip pins. A listing booked in
-    another cabin mix is kept on the row as one of its `others`. An itinerary
-    any listing of which is a top flight is one on every listing, since a
+    another cabin mix is kept on the row as one of its `others`. Where any
+    listing of an itinerary is a top flight, every listing is marked, since a
     later step may show any of them (`_listing`)."""
     listed: dict[ItineraryKey, list[GFlightWithId]] = {}
     for row in rows:
