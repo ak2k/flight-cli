@@ -7953,6 +7953,22 @@ def _answer_cross_check_document(
             alone = "Google Flights failed, and cross_check holds Matrix's rows alone"
             _envelope.explain("backend", alone)
             _envelope.explain("results", alone)
+    if (
+        google_answered
+        and not (gf or getattr(state["gf"], "dropped", 0))
+        and (opts.pax.infants_in_seat or opts.pax.infants_in_lap)
+    ):
+        # Google has served an infant no rows on a route with flights, so its
+        # empty board is not the route's answer.
+        infant = (
+            "Google Flights served no rows for a party with an infant, as it has on routes "
+            "with flights"
+        )
+        _envelope.narrow()
+        _envelope.explain(
+            "results",
+            infant if matrix_res is None else f"{infant}, and cross_check holds Matrix's rows",
+        )
     checked: dict[str, Any] | None = None
     if matrix_res is None:
         _report_search_matrix_failure(state)
