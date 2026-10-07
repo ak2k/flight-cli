@@ -28,12 +28,13 @@ def _slice(origin: str, destination: str, flight: str) -> dict[str, Any]:
 def _itinerary(*flights: str, price: str = "USD500.00") -> Itinerary:
     """A priced itinerary of one slice per flight (or `/`-joined connecting
     flights), each its own city pair."""
-    pairs = [("JFK", "LAX"), ("LAX", "BOS"), ("BOS", "SFO"), ("SFO", "SEA"), ("SEA", "ORD")]
+    cities = ["JFK", "LAX", "BOS", "SFO", "SEA", "ORD", "MIA"]
+    pairs = zip(cities, cities[1:], flights, strict=False)
     return Itinerary.model_validate(
         {
             "ext": {"price": price},
             "itinerary": {
-                "slices": [_slice(o, d, f) for (o, d), f in zip(pairs, flights, strict=False)],
+                "slices": [_slice(o, d, f) for o, d, f in pairs],
                 "carriers": [{"code": "UA"}],
             },
         }
@@ -145,3 +146,14 @@ def test_a_narrow_four_slice_table_prints_each_flight_number_whole(
     first, second = _rows(text)
     assert any("UA300/UA1023" in cell for cell in first)
     assert any("UA300/UA1028" in cell for cell in second)
+
+
+@pytest.mark.parametrize("table", ["single-cabin", "multi-cabin"])
+def test_a_narrow_six_slice_table_keeps_the_price_and_headers_whole(
+    narrow: io.StringIO, table: str
+) -> None:
+    _render(table, [_itinerary(*["UA100/UA200"] * 6, price="USD12345.00")])
+    text = narrow.getvalue()
+    assert "…" not in text
+    (row,) = _rows(text)
+    assert "12345.00" in row
