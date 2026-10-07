@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
+import io
 import itertools
 import json
 import pathlib
@@ -23,6 +24,11 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from fli.models import (  # pyright: ignore[reportMissingTypeStubs] — fli ships no stubs
+    BagsFilter,
+    PriceLimit,
+)
+from rich.console import Console
 from typer.testing import CliRunner
 
 from conftest import _NoSleepTime, capture_err
@@ -36,8 +42,9 @@ from flight_cli._gf_errors import (
     GfThrottledError,
     GfUpstreamStatusError,
 )
+from flight_cli._multi_cabin import MultiCabinRow
 from flight_cli.domain import Cabin, Leg, SearchOptions
-from flight_cli.models import SearchResult
+from flight_cli.models import Itinerary, SearchResult
 from test_envelope import _envelope_of
 from test_gflight_page import _TODAY, _board_of, _return_board_of, _round_trip_filters
 
@@ -99,7 +106,8 @@ class _Google:
     """Google Flights below the ladder, recording every GET and every pinned
     outbound by seat. `refuse` raises for a (seat, pinned flight) pair, None
     being the outbound page; `chrome` runs first on every rung-2 GET. Each
-    cabin's Cheapest tab lists no row and is counted apart, in `cheapest`."""
+    cabin's Cheapest tab lists no row and is counted apart, in `cheapest`.
+    `filters` holds every request's filters, the Cheapest tab's included."""
 
     def __init__(
         self,
@@ -115,6 +123,7 @@ class _Google:
         self.cheapest: Counter[str] = Counter()
         self.pins: dict[str, list[int]] = {}
         self.modes: list[tuple[str, str]] = []
+        self.filters: list[Any] = []
         self._lock = threading.Lock()
 
     def __call__(
@@ -122,6 +131,8 @@ class _Google:
     ) -> gfid.Board[gfid.GFlightWithId]:
         _ = currency
         seat: str = filters.seat_type.name
+        with self._lock:
+            self.filters.append(filters)
         if cheapest:
             with self._lock:
                 self.cheapest[seat] += 1
@@ -331,12 +342,28 @@ def test_every_cabin_is_priced_on_the_sort_cabins_outbounds(
     ) in _flat(result.stderr)
 
 
+@pytest.mark.parametrize(
+    ("extra", "asked"),
+    [
+        ((), {}),
+        (("--bags", "1"), {"bags": BagsFilter(checked_bags=1, carry_on=False)}),
+        (("--max-price", "1000"), {"price_limit": PriceLimit(max_price=1000, currency=None)}),
+    ],
+    ids=["plain", "bags", "cap"],
+)
 def test_the_page_loads_are_the_ones_each_cabin_spends_alone(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, extra: tuple[str, ...], asked: dict[str, Any]
 ) -> None:
+    """Under `--bags` or `--max-price` too, with every request asking for
+    them. Those two red at the base, which refused them (exit 2)."""
     google = _Google({"ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS})
-    assert _search(monkeypatch, google).exit_code == 0
+    result = _search(monkeypatch, google, *extra)
+    assert result.exit_code == 0, result.output
     assert google.gets == {"ECONOMY": 11, "BUSINESS": 11}
+    assert google.cheapest == {"ECONOMY": 1, "BUSINESS": 1}
+    assert len(google.filters) == 24
+    for field, value in asked.items():
+        assert [getattr(f, field) for f in google.filters] == [value] * 24, field
 
 
 def test_a_follower_fills_the_pins_its_board_cannot_take_with_its_own_rows(
@@ -702,6 +729,107 @@ def test_without_bags_the_cash_matches_beside_the_awards_carry_no_statement(
     legs = _award_legs(monkeypatch)
     assert all(leg["matches"] for leg in legs)
     assert not any("bags_included" in m for leg in legs for m in leg["matches"])
+
+
+_BAGS_KEY = "Bags: ✓ the fare includes the bags asked for, ✗ it does not, ? Google does not say."
+_MARKED = re.compile(r"\d[\d,]*\.\d\d [✓✗?]")
+
+
+def test_each_price_says_whether_its_own_listing_includes_the_bags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Economy's fares carry no checked bag and business's carry two, except
+    its returns on 101, which state nothing: each cell is marked by its own
+    cabin's listing, whichever cabin's seats the row shows. The key follows
+    the table once. Red at the D1 commit, whose cells carried no mark."""
+    google = _with_bags(_Google({"ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS}), unstated=101)
+    result = _search(monkeypatch, google, "--bags", "1")
+    assert result.exit_code == 0, result.output
+    rows = _table(result.stdout)
+    assert len(rows) == 10
+    assert 101 in {outbound for outbound, _ in rows}
+    for outbound, (y, j) in rows:
+        assert _MARKED.fullmatch(y), y
+        assert _MARKED.fullmatch(j), j
+        assert y.endswith(" ✗"), y
+        assert j.endswith(" ?" if outbound == 101 else " ✓"), (outbound, j)
+    lines = result.stdout.splitlines()
+    assert [i for i, line in enumerate(lines) if line == _BAGS_KEY] == [
+        max(i for i, line in enumerate(lines) if line.startswith("└")) + 1
+    ]
+
+
+def test_a_cabins_own_cheapest_is_marked_as_its_cells_are(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red at the D1 commit."""
+    result = _search(monkeypatch, _with_bags(_reversed(monkeypatch)), "--bags", "1")
+    assert result.exit_code == 0, result.output
+    assert _own_lines(result.stdout) == [
+        "J's own cheapest: USD1020.00 ✓ (B6109 / B6900), on no row above; "
+        "--sort business lists J's cheapest first."
+    ]
+    lines = result.stdout.splitlines()
+    assert lines.index(_BAGS_KEY) == lines.index(_own_lines(result.stdout)[0]) + 1
+
+
+def test_a_three_cabin_round_trip_wraps_no_marked_price(monkeypatch: pytest.MonkeyPatch) -> None:
+    """At 200 columns each price stays whole on its row's first line. Red at the
+    D1 commit, whose cells carried no mark."""
+    google = _with_bags(
+        _Google({"ECONOMY": _ECONOMY, "PREMIUM_ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS})
+    )
+    result = _search(monkeypatch, google, "--bags", "1", cabins="economy,premium,business")
+    assert result.exit_code == 0, result.output
+    body = [
+        [c.strip() for c in line.strip().strip("│").split("│")]
+        for line in result.stdout.splitlines()
+        if line.startswith("│") and "│" in line[1:]
+    ]
+    numbered = [cells for cells in body if cells[0].isdigit()]
+    assert len(numbered) == 10
+    assert all(_MARKED.fullmatch(c) for cells in numbered for c in cells[4:]), numbered
+    assert all(not any(cells[4:]) for cells in body if not cells[0].isdigit() and cells[0] != "#")
+
+
+def test_without_bags_no_price_is_marked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Green at the D1 commit."""
+    google = _with_bags(_Google({"ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS}), unstated=101)
+    result = _search(monkeypatch, google)
+    assert result.exit_code == 0, result.output
+    assert all(re.fullmatch(r"\d+\.\d\d", c) for _, cells in _table(result.stdout) for c in cells)
+    assert "Bags:" not in result.stdout
+
+
+def test_a_marked_row_reads_amount_bags_then_ticketing_and_the_keys_follow_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bags key comes before the ticketing key. Red at the D1 commit,
+    whose renderer took no bag mark."""
+    [it] = _matrix_answer((("UA101", 300.0),)).solutions
+    it = it.model_copy(update={"ticketing": "separate_tickets"})
+    row = MultiCabinRow(itinerary=it, prices={Cabin.COACH: "USD300.00"}, listings={Cabin.COACH: it})
+    buffer = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, width=200, no_color=True))
+
+    def mark(_it: Itinerary) -> str:
+        return "✓"
+
+    cli._render_multi_cabin_search(
+        [row],
+        cabins=(Cabin.COACH,),
+        sort_by=Cabin.COACH,
+        bag_mark=mark,
+    )
+    lines = [line for line in buffer.getvalue().splitlines() if line.strip()]
+    assert "300.00 ✓ †" in _table_cells(lines)
+    after = lines[[i for i, line in enumerate(lines) if line.startswith("└")][-1] + 1 :]
+    assert after[0] == _BAGS_KEY
+    assert after[1].startswith("† separate tickets")
+
+
+def _table_cells(lines: list[str]) -> list[str]:
+    return [c.strip() for line in lines if _TABLE_ROW.match(line) for c in line.split("│")]
 
 
 # ─────────────────────────────────── rung 2 ────────────────────────────────────

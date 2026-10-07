@@ -8999,6 +8999,7 @@ def _render_multi_cabin_search(
     results_by_cabin: dict[Cabin, SearchResult] | None = None,
     currency: str = "USD",
     total_of: Callable[[Itinerary], str | None] | None = None,
+    bag_mark: Callable[[Itinerary], str] | None = None,
 ) -> None:
     """Render multi-cabin merged rows. One row per itinerary, one price column
     per requested cabin, '—' for missing.
@@ -9013,7 +9014,11 @@ def _render_multi_cabin_search(
     `results_by_cabin` is what `rows` were merged from, in `currency`, the one
     the merge ranked by: each cabin's own cheapest the table does not show is
     named under it (`_print_own_cheapest`), at its total from `total_of`, the
-    one the merge was given, for a party."""
+    one the merge was given, for a party.
+
+    Under `--bags`, `bag_mark` marks each price with whether the cell's own
+    listing includes the bags asked for, ahead of `†` or `‡`, and a key line
+    follows."""
     if not rows:
         console.print("[yellow]No itineraries.[/]")
         return
@@ -9024,7 +9029,7 @@ def _render_multi_cabin_search(
     party = passengers > 1
     starred = False
     marked = [row.itinerary for row in rows if row.itinerary.ticketing is not None]
-    shows_mark = bool(marked)
+    shows_mark = bool(marked) or bag_mark is not None
 
     t = Table(
         # `title_prefix` is a parameter: its value is chosen by whoever calls, and
@@ -9071,7 +9076,9 @@ def _render_multi_cabin_search(
                 # No space before the star: Rich wraps a narrow cell at its spaces.
                 cell = f"{_amount(row.prices[cab], ccy)}*"
                 starred = True
-            price_cells.append(cell + (mark if row.prices.get(cab) else ""))
+            priced = row.prices.get(cab)
+            bag = f" {bag_mark(row.listings[cab])}" if priced and bag_mark is not None else ""
+            price_cells.append(cell + (bag + mark if priced else ""))
         t.add_row(f"{i:d}", carriers or "?", out_cell, ret_cell, *price_cells)
     console.print(t)
     if starred:
@@ -9085,8 +9092,13 @@ def _render_multi_cabin_search(
             currency=currency,
             passengers=passengers,
             total_of=total_of,
+            bag_mark=bag_mark,
         )
         marked.extend(it for it in named if it.ticketing is not None)
+    if bag_mark is not None:
+        console.print(
+            "Bags: ✓ the fare includes the bags asked for, ✗ it does not, ? Google does not say."
+        )
     if marked:
         _print_ticketing_key(
             outbound_only=any(
@@ -9113,6 +9125,7 @@ def _print_own_cheapest(
     currency: str,
     passengers: int = 1,
     total_of: Callable[[Itinerary], str | None] | None = None,
+    bag_mark: Callable[[Itinerary], str] | None = None,
 ) -> list[Itinerary]:
     """One line under the multi-cabin table for each cabin but `sort_by` whose
     own cheapest listing (`cheapest`: in `currency`, else in the first other
@@ -9123,7 +9136,8 @@ def _print_own_cheapest(
 
     For a party of `passengers`, the line names the listing's total
     (`total_of`), as the party's column prints its cells, or one traveler's
-    price where it has none, and says which.
+    price where it has none, and says which. Under `--bags`, `bag_mark` marks
+    the amount as the table marks a cell.
 
     The table prices every cabin on the sort cabin's itineraries, so another
     cabin's cheapest fare can be on an itinerary no row shows, while a document
@@ -9160,9 +9174,11 @@ def _print_own_cheapest(
             figure, code = summed, price_currency(total) or own_currency
         else:
             basis, figure, code = ", per traveler", amount, own_currency
+        bag = f" {bag_mark(own)}" if bag_mark is not None else ""
         console.print(
             f"{_safe_text(letter)}'s own cheapest{_safe_text(basis)}: {_safe_text(code)}"
-            f"{figure:.2f}{_safe_text(mark)} ({_safe_text(flights)}), on no row above; "
+            f"{figure:.2f}{_safe_text(bag)}{_safe_text(mark)} ({_safe_text(flights)}), "
+            "on no row above; "
             f"--sort {_safe_text(_CABIN_FLAG_NAMES[cab])} lists {_safe_text(letter)}'s "
             "cheapest first.",
             soft_wrap=True,
@@ -9519,6 +9535,11 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
         if opts.bags is not None
         else None
     )
+    bag_mark = (
+        None
+        if bags_by_id is None or opts.bags is None
+        else partial(_bag_mark, bags_included=bags_by_id, asked=opts.bags)
+    )
 
     def document_rows(cab: Cabin, board: list[Any]) -> list[Any]:
         res = results_by_cabin.get(cab)
@@ -9551,6 +9572,7 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
             results_by_cabin=results_by_cabin,
             currency=opts.currency or "USD",
             total_of=total_of,
+            bag_mark=bag_mark,
         )
 
     if run_pp:
@@ -9915,6 +9937,23 @@ def _bag_cell(stated: tuple[int | None, int | None], asked: Bags) -> str:
     if all(have is not None for have, _ in pairs):
         return "incl."
     return "unknown"
+
+
+def _bag_mark(
+    listing: Itinerary,
+    *,
+    bags_included: Mapping[int, Sequence[tuple[int | None, int | None]]],
+    asked: Bags,
+) -> str:
+    """Whether `listing`'s price includes the bags asked for, as one mark
+    over `_bag_cell`'s verdict on each of its members' statements
+    (`bags_included`, by `id`): `✗` when any member's leaves a bag out, `✓`
+    when every member's includes them, `?` otherwise. A combination includes
+    the bags only where each of its fares does."""
+    verdicts = {_bag_cell(stated, asked) for stated in bags_included.get(id(listing), ())}
+    if "not incl." in verdicts:
+        return "✗"
+    return "✓" if verdicts == {"incl."} else "?"
 
 
 # AVERAGE/BELOW/ABOVE are pitch-relative judgments — collapse them to color on
