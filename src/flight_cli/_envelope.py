@@ -78,6 +78,45 @@ class PriceHistory(_Frozen):
     points: list[PricePoint]
 
 
+class PriceRange(_Frozen):
+    low: float
+    high: float
+
+
+class MinuteRange(_Frozen):
+    low: int
+    high: int
+
+
+class CodeName(_Frozen):
+    code: str
+    name: str
+
+
+class ConnectingAirport(_Frozen):
+    code: str
+    city: str
+
+
+class RouteFacets(_Frozen):
+    """The filter choices Google's page states for one cabin's search, labeled
+    with its airports: its fare range in the rows' basis and currency, its
+    trip-length and layover ranges, and the alliances, airlines and connecting
+    airports its filters offer, in the page's order. An alliance's code is
+    spelled as `--extension 'ALLIANCE …'` takes it."""
+
+    cabin: str
+    origins: list[str]
+    destinations: list[str]
+    currency: str | None
+    price: PriceRange
+    duration_minutes: MinuteRange
+    layover_minutes: MinuteRange
+    airlines: list[CodeName]
+    alliances: list[CodeName]
+    connecting_airports: list[ConnectingAirport]
+
+
 class PriceGraphCell(_Frozen):
     """One date pair of Google's price graph; `return` is null on a one-way."""
 
@@ -106,6 +145,7 @@ class SearchEnvelope(_Frozen):
     awards: list[dict[str, Any]] | None
     insight: list[Insight]
     price_history: list[PriceHistory]
+    facets: list[RouteFacets]
     price_graph: list[PriceGraph]
     verify: dict[str, Any] | None
     cross_check: dict[str, Any] | None
@@ -123,6 +163,7 @@ class CalendarEnvelope(_Frozen):
     awards: list[dict[str, Any]] | None
     insight: list[Insight]
     price_history: list[PriceHistory]
+    facets: list[RouteFacets]
     price_graph: list[PriceGraph]
     verify: dict[str, Any] | None
     cross_check: dict[str, Any] | None
@@ -153,6 +194,7 @@ class _Recorder:
         self.awards: list[dict[str, Any]] | None = None
         self.insight: list[Insight] = []
         self.history: list[PriceHistory] = []
+        self.facets: list[RouteFacets] = []
         self.graphs: list[PriceGraph] = []
         self.verify: dict[str, Any] | None = None
         self.cross_check: dict[str, Any] | None = None
@@ -208,15 +250,17 @@ def record_search(
     rows: Sequence[ResultRow],
     insights: Sequence[Insight] = (),
     histories: Sequence[PriceHistory] = (),
+    facets: Sequence[RouteFacets] = (),
 ) -> None:
-    """One cabin's rows, with the insight and history of each page that
-    answered it: one page, or several where a leg was asked as several."""
+    """One cabin's rows, with the insight, history and facets of each page
+    that answered it: one page, or several where a leg was asked as several."""
     if (rec := _slot.recorder) is not None:
         with rec.lock:
             rec.backend = backend
             rec.by_cabin[cabin] = list(rows)
             rec.insight.extend(insights)
             rec.history.extend(histories)
+            rec.facets.extend(facets)
 
 
 def record_calendar(*, backend: Backend, rows: Sequence[ResultRow]) -> None:
@@ -376,6 +420,7 @@ def _document(rec: _Recorder, *, code: int, stderr: str, stray: str) -> str:
         "awards": rec.awards,
         "insight": rec.insight,
         "price_history": rec.history,
+        "facets": rec.facets,
         "price_graph": rec.graphs,
         "verify": rec.verify,
         "cross_check": rec.cross_check,
@@ -413,7 +458,11 @@ def _key_notes(
         default = "the run ended before the award search" if code else "no award search ran"
         reason = "calendar runs no award search" if calendar else why.get("awards", default)
         notes.append(f"awards: {reason}")
-    for key, items in (("insight", rec.insight), ("price_history", rec.history)):
+    for key, items in (
+        ("insight", rec.insight),
+        ("price_history", rec.history),
+        ("facets", rec.facets),
+    ):
         if items:
             continue
         if calendar:
