@@ -102,7 +102,8 @@ class RouteFacets(_Frozen):
     """The filter choices Google's page states for one cabin's search, labeled
     with its airports: its fare range in the rows' basis and currency, its
     trip-length and layover ranges, and the alliances, airlines and connecting
-    airports its filters offer, in the page's order."""
+    airports its filters offer, in the page's order. An alliance's code is
+    spelled as `--extension 'ALLIANCE …'` takes it."""
 
     cabin: str
     origins: list[str]

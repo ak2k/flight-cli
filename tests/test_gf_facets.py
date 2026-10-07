@@ -22,6 +22,8 @@ import pytest
 from conftest import FIXTURE_DIR, GFLIGHT_PAGE_DIR, _answering, _ds1, _page
 from flight_cli import _gflight_ids as gfid
 from flight_cli._gf_common import PageFetch
+from flight_cli.cli import BACKEND_GFLIGHT
+from test_backend_dispatch import _call
 from test_calendar_split import _pair_client
 from test_envelope import (
     _CALENDAR,
@@ -363,7 +365,11 @@ def test_a_one_way_carries_its_pages_facets_with_its_cabin_and_airports(
         14,
         {"code": "AS", "name": "Alaska"},
     )
-    assert facets["alliances"] == [{"code": c, "name": n} for c, n in _ALLIANCES]
+    assert facets["alliances"] == [
+        {"code": "oneworld", "name": "Oneworld"},
+        {"code": "skyteam", "name": "SkyTeam"},
+        {"code": "star-alliance", "name": "Star Alliance"},
+    ]
     assert (len(facets["connecting_airports"]), facets["connecting_airports"][0]) == (
         22,
         {"code": "ABQ", "city": "Albuquerque"},
@@ -372,6 +378,19 @@ def test_a_one_way_carries_its_pages_facets_with_its_cabin_and_airports(
     assert env["complete"] is True
     # The board and its Cheapest tab: the facets are on the page already read.
     assert len(fake.gets) == 2
+
+
+def test_each_alliance_is_a_code_the_alliance_extension_takes(
+    gf_session: Callable[..., Any],
+) -> None:
+    """Passed back as `--extension 'ALLIANCE <code>'`, a code the extension
+    does not know would send the next search to Matrix."""
+    gf_session(_served(_LAX))
+    (facets,) = _envelope_of(_envelope(*_LAX_ONE_WAY))["facets"]
+    codes = [a["code"] for a in facets["alliances"]]
+    assert {c: _call(extension=f"ALLIANCE {c}") for c in codes} == dict.fromkeys(
+        codes, BACKEND_GFLIGHT
+    )
 
 
 def test_the_json_document_carries_no_facets(gf_session: Callable[..., Any]) -> None:

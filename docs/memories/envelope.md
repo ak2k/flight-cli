@@ -215,8 +215,11 @@ and 9 live pages; the other 7 captures carry null there.
   page's currency.
 - `[1]` `[alliances, airlines]`, each `[[code, name], ...]`: the Airlines
   filter's choices. The alliances are `ONEWORLD`, `SKYTEAM` and
-  `STAR_ALLIANCE` on every capture. The airlines are the filter's list, not
-  the rows' carriers: JFK-LAX lists 14, and 4 of them fly a row.
+  `STAR_ALLIANCE` on every capture; the envelope spells each as `--extension
+  'ALLIANCE …'` takes it (`oneworld`, `skyteam`, `star-alliance`), since
+  `ALLIANCE STAR_ALLIANCE` is refused and would send the search to Matrix.
+  The airlines are the filter's list, not the rows' carriers: JFK-LAX lists
+  14, and 4 of them fly a row.
 - `[2]` `[[[code, city], ...], layover_low, layover_high]`: the airports a trip
   may connect at and the layover range, in minutes.
 - `[3]` `[duration_low, duration_high]`: the trip-length range, in minutes.

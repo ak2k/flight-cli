@@ -6643,7 +6643,12 @@ def _record_google_cabin(
                 duration_minutes=_envelope.MinuteRange(low=f.duration_low, high=f.duration_high),
                 layover_minutes=_envelope.MinuteRange(low=f.layover_low, high=f.layover_high),
                 airlines=[_envelope.CodeName(code=c, name=n) for c, n in f.airlines],
-                alliances=[_envelope.CodeName(code=c, name=n) for c, n in f.alliances],
+                # Spelled as `--extension 'ALLIANCE …'` takes it, the inverse of
+                # how the page is asked for one, so a code passes straight back.
+                alliances=[
+                    _envelope.CodeName(code=c.lower().replace("_", "-"), name=n)
+                    for c, n in f.alliances
+                ],
                 connecting_airports=[
                     _envelope.ConnectingAirport(code=c, city=n) for c, n in f.connections
                 ],
