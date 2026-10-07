@@ -133,11 +133,14 @@ class MultiCabinRow:
     we have a price for to its raw price string (e.g. 'USD623.00'). Cabins
     with no price are absent from the dict — renderer treats absence as '—'.
     `totals` maps each cabin to the party's total price where one is known.
+    `listings` maps each cabin to its own listing of the itinerary, the one
+    its price is read off, since what a fare covers is that listing's.
     """
 
     itinerary: Itinerary
     prices: dict[Cabin, str] = field(default_factory=dict)
     totals: dict[Cabin, str] = field(default_factory=dict)
+    listings: dict[Cabin, Itinerary] = field(default_factory=dict)
 
 
 def merge(
@@ -201,6 +204,7 @@ def merge(
                 for cabin, it in by_cabin.items()
                 if total_of and (total := total_of(it))
             },
+            listings=dict(by_cabin),
         )
         for by_cabin in listings.values()
     ]

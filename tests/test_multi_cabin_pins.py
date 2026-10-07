@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
+import io
 import itertools
 import json
 import pathlib
@@ -23,6 +24,11 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from fli.models import (  # pyright: ignore[reportMissingTypeStubs] — fli ships no stubs
+    BagsFilter,
+    PriceLimit,
+)
+from rich.console import Console
 from typer.testing import CliRunner
 
 from conftest import _NoSleepTime, capture_err
@@ -36,8 +42,9 @@ from flight_cli._gf_errors import (
     GfThrottledError,
     GfUpstreamStatusError,
 )
+from flight_cli._multi_cabin import MultiCabinRow
 from flight_cli.domain import Cabin, Leg, SearchOptions
-from flight_cli.models import SearchResult
+from flight_cli.models import Itinerary, SearchResult
 from test_envelope import _envelope_of
 from test_gflight_page import _TODAY, _board_of, _return_board_of, _round_trip_filters
 
@@ -99,7 +106,8 @@ class _Google:
     """Google Flights below the ladder, recording every GET and every pinned
     outbound by seat. `refuse` raises for a (seat, pinned flight) pair, None
     being the outbound page; `chrome` runs first on every rung-2 GET. Each
-    cabin's Cheapest tab lists no row and is counted apart, in `cheapest`."""
+    cabin's Cheapest tab lists no row and is counted apart, in `cheapest`.
+    `filters` holds every request's filters, the Cheapest tab's included."""
 
     def __init__(
         self,
@@ -115,6 +123,7 @@ class _Google:
         self.cheapest: Counter[str] = Counter()
         self.pins: dict[str, list[int]] = {}
         self.modes: list[tuple[str, str]] = []
+        self.filters: list[Any] = []
         self._lock = threading.Lock()
 
     def __call__(
@@ -122,6 +131,8 @@ class _Google:
     ) -> gfid.Board[gfid.GFlightWithId]:
         _ = currency
         seat: str = filters.seat_type.name
+        with self._lock:
+            self.filters.append(filters)
         if cheapest:
             with self._lock:
                 self.cheapest[seat] += 1
@@ -170,6 +181,7 @@ def _search(
     *extra: str,
     cabins: str = "economy,business",
     n: str = "10",
+    backend: str = "gflight",
 ) -> Result:
     monkeypatch.setattr(gfid, "_one_call_laddered", google)
     args = [
@@ -186,7 +198,7 @@ def _search(
         "--cabin",
         cabins,
         "--backend",
-        "gflight",
+        backend,
         "-n",
         n,
         *extra,
@@ -330,12 +342,28 @@ def test_every_cabin_is_priced_on_the_sort_cabins_outbounds(
     ) in _flat(result.stderr)
 
 
+@pytest.mark.parametrize(
+    ("extra", "asked"),
+    [
+        ((), {}),
+        (("--bags", "1"), {"bags": BagsFilter(checked_bags=1, carry_on=False)}),
+        (("--max-price", "1000"), {"price_limit": PriceLimit(max_price=1000, currency=None)}),
+    ],
+    ids=["plain", "bags", "cap"],
+)
 def test_the_page_loads_are_the_ones_each_cabin_spends_alone(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, extra: tuple[str, ...], asked: dict[str, Any]
 ) -> None:
+    """Under `--bags` or `--max-price` too, with every request asking for
+    them. Those two red at the base, which refused them (exit 2)."""
     google = _Google({"ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS})
-    assert _search(monkeypatch, google).exit_code == 0
+    result = _search(monkeypatch, google, *extra)
+    assert result.exit_code == 0, result.output
     assert google.gets == {"ECONOMY": 11, "BUSINESS": 11}
+    assert google.cheapest == {"ECONOMY": 1, "BUSINESS": 1}
+    assert len(google.filters) == 24
+    for field, value in asked.items():
+        assert [getattr(f, field) for f in google.filters] == [value] * 24, field
 
 
 def test_a_follower_fills_the_pins_its_board_cannot_take_with_its_own_rows(
@@ -523,6 +551,384 @@ def test_a_cabin_whose_page_is_empty_answers_as_it_does_alone(
     assert out[Cabin.BUSINESS] == []
     assert len(out[Cabin.COACH]) == 50
     assert google.gets == {"ECONOMY": 11, "BUSINESS": 1}
+
+
+# ───────────────────────────── a cap and bags ──────────────────────────────────
+
+
+def _on_auto(monkeypatch: pytest.MonkeyPatch, *extra: str) -> tuple[Result, list[SearchOptions]]:
+    """A round trip on `--backend auto` where every business fare is USD800 or
+    more and every economy fare under USD420, with the options of each search
+    handed to Matrix."""
+    handed: list[SearchOptions] = []
+
+    def _matrix(*, opts: SearchOptions, **_kw: Any) -> None:
+        handed.append(opts)
+
+    monkeypatch.setattr(cli, "_run_matrix_path_multi", _matrix)
+    google = _Google({"ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS})
+    return _search(monkeypatch, google, *extra, backend="auto"), handed
+
+
+def test_under_bags_a_cabin_the_cap_empties_stays_empty_on_google(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Matrix prices no bags, so the search stays on Google: business's column
+    is all '—' and its line names the cap. Red at the D1 commit, which handed
+    the whole search to Matrix."""
+    result, handed = _on_auto(monkeypatch, "--bags", "1", "--max-price", "700")
+    assert result.exit_code == 0, result.output
+    assert handed == []
+    rows = _table(result.stdout)
+    assert len(rows) == 10
+    assert all(y != "—" and j == "—" for _, (y, j) in rows), rows
+    assert "Google Flights BUSINESS: no itinerary matched a price cap of USD 700." in _flat(
+        result.stderr
+    )
+    assert "Using Matrix" not in result.stderr
+
+
+def test_without_bags_a_cabin_the_cap_empties_hands_the_search_to_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """As a one-cabin search does, with the cap for Matrix to apply. Green at
+    the D1 commit."""
+    result, handed = _on_auto(monkeypatch, "--max-price", "700")
+    assert result.exit_code == 0, result.output
+    assert [opts.max_price for opts in handed] == [700]
+    assert "Using Matrix: no Google Flights itinerary matched a price cap of USD 700" in _flat(
+        result.stderr
+    )
+
+
+def test_a_handed_off_cabin_the_cap_empties_on_matrix_is_named_as_not_shown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Handed the search, Matrix returns economy fares the cap then removes, so
+    the line says Matrix shows none under the cap rather than that it returned
+    none. Google's economy rows under the cap are left out, so the line still
+    points at them and the envelope stays narrowed. Red where the line said
+    Matrix returned no itinerary."""
+    over = {
+        Cabin.COACH: (("UA101", 750.0), ("UA102", 800.0), ("UA103", 850.0)),
+        Cabin.BUSINESS: _MATRIX[Cabin.BUSINESS],
+    }
+
+    def _multi(*, opts: SearchOptions, **_kw: object) -> dict[Cabin, SearchResult]:
+        return {cab: _matrix_answer(fares) for cab, fares in over.items()}
+
+    monkeypatch.setattr(cli, "_run_matrix_multi", _multi)
+    for fmt in ("table", "envelope"):
+        google = _Google({"ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS})
+        result = _search(monkeypatch, google, "--max-price", "700", "--format", fmt, backend="auto")
+        assert result.exit_code == 0, result.output
+        stderr = _flat(result.stderr)
+        assert "Matrix COACH: no fare at or under USD 700." in stderr
+        assert (
+            "Matrix shows no itinerary at or under USD 700 for COACH, where Google Flights "
+            "had rows; --backend gflight shows them."
+        ) in stderr, fmt
+        assert "returned no itinerary" not in stderr
+        if fmt == "envelope":
+            assert _envelope_of(result)["complete"] is False
+
+
+def test_a_cabin_whose_capped_page_served_nothing_says_no_fare_is_under_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Business's USD page, asked for the cap, served no row. Red at the D1
+    commit, which said nothing of business."""
+    google = _Google({"ECONOMY": _ECONOMY, "BUSINESS": []})
+    result = _search(monkeypatch, google, "--max-price", "1000")
+    assert result.exit_code == 0, result.output
+    assert "Google Flights BUSINESS: no fare at or under USD 1000." in _flat(result.stderr)
+    assert "Google Flights COACH" not in result.stderr
+    uncapped = _search(monkeypatch, _Google({"ECONOMY": _ECONOMY, "BUSINESS": []}))
+    assert "no fare at or under" not in uncapped.stderr
+
+
+# What each seat's fares cover, as (checked, carry-on): its outbounds, then its
+# returns. Under `--bags 1`, economy's include no checked bag and business's do.
+_STATED: dict[str, tuple[tuple[int | None, int | None], tuple[int | None, int | None]]] = {
+    "ECONOMY": ((0, 1), (0, 0)),
+    "PREMIUM_ECONOMY": ((1, 1), (1, 1)),
+    "BUSINESS": ((2, 1), (2, 1)),
+}
+
+
+def _with_bags(google: _Google, *, unstated: int | None = None) -> Callable[..., gfid.Board[Any]]:
+    """`google` with each row stating the bags its fare covers (`_STATED`),
+    and business's returns on the outbound `unstated` stating none."""
+
+    def call(
+        filters: Any, transport: Any, *, currency: str = "USD", cheapest: bool = False
+    ) -> gfid.Board[gfid.GFlightWithId]:
+        board = google(filters, transport, currency=currency, cheapest=cheapest)
+        seat: str = filters.seat_type.name
+        picked = filters.flight_segments[0].selected_flight
+        flight = None if picked is None else int(picked.legs[0].flight_number)
+        outbound, back = _STATED[seat]
+        stated = (
+            outbound
+            if flight is None
+            else (None, None)
+            if seat == "BUSINESS" and flight == unstated
+            else back
+        )
+        return gfid.Board([replace(r, bags_included=stated) for r in board])
+
+    return call
+
+
+def _members(result: Result, fmt: str) -> dict[str, list[Any]]:
+    """Each cabin's row members in the document: both of a round trip's pair."""
+    if fmt == "envelope":
+        groups = {
+            g["cabin"]: [r["row"] for r in g["rows"]] for g in _envelope_of(result)["results"]
+        }
+    else:
+        assert result.exit_code == 0, result.output
+        groups = json.loads(result.stdout)
+    return {cab: [m for row in rows for m in row] for cab, rows in groups.items()}
+
+
+@pytest.mark.parametrize("fmt", ["envelope", "json"])
+def test_each_member_of_each_cabins_rows_says_what_its_price_covers(
+    monkeypatch: pytest.MonkeyPatch, fmt: str
+) -> None:
+    """Red at the D1 commit, where no member carried `bags_included`."""
+    google = _with_bags(_Google({"ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS}))
+    members = _members(_search(monkeypatch, google, "--bags", "1", "--format", fmt), fmt)
+    assert set(members) == {"COACH", "BUSINESS"}
+    for cab, seat in (("COACH", "ECONOMY"), ("BUSINESS", "BUSINESS")):
+        assert members[cab], cab
+        out, back = _STATED[seat]
+        assert [m["bags_included"] for m in members[cab]] == [
+            {"checked": c, "carry_on": k} for _ in members[cab][::2] for c, k in (out, back)
+        ], cab
+
+
+@pytest.mark.parametrize("fmt", ["envelope", "json"])
+def test_without_bags_no_member_says_what_its_price_covers(
+    monkeypatch: pytest.MonkeyPatch, fmt: str
+) -> None:
+    """Green at the D1 commit."""
+    google = _with_bags(_Google({"ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS}))
+    members = _members(_search(monkeypatch, google, "--format", fmt), fmt)
+    assert all(members.values())
+    assert not any("bags_included" in m for ms in members.values() for m in ms)
+
+
+def _award_legs(monkeypatch: pytest.MonkeyPatch, *extra: str) -> list[dict[str, Any]]:
+    """The award document of a two-cabin round trip, with a provider that
+    matches nothing, so every cash row reaches it on its own."""
+    from flight_cli.pp import cli as pp_cli
+
+    async def _gather(*, legs: list[Any], **_kw: Any) -> tuple[list[list[Any]], list[Any]]:
+        return ([[] for _ in legs], [])
+
+    def _configured(_sel: cli.ProviderSelection) -> bool:
+        return True
+
+    monkeypatch.setattr(cli, "_should_run_awards", _configured)
+    monkeypatch.setattr(pp_cli, "gather_awards", _gather)
+    monkeypatch.setattr(pp_cli, "stored_tokens", lambda: None)
+    google = _with_bags(_Google({"ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS}))
+    result = _search(monkeypatch, google, "--format", "json", *extra)
+    assert result.exit_code == 0, result.output
+    return json.loads(result.stdout)
+
+
+def test_each_cash_match_beside_the_awards_says_what_its_own_slice_covers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The table's rows are economy's listings: one carry-on out, no bag back.
+    Red at the D1 commit, whose matches carried no `bags_included`."""
+    out, back = _award_legs(monkeypatch, "--bags", "1")
+    assert len(out["matches"]) == len(back["matches"]) == 10
+    assert {json.dumps(m["bags_included"]) for m in out["matches"]} == {
+        json.dumps({"checked": 0, "carry_on": 1})
+    }
+    assert {json.dumps(m["bags_included"]) for m in back["matches"]} == {
+        json.dumps({"checked": 0, "carry_on": 0})
+    }
+
+
+def test_without_bags_the_cash_matches_beside_the_awards_carry_no_statement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Green at the D1 commit."""
+    legs = _award_legs(monkeypatch)
+    assert all(leg["matches"] for leg in legs)
+    assert not any("bags_included" in m for leg in legs for m in leg["matches"])
+
+
+_BAGS_KEY = "Bags: ✓ the fare includes the bags asked for, ✗ it does not, ? Google does not say."
+_MARKED = re.compile(r"\d[\d,]*\.\d\d [✓✗?]")
+
+
+def test_each_price_says_whether_its_own_listing_includes_the_bags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Economy's fares carry no checked bag and business's carry two, except
+    its returns on 101, which state nothing: each cell is marked by its own
+    cabin's listing, whichever cabin's seats the row shows. The key follows
+    the table once. Red at the D1 commit, whose cells carried no mark."""
+    google = _with_bags(_Google({"ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS}), unstated=101)
+    result = _search(monkeypatch, google, "--bags", "1")
+    assert result.exit_code == 0, result.output
+    rows = _table(result.stdout)
+    assert len(rows) == 10
+    assert 101 in {outbound for outbound, _ in rows}
+    for outbound, (y, j) in rows:
+        assert _MARKED.fullmatch(y), y
+        assert _MARKED.fullmatch(j), j
+        assert y.endswith(" ✗"), y
+        assert j.endswith(" ?" if outbound == 101 else " ✓"), (outbound, j)
+    lines = result.stdout.splitlines()
+    assert [i for i, line in enumerate(lines) if line == _BAGS_KEY] == [
+        max(i for i, line in enumerate(lines) if line.startswith("└")) + 1
+    ]
+
+
+def test_a_cabins_own_cheapest_is_marked_as_its_cells_are(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red at the D1 commit."""
+    result = _search(monkeypatch, _with_bags(_reversed(monkeypatch)), "--bags", "1")
+    assert result.exit_code == 0, result.output
+    assert _own_lines(result.stdout) == [
+        "J's own cheapest: USD1020.00 ✓ (B6109 / B6900), on no row above; "
+        "--sort business lists J's cheapest first."
+    ]
+    lines = result.stdout.splitlines()
+    assert lines.index(_BAGS_KEY) == lines.index(_own_lines(result.stdout)[0]) + 1
+
+
+def test_a_three_cabin_round_trip_wraps_no_marked_price(monkeypatch: pytest.MonkeyPatch) -> None:
+    """At 200 columns each price stays whole on its row's first line. Red at the
+    D1 commit, whose cells carried no mark."""
+    google = _with_bags(
+        _Google({"ECONOMY": _ECONOMY, "PREMIUM_ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS})
+    )
+    result = _search(monkeypatch, google, "--bags", "1", cabins="economy,premium,business")
+    assert result.exit_code == 0, result.output
+    body = [
+        [c.strip() for c in line.strip().strip("│").split("│")]
+        for line in result.stdout.splitlines()
+        if line.startswith("│") and "│" in line[1:]
+    ]
+    numbered = [cells for cells in body if cells[0].isdigit()]
+    assert len(numbered) == 10
+    assert all(_MARKED.fullmatch(c) for cells in numbered for c in cells[4:]), numbered
+    assert all(not any(cells[4:]) for cells in body if not cells[0].isdigit() and cells[0] != "#")
+
+
+def test_without_bags_no_price_is_marked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Green at the D1 commit."""
+    google = _with_bags(_Google({"ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS}), unstated=101)
+    result = _search(monkeypatch, google)
+    assert result.exit_code == 0, result.output
+    assert all(re.fullmatch(r"\d+\.\d\d", c) for _, cells in _table(result.stdout) for c in cells)
+    assert "Bags:" not in result.stdout
+
+
+def _insight(cheapest: float, low: float, high: float) -> gfid.PriceInsight:
+    return gfid.PriceInsight(cheapest=cheapest, typical_low=low, typical_high=high, currency="USD")
+
+
+_Y_INSIGHT = "Price insight for Y: prices are typical for this trip (usually USD150.00-USD300.00)."
+_J_INSIGHT = "Price insight for J: prices are high for this trip (usually USD2000.00-USD3500.00)."
+
+
+def _with_insights(
+    google: _Google, insights: dict[str, gfid.PriceInsight]
+) -> Callable[..., gfid.Board[Any]]:
+    """`google` with each seat's outbound page in `insights` carrying its insight."""
+
+    def call(
+        filters: Any, transport: Any, *, currency: str = "USD", cheapest: bool = False
+    ) -> gfid.Board[gfid.GFlightWithId]:
+        board = google(filters, transport, currency=currency, cheapest=cheapest)
+        if cheapest or filters.flight_segments[0].selected_flight is not None:
+            return board
+        return gfid.Board(list(board), insight=insights.get(filters.seat_type.name))
+
+    return call
+
+
+_INSIGHTS = {"ECONOMY": _insight(200, 150, 300), "BUSINESS": _insight(4000, 2000, 3500)}
+
+
+def test_each_google_cabins_insight_follows_every_other_line_in_cabin_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In `--cabin` order, whichever cabin the table is sorted by, and after
+    the line naming a cabin's own cheapest. Red at the D1 commit."""
+    google = _with_insights(_reversed(monkeypatch), _INSIGHTS)
+    result = _search(monkeypatch, google, "--sort", "business")
+    assert result.exit_code == 0, result.output
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert lines[-2:] == [_Y_INSIGHT, _J_INSIGHT]
+    assert _own_lines(result.stdout)
+    assert sum("Price insight" in line for line in lines) == 2
+
+
+def test_a_cabin_with_no_insight_prints_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Red at the D1 commit, which printed no insight at all."""
+    google = _with_insights(
+        _Google({"ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS}), {"BUSINESS": _INSIGHTS["BUSINESS"]}
+    )
+    result = _search(monkeypatch, google)
+    assert result.exit_code == 0, result.output
+    assert [line for line in result.stdout.splitlines() if "Price insight" in line] == [_J_INSIGHT]
+
+
+def test_the_documents_carry_no_insight_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The JSON stays the boards' rows, and the envelope carries each insight
+    under `insight`, as it did. Green at the D1 commit."""
+    google = _with_insights(_Google({"ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS}), _INSIGHTS)
+    document = _search(monkeypatch, google, "--format", "json")
+    assert document.exit_code == 0, document.output
+    assert set(json.loads(document.stdout)) == {"COACH", "BUSINESS"}
+    envelope = _envelope_of(_search(monkeypatch, google, "--format", "envelope"))
+    assert [(i["cabin"], i["level"]) for i in envelope["insight"]] == [
+        ("COACH", "typical"),
+        ("BUSINESS", "high"),
+    ]
+
+
+def test_a_marked_row_reads_amount_bags_then_ticketing_and_the_keys_follow_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bags key comes before the ticketing key, and the insight line after
+    both. Red at the D1 commit, whose renderer took no bag mark."""
+    [it] = _matrix_answer((("UA101", 300.0),)).solutions
+    it = it.model_copy(update={"ticketing": "separate_tickets"})
+    row = MultiCabinRow(itinerary=it, prices={Cabin.COACH: "USD300.00"}, listings={Cabin.COACH: it})
+    buffer = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, width=200, no_color=True))
+
+    def mark(_it: Itinerary) -> str:
+        return "✓"
+
+    cli._render_multi_cabin_search(
+        [row],
+        cabins=(Cabin.COACH,),
+        sort_by=Cabin.COACH,
+        bag_mark=mark,
+        insights={Cabin.COACH: _insight(200, 150, 300)},
+    )
+    lines = [line for line in buffer.getvalue().splitlines() if line.strip()]
+    assert "300.00 ✓ †" in _table_cells(lines)
+    after = lines[[i for i, line in enumerate(lines) if line.startswith("└")][-1] + 1 :]
+    assert after[0] == _BAGS_KEY
+    assert after[1].startswith("† separate tickets")
+    assert after[-1] == _Y_INSIGHT
+
+
+def _table_cells(lines: list[str]) -> list[str]:
+    return [c.strip() for line in lines if _TABLE_ROW.match(line) for c in line.split("│")]
 
 
 # ─────────────────────────────────── rung 2 ────────────────────────────────────
@@ -979,8 +1385,11 @@ def _matrix_search(
     currency: str = "USD",
     party: int = 1,
     untotaled: frozenset[Cabin] = frozenset(),
+    asked: list[SearchOptions] | None = None,
 ) -> Result:
-    def _multi(**_kw: object) -> dict[Cabin, SearchResult]:
+    def _multi(*, opts: SearchOptions, **_kw: object) -> dict[Cabin, SearchResult]:
+        if asked is not None:
+            asked.append(opts)
         return {
             cab: _matrix_answer(fares, currency, party=party, totaled=cab not in untotaled)
             for cab, fares in _MATRIX.items()
@@ -1084,3 +1493,126 @@ def test_a_partys_google_line_names_the_total_google_lists(
         "J's own cheapest, total for 2 travelers: USD1020.00 (B6109 / B6900), on no row above; "
         "--sort business lists J's cheapest first."
     ]
+
+
+def _own_lines(stdout: str) -> list[str]:
+    return [line for line in stdout.splitlines() if "own cheapest" in line]
+
+
+def test_a_capped_matrix_cabin_keeps_only_its_fares_under_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Business keeps UA103 at USD900 alone, which no row of the economy-sorted
+    table flies, so its line names it. Red at the D1 commit, whose J column
+    printed USD1500 and USD1400."""
+    result = _matrix_search(monkeypatch, "--max-price", "1000")
+    assert result.exit_code == 0, result.output
+    assert _cells(result.stdout) == {"COACH": {300.0, 350.0}, "BUSINESS": set()}
+    assert _own_lines(result.stdout) == [
+        "J's own cheapest: USD900.00 (UA103), on no row above; "
+        "--sort business lists J's cheapest first."
+    ]
+    assert "no fare at or under" not in result.stderr
+
+
+def test_a_matrix_cabin_the_cap_leaves_no_fare_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Red at the D1 commit."""
+    result = _matrix_search(monkeypatch, "--max-price", "800")
+    assert result.exit_code == 0, result.output
+    assert _cells(result.stdout) == {"COACH": {300.0, 350.0}, "BUSINESS": set()}
+    assert _own_lines(result.stdout) == []
+    assert "Matrix BUSINESS: no fare at or under USD 800." in _flat(result.stderr)
+    assert "Matrix COACH" not in result.stderr
+
+
+def _envelope_prices(result: Result) -> tuple[dict[str, list[float]], bool]:
+    env = _envelope_of(result)
+    return {g["cabin"]: [r["price"] for r in g["rows"]] for g in env["results"]}, env["complete"]
+
+
+def _raw_counts(result: Result) -> dict[str, tuple[list[str], int]]:
+    """Each cabin's `{cabin: raw}` document: its fares and its `solutionCount`."""
+    assert result.exit_code == 0, result.output
+    doc: dict[str, dict[str, Any]] = json.loads(result.stdout)
+    return {
+        cab: (
+            [s.get("displayTotal") for s in raw["solutionList"]["solutions"]],
+            raw["solutionCount"],
+        )
+        for cab, raw in doc.items()
+    }
+
+
+@pytest.mark.parametrize(
+    ("cap", "business", "count"), [("1000", [900.0], 1), ("800", [], 0)], ids=["1000", "800"]
+)
+def test_a_capped_matrix_document_holds_no_fare_over_the_cap(
+    monkeypatch: pytest.MonkeyPatch, cap: str, business: list[float], count: int
+) -> None:
+    """Business's dropped fares are all over the cap, so its count is the kept
+    rows; economy drops none, so its count stays Matrix's. The cap narrows
+    nothing. Red at the D1 commit."""
+    listed, complete = _envelope_prices(
+        _matrix_search(monkeypatch, "--max-price", cap, "--format", "envelope")
+    )
+    assert listed == {"COACH": [300.0, 350.0, 400.0], "BUSINESS": business}
+    assert complete == _envelope_prices(_matrix_search(monkeypatch, "--format", "envelope"))[1]
+    raw = _raw_counts(_matrix_search(monkeypatch, "--max-price", cap, "--format", "json"))
+    assert raw == {
+        "COACH": (["USD300.00", "USD350.00", "USD400.00"], 3),
+        "BUSINESS": ([f"USD{p:.2f}" for p in business], count),
+    }
+
+
+@pytest.mark.parametrize(
+    ("untotaled", "business", "count", "line"),
+    [
+        (frozenset[Cabin](), [1800.0], 1, None),
+        (
+            frozenset({Cabin.BUSINESS}),
+            list[float](),
+            3,
+            "Matrix BUSINESS: no fare that states a USD total is at or under USD 2000; "
+            "those that state none are not shown.",
+        ),
+    ],
+    ids=["totaled", "untotaled"],
+)
+def test_a_partys_capped_matrix_cabin_is_held_to_its_total(
+    monkeypatch: pytest.MonkeyPatch,
+    untotaled: frozenset[Cabin],
+    business: list[float],
+    count: int,
+    line: str | None,
+) -> None:
+    """Two adults under USD2000: UA103's total is USD1800, and the other
+    business totals are over the cap. Where Matrix states no total, no fare
+    can be held to the cap, so none is kept and Matrix's count stays, and the
+    line says those fares are not shown: none was read as over the cap. Red at
+    the D1 commit; the untotaled line red where it said no fare was under."""
+    args = ("--adults", "2", "--max-price", "2000")
+    envelope = _matrix_search(
+        monkeypatch, *args, "--format", "envelope", party=2, untotaled=untotaled
+    )
+    listed, _ = _envelope_prices(envelope)
+    assert listed == {"COACH": [600.0, 700.0, 800.0], "BUSINESS": business}
+    raw = _raw_counts(
+        _matrix_search(monkeypatch, *args, "--format", "json", party=2, untotaled=untotaled)
+    )
+    assert raw["BUSINESS"] == ([f"USD{p:.2f}" for p in business], count)
+    stderr = _flat(envelope.stderr)
+    assert "no fare at or under" not in stderr
+    if line is None:
+        assert "Matrix BUSINESS" not in stderr
+    else:
+        assert line in stderr
+
+
+def test_a_capped_matrix_compare_asks_matrix_in_the_cap_s_currency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red at the D1 commit, which left the currency to Matrix."""
+    asked: list[SearchOptions] = []
+    assert _matrix_search(monkeypatch, "--max-price", "1000", asked=asked).exit_code == 0
+    assert _matrix_search(monkeypatch, asked=asked).exit_code == 0
+    assert [opts.currency for opts in asked] == ["USD", None]

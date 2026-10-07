@@ -43,7 +43,9 @@ every cabin on the sort cabin's itineraries, so a fare it shows can sit far
 down another cabin's board, and the `-n` cheapest are cheapest by amount, so
 rows Google priced in another currency can come before it; the rows added are
 read off the boards already fetched. A multi-cabin Matrix search lists each
-cabin's whole answer.
+cabin's whole answer, under `--max-price` its fares under the cap. Under
+`--bags` each member of a Google `row` carries `bags_included`, on several
+cabins as on one.
 A `calendar --fast` trip-length range writes every priced length's cells to
 `results` as one list, each the object the range document's `graphs[].grid`
 prints; its `return` date names its length. `price_graph` carries the same
