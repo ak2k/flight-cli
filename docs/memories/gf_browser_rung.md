@@ -83,7 +83,9 @@ the page's own currency, and each path that shows it prints one stderr line:
 be missing.` The currency is the page's, not the rows', since a filter can
 leave only rows of another page; pages capped in two currencies name both
 (`fares above EUR1006.00 and USD1006.00`). A round trip
-names its outbound page's figure, and a board merged from pages the lowest in
+names the lowest in each currency of its outbound page's figure and its return
+pages' (each read before the routing runs on it, so one that left no return
+still counts), and a board merged from pages the lowest in
 each currency of every page read, one that holds no pin included. A board that shows separate
 tickets takes the lower of its own figure and the Cheapest tab's. Each one-way
 board a multi-city search or `--split` reads (`cli._one_way_boards`) prints its own
