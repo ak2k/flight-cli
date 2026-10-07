@@ -3775,9 +3775,13 @@ def _keep_cells_whole(table: Table, count: int) -> None:
     folds onto more lines instead. No column is held to one line: Rich narrows
     the widest columns first, so a price stays on one line until the slice
     columns are as narrow as it is, while a held column takes the width the
-    slice columns need and can leave them none."""
+    slice columns need and can leave them none. A column narrowed to its two
+    padding cells prints nothing, so the padding goes once the console cannot
+    give each column a border, its padding and one character."""
     if count <= _ROUND_TRIP_LEGS:
         return
+    if console.width < 4 * len(table.columns) + 1:
+        table.padding = (0, 0)
     for column in table.columns:
         column.overflow = "fold"
 

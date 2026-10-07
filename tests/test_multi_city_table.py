@@ -30,7 +30,7 @@ def _itinerary(
 ) -> Itinerary:
     """A priced itinerary of one slice per flight (or `/`-joined connecting
     flights), each its own city pair."""
-    cities = ["JFK", "LAX", "BOS", "SFO", "SEA", "ORD", "MIA"]
+    cities = ["JFK", "LAX", "BOS", "SFO", "SEA", "ORD", "MIA", "DEN", "ATL"]
     pairs = zip(cities, cities[1:], flights, strict=False)
     return Itinerary.model_validate(
         {
@@ -101,15 +101,6 @@ def test_a_short_row_on_a_three_slice_table_dashes_its_missing_slices(
     assert short_line.count("—") == 2
 
 
-@pytest.fixture
-def narrow(monkeypatch: pytest.MonkeyPatch) -> io.StringIO:
-    """The table's console at 80 columns, the width Rich gives output that is
-    not a terminal."""
-    buf = io.StringIO()
-    monkeypatch.setattr(cli, "console", Console(file=buf, width=80, color_system=None))
-    return buf
-
-
 def _render(
     table: str,
     itineraries: list[Itinerary],
@@ -146,59 +137,43 @@ def _rows(text: str) -> list[list[str]]:
     return rows
 
 
-@pytest.mark.parametrize("table", ["single-cabin", "multi-cabin"])
-def test_a_narrow_four_slice_table_prints_each_flight_number_whole(
-    narrow: io.StringIO, table: str
-) -> None:
-    connecting = ("UA100/UA200", "UA101/UA201", "UA102/UA202")
-    _render(table, [_itinerary(*connecting, last) for last in ("UA300/UA1023", "UA300/UA1028")])
-    text = narrow.getvalue()
-    assert "…" not in text
-    first, second = _rows(text)
-    assert any("UA300/UA1023" in cell for cell in first)
-    assert any("UA300/UA1028" in cell for cell in second)
-
-
-@pytest.mark.parametrize("table", ["single-cabin", "multi-cabin"])
-def test_a_narrow_six_slice_table_keeps_the_price_and_headers_whole(
-    narrow: io.StringIO, table: str
-) -> None:
-    _render(table, [_itinerary(*["UA100/UA200"] * 6, price="USD12345.00")])
-    text = narrow.getvalue()
-    assert "…" not in text
-    (row,) = _rows(text)
-    assert "12345.00" in row
-
-
+@pytest.mark.parametrize("width", [40, 60, 80])
+@pytest.mark.parametrize("slices", [3, 4, 6, 8])
 @pytest.mark.parametrize(
     ("table", "cabins", "passengers", "carriers"),
     [
-        ("multi-cabin", tuple(Cabin), 1, ("UA",)),
+        ("single-cabin", (Cabin.COACH,), 1, ("UA",)),
         (
             "single-cabin",
             (Cabin.COACH,),
             3,
             ("UA", "LH", "AC", "NH", "OS", "LX", "SN", "TP", "A3", "OU"),
         ),
+        ("multi-cabin", (Cabin.COACH,), 1, ("UA",)),
+        ("multi-cabin", tuple(Cabin), 1, ("UA",)),
     ],
-    ids=["four-cabin-prices", "party-price-and-ten-carriers"],
+    ids=["one-price", "party-price-and-ten-carriers", "one-cabin", "four-cabin-prices"],
 )
-def test_a_narrow_six_slice_table_erases_no_cell_a_wide_one_prints(
+def test_a_narrow_multi_city_table_loses_no_cell_a_wide_one_prints(
     monkeypatch: pytest.MonkeyPatch,
+    width: int,
+    slices: int,
     table: str,
     cabins: tuple[Cabin, ...],
     passengers: int,
     carriers: tuple[str, ...],
 ) -> None:
     itineraries = [
-        _itinerary(*["UA100/UA200"] * 5, last, price="USD12345.00", carriers=carriers)
+        _itinerary(*["UA100/UA200"] * (slices - 1), last, price="USD12345.00", carriers=carriers)
         for last in ("UA300/UA1023", "UA300/UA1028")
     ]
     printed: dict[int, str] = {}
-    for width in (400, 80):
+    for console_width in (400, width):
         buf = io.StringIO()
-        monkeypatch.setattr(cli, "console", Console(file=buf, width=width, color_system=None))
+        monkeypatch.setattr(
+            cli, "console", Console(file=buf, width=console_width, color_system=None)
+        )
         _render(table, itineraries, cabins=cabins, passengers=passengers)
-        printed[width] = buf.getvalue()
-    assert "…" not in printed[80]
-    assert _rows(printed[80]) == _rows(printed[400])
+        printed[console_width] = buf.getvalue()
+    assert "…" not in printed[width]
+    assert _rows(printed[width]) == _rows(printed[400])
