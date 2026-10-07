@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import gzip
 import json
+from dataclasses import replace
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -277,3 +278,30 @@ def test_no_row_the_cheapest_tab_adds_is_marked(gf_session: Callable[..., Any]) 
     assert aa2720
     assert all(out["top_flight"] is True for out in aa2720)
     assert all(not out["top_flight"] for out, *_ in doc if out not in aa2720)
+
+
+# ──────────────────────────── the page merge ─────────────────────────────
+
+
+def _priced(row: gfid.GFlightWithId, price: float, *, top: bool) -> gfid.GFlightWithId:
+    return replace(row, flight=row.flight.model_copy(update={"price": price}), top_flight=top)
+
+
+@pytest.mark.parametrize("marked_on", ["dearer", "cheaper"])
+def test_two_pages_listing_one_itinerary_keep_the_cheaper_copy_marked(marked_on: str) -> None:
+    row = _board(_ds1(_LAX))[5]
+    dearer = _priced(row, 250.0, top=marked_on == "dearer")
+    cheaper = _priced(row, 200.0, top=marked_on == "cheaper")
+    for boards in ([dearer], [cheaper]), ([cheaper], [dearer]):
+        (kept,) = cli._merged_boards([gfid.Board(b) for b in boards])
+        assert (kept.flight.price, kept.top_flight) == (200.0, True)
+
+
+def test_a_round_trip_marked_only_in_its_outbound_keeps_that_member_alone_marked() -> None:
+    out = _board(_ds1(_LHR))[0]
+    ret = _board(_ds1(_RETURN))[0]
+    first = (replace(out, top_flight=True), _priced(ret, 900.0, top=False))
+    second = (replace(out, top_flight=False), _priced(ret, 800.0, top=False))
+    (kept,) = cli._merged_boards([gfid.Board([first]), gfid.Board([second])])
+    assert kept[1].flight.price == 800.0
+    assert [m.top_flight for m in kept] == [True, False]

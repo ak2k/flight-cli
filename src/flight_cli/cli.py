@@ -20,7 +20,7 @@ import json
 import re
 import shlex
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta
 from functools import partial, wraps
 from itertools import groupby, pairwise
@@ -6179,7 +6179,8 @@ def _merged_boards(boards: Sequence[Board[Any]]) -> list[Any]:
     """Every row of `boards` once, by the whole trip and how Google sells it
     (`row_key`, `ticketing`): the cheaper listing is kept, in the place the
     first one took. A row on separate tickets is a booking of its own, so it
-    stands beside the one-ticket row on its flights, as on one page."""
+    stands beside the one-ticket row on its flights, as on one page. A member
+    either page put on its Top flights board is a top flight on the row kept."""
     from ._gflight_ids import row_key  # noqa: PLC0415 — fli, ~95 ms
 
     at: dict[tuple[tuple[ItineraryKey, ...], tuple[Any, ...]], int] = {}
@@ -6192,8 +6193,25 @@ def _merged_boards(boards: Sequence[Board[Any]]) -> list[Any]:
                 at[key] = len(rows)
                 rows.append(r)
             elif _terminal_fare_key(r) < _terminal_fare_key(rows[seen]):
-                rows[seen] = r
+                rows[seen] = _with_top_marks(r, rows[seen])
+            else:
+                rows[seen] = _with_top_marks(rows[seen], r)
     return rows
+
+
+def _with_top_marks(kept: Any, dropped: Any) -> Any:
+    """`kept`, each member a top flight where it or `dropped`'s member in the
+    same slice is one."""
+    one_way = not isinstance(kept, tuple)
+    ours = (kept,) if one_way else cast("tuple[Any, ...]", kept)
+    theirs = (dropped,) if one_way else cast("tuple[Any, ...]", dropped)
+    members = tuple(
+        replace(k, top_flight=True)
+        if getattr(d, "top_flight", False) and not getattr(k, "top_flight", False)
+        else k
+        for k, d in zip(ours, theirs, strict=True)
+    )
+    return members[0] if one_way else members
 
 
 def _kept(outbound: _Outbound) -> list[Any]:
