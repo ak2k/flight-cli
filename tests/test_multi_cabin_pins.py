@@ -170,6 +170,7 @@ def _search(
     *extra: str,
     cabins: str = "economy,business",
     n: str = "10",
+    backend: str = "gflight",
 ) -> Result:
     monkeypatch.setattr(gfid, "_one_call_laddered", google)
     args = [
@@ -186,7 +187,7 @@ def _search(
         "--cabin",
         cabins,
         "--backend",
-        "gflight",
+        backend,
         "-n",
         n,
         *extra,
@@ -523,6 +524,54 @@ def test_a_cabin_whose_page_is_empty_answers_as_it_does_alone(
     assert out[Cabin.BUSINESS] == []
     assert len(out[Cabin.COACH]) == 50
     assert google.gets == {"ECONOMY": 11, "BUSINESS": 1}
+
+
+# ───────────────────────────── a cap and bags ──────────────────────────────────
+
+
+def _on_auto(monkeypatch: pytest.MonkeyPatch, *extra: str) -> tuple[Result, list[SearchOptions]]:
+    """A round trip on `--backend auto` where every business fare is USD800 or
+    more and every economy fare under USD420, with the options of each search
+    handed to Matrix."""
+    handed: list[SearchOptions] = []
+
+    def _matrix(*, opts: SearchOptions, **_kw: Any) -> None:
+        handed.append(opts)
+
+    monkeypatch.setattr(cli, "_run_matrix_path_multi", _matrix)
+    google = _Google({"ECONOMY": _ECONOMY, "BUSINESS": _BUSINESS})
+    return _search(monkeypatch, google, *extra, backend="auto"), handed
+
+
+def test_under_bags_a_cabin_the_cap_empties_stays_empty_on_google(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Matrix prices no bags, so the search stays on Google: business's column
+    is all '—' and its line names the cap. Red at the D1 commit, which handed
+    the whole search to Matrix."""
+    result, handed = _on_auto(monkeypatch, "--bags", "1", "--max-price", "700")
+    assert result.exit_code == 0, result.output
+    assert handed == []
+    rows = _table(result.stdout)
+    assert len(rows) == 10
+    assert all(y != "—" and j == "—" for _, (y, j) in rows), rows
+    assert "Google Flights BUSINESS: no itinerary matched a price cap of USD 700." in _flat(
+        result.stderr
+    )
+    assert "Using Matrix" not in result.stderr
+
+
+def test_without_bags_a_cabin_the_cap_empties_hands_the_search_to_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """As a one-cabin search does, with the cap for Matrix to apply. Green at
+    the D1 commit."""
+    result, handed = _on_auto(monkeypatch, "--max-price", "700")
+    assert result.exit_code == 0, result.output
+    assert [opts.max_price for opts in handed] == [700]
+    assert "Using Matrix: no Google Flights itinerary matched a price cap of USD 700" in _flat(
+        result.stderr
+    )
 
 
 # ─────────────────────────────────── rung 2 ────────────────────────────────────

@@ -11022,7 +11022,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                 sel=sel,
                 gf_mode=gf_mode,
                 gf_headed=gf_headed,
-                matrix_fallback=backend == BACKEND_AUTO,
+                matrix_fallback=backend == BACKEND_AUTO and not google_only,
                 separate_tickets=_separate_tickets_mode(
                     awards_only=sel.awards_only, no_separate_tickets=no_separate_tickets
                 ),
