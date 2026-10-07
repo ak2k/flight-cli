@@ -79,6 +79,7 @@ from ._gf_errors import (
     GfConsentError,
     GfPageShapeError,
     GfPinIgnoredError,
+    GfSearchServerError,
     GfTfsUnsupportedError,
     GfThrottledError,
     GfTransportError,
@@ -6920,7 +6921,7 @@ def _rung_reached(gf_mode: GfTransportMode) -> GfTransportMode:
     return TRANSPORT_BROWSER if escalated() else gf_mode
 
 
-def _gf_refusal(  # noqa: PLR0911 — one return per refusal type; see the docstring
+def _gf_refusal(  # noqa: PLR0911, PLR0912 — one return per refusal type; see the docstring
     e: GfBackendError,
     *,
     transport: GfTransportMode = TRANSPORT_HTTP,
@@ -7017,6 +7018,15 @@ def _gf_refusal(  # noqa: PLR0911 — one return per refusal type; see the docst
                 f"[yellow]Google Flights returned HTTP {status}.[/] {remedy_opening}, "
                 "or fetch the page the other way with [bold]--gf-transport http[/] or "
                 "[bold]browser[/].",
+            )
+        case GfSearchServerError():
+            # Through `_safe_text` for the HTTP arm's reason: nothing holds a
+            # caller to the `int` the annotation says.
+            code = _safe_text(e.code)
+            return _GfRefusal(
+                f"Google Flights answered with a server error (status {code})",
+                f"[yellow]Google Flights answered with a server error (status {code}).[/] "
+                f"Retry later, or {remedy}.",
             )
         case GfPageShapeError():
             return _GfRefusal(
@@ -9161,10 +9171,12 @@ def _run_gflight_multi(
     native filters and the Tier-2 post-filter cannot drift apart. They also
     share ONE throttle ladder: Google's wall is per-IP, so a cabin per thread
     laddering against it separately spends the cabin count times the requests to
-    be told the same thing. On a round trip (`_CabinSearches`, led by `sort_by`,
-    default the first cabin) every cabin's outbound page, then every cabin's
-    pins, are two fan-outs inside that one ladder and one event loop."""
-    from ._gflight_ids import shared_throttle_ladder  # noqa: PLC0415
+    be told the same thing. They are one search, too, so they share one budget
+    of pauses for Google's server errors (`search_escalation`). On a round trip
+    (`_CabinSearches`, led by `sort_by`, default the first cabin) every cabin's
+    outbound page, then every cabin's pins, are two fan-outs inside that one
+    ladder and one event loop."""
+    from ._gflight_ids import search_escalation, shared_throttle_ladder  # noqa: PLC0415
 
     if gf_mode == TRANSPORT_BROWSER:
         served = _gflight_cabins_in_series(
@@ -9224,7 +9236,7 @@ def _run_gflight_multi(
             {cab: plan.led(cab, pins, pages[cab]) for cab in cabins if cab in pages}, results
         )
 
-    with shared_throttle_ladder():
+    with shared_throttle_ladder(), search_escalation():
         try:
             anyio.run(go)
         except (typer.Exit, typer.Abort):
@@ -12915,7 +12927,10 @@ def gflight(
             pick=None,
         )
         return
-    _run_gflight_path(legs=legs, opts=opts, top_n=top_n, json_out=json_out)
+    from ._gflight_ids import search_escalation  # noqa: PLC0415 — fli, ~95 ms
+
+    with search_escalation():
+        _run_gflight_path(legs=legs, opts=opts, top_n=top_n, json_out=json_out)
 
 
 @app.command()
