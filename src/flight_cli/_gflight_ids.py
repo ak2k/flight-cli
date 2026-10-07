@@ -98,6 +98,7 @@ from ._gf_errors import (
     GfConsentError,
     GfPageShapeError,
     GfPinIgnoredError,
+    GfSearchServerError,
     GfThrottledError,
     GfTransportError,
     GfUpstreamStatusError,
@@ -545,6 +546,12 @@ _CONSENT_FORM_RE = re.compile(
 _DS_BLOB_RE = re.compile(
     r"AF_initDataCallback\(((?:(?!AF_initDataCallback\()[\s\S])*?),\s*sideChannel\s*:"
 )
+# A search Google failed on its own side: `data:` holds an RPC status, and the
+# blob ends `errorHasStatus: true` where a board's ends on `sideChannel`, so
+# `_DS_BLOB_RE` never matches it. Tempered the same way.
+_DS_ERROR_BLOB_RE = re.compile(
+    r"AF_initDataCallback\(((?:(?!AF_initDataCallback\()[\s\S])*?),\s*errorHasStatus\s*:\s*true\b"
+)
 _DS_KEY_RE = re.compile(r"key:\s*'([^']+)'")
 # Greedy to the end of the captured head — `data:` is the last key before
 # `sideChannel`, so everything after the first one is the payload.
@@ -673,6 +680,28 @@ def _extract_ds1(html: str) -> list[Any] | None:
     if carries_rows is not None:
         return carries_rows
     return long_enough if long_enough is not None else first_decodable
+
+
+def _ds1_error_status(html: str) -> int | None:
+    """The code of the RPC status (`[code, message, details]`) a `ds:1` holds
+    in place of a board, or None when no `ds:1` on the page holds one."""
+    for match in _DS_ERROR_BLOB_RE.finditer(html):
+        blob = match.group(1)
+        key = _DS_KEY_RE.search(blob)
+        data = _DS_DATA_RE.search(blob)
+        if not key or key.group(1) != _DS_FLIGHTS_KEY or not data:
+            continue
+        try:
+            status: Any = json.loads(data.group(1))
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(status, list):
+            continue
+        head = cast("list[Any]", status)[:1]
+        # `type(...) is int`, since a bool passes `isinstance(..., int)`.
+        if head and type(head[0]) is int:
+            return head[0]
+    return None
 
 
 def _is_a_readable_board(payload: list[Any]) -> bool:
@@ -1998,10 +2027,11 @@ _BOARDLESS_NAVIGATIONS = 2
 
 
 class _BoardlessPageError(GfPageShapeError):
-    """The page carried no `ds:1` payload that decodes. Under the token Google
-    sometimes serves such a page, and the next read of the URL carries the
-    board, so either rung reads it again (`_read_search_page`). A payload that
-    decodes to a layout we cannot read is a layout change, and is not."""
+    """The page carried no `ds:1` payload that decodes, and no server error in
+    its place (`GfSearchServerError`). Under the token Google sometimes serves
+    such a page, and the next read of the URL carries the board, so either rung
+    reads it again (`_read_search_page`). A payload that decodes to a layout we
+    cannot read is a layout change, and is not."""
 
 
 # One itinerary, as `_deduped` and the round-trip pins tell them apart.
@@ -2078,14 +2108,16 @@ def _rows_from_page_html(page: PageFetch) -> Board[GFlightWithId]:
 
     The order is load-bearing. The captcha interstitial is a throttle before it
     is anything else; only then is a non-2xx Google declining to serve; only then
-    is a missing `ds:1` read as consent; only then is an absent row block one.
+    is a `ds:1` holding an RPC status Google's server error; only then is a
+    missing `ds:1` read as consent; only then is an absent row block one.
     Every one of those would otherwise decode as zero rows and reach the user
     as "no flights on this route".
 
     Refusals are typed and raised (`GfThrottledError` / `GfUpstreamStatusError`
-    / `GfConsentError` / `GfPageShapeError`); a page that decodes with zero rows
-    returns an empty board, which is Google's authoritative answer and not retried.
-    A row that does not parse is skipped and counted in the board's `unread`."""
+    / `GfSearchServerError` / `GfConsentError` / `GfPageShapeError`); a page
+    that decodes with zero rows returns an empty board, which is Google's
+    authoritative answer and not retried. A row that does not parse is skipped
+    and counted in the board's `unread`."""
     html, final_url, status_code = page
     # Both rungs arrive here carrying the status they were served: rung 1 reads
     # it off the response, rung 2 off the navigation, and neither rules on it.
@@ -2105,6 +2137,11 @@ def _rows_from_page_html(page: PageFetch) -> Board[GFlightWithId]:
         raise GfUpstreamStatusError(status_code)
     payload = _extract_ds1(html)
     if payload is None:
+        status = _ds1_error_status(html)
+        if status is not None:
+            # Only code 13 has been seen; any other code is read as the same
+            # server error by choice.
+            raise GfSearchServerError(status)
         if _is_consent_page(final_url=final_url, html=html):
             raise GfConsentError(
                 "Google served its consent page instead of search results (no flight rows to read)"

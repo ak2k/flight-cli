@@ -79,6 +79,7 @@ from ._gf_errors import (
     GfConsentError,
     GfPageShapeError,
     GfPinIgnoredError,
+    GfSearchServerError,
     GfTfsUnsupportedError,
     GfThrottledError,
     GfTransportError,
@@ -6901,7 +6902,7 @@ def _rung_reached(gf_mode: GfTransportMode) -> GfTransportMode:
     return TRANSPORT_BROWSER if escalated() else gf_mode
 
 
-def _gf_refusal(  # noqa: PLR0911 — one return per refusal type; see the docstring
+def _gf_refusal(  # noqa: PLR0911, PLR0912 — one return per refusal type; see the docstring
     e: GfBackendError,
     *,
     transport: GfTransportMode = TRANSPORT_HTTP,
@@ -6998,6 +6999,15 @@ def _gf_refusal(  # noqa: PLR0911 — one return per refusal type; see the docst
                 f"[yellow]Google Flights returned HTTP {status}.[/] {remedy_opening}, "
                 "or fetch the page the other way with [bold]--gf-transport http[/] or "
                 "[bold]browser[/].",
+            )
+        case GfSearchServerError():
+            # Through `_safe_text` for the HTTP arm's reason: nothing holds a
+            # caller to the `int` the annotation says.
+            code = _safe_text(e.code)
+            return _GfRefusal(
+                f"Google Flights answered with a server error (status {code})",
+                f"[yellow]Google Flights answered with a server error (status {code}).[/] "
+                f"Retry later, or {remedy}.",
             )
         case GfPageShapeError():
             return _GfRefusal(
