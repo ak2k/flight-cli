@@ -61,9 +61,10 @@ and a round trip's failed `--split` one-way. A hand-off that holds Google's boar
 by the filter, an infant's empty board, separate-ticket rows alone on an award
 search, a multi-cabin search) notes its unread rows as `_record_google_cabin`
 does. Matrix, provider, calendar and `--split`-on-Matrix narrowings name no
-backend and count whoever answers, and so do an open jaw's one-way boards
-(`cli._one_way_boards` with `narrow`): their tickets are shown beside Matrix's
-answer, never in its place. The sites: a cabin asked and never recorded (judged
+backend and count whoever answers, and so do a `--split` one-way board's
+missing page and unread rows (`cli._one_way_boards`, an open jaw's or a round
+trip's): its tickets are shown beside the answer, never in its place. The
+sites: a cabin asked and never recorded (judged
 in the recorder, from `ask_cabins` against what the leaves recorded); Matrix
 finding nothing where Google had rows (`_note_google_rows_unshown`); the
 round-trip pin cap note; return boards refused, a pin Google served no return
@@ -87,9 +88,10 @@ range whose graph was lost;
 a `--split` one-way search that failed, a `--split` round trip Matrix answered,
 or a `--split` open jaw Google was not asked about, since the tickets were asked
 for and are not priced (no priced one-way, no pair one traveler can fly, or two
-currencies are the boards' answer, a note); an open jaw's one-way board missing
-a page or holding rows the parser could not read (`cli._one_way_boards`, the
-unread rows a note naming the slice), since its cheapest tickets may be among
+currencies are the boards' answer, a note); a `--split` one-way board (an open
+jaw's or a round trip's) missing a page or holding rows the parser could not
+read (`cli._one_way_boards`, the unread rows a note naming the leg or slice),
+since its cheapest tickets may be among
 them;
 `--max-per-query > 1` over a split, and over the one unsplit query when a
 group holds every destination; a round trip over a split set, whose returns
