@@ -1911,13 +1911,15 @@ def _run_calendar(
     n = len(subs) + (1 if floor is not None else 0)
     multi = bool(subs)  # split returns [] when one query already covers the request
     conc = min(n, max(1, max_concurrency)) if multi else 3
-    if multi and max_per_query > 1:
+    # Matrix may under-report a request naming several destinations; a split
+    # whose queries each name one is not that request.
+    if multi and any(len(q.legs[0].destinations) > 1 for q in subs):
         _envelope.narrow()
         err.print(
             "[yellow]--max-per-query > 1: Matrix may under-report a "
             "multi-destination request, so results could be incomplete.[/]"
         )
-    elif max_per_query > 1 and len(expand_airports(search.legs[0].destinations)) > 1:
+    elif not multi and max_per_query > 1 and len(expand_airports(search.legs[0].destinations)) > 1:
         # One group held every destination, so nothing split and the one query
         # asks them all: the request Matrix may under-report.
         _envelope.narrow(

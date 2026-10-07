@@ -106,8 +106,9 @@ board missing a page or holding rows the parser could not read
 (`cli._one_way_boards`, the unread rows a note naming the slice), since its
 cheapest tickets may be among them, or holding no row at all for a party with
 an infant, as on a Google search;
-`--max-per-query > 1` over a split, and over the one unsplit query when a
-group holds every destination; a round trip over a split set, whose returns
+`--max-per-query > 1` over a split when a query asks several destinations, and
+over the one unsplit query when a group holds every destination; a round trip
+over a split set, whose returns
 into another airport of the set come only from the combined query; a
 departure date of the calendar's window that Matrix's grid holds no fare for
 at some trip length asked (`cli._say_unpriced`, one `Matrix priced no fare on
