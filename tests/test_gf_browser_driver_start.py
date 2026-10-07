@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import gc
 import logging
+import os
+import signal
 import sys
 import threading
 from typing import TYPE_CHECKING, Any
@@ -86,6 +88,51 @@ def _install_real_patchright(
     return loops
 
 
+def _refusal_from(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, node: pathlib.Path
+) -> str:
+    """The reason a session with `node` as its driver refuses with, read once the
+    session, the child watchers and the loops patchright made are done."""
+    loops = _install_real_patchright(monkeypatch, tmp_path, node)
+    session = gfb.GfBrowserSession(headed=False)
+    try:
+        with pytest.raises(GfBrowserUnavailableError) as e:
+            session.get_html("https://www.google.com/travel/flights")
+        session.close()
+        reason = e.value.reason
+        del e, session
+        _join_child_watchers()
+    finally:
+        for loop in loops:
+            loop.close()
+    return reason
+
+
+def _malformed_driver(tmp_path: pathlib.Path, then: str = "") -> pathlib.Path:
+    """A driver that writes its pid to `pid`, sends one frame that is not JSON,
+    then runs the shell lines `then`."""
+    payload = b"not json"
+    frame = tmp_path / "frame"
+    frame.write_bytes(len(payload).to_bytes(4, "little") + payload)
+    pid = tmp_path / "pid"
+    node = tmp_path / "sends-a-malformed-frame"
+    node.write_text(f"#!/bin/sh\necho $$ > '{pid}'\ncat '{frame}'\n{then}\n")
+    node.chmod(0o755)
+    return node
+
+
+def _left_running(tmp_path: pathlib.Path) -> bool:
+    """Whether the driver whose pid is in `pid` is still up, killed if so: until
+    it is reaped it is this test's child, so its pid names no other process."""
+    pid = int((tmp_path / "pid").read_text())
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    os.kill(pid, signal.SIGKILL)
+    return True
+
+
 def test_a_real_driver_that_cannot_start_is_one_quiet_refusal_naming_the_driver(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -121,20 +168,9 @@ def test_a_real_driver_that_exits_at_once_is_one_quiet_refusal(
     node = tmp_path / "exits-at-once"
     node.write_text("#!/bin/sh\ntrue\n")
     node.chmod(0o755)
-    loops = _install_real_patchright(monkeypatch, tmp_path, node)
-    session = gfb.GfBrowserSession(headed=False)
-    try:
-        with pytest.raises(GfBrowserUnavailableError) as e:
-            session.get_html("https://www.google.com/travel/flights")
-        session.close()
-        reason = e.value.reason
-        del e, session
-
-        assert "driver failed to start" in reason
-        assert _no_trace_left(caplog)
-    finally:
-        for loop in loops:
-            loop.close()
+    reason = _refusal_from(monkeypatch, tmp_path, node)
+    assert "driver failed to start" in reason
+    assert _no_trace_left(caplog)
 
 
 def test_a_real_driver_that_sends_a_malformed_frame_is_one_quiet_refusal(
@@ -146,33 +182,32 @@ def test_a_real_driver_that_sends_a_malformed_frame_is_one_quiet_refusal(
     raises once the loop is closed. The loops are closed before the collection,
     an order a collected loop's own finalizer also gives."""
     caplog.set_level(logging.WARNING, logger="asyncio")
-    payload = b"not json"
-    frame = tmp_path / "frame"
-    frame.write_bytes(len(payload).to_bytes(4, "little") + payload)
-    node = tmp_path / "sends-a-malformed-frame"
-    node.write_text(f"#!/bin/sh\ncat '{frame}'\n")
-    node.chmod(0o755)
-    loops = _install_real_patchright(monkeypatch, tmp_path, node)
     unraisable: list[str] = []
 
     def _keep(u: sys.UnraisableHookArgs) -> None:
         unraisable.append(f"{u.err_msg}: {u.exc_value!r}")
 
     monkeypatch.setattr(sys, "unraisablehook", _keep)
-    session = gfb.GfBrowserSession(headed=False)
-    try:
-        with pytest.raises(GfBrowserUnavailableError) as e:
-            session.get_html("https://www.google.com/travel/flights")
-        session.close()
-        reason = e.value.reason
-        del e, session
-        _join_child_watchers()
-    finally:
-        for loop in loops:
-            loop.close()
+    reason = _refusal_from(monkeypatch, tmp_path, _malformed_driver(tmp_path))
     assert "driver failed to start" in reason
     assert _no_trace_left(caplog)
     assert unraisable == []
+
+
+def test_a_driver_with_more_to_write_after_a_malformed_frame_is_drained_to_its_exit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Nothing reads the driver's stdout once a frame fails to parse, so a driver
+    with more to write on stdin EOF than a pipe holds blocks until it is read."""
+    caplog.set_level(logging.WARNING, logger="asyncio")
+    monkeypatch.setattr(gfb, "_DRIVER_EXIT_TIMEOUT_S", 1.0)
+    done = tmp_path / "done"
+    then = f"cat >/dev/null\nprintf '%524288s' ''\ntouch '{done}'"
+    reason = _refusal_from(monkeypatch, tmp_path, _malformed_driver(tmp_path, then))
+    assert not _left_running(tmp_path)
+    assert done.exists()
+    assert "driver failed to start" in reason
+    assert _no_trace_left(caplog)
 
 
 def test_a_failed_driver_start_reports_nothing_it_left_on_its_own_loop(

@@ -184,9 +184,12 @@ def _quiet_driver_failure(manager: Any) -> None:
     driver's pipes, whose finalizer raises once the loop's own has closed it.
     So the loop's handler drops every report, and a driver that was spawned is
     let exit on stdin EOF and reaped on that loop now, which leaves its pipes
-    nothing to do. A loop patchright did not make is the caller's and keeps its
-    reports. A lookup, as `_driver_process_id` is: a patchright build that
-    moves an attribute leaves the report printed and the refusal intact."""
+    nothing to do. Its stdout is drained meanwhile, as patchright's own stop
+    does: nothing else reads it once `start()` has raised, and a driver with
+    more to write than the pipe holds would block on its way out. A loop
+    patchright did not make is the caller's and keeps its reports. A lookup,
+    as `_driver_process_id` is: a patchright build that moves an attribute
+    leaves the report printed and the refusal intact."""
     try:
         loop, own_loop = manager._loop, manager._own_loop
     except AttributeError:
@@ -196,11 +199,10 @@ def _quiet_driver_failure(manager: Any) -> None:
     loop.set_exception_handler(_drop_report)
     try:
         driver = manager._connection._transport._proc
-        driver.stdin.close()
     except AttributeError:
         return
     with contextlib.suppress(TimeoutError):
-        loop.run_until_complete(asyncio.wait_for(driver.wait(), _DRIVER_EXIT_TIMEOUT_S))
+        loop.run_until_complete(asyncio.wait_for(driver.communicate(), _DRIVER_EXIT_TIMEOUT_S))
 
 
 def _drop_report(_loop: asyncio.AbstractEventLoop, _context: dict[str, Any]) -> None:

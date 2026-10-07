@@ -278,7 +278,10 @@ closed" when the loop's own finalizer ran first. `_quiet_driver_failure` gives
 that loop an exception handler that drops every report (everything on it
 belongs to the failed start), then closes a spawned driver's stdin and runs the loop until asyncio
 has reaped it, bounded by `_DRIVER_EXIT_TIMEOUT_S`, so its pipes are closed
-before any finalizer sees them. It reads `_loop`, `_own_loop` and the
+before any finalizer sees them. It drains the driver's stdout meanwhile
+(`communicate()`, as patchright's own stop does): nothing reads it after
+`start()` raised, and a driver with more to write than the pipe holds would
+otherwise block and outlive the refusal. It reads `_loop`, `_own_loop` and the
 `_connection._transport._proc` chain, guarded like `_driver_process_id`, and
 leaves a loop patchright did not make (the caller's) alone.
 
