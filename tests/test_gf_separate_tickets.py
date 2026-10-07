@@ -54,7 +54,13 @@ _FLL_LGA = [
     *("--backend", "gflight", "--fast", "-n", "1000"),
 ]
 _THROTTLE_PAGE = "<html>Our systems have detected unusual traffic</html>"
-_SHAPELESS_PAGE = "<html><body>no flight data here</body></html>"
+# A `ds:1` too short to hold a board: a layout change, refused at one read. A
+# page with no `ds:1` at all is read three times (`_read_search_page`).
+_SHAPELESS_PAGE = (
+    "<html><body><script>"
+    "AF_initDataCallback({key: 'ds:1', hash: '9', data:[[]], sideChannel: {}});"
+    "</script></body></html>"
+)
 _KEY = (
     "† separate tickets: Google sells this trip as more than one booking. "
     "‡ self transfer: separate tickets, and you collect and recheck bags between flights."
@@ -576,7 +582,7 @@ def test_the_deprecated_command_reads_no_cheapest_tab(gf_session: Callable[..., 
 
 # ──────────────────────────────── the table ───────────────────────────────
 
-_ROW = re.compile(r"^│\s*(\d+[ab]?)\s*│([^│]*)│")
+_ROW = re.compile(r"^│\s*(★?\d+[ab]?)\s*│([^│]*)│")
 
 
 def _price_cells(stdout: str) -> dict[str, str]:
@@ -593,7 +599,7 @@ def test_the_table_marks_exactly_the_separate_ticket_rows_and_keys_them_once(
     marked = {label: cell for label, cell in cells.items() if cell.endswith(("†", "‡"))}
     assert sum(cell.endswith(" ‡") for cell in marked.values()) == 28
     assert sum(cell.endswith(" †") for cell in marked.values()) == 5
-    assert all(label.isdigit() for label in marked)
+    assert all(label.removeprefix("★").isdigit() for label in marked)
     assert len(cells) - len(marked) == 60  # 30 pairs, an `a` and a `b` row each
     said = " ".join(result.stdout.split())
     assert said.count(_KEY) == 1
@@ -1456,7 +1462,7 @@ def test_an_award_document_whose_cheapest_row_is_on_separate_tickets_lists_one_t
 
     monkeypatch.setattr(cli, "_should_run_awards", _configured)
     monkeypatch.setattr(pp_cli, "gather_awards", _gather)
-    monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
+    monkeypatch.setattr(pp_cli, "stored_tokens", lambda: None)
     args = [*_CAPPED, "--format", "json", "-n", "1"]
     pages = (_served(_LAX), _lax_with_marked_twin(5, price=100))
     base = _as_the_base(gf_session, args, *pages)

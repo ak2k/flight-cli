@@ -21,15 +21,17 @@ returns with distinct flight_ids.
 
 The page URL asks for the full board (`tfu=`, see
 `links.google_flights_search_page_url`), so every row Google has for a leg is
-parsed and a top-N is the caller's trim.
+parsed and a top-N is the caller's trim. A multi-airport board stops at
+Google's 300 cheapest rows, and says so (`_ROW_CAP`, `Board.capped_at`).
 
 That page has two transports (`GfTransport`, `_one_call_laddered`): rung 1 is
 the curl_cffi GET below, rung 2 is a real Chrome navigating the same URL
 (`_gf_browser`), which earns a far larger rate budget. `auto` starts on rung 1
 and moves a search to rung 2 when a throttle outlasts the ladder
-(`_one_call_auto`). Both go through `_rows_from_page_html` — one parser, one set
-of verdicts about what a block means. A rung supplies bytes; it never gets to
-interpret them.
+(`_one_call_auto`). Both send the `HeadlessChrome` UA token, by which Google
+picks the board it serves a multi-airport search (`_SEARCH_PAGE_UA`), and both
+go through `_rows_from_page_html` — one parser, one set of verdicts about what
+a block means. A rung supplies bytes; it never gets to interpret them.
 """
 
 from __future__ import annotations
@@ -105,7 +107,7 @@ from .links import build_search_tfs, google_flights_search_page_url
 
 if TYPE_CHECKING:
     import pathlib
-    from collections.abc import Callable, Generator, Iterable, Sequence
+    from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
 
     from fli.models.google_flights.flights import (  # pyright: ignore[reportMissingTypeStubs]
         FlightSearchFilters,
@@ -552,6 +554,10 @@ _DS_FLIGHTS_KEY = "ds:1"
 # that order because page order is what breaks a tie between equal fares once a
 # board is ordered by price (`fare_key`).
 _DS_ROW_BLOCKS = (2, 3)
+# The most rows one page serves across both blocks: a multi-airport board read
+# under the `HeadlessChrome` token stops there, at its cheapest 300 (measured
+# 2026-10-05 on seven NYC-LON pages, 5 + 295 each).
+_ROW_CAP = 300
 _SHAPE_ERROR_SAMPLE_REASONS = 3
 # What "this data is not a decodable flight row" means, in ONE place. The probe
 # and the row loop must agree: a decode failure the probe swallowed but the row
@@ -1135,6 +1141,9 @@ class GFlightWithId:
     # Set when Google sells the itinerary as more than one booking; None for one
     # ticket and for a row that does not say (`_ticketing`).
     ticketing: Ticketing | None = None
+    # Set when the page that listed this itinerary put it on Google's Top
+    # flights board (`ds:1[2]`), whichever of its listings `_deduped` kept.
+    top_flight: bool = False
     # The dearer listings of this itinerary that `_deduped` folded into this
     # one, one per other cabin mix, cheapest first: a cabin requirement this
     # listing fails can still be met by one of them (`_listing`).
@@ -1653,6 +1662,18 @@ def _is_transport_failure(e: BaseException) -> bool:
     return isinstance(e, curl_exc.RequestException) and code in _retryable_curl_codes()
 
 
+# The board Google serves a multi-airport search follows this token: under
+# `HeadlessChrome` it is the 300 cheapest rows across every airport pair, under
+# `Chrome` a curated ~75 that can leave the cheapest pair's fare out. Rung 2's
+# headless Chrome sends the token, so rung 1 sends it too and both read one
+# board. This is curl_cffi's own `chrome` UA with the token added; a test pins
+# its version to curl_cffi's default Chrome profile.
+_SEARCH_PAGE_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) HeadlessChrome/146.0.0.0 Safari/537.36"
+)
+
+
 def _get_search_page(client: Any, url: str) -> Any:
     """GET the search page through fli's session, bypassing fli's `Client.get`.
 
@@ -1686,6 +1707,9 @@ def _get_search_page(client: Any, url: str) -> Any:
         return client._session().get(  # pyright: ignore[reportAny]  # fli/curl_cffi untyped
             url,
             impersonate="chrome",
+            # Per request, never on the session: every other request fli makes
+            # on this thread's session keeps curl_cffi's own UA.
+            headers={"User-Agent": _SEARCH_PAGE_UA},
             allow_redirects=True,
             # fli's own value, imported rather than copied: it is the one that
             # reads and validates `FLI_TIMEOUT`, and a duplicate here silently
@@ -1699,7 +1723,10 @@ def _get_search_page(client: Any, url: str) -> Any:
 
 
 def _fetch_page(
-    filters: FlightSearchFilters, *, currency: str = "USD", cheapest: bool = False
+    filters: FlightSearchFilters,
+    *,
+    currency: str = "USD",
+    cheapest: bool = False,
 ) -> PageFetch:
     """One GET of the public search page.
 
@@ -1895,9 +1922,15 @@ class Board[T](list[T]):
     alone, so the merged board's `insight` and `history` are None.
     `separate_hidden` counts the separate-ticket itineraries a search asked to
     hide, and `separate_failed` is why the Cheapest tab, where those are listed,
-    went unread. `stopped` is the throttle, transport failure or dead browser
-    that ended a round trip's pin loop after some pin was served: the rows are
-    kept, and a caller that asks more pages reads it to end the search."""
+    went unread. `capped_at` maps a currency to the highest fare on a page
+    priced in it that stopped at Google's row cap (`_ROW_CAP`): every fare in
+    that currency at or below it is listed, and a dearer one may be missing.
+    Empty when no page stopped there. A round trip carries its outbound page's,
+    and a board showing the Cheapest tab's separate tickets the lower of its own
+    and the tab's in each currency (`lowest_caps`). `stopped` is the throttle,
+    transport failure or dead browser that ended a round trip's pin loop after
+    some pin was served: the rows are kept, and a caller that asks more pages
+    reads it to end the search."""
 
     def __init__(
         self,
@@ -1911,6 +1944,7 @@ class Board[T](list[T]):
         unread: int = 0,
         separate_hidden: int = 0,
         separate_failed: GfBackendError | None = None,
+        capped_at: Mapping[str, float] | None = None,
         stopped: GfBackendError | None = None,
     ) -> None:
         super().__init__(rows)
@@ -1920,12 +1954,31 @@ class Board[T](list[T]):
         self.pinned = pinned
         self.partial = partial
         self.unread = unread
+        self.capped_at: dict[str, float] = dict(capped_at or {})
         self.stop_drops: StopDrops | None = None
         self.separate_hidden = separate_hidden
         self.separate_failed = separate_failed
         self.stopped = stopped
         self.page_insights: tuple[PriceInsight, ...] = ()
         self.page_histories: tuple[PriceHistory, ...] = ()
+
+
+def lowest_caps(*caps: Mapping[str, float]) -> dict[str, float]:
+    """The lowest of `caps` in each currency (`Board.capped_at`): a fare above
+    it may be missing from the page that stopped there, though another page
+    lists dearer ones. Amounts in two currencies do not compare, so each keeps
+    its own."""
+    lowest: dict[str, float] = {}
+    for cap in caps:
+        for currency, amount in cap.items():
+            lowest[currency] = min(amount, lowest.get(currency, amount))
+    return lowest
+
+
+def _decoded_currency(rows: Iterable[GFlightWithId]) -> str | None:
+    """The currency most of `rows` decoded to, or None when none did."""
+    decoded = Counter(r.flight.currency for r in rows if r.flight.currency)
+    return decoded.most_common(1)[0][0] if decoded else None
 
 
 class _PageUnreadError(GfPageShapeError):
@@ -1936,6 +1989,19 @@ class _PageUnreadError(GfPageShapeError):
     def __init__(self, message: str, *, unread: int) -> None:
         super().__init__(message)
         self.unread = unread
+
+
+# Reads of one search-page URL that carries no board before it is refused. A
+# rung-2 navigation costs seconds where a rung-1 GET costs one request.
+_BOARDLESS_READS = 3
+_BOARDLESS_NAVIGATIONS = 2
+
+
+class _BoardlessPageError(GfPageShapeError):
+    """The page carried no `ds:1` payload that decodes. Under the token Google
+    sometimes serves such a page, and the next read of the URL carries the
+    board, so either rung reads it again (`_read_search_page`). A payload that
+    decodes to a layout we cannot read is a layout change, and is not."""
 
 
 # One itinerary, as `_deduped` and the round-trip pins tell them apart.
@@ -1981,12 +2047,16 @@ def _deduped(rows: list[GFlightWithId]) -> list[GFlightWithId]:
     dates included: the same flight numbers a day apart are a different trip.
     The first listing keeps its place, because page order breaks ties between
     equal fares in the trim and in the round-trip pins. A listing booked in
-    another cabin mix is kept on the row as one of its `others`."""
+    another cabin mix is kept on the row as one of its `others`. Where any
+    listing of an itinerary is a top flight, every listing is marked, since a
+    later step may show any of them (`_listing`)."""
     listed: dict[ItineraryKey, list[GFlightWithId]] = {}
     for row in rows:
         listed.setdefault(_itinerary_key(row), []).append(row)
     out: list[GFlightWithId] = []
-    for listings in listed.values():
+    for found in listed.values():
+        top = any(r.top_flight for r in found)
+        listings = [replace(r, top_flight=True) for r in found] if top else found
         best = min(listings, key=fare_key)
         mixes = {_cabins(best)}
         others: list[GFlightWithId] = []
@@ -2039,7 +2109,7 @@ def _rows_from_page_html(page: PageFetch) -> Board[GFlightWithId]:
             raise GfConsentError(
                 "Google served its consent page instead of search results (no flight rows to read)"
             )
-        raise GfPageShapeError(
+        raise _BoardlessPageError(
             "Google Flights' search page carried no readable ds:1 payload; the page shape changed"
         )
     board = _rows_from_ds1(payload)
@@ -2080,17 +2150,21 @@ def _rows_from_page_html(page: PageFetch) -> Board[GFlightWithId]:
                 [type(payload[i]).__name__ for i in _DS_ROW_BLOCKS],
             )
         return Board()  # Google's own answer: this leg has no flights.
+    # `_rows_from_ds1` reads the top-flights block first, so its rows lead.
+    top_block = payload[_DS_ROW_BLOCKS[0]]
+    top = len(cast("list[Any]", top_block[0])) if _looks_like_a_row_block(top_block) else 0
     out: list[GFlightWithId] = []
     reasons: list[str] = []
-    for fd in rows:
+    for i, fd in enumerate(rows):
         try:
-            out.append(_parse_flight_with_id(fd))
+            row = _parse_flight_with_id(fd)
         except _ROW_PARSE_ERRORS as e:
             # %r / !r, not %s: this text comes from the page, and a raw ESC
             # or C1 byte written to a terminal is not a diagnostic.
             log.debug("skipping flight with unparseable data: %r", e)
             reasons.append(f"{type(e).__name__}: {e!r}")
             continue
+        out.append(replace(row, top_flight=True) if i < top else row)
     if not out:
         # Rows were there and none of them parsed — the row layout moved, which
         # is a different fact from "this route has no flights". Sampled reasons
@@ -2101,11 +2175,21 @@ def _rows_from_page_html(page: PageFetch) -> Board[GFlightWithId]:
             f"the row shape changed (sample reasons: {sample})",
             unread=len(reasons),
         )
+    served = _deduped(out)
+    fares = [r.flight.price for r in served if r.flight.price is not None]
     return Board(
-        _deduped(out),
+        served,
         insight=_price_insight(payload, out),
         history=_price_history(payload, out),
         unread=len(reasons),
+        # The raw count, unread rows included: the cap is on what Google
+        # served, and no field of the page states it. Keyed "" when no row
+        # decoded a currency, until `_with_board_currency` names the page's.
+        capped_at=(
+            {_decoded_currency(served) or "": max(fares)}
+            if len(rows) >= _ROW_CAP and fares
+            else None
+        ),
     )
 
 
@@ -2117,7 +2201,10 @@ def _one_call(
         # Another thread of this search moved it to Chrome while this one was
         # on its ladder; `_one_call_auto` takes this request there too.
         raise _EscalatedError
-    rows = _rows_from_page_html(_fetch_page(filters, currency=currency, cheapest=cheapest))
+    rows = _read_search_page(
+        functools.partial(_fetch_page, filters, currency=currency, cheapest=cheapest),
+        reads=_BOARDLESS_READS,
+    )
     # A page we could READ means Google answered a warm session — save its
     # cookies (NID) so the next one-shot CLI process starts warm instead of
     # cold. Rung-1 only: rung 2 keeps its own Chrome profile, and its cookies
@@ -2130,6 +2217,25 @@ def _one_call(
     # here is what lets the rule stay "we understood the page".
     _persist_cookies(get_client())
     return rows
+
+
+def _read_search_page(fetch: Callable[[], PageFetch], *, reads: int) -> Board[GFlightWithId]:
+    """The board on the page `fetch` returns, fetched again while the page
+    carries none (`_BoardlessPageError`), and refused after `reads` fetches.
+
+    Every fetch sends the token, on either rung. Without it a multi-airport
+    search is served the curated board, which can leave out the cheapest fare
+    the token board lists, so a refusal that hands the search to Matrix is the
+    truer answer."""
+    fetched = 1
+    while True:
+        try:
+            return _rows_from_page_html(fetch())
+        except _BoardlessPageError as e:
+            if fetched == reads:
+                raise
+            fetched += 1
+            log.debug("Google Flights' search page did not read (%s); reading it again", e)
 
 
 def retry_throttled[T](call: Callable[[], T], *, retry_empty: bool = True) -> T:
@@ -2264,16 +2370,16 @@ def _one_call_browser(
 
     No retry ladder around it. Rung 2 costs a browser launch and up to a 30 s
     navigation, and a refusal it hits is terminal — re-driving Chrome through
-    rung 1's backoff would spend ~22 s more to be told the same thing.
+    rung 1's backoff would spend ~22 s more to be told the same thing. A page
+    that carries no board is the exception, navigated once more
+    (`_BOARDLESS_NAVIGATIONS`): the next read of that URL carries the board.
 
     Reached through the module attribute, never a name bound at import time, so
     a test can substitute the session without a browser anywhere in the
     process."""
-    return _rows_from_page_html(
-        _gf_browser.session(headed=headed).get_html(
-            search_page_url(filters, currency=currency, cheapest=cheapest)
-        )
-    )
+    session = _gf_browser.session(headed=headed)
+    url = search_page_url(filters, currency=currency, cheapest=cheapest)
+    return _read_search_page(functools.partial(session.get_html, url), reads=_BOARDLESS_NAVIGATIONS)
 
 
 class _EscalatedError(Exception):
@@ -2509,9 +2615,10 @@ def _with_board_currency(board: Board[GFlightWithId], requested: str) -> Board[G
     when that decode fails, and every renderer downstream would then label the
     price USD. One page is priced in one currency, so the row takes the
     currency the rows beside it decoded to, and the requested one only when
-    none did. The page's price insight rides along."""
-    decoded = Counter(r.flight.currency for r in board if r.flight.currency)
-    fill = decoded.most_common(1)[0][0] if decoded else requested
+    none did. The page's price insight rides along, and its row cap is in that
+    currency too: the cap is named by it after a filter has removed every row
+    that carried it."""
+    fill = _decoded_currency(board) or requested
 
     def filled(r: GFlightWithId) -> GFlightWithId:
         if not r.flight.currency:
@@ -2525,6 +2632,7 @@ def _with_board_currency(board: Board[GFlightWithId], requested: str) -> Board[G
         dropped=board.dropped,
         pinned=board.pinned,
         unread=board.unread,
+        capped_at={fill: min(board.capped_at.values())} if board.capped_at else None,
     )
 
 
@@ -2650,6 +2758,7 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
             history=first.history,
             dropped=dropped,
             unread=first.unread,
+            capped_at=first.capped_at,
         )
         return answer if separate is None else separate(answer)
 
@@ -2745,6 +2854,9 @@ def search_with_ids(  # noqa: PLR0915 — one arm per way a pin ends, each accou
         dropped=dropped,
         pinned=len(pins),
         unread=unread,
+        # The outbound page's alone: each return page lists one pin's returns,
+        # so its cap says nothing about which trips are on the board.
+        capped_at=first.capped_at,
         stopped=stopped,
     )
     # Before the pin outcome is judged: a separate-ticket itinerary needs no
@@ -2789,7 +2901,8 @@ def _with_separate_tickets(
     round-trip total: Google serves no return board for it, pinned or not.
 
     `fits` picks each marked itinerary's listing, among its marked listings, as
-    it picks a base row's (`_marked_listing`).
+    it picks a base row's (`_marked_listing`). No row it adds is a top flight:
+    the page's own `[2]` is not Google's Top flights board.
 
     The page is not fetched when pinning stopped on a wall, the network or the
     browser, because it would meet the same one. A refusal of this page leaves
@@ -2806,6 +2919,7 @@ def _with_separate_tickets(
         insight: PriceInsight | None = answer.insight,
         filtered: int = 0,
         unread: int = 0,
+        capped_at: Mapping[str, float] = answer.capped_at,
     ) -> Board[GFlightWithId | tuple[GFlightWithId, ...]]:
         return Board(
             rows,
@@ -2816,6 +2930,7 @@ def _with_separate_tickets(
             unread=answer.unread + unread,
             separate_hidden=hidden,
             separate_failed=failed,
+            capped_at=capped_at,
             stopped=answer.stopped,
         )
 
@@ -2828,7 +2943,9 @@ def _with_separate_tickets(
     except GfBackendError as e:
         unparsed = e.unread if isinstance(e, _PageUnreadError) else 0
         return with_notes(answer, failed=e, unread=unparsed)
-    listed = [m for r in page if (m := _marked_listing(r, fits)) is not None]
+    listed = [
+        replace(m, top_flight=False) for r in page if (m := _marked_listing(r, fits)) is not None
+    ]
     marked = [r for r in listed if keep is None or keep(0, r)]
     # Counted with the base's, so an answer they would have filled reads as
     # none matching the routing, not as Google having no flights.
@@ -2837,15 +2954,38 @@ def _with_separate_tickets(
         return with_notes(answer, hidden=len(marked), filtered=filtered, unread=page.unread)
     # The insight's level is read off the cheapest fare the answer holds, and a
     # separate-ticket fare can undercut every one-ticket fare on the base board.
+    # Only fares in the insight's currency count: the level compares them with
+    # Google's range in that currency.
     insight = answer.insight
-    fares = [r.flight.price for r in marked if r.flight.price is not None]
+    fares = (
+        []
+        if insight is None
+        else [
+            p
+            for r in marked
+            if (p := r.flight.price) is not None and r.flight.currency == insight.currency
+        ]
+    )
     if insight is not None and fares:
         insight = replace(insight, cheapest=min(insight.cheapest, *fares))
     unread = page.unread
+    # A marked row priced above the tab's cap may be missing from the rows it
+    # adds, the routing having left any of them or not.
+    capped_at = lowest_caps(answer.capped_at, page.capped_at)
     if filters.trip_type == TripType.ONE_WAY:
-        return with_notes([*answer, *marked], insight=insight, filtered=filtered, unread=unread)
+        return with_notes(
+            [*answer, *marked],
+            insight=insight,
+            filtered=filtered,
+            unread=unread,
+            capped_at=capped_at,
+        )
     return with_notes(
-        [*answer, *((r,) for r in marked)], insight=insight, filtered=filtered, unread=unread
+        [*answer, *((r,) for r in marked)],
+        insight=insight,
+        filtered=filtered,
+        unread=unread,
+        capped_at=capped_at,
     )
 
 

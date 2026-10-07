@@ -217,8 +217,14 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
   length shares the legs and filters), plus a budget: trip lengths × ⌈window
   days / 31⌉ ≤ 8, a one-way counting as one graph. A refused calendar prints one
   dim stderr line, `Google Flights price graph not asked: this is <reason>.`,
-  and runs Matrix alone with no Chrome launch; JSON is Matrix's document alone
-  and says nothing unless `--gf-transport` or `--gf-headed` asked for Chrome. A
+  in every format, and runs Matrix alone with no Chrome launch. Under
+  `--format json` and `--format envelope` the graph is read only when
+  `--gf-transport browser` or `auto` is given, so a script's calendar opens no
+  Chrome it did not name; without it a dim line says that flag reads the graph.
+  Read, it goes into the one document, written once both halves are in: JSON
+  is Matrix's body plus `google_price_graph` (`cli._graph_range_document`), the
+  envelope carries `price_graph`, and a Matrix failure writes no JSON document
+  while the envelope keeps a graph that priced. A
   range asks one graph per length (`_gf_calgraph.price_graphs`), each with the
   loads the lengths before it left, and prints one column per length (`5n`
   `6n` `7n`) beside the row minimum, "—" where a length priced nothing that
@@ -255,8 +261,10 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
   `detail` also carries `--currency USD` when several origins and no `--currency`
   asked the grid in USD: one pair asked alone answers in its origin's currency (LHR
   CDG in GBP, measured 2026-10-02). A Matrix grid in another currency is named and
-  not compared. JSON, `--fast`, `--gf-transport http`, a failed or empty side and
-  agreeing lows print no line, and stdout and the exit code are unchanged. Two lows
+  not compared. `--fast`, `--gf-transport http`, a JSON or envelope calendar
+  that read no graph, a failed or empty side and agreeing lows print no line,
+  and stdout and the exit code are unchanged; a document that read the graph
+  prints the line as the table does. Two lows
   that differ need not mean either table is wrong. Measured 2026-10-01, `calendar
   NYC PAR --start 2026-10-20 --end 2026-11-19 -d 5-7` (9 pairs plus the combined
   query, 295 solutions) had Matrix's low at USD698.00 (10-26, EWR→ORY, 5 and 6

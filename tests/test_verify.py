@@ -724,7 +724,12 @@ def test_the_rows_own_itinerary_verifies_with_its_fares(
     assert google[0]["dates"] == [leg["departure_datetime"][:10] for leg in listed["legs"]]
     assert google[0]["airports"] == [["JFK", "SEA"], ["SEA", "LAX"]]
     assert verdict["google"]["price"] == price
-    assert verdict["matrix"] == {"price": price, "total": "USD213.20", "slices": google}
+    assert verdict["matrix"] == {
+        "price": price,
+        "per_traveler": price,
+        "total": "USD213.20",
+        "slices": google,
+    }
     assert verdict["delta"] == 0.0
     assert verdict["missing_carriers"] == []
     assert [(f["fare_basis"], f["booking_code"]) for f in verdict["fares"]] == [
@@ -1343,21 +1348,29 @@ def test_awards_json_is_refused_naming_cash_only(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.parametrize(
-    "args",
+    ("args", "said"),
     [
-        pytest.param(["--slice", f"JFK-LAX:{_DEP}"], id="slice"),
-        pytest.param(["--include-unavailable"], id="matrix-only-constraint"),
+        # A multi-city search under --backend gflight runs on Google, as
+        # separate tickets, so the refusal names the row it lacks.
+        pytest.param(
+            ["--slice", f"JFK-LAX:{_DEP}"],
+            "--verify checks a Google Flights row on one ticket, and a --slice search shows none.",
+            id="slice",
+        ),
+        pytest.param(
+            ["--include-unavailable"],
+            "--verify needs a Google Flights row, and this search runs on Matrix.",
+            id="matrix-only-constraint",
+        ),
     ],
 )
-def test_a_search_that_runs_on_matrix_is_refused_before_any_request(
-    monkeypatch: pytest.MonkeyPatch, args: list[str]
+def test_a_search_with_no_google_row_is_refused_before_any_request(
+    monkeypatch: pytest.MonkeyPatch, args: list[str], said: str
 ) -> None:
     _no_request(monkeypatch)
     result = _run("--verify", *args)
     assert result.exit_code == 2, result.output
-    assert "--verify needs a Google Flights row, and this search runs on Matrix." in (
-        " ".join(result.stderr.split())
-    )
+    assert said in " ".join(result.stderr.split())
     assert result.stdout == ""
 
 

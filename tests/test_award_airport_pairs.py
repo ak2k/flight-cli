@@ -124,7 +124,7 @@ def arms(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _Arms:
         return not cast("bool", sel.cash_only)
 
     hand_out_providers(monkeypatch, _Recorder(state))
-    monkeypatch.setattr(pp_cli, "get_valid_tokens", lambda: None)
+    monkeypatch.setattr(pp_cli, "stored_tokens", lambda: None)
     monkeypatch.setattr(cli, "_should_run_awards", _awards_run)
     monkeypatch.setattr(cli, "MatrixClient", _Matrix)
     monkeypatch.setenv("COLUMNS", "400")
