@@ -202,6 +202,8 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
   `[dep, ret, [[null, price], token], 1]`. An error row has an empty payload and
   its code at `row[5][0]`. Error 13 there is a refusal of the browser session,
   not a throttle, so it never goes through `_is_throttle_block`.
+  `parse_graph` reads the body with `_gf_rpc_shared.result_payloads`, so an error
+  row anywhere in it, or text left after the last chunk, refuses the whole graph.
 - **Output.** The table is `_render_date_grid` with the trip length in the
   summary line; `--format json` writes
   `{origin, destination, currency, trip_length, grid: [{departure, return?, price}]}`
