@@ -85,7 +85,8 @@ _EVICTED = "Request content was evicted from inspector cache"
 # capture waits in short driver-side sleeps and reads what they delivered.
 _POLL_MS = 100
 # A driver that answers `start()` with garbage is still running; it exits on
-# stdin EOF, and one still up after this is left as asyncio would leave it.
+# stdin EOF, and one still up after this is killed, because the refusal drops
+# the session's only handle on it.
 _DRIVER_EXIT_TIMEOUT_S = 5.0
 # Escape hatch for a Chrome that isn't where `channel="chrome"` looks; pointing
 # it at a missing binary is also how a caller forces the typed refusal.
@@ -183,13 +184,14 @@ def _quiet_driver_failure(manager: Any) -> None:
     task), an `init` task still waiting on a driver that sent garbage, and that
     driver's pipes, whose finalizer raises once the loop's own has closed it.
     So the loop's handler drops every report, and a driver that was spawned is
-    let exit on stdin EOF and reaped on that loop now, which leaves its pipes
-    nothing to do. Its stdout is drained meanwhile, as patchright's own stop
-    does: nothing else reads it once `start()` has raised, and a driver with
-    more to write than the pipe holds would block on its way out. A loop
-    patchright did not make is the caller's and keeps its reports. A lookup,
-    as `_driver_process_id` is: a patchright build that moves an attribute
-    leaves the report printed and the refusal intact."""
+    let exit on stdin EOF, or killed at `_DRIVER_EXIT_TIMEOUT_S`, and reaped on
+    that loop now, which leaves its pipes nothing to do. Its stdout is drained
+    meanwhile, as patchright's own stop does: nothing else reads it once
+    `start()` has raised, and a driver with more to write than the pipe holds
+    would block on its way out. A loop patchright did not make is the caller's
+    and keeps its reports. A lookup, as `_driver_process_id` is: a patchright
+    build that moves an attribute leaves the report printed and the refusal
+    intact."""
     try:
         loop, own_loop = manager._loop, manager._own_loop
     except AttributeError:
@@ -201,8 +203,15 @@ def _quiet_driver_failure(manager: Any) -> None:
         driver = manager._connection._transport._proc
     except AttributeError:
         return
-    with contextlib.suppress(TimeoutError):
+    try:
         loop.run_until_complete(asyncio.wait_for(driver.communicate(), _DRIVER_EXIT_TIMEOUT_S))
+    except TimeoutError:
+        # Through asyncio's handle, which signals nothing once the child is
+        # reaped, so a pid the OS has reused is never hit.
+        with contextlib.suppress(ProcessLookupError):
+            driver.kill()
+        with contextlib.suppress(TimeoutError):
+            loop.run_until_complete(asyncio.wait_for(driver.wait(), _DRIVER_EXIT_TIMEOUT_S))
 
 
 def _drop_report(_loop: asyncio.AbstractEventLoop, _context: dict[str, Any]) -> None:

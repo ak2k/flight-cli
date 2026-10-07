@@ -219,6 +219,20 @@ def test_a_driver_with_more_to_write_after_a_malformed_frame_is_drained_to_its_e
     assert _no_trace_left(caplog)
 
 
+def test_a_driver_still_up_at_the_reaps_deadline_is_not_left_running(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The refusal drops the session's only handle on the driver, so one that
+    ignores stdin EOF would outlive it."""
+    caplog.set_level(logging.WARNING, logger="asyncio")
+    monkeypatch.setattr(gfb, "_DRIVER_EXIT_TIMEOUT_S", 0.5)
+    node = _malformed_driver(tmp_path, "exec sleep 30")
+    reason = _refusal_from(monkeypatch, tmp_path, node)
+    assert not _left_running(tmp_path)
+    assert "driver failed to start" in reason
+    assert _no_trace_left(caplog)
+
+
 def test_a_failed_driver_start_reports_nothing_it_left_on_its_own_loop(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
 ) -> None:
