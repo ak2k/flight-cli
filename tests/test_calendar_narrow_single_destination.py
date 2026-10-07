@@ -46,7 +46,13 @@ def _hermetic(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:  # pyrig
 
 
 def _grid() -> Any:
-    return _result({9: {7: ("USD204.00", 3, {})}}, cheapest="USD204.00")
+    """Every departure date of the window priced: an unpriced date narrows the
+    envelope too, and these tests isolate the narrowing by query split."""
+    by_month: dict[int, dict[int, tuple[str, int, dict[int, str]]]] = {}
+    for offset in range(14):
+        when = _START + timedelta(days=offset)
+        by_month.setdefault(when.month, {})[when.day] = ("USD204.00", 3, {})
+    return _result(by_month, cheapest="USD204.00")
 
 
 def _calendar(origins: str, destinations: str, fmt: str) -> Result:

@@ -16,7 +16,6 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 import anyio
-import anyio.to_thread
 import structlog
 
 from .._envelope import narrow
@@ -70,13 +69,12 @@ def _enabled_builders(
 
 
 async def _build_pointspath(airlines: tuple[str, ...] | None) -> AwardProvider | None:
-    # Checking the tokens can refresh them and building one asks PointsPath
-    # for its catalog, so the deadline holds over both.
+    # Building the provider refreshes a stale token and asks PointsPath for
+    # its catalog, so the deadline holds over both; the configured check
+    # only reads the stored tokens.
     with anyio.CancelScope(deadline=answer_deadline()) as scope:
         try:
-            # A refresh is a blocking request: on the event loop no deadline
-            # could cut it; in a thread the deadline stops waiting on it.
-            if await anyio.to_thread.run_sync(pp_is_configured, abandon_on_cancel=True):
+            if pp_is_configured():
                 return await PointsPathProvider.create(explicit_airlines=airlines)
         except Exception as e:  # noqa: BLE001 — per-provider failures are non-fatal
             narrow()

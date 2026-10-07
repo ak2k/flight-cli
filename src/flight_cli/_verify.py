@@ -13,9 +13,11 @@ Pure: `cli` makes the requests and prints."""
 from __future__ import annotations
 
 from datetime import date, datetime
+from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from ._cross_check import separate_tickets_reason
+from ._enrich import party_price
 from ._multi_cabin import parse_price, price_currency
 from .domain import Leg, SearchOptions
 
@@ -33,7 +35,7 @@ if TYPE_CHECKING:
         SliceEndpoint,
     )
 
-Outcome = Literal["match", "other-itinerary", "no-solution", "carrier-absent", "separate-tickets"]
+Outcome = Literal["match", "other-itinerary", "no-solution", "carrier-unseen", "separate-tickets"]
 
 
 class Flight(NamedTuple):
@@ -184,10 +186,27 @@ def most_stops(row: Row) -> int:
     return max(len(s) - 1 for s in row.slices)
 
 
+def _connections(codes: Sequence[str], stops: Sequence[str]) -> list[str]:
+    """The airports between two different flight numbers: `stops[i]` lies
+    between `codes[i]` and `codes[i + 1]`. A stop inside one through flight is
+    left out; either side may write it or not, and booking details state it."""
+    return [s for s, (a, b) in zip(stops, pairwise(codes), strict=True) if a != b]
+
+
 def _same_ends(ms: Slice, legs: tuple[Flight, ...]) -> bool:
+    codes = [_token(f) for f in ms.flights]
+    stops = [_endpoint(s) for s in ms.stops]
+    row_codes = [f.code for f in legs]
     return (
-        _folded([_token(f) for f in ms.flights]) == _folded([f.code for f in legs])
-        and [_endpoint(s) for s in ms.stops] == [f.destination for f in legs[:-1]]
+        _folded(codes) == _folded(row_codes)
+        and (
+            stops == [f.destination for f in legs[:-1]]
+            or (
+                len(stops) == len(codes) - 1
+                and _connections(codes, stops)
+                == _connections(row_codes, [f.destination for f in legs[:-1]])
+            )
+        )
         and _endpoint(ms.origin) == legs[0].origin
         and _endpoint(ms.destination) == legs[-1].destination
         and wall_clock(ms.departure) == legs[0].departure
@@ -197,8 +216,8 @@ def _same_ends(ms: Slice, legs: tuple[Flight, ...]) -> bool:
 
 def candidates(row: Row, res: SearchResult) -> list[int]:
     """Indexes of the solutions that can be the row, in Matrix's order: every
-    slice has its flights, stops, end airports and wall-clock departure and
-    arrival. Two can remain that differ only in a middle flight's day."""
+    slice has its flights, connections, end airports and wall-clock departure
+    and arrival. Two can remain that differ only in a middle flight's day."""
     out: list[int] = []
     for i, sol in enumerate(res.solutions):
         slices = sol.itinerary.slices if sol.itinerary else []
@@ -333,8 +352,8 @@ def listed_carriers(probe: SearchResult) -> set[str]:
 def unpriced(row: Row, probe: SearchResult) -> Verdict:
     """Why Matrix has no fare for the row's flights, from the same legs asked
     without the chain and with at most the row's most stops in a slice. A
-    carrier is absent only when that answer lists itineraries and names none
-    of its."""
+    carrier is unseen when that answer lists itineraries and names none of
+    its, which says nothing about Matrix's other trips."""
     stops = most_stops(row)
     within = f"with at most {stops:d} stop{'' if stops == 1 else 's'}"
     if not probe.solutions:
@@ -347,10 +366,12 @@ def unpriced(row: Row, probe: SearchResult) -> Verdict:
     carriers = list(dict.fromkeys(f.carrier for s in row.slices for f in s))
     missing = tuple(c for c in carriers if c not in listed)
     if missing:
+        read, total = len(probe.solutions), probe.solution_count
+        of = f" of {total:d}" if total > read else ""
         return Verdict(
-            "carrier-absent",
-            f"Matrix lists no itinerary {within} on {_join(missing)} for this route "
-            f"and day; it lists {_join(sorted(listed))}",
+            "carrier-unseen",
+            f"none of the {read:d}{of} trips Matrix returned {within} names "
+            f"{_join(missing)} for this route and day; they name {_join(sorted(listed))}",
             missing_carriers=missing,
         )
     return Verdict(
@@ -398,17 +419,19 @@ def fares(details: BookingDetails | None) -> list[dict[str, Any]]:
 
 
 def document(
-    n: int, row: Row, verdict: Verdict, fare_rules: dict[str, Any] | None
+    n: int, row: Row, verdict: Verdict, fare_rules: dict[str, Any] | None, passengers: int = 1
 ) -> dict[str, Any]:
     """The `verify` object of `--format json`. Matrix's side, the delta and the
     fares are there only on a match: a price for any other itinerary would be
-    read as this row's."""
+    read as this row's. Matrix's price is for the party of `passengers`, as
+    Google's is."""
     matched = verdict.outcome == "match" and verdict.solution is not None
     matrix: dict[str, Any] | None = None
     if matched and verdict.solution is not None:
         itn = verdict.details.itinerary if verdict.details else None
         matrix = {
-            "price": verdict.solution.price,
+            "price": party_price(verdict.solution, passengers),
+            "per_traveler": verdict.solution.price,
             "total": verdict.details.display_total if verdict.details else None,
             "slices": [_slice_document(s) for s in booked_flights(itn)] if itn else [],
         }
