@@ -50,6 +50,9 @@ flight search MIA PAR --dep 2026-06-15 \
 # it is Google-only, so a search only Matrix could answer is refused.
 flight search JFK LAX --dep 2026-10-20 --max-price 250
 flight search JFK LAX --dep 2026-10-20 --bags 1
+# Beside several cabins, each cabin is held to the cap and each price ends in
+# ✓ (includes the bags), ✗ (does not) or ? (Google does not say).
+flight search JFK LAX --dep 2026-10-20 --cabin economy,premium --bags 1 --max-price 900
 
 # Arrival windows and economy without basic fares are Google-only too. Every
 # row lands inside the window, to the minute; no row shows whether its fare is
