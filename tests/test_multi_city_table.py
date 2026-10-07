@@ -25,7 +25,9 @@ def _slice(origin: str, destination: str, flight: str) -> dict[str, Any]:
     }
 
 
-def _itinerary(*flights: str, price: str = "USD500.00") -> Itinerary:
+def _itinerary(
+    *flights: str, price: str = "USD500.00", carriers: tuple[str, ...] = ("UA",)
+) -> Itinerary:
     """A priced itinerary of one slice per flight (or `/`-joined connecting
     flights), each its own city pair."""
     cities = ["JFK", "LAX", "BOS", "SFO", "SEA", "ORD", "MIA"]
@@ -35,7 +37,7 @@ def _itinerary(*flights: str, price: str = "USD500.00") -> Itinerary:
             "ext": {"price": price},
             "itinerary": {
                 "slices": [_slice(o, d, f) for o, d, f in pairs],
-                "carriers": [{"code": "UA"}],
+                "carriers": [{"code": c} for c in carriers],
             },
         }
     )
@@ -108,17 +110,26 @@ def narrow(monkeypatch: pytest.MonkeyPatch) -> io.StringIO:
     return buf
 
 
-def _render(table: str, itineraries: list[Itinerary]) -> None:
+def _render(
+    table: str,
+    itineraries: list[Itinerary],
+    *,
+    cabins: tuple[Cabin, ...] = (Cabin.COACH,),
+    passengers: int = 1,
+) -> None:
     if table == "single-cabin":
-        cli._render_search(_result(*itineraries))  # pyright: ignore[reportPrivateUsage]
+        cli._render_search(  # pyright: ignore[reportPrivateUsage]
+            _result(*itineraries), passengers=passengers
+        )
         return
     rows: list[MultiCabinRow] = []
     for itn in itineraries:
         row = MultiCabinRow(itinerary=itn)
-        row.prices[Cabin.COACH] = itn.price or ""
+        for cabin in cabins:
+            row.prices[cabin] = itn.price or ""
         rows.append(row)
     cli._render_multi_cabin_search(  # pyright: ignore[reportPrivateUsage]
-        rows, cabins=(Cabin.COACH,), sort_by=Cabin.COACH
+        rows, cabins=cabins, sort_by=cabins[0]
     )
 
 
@@ -157,3 +168,37 @@ def test_a_narrow_six_slice_table_keeps_the_price_and_headers_whole(
     assert "…" not in text
     (row,) = _rows(text)
     assert "12345.00" in row
+
+
+@pytest.mark.parametrize(
+    ("table", "cabins", "passengers", "carriers"),
+    [
+        ("multi-cabin", tuple(Cabin), 1, ("UA",)),
+        (
+            "single-cabin",
+            (Cabin.COACH,),
+            3,
+            ("UA", "LH", "AC", "NH", "OS", "LX", "SN", "TP", "A3", "OU"),
+        ),
+    ],
+    ids=["four-cabin-prices", "party-price-and-ten-carriers"],
+)
+def test_a_narrow_six_slice_table_erases_no_cell_a_wide_one_prints(
+    monkeypatch: pytest.MonkeyPatch,
+    table: str,
+    cabins: tuple[Cabin, ...],
+    passengers: int,
+    carriers: tuple[str, ...],
+) -> None:
+    itineraries = [
+        _itinerary(*["UA100/UA200"] * 5, last, price="USD12345.00", carriers=carriers)
+        for last in ("UA300/UA1023", "UA300/UA1028")
+    ]
+    printed: dict[int, str] = {}
+    for width in (400, 80):
+        buf = io.StringIO()
+        monkeypatch.setattr(cli, "console", Console(file=buf, width=width, color_system=None))
+        _render(table, itineraries, cabins=cabins, passengers=passengers)
+        printed[width] = buf.getvalue()
+    assert "…" not in printed[80]
+    assert _rows(printed[80]) == _rows(printed[400])

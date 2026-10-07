@@ -3771,17 +3771,15 @@ def _slice_headers(count: int) -> list[str]:
 def _keep_cells_whole(table: Table, count: int) -> None:
     """Rich fits a table wider than the console by narrowing its columns and
     cutting with `…` what no longer fits, which on a table of many slices can
-    drop the flight number or price digits two rows differ by. There no cell is
-    cut: a slice cell folds onto more lines, and every other column keeps its
-    short value on one line, so only the slice columns narrow."""
+    drop the flight number or price digits two rows differ by. There every cell
+    folds onto more lines instead. No column is held to one line: Rich narrows
+    the widest columns first, so a price stays on one line until the slice
+    columns are as narrow as it is, while a held column takes the width the
+    slice columns need and can leave them none."""
     if count <= _ROUND_TRIP_LEGS:
         return
-    slice_headers = _slice_headers(count)
     for column in table.columns:
-        if column.header in slice_headers:
-            column.overflow = "fold"
-        else:
-            column.no_wrap = True
+        column.overflow = "fold"
 
 
 def _slice_cells(slcs: list[Slice], count: int) -> list[str]:
