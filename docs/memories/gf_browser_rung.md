@@ -266,6 +266,15 @@ answering an `OSError` with "unlocked" is the deliberate direction: erring the
 other way refuses the rung and tells the user to delete files the process just
 proved it cannot see.
 
+A driver that cannot START is a different refusal from a Chrome that cannot
+launch: `start()` raising means no launch was tried, so `_ensure_page` raises
+`_driver_failure`, whose remedy is `_INSTALL_HINT` (patchright's own install)
+rather than `_LAUNCH_REMEDY`. patchright also leaves that spawn error on the
+transport's `on_error_future`, which nothing awaits, so asyncio would print it
+as "Future exception was never retrieved" after the refusal;
+`_retrieve_driver_failure` reads it first. That walk is a fourth private
+patchright attribute, guarded like `_driver_process_id`.
+
 ## What it costs
 
 Measured 2026-09-02 on this Mac: cold launch plus one navigation, start to

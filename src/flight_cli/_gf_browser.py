@@ -158,6 +158,33 @@ def _launch_failure(profile: pathlib.Path, detail: str) -> GfBrowserUnavailableE
     )
 
 
+def _driver_failure(detail: str) -> GfBrowserUnavailableError:
+    """The refusal for a node driver that would not start.
+
+    That is patchright's own install, not Chrome: the launch has not been tried,
+    so `_LAUNCH_REMEDY` would send the user to a browser that is not the missing
+    piece."""
+    return GfBrowserUnavailableError(
+        f"patchright's driver failed to start for Google Flights: {detail}",
+        remedy=f"{_INSTALL_HINT} {BROWSER_DEFAULT_REMEDY}",
+    )
+
+
+def _retrieve_driver_failure(manager: Any) -> None:
+    """Mark the error a failed `start()` parked on the transport as read.
+
+    The transport sets the spawn error on `on_error_future` and raises it too;
+    nothing awaits the future, so asyncio prints it as "never retrieved" when
+    the manager is collected. A lookup, as `_driver_process_id` is: a patchright
+    build that moves it leaves the report printed and the refusal intact."""
+    try:
+        future = manager._connection._transport.on_error_future
+        if future.done() and not future.cancelled():
+            future.exception()
+    except AttributeError:
+        return
+
+
 def _playwright_factory() -> Callable[[], Any]:
     """patchright's `sync_playwright`, imported on demand.
 
@@ -579,6 +606,7 @@ class GfBrowserSession:
             raise GfBrowserUnavailableError(
                 f"Google Flights' browser profile directory {profile} could not be created: {e}"
             ) from e
+        manager: Any = None
         try:
             # Registered BEFORE the driver starts. `stop_driver` resolves the pid
             # when it needs it, so an interrupt after the driver is spawned inside
@@ -598,8 +626,14 @@ class GfBrowserSession:
             if self._headed:
                 _send_the_headless_token(self._context, self._page)
         # Any launch failure — missing Chrome, locked profile, driver crash — is one
-        # refusal to the caller, who cannot act on the distinctions patchright draws.
+        # typed refusal to the caller, who cannot act on the distinctions patchright
+        # draws. Only the wording differs, by whether `start()` returned.
         except Exception as e:
+            if self._playwright is None:
+                # `start()` raised, so no launch was tried: the driver is what failed.
+                _retrieve_driver_failure(manager)
+                self.close()
+                raise _driver_failure(_detail(e)) from e
             self.close()
             raise _launch_failure(profile, _detail(e)) from e
         # The launch block's broad `except Exception` above calls `close()`; an
