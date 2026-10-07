@@ -497,11 +497,11 @@ _ALONE = "--backend gflight answers a multi-city search with Google Flights' sep
             id="opted-out",
         ),
         pytest.param(
-            ("--routing", "UA+"),
+            ("--depart-times", "morning"),
             None,
-            f"{_ALONE}, and none is asked: --routing reaches no --slice, so the one-ways could "
-            "not be held to it. Drop --backend gflight.",
-            id="top-level-routing",
+            f"{_ALONE}, and none is asked: --depart-times reaches no --slice, so the one-ways "
+            "could not be held to it. Drop --backend gflight.",
+            id="top-level-times",
         ),
         pytest.param(
             (),
@@ -612,6 +612,16 @@ def test_backend_gflight_refuses_what_separate_tickets_cannot_answer(
     assert result.exit_code == 2, result.output
     assert said in _stderr(result)
     assert google.calls == [] and matrix.searches == []
+
+
+def test_backend_gflight_holds_each_one_way_to_the_top_level_routing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    google, matrix = _google(monkeypatch), _matrix(monkeypatch)
+    result = _run("--backend", "gflight", "--routing", "UA+")
+    assert result.exit_code == 0, result.output
+    assert [legs[0].route_language for legs, _, _ in google.calls] == ["UA+"] * 3
+    assert matrix.searches == []
 
 
 def _configured(sel: cli.ProviderSelection) -> bool:

@@ -848,6 +848,25 @@ _GF_MAX_PASSENGERS = 9
 _MULTI_CITY_ON_ONE_TICKET = "a multi-city itinerary on one ticket"
 
 
+def _slice_legs(
+    slice_specs: list[str], *, routing: str | None, extension: str | None
+) -> tuple[Leg, ...]:
+    """The legs of `--slice` specs, each taking the top-level codes as defaults.
+
+    A slice's own `r=`/`e=`, even an empty one, replaces the top-level value
+    whole, as `--routing-ret` does on a round trip."""
+    legs: list[Leg] = []
+    for spec in slice_specs:
+        leg = _parse_slice_spec(spec)
+        update: dict[str, str] = {}
+        if leg.route_language is None and routing is not None:
+            update["route_language"] = routing
+        if leg.extension is None and extension is not None:
+            update["extension"] = extension
+        legs.append(leg.model_copy(update=update))
+    return tuple(legs)
+
+
 def _google_reasons(
     *,
     backend: str,
@@ -4000,7 +4019,7 @@ def _open_jaw_blocker(
     """Why a multi-city trip's one-ways (`_one_way_per_slice`) are not asked of
     Google Flights, as a plain-text phrase, or None when they are: an opt-out,
     several `cabins` (a combination's tickets are priced in one), a top-level
-    option that applies to no slice, or a slice the search page can't serve as
+    time window, which applies to no slice, or a slice the search page can't serve as
     a one-way (`_google_reasons`, asked of the slice alone)."""
     if no_separate_tickets:
         return "--no-separate-tickets was given"
@@ -10568,7 +10587,8 @@ _ROUTING_RET_HELP = (
 _EXT_RET_HELP = "The return's extension codes; '' for none. Unset, a round trip copies --ext."
 _SLICE_HELP = (
     "Multi-city: 'ORIG-DEST:DATE[:r=ROUTING:e=EXT:f=FLEX:d=arrive]'. Repeat. f= takes "
-    "--flex's values; d=arrive makes DATE the day the slice lands."
+    "--flex's values; d=arrive makes DATE the day the slice lands. A top-level "
+    "--routing/--extension is the default for a slice with no r=/e=."
 )
 
 
@@ -11302,7 +11322,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         err.print("[red]--verify needs a Google Flights row, and this search runs on Matrix.[/]")
         raise typer.Exit(2)
     if slice_specs:
-        legs = tuple(_parse_slice_spec(s) for s in slice_specs)
+        legs = _slice_legs(slice_specs, routing=routing, extension=extension)
     elif origin and destination and out_day:
         origins, destinations = _require_airports(origin, destination)
         out_times = _parse_search_times(depart_times, "--depart-times")
@@ -11377,10 +11397,8 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
     # and reassigning it would throw away the narrowing this call just did.
     gf_mode = _resolve_gf_transport(gf_transport)
 
-    # Each applies to no slice, on Matrix as on Google.
+    # A time window applies to no slice, on Matrix as on Google.
     top_codes = (
-        ("--routing", routing),
-        ("--extension", extension),
         ("--depart-times", depart_times),
         ("--return-times", return_times),
     )
@@ -11768,7 +11786,7 @@ def fare(
     # is deprecated and prints so on every run, and a helper spanning a command
     # on its way out ties the survivor's leg building to the leaving one.
     if slice_specs:
-        legs = tuple(_parse_slice_spec(s) for s in slice_specs)
+        legs = _slice_legs(slice_specs, routing=routing, extension=extension)
     elif origin and destination and dep:
         origins, destinations = _require_airports(origin, destination)
         out_times = _parse_times(depart_times)
