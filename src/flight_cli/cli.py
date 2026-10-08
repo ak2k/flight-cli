@@ -79,6 +79,7 @@ from ._gf_errors import (
     GfConsentError,
     GfPageShapeError,
     GfPinIgnoredError,
+    GfSearchServerError,
     GfTfsUnsupportedError,
     GfThrottledError,
     GfTransportError,
@@ -125,7 +126,7 @@ from .links import (
     search_page_cap,
 )
 from .log import configure as configure_logging
-from .models import FareRulesResult, Itinerary
+from .models import CalendarDay, CalendarMonth, FareRulesResult, Itinerary
 from .pp import cli as _pp_cli
 from .pp.auth import load_tokens
 from .pp.cli import auth_app, run_pp_for_search
@@ -145,6 +146,7 @@ if TYPE_CHECKING:
         ItineraryKey,
         PriceHistory,
         PriceInsight,
+        RouteFacets,
         SeparateTickets,
     )
     from ._open_jaw import Combination
@@ -152,8 +154,8 @@ if TYPE_CHECKING:
         BookedItinerary,
         BookingDetails,
         BookingDetailsResult,
-        CalendarDay,
         CalendarResult,
+        DurationOption,
         FareRule,
         FareRules,
         LegInfo,
@@ -848,6 +850,25 @@ _GF_MAX_PASSENGERS = 9
 _MULTI_CITY_ON_ONE_TICKET = "a multi-city itinerary on one ticket"
 
 
+def _slice_legs(
+    slice_specs: list[str], *, routing: str | None, extension: str | None
+) -> tuple[Leg, ...]:
+    """The legs of `--slice` specs, each taking the top-level codes as defaults.
+
+    A slice's own `r=`/`e=`, even an empty one, replaces the top-level value
+    whole, as `--routing-ret` does on a round trip."""
+    legs: list[Leg] = []
+    for spec in slice_specs:
+        leg = _parse_slice_spec(spec)
+        update: dict[str, str] = {}
+        if leg.route_language is None and routing is not None:
+            update["route_language"] = routing
+        if leg.extension is None and extension is not None:
+            update["extension"] = extension
+        legs.append(leg.model_copy(update=update))
+    return tuple(legs)
+
+
 def _google_reasons(
     *,
     backend: str,
@@ -1533,14 +1554,11 @@ def _print_matrix_error(e: MatrixApiError) -> None:
 
     Matrix echoes the routing string back inside `message` ("Illegal COMMAND-LINE
     prefix: BA[/weird]AA"), so all three fields carry remote text onto a markup
-    console. Every Matrix reporter that FAILS a command reports through here — the
-    calendar sites, `_run` (which serves `detail` and the search path), the search
-    weave and the group-level multi-cabin arm — so one Matrix error reads the same
-    whichever command asked for it. The per-cabin fan-out and a calendar fan-out
-    that lost only some groups are the exceptions, and deliberate: each failure is
-    soft, one part of several, so it prints a yellow line naming that part and
-    wraps the fields itself rather than reporting a red failure for a command that
-    is still going to answer."""
+    console. Every arm that fails a command on a `MatrixApiError` reports through
+    here, so one Matrix error reads the same whichever command asked for it;
+    `tests/test_matrix_error_census.py` asserts it. An arm that is soft, one part
+    of several that still answers, prints a yellow line naming that part and wraps
+    the fields itself."""
     err.print(f"[red]Matrix returned an error ({_safe_text(e.kind)}):[/] {_safe_text(e.message)}")
     if e.request_id:
         err.print(f"[dim]request_id: {_safe_text(e.request_id)}[/]")
@@ -2267,8 +2285,14 @@ def _run_fast_browser_grid(
                 _envelope.record_calendar(
                     backend="gflight",
                     rows=[
-                        _envelope.ResultRow(
-                            price=cell["price"], currency=graph["currency"], row=cell
+                        _envelope.CalendarRow.model_validate(
+                            {
+                                "price": cell["price"],
+                                "currency": graph["currency"],
+                                "row": cell,
+                                "departure": cell["departure"],
+                                "return": cell.get("return"),
+                            }
                         )
                         for graph in graphs
                         for cell in cast("list[dict[str, Any]]", graph["grid"])
@@ -2603,7 +2627,7 @@ def _write_matrix_calendar(
     beside Matrix's body as `google_price_graph`: Matrix's own keys are
     camelCase, so it cannot meet one of them."""
     if _envelope.active():
-        _envelope.record_calendar(backend="matrix", rows=_calendar_envelope_rows(res))
+        _envelope.record_calendar(backend="matrix", rows=_calendar_envelope_rows(res, sd=sd, ed=ed))
     elif json_out:
         body = res.raw if graph is None else {**(res.raw or {}), "google_price_graph": graph}
         sys.stdout.write(json.dumps(body, indent=2))
@@ -3010,6 +3034,13 @@ def _say_unpriced(res: CalendarResult, search: CalendarSearch) -> None:
         err.print(f"[yellow]{_safe_text(line)}[/]", soft_wrap=True)
 
 
+def _cheapest_option(day: CalendarDay) -> DurationOption | None:
+    """The trip length a round-trip day's own price is: its cheapest, the shortest
+    of a tie. An option with an empty price prices no trip, so it is never that."""
+    priced = [o for o in day.options if o.min_price]
+    return min(priced, key=lambda o: (o.price_value, o.trip_length), default=None)
+
+
 def _matrix_low(
     res: CalendarResult,
     *,
@@ -3035,7 +3066,7 @@ def _matrix_low(
     if best is None:
         return None
     amount, when, price, day = best
-    option = min(day.options, key=lambda o: (o.price_value, o.trip_length), default=None)
+    option = _cheapest_option(day)
     if round_trip and option is None:
         return None
     back = when + timedelta(days=option.trip_length) if round_trip and option else None
@@ -3746,9 +3777,10 @@ def _one_way_boards(
     each one-way it would admit tickets costing up to twice the cap together.
     One Chrome serves every leg on the browser rung.
 
-    With `narrow`, a board missing a page, or rows its pages served that could
-    not be read, narrows the envelope run, the unread rows in a note naming the
-    leg: the rows it lacks may be the leg's cheapest tickets.
+    A board missing a page, or rows its pages served that could not be read,
+    narrows the envelope run, the unread rows in a note naming the leg: the rows
+    it lacks may be the leg's cheapest tickets. `narrow` is the open jaw's: its
+    unpriced tickets narrow whoever answers the search.
 
     A leg whose pages met a stop (`_search_stop`) ends the asking, as a page's
     does in `_PageAsk`: every later leg would meet the same wall, so each is
@@ -3782,9 +3814,9 @@ def _one_way_boards(
             rest = [later for _, later in legs[i + 1 :]]
             try:
                 board = _gflight_results((leg,), one_way, top_n, gf_mode, gf_headed)
-                if narrow and getattr(board, "partial", False):
+                if getattr(board, "partial", False):
                     _envelope.narrow()
-                if narrow and (unread := cast("int", getattr(board, "unread", 0))):
+                if unread := cast("int", getattr(board, "unread", 0)):
                     _envelope.narrow(
                         f"Google Flights {which} one-way: {unread:d} rows its pages served "
                         "could not be read and are left out of the answer"
@@ -4000,7 +4032,7 @@ def _open_jaw_blocker(
     """Why a multi-city trip's one-ways (`_one_way_per_slice`) are not asked of
     Google Flights, as a plain-text phrase, or None when they are: an opt-out,
     several `cabins` (a combination's tickets are priced in one), a top-level
-    option that applies to no slice, or a slice the search page can't serve as
+    time window, which applies to no slice, or a slice the search page can't serve as
     a one-way (`_google_reasons`, asked of the slice alone)."""
     if no_separate_tickets:
         return "--no-separate-tickets was given"
@@ -6124,7 +6156,8 @@ class _PageAsk:
     and every page after it is named as not asked. A pin loop that stopped
     after serving some pins answers with its rows, and the stop it carries ends
     the asking as a raised one does. So does one a page's Cheapest tab met: the
-    page answered, so no page line names it, and the tab's line says why. A
+    page answered, so no page line names it, and the tab's line says why, ahead of
+    an earlier page's refused tab, which gets a line of its own. A
     round trip asks every page's outbounds before any page's returns, so a page
     that answered its outbounds before the stop is named for the returns it did
     not get."""
@@ -6140,6 +6173,8 @@ class _PageAsk:
         self.answered: set[int] = set()
         self.stopped_at: int | None = None
         self.stop: GfBackendError | None = None
+        # A page's refused Cheapest tab that the stop's line is printed ahead of.
+        self.displaced: dict[int, GfBackendError] = {}
 
     def ask[T](self, i: int, call: Callable[[], T]) -> T | None:
         """`call`'s answer for page `i`, or None once its failure is recorded."""
@@ -6169,6 +6204,24 @@ class _PageAsk:
     def _stopped(self, i: int, e: GfBackendError) -> None:
         self.stopped_at = i
         self.stop = e
+
+    def tab_refusal(self, tabs: dict[int, GfBackendError]) -> GfBackendError | None:
+        """The refusal the one tab line says, of the pages' refused tabs `tabs`:
+        the first page's, but a stop no page line names goes ahead of it, and
+        the first page's refusal is then `displaced` onto a line of its own."""
+        if not tabs:
+            return None
+        first = min(tabs)
+        stop = self.stop
+        if (
+            stop is None
+            or tabs[first] is stop
+            or stop in self.failed.values()
+            or stop not in tabs.values()
+        ):
+            return tabs[first]
+        self.displaced[first] = tabs[first]
+        return stop
 
     def report(self) -> None:
         """One stderr line per page that did not answer, in page order."""
@@ -6207,6 +6260,15 @@ def _report_pages(asked: _PageAsk) -> None:
             f"[yellow]Google Flights page {i + 1:d} of {n:d} "
             f"({_safe_text(','.join(out.origins))}→{_safe_text(','.join(out.destinations))}) "
             f"is missing: {why}.[/]"
+        )
+    for i, e in sorted(asked.displaced.items()):
+        rung = _rung_reached(asked.gf_mode)
+        why = _gf_refusal(e, transport=rung, bags=asked.bags).note.removesuffix(".")
+        out = asked.pages[i][0]
+        err.print(
+            f"[dim]Google Flights page {i + 1:d} of {n:d} "
+            f"({_safe_text(','.join(out.origins))}→{_safe_text(','.join(out.destinations))}): "
+            f"itineraries on separate tickets not read: {why}.[/]"
         )
 
 
@@ -6327,18 +6389,20 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
     cross-check calls no flight absent from Google while any are.
     `stop_drops` sums the rows over the stop ceiling the same way, for the
     one line that counts them.
-    A page's price insight and history describe its own airports, so the
-    merged board's `insight` and `history` are None and each answered page's
-    ride in `page_insights` and `page_histories`, in page order. The board is
-    `partial` where a page is missing or the trip is round: its rows then stop
-    short of what one search would list.
+    A page's price insight, history and facets describe its own airports, so
+    the merged board's `insight`, `history` and `facets` are None and each
+    answered page's ride in `page_insights`, `page_histories` and
+    `page_facets`, in page order. The board is `partial` where a page is
+    missing or the trip is round: its rows then stop short of what one search
+    would list.
 
     `separate_tickets` goes to every page, so each reads its own Cheapest tab
     once, after its pins, a round-trip page that holds no pin included.
     `separate_hidden` sums the pages' counts and `separate_failed` is the first
-    page's, in page order. A page that holds no pin and was not reached because
-    the search stopped takes the stop as its reason: no page line names it,
-    since its outbounds answered."""
+    page's, in page order, unless a stop met by a later page's tab goes ahead
+    of it (`_PageAsk.tab_refusal`). A page that holds no pin and was not
+    reached because the search stopped takes the stop as its reason: no page
+    line names it, since its outbounds answered."""
     from ._gf_postfilter import StopDrops  # noqa: PLC0415 — GF-only
     from ._gflight_ids import (  # noqa: PLC0415 — fli, ~95 ms
         Board,
@@ -6352,7 +6416,7 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
     dropped = pinned = unread = hidden = 0
     tabs_failed: dict[int, GfBackendError] = {}
     stop_drops = StopDrops()
-    extras: dict[int, tuple[PriceInsight | None, PriceHistory | None]] = {}
+    extras: dict[int, tuple[PriceInsight | None, PriceHistory | None, RouteFacets | None]] = {}
     unboarded_caps: list[dict[str, float]] = []
     with _browser_scope(gf_mode):
         if len(pages[0]) < _ROUND_TRIP_LEGS:
@@ -6371,7 +6435,7 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
                 )
                 if board is not None:
                     boards.append(board)
-                    extras[i] = (board.insight, board.history)
+                    extras[i] = (board.insight, board.history, board.facets)
                     dropped += board.dropped
                     unread += board.unread
                     hidden += board.separate_hidden
@@ -6422,7 +6486,7 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
                         # asked: their insight, past its filter, is still this
                         # page's.
                         insight = _kept_insight(ob.board.insight, kept[i], left)
-                        extras[i] = (insight, ob.board.history)
+                        extras[i] = (insight, ob.board.history, ob.board.facets)
                     dropped += left
                     unread += ob.board.unread
                     _add_stop_drops(stop_drops, ob.stop_drops)
@@ -6431,7 +6495,7 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
                     unboarded_caps.append(ob.board.capped_at)
                 else:
                     boards.append(board)
-                    extras[i] = (board.insight, board.history)
+                    extras[i] = (board.insight, board.history, board.facets)
                     dropped += board.dropped
                     pinned += board.pinned
                     unread += board.unread
@@ -6442,6 +6506,7 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
     # Google served the rows of a page none of whose rows parsed, so a flight
     # on one of them is on its board though the page is missing.
     unread += sum(e.unread for e in asked.failed.values() if isinstance(e, _PageUnreadError))
+    separate_failed = asked.tab_refusal(tabs_failed)
     asked.report()
     rows = _merged_boards(boards)
     asked.raise_if_empty(rows)
@@ -6458,15 +6523,16 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
         partial=bool(asked.failed or asked.unasked) or len(pages[0]) >= _ROUND_TRIP_LEGS,
         unread=unread,
         separate_hidden=hidden,
-        separate_failed=tabs_failed[min(tabs_failed)] if tabs_failed else None,
+        separate_failed=separate_failed,
         capped_at=lowest_caps(*(b.capped_at for b in boards), *unboarded_caps),
         # For a caller that asks Google more after this board (`_one_way_boards`).
         stopped=asked.stop,
     )
     merged.stop_drops = stop_drops
     answered = [extras[i] for i in sorted(extras)]
-    merged.page_insights = tuple(ins for ins, _ in answered if ins is not None)
-    merged.page_histories = tuple(h for _, h in answered if h is not None)
+    merged.page_insights = tuple(ins for ins, _, _ in answered if ins is not None)
+    merged.page_histories = tuple(h for _, h, _ in answered if h is not None)
+    merged.page_facets = tuple(f for _, _, f in answered if f is not None)
     return merged
 
 
@@ -6600,11 +6666,11 @@ def _gflight_json_document(results: list[Any], bags: Bags | None = None) -> list
 def _record_google_cabin(
     cabin: Cabin, results: list[Any], served: Any, *, bags: Bags | None = None
 ) -> None:
-    """Hand one cabin's Google rows to the envelope run, with the insight and
-    history of each page that answered `served`, the board as the search
-    returned it. Each row is the object `_gflight_json_document` prints for it,
-    priced by its last member: a round trip's fare is the one every surface
-    prints for the combination.
+    """Hand one cabin's Google rows to the envelope run, with the insight,
+    history and facets of each page that answered `served`, the board as the
+    search returned it. Each row is the object `_gflight_json_document` prints
+    for it, priced by its last member: a round trip's fare is the one every
+    surface prints for the combination.
 
     `served.unread` is the board's: the rows its pages served that the parser
     could not read, so the answer is narrower by them. Counted on the board and
@@ -6636,6 +6702,10 @@ def _record_google_cabin(
     histories: Sequence[PriceHistory] = (
         (history,) if history is not None else getattr(served, "page_histories", ())
     )
+    own: RouteFacets | None = getattr(served, "facets", None)
+    facets: Sequence[RouteFacets] = (
+        (own,) if own is not None else getattr(served, "page_facets", ())
+    )
     _envelope.record_search(
         backend="gflight",
         cabin=cabin.value,
@@ -6658,6 +6728,28 @@ def _record_google_cabin(
                 points=[_envelope.PricePoint(date=d, price=v) for d, v in h.points],
             )
             for h in histories
+        ],
+        facets=[
+            _envelope.RouteFacets(
+                cabin=cabin.value,
+                origins=list(f.origins),
+                destinations=list(f.destinations),
+                currency=f.currency,
+                price=_envelope.PriceRange(low=f.price_low, high=f.price_high),
+                duration_minutes=_envelope.MinuteRange(low=f.duration_low, high=f.duration_high),
+                layover_minutes=_envelope.MinuteRange(low=f.layover_low, high=f.layover_high),
+                airlines=[_envelope.CodeName(code=c, name=n) for c, n in f.airlines],
+                # Spelled as `--extension 'ALLIANCE …'` takes it, the inverse of
+                # how the page is asked for one, so a code passes straight back.
+                alliances=[
+                    _envelope.CodeName(code=c.lower().replace("_", "-"), name=n)
+                    for c, n in f.alliances
+                ],
+                connecting_airports=[
+                    _envelope.ConnectingAirport(code=c, city=n) for c, n in f.connections
+                ],
+            )
+            for f in facets
         ],
     )
 
@@ -6696,11 +6788,18 @@ def _matrix_envelope_rows(res: SearchResult, passengers: int) -> list[_envelope.
     return rows
 
 
-def _calendar_envelope_rows(res: CalendarResult) -> list[_envelope.ResultRow]:
+def _calendar_envelope_rows(
+    res: CalendarResult, *, sd: date, ed: date
+) -> list[_envelope.CalendarRow]:
     """Each priced day of a Matrix calendar as envelope rows, the day object as
-    the body `--format json` prints holds it. A grid the table prints as empty
-    has none: a day priced under no solutions is not a fare the table shows,
-    and the unpriced-dates note names its date."""
+    the body `--format json` prints it, with the dates it prices beside it. A
+    grid the table prints as empty has none: a day priced under no solutions is
+    not a fare the table shows, and the unpriced-dates note names its date.
+
+    The departure is placed as `_window_days` places it, by the month its parsed
+    model reads and the body's `year`, and is null where no one date of the window is. The
+    return is `_matrix_low`'s: that departure plus the day's cheapest trip
+    length, null on a one-way and on a day naming no length."""
     if is_empty_calendar(res):
         return []
 
@@ -6708,8 +6807,11 @@ def _calendar_envelope_rows(res: CalendarResult) -> list[_envelope.ResultRow]:
         found: Any = cast("dict[str, Any]", holder).get(key) if isinstance(holder, dict) else None
         return cast("list[Any]", found) if isinstance(found, list) else []
 
-    rows: list[_envelope.ResultRow] = []
+    rows: list[_envelope.CalendarRow] = []
     for month in items((res.raw or {}).get("calendar"), "months"):
+        body = cast("dict[str, Any]", month) if isinstance(month, dict) else {}
+        number = CalendarMonth.model_validate(body).month
+        year: Any = body.get("year")
         for week in items(month, "weeks"):
             for day in items(week, "days"):
                 if not isinstance(day, dict):
@@ -6717,9 +6819,25 @@ def _calendar_envelope_rows(res: CalendarResult) -> list[_envelope.ResultRow]:
                 fields = cast("dict[str, Any]", day)
                 price: Any = fields.get("minPrice")
                 if isinstance(price, str) and price and not fields.get("disabled"):
+                    parsed = CalendarDay.model_validate(fields)
+                    when = _window_date(
+                        number,
+                        parsed.date,
+                        sd,
+                        ed,
+                        year=year if isinstance(year, int) else None,
+                    )
+                    option = _cheapest_option(parsed)
+                    back = when + timedelta(days=option.trip_length) if when and option else None
                     rows.append(
-                        _envelope.ResultRow(
-                            price=parse_price(price), currency=price_currency(price), row=fields
+                        _envelope.CalendarRow.model_validate(
+                            {
+                                "price": parse_price(price),
+                                "currency": price_currency(price),
+                                "row": fields,
+                                "departure": when,
+                                "return": back,
+                            }
                         )
                     )
     return rows
@@ -6951,7 +7069,7 @@ def _rung_reached(gf_mode: GfTransportMode) -> GfTransportMode:
     return TRANSPORT_BROWSER if escalated() else gf_mode
 
 
-def _gf_refusal(  # noqa: PLR0911 — one return per refusal type; see the docstring
+def _gf_refusal(  # noqa: PLR0911, PLR0912 — one return per refusal type; see the docstring
     e: GfBackendError,
     *,
     transport: GfTransportMode = TRANSPORT_HTTP,
@@ -7048,6 +7166,15 @@ def _gf_refusal(  # noqa: PLR0911 — one return per refusal type; see the docst
                 f"[yellow]Google Flights returned HTTP {status}.[/] {remedy_opening}, "
                 "or fetch the page the other way with [bold]--gf-transport http[/] or "
                 "[bold]browser[/].",
+            )
+        case GfSearchServerError():
+            # Through `_safe_text` for the HTTP arm's reason: nothing holds a
+            # caller to the `int` the annotation says.
+            code = _safe_text(e.code)
+            return _GfRefusal(
+                f"Google Flights answered with a server error (status {code})",
+                f"[yellow]Google Flights answered with a server error (status {code}).[/] "
+                f"Retry later, or {remedy}.",
             )
         case GfPageShapeError():
             return _GfRefusal(
@@ -9190,10 +9317,12 @@ def _run_gflight_multi(
     native filters and the Tier-2 post-filter cannot drift apart. They also
     share ONE throttle ladder: Google's wall is per-IP, so a cabin per thread
     laddering against it separately spends the cabin count times the requests to
-    be told the same thing. On a round trip (`_CabinSearches`, led by `sort_by`,
-    default the first cabin) every cabin's outbound page, then every cabin's
-    pins, are two fan-outs inside that one ladder and one event loop."""
-    from ._gflight_ids import shared_throttle_ladder  # noqa: PLC0415
+    be told the same thing. They are one search, too, so they share one budget
+    of pauses for Google's server errors (`search_escalation`). On a round trip
+    (`_CabinSearches`, led by `sort_by`, default the first cabin) every cabin's
+    outbound page, then every cabin's pins, are two fan-outs inside that one
+    ladder and one event loop."""
+    from ._gflight_ids import search_escalation, shared_throttle_ladder  # noqa: PLC0415
 
     if gf_mode == TRANSPORT_BROWSER:
         served = _gflight_cabins_in_series(
@@ -9253,7 +9382,7 @@ def _run_gflight_multi(
             {cab: plan.led(cab, pins, pages[cab]) for cab in cabins if cab in pages}, results
         )
 
-    with shared_throttle_ladder():
+    with shared_throttle_ladder(), search_escalation():
         try:
             anyio.run(go)
         except (typer.Exit, typer.Abort):
@@ -10575,7 +10704,7 @@ _FORMAT_OPT = typer.Option(
     autocompletion=_completer(_VALID_FORMATS),
     rich_help_panel=_GROUP_OUTPUT,
 )
-# `search` and `calendar` also write the envelope (`_envelope`): the same thirteen
+# `search` and `calendar` also write the envelope (`_envelope`): the same fifteen
 # keys whatever path answered, for a caller that cannot know the path ahead.
 _ENVELOPE_FORMATS = (*_VALID_FORMATS, "envelope")
 _ENVELOPE_FORMAT_CHOICES = "/".join(_ENVELOPE_FORMATS)
@@ -10584,8 +10713,9 @@ _ENVELOPE_FORMAT_OPT = typer.Option(
     "--format",
     help=f"Output format: one of {_ENVELOPE_FORMAT_CHOICES}. envelope is one versioned "
     "JSON document on every path: version, command, backend, currency, complete, "
-    "notes, results, awards, insight, price_history, verify, cross_check, split_ticket. "
-    "complete is false when the answer is narrower than asked, and notes carries what stderr said.",
+    "notes, results, awards, insight, price_history, facets, price_graph, verify, "
+    "cross_check, split_ticket. complete is false when the answer is narrower than "
+    "asked, and notes carries what stderr said.",
     autocompletion=_completer(_ENVELOPE_FORMATS),
     rich_help_panel=_GROUP_OUTPUT,
 )
@@ -10638,7 +10768,8 @@ _ROUTING_RET_HELP = (
 _EXT_RET_HELP = "The return's extension codes; '' for none. Unset, a round trip copies --ext."
 _SLICE_HELP = (
     "Multi-city: 'ORIG-DEST:DATE[:r=ROUTING:e=EXT:f=FLEX:d=arrive]'. Repeat. f= takes "
-    "--flex's values; d=arrive makes DATE the day the slice lands."
+    "--flex's values; d=arrive makes DATE the day the slice lands. A top-level "
+    "--routing/--extension is the default for a slice with no r=/e=."
 )
 
 
@@ -11339,8 +11470,10 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
     )
     resolved = _pick_backend(
         backend=backend,
-        routing=routing,
-        extension=extension,
+        # Beside --slice a top-level code is only the default of a slice with
+        # no r=/e=, and `_open_jaw_blocker` judges each slice by its own codes.
+        routing=None if slice_specs else routing,
+        extension=None if slice_specs else extension,
         slice_specs=slice_specs,
         depart_times=depart_times,
         return_times=return_times,
@@ -11373,7 +11506,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         err.print("[red]--verify needs a Google Flights row, and this search runs on Matrix.[/]")
         raise typer.Exit(2)
     if slice_specs:
-        legs = tuple(_parse_slice_spec(s) for s in slice_specs)
+        legs = _slice_legs(slice_specs, routing=routing, extension=extension)
     elif origin and destination and out_day:
         origins, destinations = _require_airports(origin, destination)
         out_times = _parse_search_times(depart_times, "--depart-times")
@@ -11448,10 +11581,8 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
     # and reassigning it would throw away the narrowing this call just did.
     gf_mode = _resolve_gf_transport(gf_transport)
 
-    # Each applies to no slice, on Matrix as on Google.
+    # A time window applies to no slice, on Matrix as on Google.
     top_codes = (
-        ("--routing", routing),
-        ("--extension", extension),
         ("--depart-times", depart_times),
         ("--return-times", return_times),
     )
@@ -11839,7 +11970,7 @@ def fare(
     # is deprecated and prints so on every run, and a helper spanning a command
     # on its way out ties the survivor's leg building to the leaving one.
     if slice_specs:
-        legs = tuple(_parse_slice_spec(s) for s in slice_specs)
+        legs = _slice_legs(slice_specs, routing=routing, extension=extension)
     elif origin and destination and dep:
         origins, destinations = _require_airports(origin, destination)
         out_times = _parse_times(depart_times)
@@ -12284,6 +12415,24 @@ def calendar(
                 "airports a leg), whose every filter its search page can carry; "
                 f"this is {_safe_text(blocker)}. Run without --fast for Matrix.[/]"
             )
+            # The http grid prices one trip length; the browser's graph prices one per
+            # length. Said only when that gate admits this very search, so the remedy
+            # is never another refusal.
+            if (
+                not one_way
+                and dmin != dmax
+                and _grid_branch_blocker(
+                    search,
+                    json_out=json_out,
+                    one_way=one_way,
+                    origins=origins,
+                    dests=dests,
+                    fast=True,
+                    graph=True,
+                )
+                is None
+            ):
+                err.print("[yellow]For the range on Google, run with --gf-transport browser.[/]")
         else:
             err.print(
                 "[yellow]--fast applies only to calendars one-way, of one trip length, or of "
@@ -12945,7 +13094,10 @@ def gflight(
             pick=None,
         )
         return
-    _run_gflight_path(legs=legs, opts=opts, top_n=top_n, json_out=json_out)
+    from ._gflight_ids import search_escalation  # noqa: PLC0415 — fli, ~95 ms
+
+    with search_escalation():
+        _run_gflight_path(legs=legs, opts=opts, top_n=top_n, json_out=json_out)
 
 
 @app.command()

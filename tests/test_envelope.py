@@ -74,6 +74,7 @@ _KEYS = [
     "awards",
     "insight",
     "price_history",
+    "facets",
     "price_graph",
     "verify",
     "cross_check",
@@ -190,6 +191,7 @@ def _envelope_of(r: Result, *, command: str = "search", code: int = 0) -> dict[s
     assert env["awards"] is None or isinstance(env["awards"], list)
     assert isinstance(env["insight"], list)
     assert isinstance(env["price_history"], list)
+    assert isinstance(env["facets"], list)
     assert isinstance(env["price_graph"], list)
     assert env["verify"] is None or isinstance(env["verify"], dict)
     assert env["cross_check"] is None or isinstance(env["cross_check"], dict)
@@ -1182,6 +1184,13 @@ def test_a_graph_cell_is_published_and_written_with_a_return_key() -> None:
     doc = json.loads(_envelope._document(rec, code=0, stderr="", stray=""))
     assert doc["price_graph"] == [{"trip_length": 7, "currency": "USD", "cells": [cell]}]
     _envelope.ENVELOPE.validate_python(doc)
+
+
+def test_a_document_for_a_command_it_does_not_know_is_refused() -> None:
+    """A command outside `Command` is not written as a calendar's document."""
+    rec = _envelope._Recorder(cast("_envelope.Command", "detail"))
+    with pytest.raises(AssertionError):
+        _envelope._document(rec, code=0, stderr="", stray="")
 
 
 @pytest.mark.parametrize(
