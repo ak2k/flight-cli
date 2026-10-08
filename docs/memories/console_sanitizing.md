@@ -87,6 +87,16 @@ quotes nor truncates, unlike `_quote`: a remote error is a sentence someone has
 to read whole, and the half that explains the failure is as often at the end as
 at the start.
 
+The escape is `_console_text._escape`, not bare `escape`, for a value that ends
+in backslashes. `escape` doubles a lone trailing one and leaves a longer run
+alone, and the parser collapses a backslash pair only in front of a tag-shaped
+`[`: so a seller named `Back\` ended a table cell as `Back\\`, and a run of
+three then escaped the caller's closing `[/]`. `_escape` doubles every backslash
+of the trailing run and appends an empty `[bold][/bold]`, which the parser
+consumes and prints nothing, so the run reads as typed at the end of a string,
+before a space, and before a closing tag. `_quote` needs none of this: `repr`
+ends in a quote character.
+
 The argument parsers go through one `_quote` helper: `_elide` cuts a value past
 60 characters, then `repr`, then `escape`. The message exists to show WHICH value
 was rejected, and a 4301-digit `--duration` echoed whole buries that under its
