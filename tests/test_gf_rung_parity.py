@@ -539,8 +539,8 @@ def test_a_board_under_the_cap_prints_no_line(
 def test_a_round_trip_names_its_outbound_boards_cap(
     gf_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Red at the base. Each return page lists one pin's returns, so the
-    outbound page's cap is the one that says which trips may be missing."""
+    """Red at the base. The outbound page stopped at the cap, so a trip priced
+    above its highest fare may be missing; the return pages are under it."""
     gf_session(
         _answered("ds1_nyc_lon_token"),
         _answered("ds1_nyc_lon_curated", origin="LHR", destination="JFK"),
