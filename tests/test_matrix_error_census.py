@@ -17,14 +17,10 @@ import pathlib
 import re
 import sys
 from collections import Counter
-from typing import TYPE_CHECKING
 
 import pytest
 
 from flight_cli import cli as cli_mod
-
-if TYPE_CHECKING:
-    from collections.abc import Iterable
 
 _REPORTER = "_print_matrix_error"
 
@@ -47,15 +43,20 @@ def _names_error(node: ast.AST) -> bool:
     return any(isinstance(n, ast.Name) and n.id == "MatrixApiError" for n in ast.walk(node))
 
 
-def _calls_reporter(nodes: Iterable[ast.AST]) -> bool:
-    """Whether running `nodes` calls the reporter. A def or a lambda among them
-    runs only if something calls it, so neither is looked into."""
-    return any(
-        (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == _REPORTER)
-        or _calls_reporter(ast.iter_child_nodes(n))
-        for n in nodes
-        if not isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda)
-    )
+def _calls_reporter(body: list[ast.stmt]) -> bool:
+    """Whether the arm runs the reporter whenever it runs: a statement of its
+    own body calls it before one that leaves. A call inside a def, a lambda, a
+    generator, a branch, a loop or a nested arm may not run when the arm does,
+    and a call that exits, such as `sys.exit`, is not seen as leaving."""
+    for stmt in body:
+        match stmt:
+            case ast.Expr(value=ast.Call(func=ast.Name(id=name))) if name == _REPORTER:
+                return True
+            case ast.Raise() | ast.Return() | ast.Break() | ast.Continue():
+                return False
+            case _:
+                pass
+    return False
 
 
 def _tests_error(test: ast.expr) -> bool:
@@ -186,17 +187,22 @@ def test_the_census_fails_on_an_isinstance_arm_under_and_or(
 
 
 @pytest.mark.parametrize(
-    "deferred",
-    ["def later():\n            _print_matrix_error(e)", "later = lambda: _print_matrix_error(e)"],
-    ids=["def", "lambda"],
+    "unrun",
+    [
+        "def later():\n            _print_matrix_error(e)",
+        "later = lambda: _print_matrix_error(e)",
+        "later = (_print_matrix_error(item) for item in (e,))",
+        "raise typer.Exit(1)\n        _print_matrix_error(e)",
+    ],
+    ids=["def", "lambda", "generator", "after-exit"],
 )
-def test_the_census_fails_on_a_reporter_call_the_arm_only_defines(
-    monkeypatch: pytest.MonkeyPatch, deferred: str
+def test_the_census_fails_on_a_reporter_call_the_arm_may_not_run(
+    monkeypatch: pytest.MonkeyPatch, unrun: str
 ) -> None:
     _census_with(
         monkeypatch,
         "def _new_arm(f):\n    try:\n        pass\n    except MatrixApiError as e:\n"
-        f"        {deferred}\n        raise typer.Exit(1)",
+        f"        {unrun}\n        raise typer.Exit(1)",
     )
     with pytest.raises(AssertionError) as failed:
         test_every_arm_that_names_a_matrix_error_reports_it_through_the_reporter()
