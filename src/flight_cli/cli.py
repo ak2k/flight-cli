@@ -12243,7 +12243,7 @@ def calendar(
         "Exits 1 rather than falling back, so a no-grid result is never mistaken for "
         "a fast one. Without it, a table calendar prints the same graph after "
         "Matrix's, one column per trip length of a range, and a JSON or envelope "
-        "calendar carries it when [bold]--gf-transport browser[/] is given.",
+        "calendar carries it when [bold]--gf-transport browser[/] or [bold]auto[/] is given.",
         rich_help_panel=_GROUP_BACKEND,
     ),
     gf_transport: str | None = typer.Option(
@@ -12525,7 +12525,8 @@ def _calendar_without_fast(
         elif json_out and not transport_named:
             fmt = "envelope" if _envelope.active() else "json"
             not_asked = (
-                f"--format {fmt} reads it only under --gf-transport browser, which opens Chrome"
+                f"--format {fmt} reads it only when --gf-transport names browser or auto, "
+                "which opens Chrome"
             )
         if not_asked is not None:
             # Beside a machine format it is one line, as the unpriced lines are, so

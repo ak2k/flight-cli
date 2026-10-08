@@ -265,8 +265,8 @@ def test_json_with_no_transport_named_is_matrixs_document_and_names_the_one_that
     assert result.exit_code == base.exit_code == 0
     assert result.stdout == base.stdout
     not_read = (
-        "Google Flights price graph not asked: --format json reads it only under "
-        "--gf-transport browser, which opens Chrome."
+        "Google Flights price graph not asked: --format json reads it only when "
+        "--gf-transport names browser or auto, which opens Chrome."
     )
     assert _flat(result.stderr) == _flat(f"{not_read} {base.stderr}")
     assert calls == {"calendar": 2, "weave": 0}

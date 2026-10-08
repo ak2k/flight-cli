@@ -498,7 +498,10 @@ def test_an_envelope_with_no_transport_named_opens_no_chrome(
     result = _run(*_ROUTE, "--format", "envelope")
     assert result.exit_code == 0, result.output
     env = _envelope_of(result)
-    why = "--format envelope reads it only under --gf-transport browser, which opens Chrome"
+    why = (
+        "--format envelope reads it only when --gf-transport names browser or auto, "
+        "which opens Chrome"
+    )
     assert env["price_graph"] == []
     assert _notes(env, "price_graph") == [f"price_graph: not asked: {why}"]
     assert f"Google Flights price graph not asked: {why}." in env["notes"]
@@ -529,6 +532,6 @@ def test_a_json_calendar_says_on_one_line_why_it_read_no_graph(
     )
     assert result.exit_code == 0, result.output
     assert result.stderr == (
-        "Google Flights price graph not asked: --format json reads it only under "
-        "--gf-transport browser, which opens Chrome.\n"
+        "Google Flights price graph not asked: --format json reads it only when "
+        "--gf-transport names browser or auto, which opens Chrome.\n"
     )
