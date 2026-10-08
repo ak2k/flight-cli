@@ -1042,7 +1042,7 @@ def test_a_pick_under_awards_only_leaves_the_json_document_parseable(
     assert json.loads(captured.out) == {"legs": [], "matches": []}, captured.out
     assert "--pick 6 names a row in the results table" in captured.err, captured.err
     assert "out of range" not in captured.err, captured.err
-    assert "the links below" not in captured.err, captured.err
+    assert "the links below" not in " ".join(captured.err.split()), captured.err
 
 
 def test_an_out_of_range_pick_under_json_reports_the_range_and_promises_nothing(
