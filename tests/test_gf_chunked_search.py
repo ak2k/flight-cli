@@ -1080,8 +1080,9 @@ def test_the_cross_check_calls_no_return_carrier_absent_from_a_paged_round_trip(
 
 @dataclass
 class _Priced(_Google):
-    """`_Google` whose every outbound page also carries a price insight and a
-    daily history of its own, numbered by the order the pages were asked in."""
+    """`_Google` whose every outbound page also carries a price insight, a
+    daily history and route facets of its own, numbered by the order the pages
+    were asked in."""
 
     @override
     def __call__(
@@ -1097,6 +1098,18 @@ class _Priced(_Google):
                 cheapest=100.0 + n, typical_low=200.0 + n, typical_high=300.0 + n, currency="USD"
             ),
             history=gfid.PriceHistory(points=((_DEP, 400.0 + n),), currency="USD"),
+            facets=gfid.RouteFacets(
+                currency="USD",
+                price_low=500.0 + n,
+                price_high=900.0 + n,
+                duration_low=420,
+                duration_high=900,
+                layover_low=45,
+                layover_high=600,
+                alliances=(),
+                airlines=(("BA", "British Airways"),),
+                connections=(("DUB", "Dublin"),),
+            ),
             unread=board.unread,
         )
 
@@ -1112,7 +1125,7 @@ _EX6_PAGE_2: Page = (_EX6_FROM[:4], _EX6_TO[7:])
         pytest.param(None, True, [1, 2, 3, 4], False, id="round-trip"),
     ],
 )
-def test_the_envelope_carries_every_pages_rows_insight_and_history(
+def test_the_envelope_carries_every_pages_rows_insight_history_and_facets(
     monkeypatch: pytest.MonkeyPatch,
     refuse: Page | None,
     ret: bool,
@@ -1120,9 +1133,10 @@ def test_the_envelope_carries_every_pages_rows_insight_and_history(
     complete: bool,
 ) -> None:
     """A leg asked as several pages reaches the envelope as one page does: the
-    merged rows in `results`, and each page's insight and history, in page
-    order. A page that did not answer narrows the answer, and so does a round
-    trip, whose returns fly back between their own page's airports."""
+    merged rows in `results`, and each page's insight, history and facets, in
+    page order, the facets labeled with their page's airports. A page that did
+    not answer narrows the answer, and so does a round trip, whose returns fly
+    back between their own page's airports."""
 
     def _refused(page: Page) -> Exception | None:
         return GfUpstreamStatusError(503) if page == refuse else None
@@ -1133,20 +1147,16 @@ def test_the_envelope_carries_every_pages_rows_insight_and_history(
             monkeypatch, _Priced(_EX6_PAIRS, refuse=_refused), *args, "--format", "json", ret=ret
         ).stdout
     )
-    env = _envelope_of(
-        _search(
-            monkeypatch,
-            _Priced(_EX6_PAIRS, refuse=_refused),
-            *args,
-            "--format",
-            "envelope",
-            ret=ret,
-        )
-    )
+    google = _Priced(_EX6_PAIRS, refuse=_refused)
+    env = _envelope_of(_search(monkeypatch, google, *args, "--format", "envelope", ret=ret))
     assert (env["backend"], env["complete"]) == ("gflight", complete)
     assert [r["row"] for r in _rows(env)] == doc
     assert [i["typical_low"] for i in env["insight"]] == [200.0 + n for n in pages]
     assert [h["points"][0]["price"] for h in env["price_history"]] == [400.0 + n for n in pages]
+    asked = google.pages()
+    assert [(f["price"]["low"], f["origins"], f["destinations"]) for f in env["facets"]] == [
+        (500.0 + n, list(asked[n - 1][0]), list(asked[n - 1][1])) for n in pages
+    ]
 
 
 # ───────────────────────────── separate tickets ─────────────────────────────

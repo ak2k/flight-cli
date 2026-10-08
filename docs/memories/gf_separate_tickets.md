@@ -166,9 +166,11 @@ Matrix's own body and asks Google only with `--split`, saying so on stderr. The
 ticket": Google sells the trip only as the tickets below it.
 
 Google is not asked when a slice's own codes, flex or arrival date are ones
-the page can't serve as a one-way (`_google_reasons` on the slice alone), when
-a top-level `--routing`, `--extension`, `--depart-times` or `--return-times` is
-set (none reaches a `--slice`, on Matrix either), when `--cabin` names several
+the page can't serve as a one-way (`_google_reasons` on the slice alone; a
+top-level `--routing`/`--extension` is the default code of every slice with no
+`r=`/`e=` of its own, `cli._slice_legs`, so it is judged with each slice and
+each one-way is asked with it), when a top-level `--depart-times` or
+`--return-times` is set (neither reaches a `--slice`, on Matrix either), when `--cabin` names several
 cabins (each ticket is priced in one), or under `--no-separate-tickets`
 (`cli._open_jaw_blocker`). The envelope records that reason as `{error}`, which
 narrows `complete` only under `--split`. A slice board Google served no row at
