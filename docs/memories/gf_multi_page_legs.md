@@ -69,6 +69,9 @@ no page line names it, and the separate-ticket line says why. A
 round trip asks every page's outbounds before any page's returns, so a page
 whose outbounds answered before the stop is named `its returns were not asked
 after page N stopped the search`, and no GET follows a throttle.
+A page whose pin loop stopped after serving some pins keeps its rows on the
+board, so its page line says `is short: <reason>` where a refused page's says
+`is missing`.
 When nothing merged and a page failed, the first failed page's error is raised
 and takes the route a one-page refusal takes ("A Google query that FAILS",
 above); with no failed page, a stop that left a page unasked, such as one a
@@ -94,6 +97,9 @@ page's marked rows are filtered and counted into `dropped` as on one page.
 `separate_failed` is the first page's, in page order, for the one line that
 says the Cheapest tab went unread; a page holding no pin that the search did
 not reach after a stop takes the stop's error, since no page line names it.
+A tab that stopped the search, when no page line names that stop, is
+`separate_failed` ahead of an earlier page's refusal, which is then said on a
+line of its own (`_PageAsk.displaced`).
 Under `--gf-transport browser` one Chrome serves every page
 (`cli._browser_scope`).
 The pin loop and "A partial round trip is a success, deliberately" are in
@@ -115,7 +121,8 @@ A lost length is also a stderr line, `Google Flights price graph not shown:
 6-night trips: <reason>`. No length priced names every length that way, then the
 no-grid line, and exits 1.
 `--gf-transport http` still refuses a range, and `-d 7` and a one-way are
-unchanged.
+unchanged. That refusal ends with `For the range on Google, run with
+--gf-transport browser.` when the browser's gate would admit the same search.
 
 **`search --split` prices two one-way tickets beside a round trip.** On a Google
 Flights round trip, after the answer, it asks the one-ways each way: 2 more page

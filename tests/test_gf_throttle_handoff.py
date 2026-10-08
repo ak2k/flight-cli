@@ -25,6 +25,7 @@ from test_envelope import (
     _search,
 )
 from test_gf_full_board import _DEP, _LAX, _URL, _served
+from test_gf_rung_parity import _board
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -210,3 +211,49 @@ def test_a_multi_cabin_hand_off_says_each_cabins_cheapest_tab_went_unread(
         assert line in said, said
         assert said.index(line) < said.index("Using Matrix:"), said
     assert (env["backend"], env["complete"]) == ("matrix", True), env["notes"]
+
+
+# The line `cli._note_row_cap` prints for a board shown at Google's row cap,
+# after "Google Flights" and the cabin of a multi-cabin search.
+_ROW_CAP_LINE = "stops at 300 rows for this search"
+
+
+def _nothing() -> None:
+    return None
+
+
+def _at_the_row_cap(answer: Callable[[], list[Any]]) -> Callable[[], list[Any]]:
+    """`answer`, its board stopped at Google's row cap as the token page's did."""
+
+    def capped() -> list[Any]:
+        board = cast("gfid.Board[Any]", answer())
+        board.capped_at = _board("ds1_nyc_lon_token").capped_at
+        return board
+
+    return capped
+
+
+@pytest.mark.parametrize("arm", list(_ARMS))
+def test_a_row_cap_on_a_board_handed_to_matrix_is_not_said(
+    monkeypatch: pytest.MonkeyPatch, arm: str
+) -> None:
+    """The cap bounds the board Matrix replaced, so it says nothing about
+    Matrix's answer: no line, and `complete` stays true."""
+    extra, answer = _ARMS[arm]
+    _google(monkeypatch, _nothing, _at_the_row_cap(answer))
+    env = _auto(*extra)
+    said = _said(env)
+    assert "Using Matrix:" in said, said
+    assert _ROW_CAP_LINE not in said, said
+    assert (env["backend"], env["complete"]) == ("matrix", True), env["notes"]
+
+
+def test_a_row_cap_on_googles_own_answer_is_said(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No hand-off, so the line describes the board shown. It is a note, so
+    `complete` stays true."""
+    board = gfid._rows_from_page_html(PageFetch(_served(_LAX), _URL, 200))
+    _google(monkeypatch, _nothing, _at_the_row_cap(lambda: board))
+    env = _auto("--cash-only", "--backend", "gflight", "--fast")
+    line = f"Google Flights {_ROW_CAP_LINE}: fares above USD1006.00 may be missing."
+    assert line in _said(env)
+    assert (env["backend"], env["complete"]) == ("gflight", True), env["notes"]

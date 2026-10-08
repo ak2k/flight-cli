@@ -364,6 +364,18 @@ _GOOGLE_CABIN = {
 }
 
 
+def states_other_cabin(listing: Any, cabin: Cabin) -> bool:
+    """Whether Google states a leg of this listing, or of any listing in a
+    round trip's tuple, booked in a cabin other than `cabin`. A leg it states
+    no cabin for does not show one."""
+    members: tuple[Any, ...] = listing if isinstance(listing, tuple) else (listing,)  # pyright: ignore[reportUnknownVariableType] — a tuple of listings
+    return any(
+        c is not None and c != _GOOGLE_CABIN[cabin]
+        for m in members
+        for c in [a.cabin for a in m.amenities][: len(m.flight.legs)]
+    )
+
+
 # A flight in the air between midnight and 05:00 local flew the night.
 _NIGHT_ENDS_HOUR = 5
 # The most a leg's local clocks can gain or lose on its own duration without

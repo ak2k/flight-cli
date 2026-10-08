@@ -295,15 +295,17 @@ def test_an_answer_longer_than_its_page_is_no_answer_rather_than_another_itinera
     assert (low_check["outcome"], low_check["reason"]) == ("no-answer", reason)
 
 
-def test_booking_details_silent_on_a_flights_departure_are_no_answer(
-    gf_session: Callable[..., Any], matrix: _Matrix
+@pytest.mark.parametrize("silent_on", ["departure", "arrival"])
+def test_booking_details_silent_on_a_flights_time_are_no_answer(
+    gf_session: Callable[..., Any], matrix: _Matrix, silent_on: str
 ) -> None:
     """The chain's one candidate is the row; its booking details leave out the
-    flight's departure, so they cannot show it is another itinerary."""
+    flight's departure or arrival, so they cannot show it is the row or another
+    itinerary."""
     low = _low()
     details = _details_of(low)
     (segment,) = details["bookingDetails"]["itinerary"]["slices"][0]["segments"]
-    del segment["departure"], segment["legs"][0]["departure"]
+    del segment[silent_on], segment["legs"][0][silent_on]
     matrix.probe = _chain(_b6("USD999.00"))
     matrix.chain = _chain(_row_solution("DL-1", _price(low), low))
     matrix.details = {"DL-1": details}

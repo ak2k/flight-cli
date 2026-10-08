@@ -83,7 +83,8 @@ go into detail and are loaded on demand.
   `_gf_postfilter.routing_keep`.
 - [gf_page_refusals_and_ds1.md](gf_page_refusals_and_ds1.md) — The typed
   `_gf_errors` refusals (throttle by redirect, in place or 429; consent; page
-  shape; upstream status; browser unavailable), which `ds:1` blob a page
+  shape; upstream status; Google's server error in `ds:1` and its paused
+  re-read; browser unavailable), which `ds:1` blob a page
   carrying several serves, the measured row placements at `[2]`/`[3]`, and the
   positive scan that tells a flight-less board from a moved layout. Read
   before touching `_gflight_ids._extract_ds1` / `_rows_from_ds1`.
@@ -111,7 +112,8 @@ go into detail and are loaded on demand.
   it, merged into the default board rather than swapped, marked round trips,
   `--no-separate-tickets`, and what the award matcher, `--sellers`, `--verify`,
   links and the Matrix cross-check do with a marked row; the multi-cabin join
-  key, and an open jaw answered as one Google one-way per slice beside Matrix.
+  key, and a multi-city trip answered as one Google one-way per slice beside
+  Matrix, or alone under `--backend gflight`.
 - [gf_multi_page_legs.md](gf_multi_page_legs.md) — A leg over 11 airports
   asked as several pages (`_metro.gf_leg_pages`, at most 8), how the pages'
   rows merge, a paged round trip's pins and cost, a refused page,

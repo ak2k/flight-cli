@@ -258,7 +258,7 @@ def test_n_above_thirty_returns_the_rows_the_full_board_holds(
 # sit at 6-8 behind Google's five top flights at USD295, and the 295 rows that
 # tie keep the page's order.
 _LHR_CHEAPEST_FIVE = ["104+152", "108+156", "108+158", "9656", "6939"]
-_TABLE_ROW = re.compile(r"^│\s*\d+\s*│")
+_TABLE_ROW = re.compile(r"^│\s*★?\d+\s*│")
 
 
 def _numbers(member: dict[str, Any]) -> str:

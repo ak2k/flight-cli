@@ -49,6 +49,28 @@ CTRL = {
 }
 
 
+# Consumed by the markup parser, so it prints nothing. It follows a trailing
+# backslash run because the parser collapses a backslash pair only in front of a
+# tag-shaped `[`; with this after the run, the run reads the same whether the
+# value ends the string, meets a space, or meets the caller's closing `[/]`.
+_NOOP_TAG = "[bold][/bold]"
+
+
+def _escape(text: str) -> str:
+    """`escape`, with a trailing backslash run that prints as many as it holds.
+
+    `escape` doubles a lone trailing backslash, which the parser collapses only
+    when a `[` follows: a value that ends a table cell or a printed line shows
+    two. It leaves a run of two or more alone, and a closing `[/]` after the run
+    then reads as escaped. Each trailing backslash is doubled here and the
+    no-op tag follows, so the pair always sits in front of a tag."""
+    body = text.rstrip("\\")
+    run = len(text) - len(body)
+    if not run:
+        return escape(text)
+    return escape(body) + "\\" * (2 * run) + _NOOP_TAG
+
+
 def safe_text(value: object) -> str:
     """Remote sentence-shaped text, ready for a console: control characters
     dropped, then markup escaped.
@@ -62,7 +84,7 @@ def safe_text(value: object) -> str:
     followed by `[a-z#/@]`, so a control character between the brackets hides the
     tag from it, and stripping afterwards uncovers a live one: `"[\x00red]x"`
     comes out of the other order as `"[red]x"`, styled."""
-    text = escape(str(value).translate(CTRL))
+    text = _escape(str(value).translate(CTRL))
     if not text.strip() and isinstance(value, BaseException):
         # `httpx.ConnectTimeout("")` stringifies to nothing, which would leave a
         # reporter saying "Matrix calendar failed:" and stopping. The class name is
@@ -70,7 +92,7 @@ def safe_text(value: object) -> str:
         # as the message would: a class built from a remote payload can be named
         # anything. A blank from anywhere else is a value someone chose, and stays
         # blank.
-        return escape(type(value).__name__.translate(CTRL))
+        return _escape(type(value).__name__.translate(CTRL))
     return text
 
 

@@ -9,9 +9,11 @@ results from an IP that was simultaneously throttling curl_cffi.
 
 This module supplies **bytes only**. `_gflight_ids._rows_from_page_html` reads
 them, exactly as it reads rung 1's, so there is one parser and one set of
-verdicts about what a block means. Verified 2026-09-02 on JFK-LAX: curl_cffi
-and a headless Chrome navigation of the same URL in the same minute both
-decoded 30 rows with the identical first `flight_id`.
+verdicts about what a block means. Both rungs read one board because both send
+the `HeadlessChrome` UA token, by which Google picks the board it serves a
+multi-airport search; a headed window is given it (`_send_the_headless_token`).
+Measured 2026-10-05 on NYC-LON: 300 rows from USD488 under the token, a curated
+72 from USD679 without it. A single airport pair reads one board either way.
 
 Three things are deliberate and easy to undo by accident:
 
@@ -35,6 +37,7 @@ Three things are deliberate and easy to undo by accident:
 
 from __future__ import annotations
 
+import asyncio
 import atexit
 import contextlib
 import logging
@@ -81,6 +84,10 @@ _EVICTED = "Request content was evicted from inspector cache"
 # The sync API delivers events only while one of its calls is running, so the
 # capture waits in short driver-side sleeps and reads what they delivered.
 _POLL_MS = 100
+# A driver that answers `start()` with garbage is still running; it exits on
+# stdin EOF, and one still up after this is killed, because the refusal drops
+# the session's only handle on it.
+_DRIVER_EXIT_TIMEOUT_S = 5.0
 # Escape hatch for a Chrome that isn't where `channel="chrome"` looks; pointing
 # it at a missing binary is also how a caller forces the typed refusal.
 _BROWSER_BIN_ENV = "FLIGHT_CLI_GF_BROWSER_BIN"
@@ -156,6 +163,74 @@ def _launch_failure(profile: pathlib.Path, detail: str) -> GfBrowserUnavailableE
     )
 
 
+def _driver_failure(detail: str) -> GfBrowserUnavailableError:
+    """The refusal for a node driver that would not start.
+
+    That is patchright's own install, not Chrome: the launch has not been tried,
+    so `_LAUNCH_REMEDY` would send the user to a browser that is not the missing
+    piece."""
+    return GfBrowserUnavailableError(
+        f"patchright's driver failed to start for Google Flights: {detail}",
+        remedy=f"{_INSTALL_HINT} {BROWSER_DEFAULT_REMEDY}",
+    )
+
+
+def _quiet_driver_failure(manager: Any) -> None:
+    """Keep asyncio from reporting again the error a failed `start()` raised.
+
+    What that start left on the loop patchright made for this manager reports
+    itself, with a traceback, when collected: the error parked where nothing
+    awaits it (the transport's `on_error_future`, the connection's `init`
+    task), an `init` task still waiting on a driver that sent garbage, and that
+    driver's pipes, whose finalizer raises once the loop's own has closed it.
+    So the loop's handler drops every report, and a driver that was spawned is
+    let exit on stdin EOF, or killed at `_DRIVER_EXIT_TIMEOUT_S`, and reaped on
+    that loop now, which leaves its pipes nothing to do. Its stdout is drained
+    meanwhile, as patchright's own stop does: nothing else reads it once
+    `start()` has raised, and a driver with more to write than the pipe holds
+    would block on its way out. A loop patchright did not make is the caller's
+    and keeps its reports. A lookup, as `_driver_process_id` is: a patchright
+    build that moves an attribute leaves the report printed and the refusal
+    intact."""
+    try:
+        loop, own_loop = manager._loop, manager._own_loop
+    except AttributeError:
+        return
+    if not own_loop:
+        return
+    loop.set_exception_handler(_drop_report)
+    try:
+        driver = manager._connection._transport._proc
+    except AttributeError:
+        return
+    try:
+        loop.run_until_complete(asyncio.wait_for(driver.communicate(), _DRIVER_EXIT_TIMEOUT_S))
+    except TimeoutError:
+        # Through asyncio's handle, which signals nothing once the child is
+        # reaped, so a pid the OS has reused is never hit.
+        with contextlib.suppress(ProcessLookupError):
+            driver.kill()
+        with contextlib.suppress(TimeoutError):
+            loop.run_until_complete(asyncio.wait_for(driver.wait(), _DRIVER_EXIT_TIMEOUT_S))
+
+
+def _drop_report(_loop: asyncio.AbstractEventLoop, _context: dict[str, Any]) -> None:
+    pass
+
+
+def _parked_driver_error(manager: Any) -> Exception | None:
+    """The error a driver that exited before the handshake left on patchright's
+    `init` task. `start()` then raises an `AttributeError` about patchright's own
+    state, which names no cause a user can act on. A lookup, as
+    `_driver_process_id` is."""
+    try:
+        task = manager._connection._init_task
+        error = task.exception() if task.done() and not task.cancelled() else None
+    except AttributeError:
+        return None
+    return error if isinstance(error, Exception) else None
+
+
 def _playwright_factory() -> Callable[[], Any]:
     """patchright's `sync_playwright`, imported on demand.
 
@@ -192,7 +267,10 @@ def _announce() -> None:
 
 def announce_escalation() -> None:
     """The line an `auto` search prints when a throttle moves it to Chrome, in
-    place of `_announce`'s: it says Chrome is opening, and why."""
+    place of `_announce`'s: it says Chrome is opening, and why. Silent once an
+    interrupt has been seen: `_ensure_page` refuses that launch, so nothing opens."""
+    if _interrupt_state["seen"]:
+        return
     _notice_state["printed"] = True
     _err.print(
         "[dim]Google Flights rate-limited the request; opening Chrome (rung 2) for the "
@@ -574,6 +652,7 @@ class GfBrowserSession:
             raise GfBrowserUnavailableError(
                 f"Google Flights' browser profile directory {profile} could not be created: {e}"
             ) from e
+        manager: Any = None
         try:
             # Registered BEFORE the driver starts. `stop_driver` resolves the pid
             # when it needs it, so an interrupt after the driver is spawned inside
@@ -590,9 +669,23 @@ class GfBrowserSession:
                 **_launch_target(),
             )
             self._page = self._context.new_page()
+            if self._headed:
+                _send_the_headless_token(self._context, self._page)
         # Any launch failure — missing Chrome, locked profile, driver crash — is one
-        # refusal to the caller, who cannot act on the distinctions patchright draws.
+        # typed refusal to the caller, who cannot act on the distinctions patchright
+        # draws. Only the wording differs, by whether `start()` returned.
         except Exception as e:
+            if self._playwright is None:
+                # `start()` raised, so no launch was tried: the driver is what failed.
+                # The reap runs the driver's loop, so an interrupt can land in it, and
+                # the sibling arm below never sees one raised from inside this one.
+                try:
+                    _quiet_driver_failure(manager)
+                except BaseException:
+                    self._dead = True
+                    raise
+                self.close()
+                raise _driver_failure(_detail(_parked_driver_error(manager) or e)) from e
             self.close()
             raise _launch_failure(profile, _detail(e)) from e
         # The launch block's broad `except Exception` above calls `close()`; an
@@ -643,6 +736,26 @@ def _swallow(what: str, shutdown: Callable[[], object]) -> KeyboardInterrupt | N
         log.debug("could not close the gflight browser %s: %s", what, e)
         return e if isinstance(e, KeyboardInterrupt) else None
     return None
+
+
+def _send_the_headless_token(context: Any, page: Any) -> None:
+    """Make a headed window's User-Agent say `HeadlessChrome`, as a headless
+    one's already does.
+
+    Google serves a multi-airport search a different board by that token: under
+    it the 300 cheapest rows across every airport pair, under plain `Chrome` a
+    curated ~75. Headless Chrome and rung 1 both send it, so a headed window
+    without it would read a board the default search never shows. Set once on
+    the session's one page, so every navigation on it carries the token. A UA
+    that already has it is left alone, and a headless page is never set to
+    plain `Chrome/`: that reads the curated board."""
+    cdp = context.new_cdp_session(page)
+    ua = str(cdp.send("Browser.getVersion")["userAgent"])
+    if "HeadlessChrome/" not in ua:
+        cdp.send(
+            "Emulation.setUserAgentOverride",
+            {"userAgent": ua.replace(" Chrome/", " HeadlessChrome/")},
+        )
 
 
 def _launch_target() -> dict[str, str]:
@@ -805,15 +918,15 @@ def interrupt_guard(*, armed: bool = True) -> Generator[None]:
     it for every Google Flights search, before the transport is known: that
     search runs on the thread the signal is delivered to, so nothing after the
     handler can block. The ignore the handler installs is not scoped to that
-    wait, though: it is never restored, so it stands for the rest of the
-    process's life, and what makes arming this arm broadly safe is that by then
-    there is nothing left for a second Ctrl-C to stop. The enriched arm arms it
-    only for the transports that can open a browser, `browser` and `auto`, which
-    escalates a throttle to one, because there the search runs on a worker no
-    interrupt reaches — on `http` the first Ctrl-C cannot free that worker, and
-    an ignored second one leaves nothing that can. An `auto` search that never
-    escalates pays that: its second Ctrl-C is ignored while the worker finishes
-    its GETs.
+    wait, though: when the handler stopped a driver it is never restored, so it
+    stands for the rest of the process's life, and what makes arming this arm
+    broadly safe is that by then there is nothing left for a second Ctrl-C to
+    stop. The enriched arm arms it only for the transports that can open a
+    browser, `browser` and `auto`, which escalates a throttle to one, because
+    there the search runs on a worker no interrupt reaches — on `http` the first
+    Ctrl-C cannot free that worker, and an ignored second one leaves nothing that
+    can. An `auto` search that never escalated has no driver for the handler to
+    stop, so it hands the next Ctrl-C back (below).
 
     The default handler raises `KeyboardInterrupt` on the main thread and stops
     there, which leaves the two arms broken in different ways. On `--fast` the
@@ -840,13 +953,17 @@ def interrupt_guard(*, armed: bool = True) -> Generator[None]:
     CPython's own lines: anyio imports `asyncio.Runner` rather than using its
     vendored copy (`anyio/_backends/_asyncio.py:111-112`).
 
-    After the first one, SIGINT is IGNORED for the rest of the process's life —
-    including by the restore below, which is skipped. There is nothing left for a
-    second Ctrl-C to stop: the drivers are dead and the exit is already running.
+    After a first one that finds a driver open, SIGINT is IGNORED for the rest of
+    the process's life — including by the restore below, which is skipped. There
+    is nothing left for a second Ctrl-C to stop: the drivers are dead and the exit
+    is already running.
     What it would do instead is land in the middle of that exit, as a second
     `KeyboardInterrupt` through interpreter finalisation. The cost is real: a
     shutdown that ever did hang could no longer be interrupted from the same
-    terminal.
+    terminal. A first one that finds no driver open puts the previous disposition
+    back once the stop has returned, so a second Ctrl-C ends the wait on a worker,
+    as it does on `http`. The ignore still goes in first in that case too, and a
+    launch not yet registered reads `_interrupt_state` rather than the register.
 
     Only the main thread may install a handler; on any other this is a no-op that
     still runs its body, which is correct — that thread's Ctrl-C arrives on the
@@ -874,7 +991,12 @@ def interrupt_guard(*, armed: bool = True) -> Generator[None]:
         # BEFORE the snapshot: a launch that has not registered a driver yet
         # cannot be reached by the stop, and this is what it reads instead.
         _interrupt_state["seen"] = True
+        # Read once and used after the stop: it decides whether the ignore stays.
+        with _live_lock:
+            driver_open = bool(_live)
         stop_all_drivers()
+        if not driver_open:
+            signal.signal(signal.SIGINT, previous)
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGINT, _on_sigint)

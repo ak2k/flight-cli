@@ -151,7 +151,7 @@ def matrix(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def keep_sigint() -> Iterator[None]:
-    """Restore SIGINT after a test whose interrupt leaves it ignored for good."""
+    """Restore SIGINT after a test whose interrupt may leave it ignored."""
     previous = signal.getsignal(signal.SIGINT)
     yield
     signal.signal(signal.SIGINT, previous)
