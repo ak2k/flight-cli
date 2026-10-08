@@ -84,7 +84,8 @@ def test_a_throttle_after_a_served_pin_stops_the_later_pages(
     assert len(doc) == 2  # the one pin served before the throttle, its two returns
     assert {int(pair[0]["legs"][0]["flight_number"]) for pair in doc} <= first_numbers
     printed = _flat(buf.getvalue())
-    assert _missing(1, "Google Flights rate-limited") in printed, printed
+    short = _missing(1, "Google Flights rate-limited").replace("is missing", "is short")
+    assert short in printed, printed
     assert _missing(2, "Google Flights rate-limited") not in printed, printed
     returns = "its returns were not asked after page 1 stopped the search"
     for n in (2, 3, 4):

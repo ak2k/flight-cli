@@ -306,7 +306,7 @@ def test_chrome_refusing_a_pin_after_the_escalation_ends_the_search_and_keeps_wh
     assert events == ["http"] * (4 + 1 + 5) + ["chrome"], events
     assert len(json.loads(result.stdout)) == 2
     printed = _flat(buf.getvalue())
-    assert _missing(1, why) in printed, printed
+    assert _missing(1, why).replace("is missing", "is short") in printed, printed
     for n in (2, 3, 4):
         returns = "its returns were not asked after page 1 stopped the search"
         assert _missing(n, returns) in printed, printed
