@@ -4620,6 +4620,7 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         # A refusal's note, or a sentence around the page number that stopped
         # the search; tests/test_gf_chunked_search.py prints a hostile one.
         ("_report_pages", "why"),
+        ("_report_pages", "state"),  # "short" or "missing", literals this function wrote
         # Built here from the pin budget, and every part of it is ours.
         ("_run_gflight_path_multi", "join_note"),
         ("_validate_sort_cabin", "sort_by.value"),  # the same enum, one command over

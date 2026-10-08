@@ -69,6 +69,9 @@ no page line names it, and the separate-ticket line says why. A
 round trip asks every page's outbounds before any page's returns, so a page
 whose outbounds answered before the stop is named `its returns were not asked
 after page N stopped the search`, and no GET follows a throttle.
+A page whose pin loop stopped after serving some pins keeps its rows on the
+board, so its page line says `is short: <reason>` where a refused page's says
+`is missing`.
 When nothing merged and a page failed, the first failed page's error is raised
 and takes the route a one-page refusal takes ("A Google query that FAILS",
 above); with no failed page, a stop that left a page unasked, such as one a

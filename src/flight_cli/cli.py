@@ -6160,7 +6160,8 @@ class _PageAsk:
     an earlier page's refused tab, which gets a line of its own. A
     round trip asks every page's outbounds before any page's returns, so a page
     that answered its outbounds before the stop is named for the returns it did
-    not get."""
+    not get. A page whose pin loop stopped after serving is named `short`, not
+    `missing`, since its rows are on the board."""
 
     def __init__(
         self, pages: list[tuple[Leg, ...]], *, gf_mode: GfTransportMode, bags: bool
@@ -6171,6 +6172,7 @@ class _PageAsk:
         self.failed: dict[int, GfBackendError] = {}
         self.unasked: set[int] = set()
         self.answered: set[int] = set()
+        self.short: set[int] = set()
         self.stopped_at: int | None = None
         self.stop: GfBackendError | None = None
         # A page's refused Cheapest tab that the stop's line is printed ahead of.
@@ -6196,6 +6198,7 @@ class _PageAsk:
             if held is not None:
                 self._stopped(i, held)
                 self.failed[i] = held
+                self.short.add(i)
             elif isinstance(tab, _GF_STOPS):
                 self._stopped(i, tab)
             return answer
@@ -6246,6 +6249,8 @@ def _report_pages(asked: _PageAsk) -> None:
     for i in sorted({*asked.failed, *asked.unasked}):
         out = asked.pages[i][0]
         e = asked.failed.get(i)
+        # A page whose pins stopped after serving has its rows on the board.
+        state = "short" if i in asked.short else "missing"
         if e is not None:
             rung = _rung_reached(asked.gf_mode)
             why = _gf_refusal(e, transport=rung, bags=asked.bags).note.removesuffix(".")
@@ -6259,7 +6264,7 @@ def _report_pages(asked: _PageAsk) -> None:
         err.print(
             f"[yellow]Google Flights page {i + 1:d} of {n:d} "
             f"({_safe_text(','.join(out.origins))}→{_safe_text(','.join(out.destinations))}) "
-            f"is missing: {why}.[/]"
+            f"is {state}: {why}.[/]"
         )
     for i, e in sorted(asked.displaced.items()):
         rung = _rung_reached(asked.gf_mode)
