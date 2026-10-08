@@ -294,10 +294,14 @@ def _same_legs(google: Sequence[Flight], matrix: Sequence[Flight]) -> bool:
 
 def same_flights(row: Row, itinerary: BookedItinerary) -> bool:
     """Whether the booked itinerary is the row: every flight's carrier and
-    number, local departure day and minute, and airports, slice by slice."""
+    number, local departure day and minute, and airports, slice by slice, with
+    every leg stating all of these and its arrival, so a match never leaves one
+    unknown."""
     booked = booked_flights(itinerary)
-    return len(booked) == len(row.slices) and all(
-        _same_legs(g, m) for g, m in zip(row.slices, booked, strict=True)
+    return (
+        len(booked) == len(row.slices)
+        and all(all(leg) for legs in booked for leg in legs)
+        and all(_same_legs(g, m) for g, m in zip(row.slices, booked, strict=True))
     )
 
 
