@@ -5153,7 +5153,7 @@ def _price_capped(res: SearchResult, opts: SearchOptions, *, passengers: int = 1
     )
 
 
-def _run_matrix_path(
+def _run_matrix_path(  # noqa: PLR0912 — one arm per way Matrix's answer is written
     *,
     legs: tuple[Leg, ...],
     opts: SearchOptions,
@@ -5197,6 +5197,13 @@ def _run_matrix_path(
     # links all draw from the fares under the cap.
     res = _price_capped(res, opts, passengers=opts.pax.total)
     shown = res.solutions[: opts.page_size]
+    # `--awards-only` prints no numbered table, so a pick names no row, and the
+    # links below are unpinned; `--fare-rules` is refused beside it.
+    if sel.awards_only:
+        _refuse_pick_where_nothing_is_numbered(
+            pick, links=not json_out and (matrix_url or google_url)
+        )
+        pick = None
 
     def _rules() -> _FareRulesAnswer | None:
         if not shown:
@@ -5288,10 +5295,17 @@ def _run_matrix_path(
                     search, res, matrix_url=matrix_url, google_url=google_url
                 ),
             )
-            if shown
+            if shown and not sel.awards_only
             else None
         )
-        _emit_urls(search, matrix_url=matrix_url, google_url=google_url, result=res, pick=pick)
+        # Unpinned under `--awards-only`: no numbered list backs a pin's label.
+        _emit_urls(
+            search,
+            matrix_url=matrix_url,
+            google_url=google_url,
+            result=None if sel.awards_only else res,
+            pick=pick,
+        )
 
 
 # ─────────────────────────────── fare rules ────────────────────────────────
@@ -6892,6 +6906,23 @@ def _pick_in_range(
     return None
 
 
+def _refuse_pick_where_nothing_is_numbered(pick: int | None, *, links: bool) -> None:
+    """Say once, on stderr, that `--awards-only` gives `pick` no row to name.
+
+    The award renderer is the only surface that mode prints and its columns hold
+    no `#`, so a pick there is not out of range, it has no range. The second
+    clause is conditional for the reason `_pick_in_range`'s is: where no link
+    prints (both links off, or `--format json`), a sentence about the links would
+    describe something that does not happen. The caller unpins its links."""
+    if pick is None:
+        return
+    unpinned = "; the links below are unpinned." if links else "."
+    err.print(
+        f"[yellow]--pick {pick:d} names a row in the results table, and this mode "
+        f"prints none{unpinned}[/]"
+    )
+
+
 class _GfRefusal(NamedTuple):
     """How one Google Flights refusal reads: `note` where Matrix still answers
     and the refusal is a footnote, `message` where it is the whole outcome.
@@ -7489,19 +7520,27 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     # it and row one can be pinned: `--format json` emits no link at all, and a
     # Google row carries no ids a Matrix link could pin. The range is still
     # reported; the fallback is not claimed.
-    pick = (seller_row or verify_row) or _pick_in_range(
-        pick,
-        len(results),
-        pin_follows=lambda: (
-            not json_out
-            and _pins_row_one(
-                SpecificDateSearch(legs=legs, options=opts),
-                fli_results_to_search_result(results),
-                matrix_url=matrix_url,
-                google_url=google_url,
-            )
-        ),
-    )
+    if awards_only:
+        # No numbered table is printed, so the pick names no row and the links
+        # below are unpinned, as `_run_enriched_path` does.
+        _refuse_pick_where_nothing_is_numbered(
+            pick, links=not json_out and (matrix_url or google_url)
+        )
+        pick = None
+    else:
+        pick = (seller_row or verify_row) or _pick_in_range(
+            pick,
+            len(results),
+            pin_follows=lambda: (
+                not json_out
+                and _pins_row_one(
+                    SpecificDateSearch(legs=legs, options=opts),
+                    fli_results_to_search_result(results),
+                    matrix_url=matrix_url,
+                    google_url=google_url,
+                )
+            ),
+        )
 
     # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType,
     #                 reportUnknownArgumentType, reportUnknownParameterType]
@@ -7602,7 +7641,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
             SpecificDateSearch(legs=legs, options=opts),
             matrix_url=matrix_url,
             google_url=google_url,
-            result=sr,
+            result=None if awards_only else sr,
             # The pin LABEL names the row it pins. `sr` is built from the rows
             # the table numbered, so row 1 is the default pin, and it is the
             # cheapest only when Google priced it: on a board of unpriced rows
@@ -8656,17 +8695,7 @@ def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, 
         # is refused rather than clamped. The links stay unpinned for the same
         # reason: with no numbered list, neither `itinerary #N` nor `cheapest
         # itinerary` is a label the user could check against anything.
-        #
-        # That second clause is conditional for the reason `_pick_in_range`'s
-        # own is: `--no-matrix-url --no-google-url` leaves this arm printing no
-        # link at all, and a sentence describing how links below are labelled
-        # is then describing something that does not happen.
-        if pick is not None:
-            unpinned = "; the links below are unpinned." if (matrix_url or google_url) else "."
-            err.print(
-                f"[yellow]--pick {pick:d} names a row in the results table, and this mode "
-                f"prints none{unpinned}[/]"
-            )
+        _refuse_pick_where_nothing_is_numbered(pick, links=matrix_url or google_url)
         pick = None
 
     if run_pp:
@@ -11006,7 +11035,8 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         "that cannot pin that row pre-fills the search instead; its label says which. A "
         "pick outside the table falls back to row 1 for the links and --fare-rules and is "
         "refused with --sellers and --verify. --format json emits no link lines, so there "
-        "it only chooses the --fare-rules, --sellers or --verify row.",
+        "it only chooses the --fare-rules, --sellers or --verify row. --awards-only prints "
+        "no table, so there a pick is reported as naming no row and the links are unpinned.",
         rich_help_panel=_GROUP_OUTPUT,
     ),
     sellers: bool = typer.Option(

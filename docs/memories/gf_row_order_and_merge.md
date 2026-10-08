@@ -37,6 +37,12 @@ measures the pick against its length, and `_emit_urls` is handed a result whose
 solutions ARE it. The label is then true by construction rather than by
 agreement between two call sites.
 
+Under `--awards-only` no table is printed, so a pick names no row: `_run_gflight_path`,
+`_run_matrix_path` and `_run_enriched_path` each refuse it on stderr through
+`cli._refuse_pick_where_nothing_is_numbered` and hand `_emit_urls` no result, so
+the links are unpinned. Clamping it against the solution list instead printed a
+range and a link labeled `itinerary #N` for a numbering no output carried.
+
 **The Google line pins a row only on dates its source states.** A pinned link
 names each flight's departure day, and Matrix gives a slice's two ends and no
 flight's date. The ends do not date the flights between them: NZ104 SYD-AKL

@@ -1012,15 +1012,14 @@ def test_awards_and_json_together_emit_one_document(
     assert json.loads(out) == {"legs": [], "matches": []}, out
 
 
-def test_an_out_of_range_pick_leaves_an_awards_json_document_parseable(
+def test_a_pick_under_awards_only_leaves_the_json_document_parseable(
     gf_session: Callable[..., Any],
     gf_board: Callable[..., str],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The trim narrows the range a pick is measured against, so `--pick 12`
-    against a 30-row board is in range one day and out of it the next. The
-    notice that fires then must not land in the document."""
+    """`--awards-only` prints no numbered table, so the refusal of a pick there
+    goes to stderr and must not land in the document."""
 
     def _award_document(_sr: object, **_kw: object) -> None:
         sys.stdout.write(json.dumps({"legs": [], "matches": []}))
@@ -1041,8 +1040,9 @@ def test_an_out_of_range_pick_leaves_an_awards_json_document_parseable(
     )
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {"legs": [], "matches": []}, captured.out
-    assert "out of range (1-5)" in captured.err, captured.err
-    assert "cheapest itinerary" not in captured.err, captured.err
+    assert "--pick 6 names a row in the results table" in captured.err, captured.err
+    assert "out of range" not in captured.err, captured.err
+    assert "the links below" not in captured.err, captured.err
 
 
 def test_an_out_of_range_pick_under_json_reports_the_range_and_promises_nothing(
