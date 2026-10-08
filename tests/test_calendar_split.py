@@ -4603,7 +4603,7 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         # what happens next to a link, so neither can be a bare clause the
         # sentence above it carries.
         ("_pick_in_range", "fallback"),
-        ("_run_enriched_path", "unpinned"),
+        ("_refuse_pick_where_nothing_is_numbered", "unpinned"),
         ("_reraise_if_orderly", "plural"),  # "" or "s", off a count beside it
         ("_answer_gf_empty", "plural"),
         # `_gf_refusal` sanitizes every remote field it reads and leaves both of
