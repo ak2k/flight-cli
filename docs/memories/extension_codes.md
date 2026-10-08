@@ -72,6 +72,10 @@ Codes are **case-insensitive** for the keyword (`ALLIANCE` ≡ `alliance`).
 - **Times**: `HH:MM` (e.g. `MAXCONNECT 2:00`, `MAXDUR 18:00`, `PADCONNECT 0:30`)
 - **Distances**: plain integers in miles (e.g. `MAXMILES 2900`)
 - **Counts**: plain integers (e.g. `MAXSTOPS 1`)
+- **Digits** in a count or a time are ASCII `0`-`9`, and a count has at most
+  9 of them. Any other digit (a superscript, an Arabic-Indic one) or a longer
+  count makes a code flight-cli does not parse, so it goes to Matrix with that
+  reason.
 - **Carrier/airport/aircraft codes**: IATA-style, space-separated for lists
 
 ## Itinerary constraint codes
@@ -245,7 +249,8 @@ Like `routeLanguage`, `commandLine` is **per-slice**. Outbound and return get
 independent extension strings. The CLI exposes both via `--extension` (or
 `--ext`) and `--ext-ret` on `search`, `calendar` and `detail`; `--ext-ret ''`
 sends none on the return. No code is positional, so unset, `--ext-ret` copies
-`--extension`. Multi-city sets one per slice.
+`--extension`. Multi-city sets one per slice (`:e=`); a slice with no `e=` takes
+`--extension` (`cli._slice_legs`).
 
 ## Pitfalls
 

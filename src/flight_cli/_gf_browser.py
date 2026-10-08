@@ -37,6 +37,7 @@ Three things are deliberate and easy to undo by accident:
 
 from __future__ import annotations
 
+import asyncio
 import atexit
 import contextlib
 import logging
@@ -83,6 +84,10 @@ _EVICTED = "Request content was evicted from inspector cache"
 # The sync API delivers events only while one of its calls is running, so the
 # capture waits in short driver-side sleeps and reads what they delivered.
 _POLL_MS = 100
+# A driver that answers `start()` with garbage is still running; it exits on
+# stdin EOF, and one still up after this is killed, because the refusal drops
+# the session's only handle on it.
+_DRIVER_EXIT_TIMEOUT_S = 5.0
 # Escape hatch for a Chrome that isn't where `channel="chrome"` looks; pointing
 # it at a missing binary is also how a caller forces the typed refusal.
 _BROWSER_BIN_ENV = "FLIGHT_CLI_GF_BROWSER_BIN"
@@ -156,6 +161,74 @@ def _launch_failure(profile: pathlib.Path, detail: str) -> GfBrowserUnavailableE
     return GfBrowserUnavailableError(
         f"Chrome failed to launch for Google Flights: {detail}", remedy=_LAUNCH_REMEDY
     )
+
+
+def _driver_failure(detail: str) -> GfBrowserUnavailableError:
+    """The refusal for a node driver that would not start.
+
+    That is patchright's own install, not Chrome: the launch has not been tried,
+    so `_LAUNCH_REMEDY` would send the user to a browser that is not the missing
+    piece."""
+    return GfBrowserUnavailableError(
+        f"patchright's driver failed to start for Google Flights: {detail}",
+        remedy=f"{_INSTALL_HINT} {BROWSER_DEFAULT_REMEDY}",
+    )
+
+
+def _quiet_driver_failure(manager: Any) -> None:
+    """Keep asyncio from reporting again the error a failed `start()` raised.
+
+    What that start left on the loop patchright made for this manager reports
+    itself, with a traceback, when collected: the error parked where nothing
+    awaits it (the transport's `on_error_future`, the connection's `init`
+    task), an `init` task still waiting on a driver that sent garbage, and that
+    driver's pipes, whose finalizer raises once the loop's own has closed it.
+    So the loop's handler drops every report, and a driver that was spawned is
+    let exit on stdin EOF, or killed at `_DRIVER_EXIT_TIMEOUT_S`, and reaped on
+    that loop now, which leaves its pipes nothing to do. Its stdout is drained
+    meanwhile, as patchright's own stop does: nothing else reads it once
+    `start()` has raised, and a driver with more to write than the pipe holds
+    would block on its way out. A loop patchright did not make is the caller's
+    and keeps its reports. A lookup, as `_driver_process_id` is: a patchright
+    build that moves an attribute leaves the report printed and the refusal
+    intact."""
+    try:
+        loop, own_loop = manager._loop, manager._own_loop
+    except AttributeError:
+        return
+    if not own_loop:
+        return
+    loop.set_exception_handler(_drop_report)
+    try:
+        driver = manager._connection._transport._proc
+    except AttributeError:
+        return
+    try:
+        loop.run_until_complete(asyncio.wait_for(driver.communicate(), _DRIVER_EXIT_TIMEOUT_S))
+    except TimeoutError:
+        # Through asyncio's handle, which signals nothing once the child is
+        # reaped, so a pid the OS has reused is never hit.
+        with contextlib.suppress(ProcessLookupError):
+            driver.kill()
+        with contextlib.suppress(TimeoutError):
+            loop.run_until_complete(asyncio.wait_for(driver.wait(), _DRIVER_EXIT_TIMEOUT_S))
+
+
+def _drop_report(_loop: asyncio.AbstractEventLoop, _context: dict[str, Any]) -> None:
+    pass
+
+
+def _parked_driver_error(manager: Any) -> Exception | None:
+    """The error a driver that exited before the handshake left on patchright's
+    `init` task. `start()` then raises an `AttributeError` about patchright's own
+    state, which names no cause a user can act on. A lookup, as
+    `_driver_process_id` is."""
+    try:
+        task = manager._connection._init_task
+        error = task.exception() if task.done() and not task.cancelled() else None
+    except AttributeError:
+        return None
+    return error if isinstance(error, Exception) else None
 
 
 def _playwright_factory() -> Callable[[], Any]:
@@ -579,6 +652,7 @@ class GfBrowserSession:
             raise GfBrowserUnavailableError(
                 f"Google Flights' browser profile directory {profile} could not be created: {e}"
             ) from e
+        manager: Any = None
         try:
             # Registered BEFORE the driver starts. `stop_driver` resolves the pid
             # when it needs it, so an interrupt after the driver is spawned inside
@@ -598,8 +672,20 @@ class GfBrowserSession:
             if self._headed:
                 _send_the_headless_token(self._context, self._page)
         # Any launch failure — missing Chrome, locked profile, driver crash — is one
-        # refusal to the caller, who cannot act on the distinctions patchright draws.
+        # typed refusal to the caller, who cannot act on the distinctions patchright
+        # draws. Only the wording differs, by whether `start()` returned.
         except Exception as e:
+            if self._playwright is None:
+                # `start()` raised, so no launch was tried: the driver is what failed.
+                # The reap runs the driver's loop, so an interrupt can land in it, and
+                # the sibling arm below never sees one raised from inside this one.
+                try:
+                    _quiet_driver_failure(manager)
+                except BaseException:
+                    self._dead = True
+                    raise
+                self.close()
+                raise _driver_failure(_detail(_parked_driver_error(manager) or e)) from e
             self.close()
             raise _launch_failure(profile, _detail(e)) from e
         # The launch block's broad `except Exception` above calls `close()`; an

@@ -83,6 +83,21 @@ class GfUpstreamStatusError(GfBackendError):
         super().__init__(f"Google Flights' search page returned HTTP {status_code}")
 
 
+class GfSearchServerError(GfBackendError):
+    """Google Flights served the search page with a server error where the
+    board goes: a 200 whose `ds:1` holds an RPC status (`[code, message,
+    details]`) in place of rows.
+
+    A direct child of `GfBackendError` rather than of `GfPageShapeError`, for
+    `GfPinIgnoredError`'s reason: the page has not changed shape, and a nested
+    type would render as a layout change."""
+
+    def __init__(self, code: int) -> None:
+        """Name the status code; the page carries no other detail worth showing."""
+        self.code = code
+        super().__init__(f"Google Flights answered the search with a server error (status {code})")
+
+
 # Spelled out because the browser rung is the only transport that fails for
 # reasons outside Google (no Chrome, a locked profile), where the fix is local
 # rather than the "try the other backend" every other refusal offers.

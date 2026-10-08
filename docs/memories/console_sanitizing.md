@@ -60,8 +60,11 @@ Matrix error that FAILS a command goes through `_print_matrix_error`, so one
 backend error reads the same whichever command asked for it — the calendar
 reaches it through its own single failure printer, which hands a `MatrixApiError`
 on rather than formatting it, so a fan-out keeps the kind and the request id that
-a single query keeps. The per-cabin fan-out is the one deliberate exception,
-because its failure is soft and its line names the cabin.
+a single query keeps. A soft failure is the deliberate exception: one part of
+several (a cabin, a lost calendar group, a low-check no-answer) while the command
+still answers, so its line names the part and wraps the fields itself.
+`tests/test_matrix_error_census.py` asserts both halves: an arm that names a
+`MatrixApiError` must call `_print_matrix_error` or be listed there as soft.
 
 ## `_safe_text` and `_quote`
 
@@ -83,6 +86,16 @@ character between the brackets would hide a live `[red]` from it. It neither
 quotes nor truncates, unlike `_quote`: a remote error is a sentence someone has
 to read whole, and the half that explains the failure is as often at the end as
 at the start.
+
+The escape is `_console_text._escape`, not bare `escape`, for a value that ends
+in backslashes. `escape` doubles a lone trailing one and leaves a longer run
+alone, and the parser collapses a backslash pair only in front of a tag-shaped
+`[`: so a seller named `Back\` ended a table cell as `Back\\`, and a run of
+three then escaped the caller's closing `[/]`. `_escape` doubles every backslash
+of the trailing run and appends an empty `[bold][/bold]`, which the parser
+consumes and prints nothing, so the run reads as typed at the end of a string,
+before a space, and before a closing tag. `_quote` needs none of this: `repr`
+ends in a quote character.
 
 The argument parsers go through one `_quote` helper: `_elide` cuts a value past
 60 characters, then `repr`, then `escape`. The message exists to show WHICH value

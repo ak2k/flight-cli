@@ -112,7 +112,7 @@ def _link(option: list[Any]) -> str | None:
     None unless the base is a printable https URL on `www.google.com`, as the
     table's caption says, with no user, port, query or fragment of its own and
     no space or backslash, and every pair is two strings. A browser reads a
-    backslash as "/", and `escape` doubles one that ends a printed line."""
+    backslash as "/"."""
     base, form = dig(option, 5, 2, 0), _form(dig(option, 5, 2, 1))
     if (
         form is None
