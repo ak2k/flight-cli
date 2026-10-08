@@ -193,8 +193,11 @@ def test_the_census_fails_on_an_isinstance_arm_under_and_or(
         "later = lambda: _print_matrix_error(e)",
         "later = (_print_matrix_error(item) for item in (e,))",
         "raise typer.Exit(1)\n        _print_matrix_error(e)",
+        "try:\n            pass\n        except MatrixApiError as inner:\n"
+        "            _print_matrix_error(inner)",
+        "if isinstance(f, MatrixApiError):\n            _print_matrix_error(f)",
     ],
-    ids=["def", "lambda", "generator", "after-exit"],
+    ids=["def", "lambda", "generator", "after-exit", "nested-except", "nested-isinstance"],
 )
 def test_the_census_fails_on_a_reporter_call_the_arm_may_not_run(
     monkeypatch: pytest.MonkeyPatch, unrun: str
