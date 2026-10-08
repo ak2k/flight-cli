@@ -60,8 +60,11 @@ Matrix error that FAILS a command goes through `_print_matrix_error`, so one
 backend error reads the same whichever command asked for it — the calendar
 reaches it through its own single failure printer, which hands a `MatrixApiError`
 on rather than formatting it, so a fan-out keeps the kind and the request id that
-a single query keeps. The per-cabin fan-out is the one deliberate exception,
-because its failure is soft and its line names the cabin.
+a single query keeps. A soft failure is the deliberate exception: one part of
+several (a cabin, a lost calendar group, a low-check no-answer) while the command
+still answers, so its line names the part and wraps the fields itself.
+`tests/test_matrix_error_census.py` asserts both halves: an arm that names a
+`MatrixApiError` must call `_print_matrix_error` or be listed there as soft.
 
 ## `_safe_text` and `_quote`
 
