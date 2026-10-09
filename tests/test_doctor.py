@@ -1336,7 +1336,7 @@ def test_help_adds_the_doctor_line_and_every_existing_command_stays() -> None:
     assert isinstance(group, click.Group)
     assert list(group.commands) == [
         *("search", "fare", "calendar", "detail", "explore", "gflight", "airport", "seatmap"),
-        "doctor",
+        *("doctor", "explain"),
         "auth",
     ]
     out = CliRunner().invoke(cli.app, ["--help"]).stdout

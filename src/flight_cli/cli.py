@@ -9,6 +9,7 @@ Commands:
   flight airport   — IATA autocomplete
   flight explore   — where an origin flies, cheapest first (Google Flights, Chrome)
   flight doctor    — pass, fail or skip for every backend, transport and credential
+  flight explain   — a --routing string in plain English, one line per token
   flight fare      — [deprecated] alias for `search --backend matrix`
   flight gflight   — [deprecated] alias for `search --backend gflight`
 """
@@ -66,6 +67,7 @@ from ._cross_check import (
 )
 from ._cross_check import document as cross_check_document
 from ._enrich import party_price
+from ._explain import decode_routing
 
 # The `--gf-transport` vocabulary, from the leaf that costs nothing to import.
 # `_gflight_ids` owns the ladder but costs fli (~95 ms), and EVERY search
@@ -13281,6 +13283,31 @@ def doctor(fmt: str = _FORMAT_OPT) -> None:
         )
     )
     raise typer.Exit(report.exit_code)
+
+
+@app.command()
+def explain(
+    routing: Annotated[
+        str,
+        typer.Argument(
+            help="A routing string as --routing takes it, e.g. 'O:LH+' or 'F* X:LHR F*'"
+        ),
+    ],
+) -> None:
+    """Say what a routing string means, one line per token.
+
+    Exits 1 when a token is not in the documented grammar; it is never guessed."""
+    unread = False
+    for token, meaning in decode_routing(routing):
+        if meaning is None:
+            unread = True
+            console.print(f"{_quote(token)}  ->  not recognized", soft_wrap=True, highlight=False)
+        else:
+            console.print(
+                f"{_safe_text(token)}  ->  {_safe_text(meaning)}", soft_wrap=True, highlight=False
+            )
+    if unread:
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":
