@@ -793,6 +793,7 @@ def test_a_round_trip_table_prints_its_rows_in_price_order(
         legs=_round_trip(),
         top_n=1,
         match_carriers=frozenset(),
+        currency="USD",
     )
     out = capsys.readouterr().out
     assert f"{cheapest.flight.price:.2f}" in out, out
@@ -810,6 +811,7 @@ def test_a_one_way_table_handed_the_whole_board_prints_its_cheapest_rows(
         legs=_one_way(),
         top_n=1,
         match_carriers=frozenset(),
+        currency="USD",
     )
     out = capsys.readouterr().out
     assert "6072.00" in out, out

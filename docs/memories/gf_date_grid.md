@@ -290,6 +290,9 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
   under `--fast` too; a second miss raises `GfGraphStalledError`. A wall, a
   failed navigation and any answer the graph gave, bar the one below, are never
   loaded again.
+  A failed click's refusal ends with the page's final URL, its title and its
+  visible buttons' names, read after the failure, so the next stall says what
+  the page showed.
 - **A graph Google refuses with error 13.** 2 of 13 live Chrome runs
   (2026-10-07), one `--fast` run exiting 1 with no grid and one default calendar
   losing the graph; the next identical run priced. `price_graph` loads the page

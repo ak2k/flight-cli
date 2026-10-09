@@ -1347,6 +1347,7 @@ def test_help_adds_the_doctor_line_and_every_existing_command_stays() -> None:
         *("search", "fare", "calendar", "detail", "explore", "gflight", "airport", "seatmap"),
         "doctor",
         "auth",
+        "watch",
     ]
     out = CliRunner().invoke(cli.app, ["--help"]).stdout
     row = next(ln for ln in out.splitlines() if ln.startswith("│ doctor "))

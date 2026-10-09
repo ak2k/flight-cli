@@ -74,11 +74,15 @@ the list is the one-row-per-key merge exactly
 
 **And it keeps one order: price, ascending.** `cli._price_ordered` sorts every
 Google answer immediately before each trim, on one key
-(`_gflight_ids.fare_key`, which the round-trip pins use too): a priced row by
-its fare, a row Google did not price after every row it did, and a stable sort,
-so equal fares keep the order they arrived in. A one-way row's fare is its own.
-A combination's is its terminal member's — the pinned leg is what makes the
-combination that combination, so its fare is the one every surface prints.
+(`cli._terminal_fare_key`, `_multi_cabin.price_rank` of the row's fare): a fare
+in the requested currency by amount, then each other currency in code order, a
+row Google did not price after every row it did, and a stable sort, so equal
+fares keep the order they arrived in. A row with no decoded currency ranks as
+the requested one, as `_with_board_currency` fills it; the round-trip pins sort
+one page by `_gflight_ids.fare_key`, the bare amount. A one-way row's fare is
+its own. A combination's is its terminal member's — the pinned leg is what
+makes the combination that combination, so its fare is the one every surface
+prints.
 
 One order, because every other list the CLI prints is already in it — the
 merged and multi-cabin tables, the date grid, explore — and because neither
@@ -136,5 +140,8 @@ left unset, Matrix prices in its own default (GBP from LHR, 2026-09-28) and the
 merged LHR-JFK table ranked GBP1004 above USD1043 (about GBP780) before the
 trim. The rank is the backstop for a row Google still prices in another
 currency, which `cli._note_other_currencies` names on stderr. A Google board is
-asked in one currency, every page of it when a leg takes several, so
-`cli._price_ordered` keeps bare amounts.
+asked in one currency, but a row can still come back in another, so
+`cli._price_ordered`, `_merged_boards`, `_union_pins` and `_cabin_document_rows`
+rank through `price_rank` too, each taking the requested currency
+(`opts.currency`, else USD) as a required keyword: under `--currency USD -n 1`
+a USD1043 row is kept over a GBP1004 one.
