@@ -112,9 +112,10 @@ def load_tokens() -> Tokens | None:
         return None
     try:
         return Tokens.from_json(cast("_JsonDict", json.loads(TOKENS_PATH.read_text())))
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
         # ValueError: bad JSON, bad UTF-8, a non-numeric expires_at. TypeError: JSON of
-        # another type than an object, or a field of the wrong type.
+        # another type than an object, or a field of the wrong type. RecursionError: JSON
+        # nested deeper than the decoder's recursion limit.
         return None
 
 

@@ -26,6 +26,7 @@ _BAD_STORES: dict[str, bytes] = {
     "expires_at_list": json.dumps({**_GOOD, "expires_at": [1]}).encode(),
     "expires_at_text": json.dumps({**_GOOD, "expires_at": "soon"}).encode(),
     "not_utf8": b"\xff\xfe{",
+    "deeply_nested_list": b"[" * 100_000 + b"]" * 100_000,
 }
 
 
