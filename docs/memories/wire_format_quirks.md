@@ -267,15 +267,20 @@ With awards on, the shape does not depend on the backend, and nothing in it
 names one. Cash-only is the case where the shape names the backend: a list is
 Google's, an object Matrix's. An empty Google board is still Google's answer:
 `[]` cash-only, and the award document with awards on, because the award
-providers run whatever Google served. Several cabins, cash-only, write one
-object keyed by cabin name.
+providers run whatever Google served. The exception is a party with an
+infant on auto, whose empty board goes to Matrix (below). Several cabins,
+cash-only, write one object keyed by cabin name.
 
-On auto, a stderr line that begins `Using Matrix:` says the search was handed
-from Google to Matrix, and why: the row filter emptied Google's board, or the
-Google query failed (a rate limit, the consent page, no browser, an unreachable
-host, or anything else it raised). The document after it is Matrix's. The default
-table survives the same failures by printing Matrix's half of its merged table,
-so JSON answers wherever the table does.
+On auto, a stderr line that begins `Using Matrix:` says why Matrix answered,
+and there are two causes. Google was asked and handed on: the row filter
+emptied its board, Google served no rows for a party with an infant, or the
+query failed (a rate limit, the consent page, no browser, an unreachable host,
+or anything else it raised). Or Google was never asked: a flag Google cannot
+serve (`--fare-rules`, a multi-city itinerary, a flexible date) sends the
+search to Matrix before any Google call, and the line reads `Using Matrix:
+Google Flights can't serve <reason>.` The document after either line is
+Matrix's. The default table survives the same failures by printing Matrix's
+half of its merged table, so JSON answers wherever the table does.
 
 `--fast`, `--backend gflight`, `--bags` and `--sellers` keep exit 1 with stdout
 empty when the Google query fails. `--fast` means Google alone, `--backend
