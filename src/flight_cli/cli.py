@@ -9322,7 +9322,7 @@ def _run_gflight_multi(
     native filters and the Tier-2 post-filter cannot drift apart. They also
     share ONE throttle ladder: Google's wall is per-IP, so a cabin per thread
     laddering against it separately spends the cabin count times the requests to
-    be told the same thing. They are one search, too, so they share one budget
+    be told the same thing. They are one search, too, so they share one window
     of pauses for Google's server errors (`search_escalation`). On a round trip
     (`_CabinSearches`, led by `sort_by`, default the first cabin) every cabin's
     outbound page, then every cabin's pins, are two fan-outs inside that one

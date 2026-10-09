@@ -62,9 +62,11 @@ inside 0.65 s all failed, and a read ~150 s later carried the board. Rung 1
 reads such a page again after 2 s, then 6 s (`_SERVER_ERROR_PAUSES_S`, an arm of
 `retry_throttled`: each re-read is one of the call's wall attempts and books no
 rung of the shared ladder; see [gf_throttle_ladder.md](gf_throttle_ladder.md)).
-A search pauses 8 s at most in all, whatever its page count
-(`_Escalation.pause`); after that, a page's error is read again at once, three
-reads, then refused. Rung 2 navigates it once more at once, as it does a page
+A search pauses inside one 8 s window, opened by its first pause
+(`_Escalation.pause`): pages read side by side each get the 2 s and the 6 s
+within it, so the user waits 8 s at most whatever the page count. A page read
+after the window closes has its error read again at once, three reads, then
+refused. Rung 2 navigates it once more at once, as it does a page
 with no `ds:1`. The refusal names the error and its code ("Google Flights
 answered with a server error (status 13)") on every rendering, and the
 fallback to Matrix is otherwise the one a re-shaped page gets.
