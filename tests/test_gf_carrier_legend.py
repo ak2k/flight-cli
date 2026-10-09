@@ -98,6 +98,16 @@ def test_the_legend_sits_directly_under_the_table(monkeypatch: pytest.MonkeyPatc
     assert below == "Carriers: MX Breeze Airways"
 
 
+def test_the_legend_sits_between_the_table_and_the_legroom_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = _row(("MX", "100"), amenities={0: LegAmenities(pitch_inches=31)})
+    lines = _printed(monkeypatch, [row])
+    border = next(i for i, ln in enumerate(lines) if ln.startswith("└"))
+    assert lines[border + 1] == "Carriers: MX Breeze Airways"
+    assert lines[border + 2].startswith("Legroom glyphs:")
+
+
 def test_a_code_the_map_lacks_takes_the_name_google_sent_for_that_operator(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
