@@ -127,6 +127,21 @@ def test_a_blank_name_google_sent_leaves_the_code_out(
     assert _legend(lines) == []
 
 
+@pytest.mark.parametrize(
+    "unseen",
+    ["\x1b\x00", "\u200b\u2066", " \x7f\t\u00ad "],
+    ids=["control", "invisible", "mixed"],
+)
+def test_a_name_google_sent_that_prints_as_nothing_leaves_the_code_out(
+    monkeypatch: pytest.MonkeyPatch, unseen: str
+) -> None:
+    metal = LegAmenities(operating_carrier="EN", operating_carrier_name=unseen)
+    row = _row(("EN", "8858"), amenities={0: metal})
+    lines = _printed(monkeypatch, [row])
+    assert any("EN 8858" in ln for ln in lines)
+    assert _legend(lines) == []
+
+
 def test_a_code_sold_for_another_operator_is_not_named_for_the_metal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
