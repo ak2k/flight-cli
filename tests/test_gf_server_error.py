@@ -216,13 +216,20 @@ _SERVER_ERROR_PAUSE = gfid._SERVER_ERROR_PAUSES_S[0]
 
 
 class _Clock:
-    """`time`, recording each sleep rather than taking it."""
+    """`time`, recording each sleep rather than taking it. A sleep advances
+    `monotonic` by its length, so every thread shares one timeline and the sum
+    of the sleeps is the wall wait."""
 
     def __init__(self) -> None:
         self.sleeps: list[float] = []
+        self.now = 0.0
 
     def sleep(self, seconds: float) -> None:
         self.sleeps.append(seconds)
+        self.now += seconds
+
+    def monotonic(self) -> float:
+        return self.now
 
     def __getattr__(self, name: str) -> Any:
         return getattr(time, name)
@@ -418,7 +425,7 @@ def test_a_search_pauses_at_most_eight_seconds_for_server_errors(
     clock: _Clock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Red without the search's budget, which paused 8 s for each page: the ten
+    """Red without the search's window, which paused 8 s for each page: the ten
     return pages of the round trip and its Cheapest tab, 88 s, and 96 s once a
     second cabin's outbound errs too. Green at the base, which paused for none;
     red there on the refusal it named."""

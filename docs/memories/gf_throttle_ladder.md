@@ -115,9 +115,10 @@ calls than one that throttles: 5 GETs, where reading it as a page with no
 `ds:1` and then laddering cost 7. The arm never books a rung of the shared
 round: an error on one page says nothing about the per-IP wall. It stands down
 a round it owns before it pauses, so a sibling parked on that round retries at
-once rather than after up to 8 s of pauses. Its pauses come
-out of a budget of 8 s per search, on the object `search_escalation` opens, so
-a search of many pages waits once. The measurements are in
+once rather than after up to 8 s of pauses. Its pauses fall
+inside a window of 8 s per search, opened by the search's first pause on the
+object `search_escalation` opens, so pages read side by side each get the whole
+schedule and a search of many pages waits 8 s at most. The measurements are in
 [gf_page_refusals_and_ds1.md](gf_page_refusals_and_ds1.md).
 
 Only a failure to REACH Google is retried — `curl_cffi`'s `ConnectionError` and
@@ -191,7 +192,7 @@ and by `cli._open_jaw_tickets` around a
 multi-city search's one one-way per slice, asked beside Matrix's answer on
 `auto` and in its place under `--backend gflight`, and by
 `cli._run_gflight_multi` around a multi-cabin fan-out, which never escalates
-but shares the object's budget of server-error pauses), in
+but shares the object's window of server-error pauses), in
 a ContextVar beside `_fanout_ladder`
 for the same reason: every worker of the search reads the same object, so the
 line prints once. A rung-1 GET reads it first, so a thread still backing off
