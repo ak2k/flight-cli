@@ -92,6 +92,18 @@ def test_the_legend_lists_a_code_once_in_the_order_the_rows_first_show_it(
     ]
 
 
+def test_a_code_named_only_on_a_later_row_keeps_its_first_shown_place(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """EN shows first with no name; a later row's Google name fills it in place."""
+    metal = LegAmenities(operating_carrier="EN", operating_carrier_name="Air Dolomiti")
+    rows = [
+        _row(("EN", "1"), ("MX", "2"), price=100.0),
+        _row(("EN", "3"), amenities={0: metal}, price=200.0),
+    ]
+    assert _legend(_printed(monkeypatch, rows)) == ["Carriers: EN Air Dolomiti · MX Breeze Airways"]
+
+
 def test_the_legend_sits_directly_under_the_table(monkeypatch: pytest.MonkeyPatch) -> None:
     lines = _printed(monkeypatch, [_row(("MX", "100"))])
     below = lines[next(i for i, ln in enumerate(lines) if ln.startswith("└")) + 1]

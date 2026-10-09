@@ -10199,7 +10199,9 @@ def _print_carrier_legend(members: list[Any], match_carriers: frozenset[str]) ->
     """The line under a table that names each carrier code its legs column
     shows, in the order the rows first show them. A code with no name is left
     out, and a table with none prints no line."""
-    named: dict[str, str] = {}
+    # Keyed on first show, unnamed included: a leg that names a code later fills
+    # its place rather than moving it behind the codes shown in between.
+    named: dict[str, str | None] = {}
     for g in members:
         amenities = getattr(g, "amenities", []) or []
         for k, leg in enumerate(g.flight.legs):
@@ -10207,13 +10209,12 @@ def _print_carrier_legend(members: list[Any], match_carriers: frozenset[str]) ->
             raw_code = (getattr(leg.airline, "name", "") or "").removeprefix("_")
             mf = _codeshare_match(amenity, match_carriers, raw_code)
             for shown in (raw_code,) if mf is None else (mf[:2].upper(), raw_code):
-                name = _carrier_name(shown, amenity)
-                if name is not None:
-                    named.setdefault(shown, name)
-    if named:
+                if named.get(shown) is None:
+                    named[shown] = _carrier_name(shown, amenity)
+    if any(named.values()):
         console.print(
             "[dim]Carriers: "
-            + _safe_text(" · ".join(f"{code} {name}" for code, name in named.items()))
+            + _safe_text(" · ".join(f"{code} {name}" for code, name in named.items() if name))
             + "[/]"
         )
 
