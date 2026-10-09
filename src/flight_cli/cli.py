@@ -22,6 +22,7 @@ import shlex
 import sys
 from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from functools import partial, wraps
 from itertools import groupby, pairwise
 from statistics import median
@@ -4998,14 +4999,15 @@ def _deal_days(days: Sequence[CalendarDay], ccy: str) -> list[bool]:
     `_DEAL_MIN_DAYS` are priced in `ccy`. A day in another currency is neither
     in the median nor a deal: its amount is not in the table's unit."""
     values = [d.price_value if _split_price(d.min_price)[0] == ccy else None for d in days]
-    # In whole cents: as floats 40.20 * 100 > 50.25 * 80, so a day exactly the
-    # percent under the median would not be a deal.
-    cents = [None if v is None else round(v * 100) for v in values]
-    priced = [c for c in cents if c is not None]
+    # Exact decimals: as floats 40.20 * 100 > 50.25 * 80, and whole cents round
+    # 0.804 of a three-decimal currency to 0.80. `str` of a float is the shortest
+    # decimal that reads back as it, so it is the amount as written.
+    amounts = [None if v is None else Decimal(str(v)) for v in values]
+    priced = [a for a in amounts if a is not None]
     if len(priced) < _DEAL_MIN_DAYS:
         return [False] * len(days)
     cutoff = median(priced) * (100 - _DEAL_UNDER_PCT)
-    return [c is not None and c * 100 <= cutoff for c in cents]
+    return [a is not None and a * 100 <= cutoff for a in amounts]
 
 
 def _render_calendar(

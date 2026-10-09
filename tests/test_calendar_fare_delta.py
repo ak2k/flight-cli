@@ -140,12 +140,24 @@ def test_another_currency_stays_out_of_the_median(
 def test_a_day_exactly_twenty_percent_under_to_the_cent_is_green(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # As floats 40.20 * 100 > 50.25 * 80; in whole cents the two are equal.
+    # As floats 40.20 * 100 > 50.25 * 80; as exact decimals the two are equal.
     written = _render(
         monkeypatch,
         ["USD50.25", "USD50.25", "USD50.25", "USD50.25", "USD50.25", "USD40.20"],
     )
     assert _green_amounts(written) == ["40.20"]
+
+
+def test_a_three_decimal_amount_is_compared_exactly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 0.804 is 19.6% under the median of 1.000; in whole cents it would read as
+    # 0.80 and be a deal.
+    written = _render(
+        monkeypatch,
+        ["KWD1.000", "KWD1.000", "KWD1.000", "KWD1.000", "KWD1.000", "KWD0.800", "KWD0.804"],
+    )
+    assert _green_amounts(written) == ["0.800"]
 
 
 def test_no_color_prints_the_same_text_without_escapes(
