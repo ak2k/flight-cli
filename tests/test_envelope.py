@@ -121,7 +121,7 @@ def _first_row_award(leg: LegQuery) -> AwardFlight:
     """An award on the flight of the LAX board's cheapest row, so the matcher
     attaches it to that cash row."""
     board = gfid._rows_from_page_html(PageFetch(_served(_LAX), _URL, 200))
-    first = cli._price_ordered(board)[0].flight.legs[0]
+    first = cli._price_ordered(board, currency="USD")[0].flight.legs[0]
     return AwardFlight(
         origin=leg.origin,
         destination=leg.destination,

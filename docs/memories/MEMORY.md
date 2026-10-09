@@ -97,9 +97,9 @@ go into detail and are loaded on demand.
 - [gf_row_order_and_merge.md](gf_row_order_and_merge.md) — `-n` as a trim on
   the way out, `--pick` against the printed merged table, when the Google line
   pins a Matrix row, every row once in the merged table, price-ascending order
-  (`fare_key`), the multi-cabin join key, and ranking two currencies. Read
-  before touching `cli._price_ordered`, `_enrich.merge_results` or
-  `_multi_cabin.merge`.
+  (`price_rank`, the requested currency first), the multi-cabin join key, and
+  ranking two currencies. Read before touching `cli._price_ordered`,
+  `_enrich.merge_results` or `_multi_cabin.merge`.
 - [gf_throttle_ladder.md](gf_throttle_ladder.md) — One shared throttle and
   transport ladder per fan-out with a single prober, waiter parks and
   refills, which curl failures retry and which propagate, and the measured

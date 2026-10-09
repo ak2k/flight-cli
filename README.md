@@ -141,12 +141,14 @@ Every result-printing command supports:
 - **Economy without basic fares** (`--exclude-basic`): Google Flights only, economy only. Google is asked to leave basic fares out, but no row says whether its fare is basic, and Google served basic fares on JFK-LHR anyway, so every run says the rows cannot be checked. `--sellers` and `--verify` are refused beside it: neither the booking page nor Matrix is asked to leave basic fares out.
 - **Stop limits** (`--stops N`): at most N stops per direction, on every backend. `0` = nonstop only, `1` = up to one stop, …
 - **Calendar-mode duration ranges** (`-d 5-7`): one search returns prices for 5-, 6-, and 7-night trips at every starting day. `calendar --fast -d 5-7` shows Google's price graph alone, one column per trip length, within 8 page loads.
+- **Cheap days** (`calendar`, Matrix's table): a day's `min` price prints green when it is at least 20% under the median of the window's priced days in the table's currency; with fewer than 5 such days nothing is colored.
 - **Split tickets** (`search --split`): on a Google Flights round trip, also prices one-way tickets each way and prints the cheapest pair of one-ticket one-ways whose return leaves the airport the outbound lands at, after it lands, with their total, on one line under the round-trip table.
 - **Multi-city on separate tickets** (two or more `--slice` that are not a round trip: an open jaw, or a longer trip): Matrix prices the trip as one ticket, and before its table `search` also prints the cheapest combinations of one Google Flights one-way per slice (`flight search --slice JFK-LHR:2026-10-20 --slice CDG-JFK:2026-10-27`), each total the sum of its tickets in one currency and marked `†`, because a missed flight on one ticket is not protected on the next. Each ticket leaves after the one before it lands, on a later day when it leaves from another airport. `--format envelope` carries them under `split_ticket`; `--format json` writes them beside Matrix's document only with `--split`. `--backend gflight` shows the combinations alone and asks Matrix nothing; its `--format json` is `{"search": [], "split_ticket": {…}}`.
 - **Several cabins** (`--cabin economy,business`): one table with a price column per cabin, every cabin priced on the `--sort` cabin's itineraries. A cabin whose own cheapest fare is on no row gets a line under the table naming it and the `--sort` that lists it first, for a party at the party's total, or one traveler's price where Matrix states none, and the line says which; `--format json` and `--format envelope` carry every fare the table and that line print.
 - **Google vs Matrix cross-check** (the default table): every price is for the whole party and a row ranks on the lowest one it prints; a row both sides price for the same trip shows `delta` (Google − Matrix), every other row says `why` it has none, and the caption says how much of Matrix's answer was read. Where Google's cheapest Google-only row is under every fare in Matrix's answer, Matrix is asked for that row's exact flights (60 s at most), and the line under the table gives Matrix's price for them beside Google's, or why Matrix does not price them, or that it did not answer. `flight search JFK LAX --dep 2026-10-20 --format json --enrich --cash-only` writes the same comparison as `{"search": …, "cross_check": …}`, that answer as `cross_check.low_check`, and `--format envelope` carries the comparison under `cross_check`.
 - **Party prices** (`--adults 2` and the like): every itinerary price is the party's total, on Matrix as on Google, under a header that says so; Matrix's carrier x stops grid and its cheapest line stay per traveler. The multi-cabin table (several `--cabin` values) prints each cabin's party total too, starred as per traveler where Matrix states no total.
 - **Sellers and explore** (Chrome, the `browser` extra): `flight search JFK LAX --dep 2026-10-20 --sellers --pick 2` lists every seller of row 2 with its price and fare name, cheapest first, then each seller's bag fees and booking link on a line of its own; `flight explore JFK --month 2026-11 --days 5-7 --max-price 300` lists where JFK flies that month and the cheapest round trip to each.
+- **Watches** (`flight watch add JFK LHR --below 400`, `flight watch list`, `flight watch rm 1`): saves a route, an optional `--dep` date or `--from`/`--to` window, a `--below` ceiling, a `--cabin` and `--award` to `watches.json` in the config directory (mode 0600). Nothing polls, searches or notifies from them yet.
 
 ## Checking the setup: `flight doctor`
 
@@ -155,7 +157,7 @@ credential; `--format json` gives the same checks as a document.
 
 | Check | What it checks |
 |---|---|
-| `config` | `config.toml` parses, if there is one, and the rps setting is a number greater than 0 |
+| `config` | `config.toml` parses, if there is one, and the rps setting is a number of at least 5.6e-309 |
 | `matrix-key` | which Matrix key a search would send (`FLIGHT_API_KEY`, the cache and its age, or none), without fetching one |
 | `cache` | the response cache opens |
 | `google-cookies` | the saved Google session cookie: its age and NID count |
@@ -169,6 +171,11 @@ or outage worth retrying, and 1 otherwise. Each failure names its cause; a
 `shape` failure means a parser no longer reads what Google or Matrix sends
 ([docs/memories/doctor.md](docs/memories/doctor.md)). Credentials appear only
 as `sha256:` fingerprints.
+
+When Matrix answers with a body the response models cannot read, a search
+stops with a line naming the field, the issue tracker and a saved copy of the
+body under `~/.cache/flight-cli/shape-changes/` (`MATRIX_CACHE_DIR` moves it).
+Attach that file to the report; `-vv` adds every field the parse refused.
 
 ## Award overlay
 

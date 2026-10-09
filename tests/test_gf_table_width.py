@@ -83,7 +83,7 @@ def _render(
 ) -> str:
     buffer = io.StringIO()
     monkeypatch.setattr(cli, "console", Console(file=buffer, width=width, no_color=True))
-    cli._render_gflight_table(results, legs=legs, top_n=len(results), bags=bags)
+    cli._render_gflight_table(results, legs=legs, top_n=len(results), bags=bags, currency="USD")
     return buffer.getvalue()
 
 
@@ -135,7 +135,7 @@ def _members(results: list[Any]) -> list[Any]:
     outbound before its return."""
     return [
         g
-        for r in cli._price_ordered(results)
+        for r in cli._price_ordered(results, currency="USD")
         for g in (cast("tuple[Any, ...]", r) if isinstance(r, tuple) else (r,))
     ]
 
@@ -247,7 +247,7 @@ def test_a_separate_ticket_mark_stays_beside_its_price_at_80_columns_or_more(
     results, legs, _ = _BOARDS[board]
     results = _ticketed(results)
     want: list[tuple[str, str]] = []
-    for i, r in enumerate(cli._price_ordered(results), 1):
+    for i, r in enumerate(cli._price_ordered(results, currency="USD"), 1):
         items = cast("tuple[Any, ...]", r) if isinstance(r, tuple) else (r,)
         for j, g in enumerate(items):
             label = f"{i}{'a' if j == 0 else 'b'}" if len(items) > 1 else str(i)
