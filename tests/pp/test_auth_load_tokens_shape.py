@@ -26,7 +26,6 @@ _BAD_STORES: dict[str, bytes] = {
     "expires_at_list": json.dumps({**_GOOD, "expires_at": [1]}).encode(),
     "expires_at_text": json.dumps({**_GOOD, "expires_at": "soon"}).encode(),
     "not_utf8": b"\xff\xfe{",
-    "deeply_nested_list": b"[" * 100_000 + b"]" * 100_000,
 }
 
 
@@ -57,6 +56,21 @@ def test_whoami_on_a_token_store_of_the_wrong_shape_says_not_logged_in(
         result.exception
     )
     assert result.exit_code == 1
+    assert "Not logged in" in result.output
+
+
+def test_a_deeply_nested_token_store_reads_as_no_login(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    # Nesting past the recursion limit makes json.loads raise RecursionError, not ValueError.
+    assert pp_auth.TOKENS_PATH.is_relative_to(tmp_path_factory.getbasetemp())
+    _write_store(b"[" * 100_000 + b"]" * 100_000)
+    assert pp_auth.load_tokens() is None
+    assert provider.is_configured() is False
+    result = CliRunner().invoke(cli.app, ["auth", "pp", "whoami"])
+    assert result.exception is None or isinstance(result.exception, SystemExit), repr(
+        result.exception
+    )
     assert "Not logged in" in result.output
 
 
