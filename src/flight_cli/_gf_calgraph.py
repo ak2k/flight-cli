@@ -518,7 +518,7 @@ def price_graphs(
     search: CalendarSearch, *, headed: bool, raise_unpriced: bool = True
 ) -> GraphRange:
     """One graph per trip length, in order, within `_MAX_PAGES` loads in all,
-    and pausing for Google's refusals out of one search's budget in all.
+    and pausing for Google's refusals inside one search's window.
 
     Each length is asked with the loads still left, since a page's span can fall
     short of the estimate that admitted the window. A length that fails, or that
