@@ -175,3 +175,16 @@ def test_unusable_store_message_drops_control_characters_from_an_unknown_key(
     assert "left untouched" in result.output
     assert not [c for c in _TERMINAL_DRIVERS if c in result.output]
 
+
+def test_unusable_store_message_drops_control_characters_from_the_store_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "a\x07\u202eb"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(root))
+    monkeypatch.delenv("FLIGHT_CLI_CONFIG_DIR", raising=False)
+    _store(root).parent.mkdir(parents=True)
+    _store(root).write_text("not json")
+    result = _watch("list")
+    assert result.exit_code == 1, result.output
+    assert "left untouched" in result.output
+    assert not [c for c in _TERMINAL_DRIVERS if c in result.output]
