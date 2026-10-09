@@ -303,3 +303,13 @@ sellable as LH matches `LH+` even if its primary number is UA). To keep that
 honest, `_leg_display` relabels a codeshare match to the matched identity —
 `LH9403 (op UA58)` under `--routing LH+` — using `marketing_flights` +
 `_match_carriers` (marketing-include filters only).
+
+**Carrier legend**: `_print_carrier_legend` prints `Carriers: MX Breeze Airways ·
+F9 Frontier Airlines` under the Google table, naming each code the legs column
+shows, in the order the rows first show it. A code takes its full name from
+`_carrier_names.CARRIER_NAMES`, since Google's own names are short brands
+("Delta"), else from `operating_carrier_name` when the code is the leg's
+`operating_carrier`. A code with neither is left out: the operating name is
+never used for a code sold for another operator (EN flies the LH flight, and LH
+is not "Air Dolomiti"). Under a codeshare relabel both codes on screen are
+named. Add a code to the map when a table shows one with no name.
