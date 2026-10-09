@@ -479,10 +479,41 @@ def search_escalation() -> Generator[None]:
         _search_escalation.reset(token)
 
 
+@contextlib.contextmanager
+def within_search() -> Generator[None]:
+    """Make this block part of the search running now, or a search of its own
+    when none is (`search_escalation`): a caller asking Google several times
+    for one answer pauses inside one window, on whatever thread it runs."""
+    if _search_escalation.get() is not None:
+        yield
+        return
+    with search_escalation():
+        yield
+
+
 def escalated() -> bool:
     """Whether the search running now has moved to Chrome."""
     latch = _search_escalation.get()
     return latch is not None and latch.done
+
+
+def server_error_waiter() -> Callable[[], bool]:
+    """A caller's schedule of pauses before it reads again what Google refused.
+
+    Each call sleeps the next of `_SERVER_ERROR_PAUSES_S`, cut to what is left
+    of the running search's window (`_Escalation.pause`) or, outside one, a
+    window of its own, and returns True; once the schedule is spent it sleeps
+    nothing and returns False."""
+    search = _search_escalation.get() or _Escalation()
+    pauses = iter(_SERVER_ERROR_PAUSES_S)
+
+    def wait() -> bool:
+        if (wanted := next(pauses, None)) is None:
+            return False
+        time.sleep(search.pause(wanted))
+        return True
+
+    return wait
 
 
 @contextlib.contextmanager
