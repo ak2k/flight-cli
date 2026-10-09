@@ -10189,7 +10189,7 @@ def _carrier_name(code: str, amenity: Any) -> str | None:
     if (name := CARRIER_NAMES.get(code)) is not None:
         return name
     if getattr(amenity, "operating_carrier", None) == code:
-        return getattr(amenity, "operating_carrier_name", None)
+        return (getattr(amenity, "operating_carrier_name", None) or "").strip() or None
     return None
 
 

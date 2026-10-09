@@ -7,6 +7,7 @@ import io
 from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+import pytest
 from fli.models import FlightLeg, FlightResult  # pyright: ignore[reportMissingTypeStubs]
 from fli.models.airline import Airline  # pyright: ignore[reportMissingTypeStubs]
 from fli.models.airport import Airport  # pyright: ignore[reportMissingTypeStubs]
@@ -20,8 +21,6 @@ from flight_cli.domain import Leg
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    import pytest
 
 _DEP = date.today() + timedelta(days=45)
 _DAY = datetime(2026, 11, 4, 8, 0)
@@ -105,6 +104,17 @@ def test_a_code_the_map_lacks_takes_the_name_google_sent_for_that_operator(
     metal = LegAmenities(operating_carrier="EN", operating_carrier_name="Air Dolomiti")
     row = _row(("EN", "8858"), amenities={0: metal})
     assert _legend(_printed(monkeypatch, [row])) == ["Carriers: EN Air Dolomiti"]
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_a_blank_name_google_sent_leaves_the_code_out(
+    monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    metal = LegAmenities(operating_carrier="EN", operating_carrier_name=blank)
+    row = _row(("EN", "8858"), amenities={0: metal})
+    lines = _printed(monkeypatch, [row])
+    assert any("EN 8858" in ln for ln in lines)
+    assert _legend(lines) == []
 
 
 def test_a_code_sold_for_another_operator_is_not_named_for_the_metal(
