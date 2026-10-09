@@ -1254,8 +1254,9 @@ def test_the_cheapest_fare_the_table_names_is_a_row_of_its_cabin_in_the_document
     monkeypatch: pytest.MonkeyPatch, fmt: str
 ) -> None:
     """Business's returns on 105 and 106 are priced in EUR, below its USD1020 by
-    number, so they are its ten cheapest rows by amount. The line under the
-    table still names USD1020, and the document carries it. Red at the base."""
+    number, but a fare in the requested currency ranks before any in another, so
+    USD1020 leads the document, which the line under the table names, and no EUR
+    row fills the cabin's ten ahead of it. Red at the base."""
     euros = {105: 900.0, 106: 910.0}
     table = _search(monkeypatch, _in_euros(_reversed(monkeypatch), euros))
     assert table.exit_code == 0, table.output
@@ -1268,11 +1269,11 @@ def test_the_cheapest_fare_the_table_names_is_a_row_of_its_cabin_in_the_document
         assert document.exit_code == 0, document.output
         doc: dict[str, list[list[dict[str, Any]]]] = json.loads(document.stdout)
         listed = [(row[-1]["currency"], row[-1]["price"]) for row in doc["BUSINESS"]]
-    assert listed[:10] == sorted(("EUR", base + j) for base in euros.values() for j in range(5))
-    assert listed[10] == ("USD", 1020.0)
+    assert listed[0] == ("USD", 1020.0)
+    assert {currency for currency, _ in listed} == {"USD"}
     assert [price for _, price in listed] == sorted(price for _, price in listed)
     assert {("USD", p) for p in _cells(table.stdout)["BUSINESS"]} <= set(listed)
-    assert len(listed) == 21
+    assert len(listed) == 20
 
 
 def _business_in_euros(google: _Google) -> Callable[..., gfid.Board[Any]]:

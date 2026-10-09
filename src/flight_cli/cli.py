@@ -93,7 +93,14 @@ from ._metro import (
     gf_leg_refusal,
     gf_pages_refusal,
 )
-from ._multi_cabin import MultiCabinRow, cheapest, itinerary_key, parse_price, price_currency
+from ._multi_cabin import (
+    MultiCabinRow,
+    cheapest,
+    itinerary_key,
+    parse_price,
+    price_currency,
+    price_rank,
+)
 from ._multi_cabin import merge as _merge_cabins
 from ._watch import watch_app
 from .client import MatrixApiError, MatrixClient
@@ -3829,7 +3836,11 @@ def _one_way_boards(
                         f"{_one_ways_not_asked(rest)} after the {which} one-way stopped the "
                         f"search ({str(stop) or type(stop).__name__})"
                     )
-                priced = [r for r in _price_ordered(board) if r.flight.price is not None]
+                priced = [
+                    r
+                    for r in _price_ordered(board, currency=requested)
+                    if r.flight.price is not None
+                ]
                 # A one-way sold as separate tickets is already more than one
                 # booking, so tickets holding it would not be one booking each.
                 single = [r for r in priced if not _separately_ticketed(r)]
@@ -6279,7 +6290,7 @@ def _report_pages(asked: _PageAsk) -> None:
         )
 
 
-def _merged_boards(boards: Sequence[Board[Any]]) -> list[Any]:
+def _merged_boards(boards: Sequence[Board[Any]], *, currency: str) -> list[Any]:
     """Every row of `boards` once, by the whole trip and how Google sells it
     (`row_key`, `ticketing`): the cheaper listing is kept, in the place the
     first one took. A row on separate tickets is a booking of its own, so it
@@ -6296,7 +6307,9 @@ def _merged_boards(boards: Sequence[Board[Any]]) -> list[Any]:
             if seen is None:
                 at[key] = len(rows)
                 rows.append(r)
-            elif _terminal_fare_key(r) < _terminal_fare_key(rows[seen]):
+            elif _terminal_fare_key(r, currency=currency) < _terminal_fare_key(
+                rows[seen], currency=currency
+            ):
                 rows[seen] = _with_top_marks(r, rows[seen])
             else:
                 rows[seen] = _with_top_marks(rows[seen], r)
@@ -6328,7 +6341,9 @@ def _kept(outbound: _Outbound) -> list[Any]:
     return _kept_outbounds(outbound.board, outbound.keep, outbound.fits)
 
 
-def _union_pins(kept: dict[int, list[Any]], top_n: int) -> dict[int, list[ItineraryKey]]:
+def _union_pins(
+    kept: dict[int, list[Any]], top_n: int, *, currency: str
+) -> dict[int, list[ItineraryKey]]:
     """Each page's share of the `pinned_fanout(top_n)` cheapest outbounds kept
     across every page (`kept`, by page), as the keys that page pins.
 
@@ -6347,7 +6362,9 @@ def _union_pins(kept: dict[int, list[Any]], top_n: int) -> dict[int, list[Itiner
                 at[key] = len(union)
                 union.append(r)
                 owner[key] = i
-            elif _terminal_fare_key(r) < _terminal_fare_key(union[seen]):
+            elif _terminal_fare_key(r, currency=currency) < _terminal_fare_key(
+                union[seen], currency=currency
+            ):
                 union[seen] = r
                 owner[key] = i
     shares: dict[int, list[ItineraryKey]] = {}
@@ -6458,7 +6475,7 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
             ]
             # Once a page, so its filter counts each row over the stop ceiling once.
             kept = {i: _kept(ob) for i, ob in outbounds}
-            shares = _union_pins(kept, top_n)
+            shares = _union_pins(kept, top_n, currency=opts.currency or "USD")
             _mark_tops([ob.board for _, ob in outbounds], kept.values())
             for i, ob in outbounds:
                 keys = shares.get(i, [])
@@ -6515,7 +6532,7 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
     unread += sum(e.unread for e in asked.failed.values() if isinstance(e, _PageUnreadError))
     separate_failed = asked.tab_refusal(tabs_failed)
     asked.report()
-    rows = _merged_boards(boards)
+    rows = _merged_boards(boards, currency=opts.currency or "USD")
     asked.raise_if_empty(rows)
     if rows and len(pages[0]) >= _ROUND_TRIP_LEGS:
         err.print(
@@ -6864,13 +6881,17 @@ def _bags_by_itinerary(
     }
 
 
-def _terminal_fare_key(r: Any) -> tuple[int, float]:
-    """Sort key for one Google row: `fare_key` of a one-way row, or of a
-    round-trip combination's terminal member, whose fare is the one every
-    surface prints for the combination."""
-    from ._gflight_ids import fare_key  # noqa: PLC0415 — fli, ~95 ms
-
-    return fare_key(cast("tuple[Any, ...]", r)[-1] if isinstance(r, tuple) else r)
+def _terminal_fare_key(r: Any, *, currency: str) -> tuple[int, str, float]:
+    """Sort key for one Google row: `price_rank` of a one-way row's fare, or of
+    a round-trip combination's terminal member's, the fare every surface prints
+    for the combination. A fare in a currency other than `currency`, the one
+    asked for, ranks after every fare in it; a row with no decoded currency is
+    read in `currency`, as `_with_board_currency` fills it; an unpriced row is
+    last."""
+    flight = (cast("tuple[Any, ...]", r)[-1] if isinstance(r, tuple) else r).flight
+    price: float | None = flight.price
+    shown = None if price is None else f"{flight.currency or currency}{price:.2f}"
+    return price_rank(shown, price, currency=currency)
 
 
 def _ticketings(r: Any) -> tuple[Any, ...]:
@@ -6954,13 +6975,14 @@ def _note_award_skips(separate: int) -> None:
         )
 
 
-def _price_ordered(results: list[Any]) -> list[Any]:
-    """A Google answer in price order, unpriced rows last; the argument is in
-    the memo's `-n` section.
+def _price_ordered(results: list[Any], *, currency: str) -> list[Any]:
+    """A Google answer in price order, fares in `currency`, the one asked for,
+    before any other currency's and unpriced rows last; the argument is in the
+    memo's `-n` section.
 
     The sort is stable, so rows sharing a fare keep the order they arrived in:
     the page's on a one-way board, the pins' for combinations."""
-    return sorted(results, key=_terminal_fare_key)
+    return sorted(results, key=lambda r: _terminal_fare_key(r, currency=currency))
 
 
 def _pins_row_one(
@@ -7648,7 +7670,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     # than exist, which is the failure this backend is most prone to.
     insight = getattr(results, "insight", None)
     served = results
-    ordered = _price_ordered(results)
+    ordered = _price_ordered(results, currency=opts.currency or "USD")
     results = ordered[:top_n]
     # A pinned link follows only where one is asked for, the format has room for
     # it and row one can be pinned: `--format json` emits no link at all, and a
@@ -7741,6 +7763,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
                 insight=insight,
                 bags=opts.bags,
                 passengers=opts.pax.total,
+                currency=opts.currency or "USD",
             )
         except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
             raise
@@ -7835,6 +7858,7 @@ def _paint_first_gf_table(
                 match_carriers=_match_carriers(legs),
                 insight=getattr(gf, "insight", None),
                 passengers=opts.pax.total if opts else 1,
+                currency=(opts.currency if opts else None) or "USD",
             )
         except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
             raise
@@ -8232,7 +8256,7 @@ def _answer_cross_check_document(
             impersonate=impersonate,
         )
         checked["low_check"] = _low_check_document(low)
-    rows = _price_ordered(gf)[:top_n]
+    rows = _price_ordered(gf, currency=currency)[:top_n]
     if _envelope.active():
         if google_answered:
             served = state.get("gf")
@@ -8743,7 +8767,7 @@ def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, 
         if sellers:
             # The Google table painted first is the only numbered one on
             # screen, so the pick names its row, as it does under `--fast`.
-            rows = _price_ordered(gf)[:top_n]
+            rows = _price_ordered(gf, currency=requested)[:top_n]
             n = _pick_for_sellers(pick, len(rows))
             sr = fli_results_to_search_result(rows)
             _print_booking_options(
@@ -9862,6 +9886,7 @@ def _cabin_document_rows(
     top_n: int,
     *,
     own: Itinerary | None,
+    currency: str,
 ) -> list[Any]:
     """`cabin`'s Google board as a multi-cabin document carries it: its `top_n`
     cheapest rows, then, in price order, each other row whose fare the joined
@@ -9871,18 +9896,18 @@ def _cabin_document_rows(
     The table prices every cabin on the sort cabin's itineraries, so a fare it
     prints can sit far down another cabin's board; without it, the document
     and the table of one search would hold different fares. The `top_n` are
-    cheapest by the bare amount, so rows Google priced in another currency can
-    fill them ahead of `own`. The count is the user's, not the bumped one the
-    cabins were queried at, which only gives the join overlap. A listing is
-    found by its itinerary key and price, the first such row in price order,
-    as the join keeps it."""
+    cheapest in `currency`, the one asked for, so a row Google priced in another
+    currency fills them only after every row in it. The count is the user's,
+    not the bumped one the cabins were queried at, which only gives the join
+    overlap. A listing is found by its itinerary key and price, the first such
+    row in price order, as the join keeps it."""
     from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
 
     def listing(r: Any) -> tuple[object, str | None] | None:
         adapted = fli_results_to_search_result([r]).solutions
         return (itinerary_key(adapted[0]), adapted[0].price) if adapted else None
 
-    ordered = _price_ordered(board)
+    ordered = _price_ordered(board, currency=currency)
     carried = ordered[:top_n]
     wanted = {
         (itinerary_key(row.itinerary), price)
@@ -10046,7 +10071,14 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
 
     def document_rows(cab: Cabin, board: list[Any]) -> list[Any]:
         named = named_own.get(cab)
-        return _cabin_document_rows(board, rows, cab, top_n, own=named[0] if named else None)
+        return _cabin_document_rows(
+            board,
+            rows,
+            cab,
+            top_n,
+            own=named[0] if named else None,
+            currency=opts.currency or "USD",
+        )
 
     if _envelope.active():
         for cab, board in fli_by_cabin.items():
@@ -10238,6 +10270,7 @@ def _render_gflight_table(
     insight: PriceInsight | None = None,
     bags: Bags | None = None,
     passengers: int = 1,
+    currency: str,
 ) -> None:
     """Render fli results as a rich table. Duck-typed: fli has no type stubs.
 
@@ -10246,6 +10279,8 @@ def _render_gflight_table(
     `match_carriers` enables codeshare-aware leg labels (see `_leg_display`).
     `insight`, Google's price insight for the search, is one line under the
     table, its amounts formatted the way the price column formats them.
+    `currency`, the one asked for, orders the rows the `top_n` keep: a fare in
+    another currency ranks after every fare in it (`_price_ordered`).
     `bags`, the `--bags` asked for, adds a column saying whether each row's
     price includes them (`_bag_cell`). A `CO2 kg` column (`_co2_cell`) shows
     only when a shown row carries Google's estimate, so a board without one
@@ -10282,7 +10317,7 @@ def _render_gflight_table(
         len(expand_airports(lg.origins)) > 1 or len(expand_airports(lg.destinations)) > 1
         for lg in legs
     )
-    shown = _price_ordered(results)[:top_n]
+    shown = _price_ordered(results, currency=currency)[:top_n]
     members = [
         g for r in shown for g in (cast("tuple[Any, ...]", r) if isinstance(r, tuple) else (r,))
     ]

@@ -384,7 +384,7 @@ def _render(
         else Console(file=buffer, width=200, no_color=True)
     )
     monkeypatch.setattr(cli, "console", console)
-    cli._render_gflight_table(results, legs=legs, top_n=len(results), bags=bags)
+    cli._render_gflight_table(results, legs=legs, top_n=len(results), bags=bags, currency="USD")
     return buffer.getvalue()
 
 

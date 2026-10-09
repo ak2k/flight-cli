@@ -767,6 +767,7 @@ def _table(monkeypatch: pytest.MonkeyPatch, bags: Bags | None) -> str:
         legs=(Leg.of("JFK", "LAX", _DEP),),
         top_n=10,
         bags=bags,
+        currency="USD",
     )
     return buffer.getvalue()
 
