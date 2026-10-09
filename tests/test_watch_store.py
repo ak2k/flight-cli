@@ -95,6 +95,8 @@ def test_date_window_cabin_and_award_are_stored_and_listed(config_root: Path) ->
             ["JFK", "LHR", "--from", "2026-11-09", "--to", "2026-11-01"], id="window-backwards"
         ),
         pytest.param(["JFK", "LHR", "--below", "0"], id="ceiling-zero"),
+        pytest.param(["JFK", "LHR", "--below", "inf"], id="ceiling-infinite"),
+        pytest.param(["JFK", "LHR", "--below", "1e400"], id="ceiling-overflows-to-infinite"),
         pytest.param(["JFK", "LHR", "--cabin", "steerage"], id="unknown-cabin"),
     ],
 )

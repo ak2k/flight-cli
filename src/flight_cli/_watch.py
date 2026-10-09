@@ -30,7 +30,8 @@ class Watch(BaseModel):
     destination: str = Field(pattern=_IATA)
     dep_from: date | None
     dep_to: date | None
-    below: float | None = Field(gt=0)
+    # JSON has no infinity, so an infinite ceiling would be saved as null.
+    below: float | None = Field(gt=0, allow_inf_nan=False)
     cabin: Cabin
     award: bool
 
