@@ -52,13 +52,13 @@ mean ~2 x 31 page fetches for a two-cabin round trip. The default `-n 10` is
 unchanged by the cap.
 
 Which outbounds the budget buys is the cheapest ones the filtered board lists
-(`_gflight_ids._pins`, on the same `fare_key` the `-n` trim sorts by: ties in
-page order, unpriced rows last). An outbound row's price is already the cheapest
-round trip through it (see "What a round-trip row's price means" below), so the
-cheapest outbounds are where the cheapest combinations are. On the JFK-LHR
-capture the page lists five USD295 top flights before three USD293 rows; `-n 1`
-pins EI104+EI152, the sixth row, and spends the same two GETs it spent on the
-first.
+(`_gflight_ids._pins`, on `_gflight_ids.fare_key`, the bare amount within one
+page: ties in page order, unpriced rows last). An outbound row's price is
+already the cheapest round trip through it (see "What a round-trip row's price
+means" below), so the cheapest outbounds are where the cheapest combinations
+are. On the JFK-LHR capture the page lists five USD295 top flights before three
+USD293 rows; `-n 1` pins EI104+EI152, the sixth row, and spends the same two
+GETs it spent on the first.
 
 The bump therefore widens the leg-1 rows each cabin keeps and NOT the round-trip
 pins. What makes the cabins' pins overlap is that the sort cabin leads

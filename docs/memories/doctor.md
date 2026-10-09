@@ -9,7 +9,7 @@ shape change or flakiness?" for a scheduled canary. Code: `src/flight_cli/_docto
 
 | id | kind | passes when |
 |---|---|---|
-| `config` | local | `config.toml` is absent, or parses, and the rps a search resolves (`FLIGHT_RPS`, then `[http].rps`) is a number greater than 0 |
+| `config` | local | `config.toml` is absent, or parses, and the rps a search resolves (`FLIGHT_RPS`, then `[http].rps`) is a number of at least 5.6e-309 |
 | `matrix-key` | local | always, reporting the key a search would send: `FLIGHT_API_KEY`, the cache (with its age of 30 days), or none. Fails (`config`) when `FLIGHT_API_KEY` is not shaped like a Matrix key, or the cached key cannot be read |
 | `cache` | local | the response cache opens and closes as `HttpTransport` opens it |
 | `google-cookies` | local | the NID jar is absent, or parses (age of 14 days, NID count) |
@@ -37,11 +37,11 @@ fails.
 | `unreachable` | yes | `GfTransportError`, an httpx transport error, `ApiKeyResolutionError` caused by one |
 | `upstream` | yes | `GfUpstreamStatusError`, HTTP 5xx (after Matrix's three attempts) |
 | `brownout` | yes | a Matrix timeout (no answer within the 180 s a search waits on each attempt), a `solutionList` with no solution, a `MatrixApiError` of kind `INTERNAL` / `UNAVAILABLE` / `DEADLINE_EXCEEDED` or an internal-error message |
-| `shape` | no | `GfPageShapeError`, `GfPinIgnoredError`, an empty Google board on the probe leg, a Matrix body without `solutionList`, with a `solutionList` that is not an object, or one its parser rejects, solutions with no price or flight, an SPA page (2xx) without the bundle or the key, a PointsPath pricing-info answer that does not parse or has no `pricingInfos` |
+| `shape` | no | `GfPageShapeError`, `GfPinIgnoredError`, an empty Google board on the probe leg, a Matrix body without `solutionList`, with a `solutionList` that is not an object, or one its parser rejects (`MatrixShapeError`), solutions with no price or flight, an SPA page (2xx) without the bundle or the key, a PointsPath pricing-info answer that does not parse or has no `pricingInfos` |
 | `rejected` | no | any other `MatrixApiError` |
 | `consent` | no | `GfConsentError` |
 | `auth` | no | Matrix refusing the key twice, `PPAuthError` (a Supabase 429 or 5xx on the token refresh is `throttled` or `upstream`), HTTP 401/403 from a provider |
-| `config` | no | a local setting: unparseable config, an rps that is not a number greater than 0 (a boolean included), malformed `FLIGHT_API_KEY`, an unopenable cache, an unreadable jar, a stored PointsPath or seats.aero credential file that cannot be read, `FLIGHT_CLI_GF_BROWSER_BIN` naming no executable file |
+| `config` | no | a local setting: unparseable config, an rps that is not a number of at least 5.6e-309 (a boolean included), malformed `FLIGHT_API_KEY`, an unopenable cache, an unreadable jar, a stored PointsPath or seats.aero credential file that cannot be read, `FLIGHT_CLI_GF_BROWSER_BIN` naming no executable file |
 | `browser` | no | `GfBrowserUnavailableError` (reason and remedy) |
 | `error` | no | anything else, as `Type: message` |
 

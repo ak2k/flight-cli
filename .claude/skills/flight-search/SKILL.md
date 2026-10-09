@@ -186,7 +186,7 @@ Multiple codes joined by **semicolon** (`;`). Args within a code by **space**. T
 
 | Code | Example | Meaning |
 |---|---|---|
-| `ALLIANCE x\|y\|…` | `ALLIANCE star-alliance` | Restrict to alliance(s). Multiple via `\|`. |
+| `ALLIANCE x y …` | `ALLIANCE star-alliance` | Restrict to alliance(s). Multiple separated by spaces (or `\|`). |
 | `AIRLINES x y …` | `AIRLINES BA AF KL` | Only these marketing carriers |
 | `-AIRLINES x y …` | `-AIRLINES AA UA DL` | Exclude these marketing carriers |
 | `OPAIRLINES x y …` | `OPAIRLINES LH` | Only these operating carriers (no codeshares from non-LH metal) |

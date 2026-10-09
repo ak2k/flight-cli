@@ -14,7 +14,9 @@ whether to honor them).
 
 from __future__ import annotations
 
+import math
 import os
+import sys
 import tomllib
 from pathlib import Path
 from typing import Any, cast
@@ -122,6 +124,10 @@ RPS_ENV = "FLIGHT_RPS"
 IMPERSONATE_ENV = "FLIGHT_IMPERSONATE"
 NO_CACHE_ENV = "FLIGHT_NO_CACHE"
 
+# `HttpTransport` paces a sub-1 rate by a period of `1 / rps`, which is inf at
+# and below this rate.
+_MIN_RPS = 1.0 / sys.float_info.max
+
 
 def _truthy_env(name: str) -> bool:
     """`FLIGHT_NO_CACHE=1` / `=true` / `=yes` → True. Unset / `=0` / `=false` → False."""
@@ -132,7 +138,9 @@ def _truthy_env(name: str) -> bool:
 def checked_rps(value: Any, source: str) -> float:
     """`value` as a rate the request limiter can pace by, or a ValueError naming
     `source`. `float()` alone passes a rate of 0, which the limiter divides by,
-    and a negative or nan one, which leaves a search waiting forever."""
+    and a negative or nan one, which leaves a search waiting forever. At and
+    below `_MIN_RPS` the period `1 / rps` is inf, so the limiter's rate per
+    second is 0, which it divides by once a request has to wait."""
     msg = f"{source}={value!r} is not a number greater than 0"
     try:
         rps = float(value)
@@ -142,6 +150,9 @@ def checked_rps(value: Any, source: str) -> float:
     # `float()` reads a TOML boolean as 0 or 1; `not rps > 0` refuses nan,
     # which `rps <= 0` would pass.
     if isinstance(value, bool) or not rps > 0:
+        raise ValueError(msg)
+    if not math.isfinite(1.0 / rps):
+        msg = f"{source}={value!r} is too small a rate to pace requests by (least {_MIN_RPS:.1e})"
         raise ValueError(msg)
     return rps
 
