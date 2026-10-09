@@ -108,7 +108,7 @@ stricter code is not relied on to hold beside a later, looser one.
 
 | Code | Example | Meaning |
 |---|---|---|
-| `ALLIANCE code\|code\|…` | `ALLIANCE star-alliance` | Restrict to alliance(s). Multiple via `\|`. Values: `oneworld`, `skyteam`, `star-alliance` |
+| `ALLIANCE code code …` | `ALLIANCE star-alliance` | Restrict to alliance(s). Multiple separated by spaces, as Matrix's help has it; this CLI also reads `\|`. Values: `oneworld`, `skyteam`, `star-alliance` |
 | `AIRLINES code …` | `AIRLINES BA AF` | Allow only these marketing carriers |
 | `-AIRLINES code …` | `-AIRLINES AA BA` | Prohibit these marketing carriers |
 | `OPAIRLINES code …` | `OPAIRLINES AA` | Allow only flights operated by these carriers |

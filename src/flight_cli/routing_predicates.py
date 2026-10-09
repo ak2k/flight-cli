@@ -520,10 +520,11 @@ def _parse_extension_code(directive: str) -> Predicate | None:  # noqa: PLR0911,
             return ExcludeRedeyesPred()
         case "-CODESHARE":
             return ExcludeCodesharePred()
-        # A list naming no alliance (`ALLIANCE |`) falls through to the bare
-        # directive's reason: as a filter it would admit every carrier.
+        # Names are separated by spaces (Matrix's help) or `|`. A list naming no
+        # alliance (`ALLIANCE |`) falls through to the bare directive's reason:
+        # as a filter it would admit every carrier.
         case "ALLIANCE" if codes := frozenset(
-            c.lower() for c in " ".join(args).split("|") if c.strip()
+            name.lower() for arg in args for name in arg.split("|") if name
         ):
             if codes <= _ALLIANCES:
                 return AlliancePred(codes=codes)
