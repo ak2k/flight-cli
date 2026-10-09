@@ -15,6 +15,8 @@ from typing import Annotated, Final, Literal, Self, get_args
 import typer
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
+from ._console_text import CTRL
+
 Cabin = Literal["economy", "premium", "business", "first"]
 CABINS: Final = get_args(Cabin)
 _IATA = r"^[A-Z]{3}$"
@@ -77,7 +79,9 @@ def _save(watches: list[Watch]) -> None:
 
 
 def _fail(message: str, code: int) -> typer.Exit:
-    typer.echo(message, err=True)
+    """The store path comes from the environment and a key in an unusable store
+    from the file, so either can carry characters a terminal acts on."""
+    typer.echo(message.translate(CTRL), err=True)
     return typer.Exit(code)
 
 

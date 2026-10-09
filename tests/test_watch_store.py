@@ -149,3 +149,29 @@ def test_an_unreadable_store_exits_1_and_is_never_overwritten(
     assert result.exit_code == 1, result.output
     assert "left untouched" in result.output
     assert store.read_text() == '[{"id": 1, "origin": "jfk"}]'
+
+
+_JFK_LHR = {
+    "id": 1,
+    "origin": "JFK",
+    "destination": "LHR",
+    "dep_from": None,
+    "dep_to": None,
+    "below": None,
+    "cabin": "economy",
+    "award": False,
+}
+_TERMINAL_DRIVERS = ("\x07", "\x1b", "\u202e")
+
+
+def test_unusable_store_message_drops_control_characters_from_an_unknown_key(
+    config_root: Path,
+) -> None:
+    store = _store(config_root)
+    store.parent.mkdir(parents=True)
+    store.write_text(json.dumps([{**_JFK_LHR, "\x07\x1b]0;pwn\x07\u202ek": 1}]))
+    result = _watch("list")
+    assert result.exit_code == 1, result.output
+    assert "left untouched" in result.output
+    assert not [c for c in _TERMINAL_DRIVERS if c in result.output]
+
