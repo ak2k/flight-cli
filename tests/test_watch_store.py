@@ -242,3 +242,14 @@ def test_a_store_that_cannot_be_read_exits_1_with_the_unusable_message(
     assert result.exit_code == 1, result.output
     assert "left untouched" in result.output
     assert store.is_dir()
+
+
+def test_a_store_with_values_of_the_wrong_type_is_unusable(config_root: Path) -> None:
+    store = _store(config_root)
+    store.parent.mkdir(parents=True)
+    lax = json.dumps([{**_JFK_LHR, "id": "1", "below": "400", "award": "yes"}])
+    store.write_text(lax)
+    result = _watch("list")
+    assert result.exit_code == 1, result.output
+    assert "left untouched" in result.output
+    assert store.read_text() == lax

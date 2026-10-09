@@ -34,7 +34,8 @@ _DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 
 class Watch(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    # Strict: lax parsing would read a stored "yes" as true and "400" as a number.
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     id: int
     origin: str = Field(pattern=_IATA)
@@ -49,8 +50,8 @@ class Watch(BaseModel):
     @field_validator("dep_from", "dep_to", mode="before")
     @classmethod
     def _day(cls, value: object) -> object:
-        """pydantic reads a string of digits as Unix time (`--dep 0` would be
-        1970-01-01) and a datetime with no time of day as a date."""
+        """pydantic reads a string of digits as Unix time even in strict JSON
+        (`--dep 0` would be 1970-01-01), and strict Python takes no string."""
         if not isinstance(value, str):
             return value
         if not _DAY.fullmatch(value):
