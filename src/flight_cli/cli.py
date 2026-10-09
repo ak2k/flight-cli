@@ -9,6 +9,7 @@ Commands:
   flight airport   — IATA autocomplete
   flight explore   — where an origin flies, cheapest first (Google Flights, Chrome)
   flight doctor    — pass, fail or skip for every backend, transport and credential
+  flight watch     — save, list and remove route watches (stored only; nothing polls)
   flight fare      — [deprecated] alias for `search --backend matrix`
   flight gflight   — [deprecated] alias for `search --backend gflight`
 """
@@ -55,6 +56,7 @@ from ._calendar_split import (
     split_calendar_search,
     with_fanout_currency,
 )
+from ._carrier_names import CARRIER_NAMES
 from ._console_text import CTRL as _CTRL
 from ._console_text import quote as _quote
 from ._console_text import safe_text as _safe_text
@@ -102,6 +104,7 @@ from ._multi_cabin import (
     price_rank,
 )
 from ._multi_cabin import merge as _merge_cabins
+from ._watch import watch_app
 from .client import MatrixApiError, MatrixClient
 from .domain import (
     Bags,
@@ -233,6 +236,7 @@ def _usd_amount(price: str | None) -> float | None:
 
 app = typer.Typer(rich_markup_mode="rich", help="CLI for ITA Matrix's Alkali backend.")
 app.add_typer(auth_app, name="auth")
+app.add_typer(watch_app, name="watch")
 console = Console()
 err = Console(stderr=True)
 
@@ -10201,14 +10205,57 @@ def _leg_display(leg: Any, amenity: Any, match_carriers: frozenset[str]) -> str:
     code = _safe_text(raw_code)
     number = _safe_text(getattr(leg, "flight_number", "?"))
     booking = f"{code} {number}"
+    mf = _codeshare_match(amenity, match_carriers, raw_code)
+    return booking if mf is None else f"{_safe_text(mf)} (op {code}{number})"
+
+
+def _codeshare_match(amenity: Any, match_carriers: frozenset[str], raw_code: str) -> str | None:
+    """The marketing flight a leg is relabeled to under `match_carriers`: the
+    first of its codeshares whose carrier is in the filter, when the booking
+    carrier `raw_code` is not."""
     if not match_carriers or raw_code in match_carriers:
-        return booking
+        return None
     raw_mf = getattr(amenity, "marketing_flights", ()) if amenity else ()
     mflights: tuple[str, ...] = tuple(raw_mf or ())
-    for mf in mflights:
-        if mf[:2].upper() in match_carriers:
-            return f"{_safe_text(mf)} (op {code}{number})"
-    return booking
+    return next((mf for mf in mflights if mf[:2].upper() in match_carriers), None)
+
+
+def _carrier_name(code: str, amenity: Any) -> str | None:
+    """The full name of the airline `code` is, or None when neither the bundled
+    map nor `amenity`, Google's data for the leg, names it. Google's operating
+    name is used only for the operating code: a codeshare's flight is operated by
+    another carrier, whose name would mislabel the code it is sold under."""
+    if (name := CARRIER_NAMES.get(code)) is not None:
+        return name
+    if getattr(amenity, "operating_carrier", None) == code:
+        # Judged as printed: a name of only characters the console drops names nothing.
+        name = (getattr(amenity, "operating_carrier_name", None) or "").translate(_CTRL)
+        return name.strip() or None
+    return None
+
+
+def _print_carrier_legend(members: list[Any], match_carriers: frozenset[str]) -> None:
+    """The line under a table that names each carrier code its legs column
+    shows, in the order the rows first show them. A code with no name is left
+    out, and a table with none prints no line."""
+    # Keyed on first show, unnamed included: a leg that names a code later fills
+    # its place rather than moving it behind the codes shown in between.
+    named: dict[str, str | None] = {}
+    for g in members:
+        amenities = getattr(g, "amenities", []) or []
+        for k, leg in enumerate(g.flight.legs):
+            amenity = amenities[k] if k < len(amenities) else None
+            raw_code = (getattr(leg.airline, "name", "") or "").removeprefix("_")
+            mf = _codeshare_match(amenity, match_carriers, raw_code)
+            for shown in (raw_code,) if mf is None else (mf[:2].upper(), raw_code):
+                if named.get(shown) is None:
+                    named[shown] = _carrier_name(shown, amenity)
+    if any(named.values()):
+        console.print(
+            "[dim]Carriers: "
+            + _safe_text(" · ".join(f"{code} {name}" for code, name in named.items() if name))
+            + "[/]"
+        )
 
 
 def _gflight_route(legs: Any) -> str:
@@ -10311,7 +10358,6 @@ def _render_gflight_table(
     `tests/pp/test_gflight_adapter.py`."""
     origin = ",".join(legs[0].origins) or "?"
     destination = ",".join(legs[0].destinations) or "?"
-    has_return = len(legs) >= _ROUND_TRIP_LEGS
     # One board ranks every airport of a set, so only the row can say which
     # airports it flies.
     per_row_route = any(
@@ -10344,7 +10390,7 @@ def _render_gflight_table(
         stacked, show_co2 = layouts.pop(0)
         t = Table(
             title=f"Google Flights · {_safe_text(origin)}→{_safe_text(destination)}"
-            + (" + return" if has_return else ""),
+            + (" + return" if len(legs) >= _ROUND_TRIP_LEGS else ""),
             show_header=True,
             header_style="bold green",
         )
@@ -10406,6 +10452,7 @@ def _render_gflight_table(
         if not layouts or console.measure(t, options=unbounded).maximum <= console.width:
             break
     console.print(t)
+    _print_carrier_legend(members, match_carriers)
     if any_legroom:
         console.print(_LEGROOM_KEY)
     if show_co2:

@@ -32,7 +32,8 @@ no-flights result (every sub-search empty) from a recovered one.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import date, timedelta
+from math import isfinite
 from typing import TYPE_CHECKING, Any, cast
 
 from ._metro import expand_airports
@@ -41,6 +42,7 @@ from .models import CalendarResult
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from ._envelope import CalendarRow
     from .domain import CalendarSearch, CalendarWindow
 
 # The (origin, destination) a sub-query asked, each side comma-joined.
@@ -272,3 +274,20 @@ def merge_calendar_results(
             "calendar": {"months": months},
         }
     )
+
+
+def cheapest_dates(rows: Sequence[CalendarRow], k: int) -> list[CalendarRow]:
+    """The `k` cheapest of a calendar's envelope rows, cheapest first, each a
+    departure (and return) date to search further. A row with no price, a
+    price that is not finite, or no departure is not a date and is skipped, so
+    fewer than `k` come back when fewer qualify, and none for a `k` of 0 or
+    less. Equal prices go to the earlier departure, then the earlier return, a
+    row with no return last. Prices compare as numbers, so `rows` must share one
+    currency."""
+    dated = [
+        ((r.price, r.departure, r.return_date is None, r.return_date or date.min), r)
+        for r in rows
+        if r.price is not None and isfinite(r.price) and r.departure is not None
+    ]
+    dated.sort(key=lambda pair: pair[0])
+    return [r for _, r in dated[: max(k, 0)]]
