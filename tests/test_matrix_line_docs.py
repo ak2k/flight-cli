@@ -24,3 +24,11 @@ def test_using_matrix_line_has_two_causes() -> None:
     assert "before any Google call" in memo
     assert "Using Matrix: Google Flights can't serve <reason>." in memo
     assert "says the search was handed from Google to Matrix, and why" not in memo
+
+
+def test_infant_exception_names_what_keeps_the_board_on_google() -> None:
+    memo = _flat("docs/memories/wire_format_quirks.md")
+    assert (
+        "A Google-only flag (an arrival window, `--exclude-basic`), `--verify` or `--sellers` "
+        "keeps that board Google's, with a note naming how to ask Matrix." in memo
+    )

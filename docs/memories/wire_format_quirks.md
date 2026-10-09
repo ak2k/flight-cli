@@ -268,7 +268,9 @@ names one. Cash-only is the case where the shape names the backend: a list is
 Google's, an object Matrix's. An empty Google board is still Google's answer:
 `[]` cash-only, and the award document with awards on, because the award
 providers run whatever Google served. The exception is a party with an
-infant on auto, whose empty board goes to Matrix (below). Several cabins,
+infant on auto, whose empty board goes to Matrix (below). A Google-only flag
+(an arrival window, `--exclude-basic`), `--verify` or `--sellers` keeps that
+board Google's, with a note naming how to ask Matrix. Several cabins,
 cash-only, write one object keyed by cabin name.
 
 On auto, a stderr line that begins `Using Matrix:` says why Matrix answered,
