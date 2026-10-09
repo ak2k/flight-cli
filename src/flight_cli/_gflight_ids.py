@@ -421,7 +421,8 @@ class _Escalation:
     """Whether a search on `auto` has moved to Chrome, and how long it may
     still pause for Google's server errors. The flag is set once, by the first
     of its threads whose ladder ran out on a throttle, and read by every thread
-    of that search before it asks Google anything.
+    of that search before it asks Google anything. The pauses are a window of
+    `sum(_SERVER_ERROR_PAUSES_S)` seconds that the search's first one opens.
 
     Chrome itself is thread-local (`_gf_browser.session`), so a thread that
     reads the flag set opens or reuses its own, and closes it where the browser
@@ -430,7 +431,7 @@ class _Escalation:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self.done = False
-        self._pause_left = sum(_SERVER_ERROR_PAUSES_S)
+        self._pause_until: float | None = None
 
     def take(self) -> bool:
         """Mark the search escalated: True for the one call that did, so the
@@ -442,13 +443,15 @@ class _Escalation:
 
     def pause(self, wanted: float) -> float:
         """The part of `wanted` seconds this search may still pause before
-        re-reading a page Google answered with a server error, taken from what
-        it has left. One page's schedule in all: a search of eight pages would
-        otherwise wait 64 s on an error that outlasts its pauses."""
+        re-reading a page Google answered with a server error: what is left of
+        the window its first pause opened. Pages read side by side each get the
+        whole schedule inside that one window, so the user waits 8 s at most;
+        a page read after it closes is read again at once."""
         with self._lock:
-            granted = min(wanted, self._pause_left)
-            self._pause_left -= granted
-            return granted
+            now = time.monotonic()
+            if self._pause_until is None:
+                self._pause_until = now + sum(_SERVER_ERROR_PAUSES_S)
+            return min(wanted, max(0.0, self._pause_until - now))
 
 
 # The escalation of the search running now, or None outside one. A ContextVar
@@ -463,7 +466,7 @@ _search_escalation: contextvars.ContextVar[_Escalation | None] = contextvars.Con
 def search_escalation() -> Generator[None]:
     """Make every GF call inside this block one search: on `auto` the first
     throttle a ladder cannot clear moves all of them to Chrome, said once, and
-    on every transport they share one budget of pauses for Google's server
+    on every transport they share one window of pauses for Google's server
     errors (`_Escalation.pause`).
 
     Opened on the thread that starts the search's workers, before it starts
@@ -2506,8 +2509,8 @@ def retry_throttled[T](  # noqa: PLR0915 — one arm per retry policy, each with
       a re-read after each of `_SERVER_ERROR_PAUSES_S`, re-raised when they are
       spent. Each re-read is one of the call's wall attempts and books no rung
       of the shared ladder, whose round the call gives up before each pause;
-      the pauses come out of the search's budget (`_Escalation.pause`), so a
-      search of many pages pauses for one.
+      the pauses come out of the search's window (`_Escalation.pause`), so a
+      search of many pages waits 8 s at most.
 
     Both budgets come from ONE ladder object, bound here for the whole call:
     the fan-out's when there is one, otherwise this call's own. Inside a
@@ -2582,7 +2585,7 @@ def retry_throttled[T](  # noqa: PLR0915 — one arm per retry policy, each with
                 # Not probing the wall while it pauses, so a sibling parked on a
                 # round this call owns retries now rather than after the pause.
                 ladder.stand_down()
-                # Once the search has spent its pauses the page is read again
+                # Once the search's window has closed the page is read again
                 # at once, as a page with no board is.
                 pause = search.pause(_SERVER_ERROR_PAUSES_S[server_errors - 1])
                 log.debug("%s; reading the page again in %.0fs", e, pause)
