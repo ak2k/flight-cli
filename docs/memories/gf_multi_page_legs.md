@@ -122,7 +122,8 @@ A lost length is also a stderr line, `Google Flights price graph not shown:
 no-grid line, and exits 1.
 `--gf-transport http` still refuses a range, and `-d 7` and a one-way are
 unchanged. That refusal ends with `For the range on Google, run with
---gf-transport browser.` when the browser's gate would admit the same search.
+--gf-transport browser or auto.` when the browser's gate would admit the same
+search.
 
 **`search --split` prices two one-way tickets beside a round trip.** On a Google
 Flights round trip, after the answer, it asks the one-ways each way: 2 more page

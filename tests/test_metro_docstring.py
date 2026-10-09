@@ -12,6 +12,21 @@ from pathlib import Path
 import flight_cli
 from flight_cli import _metro
 
+_METRO_MODULES: frozenset[str] = frozenset({"_metro", "flight_cli._metro"})
+
+
+def _imports_metro(node: ast.AST) -> bool:
+    if isinstance(node, ast.Import):
+        return any(alias.name in _METRO_MODULES for alias in node.names)
+    if isinstance(node, ast.ImportFrom):
+        module: str = node.module or ""
+        return (
+            module in _METRO_MODULES
+            or module.endswith("._metro")
+            or any(alias.name == "_metro" for alias in node.names)
+        )
+    return False
+
 
 def _expanding_modules() -> set[str]:
     stems: set[str] = set()
@@ -19,11 +34,8 @@ def _expanding_modules() -> set[str]:
         if path.stem == "_metro":
             continue
         tree: ast.Module = ast.parse(path.read_text())
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module is not None:
-                module: str = node.module
-                if module in {"_metro", "flight_cli._metro"} or module.endswith("._metro"):
-                    stems.add(path.stem)
+        if any(_imports_metro(node) for node in ast.walk(tree)):
+            stems.add(path.stem)
     return stems
 
 
