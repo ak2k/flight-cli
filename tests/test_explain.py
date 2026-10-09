@@ -100,6 +100,11 @@ def test_a_token_outside_the_grammar_exits_1_and_is_not_guessed(token: str) -> N
     assert lines == [f"{token!r}  ->  not recognized"]
 
 
+@pytest.mark.parametrize("token", ["12", "C:12", "O:12", "N:12", "N:12+", "12,AA", "1234"])
+def test_an_all_digit_designator_is_not_read_in_any_form(token: str) -> None:
+    assert _explain(token) == (1, [f"{token!r}  ->  not recognized"])
+
+
 def test_a_bad_token_leaves_the_others_read() -> None:
     code, lines = _explain("UA bogus LH")
     assert code == 1

@@ -31,12 +31,13 @@ _QUANTIFIERS = {"": "one", "+": "one or more", "*": "zero or more", "?": "zero o
 # A token is `~`, a comma group, and one quantifier, each optional.
 _RE_TOKEN = re.compile(r"^(~?)([^~+*?]+)([+*?]?)$")
 _RE_PREFIX = re.compile(r"^([COXL]):(.+)$")
-_RE_NONSTOP = re.compile(r"^N:([A-Z0-9]{2})$")
 # A two-character airline designator may hold digits (`3U`) but is never all
 # digits; a flight number is a designator, digits and an optional range.
-_RE_CARRIER = re.compile(r"^(?!\d\d$)[A-Z0-9]{2}$")
+_DESIGNATOR = r"(?!\d\d)[A-Z0-9]{2}"
+_RE_NONSTOP = re.compile(rf"^N:({_DESIGNATOR})$")
+_RE_CARRIER = re.compile(rf"^{_DESIGNATOR}$")
 _RE_AIRPORT = re.compile(r"^[A-Z]{3}$")
-_RE_FLIGHT = re.compile(r"^(?!\d\d)[A-Z0-9]{2}([0-9]{1,4})(?:-([0-9]{1,4}))?$")
+_RE_FLIGHT = re.compile(rf"^{_DESIGNATOR}([0-9]{{1,4}})(?:-([0-9]{{1,4}}))?$")
 # `l:nUS` is the one country form the docs show and confirm; what the `n` stands
 # for is not documented, so no other shape is read.
 _RE_COUNTRY = re.compile(r"^N([A-Z]{2})$")
