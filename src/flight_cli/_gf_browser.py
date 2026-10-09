@@ -88,13 +88,13 @@ _SNAPSHOT_TIMEOUT_MS = 3_000
 # Enough to show what a page offered without printing a whole page of controls.
 _SHOWN_BUTTONS = 40
 _SHOWN_CHARS = 200
-# One line of patchright's ARIA snapshot per button: `- button "Name"`, the
-# name JSON-quoted, then optionally a colon and the button's text. A key that
-# YAML would misread (a name holding `: `, ` #` or a brace, say) is wrapped
-# whole in single quotes, each `'` in it doubled: `- 'button "Stops: Any"'`.
-_BUTTON_LINE = re.compile(
-    r"""^\s*- (?:button ("(?:[^"\\]|\\.)*")|'button ("(?:[^"\\']|\\.|'')*"))""", re.MULTILINE
-)
+# One line of patchright's ARIA snapshot per node: `- KEY`, then `: text`, or
+# `:` when children follow. A KEY that YAML would misread (one holding `: `,
+# ` #` or a brace, say) is wrapped whole in single quotes, each `'` doubled.
+_SNAPSHOT_LINE = re.compile(r"^\s*- (?:'((?:[^'\n]|'')*)'|(.*?))(?::(?: .*)?)?$", re.MULTILINE)
+# A button's KEY: its name JSON-quoted, or as is when it starts and ends with
+# `/`, then its states in brackets: `button "Stops: Any" [disabled]`.
+_BUTTON_KEY = re.compile(r'button (?:("(?:[^"\\]|\\.)*")|(/(?:.*/)?))(?: \[[^\]]*\])*')
 # What Chrome says when asked for a body it has already dropped from its buffer.
 _EVICTED = "Request content was evicted from inspector cache"
 # The sync API delivers events only while one of its calls is running, so the
@@ -834,10 +834,11 @@ def _describe_page(page: Any) -> str:
     site all end in the same click timeout; this is what tells them apart."""
     deadline = time.monotonic() + _SNAPSHOT_TIMEOUT_MS / 1000
     snapshot = str(page.aria_snapshot(timeout=_SNAPSHOT_TIMEOUT_MS))
-    names = [
-        _one_line(_unquote(bare or quoted.replace("''", "'")))
-        for bare, quoted in _BUTTON_LINE.findall(snapshot)
-    ]
+    names: list[str] = []
+    for quoted, bare in _SNAPSHOT_LINE.findall(snapshot):
+        if button := _BUTTON_KEY.fullmatch(quoted.replace("''", "'") or bare):
+            json_name, slash_name = button.groups()
+            names.append(_one_line(_unquote(json_name) if json_name else slash_name))
     shown = ", ".join(f'"{n}"' for n in names[:_SHOWN_BUTTONS])
     if not names:
         buttons = "no visible buttons"

@@ -254,6 +254,20 @@ def test_buttons_whose_snapshot_key_is_yaml_quoted_are_named(
     assert f"visible buttons: {names}" in str(_failed_click(monkeypatch, _Page(snapshot=snapshot)))
 
 
+def test_buttons_named_between_slashes_are_named(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Patchright prints a name that starts and ends with `/` as is, not
+    # JSON-quoted; these are the lines its key escaper renders for six such names.
+    snapshot = """- button /
+- button /help/: Help
+- 'button /Sort: price/ [disabled]'
+  - button /a/b/ [pressed]: /x/
+- 'button /It''s: x/'
+- button /a/ [x]/
+"""
+    names = '"/", "/help/", "/Sort: price/", "/a/b/", "/It\'s: x/", "/a/ [x]/".'
+    assert f"visible buttons: {names}" in str(_failed_click(monkeypatch, _Page(snapshot=snapshot)))
+
+
 def test_the_stalled_graph_line_carries_what_the_page_showed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
