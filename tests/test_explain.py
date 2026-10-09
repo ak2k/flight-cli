@@ -138,3 +138,8 @@ def test_an_unread_token_is_printed_inert() -> None:
     assert "\x07" not in out
     assert "\x1b" not in out
     assert "->  not recognized" in out
+
+
+@pytest.mark.parametrize("token", [":smile:", "AA:ok:"])
+def test_an_unread_token_with_an_emoji_shortcode_prints_as_typed(token: str) -> None:
+    assert _explain(token) == (1, [f"{token!r}  ->  not recognized"])

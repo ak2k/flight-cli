@@ -13301,7 +13301,10 @@ def explain(
     for token, meaning in decode_routing(routing):
         if meaning is None:
             unread = True
-            console.print(f"{_quote(token)}  ->  not recognized", soft_wrap=True, highlight=False)
+            # Emoji off, so a `:name:` the user typed prints as typed.
+            console.print(
+                f"{_quote(token)}  ->  not recognized", soft_wrap=True, emoji=False, highlight=False
+            )
         else:
             console.print(
                 f"{_safe_text(token)}  ->  {_safe_text(meaning)}", soft_wrap=True, highlight=False
