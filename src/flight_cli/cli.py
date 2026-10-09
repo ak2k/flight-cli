@@ -12441,7 +12441,8 @@ def calendar(
             )
             # The http grid prices one trip length; the browser's graph prices one per
             # length. Said only when that gate admits this very search, so the remedy
-            # is never another refusal.
+            # is never another refusal. `auto` is the browser under `--fast` (below),
+            # so it is named beside `browser`.
             if (
                 not one_way
                 and dmin != dmax
@@ -12456,7 +12457,9 @@ def calendar(
                 )
                 is None
             ):
-                err.print("[yellow]For the range on Google, run with --gf-transport browser.[/]")
+                err.print(
+                    "[yellow]For the range on Google, run with --gf-transport browser or auto.[/]"
+                )
         else:
             err.print(
                 "[yellow]--fast applies only to calendars one-way, of one trip length, or of "
