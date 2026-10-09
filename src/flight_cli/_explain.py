@@ -110,6 +110,7 @@ def decode_routing(routing: str) -> list[Line]:
     brackets around the whole string, as Google's help page writes it, is
     dropped. A string with no token yields one unread line."""
     text = routing.strip()
-    if text.startswith("[") and text.endswith("]"):
+    # A bracket inside means the outer ones belong to tokens, as in `[F] X [F]`.
+    if text[:1] == "[" and text[-1:] == "]" and not {"[", "]"} & set(text[1:-1]):
         text = text[1:-1]
     return [Line(t, _meaning(t)) for t in text.split() or [routing]]

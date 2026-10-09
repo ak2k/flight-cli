@@ -75,6 +75,14 @@ def test_one_pair_of_brackets_around_the_whole_string_is_dropped() -> None:
     )
 
 
+def test_brackets_that_are_not_one_pair_around_the_whole_string_stay_on_their_tokens() -> None:
+    assert _explain("[F] X [F]") == (
+        1,
+        ["'[F]'  ->  not recognized", "X  ->  one connection", "'[F]'  ->  not recognized"],
+    )
+    assert _explain("[red]x[/red]") == (1, ["'[red]x[/red]'  ->  not recognized"])
+
+
 @pytest.mark.parametrize(
     "token",
     [
