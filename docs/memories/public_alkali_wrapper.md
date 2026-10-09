@@ -57,8 +57,12 @@ and `models.py`), we are the documentation.
 
 1. **Run the golden-file tests first.** If `tests/test_wire_round_trip.py`
    still passes, the request shape is fine — the break is in the response.
-2. **Capture a fresh SPA session** via `research/record_user_session.py`.
-   Diff against the existing fixture in `tests/fixtures/`.
+2. **Read the body the failing run kept.** A search whose answer the models
+   refuse saves it as `shape-changes/matrix-<UTC stamp>.json` under the cache
+   dir (`MATRIX_CACHE_DIR`, default `~/.cache/flight-cli`) and names the file
+   in its error (`MatrixShapeError`, `client.py`). If there is none, capture a
+   fresh SPA session via `research/record_user_session.py`. Diff against the
+   existing fixture in `tests/fixtures/`.
 3. **Update `wire.py` and/or `models.py`** to match the new shape. Bump
    the affected fixture(s).
 4. **Document the change** in [wire_format_quirks.md](wire_format_quirks.md)
