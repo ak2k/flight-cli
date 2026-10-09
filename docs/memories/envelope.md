@@ -277,5 +277,5 @@ Envelopes for `detail`, `explore`, `fare`, `gflight` and `doctor` (each
 refuses `--format envelope` naming the two commands); `--sellers` and
 `--fare-rules` inside it; ISO dates inside a Matrix calendar day's `row` (a
 `row` stays the day object Matrix sent, its day of the month alone; the dates
-are beside it, as `departure` and `return`); Google's facets (`ds:1[7]`); an
-exit code of its own for a partial answer (`complete` says it).
+are beside it, as `departure` and `return`); an exit
+code of its own for a partial answer (`complete` says it).
