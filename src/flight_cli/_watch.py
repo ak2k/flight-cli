@@ -8,6 +8,7 @@ override `_config.py` honors), else `$XDG_CONFIG_HOME/flight-cli`, else
 from __future__ import annotations
 
 import os
+import tempfile
 from datetime import date  # noqa: TC003 - pydantic evaluates the field annotations at runtime
 from pathlib import Path
 from typing import Annotated, Final, Literal, Self, get_args
@@ -66,12 +67,14 @@ def watches_path() -> Path:
 
 def _save(watches: list[Watch]) -> None:
     """A 0600 temp file renamed into place: no reader sees half a file, and no
-    moment has the store readable by others."""
+    moment has the store readable by others. `mkstemp` picks a name no other
+    writer holds, so the cleanup only ever removes this call's own file."""
     path = watches_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp = Path(name)
     try:
-        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as fh:
+        with os.fdopen(fd, "wb") as fh:
             _ = fh.write(_WATCHES.dump_json(watches, indent=2))
         _ = tmp.replace(path)
     except BaseException:

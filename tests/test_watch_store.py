@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import resource
 import stat
 from typing import TYPE_CHECKING
@@ -216,3 +217,14 @@ def test_a_write_that_fails_part_way_keeps_the_old_store_and_no_temp_file(
     assert isinstance(failed.exception, OSError), failed.output
     assert (store.read_bytes() if store.exists() else None) == before
     assert sorted(p.name for p in store.parent.iterdir()) == ["watches.json"][:saved]
+
+
+def test_add_succeeds_beside_a_temp_file_it_did_not_create(config_root: Path) -> None:
+    store = _store(config_root)
+    store.parent.mkdir(parents=True)
+    other = store.with_name(f".watches.json.{os.getpid()}.tmp")
+    other.write_bytes(b"another writer")
+    added = _watch("add", "JFK", "CDG")
+    assert added.exit_code == 0, added.output
+    assert other.read_bytes() == b"another writer"
+    assert [w["destination"] for w in json.loads(store.read_text())] == ["CDG"]
