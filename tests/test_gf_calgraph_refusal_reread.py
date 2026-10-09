@@ -11,14 +11,23 @@ replaced as in `test_gf_calgraph`.
 from __future__ import annotations
 
 import time
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 import pytest
 
 from flight_cli import _gf_calgraph as cg
 from flight_cli import _gflight_ids as gfid
-from test_gf_calgraph import _fixture, _search, _serve
+from test_gf_calgraph import (
+    _START,
+    _calendar,
+    _fixture,
+    _matrix_answers,
+    _ranged,
+    _round_trip_page,
+    _search,
+    _serve,
+)
 
 _FIRST, _LAST = date(2026, 10, 20), date(2026, 11, 2)
 
@@ -110,3 +119,51 @@ def test_the_pauses_come_out_of_the_running_searchs_budget(
         assert budget.pause(7.0) == 7.0
         graph = cg.price_graph(_search(start=_FIRST, end=_LAST), headed=False)
     assert (len(graph.cells), len(fake.calls), clock.sleeps) == (14, 2, [1.0])
+
+
+def test_a_trip_length_range_pauses_within_one_search_budget(
+    monkeypatch: pytest.MonkeyPatch, clock: _Clock
+) -> None:
+    """Each length's graph is one more page of the same search: the 6-night
+    graph refused on every read is given up once the 5-night one has spent the
+    8 s, rather than after 8 s of its own."""
+    refused = _fixture("error13.body")
+    first = _START - timedelta(days=7)
+    _serve(monkeypatch, refused, refused, _round_trip_page(first, 5), refused, refused, refused)
+    got = cg.price_graphs(_ranged(), headed=False)
+    assert [g.trip_length for g in got.graphs] == [5]
+    assert [(nights, getattr(cause, "code", None)) for nights, cause in got.lost] == [
+        (6, 13),
+        (7, None),
+    ]
+    assert clock.sleeps == [2.0, 6.0, 0.0, 0.0]
+
+
+def test_a_calendar_beside_matrix_pauses_within_one_search_budget(
+    monkeypatch: pytest.MonkeyPatch, clock: _Clock
+) -> None:
+    """The graph read on Matrix's worker thread shares one budget across its
+    lengths too, though that thread opened no search of its own."""
+    _matrix_answers(monkeypatch)
+    refused = _fixture("error13.body")
+    first = date(2026, 10, 13)
+    pages = [_round_trip_page(first, n) for n in (5, 6, 7)]
+    fake = _serve(
+        monkeypatch, refused, refused, pages[0], refused, refused, pages[1], refused, pages[2]
+    )
+    _calendar(fast=False, one_way=False, duration="5-7")
+    assert (len(fake.calls), clock.sleeps) == (8, [2.0, 6.0, 0.0, 0.0, 0.0])
+
+
+def test_a_trip_length_range_inside_a_running_search_pauses_out_of_its_budget(
+    monkeypatch: pytest.MonkeyPatch, clock: _Clock
+) -> None:
+    first = _START - timedelta(days=7)
+    pages = (_round_trip_page(first, n) for n in (5, 6, 7))
+    _serve(monkeypatch, _fixture("error13.body"), *pages)
+    with gfid.search_escalation():
+        budget = gfid._search_escalation.get()
+        assert budget is not None
+        assert budget.pause(7.0) == 7.0
+        got = cg.price_graphs(_ranged(), headed=False)
+    assert ([g.trip_length for g in got.graphs], clock.sleeps) == ([5, 6, 7], [1.0])

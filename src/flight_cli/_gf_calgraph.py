@@ -37,6 +37,7 @@ from ._gflight_ids import (
     _rows_from_page_html,  # pyright: ignore[reportPrivateUsage]
     search_page_url,
     server_error_waiter,
+    within_search,
 )
 from .domain import covers_one_window, time_bounds
 from .fli_bridge import (
@@ -512,10 +513,12 @@ def page_budget_blocker(search: CalendarSearch) -> str | None:
     return None
 
 
+@within_search()
 def price_graphs(
     search: CalendarSearch, *, headed: bool, raise_unpriced: bool = True
 ) -> GraphRange:
-    """One graph per trip length, in order, within `_MAX_PAGES` loads in all.
+    """One graph per trip length, in order, within `_MAX_PAGES` loads in all,
+    and pausing for Google's refusals out of one search's budget in all.
 
     Each length is asked with the loads still left, since a page's span can fall
     short of the estimate that admitted the window. A length that fails, or that

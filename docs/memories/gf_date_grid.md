@@ -294,8 +294,9 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
   (2026-10-07), one `--fast` run exiting 1 with no grid and one default calendar
   losing the graph; the next identical run priced. `price_graph` loads the page
   again after 2 s and then 6 s (`server_error_waiter`, the search page's pauses
-  out of the same `search_escalation` budget, or its own 8 s when none is open),
-  each load from the eight-load budget, and raises the refusal once they are
+  out of the same `search_escalation` budget, or one 8 s for all of a
+  calendar's trip lengths when none is open, `within_search`), each load from
+  the eight-load budget, and raises the refusal once they are
   spent or no load is left. Any other error row is raised at once.
 
 **Re-enabling is not just `_GRID_RPC_GATED = False`.** Nothing executes the

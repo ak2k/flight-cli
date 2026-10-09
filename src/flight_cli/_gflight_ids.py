@@ -476,6 +476,18 @@ def search_escalation() -> Generator[None]:
         _search_escalation.reset(token)
 
 
+@contextlib.contextmanager
+def within_search() -> Generator[None]:
+    """Make this block part of the search running now, or a search of its own
+    when none is (`search_escalation`): a caller asking Google several times
+    for one answer pauses out of one budget, on whatever thread it runs."""
+    if _search_escalation.get() is not None:
+        yield
+        return
+    with search_escalation():
+        yield
+
+
 def escalated() -> bool:
     """Whether the search running now has moved to Chrome."""
     latch = _search_escalation.get()
