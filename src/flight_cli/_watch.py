@@ -121,7 +121,7 @@ def watch_add(
     award: Annotated[bool, typer.Option("--award", help="Watch award space")] = False,
 ) -> None:
     """Save a watch; no date means any date."""
-    if dep and (dep_from or dep_to):
+    if dep is not None and (dep_from is not None or dep_to is not None):
         raise _fail("--dep excludes --from and --to", 2)
     stored = _load()
     try:
@@ -130,8 +130,8 @@ def watch_add(
                 "id": max((w.id for w in stored), default=0) + 1,
                 "origin": origin.upper(),
                 "destination": destination.upper(),
-                "dep_from": dep or dep_from,
-                "dep_to": dep or dep_to,
+                "dep_from": dep_from if dep is None else dep,
+                "dep_to": dep_to if dep is None else dep,
                 "below": below,
                 "cabin": cabin.lower(),
                 "award": award,
