@@ -66,7 +66,11 @@ def _printed(
     buffer = io.StringIO()
     monkeypatch.setattr(cli, "console", Console(file=buffer, width=width, no_color=True))
     cli._render_gflight_table(  # pyright: ignore[reportPrivateUsage] — the render site IS the unit
-        rows, legs=(Leg.of("JFK", "LAX", _DEP),), top_n=len(rows), match_carriers=match
+        rows,
+        legs=(Leg.of("JFK", "LAX", _DEP),),
+        top_n=len(rows),
+        match_carriers=match,
+        currency="USD",
     )
     return buffer.getvalue().splitlines()
 
