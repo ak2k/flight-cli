@@ -288,7 +288,15 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
   probe loads set up to snapshot the page on a failure all priced).
   `price_graph` loads such a page once more, from the same eight-load budget,
   under `--fast` too; a second miss raises `GfGraphStalledError`. A wall, a
-  failed navigation and any answer the graph gave are never loaded again.
+  failed navigation and any answer the graph gave, bar the one below, are never
+  loaded again.
+- **A graph Google refuses with error 13.** 2 of 13 live Chrome runs
+  (2026-10-07), one `--fast` run exiting 1 with no grid and one default calendar
+  losing the graph; the next identical run priced. `price_graph` loads the page
+  again after 2 s and then 6 s (`server_error_waiter`, the search page's pauses
+  out of the same `search_escalation` budget, or its own 8 s when none is open),
+  each load from the eight-load budget, and raises the refusal once they are
+  spent or no load is left. Any other error row is raised at once.
 
 **Re-enabling is not just `_GRID_RPC_GATED = False`.** Nothing executes the
 transport below the gate — there is no captured GetCalendarGraph envelope to test

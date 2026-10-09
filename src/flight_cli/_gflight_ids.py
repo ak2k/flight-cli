@@ -482,6 +482,25 @@ def escalated() -> bool:
     return latch is not None and latch.done
 
 
+def server_error_waiter() -> Callable[[], bool]:
+    """A caller's schedule of pauses before it reads again what Google refused.
+
+    Each call sleeps the next of `_SERVER_ERROR_PAUSES_S`, out of the running
+    search's budget (`_Escalation.pause`) or, outside one, a budget of its own,
+    and returns True; once the schedule is spent it sleeps nothing and returns
+    False."""
+    budget = _search_escalation.get() or _Escalation()
+    pauses = iter(_SERVER_ERROR_PAUSES_S)
+
+    def wait() -> bool:
+        if (wanted := next(pauses, None)) is None:
+            return False
+        time.sleep(budget.pause(wanted))
+        return True
+
+    return wait
+
+
 @contextlib.contextmanager
 def shared_throttle_ladder() -> Generator[None]:
     """Make every GF call inside this block draw on ONE ladder — for a caller

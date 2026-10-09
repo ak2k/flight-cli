@@ -36,6 +36,7 @@ from ._gf_rpc_shared import GfPageRpcError, result_payloads
 from ._gflight_ids import (
     _rows_from_page_html,  # pyright: ignore[reportPrivateUsage]
     search_page_url,
+    server_error_waiter,
 )
 from .domain import covers_one_window, time_bounds
 from .fli_bridge import (
@@ -63,6 +64,9 @@ if TYPE_CHECKING:
 
 _PRICE_GRAPH = Control("button", "Price graph")
 _GRAPH_RPC = "/GetCalendarGraph"
+# The error row's code for a request Google refused. Seen on the graph in 2 of 13
+# live Chrome runs, each followed by a run that priced.
+_REFUSED = 13
 # One load prices about five weeks from the date it opens on (measured: seven
 # days before it to thirty after; another page gave sixty days), so eight loads
 # cover most of a year. A window needing more is refused, never paged unbounded.
@@ -85,9 +89,9 @@ class GfPriceGraphError(GfBackendError):
     empty grid, which reads as "no fares" when nothing was priced. `code` is the
     error row's code when there was one.
 
-    An error row is not a throttle. Error 13 on the page's own request stays
-    with the browser session across retries, and "rate-limited" would send the
-    user to wait out a limit that is not there."""
+    An error row is not a throttle. Error 13 on the page's own request is read
+    again after a pause (`price_graph`), and "rate-limited" would send the user
+    to wait out a limit that is not there."""
 
     def __init__(self, reason: str, *, code: int | None = None) -> None:
         """Say what came back; `code` is the error row's, if the graph had one."""
@@ -98,7 +102,7 @@ class GfPriceGraphError(GfBackendError):
 class GfGraphBudgetError(GfPriceGraphError):
     """The graph's page loads ran out before its window did, with loads spent
     on something other than the window: a page loaded again because it drew no
-    graph, or the trip lengths before it. `loads` is every load it spent.
+    graph or Google refused it, or the trip lengths before it. `loads` is every load it spent.
 
     Its own type because "narrow --start/--end" would send the user to shorten
     a window that fits in the budget on its own."""
@@ -106,7 +110,7 @@ class GfGraphBudgetError(GfPriceGraphError):
     def __init__(self, *, loads: int, reloaded: bool) -> None:
         """Name the budget, and a page loaded again when one was."""
         self.loads = loads
-        again = " (a page that drew no graph was loaded again)" if reloaded else ""
+        again = " (a page was loaded again)" if reloaded else ""
         super().__init__(
             f"no price-graph load of the {_MAX_PAGES:d} was left for the rest of the window{again}"
         )
@@ -404,7 +408,9 @@ def parse_graph(body: str, *, trip_length: int | None) -> _GraphPage:
     return _GraphPage(max(dated), priced)
 
 
-def price_graph(search: CalendarSearch, *, headed: bool, pages: int = _MAX_PAGES) -> PriceGraph:
+def price_graph(  # noqa: PLR0912 — one branch per way a load ends
+    search: CalendarSearch, *, headed: bool, pages: int = _MAX_PAGES
+) -> PriceGraph:
     """The cheapest fare per departure date across the window.
 
     One page load when the graph's span covers the window, and more when it
@@ -415,8 +421,11 @@ def price_graph(search: CalendarSearch, *, headed: bool, pages: int = _MAX_PAGES
 
     A page that passed the wall check and then drew no graph in time is loaded
     once more, from the same budget: Google serves such a page now and then, and
-    loading it again is not asking a wall again. A wall, a failed navigation and
-    any answer the graph gave are raised as they are.
+    loading it again is not asking a wall again. A graph Google refused with
+    error 13 is loaded again after each of the search page's pauses
+    (`server_error_waiter`), from the same budget, and raised once they are
+    spent. A wall, a failed navigation and any other answer the graph gave are
+    raised as they are.
 
     Running out of loads blames the window only when the window alone spent all
     `_MAX_PAGES`; a reload, or a smaller budget left by other trip lengths, is
@@ -426,6 +435,7 @@ def price_graph(search: CalendarSearch, *, headed: bool, pages: int = _MAX_PAGES
     window = search.window
     trip_length = window.duration_min if len(search.legs) > 1 else None
     session = _gf_browser.session(headed=headed)
+    wait = server_error_waiter()
     found: dict[date, GraphCell] = {}
     cursor = window.start
     loads = 0
@@ -455,7 +465,13 @@ def price_graph(search: CalendarSearch, *, headed: bool, pages: int = _MAX_PAGES
             raise GfPriceGraphError(
                 f"Google Flights' price graph request returned HTTP {captured.status}"
             )
-        page = parse_graph(captured.body, trip_length=trip_length)
+        try:
+            page = parse_graph(captured.body, trip_length=trip_length)
+        except GfPriceGraphError as e:
+            if e.code != _REFUSED or loads >= pages or not wait():
+                raise
+            reloaded = True
+            continue
         if page.last < cursor:
             raise GfPriceGraphError(
                 f"Google Flights' price graph ends at {page.last}, before {cursor}, so it "
