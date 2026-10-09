@@ -1412,8 +1412,9 @@ def _no_gf() -> Any:
 def _undrawable_row() -> Any:
     """A Google row carrying nothing but a fare: every Google board is put in
     price order before it is trimmed, so a stub row has to sort, and nothing
-    past `.flight.price` is there for a renderer or a link builder to read."""
-    return SimpleNamespace(flight=SimpleNamespace(price=100.0))
+    past `.flight.price` and `.flight.currency` is there for a renderer or a
+    link builder to read."""
+    return SimpleNamespace(flight=SimpleNamespace(price=100.0, currency="USD"))
 
 
 def _one_gf_row() -> Any:

@@ -1,8 +1,7 @@
 # pyright: reportPrivateUsage=false
-"""A multi-cabin Google search's document carries a cabin's own cheapest listing
-only where the table names it. When that listing ties a fare the cabin's column
-prints, the table names nothing, and the document holds the column's listing
-alone."""
+"""A multi-cabin Google search's document fills a cabin's ten with the cheapest
+fares in the requested currency: a fare in another currency ranks after every
+one in it, whatever its number."""
 
 from __future__ import annotations
 
@@ -22,10 +21,9 @@ if TYPE_CHECKING:
 
     from click.testing import Result
 
-# Business's returns on 103-109 are priced in EUR from 900 up, so they are its
-# ten cheapest rows by amount. Its returns on 101 list 904 first, then 900, both
-# at USD1000: the cheapest USD fare is on 101/904, and the table's column prints
-# 101/900 at the same price, so the line under the table names nothing.
+# Business's returns on 103-109 are priced in EUR from 900 up, below every USD
+# fare by number. Its returns on 101 list 904 first, then 900, both at USD1000,
+# the cheapest USD fares.
 _EUROS = {n: 900.0 + 5 * i for i, n in enumerate(range(103, 110))}
 _BACK_ON_101 = {904: 1000.0, 900: 1000.0, 901: 1010.0, 902: 1020.0, 903: 1030.0}
 
@@ -64,19 +62,19 @@ def _business_listings(result: Result, fmt: str) -> list[tuple[str, str, str | N
 
 
 @pytest.mark.parametrize("fmt", ["envelope", "json"])
-def test_a_tied_own_cheapest_the_table_does_not_name_is_not_a_row_of_the_document(
+def test_euro_returns_do_not_fill_a_cabins_ten_ahead_of_its_dollar_ones(
     monkeypatch: pytest.MonkeyPatch, fmt: str
 ) -> None:
-    """Red at the base, whose business document holds 21 rows, the extra one
-    101/904, a listing no line or cell of the table shows."""
+    """Red at the base, whose business document opens with ten EUR rows and holds
+    21."""
     table = _search(monkeypatch, _tied(monkeypatch))
     assert table.exit_code == 0, table.output
     assert "own cheapest" not in table.stdout
     assert 1000.0 in _cells(table.stdout)["BUSINESS"]
     listed = _business_listings(_search(monkeypatch, _tied(monkeypatch), "--format", fmt), fmt)
-    assert ("101", "900", "USD", 1000.0) in listed
-    assert ("101", "904", "USD", 1000.0) not in listed
-    assert len(listed) == 20
+    assert {currency for _, _, currency, _ in listed} == {"USD"}
+    assert listed[:2] == [("101", "904", "USD", 1000.0), ("101", "900", "USD", 1000.0)]
+    assert len(listed) == 15
 
 
 @pytest.mark.parametrize(

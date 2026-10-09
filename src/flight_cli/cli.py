@@ -9,6 +9,7 @@ Commands:
   flight airport   — IATA autocomplete
   flight explore   — where an origin flies, cheapest first (Google Flights, Chrome)
   flight doctor    — pass, fail or skip for every backend, transport and credential
+  flight watch     — save, list and remove route watches (stored only; nothing polls)
   flight fare      — [deprecated] alias for `search --backend matrix`
   flight gflight   — [deprecated] alias for `search --backend gflight`
 """
@@ -54,6 +55,7 @@ from ._calendar_split import (
     split_calendar_search,
     with_fanout_currency,
 )
+from ._carrier_names import CARRIER_NAMES
 from ._console_text import CTRL as _CTRL
 from ._console_text import quote as _quote
 from ._console_text import safe_text as _safe_text
@@ -92,8 +94,16 @@ from ._metro import (
     gf_leg_refusal,
     gf_pages_refusal,
 )
-from ._multi_cabin import MultiCabinRow, cheapest, itinerary_key, parse_price, price_currency
+from ._multi_cabin import (
+    MultiCabinRow,
+    cheapest,
+    itinerary_key,
+    parse_price,
+    price_currency,
+    price_rank,
+)
 from ._multi_cabin import merge as _merge_cabins
+from ._watch import watch_app
 from .client import MatrixApiError, MatrixClient
 from .domain import (
     Bags,
@@ -225,6 +235,7 @@ def _usd_amount(price: str | None) -> float | None:
 
 app = typer.Typer(rich_markup_mode="rich", help="CLI for ITA Matrix's Alkali backend.")
 app.add_typer(auth_app, name="auth")
+app.add_typer(watch_app, name="watch")
 console = Console()
 err = Console(stderr=True)
 
@@ -3826,7 +3837,11 @@ def _one_way_boards(
                         f"{_one_ways_not_asked(rest)} after the {which} one-way stopped the "
                         f"search ({str(stop) or type(stop).__name__})"
                     )
-                priced = [r for r in _price_ordered(board) if r.flight.price is not None]
+                priced = [
+                    r
+                    for r in _price_ordered(board, currency=requested)
+                    if r.flight.price is not None
+                ]
                 # A one-way sold as separate tickets is already more than one
                 # booking, so tickets holding it would not be one booking each.
                 single = [r for r in priced if not _separately_ticketed(r)]
@@ -6276,7 +6291,7 @@ def _report_pages(asked: _PageAsk) -> None:
         )
 
 
-def _merged_boards(boards: Sequence[Board[Any]]) -> list[Any]:
+def _merged_boards(boards: Sequence[Board[Any]], *, currency: str) -> list[Any]:
     """Every row of `boards` once, by the whole trip and how Google sells it
     (`row_key`, `ticketing`): the cheaper listing is kept, in the place the
     first one took. A row on separate tickets is a booking of its own, so it
@@ -6293,7 +6308,9 @@ def _merged_boards(boards: Sequence[Board[Any]]) -> list[Any]:
             if seen is None:
                 at[key] = len(rows)
                 rows.append(r)
-            elif _terminal_fare_key(r) < _terminal_fare_key(rows[seen]):
+            elif _terminal_fare_key(r, currency=currency) < _terminal_fare_key(
+                rows[seen], currency=currency
+            ):
                 rows[seen] = _with_top_marks(r, rows[seen])
             else:
                 rows[seen] = _with_top_marks(rows[seen], r)
@@ -6325,7 +6342,9 @@ def _kept(outbound: _Outbound) -> list[Any]:
     return _kept_outbounds(outbound.board, outbound.keep, outbound.fits)
 
 
-def _union_pins(kept: dict[int, list[Any]], top_n: int) -> dict[int, list[ItineraryKey]]:
+def _union_pins(
+    kept: dict[int, list[Any]], top_n: int, *, currency: str
+) -> dict[int, list[ItineraryKey]]:
     """Each page's share of the `pinned_fanout(top_n)` cheapest outbounds kept
     across every page (`kept`, by page), as the keys that page pins.
 
@@ -6344,7 +6363,9 @@ def _union_pins(kept: dict[int, list[Any]], top_n: int) -> dict[int, list[Itiner
                 at[key] = len(union)
                 union.append(r)
                 owner[key] = i
-            elif _terminal_fare_key(r) < _terminal_fare_key(union[seen]):
+            elif _terminal_fare_key(r, currency=currency) < _terminal_fare_key(
+                union[seen], currency=currency
+            ):
                 union[seen] = r
                 owner[key] = i
     shares: dict[int, list[ItineraryKey]] = {}
@@ -6455,7 +6476,7 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
             ]
             # Once a page, so its filter counts each row over the stop ceiling once.
             kept = {i: _kept(ob) for i, ob in outbounds}
-            shares = _union_pins(kept, top_n)
+            shares = _union_pins(kept, top_n, currency=opts.currency or "USD")
             _mark_tops([ob.board for _, ob in outbounds], kept.values())
             for i, ob in outbounds:
                 keys = shares.get(i, [])
@@ -6512,7 +6533,7 @@ def _gflight_pages(  # noqa: PLR0915 — one pass over the pages, an arm per way
     unread += sum(e.unread for e in asked.failed.values() if isinstance(e, _PageUnreadError))
     separate_failed = asked.tab_refusal(tabs_failed)
     asked.report()
-    rows = _merged_boards(boards)
+    rows = _merged_boards(boards, currency=opts.currency or "USD")
     asked.raise_if_empty(rows)
     if rows and len(pages[0]) >= _ROUND_TRIP_LEGS:
         err.print(
@@ -6861,13 +6882,17 @@ def _bags_by_itinerary(
     }
 
 
-def _terminal_fare_key(r: Any) -> tuple[int, float]:
-    """Sort key for one Google row: `fare_key` of a one-way row, or of a
-    round-trip combination's terminal member, whose fare is the one every
-    surface prints for the combination."""
-    from ._gflight_ids import fare_key  # noqa: PLC0415 — fli, ~95 ms
-
-    return fare_key(cast("tuple[Any, ...]", r)[-1] if isinstance(r, tuple) else r)
+def _terminal_fare_key(r: Any, *, currency: str) -> tuple[int, str, float]:
+    """Sort key for one Google row: `price_rank` of a one-way row's fare, or of
+    a round-trip combination's terminal member's, the fare every surface prints
+    for the combination. A fare in a currency other than `currency`, the one
+    asked for, ranks after every fare in it; a row with no decoded currency is
+    read in `currency`, as `_with_board_currency` fills it; an unpriced row is
+    last."""
+    flight = (cast("tuple[Any, ...]", r)[-1] if isinstance(r, tuple) else r).flight
+    price: float | None = flight.price
+    shown = None if price is None else f"{flight.currency or currency}{price:.2f}"
+    return price_rank(shown, price, currency=currency)
 
 
 def _ticketings(r: Any) -> tuple[Any, ...]:
@@ -6951,13 +6976,14 @@ def _note_award_skips(separate: int) -> None:
         )
 
 
-def _price_ordered(results: list[Any]) -> list[Any]:
-    """A Google answer in price order, unpriced rows last; the argument is in
-    the memo's `-n` section.
+def _price_ordered(results: list[Any], *, currency: str) -> list[Any]:
+    """A Google answer in price order, fares in `currency`, the one asked for,
+    before any other currency's and unpriced rows last; the argument is in the
+    memo's `-n` section.
 
     The sort is stable, so rows sharing a fare keep the order they arrived in:
     the page's on a one-way board, the pins' for combinations."""
-    return sorted(results, key=_terminal_fare_key)
+    return sorted(results, key=lambda r: _terminal_fare_key(r, currency=currency))
 
 
 def _pins_row_one(
@@ -7645,7 +7671,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     # than exist, which is the failure this backend is most prone to.
     insight = getattr(results, "insight", None)
     served = results
-    ordered = _price_ordered(results)
+    ordered = _price_ordered(results, currency=opts.currency or "USD")
     results = ordered[:top_n]
     # A pinned link follows only where one is asked for, the format has room for
     # it and row one can be pinned: `--format json` emits no link at all, and a
@@ -7738,6 +7764,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
                 insight=insight,
                 bags=opts.bags,
                 passengers=opts.pax.total,
+                currency=opts.currency or "USD",
             )
         except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
             raise
@@ -7832,6 +7859,7 @@ def _paint_first_gf_table(
                 match_carriers=_match_carriers(legs),
                 insight=getattr(gf, "insight", None),
                 passengers=opts.pax.total if opts else 1,
+                currency=(opts.currency if opts else None) or "USD",
             )
         except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
             raise
@@ -8229,7 +8257,7 @@ def _answer_cross_check_document(
             impersonate=impersonate,
         )
         checked["low_check"] = _low_check_document(low)
-    rows = _price_ordered(gf)[:top_n]
+    rows = _price_ordered(gf, currency=currency)[:top_n]
     if _envelope.active():
         if google_answered:
             served = state.get("gf")
@@ -8740,7 +8768,7 @@ def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, 
         if sellers:
             # The Google table painted first is the only numbered one on
             # screen, so the pick names its row, as it does under `--fast`.
-            rows = _price_ordered(gf)[:top_n]
+            rows = _price_ordered(gf, currency=requested)[:top_n]
             n = _pick_for_sellers(pick, len(rows))
             sr = fli_results_to_search_result(rows)
             _print_booking_options(
@@ -9859,6 +9887,7 @@ def _cabin_document_rows(
     top_n: int,
     *,
     own: Itinerary | None,
+    currency: str,
 ) -> list[Any]:
     """`cabin`'s Google board as a multi-cabin document carries it: its `top_n`
     cheapest rows, then, in price order, each other row whose fare the joined
@@ -9868,18 +9897,18 @@ def _cabin_document_rows(
     The table prices every cabin on the sort cabin's itineraries, so a fare it
     prints can sit far down another cabin's board; without it, the document
     and the table of one search would hold different fares. The `top_n` are
-    cheapest by the bare amount, so rows Google priced in another currency can
-    fill them ahead of `own`. The count is the user's, not the bumped one the
-    cabins were queried at, which only gives the join overlap. A listing is
-    found by its itinerary key and price, the first such row in price order,
-    as the join keeps it."""
+    cheapest in `currency`, the one asked for, so a row Google priced in another
+    currency fills them only after every row in it. The count is the user's,
+    not the bumped one the cabins were queried at, which only gives the join
+    overlap. A listing is found by its itinerary key and price, the first such
+    row in price order, as the join keeps it."""
     from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
 
     def listing(r: Any) -> tuple[object, str | None] | None:
         adapted = fli_results_to_search_result([r]).solutions
         return (itinerary_key(adapted[0]), adapted[0].price) if adapted else None
 
-    ordered = _price_ordered(board)
+    ordered = _price_ordered(board, currency=currency)
     carried = ordered[:top_n]
     wanted = {
         (itinerary_key(row.itinerary), price)
@@ -10043,7 +10072,14 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
 
     def document_rows(cab: Cabin, board: list[Any]) -> list[Any]:
         named = named_own.get(cab)
-        return _cabin_document_rows(board, rows, cab, top_n, own=named[0] if named else None)
+        return _cabin_document_rows(
+            board,
+            rows,
+            cab,
+            top_n,
+            own=named[0] if named else None,
+            currency=opts.currency or "USD",
+        )
 
     if _envelope.active():
         for cab, board in fli_by_cabin.items():
@@ -10165,14 +10201,57 @@ def _leg_display(leg: Any, amenity: Any, match_carriers: frozenset[str]) -> str:
     code = _safe_text(raw_code)
     number = _safe_text(getattr(leg, "flight_number", "?"))
     booking = f"{code} {number}"
+    mf = _codeshare_match(amenity, match_carriers, raw_code)
+    return booking if mf is None else f"{_safe_text(mf)} (op {code}{number})"
+
+
+def _codeshare_match(amenity: Any, match_carriers: frozenset[str], raw_code: str) -> str | None:
+    """The marketing flight a leg is relabeled to under `match_carriers`: the
+    first of its codeshares whose carrier is in the filter, when the booking
+    carrier `raw_code` is not."""
     if not match_carriers or raw_code in match_carriers:
-        return booking
+        return None
     raw_mf = getattr(amenity, "marketing_flights", ()) if amenity else ()
     mflights: tuple[str, ...] = tuple(raw_mf or ())
-    for mf in mflights:
-        if mf[:2].upper() in match_carriers:
-            return f"{_safe_text(mf)} (op {code}{number})"
-    return booking
+    return next((mf for mf in mflights if mf[:2].upper() in match_carriers), None)
+
+
+def _carrier_name(code: str, amenity: Any) -> str | None:
+    """The full name of the airline `code` is, or None when neither the bundled
+    map nor `amenity`, Google's data for the leg, names it. Google's operating
+    name is used only for the operating code: a codeshare's flight is operated by
+    another carrier, whose name would mislabel the code it is sold under."""
+    if (name := CARRIER_NAMES.get(code)) is not None:
+        return name
+    if getattr(amenity, "operating_carrier", None) == code:
+        # Judged as printed: a name of only characters the console drops names nothing.
+        name = (getattr(amenity, "operating_carrier_name", None) or "").translate(_CTRL)
+        return name.strip() or None
+    return None
+
+
+def _print_carrier_legend(members: list[Any], match_carriers: frozenset[str]) -> None:
+    """The line under a table that names each carrier code its legs column
+    shows, in the order the rows first show them. A code with no name is left
+    out, and a table with none prints no line."""
+    # Keyed on first show, unnamed included: a leg that names a code later fills
+    # its place rather than moving it behind the codes shown in between.
+    named: dict[str, str | None] = {}
+    for g in members:
+        amenities = getattr(g, "amenities", []) or []
+        for k, leg in enumerate(g.flight.legs):
+            amenity = amenities[k] if k < len(amenities) else None
+            raw_code = (getattr(leg.airline, "name", "") or "").removeprefix("_")
+            mf = _codeshare_match(amenity, match_carriers, raw_code)
+            for shown in (raw_code,) if mf is None else (mf[:2].upper(), raw_code):
+                if named.get(shown) is None:
+                    named[shown] = _carrier_name(shown, amenity)
+    if any(named.values()):
+        console.print(
+            "[dim]Carriers: "
+            + _safe_text(" · ".join(f"{code} {name}" for code, name in named.items() if name))
+            + "[/]"
+        )
 
 
 def _gflight_route(legs: Any) -> str:
@@ -10235,6 +10314,7 @@ def _render_gflight_table(
     insight: PriceInsight | None = None,
     bags: Bags | None = None,
     passengers: int = 1,
+    currency: str,
 ) -> None:
     """Render fli results as a rich table. Duck-typed: fli has no type stubs.
 
@@ -10243,6 +10323,8 @@ def _render_gflight_table(
     `match_carriers` enables codeshare-aware leg labels (see `_leg_display`).
     `insight`, Google's price insight for the search, is one line under the
     table, its amounts formatted the way the price column formats them.
+    `currency`, the one asked for, orders the rows the `top_n` keep: a fare in
+    another currency ranks after every fare in it (`_price_ordered`).
     `bags`, the `--bags` asked for, adds a column saying whether each row's
     price includes them (`_bag_cell`). A `CO2 kg` column (`_co2_cell`) shows
     only when a shown row carries Google's estimate, so a board without one
@@ -10272,14 +10354,13 @@ def _render_gflight_table(
     `tests/pp/test_gflight_adapter.py`."""
     origin = ",".join(legs[0].origins) or "?"
     destination = ",".join(legs[0].destinations) or "?"
-    has_return = len(legs) >= _ROUND_TRIP_LEGS
     # One board ranks every airport of a set, so only the row can say which
     # airports it flies.
     per_row_route = any(
         len(expand_airports(lg.origins)) > 1 or len(expand_airports(lg.destinations)) > 1
         for lg in legs
     )
-    shown = _price_ordered(results)[:top_n]
+    shown = _price_ordered(results, currency=currency)[:top_n]
     members = [
         g for r in shown for g in (cast("tuple[Any, ...]", r) if isinstance(r, tuple) else (r,))
     ]
@@ -10305,7 +10386,7 @@ def _render_gflight_table(
         stacked, show_co2 = layouts.pop(0)
         t = Table(
             title=f"Google Flights · {_safe_text(origin)}→{_safe_text(destination)}"
-            + (" + return" if has_return else ""),
+            + (" + return" if len(legs) >= _ROUND_TRIP_LEGS else ""),
             show_header=True,
             header_style="bold green",
         )
@@ -10367,6 +10448,7 @@ def _render_gflight_table(
         if not layouts or console.measure(t, options=unbounded).maximum <= console.width:
             break
     console.print(t)
+    _print_carrier_legend(members, match_carriers)
     if any_legroom:
         console.print(_LEGROOM_KEY)
     if show_co2:

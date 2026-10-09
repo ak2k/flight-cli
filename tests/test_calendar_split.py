@@ -3769,6 +3769,7 @@ def test_gflight_table_survives_a_hostile_flight_number(
         [_fake_gf(f"{payload}117")],
         legs=(Leg.of(["JFK"], ["LHR"], date(2026, 10, 1)),),
         top_n=5,
+        currency="USD",
     )
     written = buffer.getvalue()
     probe = _flat(_SGR.sub("", written))
@@ -3809,6 +3810,7 @@ def test_gflight_table_survives_a_hostile_co2_label(
         [_fake_gf_with_co2(261000, -25, payload)],
         legs=(Leg.of(["JFK"], ["LHR"], date(2026, 10, 1)),),
         top_n=5,
+        currency="USD",
     )
     written = buffer.getvalue()
     probe = _flat(_SGR.sub("", written))
@@ -3833,6 +3835,7 @@ def test_a_gflight_co2_figure_refuses_a_string(
             [_fake_gf_with_co2(grams, delta, "lower")],
             legs=(Leg.of(["JFK"], ["LHR"], date(2026, 10, 1)),),
             top_n=5,
+            currency="USD",
         )
     assert buffer.getvalue() == ""
 
@@ -3866,6 +3869,7 @@ def test_gflight_table_survives_a_hostile_result_field(
         [_fake_gf("UA117", **{field: payload})],
         legs=(Leg.of(["JFK"], ["LHR"], date(2026, 10, 1)),),
         top_n=5,
+        currency="USD",
     )
     probe = _flat(_SGR.sub("", buffer.getvalue()))
     for driver in _DRIVERS:
@@ -3893,6 +3897,7 @@ def test_gflight_table_survives_a_hostile_amenity_field(
         [_fake_gf("UA117", **{field: payload})],
         legs=(Leg.of(["JFK"], ["LHR"], date(2026, 10, 1)),),
         top_n=5,
+        currency="USD",
     )
     probe = _flat(_SGR.sub("", buffer.getvalue()))
     for driver in _DRIVERS:
@@ -3915,6 +3920,7 @@ def test_a_gflight_number_column_refuses_a_string(field: str, monkeypatch: Any) 
             [_fake_gf("UA117", **{field: "[/x]"})],
             legs=(Leg.of(["JFK"], ["LHR"], date(2026, 10, 1)),),
             top_n=5,
+            currency="USD",
         )
 
 

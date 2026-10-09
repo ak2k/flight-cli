@@ -191,7 +191,7 @@ def test_the_json_document_marks_the_top_rows_where_price_order_puts_them(
     assert [i for i, r in enumerate(rows) if r["top_flight"] is True] == [3, 4, 5, 6, 7]
     assert all(r["top_flight"] is False for i, r in enumerate(rows) if i not in range(3, 8))
     assert {r["price"] for r in rows[3:8]} == {295.0}
-    ordered = cli._price_ordered(list(_board(_ds1(_LHR))))
+    ordered = cli._price_ordered(list(_board(_ds1(_LHR))), currency="USD")
     assert [r["flight_id"] for r in rows] == [g.flight_id for g in ordered]
     assert len(fake.gets) == 2  # the board, then its Cheapest tab
     gf_session(_served(_ds1(_LHR)))
@@ -299,7 +299,7 @@ def test_two_pages_listing_one_itinerary_keep_the_cheaper_copy_marked(marked_on:
     dearer = _priced(row, 250.0, top=marked_on == "dearer")
     cheaper = _priced(row, 200.0, top=marked_on == "cheaper")
     for boards in ([dearer], [cheaper]), ([cheaper], [dearer]):
-        (kept,) = cli._merged_boards([gfid.Board(b) for b in boards])
+        (kept,) = cli._merged_boards([gfid.Board(b) for b in boards], currency="USD")
         assert (kept.flight.price, kept.top_flight) == (200.0, True)
 
 
@@ -308,7 +308,7 @@ def test_a_round_trip_marked_only_in_its_outbound_keeps_that_member_alone_marked
     ret = _board(_ds1(_RETURN))[0]
     first = (replace(out, top_flight=True), _priced(ret, 900.0, top=False))
     second = (replace(out, top_flight=False), _priced(ret, 800.0, top=False))
-    (kept,) = cli._merged_boards([gfid.Board([first]), gfid.Board([second])])
+    (kept,) = cli._merged_boards([gfid.Board([first]), gfid.Board([second])], currency="USD")
     assert kept[1].flight.price == 800.0
     assert [m.top_flight for m in kept] == [True, False]
 
@@ -403,7 +403,9 @@ def test_a_round_trip_stars_the_outbound_member_alone(gf_session: Callable[..., 
 def _render(monkeypatch: pytest.MonkeyPatch, results: list[Any], width: int) -> str:
     buffer = io.StringIO()
     monkeypatch.setattr(cli, "console", Console(file=buffer, width=width, no_color=True))
-    cli._render_gflight_table(results, legs=(Leg.of("JFK", "LHR", _DEP),), top_n=len(results))
+    cli._render_gflight_table(
+        results, legs=(Leg.of("JFK", "LHR", _DEP),), top_n=len(results), currency="USD"
+    )
     return buffer.getvalue()
 
 
@@ -437,7 +439,7 @@ def test_a_starred_longest_label_widens_the_number_column_by_one_cell(
     """`★10` is a cell wider than `10`. Where the unstarred table fit the
     console exactly, that cell can change which layout fits; the labels and
     prices stay as they were."""
-    plain = cli._price_ordered(_LHR_ROWS[:10])
+    plain = cli._price_ordered(_LHR_ROWS[:10], currency="USD")
     marked = [*plain[:9], replace(plain[9], top_flight=True)]
     for width in range(80, 121, 2):
         shown, base = _render(monkeypatch, marked, width), _render(monkeypatch, plain, width)
