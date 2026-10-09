@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import re
 import shlex
 import sys
@@ -3640,10 +3641,10 @@ def _undercut(options: BookingOptions, table_prices: list[str | None]) -> float 
     """The table price the cheapest seller beats, or None.
 
     A seller beats the table only by beating every price the row shows, so one
-    in another currency than the sellers', or one that does not parse, leaves
-    nothing to claim. A seller price is whole units, so `d` stands for anything
-    below `d + 0.5`: it beats a table price only when that whole range sits
-    under it."""
+    in another currency than the sellers', or one that does not parse or is not
+    finite (`nan`, `inf`), leaves nothing to claim. A seller price is whole
+    units, so `d` stands for anything below `d + 0.5`: it beats a table price
+    only when that whole range sits under it."""
     amounts: list[float] = []
     for price in table_prices:
         if not price:
@@ -3652,9 +3653,12 @@ def _undercut(options: BookingOptions, table_prices: list[str | None]) -> float 
         if currency != options.currency:
             return None
         try:
-            amounts.append(float(amount.replace(",", "")))
+            value = float(amount.replace(",", ""))
         except ValueError:
             return None
+        if not math.isfinite(value):
+            return None
+        amounts.append(value)
     cheapest = options.sellers[0].price
     if not amounts or cheapest is None or cheapest + 0.5 > min(amounts):
         return None
