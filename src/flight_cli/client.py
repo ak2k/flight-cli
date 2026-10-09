@@ -5,22 +5,32 @@ response. All routing/filtering/mode-dispatch lives in `wire.to_wire()`.
 
 from __future__ import annotations
 
+import json
+import os
+from datetime import UTC, datetime
 from http import HTTPStatus
-from typing import Any, assert_never, cast
+from typing import TYPE_CHECKING, Any, assert_never, cast
 
 import httpx
+import structlog
+from pydantic import ValidationError
 
 from ._api_key import ApiKeyResolutionError, invalidate_cache, resolve_api_key
+from ._gf_common import cache_dir
 from ._http import HttpTransport
 from .domain import CalendarFollowup, CalendarSearch, Search, SpecificDateSearch
 from .models import BookingDetailsResult, CalendarResult, FareRulesResult, Location, SearchResult
 from .wire import booking_details_body, fare_rules_body, to_wire
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # Re-export so callers can `from flight_cli.client import ApiKeyResolutionError`.
 __all__ = [
     "ApiKeyResolutionError",
     "MatrixApiError",
     "MatrixClient",
+    "MatrixShapeError",
 ]
 
 BASE = "https://content-alkalimatrix-pa.googleapis.com"
@@ -28,6 +38,12 @@ SEARCH_URL = f"{BASE}/v1/search"
 SUMMARIZE_URL = f"{BASE}/v1/summarize"
 # How long a search waits on each attempt for Matrix to answer.
 SEARCH_TIMEOUT_S = 180.0
+# Where a drifted Matrix answer is reported, and the cache subdirectory that
+# keeps its body for that report.
+REPORT_URL = "https://github.com/ak2k/flight-cli/issues"
+_SHAPE_DIR = "shape-changes"
+
+log: structlog.stdlib.BoundLogger = structlog.get_logger(__name__)  # pyright: ignore[reportAny]
 
 
 class MatrixApiError(Exception):
@@ -59,8 +75,54 @@ def _raise_if_api_error(data: dict[str, Any]) -> None:
         )
 
 
+class MatrixShapeError(RuntimeError):
+    """Matrix answered, and the answer does not parse as the response model for
+    this search: the backend changed, or this CLI misreads it. Not a
+    `MatrixApiError`: Matrix reported no error, so `kind` and `request_id` have
+    nothing to carry. `str()` is the whole typed line, report URL and captured
+    body included; `detail` is the parse failure alone."""
+
+    def __init__(self, detail: str, *, captured: Path | None) -> None:
+        kept = f"attach {captured}" if captured else "its body could not be saved"
+        super().__init__(
+            f"{detail}; the backend changed shape, which may be a flight-cli bug. "
+            f"Report it at {REPORT_URL} ({kept}; re-run with -vv for every field)"
+        )
+        self.detail = detail
+        self.captured = captured
+
+
+def _capture_body(data: dict[str, Any]) -> Path | None:
+    """Write the body Matrix answered under the cache dir, readable by its owner
+    alone, or return None: a cache dir that cannot be written must not turn a
+    shape report into a second failure."""
+    try:
+        folder = cache_dir() / _SHAPE_DIR
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"matrix-{datetime.now(UTC):%Y%m%dT%H%M%S%f}.json"
+        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+            json.dump(data, f)
+    except (OSError, TypeError, ValueError):
+        return None
+    return path
+
+
 def _parse_response(search: Search, data: dict[str, Any]) -> SearchResult | CalendarResult:
-    """Pick the right response model based on the search variant."""
+    """Pick the right response model based on the search variant. A body the
+    model refuses is kept on disk and raised as `MatrixShapeError`."""
+    try:
+        return _parse_by_variant(search, data)
+    except ValidationError as e:
+        first = e.errors(include_url=False)[0]
+        where = ".".join(str(p) for p in first["loc"]) or "the top level"
+        log.debug("matrix_shape_change", errors=e.errors(include_url=False, include_input=False))
+        detail = f"Matrix's answer does not parse at {where}: {first['msg']}"
+        raise MatrixShapeError(
+            f"{detail} ({e.error_count()} error(s))", captured=_capture_body(data)
+        ) from e
+
+
+def _parse_by_variant(search: Search, data: dict[str, Any]) -> SearchResult | CalendarResult:
     match search:
         case SpecificDateSearch() | CalendarFollowup():
             # followup returns the same shape as specific-date search
