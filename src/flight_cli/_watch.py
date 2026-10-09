@@ -101,8 +101,9 @@ def _load() -> list[Watch]:
         return []
     try:
         return _WATCHES.validate_json(path.read_bytes())
-    except ValidationError as e:
-        raise _fail(f"{path} is unusable and was left untouched: {_problems(e)}", 1) from e
+    except (OSError, ValidationError) as e:
+        why = _problems(e) if isinstance(e, ValidationError) else e.strerror
+        raise _fail(f"{path} is unusable and was left untouched: {why}", 1) from e
 
 
 watch_app = typer.Typer(

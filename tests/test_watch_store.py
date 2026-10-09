@@ -228,3 +228,15 @@ def test_add_succeeds_beside_a_temp_file_it_did_not_create(config_root: Path) ->
     assert added.exit_code == 0, added.output
     assert other.read_bytes() == b"another writer"
     assert [w["destination"] for w in json.loads(store.read_text())] == ["CDG"]
+
+
+@pytest.mark.parametrize("command", [["list"], ["add", "JFK", "LHR"], ["rm", "1"]])
+def test_a_store_that_cannot_be_read_exits_1_with_the_unusable_message(
+    config_root: Path, command: list[str]
+) -> None:
+    store = _store(config_root)
+    store.mkdir(parents=True)
+    result = _watch(*command)
+    assert result.exit_code == 1, result.output
+    assert "left untouched" in result.output
+    assert store.is_dir()
