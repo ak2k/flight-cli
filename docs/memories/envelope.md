@@ -213,10 +213,12 @@ both). The stamps are 04:00 UTC on both captures, the requesting client's local
 midnight, so the day is the UTC date twelve hours after the stamp. The
 JFK-LAX full-board capture holds 61 points, 2026-07-29 at 169 to 2026-09-27 at
 204; JFK-LHR 62, 2026-07-28 at 289 to 2026-09-27 at 293. The currency is read
-off a priced row of the page, as the insight's is. The series is the route's,
-so a routing filter that restates or drops the insight leaves it as served,
-and it rides on `Board.history` through every board the page builds. It costs
-no request: it is on the page the search already fetched.
+off a priced row of the page, as the insight's is. A point whose price is not a
+finite number refuses the series whole, and an insight amount that is not one
+gives no insight. The series is the route's, so a routing filter that restates
+or drops the insight leaves it as served, and it rides on `Board.history`
+through every board the page builds. It costs no request: it is on the page the
+search already fetched.
 
 ## Route facets
 
