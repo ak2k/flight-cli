@@ -24,6 +24,7 @@ from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta
 from functools import partial, wraps
 from itertools import groupby, pairwise
+from statistics import median
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -4985,6 +4986,28 @@ def _grid_branch_blocker(  # noqa: PLR0911 — one return per named reason, chea
     return page_blocker(search)
 
 
+# A calendar day is a deal when it prices at least this percent under the median
+# of its window, once the window has `_DEAL_MIN_DAYS` days priced in one currency.
+_DEAL_UNDER_PCT = 20
+_DEAL_MIN_DAYS = 5
+
+
+def _deal_days(days: Sequence[CalendarDay], ccy: str) -> list[bool]:
+    """Per day of `days`, in order: is its price at least `_DEAL_UNDER_PCT` percent
+    under the median of the days priced in `ccy`. All False when fewer than
+    `_DEAL_MIN_DAYS` are priced in `ccy`. A day in another currency is neither
+    in the median nor a deal: its amount is not in the table's unit."""
+    values = [d.price_value if _split_price(d.min_price)[0] == ccy else None for d in days]
+    # In whole cents: as floats 40.20 * 100 > 50.25 * 80, so a day exactly the
+    # percent under the median would not be a deal.
+    cents = [None if v is None else round(v * 100) for v in values]
+    priced = [c for c in cents if c is not None]
+    if len(priced) < _DEAL_MIN_DAYS:
+        return [False] * len(days)
+    cutoff = median(priced) * (100 - _DEAL_UNDER_PCT)
+    return [c is not None and c * 100 <= cutoff for c in cents]
+
+
 def _render_calendar(
     res: CalendarResult,
     *,
@@ -5036,8 +5059,10 @@ def _render_calendar(
         for dur in range(dmin, dmax + 1):
             t.add_column(f"{dur:d}n", justify="right")
     t.add_column("sols", justify="right")
-    for d in sorted(res.priced_days, key=lambda x: x.price_value or 9e9):
-        row = [f"{d.date:d}", _amount(d.min_price, ccy)]
+    days = sorted(res.priced_days, key=lambda x: x.price_value or 9e9)
+    for d, deal in zip(days, _deal_days(days, ccy), strict=True):
+        cell = _amount(d.min_price, ccy)
+        row = [f"{d.date:d}", f"[green]{cell:s}[/]" if deal else cell]
         if routed:
             row.append(_safe_text(f"{d.origin}→{d.destination}") if d.origin else "—")
         if round_trip:
@@ -12313,7 +12338,11 @@ def calendar(
         rich_help_panel=_GROUP_BACKEND,
     ),
 ) -> None:
-    """Lowest-fare grid across a date window. Default round-trip; --one-way to flip."""
+    """Lowest-fare grid across a date window. Default round-trip; --one-way to flip.
+
+    Matrix's grid colors a day's min price green when it is at least 20% under the
+    median of the window's priced days in the grid's currency, and colors nothing
+    when fewer than 5 priced days share that currency."""
     json_out = _resolve_format(fmt=fmt, json_flag=json_out, allowed=_ENVELOPE_FORMATS) != "table"
     # A JSON or envelope calendar opens Chrome for Google's graph only when the
     # transport is named: a script's calendar launches no browser it did not ask for.
