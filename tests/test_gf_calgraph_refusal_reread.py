@@ -33,13 +33,20 @@ _FIRST, _LAST = date(2026, 10, 20), date(2026, 11, 2)
 
 
 class _Clock:
-    """`time`, recording each sleep rather than taking it."""
+    """`time`, recording each sleep rather than taking it. A sleep advances
+    `monotonic` by its length, so the search's pause window closes on the
+    sleeps alone."""
 
     def __init__(self) -> None:
         self.sleeps: list[float] = []
+        self.now = 0.0
 
     def sleep(self, seconds: float) -> None:
         self.sleeps.append(seconds)
+        self.now += seconds
+
+    def monotonic(self) -> float:
+        return self.now
 
     def __getattr__(self, name: str) -> Any:
         return getattr(time, name)
@@ -107,26 +114,27 @@ def test_another_error_row_is_not_loaded_again(
     assert (e.value.code, len(fake.calls), clock.sleeps) == (14, 1, [])
 
 
-def test_the_pauses_come_out_of_the_running_searchs_budget(
+def test_the_pauses_fall_inside_the_running_searchs_window(
     monkeypatch: pytest.MonkeyPatch, clock: _Clock
 ) -> None:
-    """A search that has paused for 7 of its 8 seconds has one left, whatever
-    page it spent them on."""
+    """A search whose 8 s window opened 7 s ago has 1 s of it left, whatever
+    page opened it."""
     fake = _serve(monkeypatch, _fixture("error13.body"), _fixture("ow_jfk_lax.body"))
     with gfid.search_escalation():
-        budget = gfid._search_escalation.get()
-        assert budget is not None
-        assert budget.pause(7.0) == 7.0
+        search = gfid._search_escalation.get()
+        assert search is not None
+        clock.sleep(search.pause(7.0))
         graph = cg.price_graph(_search(start=_FIRST, end=_LAST), headed=False)
-    assert (len(graph.cells), len(fake.calls), clock.sleeps) == (14, 2, [1.0])
+    assert (len(graph.cells), len(fake.calls), clock.sleeps) == (14, 2, [7.0, 1.0])
 
 
-def test_a_trip_length_range_pauses_within_one_search_budget(
+def test_a_trip_length_range_pauses_within_one_search_window(
     monkeypatch: pytest.MonkeyPatch, clock: _Clock
 ) -> None:
     """Each length's graph is one more page of the same search: the 6-night
-    graph refused on every read is given up once the 5-night one has spent the
-    8 s, rather than after 8 s of its own."""
+    graph refused on every read is read again at once and given up, since the
+    5-night one's pauses closed the 8 s window, rather than after 8 s of its
+    own."""
     refused = _fixture("error13.body")
     first = _START - timedelta(days=7)
     _serve(monkeypatch, refused, refused, _round_trip_page(first, 5), refused, refused, refused)
@@ -139,10 +147,10 @@ def test_a_trip_length_range_pauses_within_one_search_budget(
     assert clock.sleeps == [2.0, 6.0, 0.0, 0.0]
 
 
-def test_a_calendar_beside_matrix_pauses_within_one_search_budget(
+def test_a_calendar_beside_matrix_pauses_within_one_search_window(
     monkeypatch: pytest.MonkeyPatch, clock: _Clock
 ) -> None:
-    """The graph read on Matrix's worker thread shares one budget across its
+    """The graph read on Matrix's worker thread shares one window across its
     lengths too, though that thread opened no search of its own."""
     _matrix_answers(monkeypatch)
     refused = _fixture("error13.body")
@@ -155,15 +163,15 @@ def test_a_calendar_beside_matrix_pauses_within_one_search_budget(
     assert (len(fake.calls), clock.sleeps) == (8, [2.0, 6.0, 0.0, 0.0, 0.0])
 
 
-def test_a_trip_length_range_inside_a_running_search_pauses_out_of_its_budget(
+def test_a_trip_length_range_inside_a_running_search_pauses_inside_its_window(
     monkeypatch: pytest.MonkeyPatch, clock: _Clock
 ) -> None:
     first = _START - timedelta(days=7)
     pages = (_round_trip_page(first, n) for n in (5, 6, 7))
     _serve(monkeypatch, _fixture("error13.body"), *pages)
     with gfid.search_escalation():
-        budget = gfid._search_escalation.get()
-        assert budget is not None
-        assert budget.pause(7.0) == 7.0
+        search = gfid._search_escalation.get()
+        assert search is not None
+        clock.sleep(search.pause(7.0))
         got = cg.price_graphs(_ranged(), headed=False)
-    assert ([g.trip_length for g in got.graphs], clock.sleeps) == ([5, 6, 7], [1.0])
+    assert ([g.trip_length for g in got.graphs], clock.sleeps) == ([5, 6, 7], [7.0, 1.0])
