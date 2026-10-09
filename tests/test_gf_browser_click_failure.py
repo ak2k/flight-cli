@@ -172,6 +172,22 @@ def test_names_and_title_are_unquoted_and_kept_to_one_line(
     assert "\n" not in text.split("Timeout 20000ms exceeded.", 1)[1]
 
 
+def test_buttons_whose_snapshot_key_is_yaml_quoted_are_named(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The lines patchright's YAML key escaper renders for these names; the last
+    # is the name `a\'b: c`, its backslash JSON-escaped and its quote doubled.
+    snapshot = r"""- button "Accept all"
+- 'button "Stops: Any"': Any
+- 'button "Item #3"'
+  - 'button "Sort {price}" [disabled]'
+- 'button "It''s: ok"'
+- 'button "a\\''b: c"'
+"""
+    names = r""""Accept all", "Stops: Any", "Item #3", "Sort {price}", "It's: ok", "a\'b: c"."""
+    assert f"visible buttons: {names}" in str(_failed_click(monkeypatch, _Page(snapshot=snapshot)))
+
+
 def test_the_stalled_graph_line_carries_what_the_page_showed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

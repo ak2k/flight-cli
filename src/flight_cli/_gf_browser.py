@@ -88,8 +88,12 @@ _SNAPSHOT_TIMEOUT_MS = 3_000
 _SHOWN_BUTTONS = 40
 _SHOWN_CHARS = 200
 # One line of patchright's ARIA snapshot per button: `- button "Name"`, the
-# name JSON-quoted, then optionally a colon and the button's text.
-_BUTTON_LINE = re.compile(r'^\s*- button ("(?:[^"\\]|\\.)*")', re.MULTILINE)
+# name JSON-quoted, then optionally a colon and the button's text. A key that
+# YAML would misread (a name holding `: `, ` #` or a brace, say) is wrapped
+# whole in single quotes, each `'` in it doubled: `- 'button "Stops: Any"'`.
+_BUTTON_LINE = re.compile(
+    r"""^\s*- (?:button ("(?:[^"\\]|\\.)*")|'button ("(?:[^"\\']|\\.|'')*"))""", re.MULTILINE
+)
 # What Chrome says when asked for a body it has already dropped from its buffer.
 _EVICTED = "Request content was evicted from inspector cache"
 # The sync API delivers events only while one of its calls is running, so the
@@ -828,7 +832,10 @@ def _describe_page(page: Any) -> str:
     named. A page showing no "Price graph" button, a consent form or another
     site all end in the same click timeout; this is what tells them apart."""
     snapshot = str(page.aria_snapshot(timeout=_SNAPSHOT_TIMEOUT_MS))
-    names = [_one_line(_unquote(m)) for m in _BUTTON_LINE.findall(snapshot)]
+    names = [
+        _one_line(_unquote(bare or quoted.replace("''", "'")))
+        for bare, quoted in _BUTTON_LINE.findall(snapshot)
+    ]
     shown = ", ".join(f'"{n}"' for n in names[:_SHOWN_BUTTONS])
     if not names:
         buttons = "no visible buttons"
