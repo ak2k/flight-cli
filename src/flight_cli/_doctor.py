@@ -299,8 +299,8 @@ class _Doctor:
             cfg = _config.load()
         except (OSError, ValueError) as e:
             raise _CheckFailedError("config", f"{path} could not be read: {e}") from e
-        # Resolved as a search resolves them: an rps that is not a number
-        # greater than 0 stops the search before it sends anything.
+        # Resolved as a search resolves them: an rps that is not a number of at
+        # least 5.6e-309 stops the search before it sends anything.
         self.impersonate = _config.http_impersonate(config=cfg)
         try:
             self.rps = _config.http_rps(config=cfg)
