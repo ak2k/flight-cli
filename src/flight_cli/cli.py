@@ -9,6 +9,7 @@ Commands:
   flight airport   — IATA autocomplete
   flight explore   — where an origin flies, cheapest first (Google Flights, Chrome)
   flight doctor    — pass, fail or skip for every backend, transport and credential
+  flight watch     — save, list and remove route watches (stored only; nothing polls)
   flight fare      — [deprecated] alias for `search --backend matrix`
   flight gflight   — [deprecated] alias for `search --backend gflight`
 """
@@ -102,6 +103,7 @@ from ._multi_cabin import (
     price_rank,
 )
 from ._multi_cabin import merge as _merge_cabins
+from ._watch import watch_app
 from .client import MatrixApiError, MatrixClient
 from .domain import (
     Bags,
@@ -233,6 +235,7 @@ def _usd_amount(price: str | None) -> float | None:
 
 app = typer.Typer(rich_markup_mode="rich", help="CLI for ITA Matrix's Alkali backend.")
 app.add_typer(auth_app, name="auth")
+app.add_typer(watch_app, name="watch")
 console = Console()
 err = Console(stderr=True)
 
