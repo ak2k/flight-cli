@@ -289,6 +289,9 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
   `price_graph` loads such a page once more, from the same eight-load budget,
   under `--fast` too; a second miss raises `GfGraphStalledError`. A wall, a
   failed navigation and any answer the graph gave are never loaded again.
+  A failed click's refusal ends with the page's final URL, its title and its
+  visible buttons' names, read after the failure, so the next stall says what
+  the page showed.
 
 **Re-enabling is not just `_GRID_RPC_GATED = False`.** Nothing executes the
 transport below the gate — there is no captured GetCalendarGraph envelope to test

@@ -40,8 +40,10 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextlib
+import json
 import logging
 import os
+import re
 import signal
 import threading
 import time
@@ -79,6 +81,15 @@ _WAIT_UNTIL = "domcontentloaded"
 # allowance instead of adding its own.
 _CAPTURE_TIMEOUT_S = 45.0
 _CLICK_TIMEOUT_MS = 20_000
+# Reading the page after a failed click gets its own bound: the capture's
+# deadline is usually spent by then, and a zero budget would mean no timeout.
+_SNAPSHOT_TIMEOUT_MS = 3_000
+# Enough to show what a page offered without printing a whole page of controls.
+_SHOWN_BUTTONS = 40
+_SHOWN_CHARS = 200
+# One line of patchright's ARIA snapshot per button: `- button "Name"`, the
+# name JSON-quoted, then optionally a colon and the button's text.
+_BUTTON_LINE = re.compile(r'^\s*- button ("(?:[^"\\]|\\.)*")', re.MULTILINE)
 # What Chrome says when asked for a body it has already dropped from its buffer.
 _EVICTED = "Request content was evicted from inspector cache"
 # The sync API delivers events only while one of its calls is running, so the
@@ -404,7 +415,8 @@ class GfBrowserSession:
         raising: a throttle or consent interstitial has no control to click, so
         without it those walls would surface as a click timeout. Its exception
         propagates unwrapped. Every other failure is
-        `GfBrowserUnavailableError`."""
+        `GfBrowserUnavailableError`; a failed click's carries what the page
+        showed (URL, title, visible buttons), read after the failure."""
         page = self._ensure_page()
         deadline = time.monotonic() + timeout_s
         requests: list[Any] = []
@@ -449,12 +461,17 @@ class GfBrowserSession:
                     )
                 )
             if click is not None:
-                self._drive(
-                    f"Chrome could not click {click.name!r} on Google Flights' page",
-                    lambda: page.get_by_role(click.role, name=click.name, exact=True).click(
-                        timeout=_budget_ms(deadline, _CLICK_TIMEOUT_MS)
-                    ),
-                )
+                try:
+                    self._drive(
+                        f"Chrome could not click {click.name!r} on Google Flights' page",
+                        lambda: page.get_by_role(click.role, name=click.name, exact=True).click(
+                            timeout=_budget_ms(deadline, _CLICK_TIMEOUT_MS)
+                        ),
+                    )
+                except GfBrowserUnavailableError as e:
+                    raise GfBrowserUnavailableError(
+                        f"{e.reason} {self._page_showed(page)}", remedy=e.remedy
+                    ) from e
             while (hit := _first_finished_match(requests, responses, finished, wanted)) is None:
                 self._drive(
                     "Chrome stopped while waiting for Google Flights' page",
@@ -485,6 +502,18 @@ class GfBrowserSession:
         except BaseException:
             self._dead = True
             raise
+
+    def _page_showed(self, page: Any) -> str:
+        """What the page showed after a failed step, as one sentence.
+
+        A failure to read it is that sentence instead: the step's own failure is
+        what the caller needs, and a second error would hide it."""
+        try:
+            return self._drive(
+                "Chrome could not read the page afterward", lambda: _describe_page(page)
+            )
+        except GfBrowserUnavailableError as e:
+            return e.reason
 
     def _stop_a_late_driver_or_raise(self, manager: Any) -> None:
         """Stop a driver that finished starting after the interrupt went past.
@@ -776,6 +805,39 @@ def _detail(e: BaseException) -> str:
     lines = [line.strip() for line in str(e).strip().splitlines() if line.strip()]
     text = lines[0] if lines else e.__class__.__name__
     return text if text.endswith((".", "!", "?")) else f"{text}."
+
+
+def _one_line(text: str, limit: int = _SHOWN_CHARS) -> str:
+    """`text` on one line, cut at `limit` characters."""
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else f"{flat[: limit - 1]}…"
+
+
+def _unquote(name: str) -> str:
+    """A snapshot's JSON-quoted button name, unquoted."""
+    try:
+        return str(json.loads(name))
+    except ValueError:
+        return name.strip('"')
+
+
+def _describe_page(page: Any) -> str:
+    """The page's URL, its title and its visible buttons' accessible names.
+
+    The snapshot lists only what a user could reach, so a hidden control is not
+    named. A page showing no "Price graph" button, a consent form or another
+    site all end in the same click timeout; this is what tells them apart."""
+    snapshot = str(page.aria_snapshot(timeout=_SNAPSHOT_TIMEOUT_MS))
+    names = [_one_line(_unquote(m)) for m in _BUTTON_LINE.findall(snapshot)]
+    shown = ", ".join(f'"{n}"' for n in names[:_SHOWN_BUTTONS])
+    if not names:
+        buttons = "no visible buttons"
+    elif len(names) > _SHOWN_BUTTONS:
+        buttons = f"visible buttons: {shown}, and {len(names) - _SHOWN_BUTTONS} more"
+    else:
+        buttons = f"visible buttons: {shown}"
+    url, title = _one_line(str(page.url)), _one_line(page.title())
+    return f'The page showed URL {url}, title "{title}", {buttons}.'
 
 
 def _navigated_page(page: Any, nav: Any) -> PageFetch:
