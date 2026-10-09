@@ -8,19 +8,29 @@ override `_config.py` honors), else `$XDG_CONFIG_HOME/flight-cli`, else
 from __future__ import annotations
 
 import os
+import re
 import tempfile
-from datetime import date  # noqa: TC003 - pydantic evaluates the field annotations at runtime
+from datetime import date
 from pathlib import Path
 from typing import Annotated, Final, Literal, Self, get_args
 
 import typer
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from ._console_text import CTRL
 
 Cabin = Literal["economy", "premium", "business", "first"]
 CABINS: Final = get_args(Cabin)
 _IATA = r"^[A-Z]{3}$"
+_DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 
 class Watch(BaseModel):
@@ -35,6 +45,17 @@ class Watch(BaseModel):
     below: float | None = Field(gt=0, allow_inf_nan=False)
     cabin: Cabin
     award: bool
+
+    @field_validator("dep_from", "dep_to", mode="before")
+    @classmethod
+    def _day(cls, value: object) -> object:
+        """pydantic reads a string of digits as Unix time (`--dep 0` would be
+        1970-01-01) and a datetime with no time of day as a date."""
+        if not isinstance(value, str):
+            return value
+        if not _DAY.fullmatch(value):
+            raise ValueError("a date is YYYY-MM-DD")
+        return date.fromisoformat(value)
 
     @model_validator(mode="after")
     def _window(self) -> Self:

@@ -91,6 +91,8 @@ def test_date_window_cabin_and_award_are_stored_and_listed(config_root: Path) ->
         pytest.param(
             ["JFK", "LHR", "--dep", "2026-11-01", "--from", "2026-11-02"], id="dep-and-window"
         ),
+        pytest.param(["JFK", "LHR", "--dep", "0"], id="dep-unix-timestamp"),
+        pytest.param(["JFK", "LHR", "--dep", "2026-11-01T00:00:00"], id="dep-datetime"),
         pytest.param(["JFK", "LHR", "--dep", ""], id="dep-empty"),
         pytest.param(
             ["JFK", "LHR", "--dep", "", "--from", "2026-11-01", "--to", "2026-11-09"],
