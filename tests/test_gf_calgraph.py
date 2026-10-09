@@ -373,8 +373,7 @@ def test_the_second_load_is_spent_from_the_budget(monkeypatch: pytest.MonkeyPatc
     with pytest.raises(cg.GfGraphBudgetError) as budget:
         cg.price_graph(window, headed=False, pages=2)
     assert str(budget.value) == (
-        "no price-graph load of the 8 was left for the rest of the window "
-        "(a page that drew no graph was loaded again)"
+        "no price-graph load of the 8 was left for the rest of the window (a page was loaded again)"
     )
     assert budget.value.loads == 2
     assert len(fake.calls) == 2
@@ -388,13 +387,13 @@ def test_the_second_load_is_spent_from_the_budget(monkeypatch: pytest.MonkeyPatc
         ((429, ""), cg.GfPriceGraphError),
         ((500, "oops"), cg.GfPriceGraphError),
         ("<html>not an envelope</html>", cg.GfPriceGraphError),
-        (_fixture("error13.body"), cg.GfPriceGraphError),
+        (_fixture("error13.body").replace("[13,null,", "[14,null,"), cg.GfPriceGraphError),
         (
             _Unloaded(GfBrowserUnavailableError("Chrome could not load Google Flights' page: x.")),
             GfBrowserUnavailableError,
         ),
     ],
-    ids=["throttle", "consent", "http-429", "http-500", "unreadable", "error-13", "not-loaded"],
+    ids=["throttle", "consent", "http-429", "http-500", "unreadable", "error-14", "not-loaded"],
 )
 def test_a_wall_an_answer_or_a_page_that_never_loaded_is_not_loaded_again(
     answer: str | _Answer, error: type[Exception], monkeypatch: pytest.MonkeyPatch
@@ -1606,7 +1605,7 @@ def test_a_reload_that_spends_the_eighth_load_blames_the_budget_not_the_window(
     err = " ".join(capsys.readouterr().err.split())
     assert (
         "date grid failed: no price-graph load of the 8 was left for the rest of the window "
-        "(a page that drew no graph was loaded again)"
+        "(a page was loaded again)"
     ) in err
     assert "narrow" not in err
     assert "price-graph pages" not in err
