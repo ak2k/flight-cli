@@ -245,7 +245,7 @@ def test_a_code_that_is_its_own_airport_gets_no_fallback_caveat() -> None:
 
 def test_the_google_table_titles_name_the_whole_set(capsys: pytest.CaptureFixture[str]) -> None:
     legs = _search("JFK,EWR", "LHR").legs
-    cli._render_gflight_table([], legs=legs, top_n=1)
+    cli._render_gflight_table([], legs=legs, top_n=1, currency="USD")
     cli._render_merged([], legs=legs, top_n=1)
     out = capsys.readouterr().out
     assert "Google Flights · JFK,EWR→LHR" in out, out
@@ -269,7 +269,7 @@ def _table(rows: list[Any], search: SpecificDateSearch) -> list[str]:
     buf = io.StringIO()
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(cli, "console", Console(file=buf, width=400, no_color=True, highlight=False))
-        cli._render_gflight_table(rows, legs=search.legs, top_n=5)
+        cli._render_gflight_table(rows, legs=search.legs, top_n=5, currency="USD")
     return buf.getvalue().splitlines()
 
 
