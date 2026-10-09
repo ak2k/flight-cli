@@ -6009,6 +6009,17 @@ def _gflight_results(
     return results
 
 
+def _google_board_label(cabin: Cabin | None, one_way: str | None) -> str:
+    """How `_note_stop_drops` and `_note_row_cap` name the board they describe:
+    a multi-cabin search's cabin, a one-way board a multi-city trip or `--split`
+    reads, else the search's one board."""
+    if cabin is not None:
+        return f"Google Flights {cabin.value}"
+    if one_way is not None:
+        return f"Google Flights {one_way} one-way"
+    return "Google Flights"
+
+
 def _note_stop_drops(
     results: list[Any], cabin: Cabin | None = None, *, one_way: str | None = None
 ) -> None:
@@ -6027,13 +6038,7 @@ def _note_stop_drops(
         return
     rows = f"{drops.rows:d} row{'' if drops.rows == 1 else 's'}"
     shown = "it is" if drops.rows == 1 else "they are"
-    google = (
-        f"Google Flights {cabin.value}"
-        if cabin is not None
-        else f"Google Flights {one_way} one-way"
-        if one_way is not None
-        else "Google Flights"
-    )
+    google = _google_board_label(cabin, one_way)
     note = (
         f"{google} returned {rows} over the stop ceiling it was asked for "
         f"({drops.ceiling:d}); {shown} not shown."
@@ -6067,13 +6072,7 @@ def _note_row_cap(
     if not caps:
         return
     bounds = " and ".join(f"{ccy}{amount:.2f}" for ccy, amount in sorted(caps.items()))
-    google = (
-        f"Google Flights {cabin.value}"
-        if cabin is not None
-        else f"Google Flights {one_way} one-way"
-        if one_way is not None
-        else "Google Flights"
-    )
+    google = _google_board_label(cabin, one_way)
     note = (
         f"{google} stops at {_ROW_CAP:d} rows for this search: fares above {bounds} may be missing."
     )
@@ -9567,42 +9566,26 @@ def _print_cabin_insights(
             )
 
 
-# Each cabin as `--cabin` and `--sort` take it, in one shell word.
-_CABIN_FLAG_NAMES: dict[Cabin, str] = {
-    Cabin.COACH: "economy",
-    Cabin.PREMIUM_COACH: "premium",
-    Cabin.BUSINESS: "business",
-    Cabin.FIRST: "first",
-}
-
-
-def _print_own_cheapest(
+def _named_own_cheapest(
     rows: list[MultiCabinRow],
     results_by_cabin: dict[Cabin, SearchResult],
     *,
     cabins: tuple[Cabin, ...],
     sort_by: Cabin,
     currency: str,
-    passengers: int = 1,
-    total_of: Callable[[Itinerary], str | None] | None = None,
-    bag_mark: Callable[[Itinerary], str] | None = None,
-) -> list[Itinerary]:
-    """One line under the multi-cabin table for each cabin but `sort_by` whose
-    own cheapest listing (`cheapest`: in `currency`, else in the first other
-    currency by code that the cabin is priced in) is priced below every fare its
-    column shows in that listing's currency, or whose column shows none in it,
-    and the listings named. No rate is known, so two currencies' fares never
+) -> dict[Cabin, tuple[Itinerary, float]]:
+    """Each cabin but `sort_by` whose own cheapest listing (`cheapest`: in
+    `currency`, else in the first other currency by code that the cabin is
+    priced in) is priced below every fare its column shows in that listing's
+    currency, or whose column shows none in it, with that listing and its
+    amount, in `cabins` order. No rate is known, so two currencies' fares never
     compare.
 
-    For a party of `passengers`, the line names the listing's total
-    (`total_of`), as the party's column prints its cells, or one traveler's
-    price where it has none, and says which. Under `--bags`, `bag_mark` marks
-    the amount as the table marks a cell.
-
-    The table prices every cabin on the sort cabin's itineraries, so another
-    cabin's cheapest fare can be on an itinerary no row shows, while a document
-    of the same search lists it as that cabin's first row."""
-    named: list[Itinerary] = []
+    The one test of what the line under the multi-cabin table names
+    (`_print_own_cheapest`) and of what a document adds to a cabin's rows
+    (`_cabin_document_rows`): a listing that ties a fare the column shows is
+    named by neither."""
+    named: dict[Cabin, tuple[Itinerary, float]] = {}
     for cab in cabins:
         res = results_by_cabin.get(cab)
         own = cheapest(res, currency=currency) if cab != sort_by and res is not None else None
@@ -9617,9 +9600,38 @@ def _print_own_cheapest(
             for row in rows
             if (p := row.prices.get(cab)) and price_currency(p) == own_currency
         ]
-        if any(p is not None and p <= amount for p in shown):
-            continue
-        named.append(own)
+        if not any(p is not None and p <= amount for p in shown):
+            named[cab] = (own, amount)
+    return named
+
+
+def _print_own_cheapest(
+    rows: list[MultiCabinRow],
+    results_by_cabin: dict[Cabin, SearchResult],
+    *,
+    cabins: tuple[Cabin, ...],
+    sort_by: Cabin,
+    currency: str,
+    passengers: int = 1,
+    total_of: Callable[[Itinerary], str | None] | None = None,
+    bag_mark: Callable[[Itinerary], str] | None = None,
+) -> list[Itinerary]:
+    """One line under the multi-cabin table for each cabin
+    `_named_own_cheapest` names, and the listings named.
+
+    For a party of `passengers`, the line names the listing's total
+    (`total_of`), as the party's column prints its cells, or one traveler's
+    price where it has none, and says which. Under `--bags`, `bag_mark` marks
+    the amount as the table marks a cell.
+
+    The table prices every cabin on the sort cabin's itineraries, so another
+    cabin's cheapest fare can be on an itinerary no row shows, while a document
+    of the same search lists it as that cabin's first row."""
+    named = _named_own_cheapest(
+        rows, results_by_cabin, cabins=cabins, sort_by=sort_by, currency=currency
+    )
+    for cab, (own, amount) in named.items():
+        own_currency = price_currency(own.price) or currency
         letter = _CABIN_TO_LETTER[cab]
         mark = " ‡" if own.ticketing == "self_transfer" else " †" if own.ticketing else ""
         flights = " / ".join(
@@ -9643,7 +9655,7 @@ def _print_own_cheapest(
             "cheapest first.",
             soft_wrap=True,
         )
-    return named
+    return [own for own, _ in named.values()]
 
 
 def _validate_sort_cabin(sort_by: Cabin, cabins: tuple[Cabin, ...]) -> None:
@@ -9850,8 +9862,8 @@ def _cabin_document_rows(
 ) -> list[Any]:
     """`cabin`'s Google board as a multi-cabin document carries it: its `top_n`
     cheapest rows, then, in price order, each other row whose fare the joined
-    table `rows` prints in `cabin`, and `own`, the cabin's `cheapest` listing,
-    which the table names under it when no row shows it.
+    table `rows` prints in `cabin`, and `own`, the cabin's own cheapest listing
+    where the table names it under the cabin (`_named_own_cheapest`).
 
     The table prices every cabin on the sort cabin's itineraries, so a fare it
     prints can sit far down another cabin's board; without it, the document
@@ -10023,10 +10035,15 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
         else partial(_bag_mark, bags_included=bags_by_id, asked=opts.bags)
     )
 
+    # What the line under the table names: a listing the table does not name is
+    # not a row of its cabin's document.
+    named_own = _named_own_cheapest(
+        rows, results_by_cabin, cabins=cabins, sort_by=sort_by, currency=opts.currency or "USD"
+    )
+
     def document_rows(cab: Cabin, board: list[Any]) -> list[Any]:
-        res = results_by_cabin.get(cab)
-        own = cheapest(res, currency=opts.currency or "USD") if res is not None else None
-        return _cabin_document_rows(board, rows, cab, top_n, own=own)
+        named = named_own.get(cab)
+        return _cabin_document_rows(board, rows, cab, top_n, own=named[0] if named else None)
 
     if _envelope.active():
         for cab, board in fli_by_cabin.items():
@@ -10566,6 +10583,8 @@ _GROUP_BACKEND = "Backend & providers"
 # The canonical names `_resolve_cabin` and `_parse_times` accept, the ones
 # their refusals list; tab offers these and none of the aliases.
 _CABIN_CHOICES = ("economy", "premium", "business", "first")
+# Each cabin as `--cabin` and `--sort` take it, in one shell word.
+_CABIN_FLAG_NAMES: dict[Cabin, str] = dict(zip(Cabin, _CABIN_CHOICES, strict=True))
 _TIME_OF_DAY_CHOICES = ("early", "morning", "midday", "afternoon", "evening", "night")
 
 
