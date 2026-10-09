@@ -43,17 +43,45 @@ class _Locator:
         raise RuntimeError(_CLICK_TIMEOUT)
 
 
+class _TitleLocator:
+    def __init__(self, page: _Page) -> None:
+        self._page = page
+
+    @property
+    def first(self) -> _FirstTitle:
+        return _FirstTitle(self._page)
+
+
+class _FirstTitle:
+    def __init__(self, page: _Page) -> None:
+        self._page = page
+
+    def text_content(self, *, timeout: float) -> str:
+        self._page.title_timeouts.append(timeout)
+        if self._page.title_stalls:
+            self._page.elapsed_s += timeout / 1000
+            raise RuntimeError(f"Timeout {timeout:.0f}ms exceeded.\ncall log:\n  - waiting")
+        return self._page.title_text
+
+
 class _Page:
-    """The slice of patchright's page a failed click reads afterward."""
+    """The slice of patchright's page a failed click reads afterward.
+
+    `elapsed_s` is the time its reads took; a stalled title holds a read with
+    no timeout for as long as the stall, and one with a timeout until then."""
 
     def __init__(self, *, snapshot: str, title: str = "Before you continue") -> None:
         self.url = _START_URL
         self._snapshot = snapshot
-        self._title = title
+        self.title_text = title
         self.snapshot_error: Exception | None = None
         self.clicks_fine = False
         self.click_timeouts: list[float] = []
         self.snapshot_timeouts: list[float] = []
+        self.title_timeouts: list[float] = []
+        self.snapshot_s = 0.0
+        self.title_stalls = False
+        self.elapsed_s = 0.0
 
     def on(self, event: str, handler: Callable[[Any], None]) -> None:
         pass
@@ -72,10 +100,17 @@ class _Page:
         time.sleep(timeout / 1000)
 
     def title(self) -> str:
-        return self._title
+        if self.title_stalls:
+            self.elapsed_s += 60
+        return self.title_text
+
+    def locator(self, selector: str) -> _TitleLocator:
+        assert selector == "head > title"
+        return _TitleLocator(self)
 
     def aria_snapshot(self, *, timeout: float) -> str:
         self.snapshot_timeouts.append(timeout)
+        self.elapsed_s += self.snapshot_s
         if self.snapshot_error is not None:
             raise self.snapshot_error
         return self._snapshot
@@ -120,6 +155,36 @@ def test_the_read_after_a_failed_click_is_bounded(monkeypatch: pytest.MonkeyPatc
     assert 0 < timeout <= gfb._SNAPSHOT_TIMEOUT_MS  # pyright: ignore[reportPrivateUsage]
 
 
+def _clock(monkeypatch: pytest.MonkeyPatch, page: _Page) -> None:
+    real = time.monotonic
+    monkeypatch.setattr(time, "monotonic", lambda: real() + page.elapsed_s)
+
+
+def test_the_title_read_shares_the_bound_the_snapshot_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = _Page(snapshot='- button "Accept all"\n')
+    page.snapshot_s, page.title_stalls = 1.0, True
+    _clock(monkeypatch, page)
+    error = _failed_click(monkeypatch, page)
+    assert page.elapsed_s <= gfb._SNAPSHOT_TIMEOUT_MS / 1000  # pyright: ignore[reportPrivateUsage]
+    assert str(error).startswith(
+        "Chrome could not click 'Price graph' on Google Flights' page: Timeout 20000ms exceeded. "
+        "Chrome could not read the page afterward: Timeout "
+    )
+
+
+def test_a_snapshot_that_spends_the_bound_still_bounds_the_title_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = _Page(snapshot='- button "Accept all"\n')
+    page.snapshot_s = gfb._SNAPSHOT_TIMEOUT_MS / 1000  # pyright: ignore[reportPrivateUsage]
+    _clock(monkeypatch, page)
+    assert 'title "Before you continue"' in str(_failed_click(monkeypatch, page))
+    [timeout] = page.title_timeouts
+    assert 0 < timeout <= 1
+
+
 def test_a_click_that_works_reads_nothing_from_the_page(monkeypatch: pytest.MonkeyPatch) -> None:
     page = _Page(snapshot='- button "Accept all"\n')
     page.clicks_fine = True
@@ -128,6 +193,7 @@ def test_a_click_that_works_reads_nothing_from_the_page(monkeypatch: pytest.Monk
         session.capture(_START_URL, lambda url: url == _RPC_URL, click=_GRAPH, timeout_s=0.05)
     assert page.click_timeouts
     assert page.snapshot_timeouts == []
+    assert page.title_timeouts == []
 
 
 def test_a_page_that_cannot_be_read_leaves_the_click_failure_standing(

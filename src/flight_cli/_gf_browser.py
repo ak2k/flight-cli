@@ -81,8 +81,9 @@ _WAIT_UNTIL = "domcontentloaded"
 # allowance instead of adding its own.
 _CAPTURE_TIMEOUT_S = 45.0
 _CLICK_TIMEOUT_MS = 20_000
-# Reading the page after a failed click gets its own bound: the capture's
-# deadline is usually spent by then, and a zero budget would mean no timeout.
+# Reading the page after a failed click, every read together, gets its own
+# bound: the capture's deadline is usually spent by then, and a zero budget
+# would mean no timeout.
 _SNAPSHOT_TIMEOUT_MS = 3_000
 # Enough to show what a page offered without printing a whole page of controls.
 _SHOWN_BUTTONS = 40
@@ -831,6 +832,7 @@ def _describe_page(page: Any) -> str:
     The snapshot lists only what a user could reach, so a hidden control is not
     named. A page showing no "Price graph" button, a consent form or another
     site all end in the same click timeout; this is what tells them apart."""
+    deadline = time.monotonic() + _SNAPSHOT_TIMEOUT_MS / 1000
     snapshot = str(page.aria_snapshot(timeout=_SNAPSHOT_TIMEOUT_MS))
     names = [
         _one_line(_unquote(bare or quoted.replace("''", "'")))
@@ -843,8 +845,12 @@ def _describe_page(page: Any) -> str:
         buttons = f"visible buttons: {shown}, and {len(names) - _SHOWN_BUTTONS} more"
     else:
         buttons = f"visible buttons: {shown}"
-    url, title = _one_line(str(page.url)), _one_line(page.title())
-    return f'The page showed URL {url}, title "{title}", {buttons}.'
+    # `page.title()` takes no timeout, so the title is read under what the
+    # snapshot left of the bound, and never under zero, which means none.
+    left_ms = (deadline - time.monotonic()) * 1000
+    title = page.locator("head > title").first.text_content(timeout=max(1.0, left_ms))
+    url = _one_line(str(page.url))
+    return f'The page showed URL {url}, title "{_one_line(title)}", {buttons}.'
 
 
 def _navigated_page(page: Any, nav: Any) -> PageFetch:
