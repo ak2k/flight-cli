@@ -124,6 +124,9 @@ def pytest_configure(config: pytest.Config) -> None:
 
 def _is_local(host: object) -> bool:
     """Whether `host` names this machine without a lookup."""
+    # The resolver and `connect` take an encoded host too, and anyio always sends one.
+    if isinstance(host, bytes | bytearray):
+        host = host.decode(errors="replace")
     if host == "localhost":
         return True
     try:
