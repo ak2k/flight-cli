@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import resource
 import stat
 from typing import TYPE_CHECKING
 
@@ -188,3 +189,23 @@ def test_unusable_store_message_drops_control_characters_from_the_store_path(
     assert result.exit_code == 1, result.output
     assert "left untouched" in result.output
     assert not [c for c in _TERMINAL_DRIVERS if c in result.output]
+
+
+@pytest.mark.parametrize("saved", [0, 1], ids=["first-add", "over-a-saved-store"])
+def test_a_write_that_fails_part_way_keeps_the_old_store_and_no_temp_file(
+    config_root: Path, saved: int
+) -> None:
+    for _ in range(saved):
+        assert _watch("add", "JFK", "LHR").exit_code == 0
+    store = _store(config_root)
+    before = store.read_bytes() if saved else None
+    soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+    # A full disk, short of filling one: any write past 16 bytes fails with EFBIG.
+    resource.setrlimit(resource.RLIMIT_FSIZE, (16, hard))
+    try:
+        failed = _watch("add", "SFO", "NRT")
+    finally:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
+    assert isinstance(failed.exception, OSError), failed.output
+    assert (store.read_bytes() if store.exists() else None) == before
+    assert sorted(p.name for p in store.parent.iterdir()) == ["watches.json"][:saved]
