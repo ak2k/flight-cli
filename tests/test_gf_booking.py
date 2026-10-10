@@ -650,8 +650,8 @@ def test_a_seller_at_the_table_price_does_not_beat_it(
 
 def _wide(monkeypatch: pytest.MonkeyPatch) -> None:
     """A console wide enough that no table cell folds, and still narrower
-    than any link."""
-    monkeypatch.setattr(cli, "console", Console(width=250, no_color=True))
+    than any link. Emoji off, as the real console is."""
+    monkeypatch.setattr(cli, "console", Console(width=250, no_color=True, emoji=False))
 
 
 def _cells(line: str, bar: str) -> list[str]:
@@ -713,8 +713,8 @@ def test_fast_sellers_print_each_sellers_bags_and_whole_link(
 def test_a_link_line_names_its_seller_as_the_table_row_does(
     monkeypatch: pytest.MonkeyPatch, board: list[Any]
 ) -> None:
-    """The console reads `:smile:` in a name as an emoji, and in a link it must
-    stay the text it was."""
+    """A `:smile:` in a seller name or a link stays the text it was, and the
+    link line carries the name as its table row does."""
     _wide(monkeypatch)
     body = _booking_body(
         _option(
@@ -729,6 +729,7 @@ def test_a_link_line_names_its_seller_as_the_table_row_does(
     assert result.exit_code == 0, result.output
     lines = result.stdout.split("Booking options for #1", 1)[1].splitlines()
     (row,) = [_cells(line, "│") for line in lines if line.startswith("│")]
+    assert row[1] == "Fly :smile: Co"
     assert f"1 {row[1]} {_CLK}/:smile:?u=T" in lines
 
 

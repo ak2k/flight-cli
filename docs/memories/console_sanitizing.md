@@ -9,6 +9,12 @@ that is not this module's own is markup until it is wrapped. An unbalanced
 well-formed `[bold]` silently eats the token the reader needed; and an ESC or an
 8-bit CSI repaints the terminal.
 
+Those consoles are built with `emoji=False`: Rich otherwise turns a `:smile:` in
+a seller name, a Matrix message or a typed token into an emoji, so the text shown
+would not be the text received. A new console in either module takes the same
+argument (`tests/test_console_emoji.py`). The wifi glyph in the legroom column is
+a literal character, not a code, so it is unaffected.
+
 ## Where the values come from
 
 The routing refusal quotes the user's `--routing` / `--extension` text verbatim:
