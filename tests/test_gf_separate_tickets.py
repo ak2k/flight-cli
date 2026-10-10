@@ -167,7 +167,7 @@ def test_row_seven_says_how_google_sells_each_row(
         ([2], "separate_tickets", False),
         ([2, 1], "self_transfer", True),
         ([], None, False),
-        ([5], None, False),
+        ([5], None, None),
         (None, None, None),
         (7, None, None),
     ],

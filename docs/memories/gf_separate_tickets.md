@@ -24,7 +24,8 @@ tab only. Measured live 2026-10-02 on FLL-LGA, round trip 2026-10-20/27, `gl=US`
   together" is `row[7] == [2]` (5 of 5), and an unlabeled row is `row[7] == []`
   (53 of 53). `row[0][12]`, which fli reads as `self_transfer`, is 0 on all 86,
   so it is not this flag. `_gflight_ids._ticketing` decodes `row[7]`; a slot
-  that is absent or not a list states nothing.
+  that is absent, not a list, or holds a code other than 1 or 2 (none seen) states
+  nothing.
 - The request is the same `tfs=` with `tfu=EggIABABIAIoASIA`
   (`{2: {1: 0, 2: 1, 4: 2, 5: 1}, 4: {}}`). Over rung 1 it returned the same 86
   rows with the same marks; tfs field 16 is not needed. One GET, about 2 s.
