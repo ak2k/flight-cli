@@ -7117,10 +7117,16 @@ class _GfRefusal(NamedTuple):
     has been through `_safe_text` as well, so it is equally console-ready: a
     caller drops it straight into markup of its own. Escaping it there a second
     time puts a visible backslash in front of every bracket the remote text
-    carried, on the default search path."""
+    carried, on the default search path.
+
+    `remedy` is the sentence of `message` that names the user's next move,
+    pre-rendered like `message`, for a caller that prints `note` and would
+    otherwise leave the user without one. Only the http rung's throttle sets
+    it; every other refusal leaves it empty."""
 
     note: str
     message: str
+    remedy: str = ""
 
 
 _GF_DECLINED = "Google Flights declined the request"
@@ -7139,6 +7145,7 @@ def _gf_refusal(  # noqa: PLR0911, PLR0912 — one return per refusal type; see 
     *,
     transport: GfTransportMode = TRANSPORT_HTTP,
     bags: bool = False,
+    offer_browser: bool = True,
 ) -> _GfRefusal:
     """User-facing text for a typed Google Flights refusal.
 
@@ -7171,7 +7178,9 @@ def _gf_refusal(  # noqa: PLR0911, PLR0912 — one return per refusal type; see 
     `transport` only changes the throttle wording. The browser rung runs no
     retry ladder, so "wait a moment and retry" would describe a recovery the
     caller does not have. `bags` changes the way out: Matrix prices no bags, so
-    under `--bags` it is reached only by dropping them."""
+    under `--bags` it is reached only by dropping them. `offer_browser=False`
+    leaves the browser rung out of the http throttle's way out, for a caller
+    that is on http because that rung could not open."""
     remedy, remedy_opening = (
         (
             "drop [bold]--bags[/] to search Matrix, which prices no bags",
@@ -7190,10 +7199,12 @@ def _gf_refusal(  # noqa: PLR0911, PLR0912 — one return per refusal type; see 
         case GfThrottledError():
             # Not "this IP": the budget is per client context, which is why the
             # browser rung keeps working from an IP that is throttling this one.
+            browser = "use [bold]--gf-transport browser[/], " if offer_browser else ""
+            retry = f"Wait a moment and retry, {browser}or {remedy}."
             return _GfRefusal(
                 "Google Flights rate-limited",
-                "[yellow]Google Flights rate-limited the request.[/] Wait a moment and "
-                f"retry, use [bold]--gf-transport browser[/], or {remedy}.",
+                f"[yellow]Google Flights rate-limited the request.[/] {retry}",
+                retry,
             )
         case GfConsentError():
             return _GfRefusal(
@@ -9420,8 +9431,16 @@ def _run_gflight_multi(
         except GfBackendError as e:
             # A typed refusal is why this cabin's column will be missing; the
             # bare handler below would print it as an unexplained failure.
+            # The options shape only the remedy; the note reads the same under
+            # every one of them. This fan-out runs under `browser` only when
+            # that rung could not open, so the remedy must not send the user
+            # back to it.
             refusal = _gf_refusal(e)
-            err.print(f"[yellow]Google Flights {cab.value}: {refusal.note}.[/]")
+            remedy = _gf_refusal(
+                e, bags=opts.bags is not None, offer_browser=gf_mode != TRANSPORT_BROWSER
+            ).remedy
+            tail = f" {remedy}" if remedy else ""
+            err.print(f"[yellow]Google Flights {cab.value}: {refusal.note}.{tail}[/]")
         except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
             # `typer.Exit` subclasses `RuntimeError` on the installed click, so
             # the arm below would swallow the stop and print the exit CODE as

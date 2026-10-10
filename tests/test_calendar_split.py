@@ -4622,6 +4622,7 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_report_enriched_gf_failure", "refusal.note"),
         ("_report_enriched_gf_failure", "refusal.message"),
         ("query_cabin", "refusal.note"),
+        ("query_cabin", "tail"),  # "" or a space and a refusal's remedy, console-ready as its note
         ("note_missing_column", "note"),
         # A refusal's note, or a sentence around the page number that stopped
         # the search; tests/test_gf_chunked_search.py prints a hostile one.
