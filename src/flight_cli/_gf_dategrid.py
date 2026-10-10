@@ -76,7 +76,7 @@ from .routing_predicates import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
 
     from .domain import CalendarSearch, Leg
     from .routing_predicates import Predicate
@@ -202,7 +202,9 @@ def _unmapped_codes(p: CarrierPred | AlliancePred | ConnectionAirportPred) -> li
     ]
 
 
-def _decliner_phrase(tier: str, *, routing: bool, extension_count: int) -> str:
+def _decliner_phrase(
+    tier: str, *, routing: bool, extension_count: int, directives: Sequence[str] = ()
+) -> str:
     """The phrase naming whichever of `--routing` / `--extension` declined, for a
     sentence that continues "this is …".
 
@@ -210,11 +212,24 @@ def _decliner_phrase(tier: str, *, routing: bool, extension_count: int) -> str:
     `;`-separated list, so its half is counted and carries an article only when a
     single directive declined. At least one side must have declined — the caller
     checks that — so a bare extension phrase is the remaining case, not a default.
+    `directives`, when given, are the declining ones as typed; each is quoted after
+    the extension noun, in `repr`, which escapes what the user typed.
     """
     if not extension_count:
         return f"{tier} routing"
-    codes = f"a {tier} extension code" if extension_count == 1 else f"{tier} extension codes"
+    quoted = f" ({', '.join(map(repr, directives))})" if directives else ""
+    codes = (
+        f"a {tier} extension code{quoted}"
+        if extension_count == 1
+        else f"{tier} extension codes{quoted}"
+    )
     return f"both {tier} routing and {codes}" if routing else codes
+
+
+def _tier2_directives(extension: str | None) -> list[str]:
+    """The Tier-2 directives of `extension` as typed, in order: each
+    `;`-separated piece is classified alone, as `parse_extension` reads it."""
+    return [d.strip() for d in (extension or "").split(";") if classify(None, d).tier2]
 
 
 def grid_routing_blocker(search: CalendarSearch) -> str | None:
@@ -238,7 +253,9 @@ def grid_routing_blocker(search: CalendarSearch) -> str | None:
     Matrix-only extension code, not Matrix-only routing. Both tiers name the
     source by the same rule, so the reader learns which flag to edit whichever
     tier stopped the query, and `--extension` takes a `;`-separated list, so the
-    phrase agrees in number with how many of its directives declined.
+    phrase agrees in number with how many of its directives declined. A Tier-2
+    phrase also quotes the directives that declined, as typed, so `+CABIN 2` is
+    named rather than left for the reader to find among the codes they passed.
 
     Every leg is read, outbound first. The return leg inherits `--routing` and
     `--extension` unless `--routing-ret` / `--ext-ret` replace them, so a return
@@ -280,7 +297,10 @@ def _leg_blocker(leg: Leg) -> str | None:
         return f"{head} ({'; '.join(reasons)})" if reasons else head
     if routing_c.tier2 or ext_c.tier2:
         return _decliner_phrase(
-            "Tier-2", routing=bool(routing_c.tier2), extension_count=len(ext_c.tier2)
+            "Tier-2",
+            routing=bool(routing_c.tier2),
+            extension_count=len(ext_c.tier2),
+            directives=_tier2_directives(leg.extension),
         )
     return unwritten_constraint((*routing_c.predicates, *ext_c.predicates))
 
