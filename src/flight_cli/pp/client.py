@@ -424,12 +424,14 @@ class PPClient:
 
 def _fresh_cache(path: Path, ttl_secs: float) -> str | None:
     """The cache file's text while it is younger than `ttl_secs`; None when it
-    is missing, stale or unreadable."""
+    is missing, stale, unreadable or not text."""
     try:
         if time.time() - path.stat().st_mtime >= ttl_secs:
             return None
         return path.read_text()
-    except OSError:
+    # A write cut inside a multi-byte character fails the decode, which is not
+    # an OSError.
+    except (OSError, UnicodeDecodeError):
         return None
 
 

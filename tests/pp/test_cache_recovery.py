@@ -142,6 +142,22 @@ def test_a_pricing_cache_that_is_not_a_catalog_is_refetched(
     assert cache.read_text() == _PRICING
 
 
+@pytest.mark.parametrize(
+    "stored",
+    [b"\xff\xfe{}", '{"pricingInfos": [{"airline": "Aerom\u00e9'.encode()[:-1]],
+    ids=["bad-start-byte", "cut-mid-character"],
+)
+@pytest.mark.parametrize("endpoint", ["ext", "pricing"])
+def test_a_cache_file_that_is_not_utf8_is_refetched(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, endpoint: _Endpoint, stored: bytes
+) -> None:
+    cache = _caches(tmp_path, monkeypatch)[endpoint]
+    cache.parent.mkdir()
+    cache.write_bytes(stored)
+    assert _ask(endpoint, _GOOD[endpoint]) == ("ok", 1)
+    assert cache.read_text() == _GOOD[endpoint]
+
+
 @pytest.mark.parametrize("endpoint", ["ext", "pricing"])
 def test_a_fresh_cache_is_served_and_a_stale_one_is_refetched(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, endpoint: _Endpoint
