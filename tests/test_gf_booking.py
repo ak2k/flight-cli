@@ -1155,7 +1155,9 @@ def _matrix_answers(solutions: list[dict[str, Any]]) -> Any:
     return _answer
 
 
-def _matrix_solution(flight: str, price: str, flies: date = _DEP) -> dict[str, Any]:
+def _matrix_solution(
+    flight: str, price: str, flies: date = _DEP, lands: str | None = None
+) -> dict[str, Any]:
     day = flies.isoformat()
     return {
         "displayTotal": price,
@@ -1164,7 +1166,7 @@ def _matrix_solution(flight: str, price: str, flies: date = _DEP) -> dict[str, A
                 {
                     "flights": [flight],
                     "departure": f"{day}T08:00",
-                    "arrival": f"{day}T11:00",
+                    "arrival": lands or f"{day}T11:00",
                     "origin": {"code": "JFK"},
                     "destination": {"code": "LAX"},
                 }
@@ -1195,12 +1197,13 @@ def _merged_with(
     monkeypatch: pytest.MonkeyPatch, board: list[Any], flight: str, price: str
 ) -> None:
     """Google answers with B6 1523 alone at USD179.00, and Matrix with `flight`
-    at `price` on the day B6 1523 flies: B6 1523 is one merged row showing both
-    prices, and any other flight a row of its own."""
+    at `price` on the day B6 1523 flies, landing when it lands: B6 1523 is one
+    merged row showing both prices, and any other flight a row of its own."""
     _priced_in(monkeypatch, board[:1], "USD")
     flies = board[0].flight.legs[0].departure_datetime.date()
+    lands = board[0].flight.legs[-1].arrival_datetime.isoformat()
     monkeypatch.setattr(
-        cli, "_matrix_into", _matrix_answers([_matrix_solution(flight, price, flies)])
+        cli, "_matrix_into", _matrix_answers([_matrix_solution(flight, price, flies, lands)])
     )
 
 
@@ -1259,7 +1262,8 @@ def test_a_party_sets_the_sellers_against_the_partys_price_on_both_sides(
     against the party's prices, so Kiwi.com's USD170 for the party beats it."""
     _priced_in(monkeypatch, board[:1], "USD")
     flies = board[0].flight.legs[0].departure_datetime.date()
-    priced = {**_matrix_solution("B61523", "USD180.00", flies), "ext": {"price": "USD90.00"}}
+    lands = board[0].flight.legs[-1].arrival_datetime.isoformat()
+    priced = {**_matrix_solution("B61523", "USD180.00", flies, lands), "ext": {"price": "USD90.00"}}
     monkeypatch.setattr(cli, "_matrix_into", _matrix_answers([priced]))
     _serve(monkeypatch, _booking_body(_option("Kiwi.com", 170, flights=_B6_1523)))
     result = _run("--adults", "2", "--sellers", "--no-matrix-url", "--no-google-url")

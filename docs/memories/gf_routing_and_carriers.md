@@ -177,10 +177,10 @@ Depth costs no measurable time, and on a one-way it mostly proves completeness.
 
 **A delta compares one trip in one currency.** `MergedRow.google` is the
 Google row whose price the row shows, and `same_trip` holds only where
-`_date_lender` gave it. The key's first Matrix row priced by a Google row left
-over shares the flights and the first day, not the trip (the FI614/FI450 rows
-above land on different days), so it shows no delta and the reason
-`trip_unconfirmed` names both landings; a pair in two currencies is
+`_date_lender` gave it. A Matrix row priced by a Google row left over lands
+within five minutes of it but is not known to be its trip (the FI614/FI450 rows
+above land on different days and are never paired), so it shows no delta and
+the reason `trip_unconfirmed` names both landings; a pair in two currencies is
 `other_currency`. Google prices the whole party, on its search page and its
 booking page alike, while the price Matrix lists is one passenger's, rounded
 up (2 adults, 2026-10-01: `ext.price` USD229.00, `displayTotal` USD456.80,
