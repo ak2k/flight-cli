@@ -4685,7 +4685,7 @@ def _render_search(
     "itinerary #15 pinned" for a row the user never saw — with no out-of-range
     warning, because 15 was in range for the unrendered list.
     """
-    if res.solution_count == 0 and cap is not None:
+    if cap is not None and not res.solutions:
         console.print(f"[yellow]No solutions at or under {_safe_text(cap)}.[/]")
         return
     if res.solution_count == 0:

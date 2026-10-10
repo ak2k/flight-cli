@@ -159,7 +159,8 @@ def test_a_party_without_a_total_is_cut_by_a_cap(monkeypatch: pytest.MonkeyPatch
     _matrix_answers(monkeypatch, total=None)
     result = _search("--backend", "matrix", "--adults", "2", "--max-price", "500")
     assert result.exit_code == 0, result.output
-    assert _table(result.stdout, "Itineraries")[1] == []
+    assert "No solutions at or under USD 500." in result.stdout
+    assert "Itineraries" not in result.stdout
 
 
 def test_detail_prints_a_partys_total(monkeypatch: pytest.MonkeyPatch) -> None:
