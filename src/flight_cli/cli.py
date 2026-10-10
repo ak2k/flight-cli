@@ -6688,7 +6688,8 @@ def _gflight_json_row(g: Any, bags: Bags | None = None) -> dict[str, Any]:
     flights board.
 
     A leg's `departure_airport`/`arrival_airport` are IATA codes and its
-    `*_airport_name` fields hold fli's names for those airports."""
+    `*_airport_name` fields hold fli's names for those airports; its
+    `airline_code` is the carrier's IATA code, beside `airline`, its name."""
     row: dict[str, Any] = {**g.flight.model_dump(mode="json"), "flight_id": g.flight_id}
     if getattr(g, "ticketing", None) is not None:
         row["separate_tickets"] = True
@@ -6696,8 +6697,10 @@ def _gflight_json_row(g: Any, bags: Bags | None = None) -> dict[str, Any]:
         row["separate_tickets"] = None if g.flight.self_transfer is None else False
     row["top_flight"] = getattr(g, "top_flight", False)
     legs: list[Any] = row.get("legs") or []
-    # fli dumps an `Airport` member by its value, the name; its member name is the code.
+    # fli dumps an `Airport` and an `Airline` member by its value, the name; its member
+    # name is the code, with a leading `_` on a digit-leading airline code.
     for leg, src in zip(legs, g.flight.legs, strict=False):
+        leg["airline_code"] = src.airline.name.removeprefix("_")
         leg["departure_airport"] = src.departure_airport.name
         leg["arrival_airport"] = src.arrival_airport.name
         leg["departure_airport_name"] = src.departure_airport.value
