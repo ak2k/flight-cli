@@ -160,14 +160,16 @@ def test_the_merge_leaves_both_results_as_they_were() -> None:
 
 def test_a_google_row_landing_on_another_day_lends_no_dates() -> None:
     """Same flights leaving the same day share the match key, but a Google row
-    whose NZ10 leaves a day later does not date Matrix's NZ10."""
+    whose NZ10 leaves a day later does not date Matrix's NZ10, and landing a day
+    later it does not price it either."""
     late = _nz(arrival=f"{_D1}T10:00", segment_dates=[_D, "2026-10-22"])
-    (row,) = merge_results(
+    row, other = merge_results(
         _sr(_nz_row("USD900.00", late)), _sr(_nz_row("USD880.00", _nz())), currency="USD"
     )
-    assert row.source == "both"
+    assert (row.source, row.gf_price) == ("matrix", None)
     assert row.itinerary.itinerary is not None
     assert row.itinerary.itinerary.slices[0].segment_dates == []
+    assert (other.source, other.gf_price) == ("gf", "USD900.00")
 
 
 def _ua(arrival: str, segment_dates: list[str] | None = None) -> Slice:
@@ -198,8 +200,18 @@ def _dates_lent(google_arrival: str, matrix_arrival: str) -> list[str]:
 
 def test_a_google_row_landing_at_another_time_that_day_lends_no_dates() -> None:
     """Google's UA200 is the red-eye leaving on the 1st; Matrix's lands at
-    13:30, so it is the next morning's, and the 1st would pin the red-eye."""
-    assert _dates_lent("2026-11-02T02:45:00", "2026-11-02T13:30-05:00") == []
+    13:30, so it is the next morning's, and the 1st would pin the red-eye. Eleven
+    hours apart, Google's row does not price it either."""
+    google = _ua("2026-11-02T02:45:00", segment_dates=["2026-11-01", "2026-11-01"])
+    row, other = merge_results(
+        _sr(_nz_row("USD500.00", google)),
+        _sr(_nz_row("USD480.00", _ua("2026-11-02T13:30-05:00"))),
+        currency="USD",
+    )
+    assert (row.source, row.gf_price) == ("matrix", None)
+    assert row.itinerary.itinerary is not None
+    assert row.itinerary.itinerary.slices[0].segment_dates == []
+    assert (other.source, other.gf_price) == ("gf", "USD500.00")
 
 
 def test_a_google_row_landing_at_the_same_minute_lends_its_dates() -> None:
@@ -348,15 +360,16 @@ def test_every_matrix_row_of_a_key_is_kept_and_takes_only_its_own_trip() -> None
     ]
 
 
-def test_two_matrix_rows_of_a_key_no_google_row_dates_share_one_google_price() -> None:
-    """Neither lands when Google's row does: the key's first Matrix row is
-    priced by it, undated, and the second has no Google price."""
+def test_two_matrix_rows_of_a_key_no_google_row_dates_take_no_google_price_on_other_days() -> None:
+    """Neither lands when Google's row does, and each lands days from it: both
+    stay Matrix's alone and Google's row is a row of its own."""
     google = _sr(_fi("USD900.00", "2026-10-23T11:55:00", ["2026-10-20", "2026-10-23"]))
     matrix = _sr(
         _fi("USD884.00", "2026-10-21T11:55+00:00"), _fi("USD1180.00", "2026-10-22T11:55+00:00")
     )
     assert _view(merge_results(google, matrix, currency="USD")) == [
-        ("both", "USD900.00", "USD884.00", False),
+        ("matrix", None, "USD884.00", False),
+        ("gf", "USD900.00", None, True),
         ("matrix", None, "USD1180.00", False),
     ]
 
@@ -600,11 +613,11 @@ def test_a_pair_landing_at_the_same_minute_is_the_same_trip_and_holds_googles_ro
 
 
 def test_a_matrix_row_priced_by_a_google_row_left_over_is_not_the_same_trip() -> None:
-    """The key's first Matrix row lands the 21st and takes the only Google row,
-    which lands the 23rd: one key, two trips."""
+    """The key's first Matrix row lands two minutes after the only Google row
+    and takes it, undated; the second lands days later and has none."""
     google = _sr(_fi("USD900.00", "2026-10-23T11:55:00", ["2026-10-20", "2026-10-23"]))
     matrix = _sr(
-        _fi("USD884.00", "2026-10-21T11:55+00:00"), _fi("USD1180.00", "2026-10-22T11:55+00:00")
+        _fi("USD884.00", "2026-10-23T11:57+00:00"), _fi("USD1180.00", "2026-10-22T11:55+00:00")
     )
     first, second = merge_results(google, matrix, currency="USD")
     assert (first.source, first.same_trip) == ("both", False)

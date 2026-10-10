@@ -49,9 +49,9 @@ if TYPE_CHECKING:
 _LINE = "Matrix asked for row "
 
 
-def _b6(price: str, flight: str = "B6999") -> dict[str, Any]:
-    """Matrix's default answer: one nonstop B6 trip at `price`."""
-    return _solution("B6-1", price, f"{_DEP}T07:00-04:00", f"{_DEP}T10:08-07:00", [flight], [])
+def _b6(price: str, flight: str = "B6999", lands: str = "10:08") -> dict[str, Any]:
+    """Matrix's default answer: one nonstop B6 trip at `price`, landing at `lands`."""
+    return _solution("B6-1", price, f"{_DEP}T07:00-04:00", f"{_DEP}T{lands}-07:00", [flight], [])
 
 
 def _low() -> Any:
@@ -195,12 +195,12 @@ def test_matrix_prices_googles_low_row_as_its_exact_flights(
 def test_a_row_both_sides_price_is_never_the_checked_row(
     gf_session: Callable[..., Any], matrix: _Matrix
 ) -> None:
-    """Red at the base: no line. Matrix's B6523 shares Google's flights and
-    day, so row 1 is on both sides, Google's price under Matrix's; the check
+    """Red at the base: no line. Matrix's B6523 shares Google's flights, day and
+    landing, so row 1 is on both sides, Google's price under Matrix's; the check
     asks for row 2, the first row on Google alone."""
     low = _low()
     price = _price(low)
-    matrix.probe = _chain(_b6("USD999.00", "B6523"))
+    matrix.probe = _chain(_b6("USD999.00", "B6523", lands="10:19"))
     matrix.chain = _chain(_row_solution("DL-1", price, low))
     matrix.details = {"DL-1": _details_of(low)}
     gf_session(_served())

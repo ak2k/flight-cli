@@ -64,12 +64,15 @@ the flights and the first day, not the trip. Icelandair's FI614 then FI450 out
 of JFK connects in Keflavik the next morning or the one after: the JFK-LHR
 capture lists both (USD617 and USD690), and Matrix priced FI614/FI450 twice on
 2026-10-20 (USD884 and USD1180). Each Matrix row of a key first takes the Google
-row that is its own trip (`_date_lender`); only then does the key's first
-Matrix row, if it found none, take the first Google row left, undated. In the
-other order a USD884 Matrix fare would show the USD1180 trip's Google price.
+row that is its own trip (`_date_lender`); only then does each Matrix row that
+found none, in Matrix order, take the first Google row left that lands within
+five minutes of it (`_lands_near`), undated; a Google row landing on another
+day is never taken. In the other order a USD884 Matrix fare would show the
+USD1180 trip's Google price.
 Every row left on either side is a row of its own, extra Google rows in board
-order and extra Matrix rows after their key's first, so where no key is shared
-the list is the one-row-per-key merge exactly
+order and extra Matrix rows in Matrix order, so where no key is shared and no
+key's Matrix and Google rows state landings more than five minutes apart, the
+list is the one-row-per-key merge exactly
 (`test_enrich.test_a_board_with_no_shared_key_merges_as_it_always_did`).
 
 **And it keeps one order: price, ascending.** `cli._price_ordered` sorts every
