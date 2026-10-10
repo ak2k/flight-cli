@@ -48,8 +48,9 @@ if TYPE_CHECKING:
     from ..providers.base import AwardFlight, LegQuery, ProviderFailure
 
 
-console = Console()
-err = Console(stderr=True)
+# Emoji off, so a `:name:` in remote text prints as received.
+console = Console(emoji=False)
+err = Console(stderr=True, emoji=False)
 
 
 # ─────────────────────────── auth pp subcommands ────────────────────────────
