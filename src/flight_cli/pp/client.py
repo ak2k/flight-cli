@@ -366,10 +366,15 @@ class PPClient:
         return out
 
     async def pricing_info(self, *, force_refresh: bool = False) -> PricingInfoResponse:
-        if not force_refresh and PRICING_CACHE.exists():
-            age = time.time() - PRICING_CACHE.stat().st_mtime
-            if age < PRICING_TTL_SECS:
-                return PricingInfoResponse.model_validate(json.loads(PRICING_CACHE.read_text()))
+        cached = None if force_refresh else _cached_json(PRICING_CACHE, PRICING_TTL_SECS)
+        if cached is not None:
+            try:
+                info = PricingInfoResponse.model_validate(cached)
+            except ValueError:  # a file that is not a catalog is a miss
+                pass
+            else:
+                if info.pricingInfos:
+                    return info
         r = await self._request("GET", "/api/pricing-info")
         _raise_for_status(r, "/api/pricing-info")
         info = PricingInfoResponse.model_validate(r.json())
@@ -388,19 +393,40 @@ class PPClient:
         currently, but the full body is cached so future code paths can read
         other parts (e.g. valuation overrides) without re-fetching.
         """
-        if not force_refresh and EXT_CONFIG_CACHE.exists():
-            age = time.time() - EXT_CONFIG_CACHE.stat().st_mtime
-            if age < EXT_CONFIG_TTL_SECS:
-                return json.loads(EXT_CONFIG_CACHE.read_text())
+        cached = None if force_refresh else _cached_json(EXT_CONFIG_CACHE, EXT_CONFIG_TTL_SECS)
+        if isinstance(cached, dict):
+            return cast("_JsonDict", cached)
         r = await self._request(
             "GET",
             "/api/extension-config",
             params={"v": EXT_CONFIG_VERSION},
         )
         _raise_for_status(r, "/api/extension-config")
+        # Parsed before the write: the file is read for 7 days, so a body that
+        # is not a JSON object must not reach it.
+        config = r.json()
+        if not isinstance(config, dict):
+            raise PPApiError(
+                "/api/extension-config did not answer a JSON object",
+                endpoint="/api/extension-config",
+                status=r.status_code,
+            )
         EXT_CONFIG_CACHE.parent.mkdir(parents=True, exist_ok=True)
         EXT_CONFIG_CACHE.write_text(r.text)
-        return r.json()
+        return cast("_JsonDict", config)
+
+
+def _cached_json(path: Path, ttl_secs: float) -> Any:
+    """The cache file's JSON value while the file is younger than `ttl_secs`;
+    None when it is missing or stale, or cannot be read or decoded."""
+    try:
+        if time.time() - path.stat().st_mtime >= ttl_secs:
+            return None
+        return json.loads(path.read_text())
+    # The file holds whatever reached the disk: a torn write, bytes that are
+    # not UTF-8, nesting deeper than the decoder's stack.
+    except Exception:  # noqa: BLE001 — a cache read must never fail a request
+        return None
 
 
 # Match `enable<AirlineName>` exactly, or `enable<AirlineName>V<digits>` (the
