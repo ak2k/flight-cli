@@ -17,7 +17,7 @@ structure; the Google slice adds the per-flight dates Matrix does not state.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from ._multi_cabin import parse_price, price_currency, price_rank
@@ -40,8 +40,8 @@ class MergedRow:
 
     `google` is the Google row whose price is `gf_price`, the board's own
     object. `same_trip` holds only where that row is the Matrix row's own trip
-    (`_date_lender`); a key's first Matrix row priced by a Google row left over
-    shares its flights and first day, not necessarily its trip."""
+    (`_date_lender`); a Matrix row priced by a Google row left over lands within
+    `_LANDING_SKEW` of it but is not known to be its trip."""
 
     itinerary: Itinerary
     gf_price: str | None
@@ -123,6 +123,24 @@ def _same_trip(ms: Slice, gs: Slice) -> bool:
     )
 
 
+# How far apart two sources may state one trip's landing: a few minutes.
+_LANDING_SKEW = timedelta(minutes=5)
+
+
+def _lands_near(m: Itinerary, g: Itinerary) -> bool:
+    """Whether Google row `g` may be Matrix row `m`'s trip, the two sharing a
+    match key: on no slice do both state a landing and state it more than
+    `_LANDING_SKEW` apart. A landing a source leaves unstated rules nothing out."""
+    mi, gi = m.itinerary, g.itinerary
+    if mi is None or gi is None or len(mi.slices) != len(gi.slices):
+        return False
+    for ms, gs in zip(mi.slices, gi.slices, strict=True):
+        ma, ga = _wall_clock(ms.arrival), _wall_clock(gs.arrival)
+        if ma is not None and ga is not None and abs(ma - ga) > _LANDING_SKEW:
+            return False
+    return True
+
+
 def _date_lender(m: Itinerary, candidates: list[Itinerary]) -> Itinerary | None:
     """The Google row among `candidates`, the rows sharing `m`'s match key,
     that is `m`'s own trip on every slice. None when none is, or when several
@@ -159,6 +177,28 @@ def _with_google_dates(m: Itinerary, g: Itinerary) -> Itinerary:
     return m.model_copy(update={"itinerary": mi.model_copy(update={"slices": slices})})
 
 
+def _priced_by_near(
+    ms: list[Itinerary],
+    lenders: list[int | None],
+    candidates: list[int],
+    solutions: list[Itinerary],
+) -> list[int | None]:
+    """For each Matrix row of a key, the index of the Google row that prices
+    it: its `lenders` entry, else, in Matrix order, the first of `candidates`
+    not yet claimed that lands near it (`_lands_near`), else None."""
+    priced = list(lenders)
+    claimed = {i for i in lenders if i is not None}
+    for n, m in enumerate(ms):
+        if priced[n] is None:
+            near = next(
+                (i for i in candidates if i not in claimed and _lands_near(m, solutions[i])), None
+            )
+            if near is not None:
+                priced[n] = near
+                claimed.add(near)
+    return priced
+
+
 def merge_results(
     gf: SearchResult, matrix: SearchResult, *, currency: str, passengers: int = 1
 ) -> list[MergedRow]:
@@ -168,9 +208,11 @@ def merge_results(
     Every row of either side is in exactly one merged row. The match key fixes
     only the flights and the first day, so one key can name several trips on
     either side. Each Matrix row of a key first takes the Google row that is
-    its own trip (`_date_lender`); only then does the key's first Matrix row,
-    if it found none, take the first Google row left, undated. Handing that
-    one out first would price a Matrix trip with another trip's Google fare.
+    its own trip (`_date_lender`); only then does each Matrix row that found
+    none, in Matrix order, take the first Google row left that lands within
+    `_LANDING_SKEW` of it (`_lands_near`), undated. Handing those out first
+    would price a Matrix trip with another trip's Google fare, and a Google row
+    landing on another day is never one.
     Every Google row left over is a row of its own, and so is every row Google
     sells as separate tickets: it is another booking than Matrix's one ticket
     on the same flights, so the two prices are not one trip's.
@@ -211,10 +253,8 @@ def merge_results(
             if at is not None:
                 taken.add(at)
             lenders.append(at)
-        priced = list(lenders)
-        if priced[0] is None and (left := [i for i in candidates if i not in taken]):
-            priced[0] = left[0]
-            taken.add(left[0])
+        priced = _priced_by_near(ms, lenders, candidates, gf.solutions)
+        taken.update(i for i in priced if i is not None)
         for m, lender, at in zip(ms, lenders, priced, strict=True):
             g = gf.solutions[at] if at is not None else None
             rows.append(
