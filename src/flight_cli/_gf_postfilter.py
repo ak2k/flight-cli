@@ -77,7 +77,7 @@ _SUPPORTED: tuple[type, ...] = (
     SpecificFlightPred,
 )
 
-_FLIGHT_RE = re.compile(r"^([A-Z0-9]{2})(\d+)$", re.IGNORECASE)
+_FLIGHT_RE = re.compile(r"^([A-Z0-9]{2})([0-9]{1,9})$", re.IGNORECASE)
 _MAX_FLIGHT_NUMBER = 9999
 
 

@@ -31,6 +31,7 @@
         },
         "overnight": false,
         "co2_emissions_g": 261023,
+        "airline_code": "DL",
         "legroom_class": "AVERAGE"
       }
     ],
@@ -84,6 +85,7 @@
         },
         "overnight": false,
         "co2_emissions_g": 413890,
+        "airline_code": "B6",
         "legroom_class": "ABOVE"
       }
     ],
@@ -137,6 +139,7 @@
         },
         "overnight": false,
         "co2_emissions_g": 226509,
+        "airline_code": "DL",
         "legroom_class": "AVERAGE"
       }
     ],
@@ -190,6 +193,7 @@
         },
         "overnight": false,
         "co2_emissions_g": 373558,
+        "airline_code": "B6",
         "legroom_class": "ABOVE"
       }
     ],
@@ -243,6 +247,7 @@
         },
         "overnight": false,
         "co2_emissions_g": 240082,
+        "airline_code": "DL",
         "legroom_class": "AVERAGE"
       }
     ],
@@ -296,6 +301,7 @@
         },
         "overnight": false,
         "co2_emissions_g": 413890,
+        "airline_code": "B6",
         "legroom_class": "ABOVE"
       }
     ],
@@ -349,6 +355,7 @@
         },
         "overnight": false,
         "co2_emissions_g": 249642,
+        "airline_code": "DL",
         "legroom_class": "AVERAGE"
       }
     ],
@@ -402,6 +409,7 @@
         },
         "overnight": false,
         "co2_emissions_g": 413890,
+        "airline_code": "B6",
         "legroom_class": "ABOVE"
       }
     ],
@@ -455,6 +463,7 @@
         },
         "overnight": false,
         "co2_emissions_g": 240082,
+        "airline_code": "DL",
         "legroom_class": "AVERAGE"
       }
     ],
@@ -508,6 +517,7 @@
         },
         "overnight": false,
         "co2_emissions_g": 411426,
+        "airline_code": "B6",
         "legroom_class": "ABOVE"
       }
     ],

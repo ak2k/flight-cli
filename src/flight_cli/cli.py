@@ -653,9 +653,10 @@ def _refuse_date_option_conflicts(
     return_times: str | None,
 ) -> None:
     """Refuse a date option that cannot be read one way, before the backend is
-    announced: one beside `--slice`, which takes its own; two dates for one
-    direction; a return option with no return; and a departure window on an
-    arrival-date slice, since Matrix holds that slice's window to the arrival."""
+    announced: one beside `--slice`, which takes its own; a time window beside
+    `--slice`, which takes none; two dates for one direction; a return option
+    with no return; and a departure window on an arrival-date slice, since
+    Matrix holds that slice's window to the arrival."""
     given = [
         flag
         for flag, value in (
@@ -670,6 +671,17 @@ def _refuse_date_option_conflicts(
         err.print(
             f"[red]{_safe_text(given[0])} dates a search given by origin and destination.[/] "
             "A --slice takes its own in its f= and d=arrive fields."
+        )
+        raise typer.Exit(2)
+    timed = [
+        flag
+        for flag, value in (("--depart-times", depart_times), ("--return-times", return_times))
+        if value
+    ]
+    if slice_specs and timed:
+        err.print(
+            f"[red]{_safe_text(' and '.join(timed))} would reach no --slice:[/] a slice takes "
+            "no time window. Drop the time flags, or give the trip as origin and destination."
         )
         raise typer.Exit(2)
     if dep and arrive:
@@ -4055,24 +4067,17 @@ def _open_jaw_blocker(
     legs: tuple[Leg, ...],
     opts: SearchOptions,
     no_separate_tickets: bool,
-    top_codes: Sequence[tuple[str, str | None]],
     cabins: int = 1,
 ) -> str | None:
     """Why a multi-city trip's one-ways (`_one_way_per_slice`) are not asked of
     Google Flights, as a plain-text phrase, or None when they are: an opt-out,
-    several `cabins` (a combination's tickets are priced in one), a top-level
-    time window, which applies to no slice, or a slice the search page can't serve as
-    a one-way (`_google_reasons`, asked of the slice alone)."""
+    several `cabins` (a combination's tickets are priced in one), or a slice the
+    search page can't serve as a one-way (`_google_reasons`, asked of the slice
+    alone)."""
     if no_separate_tickets:
         return "--no-separate-tickets was given"
     if cabins > 1:
         return f"each is priced in one cabin, and --cabin asks for {cabins:d}"
-    flags = [flag for flag, value in top_codes if value]
-    if flags:
-        verb, them = ("reaches", "it") if len(flags) == 1 else ("reach", "them")
-        return (
-            f"{_join_reasons(flags)} {verb} no --slice, so the one-ways could not be held to {them}"
-        )
     p = opts.pax
     for i, leg in enumerate(legs, 1):
         reasons = _google_reasons(
@@ -5240,6 +5245,29 @@ def _price_capped(res: SearchResult, opts: SearchOptions, *, passengers: int = 1
     )
 
 
+def _cap_hid_unread_fares(served: SearchResult, capped: SearchResult) -> bool:
+    """Whether the cap left none of the fares Matrix sent while its count stays
+    nonzero, which `_price_capped` keeps only where it dropped a fare it could
+    not read. A count over no fare sent drops nothing."""
+    return bool(served.solutions) and not capped.solutions and capped.solution_count != 0
+
+
+def _say_unread_fares_not_shown(subject: str, opts: SearchOptions, cap: str) -> None:
+    """Say on stderr that a capped Matrix answer holds no fare the cap could
+    read at or under it, while Matrix's own count stays nonzero: the fares the
+    cap dropped state no total in the cap's currency, so none was read as over
+    it. `subject` names the answer. The envelope's `results` note gives the
+    same reason in place of "no itinerary in any cabin asked"."""
+    currency = opts.currency or "USD"
+    err.print(
+        f"[yellow]{_safe_text(subject)}: no fare that states a {_safe_text(currency)} "
+        f"total is at or under {_safe_text(cap)}; those that state none are not shown.[/]"
+    )
+    _envelope.explain(
+        "results", "no fare that states a " + currency + " total is at or under " + cap
+    )
+
+
 def _run_matrix_path(  # noqa: PLR0912 — one arm per way Matrix's answer is written
     *,
     legs: tuple[Leg, ...],
@@ -5282,7 +5310,9 @@ def _run_matrix_path(  # noqa: PLR0912 — one arm per way Matrix's answer is wr
     )
     # Before anything reads it, so the pick, the fare rules, the awards and the
     # links all draw from the fares under the cap.
-    res = _price_capped(res, opts, passengers=opts.pax.total)
+    served, res = res, _price_capped(res, opts, passengers=opts.pax.total)
+    if (cap := _cap_text(opts)) is not None and _cap_hid_unread_fares(served, res):
+        _say_unread_fares_not_shown("Matrix", opts, cap)
     shown = res.solutions[: opts.page_size]
     # `--awards-only` prints no numbered table, so a pick names no row, and the
     # links below are unpinned; `--fare-rules` is refused beside it.
@@ -6688,7 +6718,8 @@ def _gflight_json_row(g: Any, bags: Bags | None = None) -> dict[str, Any]:
     flights board.
 
     A leg's `departure_airport`/`arrival_airport` are IATA codes and its
-    `*_airport_name` fields hold fli's names for those airports."""
+    `*_airport_name` fields hold fli's names for those airports; its
+    `airline_code` is the carrier's IATA code, beside `airline`, its name."""
     row: dict[str, Any] = {**g.flight.model_dump(mode="json"), "flight_id": g.flight_id}
     if getattr(g, "ticketing", None) is not None:
         row["separate_tickets"] = True
@@ -6696,8 +6727,10 @@ def _gflight_json_row(g: Any, bags: Bags | None = None) -> dict[str, Any]:
         row["separate_tickets"] = None if g.flight.self_transfer is None else False
     row["top_flight"] = getattr(g, "top_flight", False)
     legs: list[Any] = row.get("legs") or []
-    # fli dumps an `Airport` member by its value, the name; its member name is the code.
+    # fli dumps an `Airport` and an `Airline` member by its value, the name; its member
+    # name is the code, with a leading `_` on a digit-leading airline code.
     for leg, src in zip(legs, g.flight.legs, strict=False):
+        leg["airline_code"] = src.airline.name.removeprefix("_")
         leg["departure_airport"] = src.departure_airport.name
         leg["arrival_airport"] = src.arrival_airport.name
         leg["departure_airport_name"] = src.departure_airport.value
@@ -9780,10 +9813,9 @@ def _cabins_capped(
     """Each cabin's Matrix answer cut to the fares under the search's cap
     (`_price_capped`), each cabin it leaves with no fare named on stderr.
 
-    A cabin keeps Matrix's own count where the cap dropped a fare it could not
-    read, one stating no total in the cap's currency, so only a count of zero
-    says no fare is under the cap; otherwise the line says those fares are not
-    shown."""
+    Where the cap dropped a fare it could not read, one stating no total in the
+    cap's currency, the line says those fares are not shown
+    (`_cap_hid_unread_fares`); otherwise it says no fare is under the cap."""
     capped = {
         cab: _price_capped(res, opts, passengers=opts.pax.total)
         for cab, res in results_by_cabin.items()
@@ -9792,16 +9824,12 @@ def _cabins_capped(
         for cab, res in capped.items():
             if res.solutions:
                 continue
-            if res.solution_count == 0:
+            if _cap_hid_unread_fares(results_by_cabin[cab], res):
+                _say_unread_fares_not_shown(f"Matrix {cab.value}", opts, cap)
+            else:
                 err.print(
                     f"[yellow]Matrix {_safe_text(cab.value)}: no fare at or under "
                     f"{_safe_text(cap)}.[/]"
-                )
-            else:
-                err.print(
-                    f"[yellow]Matrix {_safe_text(cab.value)}: no fare that states a "
-                    f"{_safe_text(opts.currency or 'USD')} total is at or under "
-                    f"{_safe_text(cap)}; those that state none are not shown.[/]"
                 )
     return capped
 
@@ -11755,11 +11783,6 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
     # and reassigning it would throw away the narrowing this call just did.
     gf_mode = _resolve_gf_transport(gf_transport)
 
-    # A time window applies to no slice, on Matrix as on Google.
-    top_codes = (
-        ("--depart-times", depart_times),
-        ("--return-times", return_times),
-    )
     beside_matrix = bool(slice_specs) and backend == BACKEND_AUTO and not sel.awards_only
 
     # `_pick_backend` puts a --slice search on Google only as one one-way per slice.
@@ -11769,7 +11792,6 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                 legs=legs,
                 opts=opts,
                 no_separate_tickets=no_separate_tickets,
-                top_codes=top_codes,
                 cabins=len(cabins_tuple),
             ),
             awards_only=sel.awards_only,
@@ -11826,7 +11848,6 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                     legs=legs,
                     opts=opts,
                     no_separate_tickets=no_separate_tickets,
-                    top_codes=top_codes,
                     cabins=len(cabins_tuple),
                 ),
                 output=output,
@@ -12000,7 +12021,6 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                 legs=legs,
                 opts=opts,
                 no_separate_tickets=no_separate_tickets,
-                top_codes=top_codes,
             ),
             output=output,
             split=split,

@@ -18,6 +18,7 @@ fli is heavy, so `cli` imports this module only when a browser grid runs.
 from __future__ import annotations
 
 import contextlib
+import math
 import urllib.parse
 from datetime import date, timedelta
 from http import HTTPStatus
@@ -387,9 +388,13 @@ def _price(cell: list[Any]) -> float | None:
         price = cell[2][0][1]
     except (IndexError, TypeError):
         return None
-    if isinstance(price, bool) or not isinstance(price, int | float) or price <= 0:
+    if isinstance(price, bool) or not isinstance(price, int | float):
         return None
-    return float(price)
+    try:
+        fare = float(price)
+    except OverflowError:
+        return None
+    return fare if math.isfinite(fare) and fare > 0 else None
 
 
 def parse_graph(body: str, *, trip_length: int | None) -> _GraphPage:

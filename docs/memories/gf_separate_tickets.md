@@ -166,13 +166,16 @@ Matrix's own body and asks Google only with `--split`, saying so on stderr. The
 `Using Matrix:` line above the table names "a multi-city itinerary on one
 ticket": Google sells the trip only as the tickets below it.
 
+`--depart-times`/`--return-times` beside a `--slice` are refused with exit 2
+before any request (`cli._refuse_date_option_conflicts`): a slice takes no time
+window, on Matrix or on Google.
+
 Google is not asked when a slice's own codes, flex or arrival date are ones
 the page can't serve as a one-way (`_google_reasons` on the slice alone; a
 top-level `--routing`/`--extension` is the default code of every slice with no
 `r=`/`e=` of its own, `cli._slice_legs`, so it is judged with each slice and
-each one-way is asked with it), when a top-level `--depart-times` or
-`--return-times` is set (neither reaches a `--slice`, on Matrix either), when `--cabin` names several
-cabins (each ticket is priced in one), or under `--no-separate-tickets`
+each one-way is asked with it), when `--cabin` names several cabins (each
+ticket is priced in one), or under `--no-separate-tickets`
 (`cli._open_jaw_blocker`). The envelope records that reason as `{error}`, which
 narrows `complete` only under `--split`. A slice board Google served no row at
 all for a party with an infant is `_NoInfantRows`: Google has done that on
