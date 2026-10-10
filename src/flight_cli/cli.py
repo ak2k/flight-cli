@@ -5116,10 +5116,10 @@ def _build_pp_legs(legs: tuple[Leg, ...]) -> list[LegQuery]:
     member airports, in typed order. The providers take one airport per end.
 
     A leg's queries share its slice_index, date and label, which names the
-    typed tokens: slice_index lets the matcher join award results to the
-    correct Itinerary slice, and `run_pp_for_search` reads consecutive queries
-    with one slice_index as one leg. A pair with one airport at both ends is
-    skipped, unless it is the only one a leg has.
+    typed tokens, a repeated one once: slice_index lets the matcher join award
+    results to the correct Itinerary slice, and `run_pp_for_search` reads
+    consecutive queries with one slice_index as one leg. A pair with one
+    airport at both ends is skipped, unless it is the only one a leg has.
 
     The providers take one departure day a leg, so a leg with a flexible or
     arrival date is asked for departures on its typed date, and a dim line on
@@ -5144,7 +5144,8 @@ def _build_pp_legs(legs: tuple[Leg, ...]) -> list[LegQuery]:
             else "one-way"
         )
         iso = leg.date.isoformat()
-        label = f"{kind} {','.join(leg.origins)}→{','.join(leg.destinations)} {iso}"
+        route = "→".join(",".join(dict.fromkeys(ends)) for ends in (leg.origins, leg.destinations))
+        label = " ".join((kind, route, iso))
         origins, destinations = expand_airports(leg.origins), expand_airports(leg.destinations)
         pairs = [(o, d) for o in origins for d in destinations if o != d] or [
             (origins[0], destinations[0])

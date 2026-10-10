@@ -557,8 +557,7 @@ class _Doctor:
             c = PPClient(tokens)
             try:
                 # The request `pricing_info` sends, without its cache write: that
-                # writes the answer over the catalog every search reads, before
-                # it parses it.
+                # writes a good answer over the catalog every search reads.
                 r = await c._request("GET", _PP_PRICING)  # pyright: ignore[reportPrivateUsage]
                 pp_client._raise_for_status(r, _PP_PRICING)  # pyright: ignore[reportPrivateUsage]
                 # The client refreshes and retries on a 401, so the token that

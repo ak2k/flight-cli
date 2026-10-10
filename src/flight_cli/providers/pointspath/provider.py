@@ -129,19 +129,27 @@ class PointsPathProvider:
         # blocking request, which in a thread the award deadline can cut.
         tokens = await anyio.to_thread.run_sync(get_valid_tokens, abandon_on_cancel=True)
         client = PPClient(tokens)
-        pricing = await client.pricing_info()
-        if explicit_airlines:
-            airlines = explicit_airlines
-        else:
-            try:
-                ext_cfg = await client.extension_config()
-                airlines = enabled_airlines(pricing, ext_cfg)
-                if not airlines:
+        try:
+            pricing = await client.pricing_info()
+            if explicit_airlines:
+                airlines = explicit_airlines
+            else:
+                try:
+                    ext_cfg = await client.extension_config()
+                    airlines = enabled_airlines(pricing, ext_cfg)
+                    if not airlines:
+                        airlines = DEFAULT_AIRLINES
+                except Exception as e:  # noqa: BLE001 — falling back is non-fatal by design
+                    log.warning("pp_provider_ext_config_fallback", error=str(e))
                     airlines = DEFAULT_AIRLINES
-            except Exception as e:  # noqa: BLE001 — falling back is non-fatal by design
-                log.warning("pp_provider_ext_config_fallback", error=str(e))
-                airlines = DEFAULT_AIRLINES
-        return cls(client, pricing, airlines)
+            return cls(client, pricing, airlines)
+        except BaseException:
+            # No provider is returned, so nothing else closes the client. The
+            # shield lets the close finish when the award deadline's cancel is
+            # what ended the build.
+            with anyio.CancelScope(shield=True):
+                await client.aclose()
+            raise
 
     async def aclose(self) -> None:
         await self._client.aclose()
