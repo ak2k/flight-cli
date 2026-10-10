@@ -5240,6 +5240,22 @@ def _price_capped(res: SearchResult, opts: SearchOptions, *, passengers: int = 1
     )
 
 
+def _say_unread_fares_not_shown(subject: str, opts: SearchOptions, cap: str) -> None:
+    """Say on stderr that a capped Matrix answer holds no fare the cap could
+    read at or under it, while Matrix's own count stays nonzero: the fares the
+    cap dropped state no total in the cap's currency, so none was read as over
+    it. `subject` names the answer. The envelope's `results` note gives the
+    same reason in place of "no itinerary in any cabin asked"."""
+    currency = opts.currency or "USD"
+    err.print(
+        f"[yellow]{_safe_text(subject)}: no fare that states a {_safe_text(currency)} "
+        f"total is at or under {_safe_text(cap)}; those that state none are not shown.[/]"
+    )
+    _envelope.explain(
+        "results", "no fare that states a " + currency + " total is at or under " + cap
+    )
+
+
 def _run_matrix_path(  # noqa: PLR0912 — one arm per way Matrix's answer is written
     *,
     legs: tuple[Leg, ...],
@@ -5283,6 +5299,8 @@ def _run_matrix_path(  # noqa: PLR0912 — one arm per way Matrix's answer is wr
     # Before anything reads it, so the pick, the fare rules, the awards and the
     # links all draw from the fares under the cap.
     res = _price_capped(res, opts, passengers=opts.pax.total)
+    if (cap := _cap_text(opts)) is not None and not res.solutions and res.solution_count:
+        _say_unread_fares_not_shown("Matrix", opts, cap)
     shown = res.solutions[: opts.page_size]
     # `--awards-only` prints no numbered table, so a pick names no row, and the
     # links below are unpinned; `--fare-rules` is refused beside it.
@@ -9798,11 +9816,7 @@ def _cabins_capped(
                     f"{_safe_text(cap)}.[/]"
                 )
             else:
-                err.print(
-                    f"[yellow]Matrix {_safe_text(cab.value)}: no fare that states a "
-                    f"{_safe_text(opts.currency or 'USD')} total is at or under "
-                    f"{_safe_text(cap)}; those that state none are not shown.[/]"
-                )
+                _say_unread_fares_not_shown(f"Matrix {cab.value}", opts, cap)
     return capped
 
 
