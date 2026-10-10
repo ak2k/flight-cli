@@ -653,9 +653,10 @@ def _refuse_date_option_conflicts(
     return_times: str | None,
 ) -> None:
     """Refuse a date option that cannot be read one way, before the backend is
-    announced: one beside `--slice`, which takes its own; two dates for one
-    direction; a return option with no return; and a departure window on an
-    arrival-date slice, since Matrix holds that slice's window to the arrival."""
+    announced: one beside `--slice`, which takes its own; a time window beside
+    `--slice`, which takes none; two dates for one direction; a return option
+    with no return; and a departure window on an arrival-date slice, since
+    Matrix holds that slice's window to the arrival."""
     given = [
         flag
         for flag, value in (
@@ -670,6 +671,17 @@ def _refuse_date_option_conflicts(
         err.print(
             f"[red]{_safe_text(given[0])} dates a search given by origin and destination.[/] "
             "A --slice takes its own in its f= and d=arrive fields."
+        )
+        raise typer.Exit(2)
+    timed = [
+        flag
+        for flag, value in (("--depart-times", depart_times), ("--return-times", return_times))
+        if value
+    ]
+    if slice_specs and timed:
+        err.print(
+            f"[red]{_safe_text(' and '.join(timed))} would reach no --slice:[/] a slice takes "
+            "no time window. Drop the time flags, or give the trip as origin and destination."
         )
         raise typer.Exit(2)
     if dep and arrive:
@@ -922,7 +934,7 @@ def _google_reasons(
     them. With `open_jaw`, a trip of one one-way per slice
     (`_one_way_per_slice`), the reason says "on one ticket": Google still
     prices it as one-way tickets (`_answer_open_jaw`)."""
-    from ._gf_postfilter import search_page_reasons  # noqa: PLC0415
+    from ._gf_postfilter import held_predicates, search_page_reasons  # noqa: PLC0415
     from .routing_predicates import classify  # noqa: PLC0415
 
     reasons: list[str] = []
@@ -972,7 +984,9 @@ def _google_reasons(
     predicates = classify(routing, extension).predicates
     reasons.extend(search_page_reasons(predicates, stops, cabins[0] if len(cabins) == 1 else None))
     reasons.extend(_gf_unmappable_reasons(backend, predicates))
-    if return_codes is not None and set(classify(*return_codes).predicates) != set(predicates):
+    if return_codes is not None and held_predicates(
+        classify(*return_codes).predicates, stops
+    ) != held_predicates(predicates, stops):
         reasons.append("different routing or extension codes on the outbound and the return")
     return reasons
 
@@ -1048,7 +1062,9 @@ def _pick_backend(
 
     The page writes one filter set onto every slice, so a round trip whose
     return (`return_codes`) carries a different predicate set from the
-    outbound's is Matrix's.
+    outbound's is Matrix's. Each is read with its stop ceilings and `stops`
+    as the one limit the page writes and every row is held to
+    (`held_predicates`): `--stops 0` beside a nonstop return is one question.
 
     `cabins` are the cabins `--cabin` asked for. A `+CABIN` naming exactly the
     one of them stays on Google, which is asked for that cabin and holds every
@@ -4051,24 +4067,17 @@ def _open_jaw_blocker(
     legs: tuple[Leg, ...],
     opts: SearchOptions,
     no_separate_tickets: bool,
-    top_codes: Sequence[tuple[str, str | None]],
     cabins: int = 1,
 ) -> str | None:
     """Why a multi-city trip's one-ways (`_one_way_per_slice`) are not asked of
     Google Flights, as a plain-text phrase, or None when they are: an opt-out,
-    several `cabins` (a combination's tickets are priced in one), a top-level
-    time window, which applies to no slice, or a slice the search page can't serve as
-    a one-way (`_google_reasons`, asked of the slice alone)."""
+    several `cabins` (a combination's tickets are priced in one), or a slice the
+    search page can't serve as a one-way (`_google_reasons`, asked of the slice
+    alone)."""
     if no_separate_tickets:
         return "--no-separate-tickets was given"
     if cabins > 1:
         return f"each is priced in one cabin, and --cabin asks for {cabins:d}"
-    flags = [flag for flag, value in top_codes if value]
-    if flags:
-        verb, them = ("reaches", "it") if len(flags) == 1 else ("reach", "them")
-        return (
-            f"{_join_reasons(flags)} {verb} no --slice, so the one-ways could not be held to {them}"
-        )
     p = opts.pax
     for i, leg in enumerate(legs, 1):
         reasons = _google_reasons(
@@ -11751,11 +11760,6 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
     # and reassigning it would throw away the narrowing this call just did.
     gf_mode = _resolve_gf_transport(gf_transport)
 
-    # A time window applies to no slice, on Matrix as on Google.
-    top_codes = (
-        ("--depart-times", depart_times),
-        ("--return-times", return_times),
-    )
     beside_matrix = bool(slice_specs) and backend == BACKEND_AUTO and not sel.awards_only
 
     # `_pick_backend` puts a --slice search on Google only as one one-way per slice.
@@ -11765,7 +11769,6 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                 legs=legs,
                 opts=opts,
                 no_separate_tickets=no_separate_tickets,
-                top_codes=top_codes,
                 cabins=len(cabins_tuple),
             ),
             awards_only=sel.awards_only,
@@ -11822,7 +11825,6 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                     legs=legs,
                     opts=opts,
                     no_separate_tickets=no_separate_tickets,
-                    top_codes=top_codes,
                     cabins=len(cabins_tuple),
                 ),
                 output=output,
@@ -11996,7 +11998,6 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                 legs=legs,
                 opts=opts,
                 no_separate_tickets=no_separate_tickets,
-                top_codes=top_codes,
             ),
             output=output,
             split=split,
