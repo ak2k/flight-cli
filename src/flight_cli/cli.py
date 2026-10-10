@@ -922,7 +922,7 @@ def _google_reasons(
     them. With `open_jaw`, a trip of one one-way per slice
     (`_one_way_per_slice`), the reason says "on one ticket": Google still
     prices it as one-way tickets (`_answer_open_jaw`)."""
-    from ._gf_postfilter import search_page_reasons  # noqa: PLC0415
+    from ._gf_postfilter import held_predicates, search_page_reasons  # noqa: PLC0415
     from .routing_predicates import classify  # noqa: PLC0415
 
     reasons: list[str] = []
@@ -972,7 +972,9 @@ def _google_reasons(
     predicates = classify(routing, extension).predicates
     reasons.extend(search_page_reasons(predicates, stops, cabins[0] if len(cabins) == 1 else None))
     reasons.extend(_gf_unmappable_reasons(backend, predicates))
-    if return_codes is not None and set(classify(*return_codes).predicates) != set(predicates):
+    if return_codes is not None and held_predicates(
+        classify(*return_codes).predicates, stops
+    ) != held_predicates(predicates, stops):
         reasons.append("different routing or extension codes on the outbound and the return")
     return reasons
 
@@ -1048,7 +1050,9 @@ def _pick_backend(
 
     The page writes one filter set onto every slice, so a round trip whose
     return (`return_codes`) carries a different predicate set from the
-    outbound's is Matrix's.
+    outbound's is Matrix's. Each is read with its stop ceilings and `stops`
+    as the one limit the page writes and every row is held to
+    (`held_predicates`): `--stops 0` beside a nonstop return is one question.
 
     `cabins` are the cabins `--cabin` asked for. A `+CABIN` naming exactly the
     one of them stays on Google, which is asked for that cabin and holds every
