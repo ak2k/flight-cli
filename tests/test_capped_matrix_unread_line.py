@@ -14,8 +14,9 @@ from typer.testing import CliRunner
 
 from flight_cli import cli
 from flight_cli.domain import Cabin
+from flight_cli.models import SearchResult
 from test_capped_unreadable_matrix import _DEP, _matrix_answers, _solution
-from test_multi_cabin_pins import _matrix_search
+from test_multi_cabin_pins import _MATRIX, _matrix_answer, _matrix_search
 
 if TYPE_CHECKING:
     from click.testing import Result
@@ -112,3 +113,48 @@ def test_a_capped_multi_cabin_envelope_with_no_total_in_any_cabin_names_why_it_i
     assert [n for n in notes if n.startswith("results:")] == [
         "results: no fare that states a USD total is at or under USD 2000"
     ]
+
+
+# Matrix counts fares it sent none of, so the cap dropped no fare.
+_COUNT_WITHOUT_FARES: dict[str, Any] = {"solutionCount": 5, "solutionList": {"solutions": []}}
+
+
+@pytest.mark.parametrize("fmt", ["table", "json", "envelope"])
+def test_a_capped_answer_with_a_count_but_no_fare_names_no_hidden_fare(
+    monkeypatch: pytest.MonkeyPatch, fmt: str
+) -> None:
+    def _run(*_a: Any, **_kw: Any) -> SearchResult:
+        return SearchResult.from_api(_COUNT_WITHOUT_FARES)
+
+    monkeypatch.setattr(cli, "_run", _run)
+    result = _search("--format", fmt)
+    assert result.exit_code == 0, result.output
+    assert result.stderr == ""
+    if fmt == "envelope":
+        notes: list[str] = json.loads(result.stdout)["notes"]
+        assert [n for n in notes if n.startswith("results:")] == [
+            "results: no itinerary in any cabin asked"
+        ]
+
+
+def test_a_capped_multi_cabin_answer_with_a_count_but_no_fare_names_no_hidden_fare(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _multi(**_kw: object) -> dict[Cabin, SearchResult]:
+        return {
+            Cabin.COACH: _matrix_answer(_MATRIX[Cabin.COACH]),
+            Cabin.BUSINESS: SearchResult.from_api(_COUNT_WITHOUT_FARES),
+        }
+
+    monkeypatch.setattr(cli, "_run_matrix_multi", _multi)
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            *("search", "--cash-only", "--no-google-url", "--no-matrix-url", "JFK", "LAX"),
+            *("--dep", _DEP.isoformat(), "--cabin", "economy,business"),
+            *("--backend", "matrix", "-n", "2", "--max-price", "2000"),
+        ],
+        env={"COLUMNS": "200", "NO_COLOR": "1"},
+    )
+    assert result.exit_code == 0, result.output
+    assert _flat(result.stderr) == "Matrix BUSINESS: no fare at or under USD 2000."
