@@ -9880,6 +9880,14 @@ def _run_matrix_path_multi(
         or "USD"
     )
     total_of = partial(party_price, passengers=opts.pax.total)
+    # The sort cabin first, then the rest as asked: Matrix answers each cabin on
+    # its own task, and a row several cabins price takes its itinerary, and so
+    # the `cash_price` the award matcher writes, from the first cabin met.
+    results_by_cabin = {
+        cab: results_by_cabin[cab]
+        for cab in dict.fromkeys((sort_by, *cabins))
+        if cab in results_by_cabin
+    }
     rows = _merge_cabins(
         results_by_cabin, sort_by=sort_by, top_n=top_n, currency=currency, total_of=total_of
     )
