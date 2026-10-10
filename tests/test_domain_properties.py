@@ -67,9 +67,9 @@ def test_iata_rejects_non_3_letter(garbage: str) -> None:
 
 @given(st.lists(iata_codes, min_size=1, max_size=5).map(tuple))
 def test_leg_of_accepts_iata_list(origins: tuple[str, ...]) -> None:
-    """Multi-airport per slice round-trips."""
+    """Multi-airport per slice round-trips, a repeated airport once."""
     leg = Leg.of(origins, ("LHR",), date(2026, 6, 1))
-    assert leg.origins == origins
+    assert leg.origins == tuple(dict.fromkeys(origins))
 
 
 # ───────────────────────────── CalendarWindow ─────────────────────────────
