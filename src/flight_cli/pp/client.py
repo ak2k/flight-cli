@@ -366,10 +366,10 @@ class PPClient:
         return out
 
     async def pricing_info(self, *, force_refresh: bool = False) -> PricingInfoResponse:
-        cached = None if force_refresh else _fresh_cache(PRICING_CACHE, PRICING_TTL_SECS)
+        cached = None if force_refresh else _cached_json(PRICING_CACHE, PRICING_TTL_SECS)
         if cached is not None:
             try:
-                info = PricingInfoResponse.model_validate(json.loads(cached))
+                info = PricingInfoResponse.model_validate(cached)
             except ValueError:  # a file that is not a catalog is a miss
                 pass
             else:
@@ -393,15 +393,9 @@ class PPClient:
         currently, but the full body is cached so future code paths can read
         other parts (e.g. valuation overrides) without re-fetching.
         """
-        cached = None if force_refresh else _fresh_cache(EXT_CONFIG_CACHE, EXT_CONFIG_TTL_SECS)
-        if cached is not None:
-            try:
-                config: Any = json.loads(cached)
-            except ValueError:  # a file that is not JSON is a miss
-                pass
-            else:
-                if isinstance(config, dict):
-                    return cast("_JsonDict", config)
+        cached = None if force_refresh else _cached_json(EXT_CONFIG_CACHE, EXT_CONFIG_TTL_SECS)
+        if isinstance(cached, dict):
+            return cast("_JsonDict", cached)
         r = await self._request(
             "GET",
             "/api/extension-config",
@@ -422,16 +416,16 @@ class PPClient:
         return cast("_JsonDict", config)
 
 
-def _fresh_cache(path: Path, ttl_secs: float) -> str | None:
-    """The cache file's text while it is younger than `ttl_secs`; None when it
-    is missing, stale, unreadable or not text."""
+def _cached_json(path: Path, ttl_secs: float) -> Any:
+    """The cache file's JSON value while the file is younger than `ttl_secs`;
+    None when it is missing or stale, or cannot be read or decoded."""
     try:
         if time.time() - path.stat().st_mtime >= ttl_secs:
             return None
-        return path.read_text()
-    # A write cut inside a multi-byte character fails the decode, which is not
-    # an OSError.
-    except (OSError, UnicodeDecodeError):
+        return json.loads(path.read_text())
+    # The file holds whatever reached the disk: a torn write, bytes that are
+    # not UTF-8, nesting deeper than the decoder's stack.
+    except Exception:  # noqa: BLE001 — a cache read must never fail a request
         return None
 
 

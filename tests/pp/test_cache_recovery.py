@@ -159,6 +159,16 @@ def test_a_cache_file_that_is_not_utf8_is_refetched(
 
 
 @pytest.mark.parametrize("endpoint", ["ext", "pricing"])
+def test_a_cache_file_nested_too_deep_to_parse_is_refetched(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, endpoint: _Endpoint
+) -> None:
+    cache = _caches(tmp_path, monkeypatch)[endpoint]
+    _seed(cache, "[" * 100_000)
+    assert _ask(endpoint, _GOOD[endpoint]) == ("ok", 1)
+    assert cache.read_text() == _GOOD[endpoint]
+
+
+@pytest.mark.parametrize("endpoint", ["ext", "pricing"])
 def test_a_fresh_cache_is_served_and_a_stale_one_is_refetched(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, endpoint: _Endpoint
 ) -> None:
