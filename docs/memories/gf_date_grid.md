@@ -190,7 +190,9 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
   `page_blocker`): Tier-2/3 routing and extension codes, a code or bound the URL
   would leave out, a time window, a non-adult passenger, `--no-airport-changes`,
   `--include-unavailable`, a predicate the page cannot carry (a connecting
-  airport), then round-trip legs with different predicates. The URL takes the
+  airport), then round-trip legs with different predicates, each leg read with
+  its stop ceilings as the lowest of them and `--stops` (`--stops 0
+  --routing-ret N` holds both legs to nonstop and is admitted). The URL takes the
   LOWEST stop limit from `--stops` and every leg's `StopsPred`, because the
   bridge reads `--stops` alone and `apply_gf_native_filters` overwrites it with
   the last predicate it meets, and it writes the outbound leg's predicates
