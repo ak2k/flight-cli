@@ -223,7 +223,8 @@ def _iata(v: str) -> str:
 
 
 class Leg(BaseModel):
-    """One segment of intent. Origins/destinations support multi-airport.
+    """One segment of intent. Origins/destinations support multi-airport,
+    each airport once, in the order given.
 
     Calendar-mode legs leave `date` unset; the calendar window owns dates
     at the search level. Specific-date and followup legs require date."""
@@ -248,7 +249,7 @@ class Leg(BaseModel):
     @field_validator("origins", "destinations")
     @classmethod
     def _validate_airports(cls, v: tuple[str, ...]) -> tuple[str, ...]:
-        return tuple(_iata(c) for c in v)
+        return tuple(dict.fromkeys(_iata(c) for c in v))
 
     @classmethod
     def of(

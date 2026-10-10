@@ -375,7 +375,8 @@ def _resolve_duration(duration: str, *, round_trip: bool) -> tuple[int, int]:
 
 
 def _parse_iata_list(s: str) -> tuple[str, ...]:
-    return tuple(a.strip().upper() for a in s.split(",") if a.strip())
+    """The typed airports, uppercased, each once, in typed order."""
+    return tuple(dict.fromkeys(a.strip().upper() for a in s.split(",") if a.strip()))
 
 
 def _require_airports(origin: str, destination: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
