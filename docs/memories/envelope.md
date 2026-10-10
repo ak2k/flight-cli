@@ -1,4 +1,4 @@
-# `--format envelope`: the one document `search` and `calendar` write on every path
+# `--format envelope`: the one document `search` and `calendar` write at exit 0 and 1
 
 `--format json` writes the answering path's own document: Google rows, Matrix's
 raw body, `{cabin: …}` over several cabins, the award document when awards run,

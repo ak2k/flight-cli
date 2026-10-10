@@ -738,8 +738,11 @@ def test_the_graph_takes_what_google_applies_from_its_url(search: CalendarSearch
         # What the base refused, in its words.
         (_search(routing="~BA+"), "Tier-2 routing"),
         (_search(routing="O:AA+"), "Tier-2 routing"),
-        (_search(extension="-CODESHARE"), "a Tier-2 extension code"),
-        (_search(extension="MINCONNECT 3:00; -CODESHARE"), "Tier-2 extension codes"),
+        (_search(extension="-CODESHARE"), "a Tier-2 extension code ('-CODESHARE')"),
+        (
+            _search(extension="MINCONNECT 3:00; -CODESHARE"),
+            "Tier-2 extension codes ('MINCONNECT 3:00', '-CODESHARE')",
+        ),
         (_search(routing="F* X:ORD F*"), "a connecting-airport filter (ORD)"),
         (_search(routing="BQ+"), "a carrier Google Flights has no code for (BQ)"),
         (_search(extension="MAXDUR 0:00"), "a maximum trip duration of 0 minutes"),
@@ -772,7 +775,7 @@ def test_the_graph_takes_what_google_applies_from_its_url(search: CalendarSearch
         ),
         (
             _search(nights=7, extension="-CODESHARE", extension_ret="MAXDUR 0:00"),
-            "a Tier-2 extension code",
+            "a Tier-2 extension code ('-CODESHARE')",
         ),
         (
             _search(nights=7, extension="MINCONNECT 3:00", extension_ret="MAXDUR 0:00"),
@@ -1251,7 +1254,7 @@ def _run_on(keyword: str, raw: str) -> str:
 _KEPT = [
     ({"routing": "~BA+"}, "Tier-2 routing"),
     ({"routing": "O:AA+"}, "Tier-2 routing"),
-    ({"extension": "-CODESHARE"}, "a Tier-2 extension code"),
+    ({"extension": "-CODESHARE"}, "a Tier-2 extension code ('-CODESHARE')"),
     ({"routing": "F* X:ORD F*"}, "a connecting-airport filter (ORD)"),
     ({"children": 1}, "a passenger type other than adults"),
     ({"extension": "MAXDUR 0:00"}, "a maximum trip duration of 0 minutes"),
@@ -1546,7 +1549,8 @@ def test_the_same_codes_with_their_separators_are_refused_by_the_graph(
     assert f"this is {reason}." in err
 
 
-# `--fast --gf-transport http`'s stderr for each, as 6fce7b1 printed it.
+# `--fast --gf-transport http`'s stderr for each, as 6fce7b1 printed it, but for the
+# Tier-2 row, which quotes the directive that declined.
 _HTTP_HEAD = (
     "--fast applies only to calendars one-way or of one trip length, between airports\n"
     "or metro codes Google Flights can ask for (up to 11 airports a leg), whose every\n"
@@ -1556,7 +1560,9 @@ _HTTP_TAIL = {
     "carrier": "this is a carrier filter (AA). Run without \n--fast for Matrix.\n",
     "alliance": "this is an alliance filter (skyteam). Run \nwithout --fast for Matrix.\n",
     "maxdur": "this is a maximum trip duration (540 min). Run\nwithout --fast for Matrix.\n",
-    "minconnect": "this is a Tier-2 extension code. Run without \n--fast for Matrix.\n",
+    "minconnect": (
+        "this is a Tier-2 extension code ('MINCONNECT \n3:00'). Run without --fast for Matrix.\n"
+    ),
     "maxconnect": "this is a layover-time bound. Run without \n--fast for Matrix.\n",
     "evening-night": "this is a departure-time window. Run without \n--fast for Matrix.\n",
 }
@@ -1575,7 +1581,7 @@ _HTTP_ARGS = {
 def test_fast_over_http_refuses_them_byte_for_byte_as_before(
     taken: str, trip: tuple[str, ...], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The RPC grid's admission is not the graph's: nothing it printed moves."""
+    """The RPC grid's admission is not the graph's: nothing it refuses moves."""
     _no_matrix(monkeypatch)
     seen = _graph_is(monkeypatch, _OW)
     monkeypatch.setenv("COLUMNS", "80")
