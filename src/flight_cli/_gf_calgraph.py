@@ -194,7 +194,7 @@ def page_blocker(search: CalendarSearch) -> str | None:
     _, reasons = page_can_encode([*stops, *(p for predicates in per_leg for p in predicates)])
     if reasons:
         return "; ".join(dict.fromkeys(reasons))
-    if len(per_leg) > 1 and set(per_leg[0]) != set(per_leg[1]):
+    if _legs_differ(search):
         return "different routing or extension codes on the outbound and the return"
     return None
 
@@ -238,9 +238,30 @@ def graph_blocker(search: CalendarSearch) -> str | None:  # noqa: PLR0911 — on
     for i, predicates in enumerate(per_leg):
         if (wider := _wider_url(set(predicates))) is not None:
             return f"{wider} on the return leg" if i else wider
-    if len(per_leg) > 1 and set(per_leg[0]) != set(per_leg[1]):
+    if _legs_differ(search):
         return "different routing or extension codes on the outbound and the return"
     return None
+
+
+def _legs_differ(search: CalendarSearch) -> bool:
+    """Whether a round trip's legs ask Google different questions.
+
+    The URL writes the outbound's predicates on both slices under ONE stop
+    limit (`page_url`), so each leg is read with its stop ceilings replaced by
+    the lowest of them and `--stops`: `--stops 0` beside `--routing-ret N` holds
+    both legs to no stops, and is the same question twice."""
+    if len(search.legs) == 1:
+        return False
+    ceiling = search.options.max_extra_stops
+    held: list[frozenset[Predicate]] = []
+    for leg in search.legs:
+        predicates = classify(leg.route_language, leg.extension).predicates
+        limits = [p.max_stops for p in predicates if isinstance(p, StopsPred)]
+        if ceiling is not None:
+            limits.append(ceiling)
+        rest = frozenset(p for p in predicates if not isinstance(p, StopsPred))
+        held.append(rest | {StopsPred(min(limits))} if limits else rest)
+    return held[0] != held[1]
 
 
 def _graph_takes(p: Predicate) -> bool:
@@ -317,8 +338,9 @@ def page_url(search: CalendarSearch, departure: date) -> str:
     overwrite it, so either order on its own can widen a nonstop request.
 
     The bridge writes one predicate set onto every slice, and the gate admits a
-    round trip only when both legs carry the same set, so the outbound's is
-    written once: both legs' together would list each carrier twice."""
+    round trip only when both legs carry the same set (`_legs_differ`), so the
+    outbound's is written once: both legs' together would list each carrier
+    twice."""
     window = search.window
     moved = window.model_copy(update={"start": departure, "end": max(departure, window.end)})
     filters = to_fli_filter(search.model_copy(update={"window": moved}))
