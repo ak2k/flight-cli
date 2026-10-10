@@ -15,6 +15,11 @@ key from the same SPA bundle the public can read. We do the same.
    bootstrap. 30-day TTL; older than that triggers a fresh fetch.
 3. **Live bootstrap from Matrix's SPA bundle.**
 
+When the cache file cannot be written (unwritable directory), the bootstrapped
+key is held for the rest of the process, so a second client in the same run
+(the low-row check's, built after the search's) does not scrape again.
+`invalidate_cache()` drops the held key and `force_bootstrap=True` replaces it.
+
 ## The bundle has 7 keys, not 1
 
 The captured SPA bundle defines:

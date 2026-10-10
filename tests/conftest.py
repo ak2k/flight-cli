@@ -51,7 +51,7 @@ from typer import rich_utils
 # and break the suite's text assertions.
 os.environ["TTY_COMPATIBLE"] = "0"
 
-from flight_cli import _config, _gf_browser
+from flight_cli import _api_key, _config, _gf_browser
 from flight_cli.pp import auth as pp_auth
 from flight_cli.providers.seats_aero import auth as seats_auth
 
@@ -200,6 +200,14 @@ def _no_local_provider_credentials(  # pyright: ignore[reportUnusedFunction] - a
     monkeypatch.setattr(seats_auth, "CONFIG_DIR", config)
     monkeypatch.setattr(seats_auth, "KEY_PATH", config / "seats.json")
     monkeypatch.setattr(_config, "DEFAULT_CONFIG_PATH", config / "config.toml")
+
+
+@pytest.fixture(autouse=True)
+def _no_held_api_key() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction] - autouse pytest fixture
+    """No test starts with the key an earlier test bootstrapped but could not save."""
+    _api_key._unsaved.clear()  # pyright: ignore[reportPrivateUsage] - the store this fixture resets
+    yield
+    _api_key._unsaved.clear()  # pyright: ignore[reportPrivateUsage] - the store this fixture resets
 
 
 @pytest.fixture(autouse=True)
