@@ -366,10 +366,15 @@ class PPClient:
         return out
 
     async def pricing_info(self, *, force_refresh: bool = False) -> PricingInfoResponse:
-        if not force_refresh and PRICING_CACHE.exists():
-            age = time.time() - PRICING_CACHE.stat().st_mtime
-            if age < PRICING_TTL_SECS:
-                return PricingInfoResponse.model_validate(json.loads(PRICING_CACHE.read_text()))
+        cached = None if force_refresh else _fresh_cache(PRICING_CACHE, PRICING_TTL_SECS)
+        if cached is not None:
+            try:
+                info = PricingInfoResponse.model_validate(json.loads(cached))
+            except ValueError:  # a file that is not a catalog is a miss
+                pass
+            else:
+                if info.pricingInfos:
+                    return info
         r = await self._request("GET", "/api/pricing-info")
         _raise_for_status(r, "/api/pricing-info")
         info = PricingInfoResponse.model_validate(r.json())
@@ -388,19 +393,44 @@ class PPClient:
         currently, but the full body is cached so future code paths can read
         other parts (e.g. valuation overrides) without re-fetching.
         """
-        if not force_refresh and EXT_CONFIG_CACHE.exists():
-            age = time.time() - EXT_CONFIG_CACHE.stat().st_mtime
-            if age < EXT_CONFIG_TTL_SECS:
-                return json.loads(EXT_CONFIG_CACHE.read_text())
+        cached = None if force_refresh else _fresh_cache(EXT_CONFIG_CACHE, EXT_CONFIG_TTL_SECS)
+        if cached is not None:
+            try:
+                config: Any = json.loads(cached)
+            except ValueError:  # a file that is not JSON is a miss
+                pass
+            else:
+                if isinstance(config, dict):
+                    return cast("_JsonDict", config)
         r = await self._request(
             "GET",
             "/api/extension-config",
             params={"v": EXT_CONFIG_VERSION},
         )
         _raise_for_status(r, "/api/extension-config")
+        # Parsed before the write: the file is read for 7 days, so a body that
+        # is not a JSON object must not reach it.
+        config = r.json()
+        if not isinstance(config, dict):
+            raise PPApiError(
+                "/api/extension-config did not answer a JSON object",
+                endpoint="/api/extension-config",
+                status=r.status_code,
+            )
         EXT_CONFIG_CACHE.parent.mkdir(parents=True, exist_ok=True)
         EXT_CONFIG_CACHE.write_text(r.text)
-        return r.json()
+        return cast("_JsonDict", config)
+
+
+def _fresh_cache(path: Path, ttl_secs: float) -> str | None:
+    """The cache file's text while it is younger than `ttl_secs`; None when it
+    is missing, stale or unreadable."""
+    try:
+        if time.time() - path.stat().st_mtime >= ttl_secs:
+            return None
+        return path.read_text()
+    except OSError:
+        return None
 
 
 # Match `enable<AirlineName>` exactly, or `enable<AirlineName>V<digits>` (the
