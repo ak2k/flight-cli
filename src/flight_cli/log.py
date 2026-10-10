@@ -3,6 +3,7 @@
 Output goes through structlog.dev.ConsoleRenderer + stderr — readable for
 a human running the CLI, structured under the hood so future debugging
 glue (binding request IDs, piping to a file) is one line not a rewrite.
+Terminal control bytes in an event's text are dropped before rendering.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from typing import TYPE_CHECKING, override
 import structlog
 
 if TYPE_CHECKING:
-    from structlog.typing import Processor
+    from structlog.typing import EventDict, Processor, WrappedLogger
 
 LEVELS: dict[str, int] = {
     "debug": logging.DEBUG,
@@ -35,9 +36,10 @@ _HANDLER_NAME = "flight-cli-stderr"
 
 
 # Bytes that drive a terminal rather than appear in it, dropped from every line
-# this handler writes. Page text reaches these records — a refusal quotes the
-# board it could not read — and stderr redirected to a file keeps every byte for
-# whatever reads the file next.
+# this handler writes and from every string `_strip_drivers` hands the structlog
+# renderer. Page text reaches these records — a refusal quotes the board it
+# could not read — and stderr redirected to a file keeps every byte for whatever
+# reads the file next.
 #
 # Its OWN table, deliberately not the console one: that helper also escapes rich
 # markup, which is wrong here. This handler renders no markup, so a record
@@ -104,6 +106,21 @@ class _StderrHandler(logging.Handler):
             # makes the same trade one stream over, for the same reason.
             with suppress(Exception):
                 self.handleError(record)
+
+
+def _strip_drivers(_logger: WrappedLogger, _method_name: str, event_dict: EventDict) -> EventDict:
+    """Drop `_DRIVERS` from the event, its keys and every string value.
+
+    `ConsoleRenderer` reprs a string only when it holds a space or a quote, so a
+    remote body with an escape sequence in it is written raw at `-vv`. It reprs
+    every other value type, which escapes what this drops from strings, so only
+    `str` needs the pass. It runs as the last processor before the renderer, so
+    the renderer's own color codes are added after it and survive; stripping
+    the stream instead would remove them too."""
+    return {
+        key.translate(_DRIVERS): value.translate(_DRIVERS) if isinstance(value, str) else value
+        for key, value in event_dict.items()
+    }
 
 
 def _stderr_wants_colour() -> bool:
@@ -222,6 +239,7 @@ def configure(level: str = "warning") -> None:
         structlog.processors.TimeStamper(fmt="%H:%M:%S", utc=False),
         structlog.processors.StackInfoRenderer(),
         structlog.dev.set_exc_info,
+        _strip_drivers,
         structlog.dev.ConsoleRenderer(colors=_stderr_wants_colour()),
     ]
     structlog.configure(
