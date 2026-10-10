@@ -44,6 +44,7 @@ import anyio
 import anyio.to_thread
 import httpx
 import typer
+from pydantic import ValidationError
 from rich.cells import cell_len
 from rich.console import Console
 from rich.markup import escape
@@ -391,6 +392,27 @@ def _require_airports(origin: str, destination: str) -> tuple[tuple[str, ...], t
         err.print("[red]origin and destination are required.[/]")
         raise typer.Exit(2)
     return origins, destinations
+
+
+def _refuse_invalid_airports[**P](build: Callable[P, Leg]) -> Callable[P, Leg]:
+    """`build`, answering a value the model rejects with one line and exit 2.
+
+    `Leg.of` checks every airport code with pydantic, and the `ValidationError`
+    of a mistyped one would otherwise reach the terminal as a traceback."""
+
+    @wraps(build)
+    def run(*args: P.args, **kwargs: P.kwargs) -> Leg:
+        try:
+            return build(*args, **kwargs)
+        except ValidationError as e:
+            problem = e.errors()[0]["msg"].removeprefix("Value error, ")
+            err.print(f"[red]{_safe_text(problem)}[/]")
+            raise typer.Exit(2) from None
+
+    return run
+
+
+_leg_or_refuse = _refuse_invalid_airports(Leg.of)
 
 
 def _parse_times(s: str | None) -> tuple[TimeOfDay, ...]:
@@ -11691,7 +11713,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         out_times = _parse_search_times(depart_times, "--depart-times")
         ret_times = _parse_search_times(return_times, "--return-times")
         legs = (
-            Leg.of(
+            _leg_or_refuse(
                 origins,
                 destinations,
                 _parse_date(out_day),
@@ -11706,7 +11728,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         )
         if ret_day and return_codes is not None:
             legs += (
-                Leg.of(
+                _leg_or_refuse(
                     destinations,
                     origins,
                     _parse_date(ret_day),
@@ -12149,7 +12171,7 @@ def fare(
         out_times = _parse_times(depart_times)
         ret_times = _parse_times(return_times)
         legs = (
-            Leg.of(
+            _leg_or_refuse(
                 origins,
                 destinations,
                 _parse_date(dep),
@@ -12166,7 +12188,7 @@ def fare(
                 extension_return=extension_return,
             )
             legs += (
-                Leg.of(
+                _leg_or_refuse(
                     destinations,
                     origins,
                     _parse_date(ret),
@@ -12291,7 +12313,7 @@ def _parse_slice_spec(s: str) -> Leg:
                     f"slice {s!r}: unknown key prefix in {chunk!r}; valid keys are "
                     "r=ROUTING, e=EXTENSION, f=FLEX and d=arrive (note the '=')"
                 )
-    return Leg.of(
+    return _leg_or_refuse(
         o,
         d,
         parsed_date,
@@ -12491,7 +12513,7 @@ def calendar(
     out_times = _parse_times(depart_times)
     ret_times = _parse_times(return_times)
 
-    out_leg = Leg.of(
+    out_leg = _leg_or_refuse(
         origins, dests, route_language=routing, extension=extension, time_ranges=out_times
     )
     legs = (out_leg,)
@@ -12503,7 +12525,7 @@ def calendar(
             extension_return=extension_return,
         )
         legs += (
-            Leg.of(
+            _leg_or_refuse(
                 dests,
                 origins,
                 route_language=ret_routing,
@@ -12900,8 +12922,7 @@ def detail(
     """Phase-2 of the calendar flow: full itineraries for a picked date."""
     json_out = _resolve_format(fmt=fmt, json_flag=json_out) == "json"
     ccy = _resolve_currency(currency)
-    origins = _parse_iata_list(origin)
-    dests = _parse_iata_list(destination)
+    origins, dests = _require_airports(origin, destination)
     dep_d = _parse_date(dep)
     ret_d = _parse_date(ret) if ret else None
     if ret_d is None:
@@ -12926,7 +12947,7 @@ def detail(
     dmin, dmax = _resolve_duration(duration, round_trip=ret_d is not None)
 
     legs = (
-        Leg.of(
+        _leg_or_refuse(
             origins,
             dests,
             dep_d,
@@ -12943,7 +12964,7 @@ def detail(
             extension_return=extension_return,
         )
         legs += (
-            Leg.of(
+            _leg_or_refuse(
                 dests,
                 origins,
                 ret_d,
@@ -13216,9 +13237,9 @@ def gflight(
     # bad airport must not be reported after a line claiming the query is already
     # on its way.
     origins, destinations = _require_airports(origin, destination)
-    legs = (Leg.of(origins, destinations, _parse_date(dep)),)
+    legs = (_leg_or_refuse(origins, destinations, _parse_date(dep)),)
     if ret:
-        legs += (Leg.of(destinations, origins, _parse_date(ret)),)
+        legs += (_leg_or_refuse(destinations, origins, _parse_date(ret)),)
     # This alias has no --backend flag, so it resolves like `search` on auto
     # rather than forcing Google Flights: a party the page can't take goes to
     # the backend that can price it rather than erroring on a query the alias
