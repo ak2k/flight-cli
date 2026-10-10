@@ -1075,8 +1075,8 @@ def _real_pp(
 def test_the_pointspath_probe_leaves_the_catalog_a_search_reads(
     world: World, monkeypatch: pytest.MonkeyPatch, body: str, status: str
 ) -> None:
-    """`pricing_info` writes the answer over the catalog before it parses it,
-    so a probe through it would hand every search what PointsPath sent."""
+    """`pricing_info` writes a good answer over the catalog, so a probe through
+    it would hand every search what PointsPath sent."""
     catalog = world.tmp / "pp_pricing.json"
     good = json.dumps({"pricingInfos": [{"airline": "Delta", "milesToCashRatio": 0.012}]})
     catalog.write_text(good)

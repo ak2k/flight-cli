@@ -372,9 +372,14 @@ class PPClient:
                 return PricingInfoResponse.model_validate(json.loads(PRICING_CACHE.read_text()))
         r = await self._request("GET", "/api/pricing-info")
         _raise_for_status(r, "/api/pricing-info")
-        PRICING_CACHE.parent.mkdir(parents=True, exist_ok=True)
-        PRICING_CACHE.write_text(r.text)
-        return PricingInfoResponse.model_validate(r.json())
+        info = PricingInfoResponse.model_validate(r.json())
+        # The model defaults a missing or null list to empty, so an error object
+        # parses; only an answer that lists programs may replace the catalog
+        # every search reads.
+        if info.pricingInfos:
+            PRICING_CACHE.parent.mkdir(parents=True, exist_ok=True)
+            PRICING_CACHE.write_text(r.text)
+        return info
 
     async def extension_config(self, *, force_refresh: bool = False) -> dict[str, Any]:
         """Fetch /api/extension-config?v=<version>. Cached 7d on disk.
