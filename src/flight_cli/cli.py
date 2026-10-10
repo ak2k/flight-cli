@@ -5267,6 +5267,29 @@ def _price_capped(res: SearchResult, opts: SearchOptions, *, passengers: int = 1
     )
 
 
+def _cap_hid_unread_fares(served: SearchResult, capped: SearchResult) -> bool:
+    """Whether the cap left none of the fares Matrix sent while its count stays
+    nonzero, which `_price_capped` keeps only where it dropped a fare it could
+    not read. A count over no fare sent drops nothing."""
+    return bool(served.solutions) and not capped.solutions and capped.solution_count != 0
+
+
+def _say_unread_fares_not_shown(subject: str, opts: SearchOptions, cap: str) -> None:
+    """Say on stderr that a capped Matrix answer holds no fare the cap could
+    read at or under it, while Matrix's own count stays nonzero: the fares the
+    cap dropped state no total in the cap's currency, so none was read as over
+    it. `subject` names the answer. The envelope's `results` note gives the
+    same reason in place of "no itinerary in any cabin asked"."""
+    currency = opts.currency or "USD"
+    err.print(
+        f"[yellow]{_safe_text(subject)}: no fare that states a {_safe_text(currency)} "
+        f"total is at or under {_safe_text(cap)}; those that state none are not shown.[/]"
+    )
+    _envelope.explain(
+        "results", "no fare that states a " + currency + " total is at or under " + cap
+    )
+
+
 def _run_matrix_path(  # noqa: PLR0912 — one arm per way Matrix's answer is written
     *,
     legs: tuple[Leg, ...],
@@ -5309,7 +5332,9 @@ def _run_matrix_path(  # noqa: PLR0912 — one arm per way Matrix's answer is wr
     )
     # Before anything reads it, so the pick, the fare rules, the awards and the
     # links all draw from the fares under the cap.
-    res = _price_capped(res, opts, passengers=opts.pax.total)
+    served, res = res, _price_capped(res, opts, passengers=opts.pax.total)
+    if (cap := _cap_text(opts)) is not None and _cap_hid_unread_fares(served, res):
+        _say_unread_fares_not_shown("Matrix", opts, cap)
     shown = res.solutions[: opts.page_size]
     # `--awards-only` prints no numbered table, so a pick names no row, and the
     # links below are unpinned; `--fare-rules` is refused beside it.
@@ -6715,7 +6740,8 @@ def _gflight_json_row(g: Any, bags: Bags | None = None) -> dict[str, Any]:
     flights board.
 
     A leg's `departure_airport`/`arrival_airport` are IATA codes and its
-    `*_airport_name` fields hold fli's names for those airports."""
+    `*_airport_name` fields hold fli's names for those airports; its
+    `airline_code` is the carrier's IATA code, beside `airline`, its name."""
     row: dict[str, Any] = {**g.flight.model_dump(mode="json"), "flight_id": g.flight_id}
     if getattr(g, "ticketing", None) is not None:
         row["separate_tickets"] = True
@@ -6723,8 +6749,10 @@ def _gflight_json_row(g: Any, bags: Bags | None = None) -> dict[str, Any]:
         row["separate_tickets"] = None if g.flight.self_transfer is None else False
     row["top_flight"] = getattr(g, "top_flight", False)
     legs: list[Any] = row.get("legs") or []
-    # fli dumps an `Airport` member by its value, the name; its member name is the code.
+    # fli dumps an `Airport` and an `Airline` member by its value, the name; its member
+    # name is the code, with a leading `_` on a digit-leading airline code.
     for leg, src in zip(legs, g.flight.legs, strict=False):
+        leg["airline_code"] = src.airline.name.removeprefix("_")
         leg["departure_airport"] = src.departure_airport.name
         leg["arrival_airport"] = src.arrival_airport.name
         leg["departure_airport_name"] = src.departure_airport.value
@@ -9807,10 +9835,9 @@ def _cabins_capped(
     """Each cabin's Matrix answer cut to the fares under the search's cap
     (`_price_capped`), each cabin it leaves with no fare named on stderr.
 
-    A cabin keeps Matrix's own count where the cap dropped a fare it could not
-    read, one stating no total in the cap's currency, so only a count of zero
-    says no fare is under the cap; otherwise the line says those fares are not
-    shown."""
+    Where the cap dropped a fare it could not read, one stating no total in the
+    cap's currency, the line says those fares are not shown
+    (`_cap_hid_unread_fares`); otherwise it says no fare is under the cap."""
     capped = {
         cab: _price_capped(res, opts, passengers=opts.pax.total)
         for cab, res in results_by_cabin.items()
@@ -9819,16 +9846,12 @@ def _cabins_capped(
         for cab, res in capped.items():
             if res.solutions:
                 continue
-            if res.solution_count == 0:
+            if _cap_hid_unread_fares(results_by_cabin[cab], res):
+                _say_unread_fares_not_shown(f"Matrix {cab.value}", opts, cap)
+            else:
                 err.print(
                     f"[yellow]Matrix {_safe_text(cab.value)}: no fare at or under "
                     f"{_safe_text(cap)}.[/]"
-                )
-            else:
-                err.print(
-                    f"[yellow]Matrix {_safe_text(cab.value)}: no fare that states a "
-                    f"{_safe_text(opts.currency or 'USD')} total is at or under "
-                    f"{_safe_text(cap)}; those that state none are not shown.[/]"
                 )
     return capped
 
