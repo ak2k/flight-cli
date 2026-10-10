@@ -10,6 +10,9 @@ Resolution order:
   1. FLIGHT_API_KEY env var (highest precedence)
   2. ~/.cache/flight-cli/.matrix-key  (auto-cached after first bootstrap; 30-day TTL)
   3. Bootstrap: scrape Matrix's SPA bundle live
+
+A key bootstrapped while the cache cannot be written is held in this process, so
+a second client built after the first does not scrape again.
 """
 
 from __future__ import annotations
@@ -24,6 +27,10 @@ import httpx
 
 _CACHE_PATH = Path.home() / ".cache" / "flight-cli" / ".matrix-key"
 _CACHE_TTL_SECS = 30 * 86400
+# The last bootstrapped key that `_write_cache` could not save. Without it every
+# `resolve_api_key()` call repeats the synchronous scrape, including the one a
+# client makes inside a bounded section.
+_unsaved: list[str] = []
 # Shape of a real Google API key. Used to reject malformed cached values
 # *before* they round-trip through a 403 from Matrix.
 _KEY_SHAPE = re.compile(r"^AIzaSy[A-Za-z0-9_-]{33}$")
@@ -71,14 +78,18 @@ def resolve_api_key(*, force_bootstrap: bool = False) -> str:
         # wrong shape from an older bootstrap that captured the People API
         # key by mistake). Fall through to re-bootstrap.
 
+    if not force_bootstrap and _unsaved:
+        return _unsaved[0]
+
     key = _bootstrap_from_spa()
-    _write_cache(key)
+    _unsaved[:] = [] if _write_cache(key) else [key]
     return key
 
 
 def invalidate_cache() -> None:
     """Delete the cached API key. Call after a 403 from Matrix to force
     re-bootstrap on the next resolve_api_key() call."""
+    _unsaved.clear()
     with contextlib.suppress(OSError):
         _CACHE_PATH.unlink(missing_ok=True)
 
@@ -90,11 +101,14 @@ def _cache_fresh() -> bool:
     return _CACHE_PATH.exists() and (time.time() - _CACHE_PATH.stat().st_mtime) < _CACHE_TTL_SECS
 
 
-def _write_cache(key: str) -> None:
-    # Cache write failure is non-fatal; we'll just re-bootstrap next time.
-    with contextlib.suppress(OSError):
+def _write_cache(key: str) -> bool:
+    # Cache write failure is non-fatal: the caller holds the key for this process.
+    try:
         _CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
         _CACHE_PATH.write_text(key + "\n")
+    except OSError:
+        return False
+    return True
 
 
 def _bootstrap_from_spa() -> str:

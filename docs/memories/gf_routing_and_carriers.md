@@ -274,7 +274,8 @@ against 88 trips from USD818, the chain was empty (19.0 s); `--verify`'s
 unrouted second search then listed only AA, BA and IB though the 88 trips name
 DL and VS, so a carrier read off it would be wrong, and this check never asks
 it. The bound does not cover building the client, which reads the API key from
-its disk cache. The check's client is built with `rebootstrap=False`: a 403
+its disk cache, or from the key this process bootstrapped when that cache cannot
+be written. The check's client is built with `rebootstrap=False`: a 403
 invalidates the cached key and is the line `…: no answer: ApiKeyResolutionError:
 Matrix rejected the API key with HTTP 403.`, since the re-bootstrap other
 clients run on a 403 is synchronous and would hold the loop past the bound. The
