@@ -13,6 +13,7 @@ the point of asking.
 from __future__ import annotations
 
 import math
+import re
 import urllib.parse
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
@@ -60,10 +61,17 @@ def _is_booking_rpc(url: str) -> bool:
     return urllib.parse.urlsplit(url).path.endswith(_BOOKING_RPC)
 
 
+# ASCII digits only, and few enough for `int`: `isdigit` also takes a superscript,
+# which `int` cannot read, and `int` refuses a string of more than 4300 digits.
+_RE_FLIGHT_DIGITS = re.compile(r"[0-9]{1,9}")
+
+
 def _flight_key(carrier: Any, number: Any) -> str:
     """`DL1788` for any spelling of the number, so `0178` and `178` agree."""
     digits = str(number)
-    return f"{carrier}{int(digits)}" if digits.isdigit() else f"{carrier}{digits}"
+    return (
+        f"{carrier}{int(digits)}" if _RE_FLIGHT_DIGITS.fullmatch(digits) else f"{carrier}{digits}"
+    )
 
 
 def _option_flights(option: list[Any]) -> tuple[str, ...]:
