@@ -192,6 +192,8 @@ def _not_asked_lines(r: Result) -> list[str]:
                 ("EWR-LAX", 0, "one-way JFK,EWR→LAX 2026-11-04"),
             ],
         ),
+        # A typed repeat is the one airport, as `JFK` is.
+        ("JFK,JFK", [("JFK-LAX", 0, "one-way JFK→LAX 2026-11-04")]),
         # LGA last: the board flies JFK and EWR, and LGA nothing.
         (
             "NYC",
