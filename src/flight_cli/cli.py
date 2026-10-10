@@ -9426,8 +9426,11 @@ def _run_gflight_multi(
         except GfBackendError as e:
             # A typed refusal is why this cabin's column will be missing; the
             # bare handler below would print it as an unexplained failure.
-            refusal = _gf_refusal(e, bags=opts.bags is not None)
-            tail = f" {refusal.remedy}" if refusal.remedy else ""
+            # The options shape only the remedy; the note reads the same under
+            # every one of them.
+            refusal = _gf_refusal(e)
+            remedy = _gf_refusal(e, bags=opts.bags is not None).remedy
+            tail = f" {remedy}" if remedy else ""
             err.print(f"[yellow]Google Flights {cab.value}: {refusal.note}.{tail}[/]")
         except (typer.Exit, typer.Abort):  # an orderly exit is not a failure
             # `typer.Exit` subclasses `RuntimeError` on the installed click, so

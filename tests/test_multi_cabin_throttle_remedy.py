@@ -16,7 +16,13 @@ import pytest
 from conftest import LITERAL_DATES_NOW, capture_err
 from flight_cli import _gflight_ids as gfid
 from flight_cli import cli
-from flight_cli._gf_errors import GfBackendError, GfPageShapeError, GfThrottledError
+from flight_cli._gf_errors import (
+    BROWSER_DEFAULT_REMEDY,
+    GfBackendError,
+    GfBrowserUnavailableError,
+    GfPageShapeError,
+    GfThrottledError,
+)
 from flight_cli.domain import Bags, Cabin, Leg, SearchOptions
 
 if TYPE_CHECKING:
@@ -73,5 +79,17 @@ def test_a_refusal_with_no_remedy_of_its_own_keeps_its_note_alone(
     lines = _lines_for(monkeypatch, GfPageShapeError("x"))
     assert lines == [
         f"Google Flights {cab.value}: Google Flights' page shape changed."
+        for cab in sorted(_CABINS, key=lambda c: c.value)
+    ]
+
+
+def test_a_browser_unavailable_cabin_line_under_bags_keeps_its_note_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under `--bags` only the remedy changes: a refusal with none prints the same line."""
+    lines = _lines_for(monkeypatch, GfBrowserUnavailableError("no chrome"), bags=Bags(checked=1))
+    assert lines == [
+        f"Google Flights {cab.value}: Google Flights' browser rung is unavailable — "
+        f"no chrome {BROWSER_DEFAULT_REMEDY}."
         for cab in sorted(_CABINS, key=lambda c: c.value)
     ]
