@@ -7144,6 +7144,7 @@ def _gf_refusal(  # noqa: PLR0911, PLR0912 — one return per refusal type; see 
     *,
     transport: GfTransportMode = TRANSPORT_HTTP,
     bags: bool = False,
+    offer_browser: bool = True,
 ) -> _GfRefusal:
     """User-facing text for a typed Google Flights refusal.
 
@@ -7176,7 +7177,9 @@ def _gf_refusal(  # noqa: PLR0911, PLR0912 — one return per refusal type; see 
     `transport` only changes the throttle wording. The browser rung runs no
     retry ladder, so "wait a moment and retry" would describe a recovery the
     caller does not have. `bags` changes the way out: Matrix prices no bags, so
-    under `--bags` it is reached only by dropping them."""
+    under `--bags` it is reached only by dropping them. `offer_browser=False`
+    leaves the browser rung out of the http throttle's way out, for a caller
+    that is on http because that rung could not open."""
     remedy, remedy_opening = (
         (
             "drop [bold]--bags[/] to search Matrix, which prices no bags",
@@ -7195,7 +7198,8 @@ def _gf_refusal(  # noqa: PLR0911, PLR0912 — one return per refusal type; see 
         case GfThrottledError():
             # Not "this IP": the budget is per client context, which is why the
             # browser rung keeps working from an IP that is throttling this one.
-            retry = f"Wait a moment and retry, use [bold]--gf-transport browser[/], or {remedy}."
+            browser = "use [bold]--gf-transport browser[/], " if offer_browser else ""
+            retry = f"Wait a moment and retry, {browser}or {remedy}."
             return _GfRefusal(
                 "Google Flights rate-limited",
                 f"[yellow]Google Flights rate-limited the request.[/] {retry}",
@@ -9427,9 +9431,13 @@ def _run_gflight_multi(
             # A typed refusal is why this cabin's column will be missing; the
             # bare handler below would print it as an unexplained failure.
             # The options shape only the remedy; the note reads the same under
-            # every one of them.
+            # every one of them. This fan-out runs under `browser` only when
+            # that rung could not open, so the remedy must not send the user
+            # back to it.
             refusal = _gf_refusal(e)
-            remedy = _gf_refusal(e, bags=opts.bags is not None).remedy
+            remedy = _gf_refusal(
+                e, bags=opts.bags is not None, offer_browser=gf_mode != TRANSPORT_BROWSER
+            ).remedy
             tail = f" {remedy}" if remedy else ""
             err.print(f"[yellow]Google Flights {cab.value}: {refusal.note}.{tail}[/]")
         except (typer.Exit, typer.Abort):  # an orderly exit is not a failure

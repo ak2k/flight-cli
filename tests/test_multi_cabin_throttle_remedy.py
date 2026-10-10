@@ -93,3 +93,31 @@ def test_a_browser_unavailable_cabin_line_under_bags_keeps_its_note_alone(
         f"no chrome {BROWSER_DEFAULT_REMEDY}."
         for cab in sorted(_CABINS, key=lambda c: c.value)
     ]
+
+
+def test_a_throttled_cabin_line_after_the_browser_rung_could_not_open_leaves_it_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--gf-transport browser` reaches the http fan-out only when Chrome would not open."""
+    buf = capture_err(monkeypatch)
+
+    def _search(*_a: Any, transport: gfid.GfTransport = gfid.HTTP_TRANSPORT, **_kw: Any) -> None:
+        if transport.mode == cli.TRANSPORT_BROWSER:
+            raise GfBrowserUnavailableError("Chrome failed to launch")
+        raise GfThrottledError("x")
+
+    monkeypatch.setattr(gfid, "search_with_ids", _search)
+    out = cli._run_gflight_multi(
+        legs=(Leg.of("JFK", "LAX", date(2026, 10, 14)),),
+        opts=SearchOptions(cabin=Cabin.COACH),
+        cabins=_CABINS,
+        top_n=5,
+        gf_mode=cli.TRANSPORT_BROWSER,
+    )
+    assert out == {}
+    assert "multi-cabin is using http" in buf.getvalue()
+    assert sorted(ln for ln in buf.getvalue().splitlines() if ln.startswith("Google Flights ")) == [
+        f"Google Flights {cab.value}: Google Flights rate-limited. Wait a moment and retry, "
+        "or use --backend matrix."
+        for cab in sorted(_CABINS, key=lambda c: c.value)
+    ]
