@@ -11,7 +11,9 @@ from __future__ import annotations
 from datetime import date
 from typing import TYPE_CHECKING, Any
 
-from conftest import capture_err
+import pytest
+
+from conftest import LITERAL_DATES_NOW, capture_err
 from flight_cli import _gflight_ids as gfid
 from flight_cli import cli
 from flight_cli._gf_errors import GfBackendError, GfPageShapeError, GfThrottledError
@@ -20,7 +22,8 @@ from flight_cli.domain import Bags, Cabin, Leg, SearchOptions
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    import pytest
+# The searches built here carry literal travel dates; see `LITERAL_DATES_NOW`.
+pytestmark = pytest.mark.time_machine(LITERAL_DATES_NOW)
 
 _CABINS = (Cabin.COACH, Cabin.BUSINESS)
 
