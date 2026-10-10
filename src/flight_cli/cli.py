@@ -10852,7 +10852,8 @@ _ENVELOPE_FORMAT_OPT = typer.Option(
     "table",
     "--format",
     help=f"Output format: one of {_ENVELOPE_FORMAT_CHOICES}. envelope is one versioned "
-    "JSON document on every path: version, command, backend, currency, complete, "
+    "JSON document, written at exit 0 and 1; a usage error (exit 2) writes no document. "
+    "Its keys, whichever path answered: version, command, backend, currency, complete, "
     "notes, results, awards, insight, price_history, facets, price_graph, verify, "
     "cross_check, split_ticket. complete is false when the answer is narrower than "
     "asked, and notes carries what stderr said.",
