@@ -241,8 +241,9 @@ def _usd_amount(price: str | None) -> float | None:
 app = typer.Typer(rich_markup_mode="rich", help="CLI for ITA Matrix's Alkali backend.")
 app.add_typer(auth_app, name="auth")
 app.add_typer(watch_app, name="watch")
-console = Console()
-err = Console(stderr=True)
+# Emoji off, so a `:name:` in remote text prints as received.
+console = Console(emoji=False)
+err = Console(stderr=True, emoji=False)
 
 
 @app.callback()
@@ -3717,8 +3718,7 @@ def _render_booking_options(
             continue
         # Off the table, so no fee or link is ever cut to fit a narrow console:
         # folded or cropped, a multi-KB link no longer opens when copied. The
-        # name prints as its table cell does; emoji off for the link alone, so a
-        # `:name:` in it stays the text it was. Unhighlighted, so a URL inside a
+        # name prints as its table cell does. Unhighlighted, so a URL inside a
         # name is not styled as if this program marked it.
         console.print(
             f"{i:d} {_safe_text(s.name)}" + (f": {_safe_text(bags)}" if bags else ""),
@@ -3727,7 +3727,7 @@ def _render_booking_options(
             highlight=False,
         )
         if s.link:
-            console.print(_safe_text(s.link), soft_wrap=True, emoji=False, highlight=False)
+            console.print(_safe_text(s.link), soft_wrap=True, highlight=False)
     table = _undercut(options, table_prices)
     cheapest = options.sellers[0]
     if table is not None and cheapest.price is not None:
@@ -13423,10 +13423,7 @@ def explain(
     for token, meaning in decode_routing(routing):
         if meaning is None:
             unread = True
-            # Emoji off, so a `:name:` the user typed prints as typed.
-            console.print(
-                f"{_quote(token)}  ->  not recognized", soft_wrap=True, emoji=False, highlight=False
-            )
+            console.print(f"{_quote(token)}  ->  not recognized", soft_wrap=True, highlight=False)
         else:
             console.print(
                 f"{_safe_text(token)}  ->  {_safe_text(meaning)}", soft_wrap=True, highlight=False
