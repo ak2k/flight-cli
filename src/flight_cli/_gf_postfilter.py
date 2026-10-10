@@ -77,7 +77,7 @@ _SUPPORTED: tuple[type, ...] = (
     SpecificFlightPred,
 )
 
-_FLIGHT_RE = re.compile(r"^([A-Z0-9]{2})(\d+)$", re.IGNORECASE)
+_FLIGHT_RE = re.compile(r"^([A-Z0-9]{2})([0-9]{1,9})$", re.IGNORECASE)
 _MAX_FLIGHT_NUMBER = 9999
 
 
@@ -301,6 +301,16 @@ def _stop_ceiling(predicates: Iterable[Predicate], max_stops: int | None) -> int
     if max_stops is not None and max_stops >= 0:
         limits.append(max_stops)
     return min(limits, default=None)
+
+
+def held_predicates(predicates: Iterable[Predicate], max_stops: int | None) -> frozenset[Predicate]:
+    """`predicates` with its stop ceilings replaced by the strictest of them and
+    `max_stops` (`_stop_ceiling`): the question a leg asks of Google once its
+    stop count is read as one limit."""
+    preds = list(predicates)
+    rest = frozenset(p for p in preds if not isinstance(p, StopsPred))
+    ceiling = _stop_ceiling(preds, max_stops)
+    return rest if ceiling is None else rest | {StopsPred(ceiling)}
 
 
 def _within(stamp: Any, windows: Sequence[TimeWindow]) -> bool:
