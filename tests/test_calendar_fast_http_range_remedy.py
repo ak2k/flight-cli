@@ -11,7 +11,7 @@ from typer.testing import CliRunner
 from flight_cli import cli
 
 _START = date.today() + timedelta(days=60)
-_REMEDY = "For the range on Google, run with --gf-transport browser."
+_REMEDY = "For the range on Google, run with --gf-transport browser or auto."
 
 
 def _refusal(*extra: str, days: int = 13, origin: str = "JFK") -> tuple[int, str, str]:

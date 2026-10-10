@@ -9,6 +9,7 @@ Commands:
   flight airport   — IATA autocomplete
   flight explore   — where an origin flies, cheapest first (Google Flights, Chrome)
   flight doctor    — pass, fail or skip for every backend, transport and credential
+  flight explain   — a --routing string in plain English, one line per token
   flight watch     — save, list and remove route watches (stored only; nothing polls)
   flight fare      — [deprecated] alias for `search --backend matrix`
   flight gflight   — [deprecated] alias for `search --backend gflight`
@@ -71,6 +72,7 @@ from ._cross_check import (
 )
 from ._cross_check import document as cross_check_document
 from ._enrich import party_price
+from ._explain import decode_routing
 
 # The `--gf-transport` vocabulary, from the leaf that costs nothing to import.
 # `_gflight_ids` owns the ladder but costs fli (~95 ms), and EVERY search
@@ -3768,9 +3770,9 @@ class _OneWaysUnpriced(str):
 
 
 class _NoInfantRows(str):
-    """Why a slice's one-way board for a party with an infant holds no row:
+    """Why a leg's one-way board for a party with an infant holds no row:
     Google has served such a board on routes with flights, so it answers
-    nothing about the slice."""
+    nothing about the leg."""
 
     __slots__ = ()
 
@@ -3802,9 +3804,10 @@ def _one_way_boards(
     A leg whose pages met a stop (`_search_stop`) ends the asking, as a page's
     does in `_PageAsk`: every later leg would meet the same wall, so each is
     named as not asked instead. A failed or stopped leg's reason is an
-    `_OneWaysUnpriced`. With `narrow`, a leg Google served no row at all for a
-    party with an infant is an `_NoInfantRows`, which narrows the run as
-    `_run_gflight_path` does for the same board.
+    `_OneWaysUnpriced`. A leg Google served no row at all for a party with an
+    infant is an `_NoInfantRows`, which narrows the run as `_run_gflight_path`
+    does for the same board: whoever answers with `narrow`, Google's answer alone
+    on a round trip, as `unpriced` narrows.
 
     A board at Google's row cap says so (`_note_row_cap`) once every leg
     answered, since the tickets drawn from it stop at its cap, or when it holds
@@ -3854,8 +3857,8 @@ def _one_way_boards(
                 if not single:
                     _note_stop_drops(board, one_way=which)
                     _note_row_cap(board, requested, one_way=which)
-                    if narrow and infant and not (board or getattr(board, "dropped", 0)):
-                        _envelope.narrow()
+                    if infant and not (board or getattr(board, "dropped", 0)):
+                        _envelope.narrow(of=None if narrow else "gflight")
                         return _NoInfantRows(
                             "Google Flights served no rows for a party with an infant on the "
                             f"{which} one-way, as it has on routes with flights"
@@ -12559,7 +12562,8 @@ def calendar(
             )
             # The http grid prices one trip length; the browser's graph prices one per
             # length. Said only when that gate admits this very search, so the remedy
-            # is never another refusal.
+            # is never another refusal. `auto` is the browser under `--fast` (below),
+            # so it is named beside `browser`.
             if (
                 not one_way
                 and dmin != dmax
@@ -12574,7 +12578,9 @@ def calendar(
                 )
                 is None
             ):
-                err.print("[yellow]For the range on Google, run with --gf-transport browser.[/]")
+                err.print(
+                    "[yellow]For the range on Google, run with --gf-transport browser or auto.[/]"
+                )
         else:
             err.print(
                 "[yellow]--fast applies only to calendars one-way, of one trip length, or of "
@@ -13399,6 +13405,34 @@ def doctor(fmt: str = _FORMAT_OPT) -> None:
         )
     )
     raise typer.Exit(report.exit_code)
+
+
+@app.command()
+def explain(
+    routing: Annotated[
+        str,
+        typer.Argument(
+            help="A routing string as --routing takes it, e.g. 'O:LH+' or 'F* X:LHR F*'"
+        ),
+    ],
+) -> None:
+    """Say what a routing string means, one line per token.
+
+    Exits 1 when a token is not in the documented grammar; it is never guessed."""
+    unread = False
+    for token, meaning in decode_routing(routing):
+        if meaning is None:
+            unread = True
+            # Emoji off, so a `:name:` the user typed prints as typed.
+            console.print(
+                f"{_quote(token)}  ->  not recognized", soft_wrap=True, emoji=False, highlight=False
+            )
+        else:
+            console.print(
+                f"{_safe_text(token)}  ->  {_safe_text(meaning)}", soft_wrap=True, highlight=False
+            )
+    if unread:
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":
