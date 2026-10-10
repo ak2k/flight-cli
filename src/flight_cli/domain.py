@@ -12,6 +12,7 @@ new case via `typing.assert_never`.
 from __future__ import annotations
 
 import itertools
+import math
 import re
 
 # resolves type hints at validation time and needs the symbol present in the
@@ -206,9 +207,11 @@ def within_price_cap(
     amount: float | None, currency: str | None, *, cap: int, cap_currency: str
 ) -> bool:
     """Whether a fare may be shown under a price cap: priced, in the cap's
-    currency, at or under it. An unpriced fare, or one in another currency,
-    cannot be shown to be under the cap."""
-    return amount is not None and currency == cap_currency and amount <= cap
+    currency, at or under it. An unpriced or non-finite fare, or one in another
+    currency, cannot be shown to be under the cap."""
+    return (
+        amount is not None and math.isfinite(amount) and currency == cap_currency and amount <= cap
+    )
 
 
 _IATA_CODE_LEN = 3
