@@ -11936,7 +11936,9 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                     separate_tickets=separate,
                 )
             return
-        with search_escalation():
+        # --split prices the one-ways after the round trip's search returns; one
+        # scope held across both keeps them on a single Chrome.
+        with search_escalation(), _browser_scope(gf_mode) if split else contextlib.nullcontext():
             unmatched = _run_gflight_path(
                 legs=legs,
                 opts=opts,
