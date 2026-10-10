@@ -1871,15 +1871,25 @@ _INSIGHT_TYPICAL_LOW_IDX = 4
 _INSIGHT_TYPICAL_HIGH_IDX = 5
 
 
+def _finite_amount(value: Any) -> float | None:
+    """`value` as a float when it is a finite number, else None: the page's JSON
+    can hold an integer too large for a float, `1e400`, which reads as infinity,
+    or `NaN`."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    try:
+        amount = float(value)
+    except OverflowError:
+        return None
+    return amount if math.isfinite(amount) else None
+
+
 def _insight_amount(block: list[Any], index: int) -> float | None:
-    """The number in a `[None, amount]` pair at `block[index]`, or None."""
+    """The finite number in a `[None, amount]` pair at `block[index]`, or None."""
     pair = block[index] if len(block) > index else None
     if not isinstance(pair, list) or len(cast("list[Any]", pair)) < 2:  # noqa: PLR2004 — a pair
         return None
-    amount = cast("list[Any]", pair)[1]
-    if isinstance(amount, bool) or not isinstance(amount, int | float):
-        return None
-    return float(amount)
+    return _finite_amount(cast("list[Any]", pair)[1])
 
 
 def _page_currency(rows: list[GFlightWithId]) -> str | None:
@@ -1927,17 +1937,19 @@ _HISTORY_DAY_OFFSET = datetime.timedelta(hours=12)
 
 
 def _history_point(point: Any) -> tuple[datetime.date, float] | None:
-    """One `[epoch_ms, price]` pair as `(date, price)`, or None for any other shape."""
+    """One `[epoch_ms, price]` pair as `(date, price)`, or None for any other shape
+    or a price that is not finite."""
     if not isinstance(point, list) or len(cast("list[Any]", point)) != 2:  # noqa: PLR2004 — a pair
         return None
     stamp, price = cast("list[Any]", point)
-    if any(isinstance(v, bool) or not isinstance(v, int | float) for v in (stamp, price)):
+    amount = _finite_amount(price)
+    if amount is None or isinstance(stamp, bool) or not isinstance(stamp, int | float):
         return None
     try:
         when = datetime.datetime.fromtimestamp(stamp / 1000, tz=datetime.UTC)
     except (OverflowError, OSError, ValueError):
         return None
-    return (when + _HISTORY_DAY_OFFSET).date(), float(price)
+    return (when + _HISTORY_DAY_OFFSET).date(), amount
 
 
 def _price_history(payload: list[Any], rows: list[GFlightWithId]) -> PriceHistory | None:
@@ -1945,8 +1957,8 @@ def _price_history(payload: list[Any], rows: list[GFlightWithId]) -> PriceHistor
 
     The currency is read off a priced row, as `_price_insight` reads the
     insight's: the page writes none beside either. A series with any point of
-    another shape is refused whole, since a skipped day would read as a gap
-    in the history rather than as a layout change."""
+    another shape or a non-finite price is refused whole, since a skipped day
+    would read as a gap in the history rather than as a layout change."""
     block = payload[_INSIGHT_IDX] if len(payload) > _INSIGHT_IDX else None
     if not isinstance(block, list) or len(cast("list[Any]", block)) <= _HISTORY_IDX:
         return None
@@ -2014,17 +2026,6 @@ def _named_pairs(block: Any) -> tuple[tuple[str, str], ...] | None:
     return tuple(pairs)
 
 
-def _fare_bound(price: list[Any], index: int) -> float | None:
-    """One end of the fare range, or None when it is not a finite number: the
-    page's JSON can hold an integer too large for a float, or `1e400`, which
-    reads as infinity."""
-    try:
-        amount = _insight_amount(price, index)
-    except OverflowError:
-        return None
-    return amount if amount is not None and math.isfinite(amount) else None
-
-
 def _minute_range(low: Any, high: Any) -> tuple[int, int] | None:
     """Whole minutes `low` to `high`, or None for another shape or a low above its high."""
     if any(isinstance(v, bool) or not isinstance(v, int) for v in (low, high)) or low > high:
@@ -2068,8 +2069,8 @@ def _read_facets(block: Any, currency: str | None) -> RouteFacets | None:
     duration = _parts(duration, 2)
     if not isinstance(price, list) or carriers is None or hubs is None or duration is None:
         return None
-    low = _fare_bound(cast("list[Any]", price), 0)
-    high = _fare_bound(cast("list[Any]", price), 1)
+    low = _insight_amount(cast("list[Any]", price), 0)
+    high = _insight_amount(cast("list[Any]", price), 1)
     alliances = _named_pairs(carriers[0])
     airlines = _named_pairs(carriers[1])
     connections = _named_pairs(hubs[0])
