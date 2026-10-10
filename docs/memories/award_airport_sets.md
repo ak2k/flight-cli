@@ -15,8 +15,9 @@ A leg's origins and destinations are expanded through `_metro.expand_airports`
 (a metro code becomes its members, any other token stays as typed) and crossed
 in typed order. A pair with one airport at both ends is skipped, unless it is
 the only pair the leg has. Every query of a leg shares its `slice_index`, date
-and label, and the label names the typed tokens (`one-way JFK,EWR→LHR
-2026-11-04`), so a one-airport label is what it always was. `run_pp_for_search`
+and label, and the label names the typed tokens, a repeated one once
+(`one-way JFK,EWR→LHR 2026-11-04`; `JFK,JFK` reads `JFK`), so a one-airport
+label is what it always was. `run_pp_for_search`
 reads consecutive queries with one `slice_index` as one leg: it concatenates
 their awards, joins and renders them as one leg, and writes one JSON entry per
 leg. The matched table keeps one row per first flight, date and pair of
