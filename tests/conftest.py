@@ -12,6 +12,10 @@ replaced, for every test, by a callable that fails whichever test touched it.
 launch failures in `except Exception`, and a guard the code under test could
 swallow would be no guard at all.
 
+The same holds one level down: **no test resolves a name or connects a socket**
+to anything but this machine (`_no_network`). A test that needs the real thing
+opts out with `@pytest.mark.network`.
+
 Tests that legitimately drive the seam — with a fake playwright, never a real
 one — opt out with `@pytest.mark.gf_browser`.
 
@@ -27,9 +31,11 @@ from __future__ import annotations
 import datetime
 import functools
 import io
+import ipaddress
 import json
 import os
 import pathlib
+import socket
 import sys
 import threading
 import time
@@ -106,6 +112,69 @@ def _no_browser_launch(  # pyright: ignore[reportUnusedFunction] - autouse pytes
         pytest.fail("this test reached rung 2's real browser launcher")
 
     monkeypatch.setattr(_gf_browser, "_playwright_factory", _forbidden)
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Declare the marker here: `--strict-markers` rejects an undeclared one."""
+    config.addinivalue_line(
+        "markers",
+        "network: may resolve names and connect sockets; opts out of the conftest network guard",
+    )
+
+
+def _is_local(host: object) -> bool:
+    """Whether `host` names this machine without a lookup."""
+    # The resolver and `connect` take an encoded host too, and anyio always sends one.
+    if isinstance(host, bytes | bytearray):
+        host = host.decode(errors="replace")
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(str(host)).is_loopback
+    except ValueError:
+        return False
+
+
+@pytest.fixture(autouse=True)
+def _no_network(  # pyright: ignore[reportUnusedFunction] - autouse pytest fixture
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail any unmarked test that resolves a name or connects a socket to an
+    address other than loopback or a Unix socket.
+
+    Socket creation stays open: asyncio's event loop builds a `socketpair`, and
+    a socket that never connects reaches nothing. `pytest.fail` raises a
+    `BaseException` for the reason `_no_browser_launch` gives."""
+    if request.node.get_closest_marker("network") is not None:  # pyright: ignore[reportUnknownMemberType]
+        return
+
+    real_getaddrinfo = socket.getaddrinfo
+    real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
+
+    def _refuse(what: str, host: object) -> None:
+        pytest.fail(f"this test reached the network: {what} {host!r}")
+
+    def getaddrinfo(host: Any, *args: Any, **kwargs: Any) -> Any:
+        if host is not None and not _is_local(host):
+            _refuse("resolved", host)
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    def _checked(sock: socket.socket, address: Any) -> None:
+        if sock.family in (socket.AF_INET, socket.AF_INET6) and not _is_local(address[0]):
+            _refuse("connected to", address[0])
+
+    def connect(self: socket.socket, address: Any) -> None:
+        _checked(self, address)
+        real_connect(self, address)
+
+    def connect_ex(self: socket.socket, address: Any) -> int:
+        _checked(self, address)
+        return real_connect_ex(self, address)
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
 
 
 @pytest.fixture(autouse=True)
