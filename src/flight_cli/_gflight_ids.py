@@ -946,7 +946,8 @@ _FARE_BAGS_IDX = 6
 
 # `row[7]` is how Google sells the itinerary, matched to the Cheapest tab's own
 # labels row by row: `[1]` "Self transfer", `[2]` "Separate tickets booked
-# together", `[]` one ticket. fli's `row[0][12]` reads False on all three.
+# together", `[]` one ticket. fli's `row[0][12]` reads False on all three. Any
+# other code is undecoded and states nothing.
 _ROW_TICKETING_IDX = 7
 _TICKETING_SELF_TRANSFER = 1
 _TICKETING_SEPARATE = 2
@@ -1236,8 +1237,9 @@ class GFlightWithId:
 
 
 def _ticketing(data: list[Any]) -> tuple[Ticketing | None, bool | None]:
-    """The row's ticketing and fli's `self_transfer`. A slot that is absent or
-    not a list states nothing, so `self_transfer` stays None."""
+    """The row's ticketing and fli's `self_transfer`. A slot that is absent, not
+    a list, or holds a code other than 1 or 2 states nothing, so `self_transfer`
+    stays None."""
     slot = data[_ROW_TICKETING_IDX] if len(data) > _ROW_TICKETING_IDX else None
     if not isinstance(slot, list):
         return None, None
@@ -1246,6 +1248,8 @@ def _ticketing(data: list[Any]) -> tuple[Ticketing | None, bool | None]:
         return "self_transfer", True
     if _TICKETING_SEPARATE in codes:
         return "separate_tickets", False
+    if codes:
+        return None, None
     return None, False
 
 
