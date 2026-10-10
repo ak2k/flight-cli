@@ -176,8 +176,11 @@ cabins (each ticket is priced in one), or under `--no-separate-tickets`
 narrows `complete` only under `--split`. A slice board Google served no row at
 all for a party with an infant is `_NoInfantRows`: Google has done that on
 routes with flights (see `_run_gflight_path`), so it narrows the run instead of
-reading as a slice with no fare. A failed or stopped board's reason is
-`_OneWaysUnpriced`, typed apart from the boards' own answers.
+reading as a slice with no fare. A `--split` round trip's outbound or return
+board does the same, narrowing Google's answer alone (`of="gflight"`); its
+`No split tickets:` line names the board and offers no Matrix remedy, since
+Google's round-trip answer is the one shown. A failed or stopped board's reason
+is `_OneWaysUnpriced`, typed apart from the boards' own answers.
 
 **`--backend gflight`** on the same trip answers with the combinations alone
 and asks Matrix nothing (`cli._answer_multi_city_on_google`): `_pick_backend`

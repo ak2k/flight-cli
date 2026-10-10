@@ -3770,9 +3770,9 @@ class _OneWaysUnpriced(str):
 
 
 class _NoInfantRows(str):
-    """Why a slice's one-way board for a party with an infant holds no row:
+    """Why a leg's one-way board for a party with an infant holds no row:
     Google has served such a board on routes with flights, so it answers
-    nothing about the slice."""
+    nothing about the leg."""
 
     __slots__ = ()
 
@@ -3804,9 +3804,10 @@ def _one_way_boards(
     A leg whose pages met a stop (`_search_stop`) ends the asking, as a page's
     does in `_PageAsk`: every later leg would meet the same wall, so each is
     named as not asked instead. A failed or stopped leg's reason is an
-    `_OneWaysUnpriced`. With `narrow`, a leg Google served no row at all for a
-    party with an infant is an `_NoInfantRows`, which narrows the run as
-    `_run_gflight_path` does for the same board.
+    `_OneWaysUnpriced`. A leg Google served no row at all for a party with an
+    infant is an `_NoInfantRows`, which narrows the run as `_run_gflight_path`
+    does for the same board: whoever answers with `narrow`, Google's answer alone
+    on a round trip, as `unpriced` narrows.
 
     A board at Google's row cap says so (`_note_row_cap`) once every leg
     answered, since the tickets drawn from it stop at its cap, or when it holds
@@ -3856,8 +3857,8 @@ def _one_way_boards(
                 if not single:
                     _note_stop_drops(board, one_way=which)
                     _note_row_cap(board, requested, one_way=which)
-                    if narrow and infant and not (board or getattr(board, "dropped", 0)):
-                        _envelope.narrow()
+                    if infant and not (board or getattr(board, "dropped", 0)):
+                        _envelope.narrow(of=None if narrow else "gflight")
                         return _NoInfantRows(
                             "Google Flights served no rows for a party with an infant on the "
                             f"{which} one-way, as it has on routes with flights"
