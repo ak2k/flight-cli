@@ -50,7 +50,13 @@ from ._gf_errors import (
     GfUpstreamStatusError,
 )
 from ._http import CACHE_SIZE_LIMIT_BYTES
-from .client import SEARCH_TIMEOUT_S, MatrixApiError, MatrixClient, MatrixShapeError
+from .client import (
+    SEARCH_TIMEOUT_S,
+    MatrixApiError,
+    MatrixClient,
+    MatrixHttpError,
+    MatrixShapeError,
+)
 from .domain import Leg, SearchOptions, SpecificDateSearch
 from .fli_bridge import to_fli_filter
 from .models import SearchResult
@@ -376,7 +382,8 @@ class _Doctor:
             payload = json.loads(text)
             saved_at = float(payload["saved_at"])
             nids = sum(1 for c in payload["cookies"] if c["name"] == "NID")
-        except (ValueError, TypeError, KeyError) as e:
+        except (ValueError, TypeError, KeyError, RecursionError) as e:
+            # RecursionError: JSON nested past the decoder's recursion limit.
             raise _CheckFailedError(
                 "config", f"{path} is not a cookie jar this CLI wrote: {e!r}"
             ) from e
@@ -632,7 +639,8 @@ def _stored_secrets() -> set[str]:
     ):
         try:
             data = json.loads(_read_quietly(path) or "{}")
-        except ValueError:
+        except (ValueError, RecursionError):
+            # RecursionError: JSON nested past the decoder's recursion limit.
             continue
         if isinstance(data, dict):
             found.update(str(data.get(f) or "") for f in fields)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
@@ -706,6 +714,8 @@ def _classify(e: Exception) -> tuple[Cause, str]:  # noqa: PLR0911, PLR0912 — 
             return "shape", str(e)
         case GfBrowserUnavailableError():
             return "browser", str(e)
+        case MatrixHttpError():
+            return _status_cause(e.status), e.message
         case MatrixApiError():
             # Both fields are copied untyped from Matrix's error body, so either
             # can be null or a number.

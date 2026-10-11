@@ -1,6 +1,12 @@
 """flight-cli: ITA Matrix Alkali backend wrapper."""
 
-from .client import ApiKeyResolutionError, MatrixApiError, MatrixClient, resolve_api_key
+from .client import (
+    ApiKeyResolutionError,
+    MatrixApiError,
+    MatrixClient,
+    MatrixHttpError,
+    resolve_api_key,
+)
 from .domain import (
     Cabin,
     CalendarFollowup,
@@ -38,6 +44,7 @@ __all__ = [
     "Location",
     "MatrixApiError",
     "MatrixClient",
+    "MatrixHttpError",
     "Pax",
     "Search",
     "SearchOptions",

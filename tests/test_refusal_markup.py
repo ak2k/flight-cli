@@ -1352,20 +1352,22 @@ def _blank_failure() -> Any:
     return _BlankFailure("")
 
 
-def test_the_matrix_error_is_built_at_exactly_one_place() -> None:
+def test_the_matrix_error_is_built_only_in_the_client() -> None:
     """`_matrix_into` stashes a result and a `MatrixApiError` into keys that its
     caller reads as alternatives, and that is sound only because the error has a
-    single origin: the one raiser sits under `execute`, so reaching the stash
+    single origin: both raisers, of the error and of its `MatrixHttpError`
+    subclass, sit under `_post`, which `execute` calls, so reaching the stash
     line at all means nothing raised.
 
     Asserted as the invariant rather than as a list of sites. An enumeration of
     file and line rots on the next edit and says nothing when it does; the count
-    is the property, and a second construction site is the event that breaks the
+    is the property, and another construction site is the event that breaks the
     argument — whichever file it lands in."""
     from flight_cli import cli as cli_mod
 
+    root = pathlib.Path(cli_mod.__file__).parent
     sites: list[str] = []
-    for path in sorted(pathlib.Path(cli_mod.__file__).parent.rglob("*.py")):
+    for path in sorted(root.rglob("*.py")):
         for node in ast.walk(ast.parse(path.read_text())):
             if not isinstance(node, ast.Call):
                 continue
@@ -1377,10 +1379,11 @@ def test_the_matrix_error_is_built_at_exactly_one_place() -> None:
                 named = func.id
             elif isinstance(func, ast.Attribute):
                 named = func.attr
-            if named == "MatrixApiError":
-                sites.append(f"{path.name}:{node.lineno}")
+            if named in {"MatrixApiError", "MatrixHttpError"}:
+                sites.append(f"{path.relative_to(root).as_posix()}:{node.lineno}")
 
-    assert len(sites) == 1, f"MatrixApiError is constructed at {len(sites)} sites: {sites}"
+    assert len(sites) == 2, f"the Matrix error is constructed at {len(sites)} sites: {sites}"
+    assert all(s.startswith("client.py:") for s in sites), sites
 
 
 def _refusing_matrix(error: Exception) -> Any:

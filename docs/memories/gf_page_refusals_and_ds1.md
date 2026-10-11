@@ -171,8 +171,8 @@ At `[2]`/`[3]` the test must NOT require a parse, or a block whose rows have all
 changed shape would drop to an empty board instead of reaching the 0-of-N parse
 guard above, which is what catches a moved ROW layout. Both share one tuple of
 "this did not decode" exception types (`_ROW_PARSE_ERRORS`), so a widening —
-`OverflowError` from an absurd price, `TypeError` from a null legs field — can't
-land in one and miss the other.
+`OverflowError` from an absurd price, `ValueError` from an infinite or NaN price,
+`TypeError` from a null legs field — can't land in one and miss the other.
 
 **What this does not detect, stated plainly:** a partial relocation — rows
 leaving `[2]` while `[3]` still parses — yields a short board. There is no

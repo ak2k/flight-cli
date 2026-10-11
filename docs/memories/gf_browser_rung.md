@@ -184,7 +184,9 @@ it does anything else, and the shutdown is over inside 60 ms — faster than a
 second signal can be aimed into it. The ignore stays only when a driver was
 open; with none (an `auto` search that never escalated) the handler gives the
 previous disposition back after its stop, so a second Ctrl-C ends the wait on
-the worker.
+the worker. Under `auto` that disposition is `second_ctrl_c_exits`'s: flush
+stdout and stderr, then `os._exit(130)`, so the interpreter's join on the worker
+cannot hold the process.
 
 The mechanism, because a hang here is otherwise re-derived from scratch: an
 interrupt that unwinds a patchright call kills the greenlet running that call's
