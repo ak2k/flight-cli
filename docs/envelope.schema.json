@@ -183,7 +183,7 @@
     },
     "CalendarRow": {
       "additionalProperties": false,
-      "description": "A calendar's priced day or graph cell, with the dates it prices beside\n`row`, which for a Matrix day holds its day of the month alone. `departure`\nis null for a day the window does not place on one date; `return` is null on\na one-way and on a round-trip day that names no trip length.",
+      "description": "A calendar's priced day or graph cell, with the dates it prices beside\n`row`, which for a Matrix day holds its day of the month alone. `departure`\nis null for a day the window does not place on one date; `return` is null on\na one-way and on a round-trip day that names no trip length with a finite price.",
       "properties": {
         "price": {
           "anyOf": [

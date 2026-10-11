@@ -58,8 +58,9 @@ departure is placed as the unpriced-dates line places a day
 (`cli._window_date`, by the month's own `month` and `year`), and is null for a
 priced day that is no one date of the window. The return is that departure
 plus the day's cheapest trip length, the shortest of a tie, as the two-lows
-note's Matrix low names it (`cli._cheapest_option`); it is null on a one-way
-and on a round-trip day with no trip length. A Google cell's are its own
+note's Matrix low names it (`cli._cheapest_option`); a length whose price has no
+finite number is never that. It is null on a one-way and on a round-trip day
+with no such trip length. A Google cell's are its own
 `departure` and `return`.
 
 Exit codes are those of `--format json` in the same state, and an envelope is

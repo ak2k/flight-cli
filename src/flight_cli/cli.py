@@ -3122,9 +3122,10 @@ def _say_unpriced(res: CalendarResult, search: CalendarSearch) -> None:
 
 def _cheapest_option(day: CalendarDay) -> DurationOption | None:
     """The trip length a round-trip day's own price is: its cheapest, the shortest
-    of a tie. An option with an empty price prices no trip, so it is never that."""
-    priced = [o for o in day.options if o.min_price]
-    return min(priced, key=lambda o: (o.price_value, o.trip_length), default=None)
+    of a tie. An option with no readable price (empty, `USDabc`, `USD1e999`)
+    prices no trip, so it is never that."""
+    priced = [o for o in day.options if o.price_value is not None]
+    return min(priced, key=lambda o: (o.price_value or 0.0, o.trip_length), default=None)
 
 
 def _matrix_low(
@@ -5157,7 +5158,7 @@ def _render_calendar(
             day_pair = (d.origin, d.destination)
             for dur in range(dmin, dmax + 1):
                 o = opts.get(dur)
-                if o is None:
+                if o is None or o.price_value is None:
                     row.append(_amount(None, ccy))
                 elif o.origin is not None and (o.origin, o.destination) != day_pair:
                     # A length another pair priced names it, or the row reads as the route's.
