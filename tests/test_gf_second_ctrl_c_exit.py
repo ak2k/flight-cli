@@ -96,6 +96,27 @@ _PROBE = textwrap.dedent(
 )
 
 
+# The main thread writes more to stdout than its pipe holds while nothing reads
+# it, so the write blocks holding the stream's lock. The pipe stops taking
+# writes only once that write has filled it, which is when the signal is sent.
+_BLOCKED_WRITE_PROBE = textwrap.dedent(
+    """
+    import os, select, signal, sys, threading, time
+    from flight_cli import _gf_browser as gfb
+
+    def sender():
+        while select.select([], [sys.stdout.fileno()], [], 0)[1]:
+            time.sleep(0.01)
+        os.kill(os.getpid(), signal.SIGINT)
+
+    with gfb.second_ctrl_c_exits():
+        threading.Thread(target=sender, daemon=True).start()
+        sys.stdout.write("x" * (4 << 20))
+        sys.stdout.flush()
+    """
+)
+
+
 def _run(mode: str, where: str) -> tuple[int | None, str, str]:
     """The probe's exit status, stdout and stderr; no status if it outlived
     `_EXIT_WITHIN` and had to be killed."""
@@ -137,6 +158,26 @@ def test_the_exit_flushes_what_stdout_still_held() -> None:
 
     assert status == 130
     assert "UNFLUSHED_LINE" in out
+
+
+def test_a_ctrl_c_inside_a_blocked_stdout_write_still_exits_130() -> None:
+    """The handler's flush re-enters the write the signal interrupted. Nothing
+    reads stdout until the probe has ended, so the write stays blocked."""
+    proc = subprocess.Popen(  # noqa: S603 — this interpreter and a literal probe
+        [sys.executable, "-c", _BLOCKED_WRITE_PROBE],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        status = proc.wait(timeout=_EXIT_WITHIN)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        status = None
+    _out, err = proc.communicate()
+
+    assert status == 130, err
+    assert "Traceback" not in err
 
 
 def test_a_second_ctrl_c_is_still_ignored_while_a_driver_is_open() -> None:

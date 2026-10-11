@@ -1090,7 +1090,10 @@ def _exit_on_sigint(_signum: int, _frame: types.FrameType | None) -> None:
     """Flush both streams and leave without the interpreter's shutdown, whose
     join on a worker thread is what an interrupt could not end."""
     for stream in (sys.stdout, sys.stderr):
-        with contextlib.suppress(OSError, ValueError):
+        # Any exception, not a list of them: the signal can land inside a write
+        # that holds the stream's lock, and the flush then raises RuntimeError.
+        # Whatever a flush raises, the exit below must still run.
+        with contextlib.suppress(Exception):
             stream.flush()
     os._exit(130)
 
