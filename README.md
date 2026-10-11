@@ -16,7 +16,7 @@ cd flight-cli
 uv venv && uv pip install -e .
 ```
 
-Requires Python 3.11+.
+Requires Python 3.12+.
 
 ### Shell completion
 
