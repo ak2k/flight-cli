@@ -100,13 +100,15 @@ _PROBE = textwrap.dedent(
 # it, so the write blocks holding the stream's lock. The pipe stops taking
 # writes only once that write has filled it, which is when the signal is sent,
 # to the main thread. `main` writes on the thread the handler runs on;
-# `worker` writes from another one while the main thread sleeps.
+# `worker` writes from another one while the main thread sleeps. The other
+# stream holds a partial line that nothing has flushed.
 _BLOCKED_WRITE_PROBE = textwrap.dedent(
     """
     import select, signal, sys, threading, time
     from flight_cli import _gf_browser as gfb
 
     stream, writer = getattr(sys, sys.argv[1]), sys.argv[2]
+    (sys.stderr if stream is sys.stdout else sys.stdout).write("HELD_UNFLUSHED")
 
     def sender():
         while select.select([], [stream.fileno()], [], 0)[1]:
@@ -171,9 +173,10 @@ def test_the_exit_flushes_what_stdout_still_held() -> None:
     assert "UNFLUSHED_LINE" in out
 
 
-def _run_blocked_write(stream: str, writer: str) -> tuple[int | None, str]:
-    """The probe's exit status and stderr, without the probe's own `x`s. Nothing
-    reads either stream until the probe has ended, so the write stays blocked."""
+def _run_blocked_write(stream: str, writer: str) -> tuple[int | None, str, str]:
+    """The probe's exit status, stdout and stderr, without the probe's own `x`s.
+    Nothing reads either stream until the probe has ended, so the write stays
+    blocked."""
     proc = subprocess.Popen(  # noqa: S603 — this interpreter and a literal probe
         [sys.executable, "-c", _BLOCKED_WRITE_PROBE, stream, writer],
         stdout=subprocess.PIPE,
@@ -185,13 +188,13 @@ def _run_blocked_write(stream: str, writer: str) -> tuple[int | None, str]:
     except subprocess.TimeoutExpired:
         proc.kill()
         status = None
-    _out, err = proc.communicate()
-    return status, err.lstrip("x")
+    out, err = proc.communicate()
+    return status, out.lstrip("x"), err.lstrip("x")
 
 
 def test_a_ctrl_c_inside_a_blocked_stdout_write_still_exits_130() -> None:
     """The handler's flush re-enters the write the signal interrupted."""
-    status, err = _run_blocked_write("stdout", "main")
+    status, _out, err = _run_blocked_write("stdout", "main")
 
     assert status == 130, err
     assert "Traceback" not in err
@@ -201,10 +204,19 @@ def test_a_ctrl_c_inside_a_blocked_stdout_write_still_exits_130() -> None:
 def test_a_ctrl_c_while_a_worker_write_blocks_still_exits_130(stream: str) -> None:
     """A worker's write holds the stream's lock and cannot finish, as a log line
     does on a stderr nobody drains, so the handler's flush waits on that lock."""
-    status, err = _run_blocked_write(stream, "worker")
+    status, _out, err = _run_blocked_write(stream, "worker")
 
     assert status == 130, err
     assert "Traceback" not in err
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_a_blocked_write_does_not_keep_the_other_stream_from_its_flush(stream: str) -> None:
+    """Whichever stream is blocked, the line the other one held reaches it."""
+    status, out, err = _run_blocked_write(stream, "worker")
+
+    assert status == 130, err
+    assert "HELD_UNFLUSHED" in (err if stream == "stdout" else out)
 
 
 def test_a_second_ctrl_c_is_still_ignored_while_a_driver_is_open() -> None:

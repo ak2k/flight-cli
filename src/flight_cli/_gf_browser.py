@@ -48,7 +48,7 @@ import signal
 import sys
 import threading
 import time
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, TextIO
 
 from rich.console import Console
 
@@ -1091,12 +1091,11 @@ def interrupt_guard(*, armed: bool = True) -> Generator[None]:
 _FLUSH_WITHIN = 0.5
 
 
-def _flush_std_streams() -> None:
-    for stream in (sys.stdout, sys.stderr):
-        # Any exception, not a list of them: a closed or absent stream must not
-        # keep the other one from its flush.
-        with contextlib.suppress(Exception):
-            stream.flush()
+def _flush_quietly(stream: TextIO) -> None:
+    # Any exception, not a list of them: a closed or absent stream is left
+    # unflushed without a thread's traceback on the way out.
+    with contextlib.suppress(Exception):
+        stream.flush()
 
 
 def _exit_on_sigint(_signum: int, _frame: types.FrameType | None) -> None:
@@ -1104,12 +1103,19 @@ def _exit_on_sigint(_signum: int, _frame: types.FrameType | None) -> None:
     join on a worker thread is what an interrupt could not end."""
     # A flush takes the stream's lock, which a write blocked on an undrained
     # pipe holds for as long as nothing reads it, on a worker or on the main
-    # thread under this handler. So the flush runs on a thread of its own and
-    # the wait for it is bounded, and nothing it raises can skip the exit.
+    # thread under this handler. So each stream flushes on a thread of its own,
+    # one that blocks does not keep the other from its flush, the wait for both
+    # is bounded together, and nothing they raise can skip the exit.
     try:
-        flusher = threading.Thread(target=_flush_std_streams, daemon=True)
-        flusher.start()
-        flusher.join(_FLUSH_WITHIN)
+        deadline = time.monotonic() + _FLUSH_WITHIN
+        flushers = [
+            threading.Thread(target=_flush_quietly, args=(stream,), daemon=True)
+            for stream in (sys.stdout, sys.stderr)
+        ]
+        for flusher in flushers:
+            flusher.start()
+        for flusher in flushers:
+            flusher.join(max(0.0, deadline - time.monotonic()))
     finally:
         os._exit(130)
 
