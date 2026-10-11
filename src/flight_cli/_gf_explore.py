@@ -108,7 +108,7 @@ def _text(value: Any) -> str | None:
 
 
 def _count(value: Any) -> int | None:
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
 def _day(value: Any) -> date | None:
