@@ -66,8 +66,8 @@ _MIN_MULTI_SEGMENT = 2  # a slice needs 2+ flights before later segments can dis
 # unaffected — an exact flight-number hit needs no carrier corroboration.
 # Being absent here costs a codeshare match; being wrongly present costs a
 # fabricated award price, which is the failure this table exists to prevent.
-# Erring toward omission is deliberate: SK and AZ changed alliance, so neither
-# is listed under any group.
+# Erring toward omission is deliberate: SK and AZ changed alliance and CZ left
+# SkyTeam, so none is listed under any group.
 _PARTNER_GROUPS: tuple[frozenset[str], ...] = (
     # oneworld
     frozenset({"AA", "AS", "BA", "AY", "IB", "JL", "MH", "QF", "QR", "RJ", "UL", "CX"}),
@@ -98,7 +98,7 @@ _PARTNER_GROUPS: tuple[frozenset[str], ...] = (
         },
     ),
     # SkyTeam
-    frozenset({"DL", "AF", "KL", "AM", "KE", "MU", "CZ", "SU", "VN", "RO", "UX", "GA"}),
+    frozenset({"DL", "AF", "KL", "AM", "KE", "MU", "SU", "VN", "RO", "UX", "GA"}),
     # Non-alliance bilaterals that codeshare heavily
     frozenset({"DL", "VS"}),  # Delta / Virgin Atlantic JV
     frozenset({"DL", "WS"}),  # Delta / WestJet

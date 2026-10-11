@@ -17,6 +17,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any, cast
@@ -48,6 +49,18 @@ class PPAuthError(Exception):
     """Auth failure (no tokens, refresh failed, expired without refresh token)."""
 
 
+def _expires_at(seconds: float | str) -> int:
+    """`seconds` as Unix seconds, or ValueError when it is no number or no
+    datetime holds it: `whoami`, `login` and `doctor` print the expiry as a date."""
+    try:
+        when = int(seconds)
+        _ = datetime.fromtimestamp(when)
+        _ = datetime.fromtimestamp(when, tz=UTC)
+    except (OverflowError, OSError) as e:
+        raise ValueError(f"expires_at {seconds!r} is out of range") from e
+    return when
+
+
 @dataclass
 class Tokens:
     access_token: str
@@ -68,7 +81,7 @@ class Tokens:
         return cls(
             access_token=d["access_token"],
             refresh_token=d.get("refresh_token", ""),
-            expires_at=int(d.get("expires_at") or 0),
+            expires_at=_expires_at(d.get("expires_at") or 0),
             user_email=d.get("user_email"),
         )
 
@@ -170,10 +183,14 @@ def refresh(tokens: Tokens) -> Tokens:
     if r.status_code != HTTPStatus.OK:
         raise PPAuthError(f"Supabase refresh failed: HTTP {r.status_code} {r.text[:200]}")
     data: _JsonDict = r.json()
+    try:
+        expires_at = _expires_at(int(time.time()) + int(data.get("expires_in", 3600)))
+    except (OverflowError, ValueError) as e:
+        raise PPAuthError(f"Supabase refresh answered an unusable expires_in: {e}") from e
     new = Tokens(
         access_token=data["access_token"],
         refresh_token=data.get("refresh_token") or tokens.refresh_token,
-        expires_at=int(time.time()) + int(data.get("expires_in", 3600)),
+        expires_at=expires_at,
         user_email=(cast("_JsonDict", data.get("user") or {})).get("email") or tokens.user_email,
     )
     # Only persist if the on-disk store is the source of truth (not env override).
@@ -224,7 +241,10 @@ def _tokens_from_supabase_payload(payload: _JsonDict) -> Tokens:
     claims_payload = parts[1] + "=" * (-len(parts[1]) % 4)
     claims: _JsonDict = json.loads(base64.urlsafe_b64decode(claims_payload))
     user: _JsonDict = payload.get("user") or {}
-    expires_at = int(payload.get("expires_at") or claims.get("exp") or 0)
+    try:
+        expires_at = _expires_at(payload.get("expires_at") or claims.get("exp") or 0)
+    except ValueError as e:
+        raise PPAuthError(f"The session holds an unusable expiry: {e}") from e
     return Tokens(
         access_token=access,
         refresh_token=payload.get("refresh_token") or "",
