@@ -25,8 +25,9 @@ from flight_cli.pp import auth as pp_auth
 _OUT_OF_RANGE = [1e300, 99999999999999]
 # The last second a datetime holds in UTC is year 10000 in a zone east of UTC; the first
 # second it does not hold is year 9999 in a zone west of it. `whoami` prints local time
-# and `doctor` prints UTC. POSIX TZ strings, since a libc that finds no zoneinfo for an
-# Olson name silently runs in UTC, where both seconds are in range.
+# and `doctor` prints UTC. The zones are POSIX TZ strings, which need no zoneinfo: a libc
+# that finds none for an Olson name silently runs in UTC, where 253402300799 fits both
+# paths and 253402300800 fits neither.
 _EDGES = [
     pytest.param(253402300799, "<+05>-5", id="253402300799-UTC+5"),
     pytest.param(253402300800, "<-05>5", id="253402300800-UTC-5"),
