@@ -13,9 +13,12 @@ import sys
 from contextlib import suppress
 from typing import TYPE_CHECKING, override
 
+import httpx
+import stamina.instrumentation
 import structlog
 
 if TYPE_CHECKING:
+    from stamina.instrumentation import RetryDetails
     from structlog.typing import EventDict, Processor, WrappedLogger
 
 LEVELS: dict[str, int] = {
@@ -225,6 +228,23 @@ def _stderr_logger_factory(*_args: object) -> structlog.PrintLogger:
     return structlog.PrintLogger(file=_LIVE_STDERR)  # pyright: ignore[reportArgumentType]
 
 
+def _retry_logged(details: RetryDetails) -> None:
+    """Log a scheduled retry naming its cause by type, and by status for an HTTP
+    status error. stamina's default hook logs `repr` of the exception, and
+    httpx's status error quotes the request URL, which for Matrix carries the
+    API key."""
+    caused_by = type(details.caused_by).__name__
+    if isinstance(details.caused_by, httpx.HTTPStatusError):
+        caused_by = f"{caused_by} {details.caused_by.response.status_code:d}"
+    structlog.get_logger("flight_cli.retry").warning(
+        "retry_scheduled",
+        callable=details.name,
+        retry_num=details.retry_num,
+        wait_for=round(details.wait_for, 2),
+        caused_by=caused_by,
+    )
+
+
 def configure(level: str = "warning") -> None:
     """Configure structlog for human-readable stderr output, and give the one
     stdlib-logging module in the package somewhere for its records to go.
@@ -233,6 +253,7 @@ def configure(level: str = "warning") -> None:
     """
     lvl = LEVELS.get(level.lower(), logging.WARNING)
     _configure_stdlib(lvl)
+    stamina.instrumentation.set_on_retry_hooks([_retry_logged])
     processors: list[Processor] = [
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,
