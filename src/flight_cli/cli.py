@@ -3080,15 +3080,16 @@ def _unpriced_lines(
 
     A day is placed as `_matrix_low` places it. A round-trip day prices a length
     only through that length's option, since the day's own price is its cheapest
-    length's. A grid the table prints as empty prices no date."""
+    length's. A price with no readable amount prices no date, as the table's cell
+    shows it. A grid the table prints as empty prices no date."""
     asked = [sd + timedelta(days=i) for i in range((ed - sd).days + 1)]
     priced: dict[int | None, set[date]] = {nights: set() for nights in lengths}
     if not is_empty_calendar(res):
         for when, day in _window_days(res, sd, ed):
-            if None in priced and day.min_price:
+            if None in priced and day.price_value is not None:
                 priced[None].add(when)
             for option in day.options:
-                if option.trip_length in priced and option.min_price:
+                if option.trip_length in priced and option.price_value is not None:
                     priced[option.trip_length].add(when)
     lines: list[str] = []
     for nights in lengths:
@@ -5122,10 +5123,14 @@ def _render_calendar(
     # the table title below, which carries the currency half a second time.
     ccy, cheapest = _split_price(res.cheapest_price)
     ccy_tag = f" ({_safe_text(ccy)})" if ccy else ""
+    # A notice with no readable amount (`USD1e999`) is the no-price dash, untagged.
+    shown = "—"
+    if res.cheapest_value is not None:
+        shown = f"{cheapest} ({ccy})" if ccy else cheapest
     duration_note = f"  · duration {dmin}-{dmax} nights" if round_trip else ""
     console.print(
         f"[bold]{res.solution_count} solutions[/]  · "
-        f"overall cheapest: [bold cyan]{_safe_text(cheapest or '—')}{ccy_tag}[/]  · "
+        f"overall cheapest: [bold cyan]{_safe_text(shown)}[/]  · "
         f"window {_safe_text(sd.isoformat())} → {_safe_text(ed.isoformat())}"
         f"{duration_note}"
     )
