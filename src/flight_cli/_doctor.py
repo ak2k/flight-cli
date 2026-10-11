@@ -50,7 +50,13 @@ from ._gf_errors import (
     GfUpstreamStatusError,
 )
 from ._http import CACHE_SIZE_LIMIT_BYTES
-from .client import SEARCH_TIMEOUT_S, MatrixApiError, MatrixClient, MatrixShapeError
+from .client import (
+    SEARCH_TIMEOUT_S,
+    MatrixApiError,
+    MatrixClient,
+    MatrixHttpError,
+    MatrixShapeError,
+)
 from .domain import Leg, SearchOptions, SpecificDateSearch
 from .fli_bridge import to_fli_filter
 from .models import SearchResult
@@ -706,6 +712,8 @@ def _classify(e: Exception) -> tuple[Cause, str]:  # noqa: PLR0911, PLR0912 — 
             return "shape", str(e)
         case GfBrowserUnavailableError():
             return "browser", str(e)
+        case MatrixHttpError():
+            return _status_cause(e.status), e.message
         case MatrixApiError():
             # Both fields are copied untyped from Matrix's error body, so either
             # can be null or a number.

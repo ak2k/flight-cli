@@ -42,7 +42,6 @@ from typing import (
 
 import anyio
 import anyio.to_thread
-import httpx
 import typer
 from rich.cells import cell_len
 from rich.console import Console
@@ -109,7 +108,7 @@ from ._multi_cabin import (
 )
 from ._multi_cabin import merge as _merge_cabins
 from ._watch import watch_app
-from .client import MatrixApiError, MatrixClient
+from .client import MatrixApiError, MatrixClient, MatrixHttpError
 from .domain import (
     Bags,
     Cabin,
@@ -7957,11 +7956,13 @@ async def _matrix_into(
     command as a bare ExceptionGroup. Every stash here is read after the weave.
 
     A result and a `MatrixApiError` cannot be stashed together: this package
-    builds that error at exactly one site, under `execute()`, and closing the
-    client awaits the transport and nothing that raises one — so the arm below
-    reaches `state["matrix"]` only through the value `execute()` returned, and
-    reaching it at all means nothing raised. The single-origin half is asserted
-    rather than described, in `tests/test_refusal_markup.py`.
+    builds that error and its `MatrixHttpError` subclass only inside
+    `MatrixClient._post` (by `_raise_if_api_error` and `_status_error`), which
+    `execute()` calls, and closing the client awaits the transport and nothing
+    that raises one — so the arm below reaches `state["matrix"]` only through
+    the value `execute()` returned, and reaching it at all means nothing raised.
+    The single-origin half is asserted rather than described, in
+    `tests/test_refusal_markup.py`.
     """
     try:
         async with MatrixClient(rps=rps, impersonate=impersonate) as c:
@@ -8479,15 +8480,13 @@ async def _exact_flights_on(
 
 def _low_check_failure(e: Exception) -> str:
     """Each failure inside `e` by its kind and message. An HTTP status error
-    is named by its status line alone: its own text quotes the request URL,
-    which carries the API key."""
+    is named by its status line alone, which is its whole message."""
     parts: list[str] = []
     for f in _failures_inside(e) or [e]:
-        if isinstance(f, MatrixApiError):
+        if isinstance(f, MatrixHttpError):
+            parts.append(f.message)
+        elif isinstance(f, MatrixApiError):
             parts.append(f"Matrix returned an error ({f.kind}): {f.message}")
-        elif isinstance(f, httpx.HTTPStatusError):
-            status = f"HTTP {f.response.status_code:d} {f.response.reason_phrase}".strip()
-            parts.append(f"Matrix answered {status}")
         else:
             parts.append(f"{type(f).__name__}: {f}" if str(f) else type(f).__name__)
     return "; ".join(parts)
