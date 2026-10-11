@@ -203,8 +203,9 @@ first request that needs it, closed where the browser transport closes one
 that never escalated. The enriched path arms its interrupt guard under `auto`
 as under `browser`, so Ctrl-C stops an escalated Chrome. The handler ignores a
 second Ctrl-C only when it stopped a driver; an `auto` search that never
-escalated has none, so its second Ctrl-C ends the wait on the worker, as on
-`http`, and a throttle met after the first prints no escalation line. The
+escalated has none, so its second Ctrl-C flushes both streams and exits 130
+without waiting on the worker (`_gf_browser.second_ctrl_c_exits`), and a
+throttle met after the first prints no escalation line. The
 enriched path's `--split` runs on a worker of its own, so after an escalation it
 opens a second Chrome there.
 

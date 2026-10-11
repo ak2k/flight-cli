@@ -5,8 +5,9 @@
 buys is protection for the driver stop it runs. With no driver open the stop
 has nothing to protect, and an ignored second Ctrl-C leaves the user waiting
 out a worker that still sends Google requests. Handlers are called directly
-and no signal is sent, except in the two subprocess cases, which are the only
-place a real second signal can be shown to end (or not end) the process."""
+and no signal is sent, except in the subprocess case at the end and in
+`tests/test_gf_second_ctrl_c_exit.py`, the only places a real second signal can
+be shown to end (or not end) the process."""
 
 from __future__ import annotations
 
@@ -161,9 +162,9 @@ _PROBE = textwrap.dedent(
 )
 
 
-def _probe(mode: str, start_delay: float = 0.0) -> str:
+def _probe(mode: str) -> str:
     done = subprocess.run(  # noqa: S603 — this interpreter and a literal probe
-        [sys.executable, "-c", _PROBE, mode, "3", str(start_delay)],
+        [sys.executable, "-c", _PROBE, mode, "3", "0"],
         capture_output=True,
         text=True,
         timeout=60,
@@ -173,20 +174,6 @@ def _probe(mode: str, start_delay: float = 0.0) -> str:
     # so it would pass these tests whatever the handler does.
     assert "WORKER_STARTED" in done.stdout, done.stdout
     return done.stdout
-
-
-def test_a_second_ctrl_c_ends_an_auto_search_before_its_worker_finishes() -> None:
-    out = _probe("auto")
-
-    assert "MAIN_CANCELLED" in out
-    assert "WORKER_FINISHED" not in out
-
-
-def test_a_second_ctrl_c_ends_an_auto_search_whose_worker_starts_late() -> None:
-    out = _probe("auto", start_delay=0.8)
-
-    assert "MAIN_CANCELLED" in out
-    assert "WORKER_FINISHED" not in out
 
 
 def test_a_second_ctrl_c_is_ignored_on_a_browser_search_holding_a_driver() -> None:

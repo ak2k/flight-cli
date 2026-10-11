@@ -18,6 +18,7 @@ fli is heavy, so `cli` imports this module only when a browser grid runs.
 from __future__ import annotations
 
 import contextlib
+import math
 import urllib.parse
 from datetime import date, timedelta
 from http import HTTPStatus
@@ -31,6 +32,10 @@ from ._gf_errors import (
     GfBrowserUnavailableError,
     GfPageShapeError,
     GfSearchServerError,
+)
+from ._gf_postfilter import (
+    _stop_ceiling,  # pyright: ignore[reportPrivateUsage]
+    held_predicates,
 )
 from ._gf_rpc_shared import GfPageRpcError, result_payloads
 from ._gflight_ids import (
@@ -248,19 +253,16 @@ def _legs_differ(search: CalendarSearch) -> bool:
 
     The URL writes the outbound's predicates on both slices under ONE stop
     limit (`page_url`), so each leg is read with its stop ceilings replaced by
-    the lowest of them and `--stops`: `--stops 0` beside `--routing-ret N` holds
-    both legs to no stops, and is the same question twice."""
+    the lowest of them and `--stops` (`held_predicates`): `--stops 0` beside
+    `--routing-ret N` holds both legs to no stops, and is the same question
+    twice. A negative `--stops` is no limit."""
     if len(search.legs) == 1:
         return False
     ceiling = search.options.max_extra_stops
     held: list[frozenset[Predicate]] = []
     for leg in search.legs:
         predicates = classify(leg.route_language, leg.extension).predicates
-        limits = [p.max_stops for p in predicates if isinstance(p, StopsPred)]
-        if ceiling is not None:
-            limits.append(ceiling)
-        rest = frozenset(p for p in predicates if not isinstance(p, StopsPred))
-        held.append(rest | {StopsPred(min(limits))} if limits else rest)
+        held.append(held_predicates(predicates, ceiling))
     return held[0] != held[1]
 
 
@@ -333,7 +335,8 @@ def page_url(search: CalendarSearch, departure: date) -> str:
 
     `to_fli_filter` first, so the page asks what a search would, with the
     return at `departure` plus the trip length. Then the legs' own predicates,
-    then ONE stop limit: the lowest any source sets. The bridge reads `--stops`
+    then ONE stop limit: the lowest any source sets, a negative `--stops` being no
+    limit (`_stop_ceiling`). The bridge reads `--stops`
     alone, and `apply_gf_native_filters` lets the last `StopsPred` it meets
     overwrite it, so either order on its own can widen a nonstop request.
 
@@ -347,11 +350,9 @@ def page_url(search: CalendarSearch, departure: date) -> str:
     leg = search.legs[0]
     predicates = list(dict.fromkeys(classify(leg.route_language, leg.extension).predicates))
     apply_gf_native_filters(filters, predicates)
-    limits = [p.max_stops for p in predicates if isinstance(p, StopsPred)]
-    if search.options.max_extra_stops is not None:
-        limits.append(search.options.max_extra_stops)
-    if limits:
-        filters.stops = _fli_max_stops(min(limits))
+    ceiling = _stop_ceiling(predicates, search.options.max_extra_stops)
+    if ceiling is not None:
+        filters.stops = _fli_max_stops(ceiling)
     return search_page_url(filters)
 
 
@@ -387,9 +388,13 @@ def _price(cell: list[Any]) -> float | None:
         price = cell[2][0][1]
     except (IndexError, TypeError):
         return None
-    if isinstance(price, bool) or not isinstance(price, int | float) or price <= 0:
+    if isinstance(price, bool) or not isinstance(price, int | float):
         return None
-    return float(price)
+    try:
+        fare = float(price)
+    except OverflowError:
+        return None
+    return fare if math.isfinite(fare) and fare > 0 else None
 
 
 def parse_graph(body: str, *, trip_length: int | None) -> _GraphPage:

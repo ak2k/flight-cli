@@ -259,7 +259,9 @@ _ALLIANCES = frozenset({"oneworld", "skyteam", "star-alliance"})
 _RE_PLACEHOLDER = re.compile(r"^F[+*]$", re.IGNORECASE)
 _RE_NONSTOP = re.compile(r"^N(?::([A-Za-z]{2}))?$", re.IGNORECASE)
 _RE_CARRIER = re.compile(r"^(~?)(O:|C:)?([A-Za-z]{2})([+*])$", re.IGNORECASE)
-_RE_FLIGHTNUM = re.compile(r"^(~?)([A-Za-z]{2})(\d+)(?:-(\d+))?([+*?]?)$", re.IGNORECASE)
+_RE_FLIGHTNUM = re.compile(
+    r"^(~?)([A-Za-z]{2})([0-9]{1,9})(?:-([0-9]{1,9}))?([+*?]?)$", re.IGNORECASE
+)
 _RE_AIRPORT = re.compile(r"^(~?)(?:X:)?([A-Za-z]{3}(?:,[A-Za-z]{3})*)$", re.IGNORECASE)
 
 
@@ -347,14 +349,17 @@ _RE_AIRPORT_DEFAULT = re.compile(r"^[A-Z]{3}$")
 # A flight number: an airline designator (`_RE_AIRLINE`'s shape), digits, an
 # optional range and an optional quantifier. Wider than `_RE_FLIGHTNUM`, which
 # decides what Google post-filters and so stays letters-only.
-_RE_ONE_FLIGHT = re.compile(r"^(?!\d\d)[A-Z0-9]{2}(\d+)(?:-(\d+))?[+*?]?$")
+_RE_ONE_FLIGHT = re.compile(r"^(?!\d\d)[A-Z0-9]{2}([0-9]+)(?:-([0-9]+))?[+*?]?$")
 
 
 def _is_one_flight(alternative: str) -> bool:
     """A range names one flight only when its ends are equal; a wider one is a
     set of numbers the return draws from as the outbound does."""
     m = _RE_ONE_FLIGHT.match(alternative)
-    return m is not None and (m.group(2) is None or int(m.group(1)) == int(m.group(2)))
+    # Digit strings compared without `int`, which refuses more than 4300 digits.
+    return m is not None and (
+        m.group(2) is None or m.group(1).lstrip("0") == m.group(2).lstrip("0")
+    )
 
 
 def _with_prefix(alternative: str, lead: str) -> str:

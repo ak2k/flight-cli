@@ -30,6 +30,7 @@ __all__ = [
     "ApiKeyResolutionError",
     "MatrixApiError",
     "MatrixClient",
+    "MatrixHttpError",
     "MatrixShapeError",
 ]
 
@@ -61,6 +62,20 @@ class MatrixApiError(Exception):
         self.kind = kind
         self.request_id = request_id
         self.raw = raw
+
+
+class MatrixHttpError(MatrixApiError):
+    """Matrix answered an HTTP error status. The message is the status line
+    alone: httpx's own text quotes the request URL, and Matrix's carries the API
+    key."""
+
+    def __init__(self, status: int, reason: str) -> None:
+        super().__init__(f"Matrix answered HTTP {status:d} {reason}".rstrip(), kind="http")
+        self.status = status
+
+
+def _status_error(e: httpx.HTTPStatusError) -> MatrixHttpError:
+    return MatrixHttpError(e.response.status_code, e.response.reason_phrase)
 
 
 def _raise_if_api_error(data: dict[str, Any]) -> None:
@@ -180,7 +195,8 @@ class MatrixClient:
 
     async def _post(self, url: str, body: dict[str, Any], *, cache: bool) -> dict[str, Any]:
         """POST a body to Matrix and return its decoded answer, Matrix errors
-        raised as `MatrixApiError`.
+        raised as `MatrixApiError` and any other HTTP error status as
+        `MatrixHttpError`.
 
         On a 403 from Matrix (typically a stale or wrong cached API key),
         invalidate the cache, re-bootstrap once, and retry. If the retry
@@ -198,7 +214,7 @@ class MatrixClient:
             )
         except httpx.HTTPStatusError as e:
             if e.response.status_code != HTTPStatus.FORBIDDEN:
-                raise
+                raise _status_error(e) from None
             invalidate_cache()
             if not self._rebootstrap:
                 raise ApiKeyResolutionError("Matrix rejected the API key with HTTP 403.") from e
@@ -218,7 +234,7 @@ class MatrixClient:
                         "a non-prod key (e.g. matrix-nightly), or Matrix has "
                         "tightened access. Set FLIGHT_API_KEY explicitly."
                     ) from e2
-                raise
+                raise _status_error(e2) from None
         _raise_if_api_error(data)
         return data
 
@@ -256,28 +272,35 @@ class MatrixClient:
 
     async def airports(self, partial: str, page_size: int = 10) -> list[Location]:
         url = f"{BASE}/v1/locationTypes/CITIES_AND_AIRPORTS/partialNames/{partial}/locations"
-        data = await self._http.get_json(
-            url,
-            params={"pageSize": page_size, "key": self._api_key},
-        )
+        try:
+            data = await self._http.get_json(
+                url,
+                params={"pageSize": page_size, "key": self._api_key},
+            )
+        except httpx.HTTPStatusError as e:
+            raise _status_error(e) from None
         return [Location.model_validate(loc) for loc in data.get("locations", [])]
 
     async def airport(self, code: str) -> Location | None:
         """Look up a single airport by IATA code. Returns None only on 404
-        ('no such airport'); network errors and auth failures propagate so
-        callers can distinguish 'doesn't exist' from 'lookup is broken'."""
+        ('no such airport'); any other HTTP error status is raised as
+        `MatrixHttpError`, and network errors propagate, so callers can
+        distinguish 'doesn't exist' from 'lookup is broken'."""
         url = f"{BASE}/v1/locationTypes/airportOrMultiAirportCity/locationCodes/{code.upper()}"
         try:
             data = await self._http.get_json(url, params={"key": self._api_key})
         except httpx.HTTPStatusError as e:
             if e.response.status_code == HTTPStatus.NOT_FOUND:
                 return None
-            raise
+            raise _status_error(e) from None
         return Location.model_validate(data)
 
     async def currencies(self) -> list[dict[str, str]]:
-        data = await self._http.get_json(
-            f"{BASE}/v1/currencies",
-            params={"key": self._api_key},
-        )
+        try:
+            data = await self._http.get_json(
+                f"{BASE}/v1/currencies",
+                params={"key": self._api_key},
+            )
+        except httpx.HTTPStatusError as e:
+            raise _status_error(e) from None
         return data.get("currencies", [])

@@ -6,6 +6,8 @@ undocumented and prone to occasional field additions.
 
 from __future__ import annotations
 
+import math
+
 # `datetime` is used in pydantic-model annotations; pydantic v2 resolves
 # type hints at validation time and needs the symbol in the module's
 # runtime globals, even with `from __future__ import annotations`.
@@ -242,6 +244,18 @@ class SearchResult(_Loose):
         return self.currency_notice.ext.price if self.currency_notice.ext else None
 
 
+def _price_amount(price: str | None) -> float | None:
+    """The number in a Matrix price string, None where it has no finite one."""
+    if not price:
+        return None
+    i = next((j for j, c in enumerate(price) if c.isdigit() or c == "."), len(price))
+    try:
+        amount = float(price[i:])
+    except ValueError:
+        return None
+    return amount if math.isfinite(amount) else None
+
+
 class DurationOption(_Loose):
     trip_length: int = Field(alias="tripLength")
     min_price: str = Field(alias="minPrice")
@@ -253,10 +267,8 @@ class DurationOption(_Loose):
     destination: str | None = None
 
     @property
-    def price_value(self) -> float:
-        s = self.min_price
-        i = next((j for j, c in enumerate(s) if c.isdigit() or c == "."), len(s))
-        return float(s[i:])
+    def price_value(self) -> float | None:
+        return _price_amount(self.min_price)
 
 
 class TripDuration(_Loose):
@@ -280,11 +292,7 @@ class CalendarDay(_Loose):
 
     @property
     def price_value(self) -> float | None:
-        if not self.min_price:
-            return None
-        s = self.min_price
-        i = next((j for j, c in enumerate(s) if c.isdigit() or c == "."), len(s))
-        return float(s[i:])
+        return _price_amount(self.min_price)
 
 
 class Week(_Loose):
@@ -324,6 +332,10 @@ class CalendarResult(_Loose):
     @property
     def cheapest_price(self) -> str | None:
         return self.currency_notice.ext.price if self.currency_notice.ext else None
+
+    @property
+    def cheapest_value(self) -> float | None:
+        return _price_amount(self.cheapest_price)
 
     @property
     def days(self) -> list[CalendarDay]:

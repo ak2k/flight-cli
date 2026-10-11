@@ -247,13 +247,6 @@ def test_a_flight_number_carrying_markup_and_an_escape_prints_literally(
             id="top-level-extension",
         ),
         pytest.param(
-            ("--routing", "BA+", "--depart-times", "morning"),
-            None,
-            "No separate tickets on Google Flights: --depart-times reaches no --slice, so the "
-            "one-ways could not be held to it.",
-            id="top-level-times",
-        ),
-        pytest.param(
             ("--no-separate-tickets",),
             None,
             "No separate tickets on Google Flights: --no-separate-tickets was given.",
