@@ -3,16 +3,20 @@
 The store is `watches.json` in the config directory: `FLIGHT_CLI_CONFIG_DIR` (the
 override `_config.py` honors), else `$XDG_CONFIG_HOME/flight-cli`, else
 `~/.config/flight-cli`. The path is resolved per call so a moved variable moves it.
+`add` and `rm` hold an exclusive `flock` on that directory while they read, change and
+rewrite the store, so two overlapping commands each keep their change (not on Windows).
 """
 
 from __future__ import annotations
 
 import os
 import re
+import sys
 import tempfile
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
-from typing import Annotated, Final, Literal, Self, get_args
+from typing import TYPE_CHECKING, Annotated, Final, Literal, Self, get_args
 
 import typer
 from pydantic import (
@@ -26,6 +30,9 @@ from pydantic import (
 )
 
 from ._console_text import CTRL
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 Cabin = Literal["economy", "premium", "business", "first"]
 CABINS: Final = get_args(Cabin)
@@ -104,6 +111,27 @@ def _save(watches: list[Watch]) -> None:
         raise
 
 
+@contextmanager
+def _locked() -> Generator[None]:
+    """Serialize read-modify-write cycles: a command that loaded the store before
+    another saved would otherwise write back a list without that change. The lock
+    sits on the config directory's own descriptor, so no file joins `watches.json`
+    there; closing the descriptor releases it."""
+    directory = watches_path().parent
+    directory.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "win32":
+        yield
+        return
+    import fcntl  # noqa: PLC0415 - the module does not exist on Windows
+
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 def _fail(message: str, code: int) -> typer.Exit:
     """The store path comes from the environment and a key in an unusable store
     from the file, so either can carry characters a terminal acts on."""
@@ -149,11 +177,10 @@ def watch_add(
     """Save a watch; no date means any date."""
     if dep is not None and (dep_from is not None or dep_to is not None):
         raise _fail("--dep excludes --from and --to", 2)
-    stored = _load()
     try:
-        new = Watch.model_validate(
+        draft = Watch.model_validate(
             {
-                "id": max((w.id for w in stored), default=0) + 1,
+                "id": 0,
                 "origin": origin.upper(),
                 "destination": destination.upper(),
                 "dep_from": dep_from if dep is None else dep,
@@ -165,7 +192,10 @@ def watch_add(
         )
     except ValidationError as e:
         raise _fail(_problems(e), 2) from e
-    _save([*stored, new])
+    with _locked():
+        stored = _load()
+        new = draft.model_copy(update={"id": max((w.id for w in stored), default=0) + 1})
+        _save([*stored, new])
     typer.echo(f"Added {new.id}: {new.describe()}")
 
 
@@ -182,9 +212,12 @@ def watch_list() -> None:
 @watch_app.command("rm")
 def watch_rm(watch_id: Annotated[int, typer.Argument(metavar="ID", help="Id from `list`")]) -> None:
     """Delete one saved watch."""
-    stored = _load()
-    gone = next((w for w in stored if w.id == watch_id), None)
-    if gone is None:
+    if not watches_path().parent.is_dir():
         raise _fail(f"no watch with id {watch_id}", 1)
-    _save([w for w in stored if w is not gone])
+    with _locked():
+        stored = _load()
+        gone = next((w for w in stored if w.id == watch_id), None)
+        if gone is None:
+            raise _fail(f"no watch with id {watch_id}", 1)
+        _save([w for w in stored if w is not gone])
     typer.echo(f"Removed {watch_id}: {gone.describe()}")
