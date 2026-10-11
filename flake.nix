@@ -59,11 +59,41 @@
           };
         });
 
-      # To `nix build` this project (for nixpkgs PRs, NixOS modules,
+      packages = forAllSystems (system:
+        let
+          pkgs = pkgsFor system;
+          python = pkgs.${pyAttr};
+          # A remote test host puts only this env's bin on PATH and clears
+          # every UV_* variable first, so the devShell's interpreter pin and
+          # library path have to travel inside the uv binary itself. The pin
+          # applies on Darwin too, so a uv-managed Python on the host can't
+          # outrank the Nix one.
+          uv = pkgs.symlinkJoin {
+            name = "uv-nix-python";
+            paths = [ pkgs.uv ];
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+            postBuild = ''
+              wrapProgram $out/bin/uv \
+                --set UV_PYTHON ${python}/bin/python3 \
+                --set UV_PYTHON_PREFERENCE only-system \
+                ${lib.optionalString pkgs.stdenv.isLinux
+                  "--prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib ]}"}
+            '';
+          };
+        in
+        {
+          # What a remote test run needs to sync the locked env and run pytest.
+          factory-tools = pkgs.buildEnv {
+            name = "factory-tools";
+            paths = [ python uv pkgs.git ];
+          };
+        });
+
+      # To `nix build` the project itself (for nixpkgs PRs, NixOS modules,
       # home-manager), enable uv2nix: https://pyproject-nix.github.io/uv2nix/
       # Then also add `nix build .#default` to ci.yml.
       #
-      # packages = forAllSystems (system: { default = ...; });
+      # packages.default = ...;
       # apps = forAllSystems (system: { default = ...; });
     };
 }
