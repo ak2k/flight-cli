@@ -740,6 +740,37 @@ def _refuse_date_option_conflicts(
         raise typer.Exit(2)
 
 
+def _refuse_return_only_flags(
+    *,
+    return_times: str | None,
+    routing_return: str | None,
+    extension_return: str | None,
+    need: str,
+    remedy: str,
+) -> None:
+    """Exit 2 when a trip with no return is given a flag that filters the return.
+
+    A one-way has no return leg to carry `--return-times`, `--routing-ret` or
+    `--ext-ret`, so a call that took them would answer without the filter the
+    user asked for. `--routing-ret ''` asks for no codes on the return, so an
+    empty value counts; an empty `--return-times` filters nothing, so it does not."""
+    names = [
+        name
+        for name, value in (
+            ("--return-times", return_times or None),
+            ("--routing-ret", routing_return),
+            ("--ext-ret", extension_return),
+        )
+        if value is not None
+    ]
+    if names:
+        err.print(
+            f"[red]{_safe_text(', '.join(names))} set the return's filters, and need "
+            f"{_safe_text(need)}.[/] Drop them, or {_safe_text(remedy)}."
+        )
+        raise typer.Exit(2)
+
+
 def _return_codes(
     *,
     routing: str | None,
@@ -11663,6 +11694,14 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             )
         )
         raise typer.Exit(2)
+    if not ret_day and not slice_specs:
+        _refuse_return_only_flags(
+            return_times=return_times,
+            routing_return=routing_return,
+            extension_return=extension_return,
+            need="a --return or --return-arrive",
+            remedy="add one",
+        )
     per_slice = _one_way_per_slice(tuple(map(_parse_slice_spec, slice_specs or [])))
     if split and (
         blocker := _split_blocker(
@@ -12532,6 +12571,14 @@ def calendar(
     origins, dests = _require_airports(origin, destination)
     sd = _parse_date(start)
     ed = _parse_date(end) if end else sd + timedelta(days=30)
+    if one_way:
+        _refuse_return_only_flags(
+            return_times=return_times,
+            routing_return=routing_return,
+            extension_return=extension_return,
+            need="a round trip",
+            remedy="drop --one-way",
+        )
     dmin, dmax = _resolve_duration(duration, round_trip=not one_way)
     out_times = _parse_times(depart_times)
     ret_times = _parse_times(return_times)
@@ -12949,22 +12996,13 @@ def detail(
     dep_d = _parse_date(dep)
     ret_d = _parse_date(ret) if ret else None
     if ret_d is None:
-        # `--routing-ret ''` asks for no codes on the return, so an empty value counts.
-        names = [
-            name
-            for name, value in (
-                ("--return-times", return_times),
-                ("--routing-ret", routing_return),
-                ("--ext-ret", extension_return),
-            )
-            if value is not None
-        ]
-        if names:
-            err.print(
-                f"[red]{_safe_text(', '.join(names))} set the return's filters, and need a "
-                "--return.[/] Drop them, or add --return."
-            )
-            raise typer.Exit(2)
+        _refuse_return_only_flags(
+            return_times=return_times,
+            routing_return=routing_return,
+            extension_return=extension_return,
+            need="a --return",
+            remedy="add --return",
+        )
     sd = _parse_date(start) if start else dep_d
     ed = _parse_date(end) if end else sd + timedelta(days=30)
     dmin, dmax = _resolve_duration(duration, round_trip=ret_d is not None)
