@@ -1086,16 +1086,32 @@ def interrupt_guard(*, armed: bool = True) -> Generator[None]:
             signal.signal(signal.SIGINT, previous)
 
 
+# Long enough for a flush to any reader that drains its pipe; it runs out only
+# when a write that cannot finish holds the stream's lock.
+_FLUSH_WITHIN = 0.5
+
+
+def _flush_std_streams() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        # Any exception, not a list of them: a closed or absent stream must not
+        # keep the other one from its flush.
+        with contextlib.suppress(Exception):
+            stream.flush()
+
+
 def _exit_on_sigint(_signum: int, _frame: types.FrameType | None) -> None:
     """Flush both streams and leave without the interpreter's shutdown, whose
     join on a worker thread is what an interrupt could not end."""
-    for stream in (sys.stdout, sys.stderr):
-        # Any exception, not a list of them: the signal can land inside a write
-        # that holds the stream's lock, and the flush then raises RuntimeError.
-        # Whatever a flush raises, the exit below must still run.
-        with contextlib.suppress(Exception):
-            stream.flush()
-    os._exit(130)
+    # A flush takes the stream's lock, which a write blocked on an undrained
+    # pipe holds for as long as nothing reads it, on a worker or on the main
+    # thread under this handler. So the flush runs on a thread of its own and
+    # the wait for it is bounded, and nothing it raises can skip the exit.
+    try:
+        flusher = threading.Thread(target=_flush_std_streams, daemon=True)
+        flusher.start()
+        flusher.join(_FLUSH_WITHIN)
+    finally:
+        os._exit(130)
 
 
 @contextlib.contextmanager
