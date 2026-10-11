@@ -293,7 +293,7 @@ alone:
 |---|---|---|---|
 | Star Alliance | `FRA,MUC,ZRH,VIE,CPH,IST,LIS` | `ICN,NRT,PEK,SIN` | `EWR,ORD,IAH,DEN,SFO,LAX` |
 | Oneworld | `LHR,MAD,HEL,DUB` | `HKG,DOH,NRT` | `JFK,DFW,ORD,LAX,MIA` |
-| SkyTeam | `CDG,AMS,PRG` | `ICN,CDG,PVG` | `JFK,ATL,DTW,MSP,SLC,LAX` |
+| SkyTeam | `CDG,AMS,PRG` | `ICN,PVG` | `JFK,ATL,DTW,MSP,SLC,LAX` |
 
 Full reference: [airport_groups.md](../../docs/memories/airport_groups.md).
 
