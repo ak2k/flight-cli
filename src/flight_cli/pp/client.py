@@ -5,7 +5,8 @@ Three endpoints matter:
   GET  /api/pricing-info      airline catalog + transfer-partner mapping (cached 24h)
   GET  /api/extension-config  per-tier feature flags (cached 7d) — drives airline filter
 
-401 → refresh tokens once → retry. Anything else propagates.
+401 → refresh tokens once → retry. A refresh PointsPath refuses is not tried
+again for the same token. Anything else propagates.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ from ..providers.base import (
     http_reason,
     record_failure,
 )
-from .auth import Tokens, get_valid_tokens
+from .auth import PPAuthError, Tokens, get_valid_tokens
 from .auth import refresh as refresh_tokens
 from .models import AirlineSearchResponse, PricingInfoResponse
 
@@ -196,6 +197,9 @@ class PPClient:
         self._tokens = tokens
         self._sem = anyio.Semaphore(concurrency)
         self._refresh_lock = anyio.Lock()
+        # The token a refresh was refused for, and the refusal: the token is
+        # unchanged, so each request queued behind the refusal would ask again.
+        self._refresh_refused: tuple[str, PPAuthError] | None = None
         # Pair queries fan out at once, so without this each would ask an
         # airline PointsPath has just turned away as unsupported before the
         # first refusal lands: an airline's first request goes out alone.
@@ -257,12 +261,20 @@ class PPClient:
             # it; in a thread the award deadline stops waiting on it. The lock
             # keeps refreshes one at a time. A request that queued behind a
             # refresh of the token it was sent with retries on the result
-            # instead of refreshing that result again.
+            # instead of refreshing that result again, and one queued behind a
+            # refusal of that token raises the refusal.
             async with self._refresh_lock:
                 if self._tokens.access_token == sent.access_token:
-                    self._tokens = await anyio.to_thread.run_sync(
-                        refresh_tokens, self._tokens, abandon_on_cancel=True
-                    )
+                    refused = self._refresh_refused
+                    if refused is not None and refused[0] == sent.access_token:
+                        raise refused[1]
+                    try:
+                        self._tokens = await anyio.to_thread.run_sync(
+                            refresh_tokens, self._tokens, abandon_on_cancel=True
+                        )
+                    except PPAuthError as e:
+                        self._refresh_refused = (sent.access_token, e)
+                        raise
             async with self._sem:
                 r = await self._client.request(
                     method,

@@ -1245,7 +1245,15 @@ def test_a_credential_utf8_cannot_encode_still_gets_every_check_reported(
         assert list(_table_rows(result.stdout)) == list(_doctor.CHECK_IDS)
 
 
-@pytest.mark.parametrize("body", ["[]", "null", '{"access_token": "a", "expires_at": "soon"}'])
+@pytest.mark.parametrize(
+    "body",
+    [
+        "[]",
+        "null",
+        '{"access_token": "a", "expires_at": "soon"}',
+        '{"access_token": "a", "expires_at": 1e400}',
+    ],
+)
 def test_a_pointspath_store_of_the_wrong_shape_fails_as_config(world: World, body: str) -> None:
     assert pp_auth.TOKENS_PATH.is_relative_to(world.tmp)
     pp_auth.TOKENS_PATH.write_text(body)
