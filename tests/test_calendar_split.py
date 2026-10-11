@@ -3229,7 +3229,7 @@ def test_calendar_summary_and_cells_survive_a_markup_price(
     query that had succeeded, and a well-formed one ate the number."""
     res = _result(
         {9: {7: ("[/x]USD500.00", 1, {5: "[bold]USD501.00", 7: "USD502.00"})}},
-        cheapest="[bold]USD421 [/x]",
+        cheapest="[bold][/x]USD421",
     )
     buffer = io.StringIO()
     monkeypatch.setattr(cli, "console", Console(file=buffer, width=300))
@@ -3244,7 +3244,7 @@ def test_calendar_summary_and_cells_survive_a_markup_price(
         round_trip=True,
     )
     written = _flat(buffer.getvalue())
-    assert "[bold]USD421 [/x]" in written  # the summary line, shown not parsed
+    assert "[bold][/x]USD421" in written  # the summary line, shown not parsed
     assert "[/x]USD500.00" in written  # the min cell
     assert "[bold]USD501.00" in written  # a per-duration cell
     _ = capsys.readouterr()

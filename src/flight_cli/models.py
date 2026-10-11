@@ -334,6 +334,10 @@ class CalendarResult(_Loose):
         return self.currency_notice.ext.price if self.currency_notice.ext else None
 
     @property
+    def cheapest_value(self) -> float | None:
+        return _price_amount(self.cheapest_price)
+
+    @property
     def days(self) -> list[CalendarDay]:
         return [d for m in self.months for d in m.days]
 
