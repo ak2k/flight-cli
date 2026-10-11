@@ -45,9 +45,10 @@ import logging
 import os
 import re
 import signal
+import sys
 import threading
 import time
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, TextIO
 
 from rich.console import Console
 
@@ -1038,8 +1039,10 @@ def interrupt_guard(*, armed: bool = True) -> Generator[None]:
     shutdown that ever did hang could no longer be interrupted from the same
     terminal. A first one that finds no driver open puts the previous disposition
     back once the stop has returned, so a second Ctrl-C ends the wait on a worker,
-    as it does on `http`. The ignore still goes in first in that case too, and a
-    launch not yet registered reads `_interrupt_state` rather than the register.
+    as it does on `http`; an `auto` weave enters `second_ctrl_c_exits` outside this
+    so that the disposition handed back ends the process. The ignore still goes
+    in first in that case too, and a launch not yet registered reads
+    `_interrupt_state` rather than the register.
 
     Only the main thread may install a handler; on any other this is a no-op that
     still runs its body, which is correct — that thread's Ctrl-C arrives on the
@@ -1080,6 +1083,68 @@ def interrupt_guard(*, armed: bool = True) -> Generator[None]:
         yield
     finally:
         if not seen:
+            signal.signal(signal.SIGINT, previous)
+
+
+# Long enough for a flush to any reader that drains its pipe; it runs out only
+# when a write that cannot finish holds the stream's lock.
+_FLUSH_WITHIN = 0.5
+
+
+def _flush_quietly(stream: TextIO) -> None:
+    # Any exception, not a list of them: a closed or absent stream is left
+    # unflushed without a thread's traceback on the way out.
+    with contextlib.suppress(Exception):
+        stream.flush()
+
+
+def _exit_on_sigint(_signum: int, _frame: types.FrameType | None) -> None:
+    """Flush both streams and leave without the interpreter's shutdown, whose
+    join on a worker thread is what an interrupt could not end."""
+    # A flush takes the stream's lock, which a write blocked on an undrained
+    # pipe holds for as long as nothing reads it, on a worker or on the main
+    # thread under this handler. So each stream flushes on a thread of its own,
+    # one that blocks does not keep the other from its flush, the wait for both
+    # is bounded together, and nothing they raise can skip the exit.
+    try:
+        deadline = time.monotonic() + _FLUSH_WITHIN
+        flushers = [
+            threading.Thread(target=_flush_quietly, args=(stream,), daemon=True)
+            for stream in (sys.stdout, sys.stderr)
+        ]
+        for flusher in flushers:
+            flusher.start()
+        for flusher in flushers:
+            flusher.join(max(0.0, deadline - time.monotonic()))
+    finally:
+        os._exit(130)
+
+
+@contextlib.contextmanager
+def second_ctrl_c_exits(*, armed: bool = True) -> Generator[None]:
+    """Make the Ctrl-C that `interrupt_guard` hands back end the process.
+
+    Enter it OUTSIDE `interrupt_guard`, so that the disposition the guard calls
+    its previous one is this. A first Ctrl-C that finds no driver open puts that
+    disposition back, and the default one raises `KeyboardInterrupt` wherever
+    the main thread stands: inside `asyncio.Runner.close`, or in the
+    interpreter's join on the worker thread, which the interrupt does not end,
+    and the process then waits out the worker. This handler flushes stdout and
+    stderr and exits with status 130 instead.
+
+    A first Ctrl-C that found a driver open leaves the guard's ignore in place,
+    and nothing is put back after any first Ctrl-C: the handler must still stand
+    during the interpreter's shutdown, which runs after this exits. Like the
+    guard, a no-op off the main thread."""
+    if not armed or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, _exit_on_sigint)
+    try:
+        yield
+    finally:
+        if not _interrupt_state["seen"]:
             signal.signal(signal.SIGINT, previous)
 
 

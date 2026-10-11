@@ -8074,7 +8074,10 @@ def _run_the_weave(
     the most ordinary command there is — and the rows the other backend already
     has go with it. A stash is not an outcome: every path out of its caller
     reads it, including the one whose other half succeeded."""
-    from ._gf_browser import interrupt_guard  # noqa: PLC0415 — patchright off the import path
+    from ._gf_browser import (  # noqa: PLC0415 — patchright off the import path
+        interrupt_guard,
+        second_ctrl_c_exits,
+    )
 
     try:
         try:
@@ -8091,7 +8094,15 @@ def _run_the_weave(
             # a worker no interrupt reaches, so on `http` the first Ctrl-C has
             # nothing to free and an ignored second one takes away the only
             # thing that could end the process.
-            with interrupt_guard(armed=gf_mode != TRANSPORT_HTTP):
+            #
+            # `auto` also enters `second_ctrl_c_exits` outside the guard: with
+            # no driver open the guard hands the next Ctrl-C back, and that
+            # one must end the process rather than raise inside the Runner's
+            # close or the shutdown join on the worker.
+            with (
+                second_ctrl_c_exits(armed=gf_mode not in (TRANSPORT_HTTP, TRANSPORT_BROWSER)),
+                interrupt_guard(armed=gf_mode != TRANSPORT_HTTP),
+            ):
                 anyio.run(go)
         except* KeyboardInterrupt:
             # With no Runner handler installed, the interrupt lands wherever the
