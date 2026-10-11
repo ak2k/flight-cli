@@ -272,28 +272,35 @@ class MatrixClient:
 
     async def airports(self, partial: str, page_size: int = 10) -> list[Location]:
         url = f"{BASE}/v1/locationTypes/CITIES_AND_AIRPORTS/partialNames/{partial}/locations"
-        data = await self._http.get_json(
-            url,
-            params={"pageSize": page_size, "key": self._api_key},
-        )
+        try:
+            data = await self._http.get_json(
+                url,
+                params={"pageSize": page_size, "key": self._api_key},
+            )
+        except httpx.HTTPStatusError as e:
+            raise _status_error(e) from None
         return [Location.model_validate(loc) for loc in data.get("locations", [])]
 
     async def airport(self, code: str) -> Location | None:
         """Look up a single airport by IATA code. Returns None only on 404
-        ('no such airport'); network errors and auth failures propagate so
-        callers can distinguish 'doesn't exist' from 'lookup is broken'."""
+        ('no such airport'); any other HTTP error status is raised as
+        `MatrixHttpError`, and network errors propagate, so callers can
+        distinguish 'doesn't exist' from 'lookup is broken'."""
         url = f"{BASE}/v1/locationTypes/airportOrMultiAirportCity/locationCodes/{code.upper()}"
         try:
             data = await self._http.get_json(url, params={"key": self._api_key})
         except httpx.HTTPStatusError as e:
             if e.response.status_code == HTTPStatus.NOT_FOUND:
                 return None
-            raise
+            raise _status_error(e) from None
         return Location.model_validate(data)
 
     async def currencies(self) -> list[dict[str, str]]:
-        data = await self._http.get_json(
-            f"{BASE}/v1/currencies",
-            params={"key": self._api_key},
-        )
+        try:
+            data = await self._http.get_json(
+                f"{BASE}/v1/currencies",
+                params={"key": self._api_key},
+            )
+        except httpx.HTTPStatusError as e:
+            raise _status_error(e) from None
         return data.get("currencies", [])
