@@ -12229,6 +12229,14 @@ def fare(
             )
         )
         raise typer.Exit(2)
+    if not ret and not slice_specs:
+        _refuse_return_only_flags(
+            return_times=return_times,
+            routing_return=None,
+            extension_return=None,
+            need="a --return",
+            remedy="add one",
+        )
     _refuse_date_option_conflicts(
         slice_specs=slice_specs,
         dep=dep,
