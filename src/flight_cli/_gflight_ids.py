@@ -1416,7 +1416,8 @@ def _seed_cookies_once(client: Any) -> None:
         saved = payload["cookies"]  # untrusted Any; iterated defensively below
     except OSError:
         return  # no saved cookies yet (first-ever run)
-    except (ValueError, TypeError, KeyError):
+    except (ValueError, TypeError, KeyError, RecursionError):
+        # RecursionError: JSON nested past the decoder's recursion limit.
         log.debug("ignoring unparseable gflight cookie cache")
         return
     if time.time() - saved_at > _COOKIE_TTL_S:
