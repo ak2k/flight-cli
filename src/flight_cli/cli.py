@@ -11180,7 +11180,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             help=(
                 "Preferred outbound times-of-day (comma list: morning,midday), or one "
                 "departure window to the minute (9:30-13:45). Beside --arrive, give "
-                "--arrive-times instead."
+                "--arrive-times instead. Refused beside --slice."
             ),
             autocompletion=_complete_times,
             rich_help_panel=_GROUP_FILTERING,
@@ -11192,7 +11192,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             "--return-times",
             help=(
                 "Preferred return times-of-day, or one window to the minute. Beside "
-                "--return-arrive, give --return-arrive-times instead."
+                "--return-arrive, give --return-arrive-times instead. Refused beside --slice."
             ),
             autocompletion=_complete_times,
             rich_help_panel=_GROUP_FILTERING,
@@ -12068,11 +12068,18 @@ def fare(
     depart_times: Annotated[
         str | None,
         typer.Option(
-            "--depart-times", help="Preferred outbound times-of-day (comma list: morning,evening)"
+            "--depart-times",
+            help=(
+                "Preferred outbound times-of-day (comma list: morning,evening). "
+                "Refused beside --slice."
+            ),
         ),
     ] = None,
     return_times: Annotated[
-        str | None, typer.Option("--return-times", help="Preferred return times-of-day")
+        str | None,
+        typer.Option(
+            "--return-times", help="Preferred return times-of-day. Refused beside --slice."
+        ),
     ] = None,
     routing_return: str | None = typer.Option(None, "--routing-ret", help=_ROUTING_RET_HELP),
     extension_return: str | None = typer.Option(None, "--ext-ret", help=_EXT_RET_HELP),
@@ -12142,6 +12149,17 @@ def fare(
             )
         )
         raise typer.Exit(2)
+    _refuse_date_option_conflicts(
+        slice_specs=slice_specs,
+        dep=dep,
+        arrive=None,
+        ret=ret,
+        return_arrive=None,
+        flex=None,
+        return_flex=None,
+        depart_times=depart_times,
+        return_times=return_times,
+    )
     # This block is `search`'s, near-duplicated. Deliberately not shared: `fare`
     # is deprecated and prints so on every run, and a helper spanning a command
     # on its way out ties the survivor's leg building to the leaving one.
