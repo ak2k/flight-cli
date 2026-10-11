@@ -4763,11 +4763,15 @@ def _render_search(
     # query that succeeded.
     ccy, cheapest = _split_price(res.cheapest_price)
     ccy_tag = f" ({_safe_text(ccy)})" if ccy else ""
+    # A notice with no readable amount (`USD1e999`) is the no-price dash, untagged.
+    headline_price = "—"
+    if res.cheapest_value is not None:
+        headline_price = f"{cheapest} ({ccy})" if ccy else cheapest
     party = passengers > 1
     console.print(
         f"[bold]{res.solution_count} solutions[/]  · "
         + ("cheapest per traveler" if party else "cheapest")
-        + f": [bold cyan]{_safe_text(cheapest or '—')}{ccy_tag}[/]"
+        + f": [bold cyan]{_safe_text(headline_price)}[/]"
     )
 
     cm = res.carrier_stop_matrix

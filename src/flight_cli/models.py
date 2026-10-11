@@ -243,6 +243,10 @@ class SearchResult(_Loose):
     def cheapest_price(self) -> str | None:
         return self.currency_notice.ext.price if self.currency_notice.ext else None
 
+    @property
+    def cheapest_value(self) -> float | None:
+        return _price_amount(self.cheapest_price)
+
 
 def _price_amount(price: str | None) -> float | None:
     """The number in a Matrix price string, None where it has no finite one."""

@@ -3301,7 +3301,9 @@ def test_search_summary_and_table_survive_a_hostile_matrix_field(
     label and a carrier cell. The currency half is driven through `_split_price`
     because `_PRICE_RE` bounds it to three letters, so the render site is pinned
     without depending on that regex staying as it is."""
-    kwargs = {field: payload} if field != "currency" else {}
+    # An amount-less price prints as the no-price dash, so the hostile text leads a readable one.
+    value = payload + "421.00" if field == "price" else payload
+    kwargs = {field: value} if field != "currency" else {}
     res = _search_result(**kwargs)
     if field == "currency":
 
