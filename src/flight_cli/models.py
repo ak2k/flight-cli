@@ -6,6 +6,8 @@ undocumented and prone to occasional field additions.
 
 from __future__ import annotations
 
+import math
+
 # `datetime` is used in pydantic-model annotations; pydantic v2 resolves
 # type hints at validation time and needs the symbol in the module's
 # runtime globals, even with `from __future__ import annotations`.
@@ -285,9 +287,10 @@ class CalendarDay(_Loose):
         s = self.min_price
         i = next((j for j, c in enumerate(s) if c.isdigit() or c == "."), len(s))
         try:
-            return float(s[i:])
+            amount = float(s[i:])
         except ValueError:
             return None
+        return amount if math.isfinite(amount) else None
 
 
 class Week(_Loose):

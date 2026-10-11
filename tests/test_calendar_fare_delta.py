@@ -160,14 +160,15 @@ def test_a_three_decimal_amount_is_compared_exactly(
     assert _green_amounts(written) == ["0.800"]
 
 
-def test_an_exponent_amount_renders_without_a_deal(
+def test_an_overflowing_amount_renders_as_no_price_without_a_deal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     written = _render(
         monkeypatch,
         ["USD100.00", "USD100.00", "USD100.00", "USD100.00", "USD100.00", "USD1e400"],
     )
-    assert "1e400" in written
+    assert "1e400" not in written
+    assert "—" in written
     assert _GREEN not in written
 
 
