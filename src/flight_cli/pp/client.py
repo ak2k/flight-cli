@@ -484,7 +484,8 @@ def _load_unsupported_raw() -> dict[str, float]:
     """
     try:
         raw: Any = json.loads(UNSUPPORTED_CACHE.read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
+        # RecursionError: JSON nested past the decoder's recursion limit.
         return {}
     if isinstance(raw, list):  # legacy: ["ANA", "Finnair", ...]
         try:
