@@ -118,7 +118,9 @@ waiting on; an abandoned refresh can still hold the process's exit for its own
 unanswered then is cut and named in the line (`not answered within 180 s`, with
 a count), and every answer already in is kept, joined and rendered. The
 deadline sits on each request and not around a provider's whole search, which
-would also cancel the merge of the answers that did arrive.
+would also cancel the merge of the answers that did arrive. A refresh the login
+refuses is not tried again for the same token by the requests queued behind it;
+each raises the same `PPAuthError`.
 
 Measured on the skill's Example 2 (`NYC MUC`, business, round trip: 6 pairs x 2
 cabins x 17 airlines = 204 PointsPath requests) before the change: Matrix
