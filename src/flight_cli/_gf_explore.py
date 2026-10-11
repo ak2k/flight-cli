@@ -15,6 +15,7 @@ under this query.
 
 from __future__ import annotations
 
+import math
 import urllib.parse
 from datetime import date
 from http import HTTPStatus
@@ -133,9 +134,13 @@ def _rows(block: Any) -> list[list[Any]]:
 
 def _price(row: list[Any]) -> float | None:
     price = dig(row, 1, 0, 1)
-    if isinstance(price, int | float) and not isinstance(price, bool) and price > 0:
-        return price
-    return None
+    if isinstance(price, bool) or not isinstance(price, int | float):
+        return None
+    try:
+        finite = math.isfinite(price)
+    except OverflowError:  # an integer too large for a float
+        return None
+    return price if finite and price > 0 else None
 
 
 def parse_destinations(body: str, *, origin: str, month: date | None) -> list[Destination]:
