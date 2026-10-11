@@ -53,7 +53,7 @@ class CalendarRow(ResultRow):
     """A calendar's priced day or graph cell, with the dates it prices beside
     `row`, which for a Matrix day holds its day of the month alone. `departure`
     is null for a day the window does not place on one date; `return` is null on
-    a one-way and on a round-trip day that names no trip length."""
+    a one-way and on a round-trip day that names no trip length with a finite price."""
 
     departure: dt.date | None
     return_date: dt.date | None = Field(alias="return")

@@ -497,13 +497,6 @@ _ALONE = "--backend gflight answers a multi-city search with Google Flights' sep
             id="opted-out",
         ),
         pytest.param(
-            ("--depart-times", "morning"),
-            None,
-            f"{_ALONE}, and none is asked: --depart-times reaches no --slice, so the one-ways "
-            "could not be held to it. Drop --backend gflight.",
-            id="top-level-times",
-        ),
-        pytest.param(
             ("--extension", "F BC=j"),
             None,
             f"{_ALONE}, and none is asked: Google Flights can't serve slice 1 (SFO→ORD) as a "

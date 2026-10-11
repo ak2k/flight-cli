@@ -41,7 +41,8 @@ def load_key() -> str | None:
         return None
     try:
         raw: Any = json.loads(KEY_PATH.read_text())
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError, RecursionError):
+        # RecursionError: JSON nested past the decoder's recursion limit.
         return None
     if not isinstance(raw, dict):
         return None
@@ -56,9 +57,15 @@ def save_key(key: str) -> None:
     """Persist the API key to ~/.config/flight-cli/seats.json with 0600 perms.
 
     The directory is created if missing. Existing contents are replaced
-    (no merge — this is a single-key file)."""
+    (no merge — this is a single-key file). A new file is created 0600 rather
+    than written at the process umask and then chmod'd, which left the key
+    readable by other users in between."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    KEY_PATH.write_text(json.dumps({"api_key": key.strip()}, indent=2))
+    payload = json.dumps({"api_key": key.strip()}, indent=2)
+    fd = os.open(KEY_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        _ = fh.write(payload)
+    # An existing file keeps its old mode through O_CREAT, so still enforce it.
     KEY_PATH.chmod(0o600)
 
 

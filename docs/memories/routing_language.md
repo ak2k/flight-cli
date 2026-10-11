@@ -198,6 +198,10 @@ Same caveat — documented in Google's help but rejected by the API:
 | `UA1000-2000+` | One or more UA flights with numbers 1000–2000 |
 | `AS21 AS487` | Exactly AS21, then AS487: one token per flight |
 
+A flight number is ASCII `0`-`9`, at most 9 digits. Any other digit (an
+Arabic-Indic one) or a longer number is no flight number flight-cli parses, so
+the routing is not GF-expressible and goes to Matrix.
+
 A chain of flight-number tokens names an itinerary's flights, one token per
 flight. One token is an itinerary of that flight alone: JFK-LAX, `AS21` answers
 "No solutions", because AS21 ends in Seattle. A through flight (one number over

@@ -77,7 +77,7 @@ _SUPPORTED: tuple[type, ...] = (
     SpecificFlightPred,
 )
 
-_FLIGHT_RE = re.compile(r"^([A-Z0-9]{2})(\d+)$", re.IGNORECASE)
+_FLIGHT_RE = re.compile(r"^([A-Z0-9]{2})([0-9]{1,9})$", re.IGNORECASE)
 _MAX_FLIGHT_NUMBER = 9999
 
 
@@ -165,7 +165,8 @@ def search_page_reasons(
     post-filter. Empty when the page serves them all.
 
     The page is asked for the strictest stop limit alone
-    (`fli_bridge.apply_gf_native_filters`), so only that one has to fit.
+    (`fli_bridge.apply_gf_native_filters`), so only that one has to fit. A
+    negative `stops` is no limit (`_stop_ceiling`).
     3.6 is one include list, so an alliance written beside a carrier or another
     alliance asks Google for either, and no row check narrows an alliance back.
     A `+CABIN` naming exactly `cabin` is served, its rows held to it: the page
@@ -173,7 +174,7 @@ def search_page_reasons(
     for."""
     preds = list(predicates)
     limits = [p.max_stops for p in preds if isinstance(p, StopsPred)]
-    if stops is not None:
+    if stops is not None and stops >= 0:
         limits.append(stops)
     reasons = page_can_encode([StopsPred(min(limits))])[1] if limits else []
     reasons += [
@@ -301,6 +302,16 @@ def _stop_ceiling(predicates: Iterable[Predicate], max_stops: int | None) -> int
     if max_stops is not None and max_stops >= 0:
         limits.append(max_stops)
     return min(limits, default=None)
+
+
+def held_predicates(predicates: Iterable[Predicate], max_stops: int | None) -> frozenset[Predicate]:
+    """`predicates` with its stop ceilings replaced by the strictest of them and
+    `max_stops` (`_stop_ceiling`): the question a leg asks of Google once its
+    stop count is read as one limit."""
+    preds = list(predicates)
+    rest = frozenset(p for p in preds if not isinstance(p, StopsPred))
+    ceiling = _stop_ceiling(preds, max_stops)
+    return rest if ceiling is None else rest | {StopsPred(ceiling)}
 
 
 def _within(stamp: Any, windows: Sequence[TimeWindow]) -> bool:
