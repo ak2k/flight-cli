@@ -382,7 +382,8 @@ class _Doctor:
             payload = json.loads(text)
             saved_at = float(payload["saved_at"])
             nids = sum(1 for c in payload["cookies"] if c["name"] == "NID")
-        except (ValueError, TypeError, KeyError) as e:
+        except (ValueError, TypeError, KeyError, RecursionError) as e:
+            # RecursionError: JSON nested past the decoder's recursion limit.
             raise _CheckFailedError(
                 "config", f"{path} is not a cookie jar this CLI wrote: {e!r}"
             ) from e
