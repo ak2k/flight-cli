@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import os
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -16,8 +18,6 @@ from flight_cli import _watch, cli
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-_PAUSE_SECS = 1.0
 
 
 @pytest.fixture
@@ -59,19 +59,31 @@ def _race(
     first: Callable[[], None],
     second: Callable[[], None],
 ) -> None:
-    """Run `first` and, once it has read the store, `second` to completion; `first`
-    waits for `second` to finish (or `_PAUSE_SECS`) before it goes on to write."""
+    """Run `first` and, once it has read the store, `second`. `first` goes on to
+    write only once `second` has finished or is blocked on a lock it cannot take,
+    so the two overlap however late `second` is scheduled."""
     real_read = Path.read_bytes
+    real_flock = fcntl.flock
     first_has_read = threading.Event()
-    second_is_done = threading.Event()
+    second_is_done_or_blocked = threading.Event()
     errors: list[BaseException] = []
 
     def read_bytes(self: Path) -> bytes:
         data = real_read(self)
         if self == store and threading.current_thread().name == "first":
             first_has_read.set()
-            _ = second_is_done.wait(_PAUSE_SECS)
+            assert second_is_done_or_blocked.wait(10), "the second writer neither ended nor blocked"
         return data
+
+    def flock(fd: int, operation: int) -> None:
+        if threading.current_thread().name == "second" and operation == fcntl.LOCK_EX:
+            try:
+                real_flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                second_is_done_or_blocked.set()
+            else:
+                return
+        real_flock(fd, operation)
 
     def guarded(job: Callable[[], None], done: threading.Event | None) -> Callable[[], None]:
         def run() -> None:
@@ -86,8 +98,11 @@ def _race(
         return run
 
     monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    monkeypatch.setattr(fcntl, "flock", flock)
     t1 = threading.Thread(target=guarded(first, None), name="first", daemon=True)
-    t2 = threading.Thread(target=guarded(second, second_is_done), name="second", daemon=True)
+    t2 = threading.Thread(
+        target=guarded(second, second_is_done_or_blocked), name="second", daemon=True
+    )
     t1.start()
     assert first_has_read.wait(10)
     t2.start()
@@ -121,6 +136,41 @@ def test_a_second_writer_starting_mid_update_does_not_lose_either_update(
     _race(monkeypatch, store, first, second)
     assert _destinations(store) == expected
     assert sorted(p.name for p in store.parent.iterdir()) == ["watches.json"]
+
+
+def _unlocked(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_watch, "_locked", contextlib.nullcontext)
+
+
+def _locked_around_save_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    lock, save = _watch._locked, _watch._save  # pyright: ignore[reportPrivateUsage] - the broken variant reuses them
+
+    def locked_save(watches: list[_watch.Watch]) -> None:
+        with lock():
+            save(watches)
+
+    monkeypatch.setattr(_watch, "_save", locked_save)
+    _unlocked(monkeypatch)
+
+
+@pytest.mark.parametrize(
+    "break_lock", [_unlocked, _locked_around_save_only], ids=["no-lock", "lock-around-save-only"]
+)
+def test_the_race_overlaps_the_writers_however_late_the_second_one_starts(
+    store: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    break_lock: Callable[[pytest.MonkeyPatch], None],
+) -> None:
+    saved = CliRunner().invoke(cli.app, ["watch", "add", "JFK", "LHR"])
+    assert saved.exit_code == 0, saved.output
+    break_lock(monkeypatch)
+
+    def late() -> None:
+        time.sleep(1.5)
+        _add("AMS")()
+
+    _race(monkeypatch, store, _add("CDG"), late)
+    assert _destinations(store) == ["LHR", "CDG"]
 
 
 def test_rm_with_no_config_directory_exits_1_and_creates_none(store: Path) -> None:
