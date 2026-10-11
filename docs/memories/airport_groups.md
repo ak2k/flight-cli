@@ -128,7 +128,7 @@ most search results would want to consider.
 |---|---|---|
 | Star Alliance Europe hubs | `FRA,MUC,ZRH,VIE,CPH,IST,LIS,WAW,ATH,BRU` | Use with `--routing 'STAR+'` or `--extension 'ALLIANCE star-alliance'` for clean alliance-only routings |
 | Oneworld Europe hubs | `LHR,MAD,HEL,DUB,WAW` | LHR is BA, MAD is IB, HEL is AY |
-| SkyTeam Europe hubs | `CDG,AMS,FCO,PRG,BUD` | CDG is AF, AMS is KL, FCO is AZ |
+| SkyTeam Europe hubs | `CDG,AMS,PRG,BUD` | CDG is AF, AMS is KL |
 | US ski destinations | `DEN,SLC,JAC,ASE,EGE,BZN,RNO,MMH` | For winter season searches |
 | Hawaii | `HNL,OGG,KOA,LIH` | All inhabited islands' major airports |
 | Caribbean major | `SJU,STT,MBJ,PUJ,POP,NAS,GCM,AUA,CUR,BGI` | High-traffic Caribbean leisure |
