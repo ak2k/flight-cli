@@ -95,7 +95,9 @@ A dead Matrix key is `auth`, never `unreachable`, so it can never exit 75.
   fingerprint: the providers' errors quote only the first 200 characters of a
   body, which can cut a secret short. httpx quotes the whole request URL in its errors, and
   Matrix's carries the key.
-- During the run, stamina's retry log is swapped for one that redacts the
-  same way, since its default hook logs `repr` of the exception and so the URL.
+- The CLI's retry log (`log._retry_logged`, installed by `log.configure`)
+  names a cause by its type and, for a status error, its status, never its
+  `repr`, which would carry the request URL. During the run it is swapped for
+  one that redacts the same way as the table.
 - The table escapes every value through `_safe_text`; the JSON keeps the text
   and `json.dumps` escapes its control characters.

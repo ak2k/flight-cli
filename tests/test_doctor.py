@@ -1189,7 +1189,9 @@ def test_no_stored_secret_reaches_either_stream_in_either_format(
         for secret in stored:
             assert secret not in result.stdout, (fmt, secret)
             assert secret not in result.stderr, (fmt, secret)
-    assert "<redacted>" in _by_id(_run())["matrix-search"].detail
+    assert (
+        _by_id(_run())["matrix-search"].detail == "Matrix answered HTTP 500 Internal Server Error"
+    )
 
 
 def test_the_key_matrix_page_served_is_redacted_from_a_later_failure(world: World) -> None:
