@@ -284,7 +284,10 @@ class CalendarDay(_Loose):
             return None
         s = self.min_price
         i = next((j for j, c in enumerate(s) if c.isdigit() or c == "."), len(s))
-        return float(s[i:])
+        try:
+            return float(s[i:])
+        except ValueError:
+            return None
 
 
 class Week(_Loose):
