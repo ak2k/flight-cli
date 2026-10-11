@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -146,3 +148,23 @@ def test_a_command_that_fails_inside_the_lock_releases_it(store: Path) -> None:
     assert not t.is_alive(), "the second add is still waiting for the lock"
     assert outcome == [0]
     assert _destinations(store) == ["LHR"]
+
+
+@pytest.mark.parametrize("lock_wait_secs", [0.2])
+def test_a_command_waiting_on_a_store_lock_left_held_fails_instead_of_hanging(
+    store: Path, lock_wait_secs: float
+) -> None:
+    store.parent.mkdir(parents=True)
+    held = os.open(store.parent, os.O_RDONLY)
+    fcntl.flock(held, fcntl.LOCK_EX)
+    # Unbounded, the add would wait forever; letting go later makes that a failure here.
+    release = threading.Timer(lock_wait_secs * 25, fcntl.flock, (held, fcntl.LOCK_UN))
+    release.start()
+    try:
+        with pytest.raises(pytest.fail.Exception, match="lock"):
+            CliRunner().invoke(cli.app, ["watch", "add", "JFK", "LHR"])
+    finally:
+        release.cancel()
+        release.join()
+        os.close(held)
+    assert not store.exists()
