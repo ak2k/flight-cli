@@ -5147,7 +5147,8 @@ def _render_calendar(
     t.add_column("sols", justify="right")
     days = sorted(res.priced_days, key=lambda x: x.price_value or 9e9)
     for d, deal in zip(days, _deal_days(days, ccy), strict=True):
-        cell = _amount(d.min_price, ccy)
+        # A price with no readable amount (`USD1e999`) is the no-price cell.
+        cell = _amount(d.min_price if d.price_value is not None else None, ccy)
         row = [f"{d.date:d}", f"[green]{cell:s}[/]" if deal else cell]
         if routed:
             row.append(_safe_text(f"{d.origin}→{d.destination}") if d.origin else "—")
@@ -6982,7 +6983,9 @@ def _calendar_envelope_rows(
                     rows.append(
                         _envelope.CalendarRow.model_validate(
                             {
-                                "price": parse_price(price),
+                                "price": parse_price(price)
+                                if parsed.price_value is not None
+                                else None,
                                 "currency": price_currency(price),
                                 "row": fields,
                                 "departure": when,
