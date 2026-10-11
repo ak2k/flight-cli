@@ -41,7 +41,7 @@ def load_key() -> str | None:
         return None
     try:
         raw: Any = json.loads(KEY_PATH.read_text())
-    except (json.JSONDecodeError, OSError, RecursionError):
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError, RecursionError):
         # RecursionError: JSON nested past the decoder's recursion limit.
         return None
     if not isinstance(raw, dict):

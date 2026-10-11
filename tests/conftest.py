@@ -35,6 +35,7 @@ import ipaddress
 import json
 import os
 import pathlib
+import signal
 import socket
 import sys
 import threading
@@ -57,6 +58,7 @@ from flight_cli.providers.seats_aero import auth as seats_auth
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
+    from types import FrameType
 
 # Today, for the modules whose searches carry literal travel dates. fli refuses a
 # travel date before today, so those modules pin the clock before every date they
@@ -175,6 +177,48 @@ def _no_network(  # pyright: ignore[reportUnusedFunction] - autouse pytest fixtu
     monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
     monkeypatch.setattr(socket.socket, "connect", connect)
     monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
+
+
+@pytest.fixture
+def lock_wait_secs() -> float:
+    """How long `_bounded_lock_wait` lets a test's own thread wait for a `flock`;
+    a test parametrizes this name to shorten it."""
+    return 5.0
+
+
+@pytest.fixture(autouse=True)
+def _bounded_lock_wait(  # pyright: ignore[reportUnusedFunction] - autouse pytest fixture
+    monkeypatch: pytest.MonkeyPatch, lock_wait_secs: float
+) -> None:
+    """Fail a test whose own thread waits longer than `lock_wait_secs` for a
+    `flock`. Nothing in the suite holds a lock that thread then waits on, so the
+    holder is a command that finished without releasing it, and the wait, and the
+    whole run with it, would never end.
+
+    Only the main thread runs a signal handler, so only its wait can be cut short;
+    a test that runs a command on another thread bounds its join instead."""
+    if sys.platform == "win32":
+        return
+    import fcntl  # the module does not exist on Windows
+
+    real_flock = fcntl.flock
+
+    def expire(_signum: int, _frame: FrameType | None) -> None:
+        pytest.fail(f"waited {lock_wait_secs} s for a file lock that nothing will release")
+
+    def flock(fd: int, operation: int) -> None:
+        if threading.current_thread() is not threading.main_thread():
+            real_flock(fd, operation)
+            return
+        previous = signal.signal(signal.SIGALRM, expire)
+        signal.setitimer(signal.ITIMER_REAL, lock_wait_secs)
+        try:
+            real_flock(fd, operation)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous)
+
+    monkeypatch.setattr(fcntl, "flock", flock)
 
 
 @pytest.fixture(autouse=True)
