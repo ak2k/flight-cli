@@ -638,7 +638,8 @@ def _stored_secrets() -> set[str]:
     ):
         try:
             data = json.loads(_read_quietly(path) or "{}")
-        except ValueError:
+        except (ValueError, RecursionError):
+            # RecursionError: JSON nested past the decoder's recursion limit.
             continue
         if isinstance(data, dict):
             found.update(str(data.get(f) or "") for f in fields)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]

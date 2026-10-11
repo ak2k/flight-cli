@@ -1103,7 +1103,7 @@ def _parse_pitch(raw: Any) -> int | None:
         return raw
     if isinstance(raw, str):
         for token in raw.split():
-            if token.isdigit():
+            if re.fullmatch(r"[0-9]{1,9}", token):
                 return int(token)
     return None
 
@@ -1329,6 +1329,10 @@ def _parse_flight_with_id(data: list[Any]) -> GFlightWithId:
     Indices match the PP extension's parser (chunks/chunk-5KW5VSHS.js): n[17]
     is the per-flight opaque ID; n[2] legs; n[9] duration; t[0][-1] price."""
     price, currency = SearchFlights._parse_price_info(data)  # pyright: ignore[reportPrivateUsage, reportUnknownMemberType]
+    if price is not None and not math.isfinite(price):
+        # fli's FlightResult refuses NaN and negative prices but accepts plus
+        # infinity, which would be served as a fare.
+        raise ValueError("row price is not a finite number")
     flight_id = data[0][_FLIGHT_ID_IDX] if len(data[0]) > _FLIGHT_ID_IDX else ""
     leg_tuples: list[list[Any]] = data[0][2]
     ticketing, self_transfer = _ticketing(data)

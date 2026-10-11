@@ -167,8 +167,8 @@ Matrix's own body and asks Google only with `--split`, saying so on stderr. The
 ticket": Google sells the trip only as the tickets below it.
 
 `--depart-times`/`--return-times` beside a `--slice` are refused with exit 2
-before any request (`cli._refuse_date_option_conflicts`): a slice takes no time
-window, on Matrix or on Google.
+before any request (`cli._refuse_date_option_conflicts`, called by `search` and
+by the deprecated `fare`): a slice takes no time window, on Matrix or on Google.
 
 Google is not asked when a slice's own codes, flex or arrival date are ones
 the page can't serve as a one-way (`_google_reasons` on the slice alone; a

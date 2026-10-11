@@ -43,6 +43,7 @@ from typing import (
 import anyio
 import anyio.to_thread
 import typer
+from pydantic import ValidationError
 from rich.cells import cell_len
 from rich.console import Console
 from rich.markup import escape
@@ -392,6 +393,27 @@ def _require_airports(origin: str, destination: str) -> tuple[tuple[str, ...], t
     return origins, destinations
 
 
+def _refuse_invalid_airports[**P](build: Callable[P, Leg]) -> Callable[P, Leg]:
+    """`build`, answering a value the model rejects with one line and exit 2.
+
+    `Leg.of` checks every airport code with pydantic, and the `ValidationError`
+    of a mistyped one would otherwise reach the terminal as a traceback."""
+
+    @wraps(build)
+    def run(*args: P.args, **kwargs: P.kwargs) -> Leg:
+        try:
+            return build(*args, **kwargs)
+        except ValidationError as e:
+            problem = e.errors()[0]["msg"].removeprefix("Value error, ")
+            err.print(f"[red]{_safe_text(problem)}[/]")
+            raise typer.Exit(2) from None
+
+    return run
+
+
+_leg_or_refuse = _refuse_invalid_airports(Leg.of)
+
+
 def _parse_times(s: str | None) -> tuple[TimeOfDay, ...]:
     if not s:
         return ()
@@ -713,6 +735,37 @@ def _refuse_date_option_conflicts(
             "[red]--return-times sets when the return leaves, and --return-arrive dates "
             "when it lands:[/] Matrix holds an arrival-date slice's times to its arrival. "
             "Give them as --return-arrive-times, or date the departure with --return."
+        )
+        raise typer.Exit(2)
+
+
+def _refuse_return_only_flags(
+    *,
+    return_times: str | None,
+    routing_return: str | None,
+    extension_return: str | None,
+    need: str,
+    remedy: str,
+) -> None:
+    """Exit 2 when a trip with no return is given a flag that filters the return.
+
+    A one-way has no return leg to carry `--return-times`, `--routing-ret` or
+    `--ext-ret`, so a call that took them would answer without the filter the
+    user asked for. `--routing-ret ''` asks for no codes on the return, so an
+    empty value counts; an empty `--return-times` filters nothing, so it does not."""
+    names = [
+        name
+        for name, value in (
+            ("--return-times", return_times or None),
+            ("--routing-ret", routing_return),
+            ("--ext-ret", extension_return),
+        )
+        if value is not None
+    ]
+    if names:
+        err.print(
+            f"[red]{_safe_text(', '.join(names))} set the return's filters, and need "
+            f"{_safe_text(need)}.[/] Drop them, or {_safe_text(remedy)}."
         )
         raise typer.Exit(2)
 
@@ -5244,6 +5297,29 @@ def _price_capped(res: SearchResult, opts: SearchOptions, *, passengers: int = 1
     )
 
 
+def _cap_hid_unread_fares(served: SearchResult, capped: SearchResult) -> bool:
+    """Whether the cap left none of the fares Matrix sent while its count stays
+    nonzero, which `_price_capped` keeps only where it dropped a fare it could
+    not read. A count over no fare sent drops nothing."""
+    return bool(served.solutions) and not capped.solutions and capped.solution_count != 0
+
+
+def _say_unread_fares_not_shown(subject: str, opts: SearchOptions, cap: str) -> None:
+    """Say on stderr that a capped Matrix answer holds no fare the cap could
+    read at or under it, while Matrix's own count stays nonzero: the fares the
+    cap dropped state no total in the cap's currency, so none was read as over
+    it. `subject` names the answer. The envelope's `results` note gives the
+    same reason in place of "no itinerary in any cabin asked"."""
+    currency = opts.currency or "USD"
+    err.print(
+        f"[yellow]{_safe_text(subject)}: no fare that states a {_safe_text(currency)} "
+        f"total is at or under {_safe_text(cap)}; those that state none are not shown.[/]"
+    )
+    _envelope.explain(
+        "results", "no fare that states a " + currency + " total is at or under " + cap
+    )
+
+
 def _run_matrix_path(  # noqa: PLR0912 — one arm per way Matrix's answer is written
     *,
     legs: tuple[Leg, ...],
@@ -5286,7 +5362,9 @@ def _run_matrix_path(  # noqa: PLR0912 — one arm per way Matrix's answer is wr
     )
     # Before anything reads it, so the pick, the fare rules, the awards and the
     # links all draw from the fares under the cap.
-    res = _price_capped(res, opts, passengers=opts.pax.total)
+    served, res = res, _price_capped(res, opts, passengers=opts.pax.total)
+    if (cap := _cap_text(opts)) is not None and _cap_hid_unread_fares(served, res):
+        _say_unread_fares_not_shown("Matrix", opts, cap)
     shown = res.solutions[: opts.page_size]
     # `--awards-only` prints no numbered table, so a pick names no row, and the
     # links below are unpinned; `--fare-rules` is refused beside it.
@@ -6692,7 +6770,8 @@ def _gflight_json_row(g: Any, bags: Bags | None = None) -> dict[str, Any]:
     flights board.
 
     A leg's `departure_airport`/`arrival_airport` are IATA codes and its
-    `*_airport_name` fields hold fli's names for those airports."""
+    `*_airport_name` fields hold fli's names for those airports; its
+    `airline_code` is the carrier's IATA code, beside `airline`, its name."""
     row: dict[str, Any] = {**g.flight.model_dump(mode="json"), "flight_id": g.flight_id}
     if getattr(g, "ticketing", None) is not None:
         row["separate_tickets"] = True
@@ -6700,8 +6779,10 @@ def _gflight_json_row(g: Any, bags: Bags | None = None) -> dict[str, Any]:
         row["separate_tickets"] = None if g.flight.self_transfer is None else False
     row["top_flight"] = getattr(g, "top_flight", False)
     legs: list[Any] = row.get("legs") or []
-    # fli dumps an `Airport` member by its value, the name; its member name is the code.
+    # fli dumps an `Airport` and an `Airline` member by its value, the name; its member
+    # name is the code, with a leading `_` on a digit-leading airline code.
     for leg, src in zip(legs, g.flight.legs, strict=False):
+        leg["airline_code"] = src.airline.name.removeprefix("_")
         leg["departure_airport"] = src.departure_airport.name
         leg["arrival_airport"] = src.arrival_airport.name
         leg["departure_airport_name"] = src.departure_airport.value
@@ -9784,10 +9865,9 @@ def _cabins_capped(
     """Each cabin's Matrix answer cut to the fares under the search's cap
     (`_price_capped`), each cabin it leaves with no fare named on stderr.
 
-    A cabin keeps Matrix's own count where the cap dropped a fare it could not
-    read, one stating no total in the cap's currency, so only a count of zero
-    says no fare is under the cap; otherwise the line says those fares are not
-    shown."""
+    Where the cap dropped a fare it could not read, one stating no total in the
+    cap's currency, the line says those fares are not shown
+    (`_cap_hid_unread_fares`); otherwise it says no fare is under the cap."""
     capped = {
         cab: _price_capped(res, opts, passengers=opts.pax.total)
         for cab, res in results_by_cabin.items()
@@ -9796,16 +9876,12 @@ def _cabins_capped(
         for cab, res in capped.items():
             if res.solutions:
                 continue
-            if res.solution_count == 0:
+            if _cap_hid_unread_fares(results_by_cabin[cab], res):
+                _say_unread_fares_not_shown(f"Matrix {cab.value}", opts, cap)
+            else:
                 err.print(
                     f"[yellow]Matrix {_safe_text(cab.value)}: no fare at or under "
                     f"{_safe_text(cap)}.[/]"
-                )
-            else:
-                err.print(
-                    f"[yellow]Matrix {_safe_text(cab.value)}: no fare that states a "
-                    f"{_safe_text(opts.currency or 'USD')} total is at or under "
-                    f"{_safe_text(cap)}; those that state none are not shown.[/]"
                 )
     return capped
 
@@ -11176,7 +11252,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             help=(
                 "Preferred outbound times-of-day (comma list: morning,midday), or one "
                 "departure window to the minute (9:30-13:45). Beside --arrive, give "
-                "--arrive-times instead."
+                "--arrive-times instead. Refused beside --slice."
             ),
             autocompletion=_complete_times,
             rich_help_panel=_GROUP_FILTERING,
@@ -11188,7 +11264,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             "--return-times",
             help=(
                 "Preferred return times-of-day, or one window to the minute. Beside "
-                "--return-arrive, give --return-arrive-times instead."
+                "--return-arrive, give --return-arrive-times instead. Refused beside --slice."
             ),
             autocompletion=_complete_times,
             rich_help_panel=_GROUP_FILTERING,
@@ -11617,6 +11693,14 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             )
         )
         raise typer.Exit(2)
+    if not ret_day and not slice_specs:
+        _refuse_return_only_flags(
+            return_times=return_times,
+            routing_return=routing_return,
+            extension_return=extension_return,
+            need="a --return or --return-arrive",
+            remedy="add one",
+        )
     per_slice = _one_way_per_slice(tuple(map(_parse_slice_spec, slice_specs or [])))
     if split and (
         blocker := _split_blocker(
@@ -11690,7 +11774,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         out_times = _parse_search_times(depart_times, "--depart-times")
         ret_times = _parse_search_times(return_times, "--return-times")
         legs = (
-            Leg.of(
+            _leg_or_refuse(
                 origins,
                 destinations,
                 _parse_date(out_day),
@@ -11705,7 +11789,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         )
         if ret_day and return_codes is not None:
             legs += (
-                Leg.of(
+                _leg_or_refuse(
                     destinations,
                     origins,
                     _parse_date(ret_day),
@@ -12064,11 +12148,18 @@ def fare(
     depart_times: Annotated[
         str | None,
         typer.Option(
-            "--depart-times", help="Preferred outbound times-of-day (comma list: morning,evening)"
+            "--depart-times",
+            help=(
+                "Preferred outbound times-of-day (comma list: morning,evening). "
+                "Refused beside --slice."
+            ),
         ),
     ] = None,
     return_times: Annotated[
-        str | None, typer.Option("--return-times", help="Preferred return times-of-day")
+        str | None,
+        typer.Option(
+            "--return-times", help="Preferred return times-of-day. Refused beside --slice."
+        ),
     ] = None,
     routing_return: str | None = typer.Option(None, "--routing-ret", help=_ROUTING_RET_HELP),
     extension_return: str | None = typer.Option(None, "--ext-ret", help=_EXT_RET_HELP),
@@ -12138,6 +12229,17 @@ def fare(
             )
         )
         raise typer.Exit(2)
+    _refuse_date_option_conflicts(
+        slice_specs=slice_specs,
+        dep=dep,
+        arrive=None,
+        ret=ret,
+        return_arrive=None,
+        flex=None,
+        return_flex=None,
+        depart_times=depart_times,
+        return_times=return_times,
+    )
     # This block is `search`'s, near-duplicated. Deliberately not shared: `fare`
     # is deprecated and prints so on every run, and a helper spanning a command
     # on its way out ties the survivor's leg building to the leaving one.
@@ -12148,7 +12250,7 @@ def fare(
         out_times = _parse_times(depart_times)
         ret_times = _parse_times(return_times)
         legs = (
-            Leg.of(
+            _leg_or_refuse(
                 origins,
                 destinations,
                 _parse_date(dep),
@@ -12165,7 +12267,7 @@ def fare(
                 extension_return=extension_return,
             )
             legs += (
-                Leg.of(
+                _leg_or_refuse(
                     destinations,
                     origins,
                     _parse_date(ret),
@@ -12290,7 +12392,7 @@ def _parse_slice_spec(s: str) -> Leg:
                     f"slice {s!r}: unknown key prefix in {chunk!r}; valid keys are "
                     "r=ROUTING, e=EXTENSION, f=FLEX and d=arrive (note the '=')"
                 )
-    return Leg.of(
+    return _leg_or_refuse(
         o,
         d,
         parsed_date,
@@ -12486,11 +12588,19 @@ def calendar(
     origins, dests = _require_airports(origin, destination)
     sd = _parse_date(start)
     ed = _parse_date(end) if end else sd + timedelta(days=30)
+    if one_way:
+        _refuse_return_only_flags(
+            return_times=return_times,
+            routing_return=routing_return,
+            extension_return=extension_return,
+            need="a round trip",
+            remedy="drop --one-way",
+        )
     dmin, dmax = _resolve_duration(duration, round_trip=not one_way)
     out_times = _parse_times(depart_times)
     ret_times = _parse_times(return_times)
 
-    out_leg = Leg.of(
+    out_leg = _leg_or_refuse(
         origins, dests, route_language=routing, extension=extension, time_ranges=out_times
     )
     legs = (out_leg,)
@@ -12502,7 +12612,7 @@ def calendar(
             extension_return=extension_return,
         )
         legs += (
-            Leg.of(
+            _leg_or_refuse(
                 dests,
                 origins,
                 route_language=ret_routing,
@@ -12899,33 +13009,23 @@ def detail(
     """Phase-2 of the calendar flow: full itineraries for a picked date."""
     json_out = _resolve_format(fmt=fmt, json_flag=json_out) == "json"
     ccy = _resolve_currency(currency)
-    origins = _parse_iata_list(origin)
-    dests = _parse_iata_list(destination)
+    origins, dests = _require_airports(origin, destination)
     dep_d = _parse_date(dep)
     ret_d = _parse_date(ret) if ret else None
     if ret_d is None:
-        # `--routing-ret ''` asks for no codes on the return, so an empty value counts.
-        names = [
-            name
-            for name, value in (
-                ("--return-times", return_times),
-                ("--routing-ret", routing_return),
-                ("--ext-ret", extension_return),
-            )
-            if value is not None
-        ]
-        if names:
-            err.print(
-                f"[red]{_safe_text(', '.join(names))} set the return's filters, and need a "
-                "--return.[/] Drop them, or add --return."
-            )
-            raise typer.Exit(2)
+        _refuse_return_only_flags(
+            return_times=return_times,
+            routing_return=routing_return,
+            extension_return=extension_return,
+            need="a --return",
+            remedy="add --return",
+        )
     sd = _parse_date(start) if start else dep_d
     ed = _parse_date(end) if end else sd + timedelta(days=30)
     dmin, dmax = _resolve_duration(duration, round_trip=ret_d is not None)
 
     legs = (
-        Leg.of(
+        _leg_or_refuse(
             origins,
             dests,
             dep_d,
@@ -12942,7 +13042,7 @@ def detail(
             extension_return=extension_return,
         )
         legs += (
-            Leg.of(
+            _leg_or_refuse(
                 dests,
                 origins,
                 ret_d,
@@ -13215,9 +13315,9 @@ def gflight(
     # bad airport must not be reported after a line claiming the query is already
     # on its way.
     origins, destinations = _require_airports(origin, destination)
-    legs = (Leg.of(origins, destinations, _parse_date(dep)),)
+    legs = (_leg_or_refuse(origins, destinations, _parse_date(dep)),)
     if ret:
-        legs += (Leg.of(destinations, origins, _parse_date(ret)),)
+        legs += (_leg_or_refuse(destinations, origins, _parse_date(ret)),)
     # This alias has no --backend flag, so it resolves like `search` on auto
     # rather than forcing Google Flights: a party the page can't take goes to
     # the backend that can price it rather than erroring on a query the alias
