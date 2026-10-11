@@ -41,7 +41,7 @@ def load_key() -> str | None:
         return None
     try:
         raw: Any = json.loads(KEY_PATH.read_text())
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         return None
     if not isinstance(raw, dict):
         return None

@@ -1011,6 +1011,17 @@ def test_a_stored_credential_file_that_cannot_be_read_fails_as_config(world: Wor
     assert world.seats_requests == []
 
 
+def test_a_seats_key_file_that_is_not_utf8_fails_as_config(
+    world: World, tmp_path: pathlib.Path
+) -> None:
+    # Before the write, which replaces whatever file this names.
+    assert seats_auth.KEY_PATH.is_relative_to(tmp_path), seats_auth.KEY_PATH
+    seats_auth.KEY_PATH.write_bytes(b"\xff")
+    report = _run()
+    assert str(seats_auth.KEY_PATH) in _fails_as(report, "seats-aero", "config").detail
+    assert world.seats_requests == []
+
+
 def test_providers_pass_with_the_expiry_and_the_quota_never_the_email(world: World) -> None:
     report = _by_id(_run())
     assert report["pointspath"].detail.startswith("token valid until ")
