@@ -1189,7 +1189,9 @@ def test_no_stored_secret_reaches_either_stream_in_either_format(
         for secret in stored:
             assert secret not in result.stdout, (fmt, secret)
             assert secret not in result.stderr, (fmt, secret)
-    assert "<redacted>" in _by_id(_run())["matrix-search"].detail
+    assert (
+        _by_id(_run())["matrix-search"].detail == "Matrix answered HTTP 500 Internal Server Error"
+    )
 
 
 def test_the_key_matrix_page_served_is_redacted_from_a_later_failure(world: World) -> None:
@@ -1245,7 +1247,15 @@ def test_a_credential_utf8_cannot_encode_still_gets_every_check_reported(
         assert list(_table_rows(result.stdout)) == list(_doctor.CHECK_IDS)
 
 
-@pytest.mark.parametrize("body", ["[]", "null", '{"access_token": "a", "expires_at": "soon"}'])
+@pytest.mark.parametrize(
+    "body",
+    [
+        "[]",
+        "null",
+        '{"access_token": "a", "expires_at": "soon"}',
+        '{"access_token": "a", "expires_at": 1e400}',
+    ],
+)
 def test_a_pointspath_store_of_the_wrong_shape_fails_as_config(world: World, body: str) -> None:
     assert pp_auth.TOKENS_PATH.is_relative_to(world.tmp)
     pp_auth.TOKENS_PATH.write_text(body)

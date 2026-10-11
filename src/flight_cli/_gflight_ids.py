@@ -1103,7 +1103,7 @@ def _parse_pitch(raw: Any) -> int | None:
         return raw
     if isinstance(raw, str):
         for token in raw.split():
-            if token.isdigit():
+            if re.fullmatch(r"[0-9]{1,9}", token):
                 return int(token)
     return None
 

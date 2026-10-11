@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING
 
 import pytest
 import typer
-from pydantic import ValidationError
 
 from flight_cli.cli import (
     BACKEND_AUTO,
@@ -915,10 +914,9 @@ def test_gflight_alias_validates_airports_before_it_names_a_backend(
     # model rejects — the ordering is only observable when both are true.
     result = CliRunner().invoke(cli.app, ["gflight", "JFK,XXXX", "MIA", "--dep", _future_dep()])
 
-    assert result.exit_code != 0
+    assert result.exit_code == 2
     assert "Using Matrix" not in result.output
-    assert isinstance(result.exception, ValidationError)
-    assert "Not a 3-letter IATA code: 'XXXX'" in str(result.exception)
+    assert "Not a 3-letter IATA code: 'XXXX'" in result.stderr
 
 
 def _no_backend_runs(monkeypatch: pytest.MonkeyPatch, command: str, origin: str) -> str:

@@ -30,6 +30,7 @@ __all__ = [
     "ApiKeyResolutionError",
     "MatrixApiError",
     "MatrixClient",
+    "MatrixHttpError",
     "MatrixShapeError",
 ]
 
@@ -61,6 +62,20 @@ class MatrixApiError(Exception):
         self.kind = kind
         self.request_id = request_id
         self.raw = raw
+
+
+class MatrixHttpError(MatrixApiError):
+    """Matrix answered an HTTP error status. The message is the status line
+    alone: httpx's own text quotes the request URL, and Matrix's carries the API
+    key."""
+
+    def __init__(self, status: int, reason: str) -> None:
+        super().__init__(f"Matrix answered HTTP {status:d} {reason}".rstrip(), kind="http")
+        self.status = status
+
+
+def _status_error(e: httpx.HTTPStatusError) -> MatrixHttpError:
+    return MatrixHttpError(e.response.status_code, e.response.reason_phrase)
 
 
 def _raise_if_api_error(data: dict[str, Any]) -> None:
@@ -180,7 +195,8 @@ class MatrixClient:
 
     async def _post(self, url: str, body: dict[str, Any], *, cache: bool) -> dict[str, Any]:
         """POST a body to Matrix and return its decoded answer, Matrix errors
-        raised as `MatrixApiError`.
+        raised as `MatrixApiError` and any other HTTP error status as
+        `MatrixHttpError`.
 
         On a 403 from Matrix (typically a stale or wrong cached API key),
         invalidate the cache, re-bootstrap once, and retry. If the retry
@@ -198,7 +214,7 @@ class MatrixClient:
             )
         except httpx.HTTPStatusError as e:
             if e.response.status_code != HTTPStatus.FORBIDDEN:
-                raise
+                raise _status_error(e) from None
             invalidate_cache()
             if not self._rebootstrap:
                 raise ApiKeyResolutionError("Matrix rejected the API key with HTTP 403.") from e
@@ -218,7 +234,7 @@ class MatrixClient:
                         "a non-prod key (e.g. matrix-nightly), or Matrix has "
                         "tightened access. Set FLIGHT_API_KEY explicitly."
                     ) from e2
-                raise
+                raise _status_error(e2) from None
         _raise_if_api_error(data)
         return data
 
