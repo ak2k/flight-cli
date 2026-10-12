@@ -81,10 +81,12 @@ class Destination(NamedTuple):
 
     @property
     def nights(self) -> int | None:
-        """Nights between the outbound and the return, where both are dated."""
+        """Nights between the outbound and the return, where both are dated and the
+        return is not before the departure (a negative length is page garbage)."""
         if self.departure is None or self.return_date is None:
             return None
-        return (self.return_date - self.departure).days
+        nights = (self.return_date - self.departure).days
+        return nights if nights >= 0 else None
 
 
 class ExploreAnswer(NamedTuple):
