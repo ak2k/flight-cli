@@ -91,16 +91,28 @@ def test_a_refusal_with_no_remedy_of_its_own_keeps_its_note_alone(
     ]
 
 
-@pytest.mark.parametrize("bags", [None, Bags(checked=1)], ids=["no-bags", "bags"])
 def test_a_browser_unavailable_cabin_line_keeps_its_note_alone(
-    monkeypatch: pytest.MonkeyPatch, bags: Bags | None
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Its note carries the reason and the remedy, so no tail is added after it, and
-    `--bags` leaves the line as it is."""
-    lines = _lines_for(monkeypatch, GfBrowserUnavailableError("no chrome"), bags=bags, served=True)
+    """Its note carries the reason and the remedy, so no tail is added after it."""
+    lines = _lines_for(monkeypatch, GfBrowserUnavailableError("no chrome"), served=True)
     assert lines == [
         "Google Flights BUSINESS: Google Flights' browser rung is unavailable — "
         f"no chrome {BROWSER_DEFAULT_REMEDY}"
+    ]
+
+
+def test_a_browser_unavailable_cabin_line_under_bags_drops_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Matrix prices no bags, so the way out under `--bags` is dropping them, with one full stop."""
+    lines = _lines_for(
+        monkeypatch, GfBrowserUnavailableError("no chrome"), bags=Bags(checked=1), served=True
+    )
+    assert lines == [
+        "Google Flights BUSINESS: Google Flights' browser rung is unavailable — no chrome "
+        "Retry, or use `--gf-transport http` "
+        "(or drop `--bags` to search Matrix, which prices no bags)."
     ]
 
 
