@@ -69,6 +69,9 @@ CACHE_TTL_SECS = 15 * 60
 # (77 days of orphans, no eviction).
 CACHE_SIZE_LIMIT_BYTES = 256 * 1024 * 1024
 
+# How long a request waits to open a connection to Matrix, on each attempt.
+CONNECT_TIMEOUT_S = 10.0
+
 
 def is_cacheable_body(data: dict[str, Any]) -> bool:
     """Whether a decoded response body may be stored.
@@ -109,7 +112,7 @@ class HttpTransport:
         rps: float = 1.0,
         concurrency: int = 3,
         timeout: float = 180.0,
-        connect_timeout: float = 10.0,
+        connect_timeout: float = CONNECT_TIMEOUT_S,
         cache_dir: pathlib.Path | str | None = None,
         cache_read: bool = True,
         cache_write: bool = True,
