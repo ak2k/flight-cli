@@ -57,9 +57,7 @@ def test_a_drifted_matrix_answer_names_the_change_and_keeps_the_body(
     assert result.exit_code == 1, result.output
     assert "Traceback" not in result.output
     assert "ValidationError" not in result.output
-    # The console wraps a line at its width, mid-path included.
-    said = "".join(result.stderr.split())
-    assert "solutionList" in said
-    assert _ISSUES in said
-    assert str(kept[0]) in said
-    assert "-vv" in said
+    assert "solutionList" in result.stderr
+    assert _ISSUES in result.stderr
+    assert str(kept[0]) in result.stderr
+    assert "-vv" in result.stderr
