@@ -908,12 +908,22 @@ def _render_matches(
     # since horizontal budget is fine there.
     show_funding = len(cabin_list) <= 1
 
+    def _route(m: MatchedFare) -> str:
+        key = _leg_row_key(m, slice_index)
+        return f"{key[2]}→{key[3]}" if key else ""
+
+    # A route column only where it tells rows apart: a set search's rows leave
+    # from or arrive at different airports, a one-pair search's rows do not.
+    show_route = len({_route(m) for m in matches}) > 1
+
     t = Table(
         title="Cash + award (matched on flight # x date)",
         show_header=True,
         header_style="bold cyan",
     )
     t.add_column("flight", overflow="fold")
+    if show_route:
+        t.add_column("route", overflow="fold")
     t.add_column("stops")
     t.add_column("price", justify="right")
     for cab in cabin_list:
@@ -934,7 +944,10 @@ def _render_matches(
         empty: Mapping[str, float] = {}
         per_cabin_cash = cash_per_cabin.get(id(m.itinerary), empty) if cash_per_cabin else empty
 
-        cells = [_safe_text(flight), _fmt_stops(stops_n), _safe_text(cash_str)]
+        cells = [_safe_text(flight)]
+        if show_route:
+            cells.append(_safe_text(_route(m)))
+        cells += [_fmt_stops(stops_n), _safe_text(cash_str)]
         for cab in cabin_list:
             # CPM is shown only when we have cash for THIS cabin specifically
             # — otherwise the value would mix cabins (e.g. business miles vs

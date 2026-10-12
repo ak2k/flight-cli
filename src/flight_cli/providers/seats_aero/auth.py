@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Any, cast
 
@@ -57,15 +58,23 @@ def save_key(key: str) -> None:
     """Persist the API key to ~/.config/flight-cli/seats.json with 0600 perms.
 
     The directory is created if missing. Existing contents are replaced
-    (no merge — this is a single-key file). The file is 0600 before the key is
-    written: O_CREAT's mode applies only to a file it creates, so an existing
-    0644 or 0666 file is tightened by fchmod first, not after the write."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    (no merge — this is a single-key file). The key goes to a 0600 temp file
+    beside the store, which then replaces it: a save that fails partway keeps
+    the previous file, whatever mode the old file had."""
+    # 0700 applies only to the leaf this call creates, so an existing directory
+    # keeps its mode; see pp.auth.save_tokens.
+    CONFIG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     payload = json.dumps({"api_key": key.strip()}, indent=2)
-    fd = os.open(KEY_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as fh:
-        os.fchmod(fd, 0o600)
-        _ = fh.write(payload)
+    fd, name = tempfile.mkstemp(prefix=f".{KEY_PATH.name}.", suffix=".tmp", dir=CONFIG_DIR)
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            os.fchmod(fd, 0o600)
+            _ = fh.write(payload)
+        _ = tmp.replace(KEY_PATH)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def clear_key() -> bool:
