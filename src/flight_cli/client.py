@@ -199,6 +199,9 @@ class MatrixClient:
 
     # ─────────────────────────── search execution ──────────────────────────
 
+    def _params(self) -> dict[str, str]:
+        return {"key": self._api_key, "alt": "json"}
+
     async def _post_once(
         self, url: str, body: dict[str, Any], *, cache: bool
     ) -> dict[str, Any] | httpx.HTTPStatusError:
@@ -210,7 +213,7 @@ class MatrixClient:
             return await self._http.post_json(
                 url,
                 body,
-                params={"key": self._api_key, "alt": "json"},
+                params=self._params(),
                 cache=cache,
             )
         except httpx.HTTPStatusError as e:
@@ -252,8 +255,16 @@ class MatrixClient:
     async def execute(self, search: Search, *, cache: bool = True) -> SearchResult | CalendarResult:
         """Run any flavor of search. Returns SearchResult or CalendarResult
         depending on the search variant."""
-        data = await self._post(SEARCH_URL, to_wire(search).as_json(), cache=cache)
-        return _parse_response(search, data)
+        body = to_wire(search).as_json()
+        data = await self._post(SEARCH_URL, body, cache=cache)
+        try:
+            return _parse_response(search, data)
+        except MatrixShapeError:
+            # The refused answer was stored under this request's key; left
+            # there, every run inside the TTL would be handed it again.
+            if cache:
+                await self._http.forget_post(SEARCH_URL, body, params=self._params())
+            raise
 
     # ──────────────────────── follow-ups on a search ───────────────────────
     # Answered from the search's session, which Matrix holds for a while after
