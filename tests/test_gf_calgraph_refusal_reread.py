@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from flight_cli import _gf_browser as gfb
 from flight_cli import _gf_calgraph as cg
 from flight_cli import _gflight_ids as gfid
 from test_gf_calgraph import (
@@ -56,6 +57,12 @@ class _Clock:
 def clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
     recorder = _Clock()
     monkeypatch.setattr(gfid, "time", recorder)
+
+    def _pause(seconds: float) -> bool:
+        recorder.sleep(seconds)
+        return True
+
+    monkeypatch.setattr(gfb, "pause_unless_stopped", _pause)
     return recorder
 
 
