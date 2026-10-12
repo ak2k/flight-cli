@@ -136,19 +136,17 @@ def load_tokens() -> Tokens | None:
 def save_tokens(t: Tokens) -> None:
     """Persist tokens 0600 — the file holds a bearer token to a paid account.
 
-    Created 0600 rather than written and then chmod'd: `write_text` makes the
-    file at the process umask (0644 by default), so the previous
-    write-then-tighten left the token world-readable for the window between
-    those two calls. Opening with the mode up front closes it, and O_TRUNC
-    keeps the rewrite-in-place behaviour `write_text` had.
+    The file is 0600 before the token is written: `write_text` makes a new file
+    at the process umask (0644 by default), and O_CREAT's mode applies only to a
+    file it creates, so an existing 0644 or 0666 file is tightened by fchmod
+    first, not after the write. O_TRUNC rewrites an existing file in place.
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(t.to_json(), indent=2)
     fd = os.open(TOKENS_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as fh:
+        os.fchmod(fd, 0o600)
         _ = fh.write(payload)
-    # An existing file keeps its old mode through O_CREAT, so still enforce it.
-    TOKENS_PATH.chmod(0o600)
 
 
 def clear_tokens() -> bool:
