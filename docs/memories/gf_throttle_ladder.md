@@ -118,7 +118,9 @@ a round it owns before it pauses, so a sibling parked on that round retries at
 once rather than after up to 8 s of pauses. Its pauses fall
 inside a window of 8 s per search, opened by the search's first pause on the
 object `search_escalation` opens, so pages read side by side each get the whole
-schedule and a search of many pages waits 8 s at most. The measurements are in
+schedule, a page read after it closes gets the part of an 8 s sum the pauses
+before it have not drawn down, and a search of many pages waits 8 s at most.
+The measurements are in
 [gf_page_refusals_and_ds1.md](gf_page_refusals_and_ds1.md).
 
 Only a failure to REACH Google is retried — `curl_cffi`'s `ConnectionError` and
