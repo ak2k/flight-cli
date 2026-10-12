@@ -46,7 +46,9 @@ def _pytest(
 def test_the_probe_sees_no_inherited_cache_dir() -> None:
     if not os.environ.get(_PROBE_ENV):
         pytest.skip(f"inner half; {_PROBE_ENV} is set by the outer test")
-    assert "MATRIX_CACHE_DIR" not in os.environ
+    # Asserting on os.environ itself would print every variable when this fails.
+    inherited = os.environ.get("MATRIX_CACHE_DIR")
+    assert inherited is None
 
 
 def test_an_inherited_cache_dir_is_not_seen_by_a_test(tmp_path: pathlib.Path) -> None:
@@ -67,3 +69,28 @@ def test_the_inner_run_writes_no_temp_dir_outside_tmp_path(tmp_path: pathlib.Pat
     result = _pytest(tmp_path, "test_an_inherited_cache_dir_is_not_seen_by_a_test", env)
     assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert list(temp_root.iterdir()) == []
+
+
+def test_a_failing_probe_prints_no_other_environment_variable(tmp_path: pathlib.Path) -> None:
+    cache_dir = str(tmp_path / "operator-cache")
+    sentinel = "flight-cli-isolation-sentinel"
+    env = {
+        **os.environ,
+        _PROBE_ENV: "1",
+        "MATRIX_CACHE_DIR": cache_dir,
+        "FLIGHT_CLI_SENTINEL": sentinel,
+    }
+    # With no conftest nothing removes the variable, so the probe fails the way a
+    # regressed fixture would make it fail; assertion reprs print untruncated.
+    result = _pytest(
+        tmp_path,
+        "test_the_probe_sees_no_inherited_cache_dir",
+        env,
+        "--noconftest",
+        "-o",
+        "verbosity_assertions=2",
+    )
+    output = result.stdout + result.stderr
+    # Booleans only: printing the output on failure would print what it leaked.
+    failed = result.returncode == pytest.ExitCode.TESTS_FAILED
+    assert (failed, cache_dir in output, sentinel in output) == (True, True, False)
