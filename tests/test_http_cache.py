@@ -12,6 +12,7 @@ expires.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import anyio
@@ -137,6 +138,45 @@ def test_cache_read_disabled_always_refetches(tmp_path: pathlib.Path) -> None:
 
     anyio.run(go)
     assert calls[0] == 2
+
+
+# ───────────────────────────── an entry is forgotten ─────────────────────────
+
+
+def test_a_forgotten_post_is_fetched_again_and_a_neighbour_is_not(
+    tmp_path: pathlib.Path,
+) -> None:
+    """`forget_post` computes the key `post_json` stored under, the stripped
+    `bgProgramResponse` and the params included."""
+    handler, calls = _counting_handler({"solutionList": {"solutions": []}})
+    url, params = "https://x.test/v1/search", {"key": "k"}
+
+    async def go() -> None:
+        t = _transport(tmp_path, handler)
+        _ = await t.post_json(url, {"q": 1, "bgProgramResponse": "a"}, params=params)
+        _ = await t.post_json(url, {"q": 2}, params=params)
+        await t.forget_post(url, {"q": 1, "bgProgramResponse": "b"}, params=params)
+        _ = await t.post_json(url, {"q": 1, "bgProgramResponse": "a"}, params=params)
+        _ = await t.post_json(url, {"q": 2}, params=params)
+        await t.aclose()
+
+    anyio.run(go)
+    assert calls[0] == 3  # q=1 twice, q=2 once
+
+
+def test_a_cache_that_cannot_delete_never_fails_the_forget(tmp_path: pathlib.Path) -> None:
+    handler, _ = _counting_handler({})
+
+    def refuse(_key: str) -> bool:
+        raise OSError
+
+    async def go() -> None:
+        t = _transport(tmp_path, handler)
+        t._cache = SimpleNamespace(delete=refuse, close=lambda: None)
+        await t.forget_post("https://x.test/v1/search", {"q": 1})
+        await t.aclose()
+
+    anyio.run(go)
 
 
 # ──────────────────────── cache key is unambiguous ────────────────────────
