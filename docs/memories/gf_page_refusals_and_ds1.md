@@ -64,10 +64,12 @@ reads such a page again after 2 s, then 6 s (`_SERVER_ERROR_PAUSES_S`, an arm of
 rung of the shared ladder; see [gf_throttle_ladder.md](gf_throttle_ladder.md)).
 A search pauses inside one 8 s window, opened by its first pause
 (`_Escalation.pause`): pages read side by side each get the 2 s and the 6 s
-within it, so the user waits 8 s at most whatever the page count. A page read
-after the window closes has its error read again at once, three reads, then
-refused. Rung 2 navigates it once more at once, as it does a page
-with no `ds:1`. The refusal names the error and its code ("Google Flights
+within it, so the user waits 8 s at most whatever the page count. Each pause
+granted also draws down an 8 s sum, which a page read after the window closes
+gets what is left of: a later page, or a second error on a page that has read
+its board, is paused for what the pages before it did not spend, and once they
+spent it has its error read again at once, three reads, then refused. Rung 2
+navigates it once more at once, as it does a page with no `ds:1`. The refusal names the error and its code ("Google Flights
 answered with a server error (status 13)") on every rendering, and the
 fallback to Matrix is otherwise the one a re-shaped page gets.
 
