@@ -96,6 +96,7 @@ def _no_browser_launch(  # pyright: ignore[reportUnusedFunction] - autouse pytes
     # Parameterised so the empty set is not partially unknown to the checker.
     monkeypatch.setattr(_gf_browser, "_live", set[_gf_browser.GfBrowserSession]())
     monkeypatch.setattr(_gf_browser, "_interrupt_state", {"seen": False})
+    monkeypatch.setattr(_gf_browser, "_stopped", {"set": False})
     monkeypatch.setattr(_gf_browser, "_scope_depth", threading.local())
     # The MARKER, not `request.keywords`. `keywords` also carries the node's
     # name, its parametrize ids and its containing directory — so a test
