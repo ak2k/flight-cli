@@ -185,6 +185,13 @@ class HttpTransport:
         h.update(json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode())
         return h.hexdigest()[:24]
 
+    def _post_key(self, url: str, body: dict[str, Any], params: dict[str, Any] | None) -> str:
+        # NB: payload includes a unique-ish bgProgramResponse on captured
+        # bodies; we strip that field before hashing so two semantically equal
+        # requests share a cache entry.
+        body_for_hash = {k: v for k, v in body.items() if k != "bgProgramResponse"}
+        return self._cache_key("POST", url, params, body_for_hash)
+
     async def _cache_get(self, key: str) -> dict[str, Any] | None:
         """Fetch a live entry, or None. Expiry is diskcache's, keyed per entry."""
         try:
@@ -205,6 +212,18 @@ class HttpTransport:
             )
         except Exception as e:  # noqa: BLE001 — a cache write must never fail a request
             log.warning("cache_write_failed", key=key, error=str(e))
+
+    async def forget_post(
+        self, url: str, body: dict[str, Any], *, params: dict[str, Any] | None = None
+    ) -> None:
+        """Drop the entry `post_json` keeps for this request, so the next call
+        asks the server again. A cache that cannot delete is logged, never
+        raised."""
+        key = self._post_key(url, body, params)
+        try:
+            await anyio.to_thread.run_sync(self._cache.delete, key)  # pyright: ignore[reportUnknownArgumentType]
+        except Exception as e:  # noqa: BLE001 — a cache delete must never fail a request
+            log.warning("cache_forget_failed", key=key, error=str(e))
 
     # ───────────────────────────── public API ──────────────────────────────
 
@@ -250,11 +269,7 @@ class HttpTransport:
         params: dict[str, Any] | None = None,
         cache: bool = True,
     ) -> dict[str, Any]:
-        # NB: payload includes a unique-ish bgProgramResponse on captured
-        # bodies; we strip that field before hashing so two semantically equal
-        # requests share a cache entry.
-        body_for_hash = {k: v for k, v in body.items() if k != "bgProgramResponse"}
-        cache_key = self._cache_key("POST", url, params, body_for_hash)
+        cache_key = self._post_key(url, body, params)
         if cache and self._cache_read:
             hit = await self._cache_get(cache_key)
             if hit is not None:
