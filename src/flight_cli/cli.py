@@ -9435,12 +9435,13 @@ def _gflight_cabins_in_series(
     def note_missing_column(cab: Cabin, e: GfBackendError) -> None:
         """Why this cabin's column will be missing. Left to the bare arm below,
         a typed refusal reads as an unexplained failure."""
+        # Both fields take the options: a browser-unavailable note ends in its
+        # remedy, which under `--bags` drops them rather than naming Matrix.
+        refusal = _gf_refusal(e, transport=TRANSPORT_BROWSER, bags=opts.bags is not None)
         # `removesuffix`, because a browser refusal's note already ends in the
         # full stop its remedy carries and every other refusal's does not.
-        note = _gf_refusal(e, transport=TRANSPORT_BROWSER).note.removesuffix(".")
-        # The options shape only the remedy; the note reads the same under every one.
-        remedy = _gf_refusal(e, transport=TRANSPORT_BROWSER, bags=opts.bags is not None).remedy
-        tail = f" {remedy}" if remedy else ""
+        note = refusal.note.removesuffix(".")
+        tail = f" {refusal.remedy}" if refusal.remedy else ""
         err.print(f"[yellow]Google Flights {cab.value}: {note}.{tail}[/]")
 
     def serve_cabin[T](cab: Cabin, call: Callable[[], T], *, served: bool) -> T | None:
