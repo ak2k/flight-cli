@@ -513,10 +513,12 @@ class GfBrowserSession:
         """What the page showed after a failed step, as one sentence.
 
         A failure to read it is that sentence instead: the step's own failure is
-        what the caller needs, and a second error would hide it."""
+        what the caller needs, and a second error would hide it. A title that
+        cannot be read alone is not a failure to read the page."""
         try:
             return self._drive(
-                "Chrome could not read the page afterward", lambda: _describe_page(page)
+                "Chrome could not read the page afterward",
+                lambda: _describe_page(page, self._drive),
             )
         except GfBrowserUnavailableError as e:
             return e.reason
@@ -827,8 +829,12 @@ def _unquote(name: str) -> str:
         return name.strip('"')
 
 
-def _describe_page(page: Any) -> str:
+def _describe_page(page: Any, drive: Callable[[str, Callable[[], Any]], Any]) -> str:
     """The page's URL, its title and its visible buttons' accessible names.
+
+    The title is read through `drive`, apart from the snapshot: a page with no
+    title, or a renderer that stalls on it, is `title unread` and keeps the
+    URL and the buttons.
 
     The snapshot lists only what a user could reach, so a hidden control is not
     named. A page showing no "Price graph" button, a consent form or another
@@ -850,9 +856,16 @@ def _describe_page(page: Any) -> str:
     # `page.title()` takes no timeout, so the title is read under what the
     # snapshot left of the bound, and never under zero, which means none.
     left_ms = (deadline - time.monotonic()) * 1000
-    title = page.locator("head > title").first.text_content(timeout=max(1.0, left_ms))
+    try:
+        title = drive(
+            "Chrome could not read the page's title",
+            lambda: page.locator("head > title").first.text_content(timeout=max(1.0, left_ms)),
+        )
+        title_shown = f'title "{_one_line(title)}"'
+    except GfBrowserUnavailableError:
+        title_shown = "title unread"
     url = _one_line(str(page.url))
-    return f'The page showed URL {url}, title "{_one_line(title)}", {buttons}.'
+    return f"The page showed URL {url}, {title_shown}, {buttons}."
 
 
 def _navigated_page(page: Any, nav: Any) -> PageFetch:
