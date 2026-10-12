@@ -11,6 +11,9 @@ replaced as in `test_gf_calgraph`.
 
 from __future__ import annotations
 
+import subprocess
+import sys
+import textwrap
 import threading
 import time
 from datetime import date
@@ -109,3 +112,67 @@ def test_a_new_interrupt_guard_does_not_inherit_an_earlier_stop() -> None:
     assert gfb.pause_unless_stopped(0.0) is False
     with gfb.interrupt_guard():
         assert gfb.pause_unless_stopped(0.0) is True
+
+
+# `--fast` pauses on the main thread inside the guard, so the handler runs
+# between two opcodes of the pause itself. Run n raises the SIGINT at the
+# pause's n-th opcode, counting those of everything it calls; the runs stop at
+# the first n past the pause's last opcode. A handler that waits on a lock the
+# pause holds never returns, and the probe outlives `_EXIT_WITHIN_S`.
+_EVERY_OPCODE_PROBE = textwrap.dedent(
+    """
+    import signal, sys
+    from flight_cli import _gf_browser as gfb
+
+    def pause_interrupted_at(n):
+        seen = 0
+
+        def trace(frame, event, _arg):
+            nonlocal seen
+            frame.f_trace_opcodes = True
+            if event == "opcode":
+                seen += 1
+                if seen == n:
+                    signal.raise_signal(signal.SIGINT)
+            return trace
+
+        with gfb.interrupt_guard():
+            # Opcode events reach a trace only if a frame asked for them
+            # before the trace was installed.
+            sys._getframe().f_trace_opcodes = True
+            sys.settrace(trace)
+            try:
+                gfb.pause_unless_stopped(0.01)
+            finally:
+                sys.settrace(None)
+
+    n = 1
+    while True:
+        try:
+            pause_interrupted_at(n)
+        except KeyboardInterrupt:
+            n += 1
+        else:
+            break
+    print(f"INTERRUPTED {n - 1}", flush=True)
+    """
+)
+_EXIT_WITHIN_S = 20.0
+
+
+def test_a_ctrl_c_at_any_opcode_of_a_pause_on_the_guarded_thread_ends_it() -> None:
+    proc = subprocess.Popen(  # noqa: S603 — argv is this interpreter and a literal probe
+        [sys.executable, "-c", _EVERY_OPCODE_PROBE],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        out, err = proc.communicate(timeout=_EXIT_WITHIN_S)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out, err = proc.communicate()
+        pytest.fail(f"the handler hung inside a pause\n{out}\n{err}")
+    assert proc.returncode == 0, err
+    (interrupted,) = (int(line.split()[1]) for line in out.splitlines() if "INTERRUPTED" in line)
+    assert interrupted > 0, out
