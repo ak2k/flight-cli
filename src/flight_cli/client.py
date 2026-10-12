@@ -199,6 +199,23 @@ class MatrixClient:
 
     # ─────────────────────────── search execution ──────────────────────────
 
+    async def _post_once(
+        self, url: str, body: dict[str, Any], *, cache: bool
+    ) -> dict[str, Any] | httpx.HTTPStatusError:
+        """POST with the current key, returning an HTTP error status rather than
+        raising it, so the caller raises its own error outside any handler:
+        inside one, httpx's error, whose text quotes the URL and key, would be
+        that error's `__context__`."""
+        try:
+            return await self._http.post_json(
+                url,
+                body,
+                params={"key": self._api_key, "alt": "json"},
+                cache=cache,
+            )
+        except httpx.HTTPStatusError as e:
+            return e
+
     async def _post(self, url: str, body: dict[str, Any], *, cache: bool) -> dict[str, Any]:
         """POST a body to Matrix and return its decoded answer, Matrix errors
         raised as `MatrixApiError` and any other HTTP error status as
@@ -211,36 +228,24 @@ class MatrixClient:
         built with `rebootstrap=False` invalidates the cache and raises on the
         first 403, so the next run bootstraps.
         """
-        try:
-            data = await self._http.post_json(
-                url,
-                body,
-                params={"key": self._api_key, "alt": "json"},
-                cache=cache,
-            )
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code != HTTPStatus.FORBIDDEN:
-                raise _status_error(e) from None
+        data = await self._post_once(url, body, cache=cache)
+        if isinstance(data, httpx.HTTPStatusError):
+            if data.response.status_code != HTTPStatus.FORBIDDEN:
+                raise _status_error(data) from None
             invalidate_cache()
             if not self._rebootstrap:
-                raise ApiKeyResolutionError("Matrix rejected the API key with HTTP 403.") from e
+                raise ApiKeyResolutionError("Matrix rejected the API key with HTTP 403.") from data
             self._api_key = resolve_api_key(force_bootstrap=True)
-            try:
-                data = await self._http.post_json(
-                    url,
-                    body,
-                    params={"key": self._api_key, "alt": "json"},
-                    cache=cache,
-                )
-            except httpx.HTTPStatusError as e2:
-                if e2.response.status_code == HTTPStatus.FORBIDDEN:
+            data = await self._post_once(url, body, cache=cache)
+            if isinstance(data, httpx.HTTPStatusError):
+                if data.response.status_code == HTTPStatus.FORBIDDEN:
                     raise ApiKeyResolutionError(
                         "Matrix rejected the API key with HTTP 403 even after "
                         "re-bootstrapping. The bootstrap regex may be picking up "
                         "a non-prod key (e.g. matrix-nightly), or Matrix has "
                         "tightened access. Set FLIGHT_API_KEY explicitly."
-                    ) from e2
-                raise _status_error(e2) from None
+                    ) from data
+                raise _status_error(data) from None
         _raise_if_api_error(data)
         return data
 
@@ -276,15 +281,21 @@ class MatrixClient:
 
     # ───────────────────────── ancillary helpers ───────────────────────────
 
+    async def _get_once(
+        self, url: str, params: dict[str, Any]
+    ) -> dict[str, Any] | httpx.HTTPStatusError:
+        """GET, returning an HTTP error status rather than raising it, as
+        `_post_once` does."""
+        try:
+            return await self._http.get_json(url, params=params)
+        except httpx.HTTPStatusError as e:
+            return e
+
     async def airports(self, partial: str, page_size: int = 10) -> list[Location]:
         url = f"{BASE}/v1/locationTypes/CITIES_AND_AIRPORTS/partialNames/{partial}/locations"
-        try:
-            data = await self._http.get_json(
-                url,
-                params={"pageSize": page_size, "key": self._api_key},
-            )
-        except httpx.HTTPStatusError as e:
-            raise _status_error(e) from None
+        data = await self._get_once(url, {"pageSize": page_size, "key": self._api_key})
+        if isinstance(data, httpx.HTTPStatusError):
+            raise _status_error(data) from None
         return [Location.model_validate(loc) for loc in data.get("locations", [])]
 
     async def airport(self, code: str) -> Location | None:
@@ -293,20 +304,15 @@ class MatrixClient:
         `MatrixHttpError`, and network errors propagate, so callers can
         distinguish 'doesn't exist' from 'lookup is broken'."""
         url = f"{BASE}/v1/locationTypes/airportOrMultiAirportCity/locationCodes/{code.upper()}"
-        try:
-            data = await self._http.get_json(url, params={"key": self._api_key})
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == HTTPStatus.NOT_FOUND:
+        data = await self._get_once(url, {"key": self._api_key})
+        if isinstance(data, httpx.HTTPStatusError):
+            if data.response.status_code == HTTPStatus.NOT_FOUND:
                 return None
-            raise _status_error(e) from None
+            raise _status_error(data) from None
         return Location.model_validate(data)
 
     async def currencies(self) -> list[dict[str, str]]:
-        try:
-            data = await self._http.get_json(
-                f"{BASE}/v1/currencies",
-                params={"key": self._api_key},
-            )
-        except httpx.HTTPStatusError as e:
-            raise _status_error(e) from None
+        data = await self._get_once(f"{BASE}/v1/currencies", {"key": self._api_key})
+        if isinstance(data, httpx.HTTPStatusError):
+            raise _status_error(data) from None
         return data.get("currencies", [])
