@@ -7224,8 +7224,8 @@ class _GfRefusal(NamedTuple):
 
     `remedy` is the sentence of `message` that names the user's next move,
     pre-rendered like `message`, for a caller that prints `note` and would
-    otherwise leave the user without one. Only the http rung's throttle sets
-    it; every other refusal leaves it empty."""
+    otherwise leave the user without one. Only a throttle sets it, each rung's
+    own; every other refusal leaves it empty."""
 
     note: str
     message: str
@@ -7265,7 +7265,7 @@ def _gf_refusal(  # noqa: PLR0911, PLR0912 — one return per refusal type; see 
     value that is not a `GfBackendError` at all. With the base case present,
     deleting a subclass arm type-checks clean.
 
-    **Every interpolated string arrives escaped, and both fields leave here
+    **Every interpolated string arrives escaped, and every field leaves here
     console-ready.** The app runs rich in markup mode, so an unescaped
     `[browser]` in a remedy, or a `[0m` in patchright's driver text, is either
     deleted from the output or raises `MarkupError` from `print` — the second
@@ -7294,10 +7294,11 @@ def _gf_refusal(  # noqa: PLR0911, PLR0912 — one return per refusal type; see 
     )
     match e:
         case GfThrottledError() if transport == TRANSPORT_BROWSER:
+            no_retry = f"It does not retry, so {remedy}."
             return _GfRefusal(
                 "Google Flights rate-limited the browser rung",
-                "[yellow]Google Flights rate-limited the browser rung.[/] It does not "
-                f"retry, so {remedy}.",
+                f"[yellow]Google Flights rate-limited the browser rung.[/] {no_retry}",
+                no_retry,
             )
         case GfThrottledError():
             # Not "this IP": the budget is per client context, which is why the
@@ -9425,7 +9426,10 @@ def _gflight_cabins_in_series(
         # `removesuffix`, because a browser refusal's note already ends in the
         # full stop its remedy carries and every other refusal's does not.
         note = _gf_refusal(e, transport=TRANSPORT_BROWSER).note.removesuffix(".")
-        err.print(f"[yellow]Google Flights {cab.value}: {note}.[/]")
+        # The options shape only the remedy; the note reads the same under every one.
+        remedy = _gf_refusal(e, transport=TRANSPORT_BROWSER, bags=opts.bags is not None).remedy
+        tail = f" {remedy}" if remedy else ""
+        err.print(f"[yellow]Google Flights {cab.value}: {note}.{tail}[/]")
 
     def serve_cabin[T](cab: Cabin, call: Callable[[], T], *, served: bool) -> T | None:
         """`call`'s answer, or None once why this cabin's column is missing has

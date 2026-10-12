@@ -4614,10 +4614,12 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_refuse_pick_where_nothing_is_numbered", "unpinned"),
         ("_reraise_if_orderly", "plural"),  # "" or "s", off a count beside it
         ("_answer_gf_empty", "plural"),
-        # `_gf_refusal` sanitizes every remote field it reads and leaves both of
-        # its own console-ready, so a wrapper at the sink would show a backslash
+        # `_gf_refusal` sanitizes every remote field it reads and leaves every one
+        # of its own console-ready, so a wrapper at the sink would show a backslash
         # in front of every bracket the remote text carried. The exactly-once
-        # tests in `tests/test_gf_browser.py` are what hold these.
+        # tests in `tests/test_gf_browser.py` are what hold these; the `tail` entries
+        # are held by `tests/test_multi_cabin_throttle_remedy.py` and
+        # `tests/test_browser_cabin_throttle_remedy.py`.
         ("_run_gflight_path", "refusal.message"),
         ("_run_gflight_path", "note"),  # a refusal's note, or `_safe_text` of a failure
         ("_note_separate_tickets", "note"),  # a refusal's note
@@ -4626,6 +4628,7 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("query_cabin", "refusal.note"),
         ("query_cabin", "tail"),  # "" or a space and a refusal's remedy, console-ready as its note
         ("note_missing_column", "note"),
+        ("note_missing_column", "tail"),  # as in query_cabin
         # A refusal's note, or a sentence around the page number that stopped
         # the search; tests/test_gf_chunked_search.py prints a hostile one.
         ("_report_pages", "why"),
