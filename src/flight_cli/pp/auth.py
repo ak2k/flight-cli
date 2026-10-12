@@ -142,7 +142,10 @@ def save_tokens(t: Tokens) -> None:
     token readable by others, whatever mode the old file had. `mkstemp` picks a
     name no other writer holds, so the cleanup removes only this call's file.
     """
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    # 0700 applies only to the leaf this call creates: at the default mode the
+    # directory lists pp.json to every local user, and an existing one may hold
+    # files that are not credentials.
+    CONFIG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     payload = json.dumps(t.to_json(), indent=2)
     fd, name = tempfile.mkstemp(prefix=f".{TOKENS_PATH.name}.", suffix=".tmp", dir=CONFIG_DIR)
     tmp = Path(name)
