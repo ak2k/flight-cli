@@ -141,7 +141,10 @@ def save_tokens(t: Tokens) -> None:
     file it creates, so an existing 0644 or 0666 file is tightened by fchmod
     first, not after the write. O_TRUNC rewrites an existing file in place.
     """
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    # 0700 applies only to the leaf this call creates: at the default mode the
+    # directory lists pp.json to every local user, and an existing one may hold
+    # files that are not credentials.
+    CONFIG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     payload = json.dumps(t.to_json(), indent=2)
     fd = os.open(TOKENS_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as fh:

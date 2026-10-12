@@ -60,7 +60,9 @@ def save_key(key: str) -> None:
     (no merge — this is a single-key file). The file is 0600 before the key is
     written: O_CREAT's mode applies only to a file it creates, so an existing
     0644 or 0666 file is tightened by fchmod first, not after the write."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    # 0700 applies only to the leaf this call creates, so an existing directory
+    # keeps its mode; see pp.auth.save_tokens.
+    CONFIG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     payload = json.dumps({"api_key": key.strip()}, indent=2)
     fd = os.open(KEY_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as fh:
