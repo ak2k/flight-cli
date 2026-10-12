@@ -310,7 +310,8 @@ calendar alone, and `--gf-headed` with `http` is a usage error.
   calendar's trip lengths when none is open, `within_search`), each load from
   the eight-load budget, and raises the refusal once they are
   spent or no load is left. A graph refused after the window closes is
-  loaded again at once. Any other error row is raised at once. A Ctrl-C ends the
+  loaded again after what the pauses before it left of the 8 s sum, at once
+  when they spent it. Any other error row is raised at once. A Ctrl-C ends the
   pause the graph's worker is sleeping at once, and the refusal is raised
   instead of a load (`_gf_browser.pause_unless_stopped`, woken by
   `stop_all_drivers`); the command exits 130 without waiting out the pause.
