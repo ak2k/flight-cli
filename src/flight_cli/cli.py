@@ -8738,6 +8738,7 @@ def _print_low_check(lc: _LowCheck) -> None:
     console.print(
         f"Matrix asked for row {lc.n:d}'s flights ({_safe_text(trip)}): {_safe_text(answer)}",
         style="yellow" if lc.outcome == "no-answer" else None,
+        soft_wrap=True,
     )
 
 
