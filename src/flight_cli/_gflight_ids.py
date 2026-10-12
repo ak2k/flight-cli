@@ -508,15 +508,15 @@ def server_error_waiter() -> Callable[[], bool]:
     Each call sleeps the next of `_SERVER_ERROR_PAUSES_S`, cut to what the
     running search's window and sum have left (`_Escalation.pause`) or, outside
     one, to those of its own, and returns True; once the schedule is spent it
-    sleeps nothing and returns False."""
+    sleeps nothing and returns False. A Ctrl-C's driver stop ends the sleep at
+    once (`_gf_browser.pause_unless_stopped`), and the call returns False."""
     search = _search_escalation.get() or _Escalation()
     pauses = iter(_SERVER_ERROR_PAUSES_S)
 
     def wait() -> bool:
         if (wanted := next(pauses, None)) is None:
             return False
-        time.sleep(search.pause(wanted))
-        return True
+        return _gf_browser.pause_unless_stopped(search.pause(wanted))
 
     return wait
 
