@@ -61,7 +61,9 @@ def save_key(key: str) -> None:
     (no merge — this is a single-key file). The key goes to a 0600 temp file
     beside the store, which then replaces it: a save that fails partway keeps
     the previous file, whatever mode the old file had."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    # 0700 applies only to the leaf this call creates, so an existing directory
+    # keeps its mode; see pp.auth.save_tokens.
+    CONFIG_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     payload = json.dumps({"api_key": key.strip()}, indent=2)
     fd, name = tempfile.mkstemp(prefix=f".{KEY_PATH.name}.", suffix=".tmp", dir=CONFIG_DIR)
     tmp = Path(name)
