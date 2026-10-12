@@ -7,8 +7,9 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, cast, override
 
 import anyio
 import anyio.to_thread
@@ -72,6 +73,32 @@ CACHE_SIZE_LIMIT_BYTES = 256 * 1024 * 1024
 # How long a request waits to open a connection to Matrix, on each attempt.
 CONNECT_TIMEOUT_S = 10.0
 
+# libcurl reports every timeout as code 28, and httpx-curl-cffi raises each one
+# as a bare `httpx.TimeoutException`. Only curl's message tells a timeout while
+# resolving or connecting (TLS included) from one after the connection opened.
+_CURL_CONNECT_TIMEOUT = re.compile(r"curl: \(28\) (?:Connection|Resolving|Failed to resolve)\b")
+
+
+class _ConnectTimeouts(httpx.AsyncBaseTransport):
+    """Raises `httpx.ConnectTimeout` for a curl timeout before the connection
+    opened, so a caller can tell the connect limit from the read limit."""
+
+    def __init__(self, inner: httpx.AsyncBaseTransport) -> None:
+        self._inner = inner
+
+    @override
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        try:
+            return await self._inner.handle_async_request(request)
+        except httpx.TimeoutException as e:
+            if _CURL_CONNECT_TIMEOUT.search(str(e)):
+                raise httpx.ConnectTimeout(str(e), request=request) from e
+            raise
+
+    @override
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
 
 def is_cacheable_body(data: dict[str, Any]) -> bool:
     """Whether a decoded response body may be stored.
@@ -118,12 +145,14 @@ class HttpTransport:
         cache_write: bool = True,
         cache_ttl: float = CACHE_TTL_SECS,
     ) -> None:
-        self._transport = AsyncCurlTransport(
-            # `impersonate` is a curl_cffi BrowserTypeLiteral string at runtime;
-            # accept any str from callers and let curl_cffi validate.
-            impersonate=cast("Any", impersonate),
-            curl_options={CurlOpt.FRESH_CONNECT: True},
-            default_headers=True,
+        self._transport = _ConnectTimeouts(
+            AsyncCurlTransport(
+                # `impersonate` is a curl_cffi BrowserTypeLiteral string at runtime;
+                # accept any str from callers and let curl_cffi validate.
+                impersonate=cast("Any", impersonate),
+                curl_options={CurlOpt.FRESH_CONNECT: True},
+                default_headers=True,
+            )
         )
         self._client = httpx.AsyncClient(
             transport=self._transport,
