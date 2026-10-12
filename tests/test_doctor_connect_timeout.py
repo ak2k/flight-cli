@@ -7,12 +7,15 @@ from __future__ import annotations
 
 import socket
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 import anyio
 import httpx
 import pytest
 import stamina
+from curl_cffi.const import CurlECode
+from curl_cffi.requests import AsyncSession
+from curl_cffi.requests.exceptions import Timeout as CurlTimeout
 
 from flight_cli._http import HttpTransport
 from test_doctor import World, _fails_as, _matrix_behind_the_real_client, _run, world
@@ -28,6 +31,19 @@ _CONNECT_LIMIT = (
     "Matrix accepted no connection within 10 s, the limit a search waits to connect on each attempt"
 )
 _READ_LIMIT = "Matrix did not answer within 180 s, the limit a search waits on each attempt"
+
+
+@pytest.fixture(autouse=True)
+def _no_socket(monkeypatch: pytest.MonkeyPatch) -> None:  # pyright: ignore[reportUnusedFunction] - autouse pytest fixture
+    """Fail a test here that binds or connects a socket, loopback included,
+    which the conftest guard admits: these tests reach curl through a fake
+    session, never a port."""
+
+    def refuse(_sock: socket.socket, address: object) -> None:
+        pytest.fail(f"this test opened a socket: {address!r}")
+
+    for name in ("bind", "connect", "connect_ex"):
+        monkeypatch.setattr(socket.socket, name, refuse)
 
 
 def test_a_matrix_connect_timeout_names_the_connect_limit(world: World) -> None:
@@ -68,22 +84,43 @@ def test_the_doctor_doc_names_both_limits_of_a_matrix_timeout() -> None:
     assert "180 s" in rows[0]
 
 
-def test_the_curl_transport_raises_a_connect_timeout_when_no_connection_opens(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def _curl_28(message: str) -> str:
+    return (
+        f"Failed to perform, curl: (28) {message}. See "
+        "https://curl.se/libcurl/c/libcurl-errors.html first for more details."
+    )
+
+
+@pytest.mark.parametrize(
+    ("curl", "raised"),
+    [
+        ("Connection timed out after 10000 milliseconds", httpx.ConnectTimeout),
+        (
+            "Operation timed out after 190000 milliseconds with 0 bytes received",
+            httpx.TimeoutException,
+        ),
+    ],
+)
+def test_the_curl_transport_raises_a_connect_timeout_only_before_the_connection_opens(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    curl: str,
+    raised: type[httpx.TimeoutException],
 ) -> None:
-    monkeypatch.setenv("no_proxy", "127.0.0.1")
-    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
-    silent = socket.socket()
-    silent.bind(("127.0.0.1", 0))
-    silent.listen()  # the kernel accepts the TCP connection; nothing answers the TLS hello
-    url = f"https://127.0.0.1:{silent.getsockname()[1]}/"
+    async def time_out(_session: object, **_request: object) -> NoReturn:
+        # What curl_cffi's session raises for libcurl's code 28; the real
+        # httpx-curl-cffi transport maps it to the bare `httpx.TimeoutException`.
+        raise CurlTimeout(_curl_28(curl), CurlECode.OPERATION_TIMEDOUT)
+
+    monkeypatch.setattr(AsyncSession, "request", time_out)
 
     async def post() -> None:
-        async with HttpTransport(connect_timeout=0.3, cache_dir=tmp_path) as http:
-            await http.post_json(url, {}, cache=False)
+        async with HttpTransport(cache_dir=tmp_path) as http:
+            await http.post_json("https://content-alkalimatrix-pa.googleapis.com/", {}, cache=False)
 
-    with silent, stamina.set_testing(True, attempts=1), pytest.raises(httpx.ConnectTimeout):
+    with stamina.set_testing(True, attempts=1), pytest.raises(httpx.TimeoutException) as e:
         anyio.run(post)
+    assert e.type is raised
 
 
 def _curl_timeout(message: str) -> Callable[[httpx.Request, float], httpx.Response]:
@@ -91,11 +128,7 @@ def _curl_timeout(message: str) -> Callable[[httpx.Request, float], httpx.Respon
     curl's message the only record of which limit ran out."""
 
     def answer(request: httpx.Request, _read: float) -> httpx.Response:
-        raise httpx.TimeoutException(
-            f"Failed to perform, curl: (28) {message}. See "
-            "https://curl.se/libcurl/c/libcurl-errors.html first for more details.",
-            request=request,
-        )
+        raise httpx.TimeoutException(_curl_28(message), request=request)
 
     return answer
 
