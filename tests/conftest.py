@@ -226,9 +226,15 @@ def _bounded_lock_wait(  # pyright: ignore[reportUnusedFunction] - autouse pytes
 def _no_local_provider_credentials(  # pyright: ignore[reportUnusedFunction] - autouse pytest fixture
     monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
-    """No test reads or writes this machine's award-provider credentials or
-    config; a test that needs one sets it itself."""
-    names = ("PP_ACCESS_TOKEN", "PP_REFRESH_TOKEN", "SEATS_AERO_API_KEY", "FLIGHT_CLI_CONFIG_DIR")
+    """No test reads or writes this machine's award-provider credentials,
+    config or response cache; a test that needs one sets it itself."""
+    names = (
+        "PP_ACCESS_TOKEN",
+        "PP_REFRESH_TOKEN",
+        "SEATS_AERO_API_KEY",
+        "FLIGHT_CLI_CONFIG_DIR",
+        "MATRIX_CACHE_DIR",
+    )
     for name in names:
         monkeypatch.delenv(name, raising=False)
     # Not the test's `tmp_path`, so a test's own files never meet these stores.
