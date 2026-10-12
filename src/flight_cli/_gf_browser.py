@@ -96,6 +96,9 @@ _SNAPSHOT_LINE = re.compile(r"^\s*- (?:'((?:[^'\n]|'')*)'|(.*?))(?::(?: .*)?)?$"
 # A button's KEY: its name JSON-quoted, or as is when it starts and ends with
 # `/`, then its states in brackets: `button "Stops: Any" [disabled]`.
 _BUTTON_KEY = re.compile(r'button (?:("(?:[^"\\]|\\.)*")|(/(?:.*/)?))(?: \[[^\]]*\])*')
+# A button the snapshot writes without a name: it has none, or one over 900
+# characters. Its KEY is `button` and its states, as in `button [disabled]`.
+_NAMELESS_BUTTON_KEY = re.compile(r"button(?: \[[^\]]*\])*")
 # What Chrome says when asked for a body it has already dropped from its buffer.
 _EVICTED = "Request content was evicted from inspector cache"
 # The sync API delivers events only while one of its calls is running, so the
@@ -832,21 +835,30 @@ def _describe_page(page: Any) -> str:
 
     The snapshot lists only what a user could reach, so a hidden control is not
     named. A page showing no "Price graph" button, a consent form or another
-    site all end in the same click timeout; this is what tells them apart."""
+    site all end in the same click timeout; this is what tells them apart. A
+    button with no name is counted after the named ones, not named."""
     deadline = time.monotonic() + _SNAPSHOT_TIMEOUT_MS / 1000
     snapshot = str(page.aria_snapshot(timeout=_SNAPSHOT_TIMEOUT_MS))
     names: list[str] = []
+    nameless = 0
     for quoted, bare in _SNAPSHOT_LINE.findall(snapshot):
-        if button := _BUTTON_KEY.fullmatch(quoted.replace("''", "'") or bare):
+        key = quoted.replace("''", "'") or bare
+        if button := _BUTTON_KEY.fullmatch(key):
             json_name, slash_name = button.groups()
             names.append(_one_line(_unquote(json_name) if json_name else slash_name))
+        elif _NAMELESS_BUTTON_KEY.fullmatch(key):
+            nameless += 1
     shown = ", ".join(f'"{n}"' for n in names[:_SHOWN_BUTTONS])
-    if not names:
-        buttons = "no visible buttons"
-    elif len(names) > _SHOWN_BUTTONS:
-        buttons = f"visible buttons: {shown}, and {len(names) - _SHOWN_BUTTONS} more"
-    else:
+    if names:
         buttons = f"visible buttons: {shown}"
+        if len(names) > _SHOWN_BUTTONS:
+            buttons += f", and {len(names) - _SHOWN_BUTTONS} more"
+        if nameless:
+            buttons += f", and {nameless} without a name"
+    elif nameless:
+        buttons = f"{nameless} visible {'button' if nameless == 1 else 'buttons'} without a name"
+    else:
+        buttons = "no visible buttons"
     # `page.title()` takes no timeout, so the title is read under what the
     # snapshot left of the bound, and never under zero, which means none.
     left_ms = (deadline - time.monotonic()) * 1000
