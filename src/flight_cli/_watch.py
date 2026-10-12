@@ -124,7 +124,10 @@ def _locked() -> Generator[None]:
         return
     import fcntl  # noqa: PLC0415 - the module does not exist on Windows
 
-    fd = os.open(directory, os.O_RDONLY)
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError as e:
+        raise _fail(f"{directory!s} cannot be locked: {e.strerror}", 1) from e
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
