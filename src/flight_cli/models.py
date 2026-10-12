@@ -228,7 +228,15 @@ class SearchResult(_Loose):
                 cls.__name__, [{"type": "dict_type", "loc": ("solutionList",), "input": listed}]
             )
         sol_container = cast("dict[str, Any]", listed)
-        sol_list: list[Any] = sol_container.get("solutions") or []
+        found: Any = sol_container.get("solutions")
+        # The same guard one level down: `or []` would turn a present `{}`, `""`,
+        # `0` or `False` into an answer with no results.
+        if found is not None and not isinstance(found, list):
+            raise ValidationError.from_exception_data(
+                cls.__name__,
+                [{"type": "list_type", "loc": ("solutionList", "solutions"), "input": found}],
+            )
+        sol_list = cast("list[Any]", found or [])
         return cls(
             solutionCount=body.get("solutionCount", len(sol_list)),
             solutions=sol_list,
