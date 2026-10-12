@@ -11938,6 +11938,11 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         raise typer.Exit(2)
 
     if len(cabins_tuple) > 1:
+        if pick is not None:
+            err.print(
+                f"[yellow]--pick {pick:d} is ignored: "
+                "a multi-cabin search has no one row to name.[/]"
+            )
         if beside_matrix and per_slice:
             _answer_open_jaw(
                 legs=legs,
