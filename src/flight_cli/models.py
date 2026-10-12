@@ -332,7 +332,15 @@ class CalendarResult(_Loose):
                 cls.__name__, [{"type": "dict_type", "loc": ("calendar",), "input": asked}]
             )
         cal = cast("dict[str, Any]", asked or {})
-        months: list[Any] = cal.get("months") or []
+        listed: Any = cal.get("months")
+        # The same guard one level down: `or []` would turn a present `{}`, `""`,
+        # `0` or `False` into an empty grid.
+        if listed is not None and not isinstance(listed, list):
+            raise ValidationError.from_exception_data(
+                cls.__name__,
+                [{"type": "list_type", "loc": ("calendar", "months"), "input": listed}],
+            )
+        months = cast("list[Any]", listed or [])
         return cls(
             solutionCount=body.get("solutionCount", 0),
             currencyNotice=body.get("currencyNotice", {}),
