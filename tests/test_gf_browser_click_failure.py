@@ -170,7 +170,7 @@ def test_the_title_read_shares_the_bound_the_snapshot_started(
     assert page.elapsed_s <= gfb._SNAPSHOT_TIMEOUT_MS / 1000  # pyright: ignore[reportPrivateUsage]
     assert str(error).startswith(
         "Chrome could not click 'Price graph' on Google Flights' page: Timeout 20000ms exceeded. "
-        "Chrome could not read the page afterward: Timeout "
+        f'The page showed URL {_FINAL_URL}, title unread, visible buttons: "Accept all". '
     )
 
 

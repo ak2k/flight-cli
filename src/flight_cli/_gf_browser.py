@@ -516,10 +516,12 @@ class GfBrowserSession:
         """What the page showed after a failed step, as one sentence.
 
         A failure to read it is that sentence instead: the step's own failure is
-        what the caller needs, and a second error would hide it."""
+        what the caller needs, and a second error would hide it. A title that
+        cannot be read alone is not a failure to read the page."""
         try:
             return self._drive(
-                "Chrome could not read the page afterward", lambda: _describe_page(page)
+                "Chrome could not read the page afterward",
+                lambda: _describe_page(page, self._drive),
             )
         except GfBrowserUnavailableError as e:
             return e.reason
@@ -830,8 +832,12 @@ def _unquote(name: str) -> str:
         return name.strip('"')
 
 
-def _describe_page(page: Any) -> str:
+def _describe_page(page: Any, drive: Callable[[str, Callable[[], Any]], Any]) -> str:
     """The page's URL, its title and its visible buttons' accessible names.
+
+    The title is read through `drive`, apart from the snapshot: a page with no
+    title, or a renderer that stalls on it, is `title unread` and keeps the
+    URL and the buttons.
 
     The snapshot lists only what a user could reach, so a hidden control is not
     named. A page showing no "Price graph" button, a consent form or another
@@ -862,9 +868,16 @@ def _describe_page(page: Any) -> str:
     # `page.title()` takes no timeout, so the title is read under what the
     # snapshot left of the bound, and never under zero, which means none.
     left_ms = (deadline - time.monotonic()) * 1000
-    title = page.locator("head > title").first.text_content(timeout=max(1.0, left_ms))
+    try:
+        title = drive(
+            "Chrome could not read the page's title",
+            lambda: page.locator("head > title").first.text_content(timeout=max(1.0, left_ms)),
+        )
+        title_shown = f'title "{_one_line(title)}"'
+    except GfBrowserUnavailableError:
+        title_shown = "title unread"
     url = _one_line(str(page.url))
-    return f'The page showed URL {url}, title "{_one_line(title)}", {buttons}.'
+    return f"The page showed URL {url}, {title_shown}, {buttons}."
 
 
 def _navigated_page(page: Any, nav: Any) -> PageFetch:
@@ -976,6 +989,15 @@ _live: set[GfBrowserSession] = set()
 # instead, on the way in and again once its own driver does exist. Process-wide
 # because the launch runs on a worker and the handler runs on the main thread.
 _interrupt_state: dict[str, bool] = {"seen": False}
+# Set by `stop_all_drivers` and cleared by the guard on its way in, like
+# `_interrupt_state`. A thread that sleeps between two page loads polls it,
+# since the stop frees a load but not a sleep. Sticky, so a stop that lands
+# before the sleep starts ends it at once. A flag, not a `threading.Event`:
+# setting an Event takes a plain lock that every `Event.wait` holds for a few
+# opcodes, and the handler that sets this can interrupt the main thread there.
+_stopped: dict[str, bool] = {"set": False}
+# How long a sleeping thread can take to see the stop.
+_STOP_POLL_S = 0.05
 
 
 def _remember(session: GfBrowserSession) -> None:
@@ -992,11 +1014,26 @@ def stop_all_drivers() -> None:
     """Stop every browser open in this process, from wherever the caller stands.
 
     A session that never launched was never registered, and one whose manager is
-    already gone degrades to a no-op, so this is safe to call at any moment."""
+    already gone degrades to a no-op, so this is safe to call at any moment.
+
+    It also ends every `pause_unless_stopped`, those running and those to come."""
+    _stopped["set"] = True
     with _live_lock:
         open_now = list(_live)
     for s in open_now:
         s.stop_driver()
+
+
+def pause_unless_stopped(seconds: float) -> bool:
+    """Sleep `seconds`, or until `stop_all_drivers` is called, whichever is first.
+    True when the whole pause was slept."""
+    deadline = time.monotonic() + seconds
+    while not _stopped["set"]:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return True
+        time.sleep(min(left, _STOP_POLL_S))
+    return False
 
 
 @contextlib.contextmanager
@@ -1069,6 +1106,7 @@ def interrupt_guard(*, armed: bool = True) -> Generator[None]:
     # completion below it is already false, and after an interrupt it stays
     # set for the rest of that shutdown, exactly as the ignore does.
     _interrupt_state["seen"] = False
+    _stopped["set"] = False
 
     def _on_sigint(_signum: int, _frame: types.FrameType | None) -> None:
         nonlocal seen

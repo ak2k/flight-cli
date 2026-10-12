@@ -23,6 +23,7 @@ from .models import BookingDetailsResult, CalendarResult, FareRulesResult, Locat
 from .wire import booking_details_body, fare_rules_body, to_wire
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 # Re-export so callers can `from flight_cli.client import ApiKeyResolutionError`.
@@ -92,7 +93,7 @@ def _raise_if_api_error(data: dict[str, Any]) -> None:
 
 class MatrixShapeError(RuntimeError):
     """Matrix answered, and the answer does not parse as the response model for
-    this search: the backend changed, or this CLI misreads it. Not a
+    its request: the backend changed, or this CLI misreads it. Not a
     `MatrixApiError`: Matrix reported no error, so `kind` and `request_id` have
     nothing to carry. `str()` is the whole typed line, report URL and captured
     body included; `detail` is the parse failure alone."""
@@ -123,10 +124,15 @@ def _capture_body(data: dict[str, Any]) -> Path | None:
 
 
 def _parse_response(search: Search, data: dict[str, Any]) -> SearchResult | CalendarResult:
-    """Pick the right response model based on the search variant. A body the
-    model refuses is kept on disk and raised as `MatrixShapeError`."""
+    """Pick the right response model based on the search variant."""
+    return _parsed(data, lambda body: _parse_by_variant(search, body))
+
+
+def _parsed[T](data: dict[str, Any], parse: Callable[[dict[str, Any]], T]) -> T:
+    """`parse(data)`, or `MatrixShapeError` when the model refuses the body. A
+    body the model refuses is kept on disk."""
     try:
-        return _parse_by_variant(search, data)
+        return parse(data)
     except ValidationError as e:
         first = e.errors(include_url=False)[0]
         where = ".".join(str(p) for p in first["loc"]) or "the top level"
@@ -257,7 +263,7 @@ class MatrixClient:
             session=session, solution_set=solution_set, solution_id=solution_id
         )
         data = await self._post(SUMMARIZE_URL, body.as_json(), cache=False)
-        return BookingDetailsResult.from_api(data)
+        return _parsed(data, BookingDetailsResult.from_api)
 
     async def fare_rules(
         self, *, session: str, solution_set: str, solution_id: str, fare_key: str
@@ -266,7 +272,7 @@ class MatrixClient:
             session=session, solution_set=solution_set, solution_id=solution_id, fare_key=fare_key
         )
         data = await self._post(SUMMARIZE_URL, body.as_json(), cache=False)
-        return FareRulesResult.from_api(data)
+        return _parsed(data, FareRulesResult.from_api)
 
     # ───────────────────────── ancillary helpers ───────────────────────────
 
