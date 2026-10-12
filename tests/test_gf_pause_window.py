@@ -3,8 +3,8 @@
 
 A search pauses for server errors inside one 8 s window, opened by its first
 pause. Pages read side by side (the cabins of a multi-cabin search) each get the
-2 s and the 6 s inside that one window; a page read after it closes is read
-again at once.
+2 s and the 6 s inside that one window; a page read after it closes gets what
+they left of the 8 s sum, which is nothing once they have spent it.
 
 Each thread has its own virtual clock: a sleep advances only the sleeping
 thread's, so pages that start together run in lockstep with no real sleep.
@@ -76,9 +76,13 @@ def test_pages_read_side_by_side_each_get_the_schedule(
     monkeypatch.setattr(gfid, "_fetch_page", fetch)
     outcomes: dict[str, object] = {}
     sleeps: dict[str, list[float]] = {}
+    idents: list[int] = []
+    together = threading.Barrier(pages)
 
     def run() -> None:
+        together.wait(5)
         name = threading.current_thread().name
+        idents.append(threading.get_ident())
         try:
             outcomes[name] = len(_http())
         except gfid.GfBackendError as e:
@@ -94,6 +98,7 @@ def test_pages_read_side_by_side_each_get_the_schedule(
             thread.start()
         for thread in threads:
             thread.join(10)
+    assert len(set(idents)) == pages, idents
     assert outcomes == {f"p{i}": 300 for i in range(pages)}, (outcomes, sleeps)
     assert sleeps == {f"p{i}": _SCHEDULE for i in range(pages)}, sleeps
 
@@ -199,3 +204,17 @@ def test_each_cabin_reads_its_board_through_an_error_its_pauses_outlast(
     assert result.exit_code == 0, stderr
     assert "server error" not in stderr, stderr
     assert sorted(clock.sleeps.values()) == [_SCHEDULE] * (2 if cabins else 1), clock.sleeps
+
+
+def test_a_pause_asked_after_the_window_closed_is_zero_not_negative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A guard: once the schedule is spent and the window has closed, a pause
+    asked 1.5 s after is nothing, not the 1.5 s the window is overdrawn by."""
+    clock = _ThreadTime()
+    monkeypatch.setattr(gfid, "time", clock)
+    window = gfid._Escalation()
+    got = [window.pause(2.0), window.pause(6.0)]
+    clock.sleep(9.5)
+    got.append(window.pause(2.0))
+    assert got == [*_SCHEDULE, 0.0], got

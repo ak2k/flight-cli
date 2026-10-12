@@ -422,7 +422,8 @@ class _Escalation:
     still pause for Google's server errors. The flag is set once, by the first
     of its threads whose ladder ran out on a throttle, and read by every thread
     of that search before it asks Google anything. The pauses are a window of
-    `sum(_SERVER_ERROR_PAUSES_S)` seconds that the search's first one opens.
+    `sum(_SERVER_ERROR_PAUSES_S)` seconds that the search's first one opens,
+    beside a sum of as many seconds that each pause granted draws down.
 
     Chrome itself is thread-local (`_gf_browser.session`), so a thread that
     reads the flag set opens or reuses its own, and closes it where the browser
@@ -432,6 +433,7 @@ class _Escalation:
         self._lock = threading.Lock()
         self.done = False
         self._pause_until: float | None = None
+        self._unspent = sum(_SERVER_ERROR_PAUSES_S)
 
     def take(self) -> bool:
         """Mark the search escalated: True for the one call that did, so the
@@ -444,14 +446,17 @@ class _Escalation:
     def pause(self, wanted: float) -> float:
         """The part of `wanted` seconds this search may still pause before
         re-reading a page Google answered with a server error: what is left of
-        the window its first pause opened. Pages read side by side each get the
-        whole schedule inside that one window, so the user waits 8 s at most;
-        a page read after it closes is read again at once."""
+        the window its first pause opened, or of the sum the pauses granted so
+        far have not drawn down, whichever is more. Pages read side by side each
+        get the whole schedule inside that one window; a page read after it
+        closes gets what they left of the sum, so the user waits 8 s at most."""
         with self._lock:
             now = time.monotonic()
             if self._pause_until is None:
                 self._pause_until = now + sum(_SERVER_ERROR_PAUSES_S)
-            return min(wanted, max(0.0, self._pause_until - now))
+            granted = min(wanted, max(self._pause_until - now, self._unspent))
+            self._unspent = max(0.0, self._unspent - granted)
+            return granted
 
 
 # The escalation of the search running now, or None outside one. A ContextVar
@@ -500,18 +505,18 @@ def escalated() -> bool:
 def server_error_waiter() -> Callable[[], bool]:
     """A caller's schedule of pauses before it reads again what Google refused.
 
-    Each call sleeps the next of `_SERVER_ERROR_PAUSES_S`, cut to what is left
-    of the running search's window (`_Escalation.pause`) or, outside one, a
-    window of its own, and returns True; once the schedule is spent it sleeps
-    nothing and returns False."""
+    Each call sleeps the next of `_SERVER_ERROR_PAUSES_S`, cut to what the
+    running search's window and sum have left (`_Escalation.pause`) or, outside
+    one, to those of its own, and returns True; once the schedule is spent it
+    sleeps nothing and returns False. A Ctrl-C's driver stop ends the sleep at
+    once (`_gf_browser.pause_unless_stopped`), and the call returns False."""
     search = _search_escalation.get() or _Escalation()
     pauses = iter(_SERVER_ERROR_PAUSES_S)
 
     def wait() -> bool:
         if (wanted := next(pauses, None)) is None:
             return False
-        time.sleep(search.pause(wanted))
-        return True
+        return _gf_browser.pause_unless_stopped(search.pause(wanted))
 
     return wait
 
@@ -2595,8 +2600,9 @@ def retry_throttled[T](  # noqa: PLR0915 — one arm per retry policy, each with
                 # Not probing the wall while it pauses, so a sibling parked on a
                 # round this call owns retries now rather than after the pause.
                 ladder.stand_down()
-                # Once the search's window has closed the page is read again
-                # at once, as a page with no board is.
+                # Once the window has closed and the pauses before this one drew
+                # the sum down to nothing, the page is read again at once, as a
+                # page with no board is.
                 pause = search.pause(_SERVER_ERROR_PAUSES_S[server_errors - 1])
                 log.debug("%s; reading the page again in %.0fs", e, pause)
                 time.sleep(pause)
