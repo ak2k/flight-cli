@@ -195,7 +195,7 @@ def test_token_file_is_created_0600_not_widened_then_tightened(
     real_open = os.open
 
     def spy(path: Any, flags: int, mode: int = 0o777, **kw: Any) -> int:
-        if str(path).endswith("pp.json"):
+        if "pp.json" in str(path):
             modes.append(mode)
         return real_open(path, flags, mode, **kw)
 
