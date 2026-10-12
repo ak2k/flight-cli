@@ -1582,7 +1582,8 @@ def _reraise_if_orderly(e: Exception, *, said: str) -> None:
         plural = "" if len(beside) == 1 else "s"
         err.print(
             f"[red]{_safe_text(said)}:[/] {len(beside):d} failure{plural} "
-            f"beside a deliberate stop: {_failure_text(e)}"
+            f"beside a deliberate stop: {_failure_text(e)}",
+            soft_wrap=True,
         )
         for f in beside:
             if isinstance(f, MatrixApiError):
@@ -1623,7 +1624,7 @@ def _run_matrix[T](go: Callable[[], Coroutine[Any, Any, T]], *, said: str) -> T:
         # there is — and this package's rule is that a third-party transport
         # error never reaches a caller untyped.
         _reraise_if_orderly(e, said=said)
-        err.print(f"[red]{_safe_text(said)}:[/] {_failure_text(e)}")
+        err.print(f"[red]{_safe_text(said)}:[/] {_failure_text(e)}", soft_wrap=True)
         # `str()` of a Matrix error is its message alone, so a group hands this
         # line the one field of three that a reader cannot act on by itself.
         # Each one inside `e` goes on to the reporter that keeps `kind` and
@@ -1824,7 +1825,10 @@ def _print_calendar_failure(
             err.print(f"[red]{_safe_text(backend)} failed.[/]")
         _print_matrix_error(cause)
         return
-    err.print(f"[red]{_safe_text(backend)} failed:[/] {_safe_text(lost)}{_failure_text(cause)}")
+    err.print(
+        f"[red]{_safe_text(backend)} failed:[/] {_safe_text(lost)}{_failure_text(cause)}",
+        soft_wrap=True,
+    )
     if isinstance(cause, BaseExceptionGroup):
         # `isinstance` narrows to the unparameterised generic, which leaves every
         # member unknown; anyio builds these and they hold whatever the tasks raised.
@@ -1958,9 +1962,9 @@ def _report_calendar_fanout(fan: _CalendarFanout, total: int, *, merged_empty: b
             if cause.request_id:
                 err.print(f"[dim]  request_id: {_safe_text(cause.request_id)}[/]")
         elif isinstance(cause, _CalendarCurrencyError):
-            err.print(f"[yellow]  {_failure_text(cause)}[/]")  # it names its route
+            err.print(f"[yellow]  {_failure_text(cause)}[/]", soft_wrap=True)  # it names its route
         else:
-            err.print(f"[yellow]  {_safe_text(route)}: {_failure_text(cause)}[/]")
+            err.print(f"[yellow]  {_safe_text(route)}: {_failure_text(cause)}[/]", soft_wrap=True)
 
 
 def _calendar_route_label(s: CalendarSearch) -> str:
@@ -8177,11 +8181,13 @@ def _report_weave_aftermath(state: dict[str, Any]) -> None:
         _report_paint_failure(state["paint_err"])
     if state.get("matrix_unexpected") is not None:
         err.print(
-            f"[yellow]Matrix answered, then failed:[/] {_failure_text(state['matrix_unexpected'])}"
+            f"[yellow]Matrix answered, then failed:[/] {_failure_text(state['matrix_unexpected'])}",
+            soft_wrap=True,
         )
     if state.get("weave_err") is not None:
         err.print(
-            f"[yellow]The search answered, then failed:[/] {_failure_text(state['weave_err'])}"
+            f"[yellow]The search answered, then failed:[/] {_failure_text(state['weave_err'])}",
+            soft_wrap=True,
         )
 
 
@@ -8267,11 +8273,14 @@ def _report_search_matrix_failure(state: dict[str, Any]) -> None:
         _print_matrix_error(e)
         said = True
     if state.get("matrix_unexpected") is not None:
-        err.print(f"[red]Matrix search failed:[/] {_failure_text(state['matrix_unexpected'])}")
+        err.print(
+            f"[red]Matrix search failed:[/] {_failure_text(state['matrix_unexpected'])}",
+            soft_wrap=True,
+        )
         said = True
     if state.get("weave_err") is not None:
         # Neutral, because this group spans both backends; see `_run_the_weave`.
-        err.print(f"[red]Search failed:[/] {_failure_text(state['weave_err'])}")
+        err.print(f"[red]Search failed:[/] {_failure_text(state['weave_err'])}", soft_wrap=True)
         said = True
     if not said:
         err.print("[yellow]Matrix search did not complete.[/]")
@@ -9239,7 +9248,9 @@ def _run_matrix_multi(
             # one more: an exception leaving this task cancels its siblings and
             # surfaces as an ExceptionGroup, so one cabin's unreachable network
             # would take the cabins that answered with it.
-            err.print(f"[yellow]Matrix {cab.value} query failed: {_safe_text(e)}[/]")
+            err.print(
+                f"[yellow]Matrix {cab.value} query failed: {_safe_text(e)}[/]", soft_wrap=True
+            )
             return
         results[cab] = cast("SearchResult", res)
 
@@ -9275,7 +9286,7 @@ def _run_matrix_multi(
         # the client's own open or close, or wrapped in the group a task raised
         # it inside — and `except MatrixApiError` catches only the first.
         _reraise_if_orderly(e, said="Matrix search failed")
-        err.print(f"[red]Matrix search failed:[/] {_failure_text(e)}")
+        err.print(f"[red]Matrix search failed:[/] {_failure_text(e)}", soft_wrap=True)
         # `str()` of a Matrix error is its message alone, so a group hands this
         # line the one field of three that a reader cannot act on by itself.
         # Each one inside `e` goes on to the reporter that keeps `kind` and
@@ -9608,7 +9619,7 @@ def _run_gflight_multi(
             # receive is a bare traceback with both streams empty, which is the
             # one outcome every reporter on this path exists to prevent.
             _reraise_if_orderly(e, said="Google Flights search failed")
-            err.print(f"[red]Google Flights search failed:[/] {_failure_text(e)}")
+            err.print(f"[red]Google Flights search failed:[/] {_failure_text(e)}", soft_wrap=True)
             raise typer.Exit(1) from e
     # In the order the cabins were asked for, not the order they finished in,
     # which `--format json` would otherwise list them in.
