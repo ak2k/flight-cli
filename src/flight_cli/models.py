@@ -322,7 +322,16 @@ class CalendarResult(_Loose):
 
     @classmethod
     def from_api(cls, body: dict[str, Any]) -> CalendarResult:
-        cal: dict[str, Any] = body.get("calendar") or {}
+        asked: Any = body.get("calendar")
+        # An absent or null calendar is an empty grid; one present and not an
+        # object is refused like `SearchResult.from_api` refuses its list, so a
+        # caller reads the shape change instead of "no fare priced" (`or {}`
+        # would turn `[]` into an empty grid).
+        if asked is not None and not isinstance(asked, dict):
+            raise ValidationError.from_exception_data(
+                cls.__name__, [{"type": "dict_type", "loc": ("calendar",), "input": asked}]
+            )
+        cal = cast("dict[str, Any]", asked or {})
         months: list[Any] = cal.get("months") or []
         return cls(
             solutionCount=body.get("solutionCount", 0),
