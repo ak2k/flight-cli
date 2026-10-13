@@ -92,7 +92,13 @@ def seats_key(api_key: Annotated[str, typer.Argument(help="Partner API key (pro_
     Alternative: set the SEATS_AERO_API_KEY env var, which takes precedence
     over the on-disk value at runtime.
     """
-    _seats_auth.save_key(api_key)
+    try:
+        _seats_auth.save_key(api_key)
+    except OSError as e:
+        err.print(
+            f"[red]Could not save the key ({_safe_text(type(e).__name__)}): {_safe_text(e)}[/]"
+        )
+        raise typer.Exit(1) from e
     console.print(f"[green]Saved Seats.aero key to {_safe_text(_seats_auth.KEY_PATH)}.[/]")
 
 
