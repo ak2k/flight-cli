@@ -159,7 +159,14 @@ def seats_logout() -> None:
     when set). After logout, the provider's `is_configured()` returns
     False and `flight search --providers seats` will error.
     """
-    if _seats_auth.clear_key():
+    try:
+        removed = _seats_auth.clear_key()
+    except OSError as e:
+        err.print(
+            f"[red]Could not delete the key ({_safe_text(type(e).__name__)}): {_safe_text(e)}[/]"
+        )
+        raise typer.Exit(1) from e
+    if removed:
         console.print(f"[green]Deleted {_safe_text(_seats_auth.KEY_PATH)}.[/]")
     else:
         console.print("[yellow]No on-disk Seats.aero key to delete.[/]")
@@ -259,7 +266,14 @@ def pp_whoami() -> None:
 @pp_auth_app.command("logout")
 def pp_logout() -> None:
     """Delete the on-disk PointsPath token store."""
-    if clear_tokens():
+    try:
+        removed = clear_tokens()
+    except OSError as e:
+        err.print(
+            f"[red]Could not delete the tokens ({_safe_text(type(e).__name__)}): {_safe_text(e)}[/]"
+        )
+        raise typer.Exit(1) from e
+    if removed:
         console.print(f"[green]Deleted[/] {_safe_text(TOKENS_PATH)}")
     else:
         console.print(f"Nothing to delete ({_safe_text(TOKENS_PATH)} doesn't exist).")
