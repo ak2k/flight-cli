@@ -99,7 +99,8 @@ def _save(watches: list[Watch]) -> None:
     moment has the store readable by others. `mkstemp` picks a name no other
     writer holds, so the cleanup only ever removes this call's own file."""
     path = watches_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    # 0700 applies only to the leaf this call creates: an existing directory keeps its mode.
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     tmp = Path(name)
     try:
@@ -118,7 +119,7 @@ def _locked() -> Generator[None]:
     sits on the config directory's own descriptor, so no file joins `watches.json`
     there; closing the descriptor releases it."""
     directory = watches_path().parent
-    directory.mkdir(parents=True, exist_ok=True)
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     if sys.platform == "win32":
         yield
         return
