@@ -36,7 +36,7 @@ fails.
 | `throttled` | yes | `GfThrottledError`, HTTP 429 anywhere |
 | `unreachable` | yes | `GfTransportError`, an httpx transport error, `ApiKeyResolutionError` caused by one |
 | `upstream` | yes | `GfUpstreamStatusError`, HTTP 5xx (after Matrix's three attempts) |
-| `brownout` | yes | a Matrix timeout (no answer within the 180 s a search waits on each attempt), a `solutionList` with no solution, a `MatrixApiError` of kind `INTERNAL` / `UNAVAILABLE` / `DEADLINE_EXCEEDED` or an internal-error message |
+| `brownout` | yes | a Matrix timeout (no connection within the 10 s, or no answer within the 180 s, a search waits on each attempt), a `solutionList` with no solution, a `MatrixApiError` of kind `INTERNAL` / `UNAVAILABLE` / `DEADLINE_EXCEEDED` or an internal-error message |
 | `shape` | no | `GfPageShapeError`, `GfPinIgnoredError`, an empty Google board on the probe leg, a Matrix body without `solutionList`, with a `solutionList` that is not an object, or one its parser rejects (`MatrixShapeError`), solutions with no price or flight, an SPA page (2xx) without the bundle or the key, a PointsPath pricing-info answer that does not parse or has no `pricingInfos` |
 | `rejected` | no | any other `MatrixApiError` |
 | `consent` | no | `GfConsentError` |

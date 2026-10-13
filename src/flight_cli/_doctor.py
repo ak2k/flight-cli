@@ -49,7 +49,7 @@ from ._gf_errors import (
     GfTransportError,
     GfUpstreamStatusError,
 )
-from ._http import CACHE_SIZE_LIMIT_BYTES
+from ._http import CACHE_SIZE_LIMIT_BYTES, CONNECT_TIMEOUT_S
 from .client import (
     SEARCH_TIMEOUT_S,
     MatrixApiError,
@@ -447,6 +447,12 @@ class _Doctor:
 
         try:
             res = anyio.run(go)
+        except httpx.ConnectTimeout as e:
+            raise _CheckFailedError(
+                "brownout",
+                f"Matrix accepted no connection within {CONNECT_TIMEOUT_S:.0f} s, "
+                "the limit a search waits to connect on each attempt",
+            ) from e
         except httpx.TimeoutException as e:
             raise _CheckFailedError(
                 "brownout",
