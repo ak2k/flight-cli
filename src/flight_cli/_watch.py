@@ -119,7 +119,10 @@ def _locked() -> Generator[None]:
     sits on the config directory's own descriptor, so no file joins `watches.json`
     there; closing the descriptor releases it."""
     directory = watches_path().parent
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError as e:
+        raise _fail(f"{directory!s} cannot be created: {e.strerror}", 1) from e
     if sys.platform == "win32":
         yield
         return
