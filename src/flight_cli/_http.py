@@ -100,7 +100,7 @@ class _ConnectTimeouts(httpx.AsyncBaseTransport):
         await self._inner.aclose()
 
 
-def is_cacheable_body(data: dict[str, Any]) -> bool:
+def is_cacheable_body(data: Any) -> bool:
     """Whether a decoded response body may be stored.
 
     Matrix signals failure with HTTP 200 plus `{"error": {...}}` (see
@@ -109,8 +109,11 @@ def is_cacheable_body(data: dict[str, Any]) -> bool:
     those bodies made a transient brownout permanent: a live cache inspected
     during review held 19 such entries, including `Internal server error`, each
     replayed forever because nothing expired.
+
+    A body that is not an object (a list, a string, a number, null) is no answer
+    Matrix gives; it is not stored either.
     """
-    return "error" not in data
+    return isinstance(data, dict) and "error" not in data
 
 
 class HttpTransport:
@@ -234,7 +237,7 @@ class HttpTransport:
         return cast("dict[str, Any] | None", hit)
 
     async def _cache_put(self, key: str, value: dict[str, Any]) -> None:
-        """Store a response body unless it is an application-level error."""
+        """Store a response body unless it is an application-level error or not an object."""
         if not is_cacheable_body(value):
             log.debug("cache_skip_error_body", key=key)
             return

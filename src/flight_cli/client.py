@@ -221,8 +221,8 @@ class MatrixClient:
 
     async def _post(self, url: str, body: dict[str, Any], *, cache: bool) -> dict[str, Any]:
         """POST a body to Matrix and return its decoded answer, Matrix errors
-        raised as `MatrixApiError` and any other HTTP error status as
-        `MatrixHttpError`.
+        raised as `MatrixApiError`, any other HTTP error status as
+        `MatrixHttpError` and a body that is not an object as `MatrixShapeError`.
 
         On a 403 from Matrix (typically a stale or wrong cached API key),
         invalidate the cache, re-bootstrap once, and retry. If the retry
@@ -249,6 +249,14 @@ class MatrixClient:
                         "tightened access. Set FLIGHT_API_KEY explicitly."
                     ) from data
                 raise _status_error(data) from None
+        if not isinstance(data, dict):  # pyright: ignore[reportUnnecessaryIsInstance]  # the wire may carry any JSON value
+            # An earlier release stored such an answer under this request's key.
+            if cache:
+                await self._http.forget_post(url, body, params=self._params())
+            raise MatrixShapeError(
+                f"Matrix's answer is not a JSON object (a {type(data).__name__})",
+                captured=_capture_body(data),
+            )
         _raise_if_api_error(data)
         return data
 
