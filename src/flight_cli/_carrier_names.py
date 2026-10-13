@@ -1,4 +1,5 @@
-"""IATA carrier code → full airline name, for the legend under the Google table.
+"""IATA carrier code → full airline name, for the legend under the Google table
+and a Google leg's `airline` in `--format json`.
 
 Google names a carrier by a short brand ("Delta", "JetBlue") when it names it at
 all. The legend wants one spelling per code, so a code listed here is named from
