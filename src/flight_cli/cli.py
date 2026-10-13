@@ -11775,6 +11775,10 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         if ret_day and not slice_specs and origin and destination and out_day
         else None
     )
+    if not slice_specs and origin and destination and out_day:
+        # The picker reads a mistyped airport as a city code and announces
+        # Matrix for it, so the refusal runs first; the leg is built again below.
+        _leg_or_refuse(*_require_airports(origin, destination))
     resolved = _pick_backend(
         backend=backend,
         # Beside --slice a top-level code is only the default of a slice with
