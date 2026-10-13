@@ -108,7 +108,7 @@ class MatrixShapeError(RuntimeError):
         self.captured = captured
 
 
-def _capture_body(data: dict[str, Any]) -> Path | None:
+def _capture_body(data: Any) -> Path | None:
     """Write the body Matrix answered under the cache dir, readable by its owner
     alone, or return None: a cache dir that cannot be written must not turn a
     shape report into a second failure."""
@@ -304,11 +304,18 @@ class MatrixClient:
         self, url: str, params: dict[str, Any]
     ) -> dict[str, Any] | httpx.HTTPStatusError:
         """GET, returning an HTTP error status rather than raising it, as
-        `_post_once` does."""
+        `_post_once` does. A body that is not an object is a `MatrixShapeError`,
+        as `_post` refuses it."""
         try:
-            return await self._http.get_json(url, params=params)
+            data = await self._http.get_json(url, params=params)
         except httpx.HTTPStatusError as e:
             return e
+        if not isinstance(data, dict):  # pyright: ignore[reportUnnecessaryIsInstance]  # the wire may carry any JSON value
+            raise MatrixShapeError(
+                f"Matrix's answer is not a JSON object (a {type(data).__name__})",
+                captured=_capture_body(data),
+            )
+        return data
 
     async def airports(self, partial: str, page_size: int = 10) -> list[Location]:
         url = f"{BASE}/v1/locationTypes/CITIES_AND_AIRPORTS/partialNames/{partial}/locations"
