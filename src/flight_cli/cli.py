@@ -6786,7 +6786,8 @@ def _gflight_json_row(g: Any, bags: Bags | None = None) -> dict[str, Any]:
 
     A leg's `departure_airport`/`arrival_airport` are IATA codes and its
     `*_airport_name` fields hold fli's names for those airports; its
-    `airline_code` is the carrier's IATA code, beside `airline`, its name."""
+    `airline_code` is the carrier's IATA code, beside `airline`, its name: the
+    one `CARRIER_NAMES` gives that code, else fli's."""
     row: dict[str, Any] = {**g.flight.model_dump(mode="json"), "flight_id": g.flight_id}
     if getattr(g, "ticketing", None) is not None:
         row["separate_tickets"] = True
@@ -6798,6 +6799,9 @@ def _gflight_json_row(g: Any, bags: Bags | None = None) -> dict[str, Any]:
     # name is the code, with a leading `_` on a digit-leading airline code.
     for leg, src in zip(legs, g.flight.legs, strict=False):
         leg["airline_code"] = src.airline.name.removeprefix("_")
+        # fli names LH its cargo arm; the bundled map's spelling wins where it has one.
+        if (name := CARRIER_NAMES.get(leg["airline_code"])) is not None:
+            leg["airline"] = name
         leg["departure_airport"] = src.departure_airport.name
         leg["arrival_airport"] = src.arrival_airport.name
         leg["departure_airport_name"] = src.departure_airport.value
@@ -11938,6 +11942,11 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         raise typer.Exit(2)
 
     if len(cabins_tuple) > 1:
+        if pick is not None:
+            err.print(
+                f"[yellow]--pick {pick:d} is ignored: "
+                "a multi-cabin search has no one row to name.[/]"
+            )
         if beside_matrix and per_slice:
             _answer_open_jaw(
                 legs=legs,
