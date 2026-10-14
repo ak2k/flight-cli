@@ -231,7 +231,7 @@ def _poll(w: Watch) -> str:
             w.origin, w.destination, start=w.dep_from, end=w.dep_to, cabin=w.cabin
         )
     except Exception as e:  # noqa: BLE001 - one watch's failure must not hide the others
-        return f"{head}: lookup failed, {type(e).__name__.translate(CTRL)}"
+        return f"{head}: lookup failed, {type(e).__name__}"
     priced = [
         (r.price, r.departure, r.currency)
         for r in rows
@@ -245,8 +245,13 @@ def _poll(w: Watch) -> str:
         verdict = ", under the ceiling" if price < w.below else ", over the ceiling"
     # Fixed point keeps every digit of a fare of a million or more, which `:g` rounds.
     shown = f"{price:.2f}".removesuffix(".00")
-    amount = f"{(currency or '').translate(CTRL)} {shown}".strip()
+    amount = f"{currency or ''} {shown}".strip()
     return f"{head}: lowest {amount} on {day}{verdict}"
+
+
+# The currency and the exception name are remote text, and a reader of stdout takes
+# each line as one watch, so the newline CTRL keeps would split a record in two.
+_ONE_LINE: Final = {**CTRL, ord("\n"): " "}
 
 
 @watch_app.command("run")
@@ -254,7 +259,7 @@ def watch_run() -> None:
     """Price each saved watch once and print a line each; nothing is sent or saved."""
     stored = _load()
     for w in stored:
-        typer.echo(_poll(w))
+        typer.echo(_poll(w).translate(_ONE_LINE))
     if not stored:
         typer.echo("No watches saved.")
 

@@ -77,7 +77,7 @@ def test_a_tie_goes_to_the_earlier_date_and_the_line_is_stripped_of_control_char
 ) -> None:
     def _row(day: int) -> CalendarRow:
         return CalendarRow.model_validate(
-            {"price": 300.0, "currency": "U\x1bSD", "row": {}, "departure": date(2026, 10, day)}
+            {"price": 300.0, "currency": "U\x1b\nSD", "row": {}, "departure": date(2026, 10, day)}
             | {"return": None}
         )
 
@@ -90,7 +90,7 @@ def test_a_tie_goes_to_the_earlier_date_and_the_line_is_stripped_of_control_char
     ran = _watch_cmd("run")
     assert ran.exit_code == 0, ran.output
     assert ran.stdout.splitlines() == [
-        "1  JFK-LAX  2026-10-20..2026-10-25  economy: lowest USD 300 on 2026-10-21"
+        "1  JFK-LAX  2026-10-20..2026-10-25  economy: lowest U SD 300 on 2026-10-21"
     ]
 
 
@@ -133,7 +133,7 @@ def _watch_calendar_calls(
     def _run(search: cli.CalendarSearch, **kw: float | str | bool) -> object:
         seen.append(kw["no_cache"])
         if fail_first and len(seen) == 1:
-            raise type("Down\x1b", (RuntimeError,), {})("down")
+            raise type("Down\x1b\nextra record", (RuntimeError,), {})("down")
         return real(search, **kw)  # pyright: ignore[reportArgumentType] - forwards the caller's keywords
 
     monkeypatch.setattr(cli, "_run_calendar", _run)
@@ -167,7 +167,7 @@ def test_a_failed_lookup_is_one_line_and_the_other_watches_still_run(
     ran = _watch_cmd("run")
     assert ran.exit_code == 0, ran.output
     assert ran.stdout.splitlines() == [
-        f"1  {_HEAD}  below 500: lookup failed, Down",
+        f"1  {_HEAD}  below 500: lookup failed, Down extra record",
         f"2  {_HEAD}  below 500: lowest USD 407 on 2026-10-31, under the ceiling",
     ]
     kept = (tmp_path / "watches.json").stat()
