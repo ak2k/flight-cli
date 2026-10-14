@@ -41,6 +41,14 @@ _IATA = r"^[A-Z]{3}$"
 _DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 
+def _digits(value: float) -> str:
+    """`value` with every digit it holds, so a printed ceiling and fare compare as
+    the verdict compared them: `:g` keeps six (1221407 reads back as 1221410),
+    and a fixed point alone rounds a sub-cent amount."""
+    fixed = f"{value:.2f}".removesuffix(".00")
+    return fixed if float(fixed) == value else repr(value)
+
+
 class Watch(BaseModel):
     # Strict: lax parsing would read a stored "yes" as true and "400" as a number.
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
@@ -80,7 +88,7 @@ class Watch(BaseModel):
             when = f"{self.dep_from}" + (f"..{self.dep_to}" if self.dep_to != self.dep_from else "")
         parts = [f"{self.origin}-{self.destination}", when, self.cabin]
         if self.below is not None:
-            parts.append(f"below {self.below:g}")
+            parts.append(f"below {_digits(self.below)}")
         return "  ".join([*parts, "award"] if self.award else parts)
 
 
@@ -243,9 +251,7 @@ def _poll(w: Watch) -> str:
     verdict = ""
     if w.below is not None:
         verdict = ", under the ceiling" if price < w.below else ", over the ceiling"
-    # Fixed point keeps every digit of a fare of a million or more, which `:g` rounds.
-    shown = f"{price:.2f}".removesuffix(".00")
-    amount = f"{currency or ''} {shown}".strip()
+    amount = f"{currency or ''} {_digits(price)}".strip()
     return f"{head}: lowest {amount} on {day}{verdict}"
 
 

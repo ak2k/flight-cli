@@ -94,10 +94,7 @@ def test_a_tie_goes_to_the_earlier_date_and_the_line_is_stripped_of_control_char
     ]
 
 
-@pytest.mark.parametrize(("price", "shown"), [(1221407.0, "1221407"), (1221407.5, "1221407.50")])
-def test_a_fare_of_a_million_or_more_prints_every_digit(
-    monkeypatch: pytest.MonkeyPatch, price: float, shown: str
-) -> None:
+def _one_krw_day(monkeypatch: pytest.MonkeyPatch, price: float) -> None:
     def _rows(*_a: object, **_kw: object) -> list[CalendarRow]:
         return [
             CalendarRow.model_validate(
@@ -107,12 +104,36 @@ def test_a_fare_of_a_million_or_more_prints_every_digit(
         ]
 
     monkeypatch.setattr(cli, "lowest_fare_rows", _rows)
+
+
+@pytest.mark.parametrize(("price", "shown"), [(1221407.0, "1221407"), (1221407.5, "1221407.50")])
+def test_a_fare_of_a_million_or_more_prints_every_digit(
+    monkeypatch: pytest.MonkeyPatch, price: float, shown: str
+) -> None:
+    _one_krw_day(monkeypatch, price)
     assert _watch_cmd("add", "ICN", "LAX", *_WINDOW).exit_code == 0
     ran = _watch_cmd("run")
     assert ran.exit_code == 0, ran.output
     assert ran.stdout.splitlines() == [
         f"1  ICN-LAX  2026-10-20..2026-11-16  economy: lowest KRW {shown} on 2026-10-31"
     ]
+
+
+@pytest.mark.parametrize(
+    ("below", "price", "tail"),
+    [
+        ("1221407", 1221408.0, "below 1221407: lowest KRW 1221408 on 2026-10-31, over the ceiling"),
+        ("400.004", 400.0, "below 400.004: lowest KRW 400 on 2026-10-31, under the ceiling"),
+    ],
+)
+def test_a_ceiling_prints_every_digit_its_verdict_compared(
+    monkeypatch: pytest.MonkeyPatch, below: str, price: float, tail: str
+) -> None:
+    _one_krw_day(monkeypatch, price)
+    assert _watch_cmd("add", "ICN", "LAX", *_WINDOW, "--below", below).exit_code == 0
+    ran = _watch_cmd("run")
+    assert ran.exit_code == 0, ran.output
+    assert ran.stdout.splitlines() == [f"1  ICN-LAX  2026-10-20..2026-11-16  economy  {tail}"]
 
 
 def test_a_window_with_no_priced_day_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
