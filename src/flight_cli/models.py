@@ -148,6 +148,7 @@ class Slice(_Loose):
 
 class SliceCarrier(_Loose):
     code: str | None = None
+    short_name: str | None = Field(None, alias="shortName")
 
 
 class ItineraryDetails(_Loose):
