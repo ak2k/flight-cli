@@ -667,15 +667,18 @@ def _deliver_awards(
 def award_space(
     queries: list[LegQuery], *, cabin: str, num_passengers: int
 ) -> list[list[AwardFlight]]:
-    """Every query's awards across the configured providers, one list each,
-    within `AWARD_DEADLINE_SECS`; what the providers could not answer is named in
-    one `Awards incomplete:` line, as a search names it."""
+    """Every query's awards across the configured providers that can seat the
+    party in `cabin`, one list each, within `AWARD_DEADLINE_SECS`; what the
+    providers could not answer is named in one `Awards incomplete:` line, as a
+    search names it."""
     from ..providers import registry  # noqa: PLC0415 - looked up at call time
+
+    name = _normalize_cabin(cabin)
 
     async def _go() -> tuple[list[list[AwardFlight]], list[ProviderFailure]]:
         with award_run(AWARD_DEADLINE_SECS) as run:
             per_query, providers = await registry.gather_awards(
-                queries, cabins=(_normalize_cabin(cabin),), num_passengers=num_passengers
+                queries, cabins=(name,), num_passengers=num_passengers
             )
             try:
                 return per_query, run.failures
@@ -684,7 +687,20 @@ def award_space(
 
     per_query, failures = anyio.run(_go)
     _print_awards_incomplete(failures)
-    return per_query
+    # A provider can return a flight it priced only in another cabin, and
+    # seats.aero does not filter on the party size. None seats is unreported.
+    return [
+        [
+            af
+            for af in found
+            if any(
+                ca.cabin == name
+                and (ca.remaining_seats is None or ca.remaining_seats >= num_passengers)
+                for ca in af.cabins
+            )
+        ]
+        for found in per_query
+    ]
 
 
 async def _aclose_all(providers: list[Any]) -> None:

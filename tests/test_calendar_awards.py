@@ -15,7 +15,7 @@ import pytest
 from conftest import LITERAL_DATES_NOW
 from flight_cli import _envelope
 from flight_cli.providers import registry
-from flight_cli.providers.base import AwardFlight, LegQuery, record_failure
+from flight_cli.providers.base import AwardFlight, CabinAward, LegQuery, record_failure
 from test_calendar_formats import _BODY, _ROUTE, _envelope_of, _run, _serve
 
 pytestmark = pytest.mark.time_machine(LITERAL_DATES_NOW)
@@ -23,8 +23,10 @@ pytestmark = pytest.mark.time_machine(LITERAL_DATES_NOW)
 _ENVELOPE = ("--format", "envelope")
 
 
-def _providers(monkeypatch: pytest.MonkeyPatch, *, configured: bool = True) -> list[str]:
-    """Award space on 2026-10-31 alone; the dates asked are recorded."""
+def _providers(
+    monkeypatch: pytest.MonkeyPatch, *, configured: bool = True, seats: int | None = None
+) -> list[str]:
+    """Economy award space on 2026-10-31 alone; the dates asked are recorded."""
     asked: list[str] = []
 
     async def _gather(
@@ -38,6 +40,7 @@ def _providers(monkeypatch: pytest.MonkeyPatch, *, configured: bool = True) -> l
             arrival="2026-10-31T11:00:00",
             flight_number="AA1",
             program="American Airlines",
+            cabins=[CabinAward("Economy", 12500, 5.6, "USD", remaining_seats=seats)],
         )
         return ([[found] if q.date == "2026-10-31" else [] for q in legs], [])
 
@@ -76,6 +79,28 @@ def test_awards_without_a_provider_say_so(monkeypatch: pytest.MonkeyPatch) -> No
     env = _calendar_awards()
     assert env["awards"] is None
     assert "awards: no award provider is configured" in env["notes"]
+
+
+@pytest.mark.parametrize(
+    ("extra", "seats", "available"),
+    [
+        pytest.param((), 1, True, id="one-seat-for-one"),
+        pytest.param(("--cabin", "business"), None, False, id="economy-only-for-business"),
+        pytest.param(("--adults", "3"), 1, False, id="one-seat-for-three"),
+        pytest.param(("--adults", "3"), None, True, id="unreported-seats-for-three"),
+    ],
+)
+def test_a_date_has_award_space_only_for_an_offer_that_seats_the_party_in_the_cabin(
+    monkeypatch: pytest.MonkeyPatch, extra: tuple[str, ...], seats: int | None, available: bool
+) -> None:
+    _serve(monkeypatch, _BODY)
+    _providers(monkeypatch, seats=seats)
+    result = _run(*_ROUTE, "--gf-transport", "http", *extra, "--awards", "1", *_ENVELOPE)
+    assert result.exit_code == 0, result.output
+    [entry] = _envelope_of(result)["awards"]
+    assert entry["departure"] == "2026-10-31"
+    assert entry["available"] is available
+    assert entry["programs"] == (["American Airlines"] if available else [])
 
 
 @pytest.mark.parametrize(
