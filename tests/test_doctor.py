@@ -1365,7 +1365,7 @@ def test_help_adds_the_doctor_line_and_every_existing_command_stays() -> None:
     group = typer.main.get_command(cli.app)
     assert isinstance(group, click.Group)
     assert list(group.commands) == [
-        *("search", "fare", "calendar", "detail", "explore", "gflight", "airport", "seatmap"),
+        *("search", "fare", "calendar", "detail", "explore", "airport", "seatmap"),
         *("doctor", "explain"),
         "auth",
         "watch",

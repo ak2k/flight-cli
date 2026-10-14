@@ -2284,7 +2284,7 @@ def _transport_seen(
 def test_the_fast_path_is_handed_the_transport_the_user_named(
     monkeypatch: pytest.MonkeyPatch, extra: list[str], expected: tuple[str, bool]
 ) -> None:
-    """`--fast`, `--format json` and the deprecated command share this frame."""
+    """`--fast` and `--format json` share this frame."""
     assert _transport_seen(monkeypatch, *extra) == [expected]
 
 
