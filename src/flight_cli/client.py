@@ -11,11 +11,13 @@ from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, assert_never, cast
 
+import anyio
 import httpx
 import structlog
 from pydantic import ValidationError
 
 from ._api_key import ApiKeyResolutionError, invalidate_cache, resolve_api_key
+from ._calendar_split import is_empty_calendar
 from ._gf_common import cache_dir
 from ._http import HttpTransport
 from .domain import CalendarFollowup, CalendarSearch, Search, SpecificDateSearch
@@ -40,6 +42,10 @@ SEARCH_URL = f"{BASE}/v1/search"
 SUMMARIZE_URL = f"{BASE}/v1/summarize"
 # How long a search waits on each attempt for Matrix to answer.
 SEARCH_TIMEOUT_S = 180.0
+# Matrix sheds load by answering a calendar with no priced day, so that answer
+# is asked for again this many times, this many seconds apart.
+_CALENDAR_BROWNOUT_RETRIES = 2
+_CALENDAR_BROWNOUT_DELAY_S = 5.0
 # Where a drifted Matrix answer is reported, and the cache subdirectory that
 # keeps its body for that report.
 REPORT_URL = "https://github.com/ak2k/flight-cli/issues"
@@ -262,8 +268,25 @@ class MatrixClient:
 
     async def execute(self, search: Search, *, cache: bool = True) -> SearchResult | CalendarResult:
         """Run any flavor of search. Returns SearchResult or CalendarResult
-        depending on the search variant."""
+        depending on the search variant. A calendar answer with no priced day is
+        asked for again, up to `_CALENDAR_BROWNOUT_RETRIES` more times, and the
+        last answer is returned if none is priced."""
         body = to_wire(search).as_json()
+        res = await self._execute_body(search, body, cache=cache)
+        for _ in range(_CALENDAR_BROWNOUT_RETRIES):
+            if not (isinstance(res, CalendarResult) and is_empty_calendar(res)):
+                break
+            await anyio.sleep(_CALENDAR_BROWNOUT_DELAY_S)
+            # The empty answer is cached under this request's key and would be
+            # served again.
+            if cache:
+                await self._http.forget_post(SEARCH_URL, body, params=self._params())
+            res = await self._execute_body(search, body, cache=cache)
+        return res
+
+    async def _execute_body(
+        self, search: Search, body: dict[str, Any], *, cache: bool
+    ) -> SearchResult | CalendarResult:
         data = await self._post(SEARCH_URL, body, cache=cache)
         try:
             return _parse_response(search, data)
