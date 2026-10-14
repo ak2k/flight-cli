@@ -149,6 +149,24 @@ def test_the_award_search_asks_the_cabin_by_its_provider_name(
     assert asked == [("Business",)]
 
 
+def test_the_award_search_asks_seats_for_the_whole_party(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _serve(monkeypatch, _BODY)
+    seats: list[object] = []
+
+    async def _gather(legs: list[LegQuery], **kw: Any) -> tuple[list[list[AwardFlight]], list[Any]]:
+        seats.append(kw.get("num_passengers"))
+        return ([[] for _ in legs], [])
+
+    monkeypatch.setattr(registry, "gather_awards", _gather)
+    monkeypatch.setattr(registry, "has_any_configured", lambda: True)
+    party = ("--adults", "2", "--children", "1")
+    result = _run(*_ROUTE, "--gf-transport", "http", *party, "--awards", "1", *_ENVELOPE)
+    assert result.exit_code == 0, result.output
+    assert seats == [3]
+
+
 def test_the_docs_name_the_awards_option() -> None:
     root = Path(__file__).resolve().parent.parent
     readme = " ".join((root / "README.md").read_text().split())

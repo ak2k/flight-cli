@@ -12750,7 +12750,13 @@ def calendar(
             ),
         )
         if awards:
-            _record_calendar_awards(awards, origins=origins, dests=dests, cabin=cabin)
+            _record_calendar_awards(
+                awards,
+                origins=origins,
+                dests=dests,
+                cabin=cabin,
+                num_passengers=_seated_pax(opts.pax),
+            )
         return
     blocker = _grid_branch_blocker(
         search,
@@ -12837,7 +12843,7 @@ def calendar(
 
 
 def _record_calendar_awards(
-    k: int, *, origins: tuple[str, ...], dests: tuple[str, ...], cabin: str
+    k: int, *, origins: tuple[str, ...], dests: tuple[str, ...], cabin: str, num_passengers: int
 ) -> None:
     """The envelope's `awards` for the `k` cheapest priced dates the calendar
     recorded: one entry a date, naming the programs that have space on it."""
@@ -12861,7 +12867,7 @@ def _record_calendar_awards(
         for o, d in pairs
     ]
     try:
-        per_query = award_space(queries, cabin=cabin)
+        per_query = award_space(queries, cabin=cabin, num_passengers=num_passengers)
     except Exception as e:  # noqa: BLE001 - an award failure must not lose the calendar
         _envelope.narrow()
         _envelope.explain("awards", "the award query failed")

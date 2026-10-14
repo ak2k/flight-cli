@@ -664,7 +664,9 @@ def _deliver_awards(
         )
 
 
-def award_space(queries: list[LegQuery], *, cabin: str) -> list[list[AwardFlight]]:
+def award_space(
+    queries: list[LegQuery], *, cabin: str, num_passengers: int
+) -> list[list[AwardFlight]]:
     """Every query's awards across the configured providers, one list each,
     within `AWARD_DEADLINE_SECS`; what the providers could not answer is named in
     one `Awards incomplete:` line, as a search names it."""
@@ -673,7 +675,7 @@ def award_space(queries: list[LegQuery], *, cabin: str) -> list[list[AwardFlight
     async def _go() -> tuple[list[list[AwardFlight]], list[ProviderFailure]]:
         with award_run(AWARD_DEADLINE_SECS) as run:
             per_query, providers = await registry.gather_awards(
-                queries, cabins=(_normalize_cabin(cabin),)
+                queries, cabins=(_normalize_cabin(cabin),), num_passengers=num_passengers
             )
             try:
                 return per_query, run.failures
