@@ -13453,7 +13453,7 @@ def airport(
         async with MatrixClient(impersonate=resolved_impersonate) as c:
             return await c.airports(query)
 
-    locs = anyio.run(go)
+    locs = _run_matrix(go, said="Matrix airport lookup failed")
     if not locs:
         console.print("[yellow]No matches.[/]")
         return

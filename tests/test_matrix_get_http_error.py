@@ -11,6 +11,7 @@ import anyio
 import httpx
 import pytest
 import stamina
+import typer
 
 import flight_cli
 from flight_cli import cli
@@ -82,21 +83,24 @@ def test_airport_answers_a_404_with_none(tmp_path: Path) -> None:
 
 
 def test_the_airport_command_fails_with_the_status_line_not_the_url(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`flight airport` has no handler of its own: what leaves the client is
-    what the user's traceback ends with."""
+    """`flight airport` leaves through `_run_matrix`: the typed Matrix error line
+    and exit 1."""
 
     def build(**_kw: object) -> MatrixClient:
         return _client(tmp_path, 500, [])
 
     monkeypatch.setattr(cli, "MatrixClient", build)
 
-    with stamina.set_testing(True, attempts=1), pytest.raises(MatrixHttpError) as caught:
+    with stamina.set_testing(True, attempts=1), pytest.raises(typer.Exit) as left:
         cli.airport(query="x", impersonate="chrome")
 
-    assert str(caught.value) == "Matrix answered HTTP 500 Internal Server Error"
-    assert _KEY not in repr(caught.value) and caught.value.__cause__ is None
+    shown = " ".join(capsys.readouterr().err.split())
+    assert left.value.exit_code == 1
+    assert "Matrix returned an error (http)" in shown
+    assert "Matrix answered HTTP 500 Internal Server Error" in shown
+    assert _KEY not in shown and "key=" not in shown
 
 
 def test_the_package_exports_matrix_http_error() -> None:
