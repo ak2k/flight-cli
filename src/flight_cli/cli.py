@@ -18,6 +18,7 @@ Commands:
 from __future__ import annotations
 
 import contextlib
+import importlib.metadata
 import json
 import math
 import re
@@ -246,8 +247,22 @@ console = Console(emoji=False)
 err = Console(stderr=True, emoji=False)
 
 
+def _print_version(value: bool) -> None:
+    if value:
+        sys.stdout.write(f"flight-cli {importlib.metadata.version('flight-cli')}\n")
+        raise typer.Exit
+
+
 @app.callback()
 def main(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            callback=_print_version,
+            help="Print the installed version and exit.",
+        ),
+    ] = False,
     verbose: Annotated[
         int,
         typer.Option(
