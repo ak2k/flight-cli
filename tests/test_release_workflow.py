@@ -59,13 +59,13 @@ def _check_step() -> list[str]:
 
 
 def _check_step_script() -> str:
+    # An allowlist, since any other step key in any spelling (if, shell, env,
+    # working-directory, continue-on-error) can skip or neuter the script.
     step = _check_step()
-    assert "        run: |" in step, "the tag-equals-version check step has no run: | block"
-    body: list[str] = []
-    for line in step[step.index("        run: |") + 1 :]:
-        if line.strip() and not line.startswith(" " * 10):
-            break
-        body.append(line)
+    assert step[1:2] == ["        run: |"], f"the check step's second line is {step[1:2]}"
+    body = step[2:]
+    for line in body:
+        assert not line.strip() or line.startswith(" " * 10), f"check step key: {line!r}"
     script = textwrap.dedent("\n".join(body)).strip()
     assert script, "the tag-equals-version check step runs nothing"
     return script
@@ -112,11 +112,17 @@ def test_release_publishes_through_trusted_publishing() -> None:
 
 
 def test_release_refuses_a_tag_that_differs_from_the_declared_version(tmp_path: Path) -> None:
-    # A skipped or failure-tolerant step, or build job, lets a mismatched tag publish.
+    # Allowlists: a workflow default, a job key or a step key in any spelling
+    # can skip or neuter the check and let a mismatched tag publish.
+    header, _, _ = _sections()
+    for line in header.splitlines():
+        top = line.strip() and not line.startswith(" ")
+        assert not top or re.match(r"(name|on|permissions):", line), f"workflow key: {line!r}"
     job_keys, _ = _build_job()
-    assert not re.search(r"^    (if|continue-on-error):", job_keys, re.MULTILINE)
-    for line in _check_step():
-        assert not re.match(r"        (if|continue-on-error):", line), line
+    job_lines = job_keys.splitlines()
+    assert job_lines[:1] == ["  build:"], f"the build job opens with {job_lines[:1]}"
+    for line in job_lines[1:]:
+        assert re.fullmatch(r"    (runs-on|timeout-minutes): [\w.-]+", line), f"job key: {line!r}"
     major, minor, patch = _declared_version().split(".")
     assert _run_check(tmp_path, f"v{major}.{minor}.{patch}") == 0
     assert _run_check(tmp_path, f"v{major}.{minor}.{int(patch) + 1}") != 0
