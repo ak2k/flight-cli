@@ -18,6 +18,7 @@ Commands:
 from __future__ import annotations
 
 import contextlib
+import importlib.metadata
 import json
 import math
 import re
@@ -27,7 +28,7 @@ from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from functools import partial, wraps
-from itertools import groupby, pairwise
+from itertools import groupby, pairwise, takewhile
 from statistics import median
 from typing import (
     TYPE_CHECKING,
@@ -38,6 +39,7 @@ from typing import (
     NoReturn,
     assert_never,
     cast,
+    override,
 )
 
 import anyio
@@ -48,6 +50,7 @@ from rich.cells import cell_len
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
+from typer.core import TyperGroup
 
 from . import _config, _envelope, _verify
 from ._calendar_split import (
@@ -150,6 +153,8 @@ from .providers.base import LegQuery
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Generator, Iterable, Mapping, Sequence
 
+    import click
+
     from ._cross_check import CrossCheck
     from ._gf_booking import BookingOptions
     from ._gf_calgraph import GraphRange, LostLength, PriceGraph
@@ -238,7 +243,20 @@ def _usd_amount(price: str | None) -> float | None:
     return parse_price(price) if usd else None
 
 
-app = typer.Typer(rich_markup_mode="rich", help="CLI for ITA Matrix's Alkali backend.")
+class _RootGroup(TyperGroup):
+    @override
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        # Click runs eager options in command-line order, so `--help --version`
+        # would print help: a root `--version` repeated in front runs first.
+        root = takewhile(lambda a: a.startswith("-") and a not in {"-", "--"}, args)
+        if "--version" in root:
+            args = ["--version", *args]
+        return super().parse_args(ctx, args)
+
+
+app = typer.Typer(
+    cls=_RootGroup, rich_markup_mode="rich", help="CLI for ITA Matrix's Alkali backend."
+)
 app.add_typer(auth_app, name="auth")
 app.add_typer(watch_app, name="watch")
 # Emoji off, so a `:name:` in remote text prints as received.
@@ -246,8 +264,24 @@ console = Console(emoji=False)
 err = Console(stderr=True, emoji=False)
 
 
+def _print_version(ctx: typer.Context, value: bool) -> None:
+    # Shell completion parses resiliently and reads stdout as its candidates.
+    if value and not ctx.resilient_parsing:
+        sys.stdout.write(f"flight-cli {importlib.metadata.version('flight-cli')}\n")
+        raise typer.Exit
+
+
 @app.callback()
 def main(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            callback=_print_version,
+            is_eager=True,
+            help="Print the installed version and exit.",
+        ),
+    ] = False,
     verbose: Annotated[
         int,
         typer.Option(
@@ -4836,6 +4870,30 @@ def _render_search(
             *slice_cells,
         )
     console.print(st)
+    _print_matrix_carrier_legend(shown)
+
+
+def _print_matrix_carrier_legend(shown: Sequence[Itinerary]) -> None:
+    """The line under the itinerary table that names each carrier code its carriers
+    column shows, in the order the rows first show them, as Matrix's `shortName`
+    gives it. A code with no name is left out, and a table with none prints no line."""
+    # Keyed on first show, unnamed included: a row that names a code later fills
+    # its place rather than moving it behind the codes shown in between.
+    named: dict[str, str | None] = {}
+    for it in shown:
+        for carrier in it.itinerary.carriers if it.itinerary else []:
+            # Judged as printed: a code or name of only characters the console drops
+            # names nothing, and two codes that print alike are one code.
+            code = (carrier.code or "").translate(_CTRL).strip()
+            if code and named.get(code) is None:
+                name = (carrier.short_name or "").translate(_CTRL).strip()
+                named[code] = name or None
+    if any(named.values()):
+        console.print(
+            "[dim]Carriers: "
+            + _safe_text(" · ".join(f"{code} {name}" for code, name in named.items() if name))
+            + "[/]"
+        )
 
 
 # ───────────────── legroom formatters (gflight-populated; Matrix slices noop) ──
@@ -11625,30 +11683,6 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         rich_help_panel=_GROUP_BACKEND,
     ),
     provider_opt: list[str] | None = _PROVIDER_OPT,
-    no_pp: bool = typer.Option(
-        False,
-        "--no-pp",
-        hidden=True,
-        help="[deprecated] Use --cash-only.",
-    ),
-    pp_only: bool = typer.Option(
-        False,
-        "--pp-only",
-        hidden=True,
-        help="[deprecated] Use --awards-only.",
-    ),
-    pp_airlines: str | None = typer.Option(
-        None,
-        "--pp-airlines",
-        hidden=True,
-        help="[deprecated] Use --provider-opt pp.airlines=A,B.",
-    ),
-    pp_cabin: str | None = typer.Option(
-        None,
-        "--pp-cabin",
-        hidden=True,
-        help="[deprecated] Use --provider-opt pp.cabins=Economy,Business.",
-    ),
 ) -> None:
     """Specific-date flight search across Matrix and Google Flights backends.
 
@@ -11712,22 +11746,11 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         return_arrive_times=google_return_arrive_times,
         exclude_basic=exclude_basic,
     )
-    # Deprecated-flag warning surfaces at runtime since hidden=True hides the
-    # banner from --help.
-    if no_pp or pp_only or pp_airlines or pp_cabin:
-        err.print(
-            "[yellow]--no-pp/--pp-only/--pp-airlines/--pp-cabin are deprecated; "
-            "use --cash-only / --awards-only / --provider-opt instead.[/]",
-        )
     sel = _resolve_providers(
         providers=providers,
         cash_only=cash_only,
         awards_only=awards_only,
         provider_opt=tuple(provider_opt or ()),
-        legacy_no_pp=no_pp,
-        legacy_pp_only=pp_only,
-        legacy_pp_airlines=pp_airlines,
-        legacy_pp_cabin=pp_cabin,
     )
     if verify and (
         blocker := _verify_blocker(
