@@ -12754,7 +12754,7 @@ def calendar(
                 awards,
                 origins=origins,
                 dests=dests,
-                cabin=cabin,
+                cabin=_CABIN_TO_PP_NAME[opts.cabin],
                 num_passengers=_seated_pax(opts.pax),
             )
         return

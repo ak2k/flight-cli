@@ -104,6 +104,29 @@ def test_a_date_has_award_space_only_for_an_offer_that_seats_the_party_in_the_ca
 
 
 @pytest.mark.parametrize(
+    "spelling", ["premium", "premiumcoach", "premium_coach", "premium_economy", "Premium-Coach"]
+)
+def test_every_premium_spelling_asks_the_providers_for_premium_economy(
+    monkeypatch: pytest.MonkeyPatch, spelling: str
+) -> None:
+    _serve(monkeypatch, _BODY)
+    asked: list[tuple[str, ...]] = []
+
+    async def _gather(
+        legs: list[LegQuery], *, cabins: tuple[str, ...], **_kw: Any
+    ) -> tuple[list[list[AwardFlight]], list[Any]]:
+        asked.append(cabins)
+        return ([[] for _ in legs], [])
+
+    monkeypatch.setattr(registry, "gather_awards", _gather)
+    monkeypatch.setattr(registry, "has_any_configured", lambda: True)
+    cabin = ("--cabin", spelling)
+    result = _run(*_ROUTE, "--gf-transport", "http", *cabin, "--awards", "1", *_ENVELOPE)
+    assert result.exit_code == 0, result.output
+    assert asked == [("Premium economy",)]
+
+
+@pytest.mark.parametrize(
     "extra",
     [
         pytest.param((), id="table"),
