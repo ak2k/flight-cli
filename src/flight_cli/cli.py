@@ -9,10 +9,9 @@ Commands:
   flight airport   — IATA autocomplete
   flight explore   — where an origin flies, cheapest first (Google Flights, Chrome)
   flight doctor    — pass, fail or skip for every backend, transport and credential
-  flight explain   — a --routing string in plain English, one line per token
-  flight watch     — save, list and remove route watches (stored only; nothing polls)
+  flight explain   — a --routing string and --ext codes in plain English, one line each
+  flight watch     — save, list, remove and price route watches (nothing is sent or saved by run)
   flight fare      — [deprecated] alias for `search --backend matrix`
-  flight gflight   — [deprecated] alias for `search --backend gflight`
 """
 
 from __future__ import annotations
@@ -56,6 +55,7 @@ from . import _config, _envelope, _verify
 from ._calendar_split import (
     Pair,
     calendar_pair,
+    cheapest_dates,
     is_empty_calendar,
     merge_calendar_results,
     price_currencies,
@@ -75,7 +75,7 @@ from ._cross_check import (
 )
 from ._cross_check import document as cross_check_document
 from ._enrich import party_price
-from ._explain import decode_routing
+from ._explain import decode_extension, decode_routing
 
 # The `--gf-transport` vocabulary, from the leaf that costs nothing to import.
 # `_gflight_ids` owns the ladder but costs fli (~95 ms), and EVERY search
@@ -147,7 +147,7 @@ from .log import configure as configure_logging
 from .models import CalendarDay, CalendarMonth, FareRulesResult, Itinerary
 from .pp import cli as _pp_cli
 from .pp.auth import load_tokens
-from .pp.cli import auth_app, run_pp_for_search
+from .pp.cli import MAX_AWARD_PAIR_QUERIES, auth_app, award_space, run_pp_for_search
 from .providers.base import LegQuery
 
 if TYPE_CHECKING:
@@ -1952,7 +1952,9 @@ def _deliver_calendar(
         raise typer.Exit(1) from e
 
 
-def _report_calendar_fanout(fan: _CalendarFanout, total: int, *, merged_empty: bool) -> None:
+def _report_calendar_fanout(
+    fan: _CalendarFanout, total: int, *, merged_empty: bool, complete: bool = False
+) -> None:
     """Say what the fan-out lost, and refuse when nothing is left to show.
 
     Judged on the MERGED grid, not on the fraction that failed. Rows still in it
@@ -1961,7 +1963,10 @@ def _report_calendar_fanout(fan: _CalendarFanout, total: int, *, merged_empty: b
     "Calendar empty" and the brownout advice, `--format json` writes
     `solutionCount: 0`, and both say Matrix priced this window and found nothing —
     which is exactly what a sub-query that never answered cannot support. So the
-    note only ever prints beside a grid, and its "below" is always true."""
+    note only ever prints beside a grid, and its "below" is always true.
+
+    `complete` refuses any loss, for a caller that reports one figure of the grid
+    rather than the grid: a lowest fare short of a group is not the lowest fare."""
     if fan.failed == 0:
         return
     # Every group that dropped, not the lowest-index one alone: three
@@ -1971,6 +1976,11 @@ def _report_calendar_fanout(fan: _CalendarFanout, total: int, *, merged_empty: b
     causes = fan.failures[0] if fan.failed == 1 else BaseExceptionGroup("sub-queries", fan.failures)
     if fan.failed >= total:
         _print_calendar_failure(causes, f"all {total:d} sub-queries failed; ")
+        raise typer.Exit(1)
+    if complete:
+        _print_calendar_failure(
+            causes, f"{fan.failed:d} of {total:d} sub-queries failed and every one is needed; "
+        )
         raise typer.Exit(1)
     if merged_empty:
         _print_calendar_failure(
@@ -2016,6 +2026,7 @@ def _run_calendar(
     no_cache: bool,
     max_per_query: int = 1,
     max_concurrency: int = _CALENDAR_FANOUT_CONCURRENCY,
+    complete: bool = False,
 ) -> tuple[CalendarResult, int, bool]:
     """Execute a calendar search. A multi-airport query is fanned out into
     sub-searches of up to `max_per_query` destinations each, run in parallel
@@ -2027,7 +2038,8 @@ def _run_calendar(
     Returns `(result, n_queries, floor_lost)` where `n_queries > 1` means the
     fan-out path was used (for a one-line note), counting that combined query, and
     `floor_lost` that it ran and its answer is not in the merge. A single-airport
-    calendar runs as one query and returns `n_queries == 0`.
+    calendar runs as one query and returns `n_queries == 0`. `complete` makes a
+    fan-out that lost any group a failure rather than a narrower grid.
     """
     subs = split_calendar_search(search, max_per_query)
     floor: CalendarSearch | None = None
@@ -2089,7 +2101,7 @@ def _run_calendar(
                 # knows.
                 merged = merge_calendar_results(fan.results, fan.floor, window=search.window)
                 empty = is_empty_calendar(merged)
-                _report_calendar_fanout(fan, n, merged_empty=empty)
+                _report_calendar_fanout(fan, n, merged_empty=empty, complete=complete)
                 floor_lost = floor is not None and fan.floor is None
                 answer = (merged, 0, False) if empty else (merged, n, floor_lost)
             # Recorded inside the `async with`, because the client's own teardown is
@@ -4811,6 +4823,12 @@ def _render_search(
         + ("cheapest per traveler" if party else "cheapest")
         + f": [bold cyan]{_safe_text(headline_price)}[/]"
     )
+    # The count includes fares past the page Matrix sent, which the cap never read.
+    if cap is not None and res.solution_count > limit:
+        console.print(
+            f"[dim]The count is Matrix's and is not checked against the cap of "
+            f"{_safe_text(cap)}; raise -n to check more fares.[/]"
+        )
 
     cm = res.carrier_stop_matrix
     if cm and cm.columns and cm.rows:
@@ -4858,6 +4876,30 @@ def _render_search(
             *slice_cells,
         )
     console.print(st)
+    _print_matrix_carrier_legend(shown)
+
+
+def _print_matrix_carrier_legend(shown: Sequence[Itinerary]) -> None:
+    """The line under the itinerary table that names each carrier code its carriers
+    column shows, in the order the rows first show them, as Matrix's `shortName`
+    gives it. A code with no name is left out, and a table with none prints no line."""
+    # Keyed on first show, unnamed included: a row that names a code later fills
+    # its place rather than moving it behind the codes shown in between.
+    named: dict[str, str | None] = {}
+    for it in shown:
+        for carrier in it.itinerary.carriers if it.itinerary else []:
+            # Judged as printed: a code or name of only characters the console drops
+            # names nothing, and two codes that print alike are one code.
+            code = (carrier.code or "").translate(_CTRL).strip()
+            if code and named.get(code) is None:
+                name = (carrier.short_name or "").translate(_CTRL).strip()
+                named[code] = name or None
+    if any(named.values()):
+        console.print(
+            "[dim]Carriers: "
+            + _safe_text(" · ".join(f"{code} {name}" for code, name in named.items() if name))
+            + "[/]"
+        )
 
 
 # ───────────────── legroom formatters (gflight-populated; Matrix slices noop) ──
@@ -7048,6 +7090,36 @@ def _calendar_envelope_rows(
     return rows
 
 
+def lowest_fare_rows(
+    origin: str, destination: str, *, start: date, end: date, cabin: str
+) -> list[_envelope.CalendarRow]:
+    """The priced days of an uncached one-way Matrix calendar for one airport pair."""
+    search = CalendarSearch(
+        legs=(_leg_or_refuse((origin,), (destination,)),),
+        options=_build_options(
+            cabin=cabin,
+            adults=1,
+            children=0,
+            seniors=0,
+            youth=0,
+            infants_in_seat=0,
+            infants_in_lap=0,
+            stops=None,
+            allow_airport_changes=True,
+            show_only_available=True,
+        ),
+        window=CalendarWindow(start=start, end=end, duration_min=0, duration_max=0),
+    )
+    res, _, _ = _run_calendar(
+        search,
+        rps=_resolve_rps(None),
+        impersonate=_resolve_impersonate(None),
+        no_cache=True,
+        complete=True,
+    )
+    return _calendar_envelope_rows(res, sd=start, ed=end)
+
+
 def _bags_by_itinerary(
     results: list[Any], sr: SearchResult
 ) -> dict[int, list[tuple[int | None, int | None]]]:
@@ -7680,8 +7752,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     everything above it reads the whole board. The awards take the first
     `top_n` one-ticket rows instead when a separate-ticket row is among them.
 
-    `gf_mode` defaults to rung 1 — the deprecated `gflight` command has no
-    transport flag, so it never asks for another.
+    `gf_mode` defaults to rung 1.
 
     `sellers` adds row `pick`'s booking options after everything else, or
     wraps the JSON document as `{"search": …, "booking_options": …}`.
@@ -12528,6 +12599,14 @@ def calendar(
         "--only-available/--include-unavailable",
         rich_help_panel=_GROUP_FILTERING,
     ),
+    awards: int = typer.Option(
+        0,
+        "--awards",
+        min=0,
+        help="Search award space on the K cheapest priced dates and answer in the "
+        "envelope's `awards` (needs --format envelope, not --fast).",
+        rich_help_panel=_GROUP_BACKEND,
+    ),
     rps: float | None = _RPS_OPT,
     impersonate: str | None = _IMPERSONATE_OPT,
     fmt: str = _ENVELOPE_FORMAT_OPT,
@@ -12645,6 +12724,11 @@ def calendar(
             "--gf-transport http opens none",
             param_hint="--gf-headed",
         )
+    if awards and (fast or not _envelope.active()):
+        raise typer.BadParameter(
+            "needs --format envelope and no --fast: the award answer is the envelope's",
+            param_hint="--awards",
+        )
     ccy = _resolve_currency(currency)
     origins, dests = _require_airports(origin, destination)
     sd = _parse_date(start)
@@ -12734,6 +12818,14 @@ def calendar(
                 depart_times=depart_times,
             ),
         )
+        if awards:
+            _record_calendar_awards(
+                awards,
+                origins=origins,
+                dests=dests,
+                cabin=_CABIN_TO_PP_NAME[opts.cabin],
+                num_passengers=_seated_pax(opts.pax),
+            )
         return
     blocker = _grid_branch_blocker(
         search,
@@ -12817,6 +12909,52 @@ def calendar(
         matrix_url=matrix_url,
         google_url=google_url,
     )
+
+
+def _record_calendar_awards(
+    k: int, *, origins: tuple[str, ...], dests: tuple[str, ...], cabin: str, num_passengers: int
+) -> None:
+    """The envelope's `awards` for the `k` cheapest priced dates the calendar
+    recorded: one entry a date, naming the programs that have space on it."""
+    from .providers.registry import has_any_configured  # noqa: PLC0415
+
+    if not has_any_configured():
+        _envelope.explain("awards", "no award provider is configured")
+        return
+    picked = cheapest_dates(_envelope.recorded_days(), k)
+    if not picked:
+        _envelope.explain("awards", "no priced day to search")
+        return
+    pairs = [(o, d) for o in expand_airports(origins) for d in expand_airports(dests) if o != d]
+    if len(pairs) > MAX_AWARD_PAIR_QUERIES:
+        pairs = pairs[:MAX_AWARD_PAIR_QUERIES]
+        _envelope.narrow(f"awards: asked the first {MAX_AWARD_PAIR_QUERIES} airport pairs")
+    queries = [
+        LegQuery(origin=o, destination=d, date=r.departure.isoformat(), slice_index=0, label="")
+        for r in picked
+        if r.departure is not None
+        for o, d in pairs
+    ]
+    try:
+        per_query = award_space(queries, cabin=cabin, num_passengers=num_passengers)
+    except Exception as e:  # noqa: BLE001 - an award failure must not lose the calendar
+        _envelope.narrow()
+        _envelope.explain("awards", "the award query failed")
+        err.print(f"[red]--awards: award query failed: {_safe_text(e)}[/]")
+        return
+    entries: list[dict[str, Any]] = []
+    for i, r in enumerate(picked):
+        found = per_query[i * len(pairs) : (i + 1) * len(pairs)]
+        flights = [af for per_pair in found for af in per_pair]
+        entries.append(
+            {
+                "departure": r.departure.isoformat() if r.departure else None,
+                "return": r.return_date.isoformat() if r.return_date else None,
+                "available": bool(flights),
+                "programs": sorted({af.program for af in flights if af.program}),
+            }
+        )
+    _envelope.record_awards(entries)
 
 
 def _calendar_without_fast(
@@ -13349,98 +13487,6 @@ def _no_explore_results(why: str) -> NoReturn:
     raise typer.Exit(1)
 
 
-@app.command(deprecated=True)
-def gflight(
-    origin: Annotated[str, typer.Argument()],
-    destination: Annotated[str, typer.Argument()],
-    dep: Annotated[str, typer.Option("--dep")],
-    ret: Annotated[str | None, typer.Option("--return", "-r")] = None,
-    cabin: str = "economy",
-    adults: int = 1,
-    children: int = 0,
-    top_n: Annotated[int, typer.Option("--n", "-n", min=1)] = 5,
-    fmt: str = _FORMAT_OPT,
-    json_out: bool = _JSON_OPT,
-) -> None:
-    """[deprecated] Use `flight search --backend gflight` (or just `flight search`)."""
-    json_out = _resolve_format(fmt=fmt, json_flag=json_out) == "json"
-    err.print(
-        "[yellow]`flight gflight` is deprecated; use `flight search` "
-        "(or `flight search --backend gflight` to force).[/]",
-    )
-    # Airports split the way `search` splits them, so `JFK,LAX` is a
-    # multi-airport query the picker routes to Matrix rather than a string
-    # `Leg.of` rejects as one bad IATA code.
-    #
-    # Legs first: `_pick_backend` announces the backend it chose, and a genuinely
-    # bad airport must not be reported after a line claiming the query is already
-    # on its way.
-    origins, destinations = _require_airports(origin, destination)
-    legs = (_leg_or_refuse(origins, destinations, _parse_date(dep)),)
-    if ret:
-        legs += (_leg_or_refuse(destinations, origins, _parse_date(ret)),)
-    # This alias has no --backend flag, so it resolves like `search` on auto
-    # rather than forcing Google Flights: a party the page can't take goes to
-    # the backend that can price it rather than erroring on a query the alias
-    # accepts. `_pick_backend` prints the reason either way.
-    resolved = _pick_backend(
-        backend=BACKEND_AUTO,
-        routing=None,
-        extension=None,
-        slice_specs=None,
-        depart_times=None,
-        return_times=None,
-        children=children,
-        seniors=0,
-        youth=0,
-        inf_seat=0,
-        inf_lap=0,
-        origin=origin,
-        destination=destination,
-        stops=None,
-        # The neutral values `_build_options` below hardcodes for this alias:
-        # it has no flag for either, so neither can be a reason here.
-        allow_airport_changes=True,
-        show_only_available=True,
-        adults=adults,
-    )
-    opts = _build_options(
-        cabin=cabin,
-        adults=adults,
-        children=children,
-        seniors=0,
-        youth=0,
-        infants_in_seat=0,
-        infants_in_lap=0,
-        stops=None,
-        allow_airport_changes=True,
-        show_only_available=True,
-        page_size=top_n,
-    )
-    if resolved == BACKEND_MATRIX:
-        _run_matrix_path(
-            legs=legs,
-            opts=opts,
-            rps=_resolve_rps(None),
-            impersonate=_resolve_impersonate(None),
-            no_cache=_resolve_no_cache(False),
-            json_out=json_out,
-            matrix_url=False,
-            google_url=False,
-            run_pp=False,
-            # This alias predates the provider flags: cash only, no awards.
-            sel=_resolve_providers(
-                providers=None, cash_only=True, awards_only=False, provider_opt=()
-            ),
-            pick=None,
-        )
-        return
-    from ._gflight_ids import search_escalation  # noqa: PLC0415 — fli, ~95 ms
-
-    with search_escalation():
-        _run_gflight_path(legs=legs, opts=opts, top_n=top_n, json_out=json_out)
-
-
 @app.command()
 def airport(
     query: Annotated[str, typer.Argument(help="Partial name or IATA")],
@@ -13602,17 +13648,32 @@ def doctor(fmt: str = _FORMAT_OPT) -> None:
 @app.command()
 def explain(
     routing: Annotated[
-        str,
+        str | None,
         typer.Argument(
             help="A routing string as --routing takes it, e.g. 'O:LH+' or 'F* X:LHR F*'"
         ),
-    ],
+    ] = None,
+    extension: Annotated[
+        str | None,
+        typer.Option(
+            "--extension",
+            "--ext",
+            help="Extension codes as --ext takes them, e.g. 'MAXSTOPS 1; -REDEYES'",
+        ),
+    ] = None,
 ) -> None:
-    """Say what a routing string means, one line per token.
+    """Say what a routing string and extension codes mean.
 
-    Exits 1 when a token is not in the documented grammar; it is never guessed."""
+    One line per token or code. Exits 1 when one is not in the documented
+    grammar; it is never guessed."""
+    if routing is None and extension is None:
+        raise typer.BadParameter("give a ROUTING, --ext codes, or both", param_hint="ROUTING")
+    lines = [
+        *(decode_routing(routing) if routing is not None else []),
+        *(decode_extension(extension) if extension is not None else []),
+    ]
     unread = False
-    for token, meaning in decode_routing(routing):
+    for token, meaning in lines:
         if meaning is None:
             unread = True
             console.print(f"{_quote(token)}  ->  not recognized", soft_wrap=True, highlight=False)

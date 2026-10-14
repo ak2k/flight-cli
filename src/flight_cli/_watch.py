@@ -1,4 +1,5 @@
-"""`flight watch add|list|rm`: saved watch specs; nothing polls or notifies from them yet.
+"""`flight watch add|list|rm|run`: saved watch specs, and a one-shot price check of each;
+nothing is sent or saved by `run`, and nothing notifies yet.
 
 The store is `watches.json` in the config directory: `FLIGHT_CLI_CONFIG_DIR` (the
 override `_config.py` honors), else `$XDG_CONFIG_HOME/flight-cli`, else
@@ -40,6 +41,14 @@ _IATA = r"^[A-Z]{3}$"
 _DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 
+def _digits(value: float) -> str:
+    """`value` with every digit it holds, so a printed ceiling and fare compare as
+    the verdict compared them: `:g` keeps six (1221407 reads back as 1221410),
+    and a fixed point alone rounds a sub-cent amount."""
+    fixed = f"{value:.2f}".removesuffix(".00")
+    return fixed if float(fixed) == value else repr(value)
+
+
 class Watch(BaseModel):
     # Strict: lax parsing would read a stored "yes" as true and "400" as a number.
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
@@ -79,7 +88,7 @@ class Watch(BaseModel):
             when = f"{self.dep_from}" + (f"..{self.dep_to}" if self.dep_to != self.dep_from else "")
         parts = [f"{self.origin}-{self.destination}", when, self.cabin]
         if self.below is not None:
-            parts.append(f"below {self.below:g}")
+            parts.append(f"below {_digits(self.below)}")
         return "  ".join([*parts, "award"] if self.award else parts)
 
 
@@ -166,7 +175,7 @@ def _load() -> list[Watch]:
 watch_app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
-    help="Saved route watches (stored only; nothing polls or notifies yet).",
+    help="Saved route watches; `run` prices each once (nothing is sent or saved).",
 )
 
 
@@ -212,6 +221,51 @@ def watch_list() -> None:
     stored = _load()
     for w in stored:
         typer.echo(f"{w.id}  {w.describe()}")
+    if not stored:
+        typer.echo("No watches saved.")
+
+
+def _poll(w: Watch) -> str:
+    """One line for `w`: its lowest priced date now, against its ceiling."""
+    from .cli import lowest_fare_rows  # noqa: PLC0415 - cli imports this module
+
+    head = f"{w.id}  {w.describe()}"
+    if w.award:
+        return f"{head}: skipped, award watches are not polled yet"
+    if w.dep_from is None or w.dep_to is None:
+        return f"{head}: skipped, a watch with no dates is not polled yet"
+    try:
+        rows = lowest_fare_rows(
+            w.origin, w.destination, start=w.dep_from, end=w.dep_to, cabin=w.cabin
+        )
+    except Exception as e:  # noqa: BLE001 - one watch's failure must not hide the others
+        return f"{head}: lookup failed, {type(e).__name__}"
+    priced = [
+        (r.price, r.departure, r.currency)
+        for r in rows
+        if r.price is not None and r.departure is not None
+    ]
+    if not priced:
+        return f"{head}: no priced date"
+    price, day, currency = min(priced, key=lambda p: (p[0], p[1]))
+    verdict = ""
+    if w.below is not None:
+        verdict = ", under the ceiling" if price < w.below else ", over the ceiling"
+    amount = f"{currency or ''} {_digits(price)}".strip()
+    return f"{head}: lowest {amount} on {day}{verdict}"
+
+
+# The currency and the exception name are remote text, and a reader of stdout takes
+# each line as one watch, so the newline CTRL keeps would split a record in two.
+_ONE_LINE: Final = {**CTRL, ord("\n"): " "}
+
+
+@watch_app.command("run")
+def watch_run() -> None:
+    """Price each saved watch once and print a line each; nothing is sent or saved."""
+    stored = _load()
+    for w in stored:
+        typer.echo(_poll(w).translate(_ONE_LINE))
     if not stored:
         typer.echo("No watches saved.")
 

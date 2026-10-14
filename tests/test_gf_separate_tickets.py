@@ -573,13 +573,6 @@ def test_the_skill_and_the_help_name_the_searches_that_read_the_cheapest_tab(
     assert "one-cabin" not in (flag.help or "")
 
 
-def test_the_deprecated_command_reads_no_cheapest_tab(gf_session: Callable[..., Any]) -> None:
-    fake = gf_session(_served(_LAX), _lax_with_marked_twin(5))
-    result = CliRunner().invoke(cli.app, ["gflight", "JFK", "LAX", "--dep", _DEP.isoformat()])
-    assert result.exit_code == 0, result.output
-    assert len(fake.gets) == 1
-
-
 # ──────────────────────────────── the table ───────────────────────────────
 
 _ROW = re.compile(r"^│\s*(★?\d+[ab]?)\s*│([^│]*)│")

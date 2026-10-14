@@ -114,9 +114,8 @@ flight airport LON
 flight search JFK LHR --dep 2026-08-15
 ```
 
-`flight fare` and `flight gflight` are deprecated aliases for `flight search
---backend matrix` and `flight search --backend gflight` respectively. They
-still work for one release; --help marks them deprecated.
+`flight fare` is a deprecated alias for `flight search --backend matrix`. It
+still works for one release; --help marks it deprecated.
 
 Every result-printing command supports:
 
@@ -141,6 +140,7 @@ Every result-printing command supports:
 - **Economy without basic fares** (`--exclude-basic`): Google Flights only, economy only. Google is asked to leave basic fares out, but no row says whether its fare is basic, and Google served basic fares on JFK-LHR anyway, so every run says the rows cannot be checked. `--sellers` and `--verify` are refused beside it: neither the booking page nor Matrix is asked to leave basic fares out.
 - **Stop limits** (`--stops N`): at most N stops per direction, on every backend. `0` = nonstop only, `1` = up to one stop, …
 - **Calendar-mode duration ranges** (`-d 5-7`): one search returns prices for 5-, 6-, and 7-night trips at every starting day. `calendar --fast -d 5-7` shows Google's price graph alone, one column per trip length, within 8 page loads.
+- **Award space on the cheapest dates** (`calendar --awards K --format envelope`, not `--fast`): searches the configured award providers on the K cheapest priced dates, one query per date and airport pair (at most 8 pairs), and answers in the envelope's `awards` with `departure`, `return`, `available` and `programs` per date. With no award provider configured, `awards` is null and `notes` says so.
 - **Cheap days** (`calendar`, Matrix's table): a day's `min` price prints green when it is at least 20% under the median of the window's priced days in the table's currency; with fewer than 5 such days nothing is colored.
 - **Split tickets** (`search --split`): on a Google Flights round trip, also prices one-way tickets each way and prints the cheapest pair of one-ticket one-ways whose return leaves the airport the outbound lands at, after it lands, with their total, on one line under the round-trip table.
 - **Multi-city on separate tickets** (two or more `--slice` that are not a round trip: an open jaw, or a longer trip): Matrix prices the trip as one ticket, and before its table `search` also prints the cheapest combinations of one Google Flights one-way per slice (`flight search --slice JFK-LHR:2026-10-20 --slice CDG-JFK:2026-10-27`), each total the sum of its tickets in one currency and marked `†`, because a missed flight on one ticket is not protected on the next. Each ticket leaves after the one before it lands, on a later day when it leaves from another airport. `--format envelope` carries them under `split_ticket`; `--format json` writes them beside Matrix's document only with `--split`. `--backend gflight` shows the combinations alone and asks Matrix nothing; its `--format json` is `{"search": [], "split_ticket": {…}}`.
@@ -148,7 +148,7 @@ Every result-printing command supports:
 - **Google vs Matrix cross-check** (the default table): every price is for the whole party and a row ranks on the lowest one it prints; a row both sides price for the same trip shows `delta` (Google − Matrix), every other row says `why` it has none, and the caption says how much of Matrix's answer was read. Where Google's cheapest Google-only row is under every fare in Matrix's answer, Matrix is asked for that row's exact flights (60 s at most), and the line under the table gives Matrix's price for them beside Google's, or why Matrix does not price them, or that it did not answer. `flight search JFK LAX --dep 2026-10-20 --format json --enrich --cash-only` writes the same comparison as `{"search": …, "cross_check": …}`, that answer as `cross_check.low_check`, and `--format envelope` carries the comparison under `cross_check`.
 - **Party prices** (`--adults 2` and the like): every itinerary price is the party's total, on Matrix as on Google, under a header that says so; Matrix's carrier x stops grid and its cheapest line stay per traveler. The multi-cabin table (several `--cabin` values) prints each cabin's party total too, starred as per traveler where Matrix states no total.
 - **Sellers and explore** (Chrome, the `browser` extra): `flight search JFK LAX --dep 2026-10-20 --sellers --pick 2` lists every seller of row 2 with its price and fare name, cheapest first, then each seller's bag fees and booking link on a line of its own; `flight explore JFK --month 2026-11 --days 5-7 --max-price 300` lists where JFK flies that month and the cheapest round trip to each.
-- **Watches** (`flight watch add JFK LHR --below 400`, `flight watch list`, `flight watch rm 1`): saves a route, an optional `--dep` date or `--from`/`--to` window, a `--below` ceiling, a `--cabin` and `--award` to `watches.json` in the config directory (mode 0600). Nothing polls, searches or notifies from them yet.
+- **Watches** (`flight watch add JFK LHR --below 400`, `flight watch list`, `flight watch run`, `flight watch rm 1`): saves a route, an optional `--dep` date or `--from`/`--to` window, a `--below` ceiling, a `--cabin` and `--award` to `watches.json` in the config directory (mode 0600). `run` prices each cash watch that has dates once, from Matrix's calendar, and prints its lowest date against the ceiling; it sends and saves nothing, and skips award and dateless watches. Nothing notifies yet.
 
 ## Checking the setup: `flight doctor`
 
@@ -280,7 +280,7 @@ Pass `--provider-opt 'pp.airlines=United,Delta,...'` to skip discovery and call 
 ### What it doesn't do
 
 - ~~Browser-based login~~ (now the default — see Setup above)
-- Award overlay on `calendar` (lowest-fare-calendar) — fan-out is N days × M airlines; deserves its own design
+- Award marks on the `calendar` table, or award space under `calendar --fast`: `--awards K` answers only in `--format envelope`, for the K cheapest priced dates
 - Ask more than 8 airport pairs in one search — a set or metro search past that names the pairs it left out (stderr, JSON `pairs_not_asked`), and the cap has no flag
 - Match against airlines we don't yet support (the few in pricing-info but not enabled for your tier are silently skipped)
 

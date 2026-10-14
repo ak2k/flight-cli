@@ -145,9 +145,9 @@ def _raising(make: Callable[[], Exception]) -> Callable[[], Board[Any]]:
     return outcome
 
 
-def _search(*extra: str, command: str = "search") -> Result:
+def _search(*extra: str) -> Result:
     return CliRunner().invoke(
-        cli.app, [command, "JFK", "LHR", "--dep", _DEP.isoformat(), "-n", "2", *extra]
+        cli.app, ["search", "JFK", "LHR", "--dep", _DEP.isoformat(), "-n", "2", *extra]
     )
 
 
@@ -372,11 +372,6 @@ _THROTTLE_MESSAGE = (
     "Google Flights rate-limited the request. Wait a moment and retry, use "
     "--gf-transport browser, or use --backend matrix.\n"
 )
-_DEPRECATED = (
-    "DeprecationWarning: The command 'gflight' is deprecated.\n"
-    "`flight gflight` is deprecated; use `flight search` (or `flight search "
-    "--backend gflight` to force).\n"
-)
 # (exit code, stdout, stderr) on each surface that asks Google alone, for one
 # typed wall and one untyped failure.
 _STAYED: dict[tuple[str, str], tuple[int, str, str]] = {
@@ -395,26 +390,17 @@ _STAYED: dict[tuple[str, str], tuple[int, str, str]] = {
     ("bags-json", "untyped"): (1, "", "Google Flights query failed: boom\n"),
     ("sellers-json", "throttle"): (1, "", _THROTTLE_MESSAGE),
     ("sellers-json", "untyped"): (1, "", "Google Flights query failed: boom\n"),
-    ("gflight-command", "throttle"): (1, "", _DEPRECATED + _THROTTLE_MESSAGE),
-    ("gflight-command", "untyped"): (
-        1,
-        "",
-        _DEPRECATED + "Google Flights query failed: boom\n",
-    ),
 }
 
 
 @pytest.mark.parametrize("wall", ["throttle", "untyped"])
-@pytest.mark.parametrize("surface", [*_STAYS, "gflight-command"])
+@pytest.mark.parametrize("surface", list(_STAYS))
 def test_a_wall_where_google_alone_was_asked_for_still_exits_1(
     monkeypatch: pytest.MonkeyPatch, arms: _Arms, surface: str, wall: str
 ) -> None:
     _google(monkeypatch, _raising(_WALLS[wall][0]))
 
-    if surface == "gflight-command":
-        r = _search("--format", "json", command="gflight")
-    else:
-        r = _search("--cash-only", *_STAYS[surface])
+    r = _search("--cash-only", *_STAYS[surface])
 
     assert (r.exit_code, r.stdout, r.stderr) == _STAYED[surface, wall]
     assert arms.matrix_calls == 0
