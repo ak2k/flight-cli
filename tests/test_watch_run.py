@@ -5,6 +5,7 @@ JFK-LAX answer whose lowest fare is USD407 on 2026-10-31."""
 
 from __future__ import annotations
 
+import copy
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -16,7 +17,9 @@ from conftest import LITERAL_DATES_NOW
 from flight_cli import _watch, cli
 from flight_cli._envelope import CalendarRow
 from flight_cli.domain import Cabin
+from flight_cli.models import CalendarResult
 from test_calendar_formats import _BODY, _serve
+from test_calendar_split import _pair_client
 
 if TYPE_CHECKING:
     from click.testing import Result
@@ -169,6 +172,29 @@ def test_a_failed_lookup_is_one_line_and_the_other_watches_still_run(
     ]
     kept = (tmp_path / "watches.json").stat()
     assert (kept.st_ino, kept.st_mtime_ns) == (stored.st_ino, stored.st_mtime_ns)
+
+
+def test_a_metro_watch_that_lost_an_airport_pair_reports_a_failed_lookup_not_a_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _answer() -> CalendarResult:
+        return CalendarResult.from_api(copy.deepcopy(_BODY))
+
+    grids: dict[tuple[str, str], CalendarResult | Exception] = {
+        ("JFK", "LAX"): RuntimeError("down"),
+        ("LGA", "LAX"): _answer(),
+        ("EWR", "LAX"): _answer(),
+    }
+    _ = _pair_client(monkeypatch, grids)
+    assert _watch_cmd("add", "NYC", "LAX", *_WINDOW, "--below", "300").exit_code == 0
+    head = "1  NYC-LAX  2026-10-20..2026-11-16  economy  below 300"
+    ran = _watch_cmd("run")
+    assert ran.exit_code == 0, ran.output
+    assert ran.stdout.splitlines() == [f"{head}: lookup failed, Exit"]
+    assert "1 of 3 sub-queries failed" in " ".join(ran.stderr.split())
+    grids[("JFK", "LAX")] = _answer()
+    ran = _watch_cmd("run")
+    assert ran.stdout.splitlines() == [f"{head}: lowest USD 407 on 2026-10-31, over the ceiling"]
 
 
 def test_a_run_with_no_watches_says_so(monkeypatch: pytest.MonkeyPatch) -> None:

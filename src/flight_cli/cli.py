@@ -1918,7 +1918,9 @@ def _deliver_calendar(
         raise typer.Exit(1) from e
 
 
-def _report_calendar_fanout(fan: _CalendarFanout, total: int, *, merged_empty: bool) -> None:
+def _report_calendar_fanout(
+    fan: _CalendarFanout, total: int, *, merged_empty: bool, complete: bool = False
+) -> None:
     """Say what the fan-out lost, and refuse when nothing is left to show.
 
     Judged on the MERGED grid, not on the fraction that failed. Rows still in it
@@ -1927,7 +1929,10 @@ def _report_calendar_fanout(fan: _CalendarFanout, total: int, *, merged_empty: b
     "Calendar empty" and the brownout advice, `--format json` writes
     `solutionCount: 0`, and both say Matrix priced this window and found nothing —
     which is exactly what a sub-query that never answered cannot support. So the
-    note only ever prints beside a grid, and its "below" is always true."""
+    note only ever prints beside a grid, and its "below" is always true.
+
+    `complete` refuses any loss, for a caller that reports one figure of the grid
+    rather than the grid: a lowest fare short of a group is not the lowest fare."""
     if fan.failed == 0:
         return
     # Every group that dropped, not the lowest-index one alone: three
@@ -1937,6 +1942,11 @@ def _report_calendar_fanout(fan: _CalendarFanout, total: int, *, merged_empty: b
     causes = fan.failures[0] if fan.failed == 1 else BaseExceptionGroup("sub-queries", fan.failures)
     if fan.failed >= total:
         _print_calendar_failure(causes, f"all {total:d} sub-queries failed; ")
+        raise typer.Exit(1)
+    if complete:
+        _print_calendar_failure(
+            causes, f"{fan.failed:d} of {total:d} sub-queries failed and every one is needed; "
+        )
         raise typer.Exit(1)
     if merged_empty:
         _print_calendar_failure(
@@ -1982,6 +1992,7 @@ def _run_calendar(
     no_cache: bool,
     max_per_query: int = 1,
     max_concurrency: int = _CALENDAR_FANOUT_CONCURRENCY,
+    complete: bool = False,
 ) -> tuple[CalendarResult, int, bool]:
     """Execute a calendar search. A multi-airport query is fanned out into
     sub-searches of up to `max_per_query` destinations each, run in parallel
@@ -1993,7 +2004,8 @@ def _run_calendar(
     Returns `(result, n_queries, floor_lost)` where `n_queries > 1` means the
     fan-out path was used (for a one-line note), counting that combined query, and
     `floor_lost` that it ran and its answer is not in the merge. A single-airport
-    calendar runs as one query and returns `n_queries == 0`.
+    calendar runs as one query and returns `n_queries == 0`. `complete` makes a
+    fan-out that lost any group a failure rather than a narrower grid.
     """
     subs = split_calendar_search(search, max_per_query)
     floor: CalendarSearch | None = None
@@ -2055,7 +2067,7 @@ def _run_calendar(
                 # knows.
                 merged = merge_calendar_results(fan.results, fan.floor, window=search.window)
                 empty = is_empty_calendar(merged)
-                _report_calendar_fanout(fan, n, merged_empty=empty)
+                _report_calendar_fanout(fan, n, merged_empty=empty, complete=complete)
                 floor_lost = floor is not None and fan.floor is None
                 answer = (merged, 0, False) if empty else (merged, n, floor_lost)
             # Recorded inside the `async with`, because the client's own teardown is
@@ -7035,7 +7047,11 @@ def lowest_fare_rows(
         window=CalendarWindow(start=start, end=end, duration_min=0, duration_max=0),
     )
     res, _, _ = _run_calendar(
-        search, rps=_resolve_rps(None), impersonate=_resolve_impersonate(None), no_cache=True
+        search,
+        rps=_resolve_rps(None),
+        impersonate=_resolve_impersonate(None),
+        no_cache=True,
+        complete=True,
     )
     return _calendar_envelope_rows(res, sd=start, ed=end)
 
