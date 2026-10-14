@@ -28,7 +28,7 @@ from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from functools import partial, wraps
-from itertools import groupby, pairwise
+from itertools import groupby, pairwise, takewhile
 from statistics import median
 from typing import (
     TYPE_CHECKING,
@@ -39,6 +39,7 @@ from typing import (
     NoReturn,
     assert_never,
     cast,
+    override,
 )
 
 import anyio
@@ -49,6 +50,7 @@ from rich.cells import cell_len
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
+from typer.core import TyperGroup
 
 from . import _config, _envelope, _verify
 from ._calendar_split import (
@@ -151,6 +153,8 @@ from .providers.base import LegQuery
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Generator, Iterable, Mapping, Sequence
 
+    import click
+
     from ._cross_check import CrossCheck
     from ._gf_booking import BookingOptions
     from ._gf_calgraph import GraphRange, LostLength, PriceGraph
@@ -239,7 +243,20 @@ def _usd_amount(price: str | None) -> float | None:
     return parse_price(price) if usd else None
 
 
-app = typer.Typer(rich_markup_mode="rich", help="CLI for ITA Matrix's Alkali backend.")
+class _RootGroup(TyperGroup):
+    @override
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        # Click runs eager options in command-line order, so `--help --version`
+        # would print help: a root `--version` repeated in front runs first.
+        root = takewhile(lambda a: a.startswith("-") and a not in {"-", "--"}, args)
+        if "--version" in root:
+            args = ["--version", *args]
+        return super().parse_args(ctx, args)
+
+
+app = typer.Typer(
+    cls=_RootGroup, rich_markup_mode="rich", help="CLI for ITA Matrix's Alkali backend."
+)
 app.add_typer(auth_app, name="auth")
 app.add_typer(watch_app, name="watch")
 # Emoji off, so a `:name:` in remote text prints as received.

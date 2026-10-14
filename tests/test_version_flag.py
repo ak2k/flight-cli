@@ -41,6 +41,15 @@ def test_version_flag_before_help_prints_the_version() -> None:
     )
 
 
+def test_version_flag_after_help_prints_the_version() -> None:
+    result = CliRunner().invoke(cli.app, ["--help", "--version"])
+    assert (result.exit_code, result.stdout, result.stderr) == (
+        0,
+        f"flight-cli {_declared_version()}\n",
+        "",
+    )
+
+
 def test_version_flag_is_listed_in_root_help() -> None:
     result = CliRunner().invoke(cli.app, ["--help"], env={"COLUMNS": "400"})
     assert result.exit_code == 0
