@@ -4777,6 +4777,12 @@ def _render_search(
         + ("cheapest per traveler" if party else "cheapest")
         + f": [bold cyan]{_safe_text(headline_price)}[/]"
     )
+    # The count includes fares past the page Matrix sent, which the cap never read.
+    if cap is not None and res.solution_count > limit:
+        console.print(
+            f"[dim]The count is Matrix's and is not checked against the cap of "
+            f"{_safe_text(cap)}; raise -n to check more fares.[/]"
+        )
 
     cm = res.carrier_stop_matrix
     if cm and cm.columns and cm.rows:
