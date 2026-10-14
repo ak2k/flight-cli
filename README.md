@@ -114,9 +114,8 @@ flight airport LON
 flight search JFK LHR --dep 2026-08-15
 ```
 
-`flight fare` and `flight gflight` are deprecated aliases for `flight search
---backend matrix` and `flight search --backend gflight` respectively. They
-still work for one release; --help marks them deprecated.
+`flight fare` is a deprecated alias for `flight search --backend matrix`. It
+still works for one release; --help marks it deprecated.
 
 Every result-printing command supports:
 
@@ -141,6 +140,7 @@ Every result-printing command supports:
 - **Economy without basic fares** (`--exclude-basic`): Google Flights only, economy only. Google is asked to leave basic fares out, but no row says whether its fare is basic, and Google served basic fares on JFK-LHR anyway, so every run says the rows cannot be checked. `--sellers` and `--verify` are refused beside it: neither the booking page nor Matrix is asked to leave basic fares out.
 - **Stop limits** (`--stops N`): at most N stops per direction, on every backend. `0` = nonstop only, `1` = up to one stop, …
 - **Calendar-mode duration ranges** (`-d 5-7`): one search returns prices for 5-, 6-, and 7-night trips at every starting day. `calendar --fast -d 5-7` shows Google's price graph alone, one column per trip length, within 8 page loads.
+- **Award space on the cheapest dates** (`calendar --awards K --format envelope`, not `--fast`): searches the configured award providers on the K cheapest priced dates, one query per date and airport pair (at most 8 pairs), and answers in the envelope's `awards` with `departure`, `return`, `available` and `programs` per date. With no award provider configured, `awards` is null and `notes` says so.
 - **Cheap days** (`calendar`, Matrix's table): a day's `min` price prints green when it is at least 20% under the median of the window's priced days in the table's currency; with fewer than 5 such days nothing is colored.
 - **Split tickets** (`search --split`): on a Google Flights round trip, also prices one-way tickets each way and prints the cheapest pair of one-ticket one-ways whose return leaves the airport the outbound lands at, after it lands, with their total, on one line under the round-trip table.
 - **Multi-city on separate tickets** (two or more `--slice` that are not a round trip: an open jaw, or a longer trip): Matrix prices the trip as one ticket, and before its table `search` also prints the cheapest combinations of one Google Flights one-way per slice (`flight search --slice JFK-LHR:2026-10-20 --slice CDG-JFK:2026-10-27`), each total the sum of its tickets in one currency and marked `†`, because a missed flight on one ticket is not protected on the next. Each ticket leaves after the one before it lands, on a later day when it leaves from another airport. `--format envelope` carries them under `split_ticket`; `--format json` writes them beside Matrix's document only with `--split`. `--backend gflight` shows the combinations alone and asks Matrix nothing; its `--format json` is `{"search": [], "split_ticket": {…}}`.
@@ -280,7 +280,7 @@ Pass `--provider-opt 'pp.airlines=United,Delta,...'` to skip discovery and call 
 ### What it doesn't do
 
 - ~~Browser-based login~~ (now the default — see Setup above)
-- Award overlay on `calendar` (lowest-fare-calendar) — fan-out is N days × M airlines; deserves its own design
+- Award marks on the `calendar` table, or award space under `calendar --fast`: `--awards K` answers only in `--format envelope`, for the K cheapest priced dates
 - Ask more than 8 airport pairs in one search — a set or metro search past that names the pairs it left out (stderr, JSON `pairs_not_asked`), and the cap has no flag
 - Match against airlines we don't yet support (the few in pricing-info but not enabled for your tier are silently skipped)
 

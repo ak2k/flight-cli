@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, assert_never, cast
 import anyio
 import httpx
 import structlog
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from ._api_key import ApiKeyResolutionError, invalidate_cache, resolve_api_key
 from ._calendar_split import is_empty_calendar
@@ -158,6 +158,13 @@ def _parse_by_variant(search: Search, data: dict[str, Any]) -> SearchResult | Ca
             return CalendarResult.from_api(data)
         case _:
             assert_never(search)
+
+
+class _Locations(BaseModel):
+    """The `locations` list of an autocomplete answer; an answer without the key
+    holds none."""
+
+    locations: list[Location] = Field(default_factory=list)
 
 
 class MatrixClient:
@@ -345,20 +352,21 @@ class MatrixClient:
         data = await self._get_once(url, {"pageSize": page_size, "key": self._api_key})
         if isinstance(data, httpx.HTTPStatusError):
             raise _status_error(data) from None
-        return [Location.model_validate(loc) for loc in data.get("locations", [])]
+        return _parsed(data, lambda body: _Locations.model_validate(body).locations)
 
     async def airport(self, code: str) -> Location | None:
         """Look up a single airport by IATA code. Returns None only on 404
         ('no such airport'); any other HTTP error status is raised as
         `MatrixHttpError`, and network errors propagate, so callers can
-        distinguish 'doesn't exist' from 'lookup is broken'."""
+        distinguish 'doesn't exist' from 'lookup is broken'. An answer the
+        model refuses is a `MatrixShapeError`."""
         url = f"{BASE}/v1/locationTypes/airportOrMultiAirportCity/locationCodes/{code.upper()}"
         data = await self._get_once(url, {"key": self._api_key})
         if isinstance(data, httpx.HTTPStatusError):
             if data.response.status_code == HTTPStatus.NOT_FOUND:
                 return None
             raise _status_error(data) from None
-        return Location.model_validate(data)
+        return _parsed(data, Location.model_validate)
 
     async def currencies(self) -> list[dict[str, str]]:
         data = await self._get_once(f"{BASE}/v1/currencies", {"key": self._api_key})

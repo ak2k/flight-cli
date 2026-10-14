@@ -1,5 +1,5 @@
 """Convert a domain Search to fli's FlightSearchFilters and run the
-Google Flights query. Used for the `flight gflight` handoff.
+Google Flights query. Used by the Google Flights path of `flight search`.
 
 Each leg carries every airport of its origin and destination sets, metro codes
 expanded (`_metro`). fli has no calendar mode, so for calendar searches we use

@@ -1074,7 +1074,6 @@ def test_the_fast_graph_is_a_google_calendar(monkeypatch: pytest.MonkeyPatch) ->
         pytest.param(["detail", "JFK", "LAX", "--dep", _DEP.isoformat()], id="detail"),
         pytest.param(["explore", "JFK"], id="explore"),
         pytest.param(["fare", "JFK", "LAX", "--dep", _DEP.isoformat()], id="fare"),
-        pytest.param(["gflight", "JFK", "LAX", "--dep", _DEP.isoformat()], id="gflight"),
         pytest.param(["doctor"], id="doctor"),
     ],
 )
