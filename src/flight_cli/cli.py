@@ -56,6 +56,7 @@ from . import _config, _envelope, _verify
 from ._calendar_split import (
     Pair,
     calendar_pair,
+    cheapest_dates,
     is_empty_calendar,
     merge_calendar_results,
     price_currencies,
@@ -147,7 +148,7 @@ from .log import configure as configure_logging
 from .models import CalendarDay, CalendarMonth, FareRulesResult, Itinerary
 from .pp import cli as _pp_cli
 from .pp.auth import load_tokens
-from .pp.cli import auth_app, run_pp_for_search
+from .pp.cli import MAX_AWARD_PAIR_QUERIES, auth_app, award_space, run_pp_for_search
 from .providers.base import LegQuery
 
 if TYPE_CHECKING:
@@ -12594,6 +12595,14 @@ def calendar(
         "--only-available/--include-unavailable",
         rich_help_panel=_GROUP_FILTERING,
     ),
+    awards: int = typer.Option(
+        0,
+        "--awards",
+        min=0,
+        help="Search award space on the K cheapest priced dates and answer in the "
+        "envelope's `awards` (needs --format envelope, not --fast).",
+        rich_help_panel=_GROUP_BACKEND,
+    ),
     rps: float | None = _RPS_OPT,
     impersonate: str | None = _IMPERSONATE_OPT,
     fmt: str = _ENVELOPE_FORMAT_OPT,
@@ -12711,6 +12720,11 @@ def calendar(
             "--gf-transport http opens none",
             param_hint="--gf-headed",
         )
+    if awards and (fast or not _envelope.active()):
+        raise typer.BadParameter(
+            "needs --format envelope and no --fast: the award answer is the envelope's",
+            param_hint="--awards",
+        )
     ccy = _resolve_currency(currency)
     origins, dests = _require_airports(origin, destination)
     sd = _parse_date(start)
@@ -12800,6 +12814,14 @@ def calendar(
                 depart_times=depart_times,
             ),
         )
+        if awards:
+            _record_calendar_awards(
+                awards,
+                origins=origins,
+                dests=dests,
+                cabin=_CABIN_TO_PP_NAME[opts.cabin],
+                num_passengers=_seated_pax(opts.pax),
+            )
         return
     blocker = _grid_branch_blocker(
         search,
@@ -12883,6 +12905,52 @@ def calendar(
         matrix_url=matrix_url,
         google_url=google_url,
     )
+
+
+def _record_calendar_awards(
+    k: int, *, origins: tuple[str, ...], dests: tuple[str, ...], cabin: str, num_passengers: int
+) -> None:
+    """The envelope's `awards` for the `k` cheapest priced dates the calendar
+    recorded: one entry a date, naming the programs that have space on it."""
+    from .providers.registry import has_any_configured  # noqa: PLC0415
+
+    if not has_any_configured():
+        _envelope.explain("awards", "no award provider is configured")
+        return
+    picked = cheapest_dates(_envelope.recorded_days(), k)
+    if not picked:
+        _envelope.explain("awards", "no priced day to search")
+        return
+    pairs = [(o, d) for o in expand_airports(origins) for d in expand_airports(dests) if o != d]
+    if len(pairs) > MAX_AWARD_PAIR_QUERIES:
+        pairs = pairs[:MAX_AWARD_PAIR_QUERIES]
+        _envelope.narrow(f"awards: asked the first {MAX_AWARD_PAIR_QUERIES} airport pairs")
+    queries = [
+        LegQuery(origin=o, destination=d, date=r.departure.isoformat(), slice_index=0, label="")
+        for r in picked
+        if r.departure is not None
+        for o, d in pairs
+    ]
+    try:
+        per_query = award_space(queries, cabin=cabin, num_passengers=num_passengers)
+    except Exception as e:  # noqa: BLE001 - an award failure must not lose the calendar
+        _envelope.narrow()
+        _envelope.explain("awards", "the award query failed")
+        err.print(f"[red]--awards: award query failed: {_safe_text(e)}[/]")
+        return
+    entries: list[dict[str, Any]] = []
+    for i, r in enumerate(picked):
+        found = per_query[i * len(pairs) : (i + 1) * len(pairs)]
+        flights = [af for per_pair in found for af in per_pair]
+        entries.append(
+            {
+                "departure": r.departure.isoformat() if r.departure else None,
+                "return": r.return_date.isoformat() if r.return_date else None,
+                "available": bool(flights),
+                "programs": sorted({af.program for af in flights if af.program}),
+            }
+        )
+    _envelope.record_awards(entries)
 
 
 def _calendar_without_fast(
