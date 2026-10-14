@@ -9,7 +9,7 @@ Commands:
   flight airport   — IATA autocomplete
   flight explore   — where an origin flies, cheapest first (Google Flights, Chrome)
   flight doctor    — pass, fail or skip for every backend, transport and credential
-  flight explain   — a --routing string in plain English, one line per token
+  flight explain   — a --routing string and --ext codes in plain English, one line each
   flight watch     — save, list, remove and price route watches (nothing is sent or saved by run)
   flight fare      — [deprecated] alias for `search --backend matrix`
   flight gflight   — [deprecated] alias for `search --backend gflight`
@@ -75,7 +75,7 @@ from ._cross_check import (
 )
 from ._cross_check import document as cross_check_document
 from ._enrich import party_price
-from ._explain import decode_routing
+from ._explain import decode_extension, decode_routing
 
 # The `--gf-transport` vocabulary, from the leaf that costs nothing to import.
 # `_gflight_ids` owns the ladder but costs fli (~95 ms), and EVERY search
@@ -13668,17 +13668,32 @@ def doctor(fmt: str = _FORMAT_OPT) -> None:
 @app.command()
 def explain(
     routing: Annotated[
-        str,
+        str | None,
         typer.Argument(
             help="A routing string as --routing takes it, e.g. 'O:LH+' or 'F* X:LHR F*'"
         ),
-    ],
+    ] = None,
+    extension: Annotated[
+        str | None,
+        typer.Option(
+            "--extension",
+            "--ext",
+            help="Extension codes as --ext takes them, e.g. 'MAXSTOPS 1; -REDEYES'",
+        ),
+    ] = None,
 ) -> None:
-    """Say what a routing string means, one line per token.
+    """Say what a routing string and extension codes mean.
 
-    Exits 1 when a token is not in the documented grammar; it is never guessed."""
+    One line per token or code. Exits 1 when one is not in the documented
+    grammar; it is never guessed."""
+    if routing is None and extension is None:
+        raise typer.BadParameter("give a ROUTING, --ext codes, or both", param_hint="ROUTING")
+    lines = [
+        *(decode_routing(routing) if routing is not None else []),
+        *(decode_extension(extension) if extension is not None else []),
+    ]
     unread = False
-    for token, meaning in decode_routing(routing):
+    for token, meaning in lines:
         if meaning is None:
             unread = True
             console.print(f"{_quote(token)}  ->  not recognized", soft_wrap=True, highlight=False)
