@@ -58,6 +58,10 @@ dev = [
     "time-machine>=3.2",
 ]
 
+[project.urls]
+Repository = "https://github.com/ak2k/flight-cli"
+Changelog = "https://github.com/ak2k/flight-cli/blob/main/CHANGELOG.md"
+
 [project.scripts]
 flight = "flight_cli.cli:app"
 

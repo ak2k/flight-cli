@@ -1,10 +1,13 @@
-"""Plain-English reading of a Matrix routing-language string (`--routing`).
+"""Plain-English reading of a Matrix routing-language string (`--routing`) and of
+extension codes (`--extension`).
 
-The grammar is `docs/memories/routing_language.md`. This is a decoder for people,
+The grammars are `docs/memories/routing_language.md` and
+`docs/memories/extension_codes.md`. This is a decoder for people,
 not a predicate parser: `routing_predicates.parse_routing` answers "what can
 Google post-filter" and returns one `UnsupportedPred` for an ordered chain, which
 is exactly what a person asking "what does this mean" has. A token this module
-does not read is reported as unread, never guessed.
+does not read is reported as unread, never guessed. A routing token and an
+extension code share `Line`.
 """
 
 from __future__ import annotations
@@ -114,3 +117,60 @@ def decode_routing(routing: str) -> list[Line]:
     if text[:1] == "[" and text[-1:] == "]" and not {"[", "]"} & set(text[1:-1]):
         text = text[1:-1]
     return [Line(t, _meaning(t)) for t in text.split() or [routing]]
+
+
+_COUNT = r"[0-9]{1,9}"
+_TIME = r"[0-9]{1,2}:[0-5][0-9]"
+# keyword -> (argument pattern, sentence with `{}` for the argument as typed)
+_WITH_ARGUMENT = {
+    "MAXSTOPS": (_COUNT, "at most {} {} in each direction"),
+    "MAXDUR": (_TIME, "no itinerary longer than {} in each direction"),
+    "MAXCONNECT": (_TIME, "no layover longer than {}"),
+    "MINCONNECT": (_TIME, "no layover shorter than {}"),
+    "MAXMILES": (_COUNT, "at most {} miles in each direction"),
+    "MINMILES": (_COUNT, "at least {} miles in each direction"),
+}
+_WITHOUT_ARGUMENT = {
+    "-REDEYES": "no red-eye flights",
+    "-OVERNIGHTS": "no overnight stops at connections",
+    "-CODESHARE": "no codeshare flights",
+}
+
+
+def _code_meaning(code: str) -> str | None:
+    words = code.upper().split()
+    if not code.isascii() or not words:
+        return None
+    keyword, *args = words
+    if keyword in _WITHOUT_ARGUMENT:
+        return None if args else _WITHOUT_ARGUMENT[keyword]
+    if keyword not in _WITH_ARGUMENT:
+        return None
+    pattern, sentence = _WITH_ARGUMENT[keyword]
+    if len(args) != 1 or not re.fullmatch(pattern, args[0]):
+        return None
+    if keyword == "MAXSTOPS":
+        return sentence.format(args[0], "stop" if int(args[0]) == 1 else "stops")
+    return sentence.format(args[0])
+
+
+def _code_line(code: str) -> Line:
+    meaning = _code_meaning(code)
+    if meaning is None:
+        return Line(code, None)
+    # Each whitespace character shows as a space: `_safe_text` drops a carriage
+    # return, joining the keyword to its argument, and a newline would split the
+    # code's line in two.
+    return Line("".join(" " if ch.isspace() else ch for ch in code), meaning)
+
+
+# Only ASCII whitespace is trimmed, so a non-ASCII space at either end of a code
+# stays in it and leaves it unread.
+_ASCII_SPACE = "".join(ch for ch in map(chr, range(128)) if ch.isspace())
+
+
+def decode_extension(extension: str) -> list[Line]:
+    """One `Line` per `;`-separated code of `extension`, in order, empty pieces
+    skipped. A string with no code yields one unread line."""
+    codes = [c for piece in extension.split(";") if (c := piece.strip(_ASCII_SPACE))]
+    return [_code_line(c) for c in codes or [extension]]
