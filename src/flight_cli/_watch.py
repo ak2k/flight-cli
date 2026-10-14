@@ -1,4 +1,5 @@
-"""`flight watch add|list|rm`: saved watch specs; nothing polls or notifies from them yet.
+"""`flight watch add|list|rm|run`: saved watch specs, and a one-shot price check of each;
+nothing is sent or saved by `run`, and nothing notifies yet.
 
 The store is `watches.json` in the config directory: `FLIGHT_CLI_CONFIG_DIR` (the
 override `_config.py` honors), else `$XDG_CONFIG_HOME/flight-cli`, else
@@ -166,7 +167,7 @@ def _load() -> list[Watch]:
 watch_app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
-    help="Saved route watches (stored only; nothing polls or notifies yet).",
+    help="Saved route watches; `run` prices each once (nothing is sent or saved).",
 )
 
 
@@ -212,6 +213,46 @@ def watch_list() -> None:
     stored = _load()
     for w in stored:
         typer.echo(f"{w.id}  {w.describe()}")
+    if not stored:
+        typer.echo("No watches saved.")
+
+
+def _poll(w: Watch) -> str:
+    """One line for `w`: its lowest priced date now, against its ceiling."""
+    from .cli import lowest_fare_rows  # noqa: PLC0415 - cli imports this module
+
+    head = f"{w.id}  {w.describe()}"
+    if w.award:
+        return f"{head}: skipped, award watches are not polled yet"
+    if w.dep_from is None or w.dep_to is None:
+        return f"{head}: skipped, a watch with no dates is not polled yet"
+    try:
+        rows = lowest_fare_rows(
+            w.origin, w.destination, start=w.dep_from, end=w.dep_to, cabin=w.cabin
+        )
+    except Exception as e:  # noqa: BLE001 - one watch's failure must not hide the others
+        return f"{head}: lookup failed, {type(e).__name__.translate(CTRL)}"
+    priced = [
+        (r.price, r.departure, r.currency)
+        for r in rows
+        if r.price is not None and r.departure is not None
+    ]
+    if not priced:
+        return f"{head}: no priced date"
+    price, day, currency = min(priced, key=lambda p: (p[0], p[1]))
+    verdict = ""
+    if w.below is not None:
+        verdict = ", under the ceiling" if price < w.below else ", over the ceiling"
+    amount = f"{(currency or '').translate(CTRL)} {price:g}".strip()
+    return f"{head}: lowest {amount} on {day}{verdict}"
+
+
+@watch_app.command("run")
+def watch_run() -> None:
+    """Price each saved watch once and print a line each; nothing is sent or saved."""
+    stored = _load()
+    for w in stored:
+        typer.echo(_poll(w))
     if not stored:
         typer.echo("No watches saved.")
 

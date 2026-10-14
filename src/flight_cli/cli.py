@@ -10,7 +10,7 @@ Commands:
   flight explore   — where an origin flies, cheapest first (Google Flights, Chrome)
   flight doctor    — pass, fail or skip for every backend, transport and credential
   flight explain   — a --routing string in plain English, one line per token
-  flight watch     — save, list and remove route watches (stored only; nothing polls)
+  flight watch     — save, list, remove and price route watches (nothing is sent or saved by run)
   flight fare      — [deprecated] alias for `search --backend matrix`
   flight gflight   — [deprecated] alias for `search --backend gflight`
 """
@@ -7012,6 +7012,32 @@ def _calendar_envelope_rows(
                         )
                     )
     return rows
+
+
+def lowest_fare_rows(
+    origin: str, destination: str, *, start: date, end: date, cabin: str
+) -> list[_envelope.CalendarRow]:
+    """The priced days of an uncached one-way Matrix calendar for one airport pair."""
+    search = CalendarSearch(
+        legs=(_leg_or_refuse((origin,), (destination,)),),
+        options=_build_options(
+            cabin=cabin,
+            adults=1,
+            children=0,
+            seniors=0,
+            youth=0,
+            infants_in_seat=0,
+            infants_in_lap=0,
+            stops=None,
+            allow_airport_changes=True,
+            show_only_available=True,
+        ),
+        window=CalendarWindow(start=start, end=end, duration_min=0, duration_max=0),
+    )
+    res, _, _ = _run_calendar(
+        search, rps=_resolve_rps(None), impersonate=_resolve_impersonate(None), no_cache=True
+    )
+    return _calendar_envelope_rows(res, sd=start, ed=end)
 
 
 def _bags_by_itinerary(
