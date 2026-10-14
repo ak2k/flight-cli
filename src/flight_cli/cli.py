@@ -13665,7 +13665,18 @@ def explain(
     """Say what a routing string and extension codes mean.
 
     One line per token or code. Exits 1 when one is not in the documented
-    grammar; it is never guessed."""
+    grammar; it is never guessed.
+
+    Routing tokens: F = any flight, N = a nonstop flight, X = any connection,
+    AA = a flight marketed by AA, O:AA = a flight operated by AA,
+    LHR = a connection at LHR, ~ = not, + = one or more, * = zero or more,
+    ? = zero or one.
+
+    Extension codes, separated by semicolons: MAXSTOPS 1 = at most 1 stop,
+    MAXCONNECT 2:00 = no layover longer than 2:00, -REDEYES = no red-eye flights.
+
+    Examples: flight explain 'F* X:LHR F*' and
+    flight explain 'O:LH+' --ext 'MAXCONNECT 2:00'."""
     if routing is None and extension is None:
         raise typer.BadParameter("give a ROUTING, --ext codes, or both", param_hint="ROUTING")
     lines = [
