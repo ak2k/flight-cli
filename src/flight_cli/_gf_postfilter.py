@@ -21,7 +21,7 @@ filter, for want of a membership table that would stay current.
 Supported Tier-2 predicates:
   - operating carrier include/exclude (`O:LH+`, `OPAIRLINES`, `-OPAIRLINES`)
   - marketing-carrier exclude (`~UA+`, `-AIRLINES`)
-  - connection-airport exclude (`~DFW`, `-CITIES`)
+  - connection-airport exclude, never connecting at the airports (`-CITIES`)
   - no codeshare (`-CODESHARE`)
   - one flight by number or range (`UA882`, `UA882+`, `UA1000-2000`), every
     leg of the slice that flight, as Matrix reads a lone flight-number token
@@ -92,9 +92,11 @@ def can_postfilter(pred: Predicate) -> bool:
 def _served_by_postfilter(pred: Predicate) -> bool:
     """A Tier-2 predicate the search page can serve by post-filtering its board.
 
-    Not connection-airport excludes, although this module evaluates them:
-    `F* ~DUB F*` is one connection, not at DUB, to Matrix, which drops the
-    nonstops the filter keeps. Nor a flight-number range with `+` or `*`,
+    Not the routing form of a connection-airport exclude, although this module
+    evaluates it: `F* ~DUB F*` is positional, so Matrix requires one connection
+    not at DUB and drops the nonstops the filter keeps. `-CITIES DUB` is served:
+    Matrix kept nonstops under it and dropped only connections at the named
+    airports. Nor a flight-number range with `+` or `*`,
     which Matrix may read as several flights in the range: `AA1-3000+`
     answered JFK-LAX with the same ten nonstops as bare `AA1-3000`, so no
     answer has shown which connections it admits. Nor a number Matrix rejects
@@ -103,7 +105,7 @@ def _served_by_postfilter(pred: Predicate) -> bool:
     digits: `AA00001` is AA1. Nor a cabin requirement, which
     `search_page_reasons` serves beside the one cabin the page is asked for."""
     match pred:
-        case ConnectionAirportPred() | CabinPred():
+        case ConnectionAirportPred(positional=True) | CabinPred():
             return False
         case SpecificFlightPred() if pred.several and pred.low != pred.high:
             return False

@@ -70,7 +70,8 @@ predicate set, each tagged with a tier:
   limits (`--stops` and any `MAXSTOPS`/`N`) the strictest wins.
 - **Tier 2 — post-filter on the result** (`_gf_postfilter`): operating carrier
   (`O:`/`OPAIRLINES`), marketing/airport *exclude* (`~UA`, `~DFW`, `-CITIES`,
-  `-AIRLINES`), `-CODESHARE`, specific flight #/range, `MINCONNECT` (the search
+  `-AIRLINES`; `~DFW` in routing form is positional and Matrix-only, below),
+  `-CODESHARE`, specific flight #/range, `MINCONNECT` (the search
   page also encodes it as 3.17; the grids have no rows to check it on),
   `-REDEYES` and `-OVERNIGHTS` (the search's rows only; the grids refuse both).
 - **Tier 3 — Matrix only**: fare construction (`F bc=y`, `aa.lon.yup`), mileage,
@@ -96,9 +97,12 @@ marketing-include + connect-at) is the correctness guarantee.
 predicate passes when the page encodes it (`page_can_encode`'s stop ceiling, or
 `_served_by_page`: carrier include, alliance, `MAXDUR`, `MINCONNECT`/
 `MAXCONNECT` with a positive maximum), or when it is Tier-2, the post-filter
-evaluates it, and it is neither a connection-airport exclude nor a
-flight-number range with `+` or `*`. `F* ~DUB F*` is one connection not at DUB
-to Matrix, which drops the nonstops the filter keeps.
+evaluates it, and it is neither a routing-form connection-airport token
+(`positional=True`) nor a flight-number range with `+` or `*`. `F* ~DUB F*` is
+one connection not at DUB to Matrix, which drops the nonstops the filter keeps.
+`-CITIES DUB` is served from the page: Matrix kept nonstops under it and dropped
+only connections at the named airports (BTR-SFO `-CITIES DFW`: nine rows, all
+via IAH; BOS-SFO `-CITIES ORD`: all ten nonstops).
 That gate is set out in [gf_search_transport.md](gf_search_transport.md).
 
 A lone flight-number token is the whole slice to Matrix, and the filter reads it

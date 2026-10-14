@@ -292,12 +292,11 @@ def test_stop_ceiling_above_two_goes_to_matrix() -> None:
         # 3.6 is one include list: Google would answer either.
         ("extension", "ALLIANCE oneworld; ALLIANCE skyteam"),
         ("extension", "AIRLINES AA; ALLIANCE star-alliance"),
-        # Post-filterable, but not with Matrix's meaning: `F* ~DUB F*` is one
+        # Post-filterable, but not with Matrix's meaning: `F* ~DUB F*` needs one
         # connection, and `AA1-3000+` may be several flights in the range.
         ("routing", "AA1-3000+"),
         ("routing", "AA1-3000*"),
         ("routing", "F* ~DUB F*"),
-        ("extension", "-CITIES DUB"),
     ],
 )
 def test_auto_unencodable_constraint_picks_matrix(flag: str, value: object) -> None:
@@ -413,14 +412,19 @@ def test_a_flight_number_matrix_rejects_goes_to_matrix_with_its_reason(
         _call(BACKEND_GFLIGHT, routing=routing)
 
 
+def test_auto_a_cities_exclusion_picks_google() -> None:
+    assert _call(extension="-CITIES DUB") == BACKEND_GFLIGHT
+    assert _call(BACKEND_GFLIGHT, extension="-CITIES DUB") == BACKEND_GFLIGHT
+
+
 def test_a_post_filterable_predicate_beside_one_that_is_not_still_picks_matrix() -> None:
-    assert _call(routing="~BA+", extension="-CITIES DUB") == BACKEND_MATRIX
+    assert _call(routing="F* ~DUB F*", extension="-REDEYES") == BACKEND_MATRIX
     assert _call(routing="~BA+", extension="-REDEYES") == BACKEND_GFLIGHT
 
 
 def test_auto_mixed_encodable_and_not_still_picks_matrix() -> None:
     """A partially-encodable set is not partially honored."""
-    assert _call(extension="ALLIANCE star-alliance; MAXSTOPS 1; -CITIES DUB") == BACKEND_MATRIX
+    assert _call(routing="F* ~DUB F*", extension="MAXSTOPS 1; -REDEYES") == BACKEND_MATRIX
     assert _call(extension="ALLIANCE star-alliance; MAXSTOPS 1; -REDEYES") == BACKEND_GFLIGHT
 
 
@@ -682,7 +686,7 @@ def test_explicit_gflight_rejects_unserveable_request() -> None:
 
 def test_explicit_gflight_error_names_the_constraint() -> None:
     with pytest.raises(typer.BadParameter, match=re.escape("a connecting-airport exclusion (DUB)")):
-        _call(BACKEND_GFLIGHT, extension="-CITIES DUB")
+        _call(BACKEND_GFLIGHT, routing="F* ~DUB F*")
     assert _call(BACKEND_GFLIGHT, extension="-REDEYES") == BACKEND_GFLIGHT
 
 
