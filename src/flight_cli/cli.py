@@ -247,8 +247,9 @@ console = Console(emoji=False)
 err = Console(stderr=True, emoji=False)
 
 
-def _print_version(value: bool) -> None:
-    if value:
+def _print_version(ctx: typer.Context, value: bool) -> None:
+    # Shell completion parses resiliently and reads stdout as its candidates.
+    if value and not ctx.resilient_parsing:
         sys.stdout.write(f"flight-cli {importlib.metadata.version('flight-cli')}\n")
         raise typer.Exit
 

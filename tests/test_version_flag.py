@@ -4,14 +4,11 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
-from typing import TYPE_CHECKING
 
+import pytest
 from typer.testing import CliRunner
 
 from flight_cli import cli
-
-if TYPE_CHECKING:
-    import pytest
 
 _ROOT = Path(__file__).resolve().parent.parent
 
@@ -40,3 +37,23 @@ def test_version_flag_is_listed_in_root_help() -> None:
     assert result.exit_code == 0
     assert "--version" in result.output
     assert "Print the installed version and exit." in result.output
+
+
+def _bash_completions(line: str) -> list[str]:
+    result = CliRunner().invoke(
+        cli.app,
+        [],
+        prog_name="flight",
+        env={
+            "_FLIGHT_COMPLETE": "complete_bash",
+            "COMP_WORDS": line,
+            "COMP_CWORD": str(len(line.split(" ")) - 1),
+        },
+    )
+    assert result.exit_code == 0, result.output
+    return [ln for ln in result.stdout.splitlines() if ln]
+
+
+@pytest.mark.parametrize("rest", ["", "search --cabin "])
+def test_version_flag_leaves_shell_completion_unchanged(rest: str) -> None:
+    assert _bash_completions(f"flight --version {rest}") == _bash_completions(f"flight {rest}")
