@@ -4858,6 +4858,30 @@ def _render_search(
             *slice_cells,
         )
     console.print(st)
+    _print_matrix_carrier_legend(shown)
+
+
+def _print_matrix_carrier_legend(shown: Sequence[Itinerary]) -> None:
+    """The line under the itinerary table that names each carrier code its carriers
+    column shows, in the order the rows first show them, as Matrix's `shortName`
+    gives it. A code with no name is left out, and a table with none prints no line."""
+    # Keyed on first show, unnamed included: a row that names a code later fills
+    # its place rather than moving it behind the codes shown in between.
+    named: dict[str, str | None] = {}
+    for it in shown:
+        for carrier in it.itinerary.carriers if it.itinerary else []:
+            # Judged as printed: a code or name of only characters the console drops
+            # names nothing, and two codes that print alike are one code.
+            code = (carrier.code or "").translate(_CTRL).strip()
+            if code and named.get(code) is None:
+                name = (carrier.short_name or "").translate(_CTRL).strip()
+                named[code] = name or None
+    if any(named.values()):
+        console.print(
+            "[dim]Carriers: "
+            + _safe_text(" · ".join(f"{code} {name}" for code, name in named.items() if name))
+            + "[/]"
+        )
 
 
 # ───────────────── legroom formatters (gflight-populated; Matrix slices noop) ──
