@@ -11641,30 +11641,6 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         rich_help_panel=_GROUP_BACKEND,
     ),
     provider_opt: list[str] | None = _PROVIDER_OPT,
-    no_pp: bool = typer.Option(
-        False,
-        "--no-pp",
-        hidden=True,
-        help="[deprecated] Use --cash-only.",
-    ),
-    pp_only: bool = typer.Option(
-        False,
-        "--pp-only",
-        hidden=True,
-        help="[deprecated] Use --awards-only.",
-    ),
-    pp_airlines: str | None = typer.Option(
-        None,
-        "--pp-airlines",
-        hidden=True,
-        help="[deprecated] Use --provider-opt pp.airlines=A,B.",
-    ),
-    pp_cabin: str | None = typer.Option(
-        None,
-        "--pp-cabin",
-        hidden=True,
-        help="[deprecated] Use --provider-opt pp.cabins=Economy,Business.",
-    ),
 ) -> None:
     """Specific-date flight search across Matrix and Google Flights backends.
 
@@ -11728,22 +11704,11 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         return_arrive_times=google_return_arrive_times,
         exclude_basic=exclude_basic,
     )
-    # Deprecated-flag warning surfaces at runtime since hidden=True hides the
-    # banner from --help.
-    if no_pp or pp_only or pp_airlines or pp_cabin:
-        err.print(
-            "[yellow]--no-pp/--pp-only/--pp-airlines/--pp-cabin are deprecated; "
-            "use --cash-only / --awards-only / --provider-opt instead.[/]",
-        )
     sel = _resolve_providers(
         providers=providers,
         cash_only=cash_only,
         awards_only=awards_only,
         provider_opt=tuple(provider_opt or ()),
-        legacy_no_pp=no_pp,
-        legacy_pp_only=pp_only,
-        legacy_pp_airlines=pp_airlines,
-        legacy_pp_cabin=pp_cabin,
     )
     if verify and (
         blocker := _verify_blocker(
