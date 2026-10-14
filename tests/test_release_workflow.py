@@ -14,7 +14,7 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parent.parent
 _WORKFLOW = _ROOT / ".github" / "workflows" / "release.yml"
 _CHANGELOG = _ROOT / "CHANGELOG.md"
-_CHECK_STEP = "      - name: Check the tag matches the declared version\n        run: |\n"
+_CHECK_STEP = "      - name: Check the tag matches the declared version"
 
 
 def _workflow_text() -> str:
@@ -38,11 +38,31 @@ def _sections() -> tuple[str, str, str]:
     return header, build, publish
 
 
+def _build_job() -> tuple[str, str]:
+    """The build job split into its own keys (before steps:) and its steps."""
+    _, build, _ = _sections()
+    assert "\n    steps:\n" in build, "the build job has no steps"
+    job_keys, steps = build.split("\n    steps:\n", 1)
+    return job_keys, steps
+
+
+def _check_step() -> list[str]:
+    """The lines of the check step, from its name: to the next step or the end of the job."""
+    lines = _build_job()[1].splitlines()
+    assert _CHECK_STEP in lines, "release.yml has no tag-equals-version check step"
+    start = lines.index(_CHECK_STEP)
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].startswith("      - ")),
+        len(lines),
+    )
+    return lines[start:end]
+
+
 def _check_step_script() -> str:
-    text = _workflow_text()
-    assert _CHECK_STEP in text, "release.yml has no tag-equals-version check step"
+    step = _check_step()
+    assert "        run: |" in step, "the tag-equals-version check step has no run: | block"
     body: list[str] = []
-    for line in text.split(_CHECK_STEP, 1)[1].splitlines():
+    for line in step[step.index("        run: |") + 1 :]:
         if line.strip() and not line.startswith(" " * 10):
             break
         body.append(line)
@@ -92,6 +112,11 @@ def test_release_publishes_through_trusted_publishing() -> None:
 
 
 def test_release_refuses_a_tag_that_differs_from_the_declared_version(tmp_path: Path) -> None:
+    # A skipped or failure-tolerant step, or build job, lets a mismatched tag publish.
+    job_keys, _ = _build_job()
+    assert not re.search(r"^    (if|continue-on-error):", job_keys, re.MULTILINE)
+    for line in _check_step():
+        assert not re.match(r"        (if|continue-on-error):", line), line
     major, minor, patch = _declared_version().split(".")
     assert _run_check(tmp_path, f"v{major}.{minor}.{patch}") == 0
     assert _run_check(tmp_path, f"v{major}.{minor}.{int(patch) + 1}") != 0
