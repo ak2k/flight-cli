@@ -10,7 +10,7 @@ Commands:
   flight explore   — where an origin flies, cheapest first (Google Flights, Chrome)
   flight doctor    — pass, fail or skip for every backend, transport and credential
   flight explain   — a --routing string and --ext codes in plain English, one line each
-  flight watch     — save, list and remove route watches (stored only; nothing polls)
+  flight watch     — save, list, remove and price route watches (nothing is sent or saved by run)
   flight fare      — [deprecated] alias for `search --backend matrix`
   flight gflight   — [deprecated] alias for `search --backend gflight`
 """
@@ -18,6 +18,7 @@ Commands:
 from __future__ import annotations
 
 import contextlib
+import importlib.metadata
 import json
 import math
 import re
@@ -27,7 +28,7 @@ from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from functools import partial, wraps
-from itertools import groupby, pairwise
+from itertools import groupby, pairwise, takewhile
 from statistics import median
 from typing import (
     TYPE_CHECKING,
@@ -38,6 +39,7 @@ from typing import (
     NoReturn,
     assert_never,
     cast,
+    override,
 )
 
 import anyio
@@ -48,6 +50,7 @@ from rich.cells import cell_len
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
+from typer.core import TyperGroup
 
 from . import _config, _envelope, _verify
 from ._calendar_split import (
@@ -150,6 +153,8 @@ from .providers.base import LegQuery
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Generator, Iterable, Mapping, Sequence
 
+    import click
+
     from ._cross_check import CrossCheck
     from ._gf_booking import BookingOptions
     from ._gf_calgraph import GraphRange, LostLength, PriceGraph
@@ -238,7 +243,20 @@ def _usd_amount(price: str | None) -> float | None:
     return parse_price(price) if usd else None
 
 
-app = typer.Typer(rich_markup_mode="rich", help="CLI for ITA Matrix's Alkali backend.")
+class _RootGroup(TyperGroup):
+    @override
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        # Click runs eager options in command-line order, so `--help --version`
+        # would print help: a root `--version` repeated in front runs first.
+        root = takewhile(lambda a: a.startswith("-") and a not in {"-", "--"}, args)
+        if "--version" in root:
+            args = ["--version", *args]
+        return super().parse_args(ctx, args)
+
+
+app = typer.Typer(
+    cls=_RootGroup, rich_markup_mode="rich", help="CLI for ITA Matrix's Alkali backend."
+)
 app.add_typer(auth_app, name="auth")
 app.add_typer(watch_app, name="watch")
 # Emoji off, so a `:name:` in remote text prints as received.
@@ -246,8 +264,24 @@ console = Console(emoji=False)
 err = Console(stderr=True, emoji=False)
 
 
+def _print_version(ctx: typer.Context, value: bool) -> None:
+    # Shell completion parses resiliently and reads stdout as its candidates.
+    if value and not ctx.resilient_parsing:
+        sys.stdout.write(f"flight-cli {importlib.metadata.version('flight-cli')}\n")
+        raise typer.Exit
+
+
 @app.callback()
 def main(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            callback=_print_version,
+            is_eager=True,
+            help="Print the installed version and exit.",
+        ),
+    ] = False,
     verbose: Annotated[
         int,
         typer.Option(
@@ -1918,7 +1952,9 @@ def _deliver_calendar(
         raise typer.Exit(1) from e
 
 
-def _report_calendar_fanout(fan: _CalendarFanout, total: int, *, merged_empty: bool) -> None:
+def _report_calendar_fanout(
+    fan: _CalendarFanout, total: int, *, merged_empty: bool, complete: bool = False
+) -> None:
     """Say what the fan-out lost, and refuse when nothing is left to show.
 
     Judged on the MERGED grid, not on the fraction that failed. Rows still in it
@@ -1927,7 +1963,10 @@ def _report_calendar_fanout(fan: _CalendarFanout, total: int, *, merged_empty: b
     "Calendar empty" and the brownout advice, `--format json` writes
     `solutionCount: 0`, and both say Matrix priced this window and found nothing —
     which is exactly what a sub-query that never answered cannot support. So the
-    note only ever prints beside a grid, and its "below" is always true."""
+    note only ever prints beside a grid, and its "below" is always true.
+
+    `complete` refuses any loss, for a caller that reports one figure of the grid
+    rather than the grid: a lowest fare short of a group is not the lowest fare."""
     if fan.failed == 0:
         return
     # Every group that dropped, not the lowest-index one alone: three
@@ -1937,6 +1976,11 @@ def _report_calendar_fanout(fan: _CalendarFanout, total: int, *, merged_empty: b
     causes = fan.failures[0] if fan.failed == 1 else BaseExceptionGroup("sub-queries", fan.failures)
     if fan.failed >= total:
         _print_calendar_failure(causes, f"all {total:d} sub-queries failed; ")
+        raise typer.Exit(1)
+    if complete:
+        _print_calendar_failure(
+            causes, f"{fan.failed:d} of {total:d} sub-queries failed and every one is needed; "
+        )
         raise typer.Exit(1)
     if merged_empty:
         _print_calendar_failure(
@@ -1982,6 +2026,7 @@ def _run_calendar(
     no_cache: bool,
     max_per_query: int = 1,
     max_concurrency: int = _CALENDAR_FANOUT_CONCURRENCY,
+    complete: bool = False,
 ) -> tuple[CalendarResult, int, bool]:
     """Execute a calendar search. A multi-airport query is fanned out into
     sub-searches of up to `max_per_query` destinations each, run in parallel
@@ -1993,7 +2038,8 @@ def _run_calendar(
     Returns `(result, n_queries, floor_lost)` where `n_queries > 1` means the
     fan-out path was used (for a one-line note), counting that combined query, and
     `floor_lost` that it ran and its answer is not in the merge. A single-airport
-    calendar runs as one query and returns `n_queries == 0`.
+    calendar runs as one query and returns `n_queries == 0`. `complete` makes a
+    fan-out that lost any group a failure rather than a narrower grid.
     """
     subs = split_calendar_search(search, max_per_query)
     floor: CalendarSearch | None = None
@@ -2055,7 +2101,7 @@ def _run_calendar(
                 # knows.
                 merged = merge_calendar_results(fan.results, fan.floor, window=search.window)
                 empty = is_empty_calendar(merged)
-                _report_calendar_fanout(fan, n, merged_empty=empty)
+                _report_calendar_fanout(fan, n, merged_empty=empty, complete=complete)
                 floor_lost = floor is not None and fan.floor is None
                 answer = (merged, 0, False) if empty else (merged, n, floor_lost)
             # Recorded inside the `async with`, because the client's own teardown is
@@ -4824,6 +4870,30 @@ def _render_search(
             *slice_cells,
         )
     console.print(st)
+    _print_matrix_carrier_legend(shown)
+
+
+def _print_matrix_carrier_legend(shown: Sequence[Itinerary]) -> None:
+    """The line under the itinerary table that names each carrier code its carriers
+    column shows, in the order the rows first show them, as Matrix's `shortName`
+    gives it. A code with no name is left out, and a table with none prints no line."""
+    # Keyed on first show, unnamed included: a row that names a code later fills
+    # its place rather than moving it behind the codes shown in between.
+    named: dict[str, str | None] = {}
+    for it in shown:
+        for carrier in it.itinerary.carriers if it.itinerary else []:
+            # Judged as printed: a code or name of only characters the console drops
+            # names nothing, and two codes that print alike are one code.
+            code = (carrier.code or "").translate(_CTRL).strip()
+            if code and named.get(code) is None:
+                name = (carrier.short_name or "").translate(_CTRL).strip()
+                named[code] = name or None
+    if any(named.values()):
+        console.print(
+            "[dim]Carriers: "
+            + _safe_text(" · ".join(f"{code} {name}" for code, name in named.items() if name))
+            + "[/]"
+        )
 
 
 # ───────────────── legroom formatters (gflight-populated; Matrix slices noop) ──
@@ -7012,6 +7082,36 @@ def _calendar_envelope_rows(
                         )
                     )
     return rows
+
+
+def lowest_fare_rows(
+    origin: str, destination: str, *, start: date, end: date, cabin: str
+) -> list[_envelope.CalendarRow]:
+    """The priced days of an uncached one-way Matrix calendar for one airport pair."""
+    search = CalendarSearch(
+        legs=(_leg_or_refuse((origin,), (destination,)),),
+        options=_build_options(
+            cabin=cabin,
+            adults=1,
+            children=0,
+            seniors=0,
+            youth=0,
+            infants_in_seat=0,
+            infants_in_lap=0,
+            stops=None,
+            allow_airport_changes=True,
+            show_only_available=True,
+        ),
+        window=CalendarWindow(start=start, end=end, duration_min=0, duration_max=0),
+    )
+    res, _, _ = _run_calendar(
+        search,
+        rps=_resolve_rps(None),
+        impersonate=_resolve_impersonate(None),
+        no_cache=True,
+        complete=True,
+    )
+    return _calendar_envelope_rows(res, sd=start, ed=end)
 
 
 def _bags_by_itinerary(
@@ -11583,30 +11683,6 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         rich_help_panel=_GROUP_BACKEND,
     ),
     provider_opt: list[str] | None = _PROVIDER_OPT,
-    no_pp: bool = typer.Option(
-        False,
-        "--no-pp",
-        hidden=True,
-        help="[deprecated] Use --cash-only.",
-    ),
-    pp_only: bool = typer.Option(
-        False,
-        "--pp-only",
-        hidden=True,
-        help="[deprecated] Use --awards-only.",
-    ),
-    pp_airlines: str | None = typer.Option(
-        None,
-        "--pp-airlines",
-        hidden=True,
-        help="[deprecated] Use --provider-opt pp.airlines=A,B.",
-    ),
-    pp_cabin: str | None = typer.Option(
-        None,
-        "--pp-cabin",
-        hidden=True,
-        help="[deprecated] Use --provider-opt pp.cabins=Economy,Business.",
-    ),
 ) -> None:
     """Specific-date flight search across Matrix and Google Flights backends.
 
@@ -11670,22 +11746,11 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         return_arrive_times=google_return_arrive_times,
         exclude_basic=exclude_basic,
     )
-    # Deprecated-flag warning surfaces at runtime since hidden=True hides the
-    # banner from --help.
-    if no_pp or pp_only or pp_airlines or pp_cabin:
-        err.print(
-            "[yellow]--no-pp/--pp-only/--pp-airlines/--pp-cabin are deprecated; "
-            "use --cash-only / --awards-only / --provider-opt instead.[/]",
-        )
     sel = _resolve_providers(
         providers=providers,
         cash_only=cash_only,
         awards_only=awards_only,
         provider_opt=tuple(provider_opt or ()),
-        legacy_no_pp=no_pp,
-        legacy_pp_only=pp_only,
-        legacy_pp_airlines=pp_airlines,
-        legacy_pp_cabin=pp_cabin,
     )
     if verify and (
         blocker := _verify_blocker(
