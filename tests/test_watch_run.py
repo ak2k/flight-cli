@@ -91,6 +91,27 @@ def test_a_tie_goes_to_the_earlier_date_and_the_line_is_stripped_of_control_char
     ]
 
 
+@pytest.mark.parametrize(("price", "shown"), [(1221407.0, "1221407"), (1221407.5, "1221407.50")])
+def test_a_fare_of_a_million_or_more_prints_every_digit(
+    monkeypatch: pytest.MonkeyPatch, price: float, shown: str
+) -> None:
+    def _rows(*_a: object, **_kw: object) -> list[CalendarRow]:
+        return [
+            CalendarRow.model_validate(
+                {"price": price, "currency": "KRW", "row": {}, "departure": date(2026, 10, 31)}
+                | {"return": None}
+            )
+        ]
+
+    monkeypatch.setattr(cli, "lowest_fare_rows", _rows)
+    assert _watch_cmd("add", "ICN", "LAX", *_WINDOW).exit_code == 0
+    ran = _watch_cmd("run")
+    assert ran.exit_code == 0, ran.output
+    assert ran.stdout.splitlines() == [
+        f"1  ICN-LAX  2026-10-20..2026-11-16  economy: lowest KRW {shown} on 2026-10-31"
+    ]
+
+
 def test_a_window_with_no_priced_day_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
     _ = _serve(monkeypatch, {"solutionCount": 0, "calendar": {"months": []}})
     assert _watch_cmd("add", "JFK", "LAX", *_WINDOW, "--below", "500").exit_code == 0

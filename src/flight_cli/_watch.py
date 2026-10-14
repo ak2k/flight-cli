@@ -243,7 +243,9 @@ def _poll(w: Watch) -> str:
     verdict = ""
     if w.below is not None:
         verdict = ", under the ceiling" if price < w.below else ", over the ceiling"
-    amount = f"{(currency or '').translate(CTRL)} {price:g}".strip()
+    # Fixed point keeps every digit of a fare of a million or more, which `:g` rounds.
+    shown = f"{price:.2f}".removesuffix(".00")
+    amount = f"{(currency or '').translate(CTRL)} {shown}".strip()
     return f"{head}: lowest {amount} on {day}{verdict}"
 
 
