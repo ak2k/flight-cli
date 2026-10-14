@@ -114,9 +114,8 @@ flight airport LON
 flight search JFK LHR --dep 2026-08-15
 ```
 
-`flight fare` and `flight gflight` are deprecated aliases for `flight search
---backend matrix` and `flight search --backend gflight` respectively. They
-still work for one release; --help marks them deprecated.
+`flight fare` is a deprecated alias for `flight search --backend matrix`. It
+still works for one release; --help marks it deprecated.
 
 Every result-printing command supports:
 

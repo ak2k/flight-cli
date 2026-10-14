@@ -825,98 +825,9 @@ def test_unknown_backend_rejected() -> None:
         _call("nope")
 
 
-# ───────────── deprecated `flight gflight` alias (work-h70kv.5) ─────────────
-
-
 def _future_dep() -> str:
     """A departure date the model will accept whatever day the suite runs."""
     return (date.today() + timedelta(days=45)).isoformat()
-
-
-def _gflight_alias(monkeypatch: pytest.MonkeyPatch, *args: str) -> tuple[list[str], str]:
-    """Run the deprecated alias with both backends stubbed, reporting its pick."""
-    from typer.testing import CliRunner
-
-    from flight_cli import cli
-
-    called: list[str] = []
-
-    def _gf(**_kw: object) -> None:
-        called.append("gflight")
-
-    def _mx(**_kw: object) -> None:
-        called.append("matrix")
-
-    monkeypatch.setattr(cli, "_run_gflight_path", _gf)
-    monkeypatch.setattr(cli, "_run_matrix_path", _mx)
-    result = CliRunner().invoke(cli.app, ["gflight", *args])
-    assert result.exit_code == 0, result.output
-    return called, result.output
-
-
-def test_gflight_alias_still_uses_google_flights_for_a_plain_search(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    called, _ = _gflight_alias(monkeypatch, "JFK", "LAX", "--dep", "2026-10-14")
-    assert called == ["gflight"]
-
-
-def test_gflight_alias_uses_google_flights_for_a_child_beside_an_adult(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    called, output = _gflight_alias(
-        monkeypatch, "JFK", "LAX", "--dep", "2026-10-14", "--children", "1"
-    )
-    assert called == ["gflight"]
-    assert "Using Matrix" not in output
-
-
-def test_gflight_alias_takes_matrix_for_a_child_with_no_adult(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The alias has no --backend flag, so it resolves like `search` on auto
-    rather than erroring on a query it accepts."""
-    called, output = _gflight_alias(
-        monkeypatch, "JFK", "LAX", "--dep", "2026-10-14", "--adults", "0", "--children", "1"
-    )
-    assert called == ["matrix"]
-    assert "a child passenger with no adult" in output
-
-
-def test_gflight_alias_splits_a_multi_airport_argument_like_search(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A comma-separated argument is a list of airports here exactly as it is
-    in `flight search`, and Google Flights serves the set. Parsing it as one
-    opaque airport code turns a query the CLI answers into a model validation
-    panel."""
-    called, output = _gflight_alias(monkeypatch, "JFK,LAX", "MIA", "--dep", _future_dep())
-    assert called == ["gflight"]
-    assert "Using Matrix" not in output
-    assert "validation error" not in output.lower()
-
-
-def test_gflight_alias_validates_airports_before_it_names_a_backend(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A backend line is a claim that the query is on its way. An airport the
-    model rejects must surface before that line, not after it."""
-    from typer.testing import CliRunner
-
-    from flight_cli import cli
-
-    def _unreached(**_kw: object) -> None:
-        raise AssertionError("a backend ran on a query that never validated")
-
-    monkeypatch.setattr(cli, "_run_gflight_path", _unreached)
-    monkeypatch.setattr(cli, "_run_matrix_path", _unreached)
-    # Multi-airport (so the picker WOULD announce Matrix) with one code the
-    # model rejects — the ordering is only observable when both are true.
-    result = CliRunner().invoke(cli.app, ["gflight", "JFK,XXXX", "MIA", "--dep", _future_dep()])
-
-    assert result.exit_code == 2
-    assert "Using Matrix" not in result.output
-    assert "Not a 3-letter IATA code: 'XXXX'" in result.stderr
 
 
 def _no_backend_runs(monkeypatch: pytest.MonkeyPatch, command: str, origin: str) -> str:
@@ -948,7 +859,7 @@ def _no_backend_runs(monkeypatch: pytest.MonkeyPatch, command: str, origin: str)
         pytest.param(" , ", id="blanks"),
     ],
 )
-@pytest.mark.parametrize("command", ["gflight", "search", "fare"])
+@pytest.mark.parametrize("command", ["search", "fare"])
 def test_a_command_that_builds_a_leg_rejects_a_blank_airport_list(
     monkeypatch: pytest.MonkeyPatch, command: str, origin: str
 ) -> None:
@@ -960,26 +871,18 @@ def test_a_command_that_builds_a_leg_rejects_a_blank_airport_list(
     assert "origin and destination are required" in _no_backend_runs(monkeypatch, command, origin)
 
 
-@pytest.mark.parametrize("command", ["gflight", "search", "fare"])
+@pytest.mark.parametrize("command", ["search", "fare"])
 def test_an_absent_origin_is_refused_by_whichever_arm_owns_it(
     monkeypatch: pytest.MonkeyPatch, command: str
 ) -> None:
     """An empty string is falsy, so on `search` and `fare` it never reaches the
     airport check — it is a query with no origin at all, and the arm that asks
-    for one answers first. `gflight` takes origin positionally and has no such
-    arm. Both exits are 2 and both name what is missing; pinned so the
-    difference stays a choice."""
-    output = _no_backend_runs(monkeypatch, command, "")
-    expected = (
-        "origin and destination are required"
-        if command == "gflight"
-        else "origin destination --dep"
-    )
-    assert expected in output
+    for one answers first. The exit is 2 and names what is missing."""
+    assert "origin destination --dep" in _no_backend_runs(monkeypatch, command, "")
 
 
 @pytest.mark.parametrize("n", ["0", "-5"], ids=["zero", "negative"])
-@pytest.mark.parametrize("command", ["gflight", "search", "fare"])
+@pytest.mark.parametrize("command", ["search", "fare"])
 def test_a_result_count_below_one_is_refused_before_any_backend_runs(
     monkeypatch: pytest.MonkeyPatch, command: str, n: str
 ) -> None:
@@ -988,8 +891,8 @@ def test_a_result_count_below_one_is_refused_before_any_backend_runs(
     whole board rather than nothing, so the guard is a floor on the option
     itself — which is a keyword argument no test reads unless one asks.
 
-    All three commands, because the floor is written three times and removing
-    it from any one of them is invisible from the other two."""
+    Both commands, because the floor is written twice and removing it from
+    either one is invisible from the other."""
     from typer.testing import CliRunner
 
     from flight_cli import cli

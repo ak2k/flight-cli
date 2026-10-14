@@ -12,7 +12,6 @@ Commands:
   flight explain   — a --routing string in plain English, one line per token
   flight watch     — save, list and remove route watches (stored only; nothing polls)
   flight fare      — [deprecated] alias for `search --backend matrix`
-  flight gflight   — [deprecated] alias for `search --backend gflight`
 """
 
 from __future__ import annotations
@@ -7646,8 +7645,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     everything above it reads the whole board. The awards take the first
     `top_n` one-ticket rows instead when a separate-ticket row is among them.
 
-    `gf_mode` defaults to rung 1 — the deprecated `gflight` command has no
-    transport flag, so it never asks for another.
+    `gf_mode` defaults to rung 1.
 
     `sellers` adds row `pick`'s booking options after everything else, or
     wraps the JSON document as `{"search": …, "booking_options": …}`.
@@ -13348,98 +13346,6 @@ def explore(
 def _no_explore_results(why: str) -> NoReturn:
     err.print(f"[red]No explore results:[/] {_safe_text(why)}")
     raise typer.Exit(1)
-
-
-@app.command(deprecated=True)
-def gflight(
-    origin: Annotated[str, typer.Argument()],
-    destination: Annotated[str, typer.Argument()],
-    dep: Annotated[str, typer.Option("--dep")],
-    ret: Annotated[str | None, typer.Option("--return", "-r")] = None,
-    cabin: str = "economy",
-    adults: int = 1,
-    children: int = 0,
-    top_n: Annotated[int, typer.Option("--n", "-n", min=1)] = 5,
-    fmt: str = _FORMAT_OPT,
-    json_out: bool = _JSON_OPT,
-) -> None:
-    """[deprecated] Use `flight search --backend gflight` (or just `flight search`)."""
-    json_out = _resolve_format(fmt=fmt, json_flag=json_out) == "json"
-    err.print(
-        "[yellow]`flight gflight` is deprecated; use `flight search` "
-        "(or `flight search --backend gflight` to force).[/]",
-    )
-    # Airports split the way `search` splits them, so `JFK,LAX` is a
-    # multi-airport query the picker routes to Matrix rather than a string
-    # `Leg.of` rejects as one bad IATA code.
-    #
-    # Legs first: `_pick_backend` announces the backend it chose, and a genuinely
-    # bad airport must not be reported after a line claiming the query is already
-    # on its way.
-    origins, destinations = _require_airports(origin, destination)
-    legs = (_leg_or_refuse(origins, destinations, _parse_date(dep)),)
-    if ret:
-        legs += (_leg_or_refuse(destinations, origins, _parse_date(ret)),)
-    # This alias has no --backend flag, so it resolves like `search` on auto
-    # rather than forcing Google Flights: a party the page can't take goes to
-    # the backend that can price it rather than erroring on a query the alias
-    # accepts. `_pick_backend` prints the reason either way.
-    resolved = _pick_backend(
-        backend=BACKEND_AUTO,
-        routing=None,
-        extension=None,
-        slice_specs=None,
-        depart_times=None,
-        return_times=None,
-        children=children,
-        seniors=0,
-        youth=0,
-        inf_seat=0,
-        inf_lap=0,
-        origin=origin,
-        destination=destination,
-        stops=None,
-        # The neutral values `_build_options` below hardcodes for this alias:
-        # it has no flag for either, so neither can be a reason here.
-        allow_airport_changes=True,
-        show_only_available=True,
-        adults=adults,
-    )
-    opts = _build_options(
-        cabin=cabin,
-        adults=adults,
-        children=children,
-        seniors=0,
-        youth=0,
-        infants_in_seat=0,
-        infants_in_lap=0,
-        stops=None,
-        allow_airport_changes=True,
-        show_only_available=True,
-        page_size=top_n,
-    )
-    if resolved == BACKEND_MATRIX:
-        _run_matrix_path(
-            legs=legs,
-            opts=opts,
-            rps=_resolve_rps(None),
-            impersonate=_resolve_impersonate(None),
-            no_cache=_resolve_no_cache(False),
-            json_out=json_out,
-            matrix_url=False,
-            google_url=False,
-            run_pp=False,
-            # This alias predates the provider flags: cash only, no awards.
-            sel=_resolve_providers(
-                providers=None, cash_only=True, awards_only=False, provider_opt=()
-            ),
-            pick=None,
-        )
-        return
-    from ._gflight_ids import search_escalation  # noqa: PLC0415 — fli, ~95 ms
-
-    with search_escalation():
-        _run_gflight_path(legs=legs, opts=opts, top_n=top_n, json_out=json_out)
 
 
 @app.command()

@@ -34,7 +34,6 @@ _COMMANDS = {
     "search-return": ["search", "JFK", "{o}", "--dep", _DAY, "--return", _END],
     "search-slice": ["search", "--slice", "{o}-LAX:" + _DAY],
     "fare": ["fare", "{o}", "LAX", "--dep", _DAY],
-    "gflight": ["gflight", "{o}", "LAX", "--dep", _DAY],
     "calendar": ["calendar", "{o}", "ATL", "--start", _DAY, "--end", _END],
     "detail": ["detail", "{o}", "LAX", "--dep", _DAY],
 }
