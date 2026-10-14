@@ -288,8 +288,9 @@ def _announce() -> None:
 def announce_escalation() -> None:
     """The line an `auto` search prints when a throttle moves it to Chrome, in
     place of `_announce`'s: it says Chrome is opening, and why. Silent once an
-    interrupt has been seen: `_ensure_page` refuses that launch, so nothing opens."""
-    if _interrupt_state["seen"]:
+    interrupt has been seen: `_ensure_page` refuses that launch, so nothing opens.
+    Silent on Windows too, where `_ensure_page` refuses every launch."""
+    if _interrupt_state["seen"] or sys.platform == "win32":
         return
     _notice_state["printed"] = True
     _err.print(
@@ -683,6 +684,12 @@ class GfBrowserSession:
             # Refusing here is what keeps a launch from opening a Chrome that
             # the shutdown has already gone past.
             raise KeyboardInterrupt
+        if sys.platform == "win32":
+            # `stop_driver` ends the driver with SIGKILL, which Windows lacks.
+            raise GfBrowserUnavailableError(
+                "Google Flights' browser rung does not run on Windows.",
+                remedy="Use --gf-transport http.",
+            )
         factory = _playwright_factory()  # its own typed refusal; never re-wrapped below
         profile = _profile_dir()
         _announce()

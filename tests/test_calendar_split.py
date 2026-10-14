@@ -1517,6 +1517,7 @@ def _calendar_fast(**overrides: Any) -> None:
         "stops": None,
         "allow_airport_changes": True,
         "only_available": True,
+        "awards": 0,
         "rps": 10.0,
         "impersonate": "chrome",
         "fmt": "table",

@@ -280,6 +280,14 @@ def record_calendar(*, backend: Backend, rows: Sequence[CalendarRow]) -> None:
             rec.days = list(rows)
 
 
+def recorded_days() -> list[CalendarRow]:
+    """The calendar rows recorded so far; none outside an envelope run."""
+    if (rec := _slot.recorder) is None:
+        return []
+    with rec.lock:
+        return list(rec.days)
+
+
 def record_price_graph(graphs: Sequence[PriceGraph]) -> None:
     """Google's price graph read for a calendar, one entry per trip length."""
     if (rec := _slot.recorder) is not None:
@@ -473,7 +481,7 @@ def _key_notes(
         notes.append(f"results: {why.get('results', failed if rec.backend is None else none)}")
     if rec.awards is None:
         default = "the run ended before the award search" if code else "no award search ran"
-        reason = "calendar runs no award search" if calendar else why.get("awards", default)
+        reason = why.get("awards", "calendar runs no award search" if calendar else default)
         notes.append(f"awards: {reason}")
     for key, items in (
         ("insight", rec.insight),
