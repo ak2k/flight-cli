@@ -4836,10 +4836,12 @@ def _print_matrix_carrier_legend(shown: Sequence[Itinerary]) -> None:
     named: dict[str, str | None] = {}
     for it in shown:
         for carrier in it.itinerary.carriers if it.itinerary else []:
-            if carrier.code and named.get(carrier.code) is None:
-                # Judged as printed: a name of only characters the console drops names nothing.
+            # Judged as printed: a code or name of only characters the console drops
+            # names nothing, and two codes that print alike are one code.
+            code = (carrier.code or "").translate(_CTRL).strip()
+            if code and named.get(code) is None:
                 name = (carrier.short_name or "").translate(_CTRL).strip()
-                named[carrier.code] = name or None
+                named[code] = name or None
     if any(named.values()):
         console.print(
             "[dim]Carriers: "

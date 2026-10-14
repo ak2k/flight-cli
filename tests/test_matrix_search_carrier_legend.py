@@ -120,6 +120,20 @@ def test_a_name_that_prints_as_nothing_leaves_the_code_out(
     assert _legend(_printed(monkeypatch, [_solution(("DL", unseen))])) == []
 
 
-def test_an_empty_code_is_left_out_of_the_legend(monkeypatch: pytest.MonkeyPatch) -> None:
-    lines = _printed(monkeypatch, [_solution(("", "Ghost"), ("DL", "Delta"))])
+@pytest.mark.parametrize(
+    "unseen",
+    ["", "\x1b", "\u200b\u2066", " \x7f\t\u00ad "],
+    ids=["empty", "control", "invisible", "mixed"],
+)
+def test_a_code_that_prints_as_nothing_is_left_out_of_the_legend(
+    monkeypatch: pytest.MonkeyPatch, unseen: str
+) -> None:
+    lines = _printed(monkeypatch, [_solution((unseen, "Ghost"), ("DL", "Delta"))])
+    assert _legend(lines) == ["Carriers: DL Delta"]
+
+
+def test_codes_that_print_alike_are_one_legend_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    lines = _printed(
+        monkeypatch, [_solution(("DL", "Delta")), _solution(("D\u200bL", "Delta Air Lines"))]
+    )
     assert _legend(lines) == ["Carriers: DL Delta"]
