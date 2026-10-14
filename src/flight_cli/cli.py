@@ -261,6 +261,7 @@ def main(
         typer.Option(
             "--version",
             callback=_print_version,
+            is_eager=True,
             help="Print the installed version and exit.",
         ),
     ] = False,
