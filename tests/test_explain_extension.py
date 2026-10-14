@@ -137,3 +137,15 @@ def test_a_read_code_shows_each_whitespace_character_as_a_space(space: str) -> N
         0,
         ["MAXSTOPS 1  ->  at most 1 stop in each direction"],
     )
+
+
+@pytest.mark.parametrize("code", ["-REDEYES\u2028", "\u00a0MAXSTOPS 1", "MAXSTOPS 1\u0085"])
+def test_a_non_ascii_space_at_either_end_of_a_code_leaves_it_unread(code: str) -> None:
+    assert _explain("--ext", code) == (1, [f"{code!r}  ->  not recognized"])
+
+
+def test_a_piece_of_only_a_non_ascii_space_is_an_unread_code() -> None:
+    assert _explain("--ext", "-REDEYES;\u3000") == (
+        1,
+        ["-REDEYES  ->  no red-eye flights", "'\\u3000'  ->  not recognized"],
+    )

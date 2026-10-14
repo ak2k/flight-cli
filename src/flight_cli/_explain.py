@@ -164,8 +164,13 @@ def _code_line(code: str) -> Line:
     return Line("".join(" " if ch.isspace() else ch for ch in code), meaning)
 
 
+# Only ASCII whitespace is trimmed, so a non-ASCII space at either end of a code
+# stays in it and leaves it unread.
+_ASCII_SPACE = "".join(ch for ch in map(chr, range(128)) if ch.isspace())
+
+
 def decode_extension(extension: str) -> list[Line]:
     """One `Line` per `;`-separated code of `extension`, in order, empty pieces
     skipped. A string with no code yields one unread line."""
-    codes = [piece.strip() for piece in extension.split(";") if piece.strip()]
+    codes = [c for piece in extension.split(";") if (c := piece.strip(_ASCII_SPACE))]
     return [_code_line(c) for c in codes or [extension]]
