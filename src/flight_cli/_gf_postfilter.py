@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .domain import Cabin, time_bounds, window_label, within_price_cap
+from .fli_bridge import fli_airports
 from .routing_predicates import (
     AlliancePred,
     CabinPred,
@@ -78,7 +79,6 @@ _SUPPORTED: tuple[type, ...] = (
 )
 
 _FLIGHT_RE = re.compile(r"^([A-Z0-9]{2})([0-9]{1,9})$", re.IGNORECASE)
-_AIRPORT_RE = re.compile(r"[A-Z]{3}")
 _MAX_FLIGHT_NUMBER = 9999
 
 
@@ -97,9 +97,9 @@ def _served_by_postfilter(pred: Predicate) -> bool:
     evaluates it: `F* ~DUB F*` is positional, so Matrix requires one connection
     not at DUB and drops the nonstops the filter keeps. `-CITIES DUB` is served:
     Matrix kept nonstops under it and dropped only connections at the named
-    airports. Not when it names a token no airport code can be, such as a comma
-    list (`DUB,LHR`): the filter would drop nothing, and Matrix's reading of it
-    is not measured. Nor a flight-number range with
+    airports. Not when it names a code no decoded row names (`_rows_name`): the
+    filter would drop no connection there, and Matrix's reading of it is not
+    measured. Nor a flight-number range with
     `+` or `*`, which Matrix may read as several flights in the range: `AA1-3000+`
     answered JFK-LAX with the same ten nonstops as bare `AA1-3000`, so no
     answer has shown which connections it admits. Nor a number Matrix rejects
@@ -110,7 +110,7 @@ def _served_by_postfilter(pred: Predicate) -> bool:
     match pred:
         case ConnectionAirportPred(positional=True) | CabinPred():
             return False
-        case ConnectionAirportPred() if not all(_AIRPORT_RE.fullmatch(c) for c in pred.codes):
+        case ConnectionAirportPred() if not all(map(_rows_name, pred.codes)):
             return False
         case SpecificFlightPred() if pred.several and pred.low != pred.high:
             return False
@@ -118,6 +118,14 @@ def _served_by_postfilter(pred: Predicate) -> bool:
             return False
         case _:
             return pred.tier is Tier.GF_POSTFILTER and can_postfilter(pred)
+
+
+def _rows_name(code: str) -> bool:
+    """Whether a decoded row can name the airport `code`. Rows are decoded
+    through `fli_airports`, which has no member for a comma list (`DUB,LHR`) or
+    most metro codes (`NYC`), and reads MLH as BSL."""
+    member = fli_airports().get(code)
+    return member is not None and member.name == code
 
 
 def _served_by_page(pred: Predicate) -> bool:
