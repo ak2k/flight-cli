@@ -3457,6 +3457,7 @@ def _overlay_awards(
     opts: Any,
     sel: Any,
     awards_only: bool,
+    no_cache: bool = False,
 ) -> None:
     """Render the award overlay for an already-fetched Matrix result."""
     p = opts.pax
@@ -3471,6 +3472,7 @@ def _overlay_awards(
         provider_filter=sel.provider_filter if sel is not None else None,
         seats_sources=sel.seats_sources() if sel is not None else None,
         cash_per_cabin=_cash_per_cabin_single(matrix_res, opts.cabin),
+        no_cache=no_cache,
     )
 
 
@@ -4745,18 +4747,22 @@ def _keep_cells_whole(table: Table, count: int) -> None:
     """Rich fits a table wider than the console by narrowing its columns and
     cutting with `…` what no longer fits, which on a table of many slices can
     drop the flight number or price digits two rows differ by. There every cell
-    folds onto more lines instead. No column is held to one line: Rich narrows
-    the widest columns first, so a price stays on one line until the slice
-    columns are as narrow as it is, while a held column takes the width the
-    slice columns need and can leave them none. A column narrowed to its two
-    padding cells prints nothing, so the padding goes once the console cannot
-    give each column a border, its padding and one character."""
+    folds onto more lines instead. A column the caller held to one line stays
+    held, since a held cell cannot fold and its own ellipsis shows the cut; the
+    others are not held: Rich narrows the widest columns first, so a price stays
+    on one line until the slice columns are as narrow as it is, while a held
+    column takes the width the slice columns need and can leave them none. A
+    column narrowed to its two padding cells prints nothing, so the padding goes
+    once the console cannot give each column a border, its padding and one
+    character."""
     if count <= _ROUND_TRIP_LEGS:
         return
     if console.width < 4 * len(table.columns) + 1:
         table.padding = (0, 0)
     for column in table.columns:
-        column.overflow = "fold"
+        # A column held to one line cannot fold; Rich would cut it with no mark.
+        if not column.no_wrap:
+            column.overflow = "fold"
 
 
 def _slice_cells(slcs: list[Slice], count: int) -> list[str]:
@@ -5531,6 +5537,7 @@ def _run_matrix_path(  # noqa: PLR0912 — one arm per way Matrix's answer is wr
             provider_filter=sel.provider_filter,
             seats_sources=sel.seats_sources(),
             cash_per_cabin=_cash_per_cabin_single(res, opts.cabin),
+            no_cache=no_cache,
         )
     # `res` was cast to SearchResult at the top of this function; safe to pass through.
     if not json_out:
@@ -7719,6 +7726,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
     matrix_fallback: bool = False,
     hand_off_failure: bool = False,
     split: bool = False,
+    no_cache: bool = False,
     matrix_remedy: str = "use --backend matrix",
     verify: bool = False,
     rps: float | None = None,
@@ -7895,6 +7903,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
             seats_sources=sel.seats_sources() if sel is not None else None,
             cash_per_cabin=_cash_per_cabin_single(sr, opts.cabin, party=opts.pax),
             bags_included=_bags_by_itinerary(rows, sr) if opts.bags is not None else None,
+            no_cache=no_cache,
         )
 
     if not results:
@@ -9146,7 +9155,9 @@ def _run_enriched_path(  # noqa: PLR0912, PLR0915 — one weave's outcome arms, 
             _note_award_skips(sum(it.ticketing is not None for it in pinnable.solutions))
         # Matrix's page is deeper than `-n` only to explain the table.
         firsts = matrix_res.model_copy(update={"solutions": matrix_res.solutions[:top_n]})
-        _overlay_awards(firsts, legs=legs, opts=opts, sel=sel, awards_only=awards_only)
+        _overlay_awards(
+            firsts, legs=legs, opts=opts, sel=sel, awards_only=awards_only, no_cache=no_cache
+        )
 
     # A result built from the rows the table numbered, so `_emit_urls`' label
     # expression is true by construction. A Google-only row carries no
@@ -9838,8 +9849,15 @@ def _render_multi_cabin_search(
         # and in a party's table the star that marks a per-traveler fare. Unwrapped
         # where a mark is shown, so it stays on its amount's line; an unwrapped cell
         # cannot fold and Rich cuts it bare, so there the ellipsis shows the cut.
-        t.add_column(
+        # The header has an overflow of its own, so the rule for a price cell never
+        # changes how a header too long for its column is cut.
+        heading = console.render_str(
             f"{letter} total{ccy_tag}" if party else f"{letter}{ccy_tag}",
+            overflow="fold" if party or count > _ROUND_TRIP_LEGS else "ellipsis",
+            highlight=False,
+        )
+        t.add_column(
+            heading,
             justify="right",
             overflow="ellipsis" if shows_mark else "fold",
             no_wrap=shows_mark,
@@ -10181,6 +10199,7 @@ def _run_matrix_path_multi(
             provider_filter=sel.provider_filter,
             seats_sources=sel.seats_sources(),
             cash_per_cabin=_cash_per_cabin_multi(rows),
+            no_cache=no_cache,
         )
 
     # Deep links are cabin-specific (Matrix's URL encodes one cabin). Emit the
@@ -10263,6 +10282,7 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
     gf_headed: bool = False,
     matrix_fallback: bool = False,
     separate_tickets: SeparateTickets = "off",
+    no_cache: bool = False,
 ) -> _MatrixHandOff | None:
     """Google Flights multi-cabin: N cabin queries → join → render.
 
@@ -10469,6 +10489,7 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
             seats_sources=sel.seats_sources(),
             cash_per_cabin=_cash_per_cabin_multi(rows, party=p),
             bags_included=bags_by_id,
+            no_cache=no_cache,
         )
     return None
 
@@ -12070,6 +12091,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         google_answered: tuple[Cabin, ...] = ()
         if resolved == BACKEND_GFLIGHT:
             hand_off = _run_gflight_path_multi(
+                no_cache=_resolve_no_cache(no_cache),
                 legs=legs,
                 opts=opts,
                 cabins=cabins_tuple,
@@ -12183,6 +12205,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         # scope held across both keeps them on a single Chrome.
         with search_escalation(), _browser_scope(gf_mode) if split else contextlib.nullcontext():
             unmatched = _run_gflight_path(
+                no_cache=_resolve_no_cache(no_cache),
                 legs=legs,
                 opts=opts,
                 top_n=page_size,
@@ -12850,6 +12873,7 @@ def calendar(
                 dests=dests,
                 cabin=_CABIN_TO_PP_NAME[opts.cabin],
                 num_passengers=_seated_pax(opts.pax),
+                no_cache=_resolve_no_cache(no_cache),
             )
         return
     blocker = _grid_branch_blocker(
@@ -12937,7 +12961,13 @@ def calendar(
 
 
 def _record_calendar_awards(
-    k: int, *, origins: tuple[str, ...], dests: tuple[str, ...], cabin: str, num_passengers: int
+    k: int,
+    *,
+    origins: tuple[str, ...],
+    dests: tuple[str, ...],
+    cabin: str,
+    num_passengers: int,
+    no_cache: bool = False,
 ) -> None:
     """The envelope's `awards` for the `k` cheapest priced dates the calendar
     recorded: one entry a date, naming the programs that have space on it."""
@@ -12961,7 +12991,9 @@ def _record_calendar_awards(
         for o, d in pairs
     ]
     try:
-        per_query = award_space(queries, cabin=cabin, num_passengers=num_passengers)
+        per_query = award_space(
+            queries, cabin=cabin, num_passengers=num_passengers, no_cache=no_cache
+        )
     except Exception as e:  # noqa: BLE001 - an award failure must not lose the calendar
         _envelope.narrow()
         _envelope.explain("awards", "the award query failed")

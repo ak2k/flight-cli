@@ -449,6 +449,7 @@ def run_pp_for_search(
     seats_sources: tuple[str, ...] | None = None,
     cash_per_cabin: Mapping[int, Mapping[str, float]] | None = None,
     bags_included: Mapping[int, Sequence[tuple[int | None, int | None]]] | None = None,
+    no_cache: bool = False,
 ) -> None:
     """Run award augmentation through the provider registry, join against
     `res`'s cash itineraries, render. Registry hands back any configured
@@ -547,6 +548,7 @@ def run_pp_for_search(
                 seats_sources=seats_sources,
                 cash_hints_per_leg=cash_hints_per_query,
                 provider_filter=provider_filter,
+                refresh=no_cache,
             )
             try:
                 return per_query, run.failures
@@ -665,7 +667,7 @@ def _deliver_awards(
 
 
 def award_space(
-    queries: list[LegQuery], *, cabin: str, num_passengers: int
+    queries: list[LegQuery], *, cabin: str, num_passengers: int, no_cache: bool = False
 ) -> list[list[AwardFlight]]:
     """Every query's awards across the configured providers that can seat the
     party in `cabin`, one list each, within `AWARD_DEADLINE_SECS`; what the
@@ -678,7 +680,7 @@ def award_space(
     async def _go() -> tuple[list[list[AwardFlight]], list[ProviderFailure]]:
         with award_run(AWARD_DEADLINE_SECS) as run:
             per_query, providers = await registry.gather_awards(
-                queries, cabins=(name,), num_passengers=num_passengers
+                queries, cabins=(name,), num_passengers=num_passengers, refresh=no_cache
             )
             try:
                 return per_query, run.failures

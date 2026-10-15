@@ -4687,6 +4687,9 @@ _PRINTABLE_IDENTIFIERS = frozenset(
         ("_render_multi_cabin_search", "cabin_labels"),
         ("_render_multi_cabin_search", "sort_label"),
         ("_render_multi_cabin_search", "letter"),
+        # A price column's header, parsed as markup at its `render_str` call, which
+        # this scan reads as it reads `add_column`.
+        ("_render_multi_cabin_search", "heading"),
         # Whether a shown row is marked, a bool this function computed.
         ("_render_multi_cabin_search", "shows_mark"),
         # `pp/cli.py`: cells composed from leaves each wrapped where they were read,
