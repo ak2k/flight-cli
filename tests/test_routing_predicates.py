@@ -112,18 +112,18 @@ def test_routing_flight_exclusion_escalates() -> None:
 
 def test_routing_via_airport_idiom() -> None:
     (p,) = parse_routing("F* X:LHR F*")
-    assert p == ConnectionAirportPred(frozenset({"LHR"}), exclude=False)
+    assert p == ConnectionAirportPred(frozenset({"LHR"}), exclude=False, positional=True)
     assert p.tier is Tier.GF_NATIVE
 
 
 def test_routing_via_airport_alternatives() -> None:
     (p,) = parse_routing("F* DFW,DEN F*")
-    assert p == ConnectionAirportPred(frozenset({"DFW", "DEN"}), exclude=False)
+    assert p == ConnectionAirportPred(frozenset({"DFW", "DEN"}), exclude=False, positional=True)
 
 
 def test_routing_avoid_airport() -> None:
     (p,) = parse_routing("F* ~DFW F*")
-    assert p == ConnectionAirportPred(frozenset({"DFW"}), exclude=True)
+    assert p == ConnectionAirportPred(frozenset({"DFW"}), exclude=True, positional=True)
 
 
 def test_routing_bare_single_airport_escalates() -> None:
