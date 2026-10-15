@@ -11,6 +11,8 @@ connection, not at DUB; nonstops dropped), so it stays on Matrix.
 
 from __future__ import annotations
 
+import pytest
+
 from flight_cli._gf_postfilter import apply_postfilter, search_page_reasons
 from flight_cli.models import (
     Itinerary,
@@ -52,6 +54,17 @@ def test_a_cities_exclusion_keeps_nonstops_and_drops_the_named_connection() -> N
         it.itinerary.slices[0].flights[0] for it in kept.solutions if it.itinerary is not None
     ]
     assert flights == ["AA1", "AA3"]
+
+
+@pytest.mark.parametrize(
+    ("extension", "named"),
+    [("-CITIES DUB,LHR", "DUB,LHR"), ("-CITIES LON", "LON"), ("-CITIES DFW LON", "DFW, LON")],
+)
+def test_a_cities_code_no_row_can_carry_goes_to_matrix(extension: str, named: str) -> None:
+    """A row's stop is one airport, so a comma list or a metro code would drop
+    nothing on the page; how Matrix reads either is not measured."""
+    reasons = search_page_reasons(classify(None, extension).predicates)
+    assert reasons == [f"a connecting-airport exclusion ({named})"]
 
 
 def test_the_routing_form_of_a_connection_exclusion_still_goes_to_matrix() -> None:

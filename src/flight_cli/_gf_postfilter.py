@@ -39,6 +39,7 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from ._metro import METRO_MEMBERS
 from .domain import Cabin, time_bounds, window_label, within_price_cap
 from .routing_predicates import (
     AlliancePred,
@@ -78,6 +79,7 @@ _SUPPORTED: tuple[type, ...] = (
 )
 
 _FLIGHT_RE = re.compile(r"^([A-Z0-9]{2})([0-9]{1,9})$", re.IGNORECASE)
+_AIRPORT_RE = re.compile(r"[A-Z]{3}")
 _MAX_FLIGHT_NUMBER = 9999
 
 
@@ -96,8 +98,10 @@ def _served_by_postfilter(pred: Predicate) -> bool:
     evaluates it: `F* ~DUB F*` is positional, so Matrix requires one connection
     not at DUB and drops the nonstops the filter keeps. `-CITIES DUB` is served:
     Matrix kept nonstops under it and dropped only connections at the named
-    airports. Nor a flight-number range with `+` or `*`,
-    which Matrix may read as several flights in the range: `AA1-3000+`
+    airports. Not when it names a code no row's stop can be, a comma list
+    (`DUB,LHR`) or a metro code (`LON`): the filter would drop nothing, and
+    Matrix's reading of either is not measured. Nor a flight-number range with
+    `+` or `*`, which Matrix may read as several flights in the range: `AA1-3000+`
     answered JFK-LAX with the same ten nonstops as bare `AA1-3000`, so no
     answer has shown which connections it admits. Nor a number Matrix rejects
     as a bad route specification (`AA3000-1`, `AA0`, `AA10000`): Google's empty
@@ -106,6 +110,10 @@ def _served_by_postfilter(pred: Predicate) -> bool:
     `search_page_reasons` serves beside the one cabin the page is asked for."""
     match pred:
         case ConnectionAirportPred(positional=True) | CabinPred():
+            return False
+        case ConnectionAirportPred() if any(
+            c in METRO_MEMBERS or not _AIRPORT_RE.fullmatch(c) for c in pred.codes
+        ):
             return False
         case SpecificFlightPred() if pred.several and pred.low != pred.high:
             return False

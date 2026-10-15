@@ -417,6 +417,11 @@ def test_auto_a_cities_exclusion_picks_google() -> None:
     assert _call(BACKEND_GFLIGHT, extension="-CITIES DUB") == BACKEND_GFLIGHT
 
 
+def test_auto_a_cities_metro_code_or_comma_list_picks_matrix() -> None:
+    assert _call(extension="-CITIES LON") == BACKEND_MATRIX
+    assert _call(extension="-CITIES DUB,LHR") == BACKEND_MATRIX
+
+
 def test_a_post_filterable_predicate_beside_one_that_is_not_still_picks_matrix() -> None:
     assert _call(routing="F* ~DUB F*", extension="-REDEYES") == BACKEND_MATRIX
     assert _call(routing="~BA+", extension="-REDEYES") == BACKEND_GFLIGHT
