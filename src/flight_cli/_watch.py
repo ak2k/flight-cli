@@ -186,7 +186,7 @@ def watch_add(
     dep: Annotated[str | None, typer.Option("--dep", help="Departure date YYYY-MM-DD")] = None,
     dep_from: Annotated[str | None, typer.Option("--from", help="Window start; needs --to")] = None,
     dep_to: Annotated[str | None, typer.Option("--to", help="Window end; needs --from")] = None,
-    below: Annotated[float | None, typer.Option("--below", help="Price ceiling")] = None,
+    below: Annotated[float | None, typer.Option("--below", help="Price ceiling in USD")] = None,
     cabin: Annotated[str, typer.Option("--cabin", help=f"One of: {', '.join(CABINS)}")] = "economy",
     award: Annotated[bool, typer.Option("--award", help="Watch award space")] = False,
 ) -> None:
@@ -249,7 +249,9 @@ def _poll(w: Watch) -> str:
         return f"{head}: no priced date"
     price, day, currency = min(priced, key=lambda p: (p[0], p[1]))
     verdict = ""
-    if w.below is not None:
+    if w.below is not None and currency != "USD":
+        verdict = ", no verdict: the ceiling is in USD"
+    elif w.below is not None:
         verdict = ", under the ceiling" if price < w.below else ", over the ceiling"
     amount = f"{currency or ''} {_digits(price)}".strip()
     return f"{head}: lowest {amount} on {day}{verdict}"

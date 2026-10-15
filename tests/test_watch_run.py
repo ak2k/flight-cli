@@ -94,11 +94,11 @@ def test_a_tie_goes_to_the_earlier_date_and_the_line_is_stripped_of_control_char
     ]
 
 
-def _one_krw_day(monkeypatch: pytest.MonkeyPatch, price: float) -> None:
+def _one_day(monkeypatch: pytest.MonkeyPatch, price: float, currency: str = "KRW") -> None:
     def _rows(*_a: object, **_kw: object) -> list[CalendarRow]:
         return [
             CalendarRow.model_validate(
-                {"price": price, "currency": "KRW", "row": {}, "departure": date(2026, 10, 31)}
+                {"price": price, "currency": currency, "row": {}, "departure": date(2026, 10, 31)}
                 | {"return": None}
             )
         ]
@@ -110,7 +110,7 @@ def _one_krw_day(monkeypatch: pytest.MonkeyPatch, price: float) -> None:
 def test_a_fare_of_a_million_or_more_prints_every_digit(
     monkeypatch: pytest.MonkeyPatch, price: float, shown: str
 ) -> None:
-    _one_krw_day(monkeypatch, price)
+    _one_day(monkeypatch, price)
     assert _watch_cmd("add", "ICN", "LAX", *_WINDOW).exit_code == 0
     ran = _watch_cmd("run")
     assert ran.exit_code == 0, ran.output
@@ -122,18 +122,38 @@ def test_a_fare_of_a_million_or_more_prints_every_digit(
 @pytest.mark.parametrize(
     ("below", "price", "tail"),
     [
-        ("1221407", 1221408.0, "below 1221407: lowest KRW 1221408 on 2026-10-31, over the ceiling"),
-        ("400.004", 400.0, "below 400.004: lowest KRW 400 on 2026-10-31, under the ceiling"),
+        ("1221407", 1221408.0, "below 1221407: lowest USD 1221408 on 2026-10-31, over the ceiling"),
+        ("400.004", 400.0, "below 400.004: lowest USD 400 on 2026-10-31, under the ceiling"),
     ],
 )
 def test_a_ceiling_prints_every_digit_its_verdict_compared(
     monkeypatch: pytest.MonkeyPatch, below: str, price: float, tail: str
 ) -> None:
-    _one_krw_day(monkeypatch, price)
+    _one_day(monkeypatch, price, "USD")
     assert _watch_cmd("add", "ICN", "LAX", *_WINDOW, "--below", below).exit_code == 0
     ran = _watch_cmd("run")
     assert ran.exit_code == 0, ran.output
     assert ran.stdout.splitlines() == [f"1  ICN-LAX  2026-10-20..2026-11-16  economy  {tail}"]
+
+
+def test_a_one_airport_watch_asks_matrix_for_usd(monkeypatch: pytest.MonkeyPatch) -> None:
+    asked = _serve(monkeypatch, _BODY)
+    assert _watch_cmd("add", "LHR", "JFK", *_WINDOW, "--below", "400").exit_code == 0
+    assert _watch_cmd("run").exit_code == 0
+    assert [s.options.currency for s in asked] == ["USD"]
+
+
+def test_a_fare_in_another_currency_gets_no_verdict_against_the_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _one_day(monkeypatch, 350.0, "GBP")
+    assert _watch_cmd("add", "LHR", "JFK", *_WINDOW, "--below", "400").exit_code == 0
+    ran = _watch_cmd("run")
+    assert ran.exit_code == 0, ran.output
+    assert ran.stdout.splitlines() == [
+        "1  LHR-JFK  2026-10-20..2026-11-16  economy  below 400: lowest GBP 350 on 2026-10-31,"
+        " no verdict: the ceiling is in USD"
+    ]
 
 
 def test_a_window_with_no_priced_day_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -233,3 +253,12 @@ def test_the_help_text_and_the_readme_say_run_polls() -> None:
     assert "run" in helped
     assert all("nothing polls" not in t.lower() for t in texts)
     assert "`flight watch run`" in texts[-1]
+
+
+def test_the_below_help_and_the_readme_say_the_ceiling_is_in_usd() -> None:
+    helped = CliRunner().invoke(cli.app, ["watch", "add", "--help"], env={"COLUMNS": "200"})
+    assert helped.exit_code == 0, helped.output
+    assert "Price ceiling in USD" in helped.stdout
+    readme = (Path(__file__).resolve().parent.parent / "README.md").read_text()
+    assert "a `--below` ceiling in USD" in readme
+    assert "(a fare in another currency gets no verdict)" in readme
