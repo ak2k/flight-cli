@@ -422,6 +422,15 @@ def test_auto_a_cities_metro_code_or_comma_list_picks_matrix() -> None:
     assert _call(extension="-CITIES DUB,LHR") == BACKEND_MATRIX
 
 
+@pytest.mark.parametrize("code", ["QSF", "SAO"])
+def test_auto_a_cities_metro_code_fli_also_has_as_an_airport_picks_matrix(code: str) -> None:
+    assert _call(extension=f"-CITIES {code}") == BACKEND_MATRIX
+    with pytest.raises(
+        typer.BadParameter, match=re.escape(f"a connecting-airport exclusion ({code})")
+    ):
+        _call(BACKEND_GFLIGHT, extension=f"-CITIES {code}")
+
+
 def test_a_post_filterable_predicate_beside_one_that_is_not_still_picks_matrix() -> None:
     assert _call(routing="F* ~DUB F*", extension="-REDEYES") == BACKEND_MATRIX
     assert _call(routing="~BA+", extension="-REDEYES") == BACKEND_GFLIGHT

@@ -39,6 +39,7 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from ._metro import METRO_MEMBERS
 from .domain import Cabin, time_bounds, window_label, within_price_cap
 from .fli_bridge import fli_airports
 from .routing_predicates import (
@@ -123,7 +124,11 @@ def _served_by_postfilter(pred: Predicate) -> bool:
 def _rows_name(code: str) -> bool:
     """Whether a decoded row can name the airport `code`. Rows are decoded
     through `fli_airports`, which has no member for a comma list (`DUB,LHR`) or
-    most metro codes (`NYC`), and reads MLH as BSL."""
+    most metro codes (`NYC`), and reads MLH as BSL. A metro code that fli does
+    have (QSF, SAO) is another airport there, so a row that names it is not the
+    metro."""
+    if code in METRO_MEMBERS:
+        return False
     member = fli_airports().get(code)
     return member is not None and member.name == code
 
