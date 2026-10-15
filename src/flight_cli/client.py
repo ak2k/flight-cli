@@ -347,12 +347,31 @@ class MatrixClient:
             )
         return data
 
+    async def _parsed_get[T](
+        self,
+        url: str,
+        params: dict[str, Any],
+        data: dict[str, Any],
+        parse: Callable[[dict[str, Any]], T],
+    ) -> T:
+        """`_parsed(data, parse)` for a GET answer. The refused body was stored
+        under this request's key; left there, every run inside the TTL would be
+        handed it again."""
+        try:
+            return _parsed(data, parse)
+        except MatrixShapeError:
+            await self._http.forget_get(url, params=params)
+            raise
+
     async def airports(self, partial: str, page_size: int = 10) -> list[Location]:
         url = f"{BASE}/v1/locationTypes/CITIES_AND_AIRPORTS/partialNames/{partial}/locations"
-        data = await self._get_once(url, {"pageSize": page_size, "key": self._api_key})
+        params = {"pageSize": page_size, "key": self._api_key}
+        data = await self._get_once(url, params)
         if isinstance(data, httpx.HTTPStatusError):
             raise _status_error(data) from None
-        return _parsed(data, lambda body: _Locations.model_validate(body).locations)
+        return await self._parsed_get(
+            url, params, data, lambda body: _Locations.model_validate(body).locations
+        )
 
     async def airport(self, code: str) -> Location | None:
         """Look up a single airport by IATA code. Returns None only on 404
@@ -361,12 +380,13 @@ class MatrixClient:
         distinguish 'doesn't exist' from 'lookup is broken'. An answer the
         model refuses is a `MatrixShapeError`."""
         url = f"{BASE}/v1/locationTypes/airportOrMultiAirportCity/locationCodes/{code.upper()}"
-        data = await self._get_once(url, {"key": self._api_key})
+        params = {"key": self._api_key}
+        data = await self._get_once(url, params)
         if isinstance(data, httpx.HTTPStatusError):
             if data.response.status_code == HTTPStatus.NOT_FOUND:
                 return None
             raise _status_error(data) from None
-        return _parsed(data, Location.model_validate)
+        return await self._parsed_get(url, params, data, Location.model_validate)
 
     async def currencies(self) -> list[dict[str, str]]:
         data = await self._get_once(f"{BASE}/v1/currencies", {"key": self._api_key})
