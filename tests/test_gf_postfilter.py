@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from fli.models import FlightLeg, FlightResult  # pyright: ignore[reportMissingTypeStubs]
 from fli.models.airline import Airline  # pyright: ignore[reportMissingTypeStubs]
-from fli.models.airport import Airport  # pyright: ignore[reportMissingTypeStubs]
 
 from conftest import _ds1
 from flight_cli import _gflight_ids as gfid
@@ -339,13 +338,14 @@ def _row(
     marketing: tuple[tuple[str, ...], ...] = (),
 ) -> GFlightWithId:
     """legs = (booking carrier, from, to, departure minute of the day, arrival
-    minute of the day), both local to their own airport."""
+    minute of the day), both local to their own airport. Airports are the
+    members the row decoder gives each code."""
     fli_legs = [
         FlightLeg(
             airline=Airline[carrier],
             flight_number=str(100 + i),
-            departure_airport=Airport[frm],
-            arrival_airport=Airport[to],
+            departure_airport=gfid._leg_airport(frm),
+            arrival_airport=gfid._leg_airport(to),
             departure_datetime=_DAY + timedelta(minutes=dep),
             arrival_datetime=_DAY + timedelta(minutes=arr),
             duration=max(arr - dep, 1),
@@ -454,6 +454,26 @@ def test_a_carrier_include_keeps_a_leg_any_allowed_carrier_sells() -> None:
     assert not _keeps(_row(("DL", "JFK", "LAX", _h(8), _h(11)), duration=360), "AA+", None)
     codeshare = _row(("B6", "JFK", "LAX", _h(8), _h(11)), duration=360, marketing=(("B6", "AA"),))
     assert _keeps(codeshare, "AA+", None)
+
+
+def test_a_cities_exclusion_drops_a_change_of_airport_at_either_airport() -> None:
+    """Landing at LGA and leaving from JFK connects at both airports."""
+    change = _row(
+        ("AA", "BOS", "LGA", _h(7), _h(8)),
+        ("AA", "JFK", "SFO", _h(11), _h(14)),
+        duration=600,
+    )
+    assert not _keeps(change, None, "-CITIES JFK")
+    assert not _keeps(change, None, "-CITIES LGA")
+    assert _keeps(change, None, "-CITIES ORD")
+
+
+@pytest.mark.parametrize("code", ["DFW", "OKA", "MLH"])
+def test_a_cities_code_the_page_serves_drops_a_connection_decoded_at_it(code: str) -> None:
+    """The decoder reads MLH as BSL, so the page must not serve `-CITIES MLH`."""
+    via = _row(("AA", "BOS", code, _h(7), _h(8)), ("AA", code, "SFO", _h(9), _h(12)), duration=300)
+    served = not search_page_reasons(classify(None, f"-CITIES {code}").predicates)
+    assert not (served and _keeps(via, None, f"-CITIES {code}"))
 
 
 def _departing(hour: int, minute: int) -> GFlightWithId:

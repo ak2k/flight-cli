@@ -1053,8 +1053,8 @@ def test_multi_cabin_unencodable_constraint_goes_to_matrix(
         "2026-10-14",
         "--cabin",
         "coach,business",
-        "--ext",
-        "-CITIES DFW",
+        "--routing",
+        "F* ~DFW F*",
         "--cash-only",
     )
     assert called == ["matrix"]

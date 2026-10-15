@@ -21,7 +21,7 @@ filter, for want of a membership table that would stay current.
 Supported Tier-2 predicates:
   - operating carrier include/exclude (`O:LH+`, `OPAIRLINES`, `-OPAIRLINES`)
   - marketing-carrier exclude (`~UA+`, `-AIRLINES`)
-  - connection-airport exclude (`~DFW`, `-CITIES`)
+  - connection-airport exclude, never connecting at the airports (`-CITIES`)
   - no codeshare (`-CODESHARE`)
   - one flight by number or range (`UA882`, `UA882+`, `UA1000-2000`), every
     leg of the slice that flight, as Matrix reads a lone flight-number token
@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .domain import Cabin, time_bounds, window_label, within_price_cap
+from .fli_bridge import fli_airports
 from .routing_predicates import (
     AlliancePred,
     CabinPred,
@@ -66,7 +67,7 @@ if TYPE_CHECKING:
 # Tier-2 predicate types this module evaluates: on a parsed slice
 # (`_slice_passes`), or on the raw row (`_row_passes`) for red-eyes, overnight
 # stops and cabins, which need each leg's own clocks and cabin. A minimum
-# layover is checked on the raw row too.
+# layover and a connection-airport exclude are checked on the raw row too.
 _SUPPORTED: tuple[type, ...] = (
     CabinPred,
     CarrierPred,
@@ -92,10 +93,14 @@ def can_postfilter(pred: Predicate) -> bool:
 def _served_by_postfilter(pred: Predicate) -> bool:
     """A Tier-2 predicate the search page can serve by post-filtering its board.
 
-    Not connection-airport excludes, although this module evaluates them:
-    `F* ~DUB F*` is one connection, not at DUB, to Matrix, which drops the
-    nonstops the filter keeps. Nor a flight-number range with `+` or `*`,
-    which Matrix may read as several flights in the range: `AA1-3000+`
+    Not the routing form of a connection-airport exclude, although this module
+    evaluates it: `F* ~DUB F*` is positional, so Matrix requires one connection
+    not at DUB and drops the nonstops the filter keeps. `-CITIES DUB` is served:
+    Matrix kept nonstops under it and dropped only connections at the named
+    airports. Not when it names a code no decoded row names (`_rows_name`): the
+    filter would drop no connection there, and Matrix's reading of it is not
+    measured. Nor a flight-number range with
+    `+` or `*`, which Matrix may read as several flights in the range: `AA1-3000+`
     answered JFK-LAX with the same ten nonstops as bare `AA1-3000`, so no
     answer has shown which connections it admits. Nor a number Matrix rejects
     as a bad route specification (`AA3000-1`, `AA0`, `AA10000`): Google's empty
@@ -103,7 +108,9 @@ def _served_by_postfilter(pred: Predicate) -> bool:
     digits: `AA00001` is AA1. Nor a cabin requirement, which
     `search_page_reasons` serves beside the one cabin the page is asked for."""
     match pred:
-        case ConnectionAirportPred() | CabinPred():
+        case ConnectionAirportPred(positional=True) | CabinPred():
+            return False
+        case ConnectionAirportPred() if not all(map(_rows_name, pred.codes)):
             return False
         case SpecificFlightPred() if pred.several and pred.low != pred.high:
             return False
@@ -111,6 +118,14 @@ def _served_by_postfilter(pred: Predicate) -> bool:
             return False
         case _:
             return pred.tier is Tier.GF_POSTFILTER and can_postfilter(pred)
+
+
+def _rows_name(code: str) -> bool:
+    """Whether a decoded row can name the airport `code`. Rows are decoded
+    through `fli_airports`, which has no member for a comma list (`DUB,LHR`) or
+    most metro codes (`NYC`), and reads MLH as BSL."""
+    member = fli_airports().get(code)
+    return member is not None and member.name == code
 
 
 def _served_by_page(pred: Predicate) -> bool:
@@ -342,7 +357,7 @@ def _row_passes(
     return not any(_row_fails(row, p) for p in predicates)
 
 
-def _row_fails(row: Any, pred: Predicate) -> bool:
+def _row_fails(row: Any, pred: Predicate) -> bool:  # noqa: PLR0911 — one arm per predicate type
     flight = row.flight
     match pred:
         case MaxDurationPred():
@@ -357,6 +372,14 @@ def _row_fails(row: Any, pred: Predicate) -> bool:
             return any(map(_red_eye, flight.legs))
         case ExcludeOvernightsPred():
             return any(itertools.starmap(_overnight_stop, itertools.pairwise(flight.legs)))
+        case ConnectionAirportPred(exclude=True):
+            # A change of airport connects at both airports; the slice's stops
+            # name only the one each leg lands at.
+            return any(
+                code in pred.codes
+                for a, b in itertools.pairwise(flight.legs)
+                for code in (a.arrival_airport.name, b.departure_airport.name)
+            )
         case CabinPred():
             # A leg Google states no cabin for cannot be shown to meet it.
             wanted = {_GOOGLE_CABIN[c] for c in pred.cabins}
