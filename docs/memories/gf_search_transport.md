@@ -139,9 +139,10 @@ full board the Tier-2 predicates the post-filter evaluates the way Matrix does
 are served by Google too, so the search gate is per predicate
 (`_gf_postfilter.search_page_reasons`), and anything else routes to Matrix with
 its reason printed. Still on Matrix: carrier and alliance excludes as encoded
-fields (they stay post-filters), connection airports (3.15; Matrix's meaning is
-positional), an infant on a multi-cabin compare, seniors and youth (no Google
-kind), time buckets that do not form one window, an alliance beside another carrier or
+fields (they stay post-filters), connection airports in routing form (3.15;
+Matrix's meaning is positional; -CITIES is post-filtered on the page unless it
+names a metro or a code no row names), an infant on a multi-cabin compare,
+seniors and youth (no Google kind), time buckets that do not form one window, an alliance beside another carrier or
 alliance include (3.6 is one list, so Google would answer either), a zero
 `MAXCONNECT` or `MAXDUR` (fli's maximums are positive), and a carrier code fli
 has no member for.
