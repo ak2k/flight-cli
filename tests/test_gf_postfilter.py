@@ -456,6 +456,18 @@ def test_a_carrier_include_keeps_a_leg_any_allowed_carrier_sells() -> None:
     assert _keeps(codeshare, "AA+", None)
 
 
+def test_a_cities_exclusion_drops_a_change_of_airport_at_either_airport() -> None:
+    """Landing at LGA and leaving from JFK connects at both airports."""
+    change = _row(
+        ("AA", "BOS", "LGA", _h(7), _h(8)),
+        ("AA", "JFK", "SFO", _h(11), _h(14)),
+        duration=600,
+    )
+    assert not _keeps(change, None, "-CITIES JFK")
+    assert not _keeps(change, None, "-CITIES LGA")
+    assert _keeps(change, None, "-CITIES ORD")
+
+
 def _departing(hour: int, minute: int) -> GFlightWithId:
     start = hour * 60 + minute
     return _row(("AA", "JFK", "LAX", start, start + 200), duration=380)

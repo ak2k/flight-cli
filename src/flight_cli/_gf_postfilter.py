@@ -66,7 +66,7 @@ if TYPE_CHECKING:
 # Tier-2 predicate types this module evaluates: on a parsed slice
 # (`_slice_passes`), or on the raw row (`_row_passes`) for red-eyes, overnight
 # stops and cabins, which need each leg's own clocks and cabin. A minimum
-# layover is checked on the raw row too.
+# layover and a connection-airport exclude are checked on the raw row too.
 _SUPPORTED: tuple[type, ...] = (
     CabinPred,
     CarrierPred,
@@ -349,7 +349,7 @@ def _row_passes(
     return not any(_row_fails(row, p) for p in predicates)
 
 
-def _row_fails(row: Any, pred: Predicate) -> bool:
+def _row_fails(row: Any, pred: Predicate) -> bool:  # noqa: PLR0911 — one arm per predicate type
     flight = row.flight
     match pred:
         case MaxDurationPred():
@@ -364,6 +364,14 @@ def _row_fails(row: Any, pred: Predicate) -> bool:
             return any(map(_red_eye, flight.legs))
         case ExcludeOvernightsPred():
             return any(itertools.starmap(_overnight_stop, itertools.pairwise(flight.legs)))
+        case ConnectionAirportPred(exclude=True):
+            # A change of airport connects at both airports; the slice's stops
+            # name only the one each leg lands at.
+            return any(
+                code in pred.codes
+                for a, b in itertools.pairwise(flight.legs)
+                for code in (a.arrival_airport.name, b.departure_airport.name)
+            )
         case CabinPred():
             # A leg Google states no cabin for cannot be shown to meet it.
             wanted = {_GOOGLE_CABIN[c] for c in pred.cabins}
