@@ -1540,6 +1540,22 @@ def _persist_cookies(client: Any) -> None:
                 tmp.unlink(missing_ok=True)
 
 
+def _forget_cookies() -> None:
+    """Drop the saved Google cookies after a wall the backoff could not outlast.
+
+    The saved NID is the identity Google just walled, and `_seed_cookies_once`
+    would otherwise hand it to every process for up to `_COOKIE_TTL_S`. Dropping
+    it costs the next process one warm-up request. The persist latch is set so
+    that a later success in THIS process, whose session still carries the walled
+    cookie, does not write it back. Best-effort: an OSError is logged and never
+    changes the search's outcome."""
+    _cookie_state["persisted"] = True
+    try:
+        _cookie_path().unlink(missing_ok=True)
+    except OSError as e:
+        log.debug("could not drop the saved gflight cookies: %s", e)
+
+
 class _Ds1Board(NamedTuple):
     """What a decoded `ds:1` payload holds, and where."""
 
@@ -2577,6 +2593,7 @@ def retry_throttled[T](  # noqa: PLR0915 — one arm per retry policy, each with
                 final = wall_attempts > _THROTTLE_RETRY_ATTEMPTS
                 backoff = ladder.throttled(final=final)
                 if final or backoff is None:
+                    _forget_cookies()
                     raise
                 log.debug(
                     "gflight throttled; backoff %.1fs (budget %d)",
