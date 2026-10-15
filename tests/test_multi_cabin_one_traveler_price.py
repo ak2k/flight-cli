@@ -1,7 +1,9 @@
+# pyright: reportPrivateUsage=false
 """A narrow one-traveler multi-cabin table prints every digit of each price."""
 
 from __future__ import annotations
 
+import json
 from datetime import date, timedelta
 from io import StringIO
 from typing import TYPE_CHECKING, Any
@@ -9,9 +11,13 @@ from typing import TYPE_CHECKING, Any
 from rich.console import Console
 from typer.testing import CliRunner
 
+from conftest import _answering, _ds1, _page
+from flight_cli import _gflight_ids as gfid
 from flight_cli import cli
+from flight_cli._gf_common import PageFetch
 from flight_cli.domain import Cabin
 from flight_cli.models import SearchResult
+from test_multi_cabin_marks import _LAX, _MARKED, _URL
 
 if TYPE_CHECKING:
     import pytest
@@ -75,3 +81,45 @@ def test_a_narrow_four_cabin_one_traveler_table_keeps_every_digit(
     body = [line.split("│") for line in buf.getvalue().splitlines() if line.startswith("│")]
     cells = ["".join(parts[col].strip() for parts in body) for col in range(-5, -1)]
     assert cells == ["103.00", "203.00", "6303.20", "14703.25"]
+
+
+def _dear_board(
+    _filters: Any, _transport: Any, *, currency: str = "USD", cheapest: bool = False
+) -> gfid.Board[gfid.GFlightWithId]:
+    """Google's answer to every cabin: the LAX capture's rows at USD14703 and up,
+    and on the Cheapest tab row `_MARKED` a self transfer at USD14700."""
+    _ = currency
+    payload: list[Any] = json.loads(_ds1(_LAX))
+    rows = gfid._rows_from_ds1(payload).rows
+    for i, row in enumerate(rows):
+        row[1][0][1] = 14703 + i
+    if cheapest:
+        rows[_MARKED][7] = [1]
+        rows[_MARKED][1][0][1] = 14700
+    html = _page(
+        _answering(json.dumps(payload), origin=None, destination=None, date=_DEP.isoformat())
+    )
+    return gfid._rows_from_page_html(PageFetch(html, _URL, 200))
+
+
+def test_a_narrow_marked_one_traveler_table_never_cuts_a_price_silently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shown mark keeps the price column on one line, so a cell too narrow for
+    its price is cut: at 33 columns to its first digits, at 50 to its amount
+    without the mark. The cut must show, or 1470 reads as a fare of 1,470."""
+    monkeypatch.setattr(gfid, "_one_call_laddered", _dear_board)
+    for width in (33, 50):
+        buf = StringIO()
+        monkeypatch.setattr(cli, "console", Console(file=buf, width=width, no_color=True))
+        result = CliRunner().invoke(
+            cli.app,
+            [
+                *("search", "JFK", "LAX", "--dep", _DEP.isoformat(), *_LINKLESS, "-n", "1"),
+                *("--backend", "gflight", "--cabin", "economy,premium,business,first"),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        body = [line.split("│") for line in buf.getvalue().splitlines() if line.startswith("│")]
+        cells = ["".join(parts[col].strip() for parts in body) for col in range(-5, -1)]
+        assert [c for c in cells if c != "14700.00 ‡" and not c.endswith("…")] == [], width

@@ -9812,11 +9812,12 @@ def _render_multi_cabin_search(
     for letter in (_CABIN_TO_LETTER[c] for c in cabins):
         # Folded: a cell squeezed by Rich's default ellipsis loses its last digits,
         # and in a party's table the star that marks a per-traveler fare. Unwrapped
-        # where a mark is shown, so it stays on its amount's line.
+        # where a mark is shown, so it stays on its amount's line; an unwrapped cell
+        # cannot fold and Rich cuts it bare, so there the ellipsis shows the cut.
         t.add_column(
             f"{letter} total{ccy_tag}" if party else f"{letter}{ccy_tag}",
             justify="right",
-            overflow="fold",
+            overflow="ellipsis" if shows_mark else "fold",
             no_wrap=shows_mark,
         )
     _keep_cells_whole(t, count)
