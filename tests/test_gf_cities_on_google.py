@@ -58,11 +58,11 @@ def test_a_cities_exclusion_keeps_nonstops_and_drops_the_named_connection() -> N
 
 @pytest.mark.parametrize(
     ("extension", "named"),
-    [("-CITIES DUB,LHR", "DUB,LHR"), ("-CITIES LON", "LON"), ("-CITIES DFW LON", "DFW, LON")],
+    [("-CITIES DUB,LHR", "DUB,LHR"), ("-CITIES DFW DUB,LHR", "DFW, DUB,LHR")],
 )
 def test_a_cities_code_no_row_can_carry_goes_to_matrix(extension: str, named: str) -> None:
-    """A row's stop is one airport, so a comma list or a metro code would drop
-    nothing on the page; how Matrix reads either is not measured."""
+    """A row's stop is one airport, so a comma list would drop nothing on the
+    page; how Matrix reads it is not measured."""
     reasons = search_page_reasons(classify(None, extension).predicates)
     assert reasons == [f"a connecting-airport exclusion ({named})"]
 
