@@ -334,8 +334,8 @@ class MatrixClient:
         self, url: str, params: dict[str, Any]
     ) -> dict[str, Any] | httpx.HTTPStatusError:
         """GET, returning an HTTP error status rather than raising it, as
-        `_post_once` does. A body that is not an object is a `MatrixShapeError`,
-        as `_post` refuses it."""
+        `_post_once` does. A body that is not an object is a `MatrixShapeError`
+        and an error object is a `MatrixApiError`, as `_post` refuses them."""
         try:
             data = await self._http.get_json(url, params=params)
         except httpx.HTTPStatusError as e:
@@ -345,6 +345,7 @@ class MatrixClient:
                 f"Matrix's answer is not a JSON object (a {type(data).__name__})",
                 captured=_capture_body(data),
             )
+        _raise_if_api_error(data)
         return data
 
     async def _parsed_get[T](
