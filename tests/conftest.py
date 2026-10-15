@@ -13,8 +13,8 @@ launch failures in `except Exception`, and a guard the code under test could
 swallow would be no guard at all.
 
 The same holds one level down: **no test resolves a name or connects a socket**
-to anything but this machine (`_no_network`). A test that needs the real thing
-opts out with `@pytest.mark.network`.
+to anything but this machine (`_no_network`), through Python's `socket` or through
+libcurl. A test that needs the real thing opts out with `@pytest.mark.network`.
 
 Tests that legitimately drive the seam — with a fake playwright, never a real
 one — opt out with `@pytest.mark.gf_browser`.
@@ -40,10 +40,13 @@ import socket
 import sys
 import threading
 import time
+import urllib.parse
 from typing import TYPE_CHECKING, Any, cast
 
+import curl_cffi
 import pytest
 import structlog
+from curl_cffi import CurlOpt
 from typer import rich_utils
 
 # Rich settles whether a console styles its output when the console is built, and
@@ -147,7 +150,12 @@ def _no_network(  # pyright: ignore[reportUnusedFunction] - autouse pytest fixtu
 
     Socket creation stays open: asyncio's event loop builds a `socketpair`, and
     a socket that never connects reaches nothing. `pytest.fail` raises a
-    `BaseException` for the reason `_no_browser_launch` gives."""
+    `BaseException` for the reason `_no_browser_launch` gives.
+
+    libcurl resolves and connects in C, so the socket patches never see it, and
+    both production HTTP clients use it. It is guarded at the URL and proxy it is
+    given, in `Curl.setopt`. A redirect libcurl follows to another host is not
+    seen."""
     if request.node.get_closest_marker("network") is not None:  # pyright: ignore[reportUnknownMemberType]
         return
 
@@ -178,6 +186,19 @@ def _no_network(  # pyright: ignore[reportUnusedFunction] - autouse pytest fixtu
     monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
     monkeypatch.setattr(socket.socket, "connect", connect)
     monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
+
+    real_setopt = curl_cffi.Curl.setopt
+
+    def setopt(self: curl_cffi.Curl, option: CurlOpt, value: Any) -> int:
+        if option in (CurlOpt.URL, CurlOpt.PROXY) and value:
+            text = value.decode(errors="replace") if isinstance(value, bytes) else str(value)
+            # A value with no scheme is a host, which libcurl reads as http.
+            host = urllib.parse.urlsplit(text if "://" in text else f"//{text}").hostname
+            if not _is_local(host):
+                _refuse("requested", host)
+        return real_setopt(self, option, value)
+
+    monkeypatch.setattr(curl_cffi.Curl, "setopt", setopt)
 
 
 @pytest.fixture
