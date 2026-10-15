@@ -417,7 +417,8 @@ def test_auto_a_cities_exclusion_picks_google() -> None:
     assert _call(BACKEND_GFLIGHT, extension="-CITIES DUB") == BACKEND_GFLIGHT
 
 
-def test_auto_a_cities_comma_list_picks_matrix() -> None:
+def test_auto_a_cities_metro_code_or_comma_list_picks_matrix() -> None:
+    assert _call(extension="-CITIES NYC") == BACKEND_MATRIX
     assert _call(extension="-CITIES DUB,LHR") == BACKEND_MATRIX
 
 

@@ -67,6 +67,16 @@ def test_a_cities_code_no_row_can_carry_goes_to_matrix(extension: str, named: st
     assert reasons == [f"a connecting-airport exclusion ({named})"]
 
 
+@pytest.mark.parametrize(
+    ("extension", "named"), [("-CITIES NYC", "NYC"), ("-CITIES DFW LON", "DFW, LON")]
+)
+def test_a_cities_metro_code_goes_to_matrix(extension: str, named: str) -> None:
+    """A row names a metro's airport (JFK, not NYC), so the filter would keep
+    every connection in it; how Matrix reads a metro code is not measured."""
+    reasons = search_page_reasons(classify(None, extension).predicates)
+    assert reasons == [f"a connecting-airport exclusion ({named})"]
+
+
 def test_the_routing_form_of_a_connection_exclusion_still_goes_to_matrix() -> None:
     reasons = search_page_reasons(classify("F* ~DUB F*", None).predicates)
     assert reasons == ["a connecting-airport exclusion (DUB)"]
