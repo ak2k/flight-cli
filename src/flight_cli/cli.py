@@ -8177,10 +8177,11 @@ async def _matrix_into(
 
     A result and a `MatrixApiError` cannot be stashed together: this package
     builds that error and its `MatrixHttpError` subclass only inside
-    `MatrixClient._post` (by `_raise_if_api_error` and `_status_error`), which
-    `execute()` calls, and closing the client awaits the transport and nothing
-    that raises one — so the arm below reaches `state["matrix"]` only through
-    the value `execute()` returned, and reaching it at all means nothing raised.
+    `MatrixClient` (`_post` and its GET helpers, by `_raise_if_api_error` and
+    `_status_error`); `execute()` calls `_post`, and closing the client awaits
+    the transport and nothing that raises one — so the arm below reaches
+    `state["matrix"]` only through the value `execute()` returned, and reaching
+    it at all means nothing raised.
     The single-origin half is asserted rather than described, in
     `tests/test_refusal_markup.py`.
     """
