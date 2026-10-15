@@ -248,17 +248,24 @@ class HttpTransport:
         except Exception as e:  # noqa: BLE001 — a cache write must never fail a request
             log.warning("cache_write_failed", key=key, error=str(e))
 
-    async def forget_post(
-        self, url: str, body: dict[str, Any], *, params: dict[str, Any] | None = None
-    ) -> None:
-        """Drop the entry `post_json` keeps for this request, so the next call
-        asks the server again. A cache that cannot delete is logged, never
-        raised."""
-        key = self._post_key(url, body, params)
+    async def _forget(self, key: str) -> None:
+        """Delete one entry. A cache that cannot delete is logged, never raised."""
         try:
             await anyio.to_thread.run_sync(self._cache.delete, key)  # pyright: ignore[reportUnknownArgumentType]
         except Exception as e:  # noqa: BLE001 — a cache delete must never fail a request
             log.warning("cache_forget_failed", key=key, error=str(e))
+
+    async def forget_post(
+        self, url: str, body: dict[str, Any], *, params: dict[str, Any] | None = None
+    ) -> None:
+        """Drop the entry `post_json` keeps for this request, so the next call
+        asks the server again."""
+        await self._forget(self._post_key(url, body, params))
+
+    async def forget_get(self, url: str, *, params: dict[str, Any] | None = None) -> None:
+        """Drop the entry `get_json` keeps for this request, so the next call
+        asks the server again."""
+        await self._forget(self._cache_key("GET", url, params, None))
 
     # ───────────────────────────── public API ──────────────────────────────
 
