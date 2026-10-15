@@ -94,10 +94,19 @@ class AlliancePred:
 @dataclass(frozen=True, slots=True)
 class ConnectionAirportPred:
     """Connect only at / never at these airports — native GF filter
-    (include list, or exclude via complement)."""
+    (include list, or exclude via complement).
+
+    `positional` is the routing-language form (`F* ~DFW F*`, `F* X:LHR F*`),
+    which Matrix reads as a connection there or not there, so a nonstop never
+    matches and several connections may. The `-CITIES` extension is not
+    positional: Matrix kept nonstops and dropped only connections at the named
+    airports (BTR-SFO 2026-11-12: `-CITIES DFW` gave nine rows, all via IAH;
+    BOS-SFO `-CITIES ORD` kept all ten nonstops), which is what the
+    post-filter's `_slice_passes` applies."""
 
     codes: frozenset[str]
     exclude: bool
+    positional: bool = False
 
     @property
     def tier(self) -> Tier:
@@ -284,7 +293,9 @@ def _airport_pred(tok: str) -> ConnectionAirportPred | None:
     m = _RE_AIRPORT.match(tok)
     if not m:
         return None
-    return ConnectionAirportPred(_airport_codes(m.group(2)), exclude=m.group(1) == "~")
+    return ConnectionAirportPred(
+        _airport_codes(m.group(2)), exclude=m.group(1) == "~", positional=True
+    )
 
 
 def _parse_single_routing_token(tok: str) -> list[Predicate] | None:
