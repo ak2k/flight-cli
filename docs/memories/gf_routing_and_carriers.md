@@ -103,8 +103,8 @@ one connection not at DUB to Matrix, which drops the nonstops the filter keeps.
 `-CITIES DUB` is served from the page: Matrix kept nonstops under it and dropped
 only connections at the named airports (BTR-SFO `-CITIES DFW`: nine rows, all
 via IAH; BOS-SFO `-CITIES ORD`: all ten nonstops). A `-CITIES` code no
-decoded row names stays on Matrix: a comma list (`DUB,LHR`), a metro code fli
-has no airport for (`NYC`), or MLH, which rows name BSL.
+decoded row names stays on Matrix: a comma list (`DUB,LHR`), a metro code (`NYC`,
+and QSF and SAO, which fli has as other airports), or MLH, which rows name BSL.
 That gate is set out in [gf_search_transport.md](gf_search_transport.md).
 
 A lone flight-number token is the whole slice to Matrix, and the filter reads it
