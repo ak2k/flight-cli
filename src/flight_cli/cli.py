@@ -7107,6 +7107,9 @@ def lowest_fare_rows(
             stops=None,
             allow_airport_changes=True,
             show_only_available=True,
+            # A watch's ceiling is in USD; left unset, Matrix prices in the
+            # origin's currency.
+            currency="USD",
         ),
         window=CalendarWindow(start=start, end=end, duration_min=0, duration_max=0),
     )
@@ -7890,7 +7893,7 @@ def _run_gflight_path(  # noqa: PLR0911, PLR0912, PLR0915 — every outcome of o
             json_out=json_out,
             provider_filter=sel.provider_filter if sel is not None else None,
             seats_sources=sel.seats_sources() if sel is not None else None,
-            cash_per_cabin=_cash_per_cabin_single(sr, opts.cabin),
+            cash_per_cabin=_cash_per_cabin_single(sr, opts.cabin, party=opts.pax),
             bags_included=_bags_by_itinerary(rows, sr) if opts.bags is not None else None,
         )
 
@@ -9286,36 +9289,57 @@ def _pp_cabins_for_multi(sel: ProviderSelection, cabins: tuple[Cabin, ...]) -> s
     return ",".join(_derive_pp_cabins(cabins))
 
 
-def _cash_per_cabin_single(res: SearchResult, query_cabin: Cabin) -> dict[int, dict[str, float]]:
+def _traveler_cash(price: str | None, party: Pax | None) -> float | None:
+    """One traveler's USD cash in `price`, or None.
+
+    `party` is given where `price` is the party's total, as Google's is. The
+    award table weighs this against one traveler's miles. An adults-only
+    party's total divides evenly; a child's or an infant's fare is not an
+    adult's, and Google states no share, so such a party gets no figure.
+    """
+    cash = _usd_amount(price)
+    if cash is None or party is None:
+        return cash
+    if not party.adults or party.total != party.adults:
+        return None
+    return cash / party.adults
+
+
+def _cash_per_cabin_single(
+    res: SearchResult, query_cabin: Cabin, *, party: Pax | None = None
+) -> dict[int, dict[str, float]]:
     """Build the per-itinerary cash map for a single-cabin invocation.
 
     The PP renderer needs to know which PP cabin name the cash field on each
     itinerary corresponds to — otherwise it can't compute ¢/mi against the
     right cash basis. For single-cabin runs the answer is the queried cabin
     applied uniformly. A fare in any currency but USD is left out, so no ¢/mi
-    is computed from it.
+    is computed from it. `party` is as `_traveler_cash` takes it.
     """
     name = _CABIN_TO_PP_NAME[query_cabin]
     out: dict[int, dict[str, float]] = {}
     for it in res.solutions:
-        cash = _usd_amount(it.price)
+        cash = _traveler_cash(it.price, party)
         if cash is not None:
             out[id(it)] = {name: cash}
     return out
 
 
-def _cash_per_cabin_multi(rows: list[MultiCabinRow]) -> dict[int, dict[str, float]]:
+def _cash_per_cabin_multi(
+    rows: list[MultiCabinRow], *, party: Pax | None = None
+) -> dict[int, dict[str, float]]:
     """Build the per-itinerary cash map for a multi-cabin merged result.
 
     `rows` carries each itinerary alongside the prices observed in each cabin.
     Object identity is preserved through the merge (and through PP's matcher
-    and de-dup), so `id(row.itinerary)` is a stable lookup key.
+    and de-dup), so `id(row.itinerary)` is a stable lookup key. `party` is as
+    `_traveler_cash` takes it.
     """
     out: dict[int, dict[str, float]] = {}
     for r in rows:
         prices: dict[str, float] = {}
         for cab, price in r.prices.items():
-            cash = _usd_amount(price)
+            cash = _traveler_cash(price, party)
             if cash is not None:
                 prices[_CABIN_TO_PP_NAME[cab]] = cash
         if prices:
@@ -10443,7 +10467,7 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
             json_out=json_out,
             provider_filter=sel.provider_filter,
             seats_sources=sel.seats_sources(),
-            cash_per_cabin=_cash_per_cabin_multi(rows),
+            cash_per_cabin=_cash_per_cabin_multi(rows, party=p),
             bags_included=bags_by_id,
         )
     return None
