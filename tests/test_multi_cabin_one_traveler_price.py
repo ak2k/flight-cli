@@ -102,8 +102,15 @@ def _dear_board(
     return gfid._rows_from_page_html(PageFetch(html, _URL, 200))
 
 
-def _marked_cells(monkeypatch: pytest.MonkeyPatch, width: int, *extra: str) -> list[str]:
-    """The four price cells of the one marked row, at `width` columns."""
+def _price_columns(text: str, edge: str) -> list[str]:
+    """The four price columns of the lines that start with `edge`, each column
+    rejoined across those lines."""
+    lines = [line.split(edge) for line in text.splitlines() if line.startswith(edge)]
+    return ["".join(parts[col].strip() for parts in lines) for col in range(-5, -1)]
+
+
+def _marked_table(monkeypatch: pytest.MonkeyPatch, width: int, *extra: str) -> str:
+    """The table whose one row is marked, printed at `width` columns."""
     monkeypatch.setattr(gfid, "_one_call_laddered", _dear_board)
     buf = StringIO()
     monkeypatch.setattr(cli, "console", Console(file=buf, width=width, no_color=True))
@@ -115,8 +122,12 @@ def _marked_cells(monkeypatch: pytest.MonkeyPatch, width: int, *extra: str) -> l
         ],
     )
     assert result.exit_code == 0, result.output
-    body = [line.split("│") for line in buf.getvalue().splitlines() if line.startswith("│")]
-    return ["".join(parts[col].strip() for parts in body) for col in range(-5, -1)]
+    return buf.getvalue()
+
+
+def _marked_cells(monkeypatch: pytest.MonkeyPatch, width: int, *extra: str) -> list[str]:
+    """The four price cells of the one marked row, at `width` columns."""
+    return _price_columns(_marked_table(monkeypatch, width, *extra), "│")
 
 
 def test_a_narrow_marked_one_traveler_table_never_cuts_a_price_silently(
@@ -135,3 +146,14 @@ def test_a_narrow_marked_party_table_never_cuts_a_price_silently(
 ) -> None:
     cells = _marked_cells(monkeypatch, 33, "--adults", "2")
     assert [c for c in cells if c != "14700.00 ‡" and not c.endswith("…")] == []
+
+
+def test_a_marked_party_table_whose_prices_fit_folds_its_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ellipsis that shows a price was cut belongs to the price cells. At 65
+    columns every price fits, and a party's header keeps its fold: on a line held
+    whole that cuts it to the first twelve characters."""
+    table = _marked_table(monkeypatch, 65, "--adults", "2")
+    assert _price_columns(table, "│") == ["14700.00 ‡"] * 4
+    assert _price_columns(table, "┃") == [f"{c} total (USD" for c in "YWJF"]

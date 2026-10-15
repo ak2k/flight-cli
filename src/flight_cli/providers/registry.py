@@ -45,6 +45,7 @@ def _enabled_builders(
     pp_airlines: tuple[str, ...] | None = None,
     seats_sources: tuple[str, ...] | None = None,
     provider_filter: tuple[str, ...] | None = None,
+    refresh: bool = False,
 ) -> list[_Build]:
     """A builder for each provider the filter allows, in the order their
     awards are listed.
@@ -62,20 +63,22 @@ def _enabled_builders(
     """
     builders: list[_Build] = []
     if provider_filter is None or _matches(provider_filter, "pp"):
-        builders.append(partial(_build_pointspath, pp_airlines))
+        builders.append(partial(_build_pointspath, pp_airlines, refresh=refresh))
     if provider_filter is None or _matches(provider_filter, "seats-aero"):
         builders.append(partial(_build_seats_aero, seats_sources))
     return builders
 
 
-async def _build_pointspath(airlines: tuple[str, ...] | None) -> AwardProvider | None:
+async def _build_pointspath(
+    airlines: tuple[str, ...] | None, *, refresh: bool = False
+) -> AwardProvider | None:
     # Building the provider refreshes a stale token and asks PointsPath for
     # its catalog, so the deadline holds over both; the configured check
     # only reads the stored tokens.
     with anyio.CancelScope(deadline=answer_deadline()) as scope:
         try:
             if pp_is_configured():
-                return await PointsPathProvider.create(explicit_airlines=airlines)
+                return await PointsPathProvider.create(explicit_airlines=airlines, refresh=refresh)
         except Exception as e:  # noqa: BLE001 — per-provider failures are non-fatal
             narrow()
             log.debug("provider_init_failed", provider="PointsPath", error=str(e))
@@ -149,6 +152,7 @@ async def gather_awards(
     seats_sources: tuple[str, ...] | None = None,
     cash_hints_per_leg: list[tuple[CashFlightHint, ...]] | None = None,
     provider_filter: tuple[str, ...] | None = None,
+    refresh: bool = False,
 ) -> tuple[list[list[AwardFlight]], list[AwardProvider]]:
     """End-to-end registry call: build each enabled provider, ask it every leg.
 
@@ -169,6 +173,7 @@ async def gather_awards(
         pp_airlines=pp_airlines,
         seats_sources=seats_sources,
         provider_filter=provider_filter,
+        refresh=refresh,
     )
     hints: list[tuple[CashFlightHint, ...]] = [
         cash_hints_per_leg[i] if cash_hints_per_leg and i < len(cash_hints_per_leg) else ()

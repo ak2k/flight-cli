@@ -122,6 +122,7 @@ class PointsPathProvider:
         cls,
         *,
         explicit_airlines: tuple[str, ...] | None = None,
+        refresh: bool = False,
     ) -> PointsPathProvider:
         """Build a configured provider. Raises PPAuthError if tokens are
         missing/expired — caller (registry) is expected to catch and skip."""
@@ -130,12 +131,12 @@ class PointsPathProvider:
         tokens = await anyio.to_thread.run_sync(get_valid_tokens, abandon_on_cancel=True)
         client = PPClient(tokens)
         try:
-            pricing = await client.pricing_info()
+            pricing = await client.pricing_info(force_refresh=refresh)
             if explicit_airlines:
                 airlines = explicit_airlines
             else:
                 try:
-                    ext_cfg = await client.extension_config()
+                    ext_cfg = await client.extension_config(force_refresh=refresh)
                     airlines = enabled_airlines(pricing, ext_cfg)
                     if not airlines:
                         airlines = DEFAULT_AIRLINES
