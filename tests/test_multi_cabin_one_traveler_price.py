@@ -102,24 +102,36 @@ def _dear_board(
     return gfid._rows_from_page_html(PageFetch(html, _URL, 200))
 
 
+def _marked_cells(monkeypatch: pytest.MonkeyPatch, width: int, *extra: str) -> list[str]:
+    """The four price cells of the one marked row, at `width` columns."""
+    monkeypatch.setattr(gfid, "_one_call_laddered", _dear_board)
+    buf = StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buf, width=width, no_color=True))
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            *("search", "JFK", "LAX", "--dep", _DEP.isoformat(), *_LINKLESS, "-n", "1"),
+            *("--backend", "gflight", "--cabin", "economy,premium,business,first", *extra),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    body = [line.split("│") for line in buf.getvalue().splitlines() if line.startswith("│")]
+    return ["".join(parts[col].strip() for parts in body) for col in range(-5, -1)]
+
+
 def test_a_narrow_marked_one_traveler_table_never_cuts_a_price_silently(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A shown mark keeps the price column on one line, so a cell too narrow for
     its price is cut: at 33 columns to its first digits, at 50 to its amount
     without the mark. The cut must show, or 1470 reads as a fare of 1,470."""
-    monkeypatch.setattr(gfid, "_one_call_laddered", _dear_board)
     for width in (33, 50):
-        buf = StringIO()
-        monkeypatch.setattr(cli, "console", Console(file=buf, width=width, no_color=True))
-        result = CliRunner().invoke(
-            cli.app,
-            [
-                *("search", "JFK", "LAX", "--dep", _DEP.isoformat(), *_LINKLESS, "-n", "1"),
-                *("--backend", "gflight", "--cabin", "economy,premium,business,first"),
-            ],
-        )
-        assert result.exit_code == 0, result.output
-        body = [line.split("│") for line in buf.getvalue().splitlines() if line.startswith("│")]
-        cells = ["".join(parts[col].strip() for parts in body) for col in range(-5, -1)]
+        cells = _marked_cells(monkeypatch, width)
         assert [c for c in cells if c != "14700.00 ‡" and not c.endswith("…")] == [], width
+
+
+def test_a_narrow_marked_party_table_never_cuts_a_price_silently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cells = _marked_cells(monkeypatch, 33, "--adults", "2")
+    assert [c for c in cells if c != "14700.00 ‡" and not c.endswith("…")] == []
