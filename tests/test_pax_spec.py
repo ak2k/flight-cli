@@ -225,3 +225,14 @@ def test_calendar_and_detail_help_offer_no_infant_code_for_pax() -> None:
     assert re.search(r"\bIL\b", rows["search"]), rows["search"]
     for command in ("calendar", "detail"):
         assert re.search(r"\bI[SL]\b|infant", rows[command]) is None, rows[command]
+
+
+def test_pax_beside_all_six_count_flags_names_every_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _stub_search(monkeypatch)
+    typed = [arg for flag in _FLAGS for arg in (flag, "0")]
+    result = _search_cli("--pax", "2A", *typed)
+    assert result.exit_code == 2, result.output
+    text = _flat(result.output)
+    for flag in _FLAGS:
+        assert re.search(rf"{flag}(?![\w-])", text), (flag, text)
+    assert calls == []

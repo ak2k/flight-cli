@@ -728,9 +728,10 @@ def _pax_counts(
         if ctx is not None and ctx.get_parameter_source(name) is ParameterSource.COMMANDLINE
     ]
     if given:
+        # Flags this module wrote, so not cut at `_quote`'s cap: six of them pass it.
         err.print(
             f"[red]--pax {_quote(spec)} gives the passengers, so it cannot go beside "
-            f"{_quote(', '.join(given))}; drop one[/]"
+            f"{_safe_text(', '.join(given))}; drop one[/]"
         )
         raise typer.Exit(2)
     if not infants and (pax.infants_in_seat or pax.infants_in_lap):
