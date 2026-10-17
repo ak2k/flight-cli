@@ -648,8 +648,10 @@ def _parse_bags(spec: str) -> Bags:
 
 # Pax's own bound on each count (Pax in domain.py).
 _PAX_MAX_COUNT = 9
-_RE_PAX = re.compile(r"(\d+)(IS|IL|[ACSY])", re.IGNORECASE)
-_RE_PAX_WHOLE = re.compile(r"(?:\d+(?:IS|IL|[ACSY]))+", re.IGNORECASE)
+# ASCII only: Unicode case folding reads U+0130 as I and U+017F as S, and `\d`
+# takes any script's digits.
+_RE_PAX = re.compile(r"(\d+)(IS|IL|[ACSY])", re.IGNORECASE | re.ASCII)
+_RE_PAX_WHOLE = re.compile(r"(?:\d+(?:IS|IL|[ACSY]))+", re.IGNORECASE | re.ASCII)
 _PAX_FIELD = {
     "A": "adults",
     "C": "children",

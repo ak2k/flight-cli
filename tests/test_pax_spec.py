@@ -197,3 +197,18 @@ def test_pax_counts_outside_a_command_counts_no_flag_as_typed() -> None:
     pax_counts = getattr(cli, "_pax_counts", None)
     assert pax_counts is not None
     assert pax_counts("2A1C1IL", (1, 0, 0, 0, 0, 0), infants=True) == (2, 1, 0, 0, 0, 1)
+
+
+def test_a_spec_with_a_letter_or_digit_outside_ascii_is_a_usage_error_naming_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _stub_search(monkeypatch)
+    # Each folds or reads as an ASCII code or digit under Unicode rules: dotted
+    # capital I, dotless small i, long s, Arabic-Indic two, fullwidth two.
+    for spec in ("1\u0130S", "1A1\u0130L", "1\u0131L", "1\u017f", "\u0662A", "\uff12A"):
+        result = _search_cli("--pax", spec)
+        assert result.exit_code == 2, (spec, result.output)
+        text = _flat(result.output)
+        assert "--pax" in text, (spec, text)
+        assert spec in text, (spec, text)
+    assert calls == []
