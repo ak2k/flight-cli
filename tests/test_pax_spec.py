@@ -236,3 +236,27 @@ def test_pax_beside_all_six_count_flags_names_every_one(monkeypatch: pytest.Monk
     for flag in _FLAGS:
         assert re.search(rf"{flag}(?![\w-])", text), (flag, text)
     assert calls == []
+
+
+def test_a_count_past_ints_digit_cap_is_a_usage_error_on_each_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _stub_search(monkeypatch)
+    seen = _stub_calendar(monkeypatch)
+    sent = _stub_detail(monkeypatch)
+    # `int` refuses a string of more than 4300 digits.
+    spec = "9" * 4301 + "A"
+    for result in (
+        _search_cli("--pax", spec),
+        _invoke(*_CALENDAR, "--pax", spec),
+        _invoke(*_DETAIL, "--pax", spec),
+    ):
+        assert result.exit_code == 2, (result.exception, result.output)
+        assert "--pax" in _flat(result.output), result.output
+    assert calls == []
+    assert seen == []
+    assert sent == []
+    # Leading zeros are not part of the count's length.
+    assert _search_cli("--pax", "0" * 4301 + "1A").exit_code == 0
+    [kw] = calls
+    assert kw["opts"].pax == Pax(adults=1)

@@ -698,12 +698,15 @@ def _parse_pax(spec: str) -> Pax:
                 f"[red]--pax {_quote(spec)} gives {_quote(code)} twice; give each code once[/]"
             )
             raise typer.Exit(2)
-        counts[code] = int(m.group(1))
-        if counts[code] > _PAX_MAX_COUNT:
+        # `int` refuses a string of more than 4300 digits, so the count's length,
+        # leading zeros aside, is checked before it is read.
+        digits = m.group(1).lstrip("0") or "0"
+        if len(digits) > len(str(_PAX_MAX_COUNT)) or int(digits) > _PAX_MAX_COUNT:
             err.print(
                 f"[red]--pax {_quote(spec)} asks for {_quote(m.group(0))}; each count is 0 to 9[/]"
             )
             raise typer.Exit(2)
+        counts[code] = int(digits)
     return Pax(**{"adults": 0, **{_PAX_FIELD[code]: n for code, n in counts.items()}})
 
 
