@@ -205,13 +205,18 @@ def _load_seen() -> dict[str, _Seen]:
 
 
 def _remember(fares: dict[str, _Seen]) -> None:
-    """Merge `fares` into the file under the lock, so overlapping runs each keep theirs."""
-    with _locked():
-        merged = {**_load_seen(), **fares}
-        try:
-            _write(seen_path(), _SEEN.dump_json(merged, indent=2))
-        except OSError as e:
-            typer.echo(f"{seen_path()} was not saved: {e.strerror}".translate(CTRL), err=True)
+    """Merge `fares` into the file under the lock, so overlapping runs each keep theirs.
+    The file is derived state, so a lock or a write that fails is named and `run` goes on."""
+    path = seen_path()
+    try:
+        with _locked():
+            merged = {**_load_seen(), **fares}
+            _write(path, _SEEN.dump_json(merged, indent=2))
+    except OSError as e:
+        typer.echo(f"{path} was not saved: {e.strerror}".translate(CTRL), err=True)
+    except typer.Exit:
+        # `_locked` has already named the directory and why it refused.
+        typer.echo(f"{path} was not saved".translate(CTRL), err=True)
 
 
 watch_app = typer.Typer(

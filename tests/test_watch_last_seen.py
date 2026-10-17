@@ -4,15 +4,22 @@ beside `watches.json` and names the change since the last run on that watch's li
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 import stat
+import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from typer.testing import CliRunner
 
 from flight_cli import _watch, cli
 from test_watch_run import _one_day
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _WINDOW = ("--from", "2026-10-20", "--to", "2026-11-16")
 _HEAD = "1  JFK-LAX  2026-10-20..2026-11-16  economy"
@@ -160,6 +167,49 @@ def test_a_seen_file_that_cannot_be_written_is_named_on_stderr_and_run_exits_0(
     assert ran.stderr.startswith(f"{seen} was not saved: "), ran.stderr
     assert seen.is_dir()
     assert list(tmp_path.glob(".watches-seen.json.*")) == []
+
+
+def _unreadable(directory: Path, _monkeypatch: pytest.MonkeyPatch) -> None:
+    directory.chmod(0o300)
+
+
+def _no_flock(_directory: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import fcntl  # the module does not exist on Windows
+
+    def _refuse(_fd: int, _operation: int) -> None:
+        raise OSError(errno.ENOLCK, os.strerror(errno.ENOLCK))
+
+    monkeypatch.setattr(fcntl, "flock", _refuse)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the lock is a no-op on Windows")
+@pytest.mark.parametrize(
+    "refuse",
+    [
+        pytest.param(
+            _unreadable,
+            id="unreadable",
+            marks=pytest.mark.skipif(os.geteuid() == 0, reason="root opens any directory"),
+        ),
+        pytest.param(_no_flock, id="no-flock"),
+    ],
+)
+def test_a_config_dir_that_cannot_be_locked_costs_the_save_and_run_exits_0(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    refuse: Callable[[Path, pytest.MonkeyPatch], None],
+) -> None:
+    _ = _lines("add", "JFK", "LAX", *_WINDOW)
+    _one_day(monkeypatch, 450.0, "USD")
+    refuse(tmp_path, monkeypatch)
+    try:
+        ran = CliRunner().invoke(cli.app, ["watch", "run"])
+    finally:
+        tmp_path.chmod(0o700)
+    assert ran.exit_code == 0, ran.output
+    assert ran.stdout.splitlines() == [f"{_HEAD}: lowest USD 450 on 2026-10-31"]
+    assert f"{tmp_path / 'watches-seen.json'} was not saved" in ran.stderr, ran.stderr
+    assert not (tmp_path / "watches-seen.json").exists()
 
 
 def test_the_help_the_docstrings_and_the_readme_say_run_saves_the_last_fare() -> None:
