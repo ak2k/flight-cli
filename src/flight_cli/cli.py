@@ -5605,11 +5605,9 @@ def _run_matrix_path(  # noqa: PLR0912 — one arm per way Matrix's answer is wr
             fare_rules=True,
         )
     if _envelope.active():
-        _envelope.record_search(
-            backend="matrix",
-            cabin=opts.cabin.value,
-            rows=_matrix_envelope_rows(res, opts.pax.total),
-        )
+        env_rows = _matrix_envelope_rows(res, opts.pax.total)
+        _envelope.record_search(backend="matrix", cabin=opts.cabin.value, rows=env_rows)
+        _envelope.record_table(_csv_rows(shown, env_rows))
         if not run_pp:
             return
     elif json_out and not run_pp:
@@ -7073,6 +7071,10 @@ def _record_google_cabin(
     facets: Sequence[RouteFacets] = (
         (own,) if own is not None else getattr(served, "page_facets", ())
     )
+    if _envelope.wants_table():
+        from .pp.gflight_adapter import fli_results_to_search_result  # noqa: PLC0415
+
+        _envelope.record_table(_csv_rows(fli_results_to_search_result(results).solutions, rows))
     _envelope.record_search(
         backend="gflight",
         cabin=cabin.value,
@@ -7151,6 +7153,38 @@ def _matrix_envelope_rows(res: SearchResult, passengers: int) -> list[_envelope.
         price = party_price(it, passengers)
         rows.append(
             _envelope.ResultRow(price=parse_price(price), currency=price_currency(price), row=obj)
+        )
+    return rows
+
+
+def _csv_rows(
+    itineraries: Sequence[Itinerary], priced: Sequence[_envelope.ResultRow]
+) -> list[list[str]]:
+    """The rows `--format csv` writes: one per itinerary, numbered as the table
+    numbers them, in `_envelope.CSV_HEADER`'s order. `priced` holds the envelope
+    row of each itinerary, so the price is the one the envelope carries, a plain
+    decimal. Stops and duration are summed over the slices, carriers are each
+    code once in flight order, and origin, destination and date are the first
+    slice's, the date as it departs."""
+    rows: list[list[str]] = []
+    for idx, (it, row) in enumerate(zip(itineraries, priced, strict=False), start=1):
+        slices = it.itinerary.slices if it.itinerary is not None else []
+        flights = [f for sl in slices for f in sl.flights]
+        durations = [sl.duration for sl in slices if sl.duration is not None]
+        first = slices[0] if slices else None
+        rows.append(
+            [
+                str(idx),
+                "" if row.price is None else f"{row.price:.2f}",
+                row.currency or "",
+                str(sum(len(sl.stops) for sl in slices)),
+                str(sum(durations)) if slices and len(durations) == len(slices) else "",
+                ";".join(dict.fromkeys(f[:2] for f in flights)),
+                ";".join(flights),
+                (first.origin.code or "") if first and first.origin else "",
+                (first.destination.code or "") if first and first.destination else "",
+                (first.departure or "")[:10] if first else "",
+            ]
         )
     return rows
 
@@ -11255,10 +11289,9 @@ def _resolve_gf_transport(mode: str) -> GfTransportMode:
 
 # ─────────────────────────── --format / --json ─────────────────────────────
 
-# Output formats currently implemented end-to-end. csv/tsv/yaml were in the
-# original work-4uls plan but deferred to a follow-up: the cash-itinerary
-# shape isn't naturally tabular without a flattening pass that deserves its
-# own design. Today's surface is the front door; emitters layer on later.
+# Output formats every command with a --format takes. csv is `search`'s alone
+# (`_SEARCH_FORMATS`): only a cash search has rows that flatten to one line per
+# itinerary (`_csv_rows`). tsv and yaml are not written.
 _VALID_FORMATS = ("table", "json")
 # Rendered once, so the message and the help string cannot drift, and so the two
 # print sites interpolate a name rather than an expression.
@@ -11275,16 +11308,35 @@ _FORMAT_OPT = typer.Option(
 # keys whatever path answered, for a caller that cannot know the path ahead.
 _ENVELOPE_FORMATS = (*_VALID_FORMATS, "envelope")
 _ENVELOPE_FORMAT_CHOICES = "/".join(_ENVELOPE_FORMATS)
-_ENVELOPE_FORMAT_OPT = typer.Option(
-    "table",
-    "--format",
-    help=f"Output format: one of {_ENVELOPE_FORMAT_CHOICES}. envelope is one versioned "
+_ENVELOPE_FORMAT_HELP = (
+    "envelope is one versioned "
     "JSON document, written at exit 0 and 1; a usage error (exit 2) writes no document. "
     "Its keys, whichever path answered: version, command, backend, currency, complete, "
     "notes, results, awards, insight, price_history, facets, price_graph, verify, "
     "cross_check, split_ticket. complete is false when the answer is narrower than "
-    "asked, and notes carries what stderr said.",
+    "asked, and notes carries what stderr said."
+)
+_ENVELOPE_FORMAT_OPT = typer.Option(
+    "table",
+    "--format",
+    help=f"Output format: one of {_ENVELOPE_FORMAT_CHOICES}. {_ENVELOPE_FORMAT_HELP}",
     autocompletion=_completer(_ENVELOPE_FORMATS),
+    rich_help_panel=_GROUP_OUTPUT,
+)
+# `search` alone also writes CSV: a header row and one row per itinerary the table
+# lists, cash rows only (`_refuse_csv_conflicts`).
+_SEARCH_FORMATS = (*_ENVELOPE_FORMATS, "csv")
+_SEARCH_FORMAT_CHOICES = "/".join(_SEARCH_FORMATS)
+_CSV_COLUMNS = ", ".join(_envelope.CSV_HEADER)
+_SEARCH_FORMAT_OPT = typer.Option(
+    "table",
+    "--format",
+    help=f"Output format: one of {_SEARCH_FORMAT_CHOICES}. {_ENVELOPE_FORMAT_HELP} "
+    f"csv is a header row ({_CSV_COLUMNS}) and one row per "
+    "itinerary the table lists, cash fares only; it is refused with --awards-only, "
+    "several --cabin values, --slice, --split, --sellers, --fare-rules, --verify "
+    "and --enrich.",
+    autocompletion=_completer(_SEARCH_FORMATS),
     rich_help_panel=_GROUP_OUTPUT,
 )
 _JSON_OPT = typer.Option(
@@ -11364,16 +11416,52 @@ def _resolve_format(*, fmt: str, json_flag: bool, allowed: tuple[str, ...] = _VA
         err.print(f"[red]--format must be one of {_FORMAT_CHOICES}; got {_quote(fmt)}[/]")
     else:
         err.print(
-            f"[red]--format must be one of {_safe_text(_ENVELOPE_FORMAT_CHOICES)}; "
-            f"got {_quote(fmt)}[/]"
+            f"[red]--format must be one of {_safe_text('/'.join(allowed))}; got {_quote(fmt)}[/]"
         )
     raise typer.Exit(2)
+
+
+def _refuse_csv_conflicts(
+    *,
+    awards_only: bool,
+    cabins: int,
+    slice_specs: list[str] | None,
+    split: bool,
+    sellers: bool,
+    fare_rules: bool,
+    verify: bool,
+    enrich: bool,
+) -> None:
+    """`--format csv` is one flat table of cash itineraries: refuse what asks for
+    award rows, a second cabin, or a document of its own, before any request."""
+    asked = [
+        flag
+        for flag, on in (
+            ("--awards-only", awards_only),
+            ("several --cabin values", cabins > 1),
+            ("--slice", bool(slice_specs)),
+            ("--split", split),
+            ("--sellers", sellers),
+            ("--fare-rules", fare_rules),
+            ("--verify", verify),
+            ("--enrich", enrich),
+        )
+        if on
+    ]
+    if asked:
+        err.print(
+            "[red]--format csv is one table of cash itineraries; it cannot carry "
+            f"{_safe_text(', '.join(asked))}. Use --format json.[/]"
+        )
+        raise typer.Exit(2)
 
 
 def _envelope_command[**P](
     command: _envelope.Command,
 ) -> Callable[[Callable[P, None]], Callable[P, None]]:
-    """Run the command as an envelope run (`_envelope.run`) under `--format envelope`.
+    """Run the command as an envelope run (`_envelope.run`) under `--format envelope`,
+    and `search` also under `--format csv`, whose run writes CSV in place of the
+    envelope.
 
     A decorator, so the command body keeps its shape: under the run every path
     goes as under `--format json`, and each JSON leaf hands its rows to the
@@ -11383,11 +11471,23 @@ def _envelope_command[**P](
     def wrap(fn: Callable[P, None]) -> Callable[P, None]:
         @wraps(fn)
         def run(*args: P.args, **kwargs: P.kwargs) -> None:
-            if kwargs.get("fmt") != "envelope":
+            fmt = kwargs.get("fmt")
+            match command:
+                case "search":
+                    held = fmt in ("envelope", "csv")
+                case "calendar":
+                    # A csv `fmt` reaches the command, which refuses it at exit 2.
+                    held = fmt == "envelope"
+                case _:
+                    assert_never(command)
+            if not held:
                 fn(*args, **kwargs)
                 return
             _envelope.run(
-                command, partial(_said_abort, fn, *args, **kwargs), consoles=(err, _pp_cli.err)
+                command,
+                partial(_said_abort, fn, *args, **kwargs),
+                consoles=(err, _pp_cli.err),
+                csv_out=fmt == "csv",
             )
 
         return run
@@ -11715,7 +11815,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
     ),
     rps: float | None = _RPS_OPT,
     impersonate: str | None = _IMPERSONATE_OPT,
-    fmt: str = _ENVELOPE_FORMAT_OPT,
+    fmt: str = _SEARCH_FORMAT_OPT,
     json_out: bool = _JSON_OPT,
     matrix_url: bool = typer.Option(
         True,
@@ -11866,8 +11966,21 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
     adults, children, seniors, youth, inf_seat, inf_lap = _pax_counts(
         pax_spec, (adults, children, seniors, youth, inf_seat, inf_lap), infants=True
     )
-    output = _resolve_format(fmt=fmt, json_flag=json_out, allowed=_ENVELOPE_FORMATS)
+    output = _resolve_format(fmt=fmt, json_flag=json_out, allowed=_SEARCH_FORMATS)
     json_out = output != "table"
+    if output == "csv":
+        _refuse_csv_conflicts(
+            awards_only=awards_only,
+            cabins=len(_resolve_cabin_list(cabin)),
+            slice_specs=slice_specs,
+            split=split,
+            sellers=sellers,
+            fare_rules=fare_rules,
+            verify=verify,
+            enrich=fast is False,
+        )
+        # No award provider is asked: a table of cash rows, as with --cash-only.
+        cash_only = True
     if output == "envelope" and (sellers or fare_rules):
         err.print(
             "[red]--sellers and --fare-rules write a document of their own; use --format json.[/]"

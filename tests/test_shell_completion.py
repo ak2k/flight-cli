@@ -55,7 +55,7 @@ _OTHER_BUCKETS = ["early", "midday", "afternoon", "evening", "night"]
         ("flight detail --cabin f", ["first"]),
         ("flight search --sort b", ["business"]),
         ("flight search --backend ", ["auto", "matrix", "gflight"]),
-        ("flight search --format ", ["table", "json", "envelope"]),
+        ("flight search --format ", ["table", "json", "envelope", "csv"]),
         ("flight calendar --format e", ["envelope"]),
         ("flight detail --format ", ["table", "json"]),
         ("flight doctor --format j", ["json"]),

@@ -18,6 +18,7 @@ one, and none of them can be imported from here.
 
 from __future__ import annotations
 
+import csv
 import datetime as dt  # noqa: TC003 — pydantic reads field annotations at runtime
 import io
 import json
@@ -190,9 +191,27 @@ def schema_text() -> str:
     return json.dumps(ENVELOPE.json_schema(), indent=2) + "\n"
 
 
+# `search --format csv` columns, in order.
+CSV_HEADER = (
+    "idx",
+    "total_price",
+    "currency",
+    "num_stops",
+    "total_duration_min",
+    "carriers",
+    "flight_numbers",
+    "origin",
+    "destination",
+    "dep_date",
+)
+
+
 class _Recorder:
     def __init__(self, command: Command) -> None:
         self.command: Command = command
+        # The rows `--format csv` writes under the header, as the table lists them.
+        self.table: list[list[str]] = []
+        self.csv_out = False
         self.lock = threading.Lock()
         self.backend: Backend | None = None
         # The backend whose answer each narrowing narrowed, None for the search's.
@@ -271,6 +290,18 @@ def record_search(
             rec.insight.extend(insights)
             rec.history.extend(histories)
             rec.facets.extend(facets)
+
+
+def wants_table() -> bool:
+    """Whether the run writes `record_table`'s rows, `--format csv`'s."""
+    return (rec := _slot.recorder) is not None and rec.csv_out
+
+
+def record_table(rows: Sequence[Sequence[str]]) -> None:
+    """The rows `--format csv` writes, one per itinerary the table lists."""
+    if (rec := _slot.recorder) is not None:
+        with rec.lock:
+            rec.table = [list(r) for r in rows]
 
 
 def record_calendar(*, backend: Backend, rows: Sequence[CalendarRow]) -> None:
@@ -366,13 +397,22 @@ def _exit_code(e: BaseException) -> int:
     return code if isinstance(code, int) else 1
 
 
-def run(command: Command, call: Callable[[], None], *, consoles: Sequence[_SoftWrapping]) -> None:
+def run(
+    command: Command,
+    call: Callable[[], None],
+    *,
+    consoles: Sequence[_SoftWrapping],
+    csv_out: bool = False,
+) -> None:
     """Run `call` as an envelope run, then write its one envelope to stdout.
 
     No envelope at exit 2: that is a usage error, and the command never ran.
+    With `csv_out` the run writes the recorded table as CSV instead, at exit 0
+    alone: a failed run writes nothing, so a header never stands for an answer.
     `consoles` print one stderr line per message for the run, so each message
     is one note."""
     rec = _Recorder(command)
+    rec.csv_out = csv_out
     out, err = sys.stdout, sys.stderr
     tee = _Tee(err)
     stray = io.StringIO()
@@ -392,9 +432,21 @@ def run(command: Command, call: Callable[[], None], *, consoles: Sequence[_SoftW
         sys.stdout, sys.stderr = out, err
         for c, was in zip(consoles, wrapped, strict=True):
             c.soft_wrap = was
-        if code in (0, 1):
+        if csv_out:
+            if code == 0:
+                out.write(_table_text(rec.table))
+                out.flush()
+        elif code in (0, 1):
             out.write(_document(rec, code=code, stderr=tee.seen(), stray=stray.getvalue()) + "\n")
             out.flush()
+
+
+def _table_text(rows: Sequence[Sequence[str]]) -> str:
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow(CSV_HEADER)
+    writer.writerows(rows)
+    return buf.getvalue()
 
 
 # CSI and OSC sequences: colour, cursor movement and hyperlinks.
