@@ -1454,6 +1454,7 @@ def _resolve_providers(  # noqa: PLR0912 — single-purpose validator + merge; s
     cash_only: bool,
     awards_only: bool,
     provider_opt: tuple[str, ...],
+    dry_run: bool = False,
     # deprecated aliases — forwarded into the new shape:
     legacy_no_pp: bool = False,
     legacy_pp_only: bool = False,
@@ -1502,6 +1503,15 @@ def _resolve_providers(  # noqa: PLR0912 — single-purpose validator + merge; s
         if not provider_filter:
             err.print("[red]--providers cannot be empty.[/]")
             raise typer.Exit(2)
+    if dry_run:
+        # A dry run asks no award provider, so it reads neither config.toml
+        # nor any provider's credentials: `cash_only` stops every award check.
+        return ProviderSelection(
+            provider_filter=provider_filter,
+            cash_only=True,
+            awards_only=awards_only,
+            provider_opts={},
+        )
 
     # Build provider_opts: config.toml < --provider-opt CLI. Section names in
     # the config are normalized through the alias map so user-facing spellings
@@ -12123,6 +12133,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         cash_only=cash_only,
         awards_only=awards_only,
         provider_opt=tuple(provider_opt or ()),
+        dry_run=dry_run,
     )
     if verify and (
         blocker := _verify_blocker(

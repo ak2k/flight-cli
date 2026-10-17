@@ -13,8 +13,11 @@ from typing import TYPE_CHECKING, Any, NoReturn
 import pytest
 from typer.testing import CliRunner
 
-from flight_cli import cli
+from flight_cli import _config, cli
 from flight_cli.client import SEARCH_URL
+from flight_cli.providers import registry
+from flight_cli.providers.pointspath import provider as pp_provider
+from flight_cli.providers.seats_aero import auth as seats_auth
 
 if TYPE_CHECKING:
     from click.testing import Result
@@ -99,6 +102,28 @@ def test_dry_run_refuses_slice_searches() -> None:
     )
     assert result.exit_code == 2, result.output
     assert "--slice" in result.output
+
+
+@pytest.mark.parametrize(
+    "extra", [[], ["--format", "json"], ["--fare-rules", "--format", "json"]], ids=str
+)
+def test_dry_run_reads_no_award_config_or_credentials(
+    monkeypatch: pytest.MonkeyPatch, extra: list[str]
+) -> None:
+    """Nothing is sent, so no award provider is asked: a config.toml that would
+    not load and the providers' credential checks are never reached."""
+
+    def _read(*_a: object, **_kw: object) -> NoReturn:
+        raise AssertionError("--dry-run read award-provider credentials")
+
+    _config.DEFAULT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _ = _config.DEFAULT_CONFIG_PATH.write_text("x = = 1\n")
+    monkeypatch.setattr(registry, "has_any_configured", _read)
+    monkeypatch.setattr(pp_provider, "is_configured", _read)
+    monkeypatch.setattr(seats_auth, "is_configured", _read)
+    result = _invoke(*_MATRIX, *extra, "--dry-run")
+    assert result.exit_code == 0, result.output
+    assert SEARCH_URL in result.stdout
 
 
 def test_readme_names_dry_run() -> None:
