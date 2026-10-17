@@ -189,6 +189,12 @@ not a context variable, because the cabin fan-outs record from worker threads.
 A `typer.Abort` is said inside the run (`cli._said_abort`) and ends as exit 1:
 click would print "Aborted." only after the run stopped hearing stderr.
 
+`search --format csv` rides the same run (`_envelope.run(..., csv_out=True)`):
+the cash paths hand the rows the table lists to `_envelope.record_table`
+(`cli._csv_rows`), and the run writes them under `_envelope.CSV_HEADER` at exit
+0 alone. Anything else written to stdout or stderr is dropped or passed on as in
+an envelope run, and a failed search writes no header.
+
 Every path runs as under `--format json`, and each JSON leaf calls the recorder
 in place of its `sys.stdout.write`. With awards on, the leaf records its cash
 rows and `run_pp_for_search` records the awards. `--verify` records its check
