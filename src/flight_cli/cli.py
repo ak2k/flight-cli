@@ -114,7 +114,7 @@ from ._multi_cabin import (
 )
 from ._multi_cabin import merge as _merge_cabins
 from ._watch import watch_app
-from .client import MatrixApiError, MatrixClient, MatrixHttpError
+from .client import SEARCH_URL, MatrixApiError, MatrixClient, MatrixHttpError
 from .domain import (
     Bags,
     Cabin,
@@ -151,6 +151,7 @@ from .pp import cli as _pp_cli
 from .pp.auth import load_tokens
 from .pp.cli import MAX_AWARD_PAIR_QUERIES, auth_app, award_space, run_pp_for_search
 from .providers.base import LegQuery
+from .wire import to_wire
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Generator, Iterable, Mapping, Sequence
@@ -5532,6 +5533,80 @@ def _say_unread_fares_not_shown(subject: str, opts: SearchOptions, cap: str) -> 
     )
 
 
+def _matrix_options(opts: SearchOptions) -> SearchOptions:
+    """`opts` as the one-slice Matrix search is asked: a cap holds each fare in
+    the cap's currency, so Matrix is asked in it. Left unset, it prices in its
+    own default (GBP from LHR) and the cap keeps nothing. Uncapped, the body
+    stays without the key."""
+    if opts.max_price is not None:
+        return opts.model_copy(update={"currency": opts.currency or "USD"})
+    return opts
+
+
+def _refuse_dry_run(route: str) -> NoReturn:
+    err.print(
+        "[red]--dry-run does not cover "
+        + _safe_text(route)
+        + " searches yet; it prints a one-slice Matrix query.[/]"
+    )
+    raise typer.Exit(2)
+
+
+def _dry_run_matrix(
+    *,
+    resolved: str,
+    backend: str,
+    legs: tuple[Leg, ...],
+    opts: SearchOptions,
+    cabins: int,
+    slices: bool,
+    output: str,
+) -> None:
+    """`search --dry-run`: print the one-slice Matrix query without sending it.
+
+    Only that route is covered; any other leaves with exit 2 and one line naming
+    it, so each later route can add its own. Nothing here opens a client."""
+    unsupported = (
+        "--slice (multi-city or open-jaw)"
+        if slices
+        else "Google Flights"
+        if resolved != BACKEND_MATRIX
+        else "multi-cabin"
+        if cabins > 1
+        else "multi-leg or round-trip"
+        if len(legs) != 1
+        else None
+    )
+    if unsupported is not None:
+        _refuse_dry_run(unsupported)
+    match output:
+        case "table" | "json":
+            fmt: Literal["table", "json"] = output
+        case _:
+            _refuse_dry_run("--format " + output)
+    match backend:
+        case "matrix":
+            why = "--backend matrix"
+        case "auto":
+            why = "auto: this search uses a Matrix-only flag"
+        case _:
+            # Only --backend matrix, or auto on a Matrix-only flag, resolves to Matrix.
+            raise AssertionError(backend)
+    body = to_wire(SpecificDateSearch(legs=legs, options=_matrix_options(opts))).as_json()
+    match fmt:
+        case "json":
+            doc = {"backend": "matrix", "reason": why, "endpoint": SEARCH_URL, "wire_body": body}
+            sys.stdout.write(json.dumps(doc, indent=2) + "\n")
+        case "table":
+            sys.stdout.write(
+                "Backend: matrix (" + why + ")\n"
+                "Endpoint: POST " + SEARCH_URL + "\n"
+                "Wire body:\n" + json.dumps(body, indent=2) + "\n"
+            )
+        case _:
+            assert_never(fmt)
+
+
 def _run_matrix_path(  # noqa: PLR0912 — one arm per way Matrix's answer is written
     *,
     legs: tuple[Leg, ...],
@@ -5553,11 +5628,7 @@ def _run_matrix_path(  # noqa: PLR0912 — one arm per way Matrix's answer is wr
 
     `split_ticket` is a multi-city trip's separate-ticket object, which the JSON
     document carries beside Matrix's as `{"search": …, "split_ticket": …}`."""
-    # A cap holds each fare in the cap's currency, so Matrix is asked in it:
-    # left unset, it prices in its own default (GBP from LHR) and the cap keeps
-    # nothing. Uncapped, the body stays without the key.
-    if opts.max_price is not None:
-        opts = opts.model_copy(update={"currency": opts.currency or "USD"})
+    opts = _matrix_options(opts)
     search = SpecificDateSearch(legs=legs, options=opts)
     rps, impersonate = _resolve_rps(rps), _resolve_impersonate(impersonate)
     # SpecificDateSearch → SearchResult by client._parse_response dispatch.
@@ -11956,6 +12027,18 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         rich_help_panel=_GROUP_BACKEND,
     ),
     provider_opt: list[str] | None = _PROVIDER_OPT,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help=(
+                "Print the resolved Matrix query (backend, endpoint, wire body) and "
+                "exit without sending it. A one-slice Matrix search only; "
+                "--format table or json."
+            ),
+            rich_help_panel=_GROUP_OUTPUT,
+        ),
+    ] = False,
 ) -> None:
     """Specific-date flight search across Matrix and Google Flights backends.
 
@@ -12247,6 +12330,18 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
     gf_mode = _resolve_gf_transport(gf_transport)
 
     beside_matrix = bool(slice_specs) and backend == BACKEND_AUTO and not sel.awards_only
+
+    if dry_run:
+        _dry_run_matrix(
+            resolved=resolved,
+            backend=backend,
+            legs=legs,
+            opts=opts,
+            cabins=len(cabins_tuple),
+            slices=bool(slice_specs),
+            output=output,
+        )
+        return
 
     # `_pick_backend` puts a --slice search on Google only as one one-way per slice.
     if slice_specs and resolved == BACKEND_GFLIGHT:
