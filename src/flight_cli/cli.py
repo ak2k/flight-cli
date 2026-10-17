@@ -10,7 +10,7 @@ Commands:
   flight explore   — where an origin flies, cheapest first (Google Flights, Chrome)
   flight doctor    — pass, fail or skip for every backend, transport and credential
   flight explain   — a --routing string and --ext codes in plain English, one line each
-  flight watch     — save, list, remove and price route watches (nothing is sent or saved by run)
+  flight watch     — save, list, remove and price route watches (run notes price changes)
   flight fare      — [deprecated] alias for `search --backend matrix`
 """
 
