@@ -10,7 +10,7 @@ Commands:
   flight explore   — where an origin flies, cheapest first (Google Flights, Chrome)
   flight doctor    — pass, fail or skip for every backend, transport and credential
   flight explain   — a --routing string and --ext codes in plain English, one line each
-  flight watch     — save, list, remove and price route watches (nothing is sent or saved by run)
+  flight watch     — save, list, remove and price route watches (run notes price changes)
   flight fare      — [deprecated] alias for `search --backend matrix`
 """
 
@@ -5295,6 +5295,9 @@ def _deal_days(days: Sequence[CalendarDay], ccy: str) -> list[bool]:
     return [a is not None and a * 100 <= cutoff for a in amounts]
 
 
+_table_days: list[_envelope.CalendarRow] = []
+
+
 def _render_calendar(
     res: CalendarResult,
     *,
@@ -5310,7 +5313,10 @@ def _render_calendar(
     dimension exists at all: `wire._set_trip_length` attaches `layover` only when
     there is a return leg, so a one-way request never asked for per-night prices
     and Matrix never sent any. Showing the columns anyway prints a wall of '—'
-    under a duration range the backend never saw."""
+    under a duration range the backend never saw.
+
+    The priced days it prints are kept in `_table_days` for `--awards`."""
+    _table_days[:] = _calendar_envelope_rows(res, sd=sd, ed=ed)
     if res.solution_count == 0 or not res.priced_days:
         console.print(
             "[yellow]Calendar empty.[/] Matrix's calendar mode "
@@ -12776,8 +12782,9 @@ def calendar(
         0,
         "--awards",
         min=0,
-        help="Search award space on the K cheapest priced dates and answer in the "
-        "envelope's `awards` (needs --format envelope, not --fast).",
+        help="Search award space on the K cheapest priced dates: the table calendar "
+        "prints a line a date under the grid, --format envelope answers in `awards` "
+        "(not --json or --fast).",
         rich_help_panel=_GROUP_BACKEND,
     ),
     rps: float | None = _RPS_OPT,
@@ -12900,9 +12907,10 @@ def calendar(
             "--gf-transport http opens none",
             param_hint="--gf-headed",
         )
-    if awards and (fast or not _envelope.active()):
+    if awards and (fast or (json_out and not _envelope.active())):
         raise typer.BadParameter(
-            "needs --format envelope and no --fast: the award answer is the envelope's",
+            "needs --format envelope or the table calendar, and no --fast: the award "
+            "answer is the envelope's `awards` or the lines under the table",
             param_hint="--awards",
         )
     ccy = _resolve_currency(currency)
@@ -12995,7 +13003,7 @@ def calendar(
             ),
         )
         if awards:
-            _record_calendar_awards(
+            _calendar_awards(
                 awards,
                 origins=origins,
                 dests=dests,
@@ -13088,7 +13096,7 @@ def calendar(
     )
 
 
-def _record_calendar_awards(
+def _calendar_awards(
     k: int,
     *,
     origins: tuple[str, ...],
@@ -13097,21 +13105,33 @@ def _record_calendar_awards(
     num_passengers: int,
     no_cache: bool = False,
 ) -> None:
-    """The envelope's `awards` for the `k` cheapest priced dates the calendar
-    recorded: one entry a date, naming the programs that have space on it."""
+    """Award space on the `k` cheapest priced dates the calendar showed: the
+    envelope's `awards`, or under the table a line a date on stdout. A reason
+    there is no answer is the envelope's note, and under the table one stderr
+    line, so the calendar prints as without `--awards`."""
     from .providers.registry import has_any_configured  # noqa: PLC0415
 
+    table = not _envelope.active()
+
+    def _none(why: str) -> None:
+        _envelope.explain("awards", why)
+        if table:
+            err.print(f"[dim]--awards: {_safe_text(why)}[/]")
+
     if not has_any_configured():
-        _envelope.explain("awards", "no award provider is configured")
+        _none("no award provider is configured")
         return
-    picked = cheapest_dates(_envelope.recorded_days(), k)
+    picked = cheapest_dates(_table_days if table else _envelope.recorded_days(), k)
     if not picked:
-        _envelope.explain("awards", "no priced day to search")
+        _none("no priced day to search")
         return
     pairs = [(o, d) for o in expand_airports(origins) for d in expand_airports(dests) if o != d]
     if len(pairs) > MAX_AWARD_PAIR_QUERIES:
         pairs = pairs[:MAX_AWARD_PAIR_QUERIES]
-        _envelope.narrow(f"awards: asked the first {MAX_AWARD_PAIR_QUERIES} airport pairs")
+        note = f"asked the first {MAX_AWARD_PAIR_QUERIES} airport pairs"
+        _envelope.narrow(f"awards: {note}")
+        if table:
+            err.print(f"[dim]--awards: {_safe_text(note)}[/]")
     queries = [
         LegQuery(origin=o, destination=d, date=r.departure.isoformat(), slice_index=0, label="")
         for r in picked
@@ -13139,7 +13159,23 @@ def _record_calendar_awards(
                 "programs": sorted({af.program for af in flights if af.program}),
             }
         )
-    _envelope.record_awards(entries)
+    if table:
+        _print_award_lines(entries)
+    else:
+        _envelope.record_awards(entries)
+
+
+def _print_award_lines(entries: list[dict[str, Any]]) -> None:
+    """One stdout line a searched date: its departure (and return) date, then
+    the programs with space on it, or `no award space`."""
+    console.print()
+    console.print("[bold]Award space on the cheapest dates[/]")
+    for entry in entries:
+        when = str(entry["departure"])
+        if entry["return"]:
+            when += " → " + str(entry["return"])
+        programs = ", ".join(entry["programs"]) or "no award space"
+        console.print(f"{_safe_text(when)}  {_safe_text(programs)}", soft_wrap=True)
 
 
 def _calendar_without_fast(

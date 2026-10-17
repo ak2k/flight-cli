@@ -1,15 +1,19 @@
 """`flight watch add|list|rm|run`: saved watch specs, and a one-shot price check of each;
-nothing is sent or saved by `run`, and nothing notifies yet.
+`run` sends nothing, saves each priced watch's lowest fare in `watches-seen.json` and
+names the change since the last run, and nothing notifies yet.
 
 The store is `watches.json` in the config directory: `FLIGHT_CLI_CONFIG_DIR` (the
 override `_config.py` honors), else `$XDG_CONFIG_HOME/flight-cli`, else
 `~/.config/flight-cli`. The path is resolved per call so a moved variable moves it.
+`watches-seen.json` sits beside it (mode 0600): for each watch id, the watch it was
+priced for and its lowest fare, so a re-used id is not compared with the old watch.
 `add` and `rm` hold an exclusive `flock` on that directory while they read, change and
 rewrite the store, so two overlapping commands each keep their change (not on Windows).
 """
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import sys
@@ -92,7 +96,19 @@ class Watch(BaseModel):
         return "  ".join([*parts, "award"] if self.award else parts)
 
 
+class _Seen(BaseModel):
+    """The lowest fare a watch's line printed at its last run."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    watch: Watch
+    amount: float = Field(allow_inf_nan=False)
+    currency: str
+    day: date
+
+
 _WATCHES = TypeAdapter(list[Watch])
+_SEEN = TypeAdapter(dict[str, _Seen])
 
 
 def watches_path() -> Path:
@@ -103,22 +119,29 @@ def watches_path() -> Path:
     return (Path(xdg) if xdg else Path.home() / ".config") / "flight-cli" / "watches.json"
 
 
-def _save(watches: list[Watch]) -> None:
+def seen_path() -> Path:
+    return watches_path().with_name("watches-seen.json")
+
+
+def _write(path: Path, payload: bytes) -> None:
     """A 0600 temp file renamed into place: no reader sees half a file, and no
     moment has the store readable by others. `mkstemp` picks a name no other
     writer holds, so the cleanup only ever removes this call's own file."""
-    path = watches_path()
     # 0700 applies only to the leaf this call creates: an existing directory keeps its mode.
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     tmp = Path(name)
     try:
         with os.fdopen(fd, "wb") as fh:
-            _ = fh.write(_WATCHES.dump_json(watches, indent=2))
+            _ = fh.write(payload)
         _ = tmp.replace(path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def _save(watches: list[Watch]) -> None:
+    _write(watches_path(), _WATCHES.dump_json(watches, indent=2))
 
 
 @contextmanager
@@ -172,10 +195,34 @@ def _load() -> list[Watch]:
         raise _fail(f"{path} is unusable and was left untouched: {why}", 1) from e
 
 
+def _load_seen() -> dict[str, _Seen]:
+    """What the last runs saw. A file that cannot be read or does not validate is
+    no history: the next run that prices a watch replaces it."""
+    try:
+        return _SEEN.validate_json(seen_path().read_bytes())
+    except (OSError, ValidationError):
+        return {}
+
+
+def _remember(fares: dict[str, _Seen]) -> None:
+    """Merge `fares` into the file under the lock, so overlapping runs each keep theirs.
+    The file is derived state, so a lock or a write that fails is named and `run` goes on."""
+    path = seen_path()
+    try:
+        with _locked():
+            merged = {**_load_seen(), **fares}
+            _write(path, _SEEN.dump_json(merged, indent=2))
+    except OSError as e:
+        typer.echo(f"{path} was not saved: {e.strerror}".translate(CTRL), err=True)
+    except typer.Exit:
+        # `_locked` has already named the directory and why it refused.
+        typer.echo(f"{path} was not saved".translate(CTRL), err=True)
+
+
 watch_app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
-    help="Saved route watches; `run` prices each once (nothing is sent or saved).",
+    help="Saved route watches; `run` prices each once and names the change since the last run.",
 )
 
 
@@ -225,36 +272,46 @@ def watch_list() -> None:
         typer.echo("No watches saved.")
 
 
-def _poll(w: Watch) -> str:
-    """One line for `w`: its lowest priced date now, against its ceiling."""
+def _poll(w: Watch, last: _Seen | None) -> tuple[str, _Seen | None]:
+    """One line for `w`: its lowest priced date now, against its ceiling and the fare
+    `last` saw, and that fare to save (none for a skipped, failed or unpriced line)."""
     from .cli import lowest_fare_rows  # noqa: PLC0415 - cli imports this module
 
     head = f"{w.id}  {w.describe()}"
     if w.award:
-        return f"{head}: skipped, award watches are not polled yet"
+        return f"{head}: skipped, award watches are not polled yet", None
     if w.dep_from is None or w.dep_to is None:
-        return f"{head}: skipped, a watch with no dates is not polled yet"
+        return f"{head}: skipped, a watch with no dates is not polled yet", None
     try:
         rows = lowest_fare_rows(
             w.origin, w.destination, start=w.dep_from, end=w.dep_to, cabin=w.cabin
         )
     except Exception as e:  # noqa: BLE001 - one watch's failure must not hide the others
-        return f"{head}: lookup failed, {type(e).__name__}"
+        return f"{head}: lookup failed, {type(e).__name__}", None
     priced = [
         (r.price, r.departure, r.currency)
         for r in rows
         if r.price is not None and r.departure is not None
     ]
     if not priced:
-        return f"{head}: no priced date"
+        return f"{head}: no priced date", None
     price, day, currency = min(priced, key=lambda p: (p[0], p[1]))
     verdict = ""
     if w.below is not None and currency != "USD":
         verdict = ", no verdict: the ceiling is in USD"
     elif w.below is not None:
         verdict = ", under the ceiling" if price < w.below else ", over the ceiling"
-    amount = f"{currency or ''} {_digits(price)}".strip()
-    return f"{head}: lowest {amount} on {day}{verdict}"
+    unit = currency or ""
+    amount = f"{unit} {_digits(price)}".strip()
+    change = ""
+    if last is not None and last.watch == w and last.currency == unit and math.isfinite(price):
+        if price == last.amount:
+            change = ", same as the last run"
+        else:
+            before = f"{unit} {_digits(last.amount)}".strip()
+            change = f", {'down' if price < last.amount else 'up'} from {before} at the last run"
+    fare = _Seen(watch=w, amount=price, currency=unit, day=day) if math.isfinite(price) else None
+    return f"{head}: lowest {amount} on {day}{verdict}{change}", fare
 
 
 # The currency and the exception name are remote text, and a reader of stdout takes
@@ -264,10 +321,18 @@ _ONE_LINE: Final = {**CTRL, ord("\n"): " "}
 
 @watch_app.command("run")
 def watch_run() -> None:
-    """Price each saved watch once and print a line each; nothing is sent or saved."""
+    """Price each saved watch once and print a line each, with the change since the last
+    run; the lowest fares are saved in `watches-seen.json`, nothing is sent."""
     stored = _load()
+    seen = _load_seen() if stored else {}
+    fares: dict[str, _Seen] = {}
     for w in stored:
-        typer.echo(_poll(w).translate(_ONE_LINE))
+        line, fare = _poll(w, seen.get(str(w.id)))
+        typer.echo(line.translate(_ONE_LINE))
+        if fare is not None:
+            fares[str(w.id)] = fare
+    if fares:
+        _remember(fares)
     if not stored:
         typer.echo("No watches saved.")
 
