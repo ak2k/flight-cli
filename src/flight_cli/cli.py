@@ -44,6 +44,8 @@ from typing import (
 import anyio
 import anyio.to_thread
 import typer
+from click import get_current_context
+from click.core import ParameterSource
 from pydantic import ValidationError
 from rich.cells import cell_len
 from rich.console import Console
@@ -642,6 +644,103 @@ def _parse_bags(spec: str) -> Bags:
         err.print(f"[red]--bags {_quote(spec)} asks for no bag; drop it, or ask for one[/]")
         raise typer.Exit(2)
     return Bags(checked=checked, carry_on=carry_on)
+
+
+# Pax's own bound on each count (Pax in domain.py).
+_PAX_MAX_COUNT = 9
+_RE_PAX = re.compile(r"(\d+)(IS|IL|[ACSY])", re.IGNORECASE)
+_RE_PAX_WHOLE = re.compile(r"(?:\d+(?:IS|IL|[ACSY]))+", re.IGNORECASE)
+_PAX_FIELD = {
+    "A": "adults",
+    "C": "children",
+    "S": "seniors",
+    "Y": "youth",
+    "IS": "infants_in_seat",
+    "IL": "infants_in_lap",
+}
+# The count flags `--pax` stands in for: the parameter's name and its flag.
+_PAX_FLAGS = (
+    ("adults", "--adults"),
+    ("children", "--children"),
+    ("seniors", "--seniors"),
+    ("youth", "--youth"),
+    ("inf_seat", "--inf-seat"),
+    ("inf_lap", "--inf-lap"),
+)
+_PAX_HELP = (
+    "Passengers as COUNT CODE pairs: A adults, C children, S seniors, Y youth, "
+    "IS infant in seat, IL infant on lap. A code left out is 0. Such as 2A1C1IL. "
+    "Instead of the count flags. Default: 1A."
+)
+
+
+def _parse_pax(spec: str) -> Pax:
+    """`--pax` as COUNT CODE pairs, each code once, or exit 2 naming the value."""
+    token = spec.strip()
+    if _RE_PAX_WHOLE.fullmatch(token) is None:
+        err.print(
+            f"[red]bad --pax {_quote(spec)}; use COUNT CODE pairs with codes A, C, S, Y, "
+            "IS and IL, such as 2A1C1IL[/]"
+        )
+        raise typer.Exit(2)
+    counts: dict[str, int] = {}
+    for m in _RE_PAX.finditer(token):
+        code = m.group(2).upper()
+        if code in counts:
+            err.print(
+                f"[red]--pax {_quote(spec)} gives {_quote(code)} twice; give each code once[/]"
+            )
+            raise typer.Exit(2)
+        counts[code] = int(m.group(1))
+        if counts[code] > _PAX_MAX_COUNT:
+            err.print(
+                f"[red]--pax {_quote(spec)} asks for {_quote(m.group(0))}; each count is 0 to 9[/]"
+            )
+            raise typer.Exit(2)
+    return Pax(**{"adults": 0, **{_PAX_FIELD[code]: n for code, n in counts.items()}})
+
+
+def _pax_counts(
+    spec: str | None,
+    flags: tuple[int, int, int, int, int, int],
+    *,
+    infants: bool,
+) -> tuple[int, int, int, int, int, int]:
+    """The counts `--pax` gives (adults, children, seniors, youth, infant in seat,
+    infant on lap), or `flags` when it is not given; exit 2 when a count flag was
+    also given on the command line, or when `infants` is false and the spec has
+    an infant."""
+    if spec is None:
+        return flags
+    pax = _parse_pax(spec)
+    # No context when a test calls the command's function directly: no flag was typed.
+    ctx = get_current_context(silent=True)
+    given = [
+        flag
+        for name, flag in _PAX_FLAGS
+        if ctx is not None and ctx.get_parameter_source(name) is ParameterSource.COMMANDLINE
+    ]
+    if given:
+        err.print(
+            f"[red]--pax {_quote(spec)} gives the passengers, so it cannot go beside "
+            f"{_quote(', '.join(given))}; drop one[/]"
+        )
+        raise typer.Exit(2)
+    if not infants and (pax.infants_in_seat or pax.infants_in_lap):
+        command = (ctx.info_name if ctx else None) or "this command"
+        err.print(
+            f"[red]--pax {_quote(spec)} asks for an infant, which {_quote(command)} "
+            "does not take; drop the IS or IL pair[/]"
+        )
+        raise typer.Exit(2)
+    return (
+        pax.adults,
+        pax.children,
+        pax.seniors,
+        pax.youth,
+        pax.infants_in_seat,
+        pax.infants_in_lap,
+    )
 
 
 def _refuse_cap_and_bag_conflicts(
@@ -11406,6 +11505,10 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             rich_help_panel=_GROUP_ITINERARY,
         ),
     ] = None,
+    pax_spec: Annotated[
+        str | None,
+        typer.Option("--pax", metavar="SPEC", help=_PAX_HELP, rich_help_panel=_GROUP_ITINERARY),
+    ] = None,
     adults: int = typer.Option(1, "--adults", rich_help_panel=_GROUP_ITINERARY),
     children: int = typer.Option(0, "--children", rich_help_panel=_GROUP_ITINERARY),
     seniors: int = typer.Option(0, "--seniors", rich_help_panel=_GROUP_ITINERARY),
@@ -11743,6 +11846,9 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
     Matrix-only flag is set (routing/extension/multi-city slice/time-of-day/
     extra pax types/PP config). Force with --backend matrix|gflight.
     """
+    adults, children, seniors, youth, inf_seat, inf_lap = _pax_counts(
+        pax_spec, (adults, children, seniors, youth, inf_seat, inf_lap), infants=True
+    )
     output = _resolve_format(fmt=fmt, json_flag=json_out, allowed=_ENVELOPE_FORMATS)
     json_out = output != "table"
     if output == "envelope" and (sellers or fare_rules):
@@ -12618,6 +12724,10 @@ def calendar(
     cabin: str = typer.Option(
         "economy", "--cabin", autocompletion=_complete_cabin, rich_help_panel=_GROUP_ITINERARY
     ),
+    pax_spec: Annotated[
+        str | None,
+        typer.Option("--pax", metavar="SPEC", help=_PAX_HELP, rich_help_panel=_GROUP_ITINERARY),
+    ] = None,
     adults: int = typer.Option(1, "--adults", rich_help_panel=_GROUP_ITINERARY),
     children: int = typer.Option(0, "--children", rich_help_panel=_GROUP_ITINERARY),
     seniors: int = typer.Option(0, "--seniors", rich_help_panel=_GROUP_ITINERARY),
@@ -12758,6 +12868,9 @@ def calendar(
     Matrix's grid colors a day's min price green when it is at least 20% under the
     median of the window's priced days in the grid's currency, and colors nothing
     when fewer than 5 priced days share that currency."""
+    adults, children, seniors, youth, *_ = _pax_counts(
+        pax_spec, (adults, children, seniors, youth, 0, 0), infants=False
+    )
     json_out = _resolve_format(fmt=fmt, json_flag=json_out, allowed=_ENVELOPE_FORMATS) != "table"
     # A JSON or envelope calendar opens Chrome for Google's graph only when the
     # transport is named: a script's calendar launches no browser it did not ask for.
@@ -13196,6 +13309,10 @@ def detail(
     cabin: str = typer.Option(
         "economy", "--cabin", autocompletion=_complete_cabin, rich_help_panel=_GROUP_ITINERARY
     ),
+    pax_spec: Annotated[
+        str | None,
+        typer.Option("--pax", metavar="SPEC", help=_PAX_HELP, rich_help_panel=_GROUP_ITINERARY),
+    ] = None,
     adults: int = typer.Option(1, "--adults", rich_help_panel=_GROUP_ITINERARY),
     children: int = typer.Option(0, "--children", rich_help_panel=_GROUP_ITINERARY),
     seniors: int = typer.Option(0, "--seniors", rich_help_panel=_GROUP_ITINERARY),
@@ -13265,6 +13382,9 @@ def detail(
     no_cache: bool = _NO_CACHE_OPT,
 ) -> None:
     """Phase-2 of the calendar flow: full itineraries for a picked date."""
+    adults, children, seniors, youth, *_ = _pax_counts(
+        pax_spec, (adults, children, seniors, youth, 0, 0), infants=False
+    )
     json_out = _resolve_format(fmt=fmt, json_flag=json_out) == "json"
     ccy = _resolve_currency(currency)
     origins, dests = _require_airports(origin, destination)
