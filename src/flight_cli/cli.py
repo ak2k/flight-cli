@@ -10,7 +10,7 @@ Commands:
   flight explore   — where an origin flies, cheapest first (Google Flights, Chrome)
   flight doctor    — pass, fail or skip for every backend, transport and credential
   flight explain   — a --routing string and --ext codes in plain English, one line each
-  flight watch     — save, list, remove and price route watches (nothing is sent or saved by run)
+  flight watch     — save, list, remove and price route watches (run notes price changes)
   flight fare      — [deprecated] alias for `search --backend matrix`
 """
 
@@ -44,6 +44,8 @@ from typing import (
 import anyio
 import anyio.to_thread
 import typer
+from click import get_current_context
+from click.core import ParameterSource
 from pydantic import ValidationError
 from rich.cells import cell_len
 from rich.console import Console
@@ -642,6 +644,114 @@ def _parse_bags(spec: str) -> Bags:
         err.print(f"[red]--bags {_quote(spec)} asks for no bag; drop it, or ask for one[/]")
         raise typer.Exit(2)
     return Bags(checked=checked, carry_on=carry_on)
+
+
+# Pax's own bound on each count (Pax in domain.py).
+_PAX_MAX_COUNT = 9
+# ASCII only: Unicode case folding reads U+0130 as I and U+017F as S, and `\d`
+# takes any script's digits.
+_RE_PAX = re.compile(r"(\d+)(IS|IL|[ACSY])", re.IGNORECASE | re.ASCII)
+_RE_PAX_WHOLE = re.compile(r"(?:\d+(?:IS|IL|[ACSY]))+", re.IGNORECASE | re.ASCII)
+_PAX_FIELD = {
+    "A": "adults",
+    "C": "children",
+    "S": "seniors",
+    "Y": "youth",
+    "IS": "infants_in_seat",
+    "IL": "infants_in_lap",
+}
+# The count flags `--pax` stands in for: the parameter's name and its flag.
+_PAX_FLAGS = (
+    ("adults", "--adults"),
+    ("children", "--children"),
+    ("seniors", "--seniors"),
+    ("youth", "--youth"),
+    ("inf_seat", "--inf-seat"),
+    ("inf_lap", "--inf-lap"),
+)
+_PAX_HELP = (
+    "Passengers as COUNT CODE pairs: A adults, C children, S seniors, Y youth, "
+    "IS infant in seat, IL infant on lap. A code left out is 0. Such as 2A1C1IL. "
+    "Instead of the count flags. Default: 1A."
+)
+# `calendar` and `detail` take no infant, so their help offers no IS or IL.
+_PAX_HELP_NO_INFANT = (
+    "Passengers as COUNT CODE pairs: A adults, C children, S seniors, Y youth. "
+    "A code left out is 0. Such as 2A1C. Instead of the count flags. Default: 1A."
+)
+
+
+def _parse_pax(spec: str) -> Pax:
+    """`--pax` as COUNT CODE pairs, each code once, or exit 2 naming the value."""
+    token = spec.strip()
+    if _RE_PAX_WHOLE.fullmatch(token) is None:
+        err.print(
+            f"[red]bad --pax {_quote(spec)}; use COUNT CODE pairs with codes A, C, S, Y, "
+            "IS and IL, such as 2A1C1IL[/]"
+        )
+        raise typer.Exit(2)
+    counts: dict[str, int] = {}
+    for m in _RE_PAX.finditer(token):
+        code = m.group(2).upper()
+        if code in counts:
+            err.print(
+                f"[red]--pax {_quote(spec)} gives {_quote(code)} twice; give each code once[/]"
+            )
+            raise typer.Exit(2)
+        # `int` refuses a string of more than 4300 digits, so the count's length,
+        # leading zeros aside, is checked before it is read.
+        digits = m.group(1).lstrip("0") or "0"
+        if len(digits) > len(str(_PAX_MAX_COUNT)) or int(digits) > _PAX_MAX_COUNT:
+            err.print(
+                f"[red]--pax {_quote(spec)} asks for {_quote(m.group(0))}; each count is 0 to 9[/]"
+            )
+            raise typer.Exit(2)
+        counts[code] = int(digits)
+    return Pax(**{"adults": 0, **{_PAX_FIELD[code]: n for code, n in counts.items()}})
+
+
+def _pax_counts(
+    spec: str | None,
+    flags: tuple[int, int, int, int, int, int],
+    *,
+    infants: bool,
+) -> tuple[int, int, int, int, int, int]:
+    """The counts `--pax` gives (adults, children, seniors, youth, infant in seat,
+    infant on lap), or `flags` when it is not given; exit 2 when a count flag was
+    also given on the command line, or when `infants` is false and the spec has
+    an infant."""
+    if spec is None:
+        return flags
+    pax = _parse_pax(spec)
+    # No context when a test calls the command's function directly: no flag was typed.
+    ctx = get_current_context(silent=True)
+    given = [
+        flag
+        for name, flag in _PAX_FLAGS
+        if ctx is not None and ctx.get_parameter_source(name) is ParameterSource.COMMANDLINE
+    ]
+    if given:
+        # Flags this module wrote, so not cut at `_quote`'s cap: six of them pass it.
+        err.print(
+            f"[red]--pax {_quote(spec)} gives the passengers, so it cannot go beside "
+            f"{_safe_text(', '.join(given))}; drop one[/]"
+        )
+        raise typer.Exit(2)
+    if not infants and (pax.infants_in_seat or pax.infants_in_lap):
+        command = (ctx.info_name if ctx else None) or "this command"
+        err.print(
+            f"[red]--pax {_quote(spec)} asks for an infant, which {_quote(command)} "
+            "does not take; drop the IS or IL pair[/]"
+        )
+        raise typer.Exit(2)
+    return (
+        pax.adults,
+        pax.children,
+        pax.seniors,
+        pax.youth,
+        pax.infants_in_seat,
+        pax.infants_in_lap,
+    )
 
 
 def _refuse_cap_and_bag_conflicts(
@@ -5185,6 +5295,9 @@ def _deal_days(days: Sequence[CalendarDay], ccy: str) -> list[bool]:
     return [a is not None and a * 100 <= cutoff for a in amounts]
 
 
+_table_days: list[_envelope.CalendarRow] = []
+
+
 def _render_calendar(
     res: CalendarResult,
     *,
@@ -5200,7 +5313,10 @@ def _render_calendar(
     dimension exists at all: `wire._set_trip_length` attaches `layover` only when
     there is a return leg, so a one-way request never asked for per-night prices
     and Matrix never sent any. Showing the columns anyway prints a wall of '—'
-    under a duration range the backend never saw."""
+    under a duration range the backend never saw.
+
+    The priced days it prints are kept in `_table_days` for `--awards`."""
+    _table_days[:] = _calendar_envelope_rows(res, sd=sd, ed=ed)
     if res.solution_count == 0 or not res.priced_days:
         console.print(
             "[yellow]Calendar empty.[/] Matrix's calendar mode "
@@ -11506,6 +11622,10 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             rich_help_panel=_GROUP_ITINERARY,
         ),
     ] = None,
+    pax_spec: Annotated[
+        str | None,
+        typer.Option("--pax", metavar="SPEC", help=_PAX_HELP, rich_help_panel=_GROUP_ITINERARY),
+    ] = None,
     adults: int = typer.Option(1, "--adults", rich_help_panel=_GROUP_ITINERARY),
     children: int = typer.Option(0, "--children", rich_help_panel=_GROUP_ITINERARY),
     seniors: int = typer.Option(0, "--seniors", rich_help_panel=_GROUP_ITINERARY),
@@ -11843,6 +11963,9 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
     Matrix-only flag is set (routing/extension/multi-city slice/time-of-day/
     extra pax types/PP config). Force with --backend matrix|gflight.
     """
+    adults, children, seniors, youth, inf_seat, inf_lap = _pax_counts(
+        pax_spec, (adults, children, seniors, youth, inf_seat, inf_lap), infants=True
+    )
     output = _resolve_format(fmt=fmt, json_flag=json_out, allowed=_SEARCH_FORMATS)
     json_out = output != "table"
     if output == "csv":
@@ -12731,6 +12854,12 @@ def calendar(
     cabin: str = typer.Option(
         "economy", "--cabin", autocompletion=_complete_cabin, rich_help_panel=_GROUP_ITINERARY
     ),
+    pax_spec: Annotated[
+        str | None,
+        typer.Option(
+            "--pax", metavar="SPEC", help=_PAX_HELP_NO_INFANT, rich_help_panel=_GROUP_ITINERARY
+        ),
+    ] = None,
     adults: int = typer.Option(1, "--adults", rich_help_panel=_GROUP_ITINERARY),
     children: int = typer.Option(0, "--children", rich_help_panel=_GROUP_ITINERARY),
     seniors: int = typer.Option(0, "--seniors", rich_help_panel=_GROUP_ITINERARY),
@@ -12766,8 +12895,9 @@ def calendar(
         0,
         "--awards",
         min=0,
-        help="Search award space on the K cheapest priced dates and answer in the "
-        "envelope's `awards` (needs --format envelope, not --fast).",
+        help="Search award space on the K cheapest priced dates: the table calendar "
+        "prints a line a date under the grid, --format envelope answers in `awards` "
+        "(not --json or --fast).",
         rich_help_panel=_GROUP_BACKEND,
     ),
     rps: float | None = _RPS_OPT,
@@ -12871,6 +13001,9 @@ def calendar(
     Matrix's grid colors a day's min price green when it is at least 20% under the
     median of the window's priced days in the grid's currency, and colors nothing
     when fewer than 5 priced days share that currency."""
+    adults, children, seniors, youth, *_ = _pax_counts(
+        pax_spec, (adults, children, seniors, youth, 0, 0), infants=False
+    )
     json_out = _resolve_format(fmt=fmt, json_flag=json_out, allowed=_ENVELOPE_FORMATS) != "table"
     # A JSON or envelope calendar opens Chrome for Google's graph only when the
     # transport is named: a script's calendar launches no browser it did not ask for.
@@ -12887,9 +13020,10 @@ def calendar(
             "--gf-transport http opens none",
             param_hint="--gf-headed",
         )
-    if awards and (fast or not _envelope.active()):
+    if awards and (fast or (json_out and not _envelope.active())):
         raise typer.BadParameter(
-            "needs --format envelope and no --fast: the award answer is the envelope's",
+            "needs --format envelope or the table calendar, and no --fast: the award "
+            "answer is the envelope's `awards` or the lines under the table",
             param_hint="--awards",
         )
     ccy = _resolve_currency(currency)
@@ -12982,7 +13116,7 @@ def calendar(
             ),
         )
         if awards:
-            _record_calendar_awards(
+            _calendar_awards(
                 awards,
                 origins=origins,
                 dests=dests,
@@ -13075,7 +13209,7 @@ def calendar(
     )
 
 
-def _record_calendar_awards(
+def _calendar_awards(
     k: int,
     *,
     origins: tuple[str, ...],
@@ -13084,21 +13218,33 @@ def _record_calendar_awards(
     num_passengers: int,
     no_cache: bool = False,
 ) -> None:
-    """The envelope's `awards` for the `k` cheapest priced dates the calendar
-    recorded: one entry a date, naming the programs that have space on it."""
+    """Award space on the `k` cheapest priced dates the calendar showed: the
+    envelope's `awards`, or under the table a line a date on stdout. A reason
+    there is no answer is the envelope's note, and under the table one stderr
+    line, so the calendar prints as without `--awards`."""
     from .providers.registry import has_any_configured  # noqa: PLC0415
 
+    table = not _envelope.active()
+
+    def _none(why: str) -> None:
+        _envelope.explain("awards", why)
+        if table:
+            err.print(f"[dim]--awards: {_safe_text(why)}[/]")
+
     if not has_any_configured():
-        _envelope.explain("awards", "no award provider is configured")
+        _none("no award provider is configured")
         return
-    picked = cheapest_dates(_envelope.recorded_days(), k)
+    picked = cheapest_dates(_table_days if table else _envelope.recorded_days(), k)
     if not picked:
-        _envelope.explain("awards", "no priced day to search")
+        _none("no priced day to search")
         return
     pairs = [(o, d) for o in expand_airports(origins) for d in expand_airports(dests) if o != d]
     if len(pairs) > MAX_AWARD_PAIR_QUERIES:
         pairs = pairs[:MAX_AWARD_PAIR_QUERIES]
-        _envelope.narrow(f"awards: asked the first {MAX_AWARD_PAIR_QUERIES} airport pairs")
+        note = f"asked the first {MAX_AWARD_PAIR_QUERIES} airport pairs"
+        _envelope.narrow(f"awards: {note}")
+        if table:
+            err.print(f"[dim]--awards: {_safe_text(note)}[/]")
     queries = [
         LegQuery(origin=o, destination=d, date=r.departure.isoformat(), slice_index=0, label="")
         for r in picked
@@ -13126,7 +13272,23 @@ def _record_calendar_awards(
                 "programs": sorted({af.program for af in flights if af.program}),
             }
         )
-    _envelope.record_awards(entries)
+    if table:
+        _print_award_lines(entries)
+    else:
+        _envelope.record_awards(entries)
+
+
+def _print_award_lines(entries: list[dict[str, Any]]) -> None:
+    """One stdout line a searched date: its departure (and return) date, then
+    the programs with space on it, or `no award space`."""
+    console.print()
+    console.print("[bold]Award space on the cheapest dates[/]")
+    for entry in entries:
+        when = str(entry["departure"])
+        if entry["return"]:
+            when += " → " + str(entry["return"])
+        programs = ", ".join(entry["programs"]) or "no award space"
+        console.print(f"{_safe_text(when)}  {_safe_text(programs)}", soft_wrap=True)
 
 
 def _calendar_without_fast(
@@ -13309,6 +13471,12 @@ def detail(
     cabin: str = typer.Option(
         "economy", "--cabin", autocompletion=_complete_cabin, rich_help_panel=_GROUP_ITINERARY
     ),
+    pax_spec: Annotated[
+        str | None,
+        typer.Option(
+            "--pax", metavar="SPEC", help=_PAX_HELP_NO_INFANT, rich_help_panel=_GROUP_ITINERARY
+        ),
+    ] = None,
     adults: int = typer.Option(1, "--adults", rich_help_panel=_GROUP_ITINERARY),
     children: int = typer.Option(0, "--children", rich_help_panel=_GROUP_ITINERARY),
     seniors: int = typer.Option(0, "--seniors", rich_help_panel=_GROUP_ITINERARY),
@@ -13378,6 +13546,9 @@ def detail(
     no_cache: bool = _NO_CACHE_OPT,
 ) -> None:
     """Phase-2 of the calendar flow: full itineraries for a picked date."""
+    adults, children, seniors, youth, *_ = _pax_counts(
+        pax_spec, (adults, children, seniors, youth, 0, 0), infants=False
+    )
     json_out = _resolve_format(fmt=fmt, json_flag=json_out) == "json"
     ccy = _resolve_currency(currency)
     origins, dests = _require_airports(origin, destination)
