@@ -38,7 +38,8 @@ def no_send(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _invoke(*args: str) -> Result:
-    return CliRunner().invoke(cli.app, list(args))
+    # At 80 columns a refusal line Rich wraps would show as two.
+    return CliRunner().invoke(cli.app, list(args), env={"COLUMNS": "80"})
 
 
 def _body(text: str) -> dict[str, Any]:
@@ -89,19 +90,29 @@ def test_dry_run_body_carries_the_cap_currency() -> None:
         (["--backend", "matrix", "--format", "csv"], "--format csv"),
     ],
 )
-def test_dry_run_refuses_a_route_it_does_not_cover(extra: list[str], route: str) -> None:
+def test_dry_run_refuses_a_route_on_one_stderr_line(extra: list[str], route: str) -> None:
     result = _invoke(*_BASE, *extra, "--dry-run")
     assert result.exit_code == 2, result.output
-    assert route in " ".join(result.output.split())
-    assert "Wire body:" not in result.output
+    assert result.stdout == ""
+    assert len(result.stderr.splitlines()) == 1, result.stderr
+    assert route in result.stderr
 
 
-def test_dry_run_refuses_slice_searches() -> None:
+def test_dry_run_refuses_slice_searches_on_one_stderr_line() -> None:
     result = _invoke(
-        "search", "--slice", "JFK-LHR:" + _DEP, "--slice", "LHR-CDG:" + _DEP, "--dry-run"
+        "search",
+        "--slice",
+        "JFK-LHR:" + _DEP,
+        "--slice",
+        "LHR-CDG:" + _DEP,
+        "--backend",
+        "gflight",
+        "--dry-run",
     )
     assert result.exit_code == 2, result.output
-    assert "--slice" in result.output
+    assert result.stdout == ""
+    assert len(result.stderr.splitlines()) == 1, result.stderr
+    assert "--slice" in result.stderr
 
 
 @pytest.mark.parametrize(

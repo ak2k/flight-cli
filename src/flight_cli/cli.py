@@ -5557,7 +5557,8 @@ def _refuse_dry_run(route: str) -> NoReturn:
     err.print(
         "[red]--dry-run does not cover "
         + _safe_text(route)
-        + " searches yet; it prints a one-slice Matrix query.[/]"
+        + " searches yet; it prints a one-slice Matrix query.[/]",
+        soft_wrap=True,
     )
     raise typer.Exit(2)
 
