@@ -674,6 +674,11 @@ _PAX_HELP = (
     "IS infant in seat, IL infant on lap. A code left out is 0. Such as 2A1C1IL. "
     "Instead of the count flags. Default: 1A."
 )
+# `calendar` and `detail` take no infant, so their help offers no IS or IL.
+_PAX_HELP_NO_INFANT = (
+    "Passengers as COUNT CODE pairs: A adults, C children, S seniors, Y youth. "
+    "A code left out is 0. Such as 2A1C. Instead of the count flags. Default: 1A."
+)
 
 
 def _parse_pax(spec: str) -> Pax:
@@ -12728,7 +12733,9 @@ def calendar(
     ),
     pax_spec: Annotated[
         str | None,
-        typer.Option("--pax", metavar="SPEC", help=_PAX_HELP, rich_help_panel=_GROUP_ITINERARY),
+        typer.Option(
+            "--pax", metavar="SPEC", help=_PAX_HELP_NO_INFANT, rich_help_panel=_GROUP_ITINERARY
+        ),
     ] = None,
     adults: int = typer.Option(1, "--adults", rich_help_panel=_GROUP_ITINERARY),
     children: int = typer.Option(0, "--children", rich_help_panel=_GROUP_ITINERARY),
@@ -13313,7 +13320,9 @@ def detail(
     ),
     pax_spec: Annotated[
         str | None,
-        typer.Option("--pax", metavar="SPEC", help=_PAX_HELP, rich_help_panel=_GROUP_ITINERARY),
+        typer.Option(
+            "--pax", metavar="SPEC", help=_PAX_HELP_NO_INFANT, rich_help_panel=_GROUP_ITINERARY
+        ),
     ] = None,
     adults: int = typer.Option(1, "--adults", rich_help_panel=_GROUP_ITINERARY),
     children: int = typer.Option(0, "--children", rich_help_panel=_GROUP_ITINERARY),
