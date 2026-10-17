@@ -4747,22 +4747,21 @@ def _keep_cells_whole(table: Table, count: int) -> None:
     """Rich fits a table wider than the console by narrowing its columns and
     cutting with `…` what no longer fits, which on a table of many slices can
     drop the flight number or price digits two rows differ by. There every cell
-    folds onto more lines instead. A column the caller held to one line stays
-    held, since a held cell cannot fold and its own ellipsis shows the cut; the
-    others are not held: Rich narrows the widest columns first, so a price stays
-    on one line until the slice columns are as narrow as it is, while a held
-    column takes the width the slice columns need and can leave them none. A
-    column narrowed to its two padding cells prints nothing, so the padding goes
-    once the console cannot give each column a border, its padding and one
+    folds onto more lines instead, a column the caller held to one line
+    included: Rich narrows the widest columns first, so a price stays on one
+    line until the slice columns are as narrow as it is, while a held column
+    keeps its width and can leave the slice columns none. A mark can then fold
+    onto the line below its amount, as any folded cell's last characters do.
+    A column narrowed to its two padding cells prints nothing, so the padding
+    goes once the console cannot give each column a border, its padding and one
     character."""
     if count <= _ROUND_TRIP_LEGS:
         return
     if console.width < 4 * len(table.columns) + 1:
         table.padding = (0, 0)
     for column in table.columns:
-        # A column held to one line cannot fold; Rich would cut it with no mark.
-        if not column.no_wrap:
-            column.overflow = "fold"
+        column.no_wrap = False
+        column.overflow = "fold"
 
 
 def _slice_cells(slcs: list[Slice], count: int) -> list[str]:
@@ -9850,6 +9849,8 @@ def _render_multi_cabin_search(
         # and in a party's table the star that marks a per-traveler fare. Unwrapped
         # where a mark is shown, so it stays on its amount's line; an unwrapped cell
         # cannot fold and Rich cuts it bare, so there the ellipsis shows the cut.
+        # A table of three or more slices folds this column too (_keep_cells_whole):
+        # a held one would take the width the slice columns need.
         # The header has an overflow of its own, so the rule for a price cell never
         # changes how a header too long for its column is cut.
         heading = console.render_str(

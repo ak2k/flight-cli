@@ -1,10 +1,9 @@
 # pyright: reportPrivateUsage=false
-"""A narrow multi-cabin table of three or more slices still marks a cut price.
+"""A narrow marked multi-cabin table of three or more slices never cuts a price.
 
-Such a table folds its slice columns so no flight number is lost. A price
-column that shows a `†`, `‡` or bag mark is held to one line, and a cell held to
-one line cannot fold: Rich cuts it, and only the ellipsis tells the reader a
-digit is gone."""
+Such a table folds every column, a price column that shows a `†`, `‡` or bag
+mark included, so no flight number and no digit of a price is lost. A mark can
+fold onto the line below its amount, as any folded cell's last characters do."""
 
 from __future__ import annotations
 
@@ -51,17 +50,17 @@ def _row() -> MultiCabinRow:
 
 
 def _price_cells(monkeypatch: pytest.MonkeyPatch, width: int) -> list[str]:
-    """The row's four price cells at `width` columns, each rejoined across lines."""
+    """The row's four price cells at `width` columns, each rejoined across its
+    lines with its spaces dropped."""
     buf = StringIO()
     monkeypatch.setattr(cli, "console", Console(file=buf, width=width, no_color=True))
     cli._render_multi_cabin_search([_row()], cabins=_CABINS, sort_by=Cabin.COACH, slices=3)
     body = [line.split("│") for line in buf.getvalue().splitlines() if line.startswith("│")]
-    return ["".join(parts[col].strip() for parts in body) for col in range(-5, -1)]
+    return ["".join(parts[col].replace(" ", "") for parts in body) for col in range(-5, -1)]
 
 
-def test_a_narrow_marked_three_slice_table_never_cuts_a_price_silently(
+def test_a_narrow_marked_three_slice_table_never_cuts_a_price(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     for width in (34, 40, 50):
-        cells = _price_cells(monkeypatch, width)
-        assert [c for c in cells if c != "14703.25 †" and not c.endswith("…")] == [], width
+        assert _price_cells(monkeypatch, width) == ["14703.25†"] * 4, width
