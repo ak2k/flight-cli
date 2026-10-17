@@ -83,7 +83,7 @@ Global flags (every search-printing command):
 | "or the day before" / "or the day after" | `--flex before` / `--flex after` |
 | "arrive on the 21st" / "land on the 21st" | `--arrive 2026-10-21` in place of `--dep` (Matrix); add `--arrive-times evening` for when |
 | "no basic economy" | `--exclude-basic` (economy only; Google may still serve basic fares, and the rows can't show which) |
-| "flying with a baby" | `--inf-lap 1` (or `--inf-seat 1` for its own seat): priced on Google, on Matrix if Google's board is empty |
+| "flying with a baby" | `--pax 1A1IL` (`1A1IS` for its own seat; `--pax 2A1C1IL` is two adults, a child and a lap infant, the same party as `--adults 2 --children 1 --inf-lap 1`, which it cannot go beside): priced on Google, on Matrix if Google's board is empty |
 | "from New York City" | `NYC` (Matrix-native metro code; expands to JFK/LGA/EWR) |
 | "from anywhere in the US East Coast" | `JFK,LGA,EWR,BOS,IAD,DCA,BWI,PHL,ATL,MIA` (see Airport groups) |
 | "to Europe" | `LHR,CDG,FRA,AMS,IST,MAD,BCN,FCO,MUC,ZRH,VIE,CPH,DUB` (see Airport groups) |
