@@ -129,12 +129,11 @@ def test_every_premium_spelling_asks_the_providers_for_premium_economy(
 @pytest.mark.parametrize(
     "extra",
     [
-        pytest.param((), id="table"),
         pytest.param(("--format", "json"), id="json"),
         pytest.param(("--format", "envelope", "--fast"), id="fast"),
     ],
 )
-def test_awards_outside_an_envelope_run_is_a_usage_error(
+def test_awards_under_json_or_fast_is_a_usage_error(
     monkeypatch: pytest.MonkeyPatch, extra: tuple[str, ...]
 ) -> None:
     _serve(monkeypatch, _BODY)
@@ -218,10 +217,11 @@ def test_the_award_search_asks_seats_for_the_whole_party(
 def test_the_docs_name_the_awards_option() -> None:
     root = Path(__file__).resolve().parent.parent
     readme = " ".join((root / "README.md").read_text().split())
-    assert "`calendar --awards K --format envelope`" in readme
+    assert "`calendar --awards K`" in readme
+    assert "`--awards K` answers in a block of lines under the table" in readme
     assert "deserves its own design" not in readme
     skill = (root / ".claude" / "skills" / "flight-search" / "SKILL.md").read_text()
-    assert "`--awards K` (`--format envelope` only, not `--fast`)" in skill
+    assert "`--awards K` (the table or `--format envelope`, not `--fast`" in skill
 
 
 def test_an_award_provider_that_failed_narrows_the_answer(monkeypatch: pytest.MonkeyPatch) -> None:
