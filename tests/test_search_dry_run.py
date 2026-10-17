@@ -137,5 +137,12 @@ def test_dry_run_reads_no_award_config_or_credentials(
     assert SEARCH_URL in result.stdout
 
 
+def test_dry_run_refuses_sellers_as_the_matrix_search_does() -> None:
+    result = _invoke(*_MATRIX, "--sellers", "--dry-run")
+    assert result.exit_code == 2, result.output
+    assert result.stdout == ""
+    assert "--sellers needs a Google Flights result" in result.stderr
+
+
 def test_readme_names_dry_run() -> None:
     assert "--dry-run" in (_ROOT / "README.md").read_text()

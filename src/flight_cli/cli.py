@@ -12343,6 +12343,28 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
 
     beside_matrix = bool(slice_specs) and backend == BACKEND_AUTO and not sel.awards_only
 
+    # Not on the multi-city answer below, which refuses --sellers itself: this
+    # check's "drop --bags or --sellers" would not hold there, since Google's
+    # separate tickets refuse each of the two.
+    if (
+        sellers
+        and not (slice_specs and resolved == BACKEND_GFLIGHT)
+        and (
+            blocker := _sellers_blocker(
+                backend=resolved,
+                multi_cabin=len(cabins_tuple) > 1,
+                awards_only=sel.awards_only,
+                awards_json=run_awards and json_out,
+                pick=pick,
+                page_size=page_size,
+                bags=bags,
+                exclude_basic=exclude_basic,
+            )
+        )
+    ):
+        err.print(f"[red]--sellers {_safe_text(blocker)}.[/]")
+        raise typer.Exit(2)
+
     if dry_run:
         _dry_run_matrix(
             resolved=resolved,
@@ -12387,24 +12409,6 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             awards=run_awards,
         )
         return
-
-    # Below the multi-city answer above, which refuses --sellers itself: this
-    # check's "drop --bags or --sellers" would not hold there, since Google's
-    # separate tickets refuse each of the two.
-    if sellers and (
-        blocker := _sellers_blocker(
-            backend=resolved,
-            multi_cabin=len(cabins_tuple) > 1,
-            awards_only=sel.awards_only,
-            awards_json=run_awards and json_out,
-            pick=pick,
-            page_size=page_size,
-            bags=bags,
-            exclude_basic=exclude_basic,
-        )
-    ):
-        err.print(f"[red]--sellers {_safe_text(blocker)}.[/]")
-        raise typer.Exit(2)
 
     if len(cabins_tuple) > 1:
         if pick is not None:
