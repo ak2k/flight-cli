@@ -141,6 +141,24 @@ def test_dry_run_refusal_on_auto_matrix_is_the_only_stderr_line(
 
 
 @pytest.mark.parametrize(
+    "args",
+    [
+        [*_BASE, "--backend", "gflight"],
+        [*_MATRIX, "--return", _RET],
+        [*_BASE, "--routing", "BA AA", "--cabin", "economy,business"],
+    ],
+    ids=["gflight", "round-trip", "auto-matrix-multi-cabin"],
+)
+def test_dry_run_refusal_beside_json_is_the_only_stderr_line(args: list[str]) -> None:
+    """The deprecated --json spelling adds no note before the refusal."""
+    result = _invoke(*args, "--json", "--dry-run")
+    assert result.exit_code == 2, result.output
+    assert result.stdout == ""
+    assert len(result.stderr.splitlines()) == 1, result.stderr
+    assert "--dry-run does not cover" in result.stderr
+
+
+@pytest.mark.parametrize(
     "extra", [[], ["--format", "json"], ["--fare-rules", "--format", "json"]], ids=str
 )
 def test_dry_run_reads_no_award_config_or_credentials(

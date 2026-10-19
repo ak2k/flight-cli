@@ -11479,15 +11479,19 @@ _SLICE_HELP = (
 )
 
 
-def _resolve_format(*, fmt: str, json_flag: bool, allowed: tuple[str, ...] = _VALID_FORMATS) -> str:
+def _resolve_format(
+    *, fmt: str, json_flag: bool, allowed: tuple[str, ...] = _VALID_FORMATS, warn: bool = True
+) -> str:
     """Collapse --format + deprecated --json into a single format string.
 
-    `--json` forwards to `--format json` with a deprecation warning. Setting
-    both (--json --format X for X != json) is a hard error: ambiguous intent.
-    `allowed` is the caller's: only `search` and `calendar` write the envelope.
+    `--json` forwards to `--format json` with a deprecation warning, unless
+    `warn` is off. Setting both (--json --format X for X != json) is a hard
+    error: ambiguous intent. `allowed` is the caller's: only `search` and
+    `calendar` write the envelope.
     """
     if json_flag:
-        err.print("[yellow]--json is deprecated; use --format json.[/]")
+        if warn:
+            err.print("[yellow]--json is deprecated; use --format json.[/]")
         if fmt not in ("table", "json"):
             err.print(f"[red]--json conflicts with --format {_quote(fmt)}; pick one.[/]")
             raise typer.Exit(2)
@@ -12064,7 +12068,8 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
     adults, children, seniors, youth, inf_seat, inf_lap = _pax_counts(
         pax_spec, (adults, children, seniors, youth, inf_seat, inf_lap), infants=True
     )
-    output = _resolve_format(fmt=fmt, json_flag=json_out, allowed=_SEARCH_FORMATS)
+    # A dry run's refusal is its only line.
+    output = _resolve_format(fmt=fmt, json_flag=json_out, allowed=_SEARCH_FORMATS, warn=not dry_run)
     json_out = output != "table"
     if output == "csv":
         _refuse_csv_conflicts(
