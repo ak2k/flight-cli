@@ -5335,7 +5335,7 @@ def _render_calendar(
     if res.solution_count == 0 or not res.priced_days:
         console.print(
             "[yellow]Calendar empty.[/] Matrix's calendar mode "
-            "brownouts regularly; retry, or use [bold]flight fare[/] "
+            "brownouts regularly; retry, or use [bold]flight search[/] "
             "for a single date."
         )
         return
