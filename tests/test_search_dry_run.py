@@ -116,6 +116,31 @@ def test_dry_run_refuses_slice_searches_on_one_stderr_line() -> None:
 
 
 @pytest.mark.parametrize(
+    ("args", "route"),
+    [
+        ([*_BASE, "--routing", "BA AA", "--cabin", "economy,business"], "multi-cabin"),
+        (
+            [*_BASE, "--routing", "BA AA", "--routing-ret", "", "--return", _RET],
+            "multi-leg or round-trip",
+        ),
+        ([*_BASE, "--routing", "BA AA", "--format", "csv"], "--format csv"),
+        (["search", "--slice", "JFK-LHR:" + _DEP, "--slice", "LHR-CDG:" + _DEP], "--slice"),
+    ],
+    ids=["multi-cabin", "round-trip", "csv", "slice"],
+)
+def test_dry_run_refusal_on_auto_matrix_is_the_only_stderr_line(
+    args: list[str], route: str
+) -> None:
+    """Auto picks Matrix for these, and the refusal is not preceded by the
+    picker's "Using Matrix" note: a search that never starts announces nothing."""
+    result = _invoke(*args, "--dry-run")
+    assert result.exit_code == 2, result.output
+    assert result.stdout == ""
+    assert len(result.stderr.splitlines()) == 1, result.stderr
+    assert route in result.stderr
+
+
+@pytest.mark.parametrize(
     "extra", [[], ["--format", "json"], ["--fare-rules", "--format", "json"]], ids=str
 )
 def test_dry_run_reads_no_award_config_or_credentials(

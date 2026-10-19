@@ -1220,6 +1220,7 @@ def _pick_backend(
     arrive: bool = False,
     return_arrive: bool = False,
     open_jaw: bool = False,
+    announce: bool = True,
 ) -> str:
     """Resolve --backend to a concrete backend.
 
@@ -1276,7 +1277,8 @@ def _pick_backend(
 
     Whatever the cause, `auto` names it on stderr. Silently taking the 45x
     slower backend leaves the user with no way to tell a constraint they could
-    drop from one they can't.
+    drop from one they can't. Unless `announce` is off: a caller that sends
+    nothing names the backend itself.
 
     Explicit --backend matrix: matrix. --backend gflight: gflight, unless the
     request is inexpressible on GF (error). A trip of one one-way per slice
@@ -1340,10 +1342,11 @@ def _pick_backend(
                 f"{google_only[0][0]} needs Google Flights, which can't serve "
                 f"{_join_reasons(reasons)}. Drop it, or {remedy}.",
             )
-        err.print(
-            f"[dim]Using Matrix: Google Flights can't serve "
-            f"{_safe_text(_join_reasons(reasons))}.[/]"
-        )
+        if announce:
+            err.print(
+                f"[dim]Using Matrix: Google Flights can't serve "
+                f"{_safe_text(_join_reasons(reasons))}.[/]"
+            )
         return BACKEND_MATRIX
     if backend == BACKEND_GFLIGHT and reasons and reasons != [_MULTI_CITY_ON_ONE_TICKET]:
         # typer renders a BadParameter as plain Text, never markup — escaping
@@ -12261,6 +12264,8 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         arrive=bool(arrive),
         return_arrive=bool(return_arrive),
         open_jaw=per_slice,
+        # A dry run's refusal is its only line, and its query names the backend.
+        announce=not dry_run,
     )
     if verify and resolved == BACKEND_MATRIX:
         err.print("[red]--verify needs a Google Flights row, and this search runs on Matrix.[/]")
