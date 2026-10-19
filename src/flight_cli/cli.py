@@ -10420,6 +10420,18 @@ def _cabin_document_rows(
     return carried
 
 
+def _all_cabins_refused(*, matrix_fallback: bool) -> _MatrixHandOff:
+    """Every Google Flights cabin query raised a refusal, each named on stderr already.
+
+    Under auto the whole search goes to Matrix, as a one-cabin search does; an
+    explicit Google backend exits 1. A cabin Google answered with no rows is
+    `{cab: []}`, which is truthy, so it never reaches this."""
+    if not matrix_fallback:
+        err.print("[red]All Google Flights cabin queries failed.[/]")
+        raise typer.Exit(1)
+    return _MatrixHandOff({}, ())
+
+
 def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards are written to
     *,
     legs: tuple[Leg, ...],
@@ -10465,8 +10477,7 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
         separate_tickets="off" if unchecked else separate_tickets,
     )
     if not fli_by_cabin:
-        err.print("[red]All Google Flights cabin queries failed.[/]")
-        raise typer.Exit(1)
+        return _all_cabins_refused(matrix_fallback=matrix_fallback)
     # In the order the cabins were asked for; the fan-out fills `fli_by_cabin`
     # in the order they finish.
     emptied: dict[Cabin, int] = {
@@ -12347,14 +12358,17 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             )
             if hand_off is None:
                 return
-            reasons = ", ".join(
-                f"{cab.value} ({dropped:d} rows filtered out)"
-                for cab, dropped in hand_off.emptied.items()
-            )
-            err.print(
-                f"[dim]Using Matrix: no Google Flights itinerary matched "
-                f"{_safe_text(_row_checks(legs, opts))} in {_safe_text(reasons)}.[/]"
-            )
+            if hand_off.emptied:
+                reasons = ", ".join(
+                    f"{cab.value} ({dropped:d} rows filtered out)"
+                    for cab, dropped in hand_off.emptied.items()
+                )
+                err.print(
+                    f"[dim]Using Matrix: no Google Flights itinerary matched "
+                    f"{_safe_text(_row_checks(legs, opts))} in {_safe_text(reasons)}.[/]"
+                )
+            else:
+                err.print("[dim]Using Matrix: every Google Flights cabin query failed.[/]")
             google_answered = hand_off.answered
         _run_matrix_path_multi(
             legs=legs,
