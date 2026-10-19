@@ -1507,12 +1507,13 @@ def _resolve_providers(  # noqa: PLR0912 — single-purpose validator + merge; s
             err.print("[red]--providers cannot be empty.[/]")
             raise typer.Exit(2)
     if dry_run:
-        # A dry run asks no award provider, so it reads neither config.toml
-        # nor any provider's credentials: `cash_only` stops every award check.
+        # A dry run asks no award provider and prints no award row: as a cash
+        # search it reads neither config.toml nor any credentials, and no flag
+        # conflicts with an --awards-only output it never prints.
         return ProviderSelection(
             provider_filter=provider_filter,
             cash_only=True,
-            awards_only=awards_only,
+            awards_only=False,
             provider_opts={},
         )
 

@@ -162,6 +162,15 @@ def test_dry_run_reads_no_award_config_or_credentials(
     assert SEARCH_URL in result.stdout
 
 
+@pytest.mark.parametrize("extra", [[], ["--format", "json"]], ids=str)
+def test_dry_run_ignores_awards_only_beside_fare_rules(extra: list[str]) -> None:
+    """--awards-only conflicts with --fare-rules only over what the two print,
+    and a dry run prints neither: the query is the one --fare-rules sends."""
+    result = _invoke(*_MATRIX, "--fare-rules", "--awards-only", *extra, "--dry-run")
+    assert result.exit_code == 0, result.output
+    assert SEARCH_URL in result.stdout
+
+
 def test_dry_run_refuses_sellers_as_the_matrix_search_does() -> None:
     result = _invoke(*_MATRIX, "--sellers", "--dry-run")
     assert result.exit_code == 2, result.output
