@@ -114,7 +114,7 @@ from ._multi_cabin import (
 )
 from ._multi_cabin import merge as _merge_cabins
 from ._watch import watch_app
-from .client import MatrixApiError, MatrixClient, MatrixHttpError
+from .client import SEARCH_URL, MatrixApiError, MatrixClient, MatrixHttpError
 from .domain import (
     Bags,
     Cabin,
@@ -151,6 +151,7 @@ from .pp import cli as _pp_cli
 from .pp.auth import load_tokens
 from .pp.cli import MAX_AWARD_PAIR_QUERIES, auth_app, award_space, run_pp_for_search
 from .providers.base import LegQuery
+from .wire import to_wire
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Generator, Iterable, Mapping, Sequence
@@ -1219,6 +1220,7 @@ def _pick_backend(
     arrive: bool = False,
     return_arrive: bool = False,
     open_jaw: bool = False,
+    announce: bool = True,
 ) -> str:
     """Resolve --backend to a concrete backend.
 
@@ -1275,7 +1277,8 @@ def _pick_backend(
 
     Whatever the cause, `auto` names it on stderr. Silently taking the 45x
     slower backend leaves the user with no way to tell a constraint they could
-    drop from one they can't.
+    drop from one they can't. Unless `announce` is off: a caller that sends
+    nothing names the backend itself.
 
     Explicit --backend matrix: matrix. --backend gflight: gflight, unless the
     request is inexpressible on GF (error). A trip of one one-way per slice
@@ -1339,10 +1342,11 @@ def _pick_backend(
                 f"{google_only[0][0]} needs Google Flights, which can't serve "
                 f"{_join_reasons(reasons)}. Drop it, or {remedy}.",
             )
-        err.print(
-            f"[dim]Using Matrix: Google Flights can't serve "
-            f"{_safe_text(_join_reasons(reasons))}.[/]"
-        )
+        if announce:
+            err.print(
+                f"[dim]Using Matrix: Google Flights can't serve "
+                f"{_safe_text(_join_reasons(reasons))}.[/]"
+            )
         return BACKEND_MATRIX
     if backend == BACKEND_GFLIGHT and reasons and reasons != [_MULTI_CITY_ON_ONE_TICKET]:
         # typer renders a BadParameter as plain Text, never markup — escaping
@@ -1453,6 +1457,7 @@ def _resolve_providers(  # noqa: PLR0912 — single-purpose validator + merge; s
     cash_only: bool,
     awards_only: bool,
     provider_opt: tuple[str, ...],
+    dry_run: bool = False,
     # deprecated aliases — forwarded into the new shape:
     legacy_no_pp: bool = False,
     legacy_pp_only: bool = False,
@@ -1501,6 +1506,16 @@ def _resolve_providers(  # noqa: PLR0912 — single-purpose validator + merge; s
         if not provider_filter:
             err.print("[red]--providers cannot be empty.[/]")
             raise typer.Exit(2)
+    if dry_run:
+        # A dry run asks no award provider and prints no award row: as a cash
+        # search it reads neither config.toml nor any credentials, and no flag
+        # conflicts with an --awards-only output it never prints.
+        return ProviderSelection(
+            provider_filter=provider_filter,
+            cash_only=True,
+            awards_only=False,
+            provider_opts={},
+        )
 
     # Build provider_opts: config.toml < --provider-opt CLI. Section names in
     # the config are normalized through the alias map so user-facing spellings
@@ -5532,6 +5547,81 @@ def _say_unread_fares_not_shown(subject: str, opts: SearchOptions, cap: str) -> 
     )
 
 
+def _matrix_options(opts: SearchOptions) -> SearchOptions:
+    """`opts` as the one-slice Matrix search is asked: a cap holds each fare in
+    the cap's currency, so Matrix is asked in it. Left unset, it prices in its
+    own default (GBP from LHR) and the cap keeps nothing. Uncapped, the body
+    stays without the key."""
+    if opts.max_price is not None:
+        return opts.model_copy(update={"currency": opts.currency or "USD"})
+    return opts
+
+
+def _refuse_dry_run(route: str) -> NoReturn:
+    err.print(
+        "[red]--dry-run does not cover "
+        + _safe_text(route)
+        + " searches yet; it prints a one-slice Matrix query.[/]",
+        soft_wrap=True,
+    )
+    raise typer.Exit(2)
+
+
+def _dry_run_matrix(
+    *,
+    resolved: str,
+    backend: str,
+    legs: tuple[Leg, ...],
+    opts: SearchOptions,
+    cabins: int,
+    slices: bool,
+    output: str,
+) -> None:
+    """`search --dry-run`: print the one-slice Matrix query without sending it.
+
+    Only that route is covered; any other leaves with exit 2 and one line naming
+    it, so each later route can add its own. Nothing here opens a client."""
+    unsupported = (
+        "--slice (multi-city or open-jaw)"
+        if slices
+        else "Google Flights"
+        if resolved != BACKEND_MATRIX
+        else "multi-cabin"
+        if cabins > 1
+        else "multi-leg or round-trip"
+        if len(legs) != 1
+        else None
+    )
+    if unsupported is not None:
+        _refuse_dry_run(unsupported)
+    match output:
+        case "table" | "json":
+            fmt: Literal["table", "json"] = output
+        case _:
+            _refuse_dry_run("--format " + output)
+    match backend:
+        case "matrix":
+            why = "--backend matrix"
+        case "auto":
+            why = "auto: this search uses a Matrix-only flag"
+        case _:
+            # Only --backend matrix, or auto on a Matrix-only flag, resolves to Matrix.
+            raise AssertionError(backend)
+    body = to_wire(SpecificDateSearch(legs=legs, options=_matrix_options(opts))).as_json()
+    match fmt:
+        case "json":
+            doc = {"backend": "matrix", "reason": why, "endpoint": SEARCH_URL, "wire_body": body}
+            sys.stdout.write(json.dumps(doc, indent=2) + "\n")
+        case "table":
+            sys.stdout.write(
+                "Backend: matrix (" + why + ")\n"
+                "Endpoint: POST " + SEARCH_URL + "\n"
+                "Wire body:\n" + json.dumps(body, indent=2) + "\n"
+            )
+        case _:
+            assert_never(fmt)
+
+
 def _run_matrix_path(  # noqa: PLR0912 — one arm per way Matrix's answer is written
     *,
     legs: tuple[Leg, ...],
@@ -5553,11 +5643,7 @@ def _run_matrix_path(  # noqa: PLR0912 — one arm per way Matrix's answer is wr
 
     `split_ticket` is a multi-city trip's separate-ticket object, which the JSON
     document carries beside Matrix's as `{"search": …, "split_ticket": …}`."""
-    # A cap holds each fare in the cap's currency, so Matrix is asked in it:
-    # left unset, it prices in its own default (GBP from LHR) and the cap keeps
-    # nothing. Uncapped, the body stays without the key.
-    if opts.max_price is not None:
-        opts = opts.model_copy(update={"currency": opts.currency or "USD"})
+    opts = _matrix_options(opts)
     search = SpecificDateSearch(legs=legs, options=opts)
     rps, impersonate = _resolve_rps(rps), _resolve_impersonate(impersonate)
     # SpecificDateSearch → SearchResult by client._parse_response dispatch.
@@ -11393,15 +11479,19 @@ _SLICE_HELP = (
 )
 
 
-def _resolve_format(*, fmt: str, json_flag: bool, allowed: tuple[str, ...] = _VALID_FORMATS) -> str:
+def _resolve_format(
+    *, fmt: str, json_flag: bool, allowed: tuple[str, ...] = _VALID_FORMATS, warn: bool = True
+) -> str:
     """Collapse --format + deprecated --json into a single format string.
 
-    `--json` forwards to `--format json` with a deprecation warning. Setting
-    both (--json --format X for X != json) is a hard error: ambiguous intent.
-    `allowed` is the caller's: only `search` and `calendar` write the envelope.
+    `--json` forwards to `--format json` with a deprecation warning, unless
+    `warn` is off. Setting both (--json --format X for X != json) is a hard
+    error: ambiguous intent. `allowed` is the caller's: only `search` and
+    `calendar` write the envelope.
     """
     if json_flag:
-        err.print("[yellow]--json is deprecated; use --format json.[/]")
+        if warn:
+            err.print("[yellow]--json is deprecated; use --format json.[/]")
         if fmt not in ("table", "json"):
             err.print(f"[red]--json conflicts with --format {_quote(fmt)}; pick one.[/]")
             raise typer.Exit(2)
@@ -11956,6 +12046,18 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         rich_help_panel=_GROUP_BACKEND,
     ),
     provider_opt: list[str] | None = _PROVIDER_OPT,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help=(
+                "Print the resolved Matrix query (backend, endpoint, wire body) and "
+                "exit without sending it. A one-slice Matrix search only; "
+                "--format table or json."
+            ),
+            rich_help_panel=_GROUP_OUTPUT,
+        ),
+    ] = False,
 ) -> None:
     """Specific-date flight search across Matrix and Google Flights backends.
 
@@ -11966,7 +12068,8 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
     adults, children, seniors, youth, inf_seat, inf_lap = _pax_counts(
         pax_spec, (adults, children, seniors, youth, inf_seat, inf_lap), infants=True
     )
-    output = _resolve_format(fmt=fmt, json_flag=json_out, allowed=_SEARCH_FORMATS)
+    # A dry run's refusal is its only line.
+    output = _resolve_format(fmt=fmt, json_flag=json_out, allowed=_SEARCH_FORMATS, warn=not dry_run)
     json_out = output != "table"
     if output == "csv":
         _refuse_csv_conflicts(
@@ -12040,6 +12143,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         cash_only=cash_only,
         awards_only=awards_only,
         provider_opt=tuple(provider_opt or ()),
+        dry_run=dry_run,
     )
     if verify and (
         blocker := _verify_blocker(
@@ -12166,6 +12270,8 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
         arrive=bool(arrive),
         return_arrive=bool(return_arrive),
         open_jaw=per_slice,
+        # A dry run's refusal is its only line, and its query names the backend.
+        announce=not dry_run,
     )
     if verify and resolved == BACKEND_MATRIX:
         err.print("[red]--verify needs a Google Flights row, and this search runs on Matrix.[/]")
@@ -12248,6 +12354,40 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
 
     beside_matrix = bool(slice_specs) and backend == BACKEND_AUTO and not sel.awards_only
 
+    # Not on the multi-city answer below, which refuses --sellers itself: this
+    # check's "drop --bags or --sellers" would not hold there, since Google's
+    # separate tickets refuse each of the two.
+    if (
+        sellers
+        and not (slice_specs and resolved == BACKEND_GFLIGHT)
+        and (
+            blocker := _sellers_blocker(
+                backend=resolved,
+                multi_cabin=len(cabins_tuple) > 1,
+                awards_only=sel.awards_only,
+                awards_json=run_awards and json_out,
+                pick=pick,
+                page_size=page_size,
+                bags=bags,
+                exclude_basic=exclude_basic,
+            )
+        )
+    ):
+        err.print(f"[red]--sellers {_safe_text(blocker)}.[/]")
+        raise typer.Exit(2)
+
+    if dry_run:
+        _dry_run_matrix(
+            resolved=resolved,
+            backend=backend,
+            legs=legs,
+            opts=opts,
+            cabins=len(cabins_tuple),
+            slices=bool(slice_specs),
+            output=output,
+        )
+        return
+
     # `_pick_backend` puts a --slice search on Google only as one one-way per slice.
     if slice_specs and resolved == BACKEND_GFLIGHT:
         if blocker := _gflight_multi_city_blocker(
@@ -12280,24 +12420,6 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
             awards=run_awards,
         )
         return
-
-    # Below the multi-city answer above, which refuses --sellers itself: this
-    # check's "drop --bags or --sellers" would not hold there, since Google's
-    # separate tickets refuse each of the two.
-    if sellers and (
-        blocker := _sellers_blocker(
-            backend=resolved,
-            multi_cabin=len(cabins_tuple) > 1,
-            awards_only=sel.awards_only,
-            awards_json=run_awards and json_out,
-            pick=pick,
-            page_size=page_size,
-            bags=bags,
-            exclude_basic=exclude_basic,
-        )
-    ):
-        err.print(f"[red]--sellers {_safe_text(blocker)}.[/]")
-        raise typer.Exit(2)
 
     if len(cabins_tuple) > 1:
         if pick is not None:
