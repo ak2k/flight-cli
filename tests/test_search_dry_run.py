@@ -147,7 +147,7 @@ def test_dry_run_refusal_on_auto_matrix_is_the_only_stderr_line(
         [*_MATRIX, "--return", _RET],
         [*_BASE, "--routing", "BA AA", "--cabin", "economy,business"],
     ],
-    ids=["gflight", "round-trip", "auto-matrix-multi-cabin"],
+    ids=["google-flights", "round-trip", "auto-matrix-multi-cabin"],
 )
 def test_dry_run_refusal_beside_json_is_the_only_stderr_line(args: list[str]) -> None:
     """The deprecated --json spelling adds no note before the refusal."""
