@@ -33,6 +33,7 @@ import functools
 import io
 import ipaddress
 import json
+import logging
 import os
 import pathlib
 import signal
@@ -118,6 +119,19 @@ def _no_browser_launch(  # pyright: ignore[reportUnusedFunction] - autouse pytes
         pytest.fail("this test reached rung 2's real browser launcher")
 
     monkeypatch.setattr(_gf_browser, "_playwright_factory", _forbidden)
+
+
+@pytest.fixture(autouse=True)
+def _restore_asyncio_log_level() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction] - autouse pytest fixture
+    """Put the `asyncio` logger back to the level it had before the test.
+
+    `GfBrowserSession.stop_driver` sets that logger to CRITICAL for the rest of
+    the process, so without this a test that ran after any stop would miss an
+    asyncio warning that `filterwarnings = error` would otherwise fail."""
+    log = logging.getLogger("asyncio")
+    level = log.level
+    yield
+    log.setLevel(level)
 
 
 def pytest_configure(config: pytest.Config) -> None:
