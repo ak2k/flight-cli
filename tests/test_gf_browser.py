@@ -1285,6 +1285,94 @@ def test_a_ctrl_c_during_the_launch_is_not_turned_into_a_refusal(
     assert killed == [(fake_pid, signal.SIGKILL)]
 
 
+def _stop_then_fail(session: gfb.GfBrowserSession, error: BaseException) -> Callable[..., Any]:
+    """A launch step that fails the way a navigation does once the handler has
+    stopped the driver: the stop lands first, then the step raises an ordinary
+    transport error that no `KeyboardInterrupt` ever reaches."""
+
+    def _step(**_kw: Any) -> Any:
+        session.stop_driver()
+        raise error
+
+    return _step
+
+
+def test_a_launch_failure_after_the_stop_is_the_interrupt_not_a_refusal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The launch block's `except Exception` arm wraps every ordinary failure as
+    a typed Chrome refusal. When the handler already stopped this session's
+    driver, that failure is the stop's own doing, and wrapped as a refusal a
+    stop the user asked for would read as a Chrome that refused to start. The
+    driver is still stopped, not dropped."""
+    pw = _install(monkeypatch, tmp_path)
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(gfb, "_driver_process_id", _fixed_pid(424242))
+    monkeypatch.setattr(gfb.os, "kill", _record_kill(killed))
+    session = gfb.GfBrowserSession(headed=False)
+    monkeypatch.setattr(
+        pw.chromium,
+        "launch_persistent_context",
+        _stop_then_fail(session, RuntimeError("Target page, context or browser has been closed")),
+    )
+    raised: BaseException | None = None
+    try:
+        session.get_html(_PAGE_URL)
+    except BaseException as e:
+        raised = e
+    assert isinstance(raised, KeyboardInterrupt), repr(raised)
+    assert killed == [(424242, signal.SIGKILL)]
+    assert pw.stopped is False  # the sync API is not driven on a stopped session
+
+
+def test_a_driver_start_failure_after_the_stop_is_the_interrupt_not_a_refusal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The same promise for the arm where `start()` itself raised."""
+    pw = _install(monkeypatch, tmp_path)
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(gfb, "_driver_process_id", _fixed_pid(424242))
+    monkeypatch.setattr(gfb.os, "kill", _record_kill(killed))
+    session = gfb.GfBrowserSession(headed=False)
+    monkeypatch.setattr(
+        pw, "start", _stop_then_fail(session, RuntimeError("driver handshake failed"))
+    )
+    raised: BaseException | None = None
+    try:
+        session.get_html(_PAGE_URL)
+    except BaseException as e:
+        raised = e
+    assert isinstance(raised, KeyboardInterrupt), repr(raised)
+    assert killed == [(424242, signal.SIGKILL)]
+
+
+def test_a_driver_start_failure_after_the_latch_alone_is_the_interrupt_not_a_refusal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The handler sets the latch before it snapshots the registry, so its stop
+    can go past a launch that registers just after and leave this session
+    alive. A `start()` that then fails is still a run the user asked to end,
+    and the arm stops nothing the stop did not."""
+    pw = _install(monkeypatch, tmp_path)
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(gfb, "_driver_process_id", _fixed_pid(424242))
+    monkeypatch.setattr(gfb.os, "kill", _record_kill(killed))
+
+    def _latch_then_fail() -> Any:
+        gfb._interrupt_state["seen"] = True
+        raise RuntimeError("driver handshake failed")
+
+    monkeypatch.setattr(pw, "start", _latch_then_fail)
+    session = gfb.GfBrowserSession(headed=False)
+    raised: BaseException | None = None
+    try:
+        session.get_html(_PAGE_URL)
+    except BaseException as e:
+        raised = e
+    assert isinstance(raised, KeyboardInterrupt), repr(raised)
+    assert killed == []
+
+
 @pytest.mark.parametrize(
     "escaping",
     [asyncio.CancelledError, SystemExit, GeneratorExit],
