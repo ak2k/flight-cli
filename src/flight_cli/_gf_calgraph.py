@@ -330,6 +330,18 @@ def _option_blocker(options: SearchOptions) -> str | None:
     return None
 
 
+def _page_predicates(search: CalendarSearch) -> list[Predicate]:
+    """The outbound leg's predicates, each once: the set `page_url` writes."""
+    leg = search.legs[0]
+    return list(dict.fromkeys(classify(leg.route_language, leg.extension).predicates))
+
+
+def page_stop_limit(search: CalendarSearch) -> int | None:
+    """The stop limit `page_url` writes onto the page, or None when it writes
+    none: the strictest of `--stops` and the outbound leg's stop codes."""
+    return _stop_ceiling(_page_predicates(search), search.options.max_extra_stops)
+
+
 def page_url(search: CalendarSearch, departure: date) -> str:
     """The filtered search page whose price graph opens on `departure`.
 
@@ -347,10 +359,8 @@ def page_url(search: CalendarSearch, departure: date) -> str:
     window = search.window
     moved = window.model_copy(update={"start": departure, "end": max(departure, window.end)})
     filters = to_fli_filter(search.model_copy(update={"window": moved}))
-    leg = search.legs[0]
-    predicates = list(dict.fromkeys(classify(leg.route_language, leg.extension).predicates))
-    apply_gf_native_filters(filters, predicates)
-    ceiling = _stop_ceiling(predicates, search.options.max_extra_stops)
+    apply_gf_native_filters(filters, _page_predicates(search))
+    ceiling = page_stop_limit(search)
     if ceiling is not None:
         filters.stops = _fli_max_stops(ceiling)
     return search_page_url(filters)

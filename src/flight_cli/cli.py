@@ -3361,16 +3361,10 @@ def _graph_low(
 
 def _stops_reach_the_page(search: CalendarSearch) -> bool:
     """Whether Google's page was asked a stop limit: `--stops`, or a stop code
-    on a leg, as `_gf_calgraph.page_url` writes one."""
-    from ._gf_postfilter import (  # noqa: PLC0415 — loaded by the gate
-        _stop_ceiling,  # pyright: ignore[reportPrivateUsage] — the rule page_url reads
-    )
-    from .routing_predicates import classify  # noqa: PLC0415 — loaded by the gate
+    on the outbound leg, as `_gf_calgraph.page_url` writes one."""
+    from ._gf_calgraph import page_stop_limit  # noqa: PLC0415 — loaded by the gate
 
-    predicates = [
-        p for leg in search.legs for p in classify(leg.route_language, leg.extension).predicates
-    ]
-    return _stop_ceiling(predicates, search.options.max_extra_stops) is not None
+    return page_stop_limit(search) is not None
 
 
 def _two_lows_note(
