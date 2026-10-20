@@ -8347,6 +8347,9 @@ def _paint_first_gf_table(
     place of the answer the other backend was about to give. The failure is
     stashed and reported after the weave, like every other one here.
 
+    The guard exists because this paint runs inside the task group, not because
+    renderers are untrusted.
+
     The note on the empty branch is true when it prints: it is gated on there
     being no Google refusal stashed, so Matrix really is the only half still
     running. A Google half that FAILED is a different sentence, and
