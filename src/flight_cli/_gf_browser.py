@@ -722,6 +722,10 @@ class GfBrowserSession:
         # typed refusal to the caller, who cannot act on the distinctions patchright
         # draws. Only the wording differs, by whether `start()` returned.
         except Exception as e:
+            # Read before anything below can change it. A stop that already ran,
+            # or whose latch is already set, is what made this step fail, so the
+            # failure is the user's stop and not a Chrome that refused to start.
+            interrupted = self._dead or _interrupt_state["seen"]
             if self._playwright is None:
                 # `start()` raised, so no launch was tried: the driver is what failed.
                 # The reap runs the driver's loop, so an interrupt can land in it, and
@@ -732,8 +736,12 @@ class GfBrowserSession:
                     self._dead = True
                     raise
                 self.close()
+                if interrupted:
+                    raise KeyboardInterrupt from e
                 raise _driver_failure(_detail(_parked_driver_error(manager) or e)) from e
             self.close()
+            if interrupted:
+                raise KeyboardInterrupt from e
             raise _launch_failure(profile, _detail(e)) from e
         # The launch block's broad `except Exception` above calls `close()`; an
         # interrupt skips it, so this is where the launch records that patchright
