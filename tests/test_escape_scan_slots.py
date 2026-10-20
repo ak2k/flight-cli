@@ -6,6 +6,8 @@ same text `err.print(<remote>)` would, with no call anywhere near it."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from test_calendar_split import escape_scan
 
 
@@ -43,3 +45,28 @@ def test_assignment_shapes_into_a_slot_are_scanned() -> None:
     }
     missed = [name for name, source in shapes.items() if not escape_scan(source)]
     assert not missed, f"the scan does not catch: {missed}"
+
+
+def test_a_markup_slot_bound_as_a_target_is_scanned() -> None:
+    shapes = {
+        "for target": "def _render_search():\n    for t.title in rows:\n        pass\n",
+        "async for target": (
+            "async def _render_search():\n    async for t.title in rows:\n        pass\n"
+        ),
+        "with target": "def _render_search():\n    with ctx() as t.title:\n        pass\n",
+        "comprehension target": "def _render_search():\n    [0 for t.title in rows]\n",
+        "tuple for target": (
+            "def _render_search():\n    for t.title, t.caption in rows:\n        pass\n"
+        ),
+    }
+    missed = [name for name, source in shapes.items() if not escape_scan(source)]
+    assert not missed, f"the scan does not read a slot bound as a target: {missed}"
+
+
+def test_the_sanitizing_note_says_a_bound_slot_faults() -> None:
+    note = Path(__file__).parent.parent / "docs" / "memories" / "console_sanitizing.md"
+    text = " ".join(note.read_text(encoding="utf-8").split())
+    assert (
+        "A slot bound as a `for`, `async for`, comprehension or `with ... as` target "
+        "has no value to judge, so it is a fault whatever the iterable holds." in text
+    )
