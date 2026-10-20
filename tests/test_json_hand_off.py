@@ -429,12 +429,15 @@ def test_the_default_table_still_weaves_a_wall_without_a_hand_off(
 
 
 @pytest.mark.parametrize("wall", ["throttle", "untyped"])
-def test_multi_cabin_json_still_exits_1_when_every_google_cabin_fails(
+def test_multi_cabin_json_hands_the_search_to_matrix_when_every_google_cabin_fails(
     monkeypatch: pytest.MonkeyPatch, wall: str
 ) -> None:
     _google(monkeypatch, _raising(_WALLS[wall][0]))
 
-    r = _search("--cash-only", "--cabin", "y,j", "--format", "json")
+    handed = _search("--cash-only", "--cabin", "y,j", "--format", "json")
+    direct = _search("--cash-only", "--cabin", "y,j", "--format", "json", "--backend", "matrix")
 
-    assert (r.exit_code, r.stdout) == (1, ""), r.output
-    assert "Using Matrix" not in r.stderr, r.stderr
+    assert handed.exit_code == 0, handed.output
+    assert handed.stdout == direct.stdout
+    assert "Using Matrix: every Google Flights cabin query failed." in handed.stderr
+    assert "All Google Flights cabin queries failed" not in handed.stderr
