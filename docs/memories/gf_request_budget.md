@@ -161,10 +161,11 @@ which with every Google list in price order is row one: a one-way board's
 lowest fare, and on a round trip the cheapest trip through the pinned outbounds.
 A single-cabin round trip pins its cheapest outbound first, so that is the
 board's cheapest round trip unless a return filter removed it, Google served its
-return board empty, or its return board was refused (refused outright, or
-answered for a different segment than the pin; `_report_pin_outcome` counts both
-refusals in its stderr warning and no line counts an empty board). Then row 1 is
-the cheapest trip through the pins whose return boards kept a row.
+return board empty (`_report_pin_outcome` warns "N of M pinned outbounds have no
+return flight on Google"), or its return board was refused (the page was refused
+outright, or it ignored the pin and answered a segment other than the one after
+the pin; the warning "N of M return boards unavailable" counts both). Then row 1
+is the cheapest trip through the pins whose return boards kept a row.
 
 **A partial round trip is a success, deliberately.** When the loop stops early
 with something served, the command exits 0 and `--format json` emits the
