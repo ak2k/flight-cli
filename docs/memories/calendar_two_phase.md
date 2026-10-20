@@ -112,8 +112,9 @@ Cheap calendar discovery → pick a date → detail-fetch is a natural flow:
 ```
 flight calendar MIA PAR --start 2026-06-07 -d 5-7 --routing "LH+" \
     --ext "MAXCONNECT 2:00"
-# → grid: PAR split into CDG, ORY and BVA, one query per pair; each day's
-#   route column names the pair that priced it, e.g. MIA→CDG
+# → grid: PAR split into CDG, ORY and BVA, one query per pair and the query as
+#   typed on a round trip; each day's route column names the pair that priced
+#   it, e.g. MIA→CDG
 
 flight detail MIA CDG --dep 2026-06-10 --return 2026-06-16 \
     --routing "LH+" --ext "MAXCONNECT 2:00" --duration 5-7
@@ -136,15 +137,15 @@ the morning window (`8:00`-`11:00`) gave 8 of 8 solutions departing 08:00 to
 their own earlier checks, and an empty `--return-times` filters nothing and
 passes).
 
-A multi-airport or metro calendar is asked one airport pair per query, so
-`detail` also needs the pair that priced the picked cell, not the calendar's
-own codes: the table's `route` column (`MIA→CDG`) for the day's minimum, the
-pair printed beside a trip length another pair priced, or `origin`/`destination`
-on each day and trip length in `--json`. Given the calendar's codes, it asks
-the combined query that AGENTS.md quirk #7 says under-reports. A cell that a
-round trip's combined query priced names the calendar's codes, and a calendar
-of one airport pair has no `route` column; for both, give `detail` the
-calendar's codes.
+A multi-airport or metro calendar is asked one airport pair per query, plus the
+query as typed on a round trip, so `detail` also needs the pair that priced the
+picked cell, not the calendar's own codes: the table's `route` column
+(`MIA→CDG`) for the day's minimum, the pair printed beside a trip length another
+pair priced, or `origin`/`destination` on each day and trip length in `--json`.
+Given the calendar's codes, it asks the combined query that AGENTS.md quirk #7
+says under-reports. A cell that a round trip's combined query priced names the
+calendar's codes, and a calendar of one airport pair has no `route` column; for
+both, give `detail` the calendar's codes.
 
 The `--duration` flag on `detail` matters: followup needs to know the
 original calendar's duration range to preserve session context. If the
