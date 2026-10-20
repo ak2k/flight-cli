@@ -56,7 +56,7 @@ from typer import rich_utils
 # and break the suite's text assertions.
 os.environ["TTY_COMPATIBLE"] = "0"
 
-from flight_cli import _api_key, _config, _gf_browser
+from flight_cli import _api_key, _config, _gf_browser, links
 from flight_cli.pp import auth as pp_auth
 from flight_cli.providers.seats_aero import auth as seats_auth
 
@@ -392,6 +392,11 @@ class _NullCookies:
         return None
 
 
+# The Cheapest tab's `tfu=` marker (`links._GF_CHEAPEST_TFU`), the one thing in
+# its URL that no other page's carries.
+_CHEAPEST_TFU = "tfu=" + links._GF_CHEAPEST_TFU
+
+
 class _NoSleepTime:
     """`time`, with `sleep` costing nothing.
 
@@ -416,16 +421,32 @@ class _FakeResponse:
 
 
 class _FakeSession:
+    """The session's `get`, answering by the KIND of page asked for.
+
+    A Cheapest-tab URL (its `tfu=` marker) is served the last body; every other
+    URL is served the next body in order, the last repeating. So a caller that
+    passes the Best-tab bodies and then the Cheapest body gets the same pages as
+    before whichever GET arrives first, which is what lets the two be read at
+    once. The counters sit under a lock for the same reason."""
+
     def __init__(self, bodies: list[str], gets: list[str]) -> None:
         self._bodies = bodies
         self.gets = gets
         self.cookies = _NullCookies()
+        self._lock = threading.Lock()
+        self._best_gets = 0
 
     def get(self, url: str, **_kw: object) -> _FakeResponse:
-        self.gets.append(url)
-        # The last body repeats, so "every pinned leg answers this" is one
-        # argument rather than one per pin.
-        return _FakeResponse(text=self._bodies[min(len(self.gets) - 1, len(self._bodies) - 1)])
+        with self._lock:
+            self.gets.append(url)
+            if _CHEAPEST_TFU in url:
+                index = len(self._bodies) - 1
+            else:
+                # The last body repeats, so "every pinned leg answers this" is
+                # one argument rather than one per pin.
+                index = min(self._best_gets, len(self._bodies) - 1)
+                self._best_gets += 1
+        return _FakeResponse(text=self._bodies[index])
 
 
 class _FakeRateLimiter:
