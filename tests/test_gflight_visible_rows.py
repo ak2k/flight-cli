@@ -18,7 +18,7 @@ unpriced rows last.
 The multi-cabin arms carry more than `-n` where the table needs it. The table
 shows the top `-n` of the join, which prices every cabin on the sort cabin's
 itineraries; each cabin's list in the JSON document and the envelope holds the
-first `-n` of that cabin's own board, then, in price order, each other row of
+`-n` cheapest of that cabin's own board, then, in price order, each other row of
 the board whose fare the table prints or the line under it names. Every fare
 the table shows is then a row of its cabin in the document.
 
