@@ -10424,7 +10424,7 @@ def _all_cabins_refused(*, matrix_fallback: bool) -> _MatrixHandOff:
     """Every Google Flights cabin query raised a refusal, each named on stderr already.
 
     Under auto the whole search goes to Matrix, as a one-cabin search does; an
-    explicit Google backend exits 1. A cabin Google answered with no rows is
+    explicit Google backend or `--fast` exits 1. A cabin Google answered with no rows is
     `{cab: []}`, which is truthy, so it never reaches this."""
     if not matrix_fallback:
         err.print("[red]All Google Flights cabin queries failed.[/]")
@@ -10445,6 +10445,7 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
     gf_mode: GfTransportMode = TRANSPORT_HTTP,
     gf_headed: bool = False,
     matrix_fallback: bool = False,
+    hand_off_failure: bool = False,
     separate_tickets: SeparateTickets = "off",
     no_cache: bool = False,
 ) -> _MatrixHandOff | None:
@@ -10462,7 +10463,8 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
     no note on Google's table, and returns the hand-off for the caller to give
     the WHOLE search to Matrix: a per-cabin hand-off would put Google's rows and
     Matrix's documents in one answer and join prices from two sources. A cabin
-    Google served nothing for is Google's answer and is not handed on."""
+    Google served nothing for is Google's answer and is not handed on. With
+    `hand_off_failure` set, every cabin query failing is handed on as well."""
     # Widen per-cabin queries so the join has overlap; see _bumped_query_top_n.
     query_top_n = _bumped_query_top_n(top_n, len(cabins))
     unchecked = _return_checks_google_skips(legs) if separate_tickets != "off" else None
@@ -10477,7 +10479,7 @@ def _run_gflight_path_multi(  # noqa: PLR0912 — one arm per surface the boards
         separate_tickets="off" if unchecked else separate_tickets,
     )
     if not fli_by_cabin:
-        return _all_cabins_refused(matrix_fallback=matrix_fallback)
+        return _all_cabins_refused(matrix_fallback=hand_off_failure)
     # In the order the cabins were asked for; the fan-out fills `fli_by_cabin`
     # in the order they finish.
     emptied: dict[Cabin, int] = {
@@ -12352,6 +12354,7 @@ def search(  # noqa: PLR0912, PLR0915 — one branch per flag that refuses or re
                 gf_mode=gf_mode,
                 gf_headed=gf_headed,
                 matrix_fallback=backend == BACKEND_AUTO and not google_only,
+                hand_off_failure=backend == BACKEND_AUTO and not google_only and not fast,
                 separate_tickets=_separate_tickets_mode(
                     awards_only=sel.awards_only, no_separate_tickets=no_separate_tickets
                 ),

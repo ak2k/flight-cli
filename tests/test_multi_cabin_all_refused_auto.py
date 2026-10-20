@@ -64,3 +64,14 @@ def test_an_explicit_google_backend_still_exits_1_when_every_cabin_is_refused(
     assert result.exit_code == 1, result.output
     assert matrix_ran == []
     assert "All Google Flights cabin queries failed." in result.stderr
+
+
+def test_fast_still_exits_1_when_every_cabin_is_refused(
+    matrix_ran: list[tuple[Cabin, ...]],
+) -> None:
+    """`--fast` asks for Google Flights alone, as a one-cabin `--fast` does."""
+    result = CliRunner().invoke(cli.app, _search("--fast"))
+    assert result.exit_code == 1, result.output
+    assert matrix_ran == []
+    assert "All Google Flights cabin queries failed." in result.stderr
+    assert "Using Matrix" not in result.stderr
