@@ -5012,20 +5012,9 @@ def _help_faults(src: str, node: ast.Call, names: _Names) -> list[str]:
     ]
 
 
-def _slot_faults(src: str, node: ast.AST, chain: list[str], names: _Names) -> list[str]:
-    """Unescaped text assigned into a markup slot, or nothing.
-
-    Only the attribute ASSIGNED counts: `t.columns[0].header` is a slot and
-    `self.title.text` is not. The value is judged as a print argument would be, so
-    a tuple unpacked into slots faults whatever it holds."""
-    targets: list[ast.expr]
-    if isinstance(node, ast.Assign):
-        targets, value = node.targets, node.value
-    elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and node.value is not None:
-        targets = [node.target]
-        value = node.value
-    else:
-        return []
+def _slots_in(targets: list[ast.expr]) -> list[str]:
+    """The markup slot attributes among assignment targets, tuples and starred
+    names unpacked."""
     slots: list[str] = []
     pending = targets[::-1]
     while pending:
@@ -5036,9 +5025,39 @@ def _slot_faults(src: str, node: ast.AST, chain: list[str], names: _Names) -> li
             pending.append(target.value)
         elif isinstance(target, ast.Attribute) and target.attr in _MARKUP_SLOTS:
             slots.append(target.attr)
+    return slots
+
+
+def _slot_faults(src: str, node: ast.AST, chain: list[str], names: _Names) -> list[str]:
+    """Unescaped text assigned into a markup slot, or nothing.
+
+    Only the attribute ASSIGNED counts: `t.columns[0].header` is a slot and
+    `self.title.text` is not. The value is judged as a print argument would be, so
+    a tuple unpacked into slots faults whatever it holds. A slot bound as a `for`,
+    `async for`, comprehension or `with ... as` target has no value to judge, so
+    it faults whatever the iterable holds."""
+    where = chain[0] if chain else "<module>"
+    bound: ast.expr | None = None
+    if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+        bound = node.target
+    elif isinstance(node, ast.withitem):
+        bound = node.optional_vars
+    if bound is not None:
+        return [
+            f"{where}:{bound.lineno} .{slot} bound as a loop or with target: no value to judge"
+            for slot in _slots_in([bound])
+        ]
+    targets: list[ast.expr]
+    if isinstance(node, ast.Assign):
+        targets, value = node.targets, node.value
+    elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and node.value is not None:
+        targets = [node.target]
+        value = node.value
+    else:
+        return []
+    slots = _slots_in(targets)
     if not slots:
         return []
-    where = chain[0] if chain else "<module>"
     faults = _argument_faults(src, value, chain, names)
     return [
         f"{where}:{node.lineno} .{slot} assigned: {fault}" for slot in slots for fault in faults
@@ -5146,7 +5165,8 @@ def escape_scan(src: str) -> list[str]:
     a field whose conversion or format spec runs after the wrapper.
 
     It reads CALLS, and assignments to a markup slot attribute (`_MARKUP_SLOTS`),
-    by attribute name; a slot filled by an API this file does not name
+    by attribute name, and faults a slot bound as a loop or `with` target whatever
+    it holds; a slot filled by an API this file does not name
     (`setattr(t, "title", x)`) is still not read. `Panel` and `Text` sit in
     `_RENDERABLE_SINKS` unimported, so an aliased import of either would have
     coverage that looks present and is not. A typer `help=` / `epilog=` f-string is read

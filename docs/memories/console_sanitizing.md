@@ -189,8 +189,10 @@ which is a claim about the binding rather than about the name.
 The scan reads CALLS, and assignments to a markup slot attribute by name: a
 table or panel title, caption, header, footer or subtitle (`_MARKUP_SLOTS`)
 filled as `t.title = x`, `t.caption = x` or `t.columns[0].header = x`, or in the
-annotated or augmented form, is judged as a print argument would be. Matching is
-by attribute name because the scan cannot type the object, so a non-Rich
+annotated or augmented form, is judged as a print argument would be. A slot bound
+as a `for`, `async for`, comprehension or `with ... as` target has no value to
+judge, so it is a fault whatever the iterable holds. Matching is by attribute
+name because the scan cannot type the object, so a non-Rich
 `.title` assigned unwrapped text is flagged too, and gets a wrapper rather than
 an allowlist entry. What it still does not read is a slot filled through an API
 it does not name (`setattr`, a `__dict__` write, a method alias such as
