@@ -21,8 +21,11 @@ are honored server-side (reusing `apply_gf_native_filters`). It returns
 (`O:`/`-CODESHARE`/`~UA`/flight#) can't be honored on a grid; those calendars go
 to Matrix.
 
-We chunk windows to <=61 days OURSELVES with the full filter set, dodging the fli
-`SearchDates` >61-day bug that drops filters on later chunks (bd work-bcdex).
+We chunk windows to <=61 days OURSELVES with the full filter set. fli's
+`SearchDates` used to drop filters on later chunks of a >61-day window (bd
+work-bcdex); fli 0.9.0 fixed that and `flights>=0.9` is required, so the loop is
+redundant but harmless. It stays because dropping it needs a live >61-day grid to
+check fli's chunker against, and the grid RPC is gated (bd work-orp1i).
 Throttle-hardened via the shared `retry_throttled` (same code-13 detection +
 backoff as the search path). fli is heavy, so `cli` imports this module lazily —
 only when a GF calendar is actually run.
