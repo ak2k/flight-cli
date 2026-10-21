@@ -29,8 +29,9 @@ if TYPE_CHECKING:
 
 @pytest.fixture(autouse=True)
 def _restore_sigint() -> Iterator[None]:  # pyright: ignore[reportUnusedFunction] - autouse pytest fixture
-    """Start from Python's own disposition: an earlier test may leave SIGINT
-    ignored, and an ignore is what these tests look for."""
+    """Start from Python's own disposition: the process may start with SIGINT
+    ignored (a background launch does that), and an ignore is what these tests
+    look for."""
     previous = signal.getsignal(signal.SIGINT)
     signal.signal(signal.SIGINT, signal.default_int_handler)
     yield
