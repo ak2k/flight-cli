@@ -4857,7 +4857,9 @@ def _fmt_slice_cell(s: Slice) -> str:
     around the whole cell would show that tag instead of colouring the pitch."""
     dur_min = s.duration or 0
     dur = f"{dur_min // 60}h{dur_min % 60:02d}m" if dur_min else ""
-    flights = _safe_text("/".join(s.flights)) or "?"
+    # A space after each `/` makes every flight number its own word, so a cell
+    # that folds breaks between numbers and never inside one.
+    flights = _safe_text("/ ".join(s.flights)) or "?"
     times = _fmt_slice_times(s.departure or "", s.arrival or "")
     head = " ".join(p for p in (_fmt_slice_route(s), flights, times, dur) if p)
     tail = _fmt_legroom_lines(s)
