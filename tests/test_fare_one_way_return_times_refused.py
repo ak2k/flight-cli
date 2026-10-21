@@ -37,8 +37,8 @@ def test_fare_with_no_return_refuses_return_times_before_any_request(
     result = _fare("--return-times", "evening")
     assert result.exit_code == 2, result.output
     printed = " ".join(result.stderr.split())
-    assert "--return-times set the return's filters, and need a --return." in printed, printed
-    assert "Drop them, or add one." in printed
+    assert "--return-times sets the return's filters, and needs a --return." in printed, printed
+    assert "Drop it, or add one." in printed
     assert matrix.searches == []
     assert result.stdout == ""
 

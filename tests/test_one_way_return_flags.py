@@ -65,7 +65,7 @@ def test_a_one_way_calendar_refuses_a_return_only_flag(
     assert result.exit_code == 2, result.output
     stderr = _flat(result.stderr)
     assert flag in stderr
-    assert "need a round trip. Drop them, or drop --one-way." in stderr
+    assert "needs a round trip. Drop it, or drop --one-way." in stderr
     assert result.stdout == ""
     assert reached == []
 
@@ -76,7 +76,7 @@ def test_a_search_with_no_return_refuses_return_times(reached: list[str]) -> Non
     assert result.exit_code == 2, result.output
     stderr = _flat(result.stderr)
     assert "--return-times" in stderr
-    assert "need a --return or --return-arrive. Drop them, or add one." in stderr
+    assert "needs a --return or --return-arrive. Drop it, or add one." in stderr
     assert result.stdout == ""
     assert reached == []
 
