@@ -4,10 +4,12 @@
 """Airport sets and metro codes at the Google boundary.
 
 `flight search NYC LAX` and `JFK,EWR LHR` are answered by Google over every
-airport of the set. The expansion happens at the two Google sites only — the
-fli bridge and the pinned link — so the Matrix request keeps the user's tokens.
-Past the page's per-leg bound the search goes to Matrix, and the pinned link
-under it falls back to the itinerary's own airports and says so."""
+airport of the set. The search the user typed keeps its tokens when it goes to
+Matrix as one query. The expansion happens at the Google sites, the fli bridge
+and the pinned link, and in the per-airport queries that `_build_pp_legs` asks
+the award providers and `_calendar_split` asks Matrix for a multi-airport
+calendar. Past the page's per-leg bound the search goes to Matrix, and the pinned
+link under it falls back to the itinerary's own airports and says so."""
 
 from __future__ import annotations
 

@@ -46,3 +46,14 @@ def test_the_docstring_names_every_module_that_expands_metro_codes() -> None:
     missing = sorted(stem for stem in stems if f"`{stem}`" not in doc)
     assert not missing, f"_metro docstring does not name {missing}"
     assert "calendar" in doc
+
+
+def test_the_airport_sets_test_docstring_names_the_award_and_calendar_expansions() -> None:
+    """The `test_gf_airport_sets` docstring names every place a metro code
+    expands: the Google sites, the award providers and the calendar split."""
+    path: Path = Path(__file__).parent / "test_gf_airport_sets.py"
+    doc: str = ast.get_docstring(ast.parse(path.read_text())) or ""
+    flat: str = " ".join(doc.split())
+    assert "sites only" not in flat, flat
+    assert "`_build_pp_legs`" in flat, flat
+    assert "`_calendar_split`" in flat, flat
