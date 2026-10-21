@@ -115,3 +115,61 @@ def test_a_through_flight_written_as_one_leg_is_the_row_on_both_paths(
     answer = _through_answer()
     assert _verify_path(answer, monkeypatch, tmp_path) == ("match", None)
     assert _low_check_path(answer, tmp_path) == ("match", None)
+
+
+def test_a_summary_connecting_where_the_row_does_not_is_another_itinerary_on_both_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """The row connects at ORD and flies XX1 through DEN. The summary lists the
+    same stops, but its flight numbers connect at DEN and fly YY2 through ORD,
+    so it is not the row; its booking details cannot be asked to be the row's
+    flights, and Matrix prices these flights only on another itinerary."""
+    row = _row(
+        (
+            _flight("XX1", "JFK", "DEN", "2026-10-20T08:00", "2026-10-20T10:00"),
+            _flight("XX1", "DEN", "ORD", "2026-10-20T11:00", "2026-10-20T14:30"),
+            _flight("YY2", "ORD", "LAX", "2026-10-20T16:00", "2026-10-20T18:00"),
+        )
+    )
+    answer = _Answer(
+        row,
+        _chain(
+            _summary(
+                "XX-1",
+                _slice(
+                    "JFK",
+                    "LAX",
+                    "2026-10-20T08:00-04:00",
+                    "2026-10-20T18:00-07:00",
+                    ["XX1", "YY2", "YY2"],
+                    ["DEN", "ORD"],
+                ),
+            )
+        ),
+        {
+            "XX-1": _booked(
+                [
+                    _through(
+                        "XX1", ("JFK", "DEN", "2026-10-20T08:00-04:00", "2026-10-20T10:00-06:00")
+                    ),
+                    _through(
+                        "YY2",
+                        ("DEN", "ORD", "2026-10-20T11:00-06:00", "2026-10-20T14:30-05:00"),
+                        ("ORD", "LAX", "2026-10-20T16:00-05:00", "2026-10-20T18:00-07:00"),
+                    ),
+                ]
+            )
+        },
+        None,
+    )
+    summary = _solution(
+        "S-1",
+        "USD1.00",
+        "2026-10-20T08:00-04:00",
+        "2026-10-20T18:00-07:00",
+        ["XX1", "YY2", "YY2"],
+        ["DEN", "ORD"],
+    )
+    assert v.candidates(row, _answer(summary)) == []
+    assert _verify_path(answer, monkeypatch, tmp_path) == ("other-itinerary", None)
+    assert _low_check_path(answer, tmp_path) == ("other-itinerary", None)
