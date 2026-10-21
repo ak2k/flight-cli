@@ -23,3 +23,14 @@ def test_memo_l4_measurement_matches_the_recorded_run() -> None:
 
 def test_readme_calendar_counts_the_query_as_typed() -> None:
     assert _flat("README.md").count("plus the query as typed on a round trip") == 2
+
+
+def test_skill_and_calendar_memo_say_a_round_trip_also_runs_the_query_as_typed() -> None:
+    skill = _flat(".claude/skills/flight-search/SKILL.md")
+    assert (
+        "the calendar asked one query per airport pair, plus the query as typed on a round trip, "
+        "and each cell names the pair that priced it"
+    ) in skill
+    memo = _flat("docs/memories/calendar_two_phase.md")
+    assert "BVA, one query per pair and the query as typed on a round trip;" in memo
+    assert "is asked one airport pair per query, plus the query as typed on a round trip," in memo
