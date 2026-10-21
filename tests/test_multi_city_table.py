@@ -177,3 +177,20 @@ def test_a_narrow_multi_city_table_loses_no_cell_a_wide_one_prints(
         printed[console_width] = buf.getvalue()
     assert "…" not in printed[width]
     assert _rows(printed[width]) == _rows(printed[400])
+
+
+def test_a_folded_slice_cell_keeps_each_flight_number_on_one_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connecting list breaks between flight numbers, never inside one: cut
+    mid-number, `UA300/UA10` over `23 Nov01` reads the date as part of the number."""
+    itineraries = [
+        _itinerary("UA100/UA200", "UA100/UA200", "UA100/UA200", last, price="USD12345.00")
+        for last in ("UA300/UA1023", "UA300/UA1028")
+    ]
+    buf = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buf, width=80, color_system=None))
+    _render("single-cabin", itineraries)
+    printed = buf.getvalue()
+    assert "UA1023" in printed
+    assert "UA1028" in printed
