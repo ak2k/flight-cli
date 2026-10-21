@@ -197,15 +197,18 @@ def _same_ends(ms: Slice, legs: tuple[Flight, ...]) -> bool:
     codes = [_token(f) for f in ms.flights]
     stops = [_endpoint(s) for s in ms.stops]
     row_codes = [f.code for f in legs]
+    row_stops = [f.destination for f in legs[:-1]]
+    # A summary that lists one stop per pair of its flights puts each stop
+    # between two of them, so the stops equal the row's only when the flights
+    # join at the same airports; the connections decide that. Any other count
+    # lists a stop inside a through flight, which only the stops can compare.
+    joined = len(stops) == len(codes) - 1
     return (
         _folded(codes) == _folded(row_codes)
         and (
-            stops == [f.destination for f in legs[:-1]]
-            or (
-                len(stops) == len(codes) - 1
-                and _connections(codes, stops)
-                == _connections(row_codes, [f.destination for f in legs[:-1]])
-            )
+            _connections(codes, stops) == _connections(row_codes, row_stops)
+            if joined
+            else stops == row_stops
         )
         and _endpoint(ms.origin) == legs[0].origin
         and _endpoint(ms.destination) == legs[-1].destination
