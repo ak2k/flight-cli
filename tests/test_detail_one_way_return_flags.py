@@ -63,6 +63,19 @@ def test_a_one_way_detail_refuses_a_return_only_flag(
     assert sent == []
 
 
+def test_a_one_way_detail_refusal_of_one_flag_uses_singular_verbs(
+    sent: list[CalendarFollowup],
+) -> None:
+    """RED at base (the one flag gets the plural verbs: `set`, `need`, `them`)."""
+    result = _invoke(*_ONE_WAY, "--ext-ret", "MAXSTOPS 0")
+    assert result.exit_code == 2, result.output
+    assert (
+        "--ext-ret sets the return's filters, and needs a --return. Drop it, or add --return."
+        in _flat(result.stderr)
+    )
+    assert sent == []
+
+
 def test_a_one_way_detail_names_every_return_only_flag_it_was_given(
     sent: list[CalendarFollowup],
 ) -> None:
