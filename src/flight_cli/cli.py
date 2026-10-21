@@ -941,7 +941,7 @@ def _return_codes(
                 f"--routing-ret {_quote(mirror)} to fly it in reverse"
                 if mirror is not None
                 else "--routing-ret with the return's routing in its own order"
-                if "[" in routing or "]" in routing
+                if not why.startswith("names flight") and ("[" in routing or "]" in routing)
                 else "--routing-ret with the return flight's number"
             )
             + ", or --routing-ret '' for no routing on the return."
