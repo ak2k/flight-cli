@@ -48,6 +48,27 @@ def test_the_docstring_names_every_module_that_expands_metro_codes() -> None:
     assert "calendar" in doc
 
 
+def _flat_metro_doc() -> str:
+    return " ".join((_metro.__doc__ or "").split())
+
+
+def test_the_docstring_states_what_matrix_is_sent_and_what_cli_does_with_members() -> None:
+    """Two claims a reader acts on, each in its own sentence: Matrix gets the
+    user's metro token except in the per-pair queries `_calendar_split` builds,
+    and `cli` expands members for the award providers as well as counting them."""
+    flat: str = _flat_metro_doc()
+    matrix = (
+        "Matrix is sent the user's metro token as typed, except in the "
+        "per-pair queries `_calendar_split` builds."
+    )
+    award = "`cli` also asks the award providers one query per member-airport pair."
+    assert matrix in flat, flat
+    assert award in flat, flat
+    for sentence in flat.split(". "):
+        assert "always receives" not in sentence, sentence
+        assert "only counts" not in sentence, sentence
+
+
 def test_the_airport_sets_test_docstring_names_the_award_and_calendar_expansions() -> None:
     """The `test_gf_airport_sets` docstring names every place a metro code
     expands: the Google sites, the award providers and the calendar split."""
