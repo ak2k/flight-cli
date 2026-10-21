@@ -4993,8 +4993,10 @@ def _render_search(
     st.add_column("carriers")
     shown = res.solutions[:limit]
     count = max([_ROUND_TRIP_LEGS, *(len(it.itinerary.slices) for it in shown if it.itinerary)])
+    # Folded, not cut: Rich shares a short console between slice columns by their
+    # cells' lengths, so any slice cell can be narrowed past its longest word.
     for header in _slice_headers(count):
-        st.add_column(header)
+        st.add_column(header, overflow="fold")
     _keep_cells_whole(st, count)
     for i, it in enumerate(shown, 1):
         itn = it.itinerary
@@ -7823,8 +7825,9 @@ def _render_merged(
     t.add_column("Google", justify="right")
     t.add_column("delta", justify="right")
     t.add_column("why")
-    t.add_column("outbound")
-    t.add_column("return")
+    # Folded, as `_render_search` folds the same cells.
+    t.add_column("outbound", overflow="fold")
+    t.add_column("return", overflow="fold")
     explained = check.rows if check is not None else ()
     # The slice count of each shown row Google sells as separate tickets.
     marked: list[int] = []
@@ -10087,8 +10090,9 @@ def _render_multi_cabin_search(
     t.add_column("carriers")
     slice_counts = [len(r.itinerary.itinerary.slices) for r in rows if r.itinerary.itinerary]
     count = max([_ROUND_TRIP_LEGS, *slice_counts])
+    # Folded, as `_render_search` folds the same cells.
     for header in _slice_headers(count):
-        t.add_column(header)
+        t.add_column(header, overflow="fold")
     for letter in (_CABIN_TO_LETTER[c] for c in cabins):
         # Folded: a cell squeezed by Rich's default ellipsis loses its last digits,
         # and in a party's table the star that marks a per-traveler fare. Unwrapped
