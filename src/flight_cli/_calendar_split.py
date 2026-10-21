@@ -210,7 +210,8 @@ def merge_calendar_results(
 ) -> CalendarResult:
     """Merge per-pair calendar grids into one: per departure day the lowest fare
     across pairs, with each per-duration column also taken as the cross-pair
-    minimum and `solution_count` summed. Every day and every duration names the
+    minimum and `solution_count` summed over the answers that priced a day; one
+    that priced none adds nothing. Every day and every duration names the
     pair whose query priced it; on a tie the earlier pair keeps it. The prices
     are compared by number, so every result must be in one currency. The result
     is built via `CalendarResult.from_api` so it renders identically to a
@@ -239,7 +240,7 @@ def merge_calendar_results(
             cheapest_pv = cpv
             cheapest_notice = (res.raw or {}).get("currencyNotice") or {}
         _fold(cells, pair, res, floor=i == len(results))
-    total_sols = sum(res.solution_count for _, res in results) + sum(
+    total_sols = sum(res.solution_count for _, res in results if res.priced_days) + sum(
         c.floor_sols for c in cells.values() if not c.sols
     )
     dated = window is not None and window.end - window.start >= _RECUR
