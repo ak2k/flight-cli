@@ -4,13 +4,15 @@ Matrix takes a metro code (`NYC`) as one token; Google's search page takes
 airports only, repeated per leg. Four modules expand metro codes through this
 table: `fli_bridge` and `links` build the Google request and the pinned link;
 `cli` counts members the same way, for example in the backend picker, the link
-caveats and the calendar grid gates, and asks the award providers one query per
-member-airport pair; `_calendar_split` fans a multi-airport calendar out into
-one Matrix query per member-airport pair. `_gf_postfilter` reads it only to keep a
--CITIES exclusion of a metro code off the search page, where a row names the
-metro's airports and never the metro. The domain `Search`, the user's
-search asked of Matrix as one query and the Matrix deep link keep the user's
-tokens, as does the combined query a round-trip calendar runs beside its pairs."""
+caveats and the calendar grid gates; `_calendar_split` fans a multi-airport
+calendar out into one Matrix query per member-airport pair. `cli` also asks the
+award providers one query per member-airport pair. `_gf_postfilter` reads it
+only to keep a -CITIES exclusion of a metro code off the search page, where a
+row names the metro's airports and never the metro. Matrix is sent the user's
+metro token as typed, except in the per-pair queries `_calendar_split` builds.
+The domain `Search`, the user's search asked of Matrix as one query and the
+Matrix deep link keep the user's tokens, as does the combined query a
+round-trip calendar runs beside its pairs."""
 
 from __future__ import annotations
 
