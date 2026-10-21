@@ -164,6 +164,27 @@ def test_a_flight_number_is_offered_the_return_flight_not_a_mirror(
     assert ran == []
 
 
+def test_a_bracketed_flight_number_is_offered_the_return_flight(
+    ran: list[tuple[str, Any]],
+) -> None:
+    """RED at base: a bracket anywhere in the routing chose the remedy for an
+    ordered chain, though the reason names a flight."""
+    errs = [_flat(_invoke("search", "--routing", r).stderr) for r in ("[DL747]", "[AA25] [AA25]")]
+    for err in errs:
+        assert "which flies one way" in err
+        assert "--routing-ret with the return flight's number" in err
+        assert "in its own order" not in err
+    assert ran == []
+
+
+def test_a_bracketed_chain_is_still_offered_its_own_order(ran: list[tuple[str, Any]]) -> None:
+    """Green at base and after: no flight is named, and a bracket cannot be
+    mirrored, so the return's routing is the user's to write."""
+    err = _flat(_invoke("search", "--routing", "[AA] [BB]").stderr)
+    assert "--routing-ret with the return's routing in its own order" in err
+    assert ran == []
+
+
 def test_the_refusal_escapes_the_routing_it_quotes(ran: list[tuple[str, Any]]) -> None:
     """RED at base. A bracket in the user's own text must print as text: one
     reaching the console unescaped is a style tag, or a MarkupError."""
