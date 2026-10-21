@@ -59,7 +59,7 @@ def test_a_one_way_detail_refuses_a_return_only_flag(
     assert result.exit_code == 2, result.output
     stderr = _flat(result.stderr)
     assert flag in stderr
-    assert "need a --return" in stderr
+    assert "needs a --return" in stderr
     assert sent == []
 
 

@@ -908,9 +908,19 @@ def _refuse_return_only_flags(
         if value is not None
     ]
     if names:
+        one = len(names) == 1
         err.print(
-            f"[red]{_safe_text(', '.join(names))} set the return's filters, and need "
-            f"{_safe_text(need)}.[/] Drop them, or {_safe_text(remedy)}."
+            "[red]"
+            + _safe_text(", ".join(names))
+            + (" sets" if one else " set")
+            + " the return's filters, and "
+            + ("needs " if one else "need ")
+            + _safe_text(need)
+            + ".[/] Drop "
+            + ("it" if one else "them")
+            + ", or "
+            + _safe_text(remedy)
+            + "."
         )
         raise typer.Exit(2)
 
