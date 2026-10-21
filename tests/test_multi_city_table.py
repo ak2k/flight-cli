@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import io
 from typing import Any
 
@@ -10,7 +11,7 @@ from rich.console import Console
 
 from flight_cli import cli
 from flight_cli._multi_cabin import MultiCabinRow
-from flight_cli.domain import Cabin
+from flight_cli.domain import Cabin, Leg
 from flight_cli.models import Itinerary, SearchResult
 
 
@@ -101,6 +102,18 @@ def test_a_short_row_on_a_three_slice_table_dashes_its_missing_slices(
     assert short_line.count("—") == 2
 
 
+_DEP = dt.date(2026, 11, 1)
+
+
+class _MergedRow:
+    """A row of the Google + Matrix table that both sources priced alike."""
+
+    def __init__(self, itinerary: Itinerary) -> None:
+        self.itinerary = itinerary
+        self.source = "both"
+        self.gf_price = self.matrix_price = itinerary.price
+
+
 def _render(
     table: str,
     itineraries: list[Itinerary],
@@ -111,6 +124,13 @@ def _render(
     if table == "single-cabin":
         cli._render_search(  # pyright: ignore[reportPrivateUsage]
             _result(*itineraries), passengers=passengers
+        )
+        return
+    if table == "merged":
+        cli._render_merged(  # pyright: ignore[reportPrivateUsage]
+            [_MergedRow(itn) for itn in itineraries],
+            legs=(Leg.of("JFK", "LAX", _DEP), Leg.of("LAX", "JFK", _DEP)),
+            top_n=len(itineraries),
         )
         return
     rows: list[MultiCabinRow] = []
@@ -177,3 +197,53 @@ def test_a_narrow_multi_city_table_loses_no_cell_a_wide_one_prints(
         printed[console_width] = buf.getvalue()
     assert "…" not in printed[width]
     assert _rows(printed[width]) == _rows(printed[400])
+
+
+def test_a_folded_slice_cell_keeps_each_flight_number_on_one_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connecting list breaks between flight numbers, never inside one: cut
+    mid-number, `UA300/UA10` over `23 Nov01` reads the date as part of the number."""
+    itineraries = [
+        _itinerary("UA100/UA200", "UA100/UA200", "UA100/UA200", last, price="USD12345.00")
+        for last in ("UA300/UA1023", "UA300/UA1028")
+    ]
+    buf = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buf, width=80, color_system=None))
+    _render("single-cabin", itineraries)
+    printed = buf.getvalue()
+    assert "UA1023" in printed
+    assert "UA1028" in printed
+
+
+@pytest.mark.parametrize(
+    ("table", "cabins", "slice_columns"),
+    [
+        ("single-cabin", (Cabin.COACH,), slice(3, 5)),
+        ("multi-cabin", (Cabin.COACH, Cabin.BUSINESS), slice(2, 4)),
+        ("merged", (Cabin.COACH,), slice(6, 8)),
+    ],
+    ids=["single-cabin", "two-cabin-prices", "google-and-matrix"],
+)
+def test_a_narrow_round_trip_table_cuts_no_slice_cell(
+    monkeypatch: pytest.MonkeyPatch,
+    table: str,
+    cabins: tuple[Cabin, ...],
+    slice_columns: slice,
+) -> None:
+    """Rich shares a short console between the outbound and return columns by
+    their cells' lengths, so any slice cell can be the one narrowed past its
+    longest word: cut there, `09:00→12:…` hides the arrival."""
+    itineraries = [
+        _itinerary("UA100/UA200", last, price="USD12345.00")
+        for last in ("UA300/UA1023", "UA300/UA1028")
+    ]
+    printed: dict[int, list[list[str]]] = {}
+    # From 33, a border, padding and one character for each of up to eight columns.
+    narrow = range(33, 121)
+    for width in (400, *narrow):
+        buf = io.StringIO()
+        monkeypatch.setattr(cli, "console", Console(file=buf, width=width, color_system=None))
+        _render(table, itineraries, cabins=cabins)
+        printed[width] = [row[slice_columns] for row in _rows(buf.getvalue())]
+    assert [width for width in narrow if printed[width] != printed[400]] == []
