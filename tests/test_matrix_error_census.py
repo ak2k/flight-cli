@@ -210,3 +210,23 @@ def test_the_census_fails_on_a_reporter_call_the_arm_may_not_run(
     with pytest.raises(AssertionError) as failed:
         test_every_arm_that_names_a_matrix_error_reports_it_through_the_reporter()
     assert "unlisted [('_new_arm', 'except'" in str(failed.value)
+
+
+def test_the_census_fails_on_an_arm_that_names_the_error_through_a_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`client.MatrixApiError` names the error as the bare name does."""
+    _census_with(
+        monkeypatch,
+        "def _new_arm(f):\n"
+        "    try:\n        pass\n    except client.MatrixApiError:\n"
+        "        raise typer.Exit(1)\n"
+        "    if isinstance(f, client.MatrixApiError):\n        raise typer.Exit(1)",
+    )
+    try:
+        test_every_arm_that_names_a_matrix_error_reports_it_through_the_reporter()
+    except AssertionError as failed:
+        said = str(failed)
+    else:
+        said = "the census stayed green"
+    assert "unlisted [('_new_arm', 'except', False), ('_new_arm', 'isinstance', False)]" in said
