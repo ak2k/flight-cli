@@ -3,12 +3,13 @@ through `_print_matrix_error`, so one backend error reads the same whichever
 command asked for it.
 
 Parsed from the module. An arm is an `except` whose type names
-`MatrixApiError`, or an `if` whose test is `isinstance(..., MatrixApiError)`
-alone or under `and`/`or`. A new arm that prints the error some other way fails
-here until it reports through the reporter or is added to `_SOFT` with its
-reason. Not seen: a negated test, an `isinstance` inside another call, a
-`match` case and a conditional expression. A list of callers in the reporter's
-docstring rots on the next edit and says nothing when it does; this does."""
+`MatrixApiError`, bare or as `module.MatrixApiError`, or an `if` whose test is
+`isinstance(..., MatrixApiError)` alone or under `and`/`or`. A new arm that
+prints the error some other way fails here until it reports through the
+reporter or is added to `_SOFT` with its reason. Not seen: a negated test, an
+`isinstance` inside another call, a `match` case and a conditional expression.
+A list of callers in the reporter's docstring rots on the next edit and says
+nothing when it does; this does."""
 
 from __future__ import annotations
 
@@ -40,7 +41,13 @@ def _cli_tree() -> ast.Module:
 
 
 def _names_error(node: ast.AST) -> bool:
-    return any(isinstance(n, ast.Name) and n.id == "MatrixApiError" for n in ast.walk(node))
+    """Whether `node` names the error, bare or through a module as in
+    `client.MatrixApiError`."""
+    return any(
+        (isinstance(n, ast.Name) and n.id == "MatrixApiError")
+        or (isinstance(n, ast.Attribute) and n.attr == "MatrixApiError")
+        for n in ast.walk(node)
+    )
 
 
 def _calls_reporter(body: list[ast.stmt]) -> bool:
