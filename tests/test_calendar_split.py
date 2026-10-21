@@ -639,6 +639,20 @@ def test_merge_counts_the_combined_query_only_where_the_pairs_counted_nothing() 
     assert merged.solution_count == 7  # the pair's 3 and the 4 on the day no pair priced
 
 
+def test_merge_total_leaves_out_an_answer_that_priced_no_day() -> None:
+    priced = _priced("USD600.00")  # 3 solutions on one priced day
+    bare = CalendarResult.from_api({"solutionCount": 5})
+    noticed = CalendarResult.from_api(
+        {"solutionCount": 5, "currencyNotice": {"ext": {"price": "GBP400.00"}}}
+    )
+    assert (
+        merge_calendar_results([(("JFK", "LHR"), priced), (("EWR", "LHR"), bare)]).solution_count
+        == 3
+    )
+    merged = merge_calendar_results([(("JFK", "LHR"), priced), (("EWR", "LHR"), noticed)])
+    assert merged.solution_count == 3  # the 5 solutions of EWR's answer price no day
+
+
 @pytest.mark.parametrize(
     "grids",
     [
