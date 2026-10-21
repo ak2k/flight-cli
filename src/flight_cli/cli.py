@@ -411,6 +411,19 @@ def _resolve_duration(duration: str, *, round_trip: bool) -> tuple[int, int]:
     return _parse_duration(_DEFAULT_CALENDAR_DURATION)
 
 
+def _require_window_order(start: date, end: date) -> None:
+    """Exit 2 on a window that ends before it starts.
+
+    No backend can answer it, and each rung would refuse it in its own words (the
+    browser rung would run it), so the CLI answers once, before any of them."""
+    if end < start:
+        err.print(
+            f"[red]--end {_quote(end.isoformat())} is before --start "
+            f"{_quote(start.isoformat())}; the window must end on or after its start.[/]"
+        )
+        raise typer.Exit(2)
+
+
 def _parse_iata_list(s: str) -> tuple[str, ...]:
     """The typed airports, uppercased, each once, in typed order."""
     return tuple(dict.fromkeys(a.strip().upper() for a in s.split(",") if a.strip()))
@@ -13176,6 +13189,7 @@ def calendar(
     origins, dests = _require_airports(origin, destination)
     sd = _parse_date(start)
     ed = _parse_date(end) if end else sd + timedelta(days=30)
+    _require_window_order(sd, ed)
     if one_way:
         _refuse_return_only_flags(
             return_times=return_times,
