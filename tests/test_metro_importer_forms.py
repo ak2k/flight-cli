@@ -42,3 +42,15 @@ def test_the_scanner_reports_an_importer_in_every_import_form(stand_in_package: 
         (stand_in_package / f"{stem}.py").write_text(source)
     (stand_in_package / "unrelated.py").write_text("from . import _config\nimport json\n")
     assert _expanding_modules() == set(_FORMS)
+
+
+def test_the_scanner_keeps_same_named_modules_in_a_subpackage_apart(
+    stand_in_package: Path,
+) -> None:
+    """`links` and `sub.links` share a stem; the docstring must name each."""
+    (stand_in_package / "links.py").write_text("from ._metro import expand_airports\n")
+    sub = stand_in_package / "sub"
+    sub.mkdir()
+    (sub / "__init__.py").write_text("")
+    (sub / "links.py").write_text("from .. import _metro\n")
+    assert _expanding_modules() == {"links", "sub.links"}
