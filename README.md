@@ -174,9 +174,10 @@ or outage worth retrying, and 1 otherwise. Each failure names its cause; a
 ([docs/memories/doctor.md](docs/memories/doctor.md)). Credentials appear only
 as `sha256:` fingerprints.
 
-When Matrix answers with a body the response models cannot read, a search
-stops with a line naming the field, the issue tracker and a saved copy of the
-body under `~/.cache/flight-cli/shape-changes/` (`MATRIX_CACHE_DIR` moves it).
+When Matrix answers with a body the response models cannot read, a search, a
+booking-details or fare-rules follow-up, or an airport lookup stops with a line
+naming the field, the issue tracker and a saved copy of the body under
+`~/.cache/flight-cli/shape-changes/` (`MATRIX_CACHE_DIR` moves it).
 Attach that file to the report; `-vv` adds every field the parse refused.
 
 ## Award overlay
