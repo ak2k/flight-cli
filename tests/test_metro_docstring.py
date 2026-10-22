@@ -2,7 +2,9 @@
 
 A reader of `_metro` learns from its docstring where a metro code turns into
 member airports and what Matrix is sent. Parsed from the package so a new
-importer of `_metro` fails here until the docstring names it."""
+importer of `_metro` fails here until the docstring names it. A module in a
+subpackage is named by its dotted path (`pp.links`), so it never passes for a
+top-level module with the same file name."""
 
 from __future__ import annotations
 
@@ -29,21 +31,23 @@ def _imports_metro(node: ast.AST) -> bool:
 
 
 def _expanding_modules() -> set[str]:
-    stems: set[str] = set()
-    for path in Path(flight_cli.__file__).parent.rglob("*.py"):
-        if path.stem == "_metro":
+    root: Path = Path(flight_cli.__file__).parent
+    names: set[str] = set()
+    for path in root.rglob("*.py"):
+        name: str = ".".join(path.relative_to(root).with_suffix("").parts)
+        if name == "_metro":
             continue
         tree: ast.Module = ast.parse(path.read_text())
         if any(_imports_metro(node) for node in ast.walk(tree)):
-            stems.add(path.stem)
-    return stems
+            names.add(name)
+    return names
 
 
 def test_the_docstring_names_every_module_that_expands_metro_codes() -> None:
-    stems = _expanding_modules()
-    assert "_calendar_split" in stems, sorted(stems)
+    names = _expanding_modules()
+    assert "_calendar_split" in names, sorted(names)
     doc: str = _metro.__doc__ or ""
-    missing = sorted(stem for stem in stems if f"`{stem}`" not in doc)
+    missing = sorted(name for name in names if f"`{name}`" not in doc)
     assert not missing, f"_metro docstring does not name {missing}"
     assert "calendar" in doc
 
