@@ -1,0 +1,282 @@
+"""Replay saved runs of the Google http-versus-Chrome disagreement probe.
+
+    python tests/live_probe/probe.py --replay RUNS --out DIR
+
+RUNS holds one step directory per load, named <query>-<role> (role http or
+browser) with a `.2` suffix on the second, back-to-back pair. A step directory
+holds argv.json, stdout, stderr, seconds and exit. The script writes
+DIR/report.json and DIR/summary.txt and prints the summary. It reads files
+only and imports nothing outside the standard library.
+
+Exit 0: no counted finding. 1: a counted finding. 2: a usage error, an
+unreadable step, or a run that measured nothing.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from collections import Counter
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Literal, assert_never, cast
+
+_STEP = re.compile(r"(?P<query>.+)-(?P<role>http|browser)(?P<second>\.2)?")
+_EXIT = re.compile(r"-?\d{1,4}")
+_ROLES = {"http", "browser"}
+_PRICE_TOLERANCE = 0.01
+_TOP_ROWS = 10
+
+type Finding = tuple[int, str]  # (rule, check name)
+type Status = Literal[
+    "ok", "timeout", "lock-timeout", "lock-failed", "throttled", "refused", "no-document"
+]
+
+
+class RunNotValid(Exception):
+    """A step directory the replay cannot read."""
+
+
+@dataclass(frozen=True)
+class Step:
+    status: Status
+    doc: dict[str, Any] | None
+
+
+def _is_ok(status: Status) -> bool:
+    match status:
+        case "ok":
+            return True
+        case "timeout" | "lock-timeout" | "lock-failed" | "throttled" | "refused" | "no-document":
+            return False
+        case _:
+            assert_never(status)
+
+
+def _obj(value: object) -> dict[str, Any] | None:
+    return cast("dict[str, Any]", value) if isinstance(value, dict) else None
+
+
+def _arr(value: object) -> list[Any] | None:
+    return cast("list[Any]", value) if isinstance(value, list) else None
+
+
+def _num(value: object) -> float | None:
+    return value if isinstance(value, int | float) else None
+
+
+def _read(path: Path) -> str:
+    try:
+        return path.read_text(errors="replace")
+    except OSError as err:
+        raise RunNotValid(f"{path.parent.name}: {err.strerror or err}") from err
+
+
+def _load_step(path: Path) -> Step:
+    try:
+        argv = _obj(json.loads(_read(path / "argv.json")))
+    except (ValueError, RecursionError) as err:
+        raise RunNotValid(f"{path.name}: argv.json is not JSON") from err
+    flight = _arr(argv.get("flight")) if argv else None
+    full = _arr(argv.get("full")) if argv else None
+    if flight is None or full is None:
+        raise RunNotValid(f"{path.name}: argv.json lacks flight and full lists")
+    locked = len(full) > len(flight) + 1
+    # Matched as text: a JSON parse of a file like [[[... raises RecursionError.
+    text = _read(path / "exit").strip()
+    if not _EXIT.fullmatch(text):
+        raise RunNotValid(f"{path.name}: exit file is not an integer")
+    code = int(text)
+    stdout = _read(path / "stdout")
+    if code == 124:
+        return Step("lock-timeout" if locked else "timeout", None)
+    if locked and code != 0 and not stdout.strip():
+        return Step("lock-failed", None)
+    if "rate-limited" in _read(path / "stderr"):
+        return Step("throttled", None)
+    if code == 2:
+        return Step("refused", None)
+    if code in (0, 1):
+        try:
+            doc = _obj(json.loads(stdout))
+        except (ValueError, RecursionError):
+            doc = None
+        if doc is not None and "complete" in doc:
+            return Step("ok", doc)
+    return Step("no-document", None)
+
+
+def _cabins(doc: dict[str, Any]) -> dict[str, list[Any]]:
+    out: dict[str, list[Any]] = {}
+    for item in _arr(doc.get("results")) or []:
+        group = _obj(item)
+        if group is not None and isinstance(group.get("cabin"), str):
+            out[group["cabin"]] = _arr(group.get("rows")) or []
+    return out
+
+
+def _cheapest(rows: list[Any]) -> float | None:
+    prices = [p for r in rows if (p := _num((_obj(r) or {}).get("price"))) is not None]
+    return min(prices) if prices else None
+
+
+def _separate(row: object) -> bool:
+    body = (_obj(row) or {}).get("row")
+    members = _arr(body) or [body]
+    return any((_obj(m) or {}).get("separate_tickets") is True for m in members)
+
+
+def _split(doc: dict[str, Any]) -> tuple[int | None, float | None]:
+    combos = _arr((_obj(doc.get("split_ticket")) or {}).get("combinations"))
+    if combos is None:
+        return None, None
+    totals = [t for c in combos if (t := _num((_obj(c) or {}).get("total"))) is not None]
+    return len(combos), (min(totals) if totals else None)
+
+
+def _apart(a: float | None, b: float | None) -> bool:
+    if a is None or b is None:
+        return a is not b
+    return abs(a - b) > _PRICE_TOLERANCE
+
+
+def _rule1(http: dict[str, Any], browser: dict[str, Any]) -> dict[str, tuple[Any, Any]]:
+    """Check name -> (http value, browser value) for each field that differs."""
+    found: dict[str, tuple[Any, Any]] = {}
+    for key in ("complete", "backend"):
+        if http.get(key) != browser.get(key):
+            found[key] = (http.get(key), browser.get(key))
+    a, b = _cabins(http), _cabins(browser)
+    for cabin in sorted(a.keys() | b.keys()):
+        if (cabin in a) != (cabin in b):
+            found[cabin + " board"] = (cabin in a, cabin in b)
+            continue
+        ra, rb = a[cabin], b[cabin]
+        if len(ra) != len(rb):
+            found[cabin + " rows"] = (len(ra), len(rb))
+        ca, cb = _cheapest(ra), _cheapest(rb)
+        if _apart(ca, cb):
+            found[cabin + " cheapest"] = (ca, cb)
+        sa = sum(_separate(r) for r in ra[:_TOP_ROWS])
+        sb = sum(_separate(r) for r in rb[:_TOP_ROWS])
+        if sa != sb:
+            found[cabin + " separate-ticket rows"] = (sa, sb)
+    (na, ta), (nb, tb) = _split(http), _split(browser)
+    if na != nb:
+        found["split_ticket combinations"] = (na, nb)
+    if _apart(ta, tb):
+        found["split_ticket cheapest"] = (ta, tb)
+    return found
+
+
+def _rule3(doc: dict[str, Any]) -> bool:
+    return doc.get("complete") is False and not doc.get("notes")
+
+
+def _pair_findings(pair: dict[str, Step]) -> dict[Finding, tuple[Any, Any]]:
+    found: dict[Finding, tuple[Any, Any]] = {}
+    http, browser = pair["http"].doc, pair["browser"].doc
+    if http is not None and browser is not None:
+        for check, values in _rule1(http, browser).items():
+            found[(1, check)] = values
+    bad = {r: s.doc is not None and _rule3(s.doc) for r, s in pair.items()}
+    if any(bad.values()):
+        found[(3, "incomplete")] = (
+            "incomplete, no notes" if bad["http"] else "fine",
+            "incomplete, no notes" if bad["browser"] else "fine",
+        )
+    return found
+
+
+def _confirm(
+    first: dict[Finding, tuple[Any, Any]], second: dict[str, Step] | None
+) -> tuple[dict[Finding, tuple[Any, Any]], list[str]]:
+    """Split a query's first-pair findings into counted and unconfirmed."""
+    again: set[Finding] = set()
+    if (
+        second is not None
+        and set(second) == _ROLES
+        and all(_is_ok(s.status) for s in second.values())
+    ):
+        again = set(_pair_findings(second))
+    counted = {k: v for k, v in first.items() if k in again}
+    return counted, [k[1] for k in first if k not in again]
+
+
+def replay(runs: Path) -> tuple[dict[str, Any], list[str]]:
+    """The report and its summary lines."""
+    pairs: dict[tuple[str, bool], dict[str, Step]] = {}
+    try:
+        listed = sorted(runs.iterdir())
+    except OSError as err:
+        raise RunNotValid(f"{runs}: {err.strerror or err}") from err
+    for path in listed:
+        m = _STEP.fullmatch(path.name)
+        if m is None or not path.is_dir():
+            continue
+        step = _load_step(path)
+        pairs.setdefault((m["query"], m["second"] is not None), {})[m["role"]] = step
+    queries = sorted({q for q, _ in pairs})
+    steps = Counter(s.status for p in pairs.values() for s in p.values())
+    findings: list[dict[str, Any]] = []
+    unconfirmed: list[str] = []
+    lines: list[str] = []
+    for query in queries:
+        first = pairs.get((query, False), {})
+        if set(first) != _ROLES:
+            continue
+        counted, dropped = _confirm(_pair_findings(first), pairs.get((query, True)))
+        unconfirmed += dropped
+        for (rule, check), (a, b) in counted.items():
+            findings.append({"query": query, "rule": rule, "check": check, "http": a, "browser": b})
+            lines.append(f"{query} rule {rule} {check}: http {a} vs browser {b}")
+    invalid: list[str] = []
+    if steps["lock-failed"]:
+        invalid.append(f"run not valid: lock failed on {steps['lock-failed']} step(s)")
+    if not steps["ok"]:
+        invalid.append("run not valid: no step succeeded")
+    counts = ", ".join(f"{k}={v}" for k, v in sorted(steps.items()))
+    head = f"{len(findings)} disagreement(s) over {len(queries)} queries; steps: {counts}"
+    report: dict[str, Any] = {
+        "queries": queries,
+        "steps": dict(steps),
+        "findings": findings,
+        "unconfirmed": unconfirmed,
+        "invalid": invalid,
+    }
+    return report, [head, *lines, *invalid]
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Replay saved disagreement-probe runs.")
+    parser.add_argument("--replay", required=True, type=Path, metavar="RUNS")
+    parser.add_argument("--out", required=True, type=Path, metavar="DIR")
+    args = parser.parse_args(argv)
+    runs: Path = args.replay
+    out: Path = args.out
+    if not runs.is_dir():
+        parser.error(f"RUNS is not a directory: {runs}")
+    try:
+        report, lines = replay(runs)
+    except RunNotValid as err:
+        print(f"run not valid: {err}", file=sys.stderr)
+        return 2
+    # Query names and JSON strings may hold text no output encoding takes.
+    summary = ("\n".join(lines) + "\n").encode("ascii", "backslashreplace").decode("ascii")
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+        (out / "summary.txt").write_text(summary)
+    except OSError as err:
+        print(f"cannot write {out}: {err}", file=sys.stderr)
+        return 2
+    sys.stdout.write(summary)
+    if report["invalid"]:
+        return 2
+    return 1 if report["findings"] else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
