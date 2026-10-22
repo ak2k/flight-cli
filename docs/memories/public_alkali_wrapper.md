@@ -57,8 +57,9 @@ and `models.py`), we are the documentation.
 
 1. **Run the golden-file tests first.** If `tests/test_wire_round_trip.py`
    still passes, the request shape is fine — the break is in the response.
-2. **Read the body the failing run kept.** A search whose answer the models
-   refuse saves it as `shape-changes/matrix-<UTC stamp>.json` under the cache
+2. **Read the body the failing run kept.** A Matrix call whose answer the models
+   refuse (a search, a booking-details or fare-rules follow-up, or an airport
+   lookup) saves it as `shape-changes/matrix-<UTC stamp>.json` under the cache
    dir (`MATRIX_CACHE_DIR`, default `~/.cache/flight-cli`) and names the file
    in its error (`MatrixShapeError`, `client.py`). If there is none, capture a
    fresh SPA session via `research/record_user_session.py`. Diff against the
