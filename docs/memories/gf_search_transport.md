@@ -94,10 +94,10 @@ so every row Google serves at one fails. Build airport members only through
 `fli_bridge.fli_airport`, which gives each aliased code a member of its own,
 named that code with the same display name (so the JSON dump shows "Naha
 Airport" for OKA and NAH alike). `tests/test_airport_alias_requests.py` fails on
-an `Airport[...]` subscript, a member read off the enum, `__members__` outside
-an `.items()` loop, or `getattr`/`hasattr` on it, under any import name or
-dotted path, and on a `_parse_airport` call outside `_leg_airport`, all under
-`src/`; `tests/test_airport_enum_gate.py` holds each form it is proven on. MLH
+every load of the enum or of `_parse_airport` under `src/`, under any import
+name or dotted path, except an annotation, an `isinstance` check and the bodies
+of `fli_airports` and `_leg_airport`; `tests/test_airport_enum_gate.py` holds
+each form it is proven on. MLH
 is the one alias kept: it is EuroAirport's second code, the same airport as BSL,
 and Google serves it only as BSL (JFK-MLH asked for MLH gave an empty board,
 asked for BSL 8 rows). Measured 2026-10-01: `flight search LAX OKA --dep
