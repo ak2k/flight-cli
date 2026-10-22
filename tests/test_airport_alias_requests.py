@@ -308,58 +308,70 @@ def _enum_lookups(tree: ast.AST) -> list[int]:
     names = {"Airport", "FliAirport"} | imported_as("Airport")
     parsers = {"_parse_airport"} | imported_as("_parse_airport")
 
-    def is_enum(node: ast.expr) -> bool:
-        return (isinstance(node, ast.Name) and node.id in names) or (
-            isinstance(node, ast.Attribute) and node.attr == "Airport"
-        )
-
-    def is_parser(node: ast.expr) -> bool:
-        return (isinstance(node, ast.Name) and node.id in parsers) or (
-            isinstance(node, ast.Attribute) and node.attr == "_parse_airport"
-        )
-
-    members = set(Airport.__members__)
-    # Iterating the whole table is how `fli_bridge` builds its own.
-    iterated = {
-        id(node.value) for node in nodes if isinstance(node, ast.Attribute) and node.attr == "items"
-    }
+    # An annotation and an `isinstance` check name the type, not a code, the body
+    # of `fli_airports` is where `fli_bridge` builds its own table, and
     # `_leg_airport` decodes only a code missing from fli's table, which cannot alias.
-    unaliased = {
-        id(inner)
-        for node in nodes
-        if isinstance(node, ast.FunctionDef) and node.name == "_leg_airport"
-        for inner in ast.walk(node)
-    }
-    lines: list[int] = []
+    roots: list[ast.AST] = []
+    table: list[ast.stmt] = []
     for node in nodes:
-        if (
-            (isinstance(node, ast.Subscript) and is_enum(node.value))
-            or (isinstance(node, ast.Attribute) and is_enum(node.value) and node.attr in members)
+        if isinstance(node, ast.arg | ast.AnnAssign) and node.annotation is not None:
+            roots.append(node.annotation)
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            if node.returns is not None:
+                roots.append(node.returns)
+            if isinstance(node, ast.FunctionDef) and node.name in {"fli_airports", "_leg_airport"}:
+                table.extend(node.body)
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "isinstance"
+            and len(node.args) == 2
+        ):
+            roots.append(node.args[1])
+    # A call or lambda in a type is `Annotated` metadata, which typer and pydantic
+    # run, and a member or subscript of the enum names a code, as `Literal` does.
+    code = {
+        id(sub)
+        for root in roots
+        for run in ast.walk(root)
+        if isinstance(run, ast.Call | ast.Lambda)
+        or (
+            isinstance(run, ast.Attribute | ast.Subscript)
+            and (
+                (isinstance(run.value, ast.Name) and run.value.id in names)
+                or (isinstance(run.value, ast.Attribute) and run.value.attr == "Airport")
+            )
+        )
+        for sub in ast.walk(run)
+    }
+    exempt = {id(sub) for root in roots for sub in ast.walk(root)} - code
+    exempt |= {id(sub) for stmt in table for sub in ast.walk(stmt)}
+    return sorted(
+        node.lineno
+        for node in nodes
+        if id(node) not in exempt
+        and (
+            (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in names)
             or (
                 isinstance(node, ast.Attribute)
-                and node.attr == "__members__"
-                and is_enum(node.value)
-                and id(node) not in iterated
+                and isinstance(node.ctx, ast.Load)
+                and node.attr == "Airport"
             )
-            or (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id in {"getattr", "hasattr"}
-                and node.args
-                and is_enum(node.args[0])
-            )
-            or (isinstance(node, ast.Call) and is_parser(node.func) and id(node) not in unaliased)
-        ):
-            lines.append(node.lineno)
-    return lines
+            or (isinstance(node, ast.Name) and node.id in parsers)
+            or (isinstance(node, ast.Attribute) and node.attr == "_parse_airport")
+        )
+    )
 
 
 def test_no_code_resolves_an_airport_through_flis_enum() -> None:
     """The enum hands an aliased code another airport's member, so every
-    lookup goes through `fli_bridge.fli_airport`: a subscript, a member read,
-    `__members__` outside `.items()`, `getattr`/`hasattr`, or a
-    `_parse_airport` call outside `_leg_airport`, under any import name. Read
-    from the syntax tree, so prose naming the enum does not match."""
+    lookup goes through `fli_bridge.fli_airport`: every load of the enum or of
+    `_parse_airport` fails, by its name, an `as` alias of that name or a dotted
+    path, except the enum as a type in an annotation, an `isinstance` check and
+    the bodies of `fli_airports` and `_leg_airport`. Read from one module's
+    syntax tree at a time, so prose naming the enum does not match, and neither
+    does a name another module re-exports the enum under or a string lookup
+    such as `getattr(fli.models, "Airport")`."""
     found = [
         f"{path.relative_to(_SRC).as_posix()}:{line}"
         for path in sorted(_SRC.rglob("*.py"))
