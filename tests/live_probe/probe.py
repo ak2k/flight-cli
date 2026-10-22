@@ -139,7 +139,10 @@ def _split(doc: dict[str, Any]) -> tuple[int | None, float | None]:
 def _apart(a: float | None, b: float | None) -> bool:
     if a is None or b is None:
         return a is not b
-    return abs(a - b) > _PRICE_TOLERANCE
+    try:
+        return abs(a - b) > _PRICE_TOLERANCE
+    except OverflowError:  # an int past float range is far from any float
+        return True
 
 
 def _rule1(http: dict[str, Any], browser: dict[str, Any]) -> dict[str, tuple[Any, Any]]:
@@ -209,12 +212,13 @@ def replay(runs: Path) -> tuple[dict[str, Any], list[str]]:
     """The report and its summary lines."""
     pairs: dict[tuple[str, bool], dict[str, Step]] = {}
     try:
-        listed = sorted(runs.iterdir())
+        # is_dir raises when RUNS can be read but not searched.
+        listed = sorted(p for p in runs.iterdir() if p.is_dir())
     except OSError as err:
         raise RunNotValid(f"{runs}: {err.strerror or err}") from err
     for path in listed:
         m = _STEP.fullmatch(path.name)
-        if m is None or not path.is_dir():
+        if m is None:
             continue
         step = _load_step(path)
         pairs.setdefault((m["query"], m["second"] is not None), {})[m["role"]] = step
@@ -260,14 +264,18 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"RUNS is not a directory: {runs}")
     try:
         report, lines = replay(runs)
+        body = json.dumps(report, indent=2) + "\n"
     except RunNotValid as err:
         print(f"run not valid: {err}", file=sys.stderr)
+        return 2
+    except RecursionError:
+        print("run not valid: a step's JSON nests too deeply to report", file=sys.stderr)
         return 2
     # Query names and JSON strings may hold text no output encoding takes.
     summary = ("\n".join(lines) + "\n").encode("ascii", "backslashreplace").decode("ascii")
     try:
         out.mkdir(parents=True, exist_ok=True)
-        (out / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+        (out / "report.json").write_text(body)
         (out / "summary.txt").write_text(summary)
     except OSError as err:
         print(f"cannot write {out}: {err}", file=sys.stderr)

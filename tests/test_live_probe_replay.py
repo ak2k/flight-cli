@@ -315,3 +315,44 @@ def test_a_runs_dir_that_cannot_be_listed_makes_the_run_not_valid(tmp_path: Path
     finally:
         runs.chmod(0o755)
     assert (code, report, f"run not valid: {runs}: " in out) == (2, None, True)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root searches a directory it cannot search")
+def test_a_runs_dir_that_cannot_be_searched_makes_the_run_not_valid(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    _pairs(runs, 457, 457)
+    runs.chmod(0o600)
+    try:
+        code, out, report = _replay(tmp_path, runs)
+    finally:
+        runs.chmod(0o755)
+    assert (code, report, "Traceback" in out, f"run not valid: {runs}: " in out) == (
+        2,
+        None,
+        False,
+        True,
+    )
+
+
+def test_a_price_past_float_range_is_apart_from_a_float_price(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    _pairs(runs, 10**400, 457.5)
+    _pairs(runs, 10**400, 457.5, ".2")
+    code, out, report = _replay(tmp_path, runs)
+    assert report is not None
+    assert (code, "Traceback" in out, [f["check"] for f in report["findings"]]) == (
+        1,
+        False,
+        ["COACH cheapest"],
+    )
+
+
+def test_a_value_nested_too_deep_to_report_makes_the_run_not_valid(tmp_path: Path) -> None:
+    # Python 3.12 reads this depth but its indented JSON writer recurses past the limit.
+    deep = _envelope([457]).replace('"gflight"', "[" * 3000 + "]" * 3000)
+    runs = tmp_path / "runs"
+    for suffix in ("", ".2"):
+        _step(runs, "q1-http" + suffix, deep)
+        _step(runs, "q1-browser" + suffix, _envelope([457]))
+    code, out, report = _replay(tmp_path, runs)
+    assert (code, report, "Traceback" in out, "run not valid: " in out) == (2, None, False, True)
