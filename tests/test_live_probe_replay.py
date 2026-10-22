@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import subprocess
@@ -374,3 +375,18 @@ def test_a_value_nested_too_deep_to_report_makes_the_run_not_valid(tmp_path: Pat
         _step(runs, "q1-browser" + suffix, _envelope([457]))
     code, out, report = _replay(tmp_path, runs)
     assert (code, report, "Traceback" in out, "run not valid: " in out) == (2, None, False, True)
+
+
+def test_the_docstring_names_every_cause_of_exit_2() -> None:
+    doc = " ".join((ast.get_docstring(ast.parse(_PROBE.read_text())) or "").split())
+    causes = (
+        "a usage error",
+        "a RUNS directory or step file that cannot be read",
+        "an argv.json or exit file that does not parse",
+        "a step whose JSON nests too deeply to report",
+        "a lock that failed on any step",
+        "no step that succeeded",
+        "a DIR that cannot be written",
+    )
+    assert [c for c in causes if c not in doc] == []
+    assert "Otherwise exit 1 when a finding is counted and 0 when none is." in doc

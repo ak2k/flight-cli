@@ -8,8 +8,11 @@ holds argv.json, stdout, stderr, seconds and exit. The script writes
 DIR/report.json and DIR/summary.txt and prints the summary. It reads files
 only and imports nothing outside the standard library.
 
-Exit 0: no counted finding. 1: a counted finding. 2: a usage error, an
-unreadable step, or a run that measured nothing.
+Exit 2 when the run cannot be counted: a usage error, a RUNS directory or step
+file that cannot be read, an argv.json or exit file that does not parse, a step
+whose JSON nests too deeply to report, a lock that failed on any step, no step
+that succeeded, or a DIR that cannot be written. Otherwise exit 1 when a
+finding is counted and 0 when none is.
 """
 
 from __future__ import annotations
