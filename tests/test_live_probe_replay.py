@@ -118,6 +118,16 @@ def test_prices_within_a_cent_agree(tmp_path: Path) -> None:
     assert (code, report["unconfirmed"]) == (0, [])
 
 
+@pytest.mark.parametrize(("http", "browser"), [(400.04, 400.03), (0.04, 0.03)])
+def test_prices_a_cent_apart_agree(tmp_path: Path, http: float, browser: float) -> None:
+    runs = tmp_path / "runs"
+    _pairs(runs, http, browser)
+    _pairs(runs, http, browser, ".2")
+    code, _out, report = _replay(tmp_path, runs)
+    assert report is not None
+    assert (code, report["findings"], report["unconfirmed"]) == (0, [], [])
+
+
 def test_rule_3_counts_an_incomplete_envelope_with_no_notes(tmp_path: Path) -> None:
     runs = tmp_path / "runs"
     for suffix in ("", ".2"):

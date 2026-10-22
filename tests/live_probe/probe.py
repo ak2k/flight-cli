@@ -143,7 +143,8 @@ def _apart(a: float | None, b: float | None) -> bool:
     if a is None or b is None:
         return a is not b
     try:
-        return abs(a - b) > _PRICE_TOLERANCE
+        # Float subtraction puts many one-cent gaps, such as 400.04 - 400.03, just above 0.01.
+        return round(abs(a - b), 9) > _PRICE_TOLERANCE
     except OverflowError:  # an int past float range is far from any float
         return True
 
