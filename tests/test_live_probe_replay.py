@@ -334,6 +334,24 @@ def test_a_runs_dir_that_cannot_be_searched_makes_the_run_not_valid(tmp_path: Pa
     )
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root searches a directory it cannot search")
+def test_a_runs_path_whose_parent_cannot_be_searched_is_a_usage_error(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    runs = parent / "runs"
+    _pairs(runs, 457, 457)
+    parent.chmod(0o600)
+    try:
+        code, out, report = _replay(tmp_path, runs)
+    finally:
+        parent.chmod(0o755)
+    assert (code, report, "Traceback" in out, f"RUNS cannot be read: {runs}: " in out) == (
+        2,
+        None,
+        False,
+        True,
+    )
+
+
 def test_a_price_past_float_range_is_apart_from_a_float_price(tmp_path: Path) -> None:
     runs = tmp_path / "runs"
     _pairs(runs, 10**400, 457.5)

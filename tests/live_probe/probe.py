@@ -260,7 +260,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     runs: Path = args.replay
     out: Path = args.out
-    if not runs.is_dir():
+    try:
+        # Python 3.12's is_dir raises when a parent of RUNS cannot be searched.
+        is_dir = runs.is_dir()
+    except OSError as err:
+        parser.error(f"RUNS cannot be read: {runs}: {err.strerror or err}")
+    if not is_dir:
         parser.error(f"RUNS is not a directory: {runs}")
     try:
         report, lines = replay(runs)
