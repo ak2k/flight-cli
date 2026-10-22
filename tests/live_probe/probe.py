@@ -10,8 +10,8 @@ only and imports nothing outside the standard library.
 
 Exit 2 when the run cannot be counted: a usage error, a RUNS directory or step
 file that cannot be read, an argv.json or exit file that does not parse, a step
-whose JSON nests too deeply to report, a lock that failed on any step, no step
-that succeeded, or a DIR that cannot be written. Otherwise exit 1 when a
+file whose JSON nests more than 64 levels deep, a lock that failed on any step,
+no step that succeeded, or a DIR that cannot be written. Otherwise exit 1 when a
 finding is counted and 0 when none is.
 """
 
@@ -31,6 +31,7 @@ _EXIT = re.compile(r"-?\d{1,4}")
 _ROLES = {"http", "browser"}
 _PRICE_TOLERANCE = 0.01
 _TOP_ROWS = 10
+_MAX_DEPTH = 64
 
 type Finding = tuple[int, str]  # (rule, check name)
 type Status = Literal[
@@ -77,10 +78,37 @@ def _read(path: Path) -> str:
         raise RunNotValid(f"{path.parent.name}: {err.strerror or err}") from err
 
 
+def _depth(value: object) -> int:
+    """How many lists and objects nest in a parsed JSON value."""
+    deepest, todo = 0, [(value, 1)]
+    while todo:
+        item, level = todo.pop()
+        members = _arr(item)
+        if members is None and (obj := _obj(item)) is not None:
+            members = list(obj.values())
+        if members is not None:
+            deepest = max(deepest, level)
+            todo.extend((m, level + 1) for m in members)
+    return deepest
+
+
+def _parse(text: str, where: str) -> object:
+    """The JSON in text; ValueError when it is not JSON."""
+    # A fixed limit: how deep json reads and writes differs by Python version.
+    too_deep = RunNotValid(f"{where} nests more than {_MAX_DEPTH} levels deep")
+    try:
+        value = json.loads(text)
+    except RecursionError as err:
+        raise too_deep from err
+    if _depth(value) > _MAX_DEPTH:
+        raise too_deep
+    return value
+
+
 def _load_step(path: Path) -> Step:
     try:
-        argv = _obj(json.loads(_read(path / "argv.json")))
-    except (ValueError, RecursionError) as err:
+        argv = _obj(_parse(_read(path / "argv.json"), f"{path.name}: argv.json"))
+    except ValueError as err:
         raise RunNotValid(f"{path.name}: argv.json is not JSON") from err
     flight = _arr(argv.get("flight")) if argv else None
     full = _arr(argv.get("full")) if argv else None
@@ -103,8 +131,8 @@ def _load_step(path: Path) -> Step:
         return Step("refused", None)
     if code in (0, 1):
         try:
-            doc = _obj(json.loads(stdout))
-        except (ValueError, RecursionError):
+            doc = _obj(_parse(stdout, f"{path.name}: stdout"))
+        except ValueError:
             doc = None
         if doc is not None and "complete" in doc:
             return Step("ok", doc)
@@ -273,18 +301,14 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"RUNS is not a directory: {runs}")
     try:
         report, lines = replay(runs)
-        body = json.dumps(report, indent=2) + "\n"
     except RunNotValid as err:
         print(f"run not valid: {err}", file=sys.stderr)
-        return 2
-    except RecursionError:
-        print("run not valid: a step's JSON nests too deeply to report", file=sys.stderr)
         return 2
     # Query names and JSON strings may hold text no output encoding takes.
     summary = ("\n".join(lines) + "\n").encode("ascii", "backslashreplace").decode("ascii")
     try:
         out.mkdir(parents=True, exist_ok=True)
-        (out / "report.json").write_text(body)
+        (out / "report.json").write_text(json.dumps(report, indent=2) + "\n")
         (out / "summary.txt").write_text(summary)
     except OSError as err:
         print(f"cannot write {out}: {err}", file=sys.stderr)
