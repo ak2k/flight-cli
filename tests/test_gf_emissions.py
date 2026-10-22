@@ -378,7 +378,12 @@ def _render(
     buffer = io.StringIO()
     console = (
         Console(
-            file=buffer, width=200, force_terminal=True, color_system="truecolor", no_color=False
+            file=buffer,
+            width=200,
+            height=50,
+            force_terminal=True,
+            color_system="truecolor",
+            no_color=False,
         )
         if color
         else Console(file=buffer, width=200, no_color=True)
@@ -437,6 +442,15 @@ def test_the_cell_is_colored_by_googles_label(monkeypatch: pytest.MonkeyPatch) -
     assert delta is not None
     shown = f"{grams // 1000} {delta:+d}%"
     assert re.search(rf"(?<!m){re.escape(shown)}\x20", written), shown
+
+
+def test_the_colored_cell_is_kept_on_a_dumb_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    # `TERM=dumb` makes rich size a Console with no height at 80 columns, which drops
+    # the CO2 column; the render helper must give the Console a height of its own.
+    monkeypatch.setenv("TERM", "dumb")
+    written = _render(monkeypatch, _parsed(_LAX), _ONE_WAY_LAX, color=True)
+    assert "\x1b[32m261 -25%\x1b[0m" in written
+    assert "CO2 kg not shown" not in written
 
 
 def _without_co2(g: gfid.GFlightWithId) -> gfid.GFlightWithId:
