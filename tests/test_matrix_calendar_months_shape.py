@@ -10,7 +10,7 @@ from flight_cli.models import CalendarResult
 
 @pytest.mark.parametrize("months", [{}, "", 0, False], ids=repr)
 def test_a_months_that_is_present_and_not_a_list_is_refused(months: object) -> None:
-    with pytest.raises(ValueError, match="months"):
+    with pytest.raises(ValueError, match=r"calendar\.months"):
         CalendarResult.from_api({"solutionCount": 0, "calendar": {"months": months}})
 
 
