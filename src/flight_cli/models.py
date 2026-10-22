@@ -12,7 +12,7 @@ import math
 # type hints at validation time and needs the symbol in the module's
 # runtime globals, even with `from __future__ import annotations`.
 from datetime import datetime  # noqa: TC003
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import (
     BaseModel,
@@ -23,9 +23,27 @@ from pydantic import (
     field_validator,
 )
 
+if TYPE_CHECKING:
+    from pydantic_core import InitErrorDetails
+
 
 class _Loose(BaseModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+
+def _in_body(refused: ValidationError, field: str, under: str) -> ValidationError:
+    """`refused` with the path of each error under `field` led by `under`, the key
+    that holds the field in the body. The model names `months.0.weeks` for what the
+    body holds at `calendar.months.0.weeks`."""
+    lines: list[InitErrorDetails] = []
+    for e in refused.errors(include_url=False):
+        loc = (under, *e["loc"]) if e["loc"][:1] == (field,) else e["loc"]
+        line: InitErrorDetails = {"type": e["type"], "loc": loc, "input": e["input"]}
+        # Some error types refuse to build without the values their message reads.
+        if "ctx" in e:
+            line["ctx"] = e["ctx"]
+        lines.append(line)
+    return ValidationError.from_exception_data(refused.title, lines)
 
 
 class Airport(_Loose):
@@ -238,15 +256,18 @@ class SearchResult(_Loose):
                 [{"type": "list_type", "loc": ("solutionList", "solutions"), "input": found}],
             )
         sol_list = cast("list[Any]", found or [])
-        return cls(
-            solutionCount=body.get("solutionCount", len(sol_list)),
-            solutions=sol_list,
-            carrierStopMatrix=body.get("carrierStopMatrix"),
-            currencyNotice=body.get("currencyNotice", {}),
-            session=body.get("session"),
-            solutionSet=body.get("solutionSet"),
-            raw=body,
-        )
+        try:
+            return cls(
+                solutionCount=body.get("solutionCount", len(sol_list)),
+                solutions=sol_list,
+                carrierStopMatrix=body.get("carrierStopMatrix"),
+                currencyNotice=body.get("currencyNotice", {}),
+                session=body.get("session"),
+                solutionSet=body.get("solutionSet"),
+                raw=body,
+            )
+        except ValidationError as e:
+            raise _in_body(e, "solutions", "solutionList") from e
 
     @property
     def cheapest_price(self) -> str | None:
@@ -350,14 +371,17 @@ class CalendarResult(_Loose):
                 [{"type": "list_type", "loc": ("calendar", "months"), "input": listed}],
             )
         months = cast("list[Any]", listed or [])
-        return cls(
-            solutionCount=body.get("solutionCount", 0),
-            currencyNotice=body.get("currencyNotice", {}),
-            months=months,
-            session=body.get("session"),
-            solutionSet=body.get("solutionSet"),
-            raw=body,
-        )
+        try:
+            return cls(
+                solutionCount=body.get("solutionCount", 0),
+                currencyNotice=body.get("currencyNotice", {}),
+                months=months,
+                session=body.get("session"),
+                solutionSet=body.get("solutionSet"),
+                raw=body,
+            )
+        except ValidationError as e:
+            raise _in_body(e, "months", "calendar") from e
 
     @property
     def cheapest_price(self) -> str | None:
