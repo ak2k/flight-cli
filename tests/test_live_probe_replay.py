@@ -407,6 +407,34 @@ def test_a_step_nested_64_levels_deep_is_reported(tmp_path: Path) -> None:
     assert (code, report["findings"][0]["http"]) == (1, json.loads(nested))
 
 
+_NAN = float("nan")
+
+
+@pytest.mark.parametrize(
+    ("http", "browser", "check"),
+    [
+        (_envelope([_NAN]), _envelope([457]), "COACH cheapest"),
+        (_envelope([_NAN, 100]), _envelope([50, 999]), "COACH cheapest"),
+        (
+            _envelope([457], split={"combinations": [{"total": _NAN}, {"total": 900}]}),
+            _envelope([457], split={"combinations": [{"total": 100}, {"total": 800}]}),
+            "split_ticket cheapest",
+        ),
+    ],
+    ids=["nan-only", "nan-first", "split-total"],
+)
+def test_a_nan_price_or_total_does_not_agree_with_a_fare(
+    tmp_path: Path, http: str, browser: str, check: str
+) -> None:
+    runs = tmp_path / "runs"
+    for suffix in ("", ".2"):
+        _step(runs, "q1-http" + suffix, http)
+        _step(runs, "q1-browser" + suffix, browser)
+    code, _out, report = _replay(tmp_path, runs)
+    assert report is not None
+    assert (code, [f["check"] for f in report["findings"]]) == (1, [check])
+
+
 @pytest.mark.parametrize("link", ["q1-http.2", "stdout"])
 def test_a_symbolic_link_in_runs_makes_the_run_not_valid(tmp_path: Path, link: str) -> None:
     runs, outside = tmp_path / "runs", tmp_path / "outside"

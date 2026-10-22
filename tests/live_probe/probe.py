@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -70,7 +71,10 @@ def _arr(value: object) -> list[Any] | None:
 
 
 def _num(value: object) -> float | None:
-    return value if isinstance(value, int | float) else None
+    if isinstance(value, float):
+        # No fare: NaN orders against nothing, so min() and _apart would let it agree.
+        return value if math.isfinite(value) else None
+    return value if isinstance(value, int) else None
 
 
 def _read(path: Path) -> str:
