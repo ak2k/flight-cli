@@ -10,7 +10,7 @@ config problem.
 Rate limit: Pro tier is 1000 calls/day. Every 200 response includes:
   X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset (seconds).
 We expose remaining via the client's `last_rate_limit` attribute so
-`flight auth seats whoami` can show it.
+`flight auth seats-aero whoami` can show it.
 
 Pagination: response has `hasMore` + `cursor`. We auto-paginate inside
 the client when callers want all results; for the augmenter, we cap at a
