@@ -171,10 +171,16 @@ def _locked() -> Generator[None]:
         os.close(fd)
 
 
+# The currency and the exception name are remote text, and a reader of stdout takes
+# each line as one watch, so the newline CTRL keeps would split a record in two. A
+# failure line is one record too: the store path comes from the environment.
+_ONE_LINE: Final = {**CTRL, ord("\n"): " "}
+
+
 def _fail(message: str, code: int) -> typer.Exit:
     """The store path comes from the environment and a key in an unusable store
     from the file, so either can carry characters a terminal acts on."""
-    typer.echo(message.translate(CTRL), err=True)
+    typer.echo(message.translate(_ONE_LINE), err=True)
     return typer.Exit(code)
 
 
@@ -312,11 +318,6 @@ def _poll(w: Watch, last: _Seen | None) -> tuple[str, _Seen | None]:
             change = f", {'down' if price < last.amount else 'up'} from {before} at the last run"
     fare = _Seen(watch=w, amount=price, currency=unit, day=day) if math.isfinite(price) else None
     return f"{head}: lowest {amount} on {day}{verdict}{change}", fare
-
-
-# The currency and the exception name are remote text, and a reader of stdout takes
-# each line as one watch, so the newline CTRL keeps would split a record in two.
-_ONE_LINE: Final = {**CTRL, ord("\n"): " "}
 
 
 @watch_app.command("run")
