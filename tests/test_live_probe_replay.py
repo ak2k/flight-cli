@@ -407,16 +407,46 @@ def test_a_step_nested_64_levels_deep_is_reported(tmp_path: Path) -> None:
     assert (code, report["findings"][0]["http"]) == (1, json.loads(nested))
 
 
+@pytest.mark.parametrize("link", ["q1-http.2", "stdout"])
+def test_a_symbolic_link_in_runs_makes_the_run_not_valid(tmp_path: Path, link: str) -> None:
+    runs, outside = tmp_path / "runs", tmp_path / "outside"
+    _pairs(runs, 679, 457)
+    _step(runs, "q1-browser.2", _envelope([457]))
+    _step(outside, "q1-http", _envelope([679]))
+    if link == "q1-http.2":
+        (runs / link).symlink_to(outside / "q1-http")
+    else:
+        _step(runs, "q1-http.2", "")
+        (runs / "q1-http.2" / link).unlink()
+        (runs / "q1-http.2" / link).symlink_to(outside / "q1-http" / link)
+    code, out, report = _replay(tmp_path, runs)
+    want = f"run not valid: q1-http.2: {link} is a symbolic link"
+    assert (code, report, "Traceback" in out, want in out) == (2, None, False, True)
+
+
+@pytest.mark.parametrize("name", ["report.json", "summary.txt"])
+def test_a_symbolic_link_in_out_is_not_written_through(tmp_path: Path, name: str) -> None:
+    runs, out, outside = tmp_path / "runs", tmp_path / "out", tmp_path / "outside"
+    _pairs(runs, 457, 457)
+    out.mkdir()
+    outside.write_text("keep")
+    (out / name).symlink_to(outside)
+    done = _run(runs, out)
+    assert (done.returncode, done.stdout, outside.read_text()) == (2, "", "keep")
+    assert done.stderr.startswith(f"cannot write {out}: ")
+
+
 def test_the_docstring_names_every_cause_of_exit_2() -> None:
     doc = " ".join((ast.get_docstring(ast.parse(_PROBE.read_text())) or "").split())
     causes = (
         "a usage error",
         "a RUNS directory or step file that cannot be read",
+        "a step directory or file that is a symbolic link",
         "an argv.json or exit file that does not parse",
         "a step file whose JSON nests more than 64 levels deep",
         "a lock that failed on any step",
         "no step that succeeded",
-        "a DIR that cannot be written",
+        "a DIR that cannot be written or whose report.json or summary.txt is a symbolic link",
     )
     assert [c for c in causes if c not in doc] == []
     assert "Otherwise exit 1 when a finding is counted and 0 when none is." in doc

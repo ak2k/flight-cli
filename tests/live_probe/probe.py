@@ -9,16 +9,18 @@ DIR/report.json and DIR/summary.txt and prints the summary. It reads files
 only and imports nothing outside the standard library.
 
 Exit 2 when the run cannot be counted: a usage error, a RUNS directory or step
-file that cannot be read, an argv.json or exit file that does not parse, a step
-file whose JSON nests more than 64 levels deep, a lock that failed on any step,
-no step that succeeded, or a DIR that cannot be written. Otherwise exit 1 when a
-finding is counted and 0 when none is.
+file that cannot be read, a step directory or file that is a symbolic link, an
+argv.json or exit file that does not parse, a step file whose JSON nests more
+than 64 levels deep, a lock that failed on any step, no step that succeeded, or
+a DIR that cannot be written or whose report.json or summary.txt is a symbolic
+link. Otherwise exit 1 when a finding is counted and 0 when none is.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from collections import Counter
@@ -73,9 +75,20 @@ def _num(value: object) -> float | None:
 
 def _read(path: Path) -> str:
     try:
+        # A link could lead outside RUNS, or let one load stand in for another.
+        for link in (path.parent, path):
+            if link.is_symlink():
+                raise RunNotValid(f"{path.parent.name}: {link.name} is a symbolic link")
         return path.read_text(errors="replace")
     except OSError as err:
         raise RunNotValid(f"{path.parent.name}: {err.strerror or err}") from err
+
+
+def _write(path: Path, text: str) -> None:
+    # O_NOFOLLOW: a link left in DIR would carry the write outside it.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o666)
+    with os.fdopen(fd, "w") as file:
+        file.write(text)
 
 
 def _depth(value: object) -> int:
@@ -308,8 +321,8 @@ def main(argv: list[str] | None = None) -> int:
     summary = ("\n".join(lines) + "\n").encode("ascii", "backslashreplace").decode("ascii")
     try:
         out.mkdir(parents=True, exist_ok=True)
-        (out / "report.json").write_text(json.dumps(report, indent=2) + "\n")
-        (out / "summary.txt").write_text(summary)
+        _write(out / "report.json", json.dumps(report, indent=2) + "\n")
+        _write(out / "summary.txt", summary)
     except OSError as err:
         print(f"cannot write {out}: {err}", file=sys.stderr)
         return 2
